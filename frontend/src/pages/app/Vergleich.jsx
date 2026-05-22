@@ -164,30 +164,29 @@ export default function Vergleich() {
           {/* Trennlinie */}
           <div className="w-px self-stretch my-1" style={{ background: "var(--divider)" }} />
 
-          {/* Portal-Toggles */}
+          {/* Portal-Toggles (Logos statt Text) */}
           <button
             type="button"
             data-testid="toggle-mobile"
             onClick={() => toggleMobile(!portalMobile)}
             title="mobile.de ein-/ausschalten"
-            className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl text-[12px] font-semibold transition-all"
-            style={portalMobile ? {
-              background: "#e8472a",
-              color: "white",
-              border: "1px solid #e8472a",
-            } : {
-              background: "var(--hover-bg)",
-              color: "var(--text-muted)",
-              border: "1px solid var(--divider)",
+            aria-label="mobile.de ein-/ausschalten"
+            aria-pressed={portalMobile}
+            className="shrink-0 flex items-center justify-center px-3 py-1.5 rounded-xl transition-all"
+            style={{
+              background: portalMobile ? "#ffffff" : "var(--hover-bg)",
+              border: portalMobile ? "2px solid #e8472a" : "2px solid var(--divider)",
+              boxShadow: portalMobile ? "0 0 0 2px rgba(232,71,42,0.15)" : "none",
+              opacity: portalMobile ? 1 : 0.45,
+              filter: portalMobile ? "none" : "grayscale(1)",
+              height: 38,
             }}
           >
-            <span style={{
-              width: 18, height: 18, borderRadius: 5,
-              background: portalMobile ? "rgba(255,255,255,0.25)" : "#e8472a",
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              fontSize: 10, fontWeight: 900, color: "white", flexShrink: 0,
-            }}>m</span>
-            mobile.de
+            <img
+              src="/logos/mobile-de.png"
+              alt="mobile.de"
+              style={{ height: 22, width: "auto", display: "block" }}
+            />
           </button>
 
           <button
@@ -195,24 +194,23 @@ export default function Vergleich() {
             data-testid="toggle-autoscout"
             onClick={() => toggleAutoscout(!portalAutoscout)}
             title="AutoScout24 ein-/ausschalten"
-            className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl text-[12px] font-semibold transition-all"
-            style={portalAutoscout ? {
-              background: "#ff6600",
-              color: "white",
-              border: "1px solid #ff6600",
-            } : {
-              background: "var(--hover-bg)",
-              color: "var(--text-muted)",
-              border: "1px solid var(--divider)",
+            aria-label="AutoScout24 ein-/ausschalten"
+            aria-pressed={portalAutoscout}
+            className="shrink-0 flex items-center justify-center px-3 py-1.5 rounded-xl transition-all"
+            style={{
+              background: portalAutoscout ? "#2b2b2b" : "var(--hover-bg)",
+              border: portalAutoscout ? "2px solid #ffe600" : "2px solid var(--divider)",
+              boxShadow: portalAutoscout ? "0 0 0 2px rgba(255,230,0,0.20)" : "none",
+              opacity: portalAutoscout ? 1 : 0.45,
+              filter: portalAutoscout ? "none" : "grayscale(1)",
+              height: 38,
             }}
           >
-            <span style={{
-              width: 18, height: 18, borderRadius: 5,
-              background: portalAutoscout ? "rgba(255,255,255,0.25)" : "#ff6600",
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              fontSize: 9, fontWeight: 900, color: "white", flexShrink: 0,
-            }}>AS</span>
-            AutoScout24
+            <img
+              src="/logos/autoscout24.png"
+              alt="AutoScout24"
+              style={{ height: 24, width: "auto", display: "block" }}
+            />
           </button>
 
           {/* Filter öffnen */}
