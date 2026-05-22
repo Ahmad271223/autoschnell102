@@ -1,0 +1,43 @@
+{
+  "summary": "Comprehensive E2E testing of the new standalone Fahrer-App (driver account) system. Backend: 14/14 pytest tests pass (driver register/login/me, dealer add-by-code/list/delete, conflicts, full appointment flow with auto-PDF for pickup-order + contract). Frontend: driver registration → dashboard, settings (code display + name update), and dealer /app/fahrer (add by code + remove) all work end-to-end against the live backend. PWA manifest.json (200, json) and /service-worker.js (200) reachable; SW is registered from index.html. Found one minor backend bug (PUT /api/driver/me returns stale display_name in response body) which the frontend works around via subsequent /me refresh.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PUT /api/driver/me", "issue": "Response body returns stale display_name (uses old `driver` dependency dict, not the freshly-updated doc). Persistence works correctly (verified via subsequent GET /api/driver/me). Frontend already does a refresh, so impact is low. Fix: re-fetch driver_account after $set before calling driver_me()."},
+      {"endpoint": "GET /api/payments/status/{session_id}", "issue": "(Pre-existing from iteration_1) Returns 500 when Stripe session lookup fails – not retested in this iteration."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_driver_system.py",
+    "/app/test_reports/pytest/driver_results.xml"
+  ],
+  "action_items": [
+    "(Optional, low priority) Refresh driver_accounts doc after PUT /api/driver/me before serializing the response so the response mirrors persisted state."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1982 lines – well past the 700 LoC threshold. Strongly recommend splitting into routers (auth, dealer, drivers, driver_portal, payments, contracts, appointments).",
+    "PUT /api/driver/me: passes the OLD driver dict (from Depends) to driver_me() instead of re-loading after $set. Cosmetic on the response, but reads as a stale-data bug.",
+    "DELETE /api/drivers/{driver_id}: only unsets driver_id on appointments where status != 'abgeschlossen'. Good. But conflict endpoint still excludes only 'abgeschlossen' – conflicts on appointments status 'abgesagt'/'storniert' would still warn; consider also excluding those.",
+    "driver_register normalizes email to lowercase but driver_login also lowercases input – consistent ✅.",
+    "Frontend Fahrer.jsx renders only one 'Plywt Drv' row pre-existing from earlier seed – ensure dealer list isn’t leaking other dealers’ drivers (looks scoped correctly via dealer_drivers link).",
+    "Auto-created appointment is correctly returned and visible to driver after assignment via PUT /api/appointments/{id}; vehicle, dealer, photos, snapshot_id wiring works.",
+    "No CSRF/origin protection on /api/drivers/add but it requires bearer auth – fine for SaaS context.",
+    "PWA service-worker.js does no offline caching – marketed as PWA but cannot work offline. If 'Add to Home Screen' is the only goal, this is fine; flag if offline is expected."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_driver_system.py",
+    "/app/memory/test_credentials.md"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% smoke + integration"},
+  "test_credentials": "Admin: admin@autohandel.app / Admin123! (lifetime). Driver test accounts are auto-created per pytest run with prefix test_*@example.com / Drv1234!. Last live test run created e.g. driver code FD-WZKWT44M (display_name 'Neuer Name').",
+  "seed_data_creation": "pytest creates ~10 throwaway driver accounts and ~2 dealer accounts per run, plus 1 contract + 1 appointment in the appointments-flow test. No teardown; mongo will accumulate test data if run repeatedly.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite for the new driver system lives at /app/backend/tests/test_driver_system.py. Run with: REACT_APP_BACKEND_URL=$(grep REACT_APP_BACKEND_URL /app/frontend/.env | cut -d= -f2) pytest /app/backend/tests/test_driver_system.py -v. The test_driver_sees_assigned_appointments test depends on /api/mobile/compare returning vehicle data for the canned mobile.de URL (id=448228023) – the existing mobile_service mock supports this. Driver emails are normalized to lowercase server-side; tests use lowercase prefixes.",
+  "rca of the issue": "PUT /api/driver/me stale response: server.py:1477 calls `await driver_me(driver)` and passes the old driver dict from Depends(current_driver). driver_me() reads `driver.get('display_name')` directly so the returned body shows the pre-update name even though the DB is updated. Fix: reload `driver = await db.driver_accounts.find_one({'id': driver['id']}, ...)` before the return."
+}

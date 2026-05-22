@@ -1,0 +1,368 @@
+"""
+listing_identity.py
+===================
+
+Robuste Erkennung von Inserats-IDs für Kleinanzeigen, mobile.de und AutoScout24
+plus Cache-Logik (MongoDB), damit jedes Inserat nur einmal von der jeweiligen
+Plattform abgerufen wird.
+
+Kernidee:
+---------
+Niemals die komplette URL als Cache-Schlüssel verwenden – URLs enthalten
+Tracking-Parameter, Suchparameter, Ref-IDs etc. Stattdessen:
+
+    cache_key = f"{source}:{item_id}"
+
+Dadurch wird derselbe Inserat unabhängig von der konkreten URL nur einmal
+geladen.
+
+Öffentliche API
+---------------
+* detect_source(url)               -> "kleinanzeigen" | "mobile" | "autoscout24" | None
+* extract_kleinanzeigen_id(url)    -> str | None
+* extract_mobile_id(url)           -> str | None
+* extract_autoscout_id(url)        -> str | None
+* get_listing_identity(url)        -> {"source", "item_id", "cache_key"}
+* get_or_fetch_listing(db, url, fetcher, ttl_hours=24)
+                                   -> Tuple[dict, bool]   (vehicle, was_cached)
+
+Bonus (am Ende der Datei):
+* SQLAlchemy-Referenzmodell (für Projekte mit SQL-DB)
+* Optional integrierbarer FastAPI-Router (`router`) mit POST /extract
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Awaitable, Callable, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
+
+# -----------------------------------------------------------------------------
+# 1. Regex-Patterns
+# -----------------------------------------------------------------------------
+
+# Kleinanzeigen: /s-anzeige/<itemId> oder /s-anzeige/<slug>/<itemId>(-<categoryId>-<userId>)?
+# Matches both:
+#   /s-anzeige/3400731605
+#   /s-anzeige/iphone-13-pro/3400731605-173-3405
+_RE_KA = re.compile(r"/s-anzeige/(?:[^/]+/)?(\d{6,})(?:-\d+-\d+)?")
+
+# mobile.de Variante 2 (Pretty-URL): /auto-inserat/<slug>/<itemId>.html
+_RE_MOBILE_HTML = re.compile(r"/(\d{6,})\.html")
+
+# AutoScout24: UUID irgendwo im Pfad
+_RE_AS24_UUID = re.compile(
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+class ListingIdentityError(ValueError):
+    """Wird geworfen, wenn keine Inserats-ID extrahiert werden konnte."""
+
+
+# -----------------------------------------------------------------------------
+# 2. Detection
+# -----------------------------------------------------------------------------
+
+def detect_source(url: str) -> Optional[str]:
+    """Bestimmt die Quelle anhand des Hostnamens. None, falls nicht unterstützt."""
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+
+    if "kleinanzeigen.de" in host:
+        return "kleinanzeigen"
+    if "mobile.de" in host:
+        return "mobile"
+    if "autoscout24." in host:  # .de, .at, .ch, .com …
+        return "autoscout24"
+    return None
+
+
+# -----------------------------------------------------------------------------
+# 3. Per-Source-Extraktoren
+# -----------------------------------------------------------------------------
+
+def extract_kleinanzeigen_id(url: str) -> Optional[str]:
+    """
+    Beispiel:
+      https://www.kleinanzeigen.de/s-anzeige/mazda-cx-5/3395964748-216-7219
+      -> 3395964748
+    """
+    if not url:
+        return None
+    path = urlparse(url).path or url
+    m = _RE_KA.search(path)
+    return m.group(1) if m else None
+
+
+def extract_mobile_id(url: str) -> Optional[str]:
+    """
+    Zwei Varianten:
+      a) https://suchen.mobile.de/fahrzeuge/details.html?id=454337945&...
+         -> 454337945
+      b) https://suchen.mobile.de/auto-inserat/<slug>/448651862.html
+         -> 448651862
+    """
+    if not url:
+        return None
+    parsed = urlparse(url)
+
+    # Variante a: ?id=
+    qs_id = parse_qs(parsed.query).get("id", [None])[0]
+    if qs_id and qs_id.isdigit():
+        return qs_id
+
+    # Variante b: /<digits>.html
+    m = _RE_MOBILE_HTML.search(parsed.path or "")
+    return m.group(1) if m else None
+
+
+def extract_autoscout_id(url: str) -> Optional[str]:
+    """
+    Beispiel:
+      https://www.autoscout24.de/angebote/mercedes-benz-c-180-...-d4dd34a4-1795-4bd8-a7d8-064f3b73d8f5?...
+      -> d4dd34a4-1795-4bd8-a7d8-064f3b73d8f5
+    """
+    if not url:
+        return None
+    path = urlparse(url).path or ""
+    m = _RE_AS24_UUID.search(path)
+    return m.group(1).lower() if m else None
+
+
+# -----------------------------------------------------------------------------
+# 4. Vereinheitlichte Identität
+# -----------------------------------------------------------------------------
+
+_EXTRACTORS = {
+    "kleinanzeigen": extract_kleinanzeigen_id,
+    "mobile": extract_mobile_id,
+    "autoscout24": extract_autoscout_id,
+}
+
+
+def get_listing_identity(url: str) -> dict:
+    """
+    Gibt {"source", "item_id", "cache_key"} zurück.
+    Wirft ListingIdentityError, wenn nichts erkannt werden kann.
+    """
+    source = detect_source(url)
+    if not source:
+        raise ListingIdentityError(
+            f"Quelle nicht erkannt: nur kleinanzeigen.de, mobile.de und "
+            f"autoscout24 werden unterstützt (URL={url!r})."
+        )
+
+    item_id = _EXTRACTORS[source](url)
+    if not item_id:
+        raise ListingIdentityError(
+            f"Konnte keine Inserats-ID aus {source}-URL extrahieren: {url!r}"
+        )
+
+    return {
+        "source": source,
+        "item_id": item_id,
+        "cache_key": f"{source}:{item_id}",
+    }
+
+
+# -----------------------------------------------------------------------------
+# 5. Cache-Logik (MongoDB – passt zu diesem Projekt)
+# -----------------------------------------------------------------------------
+
+# Collection-Schema (logisch):
+#   listings_cache: {
+#     cache_key:    "kleinanzeigen:3395964748",   # unique
+#     source:       "kleinanzeigen",
+#     item_id:      "3395964748",
+#     url:          "<letzte gesehene URL>",
+#     data:         { ... extrahierte Fahrzeugdaten ... },
+#     fetched_at:   <datetime utc>,
+#     expires_at:   <datetime utc>,
+#     last_used_at: <datetime utc>,
+#     use_count:    <int>,
+#   }
+#
+# Empfohlene Indizes (einmalig anlegen):
+#   await db.listings_cache.create_index("cache_key", unique=True)
+#   await db.listings_cache.create_index([("source", 1), ("item_id", 1)],
+#                                        unique=True)
+
+
+async def ensure_cache_indexes(db) -> None:
+    """Idempotent: legt die nötigen Indizes auf der listings_cache Collection an."""
+    await db.listings_cache.create_index("cache_key", unique=True)
+    await db.listings_cache.create_index(
+        [("source", 1), ("item_id", 1)], unique=True, name="uniq_source_item"
+    )
+
+
+async def get_or_fetch_listing(
+    db,
+    url: str,
+    fetcher: Callable[[str, str, str], Awaitable[dict]],
+    ttl_hours: int = 6,
+) -> Tuple[dict, bool, Optional[str]]:
+    """
+    Liefert (vehicle_data, was_cached, cached_snapshot_id).
+
+    Ablauf:
+      1. ID erkennen (sonst ListingIdentityError).
+      2. Cache lesen. Wenn vorhanden & nicht abgelaufen -> aus DB liefern,
+         use_count++ und last_used_at aktualisieren. Liefert auch die
+         zuletzt gespeicherte snapshot_id zurück, damit der Caller den
+         vorhandenen Beweis wiederverwenden kann.
+      3. Sonst fetcher(source, item_id, url) aufrufen und Ergebnis speichern.
+
+    `fetcher` ist eine async-Funktion (source, item_id, url) -> dict.
+    """
+    identity = get_listing_identity(url)
+    source = identity["source"]
+    item_id = identity["item_id"]
+    cache_key = identity["cache_key"]
+    now = datetime.now(timezone.utc)
+
+    cached = await db.listings_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+    if cached:
+        expires_at = cached.get("expires_at")
+        # In Mongo kommt expires_at als datetime zurück (sofern als datetime gespeichert).
+        if isinstance(expires_at, datetime):
+            # Ensure timezone-aware comparison
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at > now:
+                await db.listings_cache.update_one(
+                    {"cache_key": cache_key},
+                    {
+                        "$inc": {"use_count": 1},
+                        "$set": {"last_used_at": now, "url": url},
+                    },
+                )
+                return cached["data"], True, cached.get("snapshot_id")
+
+    # MISS oder abgelaufen -> einmal abrufen
+    data = await fetcher(source, item_id, url)
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
+        )
+
+    expires_at = now + timedelta(hours=ttl_hours)
+    await db.listings_cache.update_one(
+        {"cache_key": cache_key},
+        {
+            "$set": {
+                "cache_key": cache_key,
+                "source": source,
+                "item_id": item_id,
+                "url": url,
+                "data": data,
+                "fetched_at": now,
+                "expires_at": expires_at,
+                "last_used_at": now,
+                # Beim Re-Fetch (TTL abgelaufen) muss ein alter Snapshot
+                # als ungültig gelten — der Caller erzeugt direkt einen
+                # neuen. Vorher löschen verhindert, dass nach dem
+                # Re-Fetch versehentlich noch auf den alten Schnappschuss
+                # verwiesen wird, falls der Caller das snapshot_id-
+                # Speichern (set_cache_snapshot) auslassen sollte.
+                "snapshot_id": None,
+            },
+            "$inc": {"use_count": 1},
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+    return data, False, None
+
+
+async def set_cache_snapshot(db, url: str, snapshot_id: str) -> None:
+    """Verknüpft einen frisch erzeugten Snapshot mit dem Cache-Eintrag, so
+    dass Folge-Aufrufe innerhalb der TTL den bestehenden Beweis
+    wiederverwenden können. Fehlerhaft/unerkannte URLs werden stumm
+    ignoriert (kein harter Fehler im Hot-Path)."""
+    try:
+        identity = get_listing_identity(url)
+    except ListingIdentityError:
+        return
+    await db.listings_cache.update_one(
+        {"cache_key": identity["cache_key"]},
+        {"$set": {"snapshot_id": snapshot_id}},
+    )
+
+
+# -----------------------------------------------------------------------------
+# 6. SQLAlchemy-Referenzmodell (nur zur Dokumentation – dieses Projekt nutzt Mongo)
+# -----------------------------------------------------------------------------
+#
+# from sqlalchemy import (
+#     Column, String, DateTime, Integer, JSON, UniqueConstraint, Index, func,
+# )
+# from sqlalchemy.orm import declarative_base
+#
+# Base = declarative_base()
+#
+# class ListingCache(Base):
+#     __tablename__ = "listings_cache"
+#
+#     id           = Column(Integer, primary_key=True, autoincrement=True)
+#     source       = Column(String(32),  nullable=False)
+#     item_id      = Column(String(64),  nullable=False)
+#     cache_key    = Column(String(128), nullable=False, unique=True)
+#     url          = Column(String(1024), nullable=False)
+#     data         = Column(JSON,        nullable=False)
+#
+#     fetched_at   = Column(DateTime(timezone=True), server_default=func.now())
+#     expires_at   = Column(DateTime(timezone=True), nullable=False)
+#     last_used_at = Column(DateTime(timezone=True), server_default=func.now())
+#     use_count    = Column(Integer, nullable=False, default=0)
+#
+#     __table_args__ = (
+#         UniqueConstraint("source", "item_id", name="uq_listing_source_item"),
+#         Index("ix_listing_cache_key", "cache_key"),
+#     )
+#
+# -----------------------------------------------------------------------------
+# 7. Optionaler FastAPI-Router – kann in server.py eingebunden werden
+# -----------------------------------------------------------------------------
+
+try:
+    from fastapi import APIRouter, HTTPException
+    from pydantic import BaseModel, Field
+
+    class ExtractIn(BaseModel):
+        url: str = Field(..., description="Kleinanzeigen-, mobile.de- oder AutoScout24-URL")
+
+    router = APIRouter(prefix="/listings", tags=["listings"])
+
+    @router.post("/extract")
+    async def extract_endpoint(body: ExtractIn):
+        """Liefert nur die Identität (source / item_id / cache_key) – ohne Fetch."""
+        try:
+            return get_listing_identity(body.url)
+        except ListingIdentityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+except Exception:  # FastAPI nicht verfügbar -> nur Funktionen exportieren
+    router = None  # type: ignore
+
+
+__all__ = [
+    "ListingIdentityError",
+    "detect_source",
+    "extract_kleinanzeigen_id",
+    "extract_mobile_id",
+    "extract_autoscout_id",
+    "get_listing_identity",
+    "get_or_fetch_listing",
+    "set_cache_snapshot",
+    "ensure_cache_indexes",
+    "router",
+]

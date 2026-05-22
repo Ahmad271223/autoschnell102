@@ -1,0 +1,112 @@
+{
+  "theme_and_archetype": {
+    "theme": "dark",
+    "archetype": "Archetype 2 (Performance Pro) fused with Archetype 4 (Swiss & High-Contrast)",
+    "vibe": "Speed, Trust, Professionalism. Tactical minimalism for high-end automotive power-users.",
+    "rationale": "Car dealers require a high-density, low-eye-strain environment (Dark Mode) for daily hours-long sessions. The aesthetic borrows from luxury sports cars (carbon, metallic, precise) and trading terminals (speed, data density)."
+  },
+  "typography": {
+    "banned_fonts": ["Inter", "Roboto", "Open Sans", "Lato", "Syne"],
+    "heading_font": "Cabinet Grotesk",
+    "heading_strategy": "Authoritative, technical, tight letter spacing (tracking-tight). Use font-black for hero numbers and primary headlines.",
+    "body_font": "IBM Plex Sans",
+    "body_strategy": "Sterile, highly legible for dense data and PDF generation tables.",
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-black",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-bold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-bold",
+      "body": "text-base leading-relaxed",
+      "labels_overlines": "text-xs uppercase tracking-[0.2em] font-semibold text-neutral-400"
+    }
+  },
+  "colors": {
+    "background": {
+      "app": "#0A0A0A",
+      "card_surface": "#141414",
+      "input_surface": "#0F0F0F"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "muted": "#71717A"
+    },
+    "accents": {
+      "primary_kinetic": "#FF3B30",
+      "primary_hover": "#E6352B",
+      "secondary_action": "#007AFF",
+      "success_speed": "#34C759"
+    },
+    "borders": {
+      "default": "rgba(255, 255, 255, 0.1)",
+      "focus": "rgba(255, 59, 48, 0.5)"
+    },
+    "rules": {
+      "no_purple": true,
+      "tinted_greys": "Always tint greys with a subtle cool blue under-tone to avoid muddy looks.",
+      "contrast": "Ensure minimum 4.5:1 for standard text (WCAG AA). Never use pure `#000000` for cards."
+    }
+  },
+  "spacing_and_layout": {
+    "strategy": "Mobile-first, responsive. Generous on Landing Page, Tactical and Dense on Dashboard.",
+    "landing_page": {
+      "grid": "Bento Grid Mode A (Tetris) - grid-cols-1 md:grid-cols-12 gap-8 to gap-12. Asymmetrical layout.",
+      "padding": "Generous sections py-24 to py-32."
+    },
+    "dashboard": {
+      "grid": "Control Room Grid Mode B - grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 or gap-6.",
+      "padding": "Dense, optimized for power users. p-4 to p-6 inside cards."
+    }
+  },
+  "surfaces_and_micro_themes": {
+    "landing_page_hero": "Glassmorphism navigation (backdrop-blur-xl bg-black/60) over custom generated speed/metallic backgrounds. Max hero overlay opacity bg-black/40.",
+    "dashboard_cards": "Grid Borders (The Technical Look) or Tactical Minimalism. 1px solid border (border-white/10), flat matte background (#141414), no soft shadows. Add 2px 'Inner Glow' highlights for active states.",
+    "interactive_elements": "The Tracing Beam effect for the main 'mobile.de URL' input on the landing page to draw immediate attention. High-saturation accent blocks for CTAs."
+  },
+  "components": {
+    "html_tailwind_only": ["Landing Page Sections", "Hero Banner", "Marketing Pricing Cards"],
+    "shadcn_customized": {
+      "inputs": "Use Shadcn Input, heavily customized for the main URL bar (large text, inner glow, kinetic red submit button).",
+      "tables": "Use Shadcn Table for the Vehicle Pool, optimized with IBM Plex Sans for tabular data.",
+      "calendars": "Use Shadcn Calendar for the 'Terminplaner mit Fahrer' feature.",
+      "dialogs": "Use Shadcn Dialog for PDF preview and 'Kaufvertrag' generation."
+    },
+    "icons": "Use @phosphor-icons/react (Duotone weight for marketing, Regular for dashboard). Add with: yarn add @phosphor-icons/react",
+    "charts": "Recharts via Shadcn for admin analytics. Colors must match the brand accents (Red, Volt Blue, Pure Green)."
+  },
+  "motion_and_interactions": {
+    "philosophy": "Speed is the product. UI must feel instantaneous.",
+    "animations": "Minimalist micro-interactions. 0.15s ease-out transitions for hover states. No long fading.",
+    "loaders": "Use high-tech ASCII or subtle 'Tracing Beam' loaders. The transition from URL paste to 'Filter open / PDF ready' must visually imply extreme speed (1-3s).",
+    "hover_states": "Always explicitly set text color on hover (e.g., hover:bg-neutral-800 hover:text-white)."
+  },
+  "media_and_images": {
+    "rules": "Never use placeholders. Use provided high-quality URLs.",
+    "hero_background": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png",
+      "description": "Abstract speed and precision background with red light sweep for the public landing page hero."
+    },
+    "section_background": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/dd3f3682a6a7806bf9c8c9664b184e0728edf5f897bc17bdf2836ddfb7e76644.png",
+      "description": "High-end metallic texture for pricing or features background."
+    },
+    "marketing_sports_car": {
+      "url": "https://images.pexels.com/photos/18320398/pexels-photo-18320398.jpeg",
+      "description": "Elegant black sports car against a dark background for feature visual."
+    },
+    "dealer_keys_trust": {
+      "url": "https://images.pexels.com/photos/4173191/pexels-photo-4173191.jpeg",
+      "description": "Professional car dealer handling keys, showing trust and successful transaction for the 'About' or 'Trust' section."
+    }
+  },
+  "accessibility_and_testing": {
+    "testing": "All interactive elements, buttons, inputs, and key texts MUST include a `data-testid` attribute (e.g., data-testid='url-input-field', data-testid='generate-pdf-btn').",
+    "accessibility": "Respect prefers-reduced-motion. High contrast ratios. Focus states must use focus:ring-2 focus:ring-[#FF3B30] focus:outline-none."
+  },
+  "domain_specific_instructions": {
+    "language": "All UI copy MUST be in German (DEUTSCH).",
+    "core_loop": "The most prominent element on the landing page is the URL input field for mobile.de. It should be massive, central, and unmistakable.",
+    "live_counter": "Include a subtle but highly visible live metric on the vehicle check page: '3 Händler prüfen dieses Fahrzeug' (pulsing green dot to indicate live status).",
+    "features_required": ["Vehicle Comparison Engine", "mobile.de Filter Redirect", "PDF Contract Generator", "WhatsApp/Email Dispatch", "Driver Scheduler (Terminplaner)", "Admin Dashboard"]
+  },
+  "instructions_to_main_agent": "Implement this strictly. Ensure all Shadcn components are modified to fit the Tactical Minimalism dark mode (remove soft shadows, use 1px hard borders). Use raw Tailwind for the landing page bento grids. Integrate the provided images. Map everything to the German language requirement."
+}

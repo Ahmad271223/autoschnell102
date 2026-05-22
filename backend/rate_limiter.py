@@ -1,0 +1,61 @@
+"""Simple in-process rate limiter for login endpoints.
+
+Uses a sliding-window counter per IP address.  Works per-process (not shared
+across multiple Uvicorn workers), but is still effective against the most
+common brute-force and credential-stuffing attacks on a single-server setup.
+
+Usage:
+    from rate_limiter import login_limiter
+    if not login_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
+"""
+import time
+from collections import defaultdict
+from threading import Lock
+
+
+class SlidingWindowRateLimiter:
+    """Thread-safe sliding-window rate limiter."""
+
+    def __init__(self, max_attempts: int = 10, window_seconds: int = 60):
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._lock = Lock()
+
+    def check(self, key: str) -> bool:
+        """Return True if the request is allowed; False if the key is rate-limited.
+
+        Call this BEFORE processing the request.  The attempt is counted even
+        when the login fails, so a failed login still increments the counter.
+        """
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        with self._lock:
+            timestamps = self._buckets[key]
+            # Drop timestamps outside the current window.
+            self._buckets[key] = [t for t in timestamps if t > cutoff]
+            if len(self._buckets[key]) >= self.max_attempts:
+                return False
+            self._buckets[key].append(now)
+            return True
+
+    def reset(self, key: str) -> None:
+        """Clear the counter for a key (e.g. after a successful login)."""
+        with self._lock:
+            self._buckets.pop(key, None)
+
+
+# Shared instances — imported directly by route modules.
+# 10 attempts / 60 s per IP for the dealer/admin login.
+login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60)
+
+# Slightly more lenient for the driver app (mobile clients can have flaky
+# connectivity and may retry quickly), but still bounded.
+driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60)
+
+# Registration: 5 new accounts per IP per hour prevents spam account creation.
+register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
+
+# Driver registration: same limit.
+driver_register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)

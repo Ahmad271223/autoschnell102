@@ -1,0 +1,6 @@
+/* App.css – kept minimal, all styling lives in index.css + Tailwind */
+.App {
+  min-height: 100vh;
+  background: var(--bg-app);
+  color: var(--text-primary);
+}

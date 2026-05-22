@@ -1,0 +1,44 @@
+{
+  "summary": "End-to-end test of the new Apple-style Admin Dashboard. Backend: 19/19 pytest tests pass against the live preview backend, covering super-admin & legacy-admin login, soft-block flow (block → 403 'Account ist deaktiviert' → unblock), guards (cannot block super-admin or self), admin password reset for users (with 8-char min validation), admin self-password change (wrong current → 401, valid → 200), /admin/users shape (subscription, company_name, role, active, no _id), /admin/users/{id}/contracts (no _id, no pdf_b64), /admin/comparisons, /admin/url-stats (4 windows + now), /admin/stats, and /admin/contracts/{id}/pdf (StreamingResponse, application/pdf magic bytes verified). Authorization test confirms non-admin tokens get 401/403 on every /admin/* endpoint. Frontend: super-admin login redirects to /admin, AdminLayout sidebar shows Übersicht/Nutzer/Vergleiche/URL-Statistik/Einstellungen; /admin/users renders 4 accounts with Aktiv/Plan badges and working Passwort/Sperren buttons (modal opens); /admin/comparisons lists vehicles with sources; /admin/urls shows 4 cards (Heute/24 Std/7 Tage/Gesamt) plus the 'Live-Aktualisierung alle 60 Sekunden' indicator; /admin/settings exposes the self-password form; /admin/users/{id} (UserDetail) renders profile + read-only Verträge list; non-admin dealer navigating to /admin is correctly redirected to /login?next=%2Fadmin.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin/users", "issues": ["No data-testid attributes on per-user 'Passwort'/'Sperren'/'Entsperren' buttons or the search input — tests had to fall back to text selectors. Add testids like user-row-{id}, user-pw-btn-{id}, user-toggle-active-btn-{id} for stable automation."]},
+      {"screen": "/admin/urls", "issues": ["Sidebar label is 'URL-Statistik' but the second card is rendered as '24 Std' (not '24h' as in the spec) — only cosmetic; matches the design but worth noting."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_dashboard.py",
+    "/app/test_reports/pytest/admin_dashboard_results.xml"
+  ],
+  "action_items": [
+    "(Low) Add data-testid attributes throughout the admin_v2 pages for stable E2E (rows, action buttons, modal inputs).",
+    "(Low) Consider also blocking demote-to-non-admin / preventing role downgrade of super-admin in PUT /api/admin/users/{id} (currently only the soft-block endpoint guards super_admin)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2526 lines — well past the 700 LoC threshold. Continue splitting into routers (admin, auth, dealer, drivers, payments, contracts, listings).",
+    "POST /admin/users/{id}/active correctly invalidates current_session_id when blocking. Good.",
+    "POST /admin/users/{id}/password also invalidates the user's session — the active dealer is force-logged-out as expected. Good.",
+    "/admin/users returns a plain list (not wrapped) — Users.jsx defensively handles both shapes via `data.users || data || []`. Fine.",
+    "/admin/url-stats: `d['autoscout'] = d.pop('autoscout') + d.pop('autoscout24')` works because pop returns the values before re-insert; readability could improve with a temp var.",
+    "PUT /api/admin/users/{id} (legacy generic update) does NOT guard against blocking super-admin or self. The new dedicated /active endpoint guards both, but a malicious admin could still call PUT with {active:false} on a super-admin/themselves. Recommend hardening the legacy route too.",
+    "Admin-self password change: response invalidates ALL prior sessions of the admin (since the next /me-style call re-issues session_id), which is why my pytest had to re-login between tests — expected, but worth a test fixture caveat.",
+    "Frontend /admin/comparisons: clicking a row expands users + sources (verified 1 BMW 325 row visible)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_dashboard.py",
+    "/app/test_reports/iteration_3.json"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% (all 6 routes + redirect)"},
+  "test_credentials": "Super-Admin: CashCarHannover2025 / MaW34543WaM (verified). Legacy admin: admin@autohandel.app / Admin123! (verified, password is restored to original by the test_change_then_change_back test). Test dealer auto-created per pytest run with prefix test_admin_dash_*@example.com / InitialPass123 (final password after pwd-reset test: NewPass12345).",
+  "seed_data_creation": "Each pytest run creates one test dealer (TEST Dash Co {suffix}). Frontend non-admin redirect test creates one ephemeral dealer nonadmin_{ts}@example.com / TestPass123. None are torn down — minor data accumulation.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Admin dashboard regression suite is at /app/backend/tests/test_admin_dashboard.py — 19 tests, all passing. Run with: REACT_APP_BACKEND_URL=$(grep '^REACT_APP_BACKEND_URL=' /app/frontend/.env | cut -d= -f2-) pytest backend/tests/test_admin_dashboard.py -v. The frontend routes that exist (verified): /admin, /admin/users, /admin/users/{id}, /admin/comparisons, /admin/urls, /admin/settings (note the path is /admin/urls not /admin/url-stats). admin_v2 components have NO data-testid attrs — use text selectors. Login form has data-testid login-email/login-password/login-submit. The /api/admin/users endpoint returns a plain list (not wrapped); Users.jsx already handles both shapes. Self-password change invalidates the prior bearer token on next state-changing call (single-session guard) — fixtures must re-login if a test mutates the admin's password.",
+  "rca of the issue": "N/A — no bugs found in this iteration."
+}

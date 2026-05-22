@@ -1,0 +1,345 @@
+"""Listing endpoints: mobile/compare, live-counter, snapshots, vehicles,
+listings/extract, listings/resolve."""
+import logging
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from pydantic import BaseModel
+
+from auth import decode_token
+from autoscout_service import build_search_url as build_autoscout_url
+from deps import (
+    current_user, db, log_activity, now_iso, require_active_sub,
+)
+from kleinanzeigen_service import fetch_kleinanzeigen_vehicle
+from listing_identity import (
+    ListingIdentityError, get_listing_identity, get_or_fetch_listing,
+    set_cache_snapshot,
+)
+from mobile_service import (
+    DEFAULT_EXPORT_RULES, DEFAULT_RULES, build_search_url, get_vehicle,
+)
+from snapshot_service import (
+    create_snapshot, get_object as snapshot_get_object, run_snapshot_job,
+)
+
+log = logging.getLogger("autohandel")
+
+router = APIRouter()
+
+
+# ---------- Models ----------
+class CompareIn(BaseModel):
+    url: str
+
+
+class ListingURLIn(BaseModel):
+    url: str
+
+
+# =========================================================
+#                  MOBILE.DE COMPARE
+# =========================================================
+@router.post("/mobile/compare")
+async def compare(body: CompareIn, background: BackgroundTasks,
+                  user=Depends(require_active_sub)):
+    raw_url = (body.url or "").strip()
+
+    # Unified cache key = f"{source}:{item_id}". Dadurch werden
+    # Kleinanzeigen-/mobile.de-/AutoScout-URLs innerhalb der TTL nur EINMAL
+    # wirklich vom jeweiligen Anbieter gezogen — egal mit welchen Tracking-
+    # oder Such-Parametern die URL daherkommt.
+    try:
+        identity = get_listing_identity(raw_url)
+    except ListingIdentityError as exc:
+        raise HTTPException(
+            400,
+            str(exc) or "Keine gültige mobile.de- oder kleinanzeigen.de-Fahrzeug-URL erkannt.",
+        )
+
+    source = identity["source"]
+    item_id = identity["item_id"]
+
+    if source == "autoscout24":
+        raise HTTPException(
+            400,
+            "AutoScout24 ist aktuell nicht angebunden. Bitte eine mobile.de- oder "
+            "kleinanzeigen.de-URL verwenden.",
+        )
+
+    async def _fetcher(src: str, iid: str, url: str) -> dict:
+        """Wird nur bei Cache-MISS aufgerufen."""
+        if src == "kleinanzeigen":
+            v = await fetch_kleinanzeigen_vehicle(url)
+            v["mobile_ad_id"] = v.get("kleinanzeigen_id") or iid
+            v.setdefault("kleinanzeigen_id", iid)
+            return v
+        if src == "mobile":
+            v = await get_vehicle(db, iid)
+            if not v:
+                raise RuntimeError("Fahrzeug konnte nicht geladen werden.")
+            v.setdefault("mobile_ad_id", iid)
+            v.pop("_source", None)
+            return v
+        raise RuntimeError(f"Source '{src}' ist aktuell nicht angebunden.")
+
+    try:
+        vehicle, was_cached, cached_snapshot_id = await get_or_fetch_listing(
+            db, raw_url, _fetcher, ttl_hours=6,
+        )
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    except Exception as exc:
+        log.exception("compare fetch failed for %s", raw_url)
+        if source == "kleinanzeigen":
+            raise HTTPException(500, "Fahrzeugdaten konnten nicht geladen werden (Kleinanzeigen).")
+        raise HTTPException(500, "Fahrzeugdaten konnten nicht geladen werden.")
+
+    ad_id = vehicle.get("mobile_ad_id") or item_id
+    vehicle["mobile_ad_id"] = ad_id
+
+    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
+    active = (dealer or {}).get("active_profile", "inland")
+    if active == "export":
+        rules = (dealer or {}).get("export_rules") or DEFAULT_EXPORT_RULES
+    else:
+        rules = (dealer or {}).get("comparison_rules") or DEFAULT_RULES
+    search_url = build_search_url(vehicle, rules)
+    autoscout_url = build_autoscout_url(vehicle, rules)
+
+    # Track comparison (anonym)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=14)
+    await db.vehicle_comparisons.insert_one({
+        "id": str(uuid.uuid4()),
+        "mobile_ad_id": ad_id,
+        "source": source,
+        "cached": was_cached,
+        "dealer_id": user["dealer_id"],
+        "user_id": user["id"],
+        "created_at": now_iso(),
+        "expires_at_dt": expires_at,
+    })
+
+    # Persist vehicle for re-use (PDF, Termine)
+    vid = f"v_{ad_id}"
+    await db.vehicles.update_one(
+        {"id": vid, "dealer_id": user["dealer_id"]},
+        {"$set": {
+            "id": vid, "dealer_id": user["dealer_id"],
+            "mobile_ad_id": ad_id, "data": {k: v for k, v in vehicle.items() if not k.startswith("_")},
+            "updated_at": now_iso(),
+        },
+         "$setOnInsert": {"created_at": now_iso(), "status": "verglichen"}},
+        upsert=True,
+    )
+    await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id)
+
+    # Proof-of-listing Snapshot.
+    snap_id = None
+    is_web_url = raw_url.startswith("http") and (
+        "kleinanzeigen.de" in raw_url or "mobile.de" in raw_url
+    )
+
+    async def _reuse_cached_snapshot(sid: str) -> Optional[str]:
+        doc = await db.listing_snapshots.find_one(
+            {"id": sid, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "status": 1, "id": 1},
+        )
+        if not doc:
+            return None
+        if doc.get("status") == "failed":
+            return None
+        return doc["id"]
+
+    if is_web_url and was_cached and cached_snapshot_id:
+        snap_id = await _reuse_cached_snapshot(cached_snapshot_id)
+
+    if is_web_url and not snap_id:
+        try:
+            snap_id = await create_snapshot(
+                db,
+                dealer_id=user["dealer_id"], user_id=user["id"],
+                vehicle_id=vid, mobile_ad_id=ad_id, source_url=raw_url,
+            )
+            background.add_task(run_snapshot_job, db, snap_id)
+            try:
+                await set_cache_snapshot(db, raw_url, snap_id)
+            except Exception as exc:
+                log.warning("set_cache_snapshot failed for %s: %s", raw_url, exc)
+        except Exception as exc:
+            log.warning("could not schedule snapshot for %s: %s", raw_url, exc)
+            snap_id = None
+
+    return {
+        "vehicle_id": vid,
+        "ad_id": ad_id,
+        "vehicle": vehicle,
+        "search_url": search_url,
+        "autoscout_url": autoscout_url,
+        "rules_applied": rules,
+        "active_profile": active,
+        "source": source,
+        "cached": was_cached,
+        "cache_key": identity["cache_key"],
+        "snapshot_id": snap_id,
+        "snapshot_reused": bool(was_cached and cached_snapshot_id and snap_id == cached_snapshot_id),
+    }
+
+
+@router.get("/mobile/live-counter/{ad_id}")
+async def live_counter(ad_id: str, user=Depends(current_user)):
+    five_min = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    active = await db.vehicle_comparisons.count_documents({
+        "mobile_ad_id": ad_id, "created_at": {"$gte": five_min},
+        "dealer_id": {"$ne": user["dealer_id"]},
+    })
+    today_total = await db.vehicle_comparisons.count_documents({
+        "mobile_ad_id": ad_id, "created_at": {"$gte": today},
+    })
+    return {"active_now": active, "today": today_total}
+
+
+# =========================================================
+#                  LISTING SNAPSHOTS
+# =========================================================
+async def _load_snapshot_or_404(snap_id: str, dealer_id: str) -> dict:
+    snap = await db.listing_snapshots.find_one(
+        {"id": snap_id, "dealer_id": dealer_id}, {"_id": 0},
+    )
+    if not snap:
+        raise HTTPException(404, "Snapshot nicht gefunden")
+    return snap
+
+
+@router.get("/snapshots/{snap_id}")
+async def snapshot_status(snap_id: str, user=Depends(current_user)):
+    snap = await _load_snapshot_or_404(snap_id, user["dealer_id"])
+    snap.pop("png_path", None)
+    snap.pop("pdf_path", None)
+    return snap
+
+
+@router.get("/snapshots/{snap_id}/{kind}")
+async def snapshot_download(snap_id: str, kind: str,
+                            request: Request, auth: Optional[str] = None):
+    """Stream the captured PDF or PNG. Supports `?auth=<token>` so we can
+    use the URL directly in `<img src>` / `<iframe src>`."""
+    if kind not in ("pdf", "png"):
+        raise HTTPException(400, "kind muss 'pdf' oder 'png' sein")
+    token = None
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header[7:]
+    elif auth:
+        token = auth
+    if not token:
+        raise HTTPException(401, "Nicht authentifiziert")
+    try:
+        payload = decode_token(token)
+    except Exception:
+        raise HTTPException(401, "Token ungültig")
+    user_doc = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(401, "User nicht gefunden")
+    # Enforce single-session: revoked / rotated tokens must not grant access.
+    if not user_doc.get("active", True):
+        raise HTTPException(401, "Konto gesperrt")
+    token_sid = payload.get("sid")
+    stored_sid = user_doc.get("current_session_id")
+    if stored_sid and token_sid != stored_sid:
+        raise HTTPException(401, "Session beendet (anderes Gerät aktiv)")
+
+    snap = await _load_snapshot_or_404(snap_id, user_doc["dealer_id"])
+    if snap.get("status") != "ready":
+        raise HTTPException(409, f"Snapshot ist nicht bereit (status={snap.get('status')})")
+    path = snap.get(f"{kind}_path")
+    if not path:
+        raise HTTPException(404, f"Kein {kind.upper()}-Artefakt für diesen Snapshot")
+    try:
+        data, ctype = snapshot_get_object(path)
+    except Exception as exc:
+        log.exception("snapshot fetch failed")
+        raise HTTPException(502, "Snapshot-Storage nicht erreichbar.")
+    return Response(content=data, media_type=ctype)
+
+
+@router.get("/snapshots")
+async def list_snapshots(vehicle_id: Optional[str] = None,
+                         user=Depends(current_user)):
+    q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if vehicle_id:
+        q["vehicle_id"] = vehicle_id
+    items = await db.listing_snapshots.find(q, {"_id": 0, "png_path": 0, "pdf_path": 0}) \
+        .sort("created_at", -1).to_list(200)
+    return items
+
+
+# =========================================================
+#                       VEHICLES
+# =========================================================
+@router.get("/vehicles/{vehicle_id}")
+async def get_vehicle_detail(vehicle_id: str, user=Depends(current_user)):
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not v:
+        raise HTTPException(404, "Fahrzeug nicht gefunden")
+    return v
+
+
+@router.get("/vehicles")
+async def list_vehicles(user=Depends(current_user)):
+    items = await db.vehicles.find(
+        {"dealer_id": user["dealer_id"]}, {"_id": 0},
+    ).sort("updated_at", -1).to_list(500)
+    return items
+
+
+# =========================================================
+#               LISTING IDENTITY / CACHE
+# =========================================================
+@router.post("/listings/extract")
+async def listings_extract(body: ListingURLIn, _user=Depends(current_user)):
+    """Erkennt Quelle (kleinanzeigen / mobile / autoscout24) + item_id aus
+    einer URL. Liefert source, item_id und cache_key — ohne externen Fetch.
+    Auth required: prevents unauthenticated probing of URL patterns / item IDs."""
+    try:
+        return get_listing_identity(body.url)
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.post("/listings/resolve")
+async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub)):
+    """Cache-aware Resolver."""
+    async def _fetcher(source: str, item_id: str, url: str) -> dict:
+        if source == "kleinanzeigen":
+            return await fetch_kleinanzeigen_vehicle(url)
+        if source == "mobile":
+            v = await get_vehicle(db, item_id)
+            if not v:
+                raise RuntimeError("mobile.de Fahrzeug konnte nicht geladen werden")
+            return v
+        raise RuntimeError(f"Source '{source}' ist noch nicht angebunden.")
+
+    try:
+        data, was_cached, cached_snapshot_id = await get_or_fetch_listing(
+            db, body.url, _fetcher, ttl_hours=6,
+        )
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+
+    identity = get_listing_identity(body.url)
+    return {
+        "source": identity["source"],
+        "item_id": identity["item_id"],
+        "cache_key": identity["cache_key"],
+        "cached": was_cached,
+        "snapshot_id": cached_snapshot_id,
+        "vehicle": data,
+    }

@@ -1,0 +1,39 @@
+{
+  "summary": "Comprehensive backend + frontend smoke testing of Autohändler SaaS MVP. Backend pytest suite covers auth, single-session, subscription gating, mobile.de mock compare + cache + counter, contracts (create/PDF/send WA+Email), appointments, drivers, dealer settings, admin, payments. 23/24 tests pass. Frontend: landing renders, admin login → /app/vergleich works, vehicle compare returns mock Mercedes-Benz, search_url with filters generated, all sidebar nav routes work. One backend defect found in /api/payments/status (uncaught Stripe error → 500).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/payments/status/{session_id}", "issue": "Returns 500 Internal Server Error when Stripe checkout.session lookup fails (uncaught emergentintegrations CheckoutError). Should be wrapped in try/except returning 502 or 404 with a JSON error message. Trace: stripe._error.InvalidRequestError 'No such checkout.session: cs_test_...' bubbles up to ASGI."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Wrap /api/payments/status (and the matching webhook block) in try/except around StripeCheckout.get_checkout_status; return 502 with detail when Stripe raises CheckoutError so the polling endpoint never 500s. Same for /api/payments/checkout if Stripe is unreachable."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 983 lines – consider splitting into routers/auth.py, routers/contracts.py, routers/payments.py for maintainability (>700 LoC threshold).",
+    "Single-session enforcement is strict: every login invalidates the user's prior token. UX impact: opening the app in a 2nd tab/browser silently kicks out the first one (frontend will see 401 'Session beendet'). Consider adding a clear logout/redirect handler in AuthContext when this 401 message is seen.",
+    "/api/payments/status calls Stripe even when tx already paid is short-circuited, but otherwise has no error handling; lets InvalidRequestError become a 500.",
+    "/api/admin/users PUT does not validate plan_type values – any string is accepted and stored as a subscription plan.",
+    "Vehicle cache uses mongo expireAfterSeconds on `expires_at_dt`, but `vehicle_cache` index creation depends on that field actually being a datetime in inserts (verify mobile_service writes it correctly).",
+    "Frontend Landing showed only '120€' price visible in initial viewport snapshot; verify '1200€/Jahr' is actually rendered in the pricing block (test only matched the substring '1200' against the first 300 chars of body)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "96% (23/24)", "frontend": "100% smoke"},
+  "test_credentials": "Admin: admin@autohandel.app / Admin123! (lifetime, seeded). Dealer test users created with TEST_ prefix during pytest run; cleanup not implemented (manual mongo cleanup if needed).",
+  "seed_data_creation": "pytest creates ~6 TEST_-prefixed dealers per run + a few contracts/appointments/drivers. No teardown; fine for shared dev mongo.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest suite at /app/backend/tests/backend_test.py is the regression file. Re-run with: pytest /app/backend/tests/backend_test.py -v --junitxml=/app/test_reports/pytest/pytest_results.xml. Important: single-session enforcement means each /api/auth/login invalidates the user's previous token; tests use function-scoped token fixtures that re-login per test for shared module-scoped users. Frontend: admin login → /app/vergleich → enter mobile.de URL (sample IDs 448228023, 391155421, 1000006) → 'Vergleich starten'. Mocked APIs: mobile.de (deterministic per ad-id), email (returns mocked:true), WhatsApp (returns wa.me link). Stripe uses sk_test_emergent and the /api/payments/status endpoint is currently buggy (500 on session lookup failure).",
+  "rca of the issue": "Stripe payment_status 500: emergentintegrations.payments.stripe.checkout.StripeCheckout.get_checkout_status raises CheckoutError when stripe._error.InvalidRequestError('No such checkout.session') occurs. server.py line 808 calls this directly with no try/except, so FastAPI returns 500. Repro: POST /api/payments/checkout (returns session_id) then immediately GET /api/payments/status/{session_id}. Fix: wrap call in try/except CheckoutError → raise HTTPException(502, 'Stripe-Status nicht verfügbar')."
+}

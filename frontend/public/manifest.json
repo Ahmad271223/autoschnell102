@@ -1,0 +1,30 @@
+{
+  "short_name": "Autohandel",
+  "name": "Autohandel Fahrer-Portal",
+  "description": "Abholaufträge, Fahrzeugdaten und Dokumente für Fahrer.",
+  "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/driver-login",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#FF3B30",
+  "background_color": "#0A0A0A"
+}

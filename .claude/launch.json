@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Backend (FastAPI)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--loop", "asyncio"],
+      "port": 8001,
+      "cwd": "backend"
+    },
+    {
+      "name": "Frontend (React)",
+      "runtimeExecutable": "yarn",
+      "runtimeArgs": ["start"],
+      "port": 3000,
+      "cwd": "frontend"
+    }
+  ]
+}
