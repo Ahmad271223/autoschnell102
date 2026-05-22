@@ -82,10 +82,18 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
               onMouseLeave={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
             >
               <span
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black shrink-0"
-                style={{ background: "#e8472a", color: "white" }}
+                className="rounded-lg flex items-center justify-center shrink-0 overflow-hidden"
+                style={{
+                  background: "#ffffff",
+                  border: "1px solid #e8472a",
+                  width: 60, height: 40, padding: "4px 6px",
+                }}
               >
-                m
+                <img
+                  src="/logos/mobile-de.png"
+                  alt="mobile.de"
+                  style={{ height: 22, width: "auto", display: "block" }}
+                />
               </span>
               <div className="min-w-0 flex-1">
                 <div className="font-semibold text-sm">mobile.de öffnen</div>
@@ -112,10 +120,18 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
               onMouseLeave={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
             >
               <span
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black shrink-0"
-                style={{ background: "#ff6600", color: "white" }}
+                className="rounded-lg flex items-center justify-center shrink-0 overflow-hidden"
+                style={{
+                  background: "#2b2b2b",
+                  border: "1px solid #ffe600",
+                  width: 60, height: 40, padding: "3px",
+                }}
               >
-                AS
+                <img
+                  src="/logos/autoscout24.png"
+                  alt="AutoScout24"
+                  style={{ height: 32, width: "auto", display: "block" }}
+                />
               </span>
               <div className="min-w-0 flex-1">
                 <div className="font-semibold text-sm">AutoScout24 öffnen</div>
