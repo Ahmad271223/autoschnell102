@@ -172,20 +172,20 @@ export default function Vergleich() {
             title="mobile.de ein-/ausschalten"
             aria-label="mobile.de ein-/ausschalten"
             aria-pressed={portalMobile}
-            className="shrink-0 flex items-center justify-center px-3 py-1.5 rounded-xl transition-all"
+            className="shrink-0 flex items-center justify-center px-4 py-2 rounded-xl transition-all"
             style={{
               background: portalMobile ? "#ffffff" : "var(--hover-bg)",
               border: portalMobile ? "2px solid #e8472a" : "2px solid var(--divider)",
               boxShadow: portalMobile ? "0 0 0 2px rgba(232,71,42,0.15)" : "none",
               opacity: portalMobile ? 1 : 0.45,
               filter: portalMobile ? "none" : "grayscale(1)",
-              height: 38,
+              height: 56,
             }}
           >
             <img
               src="/logos/mobile-de.png"
               alt="mobile.de"
-              style={{ height: 22, width: "auto", display: "block" }}
+              style={{ height: 36, width: "auto", display: "block" }}
             />
           </button>
 
@@ -196,20 +196,20 @@ export default function Vergleich() {
             title="AutoScout24 ein-/ausschalten"
             aria-label="AutoScout24 ein-/ausschalten"
             aria-pressed={portalAutoscout}
-            className="shrink-0 flex items-center justify-center px-3 py-1.5 rounded-xl transition-all"
+            className="shrink-0 flex items-center justify-center px-4 py-2 rounded-xl transition-all"
             style={{
               background: portalAutoscout ? "#2b2b2b" : "var(--hover-bg)",
               border: portalAutoscout ? "2px solid #ffe600" : "2px solid var(--divider)",
               boxShadow: portalAutoscout ? "0 0 0 2px rgba(255,230,0,0.20)" : "none",
               opacity: portalAutoscout ? 1 : 0.45,
               filter: portalAutoscout ? "none" : "grayscale(1)",
-              height: 38,
+              height: 56,
             }}
           >
             <img
               src="/logos/autoscout24.png"
               alt="AutoScout24"
-              style={{ height: 24, width: "auto", display: "block" }}
+              style={{ height: 48, width: "auto", display: "block" }}
             />
           </button>
 
