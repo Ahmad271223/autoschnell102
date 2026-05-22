@@ -34,24 +34,27 @@ export function openInPopup(url, name = "filterWindow", width = 1280, height = 1
 /**
  * Öffnet mehrere URLs auf einmal — zuverlässig ohne Popup-Blocker.
  *
- * Chrome erlaubt nur EINEN window.open(…, "popup=yes") pro User-Geste.
- * Bei mehr als einer URL öffnen wir deshalb als normale Tabs (kein
- * "popup=yes"), die werden vom Browser nie geblockt wenn sie synchron
- * im selben Click-Handler aufgerufen werden.
+ * Chrome/Firefox erlauben pro User-Geste nur EIN benanntes Fenster.
+ * Der zweite window.open(url, "anderer-name") wird als zweites Popup
+ * gewertet und geblockt. Lösung: bei mehreren URLs IMMER "_blank" ohne
+ * Name verwenden — neue Tabs werden vom Browser nie geblockt, solange
+ * sie synchron im selben Click-Handler aufgerufen werden.
  */
 export function openMultiple(urls) {
   // urls: Array von { url, name }
   const valid = urls.filter((u) => u?.url);
   if (valid.length === 0) return;
   if (valid.length === 1) {
-    // Einzeln → Popup
+    // Einzeln → Popup mit Namen (Wiederverwendung bei erneutem Klick)
     openInPopup(valid[0].url, valid[0].name || "filterWindow");
     return;
   }
-  // Mehrere → Tabs (synchron, kein Popup-Feature → nicht geblockt)
-  valid.forEach(({ url, name }) => {
+  // Mehrere → _blank ohne Namen, sonst blockiert der Browser ab dem 2. Aufruf.
+  // noopener/noreferrer = isolierte Fenster, kein window.opener-Zugriff.
+  valid.forEach(({ url }) => {
     try {
-      window.open(url, name || "_blank");
+      const w = window.open(url, "_blank", "noopener,noreferrer");
+      if (w) { try { w.opener = null; } catch { /* ignore */ } }
     } catch { /* ignore */ }
   });
 }
