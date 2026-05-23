@@ -10,6 +10,7 @@ import ContractDialog from "@/components/ContractDialog";
 import SendDialog from "@/components/SendDialog";
 import SnapshotCard from "@/components/SnapshotCard";
 import ProfileBadge from "@/components/ProfileBadge";
+import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { openInPopup, openMultiple } from "@/lib/popup";
 
@@ -164,53 +165,29 @@ export default function Vergleich() {
           {/* Trennlinie */}
           <div className="w-px self-stretch my-1" style={{ background: "var(--divider)" }} />
 
-          {/* Portal-Toggles (Logos statt Text) */}
+          {/* Portal-Toggles — PortalBadge sorgt für konsistenten Look in allen Dialogen */}
           <button
             type="button"
             data-testid="toggle-mobile"
             onClick={() => toggleMobile(!portalMobile)}
-            title="mobile.de ein-/ausschalten"
+            title={portalMobile ? "mobile.de aktiv — klicken zum Deaktivieren" : "mobile.de aktivieren"}
             aria-label="mobile.de ein-/ausschalten"
             aria-pressed={portalMobile}
-            className="shrink-0 flex items-center justify-center px-4 py-2 rounded-xl transition-all"
-            style={{
-              background: portalMobile ? "#ffffff" : "var(--hover-bg)",
-              border: portalMobile ? "2px solid #e8472a" : "2px solid var(--divider)",
-              boxShadow: portalMobile ? "0 0 0 2px rgba(232,71,42,0.15)" : "none",
-              opacity: portalMobile ? 1 : 0.45,
-              filter: portalMobile ? "none" : "grayscale(1)",
-              height: 56,
-            }}
+            className="shrink-0 p-1.5 rounded-xl bg-transparent border-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"
           >
-            <img
-              src="/logos/mobile-de.png"
-              alt="mobile.de"
-              style={{ height: 36, width: "auto", display: "block" }}
-            />
+            <PortalBadge kind="mobile" active={portalMobile} size="md" />
           </button>
 
           <button
             type="button"
             data-testid="toggle-autoscout"
             onClick={() => toggleAutoscout(!portalAutoscout)}
-            title="AutoScout24 ein-/ausschalten"
+            title={portalAutoscout ? "AutoScout24 aktiv — klicken zum Deaktivieren" : "AutoScout24 aktivieren"}
             aria-label="AutoScout24 ein-/ausschalten"
             aria-pressed={portalAutoscout}
-            className="shrink-0 flex items-center justify-center px-4 py-2 rounded-xl transition-all"
-            style={{
-              background: portalAutoscout ? "#2b2b2b" : "var(--hover-bg)",
-              border: portalAutoscout ? "2px solid #ffe600" : "2px solid var(--divider)",
-              boxShadow: portalAutoscout ? "0 0 0 2px rgba(255,230,0,0.20)" : "none",
-              opacity: portalAutoscout ? 1 : 0.45,
-              filter: portalAutoscout ? "none" : "grayscale(1)",
-              height: 56,
-            }}
+            className="shrink-0 p-1.5 rounded-xl bg-transparent border-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"
           >
-            <img
-              src="/logos/autoscout24.png"
-              alt="AutoScout24"
-              style={{ height: 48, width: "auto", display: "block" }}
-            />
+            <PortalBadge kind="autoscout" active={portalAutoscout} size="md" />
           </button>
 
           {/* Filter öffnen */}
@@ -367,9 +344,12 @@ export default function Vergleich() {
 
             <div className="apple-surface p-6">
               <div className="flex items-start justify-between gap-3 mb-3">
-                <div>
-                  <div className="overline">Mobile.de Filter</div>
-                  <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Generierter Such-Link auf Basis deiner Vergleichsregeln</div>
+                <div className="flex items-start gap-3">
+                  <PortalBadge kind="mobile" size="sm" />
+                  <div>
+                    <div className="overline">Mobile.de Filter</div>
+                    <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Generierter Such-Link auf Basis deiner Vergleichsregeln</div>
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -385,10 +365,13 @@ export default function Vergleich() {
             {result.autoscout_url && (
               <div className="apple-surface p-6">
                 <div className="flex items-start justify-between gap-3 mb-3">
-                  <div>
-                    <div className="overline">AutoScout24 Filter</div>
-                    <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                      Gleicher Filter, zweite Plattform — doppelte Reichweite
+                  <div className="flex items-start gap-3">
+                    <PortalBadge kind="autoscout" size="sm" />
+                    <div>
+                      <div className="overline">AutoScout24 Filter</div>
+                      <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                        Gleicher Filter, zweite Plattform — doppelte Reichweite
+                      </div>
                     </div>
                   </div>
                   <button

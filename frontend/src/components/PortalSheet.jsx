@@ -6,6 +6,7 @@
  */
 import { ExternalLink, X } from "lucide-react";
 import { openInPopup, openMultiple } from "@/lib/popup";
+import PortalBadge from "@/components/PortalBadge";
 
 export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
   if (!mobileUrl && !autoscoutUrl) return null;
@@ -39,14 +40,24 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
 
       {/* Sheet */}
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="portal-sheet-title"
         className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-sm mx-4 rounded-2xl shadow-2xl overflow-hidden"
         style={{ background: "var(--card-bg)", border: "1px solid var(--divider)" }}
       >
+        {/* Akzent-Balken oben — visueller Anker */}
+        <div style={{ height: 3, background: "var(--accent-red)" }} />
+
         {/* Header */}
-        <div className="flex items-center justify-between px-5 pt-5 pb-3">
+        <div className="flex items-center justify-between px-5 pt-4 pb-3">
           <div>
-            <p className="overline mb-0.5">PORTAL WÄHLEN</p>
-            <h2 className="font-display font-bold text-lg tracking-tight" style={{ color: "var(--text-primary)" }}>
+            <p className="overline mb-0.5">Portal wählen</p>
+            <h2
+              id="portal-sheet-title"
+              className="font-display font-bold text-lg tracking-tight"
+              style={{ color: "var(--text-primary)" }}
+            >
               Welche Seite öffnen?
             </h2>
           </div>
@@ -57,90 +68,37 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
             onMouseEnter={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
             onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
             title="Schließen"
+            aria-label="Dialog schließen"
           >
             <X size={18} />
           </button>
         </div>
 
         {/* Divider */}
-        <div style={{ height: 1, background: "var(--divider)", margin: "0 20px" }} />
+        <div style={{ height: 1, background: "var(--hairline)", margin: "0 20px" }} />
 
         {/* Buttons */}
         <div className="p-4 flex flex-col gap-2.5">
           {/* mobile.de */}
           {mobileUrl && (
-            <button
-              type="button"
+            <PortalActionButton
+              kind="mobile"
+              accent="#e8472a"
+              label="mobile.de öffnen"
+              url={mobileUrl}
               onClick={openMobile}
-              className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl text-left transition-all"
-              style={{
-                background: "var(--hover-bg)",
-                border: "1px solid var(--divider)",
-                color: "var(--text-primary)",
-              }}
-              onMouseEnter={(e) => e.currentTarget.style.background = "var(--input-bg)"}
-              onMouseLeave={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
-            >
-              <span
-                className="rounded-lg flex items-center justify-center shrink-0 overflow-hidden"
-                style={{
-                  background: "#ffffff",
-                  border: "1px solid #e8472a",
-                  width: 60, height: 40, padding: "4px 6px",
-                }}
-              >
-                <img
-                  src="/logos/mobile-de.png"
-                  alt="mobile.de"
-                  style={{ height: 22, width: "auto", display: "block" }}
-                />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-sm">mobile.de öffnen</div>
-                <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
-                  {mobileUrl}
-                </div>
-              </div>
-              <ExternalLink size={14} style={{ color: "var(--text-muted)", shrink: 0 }} />
-            </button>
+            />
           )}
 
           {/* AutoScout24 */}
           {autoscoutUrl && (
-            <button
-              type="button"
+            <PortalActionButton
+              kind="autoscout"
+              accent="#ffe600"
+              label="AutoScout24 öffnen"
+              url={autoscoutUrl}
               onClick={openAutoscout}
-              className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl text-left transition-all"
-              style={{
-                background: "var(--hover-bg)",
-                border: "1px solid var(--divider)",
-                color: "var(--text-primary)",
-              }}
-              onMouseEnter={(e) => e.currentTarget.style.background = "var(--input-bg)"}
-              onMouseLeave={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
-            >
-              <span
-                className="rounded-lg flex items-center justify-center shrink-0 overflow-hidden"
-                style={{
-                  background: "#2b2b2b",
-                  border: "1px solid #ffe600",
-                  width: 60, height: 40, padding: "3px",
-                }}
-              >
-                <img
-                  src="/logos/autoscout24.png"
-                  alt="AutoScout24"
-                  style={{ height: 32, width: "auto", display: "block" }}
-                />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-sm">AutoScout24 öffnen</div>
-                <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
-                  {autoscoutUrl}
-                </div>
-              </div>
-              <ExternalLink size={14} style={{ color: "var(--text-muted)" }} />
-            </button>
+            />
           )}
 
           {/* Beide öffnen */}
@@ -171,5 +129,39 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
         </div>
       </div>
     </>
+  );
+}
+
+/* ───────── Hilfs-Komponenten ───────── */
+
+function PortalActionButton({ kind, accent, label, url, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-all"
+      style={{
+        background: "var(--hover-bg)",
+        border: "1px solid var(--divider)",
+        color: "var(--text-primary)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "var(--input-bg)";
+        e.currentTarget.style.borderColor = accent;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "var(--hover-bg)";
+        e.currentTarget.style.borderColor = "var(--divider)";
+      }}
+    >
+      <PortalBadge kind={kind} size="sm" />
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold text-sm">{label}</div>
+        <div className="text-[11px] truncate font-mono" style={{ color: "var(--text-muted)" }}>
+          {url}
+        </div>
+      </div>
+      <ExternalLink size={14} className="shrink-0" style={{ color: "var(--text-muted)" }} />
+    </button>
   );
 }
