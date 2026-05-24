@@ -145,6 +145,38 @@ def _parse_location(text: str) -> Optional[str]:
     return None
 
 
+def _split_location(location: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Splittet eine location-Zeile wie '10115 Berlin' oder '10115 Berlin - Mitte'
+    in (zip, city). Bei '10115 Berlin Berlin (Bundesland)' wird das Bundesland
+    entfernt, damit nur der Stadtname in der city-Spalte landet.
+
+    Rueckgabe:
+        ('10115', 'Berlin')   fuer '10115 Berlin'
+        ('10115', 'Berlin')   fuer '10115 Berlin - Mitte'   (Bezirk verworfen)
+        ('80331', 'Muenchen') fuer '80331 Muenchen Bayern'  (Bundesland verworfen)
+        (None, None)          wenn keine PLZ gefunden
+    """
+    if not location:
+        return (None, None)
+    m = re.search(r"\b(\d{5})\b\s*([^\-\n]*)", location)
+    if not m:
+        return (None, None)
+    plz = m.group(1)
+    rest = (m.group(2) or "").strip()
+    if not rest:
+        return (plz, None)
+    # Bundeslaender abschneiden — sie stehen oft hinter dem Stadtnamen.
+    state_re = re.compile(
+        r"\s+(Bayern|NRW|Nordrhein[-\w]*|Hessen|Sachsen[-\w]*|Berlin|Hamburg|Bremen|"
+        r"Saarland|Brandenburg|Th(ue|ü)ringen|Niedersachsen|Rheinland[-\w]*|"
+        r"Schleswig[-\w]*|Mecklenburg[-\w]*|Baden[-\w]*|W(ue|ü)rttemberg|"
+        r"Sachsen-Anhalt)\b.*$",
+        re.IGNORECASE,
+    )
+    city = state_re.sub("", rest).strip()
+    return (plz, city or None)
+
+
 def _parse_structured(text: str) -> Dict[str, str]:
     """Walk visible text line-by-line, collecting <field>: <next-line> pairs.
     Mirrors the layout of kleinanzeigen.de's vehicle property table."""
@@ -419,6 +451,7 @@ async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
     title = _parse_title(soup, visible)
     price, price_amount = _parse_price(visible)
     location = _parse_location(visible)
+    seller_zip, seller_city = _split_location(location)
     structured = _parse_structured(visible)
 
     raw_brand = structured.get("Marke")
@@ -493,9 +526,9 @@ async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
         "list_price": float(price_amount) if price_amount else None,
         "currency": "EUR",
         "seller_name": None,
-        "seller_address": None,
-        "seller_zip": None,
-        "seller_city": None,
+        "seller_address": None,           # KA zeigt Strasse selten oeffentlich
+        "seller_zip": seller_zip,         # aus location-Zeile extrahiert
+        "seller_city": seller_city,       # aus location-Zeile extrahiert (ohne Bezirk/Bundesland)
         "seller_phone": None,
         "seller_email": None,
         "title": title,
