@@ -2,20 +2,23 @@ import { useMemo, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
 
 /**
- * Schaden-Selector mit 5 Fahrzeug-Ansichten und 8 Schadensarten.
+ * Schaden-Selector mit fixen Klick-Punkten je Fahrzeug-Ansicht.
  *
  * Workflow:
  *   1) Schadensart oben wählen.
- *   2) In einer der 5 Skizzen auf die betroffene Stelle klicken.
- *   3) Marker mit Kürzel wird gesetzt, das nächstgelegene Karosserieteil
- *      identifiziert und als Eintrag in die Liste übernommen.
- *
- * Layout: alle 5 Ansichten sind dauerhaft sichtbar (Grid), keine Tabs —
- * der Händler kann direkt zur passenden Ansicht klicken.
+ *   2) In einer der 5 Skizzen auf einen der vordefinierten Punkte klicken.
+ *      Die Punkte sind klein und unauffällig im Bild eingezeichnet; das
+ *      Label (z.B. "Motorhaube", "Linker Hauptscheinwerfer") ist im Bild
+ *      unsichtbar und erscheint nur im Tooltip beim Hover.
+ *   3) Marker mit Kürzel wird gesetzt; der zugehörige Karosserieteil-Name
+ *      landet im Vertrag als lesbarer Text.
  *
  * Konvention (Deutschland, Linkslenker):
  *   - "links"  = Fahrerseite  (Auto schaut im Bild nach LINKS)
  *   - "rechts" = Beifahrerseite (Auto schaut im Bild nach RECHTS)
+ *   Front-Ansicht (Auto zeigt zum Betrachter):
+ *     "links"  (Fahrerseite)    = RECHTE Bildhälfte
+ *     "rechts" (Beifahrerseite) = LINKE  Bildhälfte
  */
 
 export const DAMAGE_TYPES = [
@@ -38,9 +41,7 @@ const VIEW_LABELS = {
 };
 
 // Alle neuen Skizzen liegen einheitlich bei 1536 × 1024 px in
-// /app/frontend/public/damage/. Die Klick-Koordinaten werden im
-// Image-Pixel-Raum gespeichert, damit Marker auch im PDF identisch
-// gerendert werden.
+// /app/frontend/public/damage/.
 const IMG_W = 1536;
 const IMG_H = 1024;
 const VIEW_IMAGES = {
@@ -51,200 +52,158 @@ const VIEW_IMAGES = {
   top:   { src: "/damage/top.png",   w: IMG_W, h: IMG_H },
 };
 
-// Hilfsfunktion: Zone mit Mittelpunkt + bbox-Größe (in Bild-Pixel).
-const Z = (name, cx, cy, w = 160, h = 160) => ({
-  name, cx, cy, x: cx - w / 2, y: cy - h / 2, w, h,
-});
+// Hilfsfunktion: Punkt mit Mittelpunkt (Bild-Pixel) + Name.
+const P = (name, cx, cy) => ({ name, cx, cy });
 
-// Zonen wurden auf Basis der tatsächlichen Bounding-Boxen der Skizzen
-// kalibriert (Porsche-Cayenne-Look, 1536 × 1024).
-//
-// WICHTIG — KFZ-Konvention (Fahrerperspektive):
-//   "links"  / "rechts" beziehen sich IMMER auf die Fahrer-Sichtweise
-//   (sitzend im Wagen, Blick nach vorn — also Fahrerseite vs. Beifahrerseite).
-//   Daraus folgt für die einzelnen Bilder:
-//     • Frontansicht (Auto schaut den Betrachter an):
-//         "links"  (Fahrerseite)    = RECHTE Bildhälfte
-//         "rechts" (Beifahrerseite) = LINKE  Bildhälfte
-//     • Heckansicht (Auto vom Betrachter abgewandt — gleiche Blickrichtung wie Fahrer):
-//         "links"  = LINKE  Bildhälfte
-//         "rechts" = RECHTE Bildhälfte
-//     • Draufsicht mit Front rechts:
-//         "links"  = OBERE Bildhälfte
-//         "rechts" = UNTERE Bildhälfte
-//     • Seitenansichten: nur eine Seite des Fahrzeugs sichtbar — entspricht
-//       jeweils der Fahrer- bzw. Beifahrerseite.
-const ZONES = {
-  /* ---------------- FRONTANSICHT (Auto schaut zum Betrachter) ----------------
-     Fahrerseite (links) = RECHTE Bildhälfte, Beifahrerseite (rechts) = LINKE Bildhälfte. */
+/* ------------------------------------------------------------------
+   DOTS — fix definierte, klickbare Punkte je Ansicht.
+   Im Bild visuell als kleine, unauffällige Kreise dargestellt.
+   Das Label ist im Bild UNSICHTBAR und erscheint nur im Tooltip
+   beim Hover sowie später als Text im Vertrag.
+   ------------------------------------------------------------------ */
+const DOTS = {
+  /* ---------------- FRONTANSICHT ---------------- */
   front: [
-    Z("Dach",                       765, 170, 900, 140),
-    Z("Windschutzscheibe",          765, 320, 800, 180),
-    Z("Außenspiegel rechts",        290, 440, 200, 100),  // Bei­fahrerseite -> linke Bildseite
-    Z("Außenspiegel links",        1240, 440, 200, 100),  // Fahrerseite     -> rechte Bildseite
-    Z("Motorhaube",                 765, 510, 600, 140),
-    Z("Frontscheinwerfer rechts",   490, 620, 220, 130),
-    Z("Frontscheinwerfer links",   1040, 620, 220, 130),
-    Z("Kotflügel vorne rechts",     290, 720, 240, 280),
-    Z("Kotflügel vorne links",     1240, 720, 240, 280),
-    Z("Kühlergrill",                765, 760, 460, 120),
-    Z("Kennzeichen vorne",          765, 870, 220, 90),
-    Z("Stoßstange vorne",           765, 880, 720, 160),
-    Z("Felge vorne rechts",         380, 940, 280, 200),
-    Z("Felge vorne links",         1150, 940, 280, 200),
+    P("Motorhaube",                          765, 480),
+    P("Windschutzscheibe",                   765, 290),
+    P("A-Säule rechts",                      370, 230),  // Beifahrerseite = linke Bildhälfte
+    P("A-Säule links",                      1170, 230),  // Fahrerseite     = rechte Bildhälfte
+    P("Rechter Außenspiegel",                290, 440),
+    P("Linker Außenspiegel",                1240, 440),
+    P("Marken-Emblem",                       765, 660),
+    P("Rechter Hauptscheinwerfer",           490, 620),
+    P("Linker Hauptscheinwerfer",           1040, 620),
+    P("Kühlergrill",                         765, 800),  // über dem Kennzeichen
+    P("Rechter Nebelscheinwerfer",           430, 870),
+    P("Linker Nebelscheinwerfer",           1100, 870),
+    P("Kennzeichenhalterung",                765, 880),
+    P("Rechtes Vorderrad / Reifen",          380, 940),
+    P("Linkes Vorderrad / Reifen",          1150, 940),
   ],
 
-  /* ---------------- HECKANSICHT (Auto vom Betrachter abgewandt) ----------------
-     Gleiche Sichtrichtung wie der Fahrer: links/rechts = links/rechts im Bild.
-     Kalibriert anhand der tatsächlichen Bildmerkmale (PIL-Slice-Analyse). */
+  /* ---------------- HECKANSICHT ---------------- */
   rear: [
-    Z("Dach",                       765, 180, 900, 140),
-    Z("Heckscheibe",                765, 320, 850, 260),
-    Z("Außenspiegel links",         440, 220, 200, 120),
-    Z("Außenspiegel rechts",       1090, 220, 200, 120),
-    Z("Heckklappe",                 765, 560, 380, 180),
-    Z("Rücklicht links",            440, 590, 280, 180),
-    Z("Rücklicht rechts",          1100, 590, 280, 180),
-    Z("Kennzeichen hinten",         765, 660, 240, 90),
-    Z("Kotflügel hinten links",     310, 600, 220, 280),
-    Z("Kotflügel hinten rechts",   1220, 600, 220, 280),
-    Z("Stoßstange hinten",          765, 770, 720, 110),
-    Z("Auspuff links",              620, 730, 220, 130),
-    Z("Auspuff rechts",             920, 730, 220, 130),
-    Z("Felge hinten links",         320, 870, 260, 200),
-    Z("Felge hinten rechts",       1210, 870, 260, 200),
+    P("Dach",                       765, 180),
+    P("Heckscheibe",                765, 320),
+    P("Linker Außenspiegel",        440, 220),
+    P("Rechter Außenspiegel",      1090, 220),
+    P("Heckklappe",                 765, 560),
+    P("Linkes Rücklicht",           440, 590),
+    P("Rechtes Rücklicht",         1100, 590),
+    P("Kennzeichen hinten",         765, 660),
+    P("Kotflügel hinten links",     310, 600),
+    P("Kotflügel hinten rechts",   1220, 600),
+    P("Stoßstange hinten",          765, 770),
+    P("Auspuff links",              620, 730),
+    P("Auspuff rechts",             920, 730),
+    P("Linkes Hinterrad / Felge",   320, 870),
+    P("Rechtes Hinterrad / Felge", 1210, 870),
   ],
 
-  /* -------- FAHRERSEITE (Auto schaut nach LINKS, Front am linken Bildrand) ------- */
+  /* -------- FAHRERSEITE (Auto schaut nach LINKS) ------- */
   left: [
-    // Front-Bereich (links im Bild)
-    Z("Stoßstange vorne",            85, 540, 150, 160),
-    Z("Frontscheinwerfer links",    140, 460, 140, 100),
-    Z("Kotflügel vorne links",      230, 540, 240, 200),
-    Z("Motorhaube",                 360, 410, 280, 130),
-    Z("Außenspiegel links",         500, 410, 100, 100),
-    Z("Windschutzscheibe",          580, 340, 280, 160),
-    Z("A-Säule links",              530, 360, 60, 160),
-    // Dach + Mitte
-    Z("Dach",                       820, 290, 620, 110),
-    Z("B-Säule links",              820, 380, 60, 180),
-    Z("Tür vorne links",            720, 540, 300, 280),
-    Z("Tür hinten links",          1020, 540, 300, 280),
-    Z("C-Säule links",             1100, 380, 60, 160),
-    // Heck-Bereich (rechts im Bild)
-    Z("Heckscheibe",               1280, 340, 280, 160),
-    Z("Kotflügel hinten links",    1330, 540, 240, 200),
-    Z("Heckklappe",                1430, 460, 160, 240),
-    Z("Rücklicht links",           1450, 500, 100, 100),
-    Z("Stoßstange hinten",         1450, 580, 130, 140),
-    // Schweller + Felgen
-    Z("Schweller links",            720, 690, 900, 50),
-    Z("Felge vorne links",          250, 630, 280, 200),
-    Z("Felge hinten links",        1280, 630, 280, 200),
+    P("Stoßstange vorne",            85, 540),
+    P("Linker Hauptscheinwerfer",   140, 460),
+    P("Kotflügel vorne links",      230, 540),
+    P("Motorhaube",                 360, 410),
+    P("Linker Außenspiegel",        500, 410),
+    P("Windschutzscheibe",          580, 340),
+    P("A-Säule links",              530, 360),
+    P("Dach",                       820, 290),
+    P("B-Säule links",              820, 380),
+    P("Tür vorne links",            720, 540),
+    P("Tür hinten links",          1020, 540),
+    P("C-Säule links",             1100, 380),
+    P("Heckscheibe",               1280, 340),
+    P("Kotflügel hinten links",    1330, 540),
+    P("Heckklappe",                1430, 460),
+    P("Linkes Rücklicht",          1450, 500),
+    P("Stoßstange hinten",         1450, 580),
+    P("Schweller links",            720, 690),
+    P("Vorderrad / Felge links",    250, 630),
+    P("Hinterrad / Felge links",   1280, 630),
   ],
 
-  /* ------- BEIFAHRERSEITE (Auto schaut nach RECHTS, Front am rechten Bildrand) ------- */
+  /* ------- BEIFAHRERSEITE (Auto schaut nach RECHTS) ------- */
   right: [
-    // Front-Bereich (rechts im Bild) — gespiegelt zur Fahrerseite
-    Z("Stoßstange vorne",          1450, 540, 150, 160),
-    Z("Frontscheinwerfer rechts",  1395, 460, 140, 100),
-    Z("Kotflügel vorne rechts",    1305, 540, 240, 200),
-    Z("Motorhaube",                1175, 410, 280, 130),
-    Z("Außenspiegel rechts",       1035, 410, 100, 100),
-    Z("Windschutzscheibe",          955, 340, 280, 160),
-    Z("A-Säule rechts",            1005, 360, 60, 160),
-    // Dach + Mitte
-    Z("Dach",                       715, 290, 620, 110),
-    Z("B-Säule rechts",             715, 380, 60, 180),
-    Z("Tür vorne rechts",           815, 540, 300, 280),
-    Z("Tür hinten rechts",          515, 540, 300, 280),
-    Z("C-Säule rechts",             435, 380, 60, 160),
-    // Heck-Bereich (links im Bild)
-    Z("Heckscheibe",                255, 340, 280, 160),
-    Z("Kotflügel hinten rechts",    205, 540, 240, 200),
-    Z("Heckklappe",                 105, 460, 160, 240),
-    Z("Rücklicht rechts",            85, 500, 100, 100),
-    Z("Stoßstange hinten",           85, 580, 130, 140),
-    // Schweller + Felgen
-    Z("Schweller rechts",           815, 690, 900, 50),
-    Z("Felge vorne rechts",        1285, 630, 280, 200),
-    Z("Felge hinten rechts",        255, 630, 280, 200),
+    P("Stoßstange vorne",          1450, 540),
+    P("Rechter Hauptscheinwerfer", 1395, 460),
+    P("Kotflügel vorne rechts",    1305, 540),
+    P("Motorhaube",                1175, 410),
+    P("Rechter Außenspiegel",      1035, 410),
+    P("Windschutzscheibe",          955, 340),
+    P("A-Säule rechts",            1005, 360),
+    P("Dach",                       715, 290),
+    P("B-Säule rechts",             715, 380),
+    P("Tür vorne rechts",           815, 540),
+    P("Tür hinten rechts",          515, 540),
+    P("C-Säule rechts",             435, 380),
+    P("Heckscheibe",                255, 340),
+    P("Kotflügel hinten rechts",    205, 540),
+    P("Heckklappe",                 105, 460),
+    P("Rechtes Rücklicht",           85, 500),
+    P("Stoßstange hinten",           85, 580),
+    P("Schweller rechts",           815, 690),
+    P("Vorderrad / Felge rechts",  1285, 630),
+    P("Hinterrad / Felge rechts",   255, 630),
   ],
 
-  /* -------------- DRAUFSICHT (Front rechts im Bild, Heck links) -------------- */
-  /* Linkslenker-Konvention:
-   *   - "links"  (Fahrerseite)    = OBERE Bildhälfte
-   *   - "rechts" (Beifahrerseite) = UNTERE Bildhälfte
-   */
+  /* -------------- DRAUFSICHT (Front rechts im Bild) -------------- */
   top: [
-    // Front (rechte Bildhälfte)
-    Z("Stoßstange vorne",          1430, 460, 140, 380),
-    Z("Frontscheinwerfer links",   1340, 280, 160, 130),
-    Z("Frontscheinwerfer rechts",  1340, 640, 160, 130),
-    Z("Kotflügel vorne links",     1230, 230, 220, 140),
-    Z("Kotflügel vorne rechts",    1230, 690, 220, 140),
-    Z("Motorhaube",                1130, 460, 320, 380),
-    // Mitte vorne (Windschutzscheibe + A-Säule + Spiegel)
-    Z("Windschutzscheibe",          900, 460, 220, 380),
-    Z("A-Säule links",              930, 270, 60, 80),
-    Z("A-Säule rechts",             930, 650, 60, 80),
-    Z("Außenspiegel links",         960, 200, 100, 90),
-    Z("Außenspiegel rechts",        960, 720, 100, 90),
-    // Türen
-    Z("Tür vorne links",            780, 240, 280, 130),
-    Z("Tür vorne rechts",           780, 680, 280, 130),
-    // Dach
-    Z("Dach",                       620, 460, 320, 360),
-    // Hintere Türen
-    Z("Tür hinten links",           480, 240, 280, 130),
-    Z("Tür hinten rechts",          480, 680, 280, 130),
-    Z("C-Säule links",              400, 270, 60, 80),
-    Z("C-Säule rechts",             400, 650, 60, 80),
-    // Heckscheibe + Heck (linke Bildhälfte)
-    Z("Heckscheibe",                340, 460, 200, 380),
-    Z("Kotflügel hinten links",     220, 230, 220, 140),
-    Z("Kotflügel hinten rechts",    220, 690, 220, 140),
-    Z("Heckklappe",                 180, 460, 240, 380),
-    Z("Rücklicht links",            120, 280, 130, 130),
-    Z("Rücklicht rechts",           120, 640, 130, 130),
-    Z("Stoßstange hinten",          100, 460, 140, 380),
+    P("Stoßstange vorne",          1430, 460),
+    P("Linker Hauptscheinwerfer",  1340, 280),
+    P("Rechter Hauptscheinwerfer", 1340, 640),
+    P("Kotflügel vorne links",     1230, 230),
+    P("Kotflügel vorne rechts",    1230, 690),
+    P("Motorhaube",                1130, 460),
+    P("Windschutzscheibe",          900, 460),
+    P("A-Säule links",              930, 270),
+    P("A-Säule rechts",             930, 650),
+    P("Linker Außenspiegel",        960, 200),
+    P("Rechter Außenspiegel",       960, 720),
+    P("Tür vorne links",            780, 240),
+    P("Tür vorne rechts",           780, 680),
+    P("Dach",                       620, 460),
+    P("Tür hinten links",           480, 240),
+    P("Tür hinten rechts",          480, 680),
+    P("C-Säule links",              400, 270),
+    P("C-Säule rechts",             400, 650),
+    P("Heckscheibe",                340, 460),
+    P("Kotflügel hinten links",     220, 230),
+    P("Kotflügel hinten rechts",    220, 690),
+    P("Heckklappe",                 180, 460),
+    P("Linkes Rücklicht",           120, 280),
+    P("Rechtes Rücklicht",          120, 640),
+    P("Stoßstange hinten",          100, 460),
   ],
 };
 
-function findClosestZone(view, x, y) {
-  const zones = ZONES[view] || [];
+// Klick-Toleranz: wenn der User danebentippt, schnappen wir zum
+// nächsten Dot innerhalb dieser Distanz (Image-Pixel).
+const SNAP_RADIUS = 110;
+
+function findNearestDot(view, x, y) {
+  const dots = DOTS[view] || [];
   let best = null;
   let bestDist = Infinity;
-  for (const z of zones) {
-    const dx = x - z.cx;
-    const dy = y - z.cy;
-    const inside = x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h;
-    // Starke Präferenz für Klicks innerhalb der bbox.
-    const d = Math.sqrt(dx * dx + dy * dy) - (inside ? 5000 : 0);
-    if (d < bestDist) {
-      bestDist = d;
-      best = z;
+  for (const d of dots) {
+    const dx = x - d.cx;
+    const dy = y - d.cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = d;
     }
   }
-  return best?.name || "Karosserie";
+  if (best && bestDist <= SNAP_RADIUS) return best;
+  return null;
 }
 
 export default function DamageSelector({ damages = [], onChange }) {
   const [activeType, setActiveType] = useState(DAMAGE_TYPES[5]); // default: Kratzer
 
-  const handleSvgClick = (view, e) => {
+  const handleDotClick = (view, dot) => {
     if (!activeType) return;
-    const svg = e.currentTarget;
-    const rect = svg.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const dim = VIEW_IMAGES[view];
-    // Da die SVG via Wrapper-Div auf das exakte Aspect-Ratio gezwungen wird
-    // und preserveAspectRatio="none" gesetzt ist, ist das Mapping linear:
-    // SVG-Element belegt die gesamte Wrapper-Fläche, viewBox 0..dim.w/dim.h.
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * dim.w);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * dim.h);
-    if (x < 0 || x > dim.w || y < 0 || y > dim.h) return;
-    const zone = findClosestZone(view, x, y);
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const newDamage = {
       id,
@@ -253,12 +212,27 @@ export default function DamageSelector({ damages = [], onChange }) {
       type_label: activeType.label,
       abbr: activeType.abbr,
       color: activeType.color,
-      zone,
-      x,
-      y,
+      zone: dot.name,
+      x: dot.cx,
+      y: dot.cy,
     };
     const next = [...damages, newDamage];
     onChange?.(next, damagesToText(next));
+  };
+
+  const handleSvgClick = (view, e) => {
+    // Sicherheitsnetz: Wenn der User danebentippt, schnappen wir zum
+    // nächsten Dot innerhalb von SNAP_RADIUS — sonst wird der Klick
+    // ignoriert (freies Setzen ist deaktiviert).
+    if (!activeType) return;
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dim = VIEW_IMAGES[view];
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * dim.w);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * dim.h);
+    const dot = findNearestDot(view, x, y);
+    if (dot) handleDotClick(view, dot);
   };
 
   const removeDamage = (id) => {
@@ -309,8 +283,9 @@ export default function DamageSelector({ damages = [], onChange }) {
       <div className="flex items-center justify-between gap-3 text-[11px] text-zinc-500">
         <div>
           <span className="text-zinc-400">Anleitung:</span> Schadenstyp oben
-          wählen → in einer der Skizzen auf die Stelle klicken. Marker mit
-          Kürzel erscheint, Eintrag wird automatisch in den Vertrag übernommen.
+          wählen → in einer der Skizzen auf einen der kleinen Punkte klicken.
+          Hover zeigt den Namen, nach dem Klick wird der Eintrag automatisch
+          in den Vertrag übernommen.
         </div>
         {damages.length > 0 && (
           <button
@@ -324,20 +299,36 @@ export default function DamageSelector({ damages = [], onChange }) {
         )}
       </div>
 
-      {/* Alle 5 Ansichten gleichzeitig — responsive Grid.
-          Layout (alle Karten gleich groß, jeweils ½ Breite auf md):
-            md: 2 Spalten   (Front | Heck;  Fahrer | Beifahrer;  Draufsicht | leer)
-            sm: 1 Spalte    (alles untereinander)
-      */}
+      {/* 5 Ansichten gleichzeitig — responsive Grid */}
       <div
         className="grid grid-cols-1 md:grid-cols-2 gap-3"
         data-testid="damage-grid"
       >
-        <ViewCard view="front" markers={grouped.front || []} onSvgClick={handleSvgClick} onMarkerRemove={removeDamage} />
-        <ViewCard view="rear"  markers={grouped.rear  || []} onSvgClick={handleSvgClick} onMarkerRemove={removeDamage} />
-        <ViewCard view="left"  markers={grouped.left  || []} onSvgClick={handleSvgClick} onMarkerRemove={removeDamage} />
-        <ViewCard view="right" markers={grouped.right || []} onSvgClick={handleSvgClick} onMarkerRemove={removeDamage} />
-        <ViewCard view="top"   markers={grouped.top   || []} onSvgClick={handleSvgClick} onMarkerRemove={removeDamage} />
+        <ViewCard view="front" markers={grouped.front || []}
+                  activeColor={activeType?.color}
+                  onDotClick={handleDotClick}
+                  onSvgClick={handleSvgClick}
+                  onMarkerRemove={removeDamage} />
+        <ViewCard view="rear"  markers={grouped.rear  || []}
+                  activeColor={activeType?.color}
+                  onDotClick={handleDotClick}
+                  onSvgClick={handleSvgClick}
+                  onMarkerRemove={removeDamage} />
+        <ViewCard view="left"  markers={grouped.left  || []}
+                  activeColor={activeType?.color}
+                  onDotClick={handleDotClick}
+                  onSvgClick={handleSvgClick}
+                  onMarkerRemove={removeDamage} />
+        <ViewCard view="right" markers={grouped.right || []}
+                  activeColor={activeType?.color}
+                  onDotClick={handleDotClick}
+                  onSvgClick={handleSvgClick}
+                  onMarkerRemove={removeDamage} />
+        <ViewCard view="top"   markers={grouped.top   || []}
+                  activeColor={activeType?.color}
+                  onDotClick={handleDotClick}
+                  onSvgClick={handleSvgClick}
+                  onMarkerRemove={removeDamage} />
       </div>
 
       {/* Erfasste Schäden */}
@@ -385,11 +376,15 @@ export default function DamageSelector({ damages = [], onChange }) {
   );
 }
 
-function ViewCard({ view, markers, onSvgClick, onMarkerRemove, className = "" }) {
+function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarkerRemove, className = "" }) {
   const dim = VIEW_IMAGES[view];
-  // Marker-Größe je nach Ansicht (Image-Pixel-Raum) — größer für die kleineren Detail-Ansichten
+  const dots = DOTS[view] || [];
   const markerR = view === "top" ? 28 : 26;
   const markerFs = view === "top" ? 24 : 22;
+  // Klickbare Dot-Größe — bewusst klein, damit die Skizze ruhig bleibt.
+  // Der Hover-Halo macht den Hit-Bereich grosszuegig.
+  const dotR = 14;
+  const dotHaloR = 32;
 
   return (
     <div
@@ -406,9 +401,6 @@ function ViewCard({ view, markers, onSvgClick, onMarkerRemove, className = "" })
           </span>
         )}
       </div>
-      {/* Wrapper-Div erzwingt das exakte Aspect-Ratio, SVG füllt zu 100% — so
-          ist das Mapping zwischen Klick-Position und Bild-Pixel linear und
-          der SVG-Renderer weicht nicht auf eine quadratische Default-Höhe aus. */}
       <div
         className="relative w-full overflow-hidden rounded-md"
         style={{ aspectRatio: `${dim.w} / ${dim.h}` }}
@@ -418,12 +410,11 @@ function ViewCard({ view, markers, onSvgClick, onMarkerRemove, className = "" })
           preserveAspectRatio="none"
           width="100%"
           height="100%"
-          className="cursor-crosshair select-none block absolute inset-0"
+          className="select-none block absolute inset-0"
           onClick={(e) => onSvgClick(view, e)}
           data-testid={`damage-svg-${view}`}
           style={{ touchAction: "manipulation" }}
         >
-          {/* Klick-Capture-Layer */}
           <rect x="0" y="0" width={dim.w} height={dim.h} fill="white" />
           <image
             href={dim.src}
@@ -435,6 +426,23 @@ function ViewCard({ view, markers, onSvgClick, onMarkerRemove, className = "" })
             preserveAspectRatio="xMidYMid meet"
             style={{ pointerEvents: "none" }}
           />
+
+          {/* Klickbare Dots — unauffällig, Label im title (Hover-Tooltip) */}
+          {dots.map((d) => (
+            <Dot
+              key={d.name}
+              dot={d}
+              r={dotR}
+              haloR={dotHaloR}
+              activeColor={activeColor || "#0ea5e9"}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDotClick(view, d);
+              }}
+            />
+          ))}
+
+          {/* Bereits gesetzte Marker */}
           {markers.map((m) => (
             <Marker
               key={m.id}
@@ -450,6 +458,38 @@ function ViewCard({ view, markers, onSvgClick, onMarkerRemove, className = "" })
         </svg>
       </div>
     </div>
+  );
+}
+
+/** Unauffälliger Klick-Punkt im Bild — Label nur als <title>-Tooltip,
+ *  visuell ein kleiner halbtransparenter Kreis. Hover-Halo macht den
+ *  Trefferbereich für die Maus großzügig. */
+function Dot({ dot, r, haloR, activeColor, onClick }) {
+  return (
+    <g transform={`translate(${dot.cx}, ${dot.cy})`}
+       style={{ cursor: "pointer" }}
+       className="damage-dot"
+       onClick={onClick}>
+      {/* Unsichtbarer Hover-Halo — vergrößert den Hit-Bereich */}
+      <circle r={haloR} fill="transparent" />
+      {/* Sichtbarer Punkt — wechselt bei Hover zur aktiven Schadensfarbe */}
+      <circle
+        r={r}
+        className="damage-dot-inner"
+        fill="rgba(15,23,42,0.18)"
+        stroke="rgba(15,23,42,0.55)"
+        strokeWidth="2.5"
+      />
+      <title>{dot.name}</title>
+      <style>{`
+        .damage-dot:hover .damage-dot-inner {
+          fill: ${activeColor};
+          stroke: #0a0a0a;
+          stroke-width: 3;
+          opacity: 0.95;
+        }
+      `}</style>
+    </g>
   );
 }
 
