@@ -289,6 +289,16 @@ function NumInput({ value, onChange, placeholder, suffix, testid }) {
 }
 
 function YearSelect({ value, onChange, years, placeholder, testid }) {
+  // <option> erbt von <select> nur sehr eingeschraenkt — explizit setzen
+  // sonst rendert das OS sie auf weissem Hintergrund (Dark-Mode unlesbar).
+  const optStyle = {
+    background: "var(--bg-surface)",
+    color: "var(--text-primary)",
+  };
+  const placeholderOptStyle = {
+    background: "var(--bg-surface)",
+    color: "var(--text-muted)",
+  };
   return (
     <div className="relative">
       <select
@@ -302,8 +312,10 @@ function YearSelect({ value, onChange, years, placeholder, testid }) {
           color: value ? "var(--text-primary)" : "var(--text-muted)",
         }}
       >
-        <option value="">{placeholder}</option>
-        {years.map((y) => <option key={y} value={y}>{y}</option>)}
+        <option value="" style={placeholderOptStyle}>{placeholder}</option>
+        {years.map((y) => (
+          <option key={y} value={y} style={optStyle}>{y}</option>
+        ))}
       </select>
       <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none"
                    style={{ color: "var(--text-muted)" }} />
