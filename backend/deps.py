@@ -22,7 +22,21 @@ load_dotenv(ROOT_DIR / ".env")
 log = logging.getLogger("autohandel")
 
 # ---------- Mongo ----------
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+# Connection-Pool explizit dimensioniert fuer 200-500 gleichzeitige Nutzer.
+# maxPoolSize: max. gleichzeitige Sockets pro Prozess; minPoolSize haelt
+# warme Verbindungen vor (kein Cold-Start unter Last). Timeouts verhindern,
+# dass ein langsamer DB-Call den Request unbegrenzt blockiert.
+_MONGO_MAX_POOL = int(os.environ.get("MONGO_MAX_POOL_SIZE", "100"))
+_MONGO_MIN_POOL = int(os.environ.get("MONGO_MIN_POOL_SIZE", "10"))
+client = AsyncIOMotorClient(
+    os.environ["MONGO_URL"],
+    maxPoolSize=_MONGO_MAX_POOL,
+    minPoolSize=_MONGO_MIN_POOL,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=30000,
+    retryWrites=True,
+)
 db = client[os.environ["DB_NAME"]]
 
 # ---------- Auth ----------

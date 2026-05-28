@@ -1,4 +1,5 @@
 """Appointment endpoints: CRUD + pickup-order.pdf."""
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -221,7 +222,9 @@ async def get_pickup_order_pdf(appt_id: str, download: int = 0,
 
     try:
         from pickup_pdf_service import build_pickup_pdf
-        pdf_bytes = build_pickup_pdf(
+        # CPU-gebundene PDF-Erzeugung in Thread auslagern (Event-Loop frei).
+        pdf_bytes = await asyncio.to_thread(
+            build_pickup_pdf,
             appointment=appt, vehicle=vehicle, contract=contract,
             dealer=dealer, driver=driver,
         )

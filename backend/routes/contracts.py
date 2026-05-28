@@ -1,4 +1,5 @@
 """Contract endpoints: preview, create, list, get, pdf, send, delete."""
+import asyncio
 import base64
 import re
 import uuid
@@ -194,7 +195,10 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
-    pdf_bytes = generate_contract_pdf(
+    # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
+    # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
+    pdf_bytes = await asyncio.to_thread(
+        generate_contract_pdf,
         dealer=dealer, vehicle=vehicle, contract=contract_dict,
     )
     return Response(
@@ -227,7 +231,10 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
-    pdf_bytes = generate_contract_pdf(
+    # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
+    # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
+    pdf_bytes = await asyncio.to_thread(
+        generate_contract_pdf,
         dealer=dealer, vehicle=vehicle, contract=contract_dict,
     )
     pdf_b64 = base64.b64encode(pdf_bytes).decode()

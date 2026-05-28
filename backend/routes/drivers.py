@@ -10,7 +10,10 @@ from fastapi.security import HTTPAuthorizationCredentials
 from jose import jwt
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import JWT_ALG, JWT_SECRET, _DUMMY_HASH, decode_token, hash_password, verify_password
+from auth import (
+    JWT_ALG, JWT_SECRET, _DUMMY_HASH, decode_token,
+    hash_password_async, verify_password_async,
+)
 from deps import bearer, current_user, db, log_activity, now_iso
 from rate_limiter import driver_login_limiter, driver_register_limiter
 from snapshot_service import get_object as snapshot_get_object
@@ -267,7 +270,7 @@ async def driver_register(body: DriverAccountRegister, request: Request):
     sid = str(uuid.uuid4())
     doc = {
         "id": did, "email": email,
-        "password_hash": hash_password(body.password),
+        "password_hash": await hash_password_async(body.password),
         "display_name": body.display_name.strip(),
         "driver_code": code, "active": True,
         "current_session_id": sid,
@@ -295,7 +298,7 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     da = await db.driver_accounts.find_one({"email": email})
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = da["password_hash"] if da else _DUMMY_HASH
-    if not verify_password(body.password, pw_hash) or not da:
+    if not await verify_password_async(body.password, pw_hash) or not da:
         raise HTTPException(401, "E-Mail oder Passwort falsch")
     if not da.get("active", True):
         raise HTTPException(403, "Account deaktiviert")

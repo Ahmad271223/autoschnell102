@@ -1,4 +1,5 @@
 """Authentication helpers: JWT + bcrypt + single-session enforcement."""
+import asyncio
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,18 @@ def verify_password(plain: str, hashed: str) -> bool:
         return bcrypt.checkpw(plain.encode(), hashed.encode())
     except Exception:
         return False
+
+
+# Async-Wrapper: bcrypt ist CPU-gebunden (~250ms bei 12 Runden) und gibt
+# waehrend des Hashens das GIL frei. In einen Thread ausgelagert blockiert
+# es so NICHT den Single-Worker-Event-Loop — entscheidend bei 200-500
+# gleichzeitigen Logins/Registrierungen.
+async def hash_password_async(plain: str) -> str:
+    return await asyncio.to_thread(hash_password, plain)
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 
 # Constant-time dummy hash: used when the requested account does not exist so

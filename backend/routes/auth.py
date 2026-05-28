@@ -6,7 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
 
-from auth import create_token, hash_password, new_session_id, verify_password, _DUMMY_HASH
+from auth import (
+    create_token, hash_password_async, new_session_id,
+    verify_password_async, _DUMMY_HASH,
+)
 from deps import (
     current_user, db, get_subscription_status, now_iso, clean_doc,
 )
@@ -72,7 +75,7 @@ async def register(body: RegisterIn, request: Request):
     sid = new_session_id()
     user_doc = {
         "id": user_id, "email": body.email,
-        "password_hash": hash_password(body.password),
+        "password_hash": await hash_password_async(body.password),
         "role": "dealer", "active": True,
         "dealer_id": dealer_id, "current_session_id": sid,
         "created_at": now_iso(),
@@ -138,7 +141,7 @@ async def login(body: LoginIn, request: Request):
             user = await db.users.find_one({"email": {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}})
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = user["password_hash"] if user else _DUMMY_HASH
-    if not verify_password(body.password, pw_hash) or not user:
+    if not await verify_password_async(body.password, pw_hash) or not user:
         raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")

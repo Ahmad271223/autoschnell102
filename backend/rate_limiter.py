@@ -22,6 +22,9 @@ class SlidingWindowRateLimiter:
         self.window_seconds = window_seconds
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = Lock()
+        # Garbage-Collection: alle N Aufrufe abgelaufene Buckets entfernen.
+        self._gc_every = 500
+        self._calls_since_gc = 0
 
     def check(self, key: str) -> bool:
         """Return True if the request is allowed; False if the key is rate-limited.
@@ -34,11 +37,30 @@ class SlidingWindowRateLimiter:
         with self._lock:
             timestamps = self._buckets[key]
             # Drop timestamps outside the current window.
-            self._buckets[key] = [t for t in timestamps if t > cutoff]
-            if len(self._buckets[key]) >= self.max_attempts:
+            fresh = [t for t in timestamps if t > cutoff]
+            if len(fresh) >= self.max_attempts:
+                self._buckets[key] = fresh
                 return False
-            self._buckets[key].append(now)
+            fresh.append(now)
+            self._buckets[key] = fresh
+            # Periodisches Aufraeumen leerer/abgelaufener Buckets, sonst
+            # waechst das Dict unbegrenzt (eine Entry pro je gesehener IP).
+            # Bei 200-500 Nutzern + Bots ein echtes Speicherleck.
+            self._maybe_gc(cutoff)
             return True
+
+    def _maybe_gc(self, cutoff: float) -> None:
+        """Entfernt Buckets ohne aktuelle Timestamps. Laeuft amortisiert nur
+        gelegentlich (alle GC_EVERY Aufrufe), um den Overhead klein zu halten.
+        Muss unter gehaltenem _lock aufgerufen werden."""
+        self._calls_since_gc += 1
+        if self._calls_since_gc < self._gc_every:
+            return
+        self._calls_since_gc = 0
+        stale = [k for k, ts in self._buckets.items()
+                 if not any(t > cutoff for t in ts)]
+        for k in stale:
+            del self._buckets[k]
 
     def reset(self, key: str) -> None:
         """Clear the counter for a key (e.g. after a successful login)."""
