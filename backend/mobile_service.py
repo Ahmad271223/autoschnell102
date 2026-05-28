@@ -29,6 +29,7 @@ import xmltodict
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 from owners_extractor import extract_owners_from_text
+from proxy_config import get_proxy_url, random_user_agent
 
 
 MOBILE_BASE = os.environ.get("MOBILE_API_BASE", "https://services.sandbox.mobile.de")
@@ -246,9 +247,12 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
         return None
     url = f"{MOBILE_BASE}/search-api/ad/{ad_id}"
     try:
-        async with httpx.AsyncClient(timeout=8.0, verify=_SSL_CONTEXT) as client:
+        async with httpx.AsyncClient(
+            timeout=8.0, verify=_SSL_CONTEXT, proxy=get_proxy_url(),
+        ) as client:
             r = await client.get(url, auth=(MOBILE_USER, MOBILE_PASS),
-                                 headers={"Accept": "application/xml"})
+                                 headers={"Accept": "application/xml",
+                                          "User-Agent": random_user_agent()})
             if r.status_code != 200:
                 return None
             data = xmltodict.parse(r.text)

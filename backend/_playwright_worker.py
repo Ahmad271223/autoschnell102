@@ -13,13 +13,20 @@ import base64
 import json
 import sys
 
+try:
+    # Zentrale Proxy-/UA-Konfiguration (laeuft im Backend-Verzeichnis).
+    from proxy_config import get_playwright_proxy, random_user_agent
+except Exception:  # pragma: no cover - Fallback, falls Import scheitert
+    def get_playwright_proxy():
+        return None
+
+    def random_user_agent():
+        return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36")
+
 
 _PAGE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
     "Accept-Language": "de-DE,de;q=0.9",
 }
 
@@ -27,12 +34,19 @@ _PAGE_HEADERS = {
 async def capture(url: str):
     from playwright.async_api import async_playwright
 
+    # Rotierender Proxy (oder None = direkter Zugriff) + rotierender User-Agent.
+    proxy = get_playwright_proxy()
+    user_agent = random_user_agent()
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        launch_kwargs = {"headless": True, "args": ["--no-sandbox"]}
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+        browser = await p.chromium.launch(**launch_kwargs)
         try:
             ctx = await browser.new_context(
                 viewport={"width": 1280, "height": 900},
-                user_agent=_PAGE_HEADERS["User-Agent"],
+                user_agent=user_agent,
                 locale="de-DE",
                 extra_http_headers={"Accept-Language": _PAGE_HEADERS["Accept-Language"]},
             )

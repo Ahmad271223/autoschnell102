@@ -8,6 +8,7 @@ works whether the source URL is mobile.de or kleinanzeigen.de.
 """
 from __future__ import annotations
 
+import asyncio
 import html as html_lib
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 import httpx
 from bs4 import BeautifulSoup
+
+from proxy_config import get_proxy_url, random_user_agent, SCRAPE_MAX_RETRIES
 
 # Lokal (Windows) scheitert die SSL-Verifikation an fehlenden Intermediate-CAs.
 # SSL_VERIFY=false in .env deaktiviert die Prüfung für lokale Entwicklung.
@@ -452,28 +455,51 @@ def _assert_public_host(url: str) -> None:
 
 async def _fetch_html(url: str) -> str:
     _assert_public_host(url)
-    async with httpx.AsyncClient(
-        headers=_FETCH_HEADERS, follow_redirects=True, timeout=30.0,
-        verify=_SSL_VERIFY,
-    ) as client:
-        if "kleinanzeigen.de" in url:
+    proxy = get_proxy_url()  # rotierender Proxy-Endpoint (oder None = direkt)
+    last_exc: Optional[Exception] = None
+
+    # Retry-Schleife: Bei 403/429 (Bot-Block / Rate-Limit) erneut versuchen.
+    # Mit gesetztem rotierenden Proxy bekommt jeder Versuch eine neue IP.
+    for attempt in range(max(1, SCRAPE_MAX_RETRIES)):
+        # User-Agent pro Versuch rotieren, damit nicht jeder Request denselben
+        # Fingerprint traegt.
+        headers = dict(_FETCH_HEADERS)
+        headers["User-Agent"] = random_user_agent()
+        async with httpx.AsyncClient(
+            headers=headers, follow_redirects=True, timeout=30.0,
+            verify=_SSL_VERIFY, proxy=proxy,
+        ) as client:
+            if "kleinanzeigen.de" in url:
+                try:
+                    await client.get("https://www.kleinanzeigen.de/", timeout=15.0)
+                except Exception:
+                    pass
             try:
-                await client.get("https://www.kleinanzeigen.de/", timeout=15.0)
-            except Exception:
-                pass
-        r = await client.get(url)
-        # Nach Redirects erneut pruefen: die finale URL darf ebenfalls nicht
-        # auf eine interne Adresse zeigen.
-        final_url = str(r.url)
-        if final_url != url:
-            _assert_public_host(final_url)
-        if r.status_code == 403:
-            raise RuntimeError(
-                "Kleinanzeigen blockiert automatisierte Anfragen (403). "
-                "Bitte URL manuell prüfen oder später erneut versuchen."
-            )
-        r.raise_for_status()
-        return r.text
+                r = await client.get(url)
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(2 ** attempt)
+                continue
+            # Nach Redirects erneut pruefen: die finale URL darf ebenfalls
+            # nicht auf eine interne Adresse zeigen.
+            final_url = str(r.url)
+            if final_url != url:
+                _assert_public_host(final_url)
+            if r.status_code in (403, 429):
+                # Block / Rate-Limit -> mit neuer IP + UA erneut versuchen.
+                last_exc = RuntimeError(
+                    f"Kleinanzeigen blockiert (HTTP {r.status_code})."
+                )
+                await asyncio.sleep(2 ** attempt)
+                continue
+            r.raise_for_status()
+            return r.text
+
+    raise RuntimeError(
+        "Kleinanzeigen blockiert automatisierte Anfragen "
+        f"(nach {SCRAPE_MAX_RETRIES} Versuchen). "
+        "Bitte später erneut versuchen oder Proxy prüfen."
+    ) from last_exc
 
 
 # -------------------- public entry point --------------------

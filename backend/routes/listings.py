@@ -1,9 +1,15 @@
 """Listing endpoints: mobile/compare, live-counter, snapshots, vehicles,
 listings/extract, listings/resolve."""
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+
+# Cache-Lebensdauer fuer abgerufene Inserate. Hoehere TTL = weniger echte
+# Scrape-/Proxy-Requests (dasselbe Inserat wird nur 1x je TTL geladen).
+# Default 24h, per ENV anpassbar.
+LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "24"))
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -87,7 +93,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     try:
         vehicle, was_cached, cached_snapshot_id = await get_or_fetch_listing(
-            db, raw_url, _fetcher, ttl_hours=6,
+            db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
         )
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc))
@@ -327,7 +333,7 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
 
     try:
         data, was_cached, cached_snapshot_id = await get_or_fetch_listing(
-            db, body.url, _fetcher, ttl_hours=6,
+            db, body.url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
         )
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc))
