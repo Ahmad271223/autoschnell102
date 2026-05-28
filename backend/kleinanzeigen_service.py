@@ -415,7 +415,43 @@ _FETCH_HEADERS = {
 }
 
 
+def _assert_public_host(url: str) -> None:
+    """SSRF-Defense-in-Depth: blockt das Abrufen interner/privater Adressen.
+
+    Greift auch dann, wenn ein erlaubter Host per DNS auf eine interne IP
+    zeigt (DNS-Rebinding) oder eine Redirect-Kette dorthin fuehrt. Wirft
+    RuntimeError, wenn die URL auf eine private/loopback/link-local Adresse
+    oder ein nicht-http(s)-Schema zeigt.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if (parsed.scheme or "").lower() not in ("http", "https"):
+        raise RuntimeError(f"Ungueltiges URL-Schema: {parsed.scheme!r}")
+    host = parsed.hostname
+    if not host:
+        raise RuntimeError("URL ohne Host.")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        raise RuntimeError(f"Host nicht aufloesbar: {host!r}")
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise RuntimeError(
+                f"Abruf interner/privater Adresse blockiert ({host} -> {ip})."
+            )
+
+
 async def _fetch_html(url: str) -> str:
+    _assert_public_host(url)
     async with httpx.AsyncClient(
         headers=_FETCH_HEADERS, follow_redirects=True, timeout=30.0,
         verify=_SSL_VERIFY,
@@ -426,6 +462,11 @@ async def _fetch_html(url: str) -> str:
             except Exception:
                 pass
         r = await client.get(url)
+        # Nach Redirects erneut pruefen: die finale URL darf ebenfalls nicht
+        # auf eine interne Adresse zeigen.
+        final_url = str(r.url)
+        if final_url != url:
+            _assert_public_host(final_url)
         if r.status_code == 403:
             raise RuntimeError(
                 "Kleinanzeigen blockiert automatisierte Anfragen (403). "

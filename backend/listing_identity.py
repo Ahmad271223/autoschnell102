@@ -65,22 +65,52 @@ class ListingIdentityError(ValueError):
 # 2. Detection
 # -----------------------------------------------------------------------------
 
+# Erlaubte Hosts pro Quelle. SSRF-Schutz: Es wird AUSSCHLIESSLICH exakt diese
+# Domain oder eine echte Subdomain davon akzeptiert. Ein Substring-Check
+# ("kleinanzeigen.de" in host) waere unsicher, weil ein Angreifer eine Domain
+# wie "kleinanzeigen.de.attacker.com" registrieren und den Server so dazu
+# bringen koennte, eine beliebige (auch interne) Adresse server-seitig
+# abzurufen (-> Cloud-Metadata 169.254.169.254, 127.0.0.1, internes Netz).
+_KLEINANZEIGEN_DOMAINS = ("kleinanzeigen.de",)
+_MOBILE_DOMAINS = ("mobile.de",)
+_AUTOSCOUT_DOMAINS = (
+    "autoscout24.de", "autoscout24.at", "autoscout24.ch", "autoscout24.com",
+    "autoscout24.it", "autoscout24.fr", "autoscout24.nl", "autoscout24.be",
+    "autoscout24.es", "autoscout24.lu", "autoscout24.pl",
+)
+
+
+def _host_matches(host: str, domains: tuple) -> bool:
+    """True, wenn host exakt einer Domain entspricht ODER eine echte
+    Subdomain davon ist (z.B. www./suchen./m.). Verhindert das Umgehen
+    per Suffix-Trick (kleinanzeigen.de.attacker.com)."""
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
 def detect_source(url: str) -> Optional[str]:
-    """Bestimmt die Quelle anhand des Hostnamens. None, falls nicht unterstützt."""
+    """Bestimmt die Quelle anhand des Hostnamens. None, falls nicht unterstützt.
+
+    Strikte Host-Pruefung gegen eine Allowlist (kein Substring-Match) als
+    SSRF-Schutz — siehe Kommentar an den *_DOMAINS-Konstanten.
+    """
     if not url or not isinstance(url, str):
         return None
     try:
-        host = (urlparse(url).hostname or "").lower()
+        parsed = urlparse(url)
     except Exception:
         return None
+    # Nur http/https zulassen — blockt file:, gopher:, ftp: usw.
+    if (parsed.scheme or "").lower() not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
     if not host:
         return None
 
-    if "kleinanzeigen.de" in host:
+    if _host_matches(host, _KLEINANZEIGEN_DOMAINS):
         return "kleinanzeigen"
-    if "mobile.de" in host:
+    if _host_matches(host, _MOBILE_DOMAINS):
         return "mobile"
-    if "autoscout24." in host:  # .de, .at, .ch, .com …
+    if _host_matches(host, _AUTOSCOUT_DOMAINS):
         return "autoscout24"
     return None
 
