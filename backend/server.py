@@ -56,7 +56,16 @@ load_dotenv(ROOT_DIR / ".env")
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-app = FastAPI(title="Autohändler SaaS")
+# OpenAPI-Docs (/docs, /redoc, /openapi.json) legen die komplette API-Struktur
+# offen — wertvoll fuer Angreifer-Recon. In Produktion deaktiviert; nur mit
+# ENABLE_DOCS=true (z.B. lokal/Staging) eingeschaltet.
+_DOCS_ENABLED = os.environ.get("ENABLE_DOCS", "").strip().lower() == "true"
+app = FastAPI(
+    title="Autohändler SaaS",
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 api = APIRouter(prefix="/api")
 
 

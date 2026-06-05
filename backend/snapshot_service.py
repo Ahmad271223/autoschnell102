@@ -100,9 +100,21 @@ def init_storage() -> Optional[str]:
         return None
 
 
+def _safe_local_path(path: str) -> Path:
+    """Loest einen Storage-Pfad relativ zu _LOCAL_STORAGE auf und stellt
+    sicher, dass er das Verzeichnis NICHT verlaesst (Path-Traversal-Schutz,
+    Defense-in-Depth). Wirft ValueError bei Ausbruchsversuch (z.B. '../').
+    """
+    base = _LOCAL_STORAGE.resolve()
+    dest = (base / path).resolve()
+    if dest != base and base not in dest.parents:
+        raise ValueError(f"Ungueltiger Storage-Pfad (Traversal): {path!r}")
+    return dest
+
+
 def _put_object(path: str, data: bytes, content_type: str) -> dict:
     if _USE_LOCAL:
-        dest = _LOCAL_STORAGE / path
+        dest = _safe_local_path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         log.info("local_storage: saved %s (%d bytes)", path, len(data))
@@ -123,7 +135,7 @@ def _put_object(path: str, data: bytes, content_type: str) -> dict:
 def get_object(path: str) -> tuple[bytes, str]:
     """Read object back. Returns (bytes, content_type)."""
     if _USE_LOCAL:
-        dest = _LOCAL_STORAGE / path
+        dest = _safe_local_path(path)
         if not dest.exists():
             raise FileNotFoundError(f"local_storage: {path} not found")
         ext = dest.suffix.lower()
