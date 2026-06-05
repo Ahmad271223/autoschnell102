@@ -412,6 +412,7 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
         style={{ aspectRatio: `${dim.w} / ${dim.h}` }}
       >
         <svg
+          id={`dmg-${view}`}
           viewBox={`0 0 ${dim.w} ${dim.h}`}
           preserveAspectRatio="none"
           width="100%"
@@ -421,6 +422,16 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
           data-testid={`damage-svg-${view}`}
           style={{ touchAction: "manipulation" }}
         >
+          {/* Eine zentrale Hover-Regel je Ansicht (statt pro Dot) — der
+              Punkt wechselt bei Hover zur aktiven Schadensfarbe. */}
+          <style>{`
+            #dmg-${view} .damage-dot:hover .damage-dot-inner {
+              fill: ${activeColor || "#0ea5e9"};
+              stroke: #0a0a0a;
+              stroke-width: 3;
+              opacity: 0.95;
+            }
+          `}</style>
           <rect x="0" y="0" width={dim.w} height={dim.h} fill="white" />
           <image
             href={dim.src}
@@ -440,7 +451,6 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
               dot={d}
               r={dotR}
               haloR={dotHaloR}
-              activeColor={activeColor || "#0ea5e9"}
               onClick={(e) => {
                 e.stopPropagation();
                 onDotClick(view, d);
@@ -469,8 +479,9 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
 
 /** Unauffälliger Klick-Punkt im Bild — Label nur als <title>-Tooltip,
  *  visuell ein kleiner halbtransparenter Kreis. Hover-Halo macht den
- *  Trefferbereich für die Maus großzügig. */
-function Dot({ dot, r, haloR, activeColor, onClick }) {
+ *  Trefferbereich für die Maus großzügig. Die Hover-Farbe kommt aus der
+ *  zentralen <style>-Regel in ViewCard (eine je Ansicht). */
+function Dot({ dot, r, haloR, onClick }) {
   return (
     <g transform={`translate(${dot.cx}, ${dot.cy})`}
        style={{ cursor: "pointer" }}
@@ -478,7 +489,7 @@ function Dot({ dot, r, haloR, activeColor, onClick }) {
        onClick={onClick}>
       {/* Unsichtbarer Hover-Halo — vergrößert den Hit-Bereich */}
       <circle r={haloR} fill="transparent" />
-      {/* Sichtbarer Punkt — wechselt bei Hover zur aktiven Schadensfarbe */}
+      {/* Sichtbarer Punkt */}
       <circle
         r={r}
         className="damage-dot-inner"
@@ -487,14 +498,6 @@ function Dot({ dot, r, haloR, activeColor, onClick }) {
         strokeWidth="2.5"
       />
       <title>{dot.name}</title>
-      <style>{`
-        .damage-dot:hover .damage-dot-inner {
-          fill: ${activeColor};
-          stroke: #0a0a0a;
-          stroke-width: 3;
-          opacity: 0.95;
-        }
-      `}</style>
     </g>
   );
 }

@@ -9,9 +9,15 @@ Usage:
     if not login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 """
+import os
 import time
 from collections import defaultdict
 from threading import Lock
+
+# Globaler Schalter: erlaubt das Deaktivieren des Rate-Limiters fuer
+# automatisierte Tests / CI (RATE_LIMIT_ENABLED=false). In Produktion
+# IMMER aktiv lassen (Default). Niemals in der Prod-.env auf false setzen.
+_RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").strip().lower() != "false"
 
 
 class SlidingWindowRateLimiter:
@@ -32,6 +38,9 @@ class SlidingWindowRateLimiter:
         Call this BEFORE processing the request.  The attempt is counted even
         when the login fails, so a failed login still increments the counter.
         """
+        # Test/CI-Bypass — niemals in Produktion aktivieren.
+        if not _RATE_LIMIT_ENABLED:
+            return True
         now = time.monotonic()
         cutoff = now - self.window_seconds
         with self._lock:

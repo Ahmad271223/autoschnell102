@@ -418,28 +418,9 @@ _FETCH_HEADERS = {
 }
 
 
-def _assert_public_host(url: str) -> None:
-    """SSRF-Defense-in-Depth: blockt das Abrufen interner/privater Adressen.
-
-    Greift auch dann, wenn ein erlaubter Host per DNS auf eine interne IP
-    zeigt (DNS-Rebinding) oder eine Redirect-Kette dorthin fuehrt. Wirft
-    RuntimeError, wenn die URL auf eine private/loopback/link-local Adresse
-    oder ein nicht-http(s)-Schema zeigt.
-    """
+def _assert_ip_public(host: str, infos) -> None:
+    """Prueft die aufgeloesten Adressen gegen private/interne Bereiche."""
     import ipaddress
-    import socket
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if (parsed.scheme or "").lower() not in ("http", "https"):
-        raise RuntimeError(f"Ungueltiges URL-Schema: {parsed.scheme!r}")
-    host = parsed.hostname
-    if not host:
-        raise RuntimeError("URL ohne Host.")
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except Exception:
-        raise RuntimeError(f"Host nicht aufloesbar: {host!r}")
     for info in infos:
         ip_str = info[4][0]
         try:
@@ -453,8 +434,36 @@ def _assert_public_host(url: str) -> None:
             )
 
 
+async def _assert_public_host(url: str) -> None:
+    """SSRF-Defense-in-Depth: blockt das Abrufen interner/privater Adressen.
+
+    Greift auch dann, wenn ein erlaubter Host per DNS auf eine interne IP
+    zeigt (DNS-Rebinding) oder eine Redirect-Kette dorthin fuehrt. Wirft
+    RuntimeError, wenn die URL auf eine private/loopback/link-local Adresse
+    oder ein nicht-http(s)-Schema zeigt.
+
+    DNS-Aufloesung laeuft ueber den asyncio-Resolver (loop.getaddrinfo),
+    damit der Event-Loop bei vielen gleichzeitigen Scrapes NICHT durch
+    blockierendes socket.getaddrinfo eingefroren wird.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if (parsed.scheme or "").lower() not in ("http", "https"):
+        raise RuntimeError(f"Ungueltiges URL-Schema: {parsed.scheme!r}")
+    host = parsed.hostname
+    if not host:
+        raise RuntimeError("URL ohne Host.")
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except Exception:
+        raise RuntimeError(f"Host nicht aufloesbar: {host!r}")
+    _assert_ip_public(host, infos)
+
+
 async def _fetch_html(url: str) -> str:
-    _assert_public_host(url)
+    await _assert_public_host(url)
     proxy = get_proxy_url()  # rotierender Proxy-Endpoint (oder None = direkt)
     last_exc: Optional[Exception] = None
 
@@ -484,7 +493,7 @@ async def _fetch_html(url: str) -> str:
             # nicht auf eine interne Adresse zeigen.
             final_url = str(r.url)
             if final_url != url:
-                _assert_public_host(final_url)
+                await _assert_public_host(final_url)
             if r.status_code in (403, 429):
                 # Block / Rate-Limit -> mit neuer IP + UA erneut versuchen.
                 last_exc = RuntimeError(
