@@ -11,6 +11,7 @@ Fehler:  JSON auf stdout: {"error": "<message>"}
 import asyncio
 import base64
 import json
+import os
 import sys
 
 try:
@@ -31,18 +32,45 @@ _PAGE_HEADERS = {
 }
 
 
+def _browserless_ws() -> str:
+    """Baut die WebSocket-URL fuer browserless.io (oder '' wenn nicht gesetzt).
+
+    BROWSERLESS_URL z.B. 'wss://production-sfo.browserless.io/chromium'
+    BROWSERLESS_TOKEN  wird als ?token=... angehaengt (falls nicht schon drin).
+    Eigene Query-Params (z.B. &proxy=residential&proxyCountry=de fuer die
+    browserless-Residential-Proxy-Erweiterung) koennen direkt in BROWSERLESS_URL
+    stehen und bleiben erhalten.
+    """
+    base = (os.environ.get("BROWSERLESS_URL") or "").strip()
+    if not base:
+        return ""
+    token = (os.environ.get("BROWSERLESS_TOKEN") or "").strip()
+    if token and "token=" not in base:
+        sep = "&" if "?" in base else "?"
+        base = f"{base}{sep}token={token}"
+    return base
+
+
 async def capture(url: str):
     from playwright.async_api import async_playwright
 
     # Rotierender Proxy (oder None = direkter Zugriff) + rotierender User-Agent.
     proxy = get_playwright_proxy()
     user_agent = random_user_agent()
+    ws_endpoint = _browserless_ws()
 
     async with async_playwright() as p:
-        launch_kwargs = {"headless": True, "args": ["--no-sandbox"]}
-        if proxy:
-            launch_kwargs["proxy"] = proxy
-        browser = await p.chromium.launch(**launch_kwargs)
+        if ws_endpoint:
+            # Remote: Browser laeuft in der browserless.io-Farm, der lokale
+            # Prozess haelt nur die CDP-WebSocket-Verbindung. Skaliert ueber
+            # browserless statt ueber lokalen RAM/CPU.
+            browser = await p.chromium.connect_over_cdp(ws_endpoint, timeout=60000)
+        else:
+            # Lokal: gebuendeltes Chromium starten (Dev / Single-Server).
+            launch_kwargs = {"headless": True, "args": ["--no-sandbox"]}
+            if proxy:
+                launch_kwargs["proxy"] = proxy
+            browser = await p.chromium.launch(**launch_kwargs)
         try:
             ctx = await browser.new_context(
                 viewport={"width": 1280, "height": 900},

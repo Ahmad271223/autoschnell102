@@ -48,7 +48,29 @@ _USE_LOCAL = not os.environ.get("EMERGENT_LLM_KEY")
 
 # Runtime state
 _storage_key: Optional[str] = None
-_browser_lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# Snapshot-Concurrency
+# ---------------------------------------------------------------------------
+# Frueher: asyncio.Lock() = genau 1 Snapshot gleichzeitig (Schutz gegen OOM
+# bei LOKALEN Chromium-Instanzen). Mit browserless.io laeuft der Browser aber
+# remote in der gehosteten Farm — der lokale Prozess haelt nur die
+# WebSocket-Verbindung. Dadurch koennen wir VIELE Snapshots gleichzeitig
+# anstossen; die echte Parallelitaet skaliert browserless.io.
+#
+# SNAPSHOT_CONCURRENCY steuert, wie viele Snapshots dieser Prozess gleichzeitig
+# fahren darf. Default:
+#   - mit browserless konfiguriert: 50 (an den browserless-Plan anpassen!)
+#   - ohne (lokaler Chromium):       1 (wie bisher, schont RAM)
+# Per ENV ueberschreibbar.
+_BROWSERLESS_URL = (os.environ.get("BROWSERLESS_URL") or "").strip()
+_BROWSERLESS_TOKEN = (os.environ.get("BROWSERLESS_TOKEN") or "").strip()
+_default_concurrency = 50 if _BROWSERLESS_URL else 1
+SNAPSHOT_CONCURRENCY = int(
+    os.environ.get("SNAPSHOT_CONCURRENCY", str(_default_concurrency))
+)
+# Semaphore statt Lock: erlaubt N gleichzeitige Snapshots (N=1 == altes Lock).
+_browser_lock = asyncio.Semaphore(max(1, SNAPSHOT_CONCURRENCY))
 
 
 # -------------------- Object Storage --------------------
@@ -291,7 +313,9 @@ async def _capture_with_playwright(url: str) -> tuple[bytes, bytes]:
     eigenes ProactorEventLoop-kompatibles asyncio.run() bekommt."""
     # SSRF guard: only screenshot known car-listing portals.
     _assert_allowed_snapshot_url(url)
-    _ensure_browser_executable()
+    # Lokalen Browser nur sicherstellen, wenn KEIN browserless genutzt wird.
+    if not _BROWSERLESS_URL:
+        _ensure_browser_executable()
     async with _browser_lock:
         worker = Path(__file__).parent / "_playwright_worker.py"
         loop = asyncio.get_running_loop()
