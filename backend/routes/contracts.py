@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
@@ -96,12 +96,33 @@ class ContractIn(BaseModel):
     dealer_zip: Optional[str] = None
     dealer_city: Optional[str] = None
 
+    # DoS- & Layout-Schutz: ReportLab braucht fuer riesige Strings extrem viel
+    # CPU (2 MB seller_name = ~28 s + HTTP 500) und kann lange Strings in engen
+    # Tabellenzellen gar nicht setzen (Flowable-too-large -> 500).
+    # Gestaffelte Caps, sofort bei der Validierung (422):
+    #   - Freitext-Bloecke (volle Breite, fliessen ueber Seiten): 20.000 Zeichen
+    #   - alle uebrigen Felder (enge Tabellenzellen): 500 Zeichen
+    @field_validator("*")
+    @classmethod
+    def _cap_string_length(cls, v, info):
+        if isinstance(v, str):
+            long_fields = {
+                "additional_terms", "notes", "agb_text",
+                "vehicle_description", "damages_text",
+            }
+            limit = 20000 if info.field_name in long_fields else 500
+            if len(v) > limit:
+                raise ValueError(
+                    f"Feld '{info.field_name}' zu lang (max. {limit} Zeichen)"
+                )
+        return v
+
 
 class SendIn(BaseModel):
     channel: str  # "whatsapp" | "email"
-    recipient: str
-    subject: Optional[str] = None
-    message: str
+    recipient: str = Field(max_length=200)
+    subject: Optional[str] = Field(default=None, max_length=500)
+    message: str = Field(max_length=20000)
 
 
 # ---------- Helpers ----------
@@ -197,10 +218,15 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     )
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
-    pdf_bytes = await asyncio.to_thread(
-        generate_contract_pdf,
-        dealer=dealer, vehicle=vehicle, contract=contract_dict,
-    )
+    # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
+    # einem sauberen 400 statt einem unhandled 500.
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            generate_contract_pdf,
+            dealer=dealer, vehicle=vehicle, contract=contract_dict,
+        )
+    except Exception:
+        raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -233,10 +259,15 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     )
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
-    pdf_bytes = await asyncio.to_thread(
-        generate_contract_pdf,
-        dealer=dealer, vehicle=vehicle, contract=contract_dict,
-    )
+    # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
+    # einem sauberen 400 statt einem unhandled 500.
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            generate_contract_pdf,
+            dealer=dealer, vehicle=vehicle, contract=contract_dict,
+        )
+    except Exception:
+        raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
     pdf_b64 = base64.b64encode(pdf_bytes).decode()
     pdf_id = str(uuid.uuid4())
     # Snapshot vehicle photo URLs at the moment the contract was created.
