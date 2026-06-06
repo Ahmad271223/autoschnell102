@@ -39,7 +39,7 @@ def _check_password_strength(pw: str) -> str:
 class DriverAccountRegister(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
-    display_name: str = Field(min_length=2)
+    display_name: str = Field(min_length=2, max_length=120)
 
     @field_validator("password")
     @classmethod
@@ -53,7 +53,7 @@ class DriverAccountLogin(BaseModel):
 
 
 class DriverProfileUpdate(BaseModel):
-    display_name: Optional[str] = None
+    display_name: Optional[str] = Field(default=None, max_length=120)
 
 
 class DriverLinkIn(BaseModel):

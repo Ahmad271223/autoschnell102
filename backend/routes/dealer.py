@@ -4,7 +4,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from deps import current_user, db, get_subscription_status, now_iso
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
@@ -24,6 +24,14 @@ class DealerProfile(BaseModel):
     city: Optional[str] = None
     logo_url: Optional[str] = None
 
+    # Profilfelder landen im Vertrags-PDF (enge Tabellenzellen). Cap 500.
+    @field_validator("*")
+    @classmethod
+    def _cap(cls, v):
+        if isinstance(v, str) and len(v) > 500:
+            raise ValueError("Profilfeld zu lang (max. 500 Zeichen)")
+        return v
+
 
 class DealerSettingsIn(BaseModel):
     profile: Optional[DealerProfile] = None
@@ -35,6 +43,21 @@ class DealerSettingsIn(BaseModel):
     whatsapp_template: Optional[str] = None
     default_terms: Optional[str] = None             # AGB (always appended to PDF)
     default_special_agreements: Optional[str] = None  # Standard-Besondere-Vereinbarungen
+
+    # DoS-Schutz: default_terms/default_special_agreements werden in JEDES
+    # Vertrags-PDF injiziert — ohne Cap koennte ein 2-MB-Wert jeden Vertrag
+    # lahmlegen. Freitext-Bloecke 20.000, Kurzfelder 500 Zeichen.
+    @field_validator("email_subject", "email_template", "whatsapp_template",
+                     "default_terms", "default_special_agreements",
+                     "active_profile")
+    @classmethod
+    def _cap_text(cls, v, info):
+        if isinstance(v, str):
+            short = {"active_profile"}
+            limit = 500 if info.field_name in short else 20000
+            if len(v) > limit:
+                raise ValueError(f"'{info.field_name}' zu lang (max. {limit} Zeichen)")
+        return v
 
 
 class ActiveProfileIn(BaseModel):

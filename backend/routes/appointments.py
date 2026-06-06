@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from deps import clean_doc, current_user, db, log_activity, now_iso
 
@@ -33,6 +33,17 @@ class AppointmentIn(BaseModel):
     notes: Optional[str] = ""
     final_price: Optional[float] = None
     extra_costs: Optional[float] = None
+
+    # DoS-Schutz: Termin-Felder fliessen ins Abhol-PDF (ReportLab). Cap:
+    # notes als Freitext 20.000, alle uebrigen Felder (enge Zellen) 500.
+    @field_validator("*")
+    @classmethod
+    def _cap_string_length(cls, v, info):
+        if isinstance(v, str):
+            limit = 20000 if info.field_name == "notes" else 500
+            if len(v) > limit:
+                raise ValueError(f"Feld '{info.field_name}' zu lang (max. {limit} Zeichen)")
+        return v
 
 
 @router.post("/appointments")
