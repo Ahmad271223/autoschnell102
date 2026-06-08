@@ -18,6 +18,11 @@ export default function AdminOverview() {
         if (stopped) return;
         setStats(s.data);
         setUrls(u.data);
+      } catch (e) {
+        // 401/403 (Token abgelaufen / kein Admin) etc. nicht als uncaught
+        // Runtime-Error hochblubbern lassen — sonst React-Error-Overlay.
+        // Auth-Interceptor / ProtectedRoute kuemmern sich um Redirect.
+        if (!stopped) console.warn("Admin-Übersicht konnte nicht laden:", e?.response?.status || e);
       } finally {
         if (!stopped) setLoading(false);
       }
