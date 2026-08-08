@@ -203,7 +203,7 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
 #                 LESEN / BEARBEITEN
 # =========================================================
 @router.get("/resale")
-async def list_listings(user=Depends(current_user), status: Optional[str] = None):
+async def list_listings(user=Depends(current_haendler), status: Optional[str] = None):
     query: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if status:
         query["status"] = status
@@ -213,7 +213,7 @@ async def list_listings(user=Depends(current_user), status: Optional[str] = None
 
 
 @router.get("/resale/{listing_id}")
-async def get_listing(listing_id: str, user=Depends(current_user)):
+async def get_listing(listing_id: str, user=Depends(current_haendler)):
     l = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not l:

@@ -12,12 +12,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import hash_password
+import re
+
+from auth import hash_password_async
 from deps import (
     current_user, db, get_subscription_status, log_activity, now_iso,
 )
+from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 
 router = APIRouter()
@@ -52,6 +55,11 @@ class SucherIn(BaseModel):
     phone: str = Field(default="", max_length=50)
     employee_id: str = Field(default="", max_length=50)
 
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v):
+        return _check_password_strength(v)
+
 
 class SucherUpdateIn(BaseModel):
     first_name: Optional[str] = Field(default=None, max_length=80)
@@ -60,6 +68,11 @@ class SucherUpdateIn(BaseModel):
     employee_id: Optional[str] = Field(default=None, max_length=50)
     active: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=8, max_length=200)
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v):
+        return _check_password_strength(v) if v is not None else v
 
 
 class UpgradeRequestIn(BaseModel):
@@ -72,17 +85,15 @@ class UpgradeRequestIn(BaseModel):
 # =========================================================
 @router.post("/dealer/sucher")
 async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
-    existing = await db.users.find_one({"email": body.email.lower()})
-    if not existing:
-        existing = await db.users.find_one(
-            {"email": {"$regex": f"^{body.email}$", "$options": "i"}})
+    existing = await db.users.find_one(
+        {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}})
     if existing:
         raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
     await db.users.insert_one({
         "id": sucher_id,
         "email": body.email,
-        "password_hash": hash_password(body.password),
+        "password_hash": await hash_password_async(body.password),
         "role": "sucher",
         "active": True,
         "dealer_id": user["dealer_id"],          # gehört zum Händler
@@ -134,7 +145,7 @@ async def update_sucher(sucher_id: str, body: SucherUpdateIn,
     fields = {k: v for k, v in body.model_dump(exclude_none=True).items()
               if k != "password"}
     if body.password:
-        fields["password_hash"] = hash_password(body.password)
+        fields["password_hash"] = await hash_password_async(body.password)
         fields["current_session_id"] = None
     if body.active is False:
         fields["current_session_id"] = None

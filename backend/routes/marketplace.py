@@ -15,12 +15,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import (hash_password, new_session_id, create_token,
-                  verify_password_async)
+from auth import (hash_password_async, new_session_id, create_token,
+                  verify_password_async, _DUMMY_HASH)
 from deps import current_user, db, log_activity, now_iso
-from rate_limiter import register_limiter
+from rate_limiter import register_limiter, login_limiter
+from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 
 router = APIRouter()
@@ -45,9 +46,12 @@ def _access_status(user: dict) -> dict:
     exp = acc.get("expires_at")
     if active and exp:
         try:
-            if datetime.fromisoformat(exp) < datetime.now(timezone.utc):
+            dt = datetime.fromisoformat(exp)
+            if dt.tzinfo is None:                      # naive Alt-Werte tolerieren
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt < datetime.now(timezone.utc):
                 active = False
-        except ValueError:
+        except (ValueError, TypeError):
             pass
     return {"active": active, "plan": acc.get("plan"),
             "expires_at": exp, "price": BUYER_ACCESS_PRICE}
@@ -272,6 +276,11 @@ class BuyerRegisterIn(BaseModel):
     phone: str = Field(default="", max_length=50)
     invite_token: Optional[str] = Field(default=None, max_length=100)
 
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v):
+        return _check_password_strength(v)
+
 
 @router.post("/buyer/register")
 async def buyer_register(body: BuyerRegisterIn, request: Request):
@@ -286,7 +295,7 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
     sid = new_session_id()
     await db.users.insert_one({
         "id": user_id, "email": body.email,
-        "password_hash": hash_password(body.password),
+        "password_hash": await hash_password_async(body.password),
         "role": "b2b_buyer", "active": True,
         "dealer_id": None,
         "company_name": body.company_name,
@@ -315,16 +324,19 @@ class BuyerLoginIn(BaseModel):
 @router.post("/buyer/login")
 async def buyer_login(body: BuyerLoginIn, request: Request):
     """Login für Zwischenhändler (eigener Account, Rolle b2b_buyer)."""
+    ip = (request.client.host if request.client else None) or "unknown"
+    if not login_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()
     u = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$",
                                            "$options": "i"},
                                  "role": "b2b_buyer"})
-    ok = await verify_password_async(
-        body.password, (u or {}).get("password_hash", "")) if u else False
-    if not u or not ok:
+    # Immer bcrypt rechnen (Dummy-Hash), um User-Enumeration per Timing zu
+    # verhindern. Deaktivierte Accounts geben dieselbe 401 wie falsche Daten.
+    pw_hash = u["password_hash"] if u else _DUMMY_HASH
+    ok = await verify_password_async(body.password, pw_hash)
+    if not u or not ok or not u.get("active", True):
         raise HTTPException(401, "E-Mail oder Passwort falsch")
-    if not u.get("active", True):
-        raise HTTPException(403, "Account deaktiviert")
     sid = new_session_id()
     await db.users.update_one({"id": u["id"]},
                               {"$set": {"current_session_id": sid}})
