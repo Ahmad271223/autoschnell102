@@ -66,6 +66,26 @@ class DriverStatusIn(BaseModel):
     notes: Optional[str] = None
 
 
+class DeviationIn(BaseModel):
+    """Eine bei der Abholung festgestellte Abweichung."""
+    field: Literal["mileage", "keys", "tires", "damage", "warning_light",
+                   "equipment", "documents", "other"] = "other"
+    label: str = Field(min_length=1, max_length=200)      # z.B. "Kratzer hinten rechts"
+    expected: str = Field(default="", max_length=200)     # laut Vertrag/Inserat
+    actual: str = Field(default="", max_length=200)       # vor Ort festgestellt
+    note: str = Field(default="", max_length=2000)
+    photo_b64: Optional[str] = Field(default=None, max_length=8_000_000)  # ~6 MB Bild
+
+
+class PickupReportIn(BaseModel):
+    """Digitaler Abholbericht des Fahrers (ersetzt Zettelwirtschaft)."""
+    mileage_at_pickup: Optional[int] = Field(default=None, ge=0, le=3_000_000)
+    keys_count: Optional[int] = Field(default=None, ge=0, le=10)
+    fuel_level: Optional[Literal["leer", "1/4", "1/2", "3/4", "voll"]] = None
+    deviations: list[DeviationIn] = Field(default_factory=list, max_length=30)
+    notes: str = Field(default="", max_length=5000)
+
+
 # ---------- Driver code generation & auth ----------
 DRIVER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # ohne I,O,0,1
 
@@ -568,9 +588,109 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
             "\n" if appt.get("notes") else ""
         ) + f"[Fahrer] {body.notes}"
     await db.appointments.update_one({"id": appt_id}, {"$set": update})
+    # Fahrzeug-Lebenszyklus nachziehen.
+    if appt.get("vehicle_id"):
+        from lifecycle import try_set_lifecycle
+        await try_set_lifecycle(
+            appt["vehicle_id"], appt.get("dealer_id"),
+            "abgeholt" if body.status == "abgeholt" else "nicht_abgeholt",
+            user={"id": driver["id"]},
+        )
     await log_activity(
         appt.get("dealer_id"), driver["id"],
         f"termin.fahrer.{body.status.replace(' ', '_')}", ref=appt_id,
     )
     return {"ok": True, "status": body.status,
             "auto_cleanup_days": 7 if body.status == "abgeholt" else 14}
+
+
+# =========================================================
+#            ABHOLBERICHT (digitale Abweichungen)
+# =========================================================
+# Der Bericht ist nach dem Einreichen UNVERÄNDERBAR. Korrekturen erzeugen
+# eine neue Version (version+1, replaces_id) — die alte bleibt erhalten
+# (superseded=True). Jede Einreichung wird im Audit-Log protokolliert.
+
+@router.post("/driver/appointments/{appt_id}/report")
+async def driver_submit_report(appt_id: str, body: PickupReportIn,
+                               driver=Depends(current_driver)):
+    appt = await db.appointments.find_one(
+        {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0},
+    )
+    if not appt:
+        raise HTTPException(404, "Termin nicht gefunden")
+
+    # Fotos aus base64 in den Storage auslagern (nie in Mongo speichern).
+    from storage_service import make_key, storage, StorageError
+    deviations = []
+    for d in body.deviations:
+        entry = d.model_dump(exclude={"photo_b64"})
+        entry["id"] = str(uuid.uuid4())
+        if d.photo_b64:
+            try:
+                raw = base64.b64decode(d.photo_b64.split(",")[-1], validate=False)
+                key = make_key("pickup", appt.get("dealer_id", "x"), "foto.jpg")
+                storage.save(key, raw)
+                entry["photo_key"] = key
+            except (StorageError, ValueError) as exc:
+                raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
+        deviations.append(entry)
+
+    # Versionierung: existiert schon ein Bericht, wird er ersetzt (nicht geändert).
+    prev = await db.pickup_reports.find_one(
+        {"appointment_id": appt_id, "superseded": {"$ne": True}},
+        {"_id": 0, "id": 1, "version": 1},
+        sort=[("version", -1)],
+    )
+    version = (prev or {}).get("version", 0) + 1
+    report_id = str(uuid.uuid4())
+    doc = {
+        "id": report_id,
+        "appointment_id": appt_id,
+        "vehicle_id": appt.get("vehicle_id"),
+        "dealer_id": appt.get("dealer_id"),
+        "driver_account_id": driver["id"],
+        "driver_name": driver.get("display_name", ""),
+        "mileage_at_pickup": body.mileage_at_pickup,
+        "keys_count": body.keys_count,
+        "fuel_level": body.fuel_level,
+        "deviations": deviations,
+        "notes": body.notes,
+        "version": version,
+        "replaces_id": (prev or {}).get("id"),
+        "superseded": False,
+        "status": "bestaetigt",
+        "created_at": now_iso(),
+    }
+    await db.pickup_reports.insert_one(doc)
+    if prev:
+        await db.pickup_reports.update_one(
+            {"id": prev["id"]}, {"$set": {"superseded": True}})
+    # Badge-Daten am Termin denormalisieren (schnelle Anzeige beim Händler).
+    await db.appointments.update_one(
+        {"id": appt_id},
+        {"$set": {"deviations_count": len(deviations),
+                  "has_pickup_report": True,
+                  "updated_at": now_iso()}},
+    )
+    await log_activity(
+        appt.get("dealer_id"), driver["id"],
+        "abholung.bericht" if version == 1 else "abholung.bericht.korrektur",
+        ref=appt_id,
+        meta={"version": version, "abweichungen": len(deviations)},
+    )
+    return {"ok": True, "report_id": report_id, "version": version,
+            "deviations_count": len(deviations)}
+
+
+@router.get("/driver/appointments/{appt_id}/report")
+async def driver_get_report(appt_id: str, driver=Depends(current_driver)):
+    appt = await db.appointments.find_one(
+        {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0, "id": 1},
+    )
+    if not appt:
+        raise HTTPException(404, "Termin nicht gefunden")
+    report = await db.pickup_reports.find_one(
+        {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
+    )
+    return report or {}

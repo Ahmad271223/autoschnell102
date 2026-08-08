@@ -65,7 +65,7 @@ export default function Subscription() {
           <div className="tactical-card p-8" data-testid="plan-monthly">
             <div className="overline">Monatsabo</div>
             <div className="mt-3 flex items-baseline gap-2">
-              <span className="font-display font-black text-5xl">120 €</span>
+              <span className="font-display font-black text-5xl">160 €</span>
               <span className="text-zinc-400 text-sm">/ Monat</span>
             </div>
             <p className="text-zinc-400 text-sm mt-3">Monatlich kündbar.</p>
@@ -85,13 +85,13 @@ export default function Subscription() {
 
           <div className="tactical-card p-8 relative" style={{ borderColor: "rgba(255,59,48,0.4)" }} data-testid="plan-yearly">
             <div className="absolute -top-3 left-6 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] font-bold rounded-sm"
-                 style={{ background: "var(--accent-red)" }}>2 Monate gratis</div>
+                 style={{ background: "var(--accent-red)" }}>Spart 120 €</div>
             <div className="overline">Jahresabo</div>
             <div className="mt-3 flex items-baseline gap-2">
-              <span className="font-display font-black text-5xl">1.200 €</span>
+              <span className="font-display font-black text-5xl">1.800 €</span>
               <span className="text-zinc-400 text-sm">/ Jahr</span>
             </div>
-            <p className="text-zinc-400 text-sm mt-3">Spart 240 € · 2 Monate gratis.</p>
+            <p className="text-zinc-400 text-sm mt-3">Spart 120 € gegenüber monatlich (1.920 €).</p>
             <ul className="mt-6 space-y-2 text-sm">
               {["Alle Funktionen","Priority Support","Volle Daten-Kontrolle","Updates inklusive","Einmal zahlen, ein Jahr nutzen"].map(t => (
                 <li key={t} className="flex items-center gap-2 text-zinc-300">

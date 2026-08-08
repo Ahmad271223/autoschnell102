@@ -18,8 +18,8 @@ router = APIRouter()
 # on the FastAPI app directly (not under /api), so it needs `app` in server.py.
 
 PLAN_PRICES = {
-    "monthly": {"amount": 120.00, "currency": "eur", "label": "Monatsabo"},
-    "yearly":  {"amount": 1200.00, "currency": "eur", "label": "Jahresabo"},
+    "monthly": {"amount": 160.00, "currency": "eur", "label": "Monatsabo"},
+    "yearly":  {"amount": 1800.00, "currency": "eur", "label": "Jahresabo"},
 }
 
 
@@ -56,10 +56,27 @@ async def create_checkout(body: CheckoutIn, request: Request, user=Depends(curre
     if body.plan not in PLAN_PRICES:
         raise HTTPException(400, "Unbekannter Plan")
     pkg = PLAN_PRICES[body.plan]
-    from emergentintegrations.payments.stripe.checkout import (
-        StripeCheckout, CheckoutSessionRequest,
-    )
-    api_key = os.environ["STRIPE_API_KEY"]
+    # Stripe-Anbindung ist optional (lokale Installationen haben weder das
+    # emergentintegrations-Paket noch einen STRIPE_API_KEY). Sauber mit 503
+    # antworten statt mit einem unhandled 500 abzustürzen.
+    try:
+        from emergentintegrations.payments.stripe.checkout import (
+            StripeCheckout, CheckoutSessionRequest,
+        )
+    except ImportError:
+        raise HTTPException(
+            503,
+            "Online-Zahlung ist auf diesem Server nicht eingerichtet. "
+            "Bitte den Administrator kontaktieren — das Abo kann im "
+            "Admin-Bereich manuell freigeschaltet werden.",
+        )
+    api_key = os.environ.get("STRIPE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            503,
+            "Online-Zahlung ist auf diesem Server nicht eingerichtet "
+            "(STRIPE_API_KEY fehlt). Bitte den Administrator kontaktieren.",
+        )
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
     sc = StripeCheckout(api_key=api_key, webhook_url=webhook_url)

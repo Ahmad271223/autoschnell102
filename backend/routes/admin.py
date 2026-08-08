@@ -20,7 +20,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from auth import hash_password, verify_password
 from cleanup_service import _cleanup_once
 from deps import (
-    current_admin, db, get_subscription_status, now_iso,
+    current_admin, db, get_subscription_status, log_activity, now_iso,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
 
@@ -61,7 +61,7 @@ async def admin_trigger_cleanup(user=Depends(current_admin)):
 
 # ---------- Users ----------
 @router.post("/admin/users")
-async def admin_create_user(body: AdminUserIn, _=Depends(current_admin)):
+async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
     existing = await db.users.find_one({"email": body.email})
     if existing:
         raise HTTPException(409, "E-Mail bereits registriert")
@@ -99,6 +99,8 @@ async def admin_create_user(body: AdminUserIn, _=Depends(current_admin)):
         "expires_at": None if body.plan_type == "lifetime" else expires,
         "created_at": now_iso(),
     })
+    await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.erstellt",
+                       ref=user_id, meta={"email": body.email, "plan": body.plan_type})
     return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
 
 
@@ -146,11 +148,22 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         expires = body.get("expires_at")
         if plan == "lifetime":
             expires = None
-        await db.subscriptions.insert_one({
+        sub_doc = {
             "id": str(uuid.uuid4()), "dealer_id": u["dealer_id"],
             "plan": plan, "status": "active",
             "expires_at": expires, "created_at": now_iso(),
-        })
+        }
+        # Sucher-Unteraccounts haben ein PERSÖNLICHES Abo (Phase 2).
+        if u.get("role") == "sucher":
+            sub_doc["subject_user_id"] = u["id"]
+        await db.subscriptions.insert_one(sub_doc)
+        await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.abo.vergeben",
+                           ref=user_id, meta={"plan": plan, "expires_at": expires,
+                                              "email": u.get("email", "")})
+    if fields:
+        await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.aktualisiert",
+                           ref=user_id, meta={"felder": sorted(fields.keys()),
+                                              "email": target.get("email", "")})
     return {"ok": True}
 
 
@@ -167,6 +180,8 @@ async def admin_delete_user(user_id: str, admin=Depends(current_admin)):
     if u.get("dealer_id"):
         await db.dealers.delete_many({"id": u["dealer_id"]})
         await db.subscriptions.delete_many({"dealer_id": u["dealer_id"]})
+    await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.geloescht",
+                       ref=user_id, meta={"email": u.get("email", "")})
     return {"ok": True}
 
 
@@ -191,12 +206,15 @@ async def admin_user_set_active(
     if not body.active:
         patch["current_session_id"] = None
     await db.users.update_one({"id": user_id}, {"$set": patch})
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.user.entsperrt" if body.active else "admin.user.gesperrt",
+                       ref=user_id, meta={"email": u.get("email", "")})
     return {"ok": True, "active": bool(body.active)}
 
 
 @router.post("/admin/users/{user_id}/password")
 async def admin_user_set_password(
-    user_id: str, body: AdminUserPasswordIn, _=Depends(current_admin)
+    user_id: str, body: AdminUserPasswordIn, admin=Depends(current_admin)
 ):
     """Setzt das Passwort eines Nutzers zurueck (Admin-Funktion)."""
     if len(body.new_password or "") < 8:
@@ -212,6 +230,9 @@ async def admin_user_set_password(
             "updated_at": now_iso(),
         }},
     )
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.passwort.zurueckgesetzt",
+                       ref=user_id, meta={"email": u.get("email", "")})
     return {"ok": True}
 
 
@@ -267,7 +288,244 @@ async def admin_stats(_=Depends(current_admin)):
         "comparisons_today": await db.vehicle_comparisons.count_documents({
             "created_at": {"$gte": datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()}
         }),
+        "open_errors": await db.error_logs.count_documents({"status": "open"}),
     }
+
+
+# ---------- Audit-Log ----------
+@router.get("/admin/audit")
+async def admin_audit_log(
+    limit: int = 200, action: Optional[str] = None, q: Optional[str] = None,
+    _=Depends(current_admin),
+):
+    """Audit-Trail der Plattform: Logins, Registrierungen, Verträge, Termine,
+    Admin-Aktionen. Quelle ist die activity_logs-Collection; Einträge werden
+    mit Nutzer-E-Mail/Firma angereichert, damit die Liste lesbar ist."""
+    limit = max(1, min(int(limit or 200), 1000))
+    query: dict = {}
+    if action:
+        query["action"] = {"$regex": f"^{re.escape(action)}"}
+    items = await db.activity_logs.find(query, {"_id": 0}) \
+        .sort("created_at", -1).to_list(limit * 3 if q else limit)
+
+    # E-Mail/Firma nachschlagen (ein Batch-Lookup statt N Einzel-Queries).
+    user_ids = {i.get("user_id") for i in items if i.get("user_id")}
+    users = await db.users.find(
+        {"id": {"$in": list(user_ids)}},
+        {"_id": 0, "id": 1, "email": 1, "username": 1, "role": 1},
+    ).to_list(len(user_ids) or 1)
+    by_id = {u["id"]: u for u in users}
+    out = []
+    for i in items:
+        u = by_id.get(i.get("user_id")) or {}
+        entry = {
+            **i,
+            "email": u.get("email") or (i.get("meta") or {}).get("email")
+                     or (i.get("meta") or {}).get("identifier") or "",
+            "username": u.get("username", ""),
+            "role": u.get("role", ""),
+        }
+        if q:
+            hay = " ".join(str(v) for v in (
+                entry.get("email"), entry.get("action"), entry.get("ref"),
+                str(entry.get("meta") or ""),
+            )).lower()
+            if q.lower() not in hay:
+                continue
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ---------- Fehler-Meldungen (Error-Reporting an den Admin) ----------
+@router.get("/admin/errors")
+async def admin_errors(
+    status: Optional[str] = None, limit: int = 200, _=Depends(current_admin),
+):
+    """Alle vom Server erfassten Fehler (unbehandelte Exceptions + gemeldete
+    Frontend-Fehler), neueste zuerst. status: open | resolved | (alle)."""
+    limit = max(1, min(int(limit or 200), 1000))
+    query: dict = {}
+    if status in ("open", "resolved"):
+        query["status"] = status
+    return await db.error_logs.find(query, {"_id": 0}) \
+        .sort("created_at", -1).to_list(limit)
+
+
+@router.put("/admin/errors/{error_id}")
+async def admin_resolve_error(
+    error_id: str, body: dict = Body(default={}), admin=Depends(current_admin),
+):
+    """Fehler als erledigt (oder wieder offen) markieren."""
+    new_status = body.get("status", "resolved")
+    if new_status not in ("open", "resolved"):
+        raise HTTPException(400, "status muss 'open' oder 'resolved' sein")
+    r = await db.error_logs.update_one(
+        {"id": error_id},
+        {"$set": {"status": new_status, "resolved_by": admin.get("email", ""),
+                  "resolved_at": now_iso() if new_status == "resolved" else None}},
+    )
+    if not r.matched_count:
+        raise HTTPException(404, "Fehler-Eintrag nicht gefunden")
+    return {"ok": True, "status": new_status}
+
+
+@router.delete("/admin/errors")
+async def admin_clear_resolved_errors(_=Depends(current_admin)):
+    """Alle als erledigt markierten Fehler löschen (Aufräumen)."""
+    r = await db.error_logs.delete_many({"status": "resolved"})
+    return {"ok": True, "deleted": r.deleted_count}
+
+
+# ---------- Verkaufspakete (Phase 2 — Vergabe durch den Admin) ----------
+@router.put("/admin/dealers/{dealer_id}/sale-plan")
+async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
+                              admin=Depends(current_admin)):
+    """Verkaufspaket zuweisen/ändern. tier: s5|s10|s20|s30|s40|enterprise
+    oder null zum Entfernen. Bei Neuvergabe/Wechsel startet der rollierende
+    Abrechnungszeitraum neu (Buchungsdatum)."""
+    from routes.team import SALE_PLANS
+    dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "id": 1, "sale_plan": 1})
+    if not dealer:
+        raise HTTPException(404, "Händler nicht gefunden")
+    tier = body.get("tier")
+    if tier is None:
+        await db.dealers.update_one({"id": dealer_id}, {"$unset": {"sale_plan": ""}})
+        await log_activity(admin.get("dealer_id", ""), admin["id"],
+                           "admin.verkaufsplan.entfernt", ref=dealer_id)
+        return {"ok": True, "sale_plan": None}
+    if tier not in SALE_PLANS:
+        raise HTTPException(400, f"Unbekanntes Paket: {tier}")
+    old = (dealer.get("sale_plan") or {})
+    plan = {
+        "tier": tier,
+        # Zeitraum bleibt bei reiner Quota-Erhöhung erhalten, startet aber
+        # neu, wenn vorher kein Paket existierte.
+        "period_start": old.get("period_start") or now_iso(),
+    }
+    if tier == "enterprise":
+        try:
+            plan["custom_quota"] = int(body.get("custom_quota") or 0) or None
+        except (TypeError, ValueError):
+            plan["custom_quota"] = None
+    await db.dealers.update_one({"id": dealer_id}, {"$set": {"sale_plan": plan}})
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.verkaufsplan.gesetzt", ref=dealer_id,
+                       meta={"tier": tier})
+    return {"ok": True, "sale_plan": plan}
+
+
+@router.get("/admin/plan-requests")
+async def admin_plan_requests(status: Optional[str] = None,
+                              type: Optional[str] = None,
+                              _=Depends(current_admin)):
+    query: Dict = {}
+    if status:
+        query["status"] = status
+    if type:
+        query["type"] = type
+    return await db.plan_requests.find(query, {"_id": 0}) \
+        .sort("created_at", -1).to_list(200)
+
+
+# ---------- Sucher-Abo freischalten (manuell) ----------
+@router.post("/admin/sucher/{sucher_id}/abo")
+async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
+                               admin=Depends(current_admin)):
+    """Sucher-Abo aktivieren/verlängern (plan: monthly|yearly) oder mit
+    plan=null aufheben. Legt/aktualisiert eine subscriptions-Zeile mit
+    subject_user_id an — damit gilt der Sucher als abo-berechtigt."""
+    from routes.team import SUCHER_PLANS
+    sucher = await db.users.find_one(
+        {"id": sucher_id, "role": "sucher"}, {"_id": 0, "id": 1, "dealer_id": 1})
+    if not sucher:
+        raise HTTPException(404, "Sucher nicht gefunden")
+    plan = body.get("plan")
+    if plan is None:
+        await db.subscriptions.update_many(
+            {"subject_user_id": sucher_id},
+            {"$set": {"status": "cancelled",
+                      "expires_at": now_iso(), "updated_at": now_iso()}})
+        await log_activity(admin.get("dealer_id", ""), admin["id"],
+                           "admin.sucher.abo.aufgehoben", ref=sucher_id)
+        return {"ok": True, "active": False}
+    if plan not in SUCHER_PLANS:
+        raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {plan}")
+    days = SUCHER_PLANS[plan]["days"]
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    await db.subscriptions.delete_many({"subject_user_id": sucher_id})
+    await db.subscriptions.insert_one({
+        "id": str(uuid.uuid4()),
+        "dealer_id": sucher["dealer_id"],
+        "subject_user_id": sucher_id,
+        "plan": plan, "status": "active",
+        "expires_at": expires_at,
+        "price": SUCHER_PLANS[plan]["price"],
+        "activated_by": admin.get("email", ""),
+        "created_at": now_iso(),
+    })
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.sucher.abo.freigeschaltet", ref=sucher_id,
+                       meta={"plan": plan})
+    return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at}
+
+
+# ---------- Zwischenhändler-Zugang freischalten (manuell) ----------
+@router.get("/admin/buyers")
+async def admin_list_buyers(_=Depends(current_admin)):
+    """Alle Zwischenhändler mit Zugangsstatus (für die Freischaltung)."""
+    from routes.marketplace import _access_status
+    users = await db.users.find(
+        {"role": "b2b_buyer"}, {"_id": 0, "password_hash": 0},
+    ).sort("created_at", -1).to_list(1000)
+    return [{**u, "access": _access_status(u)} for u in users]
+
+
+@router.post("/admin/buyers/{buyer_id}/access")
+async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
+                                 admin=Depends(current_admin)):
+    """Marktplatz-Zugang eines Zwischenhändlers aktivieren/verlängern
+    (plan='monthly') oder mit plan=null sperren."""
+    from routes.marketplace import BUYER_ACCESS_DAYS, BUYER_ACCESS_PRICE
+    buyer = await db.users.find_one(
+        {"id": buyer_id, "role": "b2b_buyer"}, {"_id": 0, "id": 1})
+    if not buyer:
+        raise HTTPException(404, "Zwischenhändler nicht gefunden")
+    plan = body.get("plan")
+    if plan is None:
+        await db.users.update_one(
+            {"id": buyer_id},
+            {"$set": {"marketplace_access.active": False,
+                      "marketplace_access.updated_at": now_iso()}})
+        await log_activity("", admin["id"], "admin.buyer.zugang.gesperrt",
+                           ref=buyer_id)
+        return {"ok": True, "active": False}
+    if plan != "monthly":
+        raise HTTPException(400, "Nur 'monthly' unterstützt")
+    expires_at = (datetime.now(timezone.utc)
+                  + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
+    await db.users.update_one(
+        {"id": buyer_id},
+        {"$set": {"marketplace_access": {
+            "active": True, "plan": "monthly",
+            "price": BUYER_ACCESS_PRICE, "expires_at": expires_at,
+            "activated_by": admin.get("email", ""), "updated_at": now_iso()}}})
+    await log_activity("", admin["id"], "admin.buyer.zugang.freigeschaltet",
+                       ref=buyer_id, meta={"expires_at": expires_at})
+    return {"ok": True, "active": True, "expires_at": expires_at}
+
+
+@router.put("/admin/plan-requests/{req_id}")
+async def admin_close_plan_request(req_id: str, body: dict = Body(default={}),
+                                   _=Depends(current_admin)):
+    r = await db.plan_requests.update_one(
+        {"id": req_id},
+        {"$set": {"status": body.get("status", "erledigt"),
+                  "updated_at": now_iso()}})
+    if not r.matched_count:
+        raise HTTPException(404, "Anfrage nicht gefunden")
+    return {"ok": True}
 
 
 # ---------- Vehicle comparisons ----------

@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import os
+import random
 import subprocess
 import sys
 import uuid
@@ -201,32 +202,55 @@ _PAGE_HEADERS = {
 # reicht das vollkommen; Schrift und Bild-Details bleiben erkennbar.
 MAX_WIDTH = 1100
 JPEG_QUALITY = 55
+# Harte Zielgrösse pro Artefakt (Wunsch 08/2026): unter ~600 KB. Die
+# Kompressionsstufen unten werden durchprobiert, bis das JPEG darunter
+# liegt — erst Qualität senken, dann zusätzlich die Breite reduzieren.
+TARGET_BYTES = 600 * 1024
+_COMPRESSION_STEPS = (
+    (MAX_WIDTH, JPEG_QUALITY),
+    (MAX_WIDTH, 45),
+    (MAX_WIDTH, 35),
+    (900, 40),
+    (900, 32),
+    (750, 30),
+    (640, 26),
+)
 
 
 def _compress_artifacts(png_bytes: bytes, pdf_fallback: bytes) -> tuple[bytes, bytes]:
     """Re-encode the raw PNG screenshot as a JPEG (much smaller) and build
-    a 1-page image-PDF from the same JPEG. Falls back to the original
-    Playwright PDF if Pillow rejects the screenshot for any reason."""
+    a 1-page image-PDF from the same JPEG. Probiert Stufen durch, bis das
+    JPEG unter TARGET_BYTES liegt (lange Inserats-Seiten brauchen mehr
+    Kompression als kurze). Falls back to the original Playwright PDF if
+    Pillow rejects the screenshot for any reason."""
     try:
         from PIL import Image  # local import — Pillow is heavy
         import io
         with Image.open(io.BytesIO(png_bytes)) as im:
             im = im.convert("RGB")
-            if im.width > MAX_WIDTH:
-                ratio = MAX_WIDTH / im.width
-                new_size = (MAX_WIDTH, int(im.height * ratio))
-                im = im.resize(new_size, Image.LANCZOS)
-            jpg_buf = io.BytesIO()
-            im.save(jpg_buf, format="JPEG", quality=JPEG_QUALITY,
-                    optimize=True, progressive=True)
-            jpg_bytes = jpg_buf.getvalue()
-            pdf_buf = io.BytesIO()
-            # resolution=72 (statt 100) lässt ReportLab die Seite
-            # entsprechend grösser anlegen -> gleiches Bild, weniger
-            # Meta-Overhead, und vor allem keine Neu-Kompression des
-            # Bildes (PIL bettet JPEG direkt ein).
-            im.save(pdf_buf, format="PDF", resolution=72.0)
-            pdf_bytes = pdf_buf.getvalue()
+
+            jpg_bytes = b""
+            pdf_bytes = b""
+            for width, quality in _COMPRESSION_STEPS:
+                # Immer vom Original skalieren (kein doppeltes Resampling).
+                step_im = im
+                if step_im.width > width:
+                    ratio = width / step_im.width
+                    step_im = step_im.resize(
+                        (width, int(step_im.height * ratio)), Image.LANCZOS)
+                buf = io.BytesIO()
+                step_im.save(buf, format="JPEG", quality=quality,
+                             optimize=True, progressive=True)
+                jpg_bytes = buf.getvalue()
+                # resolution=72 (statt 100) -> weniger Meta-Overhead; quality
+                # mitgeben, sonst kodiert Pillow das PDF-Bild mit Default-75
+                # neu und das PDF wird deutlich groesser als das JPEG.
+                pdf_buf = io.BytesIO()
+                step_im.save(pdf_buf, format="PDF", resolution=72.0,
+                             quality=quality)
+                pdf_bytes = pdf_buf.getvalue()
+                if len(jpg_bytes) <= TARGET_BYTES and len(pdf_bytes) <= TARGET_BYTES:
+                    break
         return jpg_bytes, pdf_bytes
     except Exception as exc:
         log.warning("artifact compression failed (%s) — using raw outputs", exc)
@@ -533,16 +557,61 @@ async def create_snapshot(
     return snap_id
 
 
+# Fehler, die ein erneuter Versuch NICHT heilt (kein Retry).
+_PERMANENT_HINTS = ("nicht erlaubt", "not allowed", "ungültige url", "invalid url",
+                    "keine url")
+
+
+def _is_transient(exc: Exception) -> bool:
+    """True, wenn ein erneuter Versuch sinnvoll ist. Netzwerk-/Timeout-/Bot-
+    Block-Fehler dominieren bei Snapshots und sind vorübergehend — daher
+    Default: wiederholen. Nur klar permanente Fehler brechen sofort ab."""
+    m = str(exc).lower()
+    return not any(h in m for h in _PERMANENT_HINTS)
+
+
+async def _capture_with_retry(db, snap_id: str, url: str, attempts: int = 3):
+    """Capture mit Backoff. Der Browser-Lock wird zwischen den Versuchen
+    freigegeben (Sleep passiert außerhalb von _capture_with_playwright), damit
+    andere Snapshots währenddessen laufen können."""
+    last_exc = None
+    for i in range(1, attempts + 1):
+        try:
+            return await _capture_with_playwright(url)
+        except Exception as exc:
+            last_exc = exc
+            if i >= attempts or not _is_transient(exc):
+                raise
+            delay = min(45.0, 5.0 * (3 ** (i - 1))) * random.uniform(0.7, 1.3)
+            log.warning("snapshot %s Versuch %d/%d fehlgeschlagen (%s) — neuer "
+                        "Versuch in %.0fs", snap_id, i, attempts,
+                        str(exc).splitlines()[0][:100], delay)
+            try:
+                await db.listing_snapshots.update_one(
+                    {"id": snap_id},
+                    {"$set": {"status": "retrying", "attempts": i,
+                              "last_error": str(exc)[:300]}})
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+    raise last_exc
+
+
 async def run_snapshot_job(db, snap_id: str) -> None:
-    """Background-task entry point. Captures the page, uploads both
-    artifacts to object storage, and flips the row to 'ready'/'failed'."""
+    """Background-task entry point. Captures the page (mit Retry bei
+    vorübergehenden Fehlern), uploads both artifacts to object storage, and
+    flips the row to 'ready'/'failed'."""
     doc = await db.listing_snapshots.find_one({"id": snap_id}, {"_id": 0})
     if not doc:
         log.warning("snapshot %s vanished before capture", snap_id)
         return
     url = doc["source_url"]
+    # Als 'running' markieren, damit Recovery laufende von verlorenen Jobs
+    # unterscheiden kann.
+    await db.listing_snapshots.update_one(
+        {"id": snap_id}, {"$set": {"status": "running"}})
     try:
-        png, pdf = await _capture_with_playwright(url)
+        png, pdf = await _capture_with_retry(db, snap_id, url)
         # Compress PNG → JPEG and rebuild a 1-page image-PDF (much smaller).
         loop = asyncio.get_running_loop()
         png, pdf = await loop.run_in_executor(None, _compress_artifacts, png, pdf)

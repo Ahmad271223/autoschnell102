@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
+import { toast } from "sonner";
 
 /**
  * Schaden-Selector mit fixen Klick-Punkten je Fahrzeug-Ansicht.
@@ -62,125 +63,136 @@ const P = (name, cx, cy) => ({ name, cx, cy });
    beim Hover sowie später als Text im Vertrag.
    ------------------------------------------------------------------ */
 const DOTS = {
-  /* ---------------- FRONTANSICHT (Porsche Cayenne, 1536x1024) ----------------
-     Kalibriert direkt am tatsaechlichen Bild.
+  /* ---------------- FRONTANSICHT (SUV, 1536x1024) ----------------
+     Neu kalibriert direkt an public/damage/front.png (08/2026).
      Konvention: "rechts" (Beifahrerseite) = LINKE Bildhaelfte,
                  "links"  (Fahrerseite)    = RECHTE Bildhaelfte. */
   front: [
-    P("Windschutzscheibe",                   765, 140),
-    P("A-Säule rechts",                      490, 130),
-    P("A-Säule links",                      1050, 130),
-    P("Rechter Außenspiegel",                160, 245),
-    P("Linker Außenspiegel",                1385, 245),
-    P("Motorhaube",                          765, 290),
-    P("Marken-Emblem",                       765, 360),
-    P("Rechter Hauptscheinwerfer",           445, 335),
-    P("Linker Hauptscheinwerfer",           1095, 335),
-    P("Kühlergrill",                         765, 475),  // grosses Mittelgitter, ueber Kennzeichen
-    P("Rechter Nebelscheinwerfer",           320, 595),
-    P("Linker Nebelscheinwerfer",           1215, 595),
-    P("Kennzeichenhalterung",                765, 600),
-    P("Rechtes Vorderrad / Reifen",          180, 745),
-    P("Linkes Vorderrad / Reifen",          1355, 745),
+    P("Dach",                                765, 100),
+    P("Windschutzscheibe",                   765, 225),
+    P("A-Säule rechts",                      370, 240),
+    P("A-Säule links",                      1160, 240),
+    P("Rechter Außenspiegel",                265, 330),
+    P("Linker Außenspiegel",                1270, 330),
+    P("Motorhaube",                          765, 395),
+    P("Marken-Emblem",                       765, 470),
+    P("Rechter Hauptscheinwerfer",           410, 460),
+    P("Linker Hauptscheinwerfer",           1120, 460),
+    P("Kotflügel vorne rechts",              295, 530),
+    P("Kotflügel vorne links",              1235, 530),
+    P("Lufteinlass rechts",                  420, 610),
+    P("Kühlergrill",                         765, 615),
+    P("Lufteinlass links",                  1110, 610),
+    P("Rechter Nebelscheinwerfer",           370, 712),
+    P("Linker Nebelscheinwerfer",           1160, 712),
+    P("Kennzeichenhalterung",                765, 715),
+    P("Stoßstange vorne",                    765, 800),
+    P("Rechtes Vorderrad / Reifen",          345, 890),
+    P("Linkes Vorderrad / Reifen",          1190, 890),
   ],
 
-  /* ---------------- HECKANSICHT (Porsche Cayenne) ---------------- */
+  /* ---------------- HECKANSICHT (kalibriert an rear.png) ----------------
+     Blick von hinten: "links" (Fahrerseite) = LINKE Bildhaelfte. */
   rear: [
-    P("Dach",                       765, 60),
-    P("Heckscheibe",                765, 170),
-    P("Linker Außenspiegel",        235, 215),
-    P("Rechter Außenspiegel",      1310, 215),
-    P("Linkes Rücklicht",           385, 305),
-    P("Rechtes Rücklicht",         1155, 305),
-    P("Heckklappe",                 765, 370),
-    P("Kennzeichen hinten",         765, 415),
-    P("Kotflügel hinten links",     200, 470),
-    P("Kotflügel hinten rechts",   1340, 470),
-    P("Auspuff links",              450, 560),
-    P("Auspuff rechts",            1085, 560),
-    P("Stoßstange hinten",          765, 615),
-    P("Linkes Hinterrad / Felge",   175, 720),
-    P("Rechtes Hinterrad / Felge", 1365, 720),
+    P("Dach",                       765, 145),
+    P("Heckscheibe",                765, 255),
+    P("Linker Außenspiegel",        310, 330),
+    P("Rechter Außenspiegel",      1220, 330),
+    P("Heckklappe",                 765, 350),
+    P("Linkes Rücklicht",           445, 400),
+    P("Rechtes Rücklicht",         1090, 400),
+    P("Kennzeichen hinten",         765, 445),
+    P("Kotflügel hinten links",     330, 520),
+    P("Kotflügel hinten rechts",   1200, 520),
+    P("Stoßstange hinten",          765, 600),
+    P("Auspuff links",              475, 670),
+    P("Auspuff rechts",            1060, 670),
+    P("Linkes Hinterrad / Felge",   375, 785),
+    P("Rechtes Hinterrad / Felge", 1160, 785),
   ],
 
-  /* -------- FAHRERSEITE (Auto schaut nach LINKS, Front am LINKEN Bildrand) ------- */
+  /* -------- FAHRERSEITE (Auto schaut nach LINKS, Front am LINKEN Bildrand,
+     kalibriert an left.png) ------- */
   left: [
-    P("Stoßstange vorne",            85, 470),
-    P("Linker Hauptscheinwerfer",   130, 410),
-    P("Kotflügel vorne links",      230, 430),
-    P("Motorhaube",                 350, 355),
-    P("Linker Außenspiegel",        555, 320),
-    P("Windschutzscheibe",          490, 270),
-    P("A-Säule links",              585, 240),
-    P("Dach",                       780, 200),
-    P("B-Säule links",              870, 350),
-    P("Tür vorne links",            745, 510),
-    P("Tür hinten links",          1010, 510),
-    P("C-Säule links",             1085, 290),
-    P("Heckscheibe",               1245, 290),
-    P("Kotflügel hinten links",    1335, 430),
-    P("Heckklappe",                1435, 380),
-    P("Linkes Rücklicht",          1460, 470),
-    P("Stoßstange hinten",         1470, 530),
-    P("Schweller links",            840, 615),
-    P("Vorderrad / Felge links",    320, 580),
-    P("Hinterrad / Felge links",   1220, 580),
+    P("Stoßstange vorne",            80, 585),
+    P("Linker Hauptscheinwerfer",   155, 490),
+    P("Kotflügel vorne links",      245, 495),
+    P("Motorhaube",                 335, 430),
+    P("A-Säule links",              525, 372),
+    P("Windschutzscheibe",          615, 352),
+    P("Linker Außenspiegel",        600, 418),
+    P("Dach",                       850, 280),
+    P("Tür vorne links",            720, 525),
+    P("B-Säule links",              858, 370),
+    P("Tür hinten links",           975, 520),
+    P("Seitenscheibe hinten links",1180, 338),
+    P("C-Säule links",             1295, 360),
+    P("Kotflügel hinten links",    1340, 505),
+    P("Heckklappe",                1450, 400),
+    P("Linkes Rücklicht",          1435, 460),
+    P("Stoßstange hinten",         1480, 560),
+    P("Schweller links",            800, 650),
+    P("Vorderrad / Felge links",    330, 620),
+    P("Hinterrad / Felge links",   1205, 620),
   ],
 
-  /* ------- BEIFAHRERSEITE (Auto schaut nach RECHTS, Front am RECHTEN Bildrand) ------- */
+  /* ------- BEIFAHRERSEITE (Auto schaut nach RECHTS, Front am RECHTEN Bildrand,
+     kalibriert an right.png) ------- */
   right: [
-    P("Stoßstange vorne",          1450, 470),
-    P("Rechter Hauptscheinwerfer", 1405, 410),
-    P("Kotflügel vorne rechts",    1305, 430),
-    P("Motorhaube",                1185, 355),
-    P("Rechter Außenspiegel",       980, 320),
-    P("Windschutzscheibe",         1045, 270),
-    P("A-Säule rechts",             950, 240),
-    P("Dach",                       755, 200),
-    P("B-Säule rechts",             665, 350),
-    P("Tür vorne rechts",           790, 510),
-    P("Tür hinten rechts",          525, 510),
-    P("C-Säule rechts",             450, 290),
-    P("Heckscheibe",                290, 290),
-    P("Kotflügel hinten rechts",    200, 430),
-    P("Heckklappe",                 100, 380),
-    P("Rechtes Rücklicht",           75, 470),
-    P("Stoßstange hinten",           65, 530),
-    P("Schweller rechts",           695, 615),
-    P("Vorderrad / Felge rechts",  1215, 580),
-    P("Hinterrad / Felge rechts",   315, 580),
+    P("Stoßstange vorne",          1460, 585),
+    P("Rechter Hauptscheinwerfer", 1355, 480),
+    P("Kotflügel vorne rechts",    1255, 495),
+    P("Motorhaube",                1190, 420),
+    P("A-Säule rechts",            1040, 365),
+    P("Windschutzscheibe",          945, 352),
+    P("Rechter Außenspiegel",       905, 410),
+    P("Dach",                       680, 280),
+    P("Tür vorne rechts",           790, 520),
+    P("B-Säule rechts",             658, 370),
+    P("Tür hinten rechts",          540, 515),
+    P("Seitenscheibe hinten rechts",350, 338),
+    P("C-Säule rechts",             255, 360),
+    P("Kotflügel hinten rechts",    215, 505),
+    P("Heckklappe",                 105, 390),
+    P("Rechtes Rücklicht",          110, 455),
+    P("Stoßstange hinten",           75, 560),
+    P("Schweller rechts",           740, 650),
+    P("Vorderrad / Felge rechts",  1155, 610),
+    P("Hinterrad / Felge rechts",   320, 610),
   ],
 
-  /* -------------- DRAUFSICHT (Front am RECHTEN Bildrand) --------------
+  /* -------------- DRAUFSICHT (Front am RECHTEN Bildrand, kalibriert an
+     top.png — das Fahrzeug liegt im Bild NICHT mittig: Mittellinie ~y 470,
+     Karosserie ca. y 195–745) --------------
      Linkslenker-Konvention beim Blick von oben mit Front rechts:
        "links"  (Fahrerseite)    = OBERE Bildhaelfte
        "rechts" (Beifahrerseite) = UNTERE Bildhaelfte  */
   top: [
-    P("Stoßstange vorne",          1450, 500),
-    P("Linker Hauptscheinwerfer",  1330, 290),
-    P("Rechter Hauptscheinwerfer", 1330, 710),
-    P("Kotflügel vorne links",     1245, 220),
-    P("Kotflügel vorne rechts",    1245, 780),
-    P("Motorhaube",                1120, 500),
-    P("Linker Außenspiegel",        995, 175),
-    P("Rechter Außenspiegel",       995, 825),
-    P("A-Säule links",              935, 250),
-    P("A-Säule rechts",             935, 750),
-    P("Windschutzscheibe",          895, 500),
-    P("Tür vorne links",            760, 270),
-    P("Tür vorne rechts",           760, 730),
-    P("Dach",                       620, 500),
-    P("Tür hinten links",           465, 270),
-    P("Tür hinten rechts",          465, 730),
-    P("C-Säule links",              370, 250),
-    P("C-Säule rechts",             370, 750),
-    P("Heckscheibe",                325, 500),
-    P("Kotflügel hinten links",     200, 220),
-    P("Kotflügel hinten rechts",    200, 780),
-    P("Heckklappe",                 150, 500),
-    P("Linkes Rücklicht",           100, 290),
-    P("Rechtes Rücklicht",          100, 710),
-    P("Stoßstange hinten",           70, 500),
+    P("Stoßstange vorne",          1465, 490),
+    P("Linker Hauptscheinwerfer",  1330, 270),
+    P("Rechter Hauptscheinwerfer", 1330, 665),
+    P("Kotflügel vorne links",     1240, 230),
+    P("Kotflügel vorne rechts",    1240, 705),
+    P("Motorhaube",                1235, 490),
+    P("Windschutzscheibe",          960, 490),
+    P("Linker Außenspiegel",        935, 185),
+    P("Rechter Außenspiegel",       935, 735),
+    P("A-Säule links",              900, 265),
+    P("A-Säule rechts",             900, 680),
+    P("Tür vorne links",            700, 245),
+    P("Tür vorne rechts",           700, 705),
+    P("Dach",                       600, 480),
+    P("Tür hinten links",           500, 245),
+    P("Tür hinten rechts",          500, 705),
+    P("C-Säule links",              330, 260),
+    P("C-Säule rechts",             330, 685),
+    P("Kotflügel hinten links",     215, 235),
+    P("Kotflügel hinten rechts",    215, 695),
+    P("Heckscheibe",                210, 480),
+    P("Heckklappe",                 135, 480),
+    P("Linkes Rücklicht",           120, 320),
+    P("Rechtes Rücklicht",          125, 640),
+    P("Stoßstange hinten",           65, 480),
   ],
 };
 
@@ -224,6 +236,9 @@ export default function DamageSelector({ damages = [], onChange }) {
     };
     const next = [...damages, newDamage];
     onChange?.(next, damagesToText(next));
+    // Feedback vor allem für Touch-Geräte (dort gibt es keinen Hover-Tooltip):
+    // kurz anzeigen, welches Bauteil getroffen wurde.
+    toast.success(`${activeType.label}: ${dot.name}`, { duration: 1600 });
   };
 
   const handleSvgClick = (view, e) => {

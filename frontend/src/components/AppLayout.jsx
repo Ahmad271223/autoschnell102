@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search,
+  Layers, LogOut, Activity, Search, Warehouse,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -13,6 +13,8 @@ const NAV = [
   { to: "/app/vertraege", label: "Verträge / PDFs", icon: FileText },
   { to: "/app/termine", label: "Terminplaner", icon: Calendar },
   { to: "/app/fahrzeuge", label: "Fahrzeugpool", icon: Car },
+  { to: "/app/bestand", label: "Bestand & Verkauf", icon: Warehouse, haendlerOnly: true },
+  { to: "/app/team", label: "Mitarbeiter / Sucher", icon: Users, haendlerOnly: true },
   { to: "/app/fahrer", label: "Fahrer", icon: Users },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon },
 ];
@@ -27,7 +29,8 @@ export default function AppLayout({ children }) {
   const nav = useNavigate();
   const { user, subscription, logout } = useAuth();
 
-  const items = [...NAV];
+  // Sucher-Unteraccounts sehen keine Händler-Funktionen (Bestand, Team).
+  const items = NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher"));
   if (user?.role === "admin") items.push({ to: "/admin", label: "Admin", icon: ShieldCheck });
 
   return (

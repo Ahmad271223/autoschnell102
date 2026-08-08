@@ -51,6 +51,10 @@ export default function Landing() {
 
           {/* Desktop-CTAs */}
           <div className="hidden md:flex items-center gap-2">
+            <Link to="/markt/login" data-testid="nav-b2b"
+                  className="px-3 py-1.5 text-sm text-zinc-300 hover:text-white">
+              B2B-Marktplatz
+            </Link>
             <Link to="/fahrer/login" data-testid="nav-driver-login"
                   className="px-3 py-1.5 text-sm text-zinc-300 hover:text-white">
               Fahrer-App
@@ -122,6 +126,10 @@ export default function Landing() {
              className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
             Kontakt
           </a>
+          <Link to="/markt/login" onClick={closeMenu} data-testid="nav-mobile-b2b"
+                className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
+            B2B-Marktplatz
+          </Link>
           <Link to="/fahrer/login" onClick={closeMenu} data-testid="nav-mobile-driver"
                 className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
             Fahrer-App
@@ -326,7 +334,7 @@ export default function Landing() {
             <div className="tactical-card p-8" data-testid="pricing-monthly">
               <div className="overline">Monatsabo</div>
               <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-5xl">120 €</span>
+                <span className="font-display font-black text-5xl">160 €</span>
                 <span className="text-zinc-400 text-sm">/ Monat</span>
               </div>
               <p className="text-zinc-400 text-sm mt-3">Flexibel, monatlich kündbar.</p>
@@ -343,19 +351,19 @@ export default function Landing() {
             </div>
             <div className="tactical-card p-8 relative" style={{ borderColor: "rgba(255,59,48,0.4)" }} data-testid="pricing-yearly">
               <div className="absolute -top-3 left-6 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] font-bold rounded-sm"
-                   style={{ background: "var(--accent-red)" }}>2 Monate gratis</div>
+                   style={{ background: "var(--accent-red)" }}>Spart 120 €</div>
               <div className="overline">Jahresabo</div>
               <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-5xl">1.200 €</span>
+                <span className="font-display font-black text-5xl">1.800 €</span>
                 <span className="text-zinc-400 text-sm">/ Jahr</span>
               </div>
-              <p className="text-zinc-400 text-sm mt-3">Spart 240 € im Vergleich zum Monatsabo.</p>
+              <p className="text-zinc-400 text-sm mt-3">Spart 120 € im Vergleich zum Monatsabo (1.920 €).</p>
               <Link to="/register?plan=yearly" data-testid="cta-yearly"
                     className="block text-center w-full mt-7 kinetic-button px-5 py-3 rounded-sm">
                 Jahresabo wählen
               </Link>
               <ul className="mt-6 space-y-2 text-sm">
-                {["Alle Funktionen freigeschaltet", "Priorisierter Support", "Kein Aufpreis bei Updates", "Volle Daten-Kontrolle", "Spart 2 Monate"].map(t => (
+                {["Alle Funktionen freigeschaltet", "Priorisierter Support", "Kein Aufpreis bei Updates", "Volle Daten-Kontrolle", "Spart 120 € pro Jahr"].map(t => (
                   <li key={t} className="flex items-center gap-2 text-zinc-300"><Check size={14} style={{ color: "var(--accent-green)" }} /> {t}</li>
                 ))}
               </ul>

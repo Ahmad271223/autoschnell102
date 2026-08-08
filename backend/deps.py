@@ -78,8 +78,21 @@ async def current_admin(user=Depends(current_user)):
     return user
 
 
-async def get_subscription_status(dealer_id: str) -> dict:
-    sub = await db.subscriptions.find_one({"dealer_id": dealer_id}, sort=[("created_at", -1)])
+async def get_subscription_status(dealer_id: str,
+                                  subject_user_id: Optional[str] = None) -> dict:
+    """Abo-Status. Ohne subject_user_id: Händler-Abo (Bestandslogik).
+    Mit subject_user_id: das persönliche Abo eines Sucher-Unteraccounts."""
+    if subject_user_id:
+        sub = await db.subscriptions.find_one(
+            {"subject_user_id": subject_user_id}, sort=[("created_at", -1)])
+    else:
+        sub = await db.subscriptions.find_one(
+            {"dealer_id": dealer_id, "subject_user_id": {"$exists": False}},
+            sort=[("created_at", -1)])
+        if not sub:
+            # Fallback: alte Abos ohne das Feld (vor Phase 2 angelegt)
+            sub = await db.subscriptions.find_one(
+                {"dealer_id": dealer_id}, sort=[("created_at", -1)])
     if not sub:
         return {"active": False, "plan": None, "expires_at": None, "status": "none"}
     plan = sub.get("plan")
@@ -101,10 +114,21 @@ async def get_subscription_status(dealer_id: str) -> dict:
     return {"active": active, "plan": plan, "expires_at": expires_at, "status": status_}
 
 
+async def subscription_for(user: dict) -> dict:
+    """Abo-Status passend zur Rolle: Sucher haben ein persönliches Abo,
+    der Händler-Hauptaccount nutzt das (Bestands-)Händler-Abo — er gilt
+    damit als 'erster Sucher' (Beschluss 05.08.2026, keine Änderung für
+    Bestandskunden)."""
+    if user.get("role") == "sucher":
+        return await get_subscription_status(user.get("dealer_id", ""),
+                                             subject_user_id=user["id"])
+    return await get_subscription_status(user.get("dealer_id", ""))
+
+
 async def require_active_sub(user=Depends(current_user)):
     if user.get("role") == "admin":
         return user
-    sub = await get_subscription_status(user["dealer_id"])
+    sub = await subscription_for(user)
     if not sub["active"]:
         raise HTTPException(402, "Kein aktives Abo")
     return user

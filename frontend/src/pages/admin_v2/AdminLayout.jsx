@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   LayoutDashboard, Users, GitCompareArrows, Activity, Settings, LogOut,
+  ScrollText, AlertTriangle, KeyRound,
 } from "lucide-react";
 
 /**
@@ -16,6 +17,9 @@ const NAV = [
   { to: "/admin/users",       label: "Nutzer",        icon: Users },
   { to: "/admin/comparisons", label: "Vergleiche",    icon: GitCompareArrows },
   { to: "/admin/urls",        label: "URL-Statistik", icon: Activity },
+  { to: "/admin/audit",       label: "Audit-Log",     icon: ScrollText },
+  { to: "/admin/errors",      label: "Fehler",        icon: AlertTriangle },
+  { to: "/admin/freischaltungen", label: "Freischaltungen", icon: KeyRound },
   { to: "/admin/settings",    label: "Einstellungen", icon: Settings },
 ];
 

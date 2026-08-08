@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, field_validator
 
 from deps import clean_doc, current_user, db, log_activity, now_iso
+from lifecycle import try_set_lifecycle
 
 log = logging.getLogger("autohandel")
 
@@ -68,6 +69,9 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_user)):
             {"id": body.contract_id, "dealer_id": user["dealer_id"]},
             {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
         )
+    if body.vehicle_id:
+        await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
+                                "abholung_geplant", user=user)
     await log_activity(user["dealer_id"], user["id"], "termin.erstellt", ref=appt_id)
     return clean_doc(doc)
 
@@ -152,9 +156,37 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         if update["status"] not in {"abgeholt", "nicht abgeholt"}:
             update["assets_cleaned_at"] = None
     await db.appointments.update_one({"id": appt_id}, {"$set": update})
+    # Lebenszyklus des Fahrzeugs nachziehen (abgeholt / nicht abgeholt).
+    vehicle_id = existing.get("vehicle_id")
+    if vehicle_id and update.get("status") != existing.get("status"):
+        if update.get("status") == "abgeholt":
+            await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
+        elif update.get("status") == "nicht abgeholt":
+            await try_set_lifecycle(vehicle_id, user["dealer_id"], "nicht_abgeholt", user=user)
     await log_activity(user["dealer_id"], user["id"], "termin.aktualisiert", ref=appt_id,
                        meta={"pickup_changed": pickup_changed})
     return {"ok": True, "pickup_date_changed": pickup_changed}
+
+
+@router.get("/appointments/{appt_id}/report")
+async def get_pickup_report(appt_id: str, versions: int = 0,
+                            user=Depends(current_user)):
+    """Händler liest den Abholbericht des Fahrers (aktuelle Version).
+    Mit ?versions=1 werden auch alte (ersetzte) Versionen mitgeliefert."""
+    appt = await db.appointments.find_one(
+        {"id": appt_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1},
+    )
+    if not appt:
+        raise HTTPException(404, "Termin nicht gefunden")
+    current = await db.pickup_reports.find_one(
+        {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
+    )
+    out: Dict[str, Any] = {"report": current}
+    if versions:
+        out["versions"] = await db.pickup_reports.find(
+            {"appointment_id": appt_id}, {"_id": 0},
+        ).sort("version", -1).to_list(20)
+    return out
 
 
 @router.delete("/appointments/{appt_id}")

@@ -7,6 +7,7 @@ import {
   CheckCircle2, Car, ChevronDown, ChevronUp, Building2, XCircle,
 } from "lucide-react";
 import PhotoGallery from "@/components/PhotoGallery";
+import AbholCheckDialog from "@/components/AbholCheckDialog";
 
 const fmtDate = (s) => {
   if (!s) return "—";
@@ -24,6 +25,7 @@ export default function DriverDashboard() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState({});
   const [busy, setBusy] = useState(null);
+  const [checkAppt, setCheckAppt] = useState(null); // Abhol-Check-Dialog
 
   useEffect(() => {
     driverApi.get("/driver/appointments")
@@ -34,9 +36,14 @@ export default function DriverDashboard() {
 
   const setStatus = async (id, status) => {
     if (busy) return;
-    const confirmMsg = status === "abgeholt"
-      ? "Abholung bestätigen?\nHinweis: Fotos & Beweis-Archiv werden nach 7 Tagen automatisch gelöscht."
-      : "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Fotos & Beweis-Archiv werden nach 14 Tagen automatisch gelöscht.";
+    // "abgeholt" läuft über den Abhol-Check-Dialog (mit Abweichungsbericht).
+    if (status === "abgeholt") {
+      const appt = items.find((a) => a.id === id);
+      if (appt) setCheckAppt(appt);
+      return;
+    }
+    const confirmMsg =
+      "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Fotos & Beweis-Archiv werden nach 14 Tagen automatisch gelöscht.";
     if (!window.confirm(confirmMsg)) return;
     setBusy(id);
     try {
@@ -252,6 +259,20 @@ export default function DriverDashboard() {
           </section>
         ))}
       </div>
+
+      {checkAppt && (
+        <AbholCheckDialog
+          appointment={checkAppt}
+          onClose={() => setCheckAppt(null)}
+          onDone={async () => {
+            setCheckAppt(null);
+            try {
+              const r = await driverApi.get("/driver/appointments");
+              setItems(r.data);
+            } catch { /* Liste wird beim nächsten Laden aktualisiert */ }
+          }}
+        />
+      )}
     </div>
   );
 }

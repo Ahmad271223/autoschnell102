@@ -10,6 +10,12 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 
+# .env muss geladen sein, BEVOR JWT_SECRET gelesen wird — sonst wird bei jedem
+# Start ein Zufalls-Secret erzeugt und alle Sessions werden ungültig.
+from pathlib import Path as _Path
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(_Path(__file__).parent / ".env")
+
 _jwt_secret_env = os.environ.get("JWT_SECRET", "")
 if not _jwt_secret_env or _jwt_secret_env == "dev-secret":
     import secrets as _secrets

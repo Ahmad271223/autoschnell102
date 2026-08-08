@@ -12,7 +12,14 @@ Usage:
 import os
 import time
 from collections import defaultdict
+from pathlib import Path
 from threading import Lock
+
+# .env selbst laden — der Schalter darf nicht davon abhängen, in welcher
+# Reihenfolge die Module importiert werden (sonst liest er den Default,
+# bevor server.py/auth.py die .env geladen haben).
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")
 
 # Globaler Schalter: erlaubt das Deaktivieren des Rate-Limiters fuer
 # automatisierte Tests / CI (RATE_LIMIT_ENABLED=false). In Produktion

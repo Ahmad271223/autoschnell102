@@ -12,6 +12,7 @@ from auth import (
 )
 from deps import (
     current_user, db, get_subscription_status, now_iso, clean_doc,
+    log_activity,
 )
 from mobile_service import DEFAULT_RULES
 from rate_limiter import login_limiter, register_limiter
@@ -116,6 +117,8 @@ async def register(body: RegisterIn, request: Request):
         "created_at": now_iso(),
     })
     token = create_token(user_id, sid)
+    await log_activity(dealer_id, user_id, "auth.registriert",
+                       meta={"email": body.email, "ip": ip})
     user = clean_doc({k: v for k, v in user_doc.items() if k != "password_hash"})
     return TokenOut(token=token, user=user)
 
@@ -142,11 +145,16 @@ async def login(body: LoginIn, request: Request):
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = user["password_hash"] if user else _DUMMY_HASH
     if not await verify_password_async(body.password, pw_hash) or not user:
+        # Audit: fehlgeschlagener Versuch (nur Kennung + IP, nie das Passwort).
+        await log_activity("", "", "auth.login.fehlgeschlagen",
+                           meta={"identifier": identifier[:120], "ip": ip})
         raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
     sid = new_session_id()
     await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": sid}})
+    await log_activity(user.get("dealer_id", ""), user["id"], "auth.login",
+                       meta={"email": user.get("email", ""), "ip": ip})
     token = create_token(user["id"], sid)
     user_clean = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
     user_clean["current_session_id"] = sid
@@ -156,11 +164,14 @@ async def login(body: LoginIn, request: Request):
 @router.post("/auth/logout")
 async def logout(user=Depends(current_user)):
     await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": None}})
+    await log_activity(user.get("dealer_id", ""), user["id"], "auth.logout",
+                       meta={"email": user.get("email", "")})
     return {"ok": True}
 
 
 @router.get("/auth/me")
 async def me(user=Depends(current_user)):
-    sub = await get_subscription_status(user["dealer_id"])
+    from deps import subscription_for
+    sub = await subscription_for(user)
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     return {"user": user, "subscription": sub, "dealer": dealer}

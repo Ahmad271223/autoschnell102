@@ -21,30 +21,35 @@ from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape as _xe  # escape user-supplied text in Paragraph HTML
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.platypus import (
     BaseDocTemplate, Flowable, Frame, KeepTogether, PageBreak, PageTemplate,
     Paragraph, Spacer, Table, TableStyle,
 )
 
-PRIMARY = colors.HexColor("#0A0A0A")
+# Einheitliches Design mit dem Kaufvertrag (pdf_service.py):
+# Schwarz/Zinc + roter Akzent, Abschnittsbalken, Fußzeile mit Seitenzahlen.
+PRIMARY = colors.HexColor("#18181B")
 ACCENT = colors.HexColor("#FF3B30")
 GREY = colors.HexColor("#71717A")
 DIVIDER = colors.HexColor("#E4E4E7")
 LIGHT_BG = colors.HexColor("#F4F4F5")
+DARK = colors.HexColor("#0A0A0A")
 
-# Blaues Corporate-Design für das Abholprotokoll (Behörden-/Übergabe-Look).
-BLUE = colors.HexColor("#1E5BB8")          # Header-Bars + Akzente
-BLUE_DARK = colors.HexColor("#164490")     # Hover/Schatten
-BLUE_LINK = colors.HexColor("#1E5BB8")     # Auftrags-Nr + E-Mail
-BLUE_SOFT = colors.HexColor("#EAF1FB")     # Optional Hintergrundtöne
+PAGE_W, PAGE_H = A4
+MARGIN = 1.8 * cm
+CONTENT_W = PAGE_W - 2 * MARGIN
 
 # Damage sketches live in the frontend's public folder. The backend just
 # reads them as static assets. Alle Skizzen sind 1536 × 1024 px (Mai 2026).
-SKETCH_DIR = Path("/app/frontend/public/damage")
+# Pfad relativ zu dieser Datei aufloesen (funktioniert lokal auf Windows UND
+# im Container); /app/... bleibt als Fallback fuer das alte Deployment.
+_LOCAL_SKETCH_DIR = Path(__file__).resolve().parent.parent / "frontend" / "public" / "damage"
+SKETCH_DIR = _LOCAL_SKETCH_DIR if _LOCAL_SKETCH_DIR.exists() else Path("/app/frontend/public/damage")
 SKETCHES = {
     "front": {"src": "front.png", "w": 1536, "h": 1024, "label": "Frontansicht"},
     "rear":  {"src": "rear.png",  "w": 1536, "h": 1024, "label": "Heckansicht"},
@@ -61,10 +66,20 @@ SKETCHES = {
 def _styles() -> Dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
     return {
-        "title": ParagraphStyle("title", parent=base["Title"], fontSize=20, leading=24,
-                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=4),
-        "subtitle": ParagraphStyle("subtitle", parent=base["Normal"], fontSize=10,
-                                   leading=13, textColor=GREY, spaceAfter=14),
+        "title": ParagraphStyle("title", parent=base["Title"], fontSize=24, leading=27,
+                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=0),
+        "subtitle": ParagraphStyle("subtitle", parent=base["Normal"], fontSize=9,
+                                   leading=12, textColor=GREY),
+        "brand": ParagraphStyle("brand", parent=base["Normal"], fontSize=10, leading=13,
+                                textColor=ACCENT),
+        "meta_label": ParagraphStyle("meta_label", parent=base["Normal"], fontSize=7,
+                                     leading=9, textColor=GREY, alignment=TA_RIGHT),
+        "meta_value": ParagraphStyle("meta_value", parent=base["Normal"], fontSize=10,
+                                     leading=13, textColor=PRIMARY, alignment=TA_RIGHT),
+        "section": ParagraphStyle("section", parent=base["Normal"], fontSize=10,
+                                  leading=13, textColor=PRIMARY),
+        "sig_label": ParagraphStyle("sig_label", parent=base["Normal"], fontSize=8,
+                                    leading=10, textColor=GREY),
         "h2": ParagraphStyle("h2", parent=base["Heading2"], fontSize=11, leading=14,
                              textColor=PRIMARY, spaceBefore=10, spaceAfter=5,
                              textTransform="uppercase"),
@@ -120,7 +135,7 @@ def _fmt_date(iso: Optional[str]) -> str:
 def _check_row(label: str, value: Any, options: List[str], st, *, bold_value: bool = False) -> List:
     """Builds a row: [label | value | ○ option1 | ○ option2 | ...]."""
     label_style = ParagraphStyle(
-        "rl", parent=st["body"], fontSize=10, leading=13, textColor=BLUE_DARK)
+        "rl", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY)
     value_style = ParagraphStyle(
         "rv", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY,
         fontName="Helvetica-Bold" if bold_value else "Helvetica",
@@ -131,7 +146,9 @@ def _check_row(label: str, value: Any, options: List[str], st, *, bold_value: bo
     )
     row = [Paragraph(label, label_style), Paragraph(_xe(_fmt(value)), value_style)]
     for opt in options:
-        row.append(Paragraph(f"○  {opt}", opt_style))
+        # "[ ]" statt "○": das Kreis-Zeichen existiert nicht in Helvetica
+        # und wuerde als schwarzes Quadrat gedruckt.
+        row.append(Paragraph(f"[&nbsp;&nbsp;]&nbsp;{opt}", opt_style))
     return row
 
 
@@ -152,7 +169,7 @@ def _checklist(items: List[tuple], st, col_count: int = 2) -> Table:
     cells = []
     for item in items:
         label, note = (item if isinstance(item, tuple) else (item, ""))
-        txt = f"○ {_xe(str(label))}"
+        txt = f"[&nbsp;&nbsp;]&nbsp;{_xe(str(label))}"
         para_html = f"<font size=9 color='#0A0A0A'>{txt}</font>"
         if note:
             para_html += f"<br/><font size=7 color='#71717A'>{_xe(str(note))}</font>"
@@ -325,47 +342,81 @@ def _damage_legend(damages: List[dict], st) -> Optional[Flowable]:
 
 
 # ---------------------------------------------------------------------------
-# Page template / header / footer
+# Page template / header / footer  (Design analog Kaufvertrag)
 # ---------------------------------------------------------------------------
 
 def _make_doc(buf: io.BytesIO) -> BaseDocTemplate:
     doc = BaseDocTemplate(
         buf, pagesize=A4,
-        leftMargin=1.8 * cm, rightMargin=1.8 * cm,
-        topMargin=2.6 * cm, bottomMargin=1.6 * cm,  # +1cm wegen blauem Header-Bar
-        title="Abholprotokoll", author="Autohändle",
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=1.7 * cm, bottomMargin=2.0 * cm,
+        title="Abholprotokoll", author="Autohändler",
     )
     frame = Frame(doc.leftMargin, doc.bottomMargin,
                   doc.width, doc.height, id="main")
-    doc.addPageTemplates([PageTemplate(id="all", frames=[frame],
-                                       onPage=_draw_chrome)])
+    doc.addPageTemplates([PageTemplate(id="all", frames=[frame])])
     return doc
 
 
-def _draw_chrome(canvas, doc):
-    canvas.saveState()
-    page_w, page_h = A4
-    # ---- Blauer Header-Bar (volle Breite) ----
-    bar_h = 1.7 * cm
-    canvas.setFillColor(BLUE)
-    canvas.rect(0, page_h - bar_h, page_w, bar_h, stroke=0, fill=1)
-    # Titel links, Datum rechts — beides in WEISS auf blau
-    canvas.setFillColor(colors.white)
-    canvas.setFont("Helvetica-Bold", 13)
-    canvas.drawString(1.8 * cm, page_h - bar_h + 0.55 * cm,
-                      "ABHOLPROTOKOLL  ·  ÜBERGABE")
-    canvas.setFont("Helvetica", 9)
-    canvas.drawRightString(page_w - 1.8 * cm, page_h - bar_h + 0.6 * cm,
-                           datetime.now().strftime("%d.%m.%Y · %H:%M"))
+def _numbered_canvas_factory(footer_left: str, footer_center: str):
+    """Canvas mit rotem Akzentbalken oben + Fußzeile 'Seite X von Y' auf
+    jeder Seite — identisch zum Kaufvertrag. Zwei-Pass-Verfahren, damit die
+    Gesamtseitenzahl bekannt ist."""
 
-    # ---- Footer ----
-    canvas.setFillColor(GREY)
-    canvas.setFont("Helvetica", 7)
-    canvas.drawString(1.8 * cm, 1.0 * cm,
-                      "Dieses Protokoll ist vom Fahrer vor Ort auszufüllen und zu unterschreiben.")
-    canvas.drawRightString(page_w - 1.8 * cm, 1.0 * cm,
-                           f"Seite {doc.page}")
-    canvas.restoreState()
+    class _NumberedCanvas(_rl_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_states = []
+
+        def showPage(self):
+            self._saved_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total = len(self._saved_states)
+            for state in self._saved_states:
+                self.__dict__.update(state)
+                self._decorate(total)
+                super().showPage()
+            super().save()
+
+        def _decorate(self, total):
+            self.saveState()
+            # Roter Akzentbalken ganz oben (volle Breite)
+            self.setFillColor(ACCENT)
+            self.rect(0, PAGE_H - 0.14 * cm, PAGE_W, 0.14 * cm, stroke=0, fill=1)
+            # Fußzeile mit Trennlinie
+            y = 1.1 * cm
+            self.setStrokeColor(DIVIDER)
+            self.setLineWidth(0.5)
+            self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
+            self.setFillColor(GREY)
+            self.setFont("Helvetica", 7)
+            self.drawString(MARGIN, y, footer_left)
+            self.drawCentredString(PAGE_W / 2, y, footer_center)
+            self.drawRightString(PAGE_W - MARGIN, y,
+                                 f"Seite {self._pageNumber} von {total}")
+            self.restoreState()
+
+    return _NumberedCanvas
+
+
+def _section(title: str, st) -> Table:
+    """Abschnittsbalken: heller Hintergrund + roter Akzentrand links —
+    gleiche Optik wie im Kaufvertrag."""
+    t = Table(
+        [[Paragraph(f"<b>{_xe(title)}</b>", st["section"])]],
+        colWidths=[CONTENT_W],
+    )
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT_BG),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
+        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -406,38 +457,35 @@ def build_pickup_pdf(
     if pickup_time and pickup_date != "—":
         abholung_str = f"{pickup_date} · {pickup_time} Uhr"
 
-    label_top = ParagraphStyle(
-        "label_top", parent=st["body"], fontSize=11, leading=15,
-        textColor=GREY, fontName="Helvetica",
-    )
-    value_top = ParagraphStyle(
-        "value_top", parent=st["body"], fontSize=12, leading=15,
-        textColor=BLUE, fontName="Helvetica-Bold",
-    )
-    value_top_dark = ParagraphStyle(
-        "value_top_dark", parent=st["body"], fontSize=12, leading=15,
-        textColor=PRIMARY, fontName="Helvetica-Bold",
-    )
-
-    head_table = Table(
-        [
-            [Paragraph("Auftragsnummer:", label_top),
-             Paragraph(auftrag_nr, value_top)],
-            [Paragraph("Abholung am:", label_top),
-             Paragraph(abholung_str, value_top_dark)],
-        ],
-        colWidths=[4.0 * cm, 13.5 * cm],
-    )
-    head_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    # ---- Briefkopf (analog Kaufvertrag): Firma + Titel links, Meta-Box rechts ----
+    company = (dealer.get("company_name") or dealer.get("name") or "Autohändler").strip()
+    header_left = [
+        Paragraph(f"<b>{_xe(company)}</b>", st["brand"]),
+        Spacer(1, 2),
+        Paragraph("<b>ABHOLPROTOKOLL</b>", st["title"]),
+        Paragraph("Übergabeprotokoll für die Fahrzeugabholung — vom Fahrer "
+                  "vor Ort auszufüllen", st["subtitle"]),
+    ]
+    header_right = [
+        Paragraph("AUFTRAGS-NR.", st["meta_label"]),
+        Paragraph(f"<b>{_xe(auftrag_nr)}</b>", st["meta_value"]),
+        Spacer(1, 5),
+        Paragraph("ABHOLUNG", st["meta_label"]),
+        Paragraph(f"<b>{_xe(abholung_str)}</b>", st["meta_value"]),
+    ]
+    head = Table([[header_left, header_right]],
+                 colWidths=[CONTENT_W - 4.5 * cm, 4.5 * cm])
+    head.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
-    story.append(Spacer(1, 0.2 * cm))
-    story.append(head_table)
-    story.append(Spacer(1, 0.6 * cm))
+    story.append(head)
+    story.append(Spacer(1, 8))
+    accent_line = Table([[""]], colWidths=[CONTENT_W], rowHeights=[2])
+    accent_line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), ACCENT)]))
+    story.append(accent_line)
+    story.append(Spacer(1, 12))
 
     # ---- Zwei Karten: AUFTRAGGEBER · ABHOLORT/VERKÄUFER ----
     seller_lines: List[str] = []
@@ -458,9 +506,7 @@ def build_pickup_pdf(
     seller_email = (appointment.get("seller_email")
                     or contract.get("seller_email") or "")
     if seller_email:
-        seller_lines.append(
-            f"<font color='#1E5BB8'>{_xe(seller_email)}</font>"
-        )
+        seller_lines.append(_xe(seller_email))
     seller_block = "<br/>".join(seller_lines) or "—"
 
     dealer_lines: List[str] = []
@@ -477,9 +523,7 @@ def build_pickup_pdf(
     if dealer.get("phone"):
         dealer_lines.append(f"Tel.: {_xe(str(dealer['phone']))}")
     if dealer.get("email"):
-        dealer_lines.append(
-            f"<font color='#1E5BB8'>{_xe(str(dealer['email']))}</font>"
-        )
+        dealer_lines.append(_xe(str(dealer["email"])))
     dealer_block = "<br/>".join(dealer_lines) or "—"
 
     card_w = 8.55 * cm
@@ -488,36 +532,31 @@ def build_pickup_pdf(
         textColor=PRIMARY,
     )
 
-    # Header + Body je Card als 2-Zeilen-Tabelle (Header blau, Body weiß)
+    # Header + Body je Card — Optik wie die Parteien-Boxen im Kaufvertrag:
+    # heller Titelbalken, feiner Rahmen, kein Farbblock.
     def _info_card(header: str, body_html: str) -> Table:
-        hdr = Table(
-            [[Paragraph(
-                f"<font color='#FFFFFF'><b>{header}</b></font>",
-                ParagraphStyle("h", parent=st["body"], fontSize=10, leading=12,
-                               fontName="Helvetica-Bold"),
-            )]],
+        t = Table(
+            [
+                [Paragraph(f"<b>{_xe(header)}</b>",
+                           ParagraphStyle("h", parent=st["body"], fontSize=9,
+                                          leading=12, textColor=PRIMARY))],
+                [Paragraph(body_html, card_body_style)],
+            ],
             colWidths=[card_w],
         )
-        hdr.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), BLUE),
-            ("LEFTPADDING", (0, 0), (-1, -1), 12),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ]))
-        body = Table(
-            [[Paragraph(body_html, card_body_style)]],
-            colWidths=[card_w],
-        )
-        body.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 12),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-            ("TOPPADDING", (0, 0), (-1, -1), 12),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+        t.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+            ("BACKGROUND", (0, 0), (0, 0), LIGHT_BG),
+            ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (0, 0), 6),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 6),
+            ("TOPPADDING", (0, 1), (0, 1), 10),
+            ("BOTTOMPADDING", (0, 1), (0, 1), 12),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ]))
-        return Table([[hdr], [body]], colWidths=[card_w])
+        return t
 
     auftrag_card = _info_card("AUFTRAGGEBER", dealer_block)
     abholort_card = _info_card("ABHOLORT / VERKÄUFER", seller_block)
@@ -537,12 +576,8 @@ def build_pickup_pdf(
     story.append(Spacer(1, 0.8 * cm))
 
     # ---- Sektion: FAHRZEUGDATEN — VOR ORT PRÜFEN ----
-    h2_blue = ParagraphStyle(
-        "h2_blue", parent=st["h2"], fontSize=13, leading=16,
-        textColor=BLUE, fontName="Helvetica-Bold",
-        spaceBefore=4, spaceAfter=4,
-    )
-    story.append(Paragraph("FAHRZEUGDATEN — VOR ORT PRÜFEN", h2_blue))
+    story.append(_section("1 · Fahrzeugdaten — vor Ort prüfen", st))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
         "Bitte Angaben mit dem Vertrag abgleichen und den zutreffenden Kreis ankreuzen.",
         st["small"]))
@@ -600,14 +635,12 @@ def build_pickup_pdf(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         # Trenner OBEN über jeder Zeile (= Linie unter der vorherigen)
         ("LINEABOVE", (0, 0), (-1, -1), 0.4, DIVIDER),
         # Letzte Zeile braucht auch unten eine Linie
         ("LINEBELOW", (0, -1), (-1, -1), 0.4, DIVIDER),
-        # Label in dezentem Blau
-        ("TEXTCOLOR", (0, 0), (0, -1), BLUE_DARK),
         ("FONTNAME", (0, 0), (0, -1), "Helvetica"),
         ("FONTSIZE", (0, 0), (0, -1), 10),
     ]))
@@ -618,7 +651,8 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     # PAGE 2 — Dokumente & Ausstattung
     # -----------------------------------------------------------------
-    story.append(Paragraph("DOKUMENTE & ZUBEHÖR", h2_blue))
+    story.append(_section("2 · Dokumente & Zubehör", st))
+    story.append(Spacer(1, 4))
     story.append(Paragraph("Vor Ort beim Verkäufer einsammeln und abhaken.", st["small"]))
     story.append(Spacer(1, 0.2 * cm))
 
@@ -637,7 +671,8 @@ def build_pickup_pdf(
     story.append(_checklist(docs_items, st, col_count=2))
 
     story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("AUSSTATTUNG LAUT INSERAT — VOR ORT PRÜFEN", h2_blue))
+    story.append(_section("3 · Ausstattung laut Inserat — vor Ort prüfen", st))
+    story.append(Spacer(1, 4))
     features = vehicle.get("features") or []
     if features:
         feat_items = [(str(f), "") for f in features if str(f).strip()]
@@ -663,24 +698,25 @@ def build_pickup_pdf(
     story.append(_checklist(feat_items, st, col_count=2))
 
     story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("TECHNISCHER ZUSTAND — FAHRER TRÄGT EIN", h2_blue))
+    story.append(_section("4 · Technischer Zustand — Fahrer trägt ein", st))
+    story.append(Spacer(1, 6))
     tech_rows = [
         [Paragraph("Kilometerstand bei Abholung", st["check_label"]),
          Paragraph("<u>_____________ km</u>", st["value"]),
          Paragraph("Tankfüllstand", st["check_label"]),
-         Paragraph("○ leer &nbsp; ○ ¼ &nbsp; ○ ½ &nbsp; ○ ¾ &nbsp; ○ voll", st["check_opt"])],
+         Paragraph("[&nbsp;] leer &nbsp; [&nbsp;] ¼ &nbsp; [&nbsp;] ½ &nbsp; [&nbsp;] ¾ &nbsp; [&nbsp;] voll", st["check_opt"])],
         [Paragraph("Reifenprofil VL / VR / HL / HR", st["check_label"]),
          Paragraph("___ / ___ / ___ / ___ mm", st["value"]),
          Paragraph("Fahrverhalten (Probefahrt)", st["check_label"]),
-         Paragraph("○ unauffällig &nbsp; ○ Mängel (Bemerkung)", st["check_opt"])],
+         Paragraph("[&nbsp;] unauffällig &nbsp; [&nbsp;] Mängel (Bemerkung)", st["check_opt"])],
         [Paragraph("Batterie / Starter", st["check_label"]),
-         Paragraph("○ OK &nbsp; ○ schwach &nbsp; ○ defekt", st["check_opt"]),
+         Paragraph("[&nbsp;] OK &nbsp; [&nbsp;] schwach &nbsp; [&nbsp;] defekt", st["check_opt"]),
          Paragraph("Kontrollleuchten leuchten", st["check_label"]),
-         Paragraph("○ keine &nbsp; ○ ja (Bemerkung)", st["check_opt"])],
+         Paragraph("[&nbsp;] keine &nbsp; [&nbsp;] ja (Bemerkung)", st["check_opt"])],
         [Paragraph("Sauberkeit Innenraum", st["check_label"]),
-         Paragraph("○ OK &nbsp; ○ mangelhaft", st["check_opt"]),
+         Paragraph("[&nbsp;] OK &nbsp; [&nbsp;] mangelhaft", st["check_opt"]),
          Paragraph("Sauberkeit Außen", st["check_label"]),
-         Paragraph("○ OK &nbsp; ○ mangelhaft", st["check_opt"])],
+         Paragraph("[&nbsp;] OK &nbsp; [&nbsp;] mangelhaft", st["check_opt"])],
     ]
     tech_t = Table(tech_rows, colWidths=[4.5 * cm, 4.2 * cm, 4.5 * cm, 4.3 * cm])
     tech_t.setStyle(TableStyle([
@@ -696,11 +732,12 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     # PAGE 3 — Vorbestehende Schäden (aus Kaufvertrag)
     # -----------------------------------------------------------------
-    story.append(Paragraph("VORBESTEHENDE SCHÄDEN LAUT KAUFVERTRAG", h2_blue))
+    story.append(_section("5 · Vorbestehende Schäden laut Kaufvertrag", st))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
         "Diese Schäden wurden im Kaufvertrag dokumentiert. Der Fahrer prüft "
-        "vor Ort, ob diese vorhanden sind (○ bestätigt / ○ nicht vorhanden / "
-        "○ weicht ab) und markiert ggf. zusätzliche Schäden auf der "
+        "vor Ort, ob diese vorhanden sind (bestätigt / nicht vorhanden / "
+        "weicht ab) und markiert ggf. zusätzliche Schäden auf der "
         "leeren Skizze der nächsten Seite.", st["small"]))
     story.append(Spacer(1, 0.2 * cm))
     legend = _damage_legend(damages, st)
@@ -714,15 +751,17 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     # PAGE 4 — Vor-Ort-Aufnahme, Bemerkungen, Unterschriften
     # -----------------------------------------------------------------
-    story.append(Paragraph("VOR-ORT-AUFNAHME DURCH DEN FAHRER", h2_blue))
+    story.append(_section("6 · Vor-Ort-Aufnahme durch den Fahrer", st))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
-        "Der Fahrer markiert hier neu entdeckte Beschädigungen mit Kreuzen (✗) "
-        "oder Kreisen (○) und notiert die Art im Feld Bemerkungen.", st["small"]))
+        "Der Fahrer markiert hier neu entdeckte Beschädigungen mit Kreuz (X) "
+        "oder Kreis (O) und notiert die Art im Feld Bemerkungen.", st["small"]))
     story.append(Spacer(1, 0.2 * cm))
     story.append(KeepTogether(_sketch_grid([], empty=True)))
 
     story.append(Spacer(1, 0.3 * cm))
-    story.append(Paragraph("BEMERKUNGEN DES FAHRERS", h2_blue))
+    story.append(_section("7 · Bemerkungen des Fahrers", st))
+    story.append(Spacer(1, 4))
     # Draw 6 empty lines
     bem_lines = []
     for _ in range(6):
@@ -735,24 +774,54 @@ def build_pickup_pdf(
     ]))
     story.append(bem_t)
 
-    story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("ÜBERGABE-BESTÄTIGUNG", h2_blue))
-    sig_rows = [
-        [Paragraph("Ort, Datum", st["label"]),
-         Paragraph("Unterschrift Verkäufer", st["label"]),
-         Paragraph("Unterschrift Fahrer", st["label"])],
-        [Paragraph("_________________________", st["value"]),
-         Paragraph("_________________________", st["value"]),
-         Paragraph("_________________________", st["value"])],
-    ]
-    sig_t = Table(sig_rows, colWidths=[5.8 * cm, 5.8 * cm, 5.8 * cm])
+    # ---- Unterschriften — umrahmte Boxen, gleiche Optik wie im Kaufvertrag ----
+    sig_col_w = (CONTENT_W - 0.5 * cm) / 2
+
+    def _sig_box(role: str) -> Table:
+        box = Table([
+            [Paragraph(f"<b>{_xe(role)}</b>", st["sig_label"])],
+            [Spacer(1, 34)],
+            [Paragraph("Ort, Datum", st["sig_label"])],
+            [Spacer(1, 22)],
+            [Paragraph("Unterschrift", st["sig_label"])],
+        ], colWidths=[sig_col_w])
+        box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+            ("BACKGROUND", (0, 0), (0, 0), LIGHT_BG),
+            ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+            ("LINEBELOW", (0, 1), (0, 1), 0.5, GREY),   # Ort/Datum-Linie
+            ("LINEBELOW", (0, 3), (0, 3), 0.5, GREY),   # Unterschrift-Linie
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (0, 0), 5),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 5),
+            ("BOTTOMPADDING", (0, -1), (0, -1), 6),
+        ]))
+        return box
+
+    sig_t = Table(
+        [[_sig_box("Verkäufer / Übergebender"), "", _sig_box("Fahrer (Abholer)")]],
+        colWidths=[sig_col_w, 0.5 * cm, sig_col_w],
+    )
     sig_t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 28),
-        ("LINEBELOW", (0, 1), (-1, 1), 0.5, PRIMARY),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.append(sig_t)
+    story.append(Spacer(1, 0.4 * cm))
+    story.append(KeepTogether([
+        _section("8 · Übergabe-Bestätigung", st),
+        Spacer(1, 8),
+        sig_t,
+        Spacer(1, 4),
+        Paragraph(
+            "Mit ihrer Unterschrift bestätigen beide Parteien die Übergabe des "
+            "Fahrzeugs im dokumentierten Zustand inklusive der aufgeführten "
+            "Dokumente und Schlüssel.", st["small"]),
+    ]))
 
-    doc.build(story)
+    footer_left = company
+    footer_center = (f"Abholprotokoll {auftrag_nr} · erstellt am "
+                     f"{datetime.now().strftime('%d.%m.%Y · %H:%M')}")
+    doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

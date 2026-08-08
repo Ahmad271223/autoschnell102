@@ -35,6 +35,16 @@ from proxy_config import get_proxy_url, random_user_agent
 MOBILE_BASE = os.environ.get("MOBILE_API_BASE", "https://services.sandbox.mobile.de")
 MOBILE_USER = os.environ.get("MOBILE_API_USER", "")
 MOBILE_PASS = os.environ.get("MOBILE_API_PASS", "")
+# Sandbox-/Demo-Daten NUR ausliefern, wenn ausdrücklich aktiviert. Sonst würde
+# jeder fehlgeschlagene mobile.de-Abruf still ein erfundenes Fahrzeug liefern
+# (und es 24 h cachen + in Verträge übernehmen). Default: ehrlicher Fehler.
+MOBILE_SANDBOX_MODE = os.environ.get("MOBILE_SANDBOX_MODE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
+class MobileUnavailable(RuntimeError):
+    """mobile.de-Fahrzeug konnte nicht echt geladen werden (Route -> HTTP 502)."""
 
 FUEL_LABELS = {
     "DIESEL": "Diesel", "PETROL": "Benzin", "ELECTRICITY": "Elektro",
@@ -342,8 +352,22 @@ async def get_vehicle(db, ad_id: str) -> dict:
         return {**cached, "_source": "cache"}
     fresh = await _fetch_from_mobile_api(ad_id)
     if not fresh:
-        fresh = _mock_vehicle(ad_id)
-        fresh["_source"] = "sandbox" if ad_id in _SANDBOX_BUNDLE else "mock"
+        # Kein echtes Ergebnis. Nur im ausdrücklichen Sandbox-Modus dürfen
+        # Demo-Daten zurückgehen — sonst ehrlicher Fehler statt Fake-Daten.
+        if MOBILE_SANDBOX_MODE:
+            fresh = _mock_vehicle(ad_id)
+            fresh["_source"] = "sandbox" if ad_id in _SANDBOX_BUNDLE else "mock"
+        elif not (MOBILE_USER and MOBILE_PASS):
+            raise MobileUnavailable(
+                "mobile.de ist nicht angebunden (Zugangsdaten fehlen). Bitte eine "
+                "kleinanzeigen.de-URL verwenden oder MOBILE_API_USER/MOBILE_API_PASS "
+                "in der .env setzen. (Zum lokalen Testen: MOBILE_SANDBOX_MODE=true)"
+            )
+        else:
+            raise MobileUnavailable(
+                "Fahrzeug konnte bei mobile.de nicht geladen werden — Inserat evtl. "
+                "entfernt oder mobile.de-API vorübergehend nicht erreichbar."
+            )
     else:
         fresh["_source"] = "api"
     # Defensive — _fetch_from_mobile_api already does this, but applying

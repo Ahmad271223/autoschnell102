@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
-  CreditCard, Calendar, X, ArrowRight, Bolt,
+  CreditCard, Calendar, X, ArrowRight, Bolt, Store,
 } from "lucide-react";
 import CountryPicker from "@/components/CountryPicker";
 
@@ -12,6 +12,7 @@ const SECTIONS = [
   { id: "profile",    label: "Profil",         icon: Building2 },
   { id: "rules",      label: "Vergleich",      icon: Sliders },
   { id: "templates",  label: "Versand",        icon: Mail },
+  { id: "markt",      label: "Marktplatz",     icon: Store },
   { id: "agb",        label: "AGB & Vereinb.", icon: ShieldCheck },
   { id: "abo",        label: "Abo",            icon: CreditCard },
 ];
@@ -29,6 +30,7 @@ export default function Einstellungen() {
         phone: dealer.phone || "", whatsapp_number: dealer.whatsapp_number || dealer.phone || "",
         email: dealer.email || "", address: dealer.address || "",
         zip_code: dealer.zip_code || "", city: dealer.city || "",
+        opening_hours: dealer.opening_hours || "", logo_url: dealer.logo_url || "",
       },
       comparison_rules: dealer.comparison_rules || {},
       export_rules: dealer.export_rules || {},
@@ -51,6 +53,21 @@ export default function Einstellungen() {
   const rulesKey = editProfile === "export" ? "export_rules" : "comparison_rules";
 
   const setProfile = (k, v) => setForm({ ...form, profile: { ...form.profile, [k]: v } });
+
+  const uploadLogo = async (file) => {
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { toast.error("Logo zu groß (max. 2 MB)"); return; }
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+      });
+      const { data } = await api.post("/dealer/logo", { logo_b64: b64 });
+      setProfile("logo_url", data.logo_url);
+      await refresh();
+      toast.success("Logo hochgeladen");
+    } catch (e) { toast.error(errMsg(e, "Logo konnte nicht hochgeladen werden")); }
+  };
   const setRule = (key, val) => setForm({
     ...form,
     [rulesKey]: { ...(form[rulesKey] || {}), [key]: val },
@@ -128,7 +145,31 @@ export default function Einstellungen() {
         {/* Content */}
         <div className="space-y-5">
           {active === "profile" && (
-            <Section title="Händlerprofil" subtitle="Diese Angaben erscheinen auf jedem Kaufvertrag und in den Versand-Vorlagen.">
+            <Section title="Händlerprofil" subtitle="Diese Angaben erscheinen auf jedem Kaufvertrag, in den Versand-Vorlagen und – für Zwischenhändler – auf dem Marktplatz.">
+              {/* Firmenlogo */}
+              <div className="flex items-center gap-4 mb-4">
+                <div className="w-20 h-20 rounded-2xl overflow-hidden flex items-center justify-center shrink-0"
+                     style={{ background: "rgba(255,255,255,0.05)", border: "1px solid var(--divider)" }}>
+                  {form.profile.logo_url
+                    ? <img src={form.profile.logo_url.startsWith("http") ? form.profile.logo_url : `${process.env.REACT_APP_BACKEND_URL}${form.profile.logo_url}`}
+                           alt="Logo" className="w-full h-full object-contain" />
+                    : <Building2 size={26} className="text-zinc-600" />}
+                </div>
+                <div>
+                  <label className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white cursor-pointer"
+                         style={{ background: "var(--accent-red)" }} data-testid="set-logo">
+                    Logo hochladen
+                    <input type="file" accept="image/*" className="hidden"
+                           onChange={(e) => uploadLogo(e.target.files?.[0])} />
+                  </label>
+                  <div className="text-[11px] text-zinc-500 mt-1.5">PNG/JPG, max. 2 MB. Erscheint auf Vertrag & Marktplatz.</div>
+                  {form.profile.logo_url && (
+                    <button type="button" onClick={() => setProfile("logo_url", "")}
+                            className="text-[11px] text-zinc-500 hover:text-red-400 mt-1">Logo entfernen</button>
+                  )}
+                </div>
+              </div>
+
               <div className="grid md:grid-cols-2 gap-3">
                 <AppleField label="Firmenname" value={form.profile.company_name} onChange={(v) => setProfile("company_name", v)} testid="set-company" />
                 <AppleField label="Ansprechpartner" value={form.profile.contact_person} onChange={(v) => setProfile("contact_person", v)} testid="set-contact" />
@@ -138,6 +179,17 @@ export default function Einstellungen() {
                 <AppleField label="Adresse" value={form.profile.address} onChange={(v) => setProfile("address", v)} testid="set-address" />
                 <AppleField label="PLZ" value={form.profile.zip_code} onChange={(v) => setProfile("zip_code", v)} testid="set-zip" />
                 <AppleField label="Ort" value={form.profile.city} onChange={(v) => setProfile("city", v)} testid="set-city" />
+              </div>
+
+              {/* Öffnungszeiten */}
+              <div className="mt-3">
+                <label className="block text-[13px] font-medium text-zinc-300 mb-1">Öffnungszeiten</label>
+                <textarea value={form.profile.opening_hours} onChange={(e) => setProfile("opening_hours", e.target.value)}
+                          rows={3} data-testid="set-hours"
+                          placeholder={"Mo–Fr: 08:00–18:00\nSa: 09:00–13:00\nSo: geschlossen"}
+                          className="w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40"
+                          style={{ borderColor: "var(--divider)" }} />
+                <div className="text-[11px] text-zinc-500 mt-1">Wird Zwischenhändlern im Marktplatz angezeigt.</div>
               </div>
             </Section>
           )}
@@ -368,6 +420,7 @@ export default function Einstellungen() {
             </Section>
           )}
 
+          {active === "markt" && <MarketplacePanel />}
           {active === "abo" && <SubscriptionPanel />}
         </div>
       </div>
@@ -477,6 +530,88 @@ function fmtGermanDate(iso) {
       day: "2-digit", month: "long", year: "numeric",
     });
   } catch { return iso; }
+}
+
+function MarketplacePanel() {
+  const [mp, setMp] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try { const { data } = await api.get("/dealer/marketplace-profile"); setMp(data); }
+    catch (e) { toast.error(errMsg(e, "Marktplatz-Profil konnte nicht geladen werden")); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const setPublic = async (val) => {
+    setBusy(true);
+    try {
+      const { data } = await api.put("/dealer/marketplace-profile", { public: val });
+      setMp((s) => ({ ...s, public: data.public }));
+      toast.success(val ? "Marktplatz-Profil ist jetzt öffentlich" : "Marktplatz-Profil ist privat");
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+
+  const saveDesc = async () => {
+    try { await api.put("/dealer/marketplace-profile", { description: mp.description || "" }); toast.success("Beschreibung gespeichert"); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+
+  if (!mp) return <Section title="Marktplatz"><div className="text-sm text-zinc-500">Lädt…</div></Section>;
+
+  return (
+    <Section title="Marktplatz" subtitle="Steuert, ob deine veröffentlichten Fahrzeuge für registrierte Zwischenhändler sichtbar sind.">
+      {/* Öffentlich-Schalter */}
+      <div className="flex items-center justify-between rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+        <div className="flex items-start gap-3">
+          <Globe size={18} className={mp.public ? "text-emerald-400 mt-0.5" : "text-zinc-500 mt-0.5"} />
+          <div>
+            <div className="text-sm font-semibold">Profil öffentlich sichtbar</div>
+            <div className="text-xs text-zinc-500 mt-0.5">
+              {mp.public
+                ? "Aktiv — veröffentlichte Fahrzeuge erscheinen im B2B-Marktplatz."
+                : "Aus — nur eingeladene Netzwerk-Partner sehen deine Fahrzeuge."}
+            </div>
+          </div>
+        </div>
+        <button onClick={() => setPublic(!mp.public)} disabled={busy}
+                className={`relative w-12 h-7 rounded-full transition ${mp.public ? "bg-emerald-500" : "bg-white/15"}`}
+                title="Umschalten" data-testid="markt-public-toggle">
+          <span className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-all ${mp.public ? "left-6" : "left-1"}`} />
+        </button>
+      </div>
+
+      {/* Kennzahlen */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+          <div className="text-2xl font-black tabular-nums">{mp.published_count ?? 0}</div>
+          <div className="text-xs text-zinc-500">veröffentlichte Fahrzeuge</div>
+        </div>
+        <div className="rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+          <div className="text-2xl font-black tabular-nums">{mp.network_members ?? 0}</div>
+          <div className="text-xs text-zinc-500">Netzwerk-Partner</div>
+        </div>
+      </div>
+
+      {/* Kurzbeschreibung */}
+      <div>
+        <label className="block text-[13px] font-medium text-zinc-300 mb-1">Kurzbeschreibung (für deine Marktplatz-Seite)</label>
+        <textarea value={mp.description || ""} onChange={(e) => setMp((s) => ({ ...s, description: e.target.value }))}
+                  rows={3} placeholder="z.B. Gepflegte Gebrauchtwagen aus Hannover, faire B2B-Preise."
+                  className="w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40"
+                  style={{ borderColor: "var(--divider)" }} />
+        <button onClick={saveDesc} className="mt-2 inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white"
+                style={{ background: "var(--accent-red)" }}>
+          <Save size={14} /> Beschreibung speichern
+        </button>
+      </div>
+
+      <div className="text-[11px] text-zinc-600">
+        Fahrzeuge veröffentlichst du im jeweiligen Inserat (Bestand → Inserat → „Auf Marktplatz veröffentlichen").
+        Dafür ist ein aktives Verkaufspaket nötig.
+      </div>
+    </Section>
+  );
 }
 
 function SubscriptionPanel() {

@@ -23,6 +23,7 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
 from deps import (
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
+from lifecycle import try_set_lifecycle
 from pdf_service import generate_contract_pdf
 
 router = APIRouter()
@@ -257,6 +258,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
+    # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
+    # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.
+    pdf_id = str(uuid.uuid4())
+    contract_no = f"KV-{datetime.now().strftime('%Y%m%d')}-{pdf_id[:6].upper()}"
+    contract_dict["contract_no"] = contract_no
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
     # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
@@ -269,14 +275,14 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     except Exception:
         raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
     pdf_b64 = base64.b64encode(pdf_bytes).decode()
-    pdf_id = str(uuid.uuid4())
     # Snapshot vehicle photo URLs at the moment the contract was created.
     # This way the dealer can still see the listing photos retrospectively
     # next to the contract PDF + Beweis-Archiv even if the original ad
     # is deleted by the seller.
     vehicle_image_urls = list(vehicle.get("image_urls") or [])
     doc = {
-        "id": pdf_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
+        "id": pdf_id, "contract_no": contract_no,
+        "dealer_id": user["dealer_id"], "user_id": user["id"],
         "vehicle_id": body.vehicle_id, "mobile_ad_id": v.get("mobile_ad_id"),
         "make": vehicle.get("make_label") or vehicle.get("make"),
         "model": vehicle.get("model_description") or vehicle.get("model_label"),
@@ -301,6 +307,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
         {"$set": {"status": "Vertrag erstellt", "purchase_price": body.purchase_price}},
     )
+    # Lebenszyklus: Vertrag erstellt → gekauft (Kaufpreis liegt vor).
+    await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "vertrag_erstellt", user=user)
+    await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "gekauft", user=user)
     await log_activity(user["dealer_id"], user["id"], "pdf.erstellt", ref=pdf_id)
 
     # Auto-create appointment if pickup_date was provided so the PDF
@@ -343,6 +352,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             )
             doc["appointment_id"] = appt_id
             doc["status"] = "Termin erstellt"
+            await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
+                                    "abholung_geplant", user=user)
             await log_activity(user["dealer_id"], user["id"], "termin.auto-erstellt", ref=appt_id)
 
     return {**clean_doc(doc), "pdf_b64": pdf_b64}

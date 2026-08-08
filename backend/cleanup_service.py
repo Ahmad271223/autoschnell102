@@ -1,9 +1,16 @@
 """Hintergrund-Cleanup für Fahrzeug-Assets nach Abholung.
 
-Regel (vom Nutzer definiert):
+Regeln (Stand B2B-Modul 08/2026):
 - Abholung erfolgreich (`status == "abgeholt"`): nach 7 Tagen Inserat-Fotos,
-  Snapshots (Beweis-Archiv PDF + PNG) und den Vehicle-Cache-Eintrag löschen.
+  Snapshots und Cache löschen — ABER NUR, solange der Händler noch keine
+  Bestands-Entscheidung getroffen hat. Ab „Speichern"/„Weiterverkaufen"
+  regelt der Fahrzeug-Lebenszyklus die Aufbewahrung.
 - Nicht abgeholt (`status == "nicht abgeholt"`): nach 14 Tagen dasselbe.
+- Bestand abgelaufen (`lifecycle == "bestand"` und `bestand.expires_at`
+  überschritten, Standard 50 Tage): NUR Fotos + temporäre Verkaufsdaten
+  (Inserats-Entwürfe) werden gelöscht; Kaufvertrag, Abholbericht,
+  Einkaufspreis, Historie und Audit-Logs bleiben erhalten. Das Fahrzeug
+  erhält den Status `archiviert`.
 
 Der Termin-Eintrag selbst bleibt bestehen (Historie), wird aber mit
 `assets_cleaned_at` markiert, damit der Cleanup-Job nicht zweimal läuft.
@@ -24,6 +31,13 @@ CLEANUP_RULES = (
     ("abgeholt", 7),
     ("nicht abgeholt", 14),
 )
+
+# Lebenszyklus-Status, in denen der Händler bereits entschieden hat —
+# die 7-Tage-Regel greift dann NICHT mehr.
+_DECIDED_STATES = {
+    "bestand", "verkaufsentwurf", "verkaufsbereit",
+    "veroeffentlicht", "reserviert", "verkauft", "archiviert",
+}
 
 # Intervall zwischen Durchläufen
 CLEANUP_INTERVAL_SECONDS = 60 * 60  # 1×/Stunde
@@ -75,6 +89,19 @@ async def _cleanup_once(db) -> dict:
             stats["checked"] += 1
             vehicle_id = appt.get("vehicle_id")
 
+            # Händler hat bereits über das Fahrzeug entschieden? Dann regelt
+            # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt.
+            if vehicle_id:
+                v_state = await db.vehicles.find_one(
+                    {"id": vehicle_id}, {"_id": 0, "lifecycle": 1})
+                if v_state and v_state.get("lifecycle") in _DECIDED_STATES:
+                    await db.appointments.update_one(
+                        {"id": appt["id"]},
+                        {"$set": {"assets_cleaned_at": now.isoformat(),
+                                  "cleanup_skipped": "haendler_entscheidung"}},
+                    )
+                    continue
+
             # 1) Snapshots + Storage-Objekte wegwerfen
             if vehicle_id:
                 deleted = await _delete_snapshots_for_vehicle(db, vehicle_id)
@@ -108,9 +135,61 @@ async def _cleanup_once(db) -> dict:
             )
             stats["cleaned"] += 1
 
-    if stats["cleaned"] or stats["snapshots_deleted"]:
+    # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
+    stats["archived"] = await _archive_expired_bestand(db, now)
+
+    if stats["cleaned"] or stats["snapshots_deleted"] or stats["archived"]:
         log.info("cleanup run: %s", stats)
     return stats
+
+
+async def _archive_expired_bestand(db, now: datetime) -> int:
+    """Bestand > 50 Tage: löscht NUR Fotos + Inserats-Entwürfe. Vertrag,
+    Abholbericht, Einkaufspreis und Historie bleiben — Fahrzeug wird
+    `archiviert` (geschäftliche Nachvollziehbarkeit)."""
+    archived = 0
+    cursor = db.vehicles.find(
+        {"lifecycle": "bestand",
+         "bestand.expires_at": {"$lte": now.isoformat(), "$ne": None}},
+        {"_id": 0, "id": 1, "dealer_id": 1, "data": 1},
+    )
+    async for v in cursor:
+        vid = v["id"]
+        # Fotos aus den Fahrzeugdaten räumen
+        data = v.get("data") or {}
+        for key in _iter_photo_keys():
+            if data.get(key):
+                data[key] = []
+        # Hochgeladene Dateien (Storage) + Inserats-Entwürfe entfernen
+        try:
+            from storage_service import storage
+            async for listing in db.resale_listings.find(
+                {"vehicle_id": vid, "status": {"$in": ["entwurf", "verkaufsbereit"]}},
+                {"_id": 0, "id": 1, "photos": 1},
+            ):
+                for k in (listing.get("photos") or {}).get("uploaded_keys", []):
+                    try:
+                        storage.delete(k)
+                    except Exception:
+                        pass
+                await db.resale_listings.delete_one({"id": listing["id"]})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("bestand archive: listing cleanup failed for %s: %s", vid, exc)
+        await _delete_snapshots_for_vehicle(db, vid)
+        await db.vehicles.update_one(
+            {"id": vid},
+            {"$set": {"data": data, "lifecycle": "archiviert",
+                      "lifecycle_changed_at": now.isoformat(),
+                      "archived_at": now.isoformat()}},
+        )
+        await db.activity_logs.insert_one({
+            "id": __import__("uuid").uuid4().hex,
+            "dealer_id": v.get("dealer_id"), "user_id": "",
+            "action": "fahrzeug.archiviert.50tage", "ref": vid,
+            "meta": {}, "created_at": now.isoformat(),
+        })
+        archived += 1
+    return archived
 
 
 async def run_cleanup_forever(db):

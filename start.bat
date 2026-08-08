@@ -1,5 +1,7 @@
 @echo off
 title AutoSchnell Starter
+chcp 65001 >nul
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo.
@@ -9,25 +11,47 @@ echo  ==========================================
 echo.
 
 :: ---------- MongoDB ----------
-echo [1/3] Pruefe MongoDB...
+echo [1/4] Starte MongoDB...
 sc query MongoDB >nul 2>&1
 if %errorlevel% == 0 (
-    sc start MongoDB >nul 2>&1
-    echo       MongoDB Service OK
+    net start MongoDB >nul 2>&1
+    echo       MongoDB-Dienst gestartet.
 ) else (
-    echo       MongoDB Service nicht gefunden - wird uebersprungen.
+    echo       MongoDB-Dienst nicht gefunden - bitte einmal setup-datenbank-EINMALIG.bat
+    echo       als Administrator ausfuehren.
 )
 
-:: ---------- Port-Check per PowerShell (Unicode-sicher) ----------
-echo [2/3] Starte Backend  (http://localhost:8001) ...
+:: ---------- Auf MongoDB warten (max. 30 s) ----------
+echo [2/4] Warte auf MongoDB (Port 27017)...
+set MONGO_OK=0
+for /L %%i in (1,1,30) do (
+    if !MONGO_OK! == 0 (
+        powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 27017 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1
+        if !errorlevel! == 0 (
+            set MONGO_OK=1
+            echo       MongoDB ist bereit.
+        ) else (
+            timeout /t 1 /nobreak >nul
+        )
+    )
+)
+if !MONGO_OK! == 0 echo       [WARNUNG] MongoDB nicht erreichbar - Backend wartet selbst weiter.
+
+:: ---------- Backend ----------
+echo [3/4] Starte Backend  (http://localhost:8001) ...
 powershell -NoProfile -Command "if (!(Get-NetTCPConnection -LocalPort 8001 -ErrorAction SilentlyContinue)) { exit 0 } else { exit 1 }" >nul 2>&1
 if %errorlevel% == 0 (
-    start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && C:\Python314\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload --loop asyncio"
+    if exist "C:\Python314\python.exe" (
+        start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && C:\Python314\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload --loop asyncio"
+    ) else (
+        start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && python -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload --loop asyncio"
+    )
 ) else (
     echo       Port 8001 belegt - Backend laeuft bereits.
 )
 
-echo [3/3] Starte Frontend (http://localhost:3000) ...
+:: ---------- Frontend ----------
+echo [4/4] Starte Frontend (http://localhost:3000) ...
 powershell -NoProfile -Command "if (!(Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue)) { exit 0 } else { exit 1 }" >nul 2>&1
 if %errorlevel% == 0 (
     start "AutoSchnell Frontend" cmd /k "cd /d "%~dp0frontend" && yarn start"

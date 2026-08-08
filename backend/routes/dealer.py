@@ -23,6 +23,7 @@ class DealerProfile(BaseModel):
     zip_code: Optional[str] = None
     city: Optional[str] = None
     logo_url: Optional[str] = None
+    opening_hours: Optional[str] = None
 
     # Profilfelder landen im Vertrags-PDF (enge Tabellenzellen). Cap 500.
     @field_validator("*")
@@ -107,6 +108,10 @@ def _validate_logo_url(url: Optional[str]) -> Optional[str]:
     """
     if not url:
         return url
+    # Selbst hochgeladene Logos liegen im eigenen Storage und werden über
+    # /api/files/<key> ausgeliefert — dieser relative Pfad ist erlaubt.
+    if url.startswith("/api/files/"):
+        return url
     try:
         scheme = urlparse(url).scheme.lower()
     except Exception:
@@ -118,6 +123,9 @@ def _validate_logo_url(url: Optional[str]) -> Optional[str]:
 
 @router.put("/dealer/settings")
 async def update_settings(body: DealerSettingsIn, user=Depends(current_user)):
+    # Händlerprofil verwalten ist Chefsache — Sucher haben nur Lesezugriff.
+    if user.get("role") == "sucher":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das Profil ändern")
     update = {}
     if body.profile:
         for k, v in body.profile.model_dump(exclude_none=True).items():
@@ -146,6 +154,38 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_user)):
     await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": update})
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     return dealer
+
+
+class LogoUploadIn(BaseModel):
+    logo_b64: str  # data-URL oder reines Base64
+
+
+@router.post("/dealer/logo")
+async def upload_logo(body: LogoUploadIn, user=Depends(current_user)):
+    """Firmenlogo hochladen (max. 2 MB). Speichert im Storage und setzt
+    logo_url auf den ausgelieferten /api/files/<key>-Pfad."""
+    if user.get("role") == "sucher":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das Logo ändern")
+    import base64
+    from storage_service import make_key, storage, StorageError
+    try:
+        raw = base64.b64decode(body.logo_b64.split(",")[-1], validate=False)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Logo konnte nicht gelesen werden")
+    if not raw:
+        raise HTTPException(400, "Leeres Logo")
+    if len(raw) > 2 * 1024 * 1024:
+        raise HTTPException(400, "Logo zu groß (max. 2 MB)")
+    try:
+        key = make_key("logo", user["dealer_id"], "logo.png")
+        storage.save(key, raw)
+    except StorageError as exc:
+        raise HTTPException(400, f"Logo konnte nicht gespeichert werden: {exc}")
+    logo_url = f"/api/files/{key}"
+    await db.dealers.update_one(
+        {"id": user["dealer_id"]},
+        {"$set": {"logo_url": logo_url, "updated_at": now_iso()}})
+    return {"ok": True, "logo_url": logo_url}
 
 
 # =========================================================
@@ -204,6 +244,8 @@ async def dealer_cancel_subscription(user=Depends(current_user)):
     uns das Datum, lassen das Abo aber bis `expires_at` weiter aktiv. Damit
     bekommt der Händler die bezahlte Zeit zu Ende und keine sofortige
     Sperre. Verlängern bleibt jederzeit möglich (neuer Checkout)."""
+    if user.get("role") == "sucher":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf Abos verwalten")
     sub = await db.subscriptions.find_one(
         {"dealer_id": user["dealer_id"]},
         sort=[("created_at", -1)],

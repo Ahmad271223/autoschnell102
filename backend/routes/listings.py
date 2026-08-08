@@ -139,7 +139,9 @@ async def compare(body: CompareIn, background: BackgroundTasks,
             "mobile_ad_id": ad_id, "data": {k: v for k, v in vehicle.items() if not k.startswith("_")},
             "updated_at": now_iso(),
         },
-         "$setOnInsert": {"created_at": now_iso(), "status": "verglichen"}},
+         "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
+                          "lifecycle": "verglichen", "source": "plattform",
+                          "lifecycle_changed_at": now_iso()}},
         upsert=True,
     )
     await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id)

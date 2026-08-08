@@ -26,10 +26,16 @@ from pathlib import Path
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+import traceback
+
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
+
+from rate_limiter import SlidingWindowRateLimiter
 
 from auth import hash_password
 from cleanup_service import run_cleanup_forever
@@ -43,12 +49,16 @@ from deps import client, db, log, now_iso
 from routes import admin as admin_routes
 from routes import appointments as appointments_routes
 from routes import auth as auth_routes
+from routes import bestand as bestand_routes
 from routes import contracts as contracts_routes
 from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
 from routes import listings as listings_routes
 from routes import manual_search as manual_search_routes
 from routes import payments as payments_routes
+from routes import resale as resale_routes
+from routes import team as team_routes
+from routes import marketplace as marketplace_routes
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -98,12 +108,100 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class ErrorReportingMiddleware(BaseHTTPMiddleware):
+    """Fängt unbehandelte Exceptions ab, speichert sie in error_logs (für den
+    Admin-Bereich sichtbar) und liefert eine saubere JSON-500-Antwort — statt
+    eines nackten 500 ohne CORS-Header, der im Browser als 'Network Error'
+    erscheint."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            err_id = str(uuid.uuid4())
+            tb = traceback.format_exc()
+            log.exception("Unhandled error on %s %s (ref=%s)",
+                          request.method, request.url.path, err_id[:8])
+            try:
+                await db.error_logs.insert_one({
+                    "id": err_id,
+                    "source": "backend",
+                    "method": request.method,
+                    "path": str(request.url.path)[:300],
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:1000],
+                    "traceback": tb[-8000:],
+                    "ip": (request.client.host if request.client else "") or "",
+                    "status": "open",
+                    "created_at": now_iso(),
+                })
+            except Exception:
+                log.exception("error_logs write failed (ref=%s)", err_id[:8])
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Interner Serverfehler — der Fehler wurde "
+                                   "automatisch an den Administrator gemeldet "
+                                   f"(Ref: {err_id[:8]})."},
+            )
+
+
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(ErrorReportingMiddleware)
 
 
 @api.get("/")
 async def api_root():
     return {"service": "autohandel", "status": "ok"}
+
+
+# ---------- Datei-Auslieferung (Storage-Abstraktion) ----------
+# Fotos/Videos aus dem Fahrzeug-/Verkaufsmodul. Keys enthalten eine
+# zufällige UUID (nicht erratbar) — Auslieferung erfolgt daher ohne Auth,
+# damit <img src=...> im Frontend ohne Header-Tricks funktioniert.
+@app.get("/api/files/{key:path}")
+async def serve_file(key: str):
+    from storage_service import guess_media_type, storage, StorageError
+    try:
+        data = storage.load(key)
+    except StorageError:
+        return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
+    return Response(content=data, media_type=guess_media_type(key),
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ---------- Frontend-Fehler-Meldung (landet im Admin-Bereich) ----------
+# 20 Meldungen / 60 s pro IP — verhindert, dass ein kaputter Client (oder
+# ein Angreifer) die error_logs-Collection flutet.
+_client_error_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60)
+
+
+class ClientErrorIn(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    stack: str = Field(default="", max_length=8000)
+    url: str = Field(default="", max_length=500)
+    user_email: str = Field(default="", max_length=200)
+
+
+@api.post("/client-errors")
+async def report_client_error(body: ClientErrorIn, request: Request):
+    ip = (request.client.host if request.client else None) or "unknown"
+    if not _client_error_limiter.check(ip):
+        return {"ok": False}
+    err_id = str(uuid.uuid4())
+    await db.error_logs.insert_one({
+        "id": err_id,
+        "source": "frontend",
+        "method": "",
+        "path": body.url,
+        "error_type": "ClientError",
+        "message": body.message,
+        "traceback": body.stack,
+        "user_email": body.user_email,
+        "ip": ip,
+        "status": "open",
+        "created_at": now_iso(),
+    })
+    return {"ok": True, "ref": err_id[:8]}
 
 
 # =========================================================
@@ -137,6 +235,21 @@ async def ensure_indexes():
     except Exception:
         pass
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
+    # Audit-Log + Fehler-Meldungen (Admin-Bereich)
+    await db.activity_logs.create_index([("created_at", -1)])
+    await db.activity_logs.create_index([("action", 1), ("created_at", -1)])
+    await db.error_logs.create_index([("status", 1), ("created_at", -1)])
+    # B2B-Modul
+    await db.pickup_reports.create_index([("appointment_id", 1), ("version", -1)])
+    await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1)])
+    await db.resale_listings.create_index([("dealer_id", 1), ("status", 1)])
+    await db.resale_listings.create_index([("vehicle_id", 1)])
+    # Phase 3: Marktplatz
+    await db.dealer_invites.create_index("token", unique=True)
+    await db.network_members.create_index(
+        [("dealer_id", 1), ("buyer_user_id", 1)], unique=True)
+    await db.listing_interest.create_index([("dealer_id", 1), ("created_at", -1)])
+    await db.listing_interest.create_index([("buyer_user_id", 1), ("created_at", -1)])
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
     # Neue Fahrer-Accounts + Dealer-Driver-Links
@@ -252,9 +365,33 @@ async def seed_super_admin():
 
 @app.on_event("startup")
 async def on_start():
-    await ensure_indexes()
-    await seed_admin()
-    await seed_super_admin()
+    # Robustheit: Nach einem PC-/Server-Neustart braucht MongoDB manchmal ein
+    # paar Sekunden. Wir warten geduldig, statt den Backend-Prozess sterben zu
+    # lassen — so läuft die App zuverlässig hoch, "sobald das Backend startet".
+    import asyncio as _asyncio
+    for attempt in range(1, 31):
+        try:
+            await ensure_indexes()
+            break
+        except Exception as exc:
+            if attempt >= 30:
+                log.error("MongoDB nach 60s nicht bereit — Indexe übersprungen: %s", exc)
+            else:
+                log.warning("Warte auf MongoDB (%d/30): %s", attempt, exc)
+                await _asyncio.sleep(2)
+    try:
+        await seed_admin()
+        await seed_super_admin()
+    except Exception as exc:
+        log.warning("Admin-Seed übersprungen (DB nicht bereit?): %s", exc)
+    # B2B-Modul: Lebenszyklus-Status für Bestandsfahrzeuge nachziehen.
+    try:
+        from lifecycle import migrate_missing_lifecycles
+        n = await migrate_missing_lifecycles()
+        if n:
+            log.info("lifecycle migration: %d Fahrzeuge migriert", n)
+    except Exception as exc:
+        log.warning("lifecycle migration failed: %s", exc)
     try:
         await ensure_cache_indexes(db)
     except Exception as exc:
@@ -347,6 +484,10 @@ api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)
 api.include_router(manual_search_routes.router)
 api.include_router(payments_routes.router)
+api.include_router(bestand_routes.router)
+api.include_router(resale_routes.router)
+api.include_router(team_routes.router)
+api.include_router(marketplace_routes.router)
 
 app.include_router(api)
 

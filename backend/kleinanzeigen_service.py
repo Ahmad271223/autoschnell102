@@ -17,6 +17,16 @@ import os
 import httpx
 from bs4 import BeautifulSoup
 
+
+def _make_soup(markup: str) -> "BeautifulSoup":
+    """Robustes Parsen: kleinanzeigen.de liefert teils kaputte Entities
+    (z.B. `&#8203` ohne Semikolon), an denen Pythons eingebauter
+    html.parser ab 3.14 mit ValueError crasht. lxml verkraftet das."""
+    try:
+        return BeautifulSoup(markup, "lxml")
+    except Exception:
+        return BeautifulSoup(markup, "html.parser")
+
 from proxy_config import get_proxy_url, random_user_agent, SCRAPE_MAX_RETRIES
 
 # Lokal (Windows) scheitert die SSL-Verifikation an fehlenden Intermediate-CAs.
@@ -90,7 +100,7 @@ def _cut_at_stop(text: str) -> str:
 
 
 def _visible_text(soup: BeautifulSoup) -> str:
-    copy = BeautifulSoup(str(soup), "html.parser")
+    copy = _make_soup(str(soup))
     for tag in copy(["script", "style", "noscript", "svg"]):
         tag.decompose()
     return _clean(copy.get_text("\n")) or ""
@@ -357,7 +367,7 @@ def _extract_images(html_text: str, max_images: int = 60) -> List[str]:
     cut = _cut_at_stop(html_text)
     seen: set = set()
     images: List[str] = []
-    soup = BeautifulSoup(cut, "html.parser")
+    soup = _make_soup(cut)
 
     def add(src: Optional[str]) -> None:
         if not src:
@@ -521,7 +531,7 @@ async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
     same `build_search_url(...)` and downstream code (PDF, contracts) work
     unchanged."""
     html_text = await _fetch_html(url)
-    soup = BeautifulSoup(html_text, "html.parser")
+    soup = _make_soup(html_text)
     visible = _cut_at_stop(_visible_text(soup))
 
     title = _parse_title(soup, visible)
