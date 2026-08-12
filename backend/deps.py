@@ -66,9 +66,13 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     user = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
     if not user or not user.get("active"):
         raise HTTPException(401, "Account deaktiviert")
-    # Single-session enforcement: jwt sid must equal user's current sid
-    if user.get("current_session_id") and payload.get("sid") != user.get("current_session_id"):
-        raise HTTPException(401, "Session beendet (anderes Gerät aktiv)")
+    # Single-session enforcement (strikt): Das Token-sid MUSS der aktuell
+    # gespeicherten Session entsprechen. Ist keine Session gesetzt (z.B. nach
+    # Logout oder bevor der Account je eingeloggt war), ist JEDES Token
+    # ungültig — sonst wären nach einem Logout alle alten Tokens wieder
+    # brauchbar und mehrere Geräte gleichzeitig möglich.
+    if payload.get("sid") != user.get("current_session_id"):
+        raise HTTPException(401, "Session beendet (anderes Gerät aktiv oder abgemeldet)")
     return user
 
 
