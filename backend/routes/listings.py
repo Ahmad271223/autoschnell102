@@ -25,7 +25,8 @@ from listing_identity import (
     set_cache_snapshot,
 )
 from mobile_service import (
-    DEFAULT_EXPORT_RULES, DEFAULT_RULES, build_search_url, get_vehicle,
+    DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
+    MOBILE_USER, build_search_url, get_vehicle,
 )
 from snapshot_service import (
     create_snapshot, get_object as snapshot_get_object, run_snapshot_job,
@@ -71,8 +72,17 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     if source == "autoscout24":
         raise HTTPException(
             400,
-            "AutoScout24 ist aktuell nicht angebunden. Bitte eine mobile.de- oder "
-            "kleinanzeigen.de-URL verwenden.",
+            "AutoScout24-Links sind noch nicht freigeschaltet (API-Zugang folgt). "
+            "Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
+        )
+    # mobile.de als QUELLE braucht den offiziellen API-Zugang. Ohne den (und
+    # ohne ausdrücklichen Sandbox-Modus) früh und verständlich abbrechen —
+    # statt tief im Fetcher mit einer technischen Meldung.
+    if source == "mobile" and not (MOBILE_USER and MOBILE_PASS) and not MOBILE_SANDBOX_MODE:
+        raise HTTPException(
+            400,
+            "mobile.de-Links sind noch nicht freigeschaltet (API-Zugang folgt). "
+            "Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
         )
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:

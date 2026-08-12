@@ -14,9 +14,9 @@ import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { openInPopup, openMultiple } from "@/lib/popup";
 
+// Aktuell ist nur Kleinanzeigen als Daten-Quelle freigeschaltet;
+// mobile.de-/AutoScout-Links folgen, sobald der API-Zugang vorliegt.
 const SAMPLE_URLS = [
-  "https://m.mobile.de/fahrzeuge/details.html?id=448228023",
-  "https://suchen.mobile.de/fahrzeuge/details.html?id=391155421",
   "https://www.kleinanzeigen.de/s-anzeige/...",
 ];
 
@@ -112,7 +112,10 @@ export default function Vergleich() {
             URL einfügen. <span style={{ color: "var(--accent-red)" }}>Vergleich starten.</span>
           </h1>
           <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            Mobile.de- oder Kleinanzeigen-Link einfügen — Daten laden, Regeln anwenden, mobile.de mit fertigem Filter öffnen.
+            Kleinanzeigen-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
+            <span className="block text-xs mt-1" style={{ color: "var(--text-secondary)", opacity: 0.7 }}>
+              mobile.de-/AutoScout-Links als Quelle folgen, sobald der API-Zugang freigeschaltet ist.
+            </span>
           </p>
         </div>
         <ProfileBadge onChange={(p) => setResult((r) => r ? { ...r, active_profile: p } : r)} />
@@ -130,7 +133,7 @@ export default function Vergleich() {
               required
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="mobile.de- oder kleinanzeigen.de-URL einfügen…"
+              placeholder="kleinanzeigen.de-URL einfügen…"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus
