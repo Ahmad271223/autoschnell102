@@ -377,9 +377,8 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="text-zinc-500 text-sm">© {new Date().getFullYear()} Autohandel SaaS · Alle Rechte vorbehalten.</div>
           <div className="flex gap-6 text-sm text-zinc-400">
-            <a href="#" className="hover:text-white">Datenschutz</a>
-            <a href="#" className="hover:text-white">AGB</a>
-            <a href="#" className="hover:text-white">Impressum</a>
+            <Link to="/datenschutz" className="hover:text-white">Datenschutz</Link>
+            <Link to="/impressum" className="hover:text-white">Impressum</Link>
             <a href="mailto:support@autohandel.app" className="hover:text-white">Support</a>
           </div>
         </div>

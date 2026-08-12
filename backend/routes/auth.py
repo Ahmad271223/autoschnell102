@@ -1,6 +1,9 @@
-"""Auth endpoints: register, login, logout, me."""
+"""Auth endpoints: register, login, logout, me, password-reset."""
+import hashlib
 import re
+import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -15,7 +18,10 @@ from deps import (
     log_activity,
 )
 from mobile_service import DEFAULT_RULES
-from rate_limiter import login_limiter, register_limiter
+from rate_limiter import SlidingWindowRateLimiter, login_limiter, register_limiter
+
+# Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
+reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
 
 router = APIRouter()
 
@@ -175,3 +181,117 @@ async def me(user=Depends(current_user)):
     sub = await subscription_for(user)
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     return {"user": user, "subscription": sub, "dealer": dealer}
+
+
+# =========================================================
+#                 PASSWORT VERGESSEN / RESET
+# =========================================================
+# Ablauf: E-Mail eingeben -> Token per Mail (1 h gültig, einmalig) -> neues
+# Passwort setzen. Sucher sind AUSGENOMMEN: deren Passwort setzt nur der
+# Händler-Hauptaccount zurück (Team-Seite) — bewusste Entscheidung 08/2026.
+RESET_TOKEN_TTL_MINUTES = 60
+
+
+class ResetRequestIn(BaseModel):
+    email: EmailStr
+
+
+class ResetConfirmIn(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return _check_password_strength(v)
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@router.post("/auth/password-reset/request")
+async def password_reset_request(body: ResetRequestIn, request: Request):
+    """Immer generische Antwort (kein User-Enumeration-Leak). Versand nur,
+    wenn der Account existiert, kein Sucher ist und SMTP konfiguriert ist."""
+    from email_service import email_configured, send_email
+    ip = (request.client.host if request.client else None) or "unknown"
+    if not reset_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anfragen – bitte später erneut versuchen.")
+    if not email_configured():
+        # Ehrlich statt Sackgasse: ohne SMTP kann kein Link verschickt werden.
+        raise HTTPException(
+            503, "Der E-Mail-Versand ist noch nicht eingerichtet. Bitte wende "
+                 "dich an den Administrator, um dein Passwort zurückzusetzen.")
+
+    generic = {"ok": True, "hinweis": "Falls die Adresse registriert ist, wurde "
+                                      "eine E-Mail mit dem Reset-Link versendet."}
+    u = await db.users.find_one(
+        {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}},
+        {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1})
+    if not u or not u.get("active", True):
+        return generic
+    if u.get("role") == "sucher":
+        # Kein Selbst-Reset für Sucher — aber die gleiche generische Antwort,
+        # damit Außenstehende Rollen nicht erraten können.
+        return generic
+
+    token = secrets.token_urlsafe(32)
+    await db.password_resets.delete_many({"user_id": u["id"]})
+    await db.password_resets.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": u["id"],
+        "token_hash": _hash_reset_token(token),
+        "expires_at": (datetime.now(timezone.utc)
+                       + timedelta(minutes=RESET_TOKEN_TTL_MINUTES)).isoformat(),
+        "used": False,
+        "requested_ip": ip,
+        "created_at": now_iso(),
+    })
+    frontend = (request.headers.get("origin")
+                or request.headers.get("referer", "").rstrip("/")
+                or "http://localhost:3000").split("?")[0].rstrip("/")
+    link = f"{frontend}/passwort-reset?token={token}"
+    await send_email(
+        u["email"],
+        "Passwort zurücksetzen – AutoSchnell",
+        f"Hallo,\n\nüber diesen Link kannst du ein neues Passwort setzen "
+        f"(gültig {RESET_TOKEN_TTL_MINUTES} Minuten):\n\n{link}\n\n"
+        "Wenn du das nicht angefordert hast, ignoriere diese E-Mail einfach — "
+        "dein Passwort bleibt unverändert.",
+    )
+    await log_activity("", u["id"], "auth.passwort.reset.angefordert",
+                       meta={"ip": ip})
+    return generic
+
+
+@router.post("/auth/password-reset/confirm")
+async def password_reset_confirm(body: ResetConfirmIn, request: Request):
+    ip = (request.client.host if request.client else None) or "unknown"
+    if not reset_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Versuche – bitte später erneut versuchen.")
+    doc = await db.password_resets.find_one(
+        {"token_hash": _hash_reset_token(body.token), "used": False}, {"_id": 0})
+    invalid = HTTPException(400, "Der Link ist ungültig oder abgelaufen. "
+                                 "Bitte fordere einen neuen an.")
+    if not doc:
+        raise invalid
+    try:
+        if datetime.fromisoformat(doc["expires_at"]) < datetime.now(timezone.utc):
+            raise invalid
+    except ValueError:
+        raise invalid
+    u = await db.users.find_one({"id": doc["user_id"]},
+                                {"_id": 0, "id": 1, "role": 1, "active": 1})
+    if not u or not u.get("active", True) or u.get("role") == "sucher":
+        raise invalid
+    await db.users.update_one(
+        {"id": u["id"]},
+        {"$set": {"password_hash": await hash_password_async(body.new_password),
+                  # Alle bestehenden Sessions beenden (Single-Session strikt)
+                  "current_session_id": None}})
+    await db.password_resets.update_one(
+        {"id": doc["id"]}, {"$set": {"used": True, "used_at": now_iso()}})
+    await log_activity("", u["id"], "auth.passwort.reset.durchgefuehrt",
+                       meta={"ip": ip})
+    return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}

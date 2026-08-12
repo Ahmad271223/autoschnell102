@@ -89,8 +89,13 @@ export default function Login() {
             {loading ? "..." : <>Anmelden <ArrowRight size={15} /></>}
           </button>
 
-          <div className="mt-6 text-sm text-zinc-400 text-center">
-            Noch kein Konto? <Link to="/register" className="text-white hover:underline">Jetzt registrieren</Link>
+          <div className="mt-6 text-sm text-zinc-400 text-center space-y-2">
+            <div>
+              <Link to="/passwort-vergessen" className="hover:text-white hover:underline">Passwort vergessen?</Link>
+            </div>
+            <div>
+              Noch kein Konto? <Link to="/register" className="text-white hover:underline">Jetzt registrieren</Link>
+            </div>
           </div>
         </form>
       </div>

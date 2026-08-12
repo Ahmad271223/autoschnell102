@@ -11,6 +11,10 @@ import AppLayout from "@/components/AppLayout";
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
+import PasswortVergessen from "@/pages/PasswortVergessen";
+import PasswortReset from "@/pages/PasswortReset";
+import Impressum from "@/pages/legal/Impressum";
+import Datenschutz from "@/pages/legal/Datenschutz";
 import Subscription from "@/pages/Subscription";
 import PaymentSuccess from "@/pages/PaymentSuccess";
 import AdminLayout from "@/pages/admin_v2/AdminLayout";
@@ -63,6 +67,10 @@ export default function App() {
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/passwort-vergessen" element={<PasswortVergessen />} />
+            <Route path="/passwort-reset" element={<PasswortReset />} />
+            <Route path="/impressum" element={<Impressum />} />
+            <Route path="/datenschutz" element={<Datenschutz />} />
 
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
             <Route path="/abo/erfolg" element={<ProtectedRoute requireSub={false}><PaymentSuccess /></ProtectedRoute>} />
