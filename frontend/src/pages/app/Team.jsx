@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Plus, X, KeyRound, Trash2, TrendingUp } from "lucide-react";
@@ -89,6 +90,22 @@ export default function Team() {
                 style={{ background: "var(--accent-red)" }}>
           <Plus size={16} /> Neuen Sucher hinzufügen
         </button>
+      </div>
+
+      {/* Chef als eigener Sucher */}
+      <div className="mt-6 rounded-xl border px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-sm"
+           style={{ borderColor: "var(--border-default)", background: "rgba(255,255,255,0.02)" }}>
+        <div className="text-zinc-300">
+          <b>Selbst suchen &amp; vergleichen?</b>{" "}
+          <span className="text-zinc-500">
+            Buche dein eigenes Sucher-Abo — danach sind Vergleich &amp; Suche in
+            deiner Seitenleiste freigeschaltet. Verkaufen &amp; Verwalten bleiben kostenlos.
+          </span>
+        </div>
+        <Link to="/abo" className="shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+              style={{ background: "var(--accent-red)" }}>
+          Eigenes Abo buchen (160&nbsp;€/M · 1.800&nbsp;€/J)
+        </Link>
       </div>
 
       {/* Weiterverkaufsplan */}
@@ -249,8 +266,10 @@ function AddSucherDialog({ onClose, onDone }) {
           <input value={f.employee_id} onChange={set("employee_id")} placeholder="Mitarbeiter-ID" className={inputCls} style={st} />
         </div>
         <div className="mt-3 text-[11px] text-zinc-500">
-          Der Sucher meldet sich mit E-Mail + Passwort in der normalen App an.
-          Zum Suchen/Vergleichen benötigt er ein aktives Sucher-Abo.
+          Der Sucher meldet sich mit E-Mail + Passwort in der normalen App an
+          und bucht dort <b>selbst</b> sein Sucher-Abo (160&nbsp;€/Monat oder
+          1.800&nbsp;€/Jahr) — erst danach kann er suchen &amp; vergleichen.
+          Freischalten/Sperren des Accounts bleibt bei dir.
         </div>
         <button onClick={submit} disabled={busy}
                 className="mt-4 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"

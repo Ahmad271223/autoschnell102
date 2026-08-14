@@ -2,7 +2,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 
-import { AuthProvider } from "@/context/AuthContext";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { DriverAuthProvider } from "@/context/DriverContext";
 import { BuyerAuthProvider } from "@/context/BuyerContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
@@ -56,6 +56,22 @@ const Wrap = ({ children }) => (
   </ProtectedRoute>
 );
 
+// Verkaufs-/Verwaltungsseiten: der Händler-Hauptaccount ist KOSTENLOS —
+// nur die Sucher-Funktionen (Vergleich/Suche/Pool) brauchen ein Abo.
+const WrapFree = ({ children }) => (
+  <ProtectedRoute requireSub={false}>
+    <AppLayout>{children}</AppLayout>
+  </ProtectedRoute>
+);
+
+// Start-Seite nach Login: Sucher landen im Vergleich, der Chef im Bestand
+// (der auch ohne Abo funktioniert — sonst würde ein kostenloser Händler
+// direkt auf die Abo-Seite umgeleitet).
+function AppHome() {
+  const { user } = useAuth();
+  return <Navigate to={user?.role === "sucher" ? "/app/vergleich" : "/app/bestand"} replace />;
+}
+
 export default function App() {
   return (
     <AuthProvider>
@@ -75,18 +91,20 @@ export default function App() {
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
             <Route path="/abo/erfolg" element={<ProtectedRoute requireSub={false}><PaymentSuccess /></ProtectedRoute>} />
 
-            <Route path="/app" element={<Navigate to="/app/vergleich" replace />} />
+            <Route path="/app" element={<ProtectedRoute requireSub={false}><AppHome /></ProtectedRoute>} />
+            {/* Sucher-Funktionen: brauchen ein aktives (persönliches) Abo */}
             <Route path="/app/vergleich" element={<Wrap><Vergleich /></Wrap>} />
             <Route path="/app/suche" element={<Wrap><ManuelleSuche /></Wrap>} />
-            <Route path="/app/vertraege" element={<Wrap><PDFArchiv /></Wrap>} />
-            <Route path="/app/termine" element={<Wrap><Termine /></Wrap>} />
             <Route path="/app/fahrzeuge" element={<Wrap><Fahrzeugpool /></Wrap>} />
-            <Route path="/app/bestand" element={<Wrap><Bestand /></Wrap>} />
-            <Route path="/app/akte/:id" element={<Wrap><FahrzeugAkte /></Wrap>} />
-            <Route path="/app/inserat/:id" element={<Wrap><Inserat /></Wrap>} />
-            <Route path="/app/fahrer" element={<Wrap><Fahrer /></Wrap>} />
-            <Route path="/app/team" element={<Wrap><Team /></Wrap>} />
-            <Route path="/app/einstellungen" element={<Wrap><Einstellungen /></Wrap>} />
+            {/* Verkaufen & Verwalten: kostenlos für den Händler-Hauptaccount */}
+            <Route path="/app/vertraege" element={<WrapFree><PDFArchiv /></WrapFree>} />
+            <Route path="/app/termine" element={<WrapFree><Termine /></WrapFree>} />
+            <Route path="/app/bestand" element={<WrapFree><Bestand /></WrapFree>} />
+            <Route path="/app/akte/:id" element={<WrapFree><FahrzeugAkte /></WrapFree>} />
+            <Route path="/app/inserat/:id" element={<WrapFree><Inserat /></WrapFree>} />
+            <Route path="/app/fahrer" element={<WrapFree><Fahrer /></WrapFree>} />
+            <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
+            <Route path="/app/einstellungen" element={<WrapFree><Einstellungen /></WrapFree>} />
 
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
             <Route path="/markt/login" element={<BuyerLogin />} />

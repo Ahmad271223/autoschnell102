@@ -161,6 +161,9 @@ async def payment_status(session_id: str, request: Request, user=Depends(current
         {"session_id": session_id},
         {"$setOnInsert": {
             "id": str(uuid.uuid4()), "dealer_id": tx["dealer_id"],
+            # Personenbezogenes Sucher-Abo: gilt fuer den ZAHLENDEN Nutzer
+            # (Chef bucht sein eigenes, jeder Sucher seins).
+            "subject_user_id": tx.get("user_id"),
             "plan": plan, "status": "active", "expires_at": expires_at,
             "session_id": session_id, "created_at": now_iso(),
         }},
@@ -207,6 +210,7 @@ async def stripe_webhook(request: Request):
                 {"session_id": session_id},
                 {"$setOnInsert": {
                     "id": str(uuid.uuid4()), "dealer_id": tx["dealer_id"],
+                    "subject_user_id": tx.get("user_id"),
                     "plan": plan, "status": "active", "expires_at": expires_at,
                     "session_id": session_id, "created_at": now_iso(),
                 }},

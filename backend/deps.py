@@ -119,13 +119,19 @@ async def get_subscription_status(dealer_id: str,
 
 
 async def subscription_for(user: dict) -> dict:
-    """Abo-Status passend zur Rolle: Sucher haben ein persönliches Abo,
-    der Händler-Hauptaccount nutzt das (Bestands-)Händler-Abo — er gilt
-    damit als 'erster Sucher' (Beschluss 05.08.2026, keine Änderung für
-    Bestandskunden)."""
+    """Abo-Status passend zur Rolle (Modell 08/2026):
+    - Sucher: NUR das persönliche Abo (subject_user_id) zählt.
+    - Händler-Hauptaccount: kostenlos fürs Verkaufen/Verwalten. Für die
+      Sucher-Funktionen (Vergleich/Suche) zählt SEIN persönliches Abo
+      ('Chef als eigener Sucher'); als Fallback bleibt das alte
+      händlerweite Abo gültig (Bestandskunden/Lifetime verlieren nichts)."""
     if user.get("role") == "sucher":
         return await get_subscription_status(user.get("dealer_id", ""),
                                              subject_user_id=user["id"])
+    personal = await get_subscription_status(user.get("dealer_id", ""),
+                                             subject_user_id=user["id"])
+    if personal.get("active"):
+        return personal
     return await get_subscription_status(user.get("dealer_id", ""))
 
 

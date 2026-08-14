@@ -14,7 +14,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
 
   const reason = params.get("reason");
-  const next = params.get("next") || "/app/vergleich";
+  const next = params.get("next") || "/app";
 
   const submit = async (e) => {
     e.preventDefault();
@@ -23,7 +23,7 @@ export default function Login() {
       const u = await login(email, pw);
       toast.success("Willkommen zurück");
       const isAdmin = u?.role === "admin" || u?.is_super_admin;
-      const fallback = isAdmin ? "/admin" : "/app/vergleich";
+      const fallback = isAdmin ? "/admin" : "/app";
       nav(params.get("next") || fallback);
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));

@@ -52,12 +52,14 @@ export default function Subscription() {
         </div>
 
         <div className="text-center mb-10">
-          <div className="overline mb-3">Abo erforderlich</div>
+          <div className="overline mb-3">Sucher-Abo erforderlich</div>
           <h1 className="font-display font-black text-4xl lg:text-6xl tracking-tighter">
-            Wähle deinen Plan.
+            Dein Sucher-Abo.
           </h1>
           <p className="text-zinc-400 mt-3 max-w-xl mx-auto">
-            Vollzugriff auf Vergleich, Kaufverträge, Versand, Terminplaner & Archiv.
+            Gilt persönlich für deinen Account: Vergleich, Suche, Kaufverträge,
+            Versand &amp; Terminplaner. Verkaufen &amp; Verwalten sind für den
+            Händler-Hauptaccount kostenlos.
           </p>
         </div>
 
