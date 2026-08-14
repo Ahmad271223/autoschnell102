@@ -201,4 +201,26 @@ async def run_cleanup_forever(db):
             await _cleanup_once(db)
         except Exception as exc:  # noqa: BLE001
             log.exception("cleanup loop error: %s", exc)
+        try:
+            await _reap_stuck_snapshots(db)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("snapshot reaper error: %s", exc)
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
+async def _reap_stuck_snapshots(db) -> None:
+    """Haengengebliebene Snapshot-Jobs heilen: alles, was seit >15 min in
+    pending/running/retrying steckt (z.B. weil das Backend mittendrin neu
+    gestartet wurde), wird als failed markiert — das Frontend hoert auf zu
+    pollen und der naechste Vergleich erzeugt einen frischen Job."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+    r = await db.listing_snapshots.update_many(
+        {"status": {"$in": ["pending", "running", "retrying"]},
+         "created_at": {"$lt": cutoff}},
+        {"$set": {"status": "failed",
+                  "error": "Zeitueberschreitung — automatisch abgebrochen "
+                           "(Backend-Neustart oder haengender Job).",
+                  "completed_at": datetime.now(timezone.utc).isoformat()}})
+    if r.modified_count:
+        log.info("snapshot reaper: %d haengende Jobs bereinigt", r.modified_count)

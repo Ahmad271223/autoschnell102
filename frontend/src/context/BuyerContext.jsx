@@ -14,6 +14,23 @@ buyerApi.interceptors.request.use((c) => {
   if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
+// Session beendet (anderes Gerät / abgemeldet) -> sauber zum Login statt
+// endloser Fehl-Requests mit totem Token.
+buyerApi.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    if (err?.response?.status === 401
+        && localStorage.getItem("ah_buyer_token")
+        && !String(err?.config?.url || "").includes("/buyer/login")) {
+      localStorage.removeItem("ah_buyer_token");
+      if (window.location.pathname.startsWith("/markt")
+          && !window.location.pathname.startsWith("/markt/login")) {
+        window.location.href = "/markt/login?reason=session";
+      }
+    }
+    return Promise.reject(err);
+  },
+);
 
 export function BuyerAuthProvider({ children }) {
   const [buyer, setBuyer] = useState(null);
@@ -30,23 +47,33 @@ export function BuyerAuthProvider({ children }) {
     if (!t) { setReady(true); return; }
     buyerApi.get("/buyer/me")
       .then((r) => setBuyer(r.data))
-      .catch(() => localStorage.removeItem("ah_buyer_token"))
+      .catch((e) => {
+        // Nur bei 401 (Session tot) ausloggen — bei Netz-/Serverfehlern
+        // Token behalten, sonst wirft ein kurzer Backend-Aussetzer alle raus.
+        if (e?.response?.status === 401) localStorage.removeItem("ah_buyer_token");
+      })
       .finally(() => setReady(true));
   }, []);
 
   const login = async (email, password) => {
     const { data } = await buyerApi.post("/buyer/login", { email, password });
     localStorage.setItem("ah_buyer_token", data.token);
-    return refresh();
+    // Login war erfolgreich — ein Fehler beim Nachladen des Profils darf
+    // NICHT als "Anmeldung fehlgeschlagen" erscheinen.
+    try { return await refresh(); }
+    catch { setBuyer(data.user || null); return data.user; }
   };
 
   const register = async (payload) => {
     const { data } = await buyerApi.post("/buyer/register", payload);
     localStorage.setItem("ah_buyer_token", data.token);
-    return refresh();
+    try { return await refresh(); }
+    catch { setBuyer(data.user || null); return data.user; }
   };
 
   const logout = () => {
+    // Server-Session mit beenden (Single-Session: Token wird ungültig).
+    buyerApi.post("/auth/logout").catch(() => {});
     localStorage.removeItem("ah_buyer_token");
     setBuyer(null);
   };

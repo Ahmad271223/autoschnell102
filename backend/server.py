@@ -259,6 +259,11 @@ async def ensure_indexes():
         [("dealer_id", 1), ("driver_account_id", 1)], unique=True,
     )
     await db.dealer_drivers.create_index("driver_account_id")
+    # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
+    try:
+        await db.listings_cache.create_index("cache_key", unique=True)
+    except Exception:
+        pass
     # Snapshots: das Frontend pollt alle 4 s auf (id, dealer_id) — ohne Index
     # ist das ab ein paar tausend Snapshots ein Collection-Scan pro Poll.
     await db.listing_snapshots.create_index("id", unique=True)

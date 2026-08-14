@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html as html_lib
+import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -472,6 +473,10 @@ async def _assert_public_host(url: str) -> None:
     _assert_ip_public(host, infos)
 
 
+class ListingGone(RuntimeError):
+    """Inserat existiert nicht mehr (404/410) - kein Retry, saubere Meldung."""
+
+
 async def _fetch_html(url: str) -> str:
     await _assert_public_host(url)
     proxy = get_proxy_url()  # rotierender Proxy-Endpoint (oder None = direkt)
@@ -493,23 +498,44 @@ async def _fetch_html(url: str) -> str:
                     await client.get("https://www.kleinanzeigen.de/", timeout=15.0)
                 except Exception:
                     pass
+            is_last = attempt >= max(1, SCRAPE_MAX_RETRIES) - 1
+
+            async def _backoff():
+                # Jitter verhindert synchronisierte Retries unter Last;
+                # nach dem LETZTEN Versuch nicht mehr sinnlos schlafen.
+                if not is_last:
+                    await asyncio.sleep((2 ** attempt) * random.uniform(0.6, 1.4))
+
             try:
                 r = await client.get(url)
             except Exception as exc:
                 last_exc = exc
-                await asyncio.sleep(2 ** attempt)
+                await _backoff()
                 continue
             # Nach Redirects erneut pruefen: die finale URL darf ebenfalls
             # nicht auf eine interne Adresse zeigen.
             final_url = str(r.url)
             if final_url != url:
                 await _assert_public_host(final_url)
-            if r.status_code in (403, 429):
-                # Block / Rate-Limit -> mit neuer IP + UA erneut versuchen.
+                # Geloeschte Anzeigen werden von Kleinanzeigen mit HTTP 200
+                # auf die Kategorie-/Suchseite umgeleitet: der /s-anzeige/-
+                # Pfad verschwindet aus der URL -> Anzeige existiert nicht mehr.
+                if "/s-anzeige/" in url and "/s-anzeige/" not in final_url:
+                    raise ListingGone(
+                        "Das Inserat ist bei Kleinanzeigen nicht mehr verfügbar "
+                        "(gelöscht, beendet oder verkauft).")
+            if r.status_code in (404, 410):
+                # Inserat geloescht/deaktiviert - Retry ist sinnlos.
+                raise ListingGone(
+                    "Das Inserat ist bei Kleinanzeigen nicht mehr verfügbar "
+                    "(gelöscht oder deaktiviert).")
+            if r.status_code in (403, 429, 500, 502, 503, 504):
+                # Block / Rate-Limit / CDN-Wackler -> erneut versuchen
+                # (mit rotierendem Proxy = neue IP pro Versuch).
                 last_exc = RuntimeError(
-                    f"Kleinanzeigen blockiert (HTTP {r.status_code})."
+                    f"Kleinanzeigen antwortet mit HTTP {r.status_code}."
                 )
-                await asyncio.sleep(2 ** attempt)
+                await _backoff()
                 continue
             r.raise_for_status()
             return r.text
@@ -533,6 +559,18 @@ async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
     html_text = await _fetch_html(url)
     soup = _make_soup(html_text)
     visible = _cut_at_stop(_visible_text(soup))
+
+    # Geloeschte/beendete Anzeigen liefern oft HTTP 200 mit einer Hinweis-
+    # Seite. Am Seitenanfang erkennen -> saubere Meldung statt Muell-Daten.
+    _head = visible[:600].lower()
+    _GONE = ("nicht mehr verfügbar", "nicht mehr verfugbar",
+             "anzeige wurde gelöscht", "anzeige wurde geloscht",
+             "anzeige ist leider nicht mehr", "wurde bereits verkauft",
+             "anzeige nicht gefunden")
+    if any(m in _head for m in _GONE):
+        raise ListingGone(
+            "Das Inserat ist bei Kleinanzeigen nicht mehr verfügbar "
+            "(gelöscht, beendet oder verkauft).")
 
     title = _parse_title(soup, visible)
     price, price_amount = _parse_price(visible)

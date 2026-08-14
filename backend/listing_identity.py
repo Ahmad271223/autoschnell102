@@ -277,9 +277,66 @@ async def get_or_fetch_listing(
                 )
                 return cached["data"], True, cached.get("snapshot_id")
 
-    # MISS oder abgelaufen -> einmal abrufen
-    data = await fetcher(source, item_id, url)
+    # MISS oder abgelaufen -> Single-Flight: nur EINE Anfrage ruft wirklich
+    # ab; gleichzeitige Anfragen derselben URL warten auf deren Ergebnis.
+    # Verhindert Doppel-Scrapes (Bot-Block-Risiko) und Doppel-Snapshots,
+    # wenn z.B. 5 Sucher zeitgleich dasselbe Inserat vergleichen.
+    import asyncio as _aio
+    from pymongo.errors import DuplicateKeyError
+
+    async def _fresh_cached():
+        c = await db.listings_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+        if not c or not c.get("data"):
+            return None
+        exp = c.get("expires_at")
+        if isinstance(exp, datetime):
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp > datetime.now(timezone.utc):
+                return c
+        return None
+
+    got_lease = False
+    for _wait in range(45):                    # max. ~70 s warten
+        lease_now = datetime.now(timezone.utc)
+        try:
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key,
+                 "$or": [{"fetching_until": {"$exists": False}},
+                         {"fetching_until": None},
+                         {"fetching_until": {"$lt": lease_now}}]},
+                {"$set": {"fetching_until": lease_now + timedelta(seconds=90)},
+                 "$setOnInsert": {"cache_key": cache_key, "created_at": lease_now}},
+                upsert=True,
+            )
+            got_lease = True
+        except DuplicateKeyError:
+            got_lease = False                  # jemand anderes laedt gerade
+        if got_lease:
+            break
+        await _aio.sleep(1.5)
+        c = await _fresh_cached()
+        if c:                                  # der Erste ist fertig - uebernehmen
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key},
+                {"$inc": {"use_count": 1},
+                 "$set": {"last_used_at": datetime.now(timezone.utc)}})
+            return c["data"], True, c.get("snapshot_id")
+    if not got_lease:
+        raise RuntimeError(
+            "Das Inserat wird gerade von einer anderen Anfrage geladen - "
+            "bitte in ein paar Sekunden erneut versuchen.")
+
+    try:
+        data = await fetcher(source, item_id, url)
+    except Exception:
+        # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        raise
     if not isinstance(data, dict):
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
         raise RuntimeError(
             f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
         )
@@ -304,6 +361,7 @@ async def get_or_fetch_listing(
                 # verwiesen wird, falls der Caller das snapshot_id-
                 # Speichern (set_cache_snapshot) auslassen sollte.
                 "snapshot_id": None,
+                "fetching_until": None,
             },
             "$inc": {"use_count": 1},
             "$setOnInsert": {"created_at": now},

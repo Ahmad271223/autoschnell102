@@ -22,7 +22,7 @@ from autoscout_service import build_search_url as build_autoscout_url
 from deps import (
     current_user, db, log_activity, now_iso, require_active_sub,
 )
-from kleinanzeigen_service import fetch_kleinanzeigen_vehicle
+from kleinanzeigen_service import ListingGone, fetch_kleinanzeigen_vehicle
 from listing_identity import (
     ListingIdentityError, get_listing_identity, get_or_fetch_listing,
     set_cache_snapshot,
@@ -110,6 +110,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         )
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc))
+    except ListingGone as exc:
+        raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
     except Exception as exc:
@@ -181,6 +183,20 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     if is_web_url and was_cached and cached_snapshot_id:
         snap_id = await _reuse_cached_snapshot(cached_snapshot_id)
+
+    # Zweite Reuse-Stufe: existiert fuer diese Anzeige-URL BEREITS irgendein
+    # brauchbarer Snapshot (egal von wem), wird er uebernommen — es wird nie
+    # doppelt fotografiert, auch nicht in Rennsituationen.
+    if is_web_url and not snap_id:
+        existing = await db.listing_snapshots.find_one(
+            {"source_url": raw_url, "status": {"$ne": "failed"}},
+            {"_id": 0, "id": 1}, sort=[("created_at", -1)])
+        if existing:
+            snap_id = existing["id"]
+            try:
+                await set_cache_snapshot(db, raw_url, snap_id)
+            except Exception:
+                pass
 
     if is_web_url and not snap_id:
         try:
