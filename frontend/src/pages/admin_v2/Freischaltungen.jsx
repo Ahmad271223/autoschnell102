@@ -46,6 +46,15 @@ export default function AdminFreischaltungen() {
     } catch (e) { toast.error(errMsg(e)); }
   };
 
+  const grantPlan = async (req) => {
+    try {
+      await api.put(`/admin/dealers/${req.dealer_id}/sale-plan`, { tier: req.wanted_tier });
+      await closeReq(req.id);
+      toast.success(`Verkaufspaket ${req.wanted_tier} aktiviert (${req.company_name || ""})`);
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
   const grantBuyer = async (req) => {
     try {
       await api.post(`/admin/buyers/${req.buyer_user_id}/access`, { plan: "monthly" });
@@ -96,7 +105,7 @@ export default function AdminFreischaltungen() {
                         <div className="min-w-0">
                           <div className="text-[14px] text-white font-medium">
                             {isSucher ? (r.sucher_name || r.sucher_email) : r.company_name}
-                            <span className="text-zinc-500 font-normal"> · {r.wanted}</span>
+                            <span className="text-zinc-500 font-normal"> · {r.wanted || (r.wanted_tier ? `Verkaufspaket ${r.wanted_tier}` : "")}</span>
                           </div>
                           <div className="text-[12px] text-zinc-500">
                             {r.company_name}{r.contact_email ? ` · ${r.contact_email}` : ""} · {fmtDate(r.created_at)}
@@ -105,6 +114,9 @@ export default function AdminFreischaltungen() {
                         <div className="ml-auto flex gap-2">
                           {isSucher && <Button size="sm" onClick={() => grantSucher(r)}><Check size={14} /> Abo aktivieren</Button>}
                           {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)}><Check size={14} /> Zugang aktivieren</Button>}
+                          {!isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
+                            <Button size="sm" onClick={() => grantPlan(r)}><Check size={14} /> Paket aktivieren</Button>
+                          )}
                           <Button size="sm" variant="ghost" onClick={() => { closeReq(r.id, "abgelehnt").then(load); }}>
                             <X size={14} /> Ablehnen
                           </Button>
