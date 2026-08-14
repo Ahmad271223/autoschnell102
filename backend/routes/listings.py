@@ -118,7 +118,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     ad_id = vehicle.get("mobile_ad_id") or item_id
     vehicle["mobile_ad_id"] = ad_id
 
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
+    from deps import effective_dealer
+    dealer = await effective_dealer(user)
     active = (dealer or {}).get("active_profile", "inland")
     if active == "export":
         rules = (dealer or {}).get("export_rules") or DEFAULT_EXPORT_RULES

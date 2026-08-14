@@ -177,9 +177,9 @@ async def logout(user=Depends(current_user)):
 
 @router.get("/auth/me")
 async def me(user=Depends(current_user)):
-    from deps import subscription_for
+    from deps import effective_dealer, subscription_for
     sub = await subscription_for(user)
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
+    dealer = await effective_dealer(user)
     return {"user": user, "subscription": sub, "dealer": dealer}
 
 

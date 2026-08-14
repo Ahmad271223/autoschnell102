@@ -135,6 +135,38 @@ async def subscription_for(user: dict) -> dict:
     return await get_subscription_status(user.get("dealer_id", ""))
 
 
+# ---------- Persönliche Einstellungs-Overrides (Sucher) ----------
+# Der Chef füllt die Händler-Einstellungen vor; jeder Sucher darf sie FÜR
+# SICH überschreiben (users.settings_override). Wirksam = Händler-Werte,
+# überlagert von den eigenen. Chef-Werte bleiben unangetastet.
+SUCHER_SETTINGS_FIELDS = {
+    # Profil (erscheint auf den Verträgen des Suchers)
+    "company_name", "contact_person", "phone", "whatsapp_number", "email",
+    "address", "zip_code", "city", "logo_url", "opening_hours",
+    # Vergleich
+    "comparison_rules", "export_rules", "active_profile",
+    # Versand
+    "email_subject", "email_template", "whatsapp_template",
+    # AGB & Vereinbarungen
+    "default_terms", "default_special_agreements",
+}
+
+
+async def effective_dealer(user: dict) -> dict:
+    """Händler-Dokument aus Sicht dieses Nutzers: für Sucher werden die
+    persönlichen Overrides über die Chef-Vorgaben gelegt."""
+    dealer = await db.dealers.find_one({"id": user.get("dealer_id")},
+                                       {"_id": 0}) or {}
+    if user.get("role") != "sucher":
+        return dealer
+    override = user.get("settings_override") or {}
+    merged = dict(dealer)
+    for k, v in override.items():
+        if k in SUCHER_SETTINGS_FIELDS and v is not None:
+            merged[k] = v
+    return merged
+
+
 async def require_active_sub(user=Depends(current_user)):
     if user.get("role") == "admin":
         return user

@@ -201,7 +201,8 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     )
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
     contract_dict = body.model_dump()
     if not (contract_dict.get("additional_terms") or "").strip():
@@ -243,7 +244,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     v = await db.vehicles.find_one({"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
     # Apply dealer defaults if the form didn't override them. Both
     # special_agreements and agb_text now support a per-contract override

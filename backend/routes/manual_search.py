@@ -117,7 +117,8 @@ async def manual_search(body: ManualSearchIn, user=Depends(current_user)):
     Übernimmt damit automatisch die Vergleichs-Regeln des Händlers (KM-Toleranz,
     Leistungs-Toleranz, Schaden-Ausschluss, …).
     """
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
     base_rules = dealer.get("comparison_rules") or DEFAULT_RULES
 
     # ---- Regeln aus dem manuellen Formular überschreiben ----

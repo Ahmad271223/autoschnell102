@@ -68,6 +68,9 @@ class ActiveProfileIn(BaseModel):
 # ---------- Endpoints ----------
 @router.get("/dealer/settings")
 async def get_settings(user=Depends(current_user)):
+    """Wirksame Einstellungen aus Sicht des Nutzers: Chef-Vorgaben,
+    bei Suchern überlagert von den eigenen persönlichen Anpassungen."""
+    from deps import effective_dealer
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     # Back-fill neuer Felder für Bestandshändler, damit das Frontend sich
     # keine Sorgen um Legacy-Dokumente machen muss.
@@ -84,18 +87,27 @@ async def get_settings(user=Depends(current_user)):
             patch["active_profile"] = "inland"
         if patch:
             await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": patch})
+    if user.get("role") == "sucher":
+        return await effective_dealer(user)
     return dealer
 
 
 @router.put("/dealer/active-profile")
 async def set_active_profile(body: ActiveProfileIn, user=Depends(current_user)):
-    """Schneller Profil-Wechsel vom Homebildschirm aus (Inland ↔ Export)."""
+    """Schneller Profil-Wechsel vom Homebildschirm aus (Inland ↔ Export).
+    Sucher wechseln nur IHR eigenes Profil (Override), nicht das des Chefs."""
     if body.active_profile not in ("inland", "export"):
         raise HTTPException(400, "active_profile muss 'inland' oder 'export' sein")
-    await db.dealers.update_one(
-        {"id": user["dealer_id"]},
-        {"$set": {"active_profile": body.active_profile, "updated_at": now_iso()}},
-    )
+    if user.get("role") == "sucher":
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"settings_override.active_profile": body.active_profile}},
+        )
+    else:
+        await db.dealers.update_one(
+            {"id": user["dealer_id"]},
+            {"$set": {"active_profile": body.active_profile, "updated_at": now_iso()}},
+        )
     return {"active_profile": body.active_profile}
 
 
@@ -121,11 +133,7 @@ def _validate_logo_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
-@router.put("/dealer/settings")
-async def update_settings(body: DealerSettingsIn, user=Depends(current_user)):
-    # Händlerprofil verwalten ist Chefsache — Sucher haben nur Lesezugriff.
-    if user.get("role") == "sucher":
-        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das Profil ändern")
+def _collect_settings_update(body: DealerSettingsIn) -> dict:
     update = {}
     if body.profile:
         for k, v in body.profile.model_dump(exclude_none=True).items():
@@ -150,6 +158,23 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_user)):
         update["default_terms"] = body.default_terms
     if body.default_special_agreements is not None:
         update["default_special_agreements"] = body.default_special_agreements
+    return update
+
+
+@router.put("/dealer/settings")
+async def update_settings(body: DealerSettingsIn, user=Depends(current_user)):
+    """Chef schreibt die Händler-Vorgaben. Sucher speichern dieselben Felder
+    als PERSÖNLICHEN Override (users.settings_override) — die Chef-Werte
+    bleiben unverändert und dienen weiter als Vorbefüllung."""
+    from deps import SUCHER_SETTINGS_FIELDS, effective_dealer
+    update = _collect_settings_update(body)
+    if user.get("role") == "sucher":
+        override_set = {f"settings_override.{k}": v for k, v in update.items()
+                        if k in SUCHER_SETTINGS_FIELDS}
+        if override_set:
+            await db.users.update_one({"id": user["id"]}, {"$set": override_set})
+        fresh_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+        return await effective_dealer(fresh_user)
     update["updated_at"] = now_iso()
     await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": update})
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
@@ -163,9 +188,8 @@ class LogoUploadIn(BaseModel):
 @router.post("/dealer/logo")
 async def upload_logo(body: LogoUploadIn, user=Depends(current_user)):
     """Firmenlogo hochladen (max. 2 MB). Speichert im Storage und setzt
-    logo_url auf den ausgelieferten /api/files/<key>-Pfad."""
-    if user.get("role") == "sucher":
-        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das Logo ändern")
+    logo_url auf den ausgelieferten /api/files/<key>-Pfad. Sucher setzen
+    damit nur IHR persönliches Logo (Override), nicht das des Chefs."""
     import base64
     from storage_service import make_key, storage, StorageError
     try:
@@ -182,9 +206,14 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_user)):
     except StorageError as exc:
         raise HTTPException(400, f"Logo konnte nicht gespeichert werden: {exc}")
     logo_url = f"/api/files/{key}"
-    await db.dealers.update_one(
-        {"id": user["dealer_id"]},
-        {"$set": {"logo_url": logo_url, "updated_at": now_iso()}})
+    if user.get("role") == "sucher":
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"settings_override.logo_url": logo_url}})
+    else:
+        await db.dealers.update_one(
+            {"id": user["dealer_id"]},
+            {"$set": {"logo_url": logo_url, "updated_at": now_iso()}})
     return {"ok": True, "logo_url": logo_url}
 
 
