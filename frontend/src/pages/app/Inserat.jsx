@@ -236,10 +236,14 @@ export default function Inserat() {
             </div>
             <div className="mt-3 grid grid-cols-4 sm:grid-cols-6 gap-2">
               {(mode !== "neu") && einkaufFotos.slice(0, 12).map((u, i) => (
-                <img key={`e${i}`} src={u} alt="" className="aspect-square object-cover rounded-lg opacity-90" />
+                <a key={`e${i}`} href={u} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
+                  <img src={u} alt="" className="aspect-square w-full object-cover rounded-lg opacity-90 hover:opacity-100 cursor-zoom-in" />
+                </a>
               ))}
               {(mode !== "einkauf") && uploadedKeys.map((k) => (
-                <img key={k} src={`${backend}/api/files/${k}`} alt="" className="aspect-square object-cover rounded-lg" />
+                <a key={k} href={`${backend}/api/files/${k}`} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
+                  <img src={`${backend}/api/files/${k}`} alt="" className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
+                </a>
               ))}
               {mode === "neu" && uploadedKeys.length === 0 && (
                 <div className="col-span-full text-xs text-zinc-500 py-4">Noch keine neuen Fotos hochgeladen.</div>

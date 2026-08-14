@@ -312,15 +312,20 @@ function DetailModal({ v, onClose }) {
            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
            onClick={(e) => e.stopPropagation()}>
         <div className="relative">
-          {photos[0] ? <img src={photos[0]} alt="" className="w-full h-56 sm:h-72 object-cover" />
-                     : <div className="w-full h-40 bg-zinc-900 flex items-center justify-center text-zinc-700 text-xs">kein Foto</div>}
+          {photos[0] ? (
+            <a href={photos[0]} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
+              <img src={photos[0]} alt="" className="w-full h-56 sm:h-72 object-cover cursor-zoom-in" />
+            </a>
+          ) : <div className="w-full h-40 bg-zinc-900 flex items-center justify-center text-zinc-700 text-xs">kein Foto</div>}
           <button onClick={onClose} className="absolute top-3 right-3 w-9 h-9 rounded-full flex items-center justify-center text-white"
                   style={{ background: "rgba(0,0,0,0.5)" }}><X size={18} /></button>
         </div>
         {photos.length > 1 && (
           <div className="flex gap-2 p-3 overflow-x-auto">
-            {photos.slice(1, 10).map((u, i) => (
-              <img key={i} src={u} alt="" className="h-16 w-24 object-cover rounded-lg shrink-0" />
+            {photos.slice(1, 20).map((u, i) => (
+              <a key={i} href={u} target="_blank" rel="noreferrer" className="shrink-0" title="Foto in Originalgröße öffnen">
+                <img src={u} alt="" className="h-16 w-24 object-cover rounded-lg hover:opacity-80 cursor-zoom-in" />
+              </a>
             ))}
           </div>
         )}

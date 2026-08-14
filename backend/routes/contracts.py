@@ -388,6 +388,22 @@ async def list_contracts(
             i for i in items
             if any(s.get("channel") == channel for s in i.get("send_status", []))
         ]
+    # Ersteller anreichern: der Chef sieht so, WELCHER Sucher den Vertrag
+    # (= Einkauf) gemacht hat.
+    creator_ids = list({i.get("user_id") for i in items if i.get("user_id")})
+    if creator_ids:
+        names = {}
+        async for u in db.users.find({"id": {"$in": creator_ids}},
+                                     {"_id": 0, "id": 1, "email": 1,
+                                      "first_name": 1, "last_name": 1, "role": 1}):
+            label = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() \
+                    or u.get("email", "")
+            names[u["id"]] = {"name": label, "role": u.get("role")}
+        for i in items:
+            c = names.get(i.get("user_id"))
+            if c:
+                i["created_by_name"] = c["name"]
+                i["created_by_role"] = c["role"]
     return items
 
 

@@ -606,11 +606,108 @@ function MarketplacePanel() {
         </button>
       </div>
 
+      {/* Einladungslinks (privates Netzwerk) */}
+      <InvitePanel />
+
       <div className="text-[11px] text-zinc-600">
-        Fahrzeuge veröffentlichst du im jeweiligen Inserat (Bestand → Inserat → „Auf Marktplatz veröffentlichen").
-        Dafür ist ein aktives Verkaufspaket nötig.
+        Fahrzeuge veröffentlichst du im jeweiligen Inserat (Bestand → Inserat → „Öffentlich
+        veröffentlichen" oder „Nur Netzwerk (privat)"). Dafür ist ein aktives Verkaufspaket nötig.
       </div>
     </Section>
+  );
+}
+
+function InvitePanel() {
+  const [invites, setInvites] = useState(null);
+  const [validity, setValidity] = useState(168);
+  const [uses, setUses] = useState(1);
+
+  const load = async () => {
+    try { const { data } = await api.get("/dealer/invites"); setInvites(data); }
+    catch (e) { setInvites([]); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    try {
+      const { data } = await api.post("/dealer/invites", {
+        validity_hours: Number(validity), max_uses: Number(uses),
+      });
+      const link = `${window.location.origin}${data.link}`;
+      try { await navigator.clipboard.writeText(link); toast.success("Einladungslink erstellt & kopiert"); }
+      catch { toast.success("Einladungslink erstellt"); }
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
+  const copy = async (inv) => {
+    const link = `${window.location.origin}/markt/registrieren?invite=${inv.token}`;
+    try { await navigator.clipboard.writeText(link); toast.success("Link kopiert"); }
+    catch { window.prompt("Link kopieren:", link); }
+  };
+
+  const remove = async (inv) => {
+    try { await api.delete(`/dealer/invites/${inv.id}`); toast.success("Einladung gelöscht"); load(); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+
+  return (
+    <div className="rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+      <div className="text-sm font-semibold mb-1">Einladungslinks (privates Netzwerk)</div>
+      <div className="text-xs text-zinc-500 mb-3">
+        Eingeladene Zwischenhändler treten deinem Netzwerk bei und sehen auch deine
+        <b> privaten</b> Inserate und Netzwerkpreise.
+      </div>
+      <div className="flex flex-wrap items-end gap-2 mb-3">
+        <div>
+          <label className="block text-[10px] text-zinc-500 mb-1 uppercase">Gültig</label>
+          <select value={validity} onChange={(e) => setValidity(e.target.value)}
+                  className="h-9 px-2 rounded-lg border bg-[#141416] text-sm" style={{ borderColor: "var(--divider)" }}>
+            <option value={24}>24 Stunden</option>
+            <option value={168}>7 Tage</option>
+            <option value={720}>30 Tage</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] text-zinc-500 mb-1 uppercase">Nutzungen</label>
+          <select value={uses} onChange={(e) => setUses(e.target.value)}
+                  className="h-9 px-2 rounded-lg border bg-[#141416] text-sm" style={{ borderColor: "var(--divider)" }}>
+            <option value={1}>1×</option>
+            <option value={5}>5×</option>
+            <option value={10}>10×</option>
+          </select>
+        </div>
+        <button onClick={create} data-testid="invite-create"
+                className="h-9 px-4 rounded-lg text-sm font-semibold text-white"
+                style={{ background: "var(--accent-red)" }}>
+          + Einladungslink erstellen
+        </button>
+      </div>
+      {invites === null ? (
+        <div className="text-xs text-zinc-500">Lädt…</div>
+      ) : invites.length === 0 ? (
+        <div className="text-xs text-zinc-500">Noch keine Einladungen erstellt.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {invites.map((inv) => (
+            <div key={inv.id} className="flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2"
+                 style={{ borderColor: "var(--divider)" }}>
+              <span className={inv.valid ? "text-emerald-400" : "text-zinc-500"}>
+                {inv.valid ? "● aktiv" : "○ abgelaufen/verbraucht"}
+              </span>
+              <span className="text-zinc-400">{inv.used_count}/{inv.max_uses} genutzt</span>
+              <span className="text-zinc-600">bis {new Date(inv.expires_at).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+              <span className="ml-auto flex gap-2">
+                {inv.valid && (
+                  <button onClick={() => copy(inv)} className="text-zinc-300 hover:text-white underline">Link kopieren</button>
+                )}
+                <button onClick={() => remove(inv)} className="text-zinc-500 hover:text-red-400">löschen</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

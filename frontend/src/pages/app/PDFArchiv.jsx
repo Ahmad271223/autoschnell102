@@ -97,7 +97,14 @@ export default function PDFArchiv() {
             )}
             {items.map((it) => (
               <tr key={it.id} className="border-t" style={{ borderColor: "var(--border-default)" }}>
-                <td className="px-4 py-3 text-zinc-400 font-mono text-xs">{new Date(it.created_at).toLocaleString("de-DE")}</td>
+                <td className="px-4 py-3 text-zinc-400 font-mono text-xs">
+                  {new Date(it.created_at).toLocaleString("de-DE")}
+                  {it.created_by_name && (
+                    <div className="mt-0.5 font-sans text-[10px] text-zinc-500">
+                      von <span className={it.created_by_role === "sucher" ? "text-sky-400" : "text-zinc-400"}>{it.created_by_name}</span>
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-3"><div className="font-semibold">{it.make}</div><div className="text-xs text-zinc-500">{it.model}</div></td>
                 <td className="px-4 py-3">
                   <PhotoCell
