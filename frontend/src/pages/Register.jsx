@@ -22,8 +22,11 @@ export default function Register() {
     setLoading(true);
     try {
       await register(form);
-      toast.success("Konto erstellt");
-      nav(planParam ? `/abo?plan=${planParam}` : "/abo");
+      toast.success("Konto erstellt — willkommen!");
+      // Händler-Hauptaccount ist kostenlos: direkt in den Bestand, NICHT auf
+      // die Abo-Seite (das Sucher-Abo braucht er nur fürs Vergleichen/Suchen
+      // und kann es jederzeit über die Team-Seite oder /abo buchen).
+      nav(planParam ? `/abo?plan=${planParam}` : "/app");
     } catch (err) {
       toast.error(errMsg(err, "Registrierung fehlgeschlagen"));
     } finally {
