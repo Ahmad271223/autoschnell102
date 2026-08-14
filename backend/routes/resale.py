@@ -179,7 +179,10 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         "auto_notes": auto_notes,
         "photos": {
             "mode": "einkauf",
-            "einkauf_urls": list((data.get("image_urls") or []))[:40],
+            # Kleinanzeigen-Fahrzeuge speichern Fotos unter "images",
+            # mobile.de/manuelle unter "image_urls" — beide Quellen nutzen.
+            "einkauf_urls": list((data.get("image_urls")
+                                  or data.get("images") or []))[:40],
             "uploaded_keys": [],
         },
         "prices": {"public": None, "b2b": None, "network": None},

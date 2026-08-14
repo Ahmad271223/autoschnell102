@@ -144,7 +144,7 @@ export default function Bestand() {
           const d = v.data || {};
           const lc = v.lifecycle || "verglichen";
           const color = LIFECYCLE_COLORS[lc] || "#71717a";
-          const img = (d.image_urls || [])[0];
+          const img = (d.image_urls || d.images || [])[0];
           return (
             <div key={v.id} className="tactical-card overflow-hidden flex flex-col" data-testid={`bestand-${v.id}`}>
               {img && (
