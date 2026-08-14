@@ -9,7 +9,10 @@ from typing import Any, Dict, Optional
 # Cache-Lebensdauer fuer abgerufene Inserate. Hoehere TTL = weniger echte
 # Scrape-/Proxy-Requests (dasselbe Inserat wird nur 1x je TTL geladen).
 # Default 24h, per ENV anpassbar.
-LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "24"))
+# Einmal verglichen = dauerhaft gespeichert (Wunsch 08/2026): dieselbe URL
+# wird NICHT erneut von Kleinanzeigen/mobile geladen, sondern aus unserem
+# Speicher bedient. Default 1 Jahr; per ENV anpassbar.
+LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "8760"))
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -164,8 +167,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     )
 
     async def _reuse_cached_snapshot(sid: str) -> Optional[str]:
+        # Bewusst OHNE dealer-Filter: der ERSTE Snapshot einer Anzeige wird
+        # von ALLEN uebernommen — nie doppelt fotografieren (Wunsch 08/2026).
         doc = await db.listing_snapshots.find_one(
-            {"id": sid, "dealer_id": user["dealer_id"]},
+            {"id": sid},
             {"_id": 0, "status": 1, "id": 1},
         )
         if not doc:
@@ -226,9 +231,11 @@ async def live_counter(ad_id: str, user=Depends(current_user)):
 # =========================================================
 #                  LISTING SNAPSHOTS
 # =========================================================
-async def _load_snapshot_or_404(snap_id: str, dealer_id: str) -> dict:
+async def _load_snapshot_or_404(snap_id: str) -> dict:
+    # Snapshots dokumentieren OEFFENTLICHE Inserate und werden haendler-
+    # uebergreifend wiederverwendet -> lesbar fuer jeden eingeloggten Nutzer.
     snap = await db.listing_snapshots.find_one(
-        {"id": snap_id, "dealer_id": dealer_id}, {"_id": 0},
+        {"id": snap_id}, {"_id": 0},
     )
     if not snap:
         raise HTTPException(404, "Snapshot nicht gefunden")
@@ -237,7 +244,7 @@ async def _load_snapshot_or_404(snap_id: str, dealer_id: str) -> dict:
 
 @router.get("/snapshots/{snap_id}")
 async def snapshot_status(snap_id: str, user=Depends(current_user)):
-    snap = await _load_snapshot_or_404(snap_id, user["dealer_id"])
+    snap = await _load_snapshot_or_404(snap_id)
     snap.pop("png_path", None)
     snap.pop("pdf_path", None)
     return snap
@@ -270,10 +277,10 @@ async def snapshot_download(snap_id: str, kind: str,
         raise HTTPException(401, "Konto gesperrt")
     token_sid = payload.get("sid")
     stored_sid = user_doc.get("current_session_id")
-    if stored_sid and token_sid != stored_sid:
+    if token_sid != stored_sid:
         raise HTTPException(401, "Session beendet (anderes Gerät aktiv)")
 
-    snap = await _load_snapshot_or_404(snap_id, user_doc["dealer_id"])
+    snap = await _load_snapshot_or_404(snap_id)
     if snap.get("status") != "ready":
         raise HTTPException(409, f"Snapshot ist nicht bereit (status={snap.get('status')})")
     path = snap.get(f"{kind}_path")
@@ -322,6 +329,8 @@ async def list_vehicles(user=Depends(current_user)):
 # =========================================================
 @router.post("/listings/extract")
 async def listings_extract(body: ListingURLIn, _user=Depends(current_user)):
+    if _user.get("role") not in ("dealer", "sucher"):
+        raise HTTPException(403, "Nur für Händler-/Sucher-Accounts")
     """Erkennt Quelle (kleinanzeigen / mobile / autoscout24) + item_id aus
     einer URL. Liefert source, item_id und cache_key — ohne externen Fetch.
     Auth required: prevents unauthenticated probing of URL patterns / item IDs."""

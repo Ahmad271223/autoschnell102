@@ -7,6 +7,7 @@ export const ProtectedRoute = ({ children, requireSub = true, adminOnly = false 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-zinc-500">Lade…</div>;
   if (!user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname)}`} replace />;
   if (adminOnly && user.role !== "admin") return <Navigate to="/app" replace />;
+  if (user.role === "b2b_buyer") return <Navigate to="/markt" replace />;
   if (requireSub && user.role !== "admin" && !subscription?.active) {
     return <Navigate to="/abo" replace />;
   }

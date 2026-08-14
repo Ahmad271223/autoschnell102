@@ -30,8 +30,11 @@ export default function AppLayout({ children }) {
   const { user, subscription, logout } = useAuth();
 
   // Sucher-Unteraccounts sehen keine Händler-Funktionen (Bestand, Team).
-  const items = NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher"));
-  if (user?.role === "admin") items.push({ to: "/admin", label: "Admin", icon: ShieldCheck });
+  // Strikte Rollentrennung: Admin-Konten verwalten nur — die Händler-/
+  // Sucher-Funktionen würden im Backend ohnehin blockiert.
+  const items = user?.role === "admin"
+    ? [{ to: "/admin", label: "Admin", icon: ShieldCheck }]
+    : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher"));
 
   return (
     <div className="min-h-screen flex" style={{ background: "var(--bg-app)", color: "var(--text-primary)" }}>

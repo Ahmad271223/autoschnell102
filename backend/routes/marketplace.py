@@ -59,7 +59,10 @@ def _access_status(user: dict) -> dict:
 
 # ---------- Auth-Hilfen ----------
 async def current_buyer(user=Depends(current_user)):
-    if user.get("role") not in ("b2b_buyer", "dealer", "admin"):
+    # Strikte Rollentrennung: Kaeufer + Haendler duerfen den Marktplatz
+    # ansehen; Admin-Konten verwalten nur (Freischaltungen laufen ueber
+    # /admin/*-Endpunkte).
+    if user.get("role") not in ("b2b_buyer", "dealer"):
         raise HTTPException(403, "Nur für registrierte Händler/Zwischenhändler")
     return user
 

@@ -3,7 +3,7 @@ import unicodedata
 import re
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from autoscout_service import _load_data as _load_autoscout
@@ -112,6 +112,8 @@ async def list_makes(_=Depends(current_user)):
 
 @router.post("/manual/search")
 async def manual_search(body: ManualSearchIn, user=Depends(current_user)):
+    if user.get("role") not in ("dealer", "sucher"):
+        raise HTTPException(403, "Nur für Händler-/Sucher-Accounts")
     """Wandelt die manuelle Eingabe in ein „virtuelles Fahrzeug" um und nutzt
     die existierenden mobile_service / autoscout_service Url-Builder.
     Übernimmt damit automatisch die Vergleichs-Regeln des Händlers (KM-Toleranz,

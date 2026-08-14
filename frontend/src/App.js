@@ -69,6 +69,7 @@ const WrapFree = ({ children }) => (
 // direkt auf die Abo-Seite umgeleitet).
 function AppHome() {
   const { user } = useAuth();
+  if (user?.role === "admin") return <Navigate to="/admin" replace />;
   return <Navigate to={user?.role === "sucher" ? "/app/vergleich" : "/app/bestand"} replace />;
 }
 

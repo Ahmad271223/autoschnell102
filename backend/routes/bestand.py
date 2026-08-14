@@ -22,10 +22,13 @@ BESTAND_RETENTION_DAYS = 50
 
 
 async def current_haendler(user=Depends(current_user)):
-    """Nur der Händler-Hauptaccount (oder Admin) — Sucher (Phase 2) haben
-    hier keinen Zugriff: Bestands-/Verkaufsentscheidungen sind Chefsache."""
-    if user.get("role") not in ("dealer", "admin"):
-        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das")
+    """NUR der Händler-Hauptaccount. Strikte Rollentrennung (08/2026):
+    Admins verwalten die Plattform, handeln aber nicht — sonst landen z.B.
+    Sucher versehentlich unter der Admin-Firma. Sucher haben hier ebenfalls
+    keinen Zugriff: Bestands-/Verkaufsentscheidungen sind Chefsache."""
+    if user.get("role") != "dealer":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das "
+                                 "(Admins bitte mit einem Händler-Account arbeiten)")
     return user
 
 

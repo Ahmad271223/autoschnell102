@@ -169,7 +169,11 @@ async def effective_dealer(user: dict) -> dict:
 
 async def require_active_sub(user=Depends(current_user)):
     if user.get("role") == "admin":
-        return user
+        # Strikte Rollentrennung: Admin-Konten verwalten die Plattform und
+        # nutzen die Sucher-Funktionen nicht (sonst entstehen Fahrzeuge/
+        # Vergleiche unter der Admin-Firma).
+        raise HTTPException(403, "Admin-Konten sind nur zur Verwaltung da — "
+                                 "bitte mit einem Händler-/Sucher-Account arbeiten.")
     sub = await subscription_for(user)
     if not sub["active"]:
         raise HTTPException(402, "Kein aktives Abo")
