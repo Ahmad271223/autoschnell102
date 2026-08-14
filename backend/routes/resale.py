@@ -131,8 +131,9 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    if v.get("lifecycle") not in ("abgeholt", "bestand", "verkaufsentwurf",
-                                  "verkaufsbereit"):
+    if v.get("lifecycle") not in ("vertrag_erstellt", "gekauft",
+                                  "abholung_geplant", "abgeholt", "bestand",
+                                  "verkaufsentwurf", "verkaufsbereit"):
         raise HTTPException(400, "Fahrzeug ist nicht im verkaufsfähigen Zustand "
                                  f"(Status: {v.get('lifecycle')})")
 

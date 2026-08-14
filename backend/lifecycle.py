@@ -47,9 +47,12 @@ ALLOWED_TRANSITIONS: dict = {
     "verglichen":       {"besichtigung", "verhandlung", "vertrag_erstellt", "storniert"},
     "besichtigung":     {"verhandlung", "vertrag_erstellt", "storniert"},
     "verhandlung":      {"vertrag_erstellt", "storniert"},
-    "vertrag_erstellt": {"gekauft", "abholung_geplant", "storniert"},
-    "gekauft":          {"abholung_geplant", "abgeholt", "storniert"},
-    "abholung_geplant": {"abgeholt", "nicht_abgeholt", "storniert"},
+    # Weiterverkauf ist schon ab Vertragserstellung erlaubt (Wunsch 08/2026):
+    # der Chef kann inserieren, waehrend die Abholung noch laeuft. Der
+    # Abholbericht landet weiterhin in der Fahrzeugakte (pickup_reports).
+    "vertrag_erstellt": {"gekauft", "abholung_geplant", "verkaufsentwurf", "storniert"},
+    "gekauft":          {"abholung_geplant", "abgeholt", "verkaufsentwurf", "storniert"},
+    "abholung_geplant": {"abgeholt", "nicht_abgeholt", "verkaufsentwurf", "storniert"},
     "abgeholt":         {"bestand", "verkaufsentwurf", "geloescht"},
     "nicht_abgeholt":   {"abholung_geplant", "storniert", "geloescht"},
     "bestand":          {"verkaufsentwurf", "geloescht", "archiviert"},

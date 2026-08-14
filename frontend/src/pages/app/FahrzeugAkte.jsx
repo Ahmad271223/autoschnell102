@@ -143,6 +143,12 @@ export default function FahrzeugAkte() {
               <Tag size={13} /> Weiterverkaufen
             </button>
           )}
+          {/* Ab Vertragserstellung sofort inserierbar (Abholung läuft parallel) */}
+          {["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
+            <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
+              <Tag size={13} /> Jetzt inserieren
+            </button>
+          )}
           {listing && ["entwurf", "verkaufsbereit", "reserviert"].includes(listing.status) && (
             <Link to={`/app/inserat/${listing.id}`} className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
               Inserat öffnen ({listing.status})
@@ -237,6 +243,10 @@ export default function FahrzeugAkte() {
         <Section title="Beschaffung & Kauf">
           <KV k="Einkaufspreis" val={fmtEur(v.purchase_price)} />
           <KV k="Quelle" val={v.source === "manuell" ? "Manuell angelegt" : (d.detail_url ? "Inserat (Plattform)" : "Plattform")} />
+          {(akte.appointments || []).slice(0, 1).map((a) => (
+            <KV key={a.id} k="Geplante Abholung"
+                val={`${a.pickup_date || "—"}${a.pickup_time ? ` · ${a.pickup_time}` : ""} (${a.status || "offen"})`} />
+          ))}
           {akte.contracts.map((c) => (
             <div key={c.id} className="mt-2 flex items-center justify-between text-sm">
               <span className="inline-flex items-center gap-1.5 text-zinc-300">

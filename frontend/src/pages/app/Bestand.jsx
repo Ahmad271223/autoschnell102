@@ -210,6 +210,15 @@ export default function Bestand() {
                           <Tag size={13} /> Weiterverkaufen
                         </button>
                       )}
+                      {/* Ab Vertragserstellung sofort inserierbar — die Abholung
+                          läuft parallel weiter (Bericht landet in der Akte). */}
+                      {["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                                style={{ background: "var(--accent-red)" }}>
+                          <Tag size={13} /> Jetzt inserieren
+                        </button>
+                      )}
                       <Link to={`/app/akte/${v.id}`}
                             className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border text-zinc-300 hover:text-white"
                             style={{ borderColor: "var(--border-default)" }}>
