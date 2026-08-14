@@ -26,6 +26,16 @@ load_dotenv(Path(__file__).parent / ".env")
 # IMMER aktiv lassen (Default). Niemals in der Prod-.env auf false setzen.
 _RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").strip().lower() != "false"
 
+# Loopback-Ausnahme: Zugriffe vom selben Rechner (127.0.0.1/::1) zaehlen
+# nicht — sonst blockieren sich lokale Tests und die eigene Nutzung
+# gegenseitig (alle teilen sich EINE IP). Im echten Server-Betrieb kommen
+# Nutzer nie von Loopback; ein Angreifer auch nicht. Abschaltbar via
+# RATE_LIMIT_EXEMPT_LOOPBACK=false (z.B. hinter lokalem Reverse-Proxy,
+# der Client-IPs nicht weiterreicht — dort besser den Proxy fixen).
+_EXEMPT_LOOPBACK = os.environ.get(
+    "RATE_LIMIT_EXEMPT_LOOPBACK", "true").strip().lower() != "false"
+_LOOPBACK_KEYS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
 
 class SlidingWindowRateLimiter:
     """Thread-safe sliding-window rate limiter."""
@@ -47,6 +57,9 @@ class SlidingWindowRateLimiter:
         """
         # Test/CI-Bypass — niemals in Produktion aktivieren.
         if not _RATE_LIMIT_ENABLED:
+            return True
+        # Lokale Zugriffe (gleicher Rechner) nicht limitieren.
+        if _EXEMPT_LOOPBACK and key in _LOOPBACK_KEYS:
             return True
         now = time.monotonic()
         cutoff = now - self.window_seconds

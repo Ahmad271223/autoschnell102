@@ -125,7 +125,13 @@ export default function Inserat() {
               <button onClick={() => publish("public")} disabled={busy}
                       className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
                       style={{ background: "var(--accent-red)" }}>
-                <Globe size={16} /> Auf Marktplatz veröffentlichen
+                <Globe size={16} /> Öffentlich veröffentlichen
+              </button>
+              <button onClick={() => publish("private")} disabled={busy}
+                      title="Nur für eingeladene Netzwerk-Partner sichtbar"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border"
+                      style={st}>
+                <EyeOff size={14} /> Nur Netzwerk (privat)
               </button>
               <button onClick={() => setStatus("reserviert")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservieren</button>
               <button onClick={() => {

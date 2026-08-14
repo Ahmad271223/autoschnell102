@@ -494,6 +494,9 @@ async def browse_listings(
         if ps_max and (ps or 0) > ps_max:
             continue
         member = l["dealer_id"] in my_networks
+        # Sichtbarkeit "private": nur für eingeladene Netzwerk-Mitglieder.
+        if (l.get("visibility") or "public") == "private" and not member:
+            continue
         view = _public_listing_view(l, is_member=member, is_trade=is_trade)
         price = view["price"] or 0
         if price_min and price < price_min:
@@ -542,6 +545,10 @@ async def dealer_page(slug: str, user=Depends(require_marketplace_access)):
     listings = await db.resale_listings.find(
         {"dealer_id": dl["id"], "status": "veroeffentlicht"}, {"_id": 0},
     ).sort("published_at", -1).to_list(200)
+    # Private Inserate nur für Netzwerk-Mitglieder (und den Händler selbst).
+    if not member and dl["id"] != user.get("dealer_id"):
+        listings = [l for l in listings
+                    if (l.get("visibility") or "public") != "private"]
     return {
         "profile": {
             "company_name": dl.get("company_name", ""),

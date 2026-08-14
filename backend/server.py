@@ -259,11 +259,21 @@ async def ensure_indexes():
         [("dealer_id", 1), ("driver_account_id", 1)], unique=True,
     )
     await db.dealer_drivers.create_index("driver_account_id")
+    # Snapshots: das Frontend pollt alle 4 s auf (id, dealer_id) — ohne Index
+    # ist das ab ein paar tausend Snapshots ein Collection-Scan pro Poll.
+    await db.listing_snapshots.create_index("id", unique=True)
+    await db.listing_snapshots.create_index([("dealer_id", 1), ("created_at", -1)])
+    await db.listing_snapshots.create_index([("vehicle_id", 1), ("status", 1)])
+    await db.listing_snapshots.create_index([("status", 1), ("created_at", 1)])
+    # Passwort-Reset-Tokens: Lookup + automatisches Wegräumen
+    await db.password_resets.create_index("token_hash")
     # Legacy-Index entfernen, falls noch vorhanden
     try:
         await db.drivers.drop()
     except Exception:
         pass
+
+
 
 
 async def seed_admin():

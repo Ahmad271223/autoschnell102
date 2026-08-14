@@ -42,9 +42,9 @@ echo [3/4] Starte Backend  (http://localhost:8001) ...
 powershell -NoProfile -Command "if (!(Get-NetTCPConnection -LocalPort 8001 -ErrorAction SilentlyContinue)) { exit 0 } else { exit 1 }" >nul 2>&1
 if %errorlevel% == 0 (
     if exist "C:\Python314\python.exe" (
-        start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && C:\Python314\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload --loop asyncio"
+        start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && C:\Python314\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8001 --loop asyncio"
     ) else (
-        start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && python -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload --loop asyncio"
+        start "AutoSchnell Backend" cmd /k "cd /d "%~dp0backend" && python -m uvicorn server:app --host 0.0.0.0 --port 8001 --loop asyncio"
     )
 ) else (
     echo       Port 8001 belegt - Backend laeuft bereits.
