@@ -61,7 +61,7 @@ ALLOWED_TRANSITIONS: dict = {
     # Marktplatz existiert (Phase 1/2), wird ohne "veroeffentlicht" verkauft.
     "verkaufsbereit":   {"veroeffentlicht", "reserviert", "verkauft",
                          "verkaufsentwurf", "bestand", "geloescht"},
-    "veroeffentlicht":  {"reserviert", "verkauft", "verkaufsbereit"},
+    "veroeffentlicht":  {"reserviert", "verkauft", "verkaufsbereit", "bestand"},
     "reserviert":       {"verkauft", "veroeffentlicht"},
     "verkauft":         {"archiviert"},
     "storniert":        {"verglichen", "geloescht"},

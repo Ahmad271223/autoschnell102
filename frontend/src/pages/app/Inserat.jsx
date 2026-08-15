@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff } from "lucide-react";
+import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2 } from "lucide-react";
 
 /**
  * Inserats-Editor: automatisch vorausgefüllter Entwurf aus der Fahrzeugakte
@@ -20,6 +20,7 @@ const STATUS_LABELS = {
 
 export default function Inserat() {
   const { id } = useParams();
+  const nav = useNavigate();
   const [l, setL] = useState(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
@@ -50,6 +51,7 @@ export default function Inserat() {
         price_public: l.prices?.public, price_b2b: l.prices?.b2b,
         price_network: l.prices?.network,
         costs: l.costs,
+        data: l.data,
         ...extra,
       });
       setL(r.data);
@@ -66,6 +68,17 @@ export default function Inserat() {
       await api.post(`/resale/${l.id}/status`, { status, sold_price: soldPrice });
       toast.success(`Status: ${STATUS_LABELS[status] || status}`);
       load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
+  const removeListing = async () => {
+    if (!window.confirm(
+      "Inserat wirklich löschen?\n\nHinweis: Bereits veröffentlichte Inserate "
+      + "zählen im laufenden Monat weiterhin auf dein Kontingent.")) return;
+    try {
+      await api.delete(`/resale/${l.id}`);
+      toast.success("Inserat gelöscht");
+      nav("/app/bestand");
     } catch (e) { toast.error(errMsg(e)); }
   };
 
@@ -213,6 +226,41 @@ export default function Inserat() {
                       rows={4} className={inputCls} style={st} disabled={l.status === "verkauft"} />
           </div>
 
+          {/* Fahrzeugdaten: 1:1 aus der Akte übernommen — vor Veröffentlichung
+              prüfbar/korrigierbar; erscheinen so beim B2B-Käufer. */}
+          <div className="tactical-card p-4">
+            <div className="text-sm font-bold uppercase tracking-wide mb-3">Fahrzeugdaten</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                ["make_label", "Marke"], ["model_label", "Modell"],
+                ["first_registration", "Erstzulassung"], ["mileage", "Kilometerstand"],
+                ["power_ps", "PS"], ["fuel_label", "Kraftstoff"],
+                ["gearbox_label", "Getriebe"], ["color", "Farbe"],
+                ["previous_owners", "Halter-Anzahl"],
+              ].map(([k, label]) => (
+                <div key={k}>
+                  <label className="text-[11px] text-zinc-500">{label}</label>
+                  <input value={l.data?.[k] ?? ""} disabled={l.status === "verkauft"}
+                         onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, [k]: e.target.value } }))}
+                         className={inputCls} style={st} />
+                </div>
+              ))}
+              <div>
+                <label className="text-[11px] text-zinc-500">Unfallfrei</label>
+                <select value={l.data?.accident_free ?? ""} disabled={l.status === "verkauft"}
+                        onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, accident_free: e.target.value } }))}
+                        className={inputCls + " bg-[#141416]"} style={st}>
+                  <option value="">— bitte angeben —</option>
+                  <option value="Ja">Ja</option>
+                  <option value="Nein">Nein</option>
+                </select>
+              </div>
+            </div>
+            <div className="mt-2 text-[10px] text-zinc-600">
+              Wird 1:1 aus dem Einkauf übernommen — bitte vor der Veröffentlichung prüfen.
+            </div>
+          </div>
+
           {/* Fotos */}
           <div className="tactical-card p-4">
             <div className="flex items-center justify-between">
@@ -296,6 +344,12 @@ export default function Inserat() {
             <button onClick={() => save()} disabled={busy}
                     className="w-full rounded-xl py-3 text-sm font-semibold border disabled:opacity-50" style={st}>
               {busy ? "Speichert…" : "Änderungen speichern"}
+            </button>
+          )}
+          {l.status !== "verkauft" && (
+            <button onClick={removeListing}
+                    className="w-full rounded-xl py-2.5 text-xs text-zinc-500 hover:text-red-400 inline-flex items-center justify-center gap-1.5">
+              <Trash2 size={13} /> Inserat löschen
             </button>
           )}
         </div>

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { buyerApi, useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock } from "lucide-react";
+import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera } from "lucide-react";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
 const fmtEur = (n) => (n == null ? "Preis auf Anfrage" : `${Number(n).toLocaleString("de-DE")} €`);
@@ -295,6 +295,16 @@ function DetailModal({ v, onClose }) {
   const d = v.data || {};
   const phone = v.dealer?.phone;
   const photos = (v.photos || []).map(photoUrl).filter(Boolean);
+  // Vom Händler nachträglich hochgeladene Bilder (z.B. Schäden) — separat
+  // ausgewiesen "zum genauen Hinschauen".
+  const dealerPhotos = (v.dealer_photos || []).map(photoUrl).filter(Boolean)
+    .filter((u) => !photos.includes(u));
+  const allPhotos = [...photos, ...dealerPhotos];
+  const [lb, setLb] = useState(-1);          // Lightbox-Index (-1 = zu)
+  const lbPrev = (e) => { e.stopPropagation(); setLb((i) => (i - 1 + allPhotos.length) % allPhotos.length); };
+  const lbNext = (e) => { e.stopPropagation(); setLb((i) => (i + 1) % allPhotos.length); };
+  const unfallfrei = d.accident_free
+    || (d.accident_damaged === true ? "Nein" : d.accident_damaged === false ? "Ja" : null);
   const specs = [
     ["Erstzulassung", d.first_registration],
     ["Kilometerstand", d.mileage != null ? `${Number(d.mileage).toLocaleString("de-DE")} km` : null],
@@ -303,6 +313,7 @@ function DetailModal({ v, onClose }) {
     ["Leistung", d.power_ps ? `${d.power_ps} PS` : null],
     ["Farbe", d.color],
     ["Vorbesitzer", d.previous_owners],
+    ["Unfallfrei", unfallfrei],
   ].filter(([, val]) => val != null && val !== "");
 
   return (
@@ -313,19 +324,18 @@ function DetailModal({ v, onClose }) {
            onClick={(e) => e.stopPropagation()}>
         <div className="relative">
           {photos[0] ? (
-            <a href={photos[0]} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-              <img src={photos[0]} alt="" className="w-full h-56 sm:h-72 object-cover cursor-zoom-in" />
-            </a>
+            <img src={photos[0]} alt="" onClick={() => setLb(0)}
+                 className="w-full h-56 sm:h-72 object-cover cursor-zoom-in" title="Zum Vergrößern klicken" />
           ) : <div className="w-full h-40 bg-zinc-900 flex items-center justify-center text-zinc-700 text-xs">kein Foto</div>}
           <button onClick={onClose} className="absolute top-3 right-3 w-9 h-9 rounded-full flex items-center justify-center text-white"
                   style={{ background: "rgba(0,0,0,0.5)" }}><X size={18} /></button>
         </div>
         {photos.length > 1 && (
           <div className="flex gap-2 p-3 overflow-x-auto">
-            {photos.slice(1, 20).map((u, i) => (
-              <a key={i} href={u} target="_blank" rel="noreferrer" className="shrink-0" title="Foto in Originalgröße öffnen">
-                <img src={u} alt="" className="h-16 w-24 object-cover rounded-lg hover:opacity-80 cursor-zoom-in" />
-              </a>
+            {photos.slice(1, 40).map((u, i) => (
+              <img key={i} src={u} alt="" onClick={() => setLb(i + 1)}
+                   className="h-16 w-24 object-cover rounded-lg hover:opacity-80 cursor-zoom-in shrink-0"
+                   title="Zum Vergrößern klicken" />
             ))}
           </div>
         )}
@@ -359,6 +369,22 @@ function DetailModal({ v, onClose }) {
             <div className="mt-4">
               <div className="text-[11px] text-zinc-500 mb-1">Bekannte Mängel</div>
               {v.known_defects.map((m, i) => <div key={i} className="text-amber-400 text-sm">• {m}</div>)}
+            </div>
+          )}
+
+          {/* Weitere Bilder vom Händler (z.B. Schäden) — zum genauen Hinschauen */}
+          {dealerPhotos.length > 0 && (
+            <div className="mt-4">
+              <div className="text-[11px] text-zinc-500 mb-2 inline-flex items-center gap-1.5">
+                <Camera size={12} /> Weitere Bilder vom Händler ({dealerPhotos.length})
+              </div>
+              <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                {dealerPhotos.map((u, i) => (
+                  <img key={i} src={u} alt="" onClick={() => setLb(photos.length + i)}
+                       className="aspect-square object-cover rounded-lg hover:opacity-80 cursor-zoom-in"
+                       title="Zum Vergrößern klicken" />
+                ))}
+              </div>
             </div>
           )}
 
@@ -399,6 +425,41 @@ function DetailModal({ v, onClose }) {
           </div>
         </div>
       </div>
+
+      {/* Lightbox: Bild vergrößert, mit ‹ › durch ALLE Bilder blättern */}
+      {lb >= 0 && allPhotos[lb] && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center"
+             style={{ background: "rgba(0,0,0,0.92)" }}
+             onClick={(e) => { e.stopPropagation(); setLb(-1); }}>
+          <img src={allPhotos[lb]} alt=""
+               onClick={(e) => e.stopPropagation()}
+               className="max-h-[88vh] max-w-[92vw] object-contain rounded-lg" />
+          {allPhotos.length > 1 && (
+            <>
+              <button onClick={lbPrev}
+                      className="absolute left-3 sm:left-6 w-11 h-11 rounded-full flex items-center justify-center text-white"
+                      style={{ background: "rgba(255,255,255,0.12)" }} title="Vorheriges Bild">
+                <ChevronLeft size={26} />
+              </button>
+              <button onClick={lbNext}
+                      className="absolute right-3 sm:right-6 w-11 h-11 rounded-full flex items-center justify-center text-white"
+                      style={{ background: "rgba(255,255,255,0.12)" }} title="Nächstes Bild">
+                <ChevronRight size={26} />
+              </button>
+            </>
+          )}
+          <button onClick={(e) => { e.stopPropagation(); setLb(-1); }}
+                  className="absolute top-4 right-4 w-10 h-10 rounded-full flex items-center justify-center text-white"
+                  style={{ background: "rgba(255,255,255,0.12)" }} title="Schließen">
+            <X size={20} />
+          </button>
+          <div className="absolute bottom-4 text-xs text-zinc-400 px-3 py-1 rounded-full"
+               style={{ background: "rgba(0,0,0,0.5)" }}>
+            {lb + 1} / {allPhotos.length}
+            {lb >= photos.length ? " · Weitere Bilder vom Händler" : ""}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

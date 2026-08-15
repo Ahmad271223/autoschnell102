@@ -208,7 +208,8 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
 # =========================================================
 @router.get("/resale")
 async def list_listings(user=Depends(current_haendler), status: Optional[str] = None):
-    query: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    query: Dict[str, Any] = {"dealer_id": user["dealer_id"],
+                             "status": {"$ne": "geloescht"}}
     if status:
         query["status"] = status
     items = await db.resale_listings.find(query, {"_id": 0}) \
@@ -256,7 +257,8 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
         allowed = {"make_label", "model_label", "model_description",
                    "first_registration", "mileage", "fuel_label",
                    "gearbox_label", "power_kw", "power_ps", "color", "vin",
-                   "previous_owners", "features", "description"}
+                   "previous_owners", "features", "description",
+                   "accident_free"}
         merged = dict(l.get("data") or {})
         for k, val in body.data.items():
             if k in allowed:
@@ -267,6 +269,36 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
     fresh = await db.resale_listings.find_one(
         {"id": listing_id}, {"_id": 0})
     return _with_margin(fresh)
+
+
+@router.delete("/resale/{listing_id}")
+async def delete_listing(listing_id: str, user=Depends(current_haendler)):
+    """Inserat loeschen (Soft-Delete). WICHTIG (Beschluss 08/2026): einmal
+    veroeffentlichte Inserate zaehlen im Abrechnungszeitraum WEITER auf das
+    Kontingent — Loeschen gibt den Slot NICHT frei (counted_periods bleibt).
+    Verkaufte Inserate bleiben als Historie erhalten (kein Loeschen)."""
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    if l.get("status") == "verkauft":
+        raise HTTPException(400, "Verkaufte Inserate koennen nicht geloescht "
+                                 "werden (Verkaufs-Historie).")
+    await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"$set": {"status": "geloescht", "deleted_at": now_iso(),
+                  "updated_at": now_iso()}})
+    # Fahrzeug zurueck in den Bestand (falls Uebergang erlaubt).
+    if l.get("vehicle_id"):
+        await try_set_lifecycle(l["vehicle_id"], user["dealer_id"], "bestand",
+                                user=user)
+    await log_activity(user["dealer_id"], user["id"], "inserat.geloescht",
+                       ref=listing_id,
+                       meta={"war_status": l.get("status"),
+                             "kontingent_bleibt": bool(l.get("counted_periods"))})
+    return {"ok": True, "hinweis": "Inserat geloescht. Bereits veroeffentlichte "
+                                   "Inserate zaehlen im laufenden Monat weiter "
+                                   "auf dein Kontingent."}
 
 
 @router.post("/resale/{listing_id}/photos")

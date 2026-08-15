@@ -232,7 +232,8 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_user)):
     ).sort("created_at", -1).to_list(20) if v.get("mobile_ad_id") else []
 
     listings = await db.resale_listings.find(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+         "status": {"$ne": "geloescht"}},
         {"_id": 0},
     ).sort("created_at", -1).to_list(5)
 

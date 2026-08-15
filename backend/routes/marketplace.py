@@ -151,8 +151,13 @@ def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
         "data": {k: data.get(k) for k in (
             "make_label", "model_label", "model_description",
             "first_registration", "mileage", "fuel_label", "gearbox_label",
-            "power_ps", "power_kw", "color", "previous_owners", "features")},
+            "power_ps", "power_kw", "color", "previous_owners", "features",
+            "accident_free", "accident_damaged")},
         "photos": urls[:40],
+        # Vom Haendler nachtraeglich hochgeladene Bilder (z.B. Schaeden) —
+        # beim Kaeufer als 'Weitere Bilder vom Haendler' zum genauen Hinschauen.
+        "dealer_photos": [f"/api/files/{k}"
+                          for k in photos.get("uploaded_keys", [])][:40],
         "price": _price_for(l, is_member=is_member, is_trade=is_trade),
         "price_level": ("netzwerk" if is_member and (l.get("prices") or {}).get("network")
                         else "b2b" if is_trade and (l.get("prices") or {}).get("b2b")
