@@ -50,6 +50,31 @@ CONTENT_W = PAGE_W - 2 * MARGIN
 # im Container); /app/... bleibt als Fallback fuer das alte Deployment.
 _LOCAL_SKETCH_DIR = Path(__file__).resolve().parent.parent / "frontend" / "public" / "damage"
 SKETCH_DIR = _LOCAL_SKETCH_DIR if _LOCAL_SKETCH_DIR.exists() else Path("/app/frontend/public/damage")
+
+# Fuer das PDF reichen 900px-Skizzen (Druckbreite ~8cm) — die 1536px-
+# Originale wuerden jedes Protokoll ~2MB gross und ~1s langsam machen.
+# Die verkleinerten JPEGs werden EINMAL erzeugt und dann wiederverwendet.
+_SKETCH_CACHE_DIR = Path(__file__).resolve().parent / "assets" / "sketch_pdf_cache"
+_PDF_SKETCH_WIDTH = 900
+
+
+def _pdf_sketch(src_name: str) -> str:
+    src = SKETCH_DIR / src_name
+    cached = _SKETCH_CACHE_DIR / (src_name.rsplit(".", 1)[0] + ".jpg")
+    try:
+        if cached.exists() and cached.stat().st_mtime >= src.stat().st_mtime:
+            return str(cached)
+        from PIL import Image as _PILImage
+        _SKETCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        im = _PILImage.open(src).convert("RGB")
+        ratio = _PDF_SKETCH_WIDTH / im.width
+        im = im.resize((_PDF_SKETCH_WIDTH, max(1, int(im.height * ratio))),
+                       _PILImage.LANCZOS)
+        im.save(cached, "JPEG", quality=82, optimize=True)
+        return str(cached)
+    except Exception:
+        # Notfall: Original verwenden (Groesse egal, Hauptsache es rendert)
+        return str(src)
 SKETCHES = {
     "front": {"src": "front.png", "w": 1536, "h": 1024, "label": "Frontansicht"},
     "rear":  {"src": "rear.png",  "w": 1536, "h": 1024, "label": "Heckansicht"},
@@ -219,7 +244,7 @@ class CarSketch(Flowable):
                  max_width_cm: float = 8.0, empty: bool = False) -> None:
         Flowable.__init__(self)
         meta = SKETCHES[view_key]
-        self.png_path = str(SKETCH_DIR / meta["src"])
+        self.png_path = _pdf_sketch(meta["src"])
         self.orig_w = meta["w"]
         self.orig_h = meta["h"]
         self.label = meta["label"]
