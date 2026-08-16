@@ -458,9 +458,13 @@ async def browse_listings(
     km_min: Optional[int] = None, km_max: Optional[int] = None,
     ps_min: Optional[int] = None, ps_max: Optional[int] = None,
     sort: Optional[str] = None, dealer: Optional[str] = None,
+    nur_favoriten: Optional[int] = 0,
 ):
     """Alle für den Betrachter sichtbaren veröffentlichten Fahrzeuge.
-    sort: preis_auf | preis_ab | km_auf | km_ab (Default: neueste zuerst)."""
+    sort: preis_auf | preis_ab | km_auf | km_ab (Default: neueste zuerst).
+    nur_favoriten=1: nur gemerkte Fahrzeuge."""
+    fav_ids = {f["listing_id"] async for f in db.buyer_favorites.find(
+        {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})}
     my_networks = [m["dealer_id"] async for m in db.network_members.find(
         {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
     public_dealer_ids = [d["id"] async for d in db.dealers.find(
@@ -505,7 +509,10 @@ async def browse_listings(
         # Sichtbarkeit "private": nur für eingeladene Netzwerk-Mitglieder.
         if (l.get("visibility") or "public") == "private" and not member:
             continue
+        if nur_favoriten and l.get("id") not in fav_ids:
+            continue
         view = _public_listing_view(l, is_member=member, is_trade=is_trade)
+        view["is_favorit"] = l.get("id") in fav_ids
         price = view["price"] or 0
         if price_min and price < price_min:
             continue
@@ -539,6 +546,38 @@ async def browse_listings(
     elif sort == "km_ab":
         out.sort(key=lambda v: (v["data"].get("mileage") or -1), reverse=True)
     return out
+
+
+# ---------- Favoriten (Merkliste) ----------
+@router.post("/marktplatz/favoriten/{listing_id}")
+async def toggle_favorit(listing_id: str, user=Depends(current_buyer)):
+    """Fahrzeug merken / Merken aufheben (Toggle). Bewusst ohne Zugangs-Abo-
+    Pflicht beim ENTFERNEN; zum Setzen muss das Inserat sichtbar sein."""
+    existing = await db.buyer_favorites.find_one(
+        {"buyer_user_id": user["id"], "listing_id": listing_id})
+    if existing:
+        await db.buyer_favorites.delete_one({"_id": existing["_id"]})
+        return {"favorit": False}
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "status": "veroeffentlicht"}, {"_id": 0, "dealer_id": 1})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    await db.buyer_favorites.insert_one({
+        "id": str(uuid.uuid4()),
+        "buyer_user_id": user["id"],
+        "listing_id": listing_id,
+        "dealer_id": l.get("dealer_id"),
+        "created_at": now_iso(),
+    })
+    return {"favorit": True}
+
+
+@router.get("/marktplatz/favoriten")
+async def list_favoriten(user=Depends(current_buyer)):
+    """IDs der gemerkten Fahrzeuge (fuers Herz-Icon)."""
+    ids = [f["listing_id"] async for f in db.buyer_favorites.find(
+        {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})]
+    return {"listing_ids": ids}
 
 
 @router.get("/marktplatz/haendler/{slug}")

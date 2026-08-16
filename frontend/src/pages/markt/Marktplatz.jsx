@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { buyerApi, useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera } from "lucide-react";
+import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera, Heart } from "lucide-react";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
 const fmtEur = (n) => (n == null ? "Preis auf Anfrage" : `${Number(n).toLocaleString("de-DE")} €`);
@@ -37,7 +37,26 @@ export default function Marktplatz() {
   const [sort, setSort] = useState("");
   const [tick, setTick] = useState(0);
   const [makes, setMakes] = useState([]);
+  const [favs, setFavs] = useState(() => new Set());
+  const [nurFavs, setNurFavs] = useState(false);
   const apply = () => setTick((t) => t + 1);
+
+  // Herz-Klick: merken/entfernen — optimistisch, Server bestaetigt.
+  const toggleFav = async (e, id) => {
+    e.stopPropagation();
+    const was = favs.has(id);
+    setFavs((f) => { const n = new Set(f); was ? n.delete(id) : n.add(id); return n; });
+    try {
+      const r = await buyerApi.post(`/marktplatz/favoriten/${id}`);
+      if (r.data.favorit !== !was) {
+        setFavs((f) => { const n = new Set(f); r.data.favorit ? n.add(id) : n.delete(id); return n; });
+      }
+      toast.success(r.data.favorit ? "Gemerkt" : "Aus Favoriten entfernt", { duration: 1200 });
+    } catch (err) {
+      setFavs((f) => { const n = new Set(f); was ? n.add(id) : n.delete(id); return n; });
+      toast.error(errMsg(err));
+    }
+  };
   const models = makes.find((m) => m.name === filters.make)?.models || [];
 
   const isBuyer = buyer?.role === "b2b_buyer";
@@ -58,6 +77,7 @@ export default function Marktplatz() {
         if (String(val).trim() !== "") p.set(k, val);
       });
       if (sort) p.set("sort", sort);
+      if (nurFavs) p.set("nur_favoriten", "1");
       const qs = p.toString();
       const r = await buyerApi.get(`/marktplatz/listings${qs ? `?${qs}` : ""}`);
       setItems(r.data);
@@ -65,18 +85,21 @@ export default function Marktplatz() {
       if (e?.response?.status === 402) setAccess((a) => ({ ...(a || {}), active: false }));
       else toast.error(errMsg(e, "Fahrzeuge konnten nicht geladen werden"));
     }
-  }, [q, filters, sort]);
+  }, [q, filters, sort, nurFavs]);
 
   useEffect(() => { if (ready && !buyer) nav("/markt/login"); }, [ready, buyer, nav]);
   useEffect(() => { if (buyer) loadAccess(); }, [buyer, loadAccess]);
   useEffect(() => {
     if (!buyer) return;
     buyerApi.get("/manual/makes").then((r) => setMakes(r.data)).catch(() => {});
+    buyerApi.get("/marktplatz/favoriten")
+      .then((r) => setFavs(new Set(r.data.listing_ids || [])))
+      .catch(() => {});
   }, [buyer]);
   // Nur bei Zugangs-Freischaltung oder explizitem Anwenden neu laden (tick),
   // NICHT bei jedem Tastendruck in den Filterfeldern.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (active) loadItems(); }, [active, tick]);
+  useEffect(() => { if (active) loadItems(); }, [active, tick, nurFavs]);
 
   const requestAccess = async () => {
     setRequesting(true);
@@ -164,6 +187,14 @@ export default function Marktplatz() {
                   <option value="km_auf">Wenigste km</option>
                   <option value="km_ab">Meiste km</option>
                 </select>
+                <button onClick={() => setNurFavs((x) => !x)}
+                        data-testid="filter-favoriten"
+                        className={`h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 transition ${
+                          nurFavs ? "text-red-400 border-red-500/50 bg-red-500/10" : "text-zinc-400"}`}
+                        style={nurFavs ? {} : { borderColor: "var(--border-default)" }}>
+                  <Heart size={14} fill={nurFavs ? "currentColor" : "none"} />
+                  Favoriten{favs.size ? ` (${favs.size})` : ""}
+                </button>
               </div>
             </div>
 
@@ -244,9 +275,18 @@ export default function Marktplatz() {
                   <div key={v.id} onClick={() => setSel(v)}
                        className="tactical-card overflow-hidden flex flex-col cursor-pointer hover:border-white/25 transition"
                        data-testid={`markt-${v.id}`}>
-                    <div className="h-44 overflow-hidden bg-zinc-900">
+                    <div className="h-44 overflow-hidden bg-zinc-900 relative">
                       {img ? <img src={img} alt="" className="w-full h-full object-cover" />
                            : <div className="w-full h-full flex items-center justify-center text-zinc-700 text-xs">kein Foto</div>}
+                      <button onClick={(e) => toggleFav(e, v.id)}
+                              data-testid={`fav-${v.id}`}
+                              title={favs.has(v.id) ? "Aus Favoriten entfernen" : "Fahrzeug merken"}
+                              className="absolute top-2 right-2 w-9 h-9 rounded-full flex items-center justify-center transition"
+                              style={{ background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)" }}>
+                        <Heart size={17}
+                               className={favs.has(v.id) ? "text-red-500" : "text-white/80"}
+                               fill={favs.has(v.id) ? "currentColor" : "none"} />
+                      </button>
                     </div>
                     <div className="p-4 flex-1 flex flex-col">
                       <div className="font-semibold">{d.make_label} {d.model_label}</div>
@@ -286,12 +326,14 @@ export default function Marktplatz() {
         )}
       </div>
 
-      {sel && <DetailModal v={sel} onClose={() => setSel(null)} />}
+      {sel && <DetailModal v={sel} onClose={() => setSel(null)}
+                           isFav={favs.has(sel.id)}
+                           onFav={(e) => toggleFav(e, sel.id)} />}
     </div>
   );
 }
 
-function DetailModal({ v, onClose }) {
+function DetailModal({ v, onClose, isFav, onFav }) {
   const d = v.data || {};
   const phone = v.dealer?.phone;
   const photos = (v.photos || []).map(photoUrl).filter(Boolean);
@@ -329,6 +371,14 @@ function DetailModal({ v, onClose }) {
           ) : <div className="w-full h-40 bg-zinc-900 flex items-center justify-center text-zinc-700 text-xs">kein Foto</div>}
           <button onClick={onClose} className="absolute top-3 right-3 w-9 h-9 rounded-full flex items-center justify-center text-white"
                   style={{ background: "rgba(0,0,0,0.5)" }}><X size={18} /></button>
+          <button onClick={onFav}
+                  data-testid="fav-modal"
+                  title={isFav ? "Aus Favoriten entfernen" : "Fahrzeug merken"}
+                  className="absolute top-3 right-14 w-9 h-9 rounded-full flex items-center justify-center"
+                  style={{ background: "rgba(0,0,0,0.5)" }}>
+            <Heart size={17} className={isFav ? "text-red-500" : "text-white/80"}
+                   fill={isFav ? "currentColor" : "none"} />
+          </button>
         </div>
         {photos.length > 1 && (
           <div className="flex gap-2 p-3 overflow-x-auto">

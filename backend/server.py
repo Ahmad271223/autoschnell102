@@ -431,6 +431,14 @@ async def on_start():
         asyncio.create_task(run_cleanup_forever(db))
     except Exception as exc:
         log.warning("cleanup task start failed: %s", exc)
+    # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
+    # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
+    # nach, wenn das letzte Backup älter als 24h ist.
+    try:
+        from backup_service import run_backup_forever
+        asyncio.create_task(run_backup_forever())
+    except Exception as exc:
+        log.warning("backup task start failed: %s", exc)
     # Snapshot Self-Heal: Beim Boot alle Snapshots, die in pending/running
     # hängen geblieben sind (z.B. weil das Backend während eines Jobs
     # neu gestartet wurde), erneut anstoßen. Sonst würde das Frontend
