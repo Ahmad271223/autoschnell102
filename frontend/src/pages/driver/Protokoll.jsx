@@ -7,6 +7,7 @@ import {
   ArrowLeft, Save, CheckCircle2, FileText, AlertTriangle, Pencil,
 } from "lucide-react";
 import SignaturePad from "@/components/SignaturePad";
+import DamageSelector from "@/components/DamageSelector";
 
 /* Section/Check sind bewusst AUSSERHALB der Seite definiert: innerhalb
  * definierte Komponenten bekommen bei jedem Render eine neue Identität —
@@ -48,7 +49,7 @@ export default function Protokoll() {
   const [data, setData] = useState(null);
   const [f, setF] = useState({
     documents: {}, features: {}, condition: {}, keys_count: "", keys_expected: "",
-    notes: "", place: "", damages_confirmed: false,
+    notes: "", place: "", damages_confirmed: false, new_damages: [],
   });
   const [sigDriver, setSigDriver] = useState(null);
   const [sigSeller, setSigSeller] = useState(null);
@@ -69,6 +70,7 @@ export default function Protokoll() {
           condition: p.condition || {}, keys_count: p.keys_count || "",
           keys_expected: p.keys_expected || "", notes: p.notes || "",
           place: p.place || "", damages_confirmed: !!p.damages_confirmed,
+          new_damages: p.new_damages || [],
         }));
       }
       setSellerName(r.data.appointment?.seller_name || "");
@@ -291,7 +293,9 @@ export default function Protokoll() {
         ) : (
           <div className="space-y-1 text-sm">
             {data.damages.map((d, i) => (
-              <div key={i} className="text-amber-400">• {d.label || d.note || d.type || "Schaden"}</div>
+              <div key={i} className="text-amber-400">
+                • {[d.type_label || d.label || d.type, d.zone].filter(Boolean).join(" — ") || "Schaden"}
+              </div>
             ))}
           </div>
         )}
@@ -300,10 +304,30 @@ export default function Protokoll() {
         </Check>
       </Section>
 
-      {/* 6 Fotos — Hinweis auf den bestehenden Abhol-Check */}
-      <Section n="6" title="Vor-Ort-Aufnahme" hint="Fotos & Abweichungen erfasst du über den Abhol-Check auf der Fahrten-Seite.">
-        <div className="text-xs text-zinc-500">
-          Abweichungen mit Foto (z.B. Kratzer) meldest du im Abhol-Check —
+      {/* 6 Vor-Ort-Aufnahme: neue Schäden per Tipp auf die Skizze markieren —
+          dieselbe Skizze wie im Kaufvertrag. Landet im PDF (Abschnitt 6). */}
+      <Section n="6" title="Vor-Ort-Aufnahme"
+               hint="Neue Schäden? Art wählen und auf die Fahrzeug-Skizze tippen — genau wie im Kaufvertrag.">
+        {isFinal ? (
+          (f.new_damages || []).length === 0 ? (
+            <div className="text-sm text-zinc-500">Keine neuen Schäden erfasst.</div>
+          ) : (
+            <div className="space-y-1 text-sm">
+              {f.new_damages.map((d, i) => (
+                <div key={d.id || i} className="text-red-400">
+                  • {[d.type_label, d.zone].filter(Boolean).join(" — ")}
+                </div>
+              ))}
+            </div>
+          )
+        ) : (
+          <DamageSelector
+            damages={f.new_damages || []}
+            onChange={(list) => upd({ new_damages: list })}
+          />
+        )}
+        <div className="text-xs text-zinc-500 mt-3">
+          Fotos zu Abweichungen machst du zusätzlich im Abhol-Check —
           sie erscheinen automatisch in der Fahrzeugakte des Händlers.
         </div>
       </Section>

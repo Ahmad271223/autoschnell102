@@ -796,11 +796,39 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     story.append(_section("6 · Vor-Ort-Aufnahme durch den Fahrer", st))
     story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        "Der Fahrer markiert hier neu entdeckte Beschädigungen mit Kreuz (X) "
-        "oder Kreis (O) und notiert die Art im Feld Bemerkungen.", st["small"]))
-    story.append(Spacer(1, 0.2 * cm))
-    story.append(KeepTogether(_sketch_grid([], empty=True)))
+    _new_damages = filled.get("new_damages") or []
+    if _new_damages:
+        # Digital ausgefuellt: die vom Fahrer auf der Skizze markierten
+        # NEUEN Schaeden — gleiche Darstellung wie die Vertrags-Schaeden.
+        story.append(Paragraph(
+            "Vom Fahrer vor Ort neu erfasste Beschädigungen "
+            f"({len(_new_damages)}):", st["small"]))
+        story.append(Spacer(1, 0.2 * cm))
+        nd_legend = _damage_legend(_new_damages, st)
+        if nd_legend:
+            story.append(nd_legend)
+            story.append(Spacer(1, 0.15 * cm))
+        # Klartext-Liste (Art — Bauteil), damit der Nachweis auch ohne
+        # Blick auf die Skizze eindeutig ist.
+        _nd_lines = " &nbsp;·&nbsp; ".join(
+            f"<b>{_xe(str(d.get('type_label') or '?'))}</b>: "
+            f"{_xe(str(d.get('zone') or d.get('view') or '?'))}"
+            for d in _new_damages[:20])
+        story.append(Paragraph(_nd_lines, st["small"]))
+        story.append(Spacer(1, 0.25 * cm))
+        story.append(KeepTogether(_sketch_grid(_new_damages, empty=False)))
+    else:
+        if filled:
+            story.append(Paragraph(
+                "Der Fahrer hat vor Ort KEINE neuen Beschädigungen erfasst.",
+                st["small"]))
+            story.append(Spacer(1, 0.2 * cm))
+        else:
+            story.append(Paragraph(
+                "Der Fahrer markiert hier neu entdeckte Beschädigungen mit Kreuz (X) "
+                "oder Kreis (O) und notiert die Art im Feld Bemerkungen.", st["small"]))
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(KeepTogether(_sketch_grid([], empty=True)))
 
     story.append(Spacer(1, 0.3 * cm))
     story.append(_section("7 · Bemerkungen des Fahrers", st))

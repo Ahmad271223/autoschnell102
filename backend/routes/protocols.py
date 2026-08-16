@@ -63,6 +63,9 @@ class ProtocolIn(BaseModel):
     features: Optional[Dict[str, bool]] = None          # Abschnitt 3
     condition: Optional[Dict[str, Any]] = None          # Abschnitt 4
     damages_confirmed: Optional[bool] = None            # Abschnitt 5
+    # Abschnitt 6: neu entdeckte Schaeden, per Tipp auf die Fahrzeug-Skizze
+    # markiert (gleiches Format wie die Kaufvertrag-Schaeden: view/zone/x/y/...)
+    new_damages: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=40)
     notes: Optional[str] = Field(default=None, max_length=5000)   # Abschnitt 7
     place: Optional[str] = Field(default=None, max_length=200)    # Ort (Abschnitt 8)
 
@@ -221,7 +224,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
 
     filled = {k: doc.get(k) for k in
               ("vehicle_check", "documents", "keys_count", "keys_expected",
-               "features", "condition", "damages_confirmed", "notes")}
+               "features", "condition", "damages_confirmed", "new_damages",
+               "notes")}
     filled["place"] = body.place or doc.get("place") or ""
     filled["seller_name"] = body.seller_name or appt.get("seller_name") or ""
     filled["driver_name"] = driver.get("display_name", "")
