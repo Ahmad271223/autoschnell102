@@ -32,6 +32,15 @@ async def current_haendler(user=Depends(current_user)):
     return user
 
 
+async def current_firma(user=Depends(current_user)):
+    """Lese-Zugriff auf Bestand/Akte: Chef UND seine Sucher. Admins und
+    Zwischenhändler (b2b_buyer) haben hier nichts zu suchen — strikte
+    Rollentrennung, auch wenn die Liste für sie ohnehin leer wäre."""
+    if user.get("role") not in ("dealer", "sucher"):
+        raise HTTPException(403, "Nur für Händler-Accounts (Chef und Sucher)")
+    return user
+
+
 # ---------- Models ----------
 class DecisionIn(BaseModel):
     decision: Literal["bestand", "verkaufsentwurf", "loeschen"]
@@ -165,7 +174,7 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
 #                     BESTANDSLISTE
 # =========================================================
 @router.get("/bestand")
-async def list_bestand(user=Depends(current_user),
+async def list_bestand(user=Depends(current_firma),
                        lifecycle: Optional[str] = None,
                        source: Optional[str] = None):
     """Fahrzeugbestand des Händlers mit Lifecycle-/Quellen-Filter.
@@ -204,7 +213,7 @@ async def list_bestand(user=Depends(current_user),
 #                     FAHRZEUGAKTE
 # =========================================================
 @router.get("/vehicles/{vehicle_id}/akte")
-async def vehicle_akte(vehicle_id: str, user=Depends(current_user)):
+async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     """Durchgehende Fahrzeugakte: aggregiert alle vorhandenen Informationen
     zu einem Fahrzeug — ohne Datendopplung, direkt aus den Quell-Collections."""
     v = await db.vehicles.find_one(

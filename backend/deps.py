@@ -94,9 +94,13 @@ async def get_subscription_status(dealer_id: str,
             {"dealer_id": dealer_id, "subject_user_id": {"$exists": False}},
             sort=[("created_at", -1)])
         if not sub:
-            # Fallback: alte Abos ohne das Feld (vor Phase 2 angelegt)
+            # Fallback: alte Abos, bei denen das Feld explizit null ist.
+            # WICHTIG: NICHT einfach irgendein Abo des Haendlers nehmen —
+            # sonst wuerde das persoenliche Abo eines Suchers faelschlich
+            # fuer den Chef zaehlen (Chef muss sein EIGENES Abo haben).
             sub = await db.subscriptions.find_one(
-                {"dealer_id": dealer_id}, sort=[("created_at", -1)])
+                {"dealer_id": dealer_id, "subject_user_id": None},
+                sort=[("created_at", -1)])
     if not sub:
         return {"active": False, "plan": None, "expires_at": None, "status": "none"}
     plan = sub.get("plan")
