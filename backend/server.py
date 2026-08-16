@@ -56,6 +56,7 @@ from routes import drivers as drivers_routes
 from routes import listings as listings_routes
 from routes import manual_search as manual_search_routes
 from routes import payments as payments_routes
+from routes import protocols as protocols_routes
 from routes import resale as resale_routes
 from routes import team as team_routes
 from routes import marketplace as marketplace_routes
@@ -503,6 +504,7 @@ api.include_router(bestand_routes.router)
 api.include_router(resale_routes.router)
 api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router)
+api.include_router(protocols_routes.router)
 
 app.include_router(api)
 

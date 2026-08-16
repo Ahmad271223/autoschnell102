@@ -27,8 +27,8 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.platypus import (
-    BaseDocTemplate, Flowable, Frame, KeepTogether, PageBreak, PageTemplate,
-    Paragraph, Spacer, Table, TableStyle,
+    BaseDocTemplate, Flowable, Frame, Image, KeepTogether, PageBreak,
+    PageTemplate, Paragraph, Spacer, Table, TableStyle,
 )
 
 # Einheitliches Design mit dem Kaufvertrag (pdf_service.py):
@@ -123,6 +123,11 @@ def _fmt_km(v: Any) -> str:
         return str(v)
 
 
+def now_iso_str() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _fmt_date(iso: Optional[str]) -> str:
     if not iso:
         return "—"
@@ -132,7 +137,8 @@ def _fmt_date(iso: Optional[str]) -> str:
         return str(iso)
 
 
-def _check_row(label: str, value: Any, options: List[str], st, *, bold_value: bool = False) -> List:
+def _check_row(label: str, value: Any, options: List[str], st, *,
+               bold_value: bool = False, selected: Any = None) -> List:
     """Builds a row: [label | value | ○ option1 | ○ option2 | ...]."""
     label_style = ParagraphStyle(
         "rl", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY)
@@ -144,11 +150,18 @@ def _check_row(label: str, value: Any, options: List[str], st, *, bold_value: bo
         "ro", parent=st["body"], fontSize=10, leading=13,
         textColor=GREY, alignment=TA_LEFT,
     )
+    opt_style_sel = ParagraphStyle(
+        "ros", parent=opt_style, textColor=PRIMARY, fontName="Helvetica-Bold")
     row = [Paragraph(label, label_style), Paragraph(_xe(_fmt(value)), value_style)]
     for opt in options:
         # "[ ]" statt "○": das Kreis-Zeichen existiert nicht in Helvetica
-        # und wuerde als schwarzes Quadrat gedruckt.
-        row.append(Paragraph(f"[&nbsp;&nbsp;]&nbsp;{opt}", opt_style))
+        # und wuerde als schwarzes Quadrat gedruckt. Bei ausgefuellten
+        # Protokollen wird die gewaehlte Option mit [X] markiert.
+        picked = (selected is not None
+                  and str(selected).strip().lower() == str(opt).strip().lower())
+        box = "[X]" if picked else "[&nbsp;&nbsp;]"
+        style = opt_style_sel if picked else opt_style
+        row.append(Paragraph(f"{box}&nbsp;{opt}", style))
     return row
 
 
@@ -163,13 +176,17 @@ def _check_table(rows: List[List], col_widths: List[float]) -> Table:
     return t
 
 
-def _checklist(items: List[tuple], st, col_count: int = 2) -> Table:
-    """Renders a grid of ○ Label / ○ Label items. `items` is list of
-    (label, sub_note?) tuples; sub_note is optional gray line."""
+def _checklist(items: List[tuple], st, col_count: int = 2,
+               checked: Optional[Dict[str, bool]] = None) -> Table:
+    """Renders a grid of [ ] Label items. `items` is list of
+    (label, sub_note?) tuples; sub_note is optional gray line.
+    `checked` (Label -> bool) markiert erledigte Punkte mit [X]."""
     cells = []
     for item in items:
         label, note = (item if isinstance(item, tuple) else (item, ""))
-        txt = f"[&nbsp;&nbsp;]&nbsp;{_xe(str(label))}"
+        is_checked = bool((checked or {}).get(str(label)))
+        box = "[X]" if is_checked else "[&nbsp;&nbsp;]"
+        txt = f"{box}&nbsp;{_xe(str(label))}"
         para_html = f"<font size=9 color='#0A0A0A'>{txt}</font>"
         if note:
             para_html += f"<br/><font size=7 color='#71717A'>{_xe(str(note))}</font>"
@@ -430,13 +447,22 @@ def build_pickup_pdf(
     contract: Optional[Dict[str, Any]] = None,
     dealer: Optional[Dict[str, Any]] = None,
     driver: Optional[Dict[str, Any]] = None,
+    filled: Optional[Dict[str, Any]] = None,
 ) -> bytes:
-    """Returns PDF bytes for the pickup / handover protocol."""
+    """Returns PDF bytes for the pickup / handover protocol.
+
+    Ohne `filled` entsteht das LEERE Formular zum Ausdrucken (unveraendert).
+    Mit `filled` (aus der Fahrer-App) wird dasselbe Protokoll AUSGEFUELLT
+    gerendert: Haken gesetzt, Werte eingetragen, Unterschriften eingebettet."""
     appointment = appointment or {}
     vehicle = vehicle or {}
     contract = contract or {}
     dealer = dealer or {}
     driver = driver or {}
+    filled = filled or {}
+    _fill_docs = filled.get("documents") or {}
+    _fill_feats = filled.get("features") or {}
+    _fill_cond = filled.get("condition") or {}
 
     # Damages: prefer contract.damages, fallback to vehicle.damages
     damages = (contract.get("damages") or vehicle.get("damages") or [])
@@ -663,12 +689,13 @@ def build_pickup_pdf(
         ("Servicebuch / Scheckheft", "gestempelt"),
         ("COC-Papiere (EG-Übereinstimmung)", "falls vorhanden"),
         ("Bedienungsanleitung", ""),
-        ("Schlüssel", "Anzahl: _____ von _____"),
+        ("Schlüssel", (f"Anzahl: {filled.get('keys_count') or '_____'} von "
+                       f"{filled.get('keys_expected') or '_____'}")),
         ("Zweitsatz Reifen", "Winter / Sommer / nein"),
         ("Ladekabel / Adapter", "bei E-/Hybrid-Fahrzeugen"),
         ("Werkzeug / Warndreieck / Verbandskasten", ""),
     ]
-    story.append(_checklist(docs_items, st, col_count=2))
+    story.append(_checklist(docs_items, st, col_count=2, checked=_fill_docs))
 
     story.append(Spacer(1, 0.4 * cm))
     story.append(_section("3 · Ausstattung laut Inserat — vor Ort prüfen", st))
@@ -695,28 +722,44 @@ def build_pickup_pdf(
                                st["small"]))
         story.append(Spacer(1, 0.1 * cm))
 
-    story.append(_checklist(feat_items, st, col_count=2))
+    story.append(_checklist(feat_items, st, col_count=2, checked=_fill_feats))
 
     story.append(Spacer(1, 0.4 * cm))
     story.append(_section("4 · Technischer Zustand — Fahrer trägt ein", st))
     story.append(Spacer(1, 6))
+    def _opts(field: str, options: List[str]) -> str:
+        """Optionen-Zeile; bei ausgefuelltem Protokoll ist die gewaehlte
+        Option mit [X] markiert (sonst alle leer wie im Papierformular)."""
+        sel = str(_fill_cond.get(field, "") or "").strip().lower()
+        parts = []
+        for o in options:
+            hit = sel and sel == o.strip().lower()
+            parts.append(("<b>[X]</b>" if hit else "[&nbsp;]") + f" {o}")
+        return " &nbsp; ".join(parts)
+
+    def _val(field: str, empty: str, suffix: str = "") -> str:
+        v = _fill_cond.get(field)
+        if v in (None, ""):
+            return empty
+        return f"<b>{_xe(str(v))}{suffix}</b>"
+
     tech_rows = [
         [Paragraph("Kilometerstand bei Abholung", st["check_label"]),
-         Paragraph("<u>_____________ km</u>", st["value"]),
+         Paragraph(_val("mileage", "<u>_____________ km</u>", " km"), st["value"]),
          Paragraph("Tankfüllstand", st["check_label"]),
-         Paragraph("[&nbsp;] leer &nbsp; [&nbsp;] ¼ &nbsp; [&nbsp;] ½ &nbsp; [&nbsp;] ¾ &nbsp; [&nbsp;] voll", st["check_opt"])],
+         Paragraph(_opts("fuel_level", ["leer", "1/4", "1/2", "3/4", "voll"]), st["check_opt"])],
         [Paragraph("Reifenprofil VL / VR / HL / HR", st["check_label"]),
-         Paragraph("___ / ___ / ___ / ___ mm", st["value"]),
+         Paragraph(_val("tire_profile", "___ / ___ / ___ / ___ mm", " mm"), st["value"]),
          Paragraph("Fahrverhalten (Probefahrt)", st["check_label"]),
-         Paragraph("[&nbsp;] unauffällig &nbsp; [&nbsp;] Mängel (Bemerkung)", st["check_opt"])],
+         Paragraph(_opts("driving", ["ok", "Mängel", "nicht gefahren"]), st["check_opt"])],
         [Paragraph("Batterie / Starter", st["check_label"]),
-         Paragraph("[&nbsp;] OK &nbsp; [&nbsp;] schwach &nbsp; [&nbsp;] defekt", st["check_opt"]),
+         Paragraph(_opts("battery", ["ok", "schwach", "defekt"]), st["check_opt"]),
          Paragraph("Kontrollleuchten leuchten", st["check_label"]),
-         Paragraph("[&nbsp;] keine &nbsp; [&nbsp;] ja (Bemerkung)", st["check_opt"])],
+         Paragraph(_opts("warning_lights", ["nein", "ja"]), st["check_opt"])],
         [Paragraph("Sauberkeit Innenraum", st["check_label"]),
-         Paragraph("[&nbsp;] OK &nbsp; [&nbsp;] mangelhaft", st["check_opt"]),
+         Paragraph(_opts("clean_inside", ["gut", "mittel", "schlecht"]), st["check_opt"]),
          Paragraph("Sauberkeit Außen", st["check_label"]),
-         Paragraph("[&nbsp;] OK &nbsp; [&nbsp;] mangelhaft", st["check_opt"])],
+         Paragraph(_opts("clean_outside", ["gut", "mittel", "schlecht"]), st["check_opt"])],
     ]
     tech_t = Table(tech_rows, colWidths=[4.5 * cm, 4.2 * cm, 4.5 * cm, 4.3 * cm])
     tech_t.setStyle(TableStyle([
@@ -762,10 +805,16 @@ def build_pickup_pdf(
     story.append(Spacer(1, 0.3 * cm))
     story.append(_section("7 · Bemerkungen des Fahrers", st))
     story.append(Spacer(1, 4))
-    # Draw 6 empty lines
+    # Ausgefuellt: echter Text; sonst 6 leere Linien zum Handschreiben.
     bem_lines = []
-    for _ in range(6):
-        bem_lines.append([Paragraph("", st["body"])])
+    _notes = (filled.get("notes") or "").strip()
+    if _notes:
+        bem_lines.append([Paragraph(_xe(_notes).replace(chr(10), "<br/>"), st["body"])])
+        for _ in range(2):
+            bem_lines.append([Paragraph("", st["body"])])
+    else:
+        for _ in range(6):
+            bem_lines.append([Paragraph("", st["body"])])
     bem_t = Table(bem_lines, colWidths=[17.5 * cm])
     bem_t.setStyle(TableStyle([
         ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
@@ -777,12 +826,28 @@ def build_pickup_pdf(
     # ---- Unterschriften — umrahmte Boxen, gleiche Optik wie im Kaufvertrag ----
     sig_col_w = (CONTENT_W - 0.5 * cm) / 2
 
-    def _sig_box(role: str) -> Table:
+    def _sig_img(raw: Optional[bytes]):
+        """Gezeichnete Unterschrift als Bild — sonst Leerraum zum Unterschreiben."""
+        if not raw:
+            return Spacer(1, 22)
+        try:
+            img = Image(io.BytesIO(raw))
+            ratio = (img.imageHeight or 1) / (img.imageWidth or 1)
+            img.drawWidth = min(sig_col_w - 20, 6.5 * cm)
+            img.drawHeight = min(img.drawWidth * ratio, 1.8 * cm)
+            img.hAlign = "LEFT"
+            return img
+        except Exception:
+            return Spacer(1, 22)
+
+    def _sig_box(role: str, *, sig: Optional[bytes] = None,
+                 who: str = "", place_date: str = "") -> Table:
         box = Table([
-            [Paragraph(f"<b>{_xe(role)}</b>", st["sig_label"])],
-            [Spacer(1, 34)],
+            [Paragraph(f"<b>{_xe(role)}</b>" + (f" &nbsp;<font size=8 color='#71717A'>{_xe(who)}</font>" if who else ""),
+                       st["sig_label"])],
+            [Paragraph(_xe(place_date), st["body"]) if place_date else Spacer(1, 34)],
             [Paragraph("Ort, Datum", st["sig_label"])],
-            [Spacer(1, 22)],
+            [_sig_img(sig)],
             [Paragraph("Unterschrift", st["sig_label"])],
         ], colWidths=[sig_col_w])
         box.setStyle(TableStyle([
@@ -799,8 +864,19 @@ def build_pickup_pdf(
         ]))
         return box
 
+    _place_date = ""
+    if filled:
+        _place = filled.get("place") or ""
+        _date = _fmt_date(now_iso_str())
+        _place_date = f"{_place}, {_date}" if _place else _date
     sig_t = Table(
-        [[_sig_box("Verkäufer / Übergebender"), "", _sig_box("Fahrer (Abholer)")]],
+        [[_sig_box("Verkäufer / Übergebender",
+                   sig=filled.get("signature_seller"),
+                   who=filled.get("seller_name", ""), place_date=_place_date),
+          "",
+          _sig_box("Fahrer (Abholer)",
+                   sig=filled.get("signature_driver"),
+                   who=filled.get("driver_name", ""), place_date=_place_date)]],
         colWidths=[sig_col_w, 0.5 * cm, sig_col_w],
     )
     sig_t.setStyle(TableStyle([

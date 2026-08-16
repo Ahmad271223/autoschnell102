@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { driverApi } from "@/context/DriverContext";
 import { errMsg, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
 import {
-  Calendar, MapPin, Phone, FileText,
+  Calendar, MapPin, Phone, FileText, ClipboardCheck,
   CheckCircle2, Car, ChevronDown, ChevronUp, Building2, XCircle,
 } from "lucide-react";
 import PhotoGallery from "@/components/PhotoGallery";
@@ -181,12 +182,21 @@ export default function DriverDashboard() {
                           <PhotoGallery photos={photos} label="Fahrzeug-Fotos" />
                         )}
 
+                        {/* Digitales Protokoll: dieselben Punkte wie im PDF,
+                            direkt in der App ausfüllbar inkl. Unterschrift. */}
+                        <Link to={`/fahrer/protokoll/${a.id}`}
+                              data-testid={`protokoll-${a.id}`}
+                              className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold kinetic-button mb-2">
+                          <ClipboardCheck size={16} /> Protokoll ausfüllen
+                        </Link>
+
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <a href={`${API_BASE}/driver/appointments/${a.id}/pickup-order.pdf${authQ}`}
                              target="_blank" rel="noreferrer"
                              data-testid={`pickup-pdf-${a.id}`}
-                             className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold kinetic-button">
-                            <FileText size={15} /> Abholauftrag
+                             className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm border"
+                             style={{ borderColor: "var(--border-default)" }}>
+                            <FileText size={15} /> Papier-PDF
                           </a>
                           {a.contract_id && (
                             <a href={`${API_BASE}/driver/contracts/${a.contract_id}/pdf${authQ}`}

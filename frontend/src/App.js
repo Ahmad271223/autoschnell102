@@ -45,6 +45,7 @@ import DriverRegister from "@/pages/driver/DriverRegister";
 import DriverLayout from "@/pages/driver/DriverLayout";
 import DriverDashboard from "@/pages/driver/DriverDashboard";
 import DriverSettings from "@/pages/driver/DriverSettings";
+import DriverProtokoll from "@/pages/driver/Protokoll";
 
 import BuyerLogin from "@/pages/markt/BuyerLogin";
 import BuyerRegister from "@/pages/markt/BuyerRegister";
@@ -117,6 +118,7 @@ export default function App() {
             <Route path="/fahrer/register" element={<DriverRegister />} />
             <Route path="/fahrer" element={<DriverLayout />}>
               <Route index element={<DriverDashboard />} />
+              <Route path="protokoll/:id" element={<DriverProtokoll />} />
               <Route path="einstellungen" element={<DriverSettings />} />
             </Route>
 
