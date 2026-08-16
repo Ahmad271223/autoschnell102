@@ -526,7 +526,8 @@ async def browse_listings(
                  "logo_url": 1, "opening_hours": 1})
             dealer_names[l["dealer_id"]] = dl or {}
         dl = dealer_names[l["dealer_id"]]
-        view["dealer"] = {"company_name": dl.get("company_name", ""),
+        view["dealer"] = {"id": l["dealer_id"],
+                          "company_name": dl.get("company_name", ""),
                           "city": dl.get("city", ""),
                           "slug": (dl.get("marketplace") or {}).get("slug", ""),
                           "phone": dl.get("phone") or dl.get("whatsapp_number") or "",
@@ -582,7 +583,10 @@ async def list_favoriten(user=Depends(current_buyer)):
 
 @router.get("/marktplatz/haendler/{slug}")
 async def dealer_page(slug: str, user=Depends(require_marketplace_access)):
-    dl = await db.dealers.find_one({"marketplace.slug": slug}, {"_id": 0})
+    # Erreichbar per Kurzname ODER Dealer-ID (nicht jeder Haendler hat
+    # einen Kurznamen gesetzt — die Karte im Markt verlinkt per ID).
+    dl = await db.dealers.find_one(
+        {"$or": [{"marketplace.slug": slug}, {"id": slug}]}, {"_id": 0})
     if not dl:
         raise HTTPException(404, "Händler nicht gefunden")
     mp = dl.get("marketplace") or {}
@@ -598,9 +602,14 @@ async def dealer_page(slug: str, user=Depends(require_marketplace_access)):
                     if (l.get("visibility") or "public") != "private"]
     return {
         "profile": {
+            "id": dl.get("id", ""),
             "company_name": dl.get("company_name", ""),
-            "city": dl.get("city", ""), "phone": dl.get("phone", ""),
+            "city": dl.get("city", ""),
+            "address": dl.get("address", ""),
+            "phone": dl.get("phone", "") or dl.get("whatsapp_number", ""),
+            "contact_person": dl.get("contact_person", ""),
             "email": dl.get("email", ""), "logo_url": dl.get("logo_url", ""),
+            "opening_hours": dl.get("opening_hours", ""),
             "description": mp.get("description", ""),
             "member_since": mp.get("member_since"),
             "network_member": member,

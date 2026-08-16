@@ -39,6 +39,9 @@ export default function Marktplatz() {
   const [makes, setMakes] = useState([]);
   const [favs, setFavs] = useState(() => new Set());
   const [nurFavs, setNurFavs] = useState(false);
+  // Haendler-Ansicht: alle Fahrzeuge EINES Haendlers + Profil (Logo,
+  // Oeffnungszeiten, Telefon). Filter/Sortierung gelten dort weiter.
+  const [dealerView, setDealerView] = useState(null);
   const apply = () => setTick((t) => t + 1);
 
   // Herz-Klick: merken/entfernen — optimistisch, Server bestaetigt.
@@ -59,6 +62,17 @@ export default function Marktplatz() {
   };
   const models = makes.find((m) => m.name === filters.make)?.models || [];
 
+  const openDealer = async (dealerId) => {
+    if (!dealerId) return;
+    setSel(null);
+    try {
+      const r = await buyerApi.get(`/marktplatz/haendler/${dealerId}`);
+      setDealerView(r.data.profile);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) { toast.error(errMsg(e, "Händler-Seite konnte nicht geladen werden")); }
+  };
+  const closeDealer = () => setDealerView(null);
+
   const isBuyer = buyer?.role === "b2b_buyer";
   const active = access?.active;
 
@@ -78,6 +92,7 @@ export default function Marktplatz() {
       });
       if (sort) p.set("sort", sort);
       if (nurFavs) p.set("nur_favoriten", "1");
+      if (dealerView?.id) p.set("dealer", dealerView.id);
       const qs = p.toString();
       const r = await buyerApi.get(`/marktplatz/listings${qs ? `?${qs}` : ""}`);
       setItems(r.data);
@@ -85,7 +100,7 @@ export default function Marktplatz() {
       if (e?.response?.status === 402) setAccess((a) => ({ ...(a || {}), active: false }));
       else toast.error(errMsg(e, "Fahrzeuge konnten nicht geladen werden"));
     }
-  }, [q, filters, sort, nurFavs]);
+  }, [q, filters, sort, nurFavs, dealerView]);
 
   useEffect(() => { if (ready && !buyer) nav("/markt/login"); }, [ready, buyer, nav]);
   useEffect(() => { if (buyer) loadAccess(); }, [buyer, loadAccess]);
@@ -99,7 +114,7 @@ export default function Marktplatz() {
   // Nur bei Zugangs-Freischaltung oder explizitem Anwenden neu laden (tick),
   // NICHT bei jedem Tastendruck in den Filterfeldern.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (active) loadItems(); }, [active, tick, nurFavs]);
+  useEffect(() => { if (active) loadItems(); }, [active, tick, nurFavs, dealerView]);
 
   const requestAccess = async () => {
     setRequesting(true);
@@ -168,11 +183,64 @@ export default function Marktplatz() {
           </div>
         ) : (
           <>
+            {/* ---- Haendler-Seite: Profilkarte (Logo, Kontakt, Zeiten) ---- */}
+            {dealerView && (
+              <div className="mb-6">
+                <button onClick={closeDealer}
+                        data-testid="dealer-back"
+                        className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white mb-3">
+                  <ChevronLeft size={14} /> Zurück zu allen Fahrzeugen
+                </button>
+                <div className="tactical-card p-5" data-testid="dealer-header">
+                  <div className="flex flex-wrap items-start gap-4">
+                    {dealerView.logo_url ? (
+                      <div className="w-16 h-16 rounded-2xl overflow-hidden flex items-center justify-center shrink-0"
+                           style={{ background: "rgba(255,255,255,0.06)" }}>
+                        <img src={photoUrl(dealerView.logo_url)} alt="" className="w-full h-full object-contain" />
+                      </div>
+                    ) : (
+                      <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 text-white"
+                           style={{ background: "var(--accent-red)" }}><Store size={26} /></div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <h1 className="font-display font-black text-2xl tracking-tighter">
+                        {dealerView.company_name}
+                      </h1>
+                      <div className="mt-1 text-xs text-zinc-500 flex flex-wrap gap-x-4 gap-y-1">
+                        {dealerView.contact_person && <span>Ansprechpartner: {dealerView.contact_person}</span>}
+                        {(dealerView.city || dealerView.address) && (
+                          <span className="inline-flex items-center gap-1">
+                            <MapPin size={11} /> {dealerView.address || dealerView.city}
+                          </span>
+                        )}
+                        <span>{dealerView.vehicle_count} Fahrzeug{dealerView.vehicle_count === 1 ? "" : "e"} im Angebot</span>
+                      </div>
+                      {dealerView.description && (
+                        <p className="mt-2 text-sm text-zinc-400">{dealerView.description}</p>
+                      )}
+                      {dealerView.opening_hours && (
+                        <div className="mt-2 flex items-start gap-1.5 text-xs text-zinc-400">
+                          <Clock size={13} className="mt-0.5 shrink-0" />
+                          <div className="whitespace-pre-line">{dealerView.opening_hours}</div>
+                        </div>
+                      )}
+                    </div>
+                    {dealerView.phone && (
+                      <a href={`tel:${dealerView.phone.replace(/\s/g, "")}`}
+                         className="inline-flex items-center gap-2 rounded-xl px-4 py-3 font-semibold text-white shrink-0"
+                         style={{ background: "var(--accent-red)" }}>
+                        <Phone size={16} /> {dealerView.phone}
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
-                <div className="overline">Marktplatz</div>
+                <div className="overline">{dealerView ? "Händler-Angebot" : "Marktplatz"}</div>
                 <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">
-                  Angebotene Fahrzeuge
+                  {dealerView ? `Fahrzeuge von ${dealerView.company_name}` : "Angebotene Fahrzeuge"}
                 </h1>
               </div>
               <div className="flex items-center gap-2">
@@ -304,9 +372,12 @@ export default function Marktplatz() {
                             <ShieldCheck size={11} /> {LEVEL_LABEL[v.price_level] || v.price_level}
                           </div>
                         </div>
-                        <div className="text-right text-[11px] text-zinc-500">
+                        <button onClick={(e) => { e.stopPropagation(); openDealer(v.dealer?.id); }}
+                                data-testid={`dealer-link-${v.id}`}
+                                title="Alle Fahrzeuge dieses Händlers ansehen"
+                                className="text-right text-[11px] text-zinc-500 hover:text-white hover:underline">
                           {v.dealer?.company_name}<br />{v.dealer?.city}
-                        </div>
+                        </button>
                       </div>
                       {phone ? (
                         <a href={`tel:${phone.replace(/\s/g, "")}`} onClick={(e) => e.stopPropagation()}
@@ -328,12 +399,13 @@ export default function Marktplatz() {
 
       {sel && <DetailModal v={sel} onClose={() => setSel(null)}
                            isFav={favs.has(sel.id)}
-                           onFav={(e) => toggleFav(e, sel.id)} />}
+                           onFav={(e) => toggleFav(e, sel.id)}
+                           onDealer={() => openDealer(sel.dealer?.id)} />}
     </div>
   );
 }
 
-function DetailModal({ v, onClose, isFav, onFav }) {
+function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
   const d = v.data || {};
   const phone = v.dealer?.phone;
   const photos = (v.photos || []).map(photoUrl).filter(Boolean);
@@ -448,9 +520,13 @@ function DetailModal({ v, onClose, isFav, onFav }) {
                 </div>
               )}
               <div>
-                <div className="flex items-center gap-2 text-sm font-semibold">
+                <button onClick={onDealer}
+                        data-testid="dealer-link-modal"
+                        title="Alle Fahrzeuge dieses Händlers ansehen"
+                        className="flex items-center gap-2 text-sm font-semibold hover:underline text-left">
                   <Store size={15} /> {v.dealer?.company_name}
-                </div>
+                  <span className="text-[10px] font-normal text-zinc-500">alle Fahrzeuge ›</span>
+                </button>
                 <div className="mt-0.5 text-xs text-zinc-500 space-y-0.5">
                   {v.dealer?.contact_person && <div>Ansprechpartner: {v.dealer.contact_person}</div>}
                   {v.dealer?.city && <div className="inline-flex items-center gap-1"><MapPin size={11} /> {v.dealer.city}</div>}
