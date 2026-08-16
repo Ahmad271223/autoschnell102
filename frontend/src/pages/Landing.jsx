@@ -379,6 +379,7 @@ export default function Landing() {
           <div className="flex gap-6 text-sm text-zinc-400">
             <Link to="/datenschutz" className="hover:text-white">Datenschutz</Link>
             <Link to="/impressum" className="hover:text-white">Impressum</Link>
+            <Link to="/agb" className="hover:text-white">AGB</Link>
             <a href="mailto:support@autohandel.app" className="hover:text-white">Support</a>
           </div>
         </div>

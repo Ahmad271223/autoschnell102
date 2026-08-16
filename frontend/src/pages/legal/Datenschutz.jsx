@@ -2,13 +2,13 @@ import LegalLayout, { H2 } from "./LegalLayout";
 
 export default function Datenschutz() {
   return (
-    <LegalLayout title="Datenschutzerklärung" draft>
+    <LegalLayout title="Datenschutzerklärung">
       <H2>1. Verantwortlicher</H2>
       <p>
         Verantwortlicher im Sinne der DSGVO:<br />
-        [Firmenname]<br />
-        [Straße und Hausnummer], [PLZ und Ort]<br />
-        E-Mail: [E-Mail-Adresse] · Telefon: [Telefonnummer]
+        AutoSchnell — Inhaber Ahmad Fakih<br />
+        Baldurstraße 5, 30657 Hannover<br />
+        E-Mail: info@autoschnell.de · Telefon: 0178 3563025
       </p>
 
       <H2>2. Welche Daten wir verarbeiten</H2>
@@ -37,12 +37,13 @@ export default function Datenschutz() {
 
       <H2>4. Auftragsverarbeitung / Empfänger</H2>
       <p>
-        [Anpassen je nach tatsächlichem Hosting/Diensten:] Unsere Server werden
-        betrieben bei [Hosting-Anbieter, z.B. Hetzner Online GmbH, Deutschland].
-        Zum Laden von Inseratsdaten werden öffentlich zugängliche
-        Fahrzeug-Inserate (z.B. kleinanzeigen.de) abgerufen. [Falls genutzt:]
-        Für die Analyse der App-Nutzung setzen wir PostHog ein — nur nach
-        deiner Einwilligung über den Cookie-Banner (Art. 6 Abs. 1 lit. a DSGVO).
+        Soweit wir für den Betrieb der Plattform externe Dienstleister
+        einsetzen (Server-Hosting in Deutschland, technischer E-Mail-Versand
+        z.B. für das Zurücksetzen von Passwörtern), erfolgt dies auf Grundlage
+        von Auftragsverarbeitungsverträgen gemäß Art. 28 DSGVO. Zum Laden von
+        Inseratsdaten werden öffentlich zugängliche Fahrzeug-Inserate
+        (z.B. kleinanzeigen.de) abgerufen. Wir setzen KEINE Analyse- oder
+        Werbe-Tracker ein.
       </p>
 
       <H2>5. Speicherdauer</H2>
@@ -50,7 +51,8 @@ export default function Datenschutz() {
         Account- und Vertragsdaten speichern wir für die Dauer der
         Geschäftsbeziehung und gemäß den gesetzlichen Aufbewahrungsfristen
         (6 bzw. 10 Jahre nach HGB/AO). Fahrzeug-Fotos aus Abholungen werden
-        nach [7/14] Tagen automatisch gelöscht; Bestandsfahrzeug-Daten nach
+        nach 7 Tagen (bei nicht abgeholten Fahrzeugen nach 14 Tagen)
+        automatisch gelöscht; Bestandsfahrzeug-Daten nach
         50 Tagen archiviert. Beweis-Snapshots von Inseraten bewahren wir zur
         Dokumentation des Vertragsschlusses auf.
       </p>
@@ -61,16 +63,17 @@ export default function Datenschutz() {
         Löschung (Art. 17), Einschränkung der Verarbeitung (Art. 18),
         Datenübertragbarkeit (Art. 20) und Widerspruch (Art. 21 DSGVO).
         Wende dich dazu an die oben genannte E-Mail-Adresse. Außerdem hast du
-        ein Beschwerderecht bei einer Datenschutz-Aufsichtsbehörde, z.B.
-        [zuständige Landesdatenschutzbehörde].
+        ein Beschwerderecht bei einer Datenschutz-Aufsichtsbehörde — für uns
+        zuständig: Die Landesbeauftragte für den Datenschutz Niedersachsen,
+        Prinzenstraße 5, 30159 Hannover.
       </p>
 
       <H2>7. Cookies & lokale Speicherung</H2>
       <p>
         Für die Anmeldung speichern wir ein technisches Sitzungs-Token im
         lokalen Speicher deines Browsers (kein Tracking, technisch
-        erforderlich). Analyse-Cookies werden nur nach Einwilligung über den
-        Cookie-Banner gesetzt; die Einwilligung kannst du jederzeit widerrufen.
+        erforderlich). Darüber hinaus setzen wir keine Cookies ein —
+        insbesondere keine Analyse- oder Werbe-Cookies.
       </p>
 
       <H2>8. Datensicherheit</H2>
@@ -81,7 +84,7 @@ export default function Datenschutz() {
         protokolliert.
       </p>
 
-      <p className="text-zinc-500 text-sm">Stand: [Monat/Jahr]</p>
+      <p className="text-zinc-500 text-sm">Stand: August 2026</p>
     </LegalLayout>
   );
 }

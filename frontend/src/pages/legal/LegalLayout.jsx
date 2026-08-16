@@ -39,6 +39,7 @@ export default function LegalLayout({ title, children, draft = false }) {
           <Link to="/" className="hover:text-white">Startseite</Link>
           <Link to="/impressum" className="hover:text-white">Impressum</Link>
           <Link to="/datenschutz" className="hover:text-white">Datenschutz</Link>
+          <Link to="/agb" className="hover:text-white">AGB</Link>
         </div>
       </div>
     </div>

@@ -15,6 +15,7 @@ import PasswortVergessen from "@/pages/PasswortVergessen";
 import PasswortReset from "@/pages/PasswortReset";
 import Impressum from "@/pages/legal/Impressum";
 import Datenschutz from "@/pages/legal/Datenschutz";
+import AGB from "@/pages/legal/AGB";
 import Subscription from "@/pages/Subscription";
 import PaymentSuccess from "@/pages/PaymentSuccess";
 import AdminLayout from "@/pages/admin_v2/AdminLayout";
@@ -89,6 +90,7 @@ export default function App() {
             <Route path="/passwort-reset" element={<PasswortReset />} />
             <Route path="/impressum" element={<Impressum />} />
             <Route path="/datenschutz" element={<Datenschutz />} />
+            <Route path="/agb" element={<AGB />} />
 
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
             <Route path="/abo/erfolg" element={<ProtectedRoute requireSub={false}><PaymentSuccess /></ProtectedRoute>} />
