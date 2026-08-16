@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from snapshot_service import delete_object
 
 log = logging.getLogger("autohandel.cleanup")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 # (status, Tage bis Löschung)
 CLEANUP_RULES = (
@@ -205,6 +210,10 @@ async def run_cleanup_forever(db):
             await _reap_stuck_snapshots(db)
         except Exception as exc:  # noqa: BLE001
             log.exception("snapshot reaper error: %s", exc)
+        try:
+            await _expire_old_snapshots(db)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("snapshot expiry error: %s", exc)
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
@@ -224,3 +233,49 @@ async def _reap_stuck_snapshots(db) -> None:
                   "completed_at": datetime.now(timezone.utc).isoformat()}})
     if r.modified_count:
         log.info("snapshot reaper: %d haengende Jobs bereinigt", r.modified_count)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-Verfall (Beschluss 08/2026): Beweis-Snapshots werden 60 Tage
+# aufbewahrt, danach werden die Dateien geloescht (Speicher waechst sonst
+# unbegrenzt — bei 500k neuen Inseraten/Monat ~300 GB monatlich).
+# AUSNAHME: Snapshots zu Fahrzeugen, fuer die ein KAUFVERTRAG existiert,
+# bleiben fuer immer — sie sind Teil des Beweis-Archivs des Vertrags.
+# Die Inserats-DATEN (listings_cache) bleiben unabhaengig davon erhalten;
+# ein erneuter Vergleich nach Ablauf erzeugt bei Bedarf einen frischen
+# Snapshot, ohne die Quelle fuer die Daten erneut anzurufen.
+# ---------------------------------------------------------------------------
+SNAPSHOT_RETENTION_DAYS = int(os.environ.get("SNAPSHOT_RETENTION_DAYS", "60"))
+
+
+async def _expire_old_snapshots(db) -> int:
+    from storage_service import storage, StorageError
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=SNAPSHOT_RETENTION_DAYS)).isoformat()
+    # Fahrzeuge mit Kaufvertrag sind geschuetzt (Beweis!).
+    protected = set()
+    async for c in db.generated_pdfs.find({}, {"_id": 0, "vehicle_id": 1}):
+        if c.get("vehicle_id"):
+            protected.add(c["vehicle_id"])
+    n = 0
+    cursor = db.listing_snapshots.find(
+        {"status": "ready", "completed_at": {"$lt": cutoff}},
+        {"_id": 0, "id": 1, "vehicle_id": 1, "pdf_path": 1, "png_path": 1})
+    async for snap in cursor:
+        if snap.get("vehicle_id") in protected:
+            continue
+        for key in (snap.get("pdf_path"), snap.get("png_path")):
+            if key:
+                try:
+                    storage.delete(key)
+                except StorageError:
+                    pass
+        await db.listing_snapshots.update_one(
+            {"id": snap["id"]},
+            {"$set": {"status": "expired", "expired_at": now_iso()},
+             "$unset": {"pdf_path": "", "png_path": ""}})
+        n += 1
+    if n:
+        log.info("[cleanup] %s Snapshots nach %s Tagen verfallen",
+                 n, SNAPSHOT_RETENTION_DAYS)
+    return n

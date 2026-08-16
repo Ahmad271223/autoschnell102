@@ -177,7 +177,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         )
         if not doc:
             return None
-        if doc.get("status") == "failed":
+        if doc.get("status") in ("failed", "expired"):
             return None
         return doc["id"]
 
@@ -189,7 +189,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # doppelt fotografiert, auch nicht in Rennsituationen.
     if is_web_url and not snap_id:
         existing = await db.listing_snapshots.find_one(
-            {"source_url": raw_url, "status": {"$ne": "failed"}},
+            {"source_url": raw_url, "status": {"$nin": ["failed", "expired"]}},
             {"_id": 0, "id": 1}, sort=[("created_at", -1)])
         if existing:
             snap_id = existing["id"]
