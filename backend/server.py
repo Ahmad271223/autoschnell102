@@ -159,9 +159,20 @@ async def api_root():
 # Fotos/Videos aus dem Fahrzeug-/Verkaufsmodul. Keys enthalten eine
 # zufällige UUID (nicht erratbar) — Auslieferung erfolgt daher ohne Auth,
 # damit <img src=...> im Frontend ohne Header-Tricks funktioniert.
+#
+# SENSIBLE Kategorien sind hier GESPERRT: Abhol-Protokolle und die darin
+# eingebetteten HANDSCHRIFTLICHEN UNTERSCHRIFTEN (Prefix "protocol/")
+# enthalten personenbezogene Daten und werden ausschliesslich über die
+# authentifizierten Endpunkte mit Eigentümer-Prüfung ausgeliefert
+# (/api/driver/appointments/{id}/protocol.pdf bzw. /api/protocols/{id}.pdf).
+_PRIVATE_FILE_PREFIXES = ("protocol/",)
+
+
 @app.get("/api/files/{key:path}")
 async def serve_file(key: str):
     from storage_service import guess_media_type, storage, StorageError
+    if key.startswith(_PRIVATE_FILE_PREFIXES):
+        return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
     try:
         data = storage.load(key)
     except StorageError:

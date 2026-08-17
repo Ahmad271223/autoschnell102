@@ -36,6 +36,28 @@ _EXEMPT_LOOPBACK = os.environ.get(
     "RATE_LIMIT_EXEMPT_LOOPBACK", "true").strip().lower() != "false"
 _LOOPBACK_KEYS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
+# Hinter einem Reverse-Proxy (nginx/Ingress) ist request.client.host die
+# ADRESSE DES PROXYS (meist 127.0.0.1) — der Rate-Limiter wuerde dann alle
+# Nutzer in einen Bucket werfen ODER (mit Loopback-Ausnahme) gar nicht
+# greifen. Ist TRUST_PROXY gesetzt, nehmen wir die echte Client-IP aus
+# X-Forwarded-For (erster Eintrag = urspruenglicher Client). NUR aktivieren,
+# wenn WIRKLICH ein vertrauenswuerdiger Proxy davor sitzt, der den Header
+# setzt/ueberschreibt — sonst koennte ihn ein Angreifer selbst faelschen.
+_TRUST_PROXY = os.environ.get("TRUST_PROXY", "").strip().lower() in ("1", "true", "yes")
+
+
+def client_ip(request) -> str:
+    """Echte Client-IP fuer Rate-Limiting — proxy-bewusst."""
+    if _TRUST_PROXY:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            # "client, proxy1, proxy2" -> erster Eintrag ist der Client.
+            return fwd.split(",")[0].strip()
+        real = request.headers.get("x-real-ip", "")
+        if real:
+            return real.strip()
+    return (request.client.host if request.client else None) or "unknown"
+
 
 class SlidingWindowRateLimiter:
     """Thread-safe sliding-window rate limiter."""

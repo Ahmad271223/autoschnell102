@@ -20,7 +20,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from auth import (hash_password_async, new_session_id, create_token,
                   verify_password_async, _DUMMY_HASH)
 from deps import current_user, db, log_activity, now_iso
-from rate_limiter import register_limiter, login_limiter
+from rate_limiter import client_ip, register_limiter, login_limiter
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 
@@ -292,7 +292,7 @@ class BuyerRegisterIn(BaseModel):
 
 @router.post("/buyer/register")
 async def buyer_register(body: BuyerRegisterIn, request: Request):
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     existing = await db.users.find_one(
@@ -332,7 +332,7 @@ class BuyerLoginIn(BaseModel):
 @router.post("/buyer/login")
 async def buyer_login(body: BuyerLoginIn, request: Request):
     """Login für Zwischenhändler (eigener Account, Rolle b2b_buyer)."""
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()

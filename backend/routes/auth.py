@@ -18,7 +18,7 @@ from deps import (
     log_activity,
 )
 from mobile_service import DEFAULT_RULES
-from rate_limiter import SlidingWindowRateLimiter, login_limiter, register_limiter
+from rate_limiter import client_ip, SlidingWindowRateLimiter, login_limiter, register_limiter
 
 # Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
 reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
@@ -71,7 +71,7 @@ class TokenOut(BaseModel):
 @router.post("/auth/register", response_model=TokenOut)
 async def register(body: RegisterIn, request: Request):
     # Rate-limit: 5 registrations per IP per hour.
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     existing = await db.users.find_one({"email": body.email})
@@ -132,7 +132,7 @@ async def register(body: RegisterIn, request: Request):
 @router.post("/auth/login", response_model=TokenOut)
 async def login(body: LoginIn, request: Request):
     # Rate-limit by client IP (10 attempts / 60 s).
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 
@@ -215,7 +215,7 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
     """Immer generische Antwort (kein User-Enumeration-Leak). Versand nur,
     wenn der Account existiert, kein Sucher ist und SMTP konfiguriert ist."""
     from email_service import email_configured, send_email
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not reset_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anfragen – bitte später erneut versuchen.")
     if not email_configured():
@@ -267,7 +267,7 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
 
 @router.post("/auth/password-reset/confirm")
 async def password_reset_confirm(body: ResetConfirmIn, request: Request):
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not reset_limiter.check(ip):
         raise HTTPException(429, "Zu viele Versuche – bitte später erneut versuchen.")
     doc = await db.password_resets.find_one(

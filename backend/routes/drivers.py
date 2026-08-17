@@ -15,7 +15,7 @@ from auth import (
     hash_password_async, verify_password_async,
 )
 from deps import bearer, current_user, db, log_activity, now_iso
-from rate_limiter import driver_login_limiter, driver_register_limiter
+from rate_limiter import client_ip, driver_login_limiter, driver_register_limiter
 from snapshot_service import get_object as snapshot_get_object
 
 import logging
@@ -278,7 +278,7 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_user)
 async def driver_register(body: DriverAccountRegister, request: Request):
     """Fahrer registriert sich in der Fahrer-App."""
     # Rate-limit: 5 new accounts per IP per hour.
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not driver_register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     email = body.email.lower().strip()
@@ -311,7 +311,7 @@ async def driver_register(body: DriverAccountRegister, request: Request):
 @router.post("/driver/login")
 async def driver_login(body: DriverAccountLogin, request: Request):
     # Rate-limit by client IP (15 attempts / 60 s).
-    ip = (request.client.host if request.client else None) or "unknown"
+    ip = client_ip(request)
     if not driver_login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()
