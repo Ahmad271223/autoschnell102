@@ -338,6 +338,51 @@ class PublishIn(BaseModel):
     visibility: Literal["public", "private"] = "public"
 
 
+class PhotoRemoveIn(BaseModel):
+    # Entweder ein hochgeladener Storage-Key ODER eine Einkaufsfoto-URL.
+    key: Optional[str] = Field(default=None, max_length=500)
+    url: Optional[str] = Field(default=None, max_length=1000)
+
+
+@router.post("/resale/{listing_id}/photos/remove")
+async def remove_photo(listing_id: str, body: PhotoRemoveIn,
+                       user=Depends(current_haendler)):
+    """Einzelnes Bild aus dem Inserat entfernen — auch NACH der
+    Veroeffentlichung (Aenderung ist sofort live). Hochgeladene Fotos
+    werden zusaetzlich aus dem Storage geloescht; Einkaufsfotos werden
+    nur aus dem Inserat genommen (das Original bleibt in der Akte)."""
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "photos": 1})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    photos = l.get("photos") or {}
+    if body.key:
+        keys = list(photos.get("uploaded_keys", []))
+        if body.key not in keys:
+            raise HTTPException(404, "Foto nicht gefunden")
+        keys.remove(body.key)
+        from storage_service import storage, StorageError
+        try:
+            storage.delete(body.key)
+        except StorageError:
+            pass
+        await db.resale_listings.update_one(
+            {"id": listing_id},
+            {"$set": {"photos.uploaded_keys": keys, "updated_at": now_iso()}})
+        return {"ok": True, "uploaded_keys": keys}
+    if body.url:
+        urls = list(photos.get("einkauf_urls", []))
+        if body.url not in urls:
+            raise HTTPException(404, "Foto nicht gefunden")
+        urls.remove(body.url)
+        await db.resale_listings.update_one(
+            {"id": listing_id},
+            {"$set": {"photos.einkauf_urls": urls, "updated_at": now_iso()}})
+        return {"ok": True, "einkauf_urls": urls}
+    raise HTTPException(400, "key oder url angeben")
+
+
 @router.post("/resale/{listing_id}/publish")
 async def publish_listing(listing_id: str, body: PublishIn,
                           user=Depends(current_haendler)):

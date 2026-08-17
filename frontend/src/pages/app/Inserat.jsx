@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2 } from "lucide-react";
+import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X } from "lucide-react";
 
 /**
  * Inserats-Editor: automatisch vorausgefüllter Entwurf aus der Fahrzeugakte
@@ -111,6 +111,19 @@ export default function Inserat() {
   const margin = l.margin || {};
   const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
   const st = { borderColor: "var(--border-default)" };
+  const removePhoto = async (which) => {
+    if (!window.confirm(which.key
+        ? "Dieses hochgeladene Bild endgültig löschen?"
+        : "Dieses Einkaufsfoto aus dem Inserat entfernen?\n(Das Original bleibt in der Fahrzeugakte.)")) return;
+    try {
+      const r = await api.post(`/resale/${l.id}/photos/remove`, which);
+      setL((s) => ({ ...s, photos: { ...s.photos,
+        ...(r.data.uploaded_keys ? { uploaded_keys: r.data.uploaded_keys } : {}),
+        ...(r.data.einkauf_urls ? { einkauf_urls: r.data.einkauf_urls } : {}) } }));
+      toast.success("Bild entfernt" + (l.status === "veroeffentlicht" ? " — Änderung ist sofort live" : ""));
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
   const einkaufFotos = l.photos?.einkauf_urls || [];
   const uploadedKeys = l.photos?.uploaded_keys || [];
   const mode = l.photos?.mode || "einkauf";
@@ -284,14 +297,32 @@ export default function Inserat() {
             </div>
             <div className="mt-3 grid grid-cols-4 sm:grid-cols-6 gap-2">
               {(mode !== "neu") && einkaufFotos.slice(0, 12).map((u, i) => (
-                <a key={`e${i}`} href={u} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                  <img src={u} alt="" className="aspect-square w-full object-cover rounded-lg opacity-90 hover:opacity-100 cursor-zoom-in" />
-                </a>
+                <div key={`e${i}`} className="relative group">
+                  <a href={u} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
+                    <img src={u} alt="" className="aspect-square w-full object-cover rounded-lg opacity-90 hover:opacity-100 cursor-zoom-in" />
+                  </a>
+                  <button onClick={() => removePhoto({ url: u })}
+                          data-testid={`foto-del-e${i}`}
+                          title="Bild aus dem Inserat entfernen (Original bleibt in der Akte)"
+                          className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition"
+                          style={{ background: "rgba(0,0,0,0.7)" }}>
+                    <X size={13} />
+                  </button>
+                </div>
               ))}
               {(mode !== "einkauf") && uploadedKeys.map((k) => (
-                <a key={k} href={`${backend}/api/files/${k}`} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                  <img src={`${backend}/api/files/${k}`} alt="" className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
-                </a>
+                <div key={k} className="relative group">
+                  <a href={`${backend}/api/files/${k}`} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
+                    <img src={`${backend}/api/files/${k}`} alt="" className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
+                  </a>
+                  <button onClick={() => removePhoto({ key: k })}
+                          data-testid={`foto-del-${k.slice(-8)}`}
+                          title="Bild endgültig löschen"
+                          className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition"
+                          style={{ background: "rgba(0,0,0,0.7)" }}>
+                    <X size={13} />
+                  </button>
+                </div>
               ))}
               {mode === "neu" && uploadedKeys.length === 0 && (
                 <div className="col-span-full text-xs text-zinc-500 py-4">Noch keine neuen Fotos hochgeladen.</div>
