@@ -24,7 +24,8 @@ from lifecycle import try_set_lifecycle
 from routes.drivers import current_driver
 
 # Haendler-/Sucher-Zugriff auf die fertigen Protokolle (Fahrzeugakte).
-from deps import current_user as _dealer_dep
+# current_firma = Chef UND seine Sucher; Admin/Kaeufer bleiben aussen vor.
+from routes.bestand import current_firma as _dealer_dep
 
 router = APIRouter()
 

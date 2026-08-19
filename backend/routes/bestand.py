@@ -246,6 +246,15 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0},
     ).sort("created_at", -1).to_list(5)
 
+    # Abgeschlossene Abhol-Protokolle (vom Fahrer, mit Unterschriften) —
+    # in der Akte als Unterlage sichtbar für Chef UND Sucher.
+    protocols = await db.pickup_protocols.find(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+         "status": "final"},
+        {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
+         "seller_name": 1, "place": 1, "corrects_version": 1},
+    ).sort("version", -1).to_list(20)
+
     history = await db.activity_logs.find(
         {"ref": vehicle_id, "dealer_id": user["dealer_id"]},
         {"_id": 0},
@@ -269,6 +278,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "pickup_report": report,
         "comparisons": comparisons,
         "listings": listings,
+        "protocols": protocols,
         "history": history,
     }
 

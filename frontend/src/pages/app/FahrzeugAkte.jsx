@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import {
-  ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText,
+  ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
 } from "lucide-react";
 
 /**
@@ -259,6 +259,29 @@ export default function FahrzeugAkte() {
             <div className="mt-2 text-xs text-zinc-500">{akte.comparisons.length} Vergleich(e) durchgeführt</div>
           )}
         </Section>
+
+        {/* Unterschriebene Abhol-Protokolle vom Fahrer (mit Unterschrift des
+            Kunden/Verkäufers) — als Unterlage zum Auto, für Chef + Sucher. */}
+        {(akte.protocols || []).length > 0 && (
+          <Section title="Unterlagen · Abhol-Protokoll">
+            {akte.protocols.map((p) => (
+              <a key={p.id}
+                 href={`${process.env.REACT_APP_BACKEND_URL}/api/protocols/${p.id}.pdf`}
+                 target="_blank" rel="noreferrer"
+                 className="mt-2 flex items-center justify-between text-sm rounded-lg px-2 py-1.5 hover:bg-white/[0.04]">
+                <span className="inline-flex items-center gap-1.5 text-zinc-200">
+                  <PenLine size={13} className="text-[color:var(--accent-green,#34c759)]" />
+                  Abhol-Protokoll (unterschrieben)
+                  {p.version > 1 && <span className="text-[10px] text-zinc-500">v{p.version}</span>}
+                </span>
+                <span className="text-zinc-500 text-xs">{fmtDate(p.finalized_at)}</span>
+              </a>
+            ))}
+            <div className="mt-1.5 text-[11px] text-zinc-500">
+              Unterschriften von Fahrer und Verkäufer/Kunde · beim Antippen als PDF öffnen
+            </div>
+          </Section>
+        )}
       </div>
 
       {/* Bestand */}
