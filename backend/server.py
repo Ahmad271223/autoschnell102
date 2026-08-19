@@ -155,6 +155,20 @@ async def api_root():
     return {"service": "autohandel", "status": "ok"}
 
 
+@api.get("/health")
+async def health_check(response: Response):
+    """Health-Check fuers Monitoring / automatischen Neustart.
+    Prueft die DB-Verbindung real (ping) — meldet 503, wenn die
+    Datenbank haengt, damit ein Watchdog eingreifen kann."""
+    try:
+        await db.command("ping")
+        return {"status": "healthy", "db": "up"}
+    except Exception as exc:
+        log.warning("health check DB ping failed: %s", exc)
+        response.status_code = 503
+        return {"status": "unhealthy", "db": "down"}
+
+
 # ---------- Datei-Auslieferung (Storage-Abstraktion) ----------
 # Fotos/Videos aus dem Fahrzeug-/Verkaufsmodul. Keys enthalten eine
 # zufällige UUID (nicht erratbar) — Auslieferung erfolgt daher ohne Auth,

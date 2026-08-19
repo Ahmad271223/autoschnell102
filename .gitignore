@@ -92,3 +92,9 @@ backend/local_storage/
 # Hochgeladene Nutzerdateien (Logos, Fotos) - nicht ins Repo
 backend/uploads/
 uploads/
+
+# Generierter PDF-Skizzen-Cache (wird zur Laufzeit erzeugt)
+backend/assets/sketch_pdf_cache/
+
+# Beispiel-Config MUSS ins Repo
+!.env.example
