@@ -15,18 +15,30 @@ from typing import Any, Dict, Optional
 LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "8760"))
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from auth import decode_token
 from autoscout_service import build_search_url as build_autoscout_url
 from deps import (
     current_user, db, log_activity, now_iso, require_active_sub,
 )
-from kleinanzeigen_service import ListingGone, fetch_kleinanzeigen_vehicle
+from kleinanzeigen_service import (
+    ListingGone, fetch_kleinanzeigen_vehicle,
+    parse_kleinanzeigen_html, looks_like_kleinanzeigen_listing,
+)
 from listing_identity import (
     ListingIdentityError, get_listing_identity, get_or_fetch_listing,
-    set_cache_snapshot,
+    peek_cached_listing, set_cache_snapshot,
 )
+
+# Client-seitiges Abrufen (nur Kleinanzeigen): ist es an, holt NICHT der
+# Server neue Kleinanzeigen-Seiten, sondern der Browser des Nutzers — und
+# schickt das HTML an /listings/ingest. Verteilt die Abrufe auf viele IPs
+# (kein Server-Block bei Massen-Vergleichen). Default AUS = bisheriges
+# Verhalten (Server holt selbst). mobile.de/AutoScout laufen IMMER server-
+# seitig (offizielle API, keine Block-Gefahr).
+CLIENT_FETCH_KLEINANZEIGEN = os.environ.get(
+    "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")
 from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
     MOBILE_USER, build_search_url, get_vehicle,
@@ -87,6 +99,19 @@ async def compare(body: CompareIn, background: BackgroundTasks,
             "mobile.de-Links sind noch nicht freigeschaltet (API-Zugang folgt). "
             "Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
         )
+
+    # CLIENT-SEITIGES ABRUFEN (nur Kleinanzeigen): Ist der Modus an und der
+    # Link noch NICHT im Speicher, holt nicht der Server — der Browser des
+    # Nutzers wird gebeten, die Seite zu holen und per /listings/ingest zu
+    # schicken. Danach ruft das Frontend compare erneut auf -> Cache-Treffer.
+    if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
+            and await peek_cached_listing(db, raw_url) is None):
+        return {
+            "needs_client_fetch": True,
+            "url": raw_url,
+            "source": "kleinanzeigen",
+            "hint": "Bitte über die Browser-Erweiterung laden.",
+        }
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:
         """Wird nur bei Cache-MISS aufgerufen."""
@@ -228,6 +253,61 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "snapshot_id": snap_id,
         "snapshot_reused": bool(was_cached and cached_snapshot_id and snap_id == cached_snapshot_id),
     }
+
+
+class IngestIn(BaseModel):
+    url: str
+    html: str = Field(min_length=500, max_length=6_000_000)
+
+
+@router.post("/listings/ingest")
+async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
+    """Nimmt vom BROWSER DES NUTZERS geladenes Kleinanzeigen-HTML entgegen,
+    wertet es aus und legt die Daten in den Speicher — danach ruft das
+    Frontend /mobile/compare erneut auf (dann Cache-Treffer, alles Weitere
+    wie gewohnt). So holt der Server neue Kleinanzeigen-Seiten NICHT selbst.
+
+    Sicherheit: nur Kleinanzeigen-URLs; HTML wird auf Plausibilität geprüft;
+    ist der Link schon im Speicher, wird NICHTS überschrieben (first-wins).
+    """
+    raw_url = (body.url or "").strip()
+    try:
+        identity = get_listing_identity(raw_url)
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc) or "Ungültige URL.")
+    if identity["source"] != "kleinanzeigen":
+        raise HTTPException(400, "Client-Abruf ist nur für Kleinanzeigen vorgesehen.")
+
+    # Schon im Speicher? Dann nichts tun (ein anderer Nutzer war schneller).
+    if await peek_cached_listing(db, raw_url) is not None:
+        return {"ok": True, "already_cached": True}
+
+    if not looks_like_kleinanzeigen_listing(body.html):
+        raise HTTPException(422, "Das übermittelte HTML sieht nicht nach einer "
+                                 "Kleinanzeigen-Fahrzeugseite aus.")
+    try:
+        parsed = parse_kleinanzeigen_html(raw_url, body.html)
+    except ListingGone as exc:
+        raise HTTPException(404, str(exc))
+    except Exception:
+        log.exception("ingest parse failed for %s", raw_url)
+        raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
+
+    # Über get_or_fetch_listing in den Cache schreiben (nutzt dieselbe
+    # Cache-/Single-Flight-Logik; der 'fetcher' liefert einfach das schon
+    # geparste Ergebnis, kein Netz-Zugriff).
+    async def _from_client(src: str, iid: str, url: str) -> dict:
+        parsed["mobile_ad_id"] = parsed.get("kleinanzeigen_id") or iid
+        parsed.setdefault("kleinanzeigen_id", iid)
+        return parsed
+
+    try:
+        await get_or_fetch_listing(db, raw_url, _from_client,
+                                   ttl_hours=LISTING_CACHE_TTL_HOURS)
+    except Exception:
+        log.exception("ingest cache write failed for %s", raw_url)
+        raise HTTPException(500, "Konnte die Daten nicht speichern.")
+    return {"ok": True, "already_cached": False}
 
 
 @router.get("/mobile/live-counter/{ad_id}")

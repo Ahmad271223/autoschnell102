@@ -553,10 +553,31 @@ def is_kleinanzeigen_url(url: str) -> bool:
 
 
 async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
-    """Return a dict shaped like the mobile_service vehicle output, so the
-    same `build_search_url(...)` and downstream code (PDF, contracts) work
-    unchanged."""
+    """Holt die Seite (Server-Abruf) UND wertet sie aus. Für den normalen
+    server-seitigen Weg (mobile.de/AutoScout brauchen das ohnehin)."""
     html_text = await _fetch_html(url)
+    return parse_kleinanzeigen_html(url, html_text)
+
+
+# Marker, an denen wir eine ECHTE Kleinanzeigen-Fahrzeug-Detailseite
+# erkennen — schützt den Client-Ingest gegen untergeschobenes Fremd-HTML.
+_KA_PAGE_MARKERS = ("kleinanzeigen", "s-anzeige", "viewad")
+
+
+def looks_like_kleinanzeigen_listing(html_text: str) -> bool:
+    """Grobe Plausibilitätsprüfung: Ist das wirklich eine Kleinanzeigen-
+    Detailseite? (Der Nutzer-Browser liefert das HTML — wir vertrauen ihm
+    nicht blind.)"""
+    if not html_text or len(html_text) < 500:
+        return False
+    low = html_text[:20000].lower()
+    return sum(1 for m in _KA_PAGE_MARKERS if m in low) >= 1
+
+
+def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
+    """Wertet BEREITS geladenes HTML aus (egal ob vom Server oder vom
+    Browser des Nutzers geholt). Return-Form identisch zum mobile_service-
+    Fahrzeug, damit PDF/Verträge/Cache unverändert weiterlaufen."""
     soup = _make_soup(html_text)
     visible = _cut_at_stop(_visible_text(soup))
 

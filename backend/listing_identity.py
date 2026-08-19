@@ -234,6 +234,29 @@ async def ensure_cache_indexes(db) -> None:
     )
 
 
+async def peek_cached_listing(db, url: str) -> Optional[Tuple[dict, Optional[str]]]:
+    """Schaut NUR im Cache nach (kein Abruf, kein Lease). Liefert
+    (data, snapshot_id) bei gültigem Treffer, sonst None. Dient dem
+    client-seitigen Abrufen: der Server prüft erst, ob der Link schon da
+    ist — nur wenn nicht, wird der Browser des Nutzers zum Holen gebeten."""
+    identity = get_listing_identity(url)
+    cache_key = identity["cache_key"]
+    cached = await db.listings_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+    if not cached or not cached.get("data"):
+        return None
+    exp = cached.get("expires_at")
+    if isinstance(exp, datetime):
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp > datetime.now(timezone.utc):
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key},
+                {"$inc": {"use_count": 1},
+                 "$set": {"last_used_at": datetime.now(timezone.utc), "url": url}})
+            return cached["data"], cached.get("snapshot_id")
+    return None
+
+
 async def get_or_fetch_listing(
     db,
     url: str,

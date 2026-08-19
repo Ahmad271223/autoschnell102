@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
   ArrowRight, ExternalLink, Activity, Gauge, Calendar as CalendarIcon, Fuel,
@@ -78,7 +79,31 @@ export default function Vergleich() {
     setContract(null);
     try {
       const t0 = Date.now();
-      const { data } = await api.post("/mobile/compare", { url });
+      let { data } = await api.post("/mobile/compare", { url });
+
+      // Client-seitiges Abrufen (nur Kleinanzeigen, wenn serverseitig aktiv):
+      // Der Server kennt den Link noch nicht und bittet den Browser des
+      // Nutzers, die Seite zu holen. Wir laden sie über die Erweiterung,
+      // schicken das HTML an den Server und fragen erneut ab.
+      if (data?.needs_client_fetch) {
+        const ready = await extensionReady();
+        if (!ready) {
+          toast.error("Für diesen neuen Link wird der AutoSchnell Abruf-Helfer "
+            + "(Browser-Erweiterung) benötigt. Bitte installieren und erneut versuchen.");
+          setLoading(false);
+          return;
+        }
+        try {
+          const html = await fetchViaExtension(data.url || url);
+          await api.post("/listings/ingest", { url: data.url || url, html });
+          ({ data } = await api.post("/mobile/compare", { url }));
+        } catch (fe) {
+          toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
+          setLoading(false);
+          return;
+        }
+      }
+
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0 });
       try {
