@@ -187,7 +187,8 @@ def _current_period(period_start_iso: str) -> tuple:
 
 async def get_sale_plan_status(dealer_id: str) -> dict:
     """Paket + Verbrauch des aktuellen Abrechnungszeitraums."""
-    dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "sale_plan": 1})
+    dealer = await db.dealers.find_one(
+        {"id": dealer_id}, {"_id": 0, "sale_plan": 1, "quota_usage": 1})
     plan = (dealer or {}).get("sale_plan")
     if not plan:
         return {"active": False, "tier": None, "quota": 0, "used": 0,
@@ -197,9 +198,13 @@ async def get_sale_plan_status(dealer_id: str) -> dict:
     meta = SALE_PLANS.get(tier, {})
     quota = plan.get("custom_quota") or meta.get("quota") or 0
     period_key, p_start, p_end = _current_period(plan.get("period_start", now_iso()))
-    # Verbrauch: Inserate, die in DIESEM Zeitraum gezählt wurden.
-    used = await db.resale_listings.count_documents(
-        {"dealer_id": dealer_id, "counted_periods": period_key})
+    # Verbrauch: bevorzugt der atomare Zähler (race-fest, siehe publish_listing).
+    # Fallback auf die abgeleitete Zählung, solange der Zähler in diesem
+    # Zeitraum noch nie gesetzt wurde (vor der ersten Veröffentlichung).
+    used = (dealer.get("quota_usage") or {}).get(period_key)
+    if used is None:
+        used = await db.resale_listings.count_documents(
+            {"dealer_id": dealer_id, "counted_periods": period_key})
     return {"active": True, "tier": tier, "label": meta.get("label", tier),
             "quota": quota, "used": used,
             "remaining": max(0, quota - used) if quota else None,

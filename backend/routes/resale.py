@@ -11,6 +11,7 @@ import base64
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
+from pymongo import ReturnDocument
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -411,10 +412,37 @@ async def publish_listing(listing_id: str, body: PublishIn,
     counted = list(l.get("counted_periods") or [])
     if period_key not in counted:
         quota = plan.get("quota")
-        if quota and plan.get("used", 0) >= quota:
-            raise HTTPException(402, f"Dein monatliches Kontingent von {quota} "
-                                     "Fahrzeugen ist erreicht. Upgrade auf ein "
-                                     "größeres Paket oder Enterprise anfragen.")
+        if quota:
+            # ATOMARE Kontingent-Beanspruchung (race-fest, auch bei mehreren
+            # Worker-Prozessen): ein Zähler pro Händler+Zeitraum wird atomar
+            # erhöht — jeder gleichzeitige Publish bekommt eine EINDEUTIGE
+            # Nummer. Wer über der Quota landet, gibt den Slot zurück und
+            # wird abgelehnt. Kein Time-of-check/Time-of-use-Leck mehr.
+            did = user["dealer_id"]
+            field = f"quota_usage.{period_key}"
+            # Zähler einmalig aus dem Ist-Stand befüllen (idempotent, per
+            # $exists-Guard gegen paralleles Doppel-Seeding).
+            seeded = await db.dealers.find_one(
+                {"id": did}, {field: 1})
+            if (seeded.get("quota_usage") or {}).get(period_key) is None:
+                cur = await db.resale_listings.count_documents(
+                    {"dealer_id": did, "counted_periods": period_key})
+                await db.dealers.update_one(
+                    {"id": did, field: {"$exists": False}},
+                    {"$set": {field: cur}})
+            claimed = await db.dealers.find_one_and_update(
+                {"id": did},
+                {"$inc": {field: 1}},
+                projection={field: 1},
+                return_document=ReturnDocument.AFTER)
+            used_now = (claimed.get("quota_usage") or {}).get(period_key, 1)
+            if used_now > quota:
+                # Über der Quota → Slot zurückgeben, ablehnen.
+                await db.dealers.update_one({"id": did}, {"$inc": {field: -1}})
+                raise HTTPException(402, f"Dein monatliches Kontingent von "
+                                         f"{quota} Fahrzeugen ist erreicht. "
+                                         "Upgrade auf ein größeres Paket oder "
+                                         "Enterprise anfragen.")
         counted.append(period_key)
 
     await db.resale_listings.update_one(
