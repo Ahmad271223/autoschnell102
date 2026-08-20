@@ -50,6 +50,7 @@ export default function Protokoll() {
   const [f, setF] = useState({
     documents: {}, features: {}, condition: {}, keys_count: "", keys_expected: "",
     notes: "", place: "", damages_confirmed: false, new_damages: [],
+    vehicle_check: {},
   });
   const [sigDriver, setSigDriver] = useState(null);
   const [sigSeller, setSigSeller] = useState(null);
@@ -71,6 +72,7 @@ export default function Protokoll() {
           keys_expected: p.keys_expected || "", notes: p.notes || "",
           place: p.place || "", damages_confirmed: !!p.damages_confirmed,
           new_damages: p.new_damages || [],
+          vehicle_check: p.vehicle_check || {},
         }));
       }
       setSellerName(r.data.appointment?.seller_name || "");
@@ -113,6 +115,10 @@ export default function Protokoll() {
     upd((s) => ({ features: { ...s.features, [name]: !s.features[name] } }));
   const setCond = (k, v) =>
     upd((s) => ({ condition: { ...s.condition, [k]: v } }));
+  // Abschnitt 1: pro Zeile Status (stimmt/weicht ab) bzw. Korrekturwert
+  const setVCheck = (key, feld, wert) =>
+    upd((s) => ({ vehicle_check: { ...s.vehicle_check,
+      [key]: { ...(s.vehicle_check?.[key] || {}), [feld]: wert } } }));
 
   const saveNow = async () => {
     setBusy(true);
@@ -212,13 +218,45 @@ export default function Protokoll() {
         </div>
       )}
 
-      {/* 1 Fahrzeugdaten */}
-      <Section n="1" title="Fahrzeugdaten" hint="Aus dem Kaufvertrag — vor Ort prüfen.">
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-          {[["Marke", veh.make_label], ["Modell", veh.model_label],
-            ["Erstzulassung", veh.first_registration],
-            ["Kilometerstand", veh.mileage], ["Kraftstoff", veh.fuel_label],
-            ["FIN", veh.vin]].map(([k, v]) => (
+      {/* 1 Fahrzeugdaten — alle 12 Zeilen wie im PDF, einzeln ankreuzbar */}
+      <Section n="1" title="Fahrzeugdaten"
+               hint="Jede Zeile mit dem Vertrag abgleichen: stimmt oder weicht ab. Bei Abweichung den richtigen Wert eintippen.">
+        <div className="space-y-3">
+          {(tpl.vehicle_check_fields || []).map((fld) => {
+            const istWert = (tpl.vehicle_check_values || {})[fld.key];
+            const entry = f.vehicle_check?.[fld.key] || {};
+            const abweichend = entry.status && entry.status !== "stimmt";
+            return (
+              <div key={fld.key} className="pb-2 border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[11px] text-zinc-500">{fld.label}</span>
+                  <span className="text-sm text-right">{istWert || "—"}</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {fld.options.map((o) => (
+                    <button key={o} type="button" disabled={isFinal}
+                            data-testid={`vc-${fld.key}-${o}`}
+                            onClick={() => setVCheck(fld.key, "status", o)}
+                            className={`px-3 py-1.5 rounded-lg text-xs border disabled:opacity-60 ${
+                              entry.status === o ? "bg-white/15 font-semibold text-white" : "text-zinc-400"}`}
+                            style={st}>
+                      {o}
+                    </button>
+                  ))}
+                </div>
+                {abweichend && (
+                  <input value={entry.value || ""} disabled={isFinal}
+                         onChange={(e) => setVCheck(fld.key, "value", e.target.value)}
+                         className={`${inputCls} mt-1.5`} style={st}
+                         placeholder="Richtiger Wert vor Ort …" />
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+          {[["Modellbezeichnung", veh.model_description],
+            ["Getriebe", veh.gearbox_label]].map(([k, v]) => (
             <div key={k}>
               <div className="text-[11px] text-zinc-500">{k}</div>
               <div>{v || "—"}</div>

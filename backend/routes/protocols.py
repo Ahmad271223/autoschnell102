@@ -43,6 +43,24 @@ DOCUMENT_ITEMS = [
     "Werkzeug / Warndreieck / Verbandskasten",
 ]
 
+# Abschnitt 1 im PDF: 12 Zeilen mit "stimmt / weicht ab" (bzw. Ja/Nein/
+# unbekannt). Der Fahrer kreuzt jede Zeile am Handy an und kann bei
+# Abweichung den korrekten Wert eintippen.
+VEHICLE_CHECK_FIELDS = [
+    ("make", "Marke", ["stimmt", "weicht ab"]),
+    ("model", "Modell", ["stimmt", "weicht ab"]),
+    ("first_registration", "Erstzulassung", ["stimmt", "weicht ab"]),
+    ("vin", "FIN (Fahrgestell-Nr.)", ["stimmt", "weicht ab"]),
+    ("power", "Leistung", ["stimmt", "weicht ab"]),
+    ("previous_owners", "Halter laut Schein", ["stimmt", "weicht ab"]),
+    ("color", "Farbe", ["stimmt", "weicht ab"]),
+    ("fuel", "Kraftstoff", ["stimmt", "weicht ab"]),
+    ("hu", "HU", ["stimmt", "weicht ab"]),
+    ("mileage_contract", "KM-Stand laut Vertrag", ["stimmt", "weicht ab"]),
+    ("commercial", "Gewerbliche Nutzung", ["Ja", "Nein", "unbekannt"]),
+    ("accident_free", "Unfallfrei laut Angabe", ["Ja", "Nein", "unbekannt"]),
+]
+
 CONDITION_FIELDS = [
     ("mileage", "Kilometerstand bei Abholung", "text"),
     ("fuel_level", "Tankfüllstand", ["leer", "1/4", "1/2", "3/4", "voll"]),
@@ -78,6 +96,39 @@ class FinalizeIn(BaseModel):
     place: Optional[str] = Field(default=None, max_length=200)
 
 
+def _vehicle_check_values(vehicle: dict, contract: dict) -> Dict[str, str]:
+    """IST-Werte fuer Abschnitt 1 — identisch zur PDF-Darstellung, damit der
+    Fahrer am Handy genau das sieht, was auf dem Papier steht."""
+    v, c = vehicle or {}, contract or {}
+    power_kw = v.get("power_kw") or v.get("kw")
+    power_ps = v.get("power_ps") or v.get("ps")
+    if power_ps in (None, "", 0) and power_kw not in (None, "", 0):
+        try:
+            power_ps = round(float(power_kw) * 1.35962)
+        except (TypeError, ValueError):
+            power_ps = None
+    hu_val = c.get("hu_valid") or ""
+    hu_until = c.get("hu_until") or v.get("hu") or ""
+    hu_disp = f"{hu_val} · gültig bis {hu_until}".strip(" ·") if (hu_val or hu_until) else ""
+    km = v.get("km") or v.get("mileage")
+    return {
+        "make": v.get("make_label") or v.get("make") or v.get("brand") or "",
+        "model": v.get("model_label") or v.get("model") or "",
+        "first_registration": v.get("first_registration") or v.get("ezl") or v.get("ez") or "",
+        "vin": v.get("vin") or v.get("fin") or "",
+        "power": (f"{power_kw or '—'} kW / {power_ps or '—'} PS"
+                  if (power_kw or power_ps) else ""),
+        "previous_owners": str(c.get("previous_owners")
+                               or v.get("previous_owners") or ""),
+        "color": v.get("color") or v.get("exterior_color") or "",
+        "fuel": v.get("fuel_label") or v.get("fuel") or v.get("fuel_type") or "",
+        "hu": hu_disp,
+        "mileage_contract": (f"{int(float(km)):,}".replace(",", ".") + " km") if km else "",
+        "commercial": c.get("commercial_since_ez") or "",
+        "accident_free": c.get("accident_free") or "",
+    }
+
+
 async def _appt_or_404(appt_id: str, driver: dict) -> dict:
     appt = await db.appointments.find_one(
         {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0})
@@ -109,6 +160,11 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     return {
         "protocol": doc,
         "template": {
+            "vehicle_check_fields": [
+                {"key": k, "label": lb, "options": opts}
+                for k, lb, opts in VEHICLE_CHECK_FIELDS
+            ],
+            "vehicle_check_values": _vehicle_check_values(vehicle, contract),
             "documents": DOCUMENT_ITEMS,
             "features": (vehicle.get("features") or [])[:20],
             "condition_fields": [

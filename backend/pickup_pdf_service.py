@@ -658,20 +658,38 @@ def build_pickup_pdf(
     commercial = contract.get("commercial_since_ez") or ""
     accident = contract.get("accident_free") or ""
 
+    # Fahrer-Eingaben zu Abschnitt 1 (App): pro Zeile "stimmt"/"weicht ab"
+    # plus optionaler Korrekturwert. _vc[key] = {"status": .., "value": ..}
+    _vc = filled.get("vehicle_check") or {}
+
+    def _vrow(key: str, label: str, value, options=None, bold=False):
+        """Zeile mit Fahrer-Auswahl; weicht der Wert ab, wird die Korrektur
+        des Fahrers zusaetzlich fett angezeigt."""
+        entry = _vc.get(key) or {}
+        sel = entry.get("status")
+        corrected = str(entry.get("value") or "").strip()
+        shown = value
+        if corrected:
+            shown = f"{_fmt(value)}  →  {corrected}"
+        return _check_row(label, shown, options or ["stimmt", "weicht ab"],
+                          st, bold_value=bold, selected=sel)
+
     col_w = [4.6 * cm, 6.4 * cm, 2.0 * cm, 2.0 * cm, 2.5 * cm]
     check_rows = [
-        _check_row("Marke",           make,   ["stimmt", "weicht ab"], st, bold_value=True),
-        _check_row("Modell",          model,  ["stimmt", "weicht ab"], st, bold_value=True),
-        _check_row("Erstzulassung",   ez,     ["stimmt", "weicht ab"], st),
-        _check_row("FIN (Fahrgestell-Nr.)", fin, ["stimmt", "weicht ab"], st),
-        _check_row("Leistung",        power,  ["stimmt", "weicht ab"], st),
-        _check_row("Halter laut Schein", halter, ["stimmt", "weicht ab"], st),
-        _check_row("Farbe",           color,  ["stimmt", "weicht ab"], st),
-        _check_row("Kraftstoff",      fuel,   ["stimmt", "weicht ab"], st),
-        _check_row("HU",              hu_disp, ["stimmt", "weicht ab"], st),
-        _check_row("KM-Stand laut Vertrag", km, ["stimmt", "weicht ab"], st),
-        _check_row("Gewerbliche Nutzung", commercial, ["Ja", "Nein", "unbekannt"], st),
-        _check_row("Unfallfrei laut Angabe", accident, ["Ja", "Nein", "unbekannt"], st),
+        _vrow("make", "Marke", make, bold=True),
+        _vrow("model", "Modell", model, bold=True),
+        _vrow("first_registration", "Erstzulassung", ez),
+        _vrow("vin", "FIN (Fahrgestell-Nr.)", fin),
+        _vrow("power", "Leistung", power),
+        _vrow("previous_owners", "Halter laut Schein", halter),
+        _vrow("color", "Farbe", color),
+        _vrow("fuel", "Kraftstoff", fuel),
+        _vrow("hu", "HU", hu_disp),
+        _vrow("mileage_contract", "KM-Stand laut Vertrag", km),
+        _vrow("commercial", "Gewerbliche Nutzung", commercial,
+              ["Ja", "Nein", "unbekannt"]),
+        _vrow("accident_free", "Unfallfrei laut Angabe", accident,
+              ["Ja", "Nein", "unbekannt"]),
     ]
     # Normalise to 5 columns (add empty col for 3-option rows via compute)
     norm = []
