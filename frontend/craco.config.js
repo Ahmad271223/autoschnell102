@@ -78,6 +78,35 @@ webpackConfig.devServer = (devServerConfig) => {
     };
   }
 
+  // --- Zugriff von anderen Rechnern (LAN / Tunnel wie ngrok) ---
+  // 1. /api wird an das Backend (Port 8001) weitergereicht. Frontend und
+  //    API teilen sich dadurch EINE Adresse -> kein CORS, nur EIN Tunnel.
+  // 2. allowedHosts: der Dev-Server wuerde fremde Hostnamen sonst mit
+  //    "Invalid Host header" abweisen (z.B. den ngrok-Hostnamen).
+  // 3. webSocketURL "auto": Live-Reload findet den richtigen Host selbst,
+  //    egal ob localhost, LAN-IP oder https-Tunnel.
+  devServerConfig.allowedHosts = "all";
+  devServerConfig.client = {
+    ...(devServerConfig.client || {}),
+    webSocketURL: "auto://0.0.0.0:0/ws",
+  };
+  // fixRequestBody: andere Dev-Server-Middleware liest den POST-Body vorher
+  // aus; ohne diesen Fix wuerde jeder weitergereichte POST/PUT haengen.
+  let fixRequestBody;
+  try {
+    ({ fixRequestBody } = require("http-proxy-middleware"));
+  } catch (err) {
+    fixRequestBody = null;
+  }
+  devServerConfig.proxy = {
+    ...(devServerConfig.proxy || {}),
+    "/api": {
+      target: process.env.BACKEND_PROXY_TARGET || "http://127.0.0.1:8001",
+      changeOrigin: true,
+      ...(fixRequestBody ? { onProxyReq: fixRequestBody } : {}),
+    },
+  };
+
   return devServerConfig;
 };
 
