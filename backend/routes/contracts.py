@@ -1,6 +1,7 @@
 """Contract endpoints: preview, create, list, get, pdf, send, delete."""
 import asyncio
 import base64
+import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+log = logging.getLogger("autohandel")
 
 
 def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
@@ -470,3 +473,75 @@ async def delete_contract(contract_id: str, user=Depends(current_user)):
     if not res.deleted_count:
         raise HTTPException(404, "Vertrag nicht gefunden")
     return {"ok": True}
+
+
+async def regenerate_contract_for_pickup(
+    *, contract_id: str, dealer_id: str, user: dict,
+    pickup_date: Optional[str] = None, pickup_time: Optional[str] = None,
+) -> bool:
+    """Erzeugt das Kaufvertrags-PDF mit GEAENDERTEM Abholtermin neu.
+
+    Wird aufgerufen, wenn im Terminkalender das Abholdatum verschoben wird —
+    der Vertrag ist eine gespeicherte Datei und wuerde sonst das alte Datum
+    zeigen. Der bisherige Termin wird in `pickup_history` mitgeschrieben,
+    damit nachvollziehbar bleibt, was wann geaendert wurde.
+    Rueckgabe: True, wenn das PDF neu erzeugt wurde.
+    """
+    if not contract_id or (pickup_date is None and pickup_time is None):
+        return False
+    doc = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": dealer_id}, {"_id": 0})
+    if not doc:
+        return False
+
+    alt_datum = doc.get("pickup_date")
+    alt_zeit = doc.get("pickup_time")
+    # Leere Werte bedeuten "nicht angegeben" — sie duerfen einen
+    # vorhandenen Termin NICHT loeschen (sonst wuerde z.B. das Speichern
+    # ohne Uhrzeit die Uhrzeit im Vertrag entfernen).
+    neu_datum = pickup_date if (pickup_date or "").strip() else alt_datum
+    neu_zeit = pickup_time if (pickup_time or "").strip() else alt_zeit
+    if neu_datum == alt_datum and neu_zeit == alt_zeit:
+        return False
+
+    contract_dict = dict(doc.get("contract_data") or {})
+    contract_dict["pickup_date"] = neu_datum or ""
+    contract_dict["pickup_time"] = neu_zeit or ""
+
+    v = await db.vehicles.find_one(
+        {"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
+    vehicle = dict(v.get("data") or {})
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
+    vehicle, dealer = _apply_contract_overrides(
+        contract=contract_dict, vehicle=vehicle, dealer=dealer)
+
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            generate_contract_pdf,
+            dealer=dealer, vehicle=vehicle, contract=contract_dict,
+        )
+    except Exception:
+        log.exception("Kaufvertrag konnte mit neuem Abholtermin nicht neu "
+                      "erzeugt werden (contract=%s)", contract_id)
+        return False
+
+    await db.generated_pdfs.update_one(
+        {"id": contract_id, "dealer_id": dealer_id},
+        {"$set": {
+            "pdf_b64": base64.b64encode(pdf_bytes).decode(),
+            "contract_data": contract_dict,
+            "pickup_date": neu_datum,
+            "pickup_time": neu_zeit,
+            "updated_at": now_iso(),
+        },
+         "$push": {"pickup_history": {
+             "von_datum": alt_datum, "von_zeit": alt_zeit,
+             "auf_datum": neu_datum, "auf_zeit": neu_zeit,
+             "geaendert_von": user.get("id"), "geaendert_am": now_iso(),
+         }}},
+    )
+    await log_activity(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
+                       ref=contract_id,
+                       meta={"von": alt_datum, "auf": neu_datum})
+    return True

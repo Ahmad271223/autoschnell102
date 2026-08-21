@@ -61,27 +61,13 @@ export default function Termine() {
     try {
       if (a.id) {
         const { data } = await api.put(`/appointments/${a.id}`, a);
-        toast.success("Termin gespeichert");
-        if (data.pickup_date_changed && a.contract_id) {
-          if (window.confirm("Abholdatum wurde geändert. Neue PDF mit aktualisiertem Abholdatum erstellen?")) {
-            const c = await api.get(`/contracts/${a.contract_id}`);
-            const newC = {
-              ...c.data.contract_data,
-              vehicle_id: c.data.vehicle_id,
-              pickup_date: a.pickup_date,
-              pickup_time: a.pickup_time,
-            };
-            // Backend creates a new contract AND auto-creates a fresh
-            // appointment for it (see server.py auto-create block).
-            // Therefore we must NOT manually POST another appointment
-            // here, and we delete the original appointment we just
-            // updated — otherwise the rescheduled date would show the
-            // termin three times (old updated + auto-created + manual).
-            await api.post("/contracts", newC);
-            await api.delete(`/appointments/${a.id}`);
-            toast.success("Neue PDF erstellt & verknüpft");
-          }
-        }
+        // Verschobenes Abholdatum uebernimmt der Server automatisch in den
+        // bestehenden Kaufvertrag (gleiche Vertragsnummer, PDF wird neu
+        // erzeugt). Frueher entstand hier per Rueckfrage ein ZWEITER
+        // Vertrag — der alte blieb mit falschem Datum liegen.
+        toast.success(data.contract_updated
+          ? "Termin gespeichert — Kaufvertrag trägt jetzt das neue Abholdatum"
+          : "Termin gespeichert");
       } else {
         await api.post(`/appointments`, a);
         toast.success("Termin angelegt");

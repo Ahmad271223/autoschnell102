@@ -146,6 +146,10 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         and existing.get("pickup_date")
         and update["pickup_date"] != existing["pickup_date"]
     )
+    zeit_geaendert = (
+        "pickup_time" in update
+        and update.get("pickup_time") != existing.get("pickup_time")
+    )
     # Wenn sich der Status ändert (vor allem zu "abgeholt" oder "nicht
     # abgeholt"), status_changed_at auffrischen, damit der Cleanup-Job
     # seine Fristen korrekt berechnen kann.
@@ -163,9 +167,25 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
         elif update.get("status") == "nicht abgeholt":
             await try_set_lifecycle(vehicle_id, user["dealer_id"], "nicht_abgeholt", user=user)
+    # Verschobener Abholtermin -> Kaufvertrag mit dem NEUEN Datum neu
+    # erzeugen. Das PDF ist eine gespeicherte Datei und wuerde sonst
+    # dauerhaft den alten Termin zeigen (Wunsch 08/2026).
+    vertrag_aktualisiert = False
+    if (pickup_changed or zeit_geaendert) and existing.get("contract_id"):
+        from routes.contracts import regenerate_contract_for_pickup
+        vertrag_aktualisiert = await regenerate_contract_for_pickup(
+            contract_id=existing["contract_id"],
+            dealer_id=user["dealer_id"],
+            user=user,
+            pickup_date=update.get("pickup_date"),
+            pickup_time=update.get("pickup_time"),
+        )
+
     await log_activity(user["dealer_id"], user["id"], "termin.aktualisiert", ref=appt_id,
-                       meta={"pickup_changed": pickup_changed})
-    return {"ok": True, "pickup_date_changed": pickup_changed}
+                       meta={"pickup_changed": pickup_changed,
+                             "vertrag_aktualisiert": vertrag_aktualisiert})
+    return {"ok": True, "pickup_date_changed": pickup_changed,
+            "contract_updated": vertrag_aktualisiert}
 
 
 @router.get("/appointments/{appt_id}/report")
