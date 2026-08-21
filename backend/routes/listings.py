@@ -4,6 +4,8 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+
+from pymongo import ReturnDocument
 from typing import Any, Dict, Optional
 
 # Cache-Lebensdauer fuer abgerufene Inserate. Hoehere TTL = weniger echte
@@ -224,20 +226,78 @@ async def compare(body: CompareIn, background: BackgroundTasks,
                 pass
 
     if is_web_url and not snap_id:
-        try:
-            snap_id = await create_snapshot(
-                db,
-                dealer_id=user["dealer_id"], user_id=user["id"],
-                vehicle_id=vid, mobile_ad_id=ad_id, source_url=raw_url,
-            )
-            background.add_task(run_snapshot_job, db, snap_id)
+        # ATOMARE RESERVIERUNG (Beschluss 08/2026): Vergleichen mehrere
+        # Nutzer im SELBEN Moment denselben NEUEN Link, darf nur EINER den
+        # Snapshot anlegen. Vorher war das ein "pruefen, dann anlegen" —
+        # gleichzeitige Vergleiche erzeugten mehrere Snapshots (mehrfacher
+        # Abruf derselben Anzeige = Block-Risiko, mehrfacher Speicher).
+        # Wer die ID im Cache setzt, gewinnt; alle anderen erben sie.
+        _ck = identity["cache_key"]
+        _reserved = str(uuid.uuid4())
+        _now = datetime.now(timezone.utc)
+        won = await db.listings_cache.find_one_and_update(
+            {"cache_key": _ck,
+             "$or": [{"snapshot_id": {"$exists": False}}, {"snapshot_id": None}]},
+            {"$set": {"snapshot_id": _reserved, "snapshot_reserved_at": _now}},
+            projection={"_id": 0, "snapshot_id": 1},
+            return_document=ReturnDocument.AFTER,
+        )
+
+        async def _anlegen(sid: str) -> Optional[str]:
             try:
-                await set_cache_snapshot(db, raw_url, snap_id)
+                new_id = await create_snapshot(
+                    db,
+                    dealer_id=user["dealer_id"], user_id=user["id"],
+                    vehicle_id=vid, mobile_ad_id=ad_id, source_url=raw_url,
+                    snapshot_id=sid,
+                )
+                background.add_task(run_snapshot_job, db, new_id)
+                return new_id
             except Exception as exc:
-                log.warning("set_cache_snapshot failed for %s: %s", raw_url, exc)
-        except Exception as exc:
-            log.warning("could not schedule snapshot for %s: %s", raw_url, exc)
-            snap_id = None
+                log.warning("could not schedule snapshot for %s: %s", raw_url, exc)
+                # Reservierung freigeben, sonst blockiert sie alle anderen.
+                await db.listings_cache.update_one(
+                    {"cache_key": _ck, "snapshot_id": sid},
+                    {"$unset": {"snapshot_id": "", "snapshot_reserved_at": ""}})
+                return None
+
+        if won and won.get("snapshot_id") == _reserved:
+            snap_id = await _anlegen(_reserved)
+        else:
+            # Jemand war schneller -> dessen Snapshot uebernehmen.
+            doc = await db.listings_cache.find_one(
+                {"cache_key": _ck},
+                {"_id": 0, "snapshot_id": 1, "snapshot_reserved_at": 1})
+            snap_id = (doc or {}).get("snapshot_id")
+            if snap_id and not await db.listing_snapshots.find_one(
+                    {"id": snap_id}, {"_id": 1}):
+                # Reservierung zeigt ins Leere (Gewinner abgebrochen). Erst
+                # nach einer Schonfrist uebernehmen — sonst wuerde man dem
+                # Gewinner die ID wegschnappen, der gerade anlegt.
+                res_at = (doc or {}).get("snapshot_reserved_at")
+                if isinstance(res_at, datetime):
+                    if res_at.tzinfo is None:
+                        res_at = res_at.replace(tzinfo=timezone.utc)
+                    veraltet = (_now - res_at).total_seconds() > 120
+                else:
+                    veraltet = True
+                if veraltet:
+                    taken = await db.listings_cache.find_one_and_update(
+                        {"cache_key": _ck, "snapshot_id": snap_id},
+                        {"$set": {"snapshot_id": _reserved,
+                                  "snapshot_reserved_at": _now}},
+                        projection={"_id": 0, "snapshot_id": 1},
+                        return_document=ReturnDocument.AFTER)
+                    if taken and taken.get("snapshot_id") == _reserved:
+                        snap_id = await _anlegen(_reserved)
+            if not snap_id:
+                # Kein Cache-Eintrag vorhanden (Sonderfall): normal anlegen.
+                snap_id = await _anlegen(str(uuid.uuid4()))
+                if snap_id:
+                    try:
+                        await set_cache_snapshot(db, raw_url, snap_id)
+                    except Exception:
+                        pass
 
     return {
         "vehicle_id": vid,

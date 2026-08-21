@@ -536,10 +536,15 @@ async def create_snapshot(
     vehicle_id: Optional[str],
     mobile_ad_id: Optional[str],
     source_url: str,
+    snapshot_id: Optional[str] = None,
 ) -> str:
     """Create a `listing_snapshots` row in 'pending' state and return its id.
-    Capture/upload runs as a background task via `run_snapshot_job`."""
-    snap_id = str(uuid.uuid4())
+    Capture/upload runs as a background task via `run_snapshot_job`.
+
+    `snapshot_id` erlaubt es, eine VORHER reservierte ID zu verwenden — so
+    kann der Aufrufer sich den Snapshot atomar sichern, bevor er ihn
+    anlegt (verhindert Doppel-Snapshots bei gleichzeitigen Vergleichen)."""
+    snap_id = snapshot_id or str(uuid.uuid4())
     await db.listing_snapshots.insert_one({
         "id": snap_id,
         "dealer_id": dealer_id,
