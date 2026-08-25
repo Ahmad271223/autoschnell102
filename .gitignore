@@ -98,3 +98,7 @@ backend/assets/sketch_pdf_cache/
 
 # Beispiel-Config MUSS ins Repo
 !.env.example
+
+# Diagnose-Protokolle der lokalen Server (nicht ins Repository)
+backend-log.txt
+frontend-log.txt
