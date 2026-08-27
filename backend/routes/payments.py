@@ -177,22 +177,43 @@ async def payment_status(session_id: str, request: Request, user=Depends(current
 async def stripe_webhook(request: Request):
     body = await request.body()
     sig = request.headers.get("Stripe-Signature", "")
-    # Try emergentintegrations first; fall back to raw stripe SDK if it Pydantic-fails
     session_id = None
     payment_status_str = None
-    try:
-        from emergentintegrations.payments.stripe.checkout import StripeCheckout
-        api_key = os.environ["STRIPE_API_KEY"]
-        host_url = str(request.base_url).rstrip("/")
-        sc = StripeCheckout(api_key=api_key, webhook_url=f"{host_url}/api/webhook/stripe")
-        evt = await sc.handle_webhook(body, sig)
-        session_id = evt.session_id
-        payment_status_str = evt.payment_status
-    except Exception as e:
-        # Do NOT fall back to raw JSON parsing — that would skip signature
-        # verification and allow anyone to forge a "paid" webhook.
-        log.warning(f"Stripe webhook verification failed: {e}. Rejecting unverified payload.")
-        return {"ok": False}
+
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    if secret:
+        # Bevorzugter Weg: Signatur mit dem offiziellen Stripe-SDK und dem
+        # STRIPE_WEBHOOK_SECRET pruefen (der Wert aus dem Stripe-Dashboard,
+        # "whsec_…"). Nur so ist die Herkunft kryptographisch belegt.
+        try:
+            import stripe as stripe_sdk
+            event = stripe_sdk.Webhook.construct_event(body, sig, secret)
+        except Exception as e:
+            # 400 (kein 200!): Stripe zeigt den Fehler im Dashboard an und
+            # versucht es erneut; Faelscher bekommen eine klare Ablehnung.
+            log.warning("Stripe webhook signature invalid: %s", e)
+            raise HTTPException(400, "Ungültige Stripe-Signatur")
+        obj = (event.get("data") or {}).get("object") or {}
+        if event.get("type") in ("checkout.session.completed",
+                                 "checkout.session.async_payment_succeeded"):
+            session_id = obj.get("id")
+            payment_status_str = obj.get("payment_status")
+    else:
+        # Fallback ohne konfiguriertes Secret (nur Entwicklung): Verifikation
+        # der Integrationsbibliothek ueberlassen. NIE auf rohes JSON-Parsen
+        # zurueckfallen — das wuerde die Signaturpruefung umgehen und jedem
+        # erlauben, ein "paid" zu faelschen.
+        try:
+            from emergentintegrations.payments.stripe.checkout import StripeCheckout
+            api_key = os.environ["STRIPE_API_KEY"]
+            host_url = str(request.base_url).rstrip("/")
+            sc = StripeCheckout(api_key=api_key, webhook_url=f"{host_url}/api/webhook/stripe")
+            evt = await sc.handle_webhook(body, sig)
+            session_id = evt.session_id
+            payment_status_str = evt.payment_status
+        except Exception as e:
+            log.warning(f"Stripe webhook verification failed: {e}. Rejecting unverified payload.")
+            raise HTTPException(400, "Webhook konnte nicht verifiziert werden")
 
     if payment_status_str == "paid" and session_id:
         tx = await db.payment_transactions.find_one({"session_id": session_id})
