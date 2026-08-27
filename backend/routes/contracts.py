@@ -437,6 +437,39 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_user)):
     )
 
 
+@router.get("/contracts/{contract_id}/versions")
+async def list_contract_versions(contract_id: str, user=Depends(current_user)):
+    """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten)."""
+    c = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})
+    if not c:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    return await db.generated_pdf_versions.find(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "pdf_b64": 0, "contract_data": 0},
+    ).sort("version", 1).to_list(100)
+
+
+@router.get("/contracts/{contract_id}/versions/{version}/pdf")
+async def get_contract_version_pdf(contract_id: str, version: int,
+                                   user=Depends(current_user)):
+    """Archivierte PDF-Fassung herunterladen (Beweissicherung)."""
+    v = await db.generated_pdf_versions.find_one(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"],
+         "version": version},
+        {"_id": 0, "pdf_b64": 1, "filename": 1})
+    if not v or not v.get("pdf_b64"):
+        raise HTTPException(404, "Vertragsfassung nicht gefunden")
+    pdf_bytes = base64.b64decode(v["pdf_b64"])
+    fname = _safe_filename(v.get("filename") or "",
+                           fallback=f"kaufvertrag-v{version}.pdf")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+    )
+
+
 @router.post("/contracts/{contract_id}/send")
 async def send_contract(contract_id: str, body: SendIn, user=Depends(require_active_sub)):
     c = await db.generated_pdfs.find_one(
@@ -526,6 +559,25 @@ async def regenerate_contract_for_pickup(
                       "erzeugt werden (contract=%s)", contract_id)
         return False
 
+    # BEWEISSICHERUNG: Die bisherige PDF-Fassung wird NICHT ueberschrieben,
+    # sondern als eigene Version archiviert. So bleibt belegbar, welcher
+    # Vertragstext (mit welchem Abholtermin) zu jedem Zeitpunkt galt.
+    alte_version = int(doc.get("version") or 1)
+    await db.generated_pdf_versions.insert_one({
+        "id": str(uuid.uuid4()),
+        "contract_id": contract_id,
+        "dealer_id": dealer_id,
+        "version": alte_version,
+        "pdf_b64": doc.get("pdf_b64"),
+        "contract_data": doc.get("contract_data"),
+        "pickup_date": alt_datum,
+        "pickup_time": alt_zeit,
+        "filename": doc.get("filename"),
+        "archived_at": now_iso(),
+        "archived_by": user.get("id"),
+        "grund": "abholtermin_geaendert",
+    })
+
     await db.generated_pdfs.update_one(
         {"id": contract_id, "dealer_id": dealer_id},
         {"$set": {
@@ -533,12 +585,14 @@ async def regenerate_contract_for_pickup(
             "contract_data": contract_dict,
             "pickup_date": neu_datum,
             "pickup_time": neu_zeit,
+            "version": alte_version + 1,
             "updated_at": now_iso(),
         },
          "$push": {"pickup_history": {
              "von_datum": alt_datum, "von_zeit": alt_zeit,
              "auf_datum": neu_datum, "auf_zeit": neu_zeit,
              "geaendert_von": user.get("id"), "geaendert_am": now_iso(),
+             "version_vorher": alte_version,
          }}},
     )
     await log_activity(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
