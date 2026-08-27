@@ -24,6 +24,7 @@ services:
         condition: service_healthy
     environment:
       - MONGO_URL=mongodb://mongo:27017
+      - DB_NAME=${DB_NAME:-autoschnell}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
       - TRUST_PROXY=true
       - RATE_LIMIT_EXEMPT_LOOPBACK=false
@@ -38,6 +39,7 @@ services:
       - SMTP_PASS=${SMTP_PASS:-}
       - SMTP_FROM=${SMTP_FROM:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - FRONTEND_URL=${FRONTEND_URL:-}
       - SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-60}
       - BACKUP_DIR=/backups
       - STRIPE_API_KEY=${STRIPE_API_KEY:-}
@@ -51,7 +53,10 @@ services:
     build:
       context: ./frontend
       args:
-        REACT_APP_BACKEND_URL: /api
+        # LEER lassen: api.js baut daraus `${BACKEND}/api` — mit "/api" hier
+        # wuerde die App /api/api/... aufrufen. Leer = gleiche Herkunft,
+        # der nginx-Proxy leitet /api an das Backend weiter.
+        REACT_APP_BACKEND_URL: ""
     restart: unless-stopped
 
   proxy:

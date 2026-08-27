@@ -14,6 +14,7 @@ Optional:  --dir <Zielordner>   (Standard: C:\\AutoSchnell-Backups)
 import argparse
 import gzip
 import json
+import os
 import shutil
 import sys
 from datetime import datetime
@@ -22,8 +23,11 @@ from pathlib import Path
 import bson
 from pymongo import MongoClient
 
-MONGO_URL = "mongodb://127.0.0.1:27017"
-DB_NAME = "autoschnell"
+# Im Container laeuft Mongo unter dem Dienstnamen "mongo", lokal unter
+# 127.0.0.1 — beides kommt aus der Umgebung, damit das Backup in BEIDEN
+# Faellen die richtige Datenbank erreicht.
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
+DB_NAME = os.environ.get("DB_NAME", "autoschnell")
 KEEP = 14          # so viele Backups bleiben erhalten
 DEFAULT_DIR = Path(r"C:\AutoSchnell-Backups")
 # Datei-Speicher (Fotos, Vertrags-PDFs, Snapshots, Unterschriften) — liegt

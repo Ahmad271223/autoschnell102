@@ -461,7 +461,7 @@ async def on_start():
     # nach, wenn das letzte Backup älter als 24h ist.
     try:
         from backup_service import run_backup_forever
-        asyncio.create_task(run_backup_forever())
+        asyncio.create_task(run_backup_forever(db))
     except Exception as exc:
         log.warning("backup task start failed: %s", exc)
     # Snapshot Self-Heal: Beim Boot alle Snapshots, die in pending/running
@@ -489,6 +489,15 @@ async def _resume_stuck_snapshots():
 
     # 5 Sekunden warten, bis der Webserver wirklich oben ist
     await asyncio.sleep(5)
+
+    # Bei mehreren Worker-Prozessen stoesst nur EINER die haengenden
+    # Snapshots neu an — sonst laeuft jeder Job achtfach.
+    try:
+        from job_lock import acquire
+        if not await acquire(db, "snapshot-resume-boot", ttl_seconds=600):
+            return
+    except Exception:
+        pass
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     too_old = await db.listing_snapshots.update_many(

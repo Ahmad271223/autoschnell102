@@ -128,6 +128,35 @@ async def _cleanup_once(db) -> dict:
                         )
                         stats["photos_cleared"] += 1
 
+                # 2b) Abweichungsfotos aus Abholberichten loeschen — die
+                #     Datenschutzerklaerung verspricht: Fotos aus Abholungen
+                #     nach 7 Tagen (nicht abgeholt: 14 Tagen) weg. Der
+                #     Berichtstext (Kilometerstand, Maengel) bleibt als
+                #     Geschaeftsunterlage erhalten, nur die Bilddateien gehen.
+                async for rep in db.pickup_reports.find(
+                        {"appointment_id": appt["id"]},
+                        {"_id": 0, "id": 1, "deviations": 1}):
+                    devs = rep.get("deviations") or []
+                    rep_changed = False
+                    for entry in devs:
+                        key = entry.get("photo_key")
+                        if not key:
+                            continue
+                        try:
+                            delete_object(key)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("report photo delete failed for %s: %s",
+                                        key, exc)
+                        entry["photo_key"] = None
+                        entry["photo_deleted_at"] = now.isoformat()
+                        rep_changed = True
+                    if rep_changed:
+                        await db.pickup_reports.update_one(
+                            {"id": rep["id"]},
+                            {"$set": {"deviations": devs}})
+                        stats["report_photos_deleted"] = (
+                            stats.get("report_photos_deleted", 0) + 1)
+
                 # 3) Listings-Cache-Eintrag entfernen, damit ein neuer
                 #    Vergleich wieder frisch zieht (sonst käme der leere
                 #    Cache-Hit).
@@ -201,7 +230,15 @@ async def run_cleanup_forever(db):
     """Endlosschleife; wird beim FastAPI-Startup als Task gestartet."""
     # kurze Verzögerung beim Start, damit andere Init-Jobs fertig werden
     await asyncio.sleep(30)
+    from job_lock import acquire, ensure_lock_index
+    await ensure_lock_index(db)
     while True:
+        # Bei mehreren Worker-Prozessen raeumt nur EINER pro Zyklus auf —
+        # sonst loeschen acht Prozesse gleichzeitig dieselben Dateien.
+        if not await acquire(db, "cleanup-cycle",
+                             ttl_seconds=CLEANUP_INTERVAL_SECONDS - 60):
+            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+            continue
         try:
             await _cleanup_once(db)
         except Exception as exc:  # noqa: BLE001

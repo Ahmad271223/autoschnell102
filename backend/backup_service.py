@@ -57,11 +57,24 @@ def _seconds_until_next_run() -> float:
     return (nxt - now).total_seconds()
 
 
-async def run_backup_forever() -> None:
+async def run_backup_forever(db=None) -> None:
+    """Backup-Schleife. Bei mehreren Worker-Prozessen (WEB_CONCURRENCY>1)
+    sorgt eine Sperre in MongoDB dafuer, dass pro Tag nur EIN Worker das
+    Backup zieht — sonst gaebe es acht identische Backups gleichzeitig."""
+
+    async def _may_run(tag: str) -> bool:
+        if db is None:
+            return True  # Einzelprozess (lokal) — keine Sperre noetig
+        from job_lock import acquire
+        # 20h TTL: erst am naechsten Tag darf wieder jemand ran; faellt der
+        # Gewinner aus, uebernimmt nach Ablauf ein anderer Worker.
+        return await acquire(db, f"backup-{tag}", ttl_seconds=20 * 3600)
+
     # Nachholen: wenn das letzte Backup >24h alt ist, sofort eins ziehen
     # (PC koennte zur geplanten Zeit ausgeschaltet gewesen sein).
     await asyncio.sleep(30)  # Backend erst in Ruhe hochfahren lassen
-    if _last_backup_age_hours() > 24:
+    if _last_backup_age_hours() > 24 and await _may_run(
+            datetime.now().strftime("%Y-%m-%d")):
         log.info("[backup] Letztes Backup >24h alt — hole nach …")
         await _run_backup()
     while True:
@@ -69,4 +82,5 @@ async def run_backup_forever() -> None:
         log.info("[backup] Naechstes Backup in %.1f h (%02d:00 Uhr)",
                  wait / 3600, BACKUP_HOUR)
         await asyncio.sleep(wait)
-        await _run_backup()
+        if await _may_run(datetime.now().strftime("%Y-%m-%d")):
+            await _run_backup()
