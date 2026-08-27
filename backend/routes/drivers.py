@@ -577,6 +577,17 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    # Vereinheitlichter Abschluss: "abgeholt" gibt es NUR mit unterschriebenem
+    # Abholprotokoll (Beweiskette: Zustand + beide Unterschriften). Der alte
+    # Schnellweg ohne Protokoll erzeugte "abgeholt"-Termine ohne jeden Beleg.
+    if body.status == "abgeholt":
+        final_proto = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "status": "final",
+             "superseded": {"$ne": True}}, {"_id": 0, "id": 1})
+        if not final_proto:
+            raise HTTPException(409, "Bitte zuerst das Abholprotokoll "
+                                     "ausfüllen und unterschreiben — erst "
+                                     "damit gilt das Fahrzeug als abgeholt.")
     update = {
         "status": body.status,
         "status_changed_at": now_iso(),
