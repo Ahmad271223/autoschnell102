@@ -19,8 +19,12 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
-assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+# REACT_APP_BACKEND_URL ist seit dem Proxy-Umbau bewusst LEER (relative
+# /api-Aufrufe). Fuer Tests brauchen wir eine absolute Adresse -> lokales
+# Backend, per TEST_BASE_URL ueberschreibbar.
+BASE_URL = (os.environ.get("TEST_BASE_URL")
+            or os.environ.get("REACT_APP_BACKEND_URL")
+            or "http://localhost:8001").rstrip("/")
 
 SUPER_USERNAME = "CashCarHannover2025"
 SUPER_PASSWORD = "MaW34543WaM"

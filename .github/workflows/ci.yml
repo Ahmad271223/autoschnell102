@@ -1,0 +1,76 @@
+# Continuous Integration — laeuft bei jedem Push und Pull Request.
+# Prueft: Backend bootet gegen echte MongoDB, Selbsttest-Suite gruen,
+# Frontend baut fehlerfrei. Erst wenn alles gruen ist, sollte gemergt werden.
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (Boot + Tests)
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017
+      DB_NAME: autoschnell_ci
+      JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
+      TEST_BASE_URL: http://127.0.0.1:8001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Abhaengigkeiten installieren
+        # emergentintegrations liegt nicht auf PyPI (optionales Stripe-Extra,
+        # im Code ueberall per try/except abgesichert) — wird uebersprungen.
+        run: |
+          grep -v '^emergentintegrations' backend/requirements.txt > /tmp/req.txt
+          pip install -r /tmp/req.txt
+      - name: Backend starten
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8001 \
+            --loop asyncio > /tmp/backend.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8001/api/health && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8001/api/health
+      - name: Selbsttest-Suite
+        working-directory: backend
+        run: |
+          python -m pytest tests/test_smoke.py \
+                           tests/test_kleinanzeigen_service.py \
+                           tests/test_mobile_service_makes.py -v
+      - name: Backend-Log bei Fehler zeigen
+        if: failure()
+        run: tail -100 /tmp/backend.log || true
+
+  frontend:
+    name: Frontend (Build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - name: Abhaengigkeiten installieren
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+      - name: Produktions-Build
+        working-directory: frontend
+        # CI=false: CRA behandelt Warnungen sonst als Fehler
+        run: CI=false yarn build

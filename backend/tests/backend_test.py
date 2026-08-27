@@ -9,7 +9,12 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://vehicle-holder-auto.preview.emergentagent.com").rstrip("/")
+# REACT_APP_BACKEND_URL ist seit dem Proxy-Umbau bewusst LEER (relative
+# /api-Aufrufe). Fuer Tests brauchen wir eine absolute Adresse -> lokales
+# Backend, per TEST_BASE_URL ueberschreibbar.
+BASE_URL = (os.environ.get("TEST_BASE_URL")
+            or os.environ.get("REACT_APP_BACKEND_URL")
+            or "http://localhost:8001").rstrip("/")
 API = f"{BASE_URL}/api"
 
 ADMIN_EMAIL = "admin@autohandel.app"
