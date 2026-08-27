@@ -196,6 +196,24 @@ async def get_sale_plan_status(dealer_id: str) -> dict:
                 "plans": SALE_PLANS}
     tier = plan.get("tier")
     meta = SALE_PLANS.get(tier, {})
+    # Ablauf pruefen: Pakete mit valid_until enden automatisch — danach ist
+    # kein Publish mehr moeglich, bis der Admin verlaengert. Alte Pakete
+    # ohne valid_until laufen unbefristet weiter (Bestandsschutz).
+    valid_until = plan.get("valid_until")
+    if valid_until:
+        try:
+            vu = datetime.fromisoformat(valid_until)
+            if vu.tzinfo is None:
+                vu = vu.replace(tzinfo=timezone.utc)
+            if vu < datetime.now(timezone.utc):
+                return {"active": False, "expired": True, "tier": tier,
+                        "label": meta.get("label", tier),
+                        "valid_until": valid_until,
+                        "quota": 0, "used": 0, "remaining": 0,
+                        "period_start": None, "period_end": None,
+                        "plans": SALE_PLANS}
+        except (TypeError, ValueError):
+            pass
     quota = plan.get("custom_quota") or meta.get("quota") or 0
     period_key, p_start, p_end = _current_period(plan.get("period_start", now_iso()))
     # Verbrauch: bevorzugt der atomare Zähler (race-fest, siehe publish_listing).
@@ -210,6 +228,7 @@ async def get_sale_plan_status(dealer_id: str) -> dict:
             "remaining": max(0, quota - used) if quota else None,
             "period_key": period_key,
             "period_start": p_start, "period_end": p_end,
+            "valid_until": plan.get("valid_until"),
             "price": meta.get("price"), "plans": SALE_PLANS}
 
 

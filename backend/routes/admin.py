@@ -404,6 +404,31 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
         # neu, wenn vorher kein Paket existierte.
         "period_start": old.get("period_start") or now_iso(),
     }
+    # Laufzeit: months=N begrenzt das Paket auf N x 30 Tage. Verlaengerung
+    # rechnet ab dem bisherigen Ablauf weiter (nicht ab heute), damit dem
+    # Haendler keine bezahlte Restlaufzeit verloren geht. Ohne months bleibt
+    # ein bestehendes Ablaufdatum erhalten; gab es keins, ist das Paket
+    # unbefristet (wie bisher).
+    months = body.get("months")
+    if months:
+        try:
+            months = max(1, min(24, int(months)))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "months muss eine Zahl (1–24) sein")
+        base = datetime.now(timezone.utc)
+        old_vu = old.get("valid_until")
+        if old_vu:
+            try:
+                prev = datetime.fromisoformat(old_vu)
+                if prev.tzinfo is None:
+                    prev = prev.replace(tzinfo=timezone.utc)
+                if prev > base:
+                    base = prev
+            except (TypeError, ValueError):
+                pass
+        plan["valid_until"] = (base + timedelta(days=30 * months)).isoformat()
+    elif old.get("valid_until"):
+        plan["valid_until"] = old["valid_until"]
     if tier == "enterprise":
         try:
             plan["custom_quota"] = int(body.get("custom_quota") or 0) or None
