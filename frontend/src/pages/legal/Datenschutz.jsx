@@ -19,6 +19,10 @@ export default function Datenschutz() {
         <li><b>Geschäftsdaten:</b> Fahrzeugdaten, Kaufverträge, Verkäuferdaten
             (Name, Adresse, Kontaktdaten der Fahrzeugverkäufer), Termine,
             Abholberichte inkl. Fotos</li>
+        <li><b>Marktplatz-Anfragen:</b> Kaufinteressen zwischen Käufern und
+            Händlern inkl. Preisangebot, Gegenangebot und mitgeschickter
+            Nachricht (kein allgemeiner Chat — die Nachrichten gehören zur
+            jeweiligen Anfrage und deren Verlauf)</li>
         <li><b>Nutzungsdaten:</b> Anmeldezeitpunkte, durchgeführte Aktionen
             (Audit-Log), IP-Adressen bei sicherheitsrelevanten Vorgängen</li>
         <li><b>Abrechnungsdaten:</b> gebuchte Abos/Pakete und deren Laufzeiten</li>

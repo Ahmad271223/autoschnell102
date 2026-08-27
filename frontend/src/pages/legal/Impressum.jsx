@@ -24,15 +24,6 @@ export default function Impressum() {
         Baldurstraße 5, 30657 Hannover
       </p>
 
-      <H2>EU-Streitschlichtung</H2>
-      <p>
-        Die Europäische Kommission stellt eine Plattform zur
-        Online-Streitbeilegung (OS) bereit:{" "}
-        <a href="https://ec.europa.eu/consumers/odr/" target="_blank" rel="noreferrer"
-           className="text-white underline">https://ec.europa.eu/consumers/odr/</a>.
-        Unsere E-Mail-Adresse findest du oben im Impressum.
-      </p>
-
       <H2>Verbraucherstreitbeilegung / Universalschlichtungsstelle</H2>
       <p>
         Die Plattform richtet sich ausschließlich an gewerbliche Nutzer
