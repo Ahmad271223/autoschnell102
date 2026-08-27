@@ -561,17 +561,37 @@ async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
 
 # Marker, an denen wir eine ECHTE Kleinanzeigen-Fahrzeug-Detailseite
 # erkennen — schützt den Client-Ingest gegen untergeschobenes Fremd-HTML.
-_KA_PAGE_MARKERS = ("kleinanzeigen", "s-anzeige", "viewad")
+# Wichtig: Die Daten landen im GLOBALEN Speicher, den alle Händler sehen.
+# Ein zu lascher Check würde erlauben, fremde Inserate mit gefälschten
+# Preisen zu "vergiften". Darum: mehrere strukturelle Marker UND die
+# Anzeigen-Nummer aus der URL muss im HTML selbst vorkommen.
+_KA_STRUCTURE_MARKERS = (
+    "kleinanzeigen.de/s-anzeige",   # kanonischer Link der Detailseite
+    "viewad-title",                 # Titel-Element der echten Seite
+    "viewad-price",                 # Preis-Element der echten Seite
+    "viewad-details",               # Detail-Tabelle (Marke, Modell, EZ …)
+    "viewad-locality",              # Standort-Element
+    "gsm_ad",                       # internes Tracking der echten Seite
+)
 
 
-def looks_like_kleinanzeigen_listing(html_text: str) -> bool:
-    """Grobe Plausibilitätsprüfung: Ist das wirklich eine Kleinanzeigen-
-    Detailseite? (Der Nutzer-Browser liefert das HTML — wir vertrauen ihm
-    nicht blind.)"""
+def looks_like_kleinanzeigen_listing(html_text: str, url: str = "") -> bool:
+    """Strenge Plausibilitätsprüfung: Ist das wirklich DIE Kleinanzeigen-
+    Detailseite zu DIESER URL? (Der Nutzer-Browser liefert das HTML — wir
+    vertrauen ihm nicht.)"""
     if not html_text or len(html_text) < 500:
         return False
-    low = html_text[:20000].lower()
-    return sum(1 for m in _KA_PAGE_MARKERS if m in low) >= 1
+    low = html_text.lower()
+    # 1) Mindestens 3 der strukturellen Marker der echten Detailseite.
+    if sum(1 for m in _KA_STRUCTURE_MARKERS if m in low) < 3:
+        return False
+    # 2) Die Anzeigen-Nummer aus der URL muss im HTML vorkommen (kanonischer
+    #    Link, Tracking, Teilen-Knopf …) — sonst gehört das HTML zu einer
+    #    ANDEREN Anzeige oder ist frei erfunden.
+    item_id = _extract_item_id(url) if url else None
+    if item_id and item_id not in html_text:
+        return False
+    return True
 
 
 def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:

@@ -342,7 +342,7 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
     if await peek_cached_listing(db, raw_url) is not None:
         return {"ok": True, "already_cached": True}
 
-    if not looks_like_kleinanzeigen_listing(body.html):
+    if not looks_like_kleinanzeigen_listing(body.html, url=raw_url):
         raise HTTPException(422, "Das übermittelte HTML sieht nicht nach einer "
                                  "Kleinanzeigen-Fahrzeugseite aus.")
     try:
@@ -356,9 +356,19 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
     # Über get_or_fetch_listing in den Cache schreiben (nutzt dieselbe
     # Cache-/Single-Flight-Logik; der 'fetcher' liefert einfach das schon
     # geparste Ergebnis, kein Netz-Zugriff).
+    # Preis/Titel muessen vorhanden sein — eine "leere" Seite deutet auf
+    # manipuliertes HTML hin und wuerde den globalen Speicher vergiften.
+    if not (parsed.get("title") or "").strip() or not parsed.get("list_price"):
+        raise HTTPException(422, "Das HTML enthält keine verwertbaren "
+                                 "Fahrzeugdaten (Titel/Preis fehlen).")
+
     async def _from_client(src: str, iid: str, url: str) -> dict:
         parsed["mobile_ad_id"] = parsed.get("kleinanzeigen_id") or iid
         parsed.setdefault("kleinanzeigen_id", iid)
+        # Nachvollziehbarkeit: WER hat diese Daten geliefert? (Kein
+        # Server-Abruf — bei Missbrauch laesst sich der Nutzer sperren.)
+        parsed["ingested_by_user"] = user.get("id") or user.get("email") or ""
+        parsed["ingested_by_dealer"] = user.get("dealer_id") or ""
         return parsed
 
     try:
