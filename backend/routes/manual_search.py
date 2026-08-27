@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from autoscout_service import _load_data as _load_autoscout
 from autoscout_service import build_search_url as build_autoscout_url
-from deps import current_user, db
+from deps import current_user, db, require_active_sub
 from mobile_service import DEFAULT_RULES
 from mobile_service import build_search_url as build_mobile_url
 
@@ -111,9 +111,10 @@ async def list_makes(_=Depends(current_user)):
 
 
 @router.post("/manual/search")
-async def manual_search(body: ManualSearchIn, user=Depends(current_user)):
-    if user.get("role") not in ("dealer", "sucher"):
-        raise HTTPException(403, "Nur für Händler-/Sucher-Accounts")
+async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
+    # require_active_sub prueft Rolle UND aktives Abo — vorher genuegte die
+    # Rolle, wodurch die Bezahlschranke per direktem API-Aufruf umgangen
+    # werden konnte.
     """Wandelt die manuelle Eingabe in ein „virtuelles Fahrzeug" um und nutzt
     die existierenden mobile_service / autoscout_service Url-Builder.
     Übernimmt damit automatisch die Vergleichs-Regeln des Händlers (KM-Toleranz,

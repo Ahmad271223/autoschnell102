@@ -101,4 +101,5 @@ backend/assets/sketch_pdf_cache/
 
 # Diagnose-Protokolle der lokalen Server (nicht ins Repository)
 backend-log.txt
+backend-err.txt
 frontend-log.txt

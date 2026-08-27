@@ -51,13 +51,23 @@ class AppointmentIn(BaseModel):
 async def create_appointment(body: AppointmentIn, user=Depends(current_user)):
     appt_id = str(uuid.uuid4())
     title = body.title or "Fahrzeug abholen"
-    if body.vehicle_id and not body.title:
-        v = await db.vehicles.find_one(
-            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
-        )
-        if v:
-            d = v["data"]
-            title = f"{d.get('make_label','')} {d.get('model_label','')} abholen".strip()
+    # EIGENTUEMER-PRUEFUNG: Fahrzeug- und Vertrags-IDs sind erratbar
+    # (v_<Inserats-ID>). Ohne diese Pruefung koennte ein Haendler einen
+    # Termin auf ein FREMDES Fahrzeug legen und dessen Daten im Fahrer-PDF
+    # bzw. Protokoll sehen.
+    vehicle_doc = None
+    if body.vehicle_id:
+        vehicle_doc = await db.vehicles.find_one(
+            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+        if not vehicle_doc:
+            raise HTTPException(404, "Fahrzeug nicht gefunden")
+    if body.contract_id:
+        if not await db.generated_pdfs.find_one(
+                {"id": body.contract_id, "dealer_id": user["dealer_id"]}, {"_id": 1}):
+            raise HTTPException(404, "Vertrag nicht gefunden")
+    if vehicle_doc and not body.title:
+        d = vehicle_doc["data"]
+        title = f"{d.get('make_label','')} {d.get('model_label','')} abholen".strip()
     doc = {"id": appt_id, "dealer_id": user["dealer_id"], "title": title,
            **body.model_dump(exclude_none=True),
            "created_at": now_iso(), "updated_at": now_iso()}
@@ -140,6 +150,13 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     if not existing:
         raise HTTPException(404, "Termin nicht gefunden")
     update = body.model_dump(exclude_none=True)
+    # Auch beim Aendern: verknuepfte IDs muessen dem Haendler gehoeren.
+    if update.get("vehicle_id") and not await db.vehicles.find_one(
+            {"id": update["vehicle_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
+        raise HTTPException(404, "Fahrzeug nicht gefunden")
+    if update.get("contract_id") and not await db.generated_pdfs.find_one(
+            {"id": update["contract_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
+        raise HTTPException(404, "Vertrag nicht gefunden")
     update["updated_at"] = now_iso()
     pickup_changed = (
         update.get("pickup_date")
@@ -154,6 +171,21 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # abgeholt"), status_changed_at auffrischen, damit der Cleanup-Job
     # seine Fristen korrekt berechnen kann.
     if "status" in update and update["status"] != existing.get("status"):
+        # Vereinheitlichter Abschluss: Ist ein FAHRER zugeteilt, entsteht
+        # "abgeholt" ausschliesslich ueber dessen unterschriebenes
+        # Abholprotokoll — nicht per Hand im Buero (sonst gaebe es
+        # "abgeholt" ohne Beweisdokument). Termine OHNE Fahrer (Abholung
+        # durch den Haendler selbst) bleiben manuell abschliessbar.
+        if update["status"] == "abgeholt" and existing.get("driver_id"):
+            final_proto = await db.pickup_protocols.find_one(
+                {"appointment_id": appt_id, "status": "final",
+                 "superseded": {"$ne": True}}, {"_id": 0, "id": 1})
+            if not final_proto:
+                raise HTTPException(409, "Für diesen Termin ist ein Fahrer "
+                                         "eingeteilt. 'Abgeholt' entsteht "
+                                         "automatisch, sobald der Fahrer das "
+                                         "Abholprotokoll unterschrieben "
+                                         "abschließt.")
         update["status_changed_at"] = now_iso()
         # Ein manueller Statuswechsel hebt eine evtl. bereits geleerte
         # Markierung auf, falls jemand den Status zurückdreht.

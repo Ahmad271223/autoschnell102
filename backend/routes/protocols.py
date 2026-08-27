@@ -150,12 +150,18 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     doc = await _current(appt_id)
     vehicle: Dict[str, Any] = {}
     if appt.get("vehicle_id"):
-        v = await db.vehicles.find_one({"id": appt["vehicle_id"]}, {"_id": 0}) or {}
+        # WICHTIG: zusaetzlich ueber dealer_id. Fahrzeug-IDs sind
+        # vorhersehbar (v_<Inserats-ID>) und nur MIT dealer_id eindeutig —
+        # sonst koennte das Fahrzeug eines fremden Haendlers geladen werden.
+        v = await db.vehicles.find_one(
+            {"id": appt["vehicle_id"], "dealer_id": appt.get("dealer_id")},
+            {"_id": 0}) or {}
         vehicle = dict(v.get("data") or {})
     contract: Dict[str, Any] = {}
     if appt.get("contract_id"):
         c = await db.generated_pdfs.find_one(
-            {"id": appt["contract_id"]}, {"_id": 0, "contract_data": 1}) or {}
+            {"id": appt["contract_id"], "dealer_id": appt.get("dealer_id")},
+            {"_id": 0, "contract_data": 1}) or {}
         contract = dict(c.get("contract_data") or {})
     return {
         "protocol": doc,
@@ -270,12 +276,18 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     # ---- Daten für das ausgefüllte PDF zusammenstellen ----
     vehicle: Dict[str, Any] = {}
     if appt.get("vehicle_id"):
-        v = await db.vehicles.find_one({"id": appt["vehicle_id"]}, {"_id": 0}) or {}
+        # WICHTIG: zusaetzlich ueber dealer_id. Fahrzeug-IDs sind
+        # vorhersehbar (v_<Inserats-ID>) und nur MIT dealer_id eindeutig —
+        # sonst koennte das Fahrzeug eines fremden Haendlers geladen werden.
+        v = await db.vehicles.find_one(
+            {"id": appt["vehicle_id"], "dealer_id": appt.get("dealer_id")},
+            {"_id": 0}) or {}
         vehicle = dict(v.get("data") or {})
     contract: Dict[str, Any] = {}
     if appt.get("contract_id"):
         c = await db.generated_pdfs.find_one(
-            {"id": appt["contract_id"]}, {"_id": 0, "contract_data": 1}) or {}
+            {"id": appt["contract_id"], "dealer_id": appt.get("dealer_id")},
+            {"_id": 0, "contract_data": 1}) or {}
         contract = dict(c.get("contract_data") or {})
     dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0}) or {}
 

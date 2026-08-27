@@ -1,4 +1,5 @@
 """Auth endpoints: register, login, logout, me, password-reset."""
+import os
 import hashlib
 import re
 import secrets
@@ -248,8 +249,11 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
         "requested_ip": ip,
         "created_at": now_iso(),
     })
-    frontend = (request.headers.get("origin")
-                or request.headers.get("referer", "").rstrip("/")
+    # Basis-Adresse NUR aus der Server-Konfiguration. Frueher kam sie aus
+    # Origin/Referer — beides bestimmt der Aufrufer, wodurch ein Angreifer
+    # den Reset-Link in einer fremden E-Mail auf seine eigene Seite lenken
+    # konnte (Reset-Link-Poisoning).
+    frontend = (os.environ.get("FRONTEND_URL")
                 or "http://localhost:3000").split("?")[0].rstrip("/")
     link = f"{frontend}/passwort-reset?token={token}"
     await send_email(
