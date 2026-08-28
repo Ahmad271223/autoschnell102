@@ -226,35 +226,128 @@ def get_listing_identity(url: str) -> dict:
 #                                        unique=True)
 
 
+class ListingBusy(RuntimeError):
+    """Das Inserat wird gerade von einer anderen Anfrage geladen —
+    der Aufrufer soll kurz warten und erneut anfragen (HTTP 503)."""
+
+
 async def ensure_cache_indexes(db) -> None:
     """Idempotent: legt die nötigen Indizes auf der listings_cache Collection an."""
+    # Altlasten raus: fruehere Versionen legten Lease-Dokumente OHNE
+    # source/item_id an. So ein null/null-Relikt blockiert wegen des
+    # Unique-Index jeden weiteren neuen Link — vor der Index-Anlage loeschen.
+    await db.listings_cache.delete_many(
+        {"$or": [{"source": None}, {"source": {"$exists": False}},
+                 {"item_id": None}, {"item_id": {"$exists": False}}]})
     await db.listings_cache.create_index("cache_key", unique=True)
     await db.listings_cache.create_index(
         [("source", 1), ("item_id", 1)], unique=True, name="uniq_source_item"
     )
+    # Quarantaene fuer Client-Einreichungen: EIN Eintrag je Inserat+Haendler.
+    # Mongo-TTL-Index raeumt abgelaufene Eintraege selbststaendig weg.
+    await db.listings_cache_client.create_index(
+        [("cache_key", 1), ("dealer_id", 1)], unique=True,
+        name="uniq_key_dealer")
+    await db.listings_cache_client.create_index(
+        "expires_at", expireAfterSeconds=0, name="ttl_expires")
 
 
-async def peek_cached_listing(db, url: str) -> Optional[Tuple[dict, Optional[str]]]:
+def _is_fresh(doc: Optional[dict]) -> bool:
+    if not doc or not doc.get("data"):
+        return False
+    exp = doc.get("expires_at")
+    if not isinstance(exp, datetime):
+        return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp > datetime.now(timezone.utc)
+
+
+async def peek_cached_listing(db, url: str,
+                              dealer_id: Optional[str] = None
+                              ) -> Optional[Tuple[dict, Optional[str]]]:
     """Schaut NUR im Cache nach (kein Abruf, kein Lease). Liefert
-    (data, snapshot_id) bei gültigem Treffer, sonst None. Dient dem
-    client-seitigen Abrufen: der Server prüft erst, ob der Link schon da
-    ist — nur wenn nicht, wird der Browser des Nutzers zum Holen gebeten."""
+    (data, snapshot_id) bei gültigem Treffer, sonst None.
+
+    Mit dealer_id wird zusaetzlich die QUARANTAENE des Haendlers geprueft:
+    Client-Einreichungen sind zunaechst nur fuer den einreichenden Haendler
+    sichtbar (globale Freigabe erst nach unabhaengiger Bestaetigung —
+    siehe store_client_listing). So kann niemand mit gefaelschtem HTML
+    die Daten ALLER Haendler vergiften."""
     identity = get_listing_identity(url)
     cache_key = identity["cache_key"]
     cached = await db.listings_cache.find_one({"cache_key": cache_key}, {"_id": 0})
-    if not cached or not cached.get("data"):
-        return None
-    exp = cached.get("expires_at")
-    if isinstance(exp, datetime):
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        if exp > datetime.now(timezone.utc):
+    if _is_fresh(cached):
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key},
+            {"$inc": {"use_count": 1},
+             "$set": {"last_used_at": datetime.now(timezone.utc), "url": url}})
+        return cached["data"], cached.get("snapshot_id")
+    if dealer_id:
+        own = await db.listings_cache_client.find_one(
+            {"cache_key": cache_key, "dealer_id": dealer_id}, {"_id": 0})
+        if _is_fresh(own):
+            return own["data"], None
+    return None
+
+
+def _client_core_match(a: dict, b: dict) -> bool:
+    """Stimmen zwei unabhaengige Einreichungen im Kern ueberein?
+    (Preis auf 1 % genau, Titel-Anfang identisch.)"""
+    try:
+        pa, pb = float(a.get("list_price") or 0), float(b.get("list_price") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not pa or not pb or abs(pa - pb) > 0.01 * max(pa, pb):
+        return False
+    ta = (a.get("title") or "").strip().lower()[:40]
+    tb = (b.get("title") or "").strip().lower()[:40]
+    return bool(ta) and ta == tb
+
+
+async def store_client_listing(db, url: str, data: dict, dealer_id: str,
+                               ttl_hours: int = 24,
+                               confirmed_ttl_hours: int = 168) -> str:
+    """Client-Einreichung speichern — ZUERST in Quarantaene (nur fuer den
+    einreichenden Haendler sichtbar, kurze TTL). Global freigegeben wird
+    ein Inserat erst, wenn ein ZWEITER, unabhaengiger Haendler dieselben
+    Kerndaten einreicht (zwei fremde Browser luegen selten identisch).
+
+    Rueckgabe: "quarantined" oder "promoted"."""
+    identity = get_listing_identity(url)
+    cache_key = identity["cache_key"]
+    now = datetime.now(timezone.utc)
+    await db.listings_cache_client.update_one(
+        {"cache_key": cache_key, "dealer_id": dealer_id},
+        {"$set": {"source": identity["source"], "item_id": identity["item_id"],
+                  "url": url, "data": data,
+                  "expires_at": now + timedelta(hours=ttl_hours)},
+         "$setOnInsert": {"cache_key": cache_key, "dealer_id": dealer_id,
+                          "created_at": now}},
+        upsert=True)
+    # Unabhaengige Bestaetigung durch einen ANDEREN Haendler?
+    async for other in db.listings_cache_client.find(
+            {"cache_key": cache_key, "dealer_id": {"$ne": dealer_id},
+             "expires_at": {"$gt": now}}, {"_id": 0}):
+        if _client_core_match(other.get("data") or {}, data):
             await db.listings_cache.update_one(
                 {"cache_key": cache_key},
-                {"$inc": {"use_count": 1},
-                 "$set": {"last_used_at": datetime.now(timezone.utc), "url": url}})
-            return cached["data"], cached.get("snapshot_id")
-    return None
+                {"$set": {"cache_key": cache_key,
+                          "source": identity["source"],
+                          "item_id": identity["item_id"],
+                          "url": url, "data": data,
+                          "fetched_at": now,
+                          # Kuerzere TTL als Server-Abrufe: Client-Daten
+                          # sind Momentaufnahmen zweier Browser, keine
+                          # API-Antwort.
+                          "expires_at": now + timedelta(hours=confirmed_ttl_hours),
+                          "last_used_at": now,
+                          "client_confirmed": True,
+                          "confirmed_by": [other.get("dealer_id"), dealer_id]},
+                 "$setOnInsert": {"created_at": now}},
+                upsert=True)
+            return "promoted"
+    return "quarantined"
 
 
 async def get_or_fetch_listing(
@@ -320,7 +413,7 @@ async def get_or_fetch_listing(
         return None
 
     got_lease = False
-    for _wait in range(45):                    # max. ~70 s warten
+    for _wait in range(20):                    # max. ~30 s warten, dann klare Meldung
         lease_now = datetime.now(timezone.utc)
         try:
             await db.listings_cache.update_one(
@@ -329,7 +422,15 @@ async def get_or_fetch_listing(
                          {"fetching_until": None},
                          {"fetching_until": {"$lt": lease_now}}]},
                 {"$set": {"fetching_until": lease_now + timedelta(seconds=90)},
-                 "$setOnInsert": {"cache_key": cache_key, "created_at": lease_now}},
+                 # WICHTIG: source/item_id MUESSEN schon beim Lease gesetzt
+                 # werden. Ohne sie legt der Upsert ein Dokument mit
+                 # source=null/item_id=null an — und der Unique-Index
+                 # uniq_source_item laesst nur EIN null/null-Paar zu. Folge
+                 # (vor diesem Fix): 100 VERSCHIEDENE neue Links blockierten
+                 # sich gegenseitig ~70 s und endeten im Fehler.
+                 "$setOnInsert": {"cache_key": cache_key, "source": source,
+                                  "item_id": item_id, "url": url,
+                                  "created_at": lease_now}},
                 upsert=True,
             )
             got_lease = True
@@ -346,17 +447,31 @@ async def get_or_fetch_listing(
                  "$set": {"last_used_at": datetime.now(timezone.utc)}})
             return c["data"], True, c.get("snapshot_id")
     if not got_lease:
-        raise RuntimeError(
+        raise ListingBusy(
             "Das Inserat wird gerade von einer anderen Anfrage geladen - "
             "bitte in ein paar Sekunden erneut versuchen.")
 
+    async def _extend_lease_forever():
+        # Herzschlag: solange der Provider-Abruf laeuft, bleibt das Lease
+        # gueltig — kein zweiter Prozess uebernimmt mittendrin.
+        while True:
+            await _aio.sleep(30)
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key},
+                {"$set": {"fetching_until":
+                          datetime.now(timezone.utc) + timedelta(seconds=90)}})
+
+    _heartbeat = _aio.create_task(_extend_lease_forever())
     try:
         data = await fetcher(source, item_id, url)
     except Exception:
         # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
+        _heartbeat.cancel()
         await db.listings_cache.update_one(
             {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
         raise
+    finally:
+        _heartbeat.cancel()
     if not isinstance(data, dict):
         await db.listings_cache.update_one(
             {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
@@ -475,5 +590,7 @@ __all__ = [
     "get_or_fetch_listing",
     "set_cache_snapshot",
     "ensure_cache_indexes",
+    "ListingBusy",
+    "store_client_listing",
     "router",
 ]
