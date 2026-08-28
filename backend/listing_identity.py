@@ -296,18 +296,47 @@ async def peek_cached_listing(db, url: str,
     return None
 
 
+# Massstaebe fuer die Freigabe aus der Quarantaene — bewusst benannt, denn
+# diese Zahlen definieren die Sicherheitsschwelle gegen gefaelschtes HTML.
+CLIENT_MATCH_PRICE_TOLERANCE = 0.01   # Preis auf 1 % genau
+CLIENT_MATCH_TITLE_PREFIX = 40        # verglichene Titel-Laenge
+
+
 def _client_core_match(a: dict, b: dict) -> bool:
     """Stimmen zwei unabhaengige Einreichungen im Kern ueberein?
-    (Preis auf 1 % genau, Titel-Anfang identisch.)"""
+
+    Preis und Titel allein waeren zu wenig: die stehen oeffentlich in der
+    Suchergebnis-Liste — ein Angreifer koennte sie abschreiben und den REST
+    faelschen (km-Stand, Erstzulassung). Deshalb muessen auch km-Stand,
+    Erstzulassung und Marke uebereinstimmen, sofern beide Seiten sie
+    liefern."""
     try:
         pa, pb = float(a.get("list_price") or 0), float(b.get("list_price") or 0)
     except (TypeError, ValueError):
         return False
-    if not pa or not pb or abs(pa - pb) > 0.01 * max(pa, pb):
+    if not pa or not pb or abs(pa - pb) > CLIENT_MATCH_PRICE_TOLERANCE * max(pa, pb):
         return False
-    ta = (a.get("title") or "").strip().lower()[:40]
-    tb = (b.get("title") or "").strip().lower()[:40]
-    return bool(ta) and ta == tb
+    ta = (a.get("title") or "").strip().lower()[:CLIENT_MATCH_TITLE_PREFIX]
+    tb = (b.get("title") or "").strip().lower()[:CLIENT_MATCH_TITLE_PREFIX]
+    if not ta or ta != tb:
+        return False
+    try:
+        ka, kb = a.get("mileage"), b.get("mileage")
+        if ka is not None and kb is not None:
+            ka, kb = float(ka), float(kb)
+            if abs(ka - kb) > 0.01 * max(ka, kb, 1):
+                return False
+    except (TypeError, ValueError):
+        return False
+    ea = str(a.get("first_registration") or "").strip()
+    eb = str(b.get("first_registration") or "").strip()
+    if ea and eb and ea != eb:
+        return False
+    ma = str(a.get("make_label") or "").strip().lower()
+    mb = str(b.get("make_label") or "").strip().lower()
+    if ma and mb and ma != mb:
+        return False
+    return True
 
 
 async def store_client_listing(db, url: str, data: dict, dealer_id: str,
@@ -340,7 +369,10 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
                 {"$set": {"cache_key": cache_key,
                           "source": identity["source"],
                           "item_id": identity["item_id"],
-                          "url": url, "data": data,
+                          # Die AELTERE Einreichung wird veroeffentlicht:
+                          # wer als Zweiter bestaetigt, bestimmt nicht den
+                          # Inhalt, den alle Haendler sehen.
+                          "url": url, "data": other.get("data") or data,
                           "fetched_at": now,
                           # Kuerzere TTL als Server-Abrufe: Client-Daten
                           # sind Momentaufnahmen zweier Browser, keine

@@ -24,9 +24,21 @@ async def ensure_lock_index(db) -> None:
     """Eindeutiger Index auf `name` — ohne ihn koennten zwei Worker
     gleichzeitig eine Sperre desselben Namens anlegen."""
     try:
+        # Alt-Duplikate (aus der Zeit vor dem Index) wuerden die Anlage
+        # dauerhaft scheitern lassen — nur das juengste je Name behalten.
+        async for row in db.job_locks.aggregate([
+                {"$sort": {"acquired_at": -1}},
+                {"$group": {"_id": "$name", "keep": {"$first": "$_id"},
+                            "n": {"$sum": 1}}}]):
+            if row.get("n", 1) > 1:
+                await db.job_locks.delete_many(
+                    {"name": row["_id"], "_id": {"$ne": row["keep"]}})
         await db.job_locks.create_index("name", unique=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Ohne den Index schuetzt die Sperre nicht zuverlaessig — laut sein.
+        import logging
+        logging.getLogger("autohandel").error(
+            "job_locks-Index konnte nicht angelegt werden: %s", exc)
 
 
 async def acquire(db, name: str, ttl_seconds: int = 3600) -> bool:

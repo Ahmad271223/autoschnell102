@@ -421,6 +421,21 @@ async def publish_listing(listing_id: str, body: PublishIn,
             {"id": listing_id, "dealer_id": user["dealer_id"],
              "counted_periods": {"$ne": period_key}},
             {"$addToSet": {"counted_periods": period_key}})
+        if not marker.modified_count:
+            # Ein GLEICHZEITIGER Publish hat die Markierung gesetzt. Zwei
+            # Faelle: (a) er hat den Slot bekommen — dann ist alles gezaehlt
+            # und wir duerfen mitveroeffentlichen; (b) er lag UEBER der
+            # Quota und hat Markierung + Slot gerade zurueckgegeben — dann
+            # duerfen wir NICHT einfach durchrutschen (vorher konnte so ein
+            # Inserat ueber der Quota live gehen, ohne je gezaehlt zu
+            # werden). Nachlesen entscheidet.
+            nachgelesen = await db.resale_listings.find_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"]},
+                {"_id": 0, "counted_periods": 1})
+            if period_key not in (nachgelesen or {}).get("counted_periods", []):
+                raise HTTPException(402, "Dein monatliches Kontingent ist "
+                                         "erreicht. Upgrade auf ein größeres "
+                                         "Paket oder Enterprise anfragen.")
         quota = plan.get("quota")
         if marker.modified_count and quota:
             # Schritt 2: ATOMARE Kontingent-Beanspruchung (race-fest, auch
