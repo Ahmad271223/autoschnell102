@@ -12,7 +12,7 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -420,18 +420,25 @@ async def browse_dealers(q: Optional[str] = None,
         {"marketplace.public": True},
         {"id": {"$in": my_networks}},
     ]}
+    if q:
+        query["company_name"] = {"$regex": re.escape(q.strip()), "$options": "i"}
+    dealers = await db.dealers.find(query, {"_id": 0}).to_list(1000)
+    dealers = [dl for dl in dealers
+               if dl["id"] != user.get("dealer_id")
+               and ((dl.get("marketplace") or {}).get("public")
+                    or dl["id"] in my_networks)]
+    # Inseratszahlen ALLER Haendler in EINER Aggregation statt
+    # count_documents je Haendler (kein N+1 mehr).
+    counts = {row["_id"]: row["n"] async for row in db.resale_listings.aggregate([
+        {"$match": {"dealer_id": {"$in": [dl["id"] for dl in dealers]},
+                    "status": "veroeffentlicht"}},
+        {"$group": {"_id": "$dealer_id", "n": {"$sum": 1}}},
+    ])}
     out = []
-    async for dl in db.dealers.find(query, {"_id": 0}):
-        if dl["id"] == user.get("dealer_id"):
-            continue  # eigener Betrieb
+    for dl in dealers:
         name = dl.get("company_name", "")
-        if q and q.lower() not in name.lower():
-            continue
         mp = dl.get("marketplace") or {}
-        published = await db.resale_listings.count_documents(
-            {"dealer_id": dl["id"], "status": "veroeffentlicht"})
-        if not mp.get("public") and dl["id"] not in my_networks:
-            continue
+        published = counts.get(dl["id"], 0)
         out.append({
             "dealer_id": dl["id"],
             "slug": mp.get("slug") or _slugify(name, dl["id"]),
@@ -459,10 +466,18 @@ async def browse_listings(
     ps_min: Optional[int] = None, ps_max: Optional[int] = None,
     sort: Optional[str] = None, dealer: Optional[str] = None,
     nur_favoriten: Optional[int] = 0,
+    page: int = 1, limit: int = 60,
 ):
     """Alle für den Betrachter sichtbaren veröffentlichten Fahrzeuge.
-    sort: preis_auf | preis_ab | km_auf | km_ab (Default: neueste zuerst).
-    nur_favoriten=1: nur gemerkte Fahrzeuge."""
+
+    Filter, Sortierung und Seitengroesse laufen komplett in MongoDB
+    (Aggregation) — keine harte 300er-Grenze und kein Nachfiltern in
+    Python mehr. sort: preis_auf | preis_ab | km_auf | km_ab
+    (Default: neueste zuerst). nur_favoriten=1: nur gemerkte Fahrzeuge.
+    page/limit: Seitennummer (ab 1) und Treffer pro Seite (max. 200)."""
+    limit = max(1, min(int(limit or 60), 200))
+    page = max(1, int(page or 1))
+
     fav_ids = {f["listing_id"] async for f in db.buyer_favorites.find(
         {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})}
     my_networks = [m["dealer_id"] async for m in db.network_members.find(
@@ -471,61 +486,90 @@ async def browse_listings(
         {"marketplace.public": True}, {"_id": 0, "id": 1})]
     visible_dealers = set(public_dealer_ids) | set(my_networks)
     visible_dealers.discard(user.get("dealer_id"))
-    query: Dict[str, Any] = {
+
+    match: Dict[str, Any] = {
         "status": "veroeffentlicht",
         "dealer_id": {"$in": list(visible_dealers)},
+        # Sichtbarkeit "private": nur für eingeladene Netzwerk-Mitglieder.
+        "$and": [{"$or": [{"visibility": {"$ne": "private"}},
+                          {"dealer_id": {"$in": my_networks}}]}],
     }
     if dealer:
-        query["dealer_id"] = dealer if dealer in visible_dealers else "___none"
-    items = await db.resale_listings.find(query, {"_id": 0}) \
-        .sort("published_at", -1).to_list(300)
+        match["dealer_id"] = dealer if dealer in visible_dealers else "___none"
+    if nur_favoriten:
+        match["id"] = {"$in": list(fav_ids)}
+    if make and len(_norm_make(make)) >= 2:
+        match["data.make_label"] = {"$regex": re.escape(make.strip()),
+                                    "$options": "i"}
+    if model:
+        rx = {"$regex": re.escape(model.strip()), "$options": "i"}
+        match["$and"].append({"$or": [{"data.model_label": rx},
+                                      {"data.model_description": rx}]})
+    if fuel:
+        match["data.fuel_label"] = {"$regex": re.escape(fuel.strip()),
+                                    "$options": "i"}
+    if q:
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
+        match["$and"].append({"$or": [{"title": rx},
+                                      {"data.model_description": rx}]})
+    if km_min:
+        match.setdefault("data.mileage", {})["$gte"] = km_min
+    if km_max:
+        match.setdefault("data.mileage", {})["$lte"] = km_max
+    if ps_min:
+        match.setdefault("data.power_ps", {})["$gte"] = ps_min
+    if ps_max:
+        match.setdefault("data.power_ps", {})["$lte"] = ps_max
+
+    # Effektiver Preis je Betrachter (Netzwerk > B2B > öffentlich) direkt in
+    # der Datenbank — noetig fuer Preisfilter und Preissortierung.
+    eff_price = {"$switch": {"branches": [
+        {"case": {"$and": [{"$in": ["$dealer_id", my_networks]},
+                           {"$gt": ["$prices.network", None]}]},
+         "then": "$prices.network"},
+        {"case": {"$gt": ["$prices.b2b", None]}, "then": "$prices.b2b"},
+    ], "default": "$prices.public"}}
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": match},
+        {"$addFields": {"_eff_price": eff_price}},
+    ]
+    price_match: Dict[str, Any] = {}
+    if price_min:
+        price_match["$gte"] = price_min
+    if price_max:
+        price_match["$lte"] = price_max
+    if price_match:
+        pipeline.append({"$match": {"_eff_price": price_match}})
+    sort_map = {
+        "preis_auf": [("_eff_price", 1)],
+        "preis_ab": [("_eff_price", -1)],
+        "km_auf": [("data.mileage", 1)],
+        "km_ab": [("data.mileage", -1)],
+    }
+    order = sort_map.get(sort or "", [("published_at", -1)])
+    pipeline.append({"$sort": dict(order)})
+    pipeline.append({"$skip": (page - 1) * limit})
+    pipeline.append({"$limit": limit})
+    pipeline.append({"$project": {"_id": 0, "_eff_price": 0}})
+
+    items = await db.resale_listings.aggregate(pipeline).to_list(limit)
+
+    # Haendler-Infos in EINER Abfrage statt je Inserat (kein N+1).
+    dealer_ids = list({l["dealer_id"] for l in items})
+    dealer_docs = {d["id"]: d async for d in db.dealers.find(
+        {"id": {"$in": dealer_ids}},
+        {"_id": 0, "id": 1, "company_name": 1, "city": 1, "marketplace": 1,
+         "phone": 1, "whatsapp_number": 1, "contact_person": 1,
+         "logo_url": 1, "opening_hours": 1})}
+
     is_trade = True  # jeder hier ist registrierter Händler/Zwischenhändler
     out = []
-    dealer_names: Dict[str, str] = {}
     for l in items:
-        data = l.get("data") or {}
-        km = data.get("mileage")
-        ps = data.get("power_ps")
-        if make and not _make_matches(make, data.get("make_label")):
-            continue
-        if model and model.lower() not in (
-                f"{data.get('model_label','')} {data.get('model_description','')}".lower()):
-            continue
-        if fuel and fuel.lower() not in str(data.get("fuel_label", "")).lower():
-            continue
-        if q:
-            hay = f"{l.get('title','')} {data.get('model_description','')}".lower()
-            if q.lower() not in hay:
-                continue
-        if km_min and (km or 0) < km_min:
-            continue
-        if km_max and (km or 0) > km_max:
-            continue
-        if ps_min and (ps or 0) < ps_min:
-            continue
-        if ps_max and (ps or 0) > ps_max:
-            continue
         member = l["dealer_id"] in my_networks
-        # Sichtbarkeit "private": nur für eingeladene Netzwerk-Mitglieder.
-        if (l.get("visibility") or "public") == "private" and not member:
-            continue
-        if nur_favoriten and l.get("id") not in fav_ids:
-            continue
         view = _public_listing_view(l, is_member=member, is_trade=is_trade)
         view["is_favorit"] = l.get("id") in fav_ids
-        price = view["price"] or 0
-        if price_min and price < price_min:
-            continue
-        if price_max and price > price_max:
-            continue
-        if l["dealer_id"] not in dealer_names:
-            dl = await db.dealers.find_one(
-                {"id": l["dealer_id"]},
-                {"_id": 0, "company_name": 1, "city": 1, "marketplace": 1,
-                 "phone": 1, "whatsapp_number": 1, "contact_person": 1,
-                 "logo_url": 1, "opening_hours": 1})
-            dealer_names[l["dealer_id"]] = dl or {}
-        dl = dealer_names[l["dealer_id"]]
+        dl = dealer_docs.get(l["dealer_id"], {})
         view["dealer"] = {"id": l["dealer_id"],
                           "company_name": dl.get("company_name", ""),
                           "city": dl.get("city", ""),
@@ -535,17 +579,6 @@ async def browse_listings(
                           "logo_url": dl.get("logo_url") or "",
                           "opening_hours": dl.get("opening_hours") or ""}
         out.append(view)
-
-    # Sortierung (None-Werte immer ans Ende)
-    BIG = float("inf")
-    if sort == "preis_auf":
-        out.sort(key=lambda v: v["price"] if v.get("price") is not None else BIG)
-    elif sort == "preis_ab":
-        out.sort(key=lambda v: v["price"] if v.get("price") is not None else -1, reverse=True)
-    elif sort == "km_auf":
-        out.sort(key=lambda v: (v["data"].get("mileage") if v["data"].get("mileage") is not None else BIG))
-    elif sort == "km_ab":
-        out.sort(key=lambda v: (v["data"].get("mileage") or -1), reverse=True)
     return out
 
 

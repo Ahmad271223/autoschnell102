@@ -121,18 +121,32 @@ async def list_sucher(user=Depends(current_haendler)):
     ).sort("created_at", 1).to_list(100)
     month_start = datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-    out = []
-    for s in items:
-        sub = await get_subscription_status(user["dealer_id"],
-                                            subject_user_id=s["id"])
-        purchases = await db.generated_pdfs.count_documents(
-            {"user_id": s["id"], "created_at": {"$gte": month_start}})
-        comparisons = await db.vehicle_comparisons.count_documents(
-            {"user_id": s["id"], "created_at": {"$gte": month_start}})
-        out.append({**s, "subscription": sub,
-                    "stats_month": {"kaeufe": purchases,
-                                    "vergleiche": comparisons}})
-    return out
+    # ALLE Zusatzdaten in 3 Sammelabfragen statt 3 Abfragen JE SUCHER
+    # (vorher: ~301 Einzelabfragen bei 100 Suchern).
+    ids = [s["id"] for s in items]
+    from routes.admin import _sub_status_from_doc
+    subs = {}
+    async for row in db.subscriptions.aggregate([
+        {"$match": {"subject_user_id": {"$in": ids}}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$subject_user_id", "sub": {"$first": "$$ROOT"}}},
+    ]):
+        subs[row["_id"]] = row["sub"]
+    purchases = {row["_id"]: row["n"] async for row in db.generated_pdfs.aggregate([
+        {"$match": {"user_id": {"$in": ids},
+                    "created_at": {"$gte": month_start}}},
+        {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
+    ])}
+    comparisons = {row["_id"]: row["n"] async for row in db.vehicle_comparisons.aggregate([
+        {"$match": {"user_id": {"$in": ids},
+                    "created_at": {"$gte": month_start}}},
+        {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
+    ])}
+    return [{**s,
+             "subscription": _sub_status_from_doc(subs.get(s["id"])),
+             "stats_month": {"kaeufe": purchases.get(s["id"], 0),
+                             "vergleiche": comparisons.get(s["id"], 0)}}
+            for s in items]
 
 
 @router.put("/dealer/sucher/{sucher_id}")
