@@ -50,7 +50,7 @@ jobs:
       - name: Selbsttest-Suite
         working-directory: backend
         run: |
-          python -m pytest tests/test_smoke.py tests/test_listing_cache.py \
+          python -m pytest tests/test_smoke.py tests/test_listing_cache.py tests/test_driver_system.py \
                            tests/test_kleinanzeigen_service.py \
                            tests/test_mobile_service_makes.py -v
       - name: Backend-Log bei Fehler zeigen

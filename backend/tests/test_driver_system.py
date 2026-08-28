@@ -22,8 +22,45 @@ BASE_URL = (os.environ.get("TEST_BASE_URL")
             or "http://localhost:8001").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@autohandel.app"
-ADMIN_PASSWORD = "Admin123!"
+# Die Tests haengen NICHT mehr an einem fest eingerichteten Demo-Admin
+# ("Admin123!") — der existiert weder in CI noch auf frischen Rechnern.
+# Stattdessen legt _make_admin() einen Wegwerf-Admin direkt in der
+# Datenbank an (dieselbe DB wie das laufende Backend, siehe MONGO_URL/
+# DB_NAME) und raeumt ihn am Ende wieder weg.
+MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
+DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
+_ADMIN_SUFFIX = uuid.uuid4().hex[:8]
+ADMIN_EMAIL = f"test_admin_{_ADMIN_SUFFIX}@e2etest-mail.de"
+ADMIN_PASSWORD = "TestAdmin123!"
+
+
+def _make_admin():
+    """Wegwerf-Admin in der DB anlegen (idempotent)."""
+    import bcrypt
+    from pymongo import MongoClient
+    dbx = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME]
+    if not dbx.users.find_one({"email": ADMIN_EMAIL}):
+        dbx.users.insert_one({
+            "id": f"testadm_{_ADMIN_SUFFIX}", "email": ADMIN_EMAIL,
+            "role": "admin", "active": True, "dealer_id": None,
+            "password_hash": bcrypt.hashpw(ADMIN_PASSWORD.encode(),
+                                           bcrypt.gensalt()).decode(),
+            "created_at": "2026-01-01T00:00:00+00:00"})
+
+
+def _drop_admin():
+    from pymongo import MongoClient
+    MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME] \
+        .users.delete_many({"email": ADMIN_EMAIL})
+
+
+def _admin_login():
+    _make_admin()
+    r = requests.post(f"{API}/auth/login",
+                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+                      timeout=30)
+    assert r.status_code == 200, f"Admin-Login: {r.status_code} {r.text[:200]}"
+    return r.json()["token"]
 
 
 # ---------------- helpers ----------------
@@ -32,13 +69,15 @@ def _unique(prefix="test"):
     return f"test_{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _admin_lifecycle():
+    yield
+    _drop_admin()
+
+
 @pytest.fixture(scope="module")
 def admin_token():
-    r = requests.post(f"{API}/auth/login",
-                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
-                      timeout=30)
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+    return _admin_login()
 
 
 @pytest.fixture(scope="module")
@@ -288,10 +327,7 @@ class TestConflicts:
 class TestDriverAppointments:
     def test_driver_sees_assigned_appointments(self, dealer_a_token, dealer_a):
         # 1) Activate lifetime for dealer_a (admin)
-        admin = requests.post(f"{API}/auth/login",
-                              json={"email": ADMIN_EMAIL,
-                                    "password": ADMIN_PASSWORD},
-                              timeout=30).json()["token"]
+        admin = _admin_login()
         ulist = requests.get(f"{API}/admin/users",
                              headers={"Authorization": f"Bearer {admin}"},
                              timeout=30).json()
