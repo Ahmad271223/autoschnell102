@@ -450,6 +450,15 @@ async def on_start():
         _ensure_browser_executable()
     except Exception as exc:
         log.warning("playwright self-heal at startup failed: %s", exc)
+    # Job-Sperren-Index SYNCHRON anlegen, BEVOR irgendein Hintergrundjob
+    # startet — sonst koennten beim allerersten Start (frische Datenbank)
+    # mehrere Worker denselben Job uebernehmen, weil der Unique-Index
+    # noch fehlt (Snapshot-Recovery startet schon nach 5 Sekunden).
+    try:
+        from job_lock import ensure_lock_index
+        await ensure_lock_index(db)
+    except Exception as exc:
+        log.warning("job lock index setup failed: %s", exc)
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         import asyncio

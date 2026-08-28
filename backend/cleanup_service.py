@@ -72,6 +72,35 @@ async def _delete_snapshots_for_vehicle(db, vehicle_id: str) -> int:
     return count
 
 
+async def _delete_report_photos(db, appt_id: str, now: datetime, stats: dict) -> None:
+    """Abweichungsfotos aus Abholberichten loeschen. Die Datenschutz-
+    erklaerung verspricht das PAUSCHAL nach 7 Tagen (nicht abgeholt: 14) —
+    unabhaengig davon, was der Haendler mit dem Fahrzeug weiter vorhat.
+    Der Berichtstext (Kilometerstand, Maengel) bleibt als
+    Geschaeftsunterlage erhalten, nur die Bilddateien gehen."""
+    async for rep in db.pickup_reports.find(
+            {"appointment_id": appt_id},
+            {"_id": 0, "id": 1, "deviations": 1}):
+        devs = rep.get("deviations") or []
+        rep_changed = False
+        for entry in devs:
+            key = entry.get("photo_key")
+            if not key:
+                continue
+            try:
+                delete_object(key)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("report photo delete failed for %s: %s", key, exc)
+            entry["photo_key"] = None
+            entry["photo_deleted_at"] = now.isoformat()
+            rep_changed = True
+        if rep_changed:
+            await db.pickup_reports.update_one(
+                {"id": rep["id"]}, {"$set": {"deviations": devs}})
+            stats["report_photos_deleted"] = (
+                stats.get("report_photos_deleted", 0) + 1)
+
+
 async def _cleanup_once(db) -> dict:
     """Ein Durchlauf. Liefert Metriken."""
     now = datetime.now(timezone.utc)
@@ -94,8 +123,14 @@ async def _cleanup_once(db) -> dict:
             stats["checked"] += 1
             vehicle_id = appt.get("vehicle_id")
 
+            # Berichts-Fotos werden IMMER nach Frist geloescht — das
+            # Datenschutz-Versprechen kennt keine Ausnahme fuer Fahrzeuge,
+            # ueber die der Haendler schon entschieden hat.
+            await _delete_report_photos(db, appt["id"], now, stats)
+
             # Händler hat bereits über das Fahrzeug entschieden? Dann regelt
-            # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt.
+            # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt
+            # (nur fuer Inserats-Fotos/Snapshots, NICHT fuer Berichts-Fotos).
             if vehicle_id:
                 v_state = await db.vehicles.find_one(
                     {"id": vehicle_id}, {"_id": 0, "lifecycle": 1})
@@ -113,7 +148,8 @@ async def _cleanup_once(db) -> dict:
                 stats["snapshots_deleted"] += deleted
 
                 # 2) Fotos aus dem Vehicle-Cache räumen
-                v = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "data": 1})
+                v = await db.vehicles.find_one(
+                    {"id": vehicle_id}, {"_id": 0, "data": 1, "mobile_ad_id": 1})
                 if v and isinstance(v.get("data"), dict):
                     data = v["data"]
                     changed = False
@@ -128,39 +164,16 @@ async def _cleanup_once(db) -> dict:
                         )
                         stats["photos_cleared"] += 1
 
-                # 2b) Abweichungsfotos aus Abholberichten loeschen — die
-                #     Datenschutzerklaerung verspricht: Fotos aus Abholungen
-                #     nach 7 Tagen (nicht abgeholt: 14 Tagen) weg. Der
-                #     Berichtstext (Kilometerstand, Maengel) bleibt als
-                #     Geschaeftsunterlage erhalten, nur die Bilddateien gehen.
-                async for rep in db.pickup_reports.find(
-                        {"appointment_id": appt["id"]},
-                        {"_id": 0, "id": 1, "deviations": 1}):
-                    devs = rep.get("deviations") or []
-                    rep_changed = False
-                    for entry in devs:
-                        key = entry.get("photo_key")
-                        if not key:
-                            continue
-                        try:
-                            delete_object(key)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("report photo delete failed for %s: %s",
-                                        key, exc)
-                        entry["photo_key"] = None
-                        entry["photo_deleted_at"] = now.isoformat()
-                        rep_changed = True
-                    if rep_changed:
-                        await db.pickup_reports.update_one(
-                            {"id": rep["id"]},
-                            {"$set": {"deviations": devs}})
-                        stats["report_photos_deleted"] = (
-                            stats.get("report_photos_deleted", 0) + 1)
-
                 # 3) Listings-Cache-Eintrag entfernen, damit ein neuer
                 #    Vergleich wieder frisch zieht (sonst käme der leere
-                #    Cache-Hit).
-                await db.listings_cache.delete_many({"source_url": {"$regex": vehicle_id}})
+                #    Cache-Hit). Der Cache ist ueber item_id adressiert —
+                #    das alte delete_many auf 'source_url' traf NIE etwas
+                #    (Feld heisst 'url', und die Fahrzeug-ID 'v_…' steht
+                #    ohnehin nicht in der URL).
+                ad_id = (v or {}).get("mobile_ad_id") or (
+                    vehicle_id[2:] if vehicle_id.startswith("v_") else None)
+                if ad_id:
+                    await db.listings_cache.delete_many({"item_id": str(ad_id)})
 
             # 4) Termin markieren, damit wir ihn nicht nochmal anfassen
             await db.appointments.update_one(
@@ -230,8 +243,7 @@ async def run_cleanup_forever(db):
     """Endlosschleife; wird beim FastAPI-Startup als Task gestartet."""
     # kurze Verzögerung beim Start, damit andere Init-Jobs fertig werden
     await asyncio.sleep(30)
-    from job_lock import acquire, ensure_lock_index
-    await ensure_lock_index(db)
+    from job_lock import acquire
     while True:
         # Bei mehreren Worker-Prozessen raeumt nur EINER pro Zyklus auf —
         # sonst loeschen acht Prozesse gleichzeitig dieselben Dateien.
