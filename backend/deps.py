@@ -82,6 +82,33 @@ async def current_admin(user=Depends(current_user)):
     return user
 
 
+def sub_status_from_doc(sub) -> dict:
+    """Abo-Status aus einem bereits geladenen Abo-Dokument berechnen.
+    EINZIGE Stelle fuer diese Geschaeftsregel — get_subscription_status,
+    die Admin-Nutzerliste und die Sucherverwaltung nutzen sie gemeinsam
+    (frueher existierte die Logik doppelt und konnte auseinanderlaufen)."""
+    if not sub:
+        return {"active": False, "plan": None, "expires_at": None, "status": "none"}
+    plan = sub.get("plan")
+    status_ = sub.get("status", "active")
+    expires_at = sub.get("expires_at")
+    if plan == "lifetime":
+        return {"active": True, "plan": "lifetime", "expires_at": None,
+                "status": "active"}
+    # Gekündigte Abos bleiben aktiv, bis das Ablaufdatum erreicht ist.
+    active = status_ in ("active", "cancelled")
+    if expires_at:
+        try:
+            ea = datetime.fromisoformat(expires_at)
+            if ea < datetime.now(timezone.utc):
+                active = False
+                status_ = "expired"
+        except Exception:
+            pass
+    return {"active": active, "plan": plan, "expires_at": expires_at,
+            "status": status_}
+
+
 async def get_subscription_status(dealer_id: str,
                                   subject_user_id: Optional[str] = None) -> dict:
     """Abo-Status. Ohne subject_user_id: Händler-Abo (Bestandslogik).
@@ -101,25 +128,7 @@ async def get_subscription_status(dealer_id: str,
             sub = await db.subscriptions.find_one(
                 {"dealer_id": dealer_id, "subject_user_id": None},
                 sort=[("created_at", -1)])
-    if not sub:
-        return {"active": False, "plan": None, "expires_at": None, "status": "none"}
-    plan = sub.get("plan")
-    status_ = sub.get("status", "active")
-    expires_at = sub.get("expires_at")
-    if plan == "lifetime":
-        return {"active": True, "plan": "lifetime", "expires_at": None, "status": "active"}
-    # Gekündigte Abos bleiben aktiv, bis das Ablaufdatum erreicht ist.
-    # Erst dann läuft der Account wirklich aus.
-    active = status_ in ("active", "cancelled")
-    if expires_at:
-        try:
-            ea = datetime.fromisoformat(expires_at)
-            if ea < datetime.now(timezone.utc):
-                active = False
-                status_ = "expired"
-        except Exception:
-            pass
-    return {"active": active, "plan": plan, "expires_at": expires_at, "status": status_}
+    return sub_status_from_doc(sub)
 
 
 async def subscription_for(user: dict) -> dict:

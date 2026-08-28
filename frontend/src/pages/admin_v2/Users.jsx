@@ -5,6 +5,33 @@ import { toast } from "sonner";
 import { Search, KeyRound, Lock, Unlock, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 
+
+// Haendler-Hauptaccount: das Backend verlangt eine ausdrueckliche
+// Bestaetigung (?firma_loeschen=true), weil dabei die KOMPLETTE Firma
+// entfernt wird. Vorher zeigen wir die Loeschvorschau des Backends.
+async function deleteUserSmart(u) {
+  try {
+    await api.delete(`/admin/users/${u.id}`);
+    return true;
+  } catch (e) {
+    if (e?.response?.status !== 409) throw e;
+  }
+  let vorschau = "";
+  try {
+    const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
+    const w = data?.wuerde_loeschen || {};
+    vorschau = Object.entries(w).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n} × ${k}`).join(", ") || "keine weiteren Daten";
+  } catch { vorschau = "Vorschau nicht verfügbar"; }
+  const ok = window.confirm(
+    `ACHTUNG: "${u.company_name || u.email}" ist ein Händler-Hauptaccount.\n` +
+    `Die KOMPLETTE Firma wird gelöscht (${vorschau}).\n\n` +
+    `Wirklich unwiderruflich löschen?`);
+  if (!ok) return false;
+  await api.delete(`/admin/users/${u.id}?firma_loeschen=true`);
+  return true;
+}
+
 export default function AdminUsers() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -58,10 +85,12 @@ export default function AdminUsers() {
     if (!deleteUser) return;
     setDeleting(true);
     try {
-      await api.delete(`/admin/users/${deleteUser.id}`);
-      toast.success(`Account "${deleteUser.company_name || deleteUser.email}" dauerhaft gelöscht`);
-      setDeleteUser(null);
-      load();
+      const done = await deleteUserSmart(deleteUser);
+      if (done) {
+        toast.success(`Account "${deleteUser.company_name || deleteUser.email}" dauerhaft gelöscht`);
+        setDeleteUser(null);
+        load();
+      }
     } catch (e) {
       toast.error(errMsg(e, "Löschen fehlgeschlagen"));
     } finally {

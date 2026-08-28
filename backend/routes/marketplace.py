@@ -105,6 +105,25 @@ def _norm_make(s: Optional[str]) -> str:
     return _MAKE_ALIASES.get(key, key)
 
 
+def _make_regex_variants(filter_make: str) -> str:
+    """Regex-Alternativen fuer den Mongo-Markenfilter — stellt die
+    Alias-Toleranz von _make_matches wieder her (VW <-> Volkswagen,
+    Mercedes <-> Mercedes-Benz). Erzeugt aus dem Filter alle Schreibweisen,
+    die auf denselben normalisierten Namen zeigen, und matcht sie
+    zeichenweise tolerant (Leer-/Sonderzeichen zwischen den Buchstaben)."""
+    key = re.sub(r"[^a-z0-9]", "", (filter_make or "").lower())
+    canon = _MAKE_ALIASES.get(key, key)
+    variants = {key, canon} | {a for a, c in _MAKE_ALIASES.items() if c == canon}
+    parts = []
+    for v in sorted(variants, key=len, reverse=True):
+        if len(v) < 2:
+            continue
+        # "mercedesbenz" soll auch "Mercedes-Benz" treffen: zwischen den
+        # Zeichen beliebige Nicht-Alphanumerik zulassen.
+        parts.append(r"[^a-z0-9]*".join(re.escape(ch) for ch in v))
+    return "|".join(parts) or re.escape(filter_make.strip())
+
+
 def _make_matches(filter_make: str, label: Optional[str]) -> bool:
     """True, wenn die gewählte Marke zum Fahrzeug-Label passt (schreibweise-tolerant)."""
     if not filter_make:
@@ -422,11 +441,11 @@ async def browse_dealers(q: Optional[str] = None,
     ]}
     if q:
         query["company_name"] = {"$regex": re.escape(q.strip()), "$options": "i"}
-    dealers = await db.dealers.find(query, {"_id": 0}).to_list(1000)
-    dealers = [dl for dl in dealers
-               if dl["id"] != user.get("dealer_id")
-               and ((dl.get("marketplace") or {}).get("public")
-                    or dl["id"] in my_networks)]
+    if user.get("dealer_id"):
+        query["id"] = {"$ne": user["dealer_id"]}
+    dealers = await db.dealers.find(
+        query, {"_id": 0, "id": 1, "company_name": 1, "city": 1, "phone": 1,
+                "logo_url": 1, "marketplace": 1}).to_list(1000)
     # Inseratszahlen ALLER Haendler in EINER Aggregation statt
     # count_documents je Haendler (kein N+1 mehr).
     counts = {row["_id"]: row["n"] async for row in db.resale_listings.aggregate([
@@ -466,7 +485,7 @@ async def browse_listings(
     ps_min: Optional[int] = None, ps_max: Optional[int] = None,
     sort: Optional[str] = None, dealer: Optional[str] = None,
     nur_favoriten: Optional[int] = 0,
-    page: int = 1, limit: int = 60,
+    page: int = 1, limit: int = 300,
 ):
     """Alle für den Betrachter sichtbaren veröffentlichten Fahrzeuge.
 
@@ -475,7 +494,10 @@ async def browse_listings(
     Python mehr. sort: preis_auf | preis_ab | km_auf | km_ab
     (Default: neueste zuerst). nur_favoriten=1: nur gemerkte Fahrzeuge.
     page/limit: Seitennummer (ab 1) und Treffer pro Seite (max. 200)."""
-    limit = max(1, min(int(limit or 60), 200))
+    # Standard 300 = das bisherige Maximum, damit das Frontend OHNE
+    # Pagination-Umbau weiterhin denselben Bestand sieht; page/limit stehen
+    # fuer kuenftige Pagination bereit.
+    limit = max(1, min(int(limit or 300), 300))
     page = max(1, int(page or 1))
 
     fav_ids = {f["listing_id"] async for f in db.buyer_favorites.find(
@@ -499,7 +521,7 @@ async def browse_listings(
     if nur_favoriten:
         match["id"] = {"$in": list(fav_ids)}
     if make and len(_norm_make(make)) >= 2:
-        match["data.make_label"] = {"$regex": re.escape(make.strip()),
+        match["data.make_label"] = {"$regex": _make_regex_variants(make),
                                     "$options": "i"}
     if model:
         rx = {"$regex": re.escape(model.strip()), "$options": "i"}
@@ -515,43 +537,68 @@ async def browse_listings(
     if km_min:
         match.setdefault("data.mileage", {})["$gte"] = km_min
     if km_max:
-        match.setdefault("data.mileage", {})["$lte"] = km_max
+        # Fehlender km-Stand galt schon immer als "unter dem Maximum" —
+        # ein $lte allein wuerde Inserate ohne km-Angabe verstecken.
+        match["$and"].append({"$or": [{"data.mileage": {"$lte": km_max}},
+                                      {"data.mileage": None}]})
     if ps_min:
         match.setdefault("data.power_ps", {})["$gte"] = ps_min
     if ps_max:
-        match.setdefault("data.power_ps", {})["$lte"] = ps_max
+        match["$and"].append({"$or": [{"data.power_ps": {"$lte": ps_max}},
+                                      {"data.power_ps": None}]})
 
-    # Effektiver Preis je Betrachter (Netzwerk > B2B > öffentlich) direkt in
-    # der Datenbank — noetig fuer Preisfilter und Preissortierung.
-    eff_price = {"$switch": {"branches": [
-        {"case": {"$and": [{"$in": ["$dealer_id", my_networks]},
-                           {"$gt": ["$prices.network", None]}]},
-         "then": "$prices.network"},
-        {"case": {"$gt": ["$prices.b2b", None]}, "then": "$prices.b2b"},
-    ], "default": "$prices.public"}}
+    pipeline: List[Dict[str, Any]] = [{"$match": match}]
 
-    pipeline: List[Dict[str, Any]] = [
-        {"$match": match},
-        {"$addFields": {"_eff_price": eff_price}},
-    ]
-    price_match: Dict[str, Any] = {}
-    if price_min:
-        price_match["$gte"] = price_min
-    if price_max:
-        price_match["$lte"] = price_max
-    if price_match:
-        pipeline.append({"$match": {"_eff_price": price_match}})
-    sort_map = {
-        "preis_auf": [("_eff_price", 1)],
-        "preis_ab": [("_eff_price", -1)],
-        "km_auf": [("data.mileage", 1)],
-        "km_ab": [("data.mileage", -1)],
-    }
-    order = sort_map.get(sort or "", [("published_at", -1)])
+    braucht_preis = bool(price_min or price_max
+                         or sort in ("preis_auf", "preis_ab"))
+    if braucht_preis:
+        # Effektiver Preis je Betrachter (Netzwerk > B2B > öffentlich) direkt
+        # in der Datenbank — nur wenn Preisfilter/-sortierung aktiv ist
+        # (sonst muesste Mongo ihn fuer JEDES Dokument berechnen).
+        # $gt 0 statt $gt None: ein als 0 hinterlegter Platzhalter-Preis
+        # zaehlt nicht — exakt wie _price_for es beim Anzeigen haelt.
+        eff_price = {"$switch": {"branches": [
+            {"case": {"$and": [{"$in": ["$dealer_id", my_networks]},
+                               {"$gt": ["$prices.network", 0]}]},
+             "then": "$prices.network"},
+            {"case": {"$gt": ["$prices.b2b", 0]}, "then": "$prices.b2b"},
+        ], "default": "$prices.public"}}
+        pipeline.append({"$addFields": {"_eff_price": eff_price}})
+        price_match: Dict[str, Any] = {}
+        if price_min:
+            price_match["$gte"] = price_min
+        if price_max:
+            price_match["$lte"] = price_max
+        if price_match:
+            # Ohne Preis ("auf Anfrage") zaehlte schon immer als 0 —
+            # unter einem Maximum sichtbar, unter einem Minimum nicht.
+            cond = {"_eff_price": price_match}
+            if price_max and not price_min:
+                cond = {"$or": [cond, {"_eff_price": None}]}
+            pipeline.append({"$match": cond})
+
+    # Aufsteigende Sortierungen: Inserate OHNE Wert ans Ende (Mongo wuerde
+    # null zuerst einsortieren — genau falsch herum fuer "guenstigste
+    # zuerst"). Sentinel statt null im Sortierschluessel.
+    OHNE_WERT_ANS_ENDE = 9e15
+    if sort == "preis_auf":
+        pipeline.append({"$addFields": {"_sortkey": {
+            "$ifNull": ["$_eff_price", OHNE_WERT_ANS_ENDE]}}})
+        order = [("_sortkey", 1)]
+    elif sort == "preis_ab":
+        order = [("_eff_price", -1)]
+    elif sort == "km_auf":
+        pipeline.append({"$addFields": {"_sortkey": {
+            "$ifNull": ["$data.mileage", OHNE_WERT_ANS_ENDE]}}})
+        order = [("_sortkey", 1)]
+    elif sort == "km_ab":
+        order = [("data.mileage", -1)]
+    else:
+        order = [("published_at", -1)]
     pipeline.append({"$sort": dict(order)})
     pipeline.append({"$skip": (page - 1) * limit})
     pipeline.append({"$limit": limit})
-    pipeline.append({"$project": {"_id": 0, "_eff_price": 0}})
+    pipeline.append({"$project": {"_id": 0, "_eff_price": 0, "_sortkey": 0}})
 
     items = await db.resale_listings.aggregate(pipeline).to_list(limit)
 

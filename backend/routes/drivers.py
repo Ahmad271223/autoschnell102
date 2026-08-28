@@ -542,12 +542,14 @@ async def driver_snapshot(snap_id: str, kind: str,
     snap = await db.listing_snapshots.find_one({"id": snap_id}, {"_id": 0})
     if not snap or snap.get("status") != "ready":
         raise HTTPException(404, "Snapshot nicht bereit")
-    # dealer_id gehoert in JEDE Zugriffspruefung: dieselbe Anzeige kann bei
-    # ZWEI Haendlern existieren — ohne Firmen-Bindung saehe der Fahrer von
-    # Haendler A den Beweis-Snapshot von Haendler B.
+    # Snapshots sind BEWUSST haendlerneutral (der erste Snapshot einer
+    # Anzeige wird von allen uebernommen — 'nie doppelt fotografieren').
+    # Eine Bindung an snap.dealer_id wuerde Fahrern von Haendler B den
+    # wiederverwendeten Snapshot von Haendler A sperren. Der Zugriff ist
+    # ueber den EIGENEN Termin des Fahrers zur selben Anzeige legitimiert;
+    # Snapshots zeigen ausschliesslich oeffentliche Inseratsdaten.
     allowed = await db.appointments.find_one(
         {"driver_id": driver["id"],
-         "dealer_id": snap.get("dealer_id"),
          "$or": [{"vehicle_id": snap.get("vehicle_id")},
                  {"mobile_ad_id": snap.get("mobile_ad_id")}]},
         {"_id": 0, "id": 1},

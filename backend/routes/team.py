@@ -124,7 +124,7 @@ async def list_sucher(user=Depends(current_haendler)):
     # ALLE Zusatzdaten in 3 Sammelabfragen statt 3 Abfragen JE SUCHER
     # (vorher: ~301 Einzelabfragen bei 100 Suchern).
     ids = [s["id"] for s in items]
-    from routes.admin import _sub_status_from_doc
+    from deps import sub_status_from_doc
     subs = {}
     async for row in db.subscriptions.aggregate([
         {"$match": {"subject_user_id": {"$in": ids}}},
@@ -143,7 +143,7 @@ async def list_sucher(user=Depends(current_haendler)):
         {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
     ])}
     return [{**s,
-             "subscription": _sub_status_from_doc(subs.get(s["id"])),
+             "subscription": sub_status_from_doc(subs.get(s["id"])),
              "stats_month": {"kaeufe": purchases.get(s["id"], 0),
                              "vergleiche": comparisons.get(s["id"], 0)}}
             for s in items]

@@ -21,6 +21,7 @@ from auth import hash_password, verify_password
 from cleanup_service import _cleanup_once
 from deps import (
     current_admin, db, get_subscription_status, log, log_activity, now_iso,
+    sub_status_from_doc,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
 
@@ -104,58 +105,39 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
     return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
 
 
-def _sub_status_from_doc(sub) -> dict:
-    """Abo-Status aus einem bereits geladenen Abo-Dokument berechnen —
-    gleiche Logik wie deps.get_subscription_status, aber ohne DB-Zugriff
-    (fuer Massen-Auswertungen ohne N+1-Abfragen)."""
-    if not sub:
-        return {"active": False, "plan": None, "expires_at": None, "status": "none"}
-    plan = sub.get("plan")
-    status_ = sub.get("status", "active")
-    expires_at = sub.get("expires_at")
-    if plan == "lifetime":
-        return {"active": True, "plan": "lifetime", "expires_at": None,
-                "status": "active"}
-    active = status_ in ("active", "cancelled")
-    if expires_at:
-        try:
-            ea = datetime.fromisoformat(expires_at)
-            if ea < datetime.now(timezone.utc):
-                active = False
-                status_ = "expired"
-        except Exception:
-            pass
-    return {"active": active, "plan": plan, "expires_at": expires_at,
-            "status": status_}
-
-
 @router.get("/admin/users")
 async def admin_list_users(_=Depends(current_admin),
-                           page: int = 1, limit: int = 200):
+                           page: int = 1, limit: int = 1000):
     """Nutzerliste MIT Firmenname und Abo-Status — in 3 Abfragen gesamt
     statt 2 Abfragen JE NUTZER (vorher: bis zu 2001 Abfragen bei 1000
-    Nutzern). page/limit blättern durch den Bestand (limit max. 500)."""
-    limit = max(1, min(int(limit or 200), 500))
+    Nutzern). Standard-Limit 1000 = bisheriges Verhalten, damit die
+    Admin-Oberflaeche ohne Umbau denselben Bestand sieht; page/limit
+    stehen fuer kuenftige Pagination bereit."""
+    limit = max(1, min(int(limit or 1000), 1000))
     page = max(1, int(page or 1))
     users = await db.users.find({}, {"_id": 0, "password_hash": 0}) \
         .sort("created_at", -1).skip((page - 1) * limit).to_list(limit)
     dealer_ids = list({u.get("dealer_id") for u in users if u.get("dealer_id")})
     dealers = {d["id"]: d async for d in db.dealers.find(
         {"id": {"$in": dealer_ids}}, {"_id": 0, "id": 1, "company_name": 1})}
-    # Juengstes HAENDLER-Abo je Firma (subject_user_id fehlt/None) in einer
-    # Aggregation — identische Auswahllogik wie get_subscription_status.
+    # Juengstes HAENDLER-Abo je Firma — mit derselben Vorrang-Regel wie
+    # deps.get_subscription_status: Dokumente OHNE subject_user_id-Feld
+    # gewinnen gegen Alt-Dokumente mit explizitem null, egal wie alt.
     newest_subs = {}
     async for row in db.subscriptions.aggregate([
         {"$match": {"dealer_id": {"$in": dealer_ids},
                     "$or": [{"subject_user_id": {"$exists": False}},
                             {"subject_user_id": None}]}},
-        {"$sort": {"created_at": -1}},
+        {"$addFields": {"_feld_fehlt": {
+            "$cond": [{"$eq": [{"$type": "$subject_user_id"}, "missing"]},
+                      1, 0]}}},
+        {"$sort": {"_feld_fehlt": -1, "created_at": -1}},
         {"$group": {"_id": "$dealer_id", "sub": {"$first": "$$ROOT"}}},
     ]):
         newest_subs[row["_id"]] = row["sub"]
     return [{**u,
              "company_name": dealers.get(u.get("dealer_id"), {}).get("company_name"),
-             "subscription": _sub_status_from_doc(newest_subs.get(u.get("dealer_id")))}
+             "subscription": sub_status_from_doc(newest_subs.get(u.get("dealer_id")))}
             for u in users]
 
 
@@ -234,9 +216,10 @@ async def admin_delete_preview(dealer_id: str, admin=Depends(current_admin)):
     counts = {}
     for coll in _COMPANY_COLLECTIONS:
         counts[coll] = await db[coll].count_documents({"dealer_id": dealer_id})
-    snap = await db.listing_snapshots.count_documents({"dealer_id": dealer_id})
-    counts["listing_snapshots"] = snap
     return {"dealer_id": dealer_id,
+            "hinweis": "Beweis-Snapshots werden NICHT geloescht (haendler"
+                       "neutral geteilt, verfallen ueber die Aufbewahrungs"
+                       "frist).",
             "company_name": dealer.get("company_name", ""),
             "wuerde_loeschen": counts}
 
@@ -285,15 +268,13 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
 
     geloescht = {}
     if dealer_id:
-        # Beweis-Snapshots inkl. Storage-Dateien zuerst (brauchen die
-        # Fahrzeug-Referenzen noch nicht — sie haengen an dealer_id).
-        try:
-            from cleanup_service import _delete_snapshots_for_vehicle
-            async for v in db.vehicles.find({"dealer_id": dealer_id},
-                                            {"_id": 0, "id": 1}):
-                await _delete_snapshots_for_vehicle(db, v["id"])
-        except Exception:
-            log.exception("Snapshot-Loeschung bei Firmenloeschung fehlgeschlagen")
+        # Beweis-Snapshots bleiben BEWUSST stehen: Snapshots sind
+        # haendlerneutral geteilt (der erste Snapshot einer Anzeige wird
+        # von allen uebernommen) — eine Loeschung ueber die Fahrzeug-ID
+        # ('v_<Anzeigen-ID>', bei mehreren Haendlern identisch) wuerde die
+        # Beweisarchive ANDERER Firmen zerstoeren. Sie enthalten nur
+        # oeffentliche Inseratsdaten und verfallen ueber die
+        # SNAPSHOT_RETENTION_DAYS-Aufraeumlogik.
         for coll in _COMPANY_COLLECTIONS:
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
