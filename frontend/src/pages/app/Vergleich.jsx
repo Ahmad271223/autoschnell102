@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { checkLink, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
 import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
@@ -37,6 +38,7 @@ export default function Vergleich() {
 
   const [url, setUrl] = useState(restored?.url || "");
   const [loading, setLoading] = useState(false);
+  const [waitMsg, setWaitMsg] = useState(null);
   const [result, setResult] = useState(restored?.result || null);
   const [counter, setCounter] = useState(restored?.counter || null);
   const [showContract, setShowContract] = useState(false);
@@ -73,13 +75,29 @@ export default function Vergleich() {
   const startCompare = async (e) => {
     e?.preventDefault?.();
     if (!url.trim()) return;
+    if (loading) return;               // Mehrfachklicks abfangen
     setLoading(true);
+    setWaitMsg(null);
     setResult(null);
     setCounter(null);
     setContract(null);
     try {
       const t0 = Date.now();
-      let { data } = await api.post("/mobile/compare", { url });
+
+      // Schritt 1: Vorab-Check. Bekannte Inserate sind sofort da; neue
+      // laufen als Hintergrundjob — wir zeigen die Wartemeldung und
+      // fragen den Status ab, statt die Anfrage minutenlang zu halten.
+      const check = await checkLink(api, url, { onWait: setWaitMsg });
+      let data;
+      if (check.status === "needs_client_fetch") {
+        data = { needs_client_fetch: true, url: check.url };
+      } else {
+        // Schritt 2: eigentlicher Vergleich (trifft jetzt den Cache).
+        // Ein 503 (Rueckstau) wird automatisch wiederholt — der Nutzer
+        // sieht nur die Wartemeldung, keine technische Fehlermeldung.
+        ({ data } = await postWithRetry503(api, "/mobile/compare", { url },
+                                           { onWait: setWaitMsg }));
+      }
 
       // Client-seitiges Abrufen (nur Kleinanzeigen, wenn serverseitig aktiv):
       // Der Server kennt den Link noch nicht und bittet den Browser des
@@ -96,7 +114,8 @@ export default function Vergleich() {
         try {
           const html = await fetchViaExtension(data.url || url);
           await api.post("/listings/ingest", { url: data.url || url, html });
-          ({ data } = await api.post("/mobile/compare", { url }));
+          ({ data } = await postWithRetry503(api, "/mobile/compare", { url },
+                                             { onWait: setWaitMsg }));
         } catch (fe) {
           toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
           setLoading(false);
@@ -111,9 +130,14 @@ export default function Vergleich() {
         setCounter(cnt);
       } catch (_) { /* ignore */ }
     } catch (err) {
-      toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
+      if (err?.code === "timeout") {
+        toast.info(TIMEOUT_MESSAGE);
+      } else {
+        toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
+      }
     } finally {
       setLoading(false);
+      setWaitMsg(null);
     }
   };
 
@@ -256,6 +280,15 @@ export default function Vergleich() {
       </form>
 
       {/* Loading skeleton */}
+      {waitMsg && loading && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-center gap-2"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}
+             data-testid="linkcheck-wait">
+          <Loader2 size={15} className="animate-spin shrink-0" />
+          {waitMsg}
+        </div>
+      )}
+
       {loading && !result && (
         <div className="mt-10 grid lg:grid-cols-12 gap-5">
           <div className="lg:col-span-8 space-y-5">
