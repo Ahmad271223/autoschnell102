@@ -47,6 +47,11 @@ from listing_identity import (
 # seitig (offizielle API, keine Block-Gefahr).
 CLIENT_FETCH_KLEINANZEIGEN = os.environ.get(
     "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")
+# NUR fuer Staging-Lasttests: externe Abrufe durch synthetische Daten
+# ersetzen (Provider werden geschont, die komplette Cache-/Lease-/Limiter-
+# Logik laeuft trotzdem echt). NIE in Produktion setzen.
+MOCK_PROVIDER_FETCH = os.environ.get(
+    "MOCK_PROVIDER_FETCH", "").strip().lower() in ("1", "true", "yes")
 from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
     MOBILE_USER, build_search_url, get_vehicle,
@@ -127,6 +132,20 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:
         """Wird nur bei Cache-MISS aufgerufen."""
+        if MOCK_PROVIDER_FETCH:
+            # NUR fuer Staging-Lasttests (MOCK_PROVIDER_FETCH=true): liefert
+            # synthetische Fahrzeugdaten mit realistischer Verzoegerung,
+            # statt echte Provider zu belasten. NIE in Produktion setzen.
+            import asyncio as _aio
+            await _aio.sleep(0.4)
+            return {"mobile_ad_id": iid, "kleinanzeigen_id": iid,
+                    "title": f"Lasttest Fahrzeug {iid}",
+                    "make_label": "VW", "model_label": "Golf",
+                    "list_price": 15000, "price": "15.000 €",
+                    "mileage": 90000, "first_registration": "01/2020",
+                    "fuel_label": "Benzin", "power_ps": 110,
+                    "seller_zip": "30159", "seller_city": "Hannover",
+                    "images": [], "_mock": True}
         if src == "kleinanzeigen":
             v = await fetch_kleinanzeigen_vehicle(url)
             v["mobile_ad_id"] = v.get("kleinanzeigen_id") or iid
