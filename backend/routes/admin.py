@@ -20,7 +20,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from auth import hash_password, verify_password
 from cleanup_service import _cleanup_once
 from deps import (
-    current_admin, db, get_subscription_status, log_activity, now_iso,
+    current_admin, db, get_subscription_status, log, log_activity, now_iso,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
 
@@ -104,15 +104,59 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
     return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
 
 
+def _sub_status_from_doc(sub) -> dict:
+    """Abo-Status aus einem bereits geladenen Abo-Dokument berechnen —
+    gleiche Logik wie deps.get_subscription_status, aber ohne DB-Zugriff
+    (fuer Massen-Auswertungen ohne N+1-Abfragen)."""
+    if not sub:
+        return {"active": False, "plan": None, "expires_at": None, "status": "none"}
+    plan = sub.get("plan")
+    status_ = sub.get("status", "active")
+    expires_at = sub.get("expires_at")
+    if plan == "lifetime":
+        return {"active": True, "plan": "lifetime", "expires_at": None,
+                "status": "active"}
+    active = status_ in ("active", "cancelled")
+    if expires_at:
+        try:
+            ea = datetime.fromisoformat(expires_at)
+            if ea < datetime.now(timezone.utc):
+                active = False
+                status_ = "expired"
+        except Exception:
+            pass
+    return {"active": active, "plan": plan, "expires_at": expires_at,
+            "status": status_}
+
+
 @router.get("/admin/users")
-async def admin_list_users(_=Depends(current_admin)):
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(1000)
-    out = []
-    for u in users:
-        dealer = await db.dealers.find_one({"id": u.get("dealer_id")}, {"_id": 0}) or {}
-        sub = await get_subscription_status(u.get("dealer_id"))
-        out.append({**u, "company_name": dealer.get("company_name"), "subscription": sub})
-    return out
+async def admin_list_users(_=Depends(current_admin),
+                           page: int = 1, limit: int = 200):
+    """Nutzerliste MIT Firmenname und Abo-Status — in 3 Abfragen gesamt
+    statt 2 Abfragen JE NUTZER (vorher: bis zu 2001 Abfragen bei 1000
+    Nutzern). page/limit blättern durch den Bestand (limit max. 500)."""
+    limit = max(1, min(int(limit or 200), 500))
+    page = max(1, int(page or 1))
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}) \
+        .sort("created_at", -1).skip((page - 1) * limit).to_list(limit)
+    dealer_ids = list({u.get("dealer_id") for u in users if u.get("dealer_id")})
+    dealers = {d["id"]: d async for d in db.dealers.find(
+        {"id": {"$in": dealer_ids}}, {"_id": 0, "id": 1, "company_name": 1})}
+    # Juengstes HAENDLER-Abo je Firma (subject_user_id fehlt/None) in einer
+    # Aggregation — identische Auswahllogik wie get_subscription_status.
+    newest_subs = {}
+    async for row in db.subscriptions.aggregate([
+        {"$match": {"dealer_id": {"$in": dealer_ids},
+                    "$or": [{"subject_user_id": {"$exists": False}},
+                            {"subject_user_id": None}]}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$dealer_id", "sub": {"$first": "$$ROOT"}}},
+    ]):
+        newest_subs[row["_id"]] = row["sub"]
+    return [{**u,
+             "company_name": dealers.get(u.get("dealer_id"), {}).get("company_name"),
+             "subscription": _sub_status_from_doc(newest_subs.get(u.get("dealer_id")))}
+            for u in users]
 
 
 @router.put("/admin/users/{user_id}")
@@ -167,8 +211,51 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     return {"ok": True}
 
 
+# Alles, was einer Firma gehoert (dealer_id-Verweis) — Grundlage fuer
+# Loeschvorschau und vollstaendige Firmenloeschung. Bewusst NICHT dabei:
+# activity_logs (Plattform-Nachvollziehbarkeit) und payment_transactions
+# (Buchhaltungs-/Aufbewahrungspflicht).
+_COMPANY_COLLECTIONS = (
+    "users", "subscriptions", "vehicles", "appointments",
+    "generated_pdfs", "generated_pdf_versions", "resale_listings",
+    "listing_interest", "pickup_protocols", "pickup_reports",
+    "driver_accounts", "dealer_drivers", "dealer_invites",
+    "plan_requests", "vehicle_comparisons",
+)
+
+
+@router.get("/admin/dealers/{dealer_id}/loeschvorschau")
+async def admin_delete_preview(dealer_id: str, admin=Depends(current_admin)):
+    """Vorschau: was eine vollstaendige Firmenloeschung entfernen wuerde."""
+    dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "id": 1,
+                                                          "company_name": 1})
+    if not dealer:
+        raise HTTPException(404, "Händler nicht gefunden")
+    counts = {}
+    for coll in _COMPANY_COLLECTIONS:
+        counts[coll] = await db[coll].count_documents({"dealer_id": dealer_id})
+    snap = await db.listing_snapshots.count_documents({"dealer_id": dealer_id})
+    counts["listing_snapshots"] = snap
+    return {"dealer_id": dealer_id,
+            "company_name": dealer.get("company_name", ""),
+            "wuerde_loeschen": counts}
+
+
 @router.delete("/admin/users/{user_id}")
-async def admin_delete_user(user_id: str, admin=Depends(current_admin)):
+async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
+                            admin=Depends(current_admin)):
+    """Nutzer loeschen — nach Rolle getrennt (Beschluss PR-Review 08/2026):
+
+    - Sucher/Fahrer/Kaeufer: NUR dieser Nutzer (+ sein persoenliches Abo)
+      wird geloescht. Firma, Fahrzeuge, Vertraege bleiben unberuehrt.
+      (Vorher riss das Loeschen eines Suchers den Firmendatensatz und
+      ALLE Abos der Firma mit — andere Nutzer blieben verwaist zurueck.)
+    - Haendler-Hauptaccount: ohne ?firma_loeschen=true kommt 409 mit dem
+      Hinweis auf Deaktivieren bzw. Loeschvorschau. Mit firma_loeschen=true
+      wird die Firma VOLLSTAENDIG entfernt (alle Nutzer, Fahrzeuge,
+      Termine, Vertraege, Inserate, Protokolle, Abos) — nachvollziehbar
+      im Audit-Log. Buchhaltungsdaten (payment_transactions) bleiben.
+    """
     u = await db.users.find_one({"id": user_id})
     if not u:
         raise HTTPException(404)
@@ -176,13 +263,50 @@ async def admin_delete_user(user_id: str, admin=Depends(current_admin)):
         raise HTTPException(400, "Super-Admin kann nicht gelöscht werden")
     if u.get("id") == admin.get("id"):
         raise HTTPException(400, "Du kannst dich nicht selbst löschen")
-    await db.users.delete_one({"id": user_id})
-    if u.get("dealer_id"):
-        await db.dealers.delete_many({"id": u["dealer_id"]})
-        await db.subscriptions.delete_many({"dealer_id": u["dealer_id"]})
-    await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.geloescht",
-                       ref=user_id, meta={"email": u.get("email", "")})
-    return {"ok": True}
+
+    if u.get("role") != "dealer":
+        # Einzelner Mitarbeiter-/Kaeufer-Account: nur diesen entfernen.
+        await db.users.delete_one({"id": user_id})
+        await db.subscriptions.delete_many({"subject_user_id": user_id})
+        await log_activity(admin.get("dealer_id", ""), admin["id"],
+                           "admin.user.geloescht", ref=user_id,
+                           meta={"email": u.get("email", ""),
+                                 "rolle": u.get("role", "")})
+        return {"ok": True, "geloescht": "nur_nutzer"}
+
+    dealer_id = u.get("dealer_id")
+    if not firma_loeschen:
+        raise HTTPException(409,
+            "Das ist der Händler-Hauptaccount. Zum Sperren bitte "
+            "'Deaktivieren' verwenden. Soll die FIRMA komplett gelöscht "
+            "werden (alle Nutzer, Fahrzeuge, Verträge, Termine), zuerst "
+            f"die Löschvorschau ansehen (/admin/dealers/{dealer_id}/"
+            "loeschvorschau) und dann mit ?firma_loeschen=true bestätigen.")
+
+    geloescht = {}
+    if dealer_id:
+        # Beweis-Snapshots inkl. Storage-Dateien zuerst (brauchen die
+        # Fahrzeug-Referenzen noch nicht — sie haengen an dealer_id).
+        try:
+            from cleanup_service import _delete_snapshots_for_vehicle
+            async for v in db.vehicles.find({"dealer_id": dealer_id},
+                                            {"_id": 0, "id": 1}):
+                await _delete_snapshots_for_vehicle(db, v["id"])
+        except Exception:
+            log.exception("Snapshot-Loeschung bei Firmenloeschung fehlgeschlagen")
+        for coll in _COMPANY_COLLECTIONS:
+            res = await db[coll].delete_many({"dealer_id": dealer_id})
+            if res.deleted_count:
+                geloescht[coll] = res.deleted_count
+        await db.dealers.delete_many({"id": dealer_id})
+    else:
+        await db.users.delete_one({"id": user_id})
+
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.firma.geloescht", ref=dealer_id or user_id,
+                       meta={"email": u.get("email", ""),
+                             "geloescht": geloescht})
+    return {"ok": True, "geloescht": geloescht or "nur_nutzer"}
 
 
 @router.post("/admin/users/{user_id}/active")
