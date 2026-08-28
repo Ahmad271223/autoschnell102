@@ -35,17 +35,31 @@ api.interceptors.response.use(
 export async function openAuthedFile(path, mime = "application/pdf", client = api) {
   // Das Fenster MUSS synchron im Klick geoeffnet werden — nach einem await
   // blockiert es der Browser (Safari immer, Chrome nach ein paar Sekunden).
-  // Deshalb erst den Tab oeffnen, dann die Datei laden und die Adresse
-  // nachtragen.
-  const tab = window.open("", "_blank", "noopener");
+  // Deshalb erst den leeren Tab oeffnen, dann die Datei laden und die
+  // Adresse nachtragen.
+  // KEIN "noopener": damit liefert window.open laut Standard null zurueck,
+  // und genau den Griff brauchen wir hier. Stattdessen die Rueckwaerts-
+  // Referenz gleich selbst kappen.
+  const tab = window.open("", "_blank");
+  if (tab) {
+    try { tab.opener = null; } catch { /* egal */ }
+  }
   try {
     const res = await client.get(path, { responseType: "blob" });
     const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
     if (tab && !tab.closed) {
       tab.location.href = url;
     } else {
-      // Popup blockiert: Klick-Ersatz im selben Tab.
-      window.location.href = url;
+      // Popup blockiert: NICHT die aktuelle Seite ersetzen (der Nutzer
+      // wuerde die App verlieren) — stattdessen als Download anbieten
+      // und, falls auch das der Browser verweigert, klar melden.
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (path.split("/").pop() || "datei") +
+                   (mime === "application/pdf" ? ".pdf" : "");
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     }
     // Spaet freigeben — der eingebaute PDF-Betrachter laedt die Adresse
     // beim Drucken/Neuladen erneut.

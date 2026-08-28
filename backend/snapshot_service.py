@@ -621,7 +621,7 @@ async def run_snapshot_job(db, snap_id: str) -> None:
     # sonst umginge der Beweis-Snapshot das Limit vollstaendig.
     from listing_identity import detect_source
     from provider_fetch import MOCK_PROVIDER_FETCH
-    from provider_limiter import acquire_slot, release_slot
+    from provider_limiter import acquire_slot, extend_slot, release_slot
     quelle = detect_source(url) or "kleinanzeigen"
     if MOCK_PROVIDER_FETCH:
         # Im Lasttest keine echten Seitenaufrufe.
@@ -643,6 +643,21 @@ async def run_snapshot_job(db, snap_id: str) -> None:
                       "error": "Anbieter gerade ausgelastet - bitte spaeter",
                       "completed_at": datetime.now(timezone.utc).isoformat()}})
         return
+    async def _slot_frisch_halten():
+        # Aufnahmen mit Wiederholungen koennen laenger dauern als die
+        # Slot-Frist. Ohne Herzschlag wuerde die Frist den Slot entfernen,
+        # waehrend der Seitenaufruf noch laeuft — der Zaehler bliebe zu
+        # hoch und die Kapazitaet dauerhaft kleiner.
+        while True:
+            try:
+                await asyncio.sleep(30)
+                await extend_slot(db, slot_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    _puls = asyncio.create_task(_slot_frisch_halten())
     try:
         png, pdf = await _capture_with_retry(db, snap_id, url)
         # Compress PNG → JPEG and rebuild a 1-page image-PDF (much smaller).
@@ -678,4 +693,7 @@ async def run_snapshot_job(db, snap_id: str) -> None:
             }},
         )
     finally:
-        await release_slot(db, slot_id)
+        _puls.cancel()
+        # Quelle mitgeben: hat die Frist das Slot-Dokument bereits entfernt,
+        # koennte der Zaehler sonst nicht zurueckgesetzt werden.
+        await release_slot(db, slot_id, quelle)
