@@ -615,6 +615,34 @@ async def run_snapshot_job(db, snap_id: str) -> None:
     # unterscheiden kann.
     await db.listing_snapshots.update_one(
         {"id": snap_id}, {"$set": {"status": "running"}})
+
+    # Snapshot-Aufnahmen sind ECHTE Seitenaufrufe beim Anbieter und zaehlen
+    # deshalb gegen dieselbe zentrale Begrenzung wie die Datenabrufe —
+    # sonst umginge der Beweis-Snapshot das Limit vollstaendig.
+    from listing_identity import detect_source
+    from provider_fetch import MOCK_PROVIDER_FETCH
+    from provider_limiter import acquire_slot, release_slot
+    quelle = detect_source(url) or "kleinanzeigen"
+    if MOCK_PROVIDER_FETCH:
+        # Im Lasttest keine echten Seitenaufrufe.
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed", "error": "Mock-Modus: kein Abruf",
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+        return
+    slot_id = None
+    for _ in range(40):                       # bis zu ~60 s auf einen Slot warten
+        slot_id = await acquire_slot(db, quelle)
+        if slot_id:
+            break
+        await asyncio.sleep(1.5)
+    if not slot_id:
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed",
+                      "error": "Anbieter gerade ausgelastet - bitte spaeter",
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+        return
     try:
         png, pdf = await _capture_with_retry(db, snap_id, url)
         # Compress PNG → JPEG and rebuild a 1-page image-PDF (much smaller).
@@ -649,3 +677,5 @@ async def run_snapshot_job(db, snap_id: str) -> None:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }},
         )
+    finally:
+        await release_slot(db, slot_id)

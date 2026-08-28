@@ -33,6 +33,7 @@ from kleinanzeigen_service import (
     ListingGone, fetch_kleinanzeigen_vehicle,
     parse_kleinanzeigen_html, looks_like_kleinanzeigen_listing,
 )
+from provider_fetch import fetch_listing
 from listing_identity import (
     ListingBusy, ListingIdentityError, get_listing_identity,
     get_or_fetch_listing, peek_cached_listing, set_cache_snapshot,
@@ -47,11 +48,6 @@ from listing_identity import (
 # seitig (offizielle API, keine Block-Gefahr).
 CLIENT_FETCH_KLEINANZEIGEN = os.environ.get(
     "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")
-# NUR fuer Staging-Lasttests: externe Abrufe durch synthetische Daten
-# ersetzen (Provider werden geschont, die komplette Cache-/Lease-/Limiter-
-# Logik laeuft trotzdem echt). NIE in Produktion setzen.
-MOCK_PROVIDER_FETCH = os.environ.get(
-    "MOCK_PROVIDER_FETCH", "").strip().lower() in ("1", "true", "yes")
 from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
     MOBILE_USER, build_search_url, get_vehicle,
@@ -132,33 +128,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:
         """Wird nur bei Cache-MISS aufgerufen."""
-        if MOCK_PROVIDER_FETCH:
-            # NUR fuer Staging-Lasttests (MOCK_PROVIDER_FETCH=true): liefert
-            # synthetische Fahrzeugdaten mit realistischer Verzoegerung,
-            # statt echte Provider zu belasten. NIE in Produktion setzen.
-            import asyncio as _aio
-            await _aio.sleep(0.4)
-            return {"mobile_ad_id": iid, "kleinanzeigen_id": iid,
-                    "title": f"Lasttest Fahrzeug {iid}",
-                    "make_label": "VW", "model_label": "Golf",
-                    "list_price": 15000, "price": "15.000 €",
-                    "mileage": 90000, "first_registration": "01/2020",
-                    "fuel_label": "Benzin", "power_ps": 110,
-                    "seller_zip": "30159", "seller_city": "Hannover",
-                    "images": [], "_mock": True}
-        if src == "kleinanzeigen":
-            v = await fetch_kleinanzeigen_vehicle(url)
-            v["mobile_ad_id"] = v.get("kleinanzeigen_id") or iid
-            v.setdefault("kleinanzeigen_id", iid)
-            return v
-        if src == "mobile":
-            v = await get_vehicle(db, iid)
-            if not v:
-                raise RuntimeError("Fahrzeug konnte nicht geladen werden.")
-            v.setdefault("mobile_ad_id", iid)
-            v.pop("_source", None)
-            return v
-        raise RuntimeError(f"Source '{src}' ist aktuell nicht angebunden.")
+        return await fetch_listing(db, src, iid, url)
 
     try:
         if client_hit is not None:
@@ -464,34 +434,18 @@ async def snapshot_status(snap_id: str, user=Depends(current_user)):
 
 
 @router.get("/snapshots/{snap_id}/{kind}")
-async def snapshot_download(snap_id: str, kind: str, request: Request):
+async def snapshot_download(snap_id: str, kind: str,
+                            user=Depends(current_user)):
     """Stream the captured PDF or PNG.
 
     Nur `Authorization: Bearer …` — ?auth=<token> wird seit 08/2026 nicht
     mehr akzeptiert (Token stand sonst in Browser-Verlauf und Logs); das
-    Frontend laedt die Datei per fetch und zeigt eine Blob-URL an."""
+    Frontend laedt die Datei per fetch und zeigt eine Blob-URL an.
+    Die Anmeldepruefung uebernimmt bewusst current_user: die frueher hier
+    handgebaute Kette (Token, Konto aktiv, Einzel-Sitzung) war bereits von
+    der zentralen Version abgewichen."""
     if kind not in ("pdf", "png"):
         raise HTTPException(400, "kind muss 'pdf' oder 'png' sein")
-    token = None
-    auth_header = request.headers.get("authorization")
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header[7:]
-    if not token:
-        raise HTTPException(401, "Nicht authentifiziert")
-    try:
-        payload = decode_token(token)
-    except Exception:
-        raise HTTPException(401, "Token ungültig")
-    user_doc = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0})
-    if not user_doc:
-        raise HTTPException(401, "User nicht gefunden")
-    # Enforce single-session: revoked / rotated tokens must not grant access.
-    if not user_doc.get("active", True):
-        raise HTTPException(401, "Konto gesperrt")
-    token_sid = payload.get("sid")
-    stored_sid = user_doc.get("current_session_id")
-    if token_sid != stored_sid:
-        raise HTTPException(401, "Session beendet (anderes Gerät aktiv)")
 
     snap = await _load_snapshot_or_404(snap_id)
     if snap.get("status") != "ready":
@@ -557,14 +511,17 @@ async def listings_extract(body: ListingURLIn, _user=Depends(current_user)):
 async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub)):
     """Cache-aware Resolver."""
     async def _fetcher(source: str, item_id: str, url: str) -> dict:
-        if source == "kleinanzeigen":
-            return await fetch_kleinanzeigen_vehicle(url)
-        if source == "mobile":
-            v = await get_vehicle(db, item_id)
-            if not v:
-                raise RuntimeError("mobile.de Fahrzeug konnte nicht geladen werden")
-            return v
-        raise RuntimeError(f"Source '{source}' ist noch nicht angebunden.")
+        return await fetch_listing(db, source, item_id, url)
+
+    # Eigene Quarantaene zuerst: sonst wuerde der Server eine Anzeige selbst
+    # abrufen, die der Nutzer per Erweiterung bereits geliefert hat.
+    eigen = await peek_cached_listing(db, body.url,
+                                      dealer_id=user.get("dealer_id"))
+    if eigen is not None:
+        ident = get_listing_identity(body.url)
+        return {"source": ident["source"], "item_id": ident["item_id"],
+                "cache_key": ident["cache_key"], "cached": True,
+                "vehicle": eigen[0], "snapshot_id": eigen[1]}
 
     try:
         data, was_cached, cached_snapshot_id = await get_or_fetch_listing(

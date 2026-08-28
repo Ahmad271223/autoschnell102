@@ -15,8 +15,13 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
-os.environ.setdefault("DB_NAME", "autoschnell_cache_test")
+# WICHTIG: KEIN os.environ.setdefault("DB_NAME", ...) — pytest importiert
+# alle Testdateien vor dem ersten Lauf, und ein hier gesetztes DB_NAME
+# gaelte auch fuer die anderen Suiten. Die schrieben ihre Testdaten dann in
+# eine andere Datenbank als das laufende Backend (Fehlerbild: 401 beim
+# Anmelden). Dieser Test benutzt deshalb eigene lokale Variablen.
+MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
+DB_PREFIX = "autoschnell_cache_test"
 
 from motor.motor_asyncio import AsyncIOMotorClient  # noqa: E402
 
@@ -26,14 +31,19 @@ from listing_identity import (  # noqa: E402
 
 N_LINKS = 30
 WAITERS_PER_LINK = 3          # zusaetzlich: mehrere Nutzer je Link
-TIME_BUDGET_SECONDS = 25      # vor dem Fix: ~70 s + Fehler (3er-Slots: ~4 s)
+# Die Regression zeigte sich als ~70 s Blockade mit anschliessendem Fehler.
+# Gemessen laeuft der Durchlauf in ~15-20 s (30 Abrufe, je 0,3 s, durch die
+# Provider-Begrenzung auf 3 gleichzeitige gedrosselt, Warte-Takt 1,5 s).
+# 45 s Budget: deutlich unter der Regressionsschwelle, aber unempfindlich
+# gegen einen ausgelasteten Rechner.
+TIME_BUDGET_SECONDS = 45
 
 
 def test_many_distinct_new_links_do_not_block_each_other():
     async def run():
-        client = AsyncIOMotorClient(os.environ["MONGO_URL"],
+        client = AsyncIOMotorClient(MONGO_URL,
                                     serverSelectionTimeoutMS=5000)
-        db = client[os.environ["DB_NAME"] + "_" + uuid.uuid4().hex[:8]]
+        db = client[DB_PREFIX + "_" + uuid.uuid4().hex[:8]]
         try:
             await ensure_cache_indexes(db)
             fetch_calls = {}

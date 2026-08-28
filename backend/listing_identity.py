@@ -236,8 +236,13 @@ async def ensure_cache_indexes(db) -> None:
     # Altlasten raus: fruehere Versionen legten Lease-Dokumente OHNE
     # source/item_id an. So ein null/null-Relikt blockiert wegen des
     # Unique-Index jeden weiteren neuen Link — vor der Index-Anlage loeschen.
+    # NUR Lease-Reste ohne Nutzdaten: fruehere Versionen legten beim
+    # Reservieren Dokumente ohne source/item_id an, die den Unique-Index
+    # blockierten. Eintraege MIT data bleiben unangetastet — sie zu
+    # loeschen wuerde den gesamten Cache-Bestand verwerfen.
     await db.listings_cache.delete_many(
-        {"$or": [{"source": None}, {"source": {"$exists": False}},
+        {"data": {"$exists": False},
+         "$or": [{"source": None}, {"source": {"$exists": False}},
                  {"item_id": None}, {"item_id": {"$exists": False}}]})
     await db.listings_cache.create_index("cache_key", unique=True)
     await db.listings_cache.create_index(
@@ -451,6 +456,18 @@ async def get_or_fetch_listing(
             "Das Inserat wird gerade von einer anderen Anfrage geladen - "
             "bitte in ein paar Sekunden erneut versuchen.")
 
+    # Letzte Kontrolle vor dem externen Abruf: hat der vorherige Halter in
+    # der Zwischenzeit fertig geschrieben, sind seine Daten jetzt da — dann
+    # NICHT noch einmal abrufen (sonst zwei Abrufe derselben Anzeige).
+    frisch = await _fresh_cached()
+    if frisch:
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key},
+            {"$inc": {"use_count": 1},
+             "$set": {"last_used_at": datetime.now(timezone.utc),
+                      "fetching_until": None}})
+        return frisch["data"], True, frisch.get("snapshot_id")
+
     # ZENTRALE PROVIDER-BEGRENZUNG: bevor wirklich extern abgerufen wird,
     # einen Slot belegen (MongoDB — wirkt ueber ALLE Worker/Server). So
     # loesen 300 gleichzeitige Nutzer nicht 300 externe Abrufe aus,
@@ -458,11 +475,17 @@ async def get_or_fetch_listing(
     # oder bekommt eine freundliche "bitte gleich nochmal"-Antwort.
     from provider_limiter import acquire_slot, extend_slot, release_slot
     slot_id = None
-    for _try in range(20):                     # max. ~30 s auf einen Slot warten
-        slot_id = await acquire_slot(db, source)
-        if slot_id:
-            break
-        await _aio.sleep(1.5)
+    try:
+        for _try in range(20):                 # max. ~30 s auf einen Slot warten
+            slot_id = await acquire_slot(db, source)
+            if slot_id:
+                break
+            await _aio.sleep(1.5)
+    except Exception:
+        # Lease nicht haengen lassen, sonst warten alle anderen 90 s.
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        raise
     if not slot_id:
         await db.listings_cache.update_one(
             {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
@@ -473,13 +496,21 @@ async def get_or_fetch_listing(
     async def _extend_lease_forever():
         # Herzschlag: solange der Provider-Abruf laeuft, bleiben Lease UND
         # Provider-Slot gueltig — kein zweiter Prozess uebernimmt mittendrin.
+        # JEDER Fehler wird geschluckt: stuerbe die Schleife an einem
+        # kurzen Datenbank-Schluckauf, liefen Lease und Slot mitten im
+        # Abruf ab — genau das, was der Herzschlag verhindern soll.
         while True:
-            await _aio.sleep(30)
-            await db.listings_cache.update_one(
-                {"cache_key": cache_key},
-                {"$set": {"fetching_until":
-                          datetime.now(timezone.utc) + timedelta(seconds=90)}})
-            await extend_slot(db, slot_id)
+            try:
+                await _aio.sleep(30)
+                await db.listings_cache.update_one(
+                    {"cache_key": cache_key},
+                    {"$set": {"fetching_until":
+                              datetime.now(timezone.utc) + timedelta(seconds=90)}})
+                await extend_slot(db, slot_id)
+            except _aio.CancelledError:
+                raise
+            except Exception:
+                continue
 
     _heartbeat = _aio.create_task(_extend_lease_forever())
     # Buchfuehrung: wie viele ECHTE externe Abrufe je Quelle und Tag —
@@ -495,13 +526,12 @@ async def get_or_fetch_listing(
         data = await fetcher(source, item_id, url)
     except Exception:
         # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
-        _heartbeat.cancel()
         await db.listings_cache.update_one(
             {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
         raise
     finally:
         _heartbeat.cancel()
-        await release_slot(db, slot_id, provider=source)
+        await release_slot(db, slot_id)
     if not isinstance(data, dict):
         await db.listings_cache.update_one(
             {"cache_key": cache_key}, {"$set": {"fetching_until": None}})

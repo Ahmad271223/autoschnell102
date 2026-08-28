@@ -269,6 +269,22 @@ async def ensure_indexes():
     await db.pickup_reports.create_index([("appointment_id", 1), ("version", -1)])
     await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1)])
     await db.resale_listings.create_index([("dealer_id", 1), ("status", 1)])
+    # Marktplatz-Liste: sortiert nach published_at innerhalb der sichtbaren
+    # Haendler — ohne diesen Index muesste Mongo den ganzen Bestand in den
+    # Speicher sortieren (08/2026, nach Umstellung auf Aggregation).
+    await db.resale_listings.create_index(
+        [("status", 1), ("dealer_id", 1), ("published_at", -1)])
+    # Haendlersuche filtert auf oeffentliche Profile.
+    await db.dealers.create_index("marketplace.public")
+    # Abo-Sammelabfragen (Admin-Nutzerliste, Sucherverwaltung): ohne diese
+    # Indizes waere die Sammelabfrage langsamer als die alten Einzelabrufe.
+    await db.subscriptions.create_index([("dealer_id", 1), ("created_at", -1)])
+    await db.subscriptions.create_index(
+        [("subject_user_id", 1), ("created_at", -1)])
+    # Monatsstatistik je Sucher.
+    await db.vehicle_comparisons.create_index(
+        [("user_id", 1), ("created_at", -1)])
+    await db.generated_pdfs.create_index([("user_id", 1), ("created_at", -1)])
     await db.resale_listings.create_index([("vehicle_id", 1)])
     # Phase 3: Marktplatz
     await db.dealer_invites.create_index("token", unique=True)
