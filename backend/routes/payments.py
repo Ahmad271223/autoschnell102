@@ -106,13 +106,16 @@ async def payment_status(session_id: str, request: Request, user=Depends(current
     tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
     if not tx:
         raise HTTPException(404, "Zahlung nicht gefunden")
-    if tx["payment_status"] == "paid":
-        return tx
 
-    # Authorization: tx must belong to the requesting user (so nobody can confirm
-    # someone else's session)
+    # Eigentuemer-Pruefung SOFORT nach dem Lookup — vor JEDER Rueckgabe.
+    # (Vorher wurden bereits bezahlte Transaktionen vor dieser Pruefung
+    # zurueckgegeben: wer eine fremde Session-ID kannte, sah fremde
+    # Zahlungs-Metadaten.)
     if tx.get("user_id") != user["id"] and user.get("role") != "admin":
         raise HTTPException(403, "Diese Zahlung gehört dir nicht")
+
+    if tx["payment_status"] == "paid":
+        return tx
 
     # 1) Webhook may have already activated a subscription
     sub = await db.subscriptions.find_one({"session_id": session_id})
