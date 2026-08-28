@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
-import { errMsg, API_BASE } from "@/lib/api";
+import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar, MapPin, Phone, FileText, ClipboardCheck,

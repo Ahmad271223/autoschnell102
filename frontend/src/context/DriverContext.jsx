@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import axios from "axios";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, openAuthedFile } from "@/lib/api";
 
 /**
  * Fahrer-Auth (eigenständige Accounts, separat vom Händler-Auth).
@@ -17,14 +17,10 @@ driverApi.interceptors.request.use((c) => {
 
 // PDF in neuem Tab oeffnen — Abruf per Authorization-Header statt
 // ?auth=<token> in der URL (der Token landete sonst in Browser-Verlauf
-// und Server-Logs). Die Blob-URL ist lokal und enthaelt kein Geheimnis.
-export async function openDriverPdf(path) {
-  const res = await driverApi.get(path, { responseType: "blob" });
-  const url = URL.createObjectURL(
-    new Blob([res.data], { type: "application/pdf" }));
-  window.open(url, "_blank", "noopener");
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
-}
+// und Server-Logs). Nutzt denselben Oeffner wie die Haendler-App, damit
+// Popup-Verhalten und Freigabe-Zeiten nur an EINER Stelle gepflegt werden.
+export const openDriverPdf = (path) =>
+  openAuthedFile(path, "application/pdf", driverApi);
 
 export function DriverAuthProvider({ children }) {
   const [driver, setDriver] = useState(null);

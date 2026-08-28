@@ -165,15 +165,14 @@ async def _cleanup_once(db) -> dict:
                         stats["photos_cleared"] += 1
 
                 # 3) Listings-Cache-Eintrag entfernen, damit ein neuer
-                #    Vergleich wieder frisch zieht (sonst käme der leere
-                #    Cache-Hit). Der Cache ist ueber item_id adressiert —
-                #    das alte delete_many auf 'source_url' traf NIE etwas
-                #    (Feld heisst 'url', und die Fahrzeug-ID 'v_…' steht
-                #    ohnehin nicht in der URL).
-                ad_id = (v or {}).get("mobile_ad_id") or (
-                    vehicle_id[2:] if vehicle_id.startswith("v_") else None)
-                if ad_id:
-                    await db.listings_cache.delete_many({"item_id": str(ad_id)})
+                #    Vergleich wieder frisch zieht. WICHTIG: der
+                #    listings_cache ist GEMEINSAM (ein Eintrag je Anzeige,
+                #    von allen Haendlern genutzt). Ihn wegen der Frist EINES
+                #    Haendlers zu loeschen wuerde alle anderen zu einem
+                #    neuen Anbieter-Abruf zwingen. Deshalb nur die
+                #    haendlereigenen Fotos (oben) entfernen und den
+                #    gemeinsamen Cache ueber seine eigene Ablauffrist
+                #    (LISTING_CACHE_TTL_HOURS) auslaufen lassen.
 
             # 4) Termin markieren, damit wir ihn nicht nochmal anfassen
             await db.appointments.update_one(

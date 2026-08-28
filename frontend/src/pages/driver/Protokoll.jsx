@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
-import { errMsg, API_BASE } from "@/lib/api";
+import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import {
   ArrowLeft, Save, CheckCircle2, FileText, AlertTriangle, Pencil,

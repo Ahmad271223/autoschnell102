@@ -281,15 +281,32 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
 
     # ---- Abschluss ATOMAR beanspruchen: von beliebig vielen gleichzeitigen
     # Aufrufen gewinnt genau EINER (kein doppeltes PDF, keine doppelten
-    # Unterschrift-Dateien). Erst nach erfolgreichem Speichern wird der
-    # Status "final"; scheitert etwas, geht es zurueck auf "entwurf".
-    vorher = doc.get("status") or "entwurf"
+    # Unterschrift-Dateien). Der Claim traegt ein ABLAUFDATUM: stirbt der
+    # Prozess mittendrin (Deploy, Absturz), kann der Fahrer nach 3 Minuten
+    # einfach erneut abschliessen — ohne Ablauf waere das Protokoll fuer
+    # immer in 'wird_abgeschlossen' gefangen (nur per Datenbank loesbar).
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    _jetzt = _dt.now(_tz.utc)
     claim = await db.pickup_protocols.find_one_and_update(
-        {"id": doc["id"], "status": {"$nin": ["final", "wird_abgeschlossen"]}},
-        {"$set": {"status": "wird_abgeschlossen", "updated_at": now_iso()}})
+        {"id": doc["id"],
+         "$or": [{"status": {"$nin": ["final", "wird_abgeschlossen"]}},
+                 {"status": "wird_abgeschlossen",
+                  "claim_bis": {"$lt": _jetzt.isoformat()}}]},
+        {"$set": {"status": "wird_abgeschlossen",
+                  "claim_bis": (_jetzt + _td(minutes=3)).isoformat(),
+                  "updated_at": now_iso()}})
     if not claim:
         raise HTTPException(409, "Das Protokoll wird gerade abgeschlossen "
                                  "— bitte einen Moment warten.")
+
+    async def _rollback():
+        """Claim freigeben — zurueck auf 'entwurf' (den einzigen Status,
+        aus dem ein Claim moeglich ist), damit der Fahrer neu abschliessen
+        kann."""
+        await db.pickup_protocols.update_one(
+            {"id": doc["id"], "status": "wird_abgeschlossen"},
+            {"$set": {"status": "entwurf"},
+             "$unset": {"claim_bis": ""}})
 
     dealer_id = appt.get("dealer_id", "x")
 
@@ -311,9 +328,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         sig_driver = _save_sig(body.signature_driver_b64, "fahrer")
         sig_seller = _save_sig(body.signature_seller_b64, "verkaeufer")
     except HTTPException:
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"], "status": "wird_abgeschlossen"},
-            {"$set": {"status": vorher}})
+        await _rollback()
         raise
 
     # ---- Daten für das ausgefüllte PDF zusammenstellen ----
@@ -363,19 +378,16 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         pdf_key = make_key("protocol", dealer_id, "abholprotokoll.pdf")
         storage.save(pdf_key, pdf_bytes)
     except StorageError as exc:
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"], "status": "wird_abgeschlossen"},
-            {"$set": {"status": vorher}})
+        await _rollback()
         raise HTTPException(400, f"PDF konnte nicht gespeichert werden: {exc}")
     except Exception:
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"], "status": "wird_abgeschlossen"},
-            {"$set": {"status": vorher}})
+        await _rollback()
         raise
 
     await db.pickup_protocols.update_one(
         {"id": doc["id"]},
-        {"$set": {"status": "final", "pdf_path": pdf_key,
+        {"$unset": {"claim_bis": ""},
+         "$set": {"status": "final", "pdf_path": pdf_key,
                   "signature_driver_key": sig_driver,
                   "signature_seller_key": sig_seller,
                   "seller_name": filled["seller_name"],

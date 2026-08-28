@@ -5,7 +5,7 @@
 //   <SnapshotCard snapshotId="..." />           — live polling for a job
 //   <SnapshotCard vehicleId="..." compact />    — show latest ready snapshot for a car
 import { useEffect, useState } from "react";
-import { api, API_BASE, openAuthedFile } from "@/lib/api";
+import { api, openAuthedFile } from "@/lib/api";
 import { Camera, FileText, ImageIcon, Loader2, AlertTriangle, CheckCircle2, ExternalLink, Printer } from "lucide-react";
 import { printSnapshot } from "@/lib/pdf";
 import { toast } from "sonner";

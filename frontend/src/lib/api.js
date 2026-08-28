@@ -32,11 +32,28 @@ api.interceptors.response.use(
 // Geschuetzte Datei (PDF/PNG) in neuem Tab oeffnen — Abruf per
 // Authorization-Header statt ?auth=<token> in der URL (der Token landete
 // sonst in Browser-Verlauf, Proxy- und Server-Logs).
-export async function openAuthedFile(path, mime = "application/pdf") {
-  const res = await api.get(path, { responseType: "blob" });
-  const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
-  window.open(url, "_blank", "noopener");
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+export async function openAuthedFile(path, mime = "application/pdf", client = api) {
+  // Das Fenster MUSS synchron im Klick geoeffnet werden — nach einem await
+  // blockiert es der Browser (Safari immer, Chrome nach ein paar Sekunden).
+  // Deshalb erst den Tab oeffnen, dann die Datei laden und die Adresse
+  // nachtragen.
+  const tab = window.open("", "_blank", "noopener");
+  try {
+    const res = await client.get(path, { responseType: "blob" });
+    const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
+    if (tab && !tab.closed) {
+      tab.location.href = url;
+    } else {
+      // Popup blockiert: Klick-Ersatz im selben Tab.
+      window.location.href = url;
+    }
+    // Spaet freigeben — der eingebaute PDF-Betrachter laedt die Adresse
+    // beim Drucken/Neuladen erneut.
+    setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+  } catch (e) {
+    if (tab && !tab.closed) tab.close();
+    throw e;
+  }
 }
 
 /**

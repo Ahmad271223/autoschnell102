@@ -19,8 +19,6 @@ import asyncio
 import json
 import os
 import random
-import statistics
-import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -157,7 +155,7 @@ def cleanup():
     dbx.users.delete_many({"id": {"$in": uids}})
 
 
-async def user_loop(session, user, stats, deadline, n_links, cpu_samples):
+async def user_loop(session, user, stats, deadline, n_links):
     """Ein simulierter Sucher: mischt neue Links, bekannte Links und
     Marktplatz-/Bestandsaufrufe — wie echtes Verhalten."""
     h = {"Authorization": f"Bearer {user['token']}"}
@@ -189,7 +187,6 @@ async def sample_system(deadline, cpu_samples):
         import psutil
     except ImportError:
         return
-    proc_names = ("python.exe", "python")
     while time.monotonic() < deadline:
         cpu = psutil.cpu_percent(interval=None)
         ram = psutil.virtual_memory().percent
@@ -208,12 +205,26 @@ async def main():
     conn = aiohttp.TCPConnector(limit=args.users + 50)
     timeout = aiohttp.ClientTimeout(total=75)
     async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
-        # Sicherheitscheck: Mock-Modus MUSS an sein (kein echter Provider-Traffic)
-        probe = 9900000000
-        async with session.post(f"{API}/auth/register", json={
-                "email": f"last_{SUFFIX}_probe@e2etest-mail.de", "password": PW,
-                "company_name": "Probe", "contact_person": "P", "phone": "1"}) as r:
-            assert r.status == 200, f"Registrierung kaputt: {r.status}"
+        # SICHERHEITSCHECK: Der Mock-Modus MUSS aktiv sein — sonst wuerde
+        # dieser Lasttest hunderte ECHTE Abrufe bei Kleinanzeigen ausloesen.
+        # Wir pruefen das mit einem einzigen Vergleich und brechen ab, wenn
+        # die Antwort nicht als synthetisch markiert ist.
+        probe_user = await register_user(session, "probe")
+        assert probe_user, "Registrierung kaputt — Backend erreichbar?"
+        seed_subscriptions_and_get_metrics_before()
+        async with session.post(
+                f"{API}/mobile/compare",
+                headers={"Authorization": f"Bearer {probe_user['token']}"},
+                json={"url": "https://www.kleinanzeigen.de/s-anzeige/probe/"
+                             "9900000000-216-1"}) as r:
+            body = await r.json() if r.status == 200 else {}
+        if not (body.get("vehicle") or {}).get("_mock"):
+            cleanup()
+            raise SystemExit(
+                "ABBRUCH: Das Backend laeuft NICHT im Mock-Modus "
+                "(MOCK_PROVIDER_FETCH=true). Ohne ihn wuerde der Lasttest "
+                "echte Abrufe bei Kleinanzeigen/mobile.de ausloesen.")
+        print("[0/4] Mock-Modus bestaetigt — keine echten Anbieter-Abrufe.")
 
         print(f"[1/4] Registriere {args.users} Test-Nutzer …")
         users = []
@@ -234,7 +245,7 @@ async def main():
               f"{args.duration}s, {args.links} verschiedene Inserate …")
         await asyncio.gather(
             sample_system(deadline, cpu_samples),
-            *[user_loop(session, u, stats, deadline, args.links, cpu_samples)
+            *[user_loop(session, u, stats, deadline, args.links)
               for u in users])
 
         print("[4/4] Auswertung …")
