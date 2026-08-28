@@ -17,6 +17,10 @@ import pytest
 import requests
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
+# Dieselbe Datenbank wie das laufende Backend (CI: autoschnell_ci) —
+# sonst landet das Test-Abo in einer anderen DB und die API sagt 402.
+MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
+DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 API = f"{BASE}/api"
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 SUFFIX = uuid.uuid4().hex[:8]
@@ -27,7 +31,7 @@ PW = "SmokeTest123!"
 def _cleanup():
     try:
         from pymongo import MongoClient
-        db = MongoClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=3000)["autoschnell"]
+        db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=3000)[DB_NAME]
         uids = [u["id"] for u in db.users.find({"email": {"$regex": "^smoke_"}}, {"id": 1})]
         dids = [d["id"] for d in db.dealers.find({"user_id": {"$in": uids}}, {"id": 1})]
         for c in ("vehicles", "generated_pdfs", "appointments", "activity_logs",
@@ -54,7 +58,7 @@ def chef():
     # Abo direkt setzen (Vertragserstellung verlangt ein aktives Abo)
     from datetime import datetime, timedelta, timezone
     from pymongo import MongoClient
-    MongoClient("mongodb://127.0.0.1:27017")["autoschnell"].subscriptions.insert_one({
+    MongoClient(MONGO_URL)[DB_NAME].subscriptions.insert_one({
         "id": str(uuid.uuid4()), "dealer_id": me["dealer_id"], "subject_user_id": me["id"],
         "plan": "monthly", "status": "active",
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
@@ -126,3 +130,67 @@ def test_rollentrennung(chef):
     btok = r.json()["token"]
     r = requests.get(f"{API}/bestand", headers={"Authorization": f"Bearer {btok}"}, timeout=30)
     assert r.status_code == 403, f"Kaeufer kam in den Bestand ({r.status_code})"
+
+
+def test_fremde_zahlung_unsichtbar(chef):
+    """Mandantentest: bezahlte Transaktion eines ANDEREN Nutzers darf
+    ueber /payments/status nicht einsehbar sein (PR-Review Blocker)."""
+    from pymongo import MongoClient
+    session_id = f"cs_smoke_{SUFFIX}"
+    MongoClient(MONGO_URL)[DB_NAME].payment_transactions.insert_one({
+        "session_id": session_id, "user_id": "jemand_anderes",
+        "dealer_id": "fremde_firma", "plan": "monthly",
+        "payment_status": "paid", "status": "complete",
+        "amount": 160.0, "created_at": "2026-01-01T00:00:00+00:00"})
+    try:
+        r = requests.get(f"{API}/payments/status/{session_id}",
+                         headers={"Authorization": f"Bearer {chef['token']}"},
+                         timeout=30)
+        assert r.status_code == 403, (
+            f"Fremde Zahlung wurde ausgeliefert ({r.status_code}): {r.text[:200]}")
+    finally:
+        MongoClient(MONGO_URL)[DB_NAME].payment_transactions.delete_one(
+            {"session_id": session_id})
+
+
+def test_sucher_loeschen_zerstoert_firma_nicht(chef):
+    """Mandantentest: loescht der Admin einen SUCHER, muessen Firma und
+    Haendler-Abo bestehen bleiben (PR-Review Blocker: Admin-Loeschung)."""
+    from pymongo import MongoClient
+    dbx = MongoClient(MONGO_URL)[DB_NAME]
+    h = {"Authorization": f"Bearer {chef['token']}"}
+    r = requests.post(f"{API}/dealer/sucher", headers=h, json={
+        "email": f"smoke_s_{SUFFIX}@e2etest-mail.de", "password": PW,
+        "first_name": "Smoke", "last_name": "Sucher"}, timeout=30)
+    assert r.status_code == 200, f"Sucher anlegen: {r.status_code} {r.text[:200]}"
+    sucher_id = r.json().get("sucher_id") or r.json().get("id")
+    assert sucher_id, f"Keine Sucher-ID in Antwort: {r.text[:200]}"
+
+    # Direkt in der DB loeschen wie der Admin-Endpunkt es tut? Nein — wir
+    # rufen den ECHTEN Endpunkt als Plattform-Admin auf. Dazu einen
+    # Wegwerf-Admin direkt in der DB anlegen (der Seed-Admin der CI-DB
+    # hat kein bekanntes Passwort).
+    import bcrypt
+    admin_mail = f"smoke_admin_{SUFFIX}@e2etest-mail.de"
+    dbx.users.insert_one({
+        "id": f"adm_{SUFFIX}", "email": admin_mail, "role": "admin",
+        "active": True, "dealer_id": None,
+        "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
+        "created_at": "2026-01-01T00:00:00+00:00"})
+    try:
+        r = requests.post(f"{API}/auth/login",
+                          json={"email": admin_mail, "password": PW}, timeout=30)
+        assert r.status_code == 200, f"Admin-Login: {r.status_code} {r.text[:200]}"
+        atok = r.json()["token"]
+        r = requests.delete(f"{API}/admin/users/{sucher_id}",
+                            headers={"Authorization": f"Bearer {atok}"}, timeout=30)
+        assert r.status_code == 200, f"Sucher loeschen: {r.status_code} {r.text[:200]}"
+        dealer_id = chef["user"]["dealer_id"]
+        assert dbx.dealers.find_one({"id": dealer_id}), \
+            "Firmendatensatz wurde beim Sucher-Loeschen mit entfernt!"
+        assert dbx.subscriptions.find_one({"dealer_id": dealer_id}), \
+            "Haendler-Abo wurde beim Sucher-Loeschen mit entfernt!"
+        assert dbx.users.find_one({"id": sucher_id}) is None, \
+            "Sucher wurde nicht geloescht"
+    finally:
+        dbx.users.delete_many({"email": admin_mail})
