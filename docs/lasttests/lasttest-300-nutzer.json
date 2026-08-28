@@ -1,0 +1,64 @@
+{
+  "konfiguration": {
+    "nutzer": 300,
+    "dauer_s": 180,
+    "verschiedene_inserate": 200,
+    "ziel": "http://localhost:8001",
+    "zeitpunkt": "2026-08-28T16:26:55.745253+00:00"
+  },
+  "anfragen_gesamt": 39751,
+  "endpunkte": {
+    "abo_status": {
+      "ok": 3934,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 200,
+      "p95_ms": 437,
+      "p99_ms": 544,
+      "max_ms": 868,
+      "fehler_nach_status": {}
+    },
+    "bestand": {
+      "ok": 5846,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 213,
+      "p95_ms": 423,
+      "p99_ms": 513,
+      "max_ms": 871,
+      "fehler_nach_status": {}
+    },
+    "vergleich_bekannter_link": {
+      "ok": 19953,
+      "fehler": 14,
+      "fehlerrate_prozent": 0.07,
+      "p50_ms": 505,
+      "p95_ms": 1396,
+      "p99_ms": 10629,
+      "max_ms": 32202,
+      "fehler_nach_status": {
+        "503": 14
+      }
+    },
+    "vergleich_neuer_link": {
+      "ok": 9984,
+      "fehler": 20,
+      "fehlerrate_prozent": 0.2,
+      "p50_ms": 504,
+      "p95_ms": 1407,
+      "p99_ms": 9851,
+      "max_ms": 30034,
+      "fehler_nach_status": {
+        "503": 20
+      }
+    }
+  },
+  "system": {
+    "externe_provider_abrufe_im_test": 191,
+    "mongo_verbindungen_aktuell": 144,
+    "mongo_verbindungen_verfuegbar": 999856,
+    "cpu_prozent_p50": 72,
+    "cpu_prozent_max": 83,
+    "ram_prozent_max": 62
+  }
+}
