@@ -451,17 +451,46 @@ async def get_or_fetch_listing(
             "Das Inserat wird gerade von einer anderen Anfrage geladen - "
             "bitte in ein paar Sekunden erneut versuchen.")
 
+    # ZENTRALE PROVIDER-BEGRENZUNG: bevor wirklich extern abgerufen wird,
+    # einen Slot belegen (MongoDB — wirkt ueber ALLE Worker/Server). So
+    # loesen 300 gleichzeitige Nutzer nicht 300 externe Abrufe aus,
+    # sondern hoechstens MAX_CONCURRENT_<QUELLE> — der Rest wartet kurz
+    # oder bekommt eine freundliche "bitte gleich nochmal"-Antwort.
+    from provider_limiter import acquire_slot, extend_slot, release_slot
+    slot_id = None
+    for _try in range(20):                     # max. ~30 s auf einen Slot warten
+        slot_id = await acquire_slot(db, source)
+        if slot_id:
+            break
+        await _aio.sleep(1.5)
+    if not slot_id:
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        raise ListingBusy(
+            "Gerade werden viele Inserate gleichzeitig geladen - "
+            "bitte in ein paar Sekunden erneut versuchen.")
+
     async def _extend_lease_forever():
-        # Herzschlag: solange der Provider-Abruf laeuft, bleibt das Lease
-        # gueltig — kein zweiter Prozess uebernimmt mittendrin.
+        # Herzschlag: solange der Provider-Abruf laeuft, bleiben Lease UND
+        # Provider-Slot gueltig — kein zweiter Prozess uebernimmt mittendrin.
         while True:
             await _aio.sleep(30)
             await db.listings_cache.update_one(
                 {"cache_key": cache_key},
                 {"$set": {"fetching_until":
                           datetime.now(timezone.utc) + timedelta(seconds=90)}})
+            await extend_slot(db, slot_id)
 
     _heartbeat = _aio.create_task(_extend_lease_forever())
+    # Buchfuehrung: wie viele ECHTE externe Abrufe je Quelle und Tag —
+    # damit laesst sich providerfreundliches Verhalten jederzeit belegen.
+    try:
+        await db.provider_stats.update_one(
+            {"provider": source,
+             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
+            {"$inc": {"calls": 1}}, upsert=True)
+    except Exception:
+        pass
     try:
         data = await fetcher(source, item_id, url)
     except Exception:
@@ -472,6 +501,7 @@ async def get_or_fetch_listing(
         raise
     finally:
         _heartbeat.cancel()
+        await release_slot(db, slot_id, provider=source)
     if not isinstance(data, dict):
         await db.listings_cache.update_one(
             {"cache_key": cache_key}, {"$set": {"fetching_until": None}})

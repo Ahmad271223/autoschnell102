@@ -459,6 +459,11 @@ async def on_start():
         await ensure_lock_index(db)
     except Exception as exc:
         log.warning("job lock index setup failed: %s", exc)
+    try:
+        from provider_limiter import ensure_slot_indexes
+        await ensure_slot_indexes(db)
+    except Exception as exc:
+        log.warning("provider slot index setup failed: %s", exc)
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         import asyncio

@@ -26,7 +26,7 @@ from listing_identity import (  # noqa: E402
 
 N_LINKS = 30
 WAITERS_PER_LINK = 3          # zusaetzlich: mehrere Nutzer je Link
-TIME_BUDGET_SECONDS = 20      # vor dem Fix: ~70 s + Fehler
+TIME_BUDGET_SECONDS = 25      # vor dem Fix: ~70 s + Fehler (3er-Slots: ~4 s)
 
 
 def test_many_distinct_new_links_do_not_block_each_other():
@@ -37,10 +37,14 @@ def test_many_distinct_new_links_do_not_block_each_other():
         try:
             await ensure_cache_indexes(db)
             fetch_calls = {}
+            live = {"now": 0, "max": 0}
 
             async def fetcher(source, item_id, url):
                 fetch_calls[item_id] = fetch_calls.get(item_id, 0) + 1
+                live["now"] += 1
+                live["max"] = max(live["max"], live["now"])
                 await asyncio.sleep(0.3)   # simulierter Provider-Abruf
+                live["now"] -= 1
                 return {"mobile_ad_id": item_id, "title": f"Auto {item_id}",
                         "list_price": 10000}
 
@@ -63,6 +67,13 @@ def test_many_distinct_new_links_do_not_block_each_other():
                 f"Mehrfach-Abrufe: { {k: v for k, v in fetch_calls.items() if v > 1} }")
             # Und jeder Aufrufer hat brauchbare Daten bekommen
             assert all(r[0].get("list_price") == 10000 for r in results)
+            # Zentrale Provider-Begrenzung: NIE mehr gleichzeitige externe
+            # Abrufe als das Kleinanzeigen-Limit erlaubt (90 Aufrufer
+            # duerfen eben NICHT 90 externe Requests ausloesen).
+            from provider_limiter import PROVIDER_MAX_CONCURRENT
+            limit = PROVIDER_MAX_CONCURRENT["kleinanzeigen"]
+            assert live["max"] <= limit, (
+                f"{live['max']} gleichzeitige Provider-Abrufe — erlaubt: {limit}")
         finally:
             await client.drop_database(db.name)
             client.close()
