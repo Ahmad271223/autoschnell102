@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { driverApi } from "@/context/DriverContext";
+import { driverApi, openDriverPdf } from "@/context/DriverContext";
 import { errMsg, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -68,8 +68,8 @@ export default function DriverDashboard() {
     return Object.entries(g).sort(([a], [b]) => a.localeCompare(b));
   }, [items]);
 
-  const token = localStorage.getItem("ah_driver_token");
-  const authQ = token ? `?auth=${encodeURIComponent(token)}` : "";
+  const oeffnePdf = (path) =>
+    openDriverPdf(path).catch((e) => toast.error(errMsg(e)));
 
   return (
     <div data-testid="driver-dashboard">
@@ -191,30 +191,27 @@ export default function DriverDashboard() {
                         </Link>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <a href={`${API_BASE}/driver/appointments/${a.id}/pickup-order.pdf${authQ}`}
-                             target="_blank" rel="noreferrer"
-                             data-testid={`pickup-pdf-${a.id}`}
-                             className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm border"
-                             style={{ borderColor: "var(--border-default)" }}>
+                          <button onClick={() => oeffnePdf(`/driver/appointments/${a.id}/pickup-order.pdf`)}
+                                  data-testid={`pickup-pdf-${a.id}`}
+                                  className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm border"
+                                  style={{ borderColor: "var(--border-default)" }}>
                             <FileText size={15} /> Papier-PDF
-                          </a>
+                          </button>
                           {a.contract_id && (
-                            <a href={`${API_BASE}/driver/contracts/${a.contract_id}/pdf${authQ}`}
-                               target="_blank" rel="noreferrer"
-                               data-testid={`contract-pdf-${a.id}`}
-                               className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold bg-white/5 hover:bg-white/10">
+                            <button onClick={() => oeffnePdf(`/driver/contracts/${a.contract_id}/pdf`)}
+                                    data-testid={`contract-pdf-${a.id}`}
+                                    className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold bg-white/5 hover:bg-white/10">
                               <FileText size={15} /> Kaufvertrag
-                            </a>
+                            </button>
                           )}
                         </div>
 
                         {a.snapshot_id && (
-                          <a href={`${API_BASE}/driver/snapshots/${a.snapshot_id}/pdf${authQ}`}
-                             target="_blank" rel="noreferrer"
-                             data-testid={`snapshot-pdf-${a.id}`}
-                             className="flex items-center justify-center gap-2 px-4 py-2 rounded-sm text-xs font-semibold bg-white/5 hover:bg-white/10">
+                          <button onClick={() => oeffnePdf(`/driver/snapshots/${a.snapshot_id}/pdf`)}
+                                  data-testid={`snapshot-pdf-${a.id}`}
+                                  className="flex items-center justify-center gap-2 px-4 py-2 rounded-sm text-xs font-semibold bg-white/5 hover:bg-white/10">
                             <CheckCircle2 size={13} /> Beweis-Archiv (Inserat-PDF)
-                          </a>
+                          </button>
                         )}
 
                         {a.notes && (

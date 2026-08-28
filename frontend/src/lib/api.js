@@ -3,7 +3,9 @@ import axios from "axios";
 const BACKEND = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND}/api`;
 
-export const api = axios.create({ baseURL: API_BASE });
+// 60 s Timeout: haengt der Server, bekommt der Nutzer eine Fehlermeldung
+// statt eines endlosen Spinners (Vergleich + PDF sind die langsamsten Wege).
+export const api = axios.create({ baseURL: API_BASE, timeout: 60000 });
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("ah_token");
@@ -26,6 +28,16 @@ api.interceptors.response.use(
     return Promise.reject(err);
   }
 );
+
+// Geschuetzte Datei (PDF/PNG) in neuem Tab oeffnen — Abruf per
+// Authorization-Header statt ?auth=<token> in der URL (der Token landete
+// sonst in Browser-Verlauf, Proxy- und Server-Logs).
+export async function openAuthedFile(path, mime = "application/pdf") {
+  const res = await api.get(path, { responseType: "blob" });
+  const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
 
 /**
  * Normalize a FastAPI / axios error into a human-readable string.

@@ -123,23 +123,15 @@ def create_driver_token(driver_id: str, session_id: str) -> str:
 
 async def current_driver(request: Request, auth: Optional[str] = None,
                          creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
-    """Akzeptiert Token via `Authorization: Bearer ...` ODER `?auth=<token>`
-    Query-Param. Letzteres wird für PDF-Links gebraucht, da `<a href>` keine
-    Header setzen kann.
+    """Token NUR via `Authorization: Bearer ...`.
 
-    Sicherheitshinweis: ?auth=<token> legt den Token in Server-Access-Logs
-    und im Browser-Verlauf ab. Deshalb ist die Token-Gültigkeit auf 7 Tage
-    begrenzt und es werden nur Fahrer-Tokens (role=driver_account) akzeptiert.
-    Für Dealer-Aktionen immer Authorization-Header verwenden.
+    ?auth=<token> in der URL wird NICHT mehr akzeptiert: der Token landete
+    damit in Browser-Verlauf, Proxy- und Server-Logs. Die Fahrer-App laedt
+    PDFs seit 08/2026 per fetch mit Authorization-Header (openDriverPdf).
     """
     token = None
     if creds and creds.credentials:
         token = creds.credentials
-    elif auth:
-        # ?auth= path — only for PDF download links (GET requests).
-        if request.method not in ("GET", "HEAD"):
-            raise HTTPException(401, "?auth= Query-Parameter nur bei GET erlaubt")
-        token = auth
     if not token:
         raise HTTPException(401, "Nicht authentifiziert")
     try:
@@ -479,7 +471,8 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
     vehicle: Dict[str, Any] = {}
     if appt.get("vehicle_id"):
         v_doc = await db.vehicles.find_one(
-            {"id": appt["vehicle_id"]}, {"_id": 0},
+            {"id": appt["vehicle_id"], "dealer_id": appt.get("dealer_id")},
+            {"_id": 0},
         ) or {}
         vehicle = dict(v_doc.get("data") or {})
         if v_doc.get("mobile_ad_id"):
@@ -487,7 +480,8 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
     contract = {}
     if appt.get("contract_id"):
         doc = await db.generated_pdfs.find_one(
-            {"id": appt["contract_id"]}, {"_id": 0, "contract_data": 1},
+            {"id": appt["contract_id"], "dealer_id": appt.get("dealer_id")},
+            {"_id": 0, "contract_data": 1},
         )
         if doc:
             contract = dict(doc.get("contract_data") or {})
@@ -495,12 +489,16 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
         {"id": appt.get("dealer_id")}, {"_id": 0},
     ) or {}
     from pickup_pdf_service import build_pickup_pdf
+    import asyncio as _aio
     driver_info = {
         "id": driver["id"],
         "name": driver.get("display_name"),
         "email": driver.get("email"),
     }
-    pdf_bytes = build_pickup_pdf(
+    # Im Thread: PDF-Erzeugung ist CPU-Arbeit und wuerde sonst den ganzen
+    # Worker-Prozess blockieren.
+    pdf_bytes = await _aio.to_thread(
+        build_pickup_pdf,
         appointment=appt, vehicle=vehicle, contract=contract,
         dealer=dealer, driver=driver_info,
     )
@@ -518,12 +516,13 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
 async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
     appt = await db.appointments.find_one(
         {"driver_id": driver["id"], "contract_id": contract_id},
-        {"_id": 0, "id": 1},
+        {"_id": 0, "id": 1, "dealer_id": 1},
     )
     if not appt:
         raise HTTPException(404, "Kein Zugriff auf diesen Vertrag")
     doc = await db.generated_pdfs.find_one(
-        {"id": contract_id}, {"_id": 0, "pdf_b64": 1},
+        {"id": contract_id, "dealer_id": appt.get("dealer_id")},
+        {"_id": 0, "pdf_b64": 1},
     )
     if not doc or not doc.get("pdf_b64"):
         raise HTTPException(404, "Vertrag nicht gefunden")
@@ -543,8 +542,12 @@ async def driver_snapshot(snap_id: str, kind: str,
     snap = await db.listing_snapshots.find_one({"id": snap_id}, {"_id": 0})
     if not snap or snap.get("status") != "ready":
         raise HTTPException(404, "Snapshot nicht bereit")
+    # dealer_id gehoert in JEDE Zugriffspruefung: dieselbe Anzeige kann bei
+    # ZWEI Haendlern existieren — ohne Firmen-Bindung saehe der Fahrer von
+    # Haendler A den Beweis-Snapshot von Haendler B.
     allowed = await db.appointments.find_one(
         {"driver_id": driver["id"],
+         "dealer_id": snap.get("dealer_id"),
          "$or": [{"vehicle_id": snap.get("vehicle_id")},
                  {"mobile_ad_id": snap.get("mobile_ad_id")}]},
         {"_id": 0, "id": 1},

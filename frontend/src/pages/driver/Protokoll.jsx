@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { driverApi } from "@/context/DriverContext";
+import { driverApi, openDriverPdf } from "@/context/DriverContext";
 import { errMsg, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -165,11 +165,8 @@ export default function Protokoll() {
 
   if (!data) return <div className="p-8 text-zinc-500 text-sm">lade…</div>;
 
-  // Bei <a>-Links kann kein Authorization-Header mitgeschickt werden —
-  // der Fahrer-Token wandert daher als Query-Parameter mit (so wie im
-  // Fahrer-Dashboard). Ohne ihn antworten die PDF-Endpunkte mit 401.
-  const driverToken = localStorage.getItem("ah_driver_token");
-  const authQ = driverToken ? `?auth=${encodeURIComponent(driverToken)}` : "";
+  const oeffnePdf = (path) =>
+    openDriverPdf(path).catch((e) => toast.error(errMsg(e)));
 
   const tpl = data.template || {};
   const veh = data.vehicle || {};
@@ -193,12 +190,11 @@ export default function Protokoll() {
             {appt.pickup_date} {appt.pickup_time} · {appt.pickup_address}
           </div>
         </div>
-        <a href={`${API_BASE}/driver/appointments/${id}/pickup-order.pdf${authQ}`}
-           target="_blank" rel="noreferrer"
-           className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs border"
-           style={st}>
+        <button onClick={() => oeffnePdf(`/driver/appointments/${id}/pickup-order.pdf`)}
+                className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs border"
+                style={st}>
           <FileText size={13} /> Papier-PDF
-        </a>
+        </button>
       </div>
 
       {isFinal && (
@@ -208,12 +204,11 @@ export default function Protokoll() {
           <div className="flex-1">
             Protokoll abgeschlossen — Fahrzeug gilt als abgeholt.
             <div className="mt-2 flex flex-wrap gap-2">
-              <a href={`${API_BASE}/driver/appointments/${id}/protocol.pdf${authQ}`}
-                 target="_blank" rel="noreferrer"
-                 className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                 style={{ background: "var(--accent-red)" }}>
+              <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                      style={{ background: "var(--accent-red)" }}>
                 <FileText size={13} /> Ausgefülltes PDF öffnen
-              </a>
+              </button>
               <button onClick={startCorrection}
                       className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
                       style={st}>

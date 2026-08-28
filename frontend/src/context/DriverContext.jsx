@@ -8,12 +8,23 @@ import { API_BASE } from "@/lib/api";
  */
 const DriverCtx = createContext(null);
 
-export const driverApi = axios.create({ baseURL: API_BASE });
+export const driverApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 driverApi.interceptors.request.use((c) => {
   const t = localStorage.getItem("ah_driver_token");
   if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
+
+// PDF in neuem Tab oeffnen — Abruf per Authorization-Header statt
+// ?auth=<token> in der URL (der Token landete sonst in Browser-Verlauf
+// und Server-Logs). Die Blob-URL ist lokal und enthaelt kein Geheimnis.
+export async function openDriverPdf(path) {
+  const res = await driverApi.get(path, { responseType: "blob" });
+  const url = URL.createObjectURL(
+    new Blob([res.data], { type: "application/pdf" }));
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
 
 export function DriverAuthProvider({ children }) {
   const [driver, setDriver] = useState(null);

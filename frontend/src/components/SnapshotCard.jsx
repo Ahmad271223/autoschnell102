@@ -5,7 +5,7 @@
 //   <SnapshotCard snapshotId="..." />           — live polling for a job
 //   <SnapshotCard vehicleId="..." compact />    — show latest ready snapshot for a car
 import { useEffect, useState } from "react";
-import { api, API_BASE } from "@/lib/api";
+import { api, API_BASE, openAuthedFile } from "@/lib/api";
 import { Camera, FileText, ImageIcon, Loader2, AlertTriangle, CheckCircle2, ExternalLink, Printer } from "lucide-react";
 import { printSnapshot } from "@/lib/pdf";
 import { toast } from "sonner";
@@ -63,10 +63,11 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
   if (!snapshotId && !vehicleId) return null;
   if (vehicleId && !snap) return null;  // nothing archived for this car
   const status = snap?.status || "pending";
-  const token = localStorage.getItem("ah_token") || "";
   const id = snap?.id || snapshotId;
-  const pdfUrl = `${API_BASE}/snapshots/${id}/pdf?auth=${token}`;
-  const pngUrl = `${API_BASE}/snapshots/${id}/png?auth=${token}`;
+  const openFile = (kind) =>
+    openAuthedFile(`/snapshots/${id}/${kind}`,
+                   kind === "pdf" ? "application/pdf" : "image/png")
+      .catch(() => toast.error("Datei konnte nicht geladen werden"));
 
   const handlePrint = async () => {
     if (!id) return;
@@ -86,16 +87,16 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
         </div>
         {status === "ready" ? (
           <>
-            <a href={pdfUrl} target="_blank" rel="noopener noreferrer"
+            <button type="button" onClick={() => openFile("pdf")}
                className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
                data-testid="snapshot-pdf-inline">
               <FileText size={11} /> PDF
-            </a>
-            <a href={pngUrl} target="_blank" rel="noopener noreferrer"
+            </button>
+            <button type="button" onClick={() => openFile("png")}
                className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
                data-testid="snapshot-png-inline">
               <ImageIcon size={11} /> Foto
-            </a>
+            </button>
             <button type="button" onClick={handlePrint}
                     className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
                     data-testid="snapshot-print-inline"
@@ -132,16 +133,16 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
             {snap?.completed_at ? new Date(snap.completed_at).toLocaleString("de-DE") : "—"}.
           </div>
           <div className="grid grid-cols-3 gap-2">
-            <a href={pdfUrl} target="_blank" rel="noopener noreferrer"
+            <button type="button" onClick={() => openFile("pdf")}
                className="apple-btn apple-btn-primary !py-2.5 !text-[12px]"
                data-testid="snapshot-pdf-btn">
               <FileText size={13} /> PDF <ExternalLink size={10} />
-            </a>
-            <a href={pngUrl} target="_blank" rel="noopener noreferrer"
+            </button>
+            <button type="button" onClick={() => openFile("png")}
                className="apple-btn apple-btn-secondary !py-2.5 !text-[12px]"
                data-testid="snapshot-png-btn">
               <ImageIcon size={13} /> Foto <ExternalLink size={10} />
-            </a>
+            </button>
             <button type="button" onClick={handlePrint}
                     className="apple-btn apple-btn-secondary !py-2.5 !text-[12px]"
                     data-testid="snapshot-print-btn"

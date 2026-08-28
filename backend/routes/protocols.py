@@ -254,6 +254,43 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     if doc.get("status") == "final":
         raise HTTPException(409, "Protokoll ist bereits abgeschlossen")
 
+    # ---- Pflichtfelder: das Backend verlaesst sich NICHT auf die App ----
+    # Abschnitt 1: alle 12 Fahrzeugdaten-Zeilen muessen beantwortet sein.
+    vc = doc.get("vehicle_check") or {}
+    fehlend = [label for key, label, _opts in VEHICLE_CHECK_FIELDS
+               if not str((vc.get(key) or {}).get("status")
+                          if isinstance(vc.get(key), dict)
+                          else vc.get(key) or "").strip()]
+    if fehlend:
+        raise HTTPException(422, "Abschnitt 1 unvollständig — bitte noch "
+                                 "ankreuzen: " + ", ".join(fehlend))
+    cond = doc.get("condition") or {}
+    if not str(cond.get("mileage") or "").strip():
+        raise HTTPException(422, "Bitte den Kilometerstand bei Abholung "
+                                 "eintragen (Abschnitt 4).")
+    if not str(doc.get("keys_count") or "").strip():
+        raise HTTPException(422, "Bitte die Anzahl der übergebenen "
+                                 "Schlüssel eintragen (Abschnitt 2).")
+    if doc.get("damages_confirmed") is None:
+        raise HTTPException(422, "Bitte Abschnitt 5 (bekannte Schäden "
+                                 "bestätigt) beantworten.")
+    if not (body.seller_name or appt.get("seller_name") or "").strip():
+        raise HTTPException(422, "Bitte den Namen des Verkäufers angeben.")
+    if not (body.place or doc.get("place") or "").strip():
+        raise HTTPException(422, "Bitte den Ort der Übergabe angeben.")
+
+    # ---- Abschluss ATOMAR beanspruchen: von beliebig vielen gleichzeitigen
+    # Aufrufen gewinnt genau EINER (kein doppeltes PDF, keine doppelten
+    # Unterschrift-Dateien). Erst nach erfolgreichem Speichern wird der
+    # Status "final"; scheitert etwas, geht es zurueck auf "entwurf".
+    vorher = doc.get("status") or "entwurf"
+    claim = await db.pickup_protocols.find_one_and_update(
+        {"id": doc["id"], "status": {"$nin": ["final", "wird_abgeschlossen"]}},
+        {"$set": {"status": "wird_abgeschlossen", "updated_at": now_iso()}})
+    if not claim:
+        raise HTTPException(409, "Das Protokoll wird gerade abgeschlossen "
+                                 "— bitte einen Moment warten.")
+
     dealer_id = appt.get("dealer_id", "x")
 
     def _save_sig(b64: str, who: str) -> str:
@@ -270,8 +307,14 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
         return key
 
-    sig_driver = _save_sig(body.signature_driver_b64, "fahrer")
-    sig_seller = _save_sig(body.signature_seller_b64, "verkaeufer")
+    try:
+        sig_driver = _save_sig(body.signature_driver_b64, "fahrer")
+        sig_seller = _save_sig(body.signature_seller_b64, "verkaeufer")
+    except HTTPException:
+        await db.pickup_protocols.update_one(
+            {"id": doc["id"], "status": "wird_abgeschlossen"},
+            {"$set": {"status": vorher}})
+        raise
 
     # ---- Daten für das ausgefüllte PDF zusammenstellen ----
     vehicle: Dict[str, Any] = {}
@@ -305,17 +348,30 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     filled["version"] = doc.get("version", 1)
 
     from pickup_pdf_service import build_pickup_pdf
-    pdf_bytes = build_pickup_pdf(
-        appointment=appt, vehicle=vehicle, contract=contract, dealer=dealer,
-        driver={"id": driver["id"], "name": driver.get("display_name"),
-                "code": driver.get("driver_code")},
-        filled=filled,
-    )
+    import asyncio as _aio
     try:
+        # Im Thread: die PDF-Erzeugung ist CPU-Arbeit und wuerde sonst den
+        # ganzen Worker-Prozess blockieren.
+        pdf_bytes = await _aio.to_thread(
+            build_pickup_pdf,
+            appointment=appt, vehicle=vehicle, contract=contract,
+            dealer=dealer,
+            driver={"id": driver["id"], "name": driver.get("display_name"),
+                    "code": driver.get("driver_code")},
+            filled=filled,
+        )
         pdf_key = make_key("protocol", dealer_id, "abholprotokoll.pdf")
         storage.save(pdf_key, pdf_bytes)
     except StorageError as exc:
+        await db.pickup_protocols.update_one(
+            {"id": doc["id"], "status": "wird_abgeschlossen"},
+            {"$set": {"status": vorher}})
         raise HTTPException(400, f"PDF konnte nicht gespeichert werden: {exc}")
+    except Exception:
+        await db.pickup_protocols.update_one(
+            {"id": doc["id"], "status": "wird_abgeschlossen"},
+            {"$set": {"status": vorher}})
+        raise
 
     await db.pickup_protocols.update_one(
         {"id": doc["id"]},
