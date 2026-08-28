@@ -15,6 +15,11 @@ from typing import Any, Dict, Optional
 # wird NICHT erneut von Kleinanzeigen/mobile geladen, sondern aus unserem
 # Speicher bedient. Default 1 Jahr; per ENV anpassbar.
 LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "8760"))
+# Client-Einreichungen (Browser-HTML) sind nur Momentaufnahmen: kurze TTL in
+# der Quarantaene, und auch nach unabhaengiger Bestaetigung deutlich kuerzer
+# als Server-Abrufe.
+CLIENT_INGEST_TTL_HOURS = int(os.environ.get("CLIENT_INGEST_TTL_HOURS", "24"))
+CLIENT_CONFIRMED_TTL_HOURS = int(os.environ.get("CLIENT_CONFIRMED_TTL_HOURS", "168"))
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -29,8 +34,9 @@ from kleinanzeigen_service import (
     parse_kleinanzeigen_html, looks_like_kleinanzeigen_listing,
 )
 from listing_identity import (
-    ListingIdentityError, get_listing_identity, get_or_fetch_listing,
-    peek_cached_listing, set_cache_snapshot,
+    ListingBusy, ListingIdentityError, get_listing_identity,
+    get_or_fetch_listing, peek_cached_listing, set_cache_snapshot,
+    store_client_listing,
 )
 
 # Client-seitiges Abrufen (nur Kleinanzeigen): ist es an, holt NICHT der
@@ -103,17 +109,21 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         )
 
     # CLIENT-SEITIGES ABRUFEN (nur Kleinanzeigen): Ist der Modus an und der
-    # Link noch NICHT im Speicher, holt nicht der Server — der Browser des
-    # Nutzers wird gebeten, die Seite zu holen und per /listings/ingest zu
-    # schicken. Danach ruft das Frontend compare erneut auf -> Cache-Treffer.
-    if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
-            and await peek_cached_listing(db, raw_url) is None):
-        return {
-            "needs_client_fetch": True,
-            "url": raw_url,
-            "source": "kleinanzeigen",
-            "hint": "Bitte über die Browser-Erweiterung laden.",
-        }
+    # Link weder global noch in der EIGENEN Quarantaene vorhanden, holt
+    # nicht der Server — der Browser des Nutzers wird gebeten, die Seite zu
+    # holen und per /listings/ingest zu schicken. Danach ruft das Frontend
+    # compare erneut auf -> Treffer (global oder eigene Quarantaene).
+    client_hit = None
+    if source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN:
+        client_hit = await peek_cached_listing(
+            db, raw_url, dealer_id=user.get("dealer_id"))
+        if client_hit is None:
+            return {
+                "needs_client_fetch": True,
+                "url": raw_url,
+                "source": "kleinanzeigen",
+                "hint": "Bitte über die Browser-Erweiterung laden.",
+            }
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:
         """Wird nur bei Cache-MISS aufgerufen."""
@@ -132,13 +142,23 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         raise RuntimeError(f"Source '{src}' ist aktuell nicht angebunden.")
 
     try:
-        vehicle, was_cached, cached_snapshot_id = await get_or_fetch_listing(
-            db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
-        )
+        if client_hit is not None:
+            # Daten aus der (eigenen) Quarantaene bzw. dem freigegebenen
+            # Client-Cache — kein Server-Abruf im Client-Fetch-Modus.
+            vehicle, was_cached, cached_snapshot_id = (
+                dict(client_hit[0]), True, client_hit[1])
+        else:
+            vehicle, was_cached, cached_snapshot_id = await get_or_fetch_listing(
+                db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
+            )
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc))
     except ListingGone as exc:
         raise HTTPException(404, str(exc))
+    except ListingBusy as exc:
+        # 503 + Retry-After: das Frontend (und jeder Proxy) weiss, dass es
+        # sich um vorübergehendes Warten handelt — kein Server-Fehler.
+        raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
     except Exception as exc:
@@ -338,8 +358,10 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
     if identity["source"] != "kleinanzeigen":
         raise HTTPException(400, "Client-Abruf ist nur für Kleinanzeigen vorgesehen.")
 
-    # Schon im Speicher? Dann nichts tun (ein anderer Nutzer war schneller).
-    if await peek_cached_listing(db, raw_url) is not None:
+    # Schon global freigegeben ODER eigene frische Einreichung vorhanden?
+    # Dann nichts tun.
+    if await peek_cached_listing(db, raw_url,
+                                 dealer_id=user.get("dealer_id")) is not None:
         return {"ok": True, "already_cached": True}
 
     if not looks_like_kleinanzeigen_listing(body.html, url=raw_url):
@@ -353,31 +375,37 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
         log.exception("ingest parse failed for %s", raw_url)
         raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
 
-    # Über get_or_fetch_listing in den Cache schreiben (nutzt dieselbe
-    # Cache-/Single-Flight-Logik; der 'fetcher' liefert einfach das schon
-    # geparste Ergebnis, kein Netz-Zugriff).
-    # Preis/Titel muessen vorhanden sein — eine "leere" Seite deutet auf
-    # manipuliertes HTML hin und wuerde den globalen Speicher vergiften.
+    # Pflichtfelder: Titel, Preis UND Marke muessen vorhanden sein — eine
+    # "leere" Seite deutet auf manipuliertes HTML hin.
     if not (parsed.get("title") or "").strip() or not parsed.get("list_price"):
         raise HTTPException(422, "Das HTML enthält keine verwertbaren "
                                  "Fahrzeugdaten (Titel/Preis fehlen).")
+    if not (parsed.get("make_id") or (parsed.get("make_label") or "").strip()):
+        raise HTTPException(422, "Das HTML enthält keine erkennbare "
+                                 "Fahrzeugmarke.")
 
-    async def _from_client(src: str, iid: str, url: str) -> dict:
-        parsed["mobile_ad_id"] = parsed.get("kleinanzeigen_id") or iid
-        parsed.setdefault("kleinanzeigen_id", iid)
-        # Nachvollziehbarkeit: WER hat diese Daten geliefert? (Kein
-        # Server-Abruf — bei Missbrauch laesst sich der Nutzer sperren.)
-        parsed["ingested_by_user"] = user.get("id") or user.get("email") or ""
-        parsed["ingested_by_dealer"] = user.get("dealer_id") or ""
-        return parsed
+    iid = identity["item_id"]
+    parsed["mobile_ad_id"] = parsed.get("kleinanzeigen_id") or iid
+    parsed.setdefault("kleinanzeigen_id", iid)
+    # Nachvollziehbarkeit: WER hat diese Daten geliefert? (Kein
+    # Server-Abruf — bei Missbrauch laesst sich der Nutzer sperren.)
+    parsed["ingested_by_user"] = user.get("id") or user.get("email") or ""
+    parsed["ingested_by_dealer"] = user.get("dealer_id") or ""
 
+    # QUARANTAENE statt globalem Speicher: die Daten sind zunaechst nur
+    # fuer den einreichenden Haendler sichtbar. Erst wenn ein ZWEITER,
+    # unabhaengiger Haendler dieselben Kerndaten einreicht, wird das
+    # Inserat global freigegeben — gefaelschtes HTML eines Einzelnen
+    # erreicht damit nie die anderen Haendler.
     try:
-        await get_or_fetch_listing(db, raw_url, _from_client,
-                                   ttl_hours=LISTING_CACHE_TTL_HOURS)
+        status = await store_client_listing(
+            db, raw_url, parsed, user.get("dealer_id") or "",
+            ttl_hours=CLIENT_INGEST_TTL_HOURS,
+            confirmed_ttl_hours=CLIENT_CONFIRMED_TTL_HOURS)
     except Exception:
         log.exception("ingest cache write failed for %s", raw_url)
         raise HTTPException(500, "Konnte die Daten nicht speichern.")
-    return {"ok": True, "already_cached": False}
+    return {"ok": True, "already_cached": False, "status": status}
 
 
 @router.get("/mobile/live-counter/{ad_id}")
@@ -417,18 +445,18 @@ async def snapshot_status(snap_id: str, user=Depends(current_user)):
 
 
 @router.get("/snapshots/{snap_id}/{kind}")
-async def snapshot_download(snap_id: str, kind: str,
-                            request: Request, auth: Optional[str] = None):
-    """Stream the captured PDF or PNG. Supports `?auth=<token>` so we can
-    use the URL directly in `<img src>` / `<iframe src>`."""
+async def snapshot_download(snap_id: str, kind: str, request: Request):
+    """Stream the captured PDF or PNG.
+
+    Nur `Authorization: Bearer …` — ?auth=<token> wird seit 08/2026 nicht
+    mehr akzeptiert (Token stand sonst in Browser-Verlauf und Logs); das
+    Frontend laedt die Datei per fetch und zeigt eine Blob-URL an."""
     if kind not in ("pdf", "png"):
         raise HTTPException(400, "kind muss 'pdf' oder 'png' sein")
     token = None
     auth_header = request.headers.get("authorization")
     if auth_header and auth_header.lower().startswith("bearer "):
         token = auth_header[7:]
-    elif auth:
-        token = auth
     if not token:
         raise HTTPException(401, "Nicht authentifiziert")
     try:
@@ -525,6 +553,8 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
         )
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc))
+    except ListingBusy as exc:
+        raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
 
