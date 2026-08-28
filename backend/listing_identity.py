@@ -593,7 +593,12 @@ async def get_or_fetch_listing(
                 "snapshot_id": None,
                 "fetching_until": None,
             },
-            "$inc": {"use_count": 1},
+            # fetch_count: Abrufzaehler je Inserat — belegt im Lasttest
+            # und im Betrieb, dass kein Inserat mehrfach extern geholt
+            # wird. WICHTIG: mit use_count in EINEM $inc — ein zweiter
+            # "$inc"-Schluessel im selben Dict wuerde den ersten still
+            # verdraengen (Python behaelt nur den letzten).
+            "$inc": {"use_count": 1, "fetch_count": 1},
             "$setOnInsert": {"created_at": now},
         },
         upsert=True,

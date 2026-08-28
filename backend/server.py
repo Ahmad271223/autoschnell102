@@ -480,6 +480,15 @@ async def on_start():
         await ensure_slot_indexes(db)
     except Exception as exc:
         log.warning("provider slot index setup failed: %s", exc)
+    # Linkpruefungs-Jobs: Indizes synchron, dann die Job-Schleife dieses
+    # Workers starten (Details in link_jobs.py).
+    try:
+        from link_jobs import ensure_job_indexes, run_job_worker_forever
+        await ensure_job_indexes(db)
+        import asyncio
+        asyncio.create_task(run_job_worker_forever(db))
+    except Exception as exc:
+        log.warning("link job worker start failed: %s", exc)
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         import asyncio

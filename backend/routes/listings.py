@@ -397,6 +397,69 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
     return {"ok": True, "already_cached": False, "status": status}
 
 
+# =========================================================
+#        LINKPRUEFUNG ALS HINTERGRUNDJOB (Phase 08/2026)
+# =========================================================
+@router.post("/listings/check")
+async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
+    """Schneller Vorab-Check beim Einfuegen eines Links.
+
+    - Inserat bekannt (Cache oder eigene Quarantaene): sofort
+      {"status": "completed"} — das Frontend ruft direkt /mobile/compare.
+    - Client-Fetch-Modus und unbekannt: {"status": "needs_client_fetch"}
+      (Erweiterungs-Weg bleibt unveraendert).
+    - Sonst unbekannt: idempotenter Hintergrundjob, sofortige Antwort mit
+      job_id. Fuer dasselbe Inserat bekommen ALLE Wartenden dieselbe
+      Job-ID; es laeuft hoechstens ein Anbieter-Abruf.
+    """
+    raw_url = (body.url or "").strip()
+    try:
+        identity = get_listing_identity(raw_url)
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc) or "Ungültige URL.")
+    source = identity["source"]
+    if source == "autoscout24":
+        raise HTTPException(400, "AutoScout24-Links sind noch nicht "
+                                 "freigeschaltet.")
+    if source == "mobile" and not (MOBILE_USER and MOBILE_PASS) \
+            and not MOBILE_SANDBOX_MODE:
+        raise HTTPException(400, "mobile.de-Links sind noch nicht "
+                                 "freigeschaltet (API-Zugang folgt).")
+
+    if await peek_cached_listing(db, raw_url,
+                                 dealer_id=user.get("dealer_id")) is not None:
+        return {"status": "completed", "cached": True,
+                "source": source, "item_id": identity["item_id"]}
+
+    if source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN:
+        return {"status": "needs_client_fetch", "url": raw_url,
+                "source": source,
+                "hint": "Bitte über die Browser-Erweiterung laden."}
+
+    from link_jobs import enqueue_job
+    job = await enqueue_job(db, raw_url, dealer_id=user.get("dealer_id") or "")
+    return {"status": job["status"], "job_id": job["id"],
+            "source": source, "item_id": identity["item_id"]}
+
+
+@router.get("/listings/check/{job_id}")
+async def listings_check_status(job_id: str, user=Depends(current_user)):
+    """Status eines Linkpruefungs-Jobs: queued | processing | completed |
+    failed. Bei completed liegt das Inserat im Cache — /mobile/compare
+    liefert dann sofort."""
+    from link_jobs import get_job
+    job = await get_job(db, job_id)
+    if not job:
+        raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+    out = {"status": job["status"], "job_id": job["id"],
+           "source": job.get("source"), "item_id": job.get("item_id"),
+           "error": job.get("error")}
+    if job["status"] == "queued":
+        out["vor_dir"] = await db.link_jobs.count_documents(
+            {"status": "queued", "created_at": {"$lt": job["created_at"]}})
+    return out
+
+
 @router.get("/mobile/live-counter/{ad_id}")
 async def live_counter(ad_id: str, user=Depends(current_user)):
     five_min = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
