@@ -354,16 +354,20 @@ class TestDriverAppointments:
         requests.post(f"{API}/drivers/add", headers=H,
                       json={"driver_code": code}, timeout=30)
 
-        # 3) Create a contract on mobile.de mock URL → auto-creates appointment
-        # Use mock vehicle URL pattern from existing tests
+        # 3) Vergleich -> Fahrzeug -> Vertrag -> Termin. Laeuft das Backend
+        # im Mock-Modus (CI: MOCK_PROVIDER_FETCH=true), nutzen wir einen
+        # synthetischen Kleinanzeigen-Link — der Test laeuft dann WIRKLICH
+        # durch. Ohne Mock (lokal, um echte Anbieter-Abrufe zu vermeiden)
+        # wird sauber uebersprungen.
+        ka_url = ("https://www.kleinanzeigen.de/s-anzeige/drvtest/"
+                  f"97{uuid.uuid4().int % 10**8:08d}-216-1")
         r = requests.post(f"{API}/mobile/compare", headers=H,
-                          json={"url": "https://www.mobile.de/fahrzeuge/details.html?id=448228023"},
-                          timeout=60)
-        if r.status_code != 200:
-            pytest.skip(f"mobile compare unavailable: {r.status_code}")
+                          json={"url": ka_url}, timeout=90)
+        if r.status_code != 200 or not (r.json().get("vehicle") or {}).get("_mock"):
+            pytest.skip("Backend ohne MOCK_PROVIDER_FETCH — Test wuerde "
+                        "einen echten Kleinanzeigen-Abruf ausloesen")
         vehicle_id = r.json().get("vehicle_id") or r.json().get("vehicle", {}).get("id")
-        if not vehicle_id:
-            pytest.skip("vehicle_id missing from compare response")
+        assert vehicle_id, f"vehicle_id fehlt in Antwort: {str(r.json())[:200]}"
 
         # Create contract
         cr = requests.post(f"{API}/contracts", headers=H, json={
