@@ -466,6 +466,16 @@ async def on_start():
         _ensure_browser_executable()
     except Exception as exc:
         log.warning("playwright self-heal at startup failed: %s", exc)
+    # Produktions-Check ZUERST: mit APP_ENV=production bricht der Start
+    # bei Entwicklungswerten (Dev-Secret, Demo-Passwort, localhost-CORS,
+    # Mongo ohne Auth) sofort und mit klarer Meldung ab.
+    try:
+        from production_check import pruefe_produktion
+        pruefe_produktion(log)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log.warning("production check failed to run: %s", exc)
     # Job-Sperren-Index SYNCHRON anlegen, BEVOR irgendein Hintergrundjob
     # startet — sonst koennten beim allerersten Start (frische Datenbank)
     # mehrere Worker denselben Job uebernehmen, weil der Unique-Index

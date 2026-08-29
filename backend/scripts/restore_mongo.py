@@ -15,7 +15,9 @@ from pathlib import Path
 import bson
 from pymongo import MongoClient
 
-MONGO_URL = "mongodb://127.0.0.1:27017"
+import os
+# Aus der Umgebung wie beim Backup — im Container heisst der Host 'mongo'.
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 
 
 def read_bson_stream(fh):

@@ -483,6 +483,66 @@ async def admin_clear_resolved_errors(_=Depends(current_admin)):
     return {"ok": True, "deleted": r.deleted_count}
 
 
+# ---------- Monitoring (Priorität 5 — Betriebsueberwachung) ----------
+@router.get("/admin/monitoring")
+async def admin_monitoring(admin=Depends(current_admin)):
+    """Betriebszustand auf einen Blick: unerwartete Fehler, Job-Rueckstau,
+    Anbieter-Slots, Zahlen fuer Alarme. Gedacht fuer den Admin-Bereich UND
+    fuer externe Ueberwachung (z.B. Uptime-Robot auf die Kennzahlen)."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    vor_1h = (now - timedelta(hours=1)).isoformat()
+
+    # Unerwartete 500er der letzten Stunde (error_logs schreibt der
+    # globale Exception-Handler)
+    fehler_1h = await db.error_logs.count_documents(
+        {"created_at": {"$gte": vor_1h}})
+
+    # Linkpruefungs-Jobs: Rueckstau + Alter des aeltesten wartenden Jobs
+    queued = await db.link_jobs.count_documents({"status": "queued"})
+    processing = await db.link_jobs.count_documents({"status": "processing"})
+    failed_1h = await db.link_jobs.count_documents(
+        {"status": "failed", "updated_at": {"$gte": now - timedelta(hours=1)}})
+    aeltester = await db.link_jobs.find_one(
+        {"status": "queued"}, {"_id": 0, "created_at": 1},
+        sort=[("created_at", 1)])
+    wartezeit_s = None
+    if aeltester and aeltester.get("created_at"):
+        ca = aeltester["created_at"]
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        wartezeit_s = int((now - ca).total_seconds())
+
+    # Anbieter-Slots (zentrale Begrenzung)
+    slots = {row["provider"]: row.get("active", 0)
+             async for row in db.provider_limits.find({}, {"_id": 0})}
+    heute = now.strftime("%Y-%m-%d")
+    abrufe_heute = {row["provider"]: row.get("calls", 0)
+                    async for row in db.provider_stats.find(
+                        {"date": heute}, {"_id": 0})}
+
+    # Ampel: gruen | gelb | rot — einfache Schwellen fuer Alarme
+    ampel = "gruen"
+    hinweise = []
+    if fehler_1h > 0:
+        ampel = "gelb"
+        hinweise.append(f"{fehler_1h} unerwartete Fehler in der letzten Stunde")
+    if queued > 50 or (wartezeit_s or 0) > 300:
+        ampel = "gelb"
+        hinweise.append("Job-Rueckstau (Warteschlange/Wartezeit erhoeht)")
+    if fehler_1h > 20 or (wartezeit_s or 0) > 900:
+        ampel = "rot"
+    return {
+        "ampel": ampel, "hinweise": hinweise, "zeitpunkt": now.isoformat(),
+        "unerwartete_fehler_letzte_stunde": fehler_1h,
+        "link_jobs": {"queued": queued, "processing": processing,
+                      "failed_letzte_stunde": failed_1h,
+                      "aeltester_wartender_sekunden": wartezeit_s},
+        "anbieter_slots_aktiv": slots,
+        "anbieter_abrufe_heute": abrufe_heute,
+    }
+
+
 # ---------- Verkaufspakete (Phase 2 — Vergabe durch den Admin) ----------
 @router.put("/admin/dealers/{dealer_id}/sale-plan")
 async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),

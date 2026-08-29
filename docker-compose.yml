@@ -23,7 +23,8 @@ services:
       mongo:
         condition: service_healthy
     environment:
-      - MONGO_URL=mongodb://mongo:27017
+      - APP_ENV=production
+      - MONGO_URL=${MONGO_URL:-mongodb://mongo:27017}
       - DB_NAME=${DB_NAME:-autoschnell}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
       - TRUST_PROXY=true
