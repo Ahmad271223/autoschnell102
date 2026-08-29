@@ -79,13 +79,13 @@ class Stats:
         return out
 
 
-async def _timed(session, stats, name, method, url, **kw):
+async def _timed(session, stats, name, method, url, capture=False, **kw):
     t0 = time.monotonic()
     try:
         async with session.request(method, url, **kw) as r:
-            await r.read()
+            body = await r.json(content_type=None) if capture else await r.read()
             stats.add(name, (time.monotonic() - t0) * 1000, r.status)
-            return r.status
+            return body if capture and r.status == 200 else r.status
     except Exception:
         stats.add(name, (time.monotonic() - t0) * 1000, 599)
         return 599
@@ -132,8 +132,17 @@ def metrics_after(calls_before):
     row = dbx.provider_stats.find_one({"provider": "kleinanzeigen",
                                        "date": today}) or {}
     server = dbx.client.admin.command("serverStatus")
+    doppelt = dbx.listings_cache.count_documents(
+        {"item_id": {"$regex": "^99"}, "fetch_count": {"$gt": 1}})
+    max_fetch = list(dbx.listings_cache.aggregate([
+        {"$match": {"item_id": {"$regex": "^99"}}},
+        {"$group": {"_id": None, "max": {"$max": "$fetch_count"}}}]))
     return {
         "externe_provider_abrufe_im_test": int(row.get("calls", 0)) - calls_before,
+        # BEWEIS gegen Mehrfach-Abrufe: Inserate, die mehr als einmal
+        # extern geholt wurden (Soll: 0) + hoechster Zaehlerstand (Soll: 1)
+        "inserate_mehrfach_extern_geholt": doppelt,
+        "max_abrufe_pro_inserat": (max_fetch[0]["max"] if max_fetch else 0),
         "mongo_verbindungen_aktuell": server.get("connections", {}).get("current"),
         "mongo_verbindungen_verfuegbar": server.get("connections", {}).get("available"),
     }
@@ -162,11 +171,32 @@ async def user_loop(session, user, stats, deadline, n_links):
     while time.monotonic() < deadline:
         dice = random.random()
         if dice < 0.25:
-            # NEUER Link (Mock-Provider): der harte Pfad (Lease+Limiter)
+            # NEUER Link: derselbe Ablauf wie das echte Frontend —
+            # /listings/check, bei Job den Status pollen (Jobwartezeit
+            # wird gemessen), danach /mobile/compare (Cache-Treffer).
             iid = 9900000000 + random.randrange(n_links)
+            link = f"https://www.kleinanzeigen.de/s-anzeige/last/{iid}-216-1"
+            t0 = time.monotonic()
+            st = await _timed(session, stats, "link_check", "POST",
+                              f"{API}/listings/check", headers=h,
+                              json={"url": link}, capture=True)
+            if isinstance(st, dict) and st.get("job_id")                     and st.get("status") != "completed":
+                fertig = False
+                while time.monotonic() - t0 < 120:
+                    await asyncio.sleep(2)
+                    js = await _timed(session, stats, "job_status", "GET",
+                                      f"{API}/listings/check/{st['job_id']}",
+                                      headers=h, capture=True)
+                    if isinstance(js, dict) and js.get("status") in (
+                            "completed", "failed"):
+                        fertig = js["status"] == "completed"
+                        break
+                stats.add("job_wartezeit",
+                          (time.monotonic() - t0) * 1000,
+                          200 if fertig else 598)
             await _timed(session, stats, "vergleich_neuer_link", "POST",
                          f"{API}/mobile/compare", headers=h,
-                         json={"url": f"https://www.kleinanzeigen.de/s-anzeige/last/{iid}-216-1"})
+                         json={"url": link})
         elif dice < 0.75:
             # BEKANNTER Link: der haeufigste Fall (Cache-Treffer)
             iid = 9900000000 + random.randrange(max(1, n_links // 4))

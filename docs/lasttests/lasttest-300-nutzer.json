@@ -4,61 +4,91 @@
     "dauer_s": 180,
     "verschiedene_inserate": 200,
     "ziel": "http://localhost:8001",
-    "zeitpunkt": "2026-08-28T16:26:55.745253+00:00"
+    "zeitpunkt": "2026-08-29T07:01:46.371736+00:00"
   },
-  "anfragen_gesamt": 39751,
+  "anfragen_gesamt": 41005,
   "endpunkte": {
     "abo_status": {
-      "ok": 3934,
+      "ok": 3136,
       "fehler": 0,
       "fehlerrate_prozent": 0.0,
-      "p50_ms": 200,
-      "p95_ms": 437,
-      "p99_ms": 544,
-      "max_ms": 868,
+      "p50_ms": 322,
+      "p95_ms": 621,
+      "p99_ms": 803,
+      "max_ms": 1064,
       "fehler_nach_status": {}
     },
     "bestand": {
-      "ok": 5846,
+      "ok": 4569,
       "fehler": 0,
       "fehlerrate_prozent": 0.0,
-      "p50_ms": 213,
-      "p95_ms": 423,
-      "p99_ms": 513,
-      "max_ms": 871,
+      "p50_ms": 350,
+      "p95_ms": 638,
+      "p99_ms": 834,
+      "max_ms": 1055,
+      "fehler_nach_status": {}
+    },
+    "job_status": {
+      "ok": 2344,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 21,
+      "p95_ms": 90,
+      "p99_ms": 234,
+      "max_ms": 409,
+      "fehler_nach_status": {}
+    },
+    "job_wartezeit": {
+      "ok": 401,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 10602,
+      "p95_ms": 22455,
+      "p99_ms": 33186,
+      "max_ms": 37596,
+      "fehler_nach_status": {}
+    },
+    "link_check": {
+      "ok": 7646,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 411,
+      "p95_ms": 756,
+      "p99_ms": 962,
+      "max_ms": 1256,
       "fehler_nach_status": {}
     },
     "vergleich_bekannter_link": {
-      "ok": 19953,
-      "fehler": 14,
-      "fehlerrate_prozent": 0.07,
-      "p50_ms": 505,
-      "p95_ms": 1396,
-      "p99_ms": 10629,
-      "max_ms": 32202,
+      "ok": 15234,
+      "fehler": 29,
+      "fehlerrate_prozent": 0.19,
+      "p50_ms": 809,
+      "p95_ms": 1678,
+      "p99_ms": 9134,
+      "max_ms": 30934,
       "fehler_nach_status": {
-        "503": 14
+        "503": 29
       }
     },
     "vergleich_neuer_link": {
-      "ok": 9984,
-      "fehler": 20,
-      "fehlerrate_prozent": 0.2,
-      "p50_ms": 504,
-      "p95_ms": 1407,
-      "p99_ms": 9851,
-      "max_ms": 30034,
-      "fehler_nach_status": {
-        "503": 20
-      }
+      "ok": 7646,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 760,
+      "p95_ms": 1546,
+      "p99_ms": 1799,
+      "max_ms": 1994,
+      "fehler_nach_status": {}
     }
   },
   "system": {
-    "externe_provider_abrufe_im_test": 191,
-    "mongo_verbindungen_aktuell": 144,
-    "mongo_verbindungen_verfuegbar": 999856,
-    "cpu_prozent_p50": 72,
-    "cpu_prozent_max": 83,
-    "ram_prozent_max": 62
+    "externe_provider_abrufe_im_test": 199,
+    "inserate_mehrfach_extern_geholt": 0,
+    "max_abrufe_pro_inserat": 1,
+    "mongo_verbindungen_aktuell": 143,
+    "mongo_verbindungen_verfuegbar": 999857,
+    "cpu_prozent_p50": 79,
+    "cpu_prozent_max": 99,
+    "ram_prozent_max": 56
   }
 }
