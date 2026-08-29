@@ -103,3 +103,5 @@ backend/assets/sketch_pdf_cache/
 backend-log.txt
 backend-err.txt
 frontend-log.txt
+matrix-lauf.log
+matrix-fehler.log
