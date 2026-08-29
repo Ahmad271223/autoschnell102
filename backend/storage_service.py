@@ -43,6 +43,39 @@ def _validate_key(key: str) -> str:
     return key
 
 
+MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES",
+                                      str(8 * 1024 * 1024)))  # 8 MB
+
+# Magic Bytes der erlaubten Bildformate — verhindert, dass ausführbare
+# oder beliebige Dateien als "Foto" im Speicher landen.
+_IMAGE_MAGIC = (
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"RIFF", "webp"),      # + 'WEBP' an Offset 8, unten geprueft
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+def validate_image_bytes(raw: bytes, wo: str = "Foto") -> None:
+    """Wirft StorageError, wenn die Datei zu gross ist oder kein
+    bekanntes Bildformat traegt (Sicherheits-/Groessenpruefung fuer
+    alle Foto-Uploads)."""
+    if not raw:
+        raise StorageError(f"{wo}: leere Datei")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise StorageError(
+            f"{wo}: Datei zu gross ({len(raw) // (1024*1024)} MB, "
+            f"erlaubt {MAX_IMAGE_BYTES // (1024*1024)} MB)")
+    for magic, art in _IMAGE_MAGIC:
+        if raw.startswith(magic):
+            if art == "webp" and raw[8:12] != b"WEBP":
+                continue
+            return
+    raise StorageError(f"{wo}: kein gueltiges Bildformat "
+                       "(erlaubt: JPEG, PNG, WebP, GIF)")
+
+
 def make_key(category: str, dealer_id: str, filename: str) -> str:
     """Erzeugt einen kollisionsfreien Key: <category>/<dealer>/<uuid><ext>."""
     ext = os.path.splitext(filename or "")[1].lower() or ".jpg"

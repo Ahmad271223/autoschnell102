@@ -311,7 +311,8 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         {"_id": 0, "photos": 1})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
-    from storage_service import make_key, storage, StorageError
+    from storage_service import (make_key, storage, StorageError,
+                                 validate_image_bytes)
     keys = list((l.get("photos") or {}).get("uploaded_keys", []))
     if len(keys) + len(body.photos_b64) > 40:
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
@@ -319,6 +320,9 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     for b64 in body.photos_b64:
         try:
             raw = base64.b64decode(b64.split(",")[-1], validate=False)
+            # Groesse + Magic Bytes: nur echte Bilder, kein 20-MB-Blob,
+            # keine umbenannten ausfuehrbaren Dateien.
+            validate_image_bytes(raw, wo="Inserats-Foto")
             key = make_key("resale", user["dealer_id"], "foto.jpg")
             storage.save(key, raw)
             added.append(key)

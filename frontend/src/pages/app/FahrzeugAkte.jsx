@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, errMsg } from "@/lib/api";
+import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { toast } from "sonner";
 import {
   ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
@@ -199,8 +199,10 @@ export default function FahrzeugAkte() {
                       <td className="py-2 pr-2">
                         {dev.label}
                         {dev.photo_key && (
-                          <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/${dev.photo_key}`}
-                             target="_blank" rel="noreferrer" className="ml-2 text-xs text-sky-400 hover:underline">Foto</a>
+                          <button type="button"
+                             onClick={() => openAuthedFile(`/pickup-fotos/${dev.photo_key}`, "image/jpeg")
+                               .catch(() => toast.error("Foto konnte nicht geladen werden"))}
+                             className="ml-2 text-xs text-sky-400 hover:underline">Foto</button>
                         )}
                       </td>
                       <td className="py-2 pr-2 text-right text-zinc-400">{dev.expected || "—"}</td>

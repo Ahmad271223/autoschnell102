@@ -179,7 +179,10 @@ async def health_check(response: Response):
 # enthalten personenbezogene Daten und werden ausschliesslich über die
 # authentifizierten Endpunkte mit Eigentümer-Prüfung ausgeliefert
 # (/api/driver/appointments/{id}/protocol.pdf bzw. /api/protocols/{id}.pdf).
-_PRIVATE_FILE_PREFIXES = ("protocol/",)
+# pickup/: Schadenfotos aus Abholberichten zeigen fremde Fahrzeuge und
+# gehoeren nicht oeffentlich ins Netz — Abruf nur noch authentifiziert
+# ueber /api/pickup-fotos/{key} (Haendler der Firma oder deren Fahrer).
+_PRIVATE_FILE_PREFIXES = ("protocol/", "pickup/")
 
 
 @app.get("/api/files/{key:path}")

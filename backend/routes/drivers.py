@@ -627,6 +627,46 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
 # eine neue Version (version+1, replaces_id) — die alte bleibt erhalten
 # (superseded=True). Jede Einreichung wird im Audit-Log protokolliert.
 
+@router.get("/pickup-fotos/{key:path}")
+async def pickup_foto(key: str, user=Depends(current_user)):
+    """Abweichungsfoto aus einem Abholbericht — nur fuer die eigene Firma.
+    (Der offene /api/files-Weg liefert pickup/-Dateien seit 08/2026 nicht
+    mehr aus.)"""
+    if not key.startswith("pickup/"):
+        raise HTTPException(404, "Datei nicht gefunden")
+    teile = key.split("/")
+    if len(teile) < 3 or teile[1] != user.get("dealer_id"):
+        raise HTTPException(404, "Datei nicht gefunden")
+    from storage_service import guess_media_type, storage, StorageError
+    try:
+        data = storage.load(key)
+    except StorageError:
+        raise HTTPException(404, "Datei nicht gefunden")
+    return Response(content=data, media_type=guess_media_type(key),
+                    headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/driver/pickup-fotos/{key:path}")
+async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
+    """Wie /pickup-fotos, aber fuer Fahrer: nur Fotos von Firmen, denen
+    der Fahrer zugeteilt ist."""
+    if not key.startswith("pickup/"):
+        raise HTTPException(404, "Datei nicht gefunden")
+    teile = key.split("/")
+    dealer_id = teile[1] if len(teile) >= 3 else ""
+    zugeteilt = await db.appointments.find_one(
+        {"driver_id": driver["id"], "dealer_id": dealer_id}, {"_id": 1})
+    if not zugeteilt:
+        raise HTTPException(404, "Datei nicht gefunden")
+    from storage_service import guess_media_type, storage, StorageError
+    try:
+        data = storage.load(key)
+    except StorageError:
+        raise HTTPException(404, "Datei nicht gefunden")
+    return Response(content=data, media_type=guess_media_type(key),
+                    headers={"Cache-Control": "private, max-age=3600"})
+
+
 @router.post("/driver/appointments/{appt_id}/report")
 async def driver_submit_report(appt_id: str, body: PickupReportIn,
                                driver=Depends(current_driver)):
@@ -645,6 +685,8 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         if d.photo_b64:
             try:
                 raw = base64.b64decode(d.photo_b64.split(",")[-1], validate=False)
+                from storage_service import validate_image_bytes
+                validate_image_bytes(raw, wo="Abweichungsfoto")
                 key = make_key("pickup", appt.get("dealer_id", "x"), "foto.jpg")
                 storage.save(key, raw)
                 entry["photo_key"] = key
