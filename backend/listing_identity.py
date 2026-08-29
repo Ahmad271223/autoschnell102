@@ -508,11 +508,14 @@ async def get_or_fetch_listing(
     from provider_limiter import acquire_slot, extend_slot, release_slot
     slot_id = None
     try:
-        for _try in range(20):                 # max. ~30 s auf einen Slot warten
+        # 0,3-s-Takt statt 1,5 s: bei kurzen Abrufen (Mock 0,4 s; echte
+        # Abrufe 1-3 s) verschenkte der grobe Takt bis zu 1,5 s je
+        # Slot-Wechsel — das drittelte den Durchsatz der Warteschlange.
+        for _try in range(100):                # max. ~30 s auf einen Slot warten
             slot_id = await acquire_slot(db, source)
             if slot_id:
                 break
-            await _aio.sleep(1.5)
+            await _aio.sleep(0.3)
     except Exception:
         # Lease nicht haengen lassen, sonst warten alle anderen 90 s.
         await db.listings_cache.update_one(

@@ -215,4 +215,4 @@ async def run_job_worker_forever(db) -> None:
                 laufend.add(asyncio.create_task(_process(db, job)))
         except Exception as exc:  # noqa: BLE001
             log.warning("link job loop error: %s", exc)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.3)
