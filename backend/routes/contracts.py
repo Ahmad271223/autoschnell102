@@ -127,6 +127,10 @@ class SendIn(BaseModel):
     recipient: str = Field(max_length=200)
     subject: Optional[str] = Field(default=None, max_length=500)
     message: str = Field(max_length=20000)
+    # Doppelversand-Schutz: gleicher Schluessel -> garantiert nur EIN
+    # Eintrag, auch bei Doppelklick, Netz-Wiederholung oder verlorener
+    # Antwort. Das Frontend erzeugt je Klick eine UUID.
+    idempotency_key: Optional[str] = Field(default=None, max_length=100)
 
 
 # ---------- Helpers ----------
@@ -491,11 +495,26 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         "channel": body.channel, "recipient": body.recipient,
         "subject": body.subject, "sent_at": out["sent_at"],
     }
-    await db.generated_pdfs.update_one(
-        {"id": contract_id},
-        {"$push": {"send_status": send_entry},
-         "$set": {"status": "versendet", "updated_at": now_iso()}},
-    )
+    if body.idempotency_key:
+        send_entry["idempotency_key"] = body.idempotency_key
+        # ATOMAR: nur wenn noch KEIN Eintrag diesen Schluessel traegt,
+        # wird gepusht — ein Retry mit demselben Schluessel erzeugt
+        # keinen zweiten Versandeintrag (Beweis: tests/test_send_idempotenz.py).
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, "dealer_id": user["dealer_id"],
+             "send_status.idempotency_key": {"$ne": body.idempotency_key}},
+            {"$push": {"send_status": send_entry},
+             "$set": {"status": "versendet", "updated_at": now_iso()}},
+        )
+        if res.modified_count == 0:
+            out["bereits_gesendet"] = True
+            return out
+    else:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id},
+            {"$push": {"send_status": send_entry},
+             "$set": {"status": "versendet", "updated_at": now_iso()}},
+        )
     await log_activity(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
     return out
 

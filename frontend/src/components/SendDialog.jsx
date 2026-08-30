@@ -21,9 +21,14 @@ export default function SendDialog({ open, contract, onClose }) {
   const send = async (channel) => {
     setBusy(true);
     try {
+      // Je Klick ein eigener Schluessel: Doppelklick oder Netz-
+      // Wiederholung erzeugt serverseitig garantiert nur EINEN Eintrag.
+      const idempotency_key = (crypto.randomUUID && crypto.randomUUID())
+        || `${Date.now()}-${Math.random()}`;
       const body = channel === "whatsapp"
-        ? { channel, recipient: phone, message: waMsg }
-        : { channel, recipient: email, subject, message: emailMsg };
+        ? { channel, recipient: phone, message: waMsg, idempotency_key }
+        : { channel, recipient: email, subject, message: emailMsg,
+            idempotency_key };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       if (channel === "whatsapp" && data.wa_url) {
         window.open(data.wa_url, "_blank", "noopener");
