@@ -74,6 +74,13 @@ def main():
         # aeltere Laeufe zaehlen als Diagnose-/Schutztests.
         final = [d for d in gruppe if d.get("klassen") is not None]
         diagnose = [d for d in gruppe if d.get("klassen") is None]
+        # Bewertet werden die JUENGSTEN drei finalen Laeufe (T3 wurde nach
+        # dem Foto-Fix erneut gefahren; die aelteren finalen Laeufe
+        # dokumentieren den Zustand VOR dem Fix und zaehlen als Diagnose).
+        final.sort(key=lambda d: d["_datei"])
+        if len(final) > 3:
+            diagnose = diagnose + final[:-3]
+            final = final[-3:]
         bewertet = final if len(final) >= 3 else (final or gruppe)
 
         anfragen = [d["anfragen_gesamt"] for d in bewertet]
