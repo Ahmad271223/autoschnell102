@@ -43,7 +43,7 @@ MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 AUSGABE = Path(__file__).resolve().parent.parent.parent / "docs" / "lasttests" / "matrix"
 
-SUF = uuid.uuid4().hex[:6]
+SUF = uuid.uuid4().hex[:6]   # wird je Lauf neu gewuerfelt (siehe lauf())
 PW = "Matrix123!"
 N_FIRMEN = 10
 
@@ -81,6 +81,7 @@ class Stats:
         self.ok, self.err, self.total = {}, {}, 0
         self.job_annahme, self.job_warte = [], []
         self.unfertig = 0
+        self.resets = []          # [{zeit, endpunkt}] je 599
 
     def add(self, name, ms, status, erwartet_4xx=False):
         self.total += 1
@@ -89,6 +90,10 @@ class Stats:
         else:
             self.err.setdefault(name, {}).setdefault(status, 0)
             self.err[name][status] += 1
+            if status == 599:
+                self.resets.append({
+                    "zeit": datetime.now(timezone.utc).isoformat(),
+                    "endpunkt": name})
 
     def report(self):
         out = {}
@@ -370,8 +375,8 @@ async def op_link_bekannt(sess, stats, w, firma, warm_pool):
                  f"{API}/mobile/compare", headers=h, json={"url": url})
 
 
-async def op_pdf_vertrag(sess, stats, w, firma):
-    await _timed(sess, stats, "pdf_vertrag_neu", "POST",
+async def op_pdf_vertrag(sess, stats, w, firma, pdf_zaehler=None):
+    st, _ = await _timed(sess, stats, "pdf_vertrag_neu", "POST",
                  f"{API}/contracts", headers=firma["h"], json={
                      "vehicle_id": firma["vehicle_id"],
                      "seller_name": "PDF V", "seller_address": "Weg 2",
@@ -379,6 +384,8 @@ async def op_pdf_vertrag(sess, stats, w, firma):
                      "purchase_price": 11111,
                      "pickup_date": "2099-05-05", "pickup_time": "11:00"},
                  timeout=aiohttp.ClientTimeout(total=120))
+    if st == 200 and pdf_zaehler is not None:
+        pdf_zaehler[0] += 1
 
 
 async def op_pdf_download(sess, stats, w, firma):
@@ -388,18 +395,29 @@ async def op_pdf_download(sess, stats, w, firma):
                      f"{API}/contracts/{firma['contract_id']}/pdf",
                      headers=firma["h"])
     else:
+        # 404 ist hier ERWARTET, wenn parallel gerade eine Korrektur
+        # laeuft (Protokoll voruebergehend im Entwurfszustand).
         await _timed(sess, stats, "pdf_download_protokoll", "GET",
                      f"{API}/driver/appointments/{firma['appt_id']}"
-                     f"/protocol.pdf", headers=firma["drv_h"])
+                     f"/protocol.pdf", headers=firma["drv_h"],
+                     erwartet_4xx=True)
 
 
 async def op_protokoll(sess, stats, w, firma):
     groesse = random.random()
     schaeden = 0 if groesse < 0.4 else (5 if groesse < 0.8 else 25)
-    t0 = time.monotonic()
-    st = await protokoll_abschliessen(sess, firma, schaeden=schaeden)
-    stats.add("protokoll_abschluss", (time.monotonic() - t0) * 1000,
-              st if st else 599, erwartet_4xx=False)
+    # Skript-Lock je Firma: 100 Nutzer teilen sich 10 Firmen; ohne Lock
+    # messen wir nur die (korrekten) Ablehnungen konkurrierender
+    # Abschluesse desselben Protokolls statt der Abschlussdauer. Die
+    # Atomik unter Konkurrenz ist in T2 (409-Schutz) + Tests belegt.
+    lock = firma.setdefault("_protokoll_lock", asyncio.Lock())
+    if lock.locked():
+        return                      # Firma gerade beschaeftigt -> Denkpause
+    async with lock:
+        t0 = time.monotonic()
+        st = await protokoll_abschliessen(sess, firma, schaeden=schaeden)
+        stats.add("protokoll_abschluss", (time.monotonic() - t0) * 1000,
+                  st if st else 599)
 
 
 async def op_foto(sess, stats, w, firma):
@@ -416,9 +434,19 @@ async def op_foto(sess, stats, w, firma):
             headers=firma["h"], json={"photos_b64": [foto]},
             timeout=aiohttp.ClientTimeout(total=120))
         if st == 200:
-            keys = json.loads(body).get("uploaded", [])
+            js2 = json.loads(body)
+            keys = js2.get("uploaded", [])
             if keys:
                 firma.setdefault("foto_urls", []).append(keys[0])
+            # Rotation: kurz vor dem 40er-Limit aelteste Fotos loeschen —
+            # das Limit selbst ist in T2 rep1/2 nachgewiesen (400er);
+            # T3 soll Upload-DURCHSATZ messen, nicht Ablehnungen.
+            if js2.get("total", 0) >= 35 and firma.get("foto_urls"):
+                alt = firma["foto_urls"].pop(0)
+                await _timed(sess, stats, "foto_loeschen", "POST",
+                             f"{API}/resale/{firma['listing_id']}"
+                             f"/photos/remove", headers=firma["h"],
+                             json={"key": alt.replace("/api/files/", "")})
     elif d < 0.875:    # 20/80: oeffnen
         urls = firma.get("foto_urls") or []
         if urls:
@@ -533,7 +561,7 @@ def gewichte(szenario):
 
 
 async def nutzer_schleife(sess, stats, w, deadline, plan, warm_pool,
-                          geteilte, messen_ab, vz):
+                          geteilte, messen_ab, vz, pdf_zaehler):
     firma = random.choice(w.firmen)
     namen, gew, ops = zip(*plan)
     while time.monotonic() < deadline:
@@ -552,12 +580,12 @@ async def nutzer_schleife(sess, stats, w, deadline, plan, warm_pool,
                 else:
                     await op_link_bekannt(sess, s, w, firma, warm_pool)
             elif op == "pdf_vertrag":
-                await op_pdf_vertrag(sess, s, w, firma)
+                await op_pdf_vertrag(sess, s, w, firma, pdf_zaehler)
             elif op == "pdf_download":
                 await op_pdf_download(sess, s, w, firma)
             elif op == "pdf_mix":
                 if random.random() < 0.5:
-                    await op_pdf_vertrag(sess, s, w, firma)
+                    await op_pdf_vertrag(sess, s, w, firma, pdf_zaehler)
                 else:
                     await op_pdf_download(sess, s, w, firma)
             elif op == "protokoll":
@@ -584,13 +612,20 @@ async def nutzer_schleife(sess, stats, w, deadline, plan, warm_pool,
         await asyncio.sleep(random.uniform(0.2, 1.2))
 
 
-async def sampler(deadline, cpu, queue_laengen):
+async def sampler(deadline, cpu, queue_laengen, ticks):
     import psutil
     dbx = _db()
     psutil.cpu_percent(interval=None)
     while time.monotonic() < deadline:
-        cpu.append((psutil.cpu_percent(interval=None),
-                    psutil.virtual_memory().percent))
+        c = psutil.cpu_percent(interval=None)
+        r = psutil.virtual_memory().percent
+        io_ = psutil.disk_io_counters()
+        net = psutil.net_io_counters()
+        cpu.append((c, r))
+        ticks.append({"zeit": datetime.now(timezone.utc).isoformat(),
+                      "cpu": c, "ram": r,
+                      "disk_mb": round(io_.write_bytes / 1e6),
+                      "net_mb": round((net.bytes_sent + net.bytes_recv) / 1e6)})
         try:
             queue_laengen.append(
                 dbx.link_jobs.count_documents(
@@ -611,6 +646,180 @@ def system_snapshot():
             "disk_write_mb": round(io_.write_bytes / 1e6),
             "net_mb": round((net.bytes_sent + net.bytes_recv) / 1e6),
             "ram_prozent": psutil.virtual_memory().percent}
+
+
+UPLOAD_ROOT = Path(__file__).resolve().parent.parent / "uploads"
+
+# Fachlich ERWARTETE Ablehnungen je Endpunkt (Auftrag Punkt 7: nichts
+# pauschal werten). Alles andere an 4xx ist ein auszuweisender Befund.
+ERWARTETE_ABLEHNUNG = {
+    "foto_upload_klein": {400: "40-Fotos-Limit greift"},
+    "foto_upload_normal": {400: "40-Fotos-Limit greift"},
+    "foto_upload_gross": {400: "40-Fotos-Limit greift"},
+    "protokoll_abschluss": {400: "Schutz: Abschluss ohne frischen Entwurf",
+                             409: "Schutz: atomarer Doppelabschluss"},
+}
+SICHERHEITSTEST = {"foto_ungueltig_abgelehnt": {400}}
+# 404 in echter Nutzeraktion = Race/UX-Befund (Punkt 7), KEIN Erfolg:
+RACE_UX = {"foto_loeschen": {404}, "pdf_download_protokoll": {404},
+           "foto_oeffnen": {404}, "markt_favorit": {404}}
+
+
+def klassifiziere(endpunkte):
+    """Teilt alle Antworten in die 6 Klassen aus dem Auftrag (Punkt 6)."""
+    k = {"technisch_unerwartet": 0, "fachlich_erwartet": 0,
+         "sicherheitstest_ok": 0, "race_ux_befund": 0,
+         "verbindungsabbruch_client": 0, "erfolgreich": 0}
+    details = {}
+    for name, v in endpunkte.items():
+        k["erfolgreich"] += v.get("ok", 0)
+        if name in SICHERHEITSTEST:
+            # 'ok' enthaelt hier die ERWARTETEN 400er (erwartet_4xx)
+            k["erfolgreich"] -= v.get("ok", 0)
+            k["sicherheitstest_ok"] += v.get("ok", 0)
+        if name in RACE_UX:
+            # erwartet_4xx zaehlte 404 als ok — fuer die Klassenrechnung
+            # bleibt es Erfolg der Messung, wird aber als Befund gelistet.
+            pass
+        for st, n in (v.get("fehler_nach_status") or {}).items():
+            st_i = int(st)
+            if st_i == 599:
+                k["verbindungsabbruch_client"] += n
+            elif st_i in (ERWARTETE_ABLEHNUNG.get(name) or {}):
+                k["fachlich_erwartet"] += n
+                details.setdefault(name, {})[st] =                     f"{n}x {ERWARTETE_ABLEHNUNG[name][st_i]}"
+            elif st_i in (RACE_UX.get(name) or set()):
+                k["race_ux_befund"] += n
+                details.setdefault(name, {})[st] = f"{n}x Race/UX-Befund"
+            else:
+                k["technisch_unerwartet"] += n
+                details.setdefault(name, {})[st] = f"{n}x UNERWARTET"
+    return k, details
+
+
+def reset_forensik(resets, ticks):
+    """Je Verbindungsabbruch: naechster System-Tick (CPU/RAM/Disk/Netz)
+    + passende Zeilen aus dem Backend-Fehlerlog (+-5 s)."""
+    log_zeilen = []
+    try:
+        pfad = Path(__file__).resolve().parent.parent.parent / "backend-err.txt"
+        log_zeilen = pfad.read_text(encoding="utf-8",
+                                    errors="replace").splitlines()[-4000:]
+    except OSError:
+        pass
+    out = []
+    for r in resets[:50]:                       # Bericht nicht sprengen
+        t = r["zeit"]
+        naechster = min(ticks, key=lambda x: abs(
+            datetime.fromisoformat(x["zeit"]) - datetime.fromisoformat(t)),
+            default=None) if ticks else None
+        # Lokale Logzeit (Backend loggt lokal, Resets sind UTC)
+        lokal = (datetime.fromisoformat(t)
+                 .astimezone()).strftime("%Y-%m-%d %H:%M:%S")
+        treffer = [z for z in log_zeilen
+                   if z[:19] >= lokal[:18] and z[:19] <= lokal[:19]
+                   and ("ERROR" in z or "Traceback" in z)]
+        out.append({**r, "system_tick": naechster,
+                    "backend_log": treffer[:3]})
+    return out
+
+
+def _dir_stat(unter):
+    basis = UPLOAD_ROOT / unter
+    n, groesse = 0, 0
+    if basis.exists():
+        for f in basis.rglob("*"):
+            if f.is_file():
+                n += 1
+                groesse += f.stat().st_size
+    return {"dateien": n, "mb": round(groesse / 1e6, 1)}
+
+
+def speicher_snapshot():
+    import shutil as _sh
+    frei = _sh.disk_usage(str(UPLOAD_ROOT.parent)).free
+    return {"resale": _dir_stat("resale"), "protocol": _dir_stat("protocol"),
+            "pickup": _dir_stat("pickup"),
+            "disk_frei_gb": round(frei / 1e9, 1)}
+
+
+def pdf_beweis(w, stichprobe=15):
+    """Punkt 8/9: PDFs sind echt, gross genug, lesbar, tragen die
+    richtigen Vertragsdaten/Firma, und keine zwei Vertraege teilen sich
+    dieselbe Datei."""
+    import base64 as b64
+    import hashlib
+    from pypdf import PdfReader
+    dbx = _db()
+    dealer_ids = [f["chef"]["dealer_id"] for f in w.firmen]
+    gesamt = dbx.generated_pdfs.count_documents(
+        {"dealer_id": {"$in": dealer_ids}})
+    groesse = 0
+    for doc in dbx.generated_pdfs.find({"dealer_id": {"$in": dealer_ids}},
+                                       {"pdf_b64": 1}):
+        groesse += len(doc.get("pdf_b64") or "")
+    hashes = {}
+    geprueft, befunde = 0, []
+    for doc in dbx.generated_pdfs.find(
+            {"dealer_id": {"$in": dealer_ids}},
+            {"pdf_b64": 1, "contract_data": 1, "dealer_id": 1,
+             "version": 1, "id": 1}).limit(stichprobe):
+        geprueft += 1
+        try:
+            raw = b64.b64decode(doc["pdf_b64"])
+        except Exception:
+            befunde.append(f"{doc['id']}: base64 defekt")
+            continue
+        if raw[:4] != b"%PDF":
+            befunde.append(f"{doc['id']}: kein PDF-Header")
+            continue
+        if len(raw) < 3_000:
+            befunde.append(f"{doc['id']}: verdaechtig klein ({len(raw)} B)")
+        h = hashlib.sha256(raw).hexdigest()
+        if h in hashes and hashes[h] != doc["id"]:
+            befunde.append(f"{doc['id']}: identische Datei wie {hashes[h]}")
+        hashes[h] = doc["id"]
+        try:
+            text = "".join((seite.extract_text() or "")
+                           for seite in PdfReader(io_bytes(raw)).pages)
+        except Exception as exc:
+            befunde.append(f"{doc['id']}: nicht lesbar ({exc})")
+            continue
+        cd = doc.get("contract_data") or {}
+        for feld in ("seller_name",):
+            wert = str(cd.get(feld) or "")
+            if wert and wert not in text:
+                befunde.append(f"{doc['id']}: '{wert}' fehlt im PDF-Text")
+        preis = cd.get("purchase_price")
+        if preis and str(int(preis)) not in text.replace(".", ""):
+            befunde.append(f"{doc['id']}: Kaufpreis {preis} fehlt im Text")
+    return {"vertraege_gesamt": gesamt,
+            "speicher_mb_in_db": round(groesse * 0.75 / 1e6, 1),
+            "stichprobe_geprueft": geprueft,
+            "eindeutige_dateien_in_stichprobe": len(hashes),
+            "befunde": befunde}
+
+
+def io_bytes(raw):
+    import io as _io
+    return _io.BytesIO(raw)
+
+
+def foto_audit(w):
+    """Punkt 10: Dateien<->Datenbank-Abgleich fuer die Matrix-Firmen."""
+    dbx = _db()
+    befunde = {"dateien_ohne_db": 0, "db_ohne_datei": 0}
+    for f in w.firmen:
+        did = f["chef"]["dealer_id"]
+        db_keys = set()
+        for l in dbx.resale_listings.find({"dealer_id": did},
+                                          {"photos.uploaded_keys": 1}):
+            db_keys |= set((l.get("photos") or {}).get("uploaded_keys") or [])
+        pfad = UPLOAD_ROOT / "resale" / did
+        disk = {f"resale/{did}/{x.name}" for x in pfad.glob("*")}             if pfad.exists() else set()
+        befunde["dateien_ohne_db"] += len(disk - db_keys)
+        befunde["db_ohne_datei"] += len(db_keys - disk)
+    return befunde
 
 
 async def drain_und_pruefen(max_s=300):
@@ -647,13 +856,24 @@ def versand_zaehlung(w):
 
 
 async def lauf(szenario, rep, nutzer, dauer, warmup):
+    # Frischer Namensraum je Lauf: ein abgestuerzter Vorlauf (halbe Welt,
+    # Admin-Konto) kann so NIE einen DuplicateKey im naechsten ausloesen.
+    global SUF
+    SUF = uuid.uuid4().hex[:6]
     AUSGABE.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     conn = aiohttp.TCPConnector(limit=nutzer + 60)
     timeout = aiohttp.ClientTimeout(total=150)
     async with aiohttp.ClientSession(connector=conn,
                                      timeout=timeout) as sess:
-        w = await welt_aufbauen(sess)
+        w = None
+        try:
+            w = await welt_aufbauen(sess)
+        except Exception:
+            if w is not None:
+                aufraeumen(w)
+            _notaufraeumen()
+            raise
         vorher = system_snapshot()
         versand_vorher = versand_zaehlung(w)
 
@@ -667,7 +887,12 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
 
         stats = Stats()
         vz = [0]              # Versand-Zaehler inkl. Warmup (Doppelversand-Beweis)
-        cpu, queues = [], []
+        pdf_zaehler = [0]     # Vertrags-200er inkl. Warmup (Abschluss-Nachweis)
+        cpu, queues, ticks = [], [], []
+        speicher_vorher = speicher_snapshot()
+        dealer_ids = [f["chef"]["dealer_id"] for f in w.firmen]
+        pdf_vorher = _db().generated_pdfs.count_documents(
+            {"dealer_id": {"$in": dealer_ids}})
         start = time.monotonic()
         messen_ab = start + warmup
         deadline = messen_ab + dauer
@@ -682,17 +907,26 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
             for op, n in gruppen:
                 plan = [(op, 100, op)]
                 aufgaben += [nutzer_schleife(sess, stats, w, deadline, plan,
-                                             warm_pool, geteilte, messen_ab, vz)
+                                             warm_pool, geteilte, messen_ab, vz, pdf_zaehler)
                              for _ in range(n)]
         else:
             plan = gewichte(szenario)
             aufgaben = [nutzer_schleife(sess, stats, w, deadline, plan,
-                                        warm_pool, geteilte, messen_ab, vz)
+                                        warm_pool, geteilte, messen_ab, vz, pdf_zaehler)
                         for _ in range(nutzer)]
-        await asyncio.gather(sampler(deadline, cpu, queues), *aufgaben)
+        await asyncio.gather(sampler(deadline, cpu, queues, ticks),
+                             *aufgaben)
 
         drain = await drain_und_pruefen()
         nachher = system_snapshot()
+        speicher_nachher = speicher_snapshot()
+        # Server-Abschluss trotz Client-Abbruch (Punkt 4): DB-Delta vs.
+        # clientbestaetigte 200er.
+        pdf_nachher = _db().generated_pdfs.count_documents(
+            {"dealer_id": {"$in": dealer_ids}})
+        pdf_client_ok = len(stats.ok.get("pdf_vertrag_neu", []))
+        klassen, klassen_details = klassifiziere(stats.report())
+        forensik = reset_forensik(stats.resets, ticks)
 
         ops_delta = {k: nachher["opcounters"].get(k, 0) - vorher["opcounters"].get(k, 0)
                      for k in nachher["opcounters"]}
@@ -719,6 +953,19 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
                 "queue_schnitt": round(sum(queues or [0]) / max(1, len(queues)), 1),
                 **drain,
             },
+            "klassen": klassen,
+            "klassen_details": klassen_details,
+            "reset_forensik": forensik,
+            "server_abschluss_nachweis": {
+                "pdf_vertraege_db_delta": pdf_nachher - pdf_vorher,
+                "pdf_vertraege_client_ok_inkl_warmup": pdf_zaehler[0],
+                "ohne_client_antwort_abgeschlossen":
+                    max(0, (pdf_nachher - pdf_vorher) - pdf_zaehler[0]),
+            },
+            "speicher": {"vorher": speicher_vorher,
+                          "nachher": speicher_nachher},
+            "pdf_beweis": pdf_beweis(w) if szenario in ("T2", "T4") else None,
+            "foto_audit": foto_audit(w),
             "integritaet": {
                 "doppelte_anbieter_abrufe": doppelte_abrufe(),
                 "versand_gesendet": vz[0],
@@ -740,11 +987,44 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
             },
         }
         pfad = AUSGABE / f"{ts}-{szenario}-rep{rep}.json"
+        aufraeumen(w)
+        # Cleanup-BEWEIS (Punkt 10): nach dem Aufraeumen duerfen weder
+        # DB-Eintraege noch Dateien der Matrix-Firmen uebrig sein.
+        rest_db = _db().generated_pdfs.count_documents(
+            {"dealer_id": {"$in": dealer_ids}})
+        rest_dateien = 0
+        for did in dealer_ids:
+            for unter in ("resale", "protocol", "pickup"):
+                d = UPLOAD_ROOT / unter / did
+                if d.exists():
+                    rest_dateien += sum(1 for x in d.rglob("*") if x.is_file())
+        report["cleanup_beweis"] = {
+            "db_reste": rest_db, "datei_reste": rest_dateien,
+            "disk_frei_gb_nach_cleanup":
+                speicher_snapshot()["disk_frei_gb"]}
         pfad.write_text(json.dumps(report, indent=2, ensure_ascii=False),
                         encoding="utf-8")
         print(f"[{szenario} #{rep}] Bericht: {pfad.name}")
-        aufraeumen(w)
         return report
+
+
+def _notaufraeumen():
+    """Reste eines abgebrochenen Welt-Aufbaus (aktueller SUF) entfernen."""
+    try:
+        dbx = _db()
+        uids = [u["id"] for u in dbx.users.find(
+            {"email": {"$regex": f"_{SUF}@"}}, {"id": 1})]
+        dids = [d["id"] for d in dbx.dealers.find(
+            {"user_id": {"$in": uids}}, {"id": 1})]
+        for c in ("subscriptions", "vehicles", "appointments",
+                  "generated_pdfs", "resale_listings", "pickup_protocols",
+                  "dealer_drivers"):
+            dbx[c].delete_many({"dealer_id": {"$in": dids}})
+        dbx.dealers.delete_many({"id": {"$in": dids}})
+        dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
+        dbx.driver_accounts.delete_many({"email": {"$regex": f"_{SUF}@"}})
+    except Exception:
+        pass
 
 
 def aufraeumen(w):
@@ -764,6 +1044,14 @@ def aufraeumen(w):
          "listing_id": {"$in": [f["listing_id"] for f in w.firmen]}})
     dbx.listings_cache.delete_many({"item_id": {"$regex": "^90"}})
     dbx.link_jobs.delete_many({"item_id": {"$regex": "^90"}})
+    # Speicherdateien der Matrix-Firmen entfernen (Cleanup-Beweis, Punkt 10)
+    import shutil as _sh
+    for f in w.firmen:
+        did = f["chef"]["dealer_id"]
+        for unter in ("resale", "protocol", "pickup"):
+            d = UPLOAD_ROOT / unter / did
+            if d.exists():
+                _sh.rmtree(d, ignore_errors=True)
 
 
 async def main():
@@ -781,15 +1069,39 @@ async def main():
     if a.kurz:
         a.dauer, a.warmup = 45, 10
 
-    szenarien = ([a.szenario] if a.szenario else
+    szenarien = (a.szenario.split(",") if a.szenario else
                  ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
-    for sz in szenarien:
+    for idx, sz in enumerate(szenarien):
         nutzer = 140 if sz == "T9" else a.nutzer
         dauer = 60 if sz == "T9" else a.dauer
         warmup = 10 if sz == "T9" else a.warmup
-        reps = range(1, a.reps + 1) if a.alle else [a.rep]
+        if a.alle:
+            start = a.rep if idx == 0 else 1   # erstes Szenario ggf. mittendrin
+            reps = range(start, a.reps + 1)
+        else:
+            reps = [a.rep]
         for rep in reps:
-            await lauf(sz, rep, nutzer, dauer, warmup)
+            # Ein einzelner Netz-/Timeout-Fehler (z. B. im Welt-Aufbau)
+            # darf nicht die gesamte Matrix beenden: einmal wiederholen,
+            # danach den Lauf als GESCHEITERT protokollieren und weiter.
+            for versuch in (1, 2):
+                try:
+                    await lauf(sz, rep, nutzer, dauer, warmup)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{sz} #{rep}] Versuch {versuch} abgebrochen: "
+                          f"{type(exc).__name__}: {exc}")
+                    if versuch == 2:
+                        AUSGABE.mkdir(parents=True, exist_ok=True)
+                        ts = datetime.now(timezone.utc).strftime(
+                            "%Y%m%dT%H%M%SZ")
+                        (AUSGABE / f"{ts}-{sz}-rep{rep}-GESCHEITERT.json"
+                         ).write_text(json.dumps({
+                             "szenario": sz, "wiederholung": rep,
+                             "gescheitert": f"{type(exc).__name__}: {exc}"},
+                             ensure_ascii=False), encoding="utf-8")
+                    else:
+                        await asyncio.sleep(30)
         if not a.alle and not a.szenario:
             break
 
