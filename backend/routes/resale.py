@@ -328,12 +328,29 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
             added.append(key)
         except (StorageError, ValueError) as exc:
             raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
-    keys.extend(added)
-    await db.resale_listings.update_one(
+    # ATOMAR anhaengen ($push $each) statt die ganze Liste zu ueberschreiben:
+    # das alte Lesen-Aendern-Schreiben verlor bei PARALLELEN Uploads aufs
+    # selbe Inserat Referenzen (im Lasttest: hunderte Dateien ohne
+    # DB-Eintrag). Das 40er-Limit prueft dieselbe Bedingung atomar mit —
+    # der Verlierer eines Rennens raeumt seine Dateien wieder weg.
+    res = await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"],
+         f"photos.uploaded_keys.{40 - len(added)}": {"$exists": False}},
+        {"$push": {"photos.uploaded_keys": {"$each": added}},
+         "$set": {"updated_at": now_iso()}})
+    if res.modified_count == 0:
+        for k in added:
+            try:
+                storage.delete(k)
+            except Exception:
+                pass
+        raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
+    doc = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"photos.uploaded_keys": keys, "updated_at": now_iso()}})
+        {"_id": 0, "photos.uploaded_keys": 1})
+    total = len((doc.get("photos") or {}).get("uploaded_keys") or [])
     return {"ok": True, "uploaded": [f"/api/files/{k}" for k in added],
-            "total": len(keys)}
+            "total": total}
 
 
 # =========================================================
@@ -372,19 +389,30 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
             storage.delete(body.key)
         except StorageError:
             pass
+        # ATOMAR entfernen ($pull) — gleiche Lost-Update-Gefahr wie beim
+        # Upload (parallele Loeschungen verdraengten sich gegenseitig).
         await db.resale_listings.update_one(
-            {"id": listing_id},
-            {"$set": {"photos.uploaded_keys": keys, "updated_at": now_iso()}})
-        return {"ok": True, "uploaded_keys": keys}
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$pull": {"photos.uploaded_keys": body.key},
+             "$set": {"updated_at": now_iso()}})
+        doc = await db.resale_listings.find_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "photos.uploaded_keys": 1})
+        return {"ok": True, "uploaded_keys":
+                (doc.get("photos") or {}).get("uploaded_keys") or []}
     if body.url:
         urls = list(photos.get("einkauf_urls", []))
         if body.url not in urls:
             raise HTTPException(404, "Foto nicht gefunden")
-        urls.remove(body.url)
         await db.resale_listings.update_one(
-            {"id": listing_id},
-            {"$set": {"photos.einkauf_urls": urls, "updated_at": now_iso()}})
-        return {"ok": True, "einkauf_urls": urls}
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$pull": {"photos.einkauf_urls": body.url},
+             "$set": {"updated_at": now_iso()}})
+        doc = await db.resale_listings.find_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "photos.einkauf_urls": 1})
+        return {"ok": True, "einkauf_urls":
+                (doc.get("photos") or {}).get("einkauf_urls") or []}
     raise HTTPException(400, "key oder url angeben")
 
 

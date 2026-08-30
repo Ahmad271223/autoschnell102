@@ -105,3 +105,5 @@ backend-err.txt
 frontend-log.txt
 matrix-lauf.log
 matrix-fehler.log
+stoss-lauf.log
+stoss-fehler.log
