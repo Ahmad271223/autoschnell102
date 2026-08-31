@@ -41,7 +41,9 @@ async def fetch_listing(db, source: str, item_id: str, url: str) -> Dict[str, An
         return v
     if source == "mobile":
         from mobile_service import get_vehicle
-        v = await get_vehicle(db, item_id)
+        # url mitgeben: der Apify-Scraper ruft dann direkt die eingefuegte
+        # Inserats-URL ab statt sie aus der ID rekonstruieren zu muessen.
+        v = await get_vehicle(db, item_id, url=url)
         if not v:
             raise RuntimeError("Fahrzeug konnte nicht geladen werden.")
         v.setdefault("mobile_ad_id", item_id)

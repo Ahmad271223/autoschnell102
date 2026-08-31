@@ -164,9 +164,9 @@ export default function Vergleich() {
             URL einfügen. <span style={{ color: "var(--accent-red)" }}>Vergleich starten.</span>
           </h1>
           <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            Kleinanzeigen-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
+            Kleinanzeigen- oder mobile.de-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
             <span className="block text-xs mt-1" style={{ color: "var(--text-secondary)", opacity: 0.7 }}>
-              mobile.de-/AutoScout-Links als Quelle folgen, sobald der API-Zugang freigeschaltet ist.
+              AutoScout24-Links als Quelle folgen, sobald der API-Zugang freigeschaltet ist.
             </span>
           </p>
         </div>
@@ -187,16 +187,20 @@ export default function Vergleich() {
               onChange={(e) => setUrl(e.target.value)}
               onPaste={(e) => {
                 // Einfuegen genuegt: erkennt der Text einen gueltigen
-                // Kleinanzeigen-Inserats-Link, startet das Auslesen sofort
-                // — der Knopf bleibt fuers manuelle Wiederholen.
+                // Inserats-Link (Kleinanzeigen ODER mobile.de), startet das
+                // Auslesen sofort — der Knopf bleibt fuers manuelle
+                // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
                 const text = (e.clipboardData?.getData("text") || "").trim();
-                if (/kleinanzeigen\.de\/s-anzeige\//i.test(text) && !loading) {
+                const istInserat =
+                  /kleinanzeigen\.de\/s-anzeige\//i.test(text) ||
+                  /mobile\.de\/(?:[^\s]*\bauto-inserat\/|fahrzeuge\/details\.html\?)/i.test(text);
+                if (istInserat && !loading) {
                   e.preventDefault();
                   setUrl(text);
                   startCompare(null, text);
                 }
               }}
-              placeholder="kleinanzeigen.de-Link einfügen – Auslesen startet automatisch…"
+              placeholder="kleinanzeigen.de- oder mobile.de-Link einfügen – Auslesen startet automatisch…"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus

@@ -50,7 +50,7 @@ CLIENT_FETCH_KLEINANZEIGEN = os.environ.get(
     "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")
 from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
-    MOBILE_USER, build_search_url, get_vehicle,
+    MOBILE_USER, build_search_url, get_vehicle, mobile_quelle_verfuegbar,
 )
 from snapshot_service import (
     create_snapshot, get_object as snapshot_get_object, run_snapshot_job,
@@ -99,14 +99,15 @@ async def compare(body: CompareIn, background: BackgroundTasks,
             "AutoScout24-Links sind noch nicht freigeschaltet (API-Zugang folgt). "
             "Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
         )
-    # mobile.de als QUELLE braucht den offiziellen API-Zugang. Ohne den (und
-    # ohne ausdrücklichen Sandbox-Modus) früh und verständlich abbrechen —
-    # statt tief im Fetcher mit einer technischen Meldung.
-    if source == "mobile" and not (MOBILE_USER and MOBILE_PASS) and not MOBILE_SANDBOX_MODE:
+    # mobile.de als QUELLE braucht offiziellen API-Zugang ODER den
+    # Apify-Scraper (APIFY_TOKEN). Ohne beides (und ohne ausdrücklichen
+    # Sandbox-Modus) früh und verständlich abbrechen — statt tief im
+    # Fetcher mit einer technischen Meldung.
+    if source == "mobile" and not mobile_quelle_verfuegbar():
         raise HTTPException(
             400,
-            "mobile.de-Links sind noch nicht freigeschaltet (API-Zugang folgt). "
-            "Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
+            "mobile.de-Links sind noch nicht freigeschaltet (kein Zugang "
+            "hinterlegt). Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
         )
 
     # CLIENT-SEITIGES ABRUFEN (nur Kleinanzeigen): Ist der Modus an und der
@@ -421,10 +422,9 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
     if source == "autoscout24":
         raise HTTPException(400, "AutoScout24-Links sind noch nicht "
                                  "freigeschaltet.")
-    if source == "mobile" and not (MOBILE_USER and MOBILE_PASS) \
-            and not MOBILE_SANDBOX_MODE:
+    if source == "mobile" and not mobile_quelle_verfuegbar():
         raise HTTPException(400, "mobile.de-Links sind noch nicht "
-                                 "freigeschaltet (API-Zugang folgt).")
+                                 "freigeschaltet (kein Zugang hinterlegt).")
 
     if await peek_cached_listing(db, raw_url,
                                  dealer_id=user.get("dealer_id")) is not None:
