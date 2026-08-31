@@ -602,6 +602,73 @@ async def _capture_with_retry(db, snap_id: str, url: str, attempts: int = 3):
     raise last_exc
 
 
+async def _mobile_datenblatt_job(db, snap_id: str, doc: dict) -> None:
+    """Datenblatt-Variante des Snapshots fuer mobile.de-Inserate.
+
+    Datenquelle (in dieser Reihenfolge): listings_cache (1 Jahr TTL) ->
+    vehicle_cache -> gespeichertes Fahrzeug. Die Original-Fotos werden vom
+    Bilder-CDN geladen und mit eingebettet."""
+    from datenblatt_service import datenblatt_bild, datenblatt_pdf, fotos_laden
+    url = doc["source_url"]
+    ad_id = doc.get("mobile_ad_id") or ""
+    try:
+        daten = None
+        abgerufen = None
+        ce = await db.listings_cache.find_one(
+            {"cache_key": f"mobile:{ad_id}"},
+            {"_id": 0, "data": 1, "fetched_at": 1})
+        if ce and ce.get("data"):
+            daten, abgerufen = ce["data"], ce.get("fetched_at")
+        if not daten:
+            vc = await db.vehicle_cache.find_one(
+                {"mobile_ad_id": ad_id}, {"_id": 0, "data": 1, "updated_at": 1})
+            if vc and vc.get("data"):
+                daten, abgerufen = vc["data"], vc.get("updated_at")
+        if not daten and doc.get("vehicle_id"):
+            v = await db.vehicles.find_one(
+                {"id": doc["vehicle_id"]}, {"_id": 0, "data": 1, "updated_at": 1})
+            if v and v.get("data"):
+                daten, abgerufen = v["data"], v.get("updated_at")
+        if not daten:
+            raise RuntimeError("Keine ausgelesenen Inserats-Daten vorhanden — "
+                               "Datenblatt nicht moeglich.")
+
+        foto_urls = daten.get("images") or daten.get("image_urls") or []
+        fotos = await fotos_laden(foto_urls, max_n=9)
+
+        loop = asyncio.get_running_loop()
+        pdf = await loop.run_in_executor(
+            None, datenblatt_pdf, daten, url, abgerufen, fotos)
+        jpg = await loop.run_in_executor(
+            None, datenblatt_bild, daten, url, abgerufen, fotos)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        base = f"{APP_NAME}/snapshots/{doc['dealer_id']}/{snap_id}-{ts}"
+        png_path = f"{base}.jpg"
+        pdf_path = f"{base}.pdf"
+        await loop.run_in_executor(None, _put_object, png_path, jpg, "image/jpeg")
+        await loop.run_in_executor(None, _put_object, pdf_path, pdf, "application/pdf")
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {
+                "status": "ready",
+                "art": "datenblatt",
+                "png_path": png_path,
+                "pdf_path": pdf_path,
+                "png_bytes": len(jpg),
+                "pdf_bytes": len(pdf),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }})
+        log.info("snapshot %s ready als Datenblatt (%d KB jpg, %d KB pdf, %d Fotos)",
+                 snap_id, len(jpg) // 1024, len(pdf) // 1024, len(fotos))
+    except Exception as exc:
+        log.exception("Datenblatt-Snapshot %s fehlgeschlagen", snap_id)
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed", "error": str(exc)[:500],
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+
+
 async def run_snapshot_job(db, snap_id: str) -> None:
     """Background-task entry point. Captures the page (mit Retry bei
     vorübergehenden Fehlern), uploads both artifacts to object storage, and
@@ -630,6 +697,16 @@ async def run_snapshot_job(db, snap_id: str) -> None:
             {"$set": {"status": "failed", "error": "Mock-Modus: kein Abruf",
                       "completed_at": datetime.now(timezone.utc).isoformat()}})
         return
+    # mobile.de blockt automatisierte Browser ("Zugriff verweigert") — ein
+    # Playwright-Foto zeigt dort nur die Fehlerseite. Fuer mobile.de wird
+    # deshalb ein ehrliches Datenblatt aus den bereits ausgelesenen
+    # Inserats-Daten erzeugt (klar gekennzeichnet, KEIN Nachbau der
+    # mobile.de-Seite). Kein Provider-Slot noetig: es wird nur das
+    # Bilder-CDN angesprochen, nicht die Anbieterseite.
+    if quelle == "mobile":
+        await _mobile_datenblatt_job(db, snap_id, doc)
+        return
+
     slot_id = None
     for _ in range(40):                       # bis zu ~60 s auf einen Slot warten
         slot_id = await acquire_slot(db, quelle)
