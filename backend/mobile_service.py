@@ -533,7 +533,10 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
         ) as client:
             r = await client.post(
                 endpoint,
-                params={"token": APIFY_TOKEN, "format": "json", "clean": "1"},
+                # Token im Header statt als ?token=: sonst landet er ueber
+                # die httpx-Request-Logzeile im Backend-Log.
+                headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+                params={"format": "json", "clean": "1"},
                 json={"startUrls": [{"url": detail_url}], "maxItems": 1},
             )
             if r.status_code not in (200, 201):
