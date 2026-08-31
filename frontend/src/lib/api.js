@@ -33,41 +33,26 @@ api.interceptors.response.use(
 // Authorization-Header statt ?auth=<token> in der URL (der Token landete
 // sonst in Browser-Verlauf, Proxy- und Server-Logs).
 export async function openAuthedFile(path, mime = "application/pdf", client = api) {
-  // Das Fenster MUSS synchron im Klick geoeffnet werden — nach einem await
-  // blockiert es der Browser (Safari immer, Chrome nach ein paar Sekunden).
-  // Deshalb erst den leeren Tab oeffnen, dann die Datei laden und die
-  // Adresse nachtragen.
-  // KEIN "noopener": damit liefert window.open laut Standard null zurueck,
-  // und genau den Griff brauchen wir hier. Stattdessen die Rueckwaerts-
-  // Referenz gleich selbst kappen.
-  const tab = window.open("", "_blank");
-  if (tab) {
-    try { tab.opener = null; } catch { /* egal */ }
-  }
-  try {
-    const res = await client.get(path, { responseType: "blob" });
-    const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
-    if (tab && !tab.closed) {
-      tab.location.href = url;
-    } else {
-      // Popup blockiert: NICHT die aktuelle Seite ersetzen (der Nutzer
-      // wuerde die App verlieren) — stattdessen als Download anbieten
-      // und, falls auch das der Browser verweigert, klar melden.
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = (path.split("/").pop() || "datei") +
-                   (mime === "application/pdf" ? ".pdf" : "");
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
-    // Spaet freigeben — der eingebaute PDF-Betrachter laedt die Adresse
-    // beim Drucken/Neuladen erneut.
-    setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
-  } catch (e) {
-    if (tab && !tab.closed) tab.close();
-    throw e;
-  }
+  // Datei erst laden, dann per unsichtbarem <a target="_blank">-Klick
+  // oeffnen — dasselbe Muster wie beim Kaufvertrag-PDF (openContractPdf),
+  // das zuverlaessig funktioniert. Der fruehere Weg (leeren Tab synchron
+  // oeffnen, opener kappen, Blob-URL nachtragen) bleibt in neueren
+  // Chrome-Versionen dauerhaft weiss: nach `opener = null` liegt der Tab
+  // in einer eigenen Storage-Partition und darf die Blob-URL des
+  // Ursprungs-Tabs nicht mehr laden.
+  const res = await client.get(path, { responseType: "blob" });
+  const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 1000);
+  // Spaet freigeben — der eingebaute PDF-Betrachter laedt die Adresse
+  // beim Drucken/Neuladen erneut.
+  setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
 }
 
 /**

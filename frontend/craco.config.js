@@ -86,6 +86,13 @@ webpackConfig.devServer = (devServerConfig) => {
   // 3. webSocketURL "auto": Live-Reload findet den richtigen Host selbst,
   //    egal ob localhost, LAN-IP oder https-Tunnel.
   devServerConfig.allowedHosts = "all";
+  // compress: false — die Kompressions-Middleware des Dev-Servers
+  // verstuemmelt grosse Binaer-Antworten, die durch den /api-Proxy laufen
+  // (Snapshot-PDF/PNG kam mit ~10 KB weniger an als angekuendigt ->
+  // Chrome bricht mit ERR_CONTENT_LENGTH_MISMATCH ab, "PDF/Foto" im
+  // Beweis-Archiv blieb leer). Auf localhost bringt Kompression ohnehin
+  // nichts; im Produktivbetrieb gibt es diesen Proxy nicht.
+  devServerConfig.compress = false;
   devServerConfig.client = {
     ...(devServerConfig.client || {}),
     webSocketURL: "auto://0.0.0.0:0/ws",
@@ -103,6 +110,14 @@ webpackConfig.devServer = (devServerConfig) => {
     "/api": {
       target: process.env.BACKEND_PROXY_TARGET || "http://127.0.0.1:8001",
       changeOrigin: true,
+      // Keep-Alive zum Backend: ohne Agent schickt der Proxy
+      // "Connection: close" — uvicorn (Windows) schliesst den Socket dann
+      // sofort nach dem letzten Write und noch gepufferte Bytes gehen
+      // verloren. Grosse Snapshot-PDF/PNG-Antworten kamen dadurch
+      // abgeschnitten an (Chrome: ERR_CONTENT_LENGTH_MISMATCH, die
+      // Beweis-Knoepfe "PDF"/"Foto" blieben leer). Mit Keep-Alive wird
+      // die Verbindung nie mitten im Puffer geschlossen.
+      agent: new (require("http").Agent)({ keepAlive: true }),
       ...(fixRequestBody ? { onProxyReq: fixRequestBody } : {}),
     },
   };

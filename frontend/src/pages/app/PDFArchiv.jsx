@@ -27,7 +27,7 @@ export default function PDFArchiv() {
       if (q) params.q = q;
       if (days) params.days = days;
       const { data } = await api.get("/contracts", { params });
-      setItems(data);
+      setItems(Array.isArray(data) ? data : []);
     } finally { setLoading(false); }
   };
 
