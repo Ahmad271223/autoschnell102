@@ -201,6 +201,13 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
     return v, d
 
 
+def _vehicle_bild_urls(vehicle: dict) -> list:
+    """Foto-URLs eines Fahrzeugs — ausgelesene Inserate speichern sie je
+    nach Quelle unter `images` (Kleinanzeigen-Scraper) oder `image_urls`."""
+    urls = vehicle.get("image_urls") or vehicle.get("images") or []
+    return [u for u in urls if isinstance(u, str) and u.startswith("http")]
+
+
 # ---------- Endpoints ----------
 @router.post("/contracts/preview")
 async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
@@ -291,7 +298,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # This way the dealer can still see the listing photos retrospectively
     # next to the contract PDF + Beweis-Archiv even if the original ad
     # is deleted by the seller.
-    vehicle_image_urls = list(vehicle.get("image_urls") or [])
+    vehicle_image_urls = _vehicle_bild_urls(vehicle)
     doc = {
         "id": pdf_id, "contract_no": contract_no,
         "dealer_id": user["dealer_id"], "user_id": user["id"],
@@ -398,6 +405,29 @@ async def list_contracts(
             i for i in items
             if any(s.get("channel") == channel for s in i.get("send_status", []))
         ]
+    # Alt-Verträge heilen: früher wurde `vehicle_image_urls` leer gespeichert,
+    # weil die Fotos beim Fahrzeug unter `data.images` liegen (nicht
+    # `image_urls`). Fehlende Listen hier einmalig aus dem Fahrzeug
+    # nachziehen und dauerhaft am Vertrag speichern — so bleiben die Fotos
+    # auch sichtbar, wenn das Fahrzeug später gelöscht wird.
+    ohne_fotos = [i for i in items if not i.get("vehicle_image_urls") and i.get("vehicle_id")]
+    if ohne_fotos:
+        vids = list({i["vehicle_id"] for i in ohne_fotos})
+        bilder = {}
+        async for v in db.vehicles.find(
+                {"id": {"$in": vids}, "dealer_id": user["dealer_id"]},
+                {"_id": 0, "id": 1, "data.images": 1, "data.image_urls": 1}):
+            urls = _vehicle_bild_urls(v.get("data") or {})
+            if urls:
+                bilder[v["id"]] = urls
+        for i in ohne_fotos:
+            urls = bilder.get(i["vehicle_id"])
+            if urls:
+                i["vehicle_image_urls"] = urls
+                await db.generated_pdfs.update_one(
+                    {"id": i["id"], "dealer_id": user["dealer_id"],
+                     "vehicle_image_urls": {"$in": [None, []]}},
+                    {"$set": {"vehicle_image_urls": urls}})
     # Ersteller anreichern: der Chef sieht so, WELCHER Sucher den Vertrag
     # (= Einkauf) gemacht hat.
     creator_ids = list({i.get("user_id") for i in items if i.get("user_id")})

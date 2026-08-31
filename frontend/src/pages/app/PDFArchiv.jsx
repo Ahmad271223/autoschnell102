@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, ImageIcon, X } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import SnapshotCard from "@/components/SnapshotCard";
 
@@ -18,8 +18,7 @@ export default function PDFArchiv() {
   const [q, setQ] = useState("");
   const [days, setDays] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [photoView, setPhotoView] = useState(null); // {item, urls}
-  const [lightbox, setLightbox] = useState(null);   // url string
+  const [gallery, setGallery] = useState(null); // {item, urls, index}
 
   const load = async () => {
     setLoading(true);
@@ -79,7 +78,6 @@ export default function PDFArchiv() {
             <tr className="text-left overline" style={{ background: "rgba(255,255,255,0.02)" }}>
               <th className="px-4 py-3">Datum</th>
               <th className="px-4 py-3">Fahrzeug</th>
-              <th className="px-4 py-3">Fotos</th>
               <th className="px-4 py-3">Verkäufer</th>
               <th className="px-4 py-3">Abholung</th>
               <th className="px-4 py-3">Preis</th>
@@ -90,10 +88,10 @@ export default function PDFArchiv() {
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={9} className="px-4 py-10 text-center text-zinc-500">Lade…</td></tr>
+              <tr><td colSpan={8} className="px-4 py-10 text-center text-zinc-500">Lade…</td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={9} className="px-4 py-10 text-center text-zinc-500">Noch keine Verträge erstellt.</td></tr>
+              <tr><td colSpan={8} className="px-4 py-10 text-center text-zinc-500">Noch keine Verträge erstellt.</td></tr>
             )}
             {items.map((it) => (
               <tr key={it.id} className="border-t" style={{ borderColor: "var(--border-default)" }}>
@@ -105,11 +103,10 @@ export default function PDFArchiv() {
                     </div>
                   )}
                 </td>
-                <td className="px-4 py-3"><div className="font-semibold">{it.make}</div><div className="text-xs text-zinc-500">{it.model}</div></td>
                 <td className="px-4 py-3">
-                  <PhotoCell
+                  <VehicleCell
                     item={it}
-                    onOpen={(urls) => setPhotoView({ item: it, urls })}
+                    onOpen={(urls, index) => setGallery({ item: it, urls, index })}
                   />
                 </td>
                 <td className="px-4 py-3 text-zinc-300">{it.seller_name}</td>
@@ -146,17 +143,14 @@ export default function PDFArchiv() {
         </table>
       </div>
 
-      {/* Photos gallery modal */}
-      {photoView && (
-        <PhotosModal
-          item={photoView.item}
-          urls={photoView.urls}
-          onClose={() => setPhotoView(null)}
-          onZoom={(u) => setLightbox(u)}
+      {/* Foto-Galerie: großes Bild, blättern mit Pfeilen / Tastatur / Wischen */}
+      {gallery && (
+        <GalleryViewer
+          item={gallery.item}
+          urls={gallery.urls}
+          startIndex={gallery.index || 0}
+          onClose={() => setGallery(null)}
         />
-      )}
-      {lightbox && (
-        <Lightbox url={lightbox} onClose={() => setLightbox(null)} />
       )}
     </div>
   );
@@ -164,161 +158,193 @@ export default function PDFArchiv() {
 
 /* ------------------------------ Sub-components ----------------------------- */
 
-function PhotoCell({ item, onOpen }) {
-  // Try cached vehicle as fallback if contract has no snapshot URLs.
+function VehicleCell({ item, onOpen }) {
+  // Foto-URLs kommen normalerweise direkt mit der Vertragsliste
+  // (vehicle_image_urls). Fehlen sie (z.B. sehr alte Verträge, deren
+  // Fahrzeug inzwischen gelöscht ist), einmal still beim Fahrzeug nachsehen.
   const [urls, setUrls] = useState(item.vehicle_image_urls || []);
-  const [tried, setTried] = useState(false);
 
-  const ensureLoaded = async () => {
-    if (urls.length > 0 || tried) return urls;
-    setTried(true);
-    if (item.vehicle_id) {
-      try {
-        const { data } = await api.get(`/vehicles/${item.vehicle_id}`);
-        // Vehicle endpoint returns {id, dealer_id, data: {…vehicle fields}}.
-        const fb = data?.data?.image_urls || data?.image_urls || [];
-        setUrls(fb);
-        return fb;
-      } catch {
-        return [];
-      }
+  useEffect(() => {
+    let aktiv = true;
+    setUrls(item.vehicle_image_urls || []);
+    if ((item.vehicle_image_urls || []).length === 0 && item.vehicle_id) {
+      api.get(`/vehicles/${item.vehicle_id}`)
+        .then(({ data }) => {
+          const d = data?.data || data || {};
+          const fb = (d.image_urls || d.images || [])
+            .filter((u) => typeof u === "string" && u.startsWith("http"));
+          if (aktiv && fb.length > 0) setUrls(fb);
+        })
+        .catch(() => {});
     }
-    return [];
-  };
+    return () => { aktiv = false; };
+  }, [item]);
 
-  if (urls.length === 0 && tried) {
-    return <span className="text-xs text-zinc-500">—</span>;
-  }
+  const name = (
+    <div className="min-w-0">
+      <div className="font-semibold truncate">{textOr(item.make)}</div>
+      <div className="text-xs text-zinc-500 truncate">{textOr(item.model)}</div>
+    </div>
+  );
+
   if (urls.length === 0) {
     return (
-      <button
-        type="button"
-        onClick={async () => {
-          const got = await ensureLoaded();
-          if (got.length > 0) onOpen(got);
-        }}
-        className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-white"
-        data-testid={`photos-load-${item.id}`}
-        title="Fotos laden"
-      >
-        <ImageIcon size={14} /> laden
-      </button>
+      <div className="flex items-center gap-3">
+        <div
+          className="h-12 w-16 shrink-0 rounded-md border flex items-center justify-center text-zinc-600 bg-white/[0.02]"
+          style={{ borderColor: "var(--border-default)" }}
+          title="Keine Fotos zum Inserat gespeichert"
+        >
+          <Car size={18} />
+        </div>
+        {name}
+      </div>
     );
   }
+
   return (
     <button
       type="button"
-      onClick={() => onOpen(urls)}
-      className="inline-flex items-center gap-2 group"
+      onClick={() => onOpen(urls, 0)}
+      className="flex items-center gap-3 group text-left"
       data-testid={`photos-open-${item.id}`}
       title={`${urls.length} Fotos ansehen`}
     >
-      <span className="relative inline-flex items-center">
+      <span className="relative shrink-0">
         <img
           src={urls[0]}
           alt=""
-          className="h-10 w-14 object-cover rounded-sm border transition-transform group-hover:scale-105"
+          className="h-12 w-16 object-cover rounded-md border transition-transform group-hover:scale-105"
           style={{ borderColor: "var(--border-default)" }}
           loading="lazy"
         />
         {urls.length > 1 && (
           <span
-            className="absolute -bottom-1 -right-1 inline-flex items-center justify-center rounded-full bg-black/80 px-1.5 py-0.5 text-[10px] font-semibold text-white border"
+            className="absolute -bottom-1.5 -right-1.5 inline-flex items-center justify-center rounded-full bg-black/85 px-1.5 py-0.5 text-[10px] font-semibold text-white border"
             style={{ borderColor: "var(--border-default)" }}
           >
             {urls.length}
           </span>
         )}
       </span>
+      {name}
     </button>
   );
 }
 
-function PhotosModal({ item, urls, onClose, onZoom }) {
+function textOr(v) { return v || "—"; }
+
+function GalleryViewer({ item, urls, startIndex = 0, onClose }) {
+  const [index, setIndex] = useState(Math.min(startIndex, urls.length - 1));
   const title = `${item.make || ""} ${item.model || ""}`.trim() || "Fahrzeugfotos";
+
+  const prev = useCallback(
+    () => setIndex((i) => (i - 1 + urls.length) % urls.length), [urls.length]);
+  const next = useCallback(
+    () => setIndex((i) => (i + 1) % urls.length), [urls.length]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft") prev();
+      if (e.key === "ArrowRight") next();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, prev, next]);
+
+  // Wisch-Geste (Touch / Trackpad-Drag)
+  const [touchX, setTouchX] = useState(null);
+  const onTouchStart = (e) => setTouchX(e.touches[0].clientX);
+  const onTouchEnd = (e) => {
+    if (touchX == null) return;
+    const dx = e.changedTouches[0].clientX - touchX;
+    if (Math.abs(dx) > 50) (dx < 0 ? next() : prev());
+    setTouchX(null);
+  };
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 apple-modal-backdrop"
+      className="fixed inset-0 z-[70] flex flex-col"
+      style={{ background: "rgba(0,0,0,0.94)", backdropFilter: "blur(14px)" }}
       onClick={onClose}
-      data-testid="photos-modal"
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+      data-testid="photos-gallery"
     >
+      {/* Kopfzeile */}
       <div
-        className="relative w-full max-w-5xl max-h-[88vh] overflow-y-auto rounded-xl border bg-[#0e0e10] p-5"
-        style={{ borderColor: "var(--border-default)" }}
+        className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <div>
-            <div className="overline">Fotos vom Inserat</div>
-            <h2 className="font-display font-bold text-xl tracking-tight">
-              {title} <span className="text-zinc-500 font-normal">({urls.length})</span>
-            </h2>
-            {item.created_at && (
-              <div className="text-[11px] text-zinc-500 mt-0.5">
-                Vertrag erstellt: {new Date(item.created_at).toLocaleString("de-DE")}
-              </div>
-            )}
+        <div className="min-w-0">
+          <div className="overline">Fotos vom Inserat</div>
+          <div className="font-display font-bold text-lg tracking-tight truncate">
+            {title} <span className="text-zinc-500 font-normal">· {index + 1} / {urls.length}</span>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-sm hover:bg-white/5 text-zinc-300"
-            data-testid="photos-modal-close"
-            aria-label="Schließen"
-          >
-            <X size={16} />
-          </button>
         </div>
+        <button
+          onClick={onClose}
+          className="w-10 h-10 shrink-0 rounded-full flex items-center justify-center text-white hover:bg-white/10"
+          data-testid="photos-gallery-close"
+          aria-label="Schließen"
+        >
+          <X size={20} />
+        </button>
+      </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+      {/* Großes Bild + Pfeile */}
+      <div className="relative flex-1 min-h-0 flex items-center justify-center px-14 sm:px-20">
+        {urls.length > 1 && (
+          <>
+            <button
+              onClick={(e) => { e.stopPropagation(); prev(); }}
+              data-testid="photos-gallery-prev"
+              className="absolute left-3 sm:left-6 w-11 h-11 rounded-full flex items-center justify-center text-white bg-white/5 hover:bg-white/15 backdrop-blur"
+              aria-label="Vorheriges Foto"
+            >
+              <ChevronLeft size={24} />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); next(); }}
+              data-testid="photos-gallery-next"
+              className="absolute right-3 sm:right-6 w-11 h-11 rounded-full flex items-center justify-center text-white bg-white/5 hover:bg-white/15 backdrop-blur"
+              aria-label="Nächstes Foto"
+            >
+              <ChevronRight size={24} />
+            </button>
+          </>
+        )}
+        <img
+          src={urls[index]}
+          alt=""
+          onClick={(e) => e.stopPropagation()}
+          className="max-w-full max-h-full object-contain select-none rounded-md"
+          draggable={false}
+          data-testid="photos-gallery-image"
+        />
+      </div>
+
+      {/* Filmstreifen zum direkten Anspringen */}
+      {urls.length > 1 && (
+        <div
+          className="px-4 sm:px-6 py-3 flex gap-2 overflow-x-auto justify-start sm:justify-center"
+          onClick={(e) => e.stopPropagation()}
+        >
           {urls.map((u, i) => (
             <button
               key={`${u}-${i}`}
-              type="button"
-              onClick={() => onZoom(u)}
-              className="group relative overflow-hidden rounded-md border bg-black/30 aspect-[4/3]"
-              style={{ borderColor: "var(--border-default)" }}
-              data-testid={`photos-thumb-${i}`}
+              onClick={() => setIndex(i)}
+              data-testid={`photos-gallery-thumb-${i}`}
+              className={`h-14 w-20 shrink-0 rounded-md overflow-hidden border-2 transition-opacity ${
+                i === index ? "border-white opacity-100" : "border-transparent opacity-50 hover:opacity-90"
+              }`}
             >
-              <img
-                src={u}
-                alt=""
-                loading="lazy"
-                className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.04]"
-              />
+              <img src={u} alt="" loading="lazy" className="h-full w-full object-cover" />
             </button>
           ))}
         </div>
-
-        <div className="text-[11px] text-zinc-500 mt-4">
-          Hinweis: Die Foto-URLs verweisen auf das Original-Inserat. Falls das
-          Inserat zwischenzeitlich gelöscht wurde, können einzelne Bilder nicht
-          mehr geladen werden.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Lightbox({ url, onClose }) {
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/90"
-      onClick={onClose}
-      data-testid="photos-lightbox"
-    >
-      <button
-        onClick={onClose}
-        className="absolute top-4 right-4 p-2 rounded-sm bg-black/40 hover:bg-white/10 text-white"
-        aria-label="Schließen"
-      >
-        <X size={18} />
-      </button>
-      <img
-        src={url}
-        alt=""
-        className="max-h-[92vh] max-w-[92vw] object-contain rounded-md shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      />
+      )}
     </div>
   );
 }
