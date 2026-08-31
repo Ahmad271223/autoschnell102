@@ -372,7 +372,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
     # ---------- Schäden / Beschädigungen — aus interaktiver Skizze ----------
     damages_text = (contract.get("damages_text") or "").strip()
     damages_list = contract.get("damages") or []
-    if damages_text or damages_list:
+    damage_note = (contract.get("vehicle_damage_note") or "").strip()
+    if damages_text or damages_list or damage_note:
         story.append(_section("Schäden / Beschädigungen", st))
         story.append(Spacer(1, 6))
         if damages_text:
@@ -388,11 +389,21 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
                 zone = _xml_escape(str(d.get("zone") or ""))
                 story.append(Paragraph(f"• {tl}: {zone}", st["body"]))
                 story.append(Spacer(1, 1))
-        story.append(Paragraph(
-            "<i>Erfassung erfolgte vor Übergabe gemeinsam mit dem Verkäufer "
-            "anhand der Fahrzeugskizze. Markierungen siehe interne Dokumentation.</i>",
-            st["small"],
-        ))
+        if damage_note:
+            # Freitextfeld "Sonstige Schäden / Hinweis" aus dem Formular —
+            # stand bisher nur in der Datenbank, nie im Vertrag.
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(
+                f"<b>Sonstige Schäden / Hinweis:</b> {_xml_escape(damage_note)}",
+                st["body"],
+            ))
+            story.append(Spacer(1, 2))
+        if damages_text or damages_list:
+            story.append(Paragraph(
+                "<i>Erfassung erfolgte vor Übergabe gemeinsam mit dem Verkäufer "
+                "anhand der Fahrzeugskizze. Markierungen siehe interne Dokumentation.</i>",
+                st["small"],
+            ))
         story.append(Spacer(1, 12))
 
     # ---------- Features ----------
@@ -419,17 +430,48 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
         story.append(Spacer(1, 12))
 
     # ---------- Price & terms ----------
-    price_str = (
-        f"{contract.get('purchase_price', 0):,.2f} EUR"
-        .replace(",", "X").replace(".", ",").replace("X", ".")
-    )
+    def _eur(betrag):
+        return (f"{betrag:,.2f} EUR"
+                .replace(",", "X").replace(".", ",").replace("X", "."))
+
+    brutto = float(contract.get("purchase_price") or 0)
+    price_str = _eur(brutto)
+
+    # MwSt-Ausweis (gewerblicher Verkauf, Regelbesteuerung): Kaufpreis ist
+    # der Bruttobetrag, Netto und Steuer werden daraus gerechnet.
+    if contract.get("show_vat"):
+        netto = brutto / 1.19
+        mwst = brutto - netto
+        preis_label = (f"Netto {_eur(netto)}   ·   "
+                       f"zzgl. 19 % MwSt {_eur(mwst)}")
+    else:
+        preis_label = "inkl. aller Bestandteile lt. Vertrag"
+
     pay_bits = [("Zahlungsart", contract.get("payment_method", "Bar / Überweisung"))]
+    # Abholung als EINE klare Zeile: "Wird abgeholt am 19.11.2026 um 10:00
+    # Uhr, <Adresse aus dem Vertrag>" — Adresse = Anschrift des Verkäufers.
     if contract.get("pickup_date"):
-        pay_bits.append(("Abholdatum", contract.get("pickup_date", "")))
-    if contract.get("pickup_time"):
-        pay_bits.append(("Abholuhrzeit", contract.get("pickup_time", "")))
+        datum = str(contract.get("pickup_date", ""))
+        try:
+            from datetime import date as _date
+            datum = _date.fromisoformat(datum).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            pass
+        abhol = f"Wird abgeholt am {datum}"
+        if str(contract.get("pickup_time") or "").strip():
+            abhol += f" um {contract['pickup_time']} Uhr"
+        adresse = ", ".join(x for x in [
+            (contract.get("seller_address") or "").strip(),
+            " ".join(y for y in [
+                (contract.get("seller_zip") or "").strip(),
+                (contract.get("seller_city") or "").strip()] if y),
+        ] if x)
+        if adresse:
+            abhol += f", {adresse}"
+        pay_bits.append(("", abhol))
     pay_sub = "   ·   ".join(
-        f"{k}: {_xml_escape(str(v))}" for k, v in pay_bits if str(v).strip()
+        (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
+        for k, v in pay_bits if str(v).strip()
     )
     price_box = Table([
         [
@@ -437,7 +479,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
             Paragraph(f"<b>{price_str}</b>", st["price_value"]),
         ],
         [
-            Paragraph("inkl. aller Bestandteile lt. Vertrag", st["price_label"]),
+            Paragraph(preis_label, st["price_label"]),
             Paragraph(pay_sub or "—", st["price_sub"]),
         ],
     ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])

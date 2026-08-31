@@ -71,6 +71,9 @@ class ContractIn(BaseModel):
     # Schäden / Beschädigungen aus der interaktiven Skizze
     damages_text: Optional[str] = ""
     damages: Optional[list] = []
+    # Gewerblicher Verkauf: MwSt (19 %) im Vertrag ausweisen —
+    # der Kaufpreis gilt dann als Brutto, das PDF rechnet Netto/MwSt aus.
+    show_vat: Optional[bool] = False
     # Fahrzeugdaten — werden im Vertrags-Dialog editierbar vorbefüllt.
     # Wenn ein Feld leer ist, fällt das PDF auf den Wert aus dem
     # Vehicle-Dokument zurück, sodass alte Verträge weiter funktionieren.
