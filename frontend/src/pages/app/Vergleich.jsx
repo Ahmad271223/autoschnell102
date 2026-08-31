@@ -72,9 +72,10 @@ export default function Vergleich() {
     } catch { /* quota/private mode — silent */ }
   }, [url, result, counter, contract]);
 
-  const startCompare = async (e) => {
+  const startCompare = async (e, direktUrl) => {
     e?.preventDefault?.();
-    if (!url.trim()) return;
+    const ziel = (direktUrl ?? url).trim();
+    if (!ziel) return;
     if (loading) return;               // Mehrfachklicks abfangen
     setLoading(true);
     setWaitMsg(null);
@@ -87,7 +88,7 @@ export default function Vergleich() {
       // Schritt 1: Vorab-Check. Bekannte Inserate sind sofort da; neue
       // laufen als Hintergrundjob — wir zeigen die Wartemeldung und
       // fragen den Status ab, statt die Anfrage minutenlang zu halten.
-      const check = await checkLink(api, url, { onWait: setWaitMsg });
+      const check = await checkLink(api, ziel, { onWait: setWaitMsg });
       let data;
       if (check.status === "needs_client_fetch") {
         data = { needs_client_fetch: true, url: check.url };
@@ -95,7 +96,8 @@ export default function Vergleich() {
         // Schritt 2: eigentlicher Vergleich (trifft jetzt den Cache).
         // Ein 503 (Rueckstau) wird automatisch wiederholt — der Nutzer
         // sieht nur die Wartemeldung, keine technische Fehlermeldung.
-        ({ data } = await postWithRetry503(api, "/mobile/compare", { url },
+        ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                           { url: ziel },
                                            { onWait: setWaitMsg }));
       }
 
@@ -112,9 +114,10 @@ export default function Vergleich() {
           return;
         }
         try {
-          const html = await fetchViaExtension(data.url || url);
-          await api.post("/listings/ingest", { url: data.url || url, html });
-          ({ data } = await postWithRetry503(api, "/mobile/compare", { url },
+          const html = await fetchViaExtension(data.url || ziel);
+          await api.post("/listings/ingest", { url: data.url || ziel, html });
+          ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                             { url: ziel },
                                              { onWait: setWaitMsg }));
         } catch (fe) {
           toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
@@ -182,7 +185,18 @@ export default function Vergleich() {
               required
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="kleinanzeigen.de-URL einfügen…"
+              onPaste={(e) => {
+                // Einfuegen genuegt: erkennt der Text einen gueltigen
+                // Kleinanzeigen-Inserats-Link, startet das Auslesen sofort
+                // — der Knopf bleibt fuers manuelle Wiederholen.
+                const text = (e.clipboardData?.getData("text") || "").trim();
+                if (/kleinanzeigen\.de\/s-anzeige\//i.test(text) && !loading) {
+                  e.preventDefault();
+                  setUrl(text);
+                  startCompare(null, text);
+                }
+              }}
+              placeholder="kleinanzeigen.de-Link einfügen – Auslesen startet automatisch…"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus
