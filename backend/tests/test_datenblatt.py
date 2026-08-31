@@ -10,7 +10,7 @@ import pytest
 from PIL import Image as PILImage
 from pypdf import PdfReader
 
-from datenblatt_service import datenblatt_bild, datenblatt_pdf
+from datenblatt_service import datenblatt_bild, datenblatt_pdf, rebuild_html
 from mobile_service import _parse_apify_item
 
 FIXTURE = Path(__file__).parent / "fixtures" / "apify_mobile_item.json"
@@ -44,7 +44,7 @@ def test_pdf_inhalt_und_kennzeichnung(daten, fotos):
                  "Benzin", "Automatik", "06/2019", "AUTO-MAGER.DE", "97078"]:
         assert muss in text, f"fehlt im PDF: {muss}"
     # Ehrliche Kennzeichnung: Quelle, ID, Abrufzeit, KEIN Original-Hinweis
-    assert "Beweis-Datenblatt" in text
+    assert "Mobile Rebuild" in text
     assert "42196329136896" in text
     assert "31.08.2026" in text
     assert "Original-Screenshot" in text
@@ -55,7 +55,7 @@ def test_pdf_ohne_fotos_funktioniert(daten):
     pdf = datenblatt_pdf(daten, URL, None, [])
     assert pdf.startswith(b"%PDF")
     text = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf)).pages)
-    assert "Volkswagen" in text and "Beweis-Datenblatt" in text
+    assert "Volkswagen" in text and "Mobile Rebuild" in text
 
 
 def test_bild_erzeugung(daten, fotos):
@@ -66,3 +66,23 @@ def test_bild_erzeugung(daten, fotos):
     # Kaputtes Einzelfoto darf die Erzeugung nicht stoppen
     jpg2 = datenblatt_bild(daten, URL, None, [b"kein-bild"] + fotos)
     assert jpg2[:2] == b"\xff\xd8"
+
+
+def test_rebuild_html_inhalt_und_kennzeichnung(daten, fotos):
+    """Dunkle Inserats-Ansicht (Mobile Rebuild): alle Kerndaten, ehrliche
+    Herkunftsangabe, Fotos als eingebettete data-URIs."""
+    html = rebuild_html(daten, URL, "2026-08-31T18:10:19", fotos)
+    for muss in ["AutoSchnell · Mobile Rebuild", "Anzeigen-ID 42196329136896",
+                 "23.850 €", "111.016 km", "213 kW (290 PS)", "Benzin",
+                 "Automatik", "06/2019", "AUTO-MAGER.DE", "97078 Würzburg",
+                 "kein Original-Screenshot", "Ausstattung (69)"]:
+        assert muss in html, f"fehlt im Rebuild-HTML: {muss}"
+    assert html.count("data:image/jpeg;base64,") == 3
+    # Kein fremdes Markenzeichen als Absender — nur die Quellenangabe.
+    assert "mobile.de-Logo" not in html
+
+
+def test_rebuild_html_ohne_fotos(daten):
+    html = rebuild_html(daten, URL, None, [])
+    assert "AutoSchnell · Mobile Rebuild" in html
+    assert "data:image/jpeg" not in html

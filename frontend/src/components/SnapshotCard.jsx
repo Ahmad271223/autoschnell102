@@ -130,7 +130,7 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
         <>
           <div className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
             {snap?.art === "datenblatt"
-              ? "Beweis-Datenblatt aus den automatisch ausgelesenen Inserats-Daten (mobile.de blockt Seiten-Screenshots) — erstellt am "
+              ? "Mobile Rebuild — nachgebaute Inserats-Ansicht aus den automatisch ausgelesenen Daten (mobile.de blockt Seiten-Screenshots) — erstellt am "
               : "Vollständiges Snapshot der Inserat-Seite — datiert auf "}
             {snap?.completed_at ? new Date(snap.completed_at).toLocaleString("de-DE") : "—"}.
           </div>

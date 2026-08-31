@@ -5,6 +5,9 @@ Playwright sein eigenes asyncio-Event-Loop (ProactorEventLoop auf Windows)
 bekommt — unabhängig vom uvicorn-Worker-Loop.
 
 Aufruf:  python _playwright_worker.py <url>
+   oder: python _playwright_worker.py --html-stdin   (HTML kommt via stdin,
+         gerendert per set_content — fuer lokal erzeugte Seiten wie das
+         Mobile-Rebuild, ohne Netzwerk und ohne Temp-Datei)
 Ausgabe: JSON auf stdout: {"png": "<base64>", "pdf": "<base64>"}
 Fehler:  JSON auf stdout: {"error": "<message>"}
 """
@@ -51,11 +54,13 @@ def _browserless_ws() -> str:
     return base
 
 
-async def capture(url: str):
+async def capture(url: str, html: str = None):
     from playwright.async_api import async_playwright
 
     # Rotierender Proxy (oder None = direkter Zugriff) + rotierender User-Agent.
-    proxy = get_playwright_proxy()
+    # Im HTML-Modus (lokal erzeugte Seite, alle Bilder als data-URIs) braucht
+    # es weder Proxy noch Tarnung.
+    proxy = None if html is not None else get_playwright_proxy()
     user_agent = random_user_agent()
     ws_endpoint = _browserless_ws()
 
@@ -79,6 +84,15 @@ async def capture(url: str):
                 extra_http_headers={"Accept-Language": _PAGE_HEADERS["Accept-Language"]},
             )
             page = await ctx.new_page()
+            if html is not None:
+                # Lokales HTML direkt rendern — kein Netzwerk, kein Consent.
+                await page.set_content(html, wait_until="domcontentloaded")
+                await page.wait_for_timeout(600)
+                png = await page.screenshot(full_page=True, type="png")
+                pdf = await page.pdf(format="A4", print_background=True,
+                                     margin={"top": "0", "right": "0",
+                                             "bottom": "0", "left": "0"})
+                return png, pdf
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
@@ -172,8 +186,14 @@ def main():
         sys.exit(1)
 
     url = sys.argv[1]
+    html = None
+    if url == "--html-stdin":
+        # Explizit als UTF-8 lesen: Windows-Python dekodiert sys.stdin sonst
+        # mit cp1252 — Umlaute und das Euro-Zeichen wuerden zu Zeichensalat.
+        html = sys.stdin.buffer.read().decode("utf-8")
+        url = "about:blank"
     try:
-        png, pdf = asyncio.run(capture(url))
+        png, pdf = asyncio.run(capture(url, html=html))
         result = {
             "png": base64.b64encode(png).decode(),
             "pdf": base64.b64encode(pdf).decode(),

@@ -334,6 +334,26 @@ html, body, #root {
 }
 .apple-input::placeholder { color: var(--apple-input-placeholder); }
 
+/* <select>: Die aufgeklappte Options-Liste uebernimmt in Chromium die
+   background-color des Elements. Mit dem halbtransparenten Standard
+   (rgba weiss 5%) malt der Browser die Liste weiss-auf-weiss — man sah
+   beim Aufklappen nichts. Deshalb: deckende dunkle Flaeche fuer select
+   UND options (Light-Theme bekommt sein deckendes Weiss). */
+select.apple-input {
+  background: #1c1c1e;
+}
+select option {
+  background-color: #1c1c1e;
+  color: #ffffff;
+}
+[data-theme="light"] select.apple-input {
+  background: #ffffff;
+}
+[data-theme="light"] select option {
+  background-color: #ffffff;
+  color: #1d1d1f;
+}
+
 .apple-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   border-radius: 10px;

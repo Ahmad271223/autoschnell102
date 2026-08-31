@@ -78,6 +78,148 @@ async def fotos_laden(urls: List[str], max_n: int = 9) -> List[bytes]:
     return fotos
 
 
+# ------------------------------------------------------- Mobile Rebuild ----
+def rebuild_html(daten: Dict[str, Any], source_url: str, abgerufen_am,
+                 fotos: List[bytes]) -> str:
+    """Dunkle Inserats-Ansicht ("Mobile Rebuild") als eigenstaendiges HTML.
+
+    Aufbau wie eine Fahrzeug-Detailseite (Galerie links, Preisbox rechts,
+    Datenkacheln, Ausstattung, Beschreibung) — aber im AutoSchnell-Design
+    mit klarer Herkunftsangabe. Alle Fotos als data-URIs eingebettet, das
+    Rendering (PNG/PDF) uebernimmt der Playwright-Worker per set_content.
+    """
+    import base64 as _b64
+
+    def _uri(bts: bytes) -> str:
+        return "data:image/jpeg;base64," + _b64.b64encode(bts).decode()
+
+    ad_id = _xml(daten.get("mobile_ad_id") or "")
+    zeit = _xml(_zeitpunkt(abgerufen_am))
+    titel = _xml(" ".join(x for x in [daten.get("make_label"),
+                                      daten.get("model_label")] if x))
+    km = daten.get("mileage")
+    kacheln = [
+        ("Kilometerstand", f"{km:,} km".replace(",", ".") if km else "—"),
+        ("Leistung", f"{daten.get('power_kw')} kW ({daten.get('power_ps')} PS)"
+                     if daten.get("power_kw") else "—"),
+        ("Kraftstoffart", daten.get("fuel_label") or "—"),
+        ("Getriebe", daten.get("gearbox_label") or "—"),
+        ("Erstzulassung", daten.get("first_registration") or "—"),
+        ("Kategorie", daten.get("category_label") or "—"),
+        ("Farbe", daten.get("color") or "—"),
+        ("Fahrzeughalter", daten.get("previous_owners") or "—"),
+        ("HU", daten.get("hu") or "—"),
+        ("Hubraum", f"{daten['displacement']:,} ccm".replace(",", ".")
+                    if daten.get("displacement") else "—"),
+        ("Türen", daten.get("doors") or "—"),
+        ("Sitzplätze", daten.get("seats") or "—"),
+    ]
+    zustand = []
+    if daten.get("accident_damaged") is not None:
+        zustand.append("Unfallschaden lt. Inserat" if daten.get("accident_damaged")
+                       else "Unfallfrei lt. Inserat")
+    if daten.get("roadworthy") is False:
+        zustand.append("Nicht fahrbereit")
+    if zustand:
+        kacheln.append(("Zustand", ", ".join(zustand)))
+
+    kacheln_html = "".join(
+        f'<div class="kachel"><div class="k">{_xml(k)}</div>'
+        f'<div class="v">{_xml(v)}</div></div>' for k, v in kacheln)
+    gross = f'<img class="gross" src="{_uri(fotos[0])}">' if fotos else ""
+    thumbs = "".join(f'<img class="thumb" src="{_uri(f)}">' for f in fotos[1:9])
+    thumbreihe = f'<div class="thumbreihe">{thumbs}</div>' if thumbs else ""
+    anzahl_gesamt = daten.get("image_count") or len(fotos)
+    foto_hinweis = (f'<div class="fotohinweis">{len(fotos)} von {anzahl_gesamt} '
+                    "Inserats-Fotos abgebildet.</div>"
+                    if anzahl_gesamt > len(fotos) else "")
+
+    features = daten.get("features") or []
+    features_html = ""
+    if features:
+        features_html = (
+            f'<div class="karte"><h2>Ausstattung ({len(features)})</h2>'
+            f'<div class="txt">{_xml(" · ".join(str(f) for f in features))}</div></div>')
+
+    beschreibung = (daten.get("description") or "").strip()
+    beschreibung_html = ""
+    if beschreibung:
+        absaetze = "".join(
+            f"<p>{'<br>'.join(_xml(z) for z in a.splitlines() if z.strip())}</p>"
+            for a in re.split(r"\n{2,}", beschreibung) if a.strip())
+        beschreibung_html = (f'<div class="karte">'
+                             f"<h2>Fahrzeugbeschreibung laut Anbieter</h2>"
+                             f'<div class="txt">{absaetze}</div></div>')
+
+    haendler = []
+    if daten.get("seller_name"):
+        haendler.append(f"<b>{_xml(daten['seller_name'])}</b>")
+    adresse = ", ".join(x for x in [
+        daten.get("seller_address"),
+        " ".join(y for y in [daten.get("seller_zip"),
+                             daten.get("seller_city")] if y)] if x)
+    if adresse:
+        haendler.append(_xml(adresse))
+    if daten.get("seller_phone"):
+        haendler.append(f"Tel.: {_xml(daten['seller_phone'])}")
+    haendler_html = ("<div class='haendler'>" + "<br>".join(haendler) + "</div>"
+                     if haendler else "")
+
+    preis = _eur(daten.get("list_price"))
+    unter = _xml(daten.get("model_description") or "")
+
+    return f"""<!doctype html><html lang="de"><head><meta charset="utf-8"><style>
+body {{ margin:0; background:#141416; color:#e5e7eb; font-family:'Segoe UI','DejaVu Sans',Arial,sans-serif; }}
+.kopf {{ background:#0c0c0e; border-bottom:3px solid #e11d2e; padding:14px 28px; display:flex; justify-content:space-between; align-items:center; }}
+.kopf b {{ font-size:19px; color:#fff; }}
+.kopf span {{ color:#9ca3af; font-size:13px; }}
+.hinweis {{ background:#1f2937; color:#d1d5db; font-size:12.5px; padding:9px 28px; }}
+.inhalt {{ display:grid; grid-template-columns:1fr 360px; gap:22px; padding:22px 28px; max-width:1250px; margin:0 auto; }}
+.gross {{ width:100%; border-radius:10px; display:block; }}
+.thumbreihe {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:8px; }}
+.thumb {{ width:100%; height:110px; object-fit:cover; border-radius:6px; }}
+.fotohinweis {{ color:#9ca3af; font-size:11.5px; margin-top:6px; }}
+.karte {{ background:#1c1c1f; border:1px solid #2b2b30; border-radius:12px; padding:18px 20px; margin-top:18px; break-inside:avoid; }}
+h2 {{ font-size:16px; margin:0 0 12px; color:#fff; }}
+.kachelraster {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
+.kachel .k {{ color:#9ca3af; font-size:11px; text-transform:uppercase; letter-spacing:.4px; }}
+.kachel .v {{ font-weight:600; font-size:15px; margin-top:2px; color:#fff; }}
+.titelbox {{ background:#1c1c1f; border:1px solid #2b2b30; border-radius:12px; padding:20px; }}
+.titelbox h1 {{ margin:0; font-size:22px; color:#fff; }}
+.titelbox .sub {{ color:#9ca3af; font-size:13px; margin-top:4px; }}
+.preis {{ color:#e11d2e; font-size:30px; font-weight:800; margin:14px 0 4px; }}
+.haendler {{ margin-top:14px; padding-top:14px; border-top:1px solid #2b2b30; font-size:13.5px; line-height:1.6; }}
+.haendler b {{ color:#fff; }}
+.quelle {{ margin-top:14px; background:#111214; border-radius:8px; padding:10px 12px; font-size:11.5px; color:#9ca3af; line-height:1.5; word-break:break-all; }}
+.txt {{ font-size:13px; color:#d1d5db; line-height:1.65; }}
+.txt p {{ margin:0 0 8px; }}
+</style></head><body>
+<div class="kopf"><b>AutoSchnell · Mobile Rebuild</b><span>Quelle: mobile.de · Anzeigen-ID {ad_id}</span></div>
+<div class="hinweis">Automatisch ausgelesene Inserats-Daten vom {zeit} — kein Original-Screenshot der Anbieterseite.</div>
+<div class="inhalt">
+  <div>
+    {gross}
+    {thumbreihe}
+    {foto_hinweis}
+    <div class="karte"><h2>Technische Daten</h2><div class="kachelraster">{kacheln_html}</div></div>
+    {features_html}
+    {beschreibung_html}
+  </div>
+  <div>
+    <div class="titelbox">
+      <h1>{titel}</h1>
+      <div class="sub">{unter}</div>
+      <div class="preis">{preis}</div>
+      <div class="sub">Angebotspreis lt. Inserat</div>
+      {haendler_html}
+      <div class="quelle"><b>Herkunft:</b> Daten des Inserats {_xml(source_url)},
+      automatisch ausgelesen am {zeit}. Von AutoSchnell nachgebaute Ansicht
+      (Mobile Rebuild), kein Dokument des Anbieters.</div>
+    </div>
+  </div>
+</div></body></html>"""
+
+
 # ---------------------------------------------------------------- PDF ----
 def _stil(name, groesse, farbe=DUNKEL, fett=False, zeilenhoehe=None):
     return ParagraphStyle(
@@ -133,7 +275,7 @@ def datenblatt_pdf(daten: Dict[str, Any], source_url: str, abgerufen_am,
         canvas.rect(0, SEITE_H - 16 * mm, 4 * mm, 16 * mm, stroke=0, fill=1)
         canvas.setFillColor(colors.white)
         canvas.setFont("Helvetica-Bold", 11)
-        canvas.drawString(15 * mm, SEITE_H - 10.5 * mm, "AutoSchnell · Beweis-Datenblatt")
+        canvas.drawString(15 * mm, SEITE_H - 10.5 * mm, "AutoSchnell · Mobile Rebuild")
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.HexColor("#d1d5db"))
         canvas.drawRightString(SEITE_B - 15 * mm, SEITE_H - 10.5 * mm,
@@ -151,7 +293,7 @@ def datenblatt_pdf(daten: Dict[str, Any], source_url: str, abgerufen_am,
     dokument = SimpleDocTemplate(
         puffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
         topMargin=22 * mm, bottomMargin=14 * mm,
-        title=f"Beweis-Datenblatt mobile.de {ad_id}")
+        title=f"Mobile Rebuild mobile.de {ad_id}")
     st_titel = _stil("titel", 17, fett=True)
     st_unter = _stil("unter", 10.5, GRAU)
     st_preis = _stil("preis", 17, ROT, fett=True)
@@ -358,7 +500,7 @@ def datenblatt_bild(daten: Dict[str, Any], source_url: str, abgerufen_am,
     # Kopfband
     z.rectangle([0, 0, B, kopf_h], fill="#141416")
     z.rectangle([0, 0, 10, kopf_h], fill="#e11d2e")
-    z.text((28, 18), "AutoSchnell · Beweis-Datenblatt", font=_font(26, True), fill="#ffffff")
+    z.text((28, 18), "AutoSchnell · Mobile Rebuild", font=_font(26, True), fill="#ffffff")
     quelle = f"Quelle: mobile.de · ID {daten.get('mobile_ad_id') or ''}"
     z.text((B - 24 - z.textlength(quelle, font=_font(20)), 22), quelle,
            font=_font(20), fill="#d1d5db")

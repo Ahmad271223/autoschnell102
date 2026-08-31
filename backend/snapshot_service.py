@@ -602,6 +602,37 @@ async def _capture_with_retry(db, snap_id: str, url: str, attempts: int = 3):
     raise last_exc
 
 
+async def _render_rebuild_html(html: str) -> tuple[bytes, bytes]:
+    """Lokal erzeugtes HTML (Mobile Rebuild) im Playwright-Worker rendern.
+    Kein Domain-Guard noetig: die Seite kommt per stdin/set_content, alle
+    Bilder sind data-URIs — es findet kein Netzwerkzugriff statt."""
+    if not _BROWSERLESS_URL:
+        _ensure_browser_executable()
+    async with _browser_lock:
+        worker = Path(__file__).parent / "_playwright_worker.py"
+        loop = asyncio.get_running_loop()
+
+        def _run():
+            env = os.environ.copy()
+            if sys.platform == "win32":
+                env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            result = subprocess.run(
+                [sys.executable, str(worker), "--html-stdin"],
+                input=html, capture_output=True, text=True, timeout=90,
+                encoding="utf-8", env=env,
+            )
+            return result.stdout, result.stderr
+
+        stdout, stderr = await loop.run_in_executor(None, _run)
+        try:
+            data = json.loads(stdout)
+        except Exception:
+            raise RuntimeError(f"Rebuild-Worker ungültige Ausgabe: {stderr[:300]}")
+        if "error" in data:
+            raise RuntimeError(f"Rebuild-Worker Fehler: {data['error']}")
+        return base64.b64decode(data["png"]), base64.b64decode(data["pdf"])
+
+
 async def _mobile_datenblatt_job(db, snap_id: str, doc: dict) -> None:
     """Datenblatt-Variante des Snapshots fuer mobile.de-Inserate.
 
@@ -637,10 +668,24 @@ async def _mobile_datenblatt_job(db, snap_id: str, doc: dict) -> None:
         fotos = await fotos_laden(foto_urls, max_n=9)
 
         loop = asyncio.get_running_loop()
-        pdf = await loop.run_in_executor(
-            None, datenblatt_pdf, daten, url, abgerufen, fotos)
-        jpg = await loop.run_in_executor(
-            None, datenblatt_bild, daten, url, abgerufen, fotos)
+        # 1. Wahl: dunkle Inserats-Ansicht ("Mobile Rebuild", Wunsch 08/2026)
+        # im Playwright-Worker rendern — JPG + PDF entstehen wie bei den
+        # Kleinanzeigen-Snapshots aus dem Seiten-Rendering. Faellt das
+        # Rendering aus (z.B. Browser kaputt), springt das helle
+        # ReportLab-Datenblatt ein — lieber ein schlichter Beweis als keiner.
+        from datenblatt_service import rebuild_html
+        try:
+            html = rebuild_html(daten, url, abgerufen, fotos)
+            png, pdf = await _render_rebuild_html(html)
+            jpg, pdf = await loop.run_in_executor(
+                None, _compress_artifacts, png, pdf)
+        except Exception:
+            log.exception("Mobile-Rebuild-Rendering fehlgeschlagen — "
+                          "Ausweich-Datenblatt (ReportLab) fuer %s", snap_id)
+            pdf = await loop.run_in_executor(
+                None, datenblatt_pdf, daten, url, abgerufen, fotos)
+            jpg = await loop.run_in_executor(
+                None, datenblatt_bild, daten, url, abgerufen, fotos)
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         base = f"{APP_NAME}/snapshots/{doc['dealer_id']}/{snap_id}-{ts}"
