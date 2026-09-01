@@ -436,8 +436,13 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
                 "source": source,
                 "hint": "Bitte über die Browser-Erweiterung laden."}
 
-    from link_jobs import enqueue_job
+    from link_jobs import enqueue_job, process_one_now
     job = await enqueue_job(db, raw_url, dealer_id=user.get("dealer_id") or "")
+    if job.get("status") == "queued":
+        # Sofort-Anstoss (parallel zur Antwort): der Abruf startet ohne
+        # die bis zu 0,3 s Wartezeit auf den Takt des Dauer-Workers.
+        import asyncio as _aio
+        _aio.get_running_loop().create_task(process_one_now(db))
     return {"status": job["status"], "job_id": job["id"],
             "source": source, "item_id": identity["item_id"]}
 
@@ -446,11 +451,22 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
 async def listings_check_status(job_id: str, user=Depends(current_user)):
     """Status eines Linkpruefungs-Jobs: queued | processing | completed |
     failed. Bei completed liegt das Inserat im Cache — /mobile/compare
-    liefert dann sofort."""
+    liefert dann sofort.
+
+    Long-Poll: die Antwort kommt, SOBALD der Job fertig ist (bis ~2,4 s
+    gehalten) — das Frontend braucht keine blinden Wartepausen mehr und
+    zeigt das Ergebnis im Moment des Abschlusses."""
+    import asyncio as _aio
     from link_jobs import get_job
-    job = await get_job(db, job_id)
-    if not job:
-        raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+    frist = datetime.now(timezone.utc) + timedelta(milliseconds=2400)
+    while True:
+        job = await get_job(db, job_id)
+        if not job:
+            raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+        if job["status"] in ("completed", "failed") \
+                or datetime.now(timezone.utc) >= frist:
+            break
+        await _aio.sleep(0.12)
     out = {"status": job["status"], "job_id": job["id"],
            "source": job.get("source"), "item_id": job.get("item_id"),
            "error": job.get("error")}

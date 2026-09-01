@@ -105,6 +105,20 @@ async def get_job(db, job_id: str) -> Optional[dict]:
     return await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
 
 
+async def process_one_now(db) -> None:
+    """Einen wartenden Job SOFORT bearbeiten — Anstoss direkt nach dem
+    Einreihen, statt auf den 0,3-s-Takt des Dauer-Workers zu warten
+    (Wunsch 09/2026: Auslesen soll schneller reagieren). Der Claim ist
+    atomar: laeuft der Dauer-Worker zeitgleich, gewinnt genau einer."""
+    try:
+        job = await _claim_one(db)
+        if job:
+            await _process(db, job)
+    except Exception:
+        import logging
+        logging.getLogger("link_jobs").exception("Sofort-Anstoss fehlgeschlagen")
+
+
 async def _requeue_stale(db) -> None:
     """Verwaiste processing-Jobs (Worker abgestuerzt) zurueckstellen bzw.
     nach zu vielen Versuchen beenden."""

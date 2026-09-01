@@ -19,7 +19,12 @@ export const TIMEOUT_MESSAGE =
 
 const DEFAULTS = {
   maxWaitMs: 120_000,   // maximale Gesamtwartezeit
-  pollMs: 2_000,        // Abstand der Statusabfragen
+  // Kurzer Abstand ZWISCHEN den Statusabfragen: der Server haelt jede
+  // Abfrage selbst bis ~2,4 s offen (Long-Poll) und antwortet in dem
+  // Moment, in dem der Abruf fertig ist. Frueher wartete das Frontend
+  // hier blind 2 s VOR der ersten Abfrage — das kostete bei jedem
+  // neuen Link rund 1-2 Sekunden.
+  pollMs: 250,
   retry503Ms: 5_000,    // Fallback, wenn kein Retry-After-Header kommt
 };
 
@@ -73,13 +78,17 @@ export async function checkLink(client, url, opts = {}) {
 
   opts.onWait?.(WAIT_MESSAGE);
   const jobId = first.job_id;
+  let ersteAbfrage = true;
   for (;;) {
     if (Date.now() >= deadline) {
       const e = new Error(TIMEOUT_MESSAGE);
       e.code = "timeout";
       throw e;
     }
-    await sleep(pollMs);
+    // Erste Abfrage SOFORT — der Server long-pollt und antwortet, sobald
+    // der Abruf fertig ist. Nur zwischen weiteren Abfragen kurz pausieren.
+    if (!ersteAbfrage) await sleep(pollMs);
+    ersteAbfrage = false;
     let data;
     try {
       ({ data } = await client.get(`/listings/check/${jobId}`));
