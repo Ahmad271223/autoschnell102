@@ -662,7 +662,7 @@ function InvitePanel() {
         <div>
           <label className="block text-[10px] text-zinc-500 mb-1 uppercase">Gültig</label>
           <select value={validity} onChange={(e) => setValidity(e.target.value)}
-                  className="h-9 px-2 rounded-lg border bg-[#141416] text-sm" style={{ borderColor: "var(--divider)" }}>
+                  className="h-9 px-2 rounded-lg border bg-[var(--bg-surface)] text-sm" style={{ borderColor: "var(--divider)" }}>
             <option value={24}>24 Stunden</option>
             <option value={168}>7 Tage</option>
             <option value={720}>30 Tage</option>
@@ -671,7 +671,7 @@ function InvitePanel() {
         <div>
           <label className="block text-[10px] text-zinc-500 mb-1 uppercase">Nutzungen</label>
           <select value={uses} onChange={(e) => setUses(e.target.value)}
-                  className="h-9 px-2 rounded-lg border bg-[#141416] text-sm" style={{ borderColor: "var(--divider)" }}>
+                  className="h-9 px-2 rounded-lg border bg-[var(--bg-surface)] text-sm" style={{ borderColor: "var(--divider)" }}>
             <option value={1}>1×</option>
             <option value={5}>5×</option>
             <option value={10}>10×</option>

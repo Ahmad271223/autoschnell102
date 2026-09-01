@@ -342,6 +342,15 @@ html, body, #root {
 select.apple-input {
   background: #1c1c1e;
 }
+/* Selects mit bg-transparent (Marktplatz-Filter, Inserat): die Utility
+   gewinnt sonst gegen das nachgestellte bg-[#141416] — der Popup-Rahmen
+   wuerde durchsichtig/weisslich. Element+Klasse schlaegt die Utility. */
+select.bg-transparent {
+  background-color: #141416;
+}
+[data-theme="light"] select.bg-transparent {
+  background-color: #ffffff;
+}
 select option {
   background-color: #1c1c1e;
   color: #ffffff;
