@@ -633,24 +633,27 @@ async def _render_rebuild_html(html: str) -> tuple[bytes, bytes]:
         return base64.b64decode(data["png"]), base64.b64decode(data["pdf"])
 
 
-async def _mobile_datenblatt_job(db, snap_id: str, doc: dict) -> None:
-    """Datenblatt-Variante des Snapshots fuer mobile.de-Inserate.
+async def _mobile_datenblatt_job(db, snap_id: str, doc: dict,
+                                 quelle: str = "mobile") -> None:
+    """Mobile-Rebuild-Variante des Snapshots (mobile.de + AutoScout24).
 
     Datenquelle (in dieser Reihenfolge): listings_cache (1 Jahr TTL) ->
-    vehicle_cache -> gespeichertes Fahrzeug. Die Original-Fotos werden vom
-    Bilder-CDN geladen und mit eingebettet."""
+    vehicle_cache (nur mobile) -> gespeichertes Fahrzeug. Die
+    Original-Fotos werden vom Bilder-CDN geladen und mit eingebettet."""
     from datenblatt_service import datenblatt_bild, datenblatt_pdf, fotos_laden
     url = doc["source_url"]
     ad_id = doc.get("mobile_ad_id") or ""
+    quelle_label = {"mobile": "mobile.de",
+                    "autoscout24": "autoscout24.de"}.get(quelle, quelle)
     try:
         daten = None
         abgerufen = None
         ce = await db.listings_cache.find_one(
-            {"cache_key": f"mobile:{ad_id}"},
+            {"cache_key": f"{quelle}:{ad_id}"},
             {"_id": 0, "data": 1, "fetched_at": 1})
         if ce and ce.get("data"):
             daten, abgerufen = ce["data"], ce.get("fetched_at")
-        if not daten:
+        if not daten and quelle == "mobile":
             vc = await db.vehicle_cache.find_one(
                 {"mobile_ad_id": ad_id}, {"_id": 0, "data": 1, "updated_at": 1})
             if vc and vc.get("data"):
@@ -675,7 +678,8 @@ async def _mobile_datenblatt_job(db, snap_id: str, doc: dict) -> None:
         # ReportLab-Datenblatt ein — lieber ein schlichter Beweis als keiner.
         from datenblatt_service import rebuild_html
         try:
-            html = rebuild_html(daten, url, abgerufen, fotos)
+            html = rebuild_html(daten, url, abgerufen, fotos,
+                                quelle_label=quelle_label)
             png, pdf = await _render_rebuild_html(html)
             jpg, pdf = await loop.run_in_executor(
                 None, _compress_artifacts, png, pdf)
@@ -683,9 +687,11 @@ async def _mobile_datenblatt_job(db, snap_id: str, doc: dict) -> None:
             log.exception("Mobile-Rebuild-Rendering fehlgeschlagen — "
                           "Ausweich-Datenblatt (ReportLab) fuer %s", snap_id)
             pdf = await loop.run_in_executor(
-                None, datenblatt_pdf, daten, url, abgerufen, fotos)
+                None, lambda: datenblatt_pdf(daten, url, abgerufen, fotos,
+                                             quelle_label=quelle_label))
             jpg = await loop.run_in_executor(
-                None, datenblatt_bild, daten, url, abgerufen, fotos)
+                None, lambda: datenblatt_bild(daten, url, abgerufen, fotos,
+                                              quelle_label=quelle_label))
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         base = f"{APP_NAME}/snapshots/{doc['dealer_id']}/{snap_id}-{ts}"
@@ -742,14 +748,14 @@ async def run_snapshot_job(db, snap_id: str) -> None:
             {"$set": {"status": "failed", "error": "Mock-Modus: kein Abruf",
                       "completed_at": datetime.now(timezone.utc).isoformat()}})
         return
-    # mobile.de blockt automatisierte Browser ("Zugriff verweigert") — ein
-    # Playwright-Foto zeigt dort nur die Fehlerseite. Fuer mobile.de wird
-    # deshalb ein ehrliches Datenblatt aus den bereits ausgelesenen
+    # mobile.de und AutoScout24 blocken automatisierte Browser — ein
+    # Playwright-Foto zeigt dort nur eine Fehlerseite. Fuer beide wird
+    # deshalb das Mobile Rebuild aus den bereits ausgelesenen
     # Inserats-Daten erzeugt (klar gekennzeichnet, KEIN Nachbau der
-    # mobile.de-Seite). Kein Provider-Slot noetig: es wird nur das
+    # Anbieterseite). Kein Provider-Slot noetig: es wird nur das
     # Bilder-CDN angesprochen, nicht die Anbieterseite.
-    if quelle == "mobile":
-        await _mobile_datenblatt_job(db, snap_id, doc)
+    if quelle in ("mobile", "autoscout24"):
+        await _mobile_datenblatt_job(db, snap_id, doc, quelle=quelle)
         return
 
     slot_id = None

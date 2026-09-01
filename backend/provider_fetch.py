@@ -49,4 +49,12 @@ async def fetch_listing(db, source: str, item_id: str, url: str) -> Dict[str, An
         v.setdefault("mobile_ad_id", item_id)
         v.pop("_source", None)
         return v
+    if source == "autoscout24":
+        from autoscout_service import fetch_autoscout_vehicle
+        v = await fetch_autoscout_vehicle(url, item_id)
+        if not v:
+            raise RuntimeError(
+                "AutoScout24-Inserat konnte nicht geladen werden — evtl. "
+                "entfernt oder Abruf vorübergehend nicht möglich.")
+        return v
     raise RuntimeError(f"Source '{source}' ist aktuell nicht angebunden.")

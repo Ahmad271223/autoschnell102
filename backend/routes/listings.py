@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from auth import decode_token
 from autoscout_service import build_search_url as build_autoscout_url
+from autoscout_service import autoscout_quelle_verfuegbar
 from deps import (
     current_user, db, log_activity, now_iso, require_active_sub,
 )
@@ -93,11 +94,11 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     source = identity["source"]
     item_id = identity["item_id"]
 
-    if source == "autoscout24":
+    if source == "autoscout24" and not autoscout_quelle_verfuegbar():
         raise HTTPException(
             400,
-            "AutoScout24-Links sind noch nicht freigeschaltet (API-Zugang folgt). "
-            "Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
+            "AutoScout24-Links sind noch nicht freigeschaltet (kein Zugang "
+            "hinterlegt). Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
         )
     # mobile.de als QUELLE braucht offiziellen API-Zugang ODER den
     # Apify-Scraper (APIFY_TOKEN). Ohne beides (und ohne ausdrücklichen
@@ -203,6 +204,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     snap_id = None
     is_web_url = raw_url.startswith("http") and (
         "kleinanzeigen.de" in raw_url or "mobile.de" in raw_url
+        or "autoscout24." in raw_url
     )
 
     async def _reuse_cached_snapshot(sid: str) -> Optional[str]:
@@ -419,9 +421,9 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc) or "Ungültige URL.")
     source = identity["source"]
-    if source == "autoscout24":
+    if source == "autoscout24" and not autoscout_quelle_verfuegbar():
         raise HTTPException(400, "AutoScout24-Links sind noch nicht "
-                                 "freigeschaltet.")
+                                 "freigeschaltet (kein Zugang hinterlegt).")
     if source == "mobile" and not mobile_quelle_verfuegbar():
         raise HTTPException(400, "mobile.de-Links sind noch nicht "
                                  "freigeschaltet (kein Zugang hinterlegt).")

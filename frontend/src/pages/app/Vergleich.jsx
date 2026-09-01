@@ -164,10 +164,7 @@ export default function Vergleich() {
             URL einfügen. <span style={{ color: "var(--accent-red)" }}>Vergleich starten.</span>
           </h1>
           <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            Kleinanzeigen- oder mobile.de-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
-            <span className="block text-xs mt-1" style={{ color: "var(--text-secondary)", opacity: 0.7 }}>
-              AutoScout24-Links als Quelle folgen, sobald der API-Zugang freigeschaltet ist.
-            </span>
+            Kleinanzeigen-, mobile.de- oder AutoScout24-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
           </p>
         </div>
         <ProfileBadge onChange={(p) => setResult((r) => r ? { ...r, active_profile: p } : r)} />
@@ -193,14 +190,15 @@ export default function Vergleich() {
                 const text = (e.clipboardData?.getData("text") || "").trim();
                 const istInserat =
                   /kleinanzeigen\.de\/s-anzeige\//i.test(text) ||
-                  /mobile\.de\/(?:[^\s]*\bauto-inserat\/|fahrzeuge\/details\.html\?)/i.test(text);
+                  /mobile\.de\/(?:[^\s]*\bauto-inserat\/|fahrzeuge\/details\.html\?)/i.test(text) ||
+                  /autoscout24\.[a-z.]{2,6}\/(?:angebote|offers)\//i.test(text);
                 if (istInserat && !loading) {
                   e.preventDefault();
                   setUrl(text);
                   startCompare(null, text);
                 }
               }}
-              placeholder="kleinanzeigen.de- oder mobile.de-Link einfügen – Auslesen startet automatisch…"
+              placeholder="Inserats-Link einfügen (Kleinanzeigen, mobile.de, AutoScout24) – Auslesen startet automatisch…"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus

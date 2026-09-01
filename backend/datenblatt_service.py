@@ -80,7 +80,7 @@ async def fotos_laden(urls: List[str], max_n: int = 9) -> List[bytes]:
 
 # ------------------------------------------------------- Mobile Rebuild ----
 def rebuild_html(daten: Dict[str, Any], source_url: str, abgerufen_am,
-                 fotos: List[bytes]) -> str:
+                 fotos: List[bytes], quelle_label: str = "mobile.de") -> str:
     """Dunkle Inserats-Ansicht ("Mobile Rebuild") als eigenstaendiges HTML.
 
     Aufbau wie eine Fahrzeug-Detailseite (Galerie links, Preisbox rechts,
@@ -194,7 +194,7 @@ h2 {{ font-size:16px; margin:0 0 12px; color:#fff; }}
 .txt {{ font-size:13px; color:#d1d5db; line-height:1.65; }}
 .txt p {{ margin:0 0 8px; }}
 </style></head><body>
-<div class="kopf"><b>AutoSchnell · Mobile Rebuild</b><span>Quelle: mobile.de · Anzeigen-ID {ad_id}</span></div>
+<div class="kopf"><b>AutoSchnell · Mobile Rebuild</b><span>Quelle: {_xml(quelle_label)} · Anzeigen-ID {ad_id}</span></div>
 <div class="hinweis">Automatisch ausgelesene Inserats-Daten vom {zeit} — kein Original-Screenshot der Anbieterseite.</div>
 <div class="inhalt">
   <div>
@@ -260,7 +260,7 @@ def _datenkacheln(daten: Dict[str, Any]) -> List[Tuple[str, str]]:
 
 
 def datenblatt_pdf(daten: Dict[str, Any], source_url: str, abgerufen_am,
-                   fotos: List[bytes]) -> bytes:
+                   fotos: List[bytes], quelle_label: str = "mobile.de") -> bytes:
     """Mehrseitiges PDF im Inserats-Aufbau — AutoSchnell-Design mit klarer
     Quellen-Kennzeichnung auf jeder Seite."""
     ad_id = daten.get("mobile_ad_id") or ""
@@ -279,7 +279,7 @@ def datenblatt_pdf(daten: Dict[str, Any], source_url: str, abgerufen_am,
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.HexColor("#d1d5db"))
         canvas.drawRightString(SEITE_B - 15 * mm, SEITE_H - 10.5 * mm,
-                               f"Quelle: mobile.de · Anzeigen-ID {ad_id}")
+                               f"Quelle: {quelle_label} · Anzeigen-ID {ad_id}")
         # Fusszeile
         canvas.setFillColor(GRAU)
         canvas.setFont("Helvetica", 7)
@@ -293,7 +293,7 @@ def datenblatt_pdf(daten: Dict[str, Any], source_url: str, abgerufen_am,
     dokument = SimpleDocTemplate(
         puffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
         topMargin=22 * mm, bottomMargin=14 * mm,
-        title=f"Mobile Rebuild mobile.de {ad_id}")
+        title=f"Mobile Rebuild {quelle_label} {ad_id}")
     st_titel = _stil("titel", 17, fett=True)
     st_unter = _stil("unter", 10.5, GRAU)
     st_preis = _stil("preis", 17, ROT, fett=True)
@@ -484,7 +484,7 @@ def _font(groesse: int, fett: bool = False):
 
 
 def datenblatt_bild(daten: Dict[str, Any], source_url: str, abgerufen_am,
-                    fotos: List[bytes]) -> bytes:
+                    fotos: List[bytes], quelle_label: str = "mobile.de") -> bytes:
     """Uebersichtsbild (JPG) fuer den 'Foto'-Knopf: Kopf, Titel/Preis,
     grosses Foto + Raster, Kennzahlen, Quellen-Fusszeile."""
     B = 1200
@@ -501,7 +501,7 @@ def datenblatt_bild(daten: Dict[str, Any], source_url: str, abgerufen_am,
     z.rectangle([0, 0, B, kopf_h], fill="#141416")
     z.rectangle([0, 0, 10, kopf_h], fill="#e11d2e")
     z.text((28, 18), "AutoSchnell · Mobile Rebuild", font=_font(26, True), fill="#ffffff")
-    quelle = f"Quelle: mobile.de · ID {daten.get('mobile_ad_id') or ''}"
+    quelle = f"Quelle: {quelle_label} · ID {daten.get('mobile_ad_id') or ''}"
     z.text((B - 24 - z.textlength(quelle, font=_font(20)), 22), quelle,
            font=_font(20), fill="#d1d5db")
 
