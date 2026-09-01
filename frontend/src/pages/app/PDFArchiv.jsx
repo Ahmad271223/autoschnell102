@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import SnapshotCard from "@/components/SnapshotCard";
 
@@ -110,10 +110,10 @@ export default function PDFArchiv() {
                         {it.status}
                       </span>
                     </div>
+                    <SpecsZeile cd={it.contract_data} />
                     <div className="mt-1.5 text-[13.5px] leading-relaxed"
                          style={{ color: "var(--text-secondary)" }}>
                       {it.seller_name}
-                      {it.pickup_date && <> · Abholung {it.pickup_date}</>}
                       <span style={{ color: "var(--text-muted)" }}>
                         {" "}· erstellt {new Date(it.created_at).toLocaleString("de-DE",
                           { day: "2-digit", month: "2-digit", year: "numeric",
@@ -124,6 +124,7 @@ export default function PDFArchiv() {
                           </span></>}
                       </span>
                     </div>
+                    <AbholZeile item={it} />
                     <div className="mt-3">
                       {it.vehicle_id ? (
                         <SnapshotCard vehicleId={it.vehicle_id} compact />
@@ -177,6 +178,47 @@ export default function PDFArchiv() {
 }
 
 /* ------------------------------ Sub-components ----------------------------- */
+
+function SpecsZeile({ cd }) {
+  // km / PS / EZ aus den beim Vertrag gespeicherten Fahrzeugdaten.
+  const km = Number(cd?.vehicle_mileage);
+  const ps = (cd?.vehicle_power_ps || "").toString().trim();
+  const ez = (cd?.vehicle_first_registration || "").toString().trim();
+  const teile = [
+    km > 0 && `${km.toLocaleString("de-DE")} km`,
+    ps && `${ps} PS`,
+    ez && `EZ ${ez}`,
+  ].filter(Boolean);
+  if (teile.length === 0) return null;
+  return (
+    <div className="mt-1.5 text-[13.5px] font-medium tracking-tight">
+      {teile.join("  ·  ")}
+    </div>
+  );
+}
+
+function AbholZeile({ item }) {
+  // Abholtermin + Abhol-Adresse (= Verkäufer-Anschrift aus dem Vertrag).
+  const cd = item.contract_data || {};
+  const adresse = [
+    (cd.seller_address || "").trim(),
+    [(cd.seller_zip || "").trim(), (cd.seller_city || "").trim()]
+      .filter(Boolean).join(" "),
+  ].filter(Boolean).join(", ");
+  if (!item.pickup_date && !adresse) return null;
+  return (
+    <div className="mt-1 flex items-center gap-1.5 text-[13.5px] leading-relaxed"
+         style={{ color: "var(--text-secondary)" }}>
+      <MapPin size={13} className="shrink-0" style={{ color: "var(--text-muted)" }} />
+      <span className="truncate">
+        {item.pickup_date && <>Abholung {item.pickup_date}
+          {cd.pickup_time ? `, ${cd.pickup_time} Uhr` : ""}</>}
+        {item.pickup_date && adresse && " · "}
+        {adresse}
+      </span>
+    </div>
+  );
+}
 
 function VehicleThumb({ item, onOpen }) {
   // Foto-URLs kommen normalerweise direkt mit der Vertragsliste
