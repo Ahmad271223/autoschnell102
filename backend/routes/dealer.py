@@ -200,6 +200,13 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
         raise HTTPException(400, "Leeres Logo")
     if len(raw) > 2 * 1024 * 1024:
         raise HTTPException(400, "Logo zu groß (max. 2 MB)")
+    # Magic-Bytes-Pruefung: nur echte Bildformate (JPEG/PNG/WebP/GIF) —
+    # beliebige Dateien liessen sich sonst als "logo.png" ablegen.
+    from storage_service import validate_image_bytes
+    try:
+        validate_image_bytes(raw, wo="Logo")
+    except StorageError as exc:
+        raise HTTPException(400, str(exc))
     try:
         key = make_key("logo", user["dealer_id"], "logo.png")
         storage.save(key, raw)

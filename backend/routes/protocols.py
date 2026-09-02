@@ -354,6 +354,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     def _save_sig(b64: str, who: str) -> str:
         try:
             raw = base64.b64decode(b64.split(",")[-1], validate=False)
+            from storage_service import validate_image_bytes
+            validate_image_bytes(raw, wo=f"Unterschrift ({who})")
         except (ValueError, TypeError):
             raise HTTPException(400, f"Unterschrift ({who}) konnte nicht gelesen werden")
         if not raw or len(raw) > 2 * 1024 * 1024:
