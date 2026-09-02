@@ -42,7 +42,7 @@ KA_URL = f"https://www.kleinanzeigen.de/s-anzeige/autodaten/{KA_ID}-216-1"
 WHITELIST = {"id", "brand", "model", "first_registration", "mileage_km",
              "fuel_type", "power_ps", "power_kw", "purchase_price_cents",
              "currency", "damages", "schema_version", "purchase_date"}
-API_FELDER = WHITELIST - {"id"}
+API_FELDER = set(WHITELIST)   # inkl. id (nur fuer die Super-Admin-Bereinigung)
 
 SELLER = {"seller_name": f"Verkaeufer Autodaten {SUF}",
           "seller_address": "Geheimweg 7", "seller_zip": "30159",
@@ -202,7 +202,7 @@ def test_01_datensatz_bei_vertragserstellung(welt):
 
 def test_02_nur_whitelist_felder(welt):
     d = _datensatz(welt)
-    felder = set(d.keys()) - {"_id"}
+    felder = set(d.keys()) - {"_id", "damages_redacted"}
     assert felder == WHITELIST, f"unerwartete Felder: {felder ^ WHITELIST}"
     assert d["schema_version"] == 2 and d["currency"] == "EUR"
     # Kaufdatum: nur der Tag (JJJJ-MM-TT), kein Zeitstempel
@@ -514,8 +514,27 @@ def test_19_datensatz_nach_loeschung_nicht_zuordenbar(welt):
     for wert in (welt["contract_id"], welt["dealer_id"], welt["chef"]["id"],
                  welt["vehicle_id"], VIN, SELLER["seller_name"],
                  SELLER["seller_email"], SELLER["seller_phone"],
-                 welt["auto_ids"][0], "created_at", "dealer", "contract"):
+                 "created_at", "dealer", "contract"):
         assert wert not in blob, wert
+
+
+def test_19c_schaeden_bereinigung_durch_super_admin(welt):
+    """Freitext-Schaeden lassen sich nachtraeglich entfernen (PII-Notfall);
+    Adresse/PLZ/Kennzeichen/IBAN werden schon beim Speichern verworfen."""
+    import auto_daten
+    assert auto_daten.schaeden_bereinigen([
+        "Kratzer Musterstr. 12", "Delle 30159 Hannover", "Beule H-AB 1234",
+        "IBAN DE89 3704 0044 0532 0130 00", "Steinschlag Frontscheibe"]) ==         ["Steinschlag Frontscheibe"]
+    did = welt["auto_ids"][1]
+    url = f"{API}/admin/vehicle-data/{did}/damages"
+    assert requests.delete(url, headers=welt["A"], timeout=30).status_code == 403
+    assert requests.delete(url, headers=welt["H"], timeout=30).status_code == 403
+    r = requests.delete(url, headers=welt["SA"], timeout=30)
+    assert r.status_code == 200 and r.json()["damages"] == []
+    d = _db().admin_vehicle_data.find_one({"id": did})
+    assert d["damages"] == [] and d.get("damages_redacted") is True
+    assert requests.delete(f"{API}/admin/vehicle-data/{uuid.uuid4()}/damages",
+                           headers=welt["SA"], timeout=30).status_code == 404
 
 
 def test_19b_gruppierte_ansicht(welt):

@@ -33,6 +33,7 @@ Bonus (am Ende der Datei):
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional, Tuple
@@ -359,11 +360,26 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
          "$setOnInsert": {"cache_key": cache_key, "dealer_id": dealer_id,
                           "created_at": now}},
         upsert=True)
-    # Unabhaengige Bestaetigung durch einen ANDEREN Haendler?
+    # Globale Freigabe ("Promotion") ist standardmaessig AUS (Pruefbericht
+    # Runde 4): Wer zwei Haendlerkonten kontrolliert, konnte sich sein
+    # gefaelschtes HTML selbst "bestaetigen" und damit ALLEN Haendlern
+    # falsche Preise/Fahrzeugdaten unterschieben. Ohne Freigabe bleiben
+    # Client-Daten strikt beim einreichenden Haendler; jeder holt das
+    # Inserat einmal selbst aus seinem Browser (kostenlos, kein Server-
+    # Abruf). Wer die Freigabe bewusst will, setzt die Mindestzahl
+    # unabhaengiger Haendler per CLIENT_INGEST_PROMOTE_MIN_DEALERS (>= 3).
+    min_dealers = int(os.environ.get("CLIENT_INGEST_PROMOTE_MIN_DEALERS", "0") or 0)
+    if min_dealers < 3:
+        return "quarantined"
+    bestaetiger = []
     async for other in db.listings_cache_client.find(
             {"cache_key": cache_key, "dealer_id": {"$ne": dealer_id},
              "expires_at": {"$gt": now}}, {"_id": 0}):
         if _client_core_match(other.get("data") or {}, data):
+            bestaetiger.append(other)
+    if len(bestaetiger) + 1 >= min_dealers:
+        other = bestaetiger[0]
+        if True:
             await db.listings_cache.update_one(
                 {"cache_key": cache_key},
                 {"$set": {"cache_key": cache_key,
@@ -380,7 +396,8 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
                           "expires_at": now + timedelta(hours=confirmed_ttl_hours),
                           "last_used_at": now,
                           "client_confirmed": True,
-                          "confirmed_by": [other.get("dealer_id"), dealer_id]},
+                          "confirmed_by": [b.get("dealer_id") for b in bestaetiger]
+                          + [dealer_id]},
                  "$setOnInsert": {"created_at": now}},
                 upsert=True)
             return "promoted"

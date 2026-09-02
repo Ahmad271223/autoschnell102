@@ -10,7 +10,7 @@ import re
 from typing import List, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel
 
 from auto_daten import COLLECTION
@@ -18,12 +18,16 @@ from deps import current_super_admin, db
 
 router = APIRouter()
 
-FELDER = ("brand", "model", "first_registration", "mileage_km", "fuel_type",
+FELDER = ("id", "brand", "model", "first_registration", "mileage_km", "fuel_type",
           "power_ps", "power_kw", "purchase_price_cents", "currency",
           "damages", "schema_version", "purchase_date")
 
 
 class AutoDatenEintrag(BaseModel):
+    # id: zufaellige UUID des Datensatzes — NUR damit der Super-Admin einen
+    # Eintrag gezielt bereinigen kann (Schaeden-Freitext mit Personenbezug,
+    # Pruefbericht Runde 4). Keine Verbindung zu Vertrag/Haendler/Person.
+    id: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
     first_registration: Optional[str] = None
@@ -231,3 +235,21 @@ async def auto_daten_gruppiert(
             name=marke, anzahl=sum(m.anzahl for m in modelle), modelle=modelle))
     return AutoDatenBaum(marken=marken, total=total,
                          truncated=total > len(docs), sort=sort)
+
+
+# ---------- Bereinigung (Wunsch/Pruefbericht Runde 4) ----------
+# Schaeden sind Freitext: trotz PII-Filter kann ein Name oder eine Adresse
+# durchrutschen. Der Super-Admin kann die Schaeden eines Datensatzes deshalb
+# nachtraeglich entfernen (Datensatz bleibt, nur der Freitext geht). Die
+# uebrigen Felder sind reine Fahrzeugtechnik ohne Personenbezug.
+@router.delete("/admin/vehicle-data/{datensatz_id}/damages")
+async def auto_daten_schaeden_entfernen(
+    datensatz_id: str = Path(pattern=r"^[0-9a-f-]{36}$"),
+    _admin=Depends(current_super_admin),
+):
+    r = await db[COLLECTION].update_one(
+        {"id": datensatz_id},
+        {"$set": {"damages": [], "damages_redacted": True}})
+    if not r.matched_count:
+        raise HTTPException(404, "Datensatz nicht gefunden")
+    return {"ok": True, "id": datensatz_id, "damages": []}

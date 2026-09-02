@@ -374,6 +374,15 @@ async def admin_user_set_password(
     u = await db.users.find_one({"id": user_id})
     if not u:
         raise HTTPException(404, "Nutzer nicht gefunden")
+    # Dieselben Regeln wie bei der PUT-Route (Pruefbericht Runde 4: hier
+    # fehlte der Schutz — ein normaler Admin konnte das Super-Admin-Passwort
+    # setzen und die Plattform uebernehmen).
+    if u.get("is_super_admin") and u.get("id") != admin.get("id"):
+        raise HTTPException(403, "Das Super-Admin-Passwort ändert nur der "
+                                 "Super-Admin selbst")
+    if u.get("role") == "admin" and u.get("id") != admin.get("id") \
+            and not admin.get("is_super_admin"):
+        raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
     await db.users.update_one(
         {"id": user_id},
         {"$set": {

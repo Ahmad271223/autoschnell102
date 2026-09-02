@@ -476,3 +476,41 @@ def test_14_inland_export_manuelle_suche_und_autoscout(welt):
                       json={"make": "VW", "model": "Golf"}, timeout=30)
     url = r.json()["autoscout_url"]
     assert "cy=D" in url and "damaged_listing=exclude" in url, url
+
+
+def test_05b_abholbericht_direkt_nach_abholung_erlaubt(welt):
+    """Pruefbericht Runde 4: Der Protokoll-Abschluss setzt 'abgeholt' selbst;
+    der Abweichungsbericht kommt danach. Erlaubt ist genau EIN Bericht
+    binnen 24 h nach 'abgeholt'; der Status-Aufruf ist idempotent."""
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+    dbx = _db()
+    now = datetime.now(timezone.utc)
+
+    def termin(status_seit):
+        aid = f"r4appt_{_uuid.uuid4().hex[:8]}"
+        dbx.appointments.insert_one({
+            "id": aid, "dealer_id": welt["dealer_a"], "driver_id": welt["driver_id"],
+            "vehicle_id": welt["vehicle_id"], "status": "abgeholt",
+            "status_changed_at": status_seit.isoformat(),
+            "pickup_date": "2099-01-01", "created_at": now.isoformat(),
+            "updated_at": now.isoformat()})
+        return aid
+    frisch = termin(now - timedelta(minutes=5))
+    r = requests.post(f"{API}/driver/appointments/{frisch}/report", headers=welt["D"],
+                      json={"notes": "Abweichungen nach Protokoll"}, timeout=60)
+    assert r.status_code == 200, r.text[:200]
+    r = requests.post(f"{API}/driver/appointments/{frisch}/report", headers=welt["D"],
+                      json={"notes": "zweite Version"}, timeout=60)
+    assert r.status_code == 409, r.text[:200]
+    assert dbx.pickup_reports.count_documents({"appointment_id": frisch}) == 1
+    r = requests.put(f"{API}/driver/appointments/{frisch}/status", headers=welt["D"],
+                     json={"status": "abgeholt"}, timeout=30)
+    assert r.status_code == 200 and r.json().get("unveraendert") is True, r.text[:200]
+    # Zu spaet (2 Tage nach Abholung): kein Erstbericht mehr
+    alt = termin(now - timedelta(days=2))
+    r = requests.post(f"{API}/driver/appointments/{alt}/report", headers=welt["D"],
+                      json={"notes": "spaet"}, timeout=60)
+    assert r.status_code == 409, r.text[:200]
+    dbx.appointments.delete_many({"id": {"$in": [frisch, alt]}})
+    dbx.pickup_reports.delete_many({"appointment_id": {"$in": [frisch, alt]}})

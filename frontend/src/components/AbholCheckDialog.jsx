@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
@@ -25,6 +26,7 @@ const DEVIATION_TYPES = [
 const FUEL_LEVELS = ["leer", "1/4", "1/2", "3/4", "voll"];
 
 export default function AbholCheckDialog({ appointment, onDone, onClose }) {
+  const navigate = useNavigate();
   const [mileage, setMileage] = useState("");
   const [keys, setKeys] = useState("2");
   const [fuel, setFuel] = useState("1/2");
@@ -55,6 +57,24 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
     }
     setBusy(true);
     try {
+      // "Abgeholt" gibt es nur mit unterschriebenem Protokoll. Vorher wurde
+      // erst der Bericht geschickt und dann der Status — der lief ohne
+      // Protokoll in 409, jeder neue Versuch legte eine weitere
+      // Berichtsversion an (Pruefbericht Runde 4). Jetzt: Protokoll zuerst.
+      if ((appointment.status || "") !== "abgeholt") {
+        let proto = null;
+        try {
+          const r = await driverApi.get(`/driver/appointments/${appointment.id}/protocol`);
+          proto = r.data?.protocol || r.data?.doc || r.data;
+        } catch (_) { proto = null; }
+        const final = proto && (proto.status === "final" || proto.protocol?.status === "final");
+        if (!final) {
+          toast.info("Bitte zuerst das Abholprotokoll ausfüllen und unterschreiben — danach den Abhol-Check senden.");
+          onClose?.();
+          navigate(`/fahrer/protokoll/${appointment.id}`);
+          return;
+        }
+      }
       await driverApi.post(`/driver/appointments/${appointment.id}/report`, {
         mileage_at_pickup: mileage ? parseInt(mileage, 10) : null,
         keys_count: keys ? parseInt(keys, 10) : null,
@@ -67,6 +87,8 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
         })),
         notes,
       });
+      // Idempotent: nach dem Protokoll-Abschluss ist der Termin bereits
+      // "abgeholt"; das Backend bestaetigt das ohne Fehler.
       await driverApi.put(`/driver/appointments/${appointment.id}/status`, { status: "abgeholt" });
       toast.success(deviations.length
         ? `Abgeholt — ${deviations.length} Abweichung(en) gemeldet`

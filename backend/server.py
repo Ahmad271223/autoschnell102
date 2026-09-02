@@ -215,7 +215,7 @@ class ClientErrorIn(BaseModel):
 @api.post("/client-errors")
 async def report_client_error(body: ClientErrorIn, request: Request):
     ip = (request.client.host if request.client else None) or "unknown"
-    if not _client_error_limiter.check(ip):
+    if not await _client_error_limiter.check(ip):
         return {"ok": False}
     err_id = str(uuid.uuid4())
     await db.error_logs.insert_one({

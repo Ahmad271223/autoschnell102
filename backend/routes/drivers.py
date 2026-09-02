@@ -652,6 +652,12 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    if (appt.get("status") or "") == body.status:
+        # Idempotent (Pruefbericht Runde 4): Der Protokoll-Abschluss setzt
+        # "abgeholt" bereits selbst; der anschliessende Aufruf aus dem
+        # Abhol-Check-Dialog lief in 409 und liess den Fahrer neu versuchen.
+        return {"ok": True, "status": body.status, "unveraendert": True,
+                "auto_cleanup_days": 7 if body.status == "abgeholt" else 14}
     _termin_offen_oder_409(appt)
     # Vereinheitlichter Abschluss: "abgeholt" gibt es NUR mit unterschriebenem
     # Abholprotokoll (Beweiskette: Zustand + beide Unterschriften). Der alte
@@ -748,7 +754,32 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
-    _termin_offen_oder_409(appt)
+    # Sperre nach Abschluss — mit EINER Ausnahme (Pruefbericht Runde 4): Der
+    # Abweichungsbericht gehoert zur Abholung und wird direkt NACH dem
+    # unterschriebenen Protokoll (Termin dann schon "abgeholt") eingereicht.
+    # Erlaubt ist deshalb der ERSTE Bericht binnen 24 h nach "abgeholt";
+    # Korrekturversionen danach nur ueber den Haendler (Termin wieder oeffnen).
+    status = appt.get("status") or "offen"
+    if status == "abgeholt":
+        vorhanden = await db.pickup_reports.count_documents(
+            {"appointment_id": appt_id})
+        seit = appt.get("status_changed_at") or ""
+        frisch = False
+        try:
+            from datetime import datetime, timedelta, timezone
+            t = datetime.fromisoformat(seit)
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            frisch = datetime.now(timezone.utc) - t <= timedelta(hours=24)
+        except (TypeError, ValueError):
+            frisch = False
+        if vorhanden or not frisch:
+            raise HTTPException(409, "Termin ist bereits 'abgeholt' — der "
+                                     "Abholbericht kann nur einmal direkt nach "
+                                     "der Abholung eingereicht werden; "
+                                     "Korrekturen nur ueber den Haendler.")
+    else:
+        _termin_offen_oder_409(appt)
 
     # Fotos aus base64 in den Storage auslagern (nie in Mongo speichern).
     from storage_service import make_key, storage, StorageError

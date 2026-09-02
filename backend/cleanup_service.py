@@ -109,8 +109,12 @@ async def _delete_report_photos(db, appt_id: str, now: datetime, stats: dict) ->
             key = entry.get("photo_key")
             if not key:
                 continue
+            # Berichtsfotos liegen im UPLOAD-Storage (storage_service, Prefix
+            # "pickup/") — nicht im Snapshot-Storage. Vorher loeschte dieser
+            # Job im falschen Backend, die Fotos blieben liegen (Runde 4).
             try:
-                delete_object(key)
+                from storage_service import storage
+                storage.delete(key)
             except Exception as exc:  # noqa: BLE001
                 log.warning("report photo delete failed for %s: %s", key, exc)
             entry["photo_key"] = None
@@ -394,7 +398,6 @@ SNAPSHOT_RETENTION_DAYS = int(os.environ.get("SNAPSHOT_RETENTION_DAYS", "60"))
 
 
 async def _expire_old_snapshots(db) -> int:
-    from storage_service import storage, StorageError
     cutoff = (datetime.now(timezone.utc)
               - timedelta(days=SNAPSHOT_RETENTION_DAYS)).isoformat()
     # Fahrzeuge mit Kaufvertrag sind geschuetzt (Beweis!).
@@ -409,12 +412,15 @@ async def _expire_old_snapshots(db) -> int:
     async for snap in cursor:
         if snap.get("vehicle_id") in protected:
             continue
+        # Snapshots liegen im SNAPSHOT-Storage (snapshot_service) — der
+        # Upload-Storage kannte diese Pfade nicht, der Verfall loeschte
+        # nichts (Runde 4).
         for key in (snap.get("pdf_path"), snap.get("png_path")):
             if key:
                 try:
-                    storage.delete(key)
-                except StorageError:
-                    pass
+                    delete_object(key)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("snapshot expire delete failed for %s: %s", key, exc)
         await db.listing_snapshots.update_one(
             {"id": snap["id"]},
             {"$set": {"status": "expired", "expired_at": now_iso()},

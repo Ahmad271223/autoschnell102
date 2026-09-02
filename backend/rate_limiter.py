@@ -6,7 +6,7 @@ common brute-force and credential-stuffing attacks on a single-server setup.
 
 Usage:
     from rate_limiter import login_limiter
-    if not login_limiter.check(ip):
+    if not await login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 """
 import os

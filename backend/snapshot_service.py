@@ -73,6 +73,47 @@ SNAPSHOT_CONCURRENCY = int(
 # Semaphore statt Lock: erlaubt N gleichzeitige Snapshots (N=1 == altes Lock).
 _browser_lock = asyncio.Semaphore(max(1, SNAPSHOT_CONCURRENCY))
 
+WORKER_TIMEOUT_SECONDS = int(os.environ.get("SNAPSHOT_WORKER_TIMEOUT", "90"))
+
+
+def _run_worker(args, stdin_text=None, timeout=None):
+    """Playwright-Worker als EIGENE Prozessgruppe starten und bei Timeout
+    die GANZE Gruppe beenden (Pruefbericht Runde 4): subprocess.run
+    killte nur den Python-Worker, die von ihm gestarteten Chromium-
+    Prozesse liefen als Waisen weiter und frassen RAM/CPU."""
+    import signal
+    env = os.environ.copy()
+    if sys.platform == "win32":
+        env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        flags = {"start_new_session": True}
+    proc = subprocess.Popen(
+        args, stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **flags)
+    try:
+        out, err = proc.communicate(
+            input=stdin_text.encode("utf-8") if stdin_text is not None else None,
+            timeout=timeout or WORKER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=15)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        proc.communicate(timeout=10)
+        raise RuntimeError("Playwright-Worker: Zeitlimit ueberschritten, "
+                           "Prozessgruppe beendet")
+    return (out.decode("utf-8", "replace"), err.decode("utf-8", "replace"),
+            proc.returncode)
+
 
 # -------------------- Object Storage --------------------
 def init_storage() -> Optional[str]:
@@ -356,21 +397,9 @@ async def _capture_with_playwright(url: str) -> tuple[bytes, bytes]:
         worker = Path(__file__).parent / "_playwright_worker.py"
         loop = asyncio.get_running_loop()
 
-        def _run():
-            # Auf Windows zeigt PLAYWRIGHT_BROWSERS_PATH auf den Linux-Pfad
-            # /pw-browsers (aus server.py). Wir entfernen ihn damit Playwright
-            # seinen eigenen Windows-Default-Pfad nutzt.
-            env = os.environ.copy()
-            if sys.platform == "win32":
-                env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-            result = subprocess.run(
-                [sys.executable, str(worker), url],
-                capture_output=True, text=True, timeout=90,
-                env=env,
-            )
-            return result.stdout, result.stderr, result.returncode
-
-        stdout, stderr, rc = await loop.run_in_executor(None, _run)
+        # Eigene Prozessgruppe + Gruppen-Kill bei Timeout (siehe _run_worker).
+        stdout, stderr, rc = await loop.run_in_executor(
+            None, _run_worker, [sys.executable, str(worker), url])
         try:
             data = json.loads(stdout)
         except Exception:
@@ -612,18 +641,8 @@ async def _render_rebuild_html(html: str) -> tuple[bytes, bytes]:
         worker = Path(__file__).parent / "_playwright_worker.py"
         loop = asyncio.get_running_loop()
 
-        def _run():
-            env = os.environ.copy()
-            if sys.platform == "win32":
-                env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-            result = subprocess.run(
-                [sys.executable, str(worker), "--html-stdin"],
-                input=html, capture_output=True, text=True, timeout=90,
-                encoding="utf-8", env=env,
-            )
-            return result.stdout, result.stderr
-
-        stdout, stderr = await loop.run_in_executor(None, _run)
+        stdout, stderr, _rc = await loop.run_in_executor(
+            None, _run_worker, [sys.executable, str(worker), "--html-stdin"], html)
         try:
             data = json.loads(stdout)
         except Exception:

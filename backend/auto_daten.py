@@ -43,6 +43,11 @@ _PII_MUSTER = (
     re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),   # E-Mail
     re.compile(r"(?:\+?\d[\s\-/()]*){8,}"),                          # Telefon
     re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b"),                          # FIN/VIN
+    # Strasse + Hausnummer ("Musterstr. 12", "Am Kanal 3a", "Hauptstrasse 7")
+    re.compile(r"(?i)\b[\w\u00e4\u00f6\u00fc\u00df.-]*(stra\u00dfe|strasse|str\.|weg|allee|platz|gasse|ring|damm|ufer)\s*\d{1,4}\s*[a-z]?\b"),
+    re.compile(r"\b\d{5}\s+[A-Z\u00c4\u00d6\u00dc][a-z\u00e4\u00f6\u00fc\u00df]{2,}"),   # PLZ + Ort
+    re.compile(r"\b[A-Z\u00c4\u00d6\u00dc]{1,3}-[A-Z\u00c4\u00d6\u00dc]{1,2}\s?\d{1,4}[EH]?\b"),  # Kennzeichen
+    re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}\b"),         # IBAN
 )
 
 
