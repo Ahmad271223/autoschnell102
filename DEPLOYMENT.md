@@ -63,6 +63,22 @@ docker run --rm -v autoschnell_backups_data:/b -v /mnt/storagebox:/dest \
 ```
 Wiederherstellen: `backend/scripts/restore_mongo.py <backup-ordner>`.
 
+## Auto-Daten & 90-Tage-Löschung
+- Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)
+  werden nach `VERTRAG_AUFBEWAHRUNG_TAGE` (Standard 90) vom stündlichen
+  Aufräumjob **vollständig gelöscht**; Terminverweise auf den Vertrag werden
+  gekappt.
+- Bei jeder Vertragserstellung entsteht zusätzlich ein **anonymer
+  Auto-Datensatz** in `admin_vehicle_data` (nur Marke, Modell, EZ, km,
+  Kraftstoff, PS, kW, Kaufpreis in Cent, Schäden). Er hat keine Verbindung
+  zu Vertrag, Händler oder Personen und bleibt dauerhaft; nur der Super-Admin
+  sieht ihn (`/api/admin/vehicle-data`, Menü „Auto-Daten").
+- Die Mongo aus `docker-compose.yml` läuft **ohne Replica Set**, daher gibt
+  es keine Multi-Dokument-Transaktionen. Der Schreibvorgang ist stattdessen
+  idempotent abgesichert (Datensatz → Vertrag → Rollback bei Fehler) und ein
+  Reparaturlauf trägt fehlende Datensätze nach. Wer echte Transaktionen will,
+  startet Mongo mit `--replSet rs0` und führt einmalig `rs.initiate()` aus.
+
 ## Skalieren (mehr Last)
 - **Mehr CPU:** Hetzner-Konsole → Server → „Rescale" (2 Min), dann in
   `.env` `WEB_CONCURRENCY` erhöhen und `docker compose up -d`.

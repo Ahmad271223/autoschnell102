@@ -206,10 +206,70 @@ async def _cleanup_once(db) -> dict:
 
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
     stats["archived"] = await _archive_expired_bestand(db, now)
+    # ---- 90-Tage-Regel: Kaufvertraege samt Personendaten loeschen ----
+    stats["contracts_deleted"] = await vertraege_nach_frist_loeschen(db, now)
+    stats["auto_daten_repariert"] = await auto_daten_reparieren(db)
 
-    if stats["cleaned"] or stats["snapshots_deleted"] or stats["archived"]:
+    if any(stats.values()):
         log.info("cleanup run: %s", stats)
     return stats
+
+
+# Kaufvertraege (Personendaten des Verkaeufers, Unterschriften, PDF) werden
+# nach dieser Frist VOLLSTAENDIG geloescht. Der anonyme Auto-Datensatz in
+# admin_vehicle_data bleibt bewusst bestehen (auto_daten.py).
+VERTRAG_AUFBEWAHRUNG_TAGE = int(os.environ.get("VERTRAG_AUFBEWAHRUNG_TAGE", "90"))
+
+
+async def vertraege_nach_frist_loeschen(db, now: datetime) -> int:
+    """Loescht alle Kaufvertraege, die aelter als VERTRAG_AUFBEWAHRUNG_TAGE
+    sind: Vertragsdokument (inkl. contract_data mit Verkaeufername/Adresse/
+    Telefon/E-Mail, PDF, Bilder-URLs, Versandstatus), alle archivierten
+    Vorversionen und die Vertragsverweise der Termine.
+
+    Bewusst NICHT angefasst: admin_vehicle_data — der dauerhafte Datensatz
+    hat keine Verbindung mehr zum Vertrag und darf hier weder geloescht
+    noch ueber admin_vehicle_data_id adressiert werden."""
+    cutoff = (now - timedelta(days=VERTRAG_AUFBEWAHRUNG_TAGE)).isoformat()
+    geloescht = 0
+    cursor = db.generated_pdfs.find(
+        {"created_at": {"$lte": cutoff}},
+        {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1})
+    async for c in cursor:
+        cid = c["id"]
+        await db.generated_pdf_versions.delete_many({"contract_id": cid})
+        await db.appointments.update_many(
+            {"contract_id": cid},
+            {"$set": {"contract_id": None, "updated_at": now.isoformat()}})
+        res = await db.generated_pdfs.delete_one({"id": cid})
+        if not res.deleted_count:
+            continue
+        await db.activity_logs.insert_one({
+            "id": __import__("uuid").uuid4().hex,
+            "dealer_id": c.get("dealer_id"), "user_id": "",
+            "action": "vertrag.geloescht.90tage",
+            "ref": cid, "meta": {"contract_no": c.get("contract_no")},
+            "created_at": now.isoformat(),
+        })
+        geloescht += 1
+    return geloescht
+
+
+async def auto_daten_reparieren(db, limit: int = 500) -> int:
+    """Reparatur unvollstaendiger Schreibvorgaenge / Backfill: Vertraege
+    ohne admin_vehicle_data_id bekommen ihren anonymen Datensatz
+    nachgetragen (atomarer Guard in auto_daten.nachtragen)."""
+    import auto_daten
+    repariert = 0
+    cursor = db.generated_pdfs.find(
+        {"admin_vehicle_data_id": {"$exists": False}},
+        {"_id": 0, "id": 1, "contract_data": 1, "make": 1, "model": 1,
+         "vehicle_id": 1, "dealer_id": 1},
+    ).limit(limit)
+    async for c in cursor:
+        if await auto_daten.nachtragen(db, c):
+            repariert += 1
+    return repariert
 
 
 async def _archive_expired_bestand(db, now: datetime) -> int:

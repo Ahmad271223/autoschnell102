@@ -333,6 +333,13 @@ async def ensure_indexes():
     await db.listing_snapshots.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.listing_snapshots.create_index([("vehicle_id", 1), ("status", 1)])
     await db.listing_snapshots.create_index([("status", 1), ("created_at", 1)])
+    # Auto-Daten (dauerhaft, anonym — auto_daten.py): eindeutige Zufalls-id,
+    # Suche nach Marke/Modell, Filter; KEIN Index auf irgendeine Quell-ID,
+    # weil es keine gibt. Vertraege: created_at fuer die 90-Tage-Loeschung.
+    await db.admin_vehicle_data.create_index("id", unique=True)
+    await db.admin_vehicle_data.create_index([("brand", 1), ("model", 1)])
+    await db.admin_vehicle_data.create_index("purchase_price_cents")
+    await db.generated_pdfs.create_index("created_at")
     # Passwort-Reset-Tokens: Lookup + automatisches Wegräumen
     await db.password_resets.create_index("token_hash")
     # Legacy-Index entfernen, falls noch vorhanden

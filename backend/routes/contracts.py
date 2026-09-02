@@ -27,6 +27,7 @@ from deps import (
     current_firma,
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
+import auto_daten
 from lifecycle import try_set_lifecycle
 from pdf_service import generate_contract_pdf
 
@@ -322,7 +323,17 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
-    await db.generated_pdfs.insert_one(doc)
+    # Dauerhafte, anonyme Auto-Daten (siehe auto_daten.py): ZUERST der
+    # Datensatz, dann der Vertrag mit dessen zufaelliger id. Scheitert der
+    # Vertrags-Insert, wird der Datensatz sofort wieder entfernt — es gibt
+    # nie einen Vertrag ohne Auto-Daten und keinen Datensatz ohne Vertrag.
+    auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+    doc["admin_vehicle_data_id"] = auto_daten_id
+    try:
+        await db.generated_pdfs.insert_one(doc)
+    except Exception:
+        await auto_daten.zurueckrollen(db, auto_daten_id)
+        raise
     await db.vehicles.update_one(
         {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
         {"$set": {"status": "Vertrag erstellt", "purchase_price": body.purchase_price}},
@@ -685,6 +696,14 @@ async def regenerate_contract_for_pickup(
              "version_vorher": alte_version,
          }}},
     )
+    # Vertragskorrektur innerhalb der Frist: den BESTEHENDEN Auto-Datensatz
+    # aktualisieren (nie ein zweiter); Altvertraege ohne id bekommen ihn
+    # hier nachgetragen.
+    if doc.get("admin_vehicle_data_id"):
+        await auto_daten.aktualisieren(db, doc["admin_vehicle_data_id"],
+                                       contract_dict, vehicle)
+    else:
+        await auto_daten.nachtragen(db, {**doc, "contract_data": contract_dict})
     await log_activity(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
                        ref=contract_id,
                        meta={"von": alt_datum, "auf": neu_datum})
