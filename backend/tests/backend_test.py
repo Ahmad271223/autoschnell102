@@ -113,23 +113,14 @@ class TestAuth:
         assert d["subscription"]["active"] is True
         assert d["dealer"] is not None
 
-    def test_mehrgeraete_max_drei_sitzungen(self):
-        """Mehrgeraete-Login (09/2026): bis zu 3 Geraete gleichzeitig
-        (Handy + PC + Tablet). Beim 4. Login faellt die AELTESTE Sitzung
-        raus — Konto-Teilen im grossen Stil bleibt unattraktiv."""
+    def test_single_session_invalidates_old(self):
         email = f"TEST_sess_{uuid.uuid4().hex[:8]}@autohandel.app"
         requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "TEST Sess"})
         t1 = _login(email, "Password123!")
         t2 = _login(email, "Password123!")
-        t3 = _login(email, "Password123!")
-        # Drei Geraete: alle drei gleichzeitig gueltig
-        for t in (t1, t2, t3):
-            assert requests.get(f"{API}/auth/me", headers=_hdr(t)).status_code == 200
-        # Viertes Geraet: aelteste Sitzung (t1) wird verdraengt
-        t4 = _login(email, "Password123!")
+        assert t1 != t2
         assert requests.get(f"{API}/auth/me", headers=_hdr(t1)).status_code == 401
-        for t in (t2, t3, t4):
-            assert requests.get(f"{API}/auth/me", headers=_hdr(t)).status_code == 200
+        assert requests.get(f"{API}/auth/me", headers=_hdr(t2)).status_code == 200
 
 
 # ============== SUBSCRIPTION GATING ==============

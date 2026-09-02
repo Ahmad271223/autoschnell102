@@ -86,7 +86,6 @@ async def register(body: RegisterIn, request: Request):
         "password_hash": await hash_password_async(body.password),
         "role": "dealer", "active": True,
         "dealer_id": dealer_id, "current_session_id": sid,
-        "session_ids": [sid],
         "created_at": now_iso(),
     }
     await db.users.insert_one(user_doc)
@@ -160,13 +159,7 @@ async def login(body: LoginIn, request: Request):
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
     sid = new_session_id()
-    # Mehrgeraete: Sitzung in die Liste aufnehmen (aelteste faellt raus,
-    # Limit MAX_GERAETE) — Handy und PC koennen gleichzeitig angemeldet sein.
-    from deps import MAX_GERAETE
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$set": {"current_session_id": sid},
-         "$push": {"session_ids": {"$each": [sid], "$slice": -MAX_GERAETE}}})
+    await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": sid}})
     await log_activity(user.get("dealer_id", ""), user["id"], "auth.login",
                        meta={"email": user.get("email", ""), "ip": ip})
     token = create_token(user["id"], sid)
@@ -177,12 +170,7 @@ async def login(body: LoginIn, request: Request):
 
 @router.post("/auth/logout")
 async def logout(user=Depends(current_user)):
-    # Nur DIESES Geraet abmelden — andere Geraete des Kontos bleiben aktiv.
-    sid = user.get("_sid")
-    update = {"$pull": {"session_ids": sid}}
-    if user.get("current_session_id") == sid:
-        update["$set"] = {"current_session_id": None}
-    await db.users.update_one({"id": user["id"]}, update)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": None}})
     await log_activity(user.get("dealer_id", ""), user["id"], "auth.logout",
                        meta={"email": user.get("email", "")})
     return {"ok": True}
@@ -304,8 +292,8 @@ async def password_reset_confirm(body: ResetConfirmIn, request: Request):
     await db.users.update_one(
         {"id": u["id"]},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
-                  # Passwort-Reset beendet ALLE Sitzungen auf allen Geraeten.
-                  "current_session_id": None, "session_ids": []}})
+                  # Alle bestehenden Sessions beenden (Single-Session strikt)
+                  "current_session_id": None}})
     await db.password_resets.update_one(
         {"id": doc["id"]}, {"$set": {"used": True, "used_at": now_iso()}})
     await log_activity("", u["id"], "auth.passwort.reset.durchgefuehrt",
