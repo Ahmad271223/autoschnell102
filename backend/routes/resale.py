@@ -78,8 +78,12 @@ def _build_description(data: dict, known_defects: List[str]) -> str:
             if isinstance(data.get("mileage"), (int, float)) else data.get("mileage")),
         ("Kraftstoff", data.get("fuel_label") or data.get("fuel")),
         ("Getriebe", data.get("gearbox_label") or data.get("gearbox")),
-        ("Leistung", f"{data.get('power_kw')} kW / {data.get('power_ps')} PS"
-            if data.get("power_kw") or data.get("power_ps") else None),
+        # Nur vorhandene Teile ausgeben — sonst stand bei fehlendem kW
+        # woertlich "None kW / 110 PS" im Inserat.
+        ("Leistung", " / ".join(t for t in (
+            f"{data.get('power_kw')} kW" if data.get("power_kw") else None,
+            f"{data.get('power_ps')} PS" if data.get("power_ps") else None,
+        ) if t) or None),
         ("Farbe", data.get("color")),
         ("Vorbesitzer", data.get("previous_owners")),
     ]
