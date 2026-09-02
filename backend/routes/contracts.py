@@ -514,19 +514,48 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    # Prepare share targets (mocked for now – real provider integration later)
+    # Ehrlicher Versand-Status (PR-Review 09/2026): "versendet" gibt es
+    # NUR nach tatsaechlicher Zustellung an den Anbieter. WhatsApp oeffnet
+    # lediglich den Chat (PDF haengt der Nutzer selbst an) -> der Vertrag
+    # wird als "versand_vorbereitet" gefuehrt, nicht als versendet.
     out: dict = {"channel": body.channel, "status": "ok", "sent_at": now_iso()}
     if body.channel == "whatsapp":
         digits = "".join(ch for ch in (body.recipient or "") if ch.isdigit())
         from urllib.parse import quote_plus
         out["wa_url"] = f"https://wa.me/{digits}?text={quote_plus(body.message)}"
+        out["zustellung"] = "chat_geoeffnet"
+        neuer_status = "versand_vorbereitet"
     elif body.channel == "email":
-        out["mocked"] = True  # MOCKED until SMTP/Resend key provided
+        from provider_fetch import MOCK_PROVIDER_FETCH
+        import email_service
+        if MOCK_PROVIDER_FETCH:
+            # Last-/CI-Tests: kein echter Versand, aber ehrlich markiert.
+            out["zustellung"] = "mock"
+            neuer_status = "versendet"
+        elif not email_service.email_configured():
+            raise HTTPException(503,
+                "E-Mail-Versand ist nicht eingerichtet (SMTP_* in der .env "
+                "setzen) — der Vertrag wurde NICHT versendet. Alternativ per "
+                "WhatsApp teilen oder das PDF herunterladen.")
+        else:
+            pdf_bytes = base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+            ok = await email_service.send_email(
+                body.recipient, body.subject or "Ihr Kaufvertrag",
+                body.message or "Anbei der Kaufvertrag als PDF.",
+                anhang=pdf_bytes, anhang_name=c.get("filename") or "Kaufvertrag.pdf")
+            if not ok:
+                raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
+                                         "bitte in ein paar Minuten erneut "
+                                         "versuchen. Der Vertrag wurde NICHT "
+                                         "als versendet markiert.")
+            out["zustellung"] = "versendet"
+            neuer_status = "versendet"
     else:
         raise HTTPException(400, "Unbekannter Kanal")
     send_entry = {
         "channel": body.channel, "recipient": body.recipient,
         "subject": body.subject, "sent_at": out["sent_at"],
+        "zustellung": out.get("zustellung", ""),
     }
     if body.idempotency_key:
         send_entry["idempotency_key"] = body.idempotency_key
@@ -537,7 +566,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             {"id": contract_id, "dealer_id": user["dealer_id"],
              "send_status.idempotency_key": {"$ne": body.idempotency_key}},
             {"$push": {"send_status": send_entry},
-             "$set": {"status": "versendet", "updated_at": now_iso()}},
+             "$set": {"status": neuer_status, "updated_at": now_iso()}},
         )
         if res.modified_count == 0:
             out["bereits_gesendet"] = True
@@ -546,7 +575,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         await db.generated_pdfs.update_one(
             {"id": contract_id},
             {"$push": {"send_status": send_entry},
-             "$set": {"status": "versendet", "updated_at": now_iso()}},
+             "$set": {"status": neuer_status, "updated_at": now_iso()}},
         )
     await log_activity(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
     return out

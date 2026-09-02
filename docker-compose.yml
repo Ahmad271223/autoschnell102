@@ -7,6 +7,12 @@ services:
   mongo:
     image: mongo:8.0
     restart: unless-stopped
+    # Authentifizierung ab dem ERSTEN Start (der Produktions-Check des
+    # Backends verlangt Zugangsdaten in MONGO_URL). Werte in .env setzen.
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:?MONGO_USER in .env setzen}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?MONGO_PASSWORD in .env setzen}
+    command: ["mongod", "--auth"]
     volumes:
       - mongo_data:/data/db
     # Kein Port nach aussen — nur intern erreichbar.
@@ -24,7 +30,7 @@ services:
         condition: service_healthy
     environment:
       - APP_ENV=production
-      - MONGO_URL=${MONGO_URL:-mongodb://mongo:27017}
+      - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin}
       - DB_NAME=${DB_NAME:-autoschnell}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
       - TRUST_PROXY=true
@@ -32,7 +38,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_EMAIL=${ADMIN_EMAIL}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
-      - SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL:-}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
       - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -45,6 +51,29 @@ services:
       - BACKUP_DIR=/backups
       - STRIPE_API_KEY=${STRIPE_API_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # Anbieter-Abrufe (mobile.de + AutoScout24 via Apify; optional
+      # offizielle mobile.de-API; optional Rotations-Proxy fuer
+      # Kleinanzeigen-Server-Abrufe)
+      - APIFY_TOKEN=${APIFY_TOKEN:-}
+      - APIFY_MOBILE_ACTOR=${APIFY_MOBILE_ACTOR:-}
+      - APIFY_AUTOSCOUT_ACTOR=${APIFY_AUTOSCOUT_ACTOR:-}
+      - MOBILE_API_USER=${MOBILE_API_USER:-}
+      - MOBILE_API_PASS=${MOBILE_API_PASS:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_ENABLED=${PROXY_ENABLED:-}
+      # Kleinanzeigen ueber die Browser-Erweiterung der Nutzer abrufen
+      - CLIENT_FETCH_KLEINANZEIGEN=${CLIENT_FETCH_KLEINANZEIGEN:-}
+      # Snapshots (Playwright) — Parallelitaet je Prozess; optional
+      # browserless.io statt lokalem Chromium
+      - SNAPSHOT_CONCURRENCY=${SNAPSHOT_CONCURRENCY:-3}
+      - BROWSERLESS_URL=${BROWSERLESS_URL:-}
+      - BROWSERLESS_TOKEN=${BROWSERLESS_TOKEN:-}
+      # Optionaler S3-kompatibler Objektspeicher (sonst lokales Volume)
+      - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - S3_REGION=${S3_REGION:-}
     volumes:
       - uploads_data:/app/uploads     # Fotos/Vertraege/Snapshots/Unterschriften
       - backups_data:/backups         # taegliche Backups (backup_service.py)

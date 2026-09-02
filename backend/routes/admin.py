@@ -248,9 +248,18 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         raise HTTPException(400, "Du kannst dich nicht selbst löschen")
 
     if u.get("role") != "dealer":
-        # Einzelner Mitarbeiter-/Kaeufer-Account: nur diesen entfernen.
+        # Einzelner Mitarbeiter-/Kaeufer-Account: diesen entfernen — samt
+        # seiner personenbezogenen Reste (DSGVO): Netzwerk-Mitgliedschaften,
+        # Favoriten, Kaufanfragen und offene Passwort-Resets. Vorher blieb
+        # all das nach der "vollstaendigen" Loeschung zurueck.
         await db.users.delete_one({"id": user_id})
         await db.subscriptions.delete_many({"subject_user_id": user_id})
+        await db.network_members.delete_many({"buyer_user_id": user_id})
+        await db.buyer_favorites.delete_many({"buyer_user_id": user_id})
+        await db.listing_interest.delete_many({"buyer_user_id": user_id})
+        await db.plan_requests.delete_many({"buyer_user_id": user_id})
+        if u.get("email"):
+            await db.password_resets.delete_many({"email": u["email"]})
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.geloescht", ref=user_id,
                            meta={"email": u.get("email", ""),
@@ -279,6 +288,22 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
                 geloescht[coll] = res.deleted_count
+        # GESPEICHERTE DATEIEN der Firma mitloeschen (DSGVO): Unterschriften
+        # + Protokoll-PDFs (protocol/), Abhol-/Schadenfotos (pickup/),
+        # Inserats-Fotos (resale/), Logo (logo/). Beweis-Snapshots bleiben
+        # bewusst (haendlerneutral geteilt, s.o.). Fehler beim Dateiloeschen
+        # brechen die Kontoloeschung nicht ab, werden aber ausgewiesen.
+        from storage_service import storage
+        dateien = 0
+        datei_fehler = []
+        for kategorie in ("protocol", "pickup", "resale", "logo"):
+            try:
+                dateien += storage.delete_prefix(f"{kategorie}/{dealer_id}/")
+            except Exception as exc:
+                datei_fehler.append(f"{kategorie}: {exc}")
+        geloescht["dateien"] = dateien
+        if datei_fehler:
+            geloescht["datei_fehler"] = datei_fehler
         await db.dealers.delete_many({"id": dealer_id})
     else:
         await db.users.delete_one({"id": user_id})

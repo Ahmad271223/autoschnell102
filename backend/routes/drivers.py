@@ -271,7 +271,7 @@ async def driver_register(body: DriverAccountRegister, request: Request):
     """Fahrer registriert sich in der Fahrer-App."""
     # Rate-limit: 5 new accounts per IP per hour.
     ip = client_ip(request)
-    if not driver_register_limiter.check(ip):
+    if not await driver_register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     email = body.email.lower().strip()
     existing = await db.driver_accounts.find_one({"email": email})
@@ -304,7 +304,7 @@ async def driver_register(body: DriverAccountRegister, request: Request):
 async def driver_login(body: DriverAccountLogin, request: Request):
     # Rate-limit by client IP (15 attempts / 60 s).
     ip = client_ip(request)
-    if not driver_login_limiter.check(ip):
+    if not await driver_login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()
     da = await db.driver_accounts.find_one({"email": email})

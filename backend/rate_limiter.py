@@ -51,8 +51,11 @@ def client_ip(request) -> str:
     if _TRUST_PROXY:
         fwd = request.headers.get("x-forwarded-for", "")
         if fwd:
-            # "client, proxy1, proxy2" -> erster Eintrag ist der Client.
-            return fwd.split(",")[0].strip()
+            # LETZTEN Eintrag nehmen: der stammt vom EIGENEN Proxy. Der
+            # erste Eintrag ist vom Client faelschbar (mitgesendeter
+            # X-Forwarded-For) — damit liesse sich das Login-Rate-Limit
+            # mit je Anfrage neuer Fantasie-IP umgehen.
+            return fwd.split(",")[-1].strip()
         real = request.headers.get("x-real-ip", "")
         if real:
             return real.strip()
@@ -60,9 +63,17 @@ def client_ip(request) -> str:
 
 
 class SlidingWindowRateLimiter:
-    """Thread-safe sliding-window rate limiter."""
+    """Rate-Limiter mit gemeinsamem Mongo-Zaehler (alle Worker) und
+    In-Prozess-Fallback."""
 
-    def __init__(self, max_attempts: int = 10, window_seconds: int = 60):
+    _index_ok = False
+
+    def __init__(self, max_attempts: int = 10, window_seconds: int = 60,
+                 name: str = ""):
+        # Stabiler Name = gemeinsamer Schluessel ueber ALLE Worker-Prozesse
+        # (id(self) o.ae. waere je Prozess anders und wuerde die Zaehler
+        # wieder trennen).
+        self.name = name or f"limit{max_attempts}per{window_seconds}"
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
         self._buckets: dict[str, list[float]] = defaultdict(list)
@@ -71,11 +82,14 @@ class SlidingWindowRateLimiter:
         self._gc_every = 500
         self._calls_since_gc = 0
 
-    def check(self, key: str) -> bool:
-        """Return True if the request is allowed; False if the key is rate-limited.
+    async def check(self, key: str) -> bool:
+        """True = erlaubt, False = limitiert. VOR der Verarbeitung rufen —
+        auch fehlgeschlagene Versuche zaehlen.
 
-        Call this BEFORE processing the request.  The attempt is counted even
-        when the login fails, so a failed login still increments the counter.
+        Der Zaehler liegt in MongoDB und gilt damit GEMEINSAM fuer alle
+        Uvicorn-Worker (vorher zaehlte jeder der z.B. 8 Prozesse separat —
+        aus 10 Versuchen/Minute wurden praktisch bis zu 80). Faellt die
+        Datenbank aus, greift der bisherige In-Prozess-Zaehler als Netz.
         """
         # Test/CI-Bypass — niemals in Produktion aktivieren.
         if not _RATE_LIMIT_ENABLED:
@@ -83,6 +97,31 @@ class SlidingWindowRateLimiter:
         # Lokale Zugriffe (gleicher Rechner) nicht limitieren.
         if _EXEMPT_LOOPBACK and key in _LOOPBACK_KEYS:
             return True
+        try:
+            return await self._check_mongo(key)
+        except Exception:
+            return self._check_lokal(key)
+
+    async def _check_mongo(self, key: str) -> bool:
+        """Festes Zeitfenster, atomar per $inc — ein Dokument je
+        (Limiter, Schluessel, Fenster); TTL raeumt alte Fenster weg."""
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+        from pymongo import ReturnDocument
+        from deps import db
+        if not SlidingWindowRateLimiter._index_ok:
+            await db.rate_limits.create_index("ablauf", expireAfterSeconds=0)
+            SlidingWindowRateLimiter._index_ok = True
+        fenster = int(_t.time() // self.window_seconds)
+        doc = await db.rate_limits.find_one_and_update(
+            {"_id": f"{self.name}:{key}:{fenster}"},
+            {"$inc": {"n": 1},
+             "$setOnInsert": {"ablauf": datetime.now(timezone.utc)
+                              + timedelta(seconds=self.window_seconds * 2)}},
+            upsert=True, return_document=ReturnDocument.AFTER)
+        return doc["n"] <= self.max_attempts
+
+    def _check_lokal(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self.window_seconds
         with self._lock:
@@ -113,22 +152,28 @@ class SlidingWindowRateLimiter:
         for k in stale:
             del self._buckets[k]
 
-    def reset(self, key: str) -> None:
-        """Clear the counter for a key (e.g. after a successful login)."""
+    async def reset(self, key: str) -> None:
+        """Zaehler eines Schluessels leeren (z.B. nach erfolgreichem Login)."""
         with self._lock:
             self._buckets.pop(key, None)
+        try:
+            from deps import db
+            await db.rate_limits.delete_many(
+                {"_id": {"$regex": f"^{self.name}:{key}:"}})
+        except Exception:
+            pass
 
 
 # Shared instances — imported directly by route modules.
 # 10 attempts / 60 s per IP for the dealer/admin login.
-login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60)
+login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login")
 
 # Slightly more lenient for the driver app (mobile clients can have flaky
 # connectivity and may retry quickly), but still bounded.
-driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60)
+driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60, name="fahrer-login")
 
 # Registration: 5 new accounts per IP per hour prevents spam account creation.
-register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
+register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung")
 
 # Driver registration: same limit.
-driver_register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
+driver_register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung")

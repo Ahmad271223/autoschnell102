@@ -34,12 +34,16 @@ def email_configured() -> bool:
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
 
 
-def _send_sync(to: str, subject: str, text: str) -> None:
+def _send_sync(to: str, subject: str, text: str,
+               anhang: bytes = None, anhang_name: str = "") -> None:
     msg = EmailMessage()
     msg["From"] = SMTP_FROM if "<" in SMTP_FROM else formataddr(("AutoSchnell", SMTP_FROM))
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(text)
+    if anhang:
+        msg.add_attachment(anhang, maintype="application", subtype="pdf",
+                           filename=anhang_name or "Dokument.pdf")
 
     ctx = ssl.create_default_context()
     if SMTP_PORT == 465:
@@ -53,7 +57,8 @@ def _send_sync(to: str, subject: str, text: str) -> None:
             s.send_message(msg)
 
 
-async def send_email(to: str, subject: str, text: str) -> bool:
+async def send_email(to: str, subject: str, text: str,
+                     anhang: bytes = None, anhang_name: str = "") -> bool:
     """Versand im Thread (SMTP blockiert). True bei Erfolg, False bei Fehler —
     Fehler werden geloggt, aber nicht geworfen (Aufrufer entscheidet über UX)."""
     if not email_configured():
@@ -61,7 +66,7 @@ async def send_email(to: str, subject: str, text: str) -> bool:
                     subject, to)
         return False
     try:
-        await asyncio.to_thread(_send_sync, to, subject, text)
+        await asyncio.to_thread(_send_sync, to, subject, text, anhang, anhang_name)
         log.info("email_service: '%s' an %s gesendet", subject, to)
         return True
     except Exception as exc:

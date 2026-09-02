@@ -278,13 +278,19 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     inv = await db.dealer_invites.find_one({"token": token})
     if not inv:
         return None
-    if inv["expires_at"] <= now_iso() or inv["used_count"] >= inv["max_uses"]:
-        return None
     if buyer_user_id in (inv.get("used_by") or []):
-        return inv["dealer_id"]  # bereits Mitglied
-    await db.dealer_invites.update_one(
-        {"id": inv["id"]},
+        return inv["dealer_id"]  # bereits Mitglied — verbraucht nichts
+    # ATOMAR pruefen UND verbrauchen: Gueltigkeit, Restnutzungen und die
+    # Erhoehung passieren in EINEM Schritt. Vorher (lesen, dann erhoehen)
+    # konnten zwei GLEICHZEITIGE Aufrufe denselben Einmal-Link beide
+    # erfolgreich einloesen.
+    verbraucht = await db.dealer_invites.find_one_and_update(
+        {"id": inv["id"],
+         "expires_at": {"$gt": now_iso()},
+         "$expr": {"$lt": ["$used_count", "$max_uses"]}},
         {"$inc": {"used_count": 1}, "$push": {"used_by": buyer_user_id}})
+    if not verbraucht:
+        return None
     await db.network_members.update_one(
         {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
         {"$setOnInsert": {"via_invite_id": inv["id"], "created_at": now_iso()}},
@@ -312,7 +318,7 @@ class BuyerRegisterIn(BaseModel):
 @router.post("/buyer/register")
 async def buyer_register(body: BuyerRegisterIn, request: Request):
     ip = client_ip(request)
-    if not register_limiter.check(ip):
+    if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     existing = await db.users.find_one(
         {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}})
@@ -352,7 +358,7 @@ class BuyerLoginIn(BaseModel):
 async def buyer_login(body: BuyerLoginIn, request: Request):
     """Login für Zwischenhändler (eigener Account, Rolle b2b_buyer)."""
     ip = client_ip(request)
-    if not login_limiter.check(ip):
+    if not await login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()
     u = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$",

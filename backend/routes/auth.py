@@ -22,7 +22,7 @@ from mobile_service import DEFAULT_RULES
 from rate_limiter import client_ip, SlidingWindowRateLimiter, login_limiter, register_limiter
 
 # Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
-reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
+reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="passwort-reset")
 
 router = APIRouter()
 
@@ -73,7 +73,7 @@ class TokenOut(BaseModel):
 async def register(body: RegisterIn, request: Request):
     # Rate-limit: 5 registrations per IP per hour.
     ip = client_ip(request)
-    if not register_limiter.check(ip):
+    if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     existing = await db.users.find_one({"email": body.email})
     if existing:
@@ -134,7 +134,7 @@ async def register(body: RegisterIn, request: Request):
 async def login(body: LoginIn, request: Request):
     # Rate-limit by client IP (10 attempts / 60 s).
     ip = client_ip(request)
-    if not login_limiter.check(ip):
+    if not await login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 
     # Accept email OR username. Email lookup is case-insensitive.
@@ -217,7 +217,7 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
     wenn der Account existiert, kein Sucher ist und SMTP konfiguriert ist."""
     from email_service import email_configured, send_email
     ip = client_ip(request)
-    if not reset_limiter.check(ip):
+    if not await reset_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anfragen – bitte später erneut versuchen.")
     if not email_configured():
         # Ehrlich statt Sackgasse: ohne SMTP kann kein Link verschickt werden.
@@ -272,7 +272,7 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
 @router.post("/auth/password-reset/confirm")
 async def password_reset_confirm(body: ResetConfirmIn, request: Request):
     ip = client_ip(request)
-    if not reset_limiter.check(ip):
+    if not await reset_limiter.check(ip):
         raise HTTPException(429, "Zu viele Versuche – bitte später erneut versuchen.")
     doc = await db.password_resets.find_one(
         {"token_hash": _hash_reset_token(body.token), "used": False}, {"_id": 0})
