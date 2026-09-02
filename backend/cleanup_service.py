@@ -269,6 +269,20 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
     async for c in cursor:
         if await auto_daten.nachtragen(db, c):
             repariert += 1
+    # Schema v2 (09/2026): Kaufdatum fuer Bestandsdatensaetze nachziehen,
+    # solange der Vertrag noch existiert (danach ist es nicht mehr
+    # rekonstruierbar — bewusst, denn genau das ist die Anonymisierung).
+    async for c in db.generated_pdfs.find(
+            {"admin_vehicle_data_id": {"$exists": True}},
+            {"_id": 0, "admin_vehicle_data_id": 1, "created_at": 1}).limit(limit):
+        tag = auto_daten.kaufdatum(c.get("created_at"))
+        if tag:
+            r = await db[auto_daten.COLLECTION].update_one(
+                {"id": c["admin_vehicle_data_id"],
+                 "purchase_date": {"$exists": False}},
+                {"$set": {"purchase_date": tag,
+                          "schema_version": auto_daten.SCHEMA_VERSION}})
+            repariert += r.modified_count
     return repariert
 
 

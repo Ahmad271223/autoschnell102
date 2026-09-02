@@ -41,7 +41,7 @@ KA_URL = f"https://www.kleinanzeigen.de/s-anzeige/autodaten/{KA_ID}-216-1"
 
 WHITELIST = {"id", "brand", "model", "first_registration", "mileage_km",
              "fuel_type", "power_ps", "power_kw", "purchase_price_cents",
-             "currency", "damages", "schema_version"}
+             "currency", "damages", "schema_version", "purchase_date"}
 API_FELDER = WHITELIST - {"id"}
 
 SELLER = {"seller_name": f"Verkaeufer Autodaten {SUF}",
@@ -204,7 +204,9 @@ def test_02_nur_whitelist_felder(welt):
     d = _datensatz(welt)
     felder = set(d.keys()) - {"_id"}
     assert felder == WHITELIST, f"unerwartete Felder: {felder ^ WHITELIST}"
-    assert d["schema_version"] == 1 and d["currency"] == "EUR"
+    assert d["schema_version"] == 2 and d["currency"] == "EUR"
+    # Kaufdatum: nur der Tag (JJJJ-MM-TT), kein Zeitstempel
+    assert d["purchase_date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def test_03_keine_verknuepfung_zu_vertrag_haendler_person(welt):
@@ -428,7 +430,8 @@ def test_15_pagination_stabil_ohne_duplikate(welt):
             "mileage_km": 1000 * i, "fuel_type": "Elektro" if i % 2 else "Benzin",
             "power_ps": 100 + i, "power_kw": 74 + i,
             "purchase_price_cents": 100000 + i * 1000, "currency": "EUR",
-            "damages": [], "schema_version": 1})
+            "damages": [], "schema_version": 2,
+            "purchase_date": f"2026-{1 + i % 12:02d}-{1 + i % 28:02d}"})
     gesehen, cursor, seiten = [], None, 0
     while True:
         params = {"limit": 50, "search": f"ZzSeed{SUF}"}
@@ -513,6 +516,42 @@ def test_19_datensatz_nach_loeschung_nicht_zuordenbar(welt):
                  SELLER["seller_email"], SELLER["seller_phone"],
                  welt["auto_ids"][0], "created_at", "dealer", "contract"):
         assert wert not in blob, wert
+
+
+def test_19b_gruppierte_ansicht(welt):
+    url = f"{API}/admin/vehicle-data/gruppiert"
+    for name in ("A", "H", "S", "B"):
+        assert requests.get(url, headers=welt[name], timeout=30).status_code == 403
+    assert requests.get(url, timeout=30).status_code == 401
+    r = requests.get(url, headers=welt["SA"], params={"search": f"ZzSeed{SUF}"},
+                     timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    assert r.headers.get("Cache-Control", "").lower() == "no-store"
+    b = r.json()
+    assert set(b.keys()) == {"marken", "total", "truncated", "sort"}
+    assert b["total"] == 120 and b["truncated"] is False and b["sort"] == "ps"
+    assert [m["name"] for m in b["marken"]] == [f"ZzSeed{SUF}"]
+    marke = b["marken"][0]
+    assert marke["anzahl"] == 120 and len(marke["modelle"]) == 120
+    # Jahr -> Kraftstoff -> Autos; Felder = API-Whitelist; Kaufdatum dabei
+    modell = marke["modelle"][0]
+    jahr = modell["jahre"][0]
+    kraft = jahr["kraftstoffe"][0]
+    assert jahr["jahr"].isdigit() and kraft["name"] in ("Benzin", "Elektro")
+    auto = kraft["autos"][0]
+    assert set(auto.keys()) == API_FELDER and auto["purchase_date"].startswith("2026-")
+    # Preis-Sortierung innerhalb der Kraftstoffgruppen
+    r = requests.get(url, headers=welt["SA"],
+                     params={"search": "VW", "sort": "price_desc"}, timeout=30)
+    assert r.status_code == 200
+    for m in r.json()["marken"]:
+        for mo in m["modelle"]:
+            for j in mo["jahre"]:
+                for k in j["kraftstoffe"]:
+                    preise = [a.get("purchase_price_cents") or -1 for a in k["autos"]]
+                    assert preise == sorted(preise, reverse=True), preise
+    assert requests.get(url, headers=welt["SA"], params={"sort": "DROP"},
+                        timeout=30).status_code == 422
 
 
 def test_20_lifecycle_loeschung_ueberlebt_datensatz_zweiter_vertrag(welt):

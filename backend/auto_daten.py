@@ -31,7 +31,7 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # v2: + purchase_date (Kaufdatum, nur der Tag)
 COLLECTION = "admin_vehicle_data"
 
 MAX_SCHAEDEN = 50            # feste Hoechstzahl an Schadens-Eintraegen
@@ -102,10 +102,22 @@ def schaeden_bereinigen(rohe: List[Any]) -> List[str]:
     return sauber
 
 
+def kaufdatum(wert) -> Optional[str]:
+    """Kaufdatum als 'JJJJ-MM-TT' (nur der Tag — kein Zeitstempel, der sich
+    mit Log- oder Vertragszeiten abgleichen liesse)."""
+    if not wert:
+        return None
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", str(wert))
+    return m.group(1) if m else None
+
+
 def daten_extrahieren(contract_dict: Dict[str, Any],
-                      vehicle: Dict[str, Any]) -> Dict[str, Any]:
+                      vehicle: Dict[str, Any],
+                      gekauft_am: Optional[str] = None) -> Dict[str, Any]:
     """Whitelist-Extraktion aus Vertrag + Fahrzeugdaten. Alles andere
-    (IDs, Personen, FIN, Fotos, Links) wird bewusst NICHT uebernommen."""
+    (IDs, Personen, FIN, Fotos, Links) wird bewusst NICHT uebernommen.
+    `gekauft_am`: Tag der Vertragserstellung (Wunsch 09/2026: Kaufdatum
+    in der Auto-Daten-Ansicht); None laesst ein vorhandenes Datum stehen."""
     c, v = contract_dict or {}, vehicle or {}
 
     def erst(*werte):
@@ -126,7 +138,7 @@ def daten_extrahieren(contract_dict: Dict[str, Any],
     if isinstance(c.get("damages"), list):
         schaeden_roh.extend(c["damages"])
 
-    return {
+    daten = {
         "brand": erst(c.get("vehicle_make"), v.get("make_label"), v.get("make")),
         "model": erst(c.get("vehicle_model"), v.get("model_label"), v.get("model")),
         "first_registration": ez_normalisieren(
@@ -140,14 +152,22 @@ def daten_extrahieren(contract_dict: Dict[str, Any],
         "damages": schaeden_bereinigen(schaeden_roh),
         "schema_version": SCHEMA_VERSION,
     }
+    tag = kaufdatum(gekauft_am)
+    if tag:
+        daten["purchase_date"] = tag
+    return daten
 
 
 async def anlegen(db, contract_dict: Dict[str, Any],
-                  vehicle: Dict[str, Any]) -> str:
+                  vehicle: Dict[str, Any],
+                  gekauft_am: Optional[str] = None) -> str:
     """Neuen Auto-Datensatz anlegen; liefert dessen zufaellige UUID.
     Idempotenter Upsert auf die frisch erzeugte id."""
+    from datetime import datetime, timezone
     datensatz_id = str(uuid.uuid4())
-    daten = daten_extrahieren(contract_dict, vehicle)
+    daten = daten_extrahieren(
+        contract_dict, vehicle,
+        gekauft_am or datetime.now(timezone.utc).isoformat())
     await db[COLLECTION].update_one(
         {"id": datensatz_id},
         {"$set": daten, "$setOnInsert": {"id": datensatz_id}},
@@ -164,12 +184,14 @@ async def zurueckrollen(db, datensatz_id: str) -> None:
 
 async def aktualisieren(db, datensatz_id: str,
                         contract_dict: Dict[str, Any],
-                        vehicle: Dict[str, Any]) -> None:
+                        vehicle: Dict[str, Any],
+                        gekauft_am: Optional[str] = None) -> None:
     """Zulaessige Vertragskorrektur innerhalb der 90 Tage: den
-    BESTEHENDEN Datensatz aktualisieren (kein Duplikat)."""
+    BESTEHENDEN Datensatz aktualisieren (kein Duplikat). Das Kaufdatum
+    wird nur gesetzt, wenn es mitgegeben wird (Korrektur aendert es nicht)."""
     if not datensatz_id:
         return
-    daten = daten_extrahieren(contract_dict, vehicle)
+    daten = daten_extrahieren(contract_dict, vehicle, gekauft_am)
     await db[COLLECTION].update_one({"id": datensatz_id}, {"$set": daten})
 
 
@@ -190,7 +212,8 @@ async def nachtragen(db, contract_doc: Dict[str, Any]) -> Optional[str]:
              "dealer_id": contract_doc.get("dealer_id")}, {"_id": 0, "data": 1})
         if v and isinstance(v.get("data"), dict):
             vehicle = {**v["data"], **{k: w for k, w in vehicle.items() if w}}
-    datensatz_id = await anlegen(db, cd, vehicle)
+    datensatz_id = await anlegen(db, cd, vehicle,
+                                 gekauft_am=contract_doc.get("created_at"))
     res = await db.generated_pdfs.update_one(
         {"id": contract_doc["id"],
          "admin_vehicle_data_id": {"$exists": False}},
