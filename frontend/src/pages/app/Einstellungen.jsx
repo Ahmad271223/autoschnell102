@@ -252,6 +252,7 @@ export default function Einstellungen() {
                              onChange={(v) => setRule("first_registration", { ...r.first_registration, mode: v })}
                              options={[
                                { v: "ignore", l: "Nicht übernehmen" },
+                               { v: "any", l: "Beliebig (Export-Standard)" },
                                { v: "exact", l: "1:1 (gleiches Jahr)" },
                                { v: "older_exact", l: "X Jahre älter" },
                              ]} />
@@ -703,6 +704,56 @@ function InvitePanel() {
                 )}
                 <button onClick={() => remove(inv)} className="text-zinc-500 hover:text-red-400">löschen</button>
               </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <NetzwerkMitglieder />
+    </div>
+  );
+}
+
+// Mitglieder des privaten Netzwerks: sichtbar und widerrufbar. Ein
+// Widerruf nimmt dem Zwischenhaendler sofort den Zugang zu privaten
+// Inseraten und Netzwerkpreisen (Backend: DELETE /dealer/network/members).
+function NetzwerkMitglieder() {
+  const [members, setMembers] = useState(null);
+
+  const load = async () => {
+    try { const { data } = await api.get("/dealer/network/members"); setMembers(data); }
+    catch (e) { setMembers([]); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const revoke = async (m) => {
+    if (!window.confirm(`${m.company_name || m.email} aus dem Netzwerk entfernen? Er sieht deine privaten Inserate danach nicht mehr.`)) return;
+    try { await api.delete(`/dealer/network/members/${m.buyer_user_id}`); toast.success("Zugang widerrufen"); load(); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+
+  return (
+    <div className="mt-4 pt-4 border-t" style={{ borderColor: "var(--divider)" }} data-testid="network-members">
+      <div className="text-sm font-semibold mb-1">Netzwerk-Mitglieder ({members?.length ?? "…"})</div>
+      <div className="text-xs text-zinc-500 mb-2">
+        Zwischenhändler, die über eine Einladung beigetreten sind. Zugang jederzeit widerrufbar.
+      </div>
+      {members === null ? (
+        <div className="text-xs text-zinc-500">Lädt…</div>
+      ) : members.length === 0 ? (
+        <div className="text-xs text-zinc-500">Noch keine Mitglieder.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {members.map((m) => (
+            <div key={m.buyer_user_id} className="flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2"
+                 style={{ borderColor: "var(--divider)" }}>
+              <span className="font-semibold">{m.company_name || "—"}</span>
+              <span className="text-zinc-400">{m.contact_name}</span>
+              <span className="text-zinc-500">{m.email}</span>
+              {m.joined_at && (
+                <span className="text-zinc-600">seit {new Date(m.joined_at).toLocaleDateString("de-DE")}</span>
+              )}
+              <button onClick={() => revoke(m)} className="ml-auto text-zinc-500 hover:text-red-400"
+                      data-testid={`revoke-${m.buyer_user_id}`}>Zugang widerrufen</button>
             </div>
           ))}
         </div>

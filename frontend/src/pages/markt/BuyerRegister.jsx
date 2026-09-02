@@ -24,8 +24,13 @@ export default function BuyerRegister() {
     }
     setBusy(true);
     try {
-      await register({ ...f, invite_token: invite || undefined });
-      toast.success(invite ? "Registriert & Netzwerk beigetreten" : "Registriert");
+      const res = await register({ ...f, invite_token: invite || undefined });
+      if (invite && !res?.network_joined) {
+        toast.warning("Registriert — aber die Einladung ist ungültig, abgelaufen oder "
+          + "bereits aufgebraucht. Bitte den Händler um einen neuen Link.", { duration: 8000 });
+      } else {
+        toast.success(invite ? "Registriert & Netzwerk beigetreten" : "Registriert");
+      }
       nav("/markt");
     } catch (err) {
       toast.error(errMsg(err, "Registrierung fehlgeschlagen"));

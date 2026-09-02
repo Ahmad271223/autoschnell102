@@ -59,11 +59,13 @@ def _access_status(user: dict) -> dict:
 
 # ---------- Auth-Hilfen ----------
 async def current_buyer(user=Depends(current_user)):
-    # Strikte Rollentrennung: Kaeufer + Haendler duerfen den Marktplatz
-    # ansehen; Admin-Konten verwalten nur (Freischaltungen laufen ueber
-    # /admin/*-Endpunkte).
-    if user.get("role") not in ("b2b_buyer", "dealer"):
-        raise HTTPException(403, "Nur für registrierte Händler/Zwischenhändler")
+    # Strikte Rollentrennung (PR-Review 09/2026): der Marktplatz ist der
+    # Bereich der Zwischenhaendler (b2b_buyer). Haendler waren backendseitig
+    # zugelassen, die Oberflaeche akzeptierte aber nur den Kaeufer-Token —
+    # ein toter, ungetesteter Zugangspfad. Haendler verkaufen ueber ihre
+    # Inserate; Admin-Konten verwalten nur (Freischaltungen unter /admin/*).
+    if user.get("role") != "b2b_buyer":
+        raise HTTPException(403, "Nur für registrierte Zwischenhändler")
     return user
 
 
@@ -273,13 +275,55 @@ async def delete_invite(invite_id: str, user=Depends(current_haendler)):
     return {"ok": True}
 
 
+@router.get("/dealer/network/members")
+async def list_network_members(user=Depends(current_haendler)):
+    """Mitglieder des privaten Netzwerks (PR-Review 09/2026: vorher gab es
+    weder Liste noch Widerruf — ein beigetretener Kaeufer behielt den
+    Zugang dauerhaft, das Loeschen der Einladung entfernte nur den Link)."""
+    out = []
+    async for m in db.network_members.find(
+            {"dealer_id": user["dealer_id"]}, {"_id": 0}).sort("created_at", -1):
+        b = await db.users.find_one(
+            {"id": m["buyer_user_id"]},
+            {"_id": 0, "company_name": 1, "contact_name": 1, "email": 1,
+             "active": 1}) or {}
+        out.append({"buyer_user_id": m["buyer_user_id"],
+                    "company_name": b.get("company_name", ""),
+                    "contact_name": b.get("contact_name", ""),
+                    "email": b.get("email", ""),
+                    "active": b.get("active", True),
+                    "joined_at": m.get("created_at")})
+    return out
+
+
+@router.delete("/dealer/network/members/{buyer_user_id}")
+async def remove_network_member(buyer_user_id: str,
+                                user=Depends(current_haendler)):
+    """Netzwerk-Zugang eines Zwischenhaendlers widerrufen: er sieht private
+    Inserate und Netzwerkpreise dieses Haendlers ab sofort nicht mehr."""
+    r = await db.network_members.delete_one(
+        {"dealer_id": user["dealer_id"], "buyer_user_id": buyer_user_id})
+    if not r.deleted_count:
+        raise HTTPException(404, "Mitglied nicht gefunden")
+    # Einmal-Einladungen des Kaeufers nicht wieder freigeben: der Widerruf
+    # soll nicht ueber denselben alten Link umgehbar sein.
+    await log_activity(user["dealer_id"], user["id"], "netzwerk.mitglied.entfernt",
+                       ref=buyer_user_id)
+    return {"ok": True}
+
+
 async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     """Löst eine Einladung ein. Liefert dealer_id oder None."""
     inv = await db.dealer_invites.find_one({"token": token})
     if not inv:
         return None
     if buyer_user_id in (inv.get("used_by") or []):
-        return inv["dealer_id"]  # bereits Mitglied — verbraucht nichts
+        # Bereits eingeloest: nur dann noch Mitglied, wenn der Haendler den
+        # Zugang nicht inzwischen widerrufen hat.
+        noch = await db.network_members.find_one(
+            {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
+            {"_id": 1})
+        return inv["dealer_id"] if noch else None
     # ATOMAR pruefen UND verbrauchen: Gueltigkeit, Restnutzungen und die
     # Erhoehung passieren in EINEM Schritt. Vorher (lesen, dann erhoehen)
     # konnten zwei GLEICHZEITIGE Aufrufe denselben Einmal-Link beide

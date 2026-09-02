@@ -595,6 +595,19 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
 
 @router.delete("/contracts/{contract_id}")
 async def delete_contract(contract_id: str, user=Depends(current_firma)):
+    # Berechtigungsmatrix (PR-Review 09/2026): Loeschen ist destruktiv —
+    # der Chef darf alle Vertraege der Firma loeschen, ein Sucher NUR die
+    # von ihm selbst erstellten.
+    if user.get("role") == "sucher":
+        eigener = await db.generated_pdfs.find_one(
+            {"id": contract_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "user_id": 1})
+        if not eigener:
+            raise HTTPException(404, "Vertrag nicht gefunden")
+        if eigener.get("user_id") != user["id"]:
+            raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
+                                     "löschen — fremde Verträge löscht der "
+                                     "Händler-Hauptaccount")
     res = await db.generated_pdfs.delete_one({"id": contract_id, "dealer_id": user["dealer_id"]})
     if not res.deleted_count:
         raise HTTPException(404, "Vertrag nicht gefunden")

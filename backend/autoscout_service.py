@@ -158,6 +158,13 @@ def _parse_first_registration(raw) -> Optional[int]:
 
 
 # ---------- Public: URL builder ----------
+# ISO-Laendercode -> AutoScout24 "cy"-Code
+_AUTOSCOUT_COUNTRY = {
+    "DE": "D", "AT": "A", "BE": "B", "ES": "E", "FR": "F", "IT": "I",
+    "LU": "L", "NL": "NL",
+}
+
+
 def build_search_url(vehicle: dict, rules: dict) -> str:
     """Erzeugt eine AutoScout24-Suchurl, die zum übergebenen Fahrzeug passt.
 
@@ -193,10 +200,23 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     path = f"/lst/{slug}" if slug else "/lst"
 
     # ---- Query-Parameter ------------------------------------------------
-    params: list = [
-        ("atype", "C"),       # Car
-        ("cy", "D"),          # Country: Germany
-    ]
+    params: list = [("atype", "C")]        # Car
+    # Land aus dem Regelwerk (PR-Review 09/2026): vorher immer "D", sodass
+    # "Export – alle Laender" auf AutoScout eine Deutschland-Suche blieb.
+    country_rule = rules.get("country") or {"mode": "exact", "codes": ["DE"]}
+    if country_rule.get("mode") == "exact":
+        codes = [_AUTOSCOUT_COUNTRY.get(str(c).upper())
+                 for c in (country_rule.get("codes") or ["DE"])]
+        codes = [c for c in codes if c]
+        if codes:
+            params.append(("cy", ",".join(codes)))
+    # mode "all"/"any": kein cy-Parameter -> alle Laender
+    # Verkaeufertyp (Haendler/Privat) wie bei mobile.de
+    seller_mode = (rules.get("seller") or {}).get("mode", "all")
+    if seller_mode == "dealer":
+        params.append(("custtype", "D"))
+    elif seller_mode == "private":
+        params.append(("custtype", "P"))
 
     # Marke+Modell-Kombi (mawXmoY) — nur wenn beide bekannt
     if make and model:
@@ -290,11 +310,13 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         if gb_code:
             params.append(("gear", gb_code))
 
-    # Schaden
-    if rules.get("damage", {}).get("mode") == "no_accident":
+    # Schaden: NUR ausschliessen, wenn das Regelwerk es sagt. Vorher wurde
+    # immer ausgeschlossen — auch wenn das Exportprofil "Schaeden
+    # einschliessen" vorgab (PR-Review 09/2026). Fehlt die Regel, gilt der
+    # Inland-Default (keine Unfallwagen).
+    damage_mode = (rules.get("damage") or {}).get("mode", "no_accident")
+    if damage_mode == "no_accident":
         params.append(("damaged_listing", "exclude"))
-    else:
-        params.append(("damaged_listing", "exclude"))  # default: keine Unfaller
 
     # Default-Polish: passt zum vom Nutzer geschickten Beispiel
     params.append(("ocs_listing", "include"))

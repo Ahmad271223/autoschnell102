@@ -133,6 +133,17 @@ def _validate_logo_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
+def _regeln_pruefen(rohe: dict, profil: str) -> dict:
+    """Regelpaket gegen das feste Schema pruefen (regeln.py). Ungueltige
+    Werte werden mit 400 abgelehnt statt spaeter den Vergleich mit 500 zu
+    zerlegen (PR-Review 09/2026)."""
+    from regeln import RegelFehler, regeln_validieren
+    try:
+        return regeln_validieren(rohe)
+    except RegelFehler as exc:
+        raise HTTPException(400, f"{profil}-Regeln ungültig: {exc}")
+
+
 def _collect_settings_update(body: DealerSettingsIn) -> dict:
     update = {}
     if body.profile:
@@ -141,9 +152,9 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
                 v = _validate_logo_url(v)
             update[k] = v
     if body.comparison_rules is not None:
-        update["comparison_rules"] = body.comparison_rules
+        update["comparison_rules"] = _regeln_pruefen(body.comparison_rules, "Inland")
     if body.export_rules is not None:
-        update["export_rules"] = body.export_rules
+        update["export_rules"] = _regeln_pruefen(body.export_rules, "Export")
     if body.active_profile is not None:
         if body.active_profile not in ("inland", "export"):
             raise HTTPException(400, "active_profile muss 'inland' oder 'export' sein")
@@ -169,10 +180,36 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
     from deps import SUCHER_SETTINGS_FIELDS, effective_dealer
     update = _collect_settings_update(body)
     if user.get("role") == "sucher":
-        override_set = {f"settings_override.{k}": v for k, v in update.items()
-                        if k in SUCHER_SETTINGS_FIELDS}
-        if override_set:
-            await db.users.update_one({"id": user["id"]}, {"$set": override_set})
+        from deps import log_activity
+        # Nur ECHTE Abweichungen von der Chef-Vorgabe werden Override. Die
+        # Oberflaeche schickt beim Speichern alle effektiven Werte zurueck —
+        # vorher wurden dadurch geerbte Chef-Werte als persoenliche Overrides
+        # "eingefroren" und spaetere Chef-Aenderungen kamen beim Sucher nie an
+        # (PR-Review 09/2026). Gleiche Werte loeschen den Override wieder.
+        dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+        aktuell = user.get("settings_override") or {}
+        setzen, loeschen = {}, {}
+        for k, v in update.items():
+            if k not in SUCHER_SETTINGS_FIELDS:
+                continue
+            if v == dealer.get(k):
+                if k in aktuell:
+                    loeschen[f"settings_override.{k}"] = ""
+            elif aktuell.get(k) != v:
+                setzen[f"settings_override.{k}"] = v
+        ops = {}
+        if setzen:
+            ops["$set"] = setzen
+        if loeschen:
+            ops["$unset"] = loeschen
+        if ops:
+            await db.users.update_one({"id": user["id"]}, ops)
+            # Audit-Log: welcher Sucher welche Felder fuer sich abweichend
+            # gesetzt bzw. wieder auf die Chef-Vorgabe zurueckgesetzt hat.
+            await log_activity(
+                user["dealer_id"], user["id"], "sucher.einstellungen.override",
+                meta={"gesetzt": sorted(k.split(".", 1)[1] for k in setzen),
+                      "zurueckgesetzt": sorted(k.split(".", 1)[1] for k in loeschen)})
         fresh_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
         return await effective_dealer(fresh_user)
     update["updated_at"] = now_iso()

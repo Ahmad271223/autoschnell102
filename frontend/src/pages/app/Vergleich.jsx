@@ -167,7 +167,17 @@ export default function Vergleich() {
             Kleinanzeigen-, mobile.de- oder AutoScout24-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
           </p>
         </div>
-        <ProfileBadge onChange={(p) => setResult((r) => r ? { ...r, active_profile: p } : r)} />
+        {/* Profilwechsel: die Portal-Links werden serverseitig aus dem
+            aktiven Regelwerk gebaut — deshalb den Vergleich neu laufen
+            lassen, statt nur das Badge umzuschalten (die alten Links
+            truegen sonst die Filter des vorherigen Profils). */}
+        <ProfileBadge onChange={(p) => {
+          if (result && url.trim() && !loading) {
+            startCompare(null, url);
+          } else {
+            setResult((r) => r ? { ...r, active_profile: p } : r);
+          }
+        }} />
       </div>
 
       {/* Search bar */}

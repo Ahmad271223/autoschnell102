@@ -186,11 +186,27 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     }
 
 
+# Termine, die abgeschlossen oder storniert sind, nehmen KEINE neuen
+# Protokoll-Versionen mehr an (PR-Review 09/2026): sonst konnte ein Fahrer
+# nach Abholung/Nichtabholung/Storno die aktuelle Beweisversion ersetzen.
+# Will der Haendler eine Korrektur, setzt er den Termin im Buero wieder auf
+# "offen" — erst dann darf der Fahrer erneut ans Protokoll.
+_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
+
+
+def _termin_offen_oder_409(appt: dict) -> None:
+    if (appt.get("status") or "offen") in _ABGESCHLOSSEN:
+        raise HTTPException(409, f"Termin ist '{appt.get('status')}' — das "
+                                 "Protokoll ist gesperrt. Für eine Korrektur "
+                                 "muss der Händler den Termin wieder öffnen.")
+
+
 @router.put("/driver/appointments/{appt_id}/protocol")
 async def save_protocol(appt_id: str, body: ProtocolIn,
                         driver=Depends(current_driver)):
     """Zwischenstand speichern — beliebig oft, solange nicht abgeschlossen."""
     appt = await _appt_or_404(appt_id, driver)
+    _termin_offen_oder_409(appt)
     doc = await _current(appt_id)
     if doc and doc.get("status") == "final":
         raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
@@ -233,7 +249,8 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
 @router.post("/driver/appointments/{appt_id}/protocol/correction")
 async def start_correction(appt_id: str, driver=Depends(current_driver)):
     """Neue Version anlegen: die alte bleibt als Beweis erhalten."""
-    await _appt_or_404(appt_id, driver)
+    appt = await _appt_or_404(appt_id, driver)
+    _termin_offen_oder_409(appt)
     doc = await _current(appt_id)
     if not doc or doc.get("status") != "final":
         raise HTTPException(400, "Es gibt kein abgeschlossenes Protokoll zum Korrigieren")

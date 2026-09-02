@@ -47,7 +47,6 @@ class AppointmentIn(BaseModel):
         return v
 
 
-@router.post("/appointments")
 async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
     """Fahrer-Zuweisung nur an AKTUELL verknuepfte Fahrer der Firma.
 
@@ -64,6 +63,7 @@ async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
                                  "'Fahrer' per Code hinzufügen.")
 
 
+@router.post("/appointments")
 async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     appt_id = str(uuid.uuid4())
     title = body.title or "Fahrzeug abholen"
@@ -87,6 +87,7 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         title = f"{d.get('make_label','')} {d.get('model_label','')} abholen".strip()
     doc = {"id": appt_id, "dealer_id": user["dealer_id"], "title": title,
            **body.model_dump(exclude_none=True),
+           "created_by": user["id"],
            "created_at": now_iso(), "updated_at": now_iso()}
     if "status" not in doc:
         doc["status"] = "offen"
@@ -262,6 +263,21 @@ async def get_pickup_report(appt_id: str, versions: int = 0,
 
 @router.delete("/appointments/{appt_id}")
 async def delete_appointment(appt_id: str, user=Depends(current_firma)):
+    # Berechtigungsmatrix (PR-Review 09/2026): firmenweite Termine loescht
+    # der Chef; ein Sucher nur seine eigenen, noch offenen Termine.
+    if user.get("role") == "sucher":
+        appt = await db.appointments.find_one(
+            {"id": appt_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "created_by": 1, "status": 1})
+        if not appt:
+            raise HTTPException(404, "Termin nicht gefunden")
+        if appt.get("created_by") != user["id"]:
+            raise HTTPException(403, "Sucher dürfen nur ihre eigenen Termine "
+                                     "löschen — andere löscht der Händler-"
+                                     "Hauptaccount")
+        if (appt.get("status") or "offen") not in ("offen", "verschoben"):
+            raise HTTPException(409, "Abgeschlossene oder stornierte Termine "
+                                     "löscht nur der Händler-Hauptaccount")
     res = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]})
     if not res.deleted_count:
         raise HTTPException(404, "Termin nicht gefunden")

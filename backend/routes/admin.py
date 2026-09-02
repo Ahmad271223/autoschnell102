@@ -434,7 +434,10 @@ async def admin_contract_pdf(contract_id: str, _=Depends(current_admin)):
 async def admin_stats(_=Depends(current_admin)):
     return {
         "users": await db.users.count_documents({}),
-        "active_subs": await db.subscriptions.count_documents({"status": "active"}),
+        # "aktiv" heisst: Status aktiv UND nicht abgelaufen (PR-Review 09/2026)
+        "active_subs": await db.subscriptions.count_documents(
+            {"status": "active",
+             "$or": [{"expires_at": None}, {"expires_at": {"$gt": now_iso()}}]}),
         "contracts": await db.generated_pdfs.count_documents({}),
         "appointments": await db.appointments.count_documents({}),
         "comparisons_today": await db.vehicle_comparisons.count_documents({
@@ -690,7 +693,13 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
     if plan not in SUCHER_PLANS:
         raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {plan}")
     days = SUCHER_PLANS[plan]["days"]
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    # Restlaufzeit erhalten (PR-Review 09/2026): erneutes Freischalten
+    # verlaengert ab dem bisherigen Ablauf, nicht ab "jetzt".
+    basis = _restlaufzeit_basis(
+        (await db.subscriptions.find_one(
+            {"subject_user_id": sucher_id, "status": "active"},
+            {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
+    expires_at = (basis + timedelta(days=days)).isoformat()
     await db.subscriptions.delete_many({"subject_user_id": sucher_id})
     await db.subscriptions.insert_one({
         "id": str(uuid.uuid4()),
@@ -705,7 +714,29 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.sucher.abo.freigeschaltet", ref=sucher_id,
                        meta={"plan": plan})
+    # Offene Anfrage im selben Vorgang schliessen — vorher waren Freischalten
+    # und Schliessen getrennt; scheiterte das Schliessen, blieb der erfuellte
+    # Antrag offen und konnte doppelt bearbeitet werden.
+    await db.plan_requests.update_many(
+        {"type": "sucher_abo", "subject_user_id": sucher_id, "status": "offen"},
+        {"$set": {"status": "erledigt", "updated_at": now_iso(),
+                  "erledigt_durch": "freischaltung"}})
     return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at}
+
+
+def _restlaufzeit_basis(expires_at) -> datetime:
+    """Startpunkt einer Verlaengerung: bisheriger Ablauf, falls der noch in
+    der Zukunft liegt — sonst jetzt."""
+    jetzt = datetime.now(timezone.utc)
+    if not expires_at:
+        return jetzt
+    try:
+        alt = datetime.fromisoformat(expires_at)
+        if alt.tzinfo is None:
+            alt = alt.replace(tzinfo=timezone.utc)
+        return alt if alt > jetzt else jetzt
+    except (ValueError, TypeError):
+        return jetzt
 
 
 # ---------- Zwischenhändler-Zugang freischalten (manuell) ----------
@@ -740,8 +771,10 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
         return {"ok": True, "active": False}
     if plan != "monthly":
         raise HTTPException(400, "Nur 'monthly' unterstützt")
-    expires_at = (datetime.now(timezone.utc)
-                  + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
+    voll = await db.users.find_one({"id": buyer_id}, {"_id": 0, "marketplace_access": 1})
+    acc = (voll or {}).get("marketplace_access") or {}
+    basis = _restlaufzeit_basis(acc.get("expires_at") if acc.get("active") else None)
+    expires_at = (basis + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
     await db.users.update_one(
         {"id": buyer_id},
         {"$set": {"marketplace_access": {
@@ -750,6 +783,10 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
             "activated_by": admin.get("email", ""), "updated_at": now_iso()}}})
     await log_activity("", admin["id"], "admin.buyer.zugang.freigeschaltet",
                        ref=buyer_id, meta={"expires_at": expires_at})
+    await db.plan_requests.update_many(
+        {"type": "buyer_access", "buyer_user_id": buyer_id, "status": "offen"},
+        {"$set": {"status": "erledigt", "updated_at": now_iso(),
+                  "erledigt_durch": "freischaltung"}})
     return {"ok": True, "active": True, "expires_at": expires_at}
 
 

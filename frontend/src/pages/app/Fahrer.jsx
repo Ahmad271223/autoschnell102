@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { errMsg } from "@/lib/api";
 import { Plus, Trash2, Copy, User, Mail, KeyRound } from "lucide-react";
 
 export default function Fahrer() {
+  const { user } = useAuth();
+  // Fahrer hinzufuegen/entfernen ist Chefsache (Backend erzwingt 403);
+  // Sucher sehen die Liste nur, um Termine zuweisen zu koennen.
+  const chef = user?.role === "dealer";
   const [items, setItems] = useState([]);
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
@@ -52,6 +57,13 @@ export default function Fahrer() {
         Gib dir diese ID vom Fahrer geben – und füge ihn hier hinzu.
       </p>
 
+      {!chef && (
+        <div className="tactical-card p-4 mt-6 text-sm text-zinc-400" data-testid="drivers-readonly-hint">
+          Fahrer hinzufügen oder entfernen kann nur der Händler-Hauptaccount. Du kannst
+          die Fahrer hier einsehen und ihnen im Terminplaner Abholungen zuweisen.
+        </div>
+      )}
+      {chef && (
       <form onSubmit={add} className="tactical-card p-5 mt-6 flex flex-col sm:flex-row gap-3 items-end">
         <div className="flex-1 w-full">
           <label className="text-xs text-zinc-400 flex items-center gap-2">
@@ -67,6 +79,7 @@ export default function Fahrer() {
           <Plus size={15} /> Hinzufügen
         </button>
       </form>
+      )}
 
       <div className="mt-6 tactical-card overflow-hidden">
         <table className="w-full text-sm">
@@ -110,10 +123,14 @@ export default function Fahrer() {
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <button onClick={() => remove(d.id)} data-testid={`del-driver-${d.id}`}
-                    className="p-2 hover:bg-white/5 rounded-sm">
-                    <Trash2 size={14} />
-                  </button>
+                  {chef ? (
+                    <button onClick={() => remove(d.id)} data-testid={`del-driver-${d.id}`}
+                      className="p-2 hover:bg-white/5 rounded-sm">
+                      <Trash2 size={14} />
+                    </button>
+                  ) : (
+                    <span className="text-xs text-zinc-600">—</span>
+                  )}
                 </td>
               </tr>
             ))}

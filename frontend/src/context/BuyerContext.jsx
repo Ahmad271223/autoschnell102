@@ -67,8 +67,12 @@ export function BuyerAuthProvider({ children }) {
   const register = async (payload) => {
     const { data } = await buyerApi.post("/buyer/register", payload);
     localStorage.setItem("ah_buyer_token", data.token);
-    try { return await refresh(); }
-    catch { setBuyer(data.user || null); return data.user; }
+    let u = data.user || null;
+    try { u = await refresh(); }
+    catch { setBuyer(data.user || null); }
+    // network_joined kommt ehrlich vom Server: false bei ungueltiger,
+    // abgelaufener oder aufgebrauchter Einladung.
+    return { ...(u || {}), network_joined: !!data.network_joined };
   };
 
   const logout = () => {

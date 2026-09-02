@@ -16,7 +16,7 @@ from auth import (
 )
 from deps import (
     current_user, db, get_subscription_status, now_iso, clean_doc,
-    log_activity,
+    log_activity, log,
 )
 from mobile_service import DEFAULT_RULES
 from rate_limiter import client_ip, SlidingWindowRateLimiter, login_limiter, register_limiter
@@ -93,8 +93,7 @@ async def register(body: RegisterIn, request: Request):
         "dealer_id": dealer_id, "current_session_id": sid,
         "created_at": now_iso(),
     }
-    await db.users.insert_one(user_doc)
-    await db.dealers.insert_one({
+    dealer_doc = {
         "id": dealer_id, "user_id": user_id,
         "company_name": body.company_name,
         "contact_person": body.contact_person or "",
@@ -127,7 +126,19 @@ async def register(body: RegisterIn, request: Request):
         ),
         "default_special_agreements": "",
         "created_at": now_iso(),
-    })
+    }
+    # Zwei Inserts ohne Transaktion (PR-Review 09/2026): erst das Haendler-
+    # profil, dann der Benutzer. Scheitert der Benutzer-Insert, wird das
+    # Profil wieder entfernt — es bleibt nie ein aktives, aber unvollstaendiges
+    # Konto zurueck (vorher: Benutzer ohne Haendlerprofil).
+    await db.dealers.insert_one(dealer_doc)
+    try:
+        await db.users.insert_one(user_doc)
+    except Exception:
+        await db.dealers.delete_one({"id": dealer_id})
+        log.exception("Registrierung: Benutzer-Insert fehlgeschlagen")
+        raise HTTPException(500, "Registrierung fehlgeschlagen — bitte erneut "
+                                 "versuchen.")
     token = create_token(user_id, sid)
     await log_activity(dealer_id, user_id, "auth.registriert",
                        meta={"email": body.email, "ip": ip})
@@ -235,6 +246,15 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
     u = await db.users.find_one(
         {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}},
         {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1})
+    konto_typ = "user"
+    if not u:
+        # Fahrer-Konten leben in driver_accounts (PR-Review 09/2026: vorher
+        # hatten Fahrer keinerlei Wiederherstellungsweg).
+        d = await db.driver_accounts.find_one(
+            {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}},
+            {"_id": 0, "id": 1, "email": 1, "active": 1})
+        if d:
+            u, konto_typ = {**d, "role": "driver"}, "driver"
     if not u or not u.get("active", True):
         return generic
     if u.get("role") == "sucher":
@@ -247,6 +267,7 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
     await db.password_resets.insert_one({
         "id": str(uuid.uuid4()),
         "user_id": u["id"],
+        "account_type": konto_typ,
         "token_hash": _hash_reset_token(token),
         "expires_at": (datetime.now(timezone.utc)
                        + timedelta(minutes=RESET_TOKEN_TTL_MINUTES)).isoformat(),
@@ -290,11 +311,12 @@ async def password_reset_confirm(body: ResetConfirmIn, request: Request):
             raise invalid
     except ValueError:
         raise invalid
-    u = await db.users.find_one({"id": doc["user_id"]},
-                                {"_id": 0, "id": 1, "role": 1, "active": 1})
+    konten = db.driver_accounts if doc.get("account_type") == "driver" else db.users
+    u = await konten.find_one({"id": doc["user_id"]},
+                              {"_id": 0, "id": 1, "role": 1, "active": 1})
     if not u or not u.get("active", True) or u.get("role") == "sucher":
         raise invalid
-    await db.users.update_one(
+    await konten.update_one(
         {"id": u["id"]},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   # Alle bestehenden Sessions beenden (Single-Session strikt)

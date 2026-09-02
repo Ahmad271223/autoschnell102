@@ -75,6 +75,11 @@ export default function DriverLogin() {
             </button>
           </form>
 
+          <div className="mt-3 text-center text-xs">
+            <Link to="/passwort-vergessen" data-testid="link-driver-reset" className="text-zinc-400 hover:text-white underline">
+              Passwort vergessen?
+            </Link>
+          </div>
           <div className="mt-5 text-center text-sm text-zinc-400">
             Noch kein Fahrer-Account?{" "}
             <Link to="/fahrer/register" data-testid="link-driver-register"

@@ -122,7 +122,14 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
     """
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
-    base_rules = dealer.get("comparison_rules") or DEFAULT_RULES
+    # Dasselbe Regelpaket wie der Vergleich (PR-Review 09/2026): vorher
+    # nutzte die manuelle Suche IMMER die Inland-Regeln — das aktive
+    # Export-Profil samt export_rules wurde komplett ignoriert.
+    if (dealer.get("active_profile") or "inland") == "export":
+        from mobile_service import DEFAULT_EXPORT_RULES
+        base_rules = dealer.get("export_rules") or DEFAULT_EXPORT_RULES
+    else:
+        base_rules = dealer.get("comparison_rules") or DEFAULT_RULES
 
     # ---- Regeln aus dem manuellen Formular überschreiben ----
     rules = {**base_rules}

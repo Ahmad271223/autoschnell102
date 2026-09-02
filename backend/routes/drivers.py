@@ -56,6 +56,18 @@ class DriverProfileUpdate(BaseModel):
     display_name: Optional[str] = Field(default=None, max_length=120)
 
 
+class DriverPasswordIn(BaseModel):
+    """Fahrer aendert sein eigenes Passwort (PR-Review 09/2026: vorher gab es
+    fuer Fahrer weder Wechsel noch Wiederherstellung)."""
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return _check_password_strength(v)
+
+
 class DriverLinkIn(BaseModel):
     driver_code: str
 
@@ -145,12 +157,16 @@ async def current_driver(request: Request, auth: Optional[str] = None,
     )
     if not driver or not driver.get("active", True):
         raise HTTPException(401, "Fahrer-Account deaktiviert")
-    # Single-session enforcement: token sid must match the stored session.
-    # Legacy tokens without sid are accepted only if the account has no session set yet.
+    # Single-Session STRIKT (wie bei deps.current_user): die Session-ID im
+    # Token muss exakt der gespeicherten entsprechen. Die fruehere Toleranz
+    # fuer Konten ohne gespeicherte Session machte jeden Sitzungs-Widerruf
+    # (Passwortwechsel/Reset setzt die Session auf leer) wirkungslos —
+    # der alte Token blieb gueltig (Negativtest 09/2026).
     token_sid = payload.get("sid")
     stored_sid = driver.get("current_session_id")
-    if stored_sid and token_sid != stored_sid:
-        raise HTTPException(401, "Session beendet (anderes Gerät aktiv)")
+    if not stored_sid or token_sid != stored_sid:
+        raise HTTPException(401, "Session beendet (anderes Gerät aktiv oder "
+                                 "abgemeldet)")
     return driver
 
 
@@ -396,6 +412,38 @@ async def driver_update_me(body: DriverProfileUpdate,
     return await driver_me(fresh or driver)
 
 
+@router.put("/driver/password")
+async def driver_change_password(body: DriverPasswordIn,
+                                 driver=Depends(current_driver)):
+    """Eigenes Passwort aendern. Beendet danach alle Sitzungen des
+    Fahrer-Kontos (Single-Session strikt) — der Fahrer meldet sich neu an."""
+    konto = await db.driver_accounts.find_one(
+        {"id": driver["id"]}, {"_id": 0, "password_hash": 1})
+    if not konto or not await verify_password_async(
+            body.current_password, konto.get("password_hash", "")):
+        raise HTTPException(400, "Aktuelles Passwort ist falsch")
+    if body.current_password == body.new_password:
+        raise HTTPException(400, "Das neue Passwort muss sich vom alten unterscheiden")
+    await db.driver_accounts.update_one(
+        {"id": driver["id"]},
+        {"$set": {"password_hash": await hash_password_async(body.new_password),
+                  "current_session_id": None, "updated_at": now_iso()}})
+    await log_activity("", driver["id"], "fahrer.passwort.geaendert")
+    return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}
+
+
+# Termine in diesen Zustaenden nehmen keine Fahrer-Aenderungen mehr an
+# (PR-Review 09/2026): Status-Umschaltung und neue Berichtsversionen sind
+# gesperrt; eine Korrektur laeuft ueber den Haendler (Termin wieder oeffnen).
+_TERMIN_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
+
+
+def _termin_offen_oder_409(appt: dict) -> None:
+    if (appt.get("status") or "offen") in _TERMIN_ABGESCHLOSSEN:
+        raise HTTPException(409, f"Termin ist bereits '{appt.get('status')}' — "
+                                 "Änderungen nur noch über den Händler.")
+
+
 @router.get("/driver/appointments")
 async def driver_appointments(driver=Depends(current_driver)):
     """Alle Termine (aller Händler), die diesem Fahrer-Account zugewiesen sind."""
@@ -403,19 +451,28 @@ async def driver_appointments(driver=Depends(current_driver)):
         {"driver_id": driver["id"]}, {"_id": 0},
     ).sort("pickup_date", 1).to_list(500)
 
-    veh_ids = [a.get("vehicle_id") for a in appts if a.get("vehicle_id")]
+    # Fahrzeuge STRENG ueber (dealer_id, vehicle_id) laden (PR-Review
+    # 09/2026): Fahrzeug-IDs leiten sich aus der Inserats-ID ab, zwei
+    # Haendler koennen also dasselbe Fahrzeug mit derselben ID fuehren —
+    # vorher gewann der zuletzt gelesene Datensatz, und der Fahrer sah
+    # Daten/Fotos des FALSCHEN Haendlers.
+    paare = {(a.get("dealer_id"), a.get("vehicle_id"))
+             for a in appts if a.get("vehicle_id")}
     vehicles = {}
-    if veh_ids:
-        async for v in db.vehicles.find({"id": {"$in": veh_ids}}, {"_id": 0}):
-            vehicles[v["id"]] = v
+    if paare:
+        async for v in db.vehicles.find(
+                {"$or": [{"id": vid, "dealer_id": did} for did, vid in paare]},
+                {"_id": 0}):
+            vehicles[(v.get("dealer_id"), v["id"])] = v
 
     snap_map = {}
-    if veh_ids:
+    if paare:
         async for s in db.listing_snapshots.find(
-            {"vehicle_id": {"$in": veh_ids}, "status": "ready"},
-            {"_id": 0, "id": 1, "vehicle_id": 1, "completed_at": 1},
+            {"$or": [{"vehicle_id": vid, "dealer_id": did} for did, vid in paare],
+             "status": "ready"},
+            {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1, "completed_at": 1},
         ).sort("completed_at", -1):
-            snap_map.setdefault(s["vehicle_id"], s["id"])
+            snap_map.setdefault((s.get("dealer_id"), s["vehicle_id"]), s["id"])
 
     dealer_ids = list({a.get("dealer_id") for a in appts if a.get("dealer_id")})
     dealers = {}
@@ -429,7 +486,8 @@ async def driver_appointments(driver=Depends(current_driver)):
     out = []
     for a in appts:
         vid = a.get("vehicle_id")
-        v = (vehicles.get(vid) or {}).get("data", {}) if vid else {}
+        schluessel = (a.get("dealer_id"), vid)
+        v = (vehicles.get(schluessel) or {}).get("data", {}) if vid else {}
         photos = (
             v.get("image_urls") or v.get("images") or v.get("photos")
             or v.get("pictures") or []
@@ -467,7 +525,7 @@ async def driver_appointments(driver=Depends(current_driver)):
                 "fin": v.get("vin") or v.get("fin"),
                 "photos": photos,
             } if v else None,
-            "snapshot_id": snap_map.get(vid),
+            "snapshot_id": snap_map.get(schluessel),
         })
     return out
 
@@ -594,6 +652,7 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    _termin_offen_oder_409(appt)
     # Vereinheitlichter Abschluss: "abgeholt" gibt es NUR mit unterschriebenem
     # Abholprotokoll (Beweiskette: Zustand + beide Unterschriften). Der alte
     # Schnellweg ohne Protokoll erzeugte "abgeholt"-Termine ohne jeden Beleg.
@@ -689,6 +748,7 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    _termin_offen_oder_409(appt)
 
     # Fotos aus base64 in den Storage auslagern (nie in Mongo speichern).
     from storage_service import make_key, storage, StorageError

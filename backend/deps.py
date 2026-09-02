@@ -89,6 +89,16 @@ async def current_firma(user=Depends(current_user)):
     return user
 
 
+async def current_chef(user=Depends(current_firma)):
+    """NUR der Haendler-Hauptaccount. Berechtigungsmatrix (PR-Review
+    09/2026): destruktive und firmenweite Aktionen (Fahrerliste, fremde
+    Vertraege/Termine loeschen, Netzwerk-Mitglieder) sind Chefsache;
+    Sucher arbeiten in ihrem eigenen Bereich."""
+    if user.get("role") != "dealer":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das")
+    return user
+
+
 async def current_admin(user=Depends(current_user)):
     if user.get("role") != "admin":
         raise HTTPException(403, "Admin erforderlich")
