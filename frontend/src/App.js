@@ -28,6 +28,7 @@ import AdminAuditLog from "@/pages/admin_v2/AuditLog";
 import AdminErrors from "@/pages/admin_v2/Errors";
 import AdminFreischaltungen from "@/pages/admin_v2/Freischaltungen";
 import AdminSettings from "@/pages/admin_v2/Settings";
+import AdminAutoDaten from "@/pages/admin_v2/AutoDaten";
 
 import Vergleich from "@/pages/app/Vergleich";
 import ManuelleSuche from "@/pages/app/ManuelleSuche";
@@ -137,6 +138,7 @@ export default function App() {
               <Route path="audit" element={<AdminAuditLog />} />
               <Route path="errors" element={<AdminErrors />} />
               <Route path="freischaltungen" element={<AdminFreischaltungen />} />
+              <Route path="auto-daten" element={<AdminAutoDaten />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>
 

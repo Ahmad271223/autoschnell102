@@ -47,6 +47,7 @@ from deps import client, db, log, now_iso
 
 # Modular routers.
 from routes import admin as admin_routes
+from routes import admin_auto_daten as admin_auto_daten_routes
 from routes import appointments as appointments_routes
 from routes import auth as auth_routes
 from routes import bestand as bestand_routes
@@ -619,6 +620,7 @@ async def on_stop():
 # =========================================================
 api.include_router(auth_routes.router)
 api.include_router(admin_routes.router)
+api.include_router(admin_auto_daten_routes.router)
 api.include_router(dealer_routes.router)
 api.include_router(contracts_routes.router)
 api.include_router(appointments_routes.router)

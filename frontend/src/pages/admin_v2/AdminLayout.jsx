@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   LayoutDashboard, Users, GitCompareArrows, Activity, Settings, LogOut,
-  ScrollText, AlertTriangle, KeyRound,
+  ScrollText, AlertTriangle, KeyRound, Car,
 } from "lucide-react";
 
 /**
@@ -20,12 +20,16 @@ const NAV = [
   { to: "/admin/audit",       label: "Audit-Log",     icon: ScrollText },
   { to: "/admin/errors",      label: "Fehler",        icon: AlertTriangle },
   { to: "/admin/freischaltungen", label: "Freischaltungen", icon: KeyRound },
+  // Nur der Super-Admin sieht die anonymen Auto-Daten (Backend blockt
+  // normale Admins zusätzlich mit 403).
+  { to: "/admin/auto-daten",  label: "Auto-Daten",    icon: Car, superOnly: true },
   { to: "/admin/settings",    label: "Einstellungen", icon: Settings },
 ];
 
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const NAV_SICHTBAR = NAV.filter((item) => !item.superOnly || user?.is_super_admin);
 
   const handleLogout = async () => {
     await logout();
@@ -65,7 +69,7 @@ export default function AdminLayout() {
             </div>
           </div>
           <nav className="px-3 mt-2 flex-1 space-y-1">
-            {NAV.map((item) => (
+            {NAV_SICHTBAR.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -136,7 +140,7 @@ export default function AdminLayout() {
             }}
           >
             <div className="flex gap-1 px-2 py-1.5 whitespace-nowrap">
-              {NAV.map((item) => (
+              {NAV_SICHTBAR.map((item) => (
                 <NavLink
                   key={item.to}
                   to={item.to}
