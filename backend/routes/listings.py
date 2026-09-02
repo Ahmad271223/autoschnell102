@@ -47,8 +47,12 @@ from listing_identity import (
 # (kein Server-Block bei Massen-Vergleichen). Default AUS = bisheriges
 # Verhalten (Server holt selbst). mobile.de/AutoScout laufen IMMER server-
 # seitig (offizielle API, keine Block-Gefahr).
+# Client-Abruf (Browser-Erweiterung) — im Lasttest-/CI-Mock-Modus wird er
+# grundsaetzlich ignoriert: der Mock existiert, damit KEINE echten Abrufe
+# noetig sind; needs_client_fetch wuerde dort jeden Test/Lasttest brechen.
 CLIENT_FETCH_KLEINANZEIGEN = os.environ.get(
-    "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")
+    "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")     and os.environ.get("MOCK_PROVIDER_FETCH", "").strip().lower() not in (
+        "1", "true", "yes")
 from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
     MOBILE_USER, build_search_url, get_vehicle, mobile_quelle_verfuegbar,

@@ -328,7 +328,7 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
         "company_name": body.company_name,
         "contact_name": body.contact_name,
         "phone": body.phone,
-        "current_session_id": sid,
+        "current_session_id": sid, "session_ids": [sid],
         "created_at": now_iso(),
     })
     joined = None
@@ -365,8 +365,11 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     if not u or not ok or not u.get("active", True):
         raise HTTPException(401, "E-Mail oder Passwort falsch")
     sid = new_session_id()
-    await db.users.update_one({"id": u["id"]},
-                              {"$set": {"current_session_id": sid}})
+    from deps import MAX_GERAETE
+    await db.users.update_one(
+        {"id": u["id"]},
+        {"$set": {"current_session_id": sid},
+         "$push": {"session_ids": {"$each": [sid], "$slice": -MAX_GERAETE}}})
     return {"ok": True, "token": create_token(u["id"], sid),
             "user": _buyer_public(u)}
 

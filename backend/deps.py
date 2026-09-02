@@ -56,6 +56,22 @@ def clean_doc(d: dict) -> dict:
 
 
 # ---------- Auth dependencies ----------
+# Wie viele Geraete duerfen je Konto gleichzeitig angemeldet sein?
+# 3 = z.B. Buero-PC + Handy + Tablet. Ueberzaehlige (aelteste) Sitzungen
+# fallen beim naechsten Login automatisch raus.
+MAX_GERAETE = int(os.environ.get("MAX_GERAETE_JE_KONTO", "3"))
+
+
+def sitzung_gueltig(konto: dict, sid) -> bool:
+    """True, wenn die Token-Sitzung zu einer aktiven Sitzung des Kontos
+    gehoert (Mehrgeraete-Liste ODER die juengste Einzel-Sitzung)."""
+    if not sid:
+        return False
+    if sid in (konto.get("session_ids") or []):
+        return True
+    return sid == konto.get("current_session_id") and bool(konto.get("current_session_id"))
+
+
 async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
     if not creds or not creds.credentials:
         raise HTTPException(401, "Nicht authentifiziert")
@@ -66,13 +82,16 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     user = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
     if not user or not user.get("active"):
         raise HTTPException(401, "Account deaktiviert")
-    # Single-session enforcement (strikt): Das Token-sid MUSS der aktuell
-    # gespeicherten Session entsprechen. Ist keine Session gesetzt (z.B. nach
-    # Logout oder bevor der Account je eingeloggt war), ist JEDES Token
-    # ungültig — sonst wären nach einem Logout alle alten Tokens wieder
-    # brauchbar und mehrere Geräte gleichzeitig möglich.
-    if payload.get("sid") != user.get("current_session_id"):
-        raise HTTPException(401, "Session beendet (anderes Gerät aktiv oder abgemeldet)")
+    # Sitzungs-Pruefung: Bis zu MAX_GERAETE gleichzeitige Geraete je Konto
+    # (Wunsch 09/2026: Sucher arbeitet mit Handy UND PC). Jeder Login legt
+    # eine Sitzung in session_ids ab (aelteste faellt raus); ein Token ist
+    # gueltig, solange seine sid dort steht. current_session_id bleibt als
+    # "juengste Sitzung" fuer Alt-Tokens und Werkzeuge erhalten. Ist BEIDES
+    # leer (Logout aller Geraete / Passwort-Reset), ist jedes Token
+    # unguelig — Konto-Teilen im grossen Stil bleibt damit unattraktiv.
+    if not sitzung_gueltig(user, payload.get("sid")):
+        raise HTTPException(401, "Session beendet (zu viele Geräte oder abgemeldet)")
+    user["_sid"] = payload.get("sid")   # fuer Logout: nur DIESES Geraet abmelden
     return user
 
 

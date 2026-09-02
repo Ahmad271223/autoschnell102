@@ -145,12 +145,13 @@ async def current_driver(request: Request, auth: Optional[str] = None,
     )
     if not driver or not driver.get("active", True):
         raise HTTPException(401, "Fahrer-Account deaktiviert")
-    # Single-session enforcement: token sid must match the stored session.
-    # Legacy tokens without sid are accepted only if the account has no session set yet.
+    # Mehrgeraete wie beim Haupt-Login (deps.sitzung_gueltig): bis zu
+    # MAX_GERAETE gleichzeitige Sitzungen; Alt-Konten ohne Sitzungs-Liste
+    # laufen ueber current_session_id weiter.
+    from deps import sitzung_gueltig
     token_sid = payload.get("sid")
-    stored_sid = driver.get("current_session_id")
-    if stored_sid and token_sid != stored_sid:
-        raise HTTPException(401, "Session beendet (anderes Gerät aktiv)")
+    if (driver.get("current_session_id") or driver.get("session_ids"))             and not sitzung_gueltig(driver, token_sid):
+        raise HTTPException(401, "Session beendet (zu viele Geräte oder abgemeldet)")
     return driver
 
 
@@ -285,7 +286,7 @@ async def driver_register(body: DriverAccountRegister, request: Request):
         "password_hash": await hash_password_async(body.password),
         "display_name": body.display_name.strip(),
         "driver_code": code, "active": True,
-        "current_session_id": sid,
+        "current_session_id": sid, "session_ids": [sid],
         "created_at": now_iso(),
     }
     await db.driver_accounts.insert_one(doc)
@@ -314,10 +315,13 @@ async def driver_login(body: DriverAccountLogin, request: Request):
         raise HTTPException(401, "E-Mail oder Passwort falsch")
     if not da.get("active", True):
         raise HTTPException(403, "Account deaktiviert")
-    # Rotate session ID on every login to invalidate previous tokens.
+    # Neue Sitzung in die Mehrgeraete-Liste aufnehmen (aelteste faellt raus).
+    from deps import MAX_GERAETE
     sid = str(uuid.uuid4())
     await db.driver_accounts.update_one(
-        {"id": da["id"]}, {"$set": {"current_session_id": sid}},
+        {"id": da["id"]},
+        {"$set": {"current_session_id": sid},
+         "$push": {"session_ids": {"$each": [sid], "$slice": -MAX_GERAETE}}},
     )
     token = create_driver_token(da["id"], sid)
     return {
