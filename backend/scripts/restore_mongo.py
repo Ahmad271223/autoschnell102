@@ -67,7 +67,30 @@ def main() -> int:
             db[name].insert_many(docs, ordered=False)
         total += len(docs)
         print(f"  {name}: {len(docs)} Dokumente")
-    print(f"RESTORE OK: {len(files)} Collections, {total} Dokumente -> {args.db}")
+    # Datei-Speicher zurueckspielen (uploads + local_storage) — vorher
+    # stellte "Restore" nur die Datenbank her; Fotos, Unterschriften,
+    # Protokoll-PDFs und Beweis-Snapshots fehlten (PR-Review 09/2026).
+    import shutil
+    backend = Path(__file__).resolve().parent.parent
+    n_files = 0
+    for name in ("uploads", "local_storage"):
+        quelle = src.parent / name if (src.parent / name).is_dir() else src / name
+        if not quelle.is_dir():
+            continue
+        ziel = backend / name
+        for f2 in quelle.rglob("*"):
+            if not f2.is_file():
+                continue
+            rel = f2.relative_to(quelle)
+            d = ziel / rel
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f2, d)
+            n_files += 1
+    print(f"RESTORE OK: {len(files)} Collections, {total} Dokumente, "
+          f"{n_files} Dateien -> {args.db}")
+    print("HINWEIS: Eindeutigkeits-Indizes legt das Backend beim naechsten "
+          "Start selbst wieder an (ensure_indexes) — nach dem Restore einmal "
+          "neu starten.")
     return 0
 
 

@@ -24,6 +24,7 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     return safe[:200] or fallback
 
 from deps import (
+    current_firma,
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
 from lifecycle import try_set_lifecycle
@@ -380,7 +381,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
 
 @router.get("/contracts")
 async def list_contracts(
-    user=Depends(current_user),
+    user=Depends(current_firma),
     q: Optional[str] = None,
     days: Optional[int] = None,
     channel: Optional[str] = None,
@@ -448,7 +449,7 @@ async def list_contracts(
 
 
 @router.get("/contracts/{contract_id}")
-async def get_contract(contract_id: str, user=Depends(current_user)):
+async def get_contract(contract_id: str, user=Depends(current_firma)):
     c = await db.generated_pdfs.find_one(
         {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
     )
@@ -458,7 +459,7 @@ async def get_contract(contract_id: str, user=Depends(current_user)):
 
 
 @router.get("/contracts/{contract_id}/pdf")
-async def get_contract_pdf(contract_id: str, user=Depends(current_user)):
+async def get_contract_pdf(contract_id: str, user=Depends(current_firma)):
     c = await db.generated_pdfs.find_one(
         {"id": contract_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "pdf_b64": 1, "filename": 1},
@@ -475,7 +476,7 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_user)):
 
 
 @router.get("/contracts/{contract_id}/versions")
-async def list_contract_versions(contract_id: str, user=Depends(current_user)):
+async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
     """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten)."""
     c = await db.generated_pdfs.find_one(
         {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})
@@ -489,7 +490,7 @@ async def list_contract_versions(contract_id: str, user=Depends(current_user)):
 
 @router.get("/contracts/{contract_id}/versions/{version}/pdf")
 async def get_contract_version_pdf(contract_id: str, version: int,
-                                   user=Depends(current_user)):
+                                   user=Depends(current_firma)):
     """Archivierte PDF-Fassung herunterladen (Beweissicherung)."""
     v = await db.generated_pdf_versions.find_one(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"],
@@ -582,7 +583,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
 
 
 @router.delete("/contracts/{contract_id}")
-async def delete_contract(contract_id: str, user=Depends(current_user)):
+async def delete_contract(contract_id: str, user=Depends(current_firma)):
     res = await db.generated_pdfs.delete_one({"id": contract_id, "dealer_id": user["dealer_id"]})
     if not res.deleted_count:
         raise HTTPException(404, "Vertrag nicht gefunden")

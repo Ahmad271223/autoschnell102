@@ -53,10 +53,30 @@ def _iter_photo_keys() -> Iterable[str]:
     return ("image_urls", "images", "photos", "pictures")
 
 
-async def _delete_snapshots_for_vehicle(db, vehicle_id: str) -> int:
-    """Löscht alle listing_snapshots zum Fahrzeug inkl. der dahinter
-    liegenden Object-Storage-Blobs. Liefert Anzahl gelöschter Einträge."""
+async def _delete_snapshots_for_vehicle(db, vehicle_id: str,
+                                         dealer_id: str = "") -> int:
+    """Löscht listing_snapshots zum Fahrzeug inkl. Storage-Blobs —
+    aber NUR, wenn niemand anderes sie noch braucht.
+
+    Fahrzeug-IDs (v_<Anzeigen-ID>) sind haendleruebergreifend identisch
+    und Snapshots bewusst geteilt (nie doppelt fotografieren). Vorher
+    konnte der abgelaufene Termin EINER Firma das Beweisarchiv ALLER
+    Firmen zu diesem Inserat vernichten (PR-Review 09/2026). Jetzt wird
+    uebersprungen, wenn (a) irgendein Kaufvertrag auf das Fahrzeug
+    verweist oder (b) eine ANDERE Firma dasselbe Fahrzeug fuehrt —
+    das normale Verfallsdatum (_expire_old_snapshots) raeumt dann auf."""
     if not vehicle_id:
+        return 0
+    vertraege = await db.generated_pdfs.count_documents(
+        {"vehicle_id": vehicle_id})
+    if vertraege:
+        return 0
+    andere_firma = {"id": vehicle_id}
+    if dealer_id:
+        andere_firma["dealer_id"] = {"$ne": dealer_id}
+        if await db.vehicles.count_documents(andere_firma):
+            return 0
+    elif await db.vehicles.count_documents(andere_firma) > 1:
         return 0
     count = 0
     async for snap in db.listing_snapshots.find({"vehicle_id": vehicle_id}, {"_id": 0}):
@@ -68,6 +88,8 @@ async def _delete_snapshots_for_vehicle(db, vehicle_id: str) -> int:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("storage delete failed for %s: %s", path, exc)
         await db.listing_snapshots.delete_one({"id": snap["id"]})
+        await db.listings_cache.update_many(
+            {"snapshot_id": snap["id"]}, {"$set": {"snapshot_id": None}})
         count += 1
     return count
 
@@ -144,7 +166,8 @@ async def _cleanup_once(db) -> dict:
 
             # 1) Snapshots + Storage-Objekte wegwerfen
             if vehicle_id:
-                deleted = await _delete_snapshots_for_vehicle(db, vehicle_id)
+                deleted = await _delete_snapshots_for_vehicle(
+                    db, vehicle_id, dealer_id=appt.get("dealer_id", ""))
                 stats["snapshots_deleted"] += deleted
 
                 # 2) Fotos aus dem Vehicle-Cache räumen
@@ -221,7 +244,7 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
                 await db.resale_listings.delete_one({"id": listing["id"]})
         except Exception as exc:  # noqa: BLE001
             log.warning("bestand archive: listing cleanup failed for %s: %s", vid, exc)
-        await _delete_snapshots_for_vehicle(db, vid)
+        await _delete_snapshots_for_vehicle(db, vid, dealer_id=v.get("dealer_id", ""))
         await db.vehicles.update_one(
             {"id": vid},
             {"$set": {"data": data, "lifecycle": "archiviert",

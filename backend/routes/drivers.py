@@ -14,7 +14,7 @@ from auth import (
     JWT_ALG, JWT_SECRET, _DUMMY_HASH, decode_token,
     hash_password_async, verify_password_async,
 )
-from deps import bearer, current_user, db, log_activity, now_iso
+from deps import bearer, current_user, db, log_activity, now_iso, current_firma
 from rate_limiter import client_ip, driver_login_limiter, driver_register_limiter
 from snapshot_service import get_object as snapshot_get_object
 
@@ -182,7 +182,7 @@ async def _load_dealer_driver(dealer_id: str, driver_account_id: str) -> Optiona
 
 
 @router.post("/drivers/add")
-async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_user)):
+async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
     """Händler fügt Fahrer per öffentlichem Code hinzu."""
     code = (body.driver_code or "").strip().upper()
     if not code:
@@ -208,7 +208,7 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_user)):
 
 
 @router.get("/drivers")
-async def list_drivers(user=Depends(current_user)):
+async def list_drivers(user=Depends(current_firma)):
     links = await db.dealer_drivers.find(
         {"dealer_id": user["dealer_id"]}, {"_id": 0},
     ).to_list(500)
@@ -222,7 +222,7 @@ async def list_drivers(user=Depends(current_user)):
 
 
 @router.delete("/drivers/{driver_id}")
-async def delete_driver(driver_id: str, user=Depends(current_user)):
+async def delete_driver(driver_id: str, user=Depends(current_firma)):
     """Verknüpfung entfernen. Der Fahrer-Account selbst bleibt bestehen."""
     res = await db.dealer_drivers.delete_one(
         {"dealer_id": user["dealer_id"], "driver_account_id": driver_id},
@@ -238,7 +238,7 @@ async def delete_driver(driver_id: str, user=Depends(current_user)):
 
 
 @router.get("/drivers/{driver_id}/conflicts")
-async def driver_conflicts(driver_id: str, date: str, user=Depends(current_user)):
+async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma)):
     """Warnung: Gibt dem Händler zurück, ob der Fahrer an diesem Datum
     bereits eine Fahrt hat. Blockiert nicht – der Händler entscheidet selbst."""
     if not date:
@@ -628,7 +628,7 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
 # (superseded=True). Jede Einreichung wird im Audit-Log protokolliert.
 
 @router.get("/pickup-fotos/{key:path}")
-async def pickup_foto(key: str, user=Depends(current_user)):
+async def pickup_foto(key: str, user=Depends(current_firma)):
     """Abweichungsfoto aus einem Abholbericht — nur fuer die eigene Firma.
     (Der offene /api/files-Weg liefert pickup/-Dateien seit 08/2026 nicht
     mehr aus.)"""

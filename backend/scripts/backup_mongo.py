@@ -33,6 +33,10 @@ DEFAULT_DIR = Path(r"C:\AutoSchnell-Backups")
 # Datei-Speicher (Fotos, Vertrags-PDFs, Snapshots, Unterschriften) — liegt
 # NICHT in MongoDB und muss deshalb mitgesichert werden.
 UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
+# Beweis-Snapshots (Mobile Rebuild, Kleinanzeigen-Fotos) liegen NICHT in
+# uploads/, sondern hier — ohne diese Sicherung waere "wiederherstellbar"
+# eine Falschaussage (PR-Review 09/2026).
+LOCAL_STORAGE_DIR = Path(__file__).resolve().parent.parent / "local_storage"
 
 
 def log(msg: str, logfile: Path) -> None:
@@ -82,7 +86,16 @@ def main() -> int:
     logfile = base / "backup.log"
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    target = base / f"autoschnell-{stamp}" / DB_NAME
+    # ATOMAR (PR-Review 09/2026): erst in einen .tmp-Ordner schreiben und
+    # NUR bei vollem Erfolg auf den endgueltigen Namen umbenennen. Vorher
+    # blieb bei einem Teilfehler ein halber "autoschnell-…"-Ordner stehen,
+    # den die Ueberwachung als gueltiges letztes Backup wertete — weitere
+    # Backups unterblieben dann 24 h lang.
+    final_dir = base / f"autoschnell-{stamp}"
+    tmp_dir = base / f".tmp-autoschnell-{stamp}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    target = tmp_dir / DB_NAME
     target.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -91,6 +104,7 @@ def main() -> int:
         names = sorted(db.list_collection_names())
     except Exception as exc:
         log(f"FEHLER: MongoDB nicht erreichbar — {exc}", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
 
     total_docs = 0
@@ -101,25 +115,31 @@ def main() -> int:
             log(f"  {name}: {n} Dokumente", logfile)
         except Exception as exc:
             log(f"FEHLER bei {name}: {exc}", logfile)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             return 1
 
     # Datei-Speicher spiegeln (nur neue/geänderte Dateien kopieren).
     n_files = 0
-    if UPLOADS_DIR.is_dir():
-        files_target = target.parent / "uploads"
-        for src in UPLOADS_DIR.rglob("*"):
+    for quelle, name in ((UPLOADS_DIR, "uploads"),
+                         (LOCAL_STORAGE_DIR, "local_storage")):
+        if not quelle.is_dir():
+            continue
+        files_target = target.parent / name
+        for src in quelle.rglob("*"):
             if not src.is_file():
                 continue
-            rel = src.relative_to(UPLOADS_DIR)
+            rel = src.relative_to(quelle)
             dst = files_target / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             n_files += 1
-        log(f"  Datei-Speicher: {n_files} Dateien gesichert", logfile)
+    log(f"  Datei-Speicher: {n_files} Dateien gesichert "
+        f"(uploads + local_storage)", logfile)
 
     size_mb = sum(f.stat().st_size for f in target.parent.rglob("*") if f.is_file()) / 1e6
+    tmp_dir.rename(final_dir)          # atomarer Abschluss
     log(f"BACKUP OK: {len(names)} Collections, {total_docs} Dokumente, "
-        f"{n_files} Dateien, {size_mb:.1f} MB -> {target.parent.name}", logfile)
+        f"{n_files} Dateien, {size_mb:.1f} MB -> {final_dir.name}", logfile)
     rotate(base, logfile)
     return 0
 

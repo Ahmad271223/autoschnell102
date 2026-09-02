@@ -76,6 +76,19 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     return user
 
 
+async def current_firma(user=Depends(current_user)):
+    """Firmen-Routen (Termine, Vertraege, Fahrzeuge, Fahrer-Verwaltung,
+    Haendler-Profil): NUR Chef und Sucher einer echten Firma.
+
+    Wichtig gegen das Mandantenleck (PR-Review 09/2026): Zwischenhaendler
+    (b2b_buyer) haben dealer_id=None — ohne diese Sperre teilten sich ALLE
+    Kaeufer den "None-Mandanten" und konnten dort gegenseitig Termine
+    samt Verkaeuferdaten anlegen und lesen."""
+    if user.get("role") not in ("dealer", "sucher") or not user.get("dealer_id"):
+        raise HTTPException(403, "Nur für Händler-Accounts (Chef und Sucher)")
+    return user
+
+
 async def current_admin(user=Depends(current_user)):
     if user.get("role") != "admin":
         raise HTTPException(403, "Admin erforderlich")

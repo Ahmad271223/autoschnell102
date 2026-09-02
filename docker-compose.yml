@@ -75,8 +75,9 @@ services:
       - S3_SECRET_KEY=${S3_SECRET_KEY:-}
       - S3_REGION=${S3_REGION:-}
     volumes:
-      - uploads_data:/app/uploads     # Fotos/Vertraege/Snapshots/Unterschriften
-      - backups_data:/backups         # taegliche Backups (backup_service.py)
+      - uploads_data:/app/uploads         # Fotos/Unterschriften/Protokolle
+      - snapshots_data:/app/local_storage # Beweis-Snapshots (Mobile Rebuild)
+      - backups_data:/backups             # taegliche Backups (backup_service.py)
     # Kein Port nach aussen — nur der Proxy spricht mit dem Backend.
 
   web:
@@ -103,4 +104,5 @@ services:
 volumes:
   mongo_data:
   uploads_data:
+  snapshots_data:
   backups_data:

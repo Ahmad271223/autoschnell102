@@ -8,7 +8,7 @@ from typing import Any, Dict, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, field_validator
 
-from deps import clean_doc, current_user, db, log_activity, now_iso
+from deps import clean_doc, current_user, db, log_activity, now_iso, current_firma
 from lifecycle import try_set_lifecycle
 
 log = logging.getLogger("autohandel")
@@ -48,7 +48,7 @@ class AppointmentIn(BaseModel):
 
 
 @router.post("/appointments")
-async def create_appointment(body: AppointmentIn, user=Depends(current_user)):
+async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     appt_id = str(uuid.uuid4())
     title = body.title or "Fahrzeug abholen"
     # EIGENTUEMER-PRUEFUNG: Fahrzeug- und Vertrags-IDs sind erratbar
@@ -87,7 +87,7 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_user)):
 
 
 @router.get("/appointments")
-async def list_appointments(user=Depends(current_user), status: Optional[str] = None):
+async def list_appointments(user=Depends(current_firma), status: Optional[str] = None):
     query: dict = {"dealer_id": user["dealer_id"]}
     if status:
         query["status"] = status
@@ -119,7 +119,7 @@ async def list_appointments(user=Depends(current_user), status: Optional[str] = 
 
 
 @router.get("/appointments/{appt_id}")
-async def get_appointment(appt_id: str, user=Depends(current_user)):
+async def get_appointment(appt_id: str, user=Depends(current_firma)):
     a = await db.appointments.find_one({"id": appt_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not a:
         raise HTTPException(404, "Termin nicht gefunden")
@@ -143,7 +143,7 @@ async def get_appointment(appt_id: str, user=Depends(current_user)):
 
 
 @router.put("/appointments/{appt_id}")
-async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(current_user)):
+async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(current_firma)):
     existing = await db.appointments.find_one(
         {"id": appt_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
     )
@@ -222,7 +222,7 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
 
 @router.get("/appointments/{appt_id}/report")
 async def get_pickup_report(appt_id: str, versions: int = 0,
-                            user=Depends(current_user)):
+                            user=Depends(current_firma)):
     """Händler liest den Abholbericht des Fahrers (aktuelle Version).
     Mit ?versions=1 werden auch alte (ersetzte) Versionen mitgeliefert."""
     appt = await db.appointments.find_one(
@@ -242,7 +242,7 @@ async def get_pickup_report(appt_id: str, versions: int = 0,
 
 
 @router.delete("/appointments/{appt_id}")
-async def delete_appointment(appt_id: str, user=Depends(current_user)):
+async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     res = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]})
     if not res.deleted_count:
         raise HTTPException(404, "Termin nicht gefunden")
@@ -251,7 +251,7 @@ async def delete_appointment(appt_id: str, user=Depends(current_user)):
 
 @router.get("/appointments/{appt_id}/pickup-order.pdf")
 async def get_pickup_order_pdf(appt_id: str, download: int = 0,
-                               user=Depends(current_user)):
+                               user=Depends(current_firma)):
     """Erzeugt das Abholprotokoll (Übergabe-PDF für den Fahrer) on-demand.
 
     Inhalte:

@@ -28,6 +28,7 @@ from auth import decode_token
 from autoscout_service import build_search_url as build_autoscout_url
 from autoscout_service import autoscout_quelle_verfuegbar
 from deps import (
+    current_firma,
     current_user, db, log_activity, now_iso, require_active_sub,
 )
 from kleinanzeigen_service import (
@@ -454,7 +455,7 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
 
 
 @router.get("/listings/check/{job_id}")
-async def listings_check_status(job_id: str, user=Depends(current_user)):
+async def listings_check_status(job_id: str, user=Depends(current_firma)):
     """Status eines Linkpruefungs-Jobs: queued | processing | completed |
     failed. Bei completed liegt das Inserat im Cache — /mobile/compare
     liefert dann sofort.
@@ -483,7 +484,7 @@ async def listings_check_status(job_id: str, user=Depends(current_user)):
 
 
 @router.get("/mobile/live-counter/{ad_id}")
-async def live_counter(ad_id: str, user=Depends(current_user)):
+async def live_counter(ad_id: str, user=Depends(current_firma)):
     five_min = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     active = await db.vehicle_comparisons.count_documents({
@@ -548,7 +549,7 @@ async def snapshot_download(snap_id: str, kind: str,
 
 @router.get("/snapshots")
 async def list_snapshots(vehicle_id: Optional[str] = None,
-                         user=Depends(current_user)):
+                         user=Depends(current_firma)):
     q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if vehicle_id:
         q["vehicle_id"] = vehicle_id
@@ -561,7 +562,7 @@ async def list_snapshots(vehicle_id: Optional[str] = None,
 #                       VEHICLES
 # =========================================================
 @router.get("/vehicles/{vehicle_id}")
-async def get_vehicle_detail(vehicle_id: str, user=Depends(current_user)):
+async def get_vehicle_detail(vehicle_id: str, user=Depends(current_firma)):
     v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
@@ -569,7 +570,7 @@ async def get_vehicle_detail(vehicle_id: str, user=Depends(current_user)):
 
 
 @router.get("/vehicles")
-async def list_vehicles(user=Depends(current_user)):
+async def list_vehicles(user=Depends(current_firma)):
     items = await db.vehicles.find(
         {"dealer_id": user["dealer_id"]}, {"_id": 0},
     ).sort("updated_at", -1).to_list(500)
@@ -580,7 +581,7 @@ async def list_vehicles(user=Depends(current_user)):
 #               LISTING IDENTITY / CACHE
 # =========================================================
 @router.post("/listings/extract")
-async def listings_extract(body: ListingURLIn, _user=Depends(current_user)):
+async def listings_extract(body: ListingURLIn, _user=Depends(current_firma)):
     if _user.get("role") not in ("dealer", "sucher"):
         raise HTTPException(403, "Nur für Händler-/Sucher-Accounts")
     """Erkennt Quelle (kleinanzeigen / mobile / autoscout24) + item_id aus

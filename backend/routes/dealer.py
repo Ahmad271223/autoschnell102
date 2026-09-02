@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
-from deps import current_user, db, get_subscription_status, now_iso
+from deps import current_user, db, get_subscription_status, now_iso, current_firma
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
 
 router = APIRouter()
@@ -67,7 +67,7 @@ class ActiveProfileIn(BaseModel):
 
 # ---------- Endpoints ----------
 @router.get("/dealer/settings")
-async def get_settings(user=Depends(current_user)):
+async def get_settings(user=Depends(current_firma)):
     """Wirksame Einstellungen aus Sicht des Nutzers: Chef-Vorgaben,
     bei Suchern überlagert von den eigenen persönlichen Anpassungen."""
     from deps import effective_dealer
@@ -93,7 +93,7 @@ async def get_settings(user=Depends(current_user)):
 
 
 @router.put("/dealer/active-profile")
-async def set_active_profile(body: ActiveProfileIn, user=Depends(current_user)):
+async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma)):
     """Schneller Profil-Wechsel vom Homebildschirm aus (Inland ↔ Export).
     Sucher wechseln nur IHR eigenes Profil (Override), nicht das des Chefs."""
     if body.active_profile not in ("inland", "export"):
@@ -162,7 +162,7 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
 
 
 @router.put("/dealer/settings")
-async def update_settings(body: DealerSettingsIn, user=Depends(current_user)):
+async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
     """Chef schreibt die Händler-Vorgaben. Sucher speichern dieselben Felder
     als PERSÖNLICHEN Override (users.settings_override) — die Chef-Werte
     bleiben unverändert und dienen weiter als Vorbefüllung."""
@@ -186,7 +186,7 @@ class LogoUploadIn(BaseModel):
 
 
 @router.post("/dealer/logo")
-async def upload_logo(body: LogoUploadIn, user=Depends(current_user)):
+async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     """Firmenlogo hochladen (max. 2 MB). Speichert im Storage und setzt
     logo_url auf den ausgelieferten /api/files/<key>-Pfad. Sucher setzen
     damit nur IHR persönliches Logo (Override), nicht das des Chefs."""
@@ -221,7 +221,7 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_user)):
 #                  ABO / SUBSCRIPTION
 # =========================================================
 @router.get("/dealer/subscription")
-async def dealer_subscription(user=Depends(current_user)):
+async def dealer_subscription(user=Depends(current_firma)):
     """Liefert dem Händler den aktuellen Abo-Stand: Plan, Status, Ablaufdatum,
     verbleibende Tage und ob Kündigen/Verlängern möglich ist.
 
@@ -268,7 +268,7 @@ async def dealer_subscription(user=Depends(current_user)):
 
 
 @router.post("/dealer/subscription/cancel")
-async def dealer_cancel_subscription(user=Depends(current_user)):
+async def dealer_cancel_subscription(user=Depends(current_firma)):
     """Kündigt das aktuelle Abo. Wir setzen `status='cancelled'` UND merken
     uns das Datum, lassen das Abo aber bis `expires_at` weiter aktiv. Damit
     bekommt der Händler die bezahlte Zeit zu Ende und keine sofortige
