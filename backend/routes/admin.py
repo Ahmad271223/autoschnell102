@@ -150,12 +150,29 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     for k in ("active", "role"):
         if k in body:
             fields[k] = body[k]
-    # Super-Admin schützen: weder demote noch deaktivieren erlaubt
+    # ROLLENAENDERUNGEN sind Super-Admin-Sache (PR-Review 09/2026): sonst
+    # kann jeder normale Admin beliebige Nutzer zu weiteren Admins machen
+    # (Eskalation) oder Kollegen degradieren. Erlaubte Zielrollen sind
+    # zudem fest verdrahtet.
+    if "role" in fields:
+        if not admin.get("is_super_admin"):
+            raise HTTPException(403, "Rollen ändern darf nur der Super-Admin")
+        if fields["role"] not in ("dealer", "sucher", "admin", "b2b_buyer"):
+            raise HTTPException(400, "Unbekannte Rolle")
+    # Admin-Konten verwalten nur Super-Admins: Passwort-Reset, Sperren
+    # oder Loeschen eines Admins durch einen NORMALEN Admin waere eine
+    # Kontouebernahme auf gleicher Stufe.
+    if target.get("role") == "admin" and target.get("id") != admin.get("id") \
+            and not admin.get("is_super_admin"):
+        raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
     if target.get("is_super_admin"):
         if "role" in fields and fields["role"] != "admin":
             raise HTTPException(400, "Super-Admin-Rolle kann nicht geändert werden")
         if "active" in fields and not fields["active"]:
             raise HTTPException(400, "Super-Admin kann nicht gesperrt werden")
+        if "password" in body and target.get("id") != admin.get("id"):
+            raise HTTPException(403, "Das Super-Admin-Passwort ändert nur der "
+                                     "Super-Admin selbst")
     # Selbst-Sperre verhindern
     if target.get("id") == admin.get("id") and "active" in fields and not fields["active"]:
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
@@ -164,6 +181,9 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         if len(pw) < 8:
             raise HTTPException(400, "Passwort muss mindestens 8 Zeichen haben")
         fields["password_hash"] = hash_password(pw)
+        # Passwortwechsel beendet alle Sitzungen des Kontos — ein
+        # gestohlener Token ueberlebt die Aenderung nicht (PR-Review).
+        fields["current_session_id"] = None
     if fields:
         await db.users.update_one({"id": user_id}, {"$set": fields})
     if "plan_type" in body:
@@ -244,6 +264,8 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         raise HTTPException(404)
     if u.get("is_super_admin"):
         raise HTTPException(400, "Super-Admin kann nicht gelöscht werden")
+    if u.get("role") == "admin" and not admin.get("is_super_admin"):
+        raise HTTPException(403, "Admin-Konten löscht nur der Super-Admin")
     if u.get("id") == admin.get("id"):
         raise HTTPException(400, "Du kannst dich nicht selbst löschen")
 

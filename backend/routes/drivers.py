@@ -183,6 +183,11 @@ async def _load_dealer_driver(dealer_id: str, driver_account_id: str) -> Optiona
 
 @router.post("/drivers/add")
 async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
+    # Fahrer HINZUFUEGEN ist Chefsache — Sucher sehen die Liste und
+    # weisen Termine zu, veraendern die Firmen-Fahrerliste aber nicht.
+    if user.get("role") != "dealer":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf Fahrer "
+                                 "hinzufügen")
     """Händler fügt Fahrer per öffentlichem Code hinzu."""
     code = (body.driver_code or "").strip().upper()
     if not code:
@@ -224,14 +229,21 @@ async def list_drivers(user=Depends(current_firma)):
 @router.delete("/drivers/{driver_id}")
 async def delete_driver(driver_id: str, user=Depends(current_firma)):
     """Verknüpfung entfernen. Der Fahrer-Account selbst bleibt bestehen."""
+    if user.get("role") != "dealer":
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf Fahrer "
+                                 "entfernen")
     res = await db.dealer_drivers.delete_one(
         {"dealer_id": user["dealer_id"], "driver_account_id": driver_id},
     )
     if not res.deleted_count:
         raise HTTPException(404, "Fahrer nicht in deiner Liste")
+    # Nur OFFENE Fahrten vom Fahrer trennen — "abgeholt"/"nicht
+    # abgeholt"/"erledigt" behalten die historische Zuordnung als Beweis
+    # (der alte Schutz prüfte den nie benutzten Status "abgeschlossen"
+    # und trennte damit auch Abgeschlossenes, PR-Review 09/2026).
     await db.appointments.update_many(
         {"dealer_id": user["dealer_id"], "driver_id": driver_id,
-         "status": {"$ne": "abgeschlossen"}},
+         "status": {"$in": ["offen", "verschoben"]}},
         {"$unset": {"driver_id": ""}},
     )
     return {"ok": True}

@@ -95,6 +95,17 @@ async def current_admin(user=Depends(current_user)):
     return user
 
 
+async def current_super_admin(user=Depends(current_admin)):
+    """NUR der Super-Admin (is_super_admin=true in der Datenbank).
+
+    Ein normaler Admin reicht NICHT (PR-Review 09/2026): sonst koennte
+    jeder Admin Rollen vergeben, Super-Admin-Passwoerter zuruecksetzen
+    und damit die Plattform uebernehmen."""
+    if not user.get("is_super_admin"):
+        raise HTTPException(403, "Nur der Super-Admin darf das")
+    return user
+
+
 def sub_status_from_doc(sub) -> dict:
     """Abo-Status aus einem bereits geladenen Abo-Dokument berechnen.
     EINZIGE Stelle fuer diese Geschaeftsregel — get_subscription_status,

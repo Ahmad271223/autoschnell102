@@ -356,11 +356,17 @@ async def seed_admin():
         return
     existing = await db.users.find_one({"email": email})
     if existing:
-        # ensure role admin & lifetime
-        await db.users.update_one(
-            {"email": email},
-            {"$set": {"role": "admin", "active": True}},
-        )
+        if existing.get("role") == "admin":
+            await db.users.update_one({"email": email},
+                                      {"$set": {"active": True}})
+        else:
+            # NIEMALS ein Fremdkonto hochstufen (PR-Review 09/2026): wer
+            # die Admin-Mail zuerst registriert hatte, wuerde sonst nach
+            # einer Fehlkonfiguration automatisch Admin.
+            log.error("seed_admin: unter %s existiert bereits ein NORMALES "
+                      "Konto (Rolle %s) — es wird NICHT zum Admin "
+                      "hochgestuft. ADMIN_EMAIL in der .env aendern.",
+                      email, existing.get("role"))
         return
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())

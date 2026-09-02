@@ -835,7 +835,7 @@ function SubscriptionPanel() {
           <div className="grid md:grid-cols-2 gap-4 mb-4">
             <PlanCard
               title="Monatsabo"
-              price="120 €"
+              price="160 €"
               suffix="/ Monat"
               tagline="Monatlich kündbar — flexibel bleiben."
               testid="abo-renew-monthly"
@@ -845,7 +845,7 @@ function SubscriptionPanel() {
             />
             <PlanCard
               title="Jahresabo"
-              price="1.200 €"
+              price="1.800 €"
               suffix="/ Jahr"
               tagline="2 Monate gratis · 240 € sparen."
               highlight
