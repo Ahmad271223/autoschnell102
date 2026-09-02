@@ -172,7 +172,8 @@ async def _process(db, job: dict) -> None:
         return
 
     async def _fetcher(src, iid, url):
-        return await fetch_listing(db, src, iid, url)
+        return await fetch_listing(db, src, iid, url,
+                                   dealer_id=job.get("requested_by_dealer", ""))
 
     try:
         await get_or_fetch_listing(db, job["url"], _fetcher,

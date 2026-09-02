@@ -48,6 +48,22 @@ class AppointmentIn(BaseModel):
 
 
 @router.post("/appointments")
+async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
+    """Fahrer-Zuweisung nur an AKTUELL verknuepfte Fahrer der Firma.
+
+    Vorher wurde driver_id ungeprueft uebernommen — wer die ID eines
+    ehemaligen (entfernten) Fahrers kannte, konnte ihm weiter Termine
+    samt Verkaeuferdaten zustellen (PR-Review 09/2026)."""
+    if not driver_id:
+        return
+    if not await db.dealer_drivers.find_one(
+            {"dealer_id": dealer_id, "driver_account_id": driver_id},
+            {"_id": 1}):
+        raise HTTPException(400, "Dieser Fahrer ist nicht (mehr) mit deiner "
+                                 "Firma verknüpft — bitte zuerst unter "
+                                 "'Fahrer' per Code hinzufügen.")
+
+
 async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     appt_id = str(uuid.uuid4())
     title = body.title or "Fahrzeug abholen"
@@ -65,6 +81,7 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         if not await db.generated_pdfs.find_one(
                 {"id": body.contract_id, "dealer_id": user["dealer_id"]}, {"_id": 1}):
             raise HTTPException(404, "Vertrag nicht gefunden")
+    await _fahrer_pruefen(user["dealer_id"], body.driver_id)
     if vehicle_doc and not body.title:
         d = vehicle_doc["data"]
         title = f"{d.get('make_label','')} {d.get('model_label','')} abholen".strip()
@@ -157,6 +174,8 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     if update.get("contract_id") and not await db.generated_pdfs.find_one(
             {"id": update["contract_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
         raise HTTPException(404, "Vertrag nicht gefunden")
+    if "driver_id" in update:
+        await _fahrer_pruefen(user["dealer_id"], update.get("driver_id"))
     update["updated_at"] = now_iso()
     pickup_changed = (
         update.get("pickup_date")

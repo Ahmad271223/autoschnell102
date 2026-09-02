@@ -213,7 +213,20 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         **payload,
         "created_at": now_iso(), "updated_at": now_iso(),
     }
-    await db.pickup_protocols.insert_one(new_doc)
+    try:
+        await db.pickup_protocols.insert_one(new_doc)
+    except Exception:
+        # Unique-Index (genau EIN aktuelles Protokoll je Termin): ein
+        # GLEICHZEITIGER Request hat den Entwurf gerade angelegt — dann
+        # dessen Dokument aktualisieren statt ein zweites zu erzeugen.
+        vorhandenes = await _current(appt_id)
+        if not vorhandenes:
+            raise
+        await db.pickup_protocols.update_one(
+            {"id": vorhandenes["id"]},
+            {"$set": {**payload, "updated_at": now_iso()}})
+        return await db.pickup_protocols.find_one(
+            {"id": vorhandenes["id"]}, {"_id": 0})
     return {k: v for k, v in new_doc.items() if k != "_id"}
 
 
@@ -237,7 +250,16 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
         "corrects_version": doc.get("version", 1),
         "created_at": now_iso(), "updated_at": now_iso(),
     })
-    await db.pickup_protocols.insert_one(new_doc)
+    try:
+        await db.pickup_protocols.insert_one(new_doc)
+    except Exception:
+        # Schlaegt der Insert fehl, darf der Termin nicht OHNE aktuelle
+        # Version zurueckbleiben: alte Version wieder aktiv schalten.
+        await db.pickup_protocols.update_one(
+            {"id": doc["id"]}, {"$set": {"superseded": False}})
+        raise HTTPException(500, "Korrektur konnte nicht angelegt werden — "
+                                 "bitte erneut versuchen (alte Version ist "
+                                 "weiterhin gültig).")
     return {k: v for k, v in new_doc.items() if k != "_id"}
 
 
@@ -252,6 +274,25 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     if not doc:
         raise HTTPException(400, "Bitte zuerst das Protokoll ausfüllen")
     if doc.get("status") == "final":
+        # SELBSTHEILUNG (PR-Review 09/2026): Der Abschluss besteht aus
+        # mehreren Schritten (Protokoll final -> Termin abgeholt ->
+        # Fahrzeug-Lebenszyklus). Brach er dazwischen ab, war das
+        # Protokoll final, der Termin aber offen — und jeder neue Versuch
+        # scheiterte hier mit 409. Jetzt zieht ein Wiederholungsaufruf
+        # die fehlenden Status nach, statt dauerhaft zu blockieren.
+        if (appt.get("status") or "") != "abgeholt":
+            await db.appointments.update_one(
+                {"id": appt_id},
+                {"$set": {"status": "abgeholt",
+                          "status_changed_at": now_iso(),
+                          "protocol_id": doc["id"]}})
+            if appt.get("vehicle_id"):
+                await try_set_lifecycle(appt["vehicle_id"],
+                                        appt.get("dealer_id", ""), "abgeholt")
+            return {"ok": True, "protocol_id": doc["id"],
+                    "version": doc.get("version", 1),
+                    "nachgezogen": True,
+                    "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
         raise HTTPException(409, "Protokoll ist bereits abgeschlossen")
 
     # ---- Pflichtfelder: das Backend verlaesst sich NICHT auf die App ----

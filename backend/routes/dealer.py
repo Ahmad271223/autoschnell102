@@ -275,10 +275,19 @@ async def dealer_cancel_subscription(user=Depends(current_firma)):
     Sperre. Verlängern bleibt jederzeit möglich (neuer Checkout)."""
     if user.get("role") == "sucher":
         raise HTTPException(403, "Nur der Händler-Hauptaccount darf Abos verwalten")
+    # DIESELBE Auswahlregel wie die Statusberechnung (deps): das
+    # FIRMEN-Abo hat kein subject_user_id — sonst konnte die Kuendigung
+    # versehentlich das juengste PERSOENLICHE Sucher-Abo treffen.
     sub = await db.subscriptions.find_one(
-        {"dealer_id": user["dealer_id"]},
+        {"dealer_id": user["dealer_id"],
+         "subject_user_id": {"$exists": False}},
         sort=[("created_at", -1)],
     )
+    if not sub:
+        sub = await db.subscriptions.find_one(
+            {"dealer_id": user["dealer_id"], "subject_user_id": None},
+            sort=[("created_at", -1)],
+        )
     if not sub:
         raise HTTPException(404, "Kein Abo vorhanden")
     if sub.get("plan") == "lifetime":

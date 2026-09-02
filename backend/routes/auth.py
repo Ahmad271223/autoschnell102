@@ -75,14 +75,19 @@ async def register(body: RegisterIn, request: Request):
     ip = client_ip(request)
     if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
-    existing = await db.users.find_one({"email": body.email})
+    # E-Mail KANONISCH speichern (klein, getrimmt) und case-insensitiv auf
+    # Duplikate pruefen — vorher konnten User@x.de und user@x.de als zwei
+    # Konten entstehen, waehrend der Login case-insensitiv irgendeins fand.
+    email = body.email.strip().lower()
+    existing = await db.users.find_one(
+        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
     if existing:
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
     sid = new_session_id()
     user_doc = {
-        "id": user_id, "email": body.email,
+        "id": user_id, "email": email,
         "password_hash": await hash_password_async(body.password),
         "role": "dealer", "active": True,
         "dealer_id": dealer_id, "current_session_id": sid,
@@ -294,8 +299,13 @@ async def password_reset_confirm(body: ResetConfirmIn, request: Request):
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   # Alle bestehenden Sessions beenden (Single-Session strikt)
                   "current_session_id": None}})
-    await db.password_resets.update_one(
-        {"id": doc["id"]}, {"$set": {"used": True, "used_at": now_iso()}})
+    # ATOMAR entwerten: nur der ERSTE parallele Bestaetiger gewinnt —
+    # vorher konnten zwei gleichzeitige Aufrufe denselben Token nutzen.
+    verbraucht = await db.password_resets.find_one_and_update(
+        {"id": doc["id"], "used": {"$ne": True}},
+        {"$set": {"used": True, "used_at": now_iso()}})
+    if not verbraucht:
+        raise invalid
     await log_activity("", u["id"], "auth.passwort.reset.durchgefuehrt",
                        meta={"ip": ip})
     return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}

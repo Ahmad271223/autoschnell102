@@ -53,6 +53,12 @@ class CheckoutIn(BaseModel):
 
 @router.post("/payments/checkout")
 async def create_checkout(body: CheckoutIn, request: Request, user=Depends(current_user)):
+    # Zwischenhaendler haben ein EIGENES Zugangs-Abo (Admin-Freischaltung) —
+    # der Haendler-/Sucher-Checkout waere fuer sie bezahlt, aber nutzlos.
+    if user.get("role") == "b2b_buyer":
+        raise HTTPException(400, "Für Marktplatz-Käufer läuft die "
+                                 "Freischaltung über den Admin (Menüpunkt "
+                                 "Zugang), nicht über diesen Checkout.")
     if body.plan not in PLAN_PRICES:
         raise HTTPException(400, "Unbekannter Plan")
     pkg = PLAN_PRICES[body.plan]

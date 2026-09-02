@@ -92,7 +92,7 @@ class TestAuth:
         assert r.status_code == 200, r.text
         body = r.json()
         assert "token" in body and len(body["token"]) > 10
-        assert body["user"]["email"] == email
+        assert body["user"]["email"] == email.lower()
         assert body["user"]["role"] == "dealer"
 
     def test_register_duplicate(self):

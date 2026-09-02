@@ -27,12 +27,45 @@ def mock_vehicle(item_id: str) -> Dict[str, Any]:
             "images": [], "_mock": True}
 
 
-async def fetch_listing(db, source: str, item_id: str, url: str) -> Dict[str, Any]:
+# Tagesbudget fuer KOSTENPFLICHTIGE Abrufe (mobile.de/AutoScout via Apify,
+# ~0,4-0,6 Cent je Abruf). Begrenzt je Firma und gesamt, damit ein
+# kompromittierter oder boeswilliger Account keine unbegrenzten Apify-/
+# Proxy-Kosten erzeugen kann (PR-Review 09/2026). Cache-Treffer kosten
+# nichts und zaehlen nicht — nur echte Frisch-Abrufe landen hier.
+TAGESLIMIT_JE_FIRMA = int(os.environ.get("ANBIETER_TAGESLIMIT_JE_FIRMA", "200"))
+TAGESLIMIT_GESAMT = int(os.environ.get("ANBIETER_TAGESLIMIT_GESAMT", "2000"))
+
+
+async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
+    if source not in ("mobile", "autoscout24"):
+        return
+    from datetime import datetime, timedelta, timezone
+    from pymongo import ReturnDocument
+    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ablauf = datetime.now(timezone.utc) + timedelta(days=2)
+    for schluessel, limit in ((f"{tag}:gesamt", TAGESLIMIT_GESAMT),
+                              (f"{tag}:firma:{dealer_id or 'ohne'}",
+                               TAGESLIMIT_JE_FIRMA)):
+        doc = await db.provider_budget.find_one_and_update(
+            {"_id": schluessel},
+            {"$inc": {"n": 1}, "$setOnInsert": {"ablauf": ablauf}},
+            upsert=True, return_document=ReturnDocument.AFTER)
+        if doc["n"] > limit:
+            raise RuntimeError(
+                "Tageslimit für kostenpflichtige Anbieter-Abrufe erreicht "
+                f"({limit}/Tag). Bekannte Links kommen weiter aus dem "
+                "Speicher; neue Links bitte morgen erneut — oder das Limit "
+                "in der .env erhöhen (ANBIETER_TAGESLIMIT_*).")
+
+
+async def fetch_listing(db, source: str, item_id: str, url: str,
+                        dealer_id: str = "") -> Dict[str, Any]:
     """Holt ein Inserat bei der Quelle — oder liefert im Lasttest-Modus
     synthetische Daten mit realistischer Verzoegerung."""
     if MOCK_PROVIDER_FETCH:
         await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
+    await _budget_pruefen(db, source, dealer_id)
     if source == "kleinanzeigen":
         from kleinanzeigen_service import fetch_kleinanzeigen_vehicle
         v = await fetch_kleinanzeigen_vehicle(url)

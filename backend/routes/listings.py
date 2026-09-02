@@ -135,7 +135,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:
         """Wird nur bei Cache-MISS aufgerufen."""
-        return await fetch_listing(db, src, iid, url)
+        return await fetch_listing(db, src, iid, url,
+                                   dealer_id=user.get("dealer_id") or "")
 
     try:
         if client_hit is not None:
@@ -597,7 +598,8 @@ async def listings_extract(body: ListingURLIn, _user=Depends(current_firma)):
 async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub)):
     """Cache-aware Resolver."""
     async def _fetcher(source: str, item_id: str, url: str) -> dict:
-        return await fetch_listing(db, source, item_id, url)
+        return await fetch_listing(db, source, item_id, url,
+                                   dealer_id=user.get("dealer_id") or "")
 
     # Eigene Quarantaene zuerst: sonst wuerde der Server eine Anzeige selbst
     # abrufen, die der Nutzer per Erweiterung bereits geliefert hat.

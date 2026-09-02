@@ -652,11 +652,13 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
     der Fahrer zugeteilt ist."""
     if not key.startswith("pickup/"):
         raise HTTPException(404, "Datei nicht gefunden")
-    teile = key.split("/")
-    dealer_id = teile[1] if len(teile) >= 3 else ""
-    zugeteilt = await db.appointments.find_one(
-        {"driver_id": driver["id"], "dealer_id": dealer_id}, {"_id": 1})
-    if not zugeteilt:
+    # NUR Fotos aus den EIGENEN Abholberichten (PR-Review 09/2026):
+    # vorher genuegte irgendein Termin bei der Firma, um bei bekanntem
+    # Key beliebige Abholfotos dieser Firma zu laden.
+    eigener_bericht = await db.pickup_reports.find_one(
+        {"deviations.photo_key": key, "driver_account_id": driver["id"]},
+        {"_id": 1})
+    if not eigener_bericht:
         raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, storage, StorageError
     try:
@@ -720,7 +722,23 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         "status": "bestaetigt",
         "created_at": now_iso(),
     }
-    await db.pickup_reports.insert_one(doc)
+    for versuch in range(3):
+        try:
+            await db.pickup_reports.insert_one(doc)
+            break
+        except Exception:
+            # Unique-Index (appointment_id, version): ein paralleler
+            # Bericht hat dieselbe Version belegt -> frisch lesen, neue
+            # Versionsnummer nehmen und erneut versuchen.
+            if versuch == 2:
+                raise HTTPException(409, "Bericht wurde gerade parallel "
+                                         "gespeichert — bitte neu laden.")
+            doc.pop("_id", None)
+            prev = await db.pickup_reports.find_one(
+                {"appointment_id": appt_id, "superseded": {"$ne": True}},
+                {"_id": 0, "id": 1, "version": 1}, sort=[("version", -1)])
+            doc["version"] = (prev or {}).get("version", 0) + 1
+            doc["replaces_id"] = (prev or {}).get("id")
     if prev:
         await db.pickup_reports.update_one(
             {"id": prev["id"]}, {"$set": {"superseded": True}})

@@ -240,18 +240,34 @@ async def ensure_indexes():
     await db.users.create_index("email", unique=True)
     await db.dealers.create_index("user_id", unique=True)
     await db.vehicle_cache.create_index("mobile_ad_id", unique=True)
+    # Genau EIN aktuelles Abholprotokoll je Termin (Race-Schutz: zwei
+    # parallele Entwurf-Anlagen koennen sonst zwei "aktuelle" Versionen
+    # erzeugen). Berichte: je Termin darf jede Versionsnummer nur einmal
+    # existieren — der Verlierer eines Rennens bekommt DuplicateKey und
+    # wiederholt mit frisch gelesener Version.
+    await db.pickup_protocols.create_index(
+        "appointment_id", unique=True,
+        partialFilterExpression={"superseded": False},
+        name="ein_aktuelles_protokoll_je_termin")
+    await db.pickup_reports.create_index(
+        [("appointment_id", 1), ("version", 1)], unique=True,
+        name="berichtsversion_eindeutig")
+    # Tagesbudget-Zaehler (provider_fetch) raeumen sich selbst weg.
+    await db.provider_budget.create_index("ablauf", expireAfterSeconds=0)
     # TTL on cache (30 minutes)
     try:
         await db.vehicle_cache.create_index("expires_at_dt", expireAfterSeconds=0)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
+                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
     # Vehicle comparisons – auto-cleanup after 14 days
     try:
         await db.vehicle_comparisons.create_index(
             "expires_at_dt", expireAfterSeconds=0,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
+                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
     await db.subscriptions.create_index("dealer_id")
     # Unique index on session_id prevents duplicate subscriptions from race
     # conditions between concurrent payment-status polls and webhook deliveries.
@@ -261,8 +277,9 @@ async def ensure_indexes():
         await db.subscriptions.create_index(
             "session_id", unique=True, sparse=True,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
+                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
     # Audit-Log + Fehler-Meldungen (Admin-Bereich)
     await db.activity_logs.create_index([("created_at", -1)])
@@ -307,8 +324,9 @@ async def ensure_indexes():
     # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
     try:
         await db.listings_cache.create_index("cache_key", unique=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
+                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
     # Snapshots: das Frontend pollt alle 4 s auf (id, dealer_id) — ohne Index
     # ist das ab ein paar tausend Snapshots ein Collection-Scan pro Poll.
     await db.listing_snapshots.create_index("id", unique=True)
@@ -320,8 +338,9 @@ async def ensure_indexes():
     # Legacy-Index entfernen, falls noch vorhanden
     try:
         await db.drivers.drop()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
+                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
 
 
 

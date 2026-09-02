@@ -2,7 +2,9 @@
 FROM node:20-slim AS build
 WORKDIR /app
 COPY package.json yarn.lock* ./
-RUN yarn install --frozen-lockfile || yarn install
+# Streng nach Lockfile — der fruehere '|| yarn install'-Ausweg umging den
+# Schutz genau dann, wenn er gebraucht wurde (abweichende Abhaengigkeiten).
+RUN yarn install --frozen-lockfile
 COPY . .
 # Backend-URL wird zur Build-Zeit eingebacken (CRA/craco liest REACT_APP_*).
 ARG REACT_APP_BACKEND_URL=/api

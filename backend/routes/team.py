@@ -178,6 +178,11 @@ async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
     if not s:
         raise HTTPException(404, "Sucher nicht gefunden")
     await db.users.delete_one({"id": sucher_id})
+    # Persoenliche Reste mitloeschen (PR-Review 09/2026): das Sucher-Abo
+    # blieb sonst bestehen und konnte Status-/Kuendigungslogik verwirren.
+    await db.subscriptions.delete_many({"subject_user_id": sucher_id})
+    if s.get("email"):
+        await db.password_resets.delete_many({"email": s["email"]})
     await log_activity(user["dealer_id"], user["id"], "sucher.geloescht",
                        ref=sucher_id, meta={"email": s.get("email", "")})
     return {"ok": True}

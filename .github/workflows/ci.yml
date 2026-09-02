@@ -27,6 +27,12 @@ jobs:
       # Anbieter-Mock: E2E-, Job- und Mandantentests vergleichen echte
       # Ablaeufe, ohne Kleinanzeigen/mobile.de zu belasten.
       MOCK_PROVIDER_FETCH: "true"
+      # Admin-/Super-Admin-Seeds fuer tests/test_admin_dashboard.py
+      # (nur CI-Testwerte — Produktion setzt eigene in der .env).
+      ADMIN_EMAIL: admin@autohandel.app
+      ADMIN_PASSWORD: "Admin123!"
+      SUPER_ADMIN_USERNAME: CashCarHannover2025
+      SUPER_ADMIN_PASSWORD: MaW34543WaM
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

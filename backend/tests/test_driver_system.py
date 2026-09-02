@@ -331,7 +331,8 @@ class TestDriverAppointments:
         ulist = requests.get(f"{API}/admin/users",
                              headers={"Authorization": f"Bearer {admin}"},
                              timeout=30).json()
-        target = next(u for u in ulist if u["email"] == dealer_a["email"])
+        target = next(u for u in ulist
+                      if u["email"].lower() == dealer_a["email"].lower())
         requests.put(f"{API}/admin/users/{target['id']}",
                      headers={"Authorization": f"Bearer {admin}"},
                      json={"plan_type": "lifetime"}, timeout=30)

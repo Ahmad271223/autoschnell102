@@ -587,6 +587,14 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
     res = await db.generated_pdfs.delete_one({"id": contract_id, "dealer_id": user["dealer_id"]})
     if not res.deleted_count:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    # Kaskade (PR-Review 09/2026): archivierte Versionen mitloeschen und
+    # Termin-Verweise kappen — sonst blieben verwaiste Versionen und
+    # Termine, deren "Kaufvertrag oeffnen" ins Leere zeigt.
+    await db.generated_pdf_versions.delete_many(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"]})
+    await db.appointments.update_many(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
+        {"$set": {"contract_id": None, "updated_at": now_iso()}})
     return {"ok": True}
 
 

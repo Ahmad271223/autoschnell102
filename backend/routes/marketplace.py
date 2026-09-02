@@ -327,7 +327,7 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
     user_id = str(uuid.uuid4())
     sid = new_session_id()
     await db.users.insert_one({
-        "id": user_id, "email": body.email,
+        "id": user_id, "email": body.email.strip().lower(),
         "password_hash": await hash_password_async(body.password),
         "role": "b2b_buyer", "active": True,
         "dealer_id": None,
@@ -635,6 +635,25 @@ async def browse_listings(
     return out
 
 
+async def _inserat_sichtbar_fuer(user: dict, listing: dict) -> bool:
+    """Darf DIESER Betrachter das Inserat sehen? (oeffentlicher Haendler
+    oder eigenes Netzwerk; visibility=private nur im Netzwerk). Vorher
+    liessen sich private Inserate bei bekannter ID favorisieren und
+    anfragen (PR-Review 09/2026)."""
+    dealer_id = listing.get("dealer_id")
+    if dealer_id == user.get("dealer_id"):
+        return False                      # eigene Inserate: kein Selbst-Interesse
+    im_netzwerk = await db.network_members.find_one(
+        {"dealer_id": dealer_id, "buyer_user_id": user["id"]}, {"_id": 1})
+    if (listing.get("visibility") or "") == "private" and not im_netzwerk:
+        return False
+    if im_netzwerk:
+        return True
+    d = await db.dealers.find_one({"id": dealer_id},
+                                  {"_id": 0, "marketplace.public": 1})
+    return bool(((d or {}).get("marketplace") or {}).get("public"))
+
+
 # ---------- Favoriten (Merkliste) ----------
 @router.post("/marktplatz/favoriten/{listing_id}")
 async def toggle_favorit(listing_id: str, user=Depends(current_buyer)):
@@ -646,8 +665,9 @@ async def toggle_favorit(listing_id: str, user=Depends(current_buyer)):
         await db.buyer_favorites.delete_one({"_id": existing["_id"]})
         return {"favorit": False}
     l = await db.resale_listings.find_one(
-        {"id": listing_id, "status": "veroeffentlicht"}, {"_id": 0, "dealer_id": 1})
-    if not l:
+        {"id": listing_id, "status": "veroeffentlicht"},
+        {"_id": 0, "dealer_id": 1, "visibility": 1})
+    if not l or not await _inserat_sichtbar_fuer(user, l):
         raise HTTPException(404, "Inserat nicht gefunden")
     await db.buyer_favorites.insert_one({
         "id": str(uuid.uuid4()),
@@ -729,6 +749,8 @@ async def send_interest(listing_id: str, body: InterestIn,
         raise HTTPException(404, "Inserat nicht gefunden oder nicht verfügbar")
     if l["dealer_id"] == user.get("dealer_id"):
         raise HTTPException(400, "Eigene Inserate können nicht angefragt werden")
+    if not await _inserat_sichtbar_fuer(user, l):
+        raise HTTPException(404, "Inserat nicht gefunden oder nicht verfügbar")
     doc = {
         "id": str(uuid.uuid4()),
         "listing_id": listing_id,
