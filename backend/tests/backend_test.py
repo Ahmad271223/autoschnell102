@@ -17,8 +17,8 @@ BASE_URL = (os.environ.get("TEST_BASE_URL")
             or "http://localhost:8001").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@autohandel.app"
-ADMIN_PASS = "Admin123!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "ci-admin@ci.invalid")
+ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 SAMPLE_AD_URL = "https://m.mobile.de/fahrzeuge/details.html?id=448228023"
 SAMPLE_AD_URL_2 = "https://m.mobile.de/fahrzeuge/details.html?id=391155421"
 

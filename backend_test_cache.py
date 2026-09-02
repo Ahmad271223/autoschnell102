@@ -4,6 +4,7 @@ Backend API Testing for Unified Listing Cache Feature
 Tests the cache logic with source + item_id as key for mobile.de and kleinanzeigen.de
 """
 
+import os
 import requests
 import json
 import sys
@@ -14,8 +15,8 @@ from typing import Dict, Any, Optional, Tuple
 BACKEND_URL = "https://vehicle-holder-auto.preview.emergentagent.com/api"
 
 # Test credentials from /app/memory/test_credentials.md
-ADMIN_EMAIL = "admin@autohandel.app"
-ADMIN_PASSWORD = "Admin123!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "ci-admin@ci.invalid")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 
 class CacheTester:
     def __init__(self):

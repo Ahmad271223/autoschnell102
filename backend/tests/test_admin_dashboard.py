@@ -26,10 +26,10 @@ BASE_URL = (os.environ.get("TEST_BASE_URL")
             or os.environ.get("REACT_APP_BACKEND_URL")
             or "http://localhost:8001").rstrip("/")
 
-SUPER_USERNAME = "CashCarHannover2025"
-SUPER_PASSWORD = "MaW34543WaM"
-LEGACY_ADMIN_EMAIL = "admin@autohandel.app"
-LEGACY_ADMIN_PASSWORD = "Admin123!"
+SUPER_USERNAME = os.environ.get("SUPER_ADMIN_USERNAME", "ci-superadmin")
+SUPER_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD", "ci-only-superadmin-pw-1")
+LEGACY_ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "ci-admin@ci.invalid")
+LEGACY_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 
 
 # --------------------- helpers / fixtures ---------------------
