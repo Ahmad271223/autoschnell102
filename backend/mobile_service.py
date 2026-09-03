@@ -16,6 +16,7 @@ import html as _htmllib
 import json
 import logging
 import os
+import asyncio
 import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
@@ -285,7 +286,7 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
                                           "User-Agent": random_user_agent()})
             if r.status_code != 200:
                 return None
-            data = xmltodict.parse(r.text)
+            data = await asyncio.to_thread(xmltodict.parse, r.text)
             ad = data.get("ad:ad") or data.get("ad") or {}
             if not ad:
                 return None

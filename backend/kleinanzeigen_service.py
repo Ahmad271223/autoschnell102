@@ -101,10 +101,14 @@ def _cut_at_stop(text: str) -> str:
 
 
 def _visible_text(soup: BeautifulSoup) -> str:
-    copy = _make_soup(str(soup))
-    for tag in copy(["script", "style", "noscript", "svg"]):
+    # copy.copy() dupliziert den Baum direkt — der alte Weg
+    # (_make_soup(str(soup))) serialisierte und parste die komplette
+    # Seite ein ZWEITES Mal (Review 09/2026: halbiert die CPU-Zeit).
+    import copy as _copy
+    kopie = _copy.copy(soup)
+    for tag in kopie(["script", "style", "noscript", "svg"]):
         tag.decompose()
-    return _clean(copy.get_text("\n")) or ""
+    return _clean(kopie.get_text("\n")) or ""
 
 
 def _meta(soup: BeautifulSoup, *names: str) -> Optional[str]:
@@ -556,7 +560,10 @@ async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
     """Holt die Seite (Server-Abruf) UND wertet sie aus. Für den normalen
     server-seitigen Weg (mobile.de/AutoScout brauchen das ohnehin)."""
     html_text = await _fetch_html(url)
-    return parse_kleinanzeigen_html(url, html_text)
+    # CPU-Parse (BS4/lxml) in den Threadpool — der Fetch-Pfad laeuft in
+    # /mobile/compare, /listings/resolve UND im Link-Job-Worker; sync
+    # blockierte jeder Parse alle gleichzeitigen Requests (Review 09/2026).
+    return await asyncio.to_thread(parse_kleinanzeigen_html, url, html_text)
 
 
 # Marker, an denen wir eine ECHTE Kleinanzeigen-Fahrzeug-Detailseite

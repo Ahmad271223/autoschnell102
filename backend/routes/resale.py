@@ -320,18 +320,33 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     keys = list((l.get("photos") or {}).get("uploaded_keys", []))
     if len(keys) + len(body.photos_b64) > 40:
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
-    added = []
-    for b64 in body.photos_b64:
+    def _alle_speichern() -> list:
+        """Decode+Validierung+Save fuer bis zu 40 Fotos — als EIN Thread-Hop,
+        damit der Event-Loop nicht sekundenlang steht (Review 09/2026)."""
+        neu = []
         try:
-            raw = base64.b64decode(b64.split(",")[-1], validate=False)
-            # Groesse + Magic Bytes: nur echte Bilder, kein 20-MB-Blob,
-            # keine umbenannten ausfuehrbaren Dateien.
-            validate_image_bytes(raw, wo="Inserats-Foto")
-            key = make_key("resale", user["dealer_id"], "foto.jpg")
-            storage.save(key, raw)
-            added.append(key)
-        except (StorageError, ValueError) as exc:
-            raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
+            for b64 in body.photos_b64:
+                raw = base64.b64decode(b64.split(",")[-1], validate=False)
+                # Groesse + Magic Bytes: nur echte Bilder, kein 20-MB-Blob,
+                # keine umbenannten ausfuehrbaren Dateien.
+                validate_image_bytes(raw, wo="Inserats-Foto")
+                key = make_key("resale", user["dealer_id"], "foto.jpg")
+                storage.save(key, raw)
+                neu.append(key)
+        except (StorageError, ValueError):
+            for k in neu:              # halb gespeicherte wieder wegraeumen
+                try:
+                    storage.delete(k)
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        return neu
+
+    import asyncio as _asyncio
+    try:
+        added = await _asyncio.to_thread(_alle_speichern)
+    except (StorageError, ValueError) as exc:
+        raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
     # ATOMAR anhaengen ($push $each) statt die ganze Liste zu ueberschreiben:
     # das alte Lesen-Aendern-Schreiben verlor bei PARALLELEN Uploads aufs
     # selbe Inserat Referenzen (im Lasttest: hunderte Dateien ohne
@@ -343,11 +358,13 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         {"$push": {"photos.uploaded_keys": {"$each": added}},
          "$set": {"updated_at": now_iso()}})
     if res.modified_count == 0:
-        for k in added:
-            try:
-                storage.delete(k)
-            except Exception:
-                pass
+        def _wegraeumen():
+            for k in added:
+                try:
+                    storage.delete(k)
+                except Exception:  # noqa: BLE001
+                    pass
+        await _asyncio.to_thread(_wegraeumen)
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
     doc = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
@@ -388,9 +405,9 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         if body.key not in keys:
             raise HTTPException(404, "Foto nicht gefunden")
         keys.remove(body.key)
-        from storage_service import storage, StorageError
+        from storage_service import delete_async, StorageError
         try:
-            storage.delete(body.key)
+            await delete_async(body.key)
         except StorageError:
             pass
         # ATOMAR entfernen ($pull) — gleiche Lost-Update-Gefahr wie beim
@@ -456,6 +473,12 @@ async def publish_listing(listing_id: str, body: PublishIn,
             {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
         if not l:
             raise HTTPException(404, "Inserat nicht gefunden")
+        if l.get("status") == "veroeffentlicht":
+            # Idempotent (Review 09/2026): Doppelklick oder parallele
+            # Anfrage NACH dem erfolgreichen Publish ist kein Fehler.
+            return {"ok": True, "status": "veroeffentlicht",
+                    "visibility": l.get("visibility") or body.visibility,
+                    "bereits_veroeffentlicht": True}
         if l.get("status") not in ("verkaufsbereit", "zurueckgezogen"):
             raise HTTPException(400, "Nur verkaufsbereite (oder zurückgezogene) "
                                      "Inserate können veröffentlicht werden")

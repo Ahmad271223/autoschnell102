@@ -200,6 +200,16 @@ def get_object(path: str) -> tuple[bytes, str]:
     return r.content, r.headers.get("Content-Type", "application/octet-stream")
 
 
+async def get_object_async(path: str) -> tuple[bytes, str]:
+    """get_object ohne Loop-Block (sync requests, Timeout 60 s)."""
+    return await asyncio.to_thread(get_object, path)
+
+
+async def delete_object_async(path: str) -> bool:
+    """delete_object ohne Loop-Block (sync requests, Timeout 30 s)."""
+    return await asyncio.to_thread(delete_object, path)
+
+
 def delete_object(path: str) -> bool:
     """Best-effort object-delete. Returns True bei 2xx/404, False sonst.
     404 gilt als OK, weil das Objekt eh weg ist."""
@@ -708,8 +718,9 @@ async def _mobile_datenblatt_job(db, snap_id: str, doc: dict,
         # ReportLab-Datenblatt ein — lieber ein schlichter Beweis als keiner.
         from datenblatt_service import rebuild_html
         try:
-            html = rebuild_html(daten, url, abgerufen, fotos,
-                                quelle_label=quelle_label)
+            html = await asyncio.to_thread(
+                rebuild_html, daten, url, abgerufen, fotos,
+                quelle_label=quelle_label)
             png, pdf = await _render_rebuild_html(html)
             jpg, pdf = await loop.run_in_executor(
                 None, _compress_artifacts, png, pdf)

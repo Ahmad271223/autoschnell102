@@ -246,7 +246,8 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
         raise HTTPException(400, str(exc))
     try:
         key = make_key("logo", user["dealer_id"], "logo.png")
-        storage.save(key, raw)
+        from storage_service import save_async
+        await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, f"Logo konnte nicht gespeichert werden: {exc}")
     logo_url = f"/api/files/{key}"

@@ -1,6 +1,7 @@
 """Payments: Stripe checkout, status polling, webhook."""
 import logging
 import os
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -139,7 +140,10 @@ async def payment_status(session_id: str, request: Request, user=Depends(current
         stripe_sdk.api_key = os.environ["STRIPE_API_KEY"]
         if hasattr(stripe_sdk, "api_base"):
             stripe_sdk.api_base = "https://integrations.emergentagent.com/stripe"
-        cs = stripe_sdk.checkout.Session.retrieve(session_id)
+        # Sync-SDK in gepollter Route — ohne to_thread stand der Loop
+        # je Poll einen HTTP-Roundtrip lang (Review 09/2026).
+        cs = await asyncio.to_thread(stripe_sdk.checkout.Session.retrieve,
+                                     session_id)
         payment_status_str = cs.get("payment_status") or "pending"
         status_str = cs.get("status") or "open"
     except Exception as e:

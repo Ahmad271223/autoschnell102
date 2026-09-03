@@ -362,11 +362,15 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
                                  dealer_id=user.get("dealer_id")) is not None:
         return {"ok": True, "already_cached": True}
 
-    if not looks_like_kleinanzeigen_listing(body.html, url=raw_url):
+    import asyncio as _asyncio
+    if not await _asyncio.to_thread(looks_like_kleinanzeigen_listing,
+                                    body.html, url=raw_url):
         raise HTTPException(422, "Das übermittelte HTML sieht nicht nach einer "
                                  "Kleinanzeigen-Fahrzeugseite aus.")
     try:
-        parsed = parse_kleinanzeigen_html(raw_url, body.html)
+        # CPU-Parse (BS4/lxml, bis 6 MB Client-HTML) nie im Loop.
+        parsed = await _asyncio.to_thread(parse_kleinanzeigen_html,
+                                          raw_url, body.html)
     except ListingGone as exc:
         raise HTTPException(404, str(exc))
     except Exception:
@@ -552,7 +556,8 @@ async def snapshot_download(snap_id: str, kind: str,
     if not path:
         raise HTTPException(404, f"Kein {kind.upper()}-Artefakt für diesen Snapshot")
     try:
-        data, ctype = snapshot_get_object(path)
+        from snapshot_service import get_object_async
+        data, ctype = await get_object_async(path)
     except Exception as exc:
         log.exception("snapshot fetch failed")
         raise HTTPException(502, "Snapshot-Storage nicht erreichbar.")

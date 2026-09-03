@@ -84,7 +84,7 @@ async def _delete_snapshots_for_vehicle(db, vehicle_id: str,
             path = snap.get(key)
             if path:
                 try:
-                    delete_object(path)
+                    await asyncio.to_thread(delete_object, path)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("storage delete failed for %s: %s", path, exc)
         await db.listing_snapshots.delete_one({"id": snap["id"]})
@@ -113,8 +113,8 @@ async def _delete_report_photos(db, appt_id: str, now: datetime, stats: dict) ->
             # "pickup/") — nicht im Snapshot-Storage. Vorher loeschte dieser
             # Job im falschen Backend, die Fotos blieben liegen (Runde 4).
             try:
-                from storage_service import storage
-                storage.delete(key)
+                from storage_service import delete_async
+                await delete_async(key)
             except Exception as exc:  # noqa: BLE001
                 log.warning("report photo delete failed for %s: %s", key, exc)
             entry["photo_key"] = None
@@ -262,7 +262,7 @@ async def vertraege_nach_frist_loeschen(db, now: datetime) -> int:
                             p.get("signature_seller_key")):
                     if key:
                         try:
-                            storage.delete(key)
+                            await asyncio.to_thread(storage.delete, key)
                         except Exception as exc:  # noqa: BLE001
                             log.warning("protokoll-datei delete failed %s: %s", key, exc)
                 await db.pickup_protocols.update_one(
@@ -323,7 +323,7 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
     erledigt = 0
     async for e in db.storage_delete_retry.find({}, {"_id": 0}).limit(limit):
         try:
-            storage.delete_prefix(e["prefix"])
+            await asyncio.to_thread(storage.delete_prefix, e["prefix"])
             await db.storage_delete_retry.delete_one({"id": e["id"]})
             erledigt += 1
         except Exception as exc:  # noqa: BLE001
@@ -392,8 +392,8 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
             ):
                 for k in (listing.get("photos") or {}).get("uploaded_keys", []):
                     try:
-                        storage.delete(k)
-                    except Exception:
+                        await asyncio.to_thread(storage.delete, k)
+                    except Exception:  # noqa: BLE001
                         pass
                 await db.resale_listings.delete_one({"id": listing["id"]})
         except Exception as exc:  # noqa: BLE001
@@ -503,7 +503,7 @@ async def _expire_old_snapshots(db) -> int:
         for key in (snap.get("pdf_path"), snap.get("png_path")):
             if key:
                 try:
-                    delete_object(key)
+                    await asyncio.to_thread(delete_object, key)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("snapshot expire delete failed for %s: %s", key, exc)
         await db.listing_snapshots.update_one(

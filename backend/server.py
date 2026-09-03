@@ -188,11 +188,12 @@ _PRIVATE_FILE_PREFIXES = ("protocol/", "pickup/")
 
 @app.get("/api/files/{key:path}")
 async def serve_file(key: str):
-    from storage_service import guess_media_type, storage, StorageError
+    from storage_service import guess_media_type, load_async, StorageError
     if key.startswith(_PRIVATE_FILE_PREFIXES):
         return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
     try:
-        data = storage.load(key)
+        # Heissester Pfad der App (jedes Foto/Video) — nie im Loop lesen.
+        data = await load_async(key)
     except StorageError:
         return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
     return Response(content=data, media_type=guess_media_type(key),

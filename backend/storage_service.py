@@ -221,6 +221,29 @@ def _build_storage():
 storage = _build_storage()
 
 
+# ---------- Async-Wrapper (Review 09/2026) ----------
+# Beide Backends blockieren (Platte bzw. boto3-HTTP). Async-Routen muessen
+# diese Wrapper nutzen, sonst steht der ganze Event-Loop des Workers,
+# waehrend EINE Datei geschrieben/gelesen/geloescht wird.
+import asyncio as _asyncio
+
+
+async def save_async(key: str, data: bytes) -> str:
+    return await _asyncio.to_thread(storage.save, key, data)
+
+
+async def load_async(key: str) -> bytes:
+    return await _asyncio.to_thread(storage.load, key)
+
+
+async def delete_async(key: str) -> bool:
+    return await _asyncio.to_thread(storage.delete, key)
+
+
+async def delete_prefix_async(prefix: str) -> int:
+    return await _asyncio.to_thread(storage.delete_prefix, prefix)
+
+
 def guess_media_type(key: str) -> str:
     ext = os.path.splitext(key)[1].lower()
     return {

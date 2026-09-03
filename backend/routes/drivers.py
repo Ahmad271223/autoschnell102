@@ -639,7 +639,8 @@ async def driver_snapshot(snap_id: str, kind: str,
     if not path:
         raise HTTPException(404, "Datei fehlt im Objectstore")
     try:
-        data, ctype = snapshot_get_object(path)
+        from snapshot_service import get_object_async
+        data, ctype = await get_object_async(path)
     except Exception as exc:
         log.exception("driver snapshot fetch failed")
         raise HTTPException(502, "Snapshot-Storage nicht erreichbar.")
@@ -723,9 +724,9 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
     teile = key.split("/")
     if len(teile) < 3 or teile[1] != user.get("dealer_id"):
         raise HTTPException(404, "Datei nicht gefunden")
-    from storage_service import guess_media_type, storage, StorageError
+    from storage_service import guess_media_type, load_async, StorageError
     try:
-        data = storage.load(key)
+        data = await load_async(key)
     except StorageError:
         raise HTTPException(404, "Datei nicht gefunden")
     return Response(content=data, media_type=guess_media_type(key),
@@ -746,9 +747,9 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
         {"_id": 1})
     if not eigener_bericht:
         raise HTTPException(404, "Datei nicht gefunden")
-    from storage_service import guess_media_type, storage, StorageError
+    from storage_service import guess_media_type, load_async, StorageError
     try:
-        data = storage.load(key)
+        data = await load_async(key)
     except StorageError:
         raise HTTPException(404, "Datei nicht gefunden")
     return Response(content=data, media_type=guess_media_type(key),
@@ -814,7 +815,8 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                 from storage_service import validate_image_bytes
                 validate_image_bytes(raw, wo="Abweichungsfoto")
                 key = make_key("pickup", appt.get("dealer_id", "x"), "foto.jpg")
-                storage.save(key, raw)
+                from storage_service import save_async
+                await save_async(key, raw)
                 entry["photo_key"] = key
             except (StorageError, ValueError) as exc:
                 raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")

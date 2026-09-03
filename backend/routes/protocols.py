@@ -419,9 +419,10 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
         return key
 
+    import asyncio as _asyncio
     try:
-        sig_driver = _save_sig(body.signature_driver_b64, "fahrer")
-        sig_seller = _save_sig(body.signature_seller_b64, "verkaeufer")
+        sig_driver = await _asyncio.to_thread(_save_sig, body.signature_driver_b64, "fahrer")
+        sig_seller = await _asyncio.to_thread(_save_sig, body.signature_seller_b64, "verkaeufer")
     except HTTPException:
         await _rollback()
         raise
@@ -471,7 +472,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             filled=filled,
         )
         pdf_key = make_key("protocol", dealer_id, "abholprotokoll.pdf")
-        storage.save(pdf_key, pdf_bytes)
+        from storage_service import save_async
+        await save_async(pdf_key, pdf_bytes)
     except StorageError as exc:
         await _rollback()
         raise HTTPException(400, f"PDF konnte nicht gespeichert werden: {exc}")
@@ -508,14 +510,13 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
 async def driver_protocol_pdf(appt_id: str, driver=Depends(current_driver)):
     """Das ausgefüllte, abgeschlossene Protokoll als PDF (Fahrer-Ansicht)."""
     from fastapi import Response
-    from snapshot_service import get_object as storage_get
     await _appt_or_404(appt_id, driver)
     doc = await _current(appt_id)
     if not doc or doc.get("status") != "final" or not doc.get("pdf_path"):
         raise HTTPException(404, "Noch kein abgeschlossenes Protokoll vorhanden")
-    from storage_service import storage, StorageError
+    from storage_service import load_async, StorageError
     try:
-        data = storage.load(doc["pdf_path"])
+        data = await load_async(doc["pdf_path"])
     except StorageError:
         raise HTTPException(404, "PDF nicht gefunden")
     return Response(content=data, media_type="application/pdf")
@@ -541,9 +542,9 @@ async def dealer_protocol_pdf(protocol_id: str, user=Depends(_dealer_dep)):
         {"id": protocol_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not doc or not doc.get("pdf_path"):
         raise HTTPException(404, "Protokoll nicht gefunden")
-    from storage_service import storage, StorageError
+    from storage_service import load_async, StorageError
     try:
-        data = storage.load(doc["pdf_path"])
+        data = await load_async(doc["pdf_path"])
     except StorageError:
         raise HTTPException(404, "PDF nicht gefunden")
     return Response(content=data, media_type="application/pdf")
