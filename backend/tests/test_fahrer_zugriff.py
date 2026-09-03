@@ -413,7 +413,8 @@ def test_parallele_korrekturen_genau_eine_gewinnt():
         fehler = [r for r in res if isinstance(r, HTTPException)]
         assert len(ok) == 1 and len(fehler) == 2, res
         assert all(f.status_code in (400, 409) for f in fehler), fehler
-        assert any(f.status_code == 409 for f in fehler), fehler
+        # Verlierer sehen entweder den Claim (409) oder schon den neuen Entwurf
+        # des Gewinners (400) — beides korrekt, zeitabhaengig (CI 09/2026).
 
         docs = [d async for d in db.pickup_protocols.find(
             {"appointment_id": appt_id}, {"_id": 0})]
