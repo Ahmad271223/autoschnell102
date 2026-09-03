@@ -222,7 +222,9 @@ async def report_client_error(body: ClientErrorIn, request: Request):
         "id": err_id,
         "source": "frontend",
         "method": "",
-        "path": body.url,
+        # Runde 5: Query + Fragment entfernen — Reset-Token (?token=) und
+        # Stripe-Session (?session_id=) landeten sonst im Fehlerarchiv.
+        "path": body.url.split("?")[0].split("#")[0][:500],
         "error_type": "ClientError",
         "message": body.message,
         "traceback": body.stack,
@@ -237,9 +239,31 @@ async def report_client_error(body: ClientErrorIn, request: Request):
 # =========================================================
 #                  INDEX & SEED SETUP
 # =========================================================
+async def _unique_index_sicher(coll, feld: str) -> None:
+    """Unique-Index nur anlegen, wenn keine Dubletten existieren (Runde 5).
+    Vorher scheiterte die Anlage still, und die Eindeutigkeit (z.B. eine
+    E-Mail = ein Konto) galt dann einfach nicht. In Produktion bricht der
+    Start ab, sonst wird gewarnt — bereinigen mit scripts/dubletten_pruefen.py."""
+    dubletten = await coll.aggregate([
+        {"$match": {feld: {"$exists": True, "$ne": None}}},
+        {"$group": {"_id": f"${feld}", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+    if dubletten:
+        beispiele = ", ".join(str(d["_id"]) for d in dubletten)
+        msg = (f"{coll.name}.{feld}: doppelte Werte vorhanden ({beispiele}) — "
+               "Unique-Index NICHT angelegt. Bereinigen: "
+               "python scripts/dubletten_pruefen.py")
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            log.error("Start ABGEBROCHEN: %s", msg)
+            raise SystemExit(78)
+        log.error("ensure_indexes: %s", msg)
+        return
+    await coll.create_index(feld, unique=True)
+
+
 async def ensure_indexes():
-    await db.users.create_index("email", unique=True)
-    await db.dealers.create_index("user_id", unique=True)
+    await _unique_index_sicher(db.users, "email")
+    await _unique_index_sicher(db.dealers, "user_id")
     await db.vehicle_cache.create_index("mobile_ad_id", unique=True)
     # Genau EIN aktuelles Abholprotokoll je Termin (Race-Schutz: zwei
     # parallele Entwurf-Anlagen koennen sonst zwei "aktuelle" Versionen
@@ -316,8 +340,8 @@ async def ensure_indexes():
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
     # Neue Fahrer-Accounts + Dealer-Driver-Links
-    await db.driver_accounts.create_index("email", unique=True)
-    await db.driver_accounts.create_index("driver_code", unique=True)
+    await _unique_index_sicher(db.driver_accounts, "email")
+    await _unique_index_sicher(db.driver_accounts, "driver_code")
     await db.dealer_drivers.create_index(
         [("dealer_id", 1), ("driver_account_id", 1)], unique=True,
     )
@@ -343,12 +367,12 @@ async def ensure_indexes():
     await db.generated_pdfs.create_index("created_at")
     # Passwort-Reset-Tokens: Lookup + automatisches Wegräumen
     await db.password_resets.create_index("token_hash")
-    # Legacy-Index entfernen, falls noch vorhanden
-    try:
-        await db.drivers.drop()
-    except Exception as exc:
-        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
-                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
+    # Runde 5: automatisches Wegraeumen war nur versprochen, nicht angelegt.
+    await db.password_resets.create_index("loeschen_ab", expireAfterSeconds=0,
+                                          name="ttl_loeschen_ab")
+    # (N1, Review 09/2026) Frueher stand hier `db.drivers.drop()` bei JEDEM
+    # Start — als "Legacy-Index entfernen" beschriftet, tatsaechlich ein
+    # Collection-Drop. Die Migration ist laengst durch; ersatzlos gestrichen.
 
 
 
@@ -365,8 +389,9 @@ async def seed_admin():
     existing = await db.users.find_one({"email": email})
     if existing:
         if existing.get("role") == "admin":
-            await db.users.update_one({"email": email},
-                                      {"$set": {"active": True}})
+            # Runde 5: KEINE Reaktivierung — ein vom Super-Admin gesperrter
+            # Admin wurde sonst bei jedem Neustart wieder entsperrt.
+            pass
         else:
             # NIEMALS ein Fremdkonto hochstufen (PR-Review 09/2026): wer
             # die Admin-Mail zuerst registriert hatte, wuerde sonst nach
@@ -422,7 +447,8 @@ async def seed_super_admin():
             {"$set": {
                 "role": "admin",
                 "is_super_admin": True,
-                "active": True,
+                # Runde 5: active wird NICHT angefasst (keine Reaktivierung
+                # eines bewusst gesperrten Kontos beim Neustart).
                 "username": username,
             }},
         )
@@ -462,6 +488,17 @@ async def on_start():
     # paar Sekunden. Wir warten geduldig, statt den Backend-Prozess sterben zu
     # lassen — so läuft die App zuverlässig hoch, "sobald das Backend startet".
     import asyncio as _asyncio
+    # Produktions-Check WIRKLICH zuerst (Runde 5): vorher liefen Indexanlage
+    # und Admin-Seeding bereits, bevor eine fehlerhafte Produktions-
+    # konfiguration den Start abbrach — die Datenbank war dann schon
+    # veraendert.
+    try:
+        from production_check import pruefe_produktion
+        pruefe_produktion(log)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log.warning("production check failed to run: %s", exc)
     for attempt in range(1, 31):
         try:
             await ensure_indexes()
@@ -502,16 +539,6 @@ async def on_start():
         _ensure_browser_executable()
     except Exception as exc:
         log.warning("playwright self-heal at startup failed: %s", exc)
-    # Produktions-Check ZUERST: mit APP_ENV=production bricht der Start
-    # bei Entwicklungswerten (Dev-Secret, Demo-Passwort, localhost-CORS,
-    # Mongo ohne Auth) sofort und mit klarer Meldung ab.
-    try:
-        from production_check import pruefe_produktion
-        pruefe_produktion(log)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        log.warning("production check failed to run: %s", exc)
     # Job-Sperren-Index SYNCHRON anlegen, BEVOR irgendein Hintergrundjob
     # startet — sonst koennten beim allerersten Start (frische Datenbank)
     # mehrere Worker denselben Job uebernehmen, weil der Unique-Index

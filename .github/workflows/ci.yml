@@ -41,7 +41,17 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - name: Abhaengigkeiten installieren
-        run: pip install -r backend/requirements.txt
+        run: pip install -r backend/requirements-dev.txt
+      - name: Abhaengigkeiten auf bekannte Schwachstellen pruefen (pip-audit)
+        # Runde 5: Bericht — blockiert (noch) nicht, bis die Altlasten
+        # aktualisiert sind; das Ergebnis steht im Job-Log.
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt --progress-spinner off
+      - name: Geheimnisse im Arbeitsbaum suchen (gitleaks)
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --no-git -s /repo --redact -v
       - name: Backend starten
         working-directory: backend
         run: |
@@ -55,7 +65,7 @@ jobs:
       - name: Selbsttest-Suite
         working-directory: backend
         run: |
-          python -m pytest -v tests/test_smoke.py tests/test_listing_cache.py tests/test_link_jobs.py tests/test_e2e_flow.py tests/test_tenant_isolation.py tests/test_send_idempotenz.py tests/test_foto_parallel.py tests/test_driver_system.py tests/test_kleinanzeigen_service.py tests/test_mobile_service_makes.py tests/test_apify_mobile.py tests/test_datenblatt.py tests/test_apify_autoscout.py tests/test_admin_dashboard.py tests/test_auto_daten.py tests/test_rollen_negativ.py tests/test_kontingent.py
+          python -m pytest -v tests/test_smoke.py tests/test_listing_cache.py tests/test_link_jobs.py tests/test_e2e_flow.py tests/test_tenant_isolation.py tests/test_send_idempotenz.py tests/test_foto_parallel.py tests/test_driver_system.py tests/test_kleinanzeigen_service.py tests/test_mobile_service_makes.py tests/test_apify_mobile.py tests/test_datenblatt.py tests/test_apify_autoscout.py tests/test_admin_dashboard.py tests/test_auto_daten.py tests/test_rollen_negativ.py tests/test_kontingent.py tests/test_runde5.py tests/test_backup_restore.py
       - name: Backend-Log bei Fehler zeigen
         if: failure()
         run: tail -100 /tmp/backend.log || true
@@ -73,6 +83,9 @@ jobs:
       - name: Abhaengigkeiten installieren
         working-directory: frontend
         run: yarn install --frozen-lockfile
+      - name: Abhaengigkeiten auf bekannte Schwachstellen pruefen (yarn audit)
+        continue-on-error: true
+        run: yarn audit --level high
       - name: Frontend-Tests
         working-directory: frontend
         run: CI=true yarn test --watchAll=false

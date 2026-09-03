@@ -22,8 +22,11 @@ RUN playwright install --with-deps chromium
 COPY . .
 
 # Nicht als root laufen (Sicherheit). /app + Browser-Ordner beschreibbar.
-RUN useradd -m app && mkdir -p /pw-browsers /app/uploads \
-    && chown -R app:app /app /pw-browsers
+# Runde 5: Backup-, Upload- und Snapshot-Verzeichnisse existieren im Image und
+# gehoeren 'app' — benannte Docker-Volumes uebernehmen diese Rechte beim
+# ersten Start (sonst waren /backups und /app/local_storage nicht beschreibbar).
+RUN useradd -m app && mkdir -p /pw-browsers /app/uploads /app/local_storage /backups \
+    && chown -R app:app /app /pw-browsers /backups
 USER app
 
 EXPOSE 8001

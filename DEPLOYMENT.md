@@ -61,7 +61,35 @@ Storage Box), damit ein Server-Ausfall nicht auch die Backups mitnimmt:
 docker run --rm -v autoschnell_backups_data:/b -v /mnt/storagebox:/dest \
   alpine sh -c "cp -ru /b/. /dest/"
 ```
-Wiederherstellen: `backend/scripts/restore_mongo.py <backup-ordner>`.
+Wiederherstellen: `backend/scripts/restore_mongo.py <backup-ordner>` — prüft
+zuerst alle Prüfsummen (manifest.json) und liest jede Datei vollständig,
+lädt dann in eine temporäre Datenbank und schaltet je Collection atomar um;
+der bisherige Stand bleibt als `autoschnell__vorher_<zeit>` erhalten.
+`--dry-run` prüft nur. Ein Backup meldet `BACKUP OK` nur, wenn Datenbank
+**und** alle Datei-Speicher (uploads, local_storage, ggf. S3) gesichert
+wurden — sonst `BACKUP UNVOLLSTAENDIG` (Exit-Code 2) mit Begründung im Log.
+
+## Bestehendes Mongo-Volume auf Authentifizierung umstellen
+Läuft bereits eine Mongo **ohne** `--auth` mit Daten im Volume, legt
+`MONGO_INITDB_ROOT_*` beim Neustart **keinen** Benutzer mehr an (das
+passiert nur bei leerem Datenverzeichnis). Reihenfolge:
+```bash
+docker compose exec mongo mongosh --eval   "db.getSiblingDB('admin').createUser({user:'<MONGO_USER>',pwd:'<MONGO_PASSWORD>',roles:['root']})"
+# .env: MONGO_USER/MONGO_PASSWORD setzen, MONGO_URL mit user:pass@mongo/...?authSource=admin
+docker compose up -d --force-recreate mongo backend
+docker compose exec backend python -c "from deps import db; import asyncio; print(asyncio.run(db.command('ping')))"
+```
+Vorher ein Backup ziehen. Erst wenn der Ping mit Zugangsdaten klappt, ist
+die Umstellung abgeschlossen. Dieser Ablauf wurde **nicht** in einer
+Testumgebung nachgestellt — bitte zuerst auf Staging durchspielen.
+
+## Beim Start geprüft (production_check.py)
+Mit `APP_ENV=production` bricht der Start ab bei: Dev-Secret/Demo-Passwort,
+`localhost` in FRONTEND_URL/CORS, Mongo ohne Auth, aktivem Mock, nicht
+beschreibbaren Backup-/Upload-/Snapshot-Verzeichnissen, fehlendem SMTP,
+Aufbewahrungsfristen ≤ 0, halb konfiguriertem S3 sowie bei doppelten Werten
+in Feldern mit Eindeutigkeits-Index (`scripts/dubletten_pruefen.py`). Die
+Prüfung läuft **vor** Indexanlage und Admin-Seeding.
 
 ## Auto-Daten & 90-Tage-Löschung
 - Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)

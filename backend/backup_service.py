@@ -41,7 +41,16 @@ async def _run_backup() -> None:
         sys.executable, "-X", "utf8", str(_SCRIPT), "--dir", str(BACKUP_DIR),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
-    out, _ = await proc.communicate()
+    try:
+        # Review 09/2026: ohne Zeitlimit blieb ein haengendes Backup ewig
+        # offen und blockierte alle folgenden Laeufe.
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3 * 3600)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.error("[backup] FEHLGESCHLAGEN: Zeitlimit (3 h) ueberschritten, "
+                  "Prozess beendet")
+        return
     tail = (out or b"").decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
     if proc.returncode == 0:
         log.info("[backup] %s", tail[0])
