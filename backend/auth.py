@@ -8,7 +8,8 @@ from typing import Optional
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
+import jwt                                   # PyJWT (python-jose entfernt: ecdsa ohne Fix)
+from jwt import PyJWTError as JWTError
 
 # .env muss geladen sein, BEVOR JWT_SECRET gelesen wird — sonst wird bei jedem
 # Start ein Zufalls-Secret erzeugt und alle Sessions werden ungültig.

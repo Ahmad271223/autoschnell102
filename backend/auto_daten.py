@@ -56,9 +56,11 @@ _PII_MUSTER = (
 # ungewoehnlich geschriebene Personendaten kann kein Filter sicher erkennen
 # (Pruefbericht Runde 5). Mit AUTO_DATEN_SCHAEDEN_FREITEXT=false werden nur
 # die vordefinierten Skizzen-Bezeichnungen uebernommen, kein Freitext.
+# Standard seit Go-Live-Audit 09/2026: AUS (produktionssicher); Altbestand
+# bereinigt scripts/schaeden_freitext_bereinigen.py.
 import os as _os
-SCHAEDEN_FREITEXT = _os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "true") \
-    .strip().lower() not in ("0", "false", "no", "nein")
+SCHAEDEN_FREITEXT = _os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "false") \
+    .strip().lower() in ("1", "true", "yes", "ja")
 
 
 def _zahl(wert) -> Optional[int]:
@@ -95,10 +97,20 @@ def schaeden_bereinigen(rohe: List[Any]) -> List[str]:
     sauber: List[str] = []
     for eintrag in rohe or []:
         if isinstance(eintrag, dict):
-            # Skizzen-Eintraege: nur die textlichen Teile uebernehmen.
-            text = " ".join(str(eintrag.get(k, "")).strip() for k in
-                            ("label", "part", "type", "note", "text")
-                            if eintrag.get(k))
+            # Skizzen-Eintraege: vordefinierte Bezeichnungen uebernehmen.
+            # Audit 09/2026: die Skizze liefert type_label + zone (vorher nur
+            # label/part/type/note/text gelesen -> bei Freitext=aus blieb
+            # nichts uebrig). Notiz/Freitext nur, wenn SCHAEDEN_FREITEXT.
+            art = str(eintrag.get("type_label") or eintrag.get("type")
+                      or eintrag.get("kategorie") or "").strip()
+            teil = str(eintrag.get("zone") or eintrag.get("part_label")
+                       or eintrag.get("part") or eintrag.get("label") or "").strip()
+            teile = [t for t in (art, teil) if t]
+            text = ": ".join(teile) if len(teile) == 2 else " ".join(teile)
+            if SCHAEDEN_FREITEXT:
+                notiz = " ".join(str(eintrag.get(k, "")).strip()
+                                 for k in ("note", "text") if eintrag.get(k))
+                text = (text + " " + notiz).strip() if notiz else text
         else:
             text = str(eintrag or "")
         # Reiner Text: HTML-Tags raus, Whitespace normalisieren. Das

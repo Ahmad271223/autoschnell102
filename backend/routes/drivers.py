@@ -1,13 +1,14 @@
 """Driver endpoints: dealer-driver linking + standalone driver-app accounts."""
 import base64
+import hashlib
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response  # Request already imported
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import jwt
+import jwt                                   # PyJWT
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from auth import (
@@ -15,6 +16,11 @@ from auth import (
     hash_password_async, verify_password_async,
 )
 from deps import bearer, current_user, db, log_activity, now_iso, current_firma
+# Zentrale Passwortregeln (Pruefbericht 09/2026, Punkt 32): dieselbe
+# Pruefung wie fuer Firma/Sucher/Admin — vorher hatte drivers.py eine
+# eigene, schwaechere Kopie (8 Zeichen, keine Blockliste, keine 72-Byte-
+# bcrypt-Grenze).
+from passwoerter import pruefe_passwort as _check_password_strength
 from rate_limiter import client_ip, driver_login_limiter, driver_register_limiter
 from snapshot_service import get_object as snapshot_get_object
 
@@ -22,17 +28,6 @@ import logging
 log = logging.getLogger("autohandel")
 
 router = APIRouter()
-
-
-_SPECIAL_CHARS = set("!@#$%^&*()_+-=[]{}|;':\",./<>?")
-
-
-def _check_password_strength(pw: str) -> str:
-    if len(pw) < 8:
-        raise ValueError("Passwort muss mindestens 8 Zeichen lang sein")
-    if not any(c.isdigit() for c in pw) and not any(c in _SPECIAL_CHARS for c in pw):
-        raise ValueError("Passwort muss mindestens eine Ziffer oder ein Sonderzeichen enthalten")
-    return pw
 
 
 # ---------- Models ----------
@@ -176,6 +171,42 @@ async def current_driver(request: Request, auth: Optional[str] = None,
     return driver
 
 
+# Termine in diesen Zustaenden nehmen keine Fahrer-Aenderungen mehr an
+# (PR-Review 09/2026): Status-Umschaltung und neue Berichtsversionen sind
+# gesperrt; eine Korrektur laeuft ueber den Haendler (Termin wieder oeffnen).
+_TERMIN_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
+# Gegenstueck: in diesen Zustaenden darf der Fahrer noch vom Termin getrennt
+# werden, ohne dass eine historische Zuordnung verloren geht. Fehlender oder
+# leerer Status zaehlt als "offen" (wie ueberall: appt.get("status") or "offen").
+_TERMIN_OFFEN = {"offen", "verschoben", "bestätigt", "in Bearbeitung"}
+_OFFEN_WERTE: List[Any] = sorted(_TERMIN_OFFEN) + ["", None]
+
+
+async def _verknuepfte_dealer_ids(driver_id: str) -> List[str]:
+    """Firmen, in deren Fahrerliste der Fahrer AKTUELL steht."""
+    links = await db.dealer_drivers.find(
+        {"driver_account_id": driver_id}, {"_id": 0, "dealer_id": 1},
+    ).to_list(500)
+    return [link["dealer_id"] for link in links if link.get("dealer_id")]
+
+
+async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
+    """Fahrer-Zugriff auf einen Termin (Pruefbericht 09/2026): die Zuweisung
+    (appointments.driver_id) allein reicht NICHT. Entfernt der Haendler den
+    Fahrer aus seiner Liste, behalten abgeschlossene Termine die historische
+    Zuordnung als Beweis — der Fahrer selbst darf Abholauftrag, Vertrag,
+    Protokoll und Bericht dieser Firma dann aber nicht mehr laden. Deshalb
+    muss ZUSAETZLICH die Verknuepfung dealer_drivers aktuell bestehen.
+    Antwort ist bewusst 404 (kein Hinweis, dass der Termin existiert).
+    Funktioniert fuer jedes Dokument mit dealer_id (Termin, Bericht)."""
+    link = await db.dealer_drivers.find_one(
+        {"dealer_id": appt.get("dealer_id"), "driver_account_id": driver["id"]},
+        {"_id": 1},
+    )
+    if not link:
+        raise HTTPException(404, "Termin nicht gefunden")
+
+
 # =========================================================
 #   DEALER → FAHRER  (Händler verwaltet seine Fahrer-Liste
 #   über die öffentlichen Fahrer-Codes der Fahrer-Accounts)
@@ -259,16 +290,36 @@ async def delete_driver(driver_id: str, user=Depends(current_firma)):
     )
     if not res.deleted_count:
         raise HTTPException(404, "Fahrer nicht in deiner Liste")
-    # Nur OFFENE Fahrten vom Fahrer trennen — "abgeholt"/"nicht
-    # abgeholt"/"erledigt" behalten die historische Zuordnung als Beweis
-    # (der alte Schutz prüfte den nie benutzten Status "abgeschlossen"
-    # und trennte damit auch Abgeschlossenes, PR-Review 09/2026).
-    await db.appointments.update_many(
+    # Termine dieser Firma vom Fahrer trennen (Pruefbericht 09/2026):
+    #  * OFFENE Fahrten verlieren die Zuweisung komplett — der Chef teilt
+    #    neu zu; eine noch unbeantwortete Annahme-Anfrage wird mit
+    #    zuteilung=None verworfen.
+    #  * ABGESCHLOSSENE Fahrten behalten die Zuordnung als Beweis fuer den
+    #    Chef, aber in driver_id_hist statt driver_id: driver_id ist das
+    #    Zugriffsfeld der Fahrer-App, und ein entfernter Fahrer soll die
+    #    Unterlagen dieser Firma nicht weiter laden koennen (zusaetzlich
+    #    prueft jede Fahrer-Route die Verknuepfung, siehe _zugriff_pruefen).
+    #    Vorher blieb driver_id auf "abgeholt"-Terminen stehen und der
+    #    Fahrer kam weiter an Abholauftrag, Vertrag und Protokoll.
+    # Die Sitzung des Fahrers wird NICHT beendet: er arbeitet ggf. fuer
+    # andere Firmen weiter; die Verknuepfungspruefung reicht.
+    jetzt = now_iso()
+    offen = await db.appointments.update_many(
         {"dealer_id": user["dealer_id"], "driver_id": driver_id,
-         "status": {"$in": ["offen", "verschoben"]}},
-        {"$unset": {"driver_id": ""}},
+         "status": {"$in": _OFFEN_WERTE}},
+        {"$unset": {"driver_id": ""},
+         "$set": {"zuteilung": None, "updated_at": jetzt}},
     )
-    return {"ok": True}
+    # Update-Pipeline: driver_id atomar nach driver_id_hist verschieben.
+    geschlossen = await db.appointments.update_many(
+        {"dealer_id": user["dealer_id"], "driver_id": driver_id},
+        [{"$set": {"driver_id_hist": "$driver_id",
+                   "updated_at": {"$literal": jetzt}}},
+         {"$unset": "driver_id"}],
+    )
+    return {"ok": True,
+            "offene_termine_getrennt": offen.modified_count,
+            "abgeschlossene_termine_archiviert": geschlossen.modified_count}
 
 
 @router.get("/drivers/{driver_id}/conflicts")
@@ -282,9 +333,12 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma
     )
     if not link:
         raise HTTPException(404, "Fahrer nicht in deiner Liste")
+    # Abgeschlossene/stornierte Fahrten belegen den Fahrer nicht mehr. Der
+    # alte Filter schloss nur den nie benutzten Status "abgeschlossen" aus
+    # und meldete damit jede erledigte Fahrt als Konflikt (Pruefbericht 09/2026).
     conflicts = await db.appointments.find(
         {"driver_id": driver_id, "pickup_date": date,
-         "status": {"$ne": "abgeschlossen"}},
+         "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}},
         {"_id": 0, "id": 1, "dealer_id": 1, "pickup_time": 1,
          "pickup_address": 1, "title": 1},
     ).to_list(50)
@@ -295,6 +349,75 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma
             c["title"] = "Andere Fahrt"
         c.pop("dealer_id", None)
     return {"conflicts": conflicts, "count": len(conflicts)}
+
+
+async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
+    """Spuren eines GELOESCHTEN Fahrer-Kontos pseudonymisieren (DSGVO,
+    Pruefbericht 09/2026). Wird von DELETE /admin/drivers/{id} aufgerufen;
+    das Konto selbst (driver_accounts) loescht die Admin-Route. `db` kommt
+    als Parameter, damit der Aufrufer (Admin-Route, Tests) die Datenbank
+    bestimmt.
+
+    Das Pseudonym ist deterministisch (SHA-256 der alten ID, 12 Hex-
+    Zeichen): die Historie einer Firma laesst weiterhin erkennen, dass
+    mehrere Fahrten DERSELBE — inzwischen geloeschte — Fahrer erledigt
+    hat, ohne Rueckschluss auf die Person.
+
+    Unterschriften in bereits abgeschlossenen Protokoll-PDFs bleiben
+    unveraendert: sie sind Teil der Beweiskette (Uebergabe-Nachweis
+    gegenueber Verkaeufer und Haendler) und werden nicht nachtraeglich
+    aus den Dokumenten entfernt. Nur die Kennung/der Klarname in den
+    Datensaetzen wird ersetzt.
+
+    Liefert die Anzahl geaenderter bzw. geloeschter Datensaetze je
+    Collection (plus das verwendete Pseudonym)."""
+    pseudonym = "geloescht:" + hashlib.sha256(
+        driver_id.encode("utf-8")).hexdigest()[:12]
+    jetzt = now_iso()
+    # 1) Termine: offene verlieren die Zuweisung (zuteilung=None); alle mit
+    #    dieser driver_id bekommen das Pseudonym in driver_id_hist, das
+    #    Zugriffsfeld driver_id verschwindet. Bereits archivierte Zuordnungen
+    #    (driver_id_hist aus delete_driver) werden ebenfalls ersetzt.
+    r_offen = await db.appointments.update_many(
+        {"driver_id": driver_id, "status": {"$in": _OFFEN_WERTE}},
+        {"$set": {"driver_id_hist": pseudonym, "zuteilung": None,
+                  "updated_at": jetzt},
+         "$unset": {"driver_id": ""}})
+    r_rest = await db.appointments.update_many(
+        {"driver_id": driver_id},
+        {"$set": {"driver_id_hist": pseudonym, "updated_at": jetzt},
+         "$unset": {"driver_id": ""}})
+    r_hist = await db.appointments.update_many(
+        {"driver_id_hist": driver_id},
+        {"$set": {"driver_id_hist": pseudonym}})
+    # 2) Abholberichte / Protokolle: Kennung + Klarname
+    ersatz = {"$set": {"driver_account_id": pseudonym,
+                       "driver_name": "Fahrer (gelöscht)"}}
+    r_ber = await db.pickup_reports.update_many(
+        {"driver_account_id": driver_id}, ersatz)
+    r_prot = await db.pickup_protocols.update_many(
+        {"driver_account_id": driver_id}, ersatz)
+    # 3) Audit-Log: Handelnder pseudonymisieren, personenbezogene
+    #    Meta-Felder entfernen (E-Mail, Fahrer-Code, Anzeigename)
+    r_log = await db.activity_logs.update_many(
+        {"user_id": driver_id},
+        {"$set": {"user_id": pseudonym},
+         "$unset": {"meta.email": "", "meta.driver_code": "",
+                    "meta.display_name": ""}})
+    # 4) Reset-Tokens und Haendler-Verknuepfungen weg
+    r_reset = await db.password_resets.delete_many({"user_id": driver_id})
+    r_links = await db.dealer_drivers.delete_many(
+        {"driver_account_id": driver_id})
+    return {
+        "pseudonym": pseudonym,
+        "appointments": (r_offen.modified_count + r_rest.modified_count
+                         + r_hist.modified_count),
+        "pickup_reports": r_ber.modified_count,
+        "pickup_protocols": r_prot.modified_count,
+        "activity_logs": r_log.modified_count,
+        "password_resets": r_reset.deleted_count,
+        "dealer_drivers": r_links.deleted_count,
+    }
 
 
 # =========================================================
@@ -447,12 +570,6 @@ async def driver_change_password(body: DriverPasswordIn,
     return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}
 
 
-# Termine in diesen Zustaenden nehmen keine Fahrer-Aenderungen mehr an
-# (PR-Review 09/2026): Status-Umschaltung und neue Berichtsversionen sind
-# gesperrt; eine Korrektur laeuft ueber den Haendler (Termin wieder oeffnen).
-_TERMIN_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
-
-
 def _termin_offen_oder_409(appt: dict) -> None:
     if (appt.get("status") or "offen") in _TERMIN_ABGESCHLOSSEN:
         raise HTTPException(409, f"Termin ist bereits '{appt.get('status')}' — "
@@ -462,8 +579,15 @@ def _termin_offen_oder_409(appt: dict) -> None:
 @router.get("/driver/appointments")
 async def driver_appointments(driver=Depends(current_driver)):
     """Alle Termine (aller Händler), die diesem Fahrer-Account zugewiesen sind."""
+    # Nur Firmen, in deren Fahrerliste der Fahrer AKTUELL steht: nach dem
+    # Entfernen durch den Haendler verschwinden dessen Termine aus der App
+    # (Pruefbericht 09/2026, siehe _zugriff_pruefen).
+    dealer_ids_aktiv = await _verknuepfte_dealer_ids(driver["id"])
+    if not dealer_ids_aktiv:
+        return []
     appts = await db.appointments.find(
-        {"driver_id": driver["id"]}, {"_id": 0},
+        {"driver_id": driver["id"], "dealer_id": {"$in": dealer_ids_aktiv}},
+        {"_id": 0},
     ).sort("pickup_date", 1).to_list(500)
 
     # Fahrzeuge STRENG ueber (dealer_id, vehicle_id) laden (PR-Review
@@ -555,6 +679,7 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    await _zugriff_pruefen(appt, driver)
     vehicle: Dict[str, Any] = {}
     if appt.get("vehicle_id"):
         v_doc = await db.vehicles.find_one(
@@ -607,6 +732,7 @@ async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
     )
     if not appt:
         raise HTTPException(404, "Kein Zugriff auf diesen Vertrag")
+    await _zugriff_pruefen(appt, driver)
     doc = await db.generated_pdfs.find_one(
         {"id": contract_id, "dealer_id": appt.get("dealer_id")},
         {"_id": 0, "pdf_b64": 1},
@@ -635,12 +761,18 @@ async def driver_snapshot(snap_id: str, kind: str,
     # wiederverwendeten Snapshot von Haendler A sperren. Der Zugriff ist
     # ueber den EIGENEN Termin des Fahrers zur selben Anzeige legitimiert;
     # Snapshots zeigen ausschliesslich oeffentliche Inseratsdaten.
-    allowed = await db.appointments.find_one(
-        {"driver_id": driver["id"],
-         "$or": [{"vehicle_id": snap.get("vehicle_id")},
-                 {"mobile_ad_id": snap.get("mobile_ad_id")}]},
-        {"_id": 0, "id": 1},
-    )
+    # Der legitimierende Termin muss bei einer Firma liegen, in deren
+    # Fahrerliste der Fahrer AKTUELL steht (Pruefbericht 09/2026).
+    dealer_ids_aktiv = await _verknuepfte_dealer_ids(driver["id"])
+    allowed = None
+    if dealer_ids_aktiv:
+        allowed = await db.appointments.find_one(
+            {"driver_id": driver["id"],
+             "dealer_id": {"$in": dealer_ids_aktiv},
+             "$or": [{"vehicle_id": snap.get("vehicle_id")},
+                     {"mobile_ad_id": snap.get("mobile_ad_id")}]},
+            {"_id": 0, "id": 1},
+        )
     if not allowed:
         raise HTTPException(404, "Kein Zugriff auf diesen Snapshot")
     path = snap.get("pdf_path") if kind == "pdf" else snap.get("png_path")
@@ -668,6 +800,7 @@ async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
         {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0})
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    await _zugriff_pruefen(appt, driver)
     _termin_offen_oder_409(appt)
     if (appt.get("zuteilung") or "angenommen") != "offen":
         return {"ok": True, "zuteilung": appt.get("zuteilung") or "angenommen",
@@ -709,6 +842,7 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    await _zugriff_pruefen(appt, driver)
     if (appt.get("status") or "") == body.status:
         # Idempotent (Pruefbericht Runde 4): Der Protokoll-Abschluss setzt
         # "abgeholt" bereits selbst; der anschliessende Aufruf aus dem
@@ -793,8 +927,13 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
     # Key beliebige Abholfotos dieser Firma zu laden.
     eigener_bericht = await db.pickup_reports.find_one(
         {"deviations.photo_key": key, "driver_account_id": driver["id"]},
-        {"_id": 1})
+        {"_id": 0, "dealer_id": 1})
     if not eigener_bericht:
+        raise HTTPException(404, "Datei nicht gefunden")
+    # ... und nur solange der Fahrer bei dieser Firma noch in der Liste steht.
+    try:
+        await _zugriff_pruefen(eigener_bericht, driver)
+    except HTTPException:
         raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, load_async, StorageError
     try:
@@ -813,6 +952,7 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    await _zugriff_pruefen(appt, driver)
     # Sperre nach Abschluss — mit EINER Ausnahme (Pruefbericht Runde 4): Der
     # Abweichungsbericht gehoert zur Abholung und wird direkt NACH dem
     # unterschriebenen Protokoll (Termin dann schon "abgeholt") eingereicht.
@@ -940,10 +1080,12 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
 @router.get("/driver/appointments/{appt_id}/report")
 async def driver_get_report(appt_id: str, driver=Depends(current_driver)):
     appt = await db.appointments.find_one(
-        {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0, "id": 1},
+        {"id": appt_id, "driver_id": driver["id"]},
+        {"_id": 0, "id": 1, "dealer_id": 1},
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    await _zugriff_pruefen(appt, driver)
     report = await db.pickup_reports.find_one(
         {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
     )

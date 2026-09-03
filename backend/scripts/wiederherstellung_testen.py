@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Automatisierter Nachweis: Backup laesst sich WIRKLICH wiederherstellen.
+"""Restore-Probe: automatisierter Nachweis, dass ein Backup sich WIRKLICH
+wiederherstellen laesst.
 
-Ablauf (Priorität 5 aus dem Review):
+Ablauf:
   1. Frisches Backup der Live-Datenbank ziehen (backup_mongo.py)
   2. In die SEPARATE Testdatenbank 'autoschnell_restore_test' einspielen
-  3. Je Collection die Dokumentzahlen Backup vs. Wiederherstellung
-     vergleichen (Stichprobe: zusaetzlich je ein Dokument lesen)
-  4. Testdatenbank wieder loeschen
+     (--nur-datenbank: die Live-Datei-Speicher bleiben unangetastet)
+  3. Je Collection die Dokumentzahl laut Manifest mit der Testdatenbank
+     vergleichen (Stichprobe: zusaetzlich je ein Dokument lesen); pruefen,
+     dass der Wartungsmodus nach dem Restore wieder aus ist
+  4. Testdatenbank (und ihre __vorher_/__restore_-Reste) wieder loeschen
 
-Exit 0 = Wiederherstellung bewiesen; Exit 1 = Abweichung gefunden.
-Regelmaessig laufen lassen (z.B. woechentlich per Cron) — ein Backup, das
+Exit 0 = Wiederherstellung bewiesen und Backup vollstaendig
+Exit 2 = Datenbank-Wiederherstellung bewiesen, aber Backup UNVOLLSTAENDIG
+         (Datei-Speicher oder Offsite-Kopie fehlt) — Ursache beheben
+Exit 1 = Abweichung gefunden bzw. Backup/Restore fehlgeschlagen
+
+Monatlich laufen lassen (DEPLOYMENT.md, "Restore-Probe") — ein Backup, das
 nie testweise wiederhergestellt wurde, ist keins.
 """
+import json
 import os
 import subprocess
 import sys
@@ -26,48 +34,52 @@ TEST_DB = "autoschnell_restore_test"
 HIER = Path(__file__).resolve().parent
 
 
+def _aufraeumen(client) -> None:
+    for name in client.list_database_names():
+        if name == TEST_DB or name.startswith(TEST_DB + "__"):
+            client.drop_database(name)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="as-restore-test-") as tmp:
         print(f"[1/4] Backup nach {tmp} …")
         r = subprocess.run([sys.executable, "-X", "utf8",
                             str(HIER / "backup_mongo.py"), "--dir", tmp],
-                           capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
+                           capture_output=True, text=True, timeout=1800)
+        if r.returncode not in (0, 2):
             print("BACKUP FEHLGESCHLAGEN:\n", r.stdout[-800:], r.stderr[-800:])
             return 1
         dump = next(p for p in Path(tmp).iterdir()
                     if p.is_dir() and p.name.startswith("autoschnell-"))
-        print(f"      Backup: {dump.name}")
+        manifest = json.loads((dump / "manifest.json").read_text(encoding="utf-8"))
+        fehlend = [str(x) for x in manifest.get("unvollstaendig") or []]
+        print(f"      Backup: {dump.name} (Konsistenz: "
+              f"{manifest.get('konsistenz', 'unbekannt')}, Offsite: "
+              f"{'ja' if manifest.get('offsite') else 'nein'})")
+        if fehlend:
+            print("      WARNUNG: Backup UNVOLLSTAENDIG — " + "; ".join(fehlend))
 
-        print(f"[2/4] Wiederherstellung in Testdatenbank '{TEST_DB}' …")
-        r = subprocess.run([sys.executable, "-X", "utf8",
-                            str(HIER / "restore_mongo.py"), str(dump),
-                            "--db", TEST_DB, "--yes"],
-                           capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            print("RESTORE FEHLGESCHLAGEN:\n", r.stdout[-800:], r.stderr[-800:])
+        print(f"[2/4] Wiederherstellung in Testdatenbank '{TEST_DB}' (nur Datenbank) …")
+        client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+        _aufraeumen(client)  # Reste einer abgebrochenen Probe
+        cmd = [sys.executable, "-X", "utf8", str(HIER / "restore_mongo.py"),
+               str(dump), "--db", TEST_DB, "--yes", "--nur-datenbank"]
+        if fehlend:
+            cmd.append("--notfall-unvollstaendig-akzeptieren")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0 or "RESTORE OK" not in (r.stdout or ""):
+            print("RESTORE FEHLGESCHLAGEN:\n", r.stdout[-1200:], r.stderr[-800:])
+            _aufraeumen(client)
             return 1
 
-        print("[3/4] Vergleiche Dokumentzahlen …")
-        client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-        quelle, ziel = client[DB_NAME], client[TEST_DB]
+        print("[3/4] Vergleiche Dokumentzahlen (Manifest vs. Testdatenbank) …")
+        ziel = client[TEST_DB]
+        erwartet = manifest.get("collections") or {}
         fehler = 0
-        # Der Dump liegt im Unterordner <datenbankname>/ (mongodump-Layout).
-        colls = [p.name[:-len(".bson.gz")]
-                 for p in dump.rglob("*.bson.gz")]
-        for c in sorted(colls):
-            n_ziel = ziel[c].count_documents({})
-            # Quelle kann seit dem Backup weitergelaufen sein — wir pruefen
-            # daher gegen die Dokumentzahl IM BACKUP (Datei selbst).
-            import gzip
-            n_backup = 0
-            with gzip.open(next(dump.rglob(f"{c}.bson.gz")), "rb") as fh:
-                while True:
-                    head = fh.read(4)
-                    if len(head) < 4:
-                        break
-                    fh.read(int.from_bytes(head, "little") - 4)
-                    n_backup += 1
+        for c in sorted(erwartet):
+            if c == "system_flags":
+                continue  # Betriebs-Flags werden nie zurueckgespielt
+            n_backup, n_ziel = int(erwartet[c]), ziel[c].count_documents({})
             status = "OK " if n_backup == n_ziel else "DIFF"
             if n_backup != n_ziel:
                 fehler += 1
@@ -76,14 +88,23 @@ def main() -> int:
             if n_ziel and ziel[c].find_one() is None:
                 print(f"      LESE-FEHLER in {c}")
                 fehler += 1
+        flag = ziel.system_flags.find_one({"_id": "wartungsmodus"})
+        if flag and flag.get("aktiv"):
+            print("      FEHLER: Wartungsmodus nach dem Restore noch aktiv")
+            fehler += 1
 
         print(f"[4/4] Testdatenbank '{TEST_DB}' loeschen …")
-        client.drop_database(TEST_DB)
+        _aufraeumen(client)
 
         if fehler:
             print(f"\nERGEBNIS: {fehler} Abweichung(en) — Backup NICHT ok!")
             return 1
-        print(f"\nERGEBNIS: Wiederherstellung bewiesen — {len(colls)} "
+        if fehlend:
+            print(f"\nERGEBNIS: Datenbank-Wiederherstellung bewiesen ({len(erwartet)} "
+                  f"Collections), ABER das Backup ist UNVOLLSTAENDIG: "
+                  + "; ".join(fehlend))
+            return 2
+        print(f"\nERGEBNIS: Wiederherstellung bewiesen — {len(erwartet)} "
               f"Collections identisch.")
         return 0
 

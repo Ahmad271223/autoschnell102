@@ -240,7 +240,7 @@ def test_08_firmen_checkout_geschlossen(welt):
         assert r.status_code == 403, r.text[:200]
         assert "Rechnung" in r.text
     # Kaeufer mit unbekanntem Plan -> 400
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
         "company_name": "BT Kaeufer", "contact_name": "K B",
         "email": f"bt_kaeufer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
     assert r.status_code == 200, r.text[:200]

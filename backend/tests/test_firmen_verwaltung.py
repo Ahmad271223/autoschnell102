@@ -259,9 +259,13 @@ def test_05_backfill_parallel_ohne_dubletten(welt):
 
     async def zwei_worker(db):
         import deps
+        alt = deps.db
         deps.db = db
-        return await asyncio.gather(deps.kunden_nummern_nachziehen(),
-                                    deps.kunden_nummern_nachziehen())
+        try:
+            return await asyncio.gather(deps.kunden_nummern_nachziehen(),
+                                        deps.kunden_nummern_nachziehen())
+        finally:
+            deps.db = alt          # Modulzustand fuer nachfolgende Tests zuruecksetzen
 
     ergebnis = _run(zwei_worker)
     assert sum(ergebnis) == 3, ergebnis          # jede Firma genau einmal
@@ -274,8 +278,12 @@ def test_05_backfill_parallel_ohne_dubletten(welt):
 
 async def _nachziehen(db):
     import deps
+    alt = deps.db
     deps.db = db
-    return await deps.kunden_nummern_nachziehen()
+    try:
+        return await deps.kunden_nummern_nachziehen()
+    finally:
+        deps.db = alt
 
 
 # ---------- Doppelklick beim Freischalten ----------
@@ -308,13 +316,15 @@ def test_06_doppelklick_freischalten_genau_eine_zahlung(welt):
         codes = [r.status_code for r in ex.map(frei, range(6))]
     assert set(codes) <= {200, 409}, codes
     assert dbx.manual_payments.count_documents({"subject_user_id": sid}) == vorher + codes.count(200)
-    assert dbx.subscriptions.count_documents({"subject_user_id": sid}) == 1
+    # Historie bleibt (Audit): genau EIN aktives Abo, alte Zeilen als "ersetzt"
+    assert dbx.subscriptions.count_documents({"subject_user_id": sid, "status": "active"}) == 1
     assert dbx.subscriptions.count_documents({"subject_user_id": sid, "status": "active"}) == 1
     assert dbx.sperren.count_documents({"_id": f"abo:{sid}"}) == 0
     # Sperre wieder frei: naechste (gewollte) Freischaltung geht durch
     r = requests.post(url, headers=welt["A"], json={"plan": "yearly"}, timeout=60)
     assert r.status_code == 200, r.text[:200]
-    assert dbx.subscriptions.count_documents({"subject_user_id": sid}) == 1
+    # Historie bleibt (Audit): genau EIN aktives Abo, alte Zeilen als "ersetzt"
+    assert dbx.subscriptions.count_documents({"subject_user_id": sid, "status": "active"}) == 1
 
 
 # ---------- gueltig_bis-Grenzfaelle ----------

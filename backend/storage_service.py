@@ -244,6 +244,84 @@ async def delete_prefix_async(prefix: str) -> int:
     return await _asyncio.to_thread(storage.delete_prefix, prefix)
 
 
+# ---------- Loeschen oder vormerken (Go-Live-Audit 09/2026) ----------
+# Bisher galt eine fehlgeschlagene Datei-Loeschung stillschweigend als
+# Erfolg: der Aufrufer entfernte den Key aus seinem Dokument, die Datei
+# blieb fuer immer liegen (Fotos, Snapshots, Protokoll-PDFs, Unterschriften).
+# Jetzt gibt es EINEN zentralen Weg: klappt die Loeschung, True; sonst wird
+# sie in `storage_delete_retry` vorgemerkt und der Aufraeumjob
+# (cleanup_service.storage_loeschungen_nachholen) holt sie nach.
+#
+# REGEL fuer Aufrufer: Den Key/das Feld im eigenen Dokument NUR entfernen,
+# wenn der Helfer True liefert. Bei False bleibt der Key stehen und das
+# Dokument bekommt `<feld>_loeschung_offen: True` (o.ae.), damit nichts
+# verloren geht. `ref` beschreibt, wo der Key referenziert ist, damit die
+# Nachholung das Dokument nach Erfolg selbst bereinigen kann:
+#   {"collection": <Name>, "id": <Dokument-id>, "unset_fields": [...]}
+# optional zusaetzlich:
+#   "pull_key_from": <Array-Feld>        -> $pull des Keys aus dieser Liste
+#   "array": {"pfad": <Array-Feld>, "schluessel": <Elementfeld>}
+#                                        -> unset_fields/set_fields gelten
+#                                           fuer das Element mit Feld == Key
+#   "set_fields": {<Feld>: <Wert|"$now">} -> nach Erfolg setzen
+#   "loeschen_wenn_leer": [<Felder>]     -> Dokument loeschen, sobald keines
+#                                           dieser Felder mehr belegt ist
+async def loeschen_oder_vormerken(db, *, key: Optional[str] = None,
+                                  prefix: Optional[str] = None, grund: str,
+                                  dealer_id: str = "", ref: Optional[dict] = None,
+                                  art: str = "storage") -> bool:
+    """Datei (key), Ordner (prefix) oder Snapshot-Objekt (art="snapshot",
+    key) loeschen. True = weg. False = NICHT geloescht, aber in
+    `storage_delete_retry` vorgemerkt (wird nie stillschweigend verloren).
+    Wirft selbst nie."""
+    import logging
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    log = logging.getLogger("autohandel.storage")
+    if art == "snapshot":
+        art_eintrag = "snapshot"
+    elif prefix:
+        art_eintrag = "prefix"
+    else:
+        art_eintrag = "key"
+    fehler: Optional[str] = None
+    try:
+        if art_eintrag == "snapshot":
+            if not key:
+                raise StorageError("Snapshot-Loeschung ohne Key")
+            from snapshot_service import delete_object_async
+            if not await delete_object_async(key):
+                raise RuntimeError("Snapshot-Storage meldet Fehlschlag")
+        elif art_eintrag == "prefix":
+            await delete_prefix_async(prefix)
+        else:
+            if not key:
+                raise StorageError("Datei-Loeschung ohne Key")
+            # False = Datei gab es nicht mehr -> Ziel erreicht (idempotent).
+            await delete_async(key)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        fehler = str(exc)[:300]
+    jetzt = datetime.now(timezone.utc).isoformat()
+    log.warning("Datei-Loeschung fehlgeschlagen (%s %s, %s) — vorgemerkt: %s",
+                art_eintrag, key or prefix, grund, fehler)
+    try:
+        # Upsert je (art, key/prefix): derselbe Key wird nicht mehrfach
+        # vorgemerkt, wenn der Aufraeumjob ihn stuendlich erneut anfasst.
+        await db.storage_delete_retry.update_one(
+            {"art": art_eintrag, "key": key, "prefix": prefix},
+            {"$setOnInsert": {"id": str(_uuid.uuid4()), "art": art_eintrag,
+                              "key": key, "prefix": prefix, "versuche": 0,
+                              "created_at": jetzt},
+             "$set": {"grund": grund, "dealer_id": dealer_id or "",
+                      "ref": ref, "letzter_fehler": fehler, "updated_at": jetzt}},
+            upsert=True)
+    except Exception:  # noqa: BLE001
+        log.exception("storage_delete_retry konnte nicht geschrieben werden (%s)",
+                      key or prefix)
+    return False
+
+
 def guess_media_type(key: str) -> str:
     ext = os.path.splitext(key)[1].lower()
     return {

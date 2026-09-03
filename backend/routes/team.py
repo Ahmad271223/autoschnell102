@@ -92,7 +92,7 @@ class UpgradeRequestIn(BaseModel):
 # bestehenden Tests und lokales Ausprobieren funktionieren.
 def _chef_verwaltung_erlaubt() -> bool:
     import os
-    return os.environ.get("SELF_SIGNUP", "true").strip().lower() not in (
+    return os.environ.get("SELF_SIGNUP", "false" if os.environ.get("APP_ENV", "").strip().lower() == "production" else "true").strip().lower() not in (
         "false", "0", "no", "off")
 
 

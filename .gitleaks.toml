@@ -1,0 +1,35 @@
+# gitleaks-Konfiguration (Audit 09/2026, Punkt 2): CI scannt die GESAMTE
+# Git-Historie (nicht nur den Arbeitsbaum). Zusaetzlich zu den Standard-
+# regeln werden Zuweisungen der Plattform-Geheimnisse erkannt, sofern der
+# Wert kein offensichtlicher Platzhalter ist.
+title = "AutoSchnell gitleaks"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "autoschnell-env-secret"
+description = "Plattform-Geheimnis als Klartext (JWT_SECRET, Admin-Passwoerter, Mongo-Passwort, Stripe/Apify)"
+regex = '''(?i)\b(JWT_SECRET|ADMIN_PASSWORD|SUPER_ADMIN_PASSWORD|MONGO_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|APIFY_TOKEN|S3_SECRET_KEY|SMTP_PASS|BROWSERLESS_TOKEN)\s*[:=]\s*["']?([^\s"'#]{8,})'''
+secretGroup = 2
+keywords = ["JWT_SECRET", "ADMIN_PASSWORD", "SUPER_ADMIN_PASSWORD", "MONGO_PASSWORD", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "APIFY_TOKEN", "S3_SECRET_KEY", "SMTP_PASS", "BROWSERLESS_TOKEN"]
+
+[rules.allowlist]
+regexes = [
+  '''(?i)(BITTE|ERSETZEN|changeme|ci-only|ci-nur|beispiel|example|platzhalter|dev-secret|\$\{[A-Z_]+|<[^>]+>)''',
+  '''(?i)(os\.environ|process\.env|getenv|environ\.get)''',
+]
+paths = [
+  '''\.env\.example$''',
+  '''\.gitleaks\.toml$''',
+  '''\.github/workflows/.*\.yml$''',
+  '''backend/production_check\.py$''',
+  '''backend/tests/.*\.py$''',
+]
+
+[allowlist]
+description = "Testdaten und Dokumentation"
+paths = [
+  '''frontend/yarn\.lock$''',
+  '''frontend/public/fonts/.*''',
+]

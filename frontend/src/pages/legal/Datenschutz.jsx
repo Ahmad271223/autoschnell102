@@ -40,26 +40,114 @@ export default function Datenschutz() {
       </ul>
 
       <H2>4. Auftragsverarbeitung / Empfänger</H2>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Angaben in [eckigen
+          Klammern] vor dem Live-Gang durch die echten Vertragspartner
+          ersetzen (Hosting, SMTP-Anbieter, ggf. S3-Speicher, browserless).
+          Herkunft der Liste: backend/email_service.py (SMTP),
+          routes/payments.py (Stripe Checkout), mobile_service.py +
+          autoscout_service.py (Apify), storage_service.py (S3 optional),
+          snapshot_service.py (BROWSERLESS_URL optional). Nicht genutzte
+          optionale Dienste bitte streichen oder als "nicht im Einsatz"
+          kennzeichnen. */}
       <p>
-        Soweit wir für den Betrieb der Plattform externe Dienstleister
-        einsetzen (Server-Hosting in Deutschland, technischer E-Mail-Versand
-        z.B. für das Zurücksetzen von Passwörtern), erfolgt dies auf Grundlage
-        von Auftragsverarbeitungsverträgen gemäß Art. 28 DSGVO. Zum Laden von
-        Inseratsdaten werden öffentlich zugängliche Fahrzeug-Inserate
-        (z.B. kleinanzeigen.de) abgerufen. Wir setzen KEINE Analyse- oder
+        Für den Betrieb der Plattform setzen wir die folgenden Dienstleister
+        ein. Soweit sie personenbezogene Daten in unserem Auftrag
+        verarbeiten, geschieht das auf Grundlage von
+        Auftragsverarbeitungsverträgen gemäß Art. 28 DSGVO; eine Übermittlung
+        in Länder außerhalb der EU/des EWR erfolgt nur auf Grundlage eines
+        Angemessenheitsbeschlusses oder von EU-Standardvertragsklauseln
+        (Art. 44 ff. DSGVO).
+      </p>
+      <ul className="list-disc pl-6 space-y-1">
+        <li><b>Server-Hosting und Datenbank:</b> [Hosting-Anbieter, Anschrift,
+            Deutschland] — Betrieb der Anwendung und Speicherung sämtlicher
+            Plattformdaten (Account-, Geschäfts- und Nutzungsdaten).</li>
+        <li><b>E-Mail-Versand:</b> System-E-Mails (z.B. Passwort zurücksetzen,
+            Einladungen, Benachrichtigungen) werden per SMTP über
+            [SMTP-/E-Mail-Anbieter, Standort] versendet. Übermittelt werden
+            die Empfänger-Adresse und der Inhalt der jeweiligen Nachricht.</li>
+        <li><b>Zahlungsabwicklung Marktplatz-Zugang:</b> Stripe Payments
+            Europe Ltd., 1 Grand Canal Street Lower, Dublin 2, Irland.
+            Zahlungsdaten (Karten-/Kontodaten) werden ausschließlich auf der
+            Bezahlseite von Stripe eingegeben und erreichen unsere Server
+            nicht; wir erhalten von Stripe nur Zahlungsstatus, Betrag und
+            eine Vorgangs-Kennung. Stripe kann Daten an seine
+            Konzerngesellschaft in den USA übermitteln
+            (EU-Standardvertragsklauseln bzw. EU-US Data Privacy Framework).
+            Datenschutzhinweise: stripe.com/de/privacy.</li>
+        <li><b>Abruf von Fahrzeug-Inseraten:</b> Öffentlich zugängliche
+            Inserate von mobile.de und AutoScout24 laden wir über den
+            Abrufdienst der Apify Technologies s.r.o., Vodičkova 704/36,
+            110 00 Prag, Tschechien (EU). Übermittelt werden nur die
+            Inserats-URL bzw. die Suchparameter — keine Daten unserer Nutzer.
+            Inserate von kleinanzeigen.de werden je nach Konfiguration von
+            unserem Server oder direkt aus dem Browser des Nutzers abgerufen.</li>
+        <li><b>Dateispeicher (optional):</b> Fotos, Abholberichte und
+            Dokumente können statt auf unserem Server in einem
+            S3-kompatiblen Objektspeicher abgelegt werden:
+            [Speicher-Anbieter, Standort — oder „derzeit nicht im Einsatz,
+            Speicherung auf dem eigenen Server“].</li>
+        <li><b>Browser-Rendering für Beweis-Snapshots (optional):</b> Für die
+            Screenshot-/PDF-Sicherung von Inseraten kann ein externer
+            Browser-Dienst (browserless) eingesetzt werden: [Anbieter,
+            Standort — oder „derzeit nicht im Einsatz, Rendering auf dem
+            eigenen Server“]. Übermittelt wird nur die öffentliche
+            Inserats-URL.</li>
+      </ul>
+      <p>
+        Schriftarten liefern wir lokal von unserem eigenen Server aus — es
+        werden keine Schriften von Google Fonts, Fontshare oder anderen
+        Drittanbietern nachgeladen. Wir setzen KEINE Analyse- oder
         Werbe-Tracker ein.
       </p>
 
       <H2>5. Speicherdauer</H2>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Die genannten Fristen
+          sind technisch konfigurierte Werte, keine rechtlich geprueften
+          Zusagen — eine abschliessende rechtliche Pruefung steht noch aus.
+          Quellen: backend/cleanup_service.py (VERTRAG_AUFBEWAHRUNG_TAGE=90,
+          LOG_AUFBEWAHRUNG_TAGE=180, SNAPSHOT_RETENTION_DAYS=60,
+          CLEANUP_RULES 7/14 Tage), routes/bestand.py
+          (BESTAND_RETENTION_DAYS=50), routes/listings.py
+          (LISTING_CACHE_TTL_HOURS). Wird eine Umgebungsvariable geaendert,
+          muss dieser Text nachgezogen werden. Abweichung Stand 09/2026:
+          LISTING_CACHE_TTL_HOURS steht per Default auf 8760 h (= 365 Tage),
+          zugesagt sind hier "max. 90 Tage" — Default oder Text angleichen. */}
       <p>
-        Account- und Vertragsdaten speichern wir für die Dauer der
-        Geschäftsbeziehung und gemäß den gesetzlichen Aufbewahrungsfristen
-        (6 bzw. 10 Jahre nach HGB/AO). Fahrzeug-Fotos aus Abholungen werden
-        nach 7 Tagen (bei nicht abgeholten Fahrzeugen nach 14 Tagen)
-        automatisch gelöscht; Bestandsfahrzeug-Daten nach
-        50 Tagen archiviert. Beweis-Snapshots von Inseraten bewahren wir zur
-        Dokumentation des Vertragsschlusses auf.
+        <b>Account-Daten</b> speichern wir für die Dauer der
+        Geschäftsbeziehung; nach Löschung des Accounts werden sie entfernt,
+        soweit keine gesetzlichen Aufbewahrungspflichten (z.B. für
+        Rechnungen) entgegenstehen.
       </p>
+      <p>
+        <b>Kaufverträge:</b> Die auf der Plattform erzeugten
+        Vertragsdokumente (PDF) und die darin enthaltenen personenbezogenen
+        Daten (insbesondere Name, Anschrift und Kontaktdaten des
+        Fahrzeugverkäufers sowie Unterschriften) werden nach Ablauf der
+        eingestellten Aufbewahrungsfrist (derzeit 90 Tage nach Erstellung)
+        automatisch und vollständig gelöscht. Für die handels- und
+        steuerrechtliche Aufbewahrung des Kaufvertrags (6 bzw. 10 Jahre nach
+        HGB/AO) ist der Händler selbst verantwortlich: Er lädt das
+        Vertragsdokument herunter und bewahrt es in seinen eigenen
+        Unterlagen auf. Anonymisierte Fahrzeugdaten ohne Personenbezug
+        (z.B. Marke, Modell, Erstzulassung, Kaufpreis) bleiben dauerhaft
+        gespeichert.
+      </p>
+      <p>
+        Fahrzeug-Fotos aus Abholungen werden nach 7 Tagen (bei nicht
+        abgeholten Fahrzeugen nach 14 Tagen) automatisch gelöscht;
+        Bestandsfahrzeug-Daten nach 50 Tagen archiviert. Beweis-Snapshots
+        von Inseraten bewahren wir zur Dokumentation des Vertragsschlusses
+        auf.
+      </p>
+      <p>Weitere Fristen:</p>
+      <ul className="list-disc pl-6 space-y-1">
+        <li>Zugangs- und Abo-Anfragen (erledigt oder abgelehnt): 90 Tage</li>
+        <li>Fehlerprotokolle: max. 365 Tage</li>
+        <li>Marktplatz-Anfragen: 180 Tage nach Abschluss</li>
+        <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 90 Tage</li>
+        <li>Backups: verschlüsselt, max. 30 Tage</li>
+      </ul>
 
       <H2>6. Deine Rechte</H2>
       <p>

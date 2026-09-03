@@ -5,7 +5,8 @@ import base64
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from decimal import Decimal
+from typing import Dict, Literal, Optional
 
 
 def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
@@ -22,10 +23,10 @@ from auth import (hash_password, hash_password_async,
                   verify_password, verify_password_async)
 from cleanup_service import _cleanup_once
 from deps import (
-    current_admin, db, get_subscription_status, log, log_activity, now_iso,
-    sub_status_from_doc,
+    current_admin, current_super_admin, db, get_subscription_status, log, log_activity, now_iso, sub_status_from_doc, subscription_for,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
+from passwoerter import pruefe_passwort
 
 router = APIRouter()
 
@@ -33,11 +34,18 @@ router = APIRouter()
 # ---------- Models ----------
 class AdminUserIn(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8)
-    company_name: str
-    plan_type: str = "monthly"  # monthly | yearly | lifetime | trial
+    password: str = Field(min_length=8, max_length=200)
+    company_name: str = Field(min_length=1, max_length=200)
+    # Audit 09/2026: nur feste Werte — "lifetime" und Freitext erzeugten
+    # unbegrenzten Zugang. Betreiber-Modell: "none" (Firma ohne Abo).
+    plan_type: Literal["none", "monthly", "yearly", "trial"] = "none"
     expires_at: Optional[str] = None
     active: Optional[bool] = True
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return pruefe_passwort(v)
 
 
 class AdminActiveIn(BaseModel):
@@ -45,7 +53,12 @@ class AdminActiveIn(BaseModel):
 
 
 class AdminUserPasswordIn(BaseModel):
-    new_password: str
+    new_password: str = Field(min_length=1, max_length=200)
+
+    @field_validator("new_password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return pruefe_passwort(v)
 
 
 class AdminSelfPasswordIn(BaseModel):
@@ -55,7 +68,7 @@ class AdminSelfPasswordIn(BaseModel):
 
 # ---------- Cleanup trigger ----------
 @router.post("/admin/cleanup/run")
-async def admin_trigger_cleanup(user=Depends(current_admin)):
+async def admin_trigger_cleanup(user=Depends(current_super_admin)):
     """Manuell einen Cleanup-Durchlauf anstoßen (Debug/QA).
     Regulär läuft der Loop 1× pro Stunde automatisch."""
     stats = await _cleanup_once(db)
@@ -79,7 +92,7 @@ async def _dealer_anlegen_mit_kunden_nr(doc: dict, naechste_kunden_nr) -> None:
 
 # ---------- Users ----------
 @router.post("/admin/users")
-async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
+async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin)):
     # Haertung 09/2026: E-Mail wie bei Registrierung/Sucher normalisieren und
     # schreibungsunabhaengig pruefen — vorher konnten "Chef@X.de" und
     # "chef@x.de" als zwei Konten existieren (Login trifft dann das falsche).
@@ -178,27 +191,38 @@ async def admin_list_users(_=Depends(current_admin),
         {"$group": {"_id": "$dealer_id", "sub": {"$first": "$$ROOT"}}},
     ]):
         newest_subs[row["_id"]] = row["sub"]
-    # Sucher: persoenliches Abo (subject_user_id) statt Firmen-Abo (Review 09/2026)
-    sucher_ids = [u["id"] for u in users if u.get("role") == "sucher"]
+    # Persoenliche Abos fuer ALLE Konten (Sucher UND Chef) — dieselbe Regel
+    # wie deps.subscription_for (Audit 09/2026: Anzeige und Zugriff duerfen
+    # nicht auseinanderlaufen): Chef = persoenlich, sonst altes Firmen-Abo.
+    konto_ids = [u["id"] for u in users if u.get("role") in ("sucher", "dealer")]
     persoenlich = {}
-    if sucher_ids:
+    if konto_ids:
         async for row in db.subscriptions.aggregate([
-            {"$match": {"subject_user_id": {"$in": sucher_ids}}},
+            {"$match": {"subject_user_id": {"$in": konto_ids},
+                        "status": {"$ne": "ersetzt"}}},
             {"$sort": {"created_at": -1}},
             {"$group": {"_id": "$subject_user_id", "sub": {"$first": "$$ROOT"}}},
         ]):
             persoenlich[row["_id"]] = row["sub"]
+
+    def _abo(u):
+        if u.get("role") == "sucher":
+            return sub_status_from_doc(persoenlich.get(u["id"]))
+        pers = sub_status_from_doc(persoenlich.get(u["id"]))
+        if pers["active"] or u.get("role") != "dealer":
+            return pers
+        firma = sub_status_from_doc(newest_subs.get(u.get("dealer_id")))
+        return firma if firma["active"] else pers
+
     return [{**u,
              "company_name": dealers.get(u.get("dealer_id"), {}).get("company_name"),
              "kunden_nr": dealers.get(u.get("dealer_id"), {}).get("kunden_nr"),
-             "subscription": sub_status_from_doc(
-                 persoenlich.get(u["id"]) if u.get("role") == "sucher"
-                 else newest_subs.get(u.get("dealer_id")))}
+             "subscription": _abo(u)}
             for u in users]
 
 
 @router.put("/admin/users/{user_id}")
-async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(current_admin)):
+async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(current_super_admin)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(404, "Nutzer nicht gefunden")
@@ -234,8 +258,10 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
     if "password" in body and body["password"]:
         pw = str(body["password"])
-        if len(pw) < 8:
-            raise HTTPException(400, "Passwort muss mindestens 8 Zeichen haben")
+        try:
+            pruefe_passwort(pw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         fields["password_hash"] = await hash_password_async(pw)
         # Passwortwechsel beendet alle Sitzungen des Kontos — ein
         # gestohlener Token ueberlebt die Aenderung nicht (PR-Review).
@@ -306,7 +332,7 @@ async def admin_delete_preview(dealer_id: str, admin=Depends(current_admin)):
 
 @router.delete("/admin/users/{user_id}")
 async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
-                            admin=Depends(current_admin)):
+                            admin=Depends(current_super_admin)):
     """Nutzer loeschen — nach Rolle getrennt (Beschluss PR-Review 08/2026):
 
     - Sucher/Fahrer/Kaeufer: NUR dieser Nutzer (+ sein persoenliches Abo)
@@ -422,7 +448,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
 
 @router.post("/admin/users/{user_id}/active")
 async def admin_user_set_active(
-    user_id: str, body: AdminActiveIn, admin=Depends(current_admin)
+    user_id: str, body: AdminActiveIn, admin=Depends(current_super_admin)
 ):
     """Soft-Block / Entsperren eines Nutzer-Kontos.
 
@@ -446,19 +472,29 @@ async def admin_user_set_active(
     if not body.active:
         patch["current_session_id"] = None
     await db.users.update_one({"id": user_id}, {"$set": patch})
+    sucher_abgemeldet = 0
+    if not body.active and u.get("role") == "dealer" and u.get("dealer_id"):
+        # Firmensperre (Audit 09/2026): auch die Sitzungen aller Sucher der
+        # Firma sofort widerrufen — vorher wurden alte Sucher-Tokens nach
+        # dem Entsperren wieder gueltig (auch gestohlene).
+        r = await db.users.update_many(
+            {"dealer_id": u["dealer_id"], "role": "sucher"},
+            {"$set": {"current_session_id": None, "updated_at": now_iso()}})
+        sucher_abgemeldet = r.modified_count
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.user.entsperrt" if body.active else "admin.user.gesperrt",
-                       ref=user_id, meta={"email": u.get("email", "")})
-    return {"ok": True, "active": bool(body.active)}
+                       ref=user_id, meta={"email": u.get("email", ""),
+                                          "sucher_abgemeldet": sucher_abgemeldet})
+    return {"ok": True, "active": bool(body.active),
+            "sucher_abgemeldet": sucher_abgemeldet}
 
 
 @router.post("/admin/users/{user_id}/password")
 async def admin_user_set_password(
-    user_id: str, body: AdminUserPasswordIn, admin=Depends(current_admin)
+    user_id: str, body: AdminUserPasswordIn, admin=Depends(current_super_admin)
 ):
     """Setzt das Passwort eines Nutzers zurueck (Admin-Funktion)."""
-    if len(body.new_password or "") < 8:
-        raise HTTPException(400, "Passwort muss mind. 8 Zeichen haben")
+    # (Passwortregel bereits im Modell AdminUserPasswordIn)
     u = await db.users.find_one({"id": user_id})
     if not u:
         raise HTTPException(404, "Nutzer nicht gefunden")
@@ -531,7 +567,7 @@ async def _fahrer_or_404(driver_id: str) -> dict:
 
 @router.post("/admin/drivers/{driver_id}/active")
 async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
-                                  admin=Depends(current_admin)):
+                                  admin=Depends(current_super_admin)):
     d = await _fahrer_or_404(driver_id)
     fields = {"active": body.active, "updated_at": now_iso()}
     if not body.active:
@@ -546,7 +582,7 @@ async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
 
 @router.post("/admin/drivers/{driver_id}/password")
 async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
-                                    admin=Depends(current_admin)):
+                                    admin=Depends(current_super_admin)):
     d = await _fahrer_or_404(driver_id)
     # Gleiche Staerke-Regel wie bei der Fahrer-Registrierung (wirft
     # ValueError -> sauberer 400 statt 500).
@@ -566,18 +602,19 @@ async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
 
 
 @router.delete("/admin/drivers/{driver_id}")
-async def admin_delete_driver(driver_id: str, admin=Depends(current_admin)):
+async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)):
     """Fahrer-Konto loeschen (DSGVO — vorher gab es dafuer KEINEN Weg):
     Haendler-Verknuepfungen entfernen, OFFENE Termine vom Fahrer trennen
     (abgeschlossene behalten die historische Zuordnung — nach der Loeschung
     ist die driver_id keiner Person mehr zuzuordnen), Reset-Tokens weg,
     dann das Konto selbst."""
     d = await _fahrer_or_404(driver_id)
-    links = await db.dealer_drivers.delete_many({"driver_account_id": driver_id})
-    getrennt = await db.appointments.update_many(
-        {"driver_id": driver_id, "status": {"$in": ["offen", "verschoben"]}},
-        {"$unset": {"driver_id": ""}})
-    await db.password_resets.delete_many({"user_id": driver_id})
+    # Audit 09/2026: nicht nur trennen, sondern pseudonymisieren (Termine,
+    # Berichte, Protokolle, Audit-Log) — Funktion in routes/drivers.py.
+    from routes.drivers import fahrer_konto_anonymisieren
+    anonym = await fahrer_konto_anonymisieren(db, driver_id)
+    links = type("R", (), {"deleted_count": anonym.get("dealer_drivers", 0)})()
+    getrennt = type("R", (), {"modified_count": anonym.get("appointments", 0)})()
     await db.driver_accounts.delete_one({"id": driver_id})
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.geloescht", ref=driver_id,
@@ -805,7 +842,7 @@ async def admin_monitoring(admin=Depends(current_admin)):
 # ---------- Verkaufspakete (Phase 2 — Vergabe durch den Admin) ----------
 @router.put("/admin/dealers/{dealer_id}/sale-plan")
 async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
-                              admin=Depends(current_admin)):
+                              admin=Depends(current_super_admin)):
     """Verkaufspaket zuweisen/ändern. tier: s5|s10|s20|s30|s40|enterprise
     oder null zum Entfernen. Bei Neuvergabe/Wechsel startet der rollierende
     Abrechnungszeitraum neu (Buchungsdatum)."""
@@ -879,113 +916,199 @@ async def admin_plan_requests(status: Optional[str] = None,
 
 
 # ---------- Sucher-Abo freischalten (manuell) ----------
+class AboFreischaltenIn(BaseModel):
+    """Freischalten/Verlaengern (plan) oder Aufheben (plan=null).
+    Audit 09/2026: feste Plantypen, echte Betragspruefung (kein stilles
+    Ersetzen durch den Listenpreis, kein 0 EUR), Zahlungsart mit
+    Pflichtbegruendung bei Kulanz."""
+    plan: Optional[Literal["monthly", "yearly"]] = None
+    gueltig_bis: Optional[str] = Field(default=None, max_length=30)
+    betrag: Optional[Decimal] = Field(default=None, gt=Decimal("0"),
+                                      le=Decimal("100000"))
+    gezahlt_am: Optional[str] = Field(default=None, max_length=10)
+    notiz: str = Field(default="", max_length=500)
+    zahlungsart: Literal["rechnung_bezahlt", "kulanz"] = "rechnung_bezahlt"
+    grund: str = Field(default="", max_length=300)
+    waehrung: Literal["EUR"] = "EUR"
+
+
+def _datum_pruefen_400(wert, feld: str) -> str:
+    """'JJJJ-MM-TT' oder leer; sonst 400 (nicht 422, damit die Oberflaeche
+    eine deutsche Meldung zeigt)."""
+    if not wert:
+        return ""
+    w = str(wert).strip()[:10]
+    try:
+        datetime.strptime(w, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"{feld} muss ein Datum JJJJ-MM-TT sein")
+    return w
+
+
 @router.post("/admin/sucher/{sucher_id}/abo")
-async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
-                               admin=Depends(current_admin)):
-    """Sucher-Abo aktivieren/verlängern (plan: monthly|yearly) oder mit
-    plan=null aufheben. Legt/aktualisiert eine subscriptions-Zeile mit
-    subject_user_id an — damit gilt der Sucher als abo-berechtigt."""
+async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
+                               admin=Depends(current_super_admin)):
+    """Sucher-Abo aktivieren/verlaengern (plan: monthly|yearly) oder mit
+    plan=null aufheben. NUR Super-Admin (Betreiber). Legt einen
+    idempotenten Vorgang (abo_vorgaenge) an — jeder Schritt ist
+    wiederholbar, ein Reparaturlauf holt Abgebrochenes nach."""
     from routes.team import SUCHER_PLANS
-    # Auch der Chef kann einen persoenlichen Sucher-Zugang haben ("Chef als
-    # eigener Sucher") — Freischaltung laeuft ueber denselben Endpunkt.
     sucher = await db.users.find_one(
         {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
-        {"_id": 0, "id": 1, "dealer_id": 1})
+        {"_id": 0, "id": 1, "dealer_id": 1, "email": 1})
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
-    plan = body.get("plan")
-    if plan is None:
+    if body.plan is None:
+        # Aufheben = NUR die kostenpflichtige Sucher-Funktion sperren
+        # (Login/Bestand bleiben). Auch Lifetime wird damit inaktiv.
         await db.subscriptions.update_many(
-            {"subject_user_id": sucher_id},
-            {"$set": {"status": "cancelled",
-                      "expires_at": now_iso(), "updated_at": now_iso()}})
+            {"subject_user_id": sucher_id, "status": {"$in": ["active", "cancelled"]}},
+            {"$set": {"status": "cancelled", "expires_at": now_iso(),
+                      "aufgehoben_von": admin.get("email", ""),
+                      "updated_at": now_iso()}})
         await log_activity(admin.get("dealer_id", ""), admin["id"],
-                           "admin.sucher.abo.aufgehoben", ref=sucher_id)
+                           "admin.sucher.abo.aufgehoben", ref=sucher_id,
+                           meta={"grund": body.grund})
         return {"ok": True, "active": False}
-    if plan not in SUCHER_PLANS:
-        raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {plan}")
-    # Doppelklick-/Doppelanfrage-Schutz (Haertung 09/2026): zwei gleichzeitige
-    # Freischaltungen erzeugten zwei Zahlungen und zwei Abo-Zeilen. Atomare
-    # Sperre in Mongo (gilt ueber alle Worker), wird am Ende geloest.
+    if body.plan not in SUCHER_PLANS:
+        raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {body.plan}")
+    if body.zahlungsart == "kulanz" and not body.grund.strip():
+        raise HTTPException(400, "Kulanz-Freischaltung braucht eine Begruendung")
+    gezahlt_am = _datum_pruefen_400(body.gezahlt_am, "gezahlt_am")
+    # Doppelklick-/Doppelanfrage-Schutz mit Besitzer-Token (Audit 09/2026):
+    # geloest wird NUR die eigene Sperre; eine verwaiste Sperre wird per
+    # Compare-and-Swap uebernommen, nie blind geloescht.
     sperre = f"abo:{sucher_id}"
+    besitzer = str(uuid.uuid4())
     try:
-        await db.sperren.insert_one({"_id": sperre, "seit": now_iso()})
+        await db.sperren.insert_one({"_id": sperre, "owner": besitzer,
+                                     "seit": now_iso()})
     except DuplicateKeyError:
-        alt = await db.sperren.find_one({"_id": sperre})
+        alt = await db.sperren.find_one({"_id": sperre}) or {}
         try:
             alter = (datetime.now(timezone.utc)
                      - datetime.fromisoformat(alt["seit"])).total_seconds()
         except Exception:
             alter = 999
-        if alter < 30:
+        if alter < 60:
             raise HTTPException(409, "Freischaltung laeuft gerade — bitte "
                                      "einen Moment warten (Doppelklick)")
-        await db.sperren.delete_one({"_id": sperre})   # verwaiste Sperre
-        await db.sperren.insert_one({"_id": sperre, "seit": now_iso()})
+        r = await db.sperren.update_one(
+            {"_id": sperre, "owner": alt.get("owner")},
+            {"$set": {"owner": besitzer, "seit": now_iso()}})
+        if r.modified_count == 0:
+            raise HTTPException(409, "Freischaltung laeuft gerade — bitte "
+                                     "einen Moment warten (Doppelklick)")
     try:
-        return await _abo_freischalten(sucher, sucher_id, plan, body, admin)
+        return await _abo_freischalten(sucher, sucher_id, body, gezahlt_am, admin)
     finally:
-        await db.sperren.delete_one({"_id": sperre})
+        await db.sperren.delete_one({"_id": sperre, "owner": besitzer})
 
 
-async def _abo_freischalten(sucher: dict, sucher_id: str, plan: str,
-                            body: dict, admin: dict) -> dict:
+async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenIn,
+                            gezahlt_am: str, admin: dict) -> dict:
     from routes.team import SUCHER_PLANS
+    plan = body.plan
     days = SUCHER_PLANS[plan]["days"]
-    gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
+    gueltig_bis = _gueltig_bis_parsen(body.gueltig_bis)
     if gueltig_bis:
         # Wunsch 09/2026: der Betreiber schreibt direkt "bis wann gueltig" —
         # ab dann sperrt die Sucher-Funktion automatisch (Abo-Ablaufpruefung).
         expires_at = gueltig_bis
     else:
-        # Restlaufzeit erhalten (PR-Review 09/2026): erneutes Freischalten
-        # verlaengert ab dem bisherigen Ablauf, nicht ab "jetzt".
+        # Restlaufzeit erhalten: erneutes Freischalten verlaengert ab dem
+        # bisherigen Ablauf, nicht ab "jetzt".
         basis = _restlaufzeit_basis(
             (await db.subscriptions.find_one(
                 {"subject_user_id": sucher_id, "status": "active"},
                 {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
         expires_at = (basis + timedelta(days=days)).isoformat()
-    await db.subscriptions.delete_many({"subject_user_id": sucher_id})
-    await db.subscriptions.insert_one({
-        "id": str(uuid.uuid4()),
-        "dealer_id": sucher["dealer_id"],
-        "subject_user_id": sucher_id,
-        "plan": plan, "status": "active",
-        "expires_at": expires_at,
-        "price": SUCHER_PLANS[plan]["price"],
-        "activated_by": admin.get("email", ""),
-        "created_at": now_iso(),
-    })
-    # Zahlung direkt mit erfassen (Abrechnung per Rechnung, 09/2026):
-    # Freischalten = "es wurde gezahlt". Betrag/Datum sind überschreibbar
-    # (body.betrag / body.gezahlt_am), Default = Listenpreis / heute.
-    try:
-        betrag = round(float(body.get("betrag", SUCHER_PLANS[plan]["price"])), 2)
-    except (TypeError, ValueError):
-        betrag = SUCHER_PLANS[plan]["price"]
-    await db.manual_payments.insert_one({
-        "id": str(uuid.uuid4()),
-        "dealer_id": sucher["dealer_id"],
-        "subject_user_id": sucher_id,
-        "plan": plan,
-        "amount": betrag,
-        "paid_at": str(body.get("gezahlt_am") or now_iso())[:10],
-        "period_until": expires_at,           # bezahlt bis = nächste Zahlung
-        "note": str(body.get("notiz", ""))[:500],
-        "recorded_by": admin.get("email", ""),
-        "created_at": now_iso(),
-    })
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
-                       "admin.sucher.abo.freigeschaltet", ref=sucher_id,
-                       meta={"plan": plan, "betrag": betrag})
-    # Offene Anfrage im selben Vorgang schliessen — vorher waren Freischalten
-    # und Schliessen getrennt; scheiterte das Schliessen, blieb der erfuellte
-    # Antrag offen und konnte doppelt bearbeitet werden.
+    if body.zahlungsart == "kulanz":
+        betrag = 0.0
+    elif body.betrag is not None:
+        betrag = round(float(body.betrag), 2)
+    else:
+        betrag = float(SUCHER_PLANS[plan]["price"])
+    vorgang = {
+        "id": str(uuid.uuid4()), "typ": "freischaltung",
+        "subject_user_id": sucher_id, "dealer_id": sucher.get("dealer_id"),
+        "plan": plan, "expires_at": expires_at, "betrag": betrag,
+        "waehrung": "EUR", "zahlungsart": body.zahlungsart,
+        "grund": body.grund.strip(), "gezahlt_am": gezahlt_am or now_iso()[:10],
+        "notiz": body.notiz.strip(),
+        "admin_id": admin["id"], "admin_email": admin.get("email", ""),
+        "status": "laeuft", "schritte": {},
+        "created_at": now_iso(), "updated_at": now_iso(),
+    }
+    await db.abo_vorgaenge.insert_one(dict(vorgang))
+    await _abo_vorgang_ausfuehren(vorgang)
+    return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at,
+            "vorgang_id": vorgang["id"], "betrag": betrag}
+
+
+async def _abo_vorgang_ausfuehren(v: dict) -> None:
+    """Alle Schritte einer Freischaltung — jeder Schritt idempotent, damit
+    ein Wiederholungslauf (nach Absturz/Timeout) nichts doppelt anlegt:
+    1) alte Abos als 'ersetzt' markieren (Historie bleibt), 2) neues Abo mit
+    id = Vorgangs-ID (Upsert), 3) genau EINE Zahlung je Vorgang (Upsert
+    ueber vorgang_id), 4) offene Anfrage schliessen, 5) Audit einmalig,
+    6) Vorgang fertig."""
+    vid, sid, jetzt = v["id"], v["subject_user_id"], now_iso()
+    await db.subscriptions.update_many(
+        {"subject_user_id": sid, "id": {"$ne": vid}, "status": {"$ne": "ersetzt"}},
+        {"$set": {"status": "ersetzt", "ersetzt_durch": vid, "updated_at": jetzt}})
+    await db.subscriptions.update_one(
+        {"id": vid},
+        {"$setOnInsert": {
+            "id": vid, "dealer_id": v.get("dealer_id"), "subject_user_id": sid,
+            "plan": v["plan"], "status": "active", "expires_at": v["expires_at"],
+            "price": v["betrag"], "vorgang_id": vid,
+            "activated_by": v.get("admin_email", ""), "created_at": jetzt}},
+        upsert=True)
+    await db.manual_payments.update_one(
+        {"vorgang_id": vid},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()), "dealer_id": v.get("dealer_id"),
+            "subject_user_id": sid, "plan": v["plan"],
+            "amount": float(v["betrag"]), "currency": "EUR",
+            "paid_at": v.get("gezahlt_am") or jetzt[:10],
+            "period_until": v["expires_at"],       # bezahlt bis = Ablauf bei Freischaltung
+            "note": v.get("notiz", ""),
+            "zahlungsart": v.get("zahlungsart", "rechnung_bezahlt"),
+            "kostenlos": v.get("zahlungsart") == "kulanz",
+            "grund": v.get("grund", ""),
+            "quelle": "manuell", "vorgang_id": vid,
+            "recorded_by": v.get("admin_email", ""), "created_at": jetzt}},
+        upsert=True)
     await db.plan_requests.update_many(
-        {"type": "sucher_abo", "subject_user_id": sucher_id, "status": "offen"},
-        {"$set": {"status": "erledigt", "updated_at": now_iso(),
-                  "erledigt_durch": "freischaltung"}})
-    return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at}
+        {"type": "sucher_abo", "subject_user_id": sid, "status": "offen"},
+        {"$set": {"status": "erledigt", "updated_at": jetzt,
+                  "erledigt_durch": "freischaltung", "vorgang_id": vid}})
+    if not (v.get("schritte") or {}).get("audit"):
+        await log_activity(v.get("dealer_id", "") or "", v.get("admin_id", ""),
+                           "admin.sucher.abo.freigeschaltet", ref=sid,
+                           meta={"plan": v["plan"], "betrag": v["betrag"],
+                                 "zahlungsart": v.get("zahlungsart"),
+                                 "vorgang_id": vid})
+        await db.abo_vorgaenge.update_one({"id": vid}, {"$set": {"schritte.audit": True}})
+    await db.abo_vorgaenge.update_one(
+        {"id": vid}, {"$set": {"status": "fertig", "updated_at": now_iso()}})
+
+
+async def abo_vorgaenge_nachholen(db_=None) -> int:
+    """Reparaturlauf: Vorgaenge, die vor >2 Minuten begonnen und nie
+    'fertig' wurden (Absturz mitten im Freischalten), werden komplett
+    wiederholt — alle Schritte sind idempotent."""
+    frist = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    n = 0
+    async for v in db.abo_vorgaenge.find({"status": "laeuft", "updated_at": {"$lt": frist}},
+                                         {"_id": 0}).limit(100):
+        try:
+            await _abo_vorgang_ausfuehren(v)
+            n += 1
+        except Exception:
+            log.exception("Abo-Vorgang %s konnte nicht nachgeholt werden", v.get("id"))
+    return n
 
 
 def _gueltig_bis_parsen(wert) -> str:
@@ -1013,29 +1136,35 @@ def _gueltig_bis_parsen(wert) -> str:
 
 @router.patch("/admin/sucher/{sucher_id}/abo-gueltig-bis")
 async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
-                                    admin=Depends(current_admin)):
+                                    admin=Depends(current_super_admin)):
     """NUR das Ablaufdatum eines AKTIVEN Abos aendern (Wunsch 09/2026) —
-    ohne neue Zahlung zu erfassen. Nach dem Datum sperrt die
-    Sucher-Funktion automatisch."""
+    ohne Zahlung. Audit 09/2026: die Zahlungshistorie wird NICHT mehr
+    umgeschrieben; die Aenderung landet als eigener Datensatz in
+    zugangs_aenderungen (alt/neu/Grund/Admin)."""
     gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
     if not gueltig_bis:
         raise HTTPException(400, "gueltig_bis (JJJJ-MM-TT) fehlt")
-    r = await db.subscriptions.update_many(
+    aktiv = await db.subscriptions.find_one(
+        {"subject_user_id": sucher_id, "status": "active"},
+        {"_id": 0, "id": 1, "expires_at": 1, "dealer_id": 1, "plan": 1},
+        sort=[("created_at", -1)])
+    if not aktiv:
+        raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
+    await db.subscriptions.update_many(
         {"subject_user_id": sucher_id, "status": "active"},
         {"$set": {"expires_at": gueltig_bis, "updated_at": now_iso()}})
-    if r.matched_count == 0:
-        raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
-    # Zahlungshistorie: "bezahlt bis" der letzten Zahlung nachziehen,
-    # damit Anzeige und Abo nicht auseinanderlaufen.
-    letzte = await db.manual_payments.find_one(
-        {"subject_user_id": sucher_id}, {"_id": 0, "id": 1},
-        sort=[("created_at", -1)])
-    if letzte:
-        await db.manual_payments.update_one(
-            {"id": letzte["id"]}, {"$set": {"period_until": gueltig_bis}})
+    await db.zugangs_aenderungen.insert_one({
+        "id": str(uuid.uuid4()), "subject_user_id": sucher_id,
+        "dealer_id": aktiv.get("dealer_id"), "abo_id": aktiv.get("id"),
+        "plan": aktiv.get("plan"),
+        "alt": aktiv.get("expires_at"), "neu": gueltig_bis,
+        "grund": str(body.get("grund", ""))[:300],
+        "admin_id": admin["id"], "admin_email": admin.get("email", ""),
+        "created_at": now_iso(),
+    })
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.sucher.abo.gueltig_bis", ref=sucher_id,
-                       meta={"gueltig_bis": gueltig_bis[:10]})
+                       meta={"alt": aktiv.get("expires_at"), "gueltig_bis": gueltig_bis[:10]})
     return {"ok": True, "expires_at": gueltig_bis}
 
 
@@ -1065,10 +1194,15 @@ class AdminSucherIn(BaseModel):
     last_name: str = Field(default="", max_length=80)
     phone: str = Field(default="", max_length=50)
 
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return pruefe_passwort(v)
+
 
 @router.post("/admin/dealers/{dealer_id}/sucher")
 async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
-                              admin=Depends(current_admin)):
+                              admin=Depends(current_super_admin)):
     dealer = await db.dealers.find_one({"id": dealer_id},
                                        {"_id": 0, "id": 1, "company_name": 1})
     if not dealer:
@@ -1113,7 +1247,9 @@ async def admin_list_dealer_sucher(dealer_id: str, _=Depends(current_admin)):
     items.sort(key=lambda x: 0 if x.get("role") == "dealer" else 1)
     out = []
     for s in items:
-        sub = await get_subscription_status(dealer_id, subject_user_id=s["id"])
+        # Chef: zentrale Aufloesung (persoenlich, sonst altes Firmen-Abo)
+        sub = (await subscription_for(s) if s.get("role") == "dealer"
+               else await get_subscription_status(dealer_id, subject_user_id=s["id"]))
         letzte = await db.manual_payments.find_one(
             {"subject_user_id": s["id"]}, {"_id": 0},
             sort=[("created_at", -1)])
@@ -1132,7 +1268,7 @@ class AdminZahlungIn(BaseModel):
 
 
 @router.get("/admin/dealers/{dealer_id}/zahlungen")
-async def admin_list_zahlungen(dealer_id: str, _=Depends(current_admin)):
+async def admin_list_zahlungen(dealer_id: str, _=Depends(current_super_admin)):
     """Zahlungshistorie einer Firma (alle manuell erfassten Zahlungen,
     neueste zuerst) — Grundlage für 'was wurde wann gezahlt'."""
     return await db.manual_payments.find(
@@ -1142,7 +1278,7 @@ async def admin_list_zahlungen(dealer_id: str, _=Depends(current_admin)):
 
 @router.post("/admin/dealers/{dealer_id}/zahlungen")
 async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
-                            admin=Depends(current_admin)):
+                            admin=Depends(current_super_admin)):
     """Zahlung nachtragen/korrigieren, OHNE am Abo etwas zu ändern
     (Freischalten + Verlängern erfasst die Zahlung bereits automatisch)."""
     dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "id": 1})
@@ -1181,7 +1317,7 @@ async def admin_list_buyers(_=Depends(current_admin)):
 
 @router.post("/admin/buyers/{buyer_id}/access")
 async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
-                                 admin=Depends(current_admin)):
+                                 admin=Depends(current_super_admin)):
     """Marktplatz-Zugang eines Zwischenhändlers aktivieren/verlängern
     (plan='monthly') oder mit plan=null sperren."""
     from routes.marketplace import BUYER_ACCESS_DAYS, BUYER_ACCESS_PRICE
@@ -1200,10 +1336,27 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
         return {"ok": True, "active": False}
     if plan != "monthly":
         raise HTTPException(400, "Nur 'monthly' unterstützt")
+    zahlungsart = body.get("zahlungsart", "rechnung_bezahlt")
+    if zahlungsart not in ("rechnung_bezahlt", "kulanz"):
+        raise HTTPException(400, "zahlungsart: rechnung_bezahlt oder kulanz")
+    grund = str(body.get("grund", ""))[:300].strip()
+    if zahlungsart == "kulanz" and not grund:
+        raise HTTPException(400, "Kulanz-Freischaltung braucht eine Begruendung")
     voll = await db.users.find_one({"id": buyer_id}, {"_id": 0, "marketplace_access": 1})
     acc = (voll or {}).get("marketplace_access") or {}
     basis = _restlaufzeit_basis(acc.get("expires_at") if acc.get("active") else None)
     expires_at = (basis + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
+    # Audit 09/2026: manuelle Marktplatz-Freischaltung erzeugt jetzt einen
+    # Zahlungsdatensatz (Zugang und Finanzhistorie laufen nicht auseinander).
+    await db.manual_payments.insert_one({
+        "id": str(uuid.uuid4()), "dealer_id": None, "subject_user_id": buyer_id,
+        "plan": "marktplatz",
+        "amount": 0.0 if zahlungsart == "kulanz" else float(BUYER_ACCESS_PRICE),
+        "currency": "EUR", "paid_at": now_iso()[:10], "period_until": expires_at,
+        "zahlungsart": zahlungsart, "kostenlos": zahlungsart == "kulanz",
+        "grund": grund, "note": str(body.get("notiz", ""))[:500],
+        "quelle": "manuell", "recorded_by": admin.get("email", ""),
+        "created_at": now_iso()})
     await db.users.update_one(
         {"id": buyer_id},
         {"$set": {"marketplace_access": {
@@ -1221,7 +1374,7 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
 
 @router.put("/admin/plan-requests/{req_id}")
 async def admin_close_plan_request(req_id: str, body: dict = Body(default={}),
-                                   _=Depends(current_admin)):
+                                   _=Depends(current_super_admin)):
     r = await db.plan_requests.update_one(
         {"id": req_id},
         {"$set": {"status": body.get("status", "erledigt"),
@@ -1364,8 +1517,10 @@ async def admin_url_stats(_=Depends(current_admin)):
 # ---------- Self-password change ----------
 @router.post("/admin/me/password")
 async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_admin)):
-    if len(body.new_password or "") < 8:
-        raise HTTPException(400, "Neues Passwort muss mind. 8 Zeichen haben")
+    try:
+        pruefe_passwort(body.new_password or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     user = await db.users.find_one({"id": admin["id"]})
     if not user or not await verify_password_async(body.current_password, user["password_hash"]):
         raise HTTPException(401, "Aktuelles Passwort ist nicht korrekt")
@@ -1375,3 +1530,47 @@ async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_a
           "current_session_id": None}},
     )
     return {"ok": True}
+
+
+# ---------- Betrieb: Alarme, Loesch-Warteschlange, Abgleiche ----------
+@router.get("/admin/betrieb")
+async def admin_betrieb(admin=Depends(current_super_admin)):
+    """Sichtbarkeit fuer alles, was frueher still scheiterte (Audit 09/2026):
+    offene Betriebsalarme, nicht loeschbare Dateien, haengende
+    Freischaltungs-Vorgaenge, Zahlungen ohne Zugang, letztes Backup."""
+    from betrieb import offene_alarme
+    try:
+        from backup_service import letztes_backup_info
+        backup = letztes_backup_info()
+    except Exception as exc:                      # pragma: no cover
+        backup = {"hinweis": f"nicht ermittelbar: {exc}"}
+    frist = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    return {
+        "alarme": await offene_alarme(db),
+        "datei_loeschungen_offen": await db.storage_delete_retry.count_documents({}),
+        "datei_loeschungen_aufgegeben": await db.storage_delete_retry.find(
+            {"aufgegeben": True}, {"_id": 0}).limit(50).to_list(50),
+        "abo_vorgaenge_haengend": await db.abo_vorgaenge.count_documents(
+            {"status": "laeuft", "updated_at": {"$lt": frist}}),
+        "zahlungen_ohne_zugang": await db.payment_transactions.count_documents(
+            {"status": {"$in": ["paid", "activating", "activation_failed"]}}),
+        "backup": backup,
+        "wartungsmodus": bool(((await db.system_flags.find_one(
+            {"_id": "wartungsmodus"})) or {}).get("aktiv")),
+    }
+
+
+@router.post("/admin/betrieb/alarme/{alarm_id}/quittieren")
+async def admin_alarm_quittieren(alarm_id: str, admin=Depends(current_super_admin)):
+    from betrieb import quittieren
+    if not await quittieren(db, alarm_id, admin.get("email", admin["id"])):
+        raise HTTPException(404, "Alarm nicht gefunden oder bereits quittiert")
+    return {"ok": True}
+
+
+@router.post("/admin/betrieb/nachholen")
+async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
+    """Reparaturlaeufe sofort anstossen (sonst alle 10 Minuten automatisch)."""
+    from routes.payments import zahlungen_abgleichen
+    return {"abo_vorgaenge": await abo_vorgaenge_nachholen(),
+            "zahlungen": await zahlungen_abgleichen(db)}

@@ -19,11 +19,14 @@ const NAV = [
   { to: "/admin/urls",        label: "URL-Statistik", icon: Activity },
   { to: "/admin/audit",       label: "Audit-Log",     icon: ScrollText },
   { to: "/admin/errors",      label: "Fehler",        icon: AlertTriangle },
-  { to: "/admin/freischaltungen", label: "Freischaltungen", icon: KeyRound },
+  // Audit 09/2026: Betreiber-Funktionen (Freischalten, Zahlungen, Firmen
+  // anlegen/sperren) sind Super-Admin-exklusiv — Backend erzwingt das.
+  { to: "/admin/freischaltungen", superOnly: true, label: "Freischaltungen", icon: KeyRound },
   { to: "/admin/fahrer",      label: "Fahrer",        icon: Truck },
   // Nur der Super-Admin sieht die anonymen Auto-Daten (Backend blockt
   // normale Admins zusätzlich mit 403).
   { to: "/admin/auto-daten",  label: "Auto-Daten",    icon: Car, superOnly: true },
+  { to: "/admin/betrieb",     label: "Betrieb",       icon: Activity, superOnly: true },
   { to: "/admin/settings",    label: "Einstellungen", icon: Settings },
 ];
 

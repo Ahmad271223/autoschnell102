@@ -23,6 +23,7 @@ from deps import current_user, db, log_activity, now_iso
 from rate_limiter import client_ip, register_limiter, login_limiter
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
+from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 
 router = APIRouter()
 
@@ -163,7 +164,7 @@ def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
     if mode in ("einkauf", "beide"):
         urls += photos.get("einkauf_urls", [])
     if mode in ("neu", "beide"):
-        urls += [f"/api/files/{k}" for k in photos.get("uploaded_keys", [])]
+        urls += [signierte_datei_url(k) for k in photos.get("uploaded_keys", [])]
     return {
         "id": l["id"], "dealer_id": l["dealer_id"],
         "title": l.get("title"), "description": l.get("description"),
@@ -177,7 +178,7 @@ def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
         "photos": urls[:40],
         # Vom Haendler nachtraeglich hochgeladene Bilder (z.B. Schaeden) —
         # beim Kaeufer als 'Weitere Bilder vom Haendler' zum genauen Hinschauen.
-        "dealer_photos": [f"/api/files/{k}"
+        "dealer_photos": [signierte_datei_url(k)
                           for k in photos.get("uploaded_keys", [])][:40],
         "price": _price_for(l, is_member=is_member, is_trade=is_trade),
         "price_level": ("netzwerk" if is_member and (l.get("prices") or {}).get("network")
@@ -352,6 +353,12 @@ class BuyerRegisterIn(BaseModel):
     password: str = Field(min_length=8, max_length=200)
     phone: str = Field(default="", max_length=50)
     invite_token: Optional[str] = Field(default=None, max_length=100)
+    # B2B-Bestaetigung (AGB §1): Pflicht-Checkbox "Ich handle als Unternehmer
+    # ... und akzeptiere AGB + Datenschutz". Pflichtfeld; False -> 400.
+    gewerblich_bestaetigt: bool
+    # USt-IdNr. oder Handelsregister-Nr. — freiwillige Angabe, wird nur
+    # gespeichert (keine Online-Pruefung).
+    ust_id: str = Field(default="", max_length=40)
 
     @field_validator("password")
     @classmethod
@@ -361,6 +368,8 @@ class BuyerRegisterIn(BaseModel):
 
 @router.post("/buyer/register")
 async def buyer_register(body: BuyerRegisterIn, request: Request):
+    if not body.gewerblich_bestaetigt:
+        raise HTTPException(400, "Bitte bestätige, dass du als Unternehmer handelst")
     ip = client_ip(request)
     if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
@@ -378,6 +387,8 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
         "company_name": body.company_name,
         "contact_name": body.contact_name,
         "phone": body.phone,
+        "ust_id": body.ust_id.strip(),
+        "gewerblich_bestaetigt_am": now_iso(),
         "current_session_id": sid,
         "created_at": now_iso(),
     })

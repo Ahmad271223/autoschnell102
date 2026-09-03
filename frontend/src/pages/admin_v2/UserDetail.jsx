@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft, FileText, Crown, Mail, Building2, Calendar, Download, Eye,
   UserPlus, X, Euro, Ban, Trash2, Check,
@@ -13,6 +14,8 @@ import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum }
 const fmtTag = (iso) => (iso ? String(iso).slice(0, 10).split("-").reverse().join(".") : "—");
 
 export default function AdminUserDetail() {
+  const { user: ich } = useAuth();
+  const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
   const { id } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -36,7 +39,8 @@ export default function AdminUserDetail() {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [id]);
 
   const dealerId = data?.user?.role === "dealer" ? data.user.dealer_id : null;
 
@@ -93,13 +97,14 @@ export default function AdminUserDetail() {
     finally { freigeben(); }
   };
   const revokeAbo = async (s) => {
-    if (!window.confirm(`Abo von ${s.email} aufheben?`)) return;
+    if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${s.email} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
     if (!sperren(s.id)) return;
     try { await api.post(`/admin/sucher/${s.id}/abo`, { plan: null }); toast.success("Abo aufgehoben"); loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
   const toggleSucherActive = async (s) => {
+    if (s.active && !window.confirm(`Konto ${s.email} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
     try {
       await api.post(`/admin/users/${s.id}/active`, { active: !s.active });
       toast.success(s.active ? "Sucher gesperrt" : "Sucher entsperrt");
@@ -200,7 +205,7 @@ export default function AdminUserDetail() {
                 <span className="text-[15px] font-semibold text-white">Chef & Sucher — Freischaltung</span>
                 <Badge>{fmtNum((sucher || []).length)}</Badge>
               </div>
-              <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher">
+              <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher" disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin"}>
                 <UserPlus size={14} /> Sucher anlegen
               </Button>
             </div>
@@ -236,14 +241,14 @@ export default function AdminUserDetail() {
                           ) : (
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <Badge tone="red">Sucher-Funktion: nein</Badge>
-                              <Button size="sm" onClick={() => grantAbo(s, "monthly")} disabled={busy === s.id}
+                              <Button size="sm" onClick={() => grantAbo(s, "monthly")} disabled={busy === s.id || !superAdmin}
                                       data-testid={`abo-monat-${s.id}`}
-                                      title="Freischalten — erfasst 150 € Zahlung; ohne Datum 30 Tage gültig">
+                                      title="Freischalten — erfasst 150 € Zahlung (Rechnung bezahlt); ohne Datum 30 Tage gültig">
                                 <Check size={13} /> 150 €/M
                               </Button>
-                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")} disabled={busy === s.id}
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")} disabled={busy === s.id || !superAdmin}
                                       data-testid={`abo-jahr-${s.id}`}
-                                      title="Freischalten — erfasst 1.500 € Zahlung; ohne Datum 365 Tage gültig">
+                                      title="Freischalten — erfasst 1.500 € Zahlung (Rechnung bezahlt); ohne Datum 365 Tage gültig">
                                 1.500 €/J
                               </Button>
                             </div>
@@ -261,7 +266,7 @@ export default function AdminUserDetail() {
                                    style={{ background: "#18181b", color: "#fff",
                                             border: "1px solid rgba(255,255,255,0.12)", colorScheme: "dark" }} />
                             {s.subscription?.active && (
-                              <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)} disabled={busy === s.id}
+                              <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)} disabled={busy === s.id || !superAdmin}
                                       data-testid={`gueltig-bis-speichern-${s.id}`}
                                       title="Ablaufdatum speichern — danach automatisch gesperrt">
                                 Speichern
@@ -281,16 +286,16 @@ export default function AdminUserDetail() {
                         </td>
                         <td className="px-4 py-2.5 text-right whitespace-nowrap">
                           {s.subscription?.active && (
-                            <Button size="sm" variant="ghost" onClick={() => revokeAbo(s)} disabled={busy === s.id} title="Abo aufheben">
+                            <Button size="sm" variant="ghost" onClick={() => revokeAbo(s)} disabled={busy === s.id || !superAdmin} title="Nur Suche & Vergleich sperren (Konto bleibt aktiv)">
                               Abo aufheben
                             </Button>
                           )}
                           {!s.ist_chef && (
                             <>
-                              <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} title={s.active ? "Sperren" : "Entsperren"}>
-                                <Ban size={13} /> {s.active ? "Sperren" : "Entsperren"}
+                              <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} disabled={!superAdmin} title={s.active ? "Konto komplett sperren (Anmeldung unmoeglich)" : "Konto entsperren"}>
+                                <Ban size={13} /> {s.active ? "Konto sperren" : "Entsperren"}
                               </Button>
-                              <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} title="Löschen">
+                              <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} disabled={!superAdmin} title="Löschen">
                                 <Trash2 size={13} />
                               </Button>
                             </>
@@ -311,7 +316,7 @@ export default function AdminUserDetail() {
                 <Euro size={15} className="text-zinc-500" />
                 <span className="text-[15px] font-semibold text-white">Zahlungen</span>
               </div>
-              <Button size="sm" variant="outline" onClick={addZahlung}>Nachtragen</Button>
+              <Button size="sm" variant="outline" onClick={addZahlung} disabled={!superAdmin}>Nachtragen</Button>
             </div>
             {!zahlungen?.length ? (
               <EmptyState title="Noch keine Zahlungen" hint="Beim Freischalten eines Abos wird die Zahlung automatisch erfasst." />

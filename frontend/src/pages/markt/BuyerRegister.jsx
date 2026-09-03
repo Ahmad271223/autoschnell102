@@ -22,7 +22,11 @@ export default function BuyerRegister() {
   }, [ready, buyer, invite, nav]);
   const [f, setF] = useState({
     company_name: "", contact_name: "", email: "", password: "", phone: "",
+    ust_id: "",
   });
+  // Pflicht-Bestaetigung: Unternehmer (B2B) + AGB/Datenschutz akzeptiert
+  // (AGB §1, Pruefbericht 09/2026). Das Backend lehnt false mit 400 ab.
+  const [gewerblich, setGewerblich] = useState(false);
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
 
@@ -32,9 +36,15 @@ export default function BuyerRegister() {
       toast.error("Bitte Firma, Name, E-Mail und Passwort (min. 8 Zeichen) angeben");
       return;
     }
+    if (!gewerblich) {
+      toast.error("Bitte bestätige, dass du als Unternehmer handelst und AGB sowie Datenschutzerklärung akzeptierst");
+      return;
+    }
     setBusy(true);
     try {
-      const res = await register({ ...f, invite_token: invite || undefined });
+      const res = await register({ ...f, ust_id: f.ust_id.trim(),
+                                   gewerblich_bestaetigt: gewerblich,
+                                   invite_token: invite || undefined });
       if (invite && !res?.network_joined) {
         toast.warning("Registriert — aber die Einladung ist ungültig, abgelaufen oder "
           + "bereits aufgebraucht. Bitte den Händler um einen neuen Link.", { duration: 8000 });
@@ -68,7 +78,7 @@ export default function BuyerRegister() {
         <p className="text-sm text-zinc-500 mt-1 mb-6">
           {invite
             ? "Du wurdest in ein Händler-Netzwerk eingeladen."
-            : "Zugang zu angebotenen Fahrzeugen erfordert ein Marktplatz-Abo (20 € / Monat)."}
+            : "Zugang zu angebotenen Fahrzeugen erfordert ein Marktplatz-Abo (20 € je 30 Tage, inkl. USt)."}
         </p>
         <form onSubmit={submit} className="grid grid-cols-2 gap-3">
           <div className="col-span-2">
@@ -82,6 +92,27 @@ export default function BuyerRegister() {
           <div className="col-span-2">
             <input value={f.password} onChange={set("password")} type="password" placeholder="Passwort (min. 8 Zeichen) *" className={inputCls} style={st} />
           </div>
+          <div className="col-span-2">
+            <input value={f.ust_id} onChange={set("ust_id")} maxLength={40}
+                   placeholder="USt-IdNr. oder Handelsregister-Nr. (optional)"
+                   data-testid="buyer-ust-id" className={inputCls} style={st} />
+          </div>
+          <label className="col-span-2 flex items-start gap-3 text-sm text-zinc-300 cursor-pointer select-none">
+            <input type="checkbox" checked={gewerblich}
+                   onChange={(e) => setGewerblich(e.target.checked)}
+                   data-testid="buyer-b2b-consent"
+                   className="mt-0.5 h-4 w-4 shrink-0"
+                   style={{ accentColor: "var(--accent-red)" }} />
+            <span>
+              Ich handle als Unternehmer/gewerblicher Kfz-Händler (B2B) und
+              akzeptiere die{" "}
+              <Link to="/agb" target="_blank" rel="noopener noreferrer"
+                    className="text-white font-semibold underline">AGB</Link>{" "}
+              und die{" "}
+              <Link to="/datenschutz" target="_blank" rel="noopener noreferrer"
+                    className="text-white font-semibold underline">Datenschutzerklärung</Link>. *
+            </span>
+          </label>
           <button type="submit" disabled={busy}
                   className="col-span-2 inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold text-white disabled:opacity-50"
                   style={{ background: "var(--accent-red)" }}>

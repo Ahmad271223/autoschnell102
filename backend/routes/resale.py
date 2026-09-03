@@ -12,6 +12,7 @@ import uuid
 from typing import Any, Dict, List, Literal, Optional
 
 from pymongo import ReturnDocument
+from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -219,7 +220,7 @@ async def list_listings(user=Depends(current_haendler), status: Optional[str] = 
         query["status"] = status
     items = await db.resale_listings.find(query, {"_id": 0}) \
         .sort("updated_at", -1).to_list(300)
-    return [_with_margin(i) for i in items]
+    return [_mit_foto_urls(_with_margin(i)) for i in items]
 
 
 @router.get("/resale/{listing_id}")
@@ -228,7 +229,15 @@ async def get_listing(listing_id: str, user=Depends(current_haendler)):
         {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
-    return _with_margin(l)
+    return _mit_foto_urls(_with_margin(l))
+
+
+def _mit_foto_urls(doc: dict) -> dict:
+    """Signierte, kurzlebige Links zu den hochgeladenen Fotos (Audit 09/2026,
+    Punkt 45) — die Oberflaeche baut keine /api/files-Pfade mehr selbst."""
+    keys = ((doc.get("photos") or {}).get("uploaded_keys") or [])
+    doc["photo_urls"] = [{"key": k, "url": signierte_datei_url(k)} for k in keys]
+    return doc
 
 
 @router.put("/resale/{listing_id}")
@@ -316,13 +325,15 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
     from storage_service import (make_key, storage, StorageError,
-                                 validate_image_bytes)
+                                 validate_image_bytes, loeschen_oder_vormerken)
     keys = list((l.get("photos") or {}).get("uploaded_keys", []))
     if len(keys) + len(body.photos_b64) > 40:
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
-    def _alle_speichern() -> list:
+    def _alle_speichern() -> tuple:
         """Decode+Validierung+Save fuer bis zu 40 Fotos — als EIN Thread-Hop,
-        damit der Event-Loop nicht sekundenlang steht (Review 09/2026)."""
+        damit der Event-Loop nicht sekundenlang steht (Review 09/2026).
+        Liefert (gespeicherte Keys, Fehler|None); bei Fehler raeumt der
+        Aufrufer die halb gespeicherten Dateien weg."""
         neu = []
         try:
             for b64 in body.photos_b64:
@@ -333,20 +344,21 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
                 key = make_key("resale", user["dealer_id"], "foto.jpg")
                 storage.save(key, raw)
                 neu.append(key)
-        except (StorageError, ValueError):
-            for k in neu:              # halb gespeicherte wieder wegraeumen
-                try:
-                    storage.delete(k)
-                except Exception:  # noqa: BLE001
-                    pass
-            raise
-        return neu
+        except (StorageError, ValueError) as exc:
+            return neu, exc
+        return neu, None
 
     import asyncio as _asyncio
-    try:
-        added = await _asyncio.to_thread(_alle_speichern)
-    except (StorageError, ValueError) as exc:
-        raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
+    added, fehler = await _asyncio.to_thread(_alle_speichern)
+    if fehler is not None:
+        # Halb gespeicherte wieder wegraeumen. Fehlschlaege werden NICHT
+        # mehr verschluckt, sondern vorgemerkt (storage_delete_retry) und
+        # vom Aufraeumjob nachgeholt (Go-Live-Audit 09/2026).
+        for k in added:
+            await loeschen_oder_vormerken(
+                db, key=k, grund="inserat_upload_abbruch",
+                dealer_id=user["dealer_id"])
+        raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {fehler}")
     # ATOMAR anhaengen ($push $each) statt die ganze Liste zu ueberschreiben:
     # das alte Lesen-Aendern-Schreiben verlor bei PARALLELEN Uploads aufs
     # selbe Inserat Referenzen (im Lasttest: hunderte Dateien ohne
@@ -358,19 +370,15 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         {"$push": {"photos.uploaded_keys": {"$each": added}},
          "$set": {"updated_at": now_iso()}})
     if res.modified_count == 0:
-        def _wegraeumen():
-            for k in added:
-                try:
-                    storage.delete(k)
-                except Exception:  # noqa: BLE001
-                    pass
-        await _asyncio.to_thread(_wegraeumen)
+        for k in added:
+            await loeschen_oder_vormerken(
+                db, key=k, grund="inserat_foto_limit", dealer_id=user["dealer_id"])
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
     doc = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "photos.uploaded_keys": 1})
     total = len((doc.get("photos") or {}).get("uploaded_keys") or [])
-    return {"ok": True, "uploaded": [f"/api/files/{k}" for k in added],
+    return {"ok": True, "uploaded": [signierte_datei_url(k) for k in added],
             "total": total}
 
 
@@ -405,17 +413,23 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         if body.key not in keys:
             raise HTTPException(404, "Foto nicht gefunden")
         keys.remove(body.key)
-        from storage_service import delete_async, StorageError
-        try:
-            await delete_async(body.key)
-        except StorageError:
-            pass
+        from storage_service import loeschen_oder_vormerken
+        # Laesst sich die Datei nicht loeschen, wird sie vorgemerkt; der Key
+        # bleibt im Inserat unter photos.loeschung_offen_keys erhalten (nicht
+        # mehr sichtbar, aber nicht verloren) — die Nachholung entfernt ihn.
+        ok = await loeschen_oder_vormerken(
+            db, key=body.key, grund="inserat_foto_entfernt",
+            dealer_id=user["dealer_id"],
+            ref={"collection": "resale_listings", "id": listing_id,
+                 "pull_key_from": "photos.loeschung_offen_keys"})
         # ATOMAR entfernen ($pull) — gleiche Lost-Update-Gefahr wie beim
         # Upload (parallele Loeschungen verdraengten sich gegenseitig).
+        update = {"$pull": {"photos.uploaded_keys": body.key},
+                  "$set": {"updated_at": now_iso()}}
+        if not ok:
+            update["$addToSet"] = {"photos.loeschung_offen_keys": body.key}
         await db.resale_listings.update_one(
-            {"id": listing_id, "dealer_id": user["dealer_id"]},
-            {"$pull": {"photos.uploaded_keys": body.key},
-             "$set": {"updated_at": now_iso()}})
+            {"id": listing_id, "dealer_id": user["dealer_id"]}, update)
         doc = await db.resale_listings.find_one(
             {"id": listing_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "photos.uploaded_keys": 1})

@@ -14,7 +14,9 @@ from typing import Any, Dict, Optional
 # Einmal verglichen = dauerhaft gespeichert (Wunsch 08/2026): dieselbe URL
 # wird NICHT erneut von Kleinanzeigen/mobile geladen, sondern aus unserem
 # Speicher bedient. Default 1 Jahr; per ENV anpassbar.
-LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "8760"))
+# Audit 09/2026 (Punkt 39): Inserats-Cache (kann Verkaeuferangaben enthalten)
+# hoechstens 90 Tage statt ein Jahr.
+LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
 # Client-Einreichungen (Browser-HTML) sind nur Momentaufnahmen: kurze TTL in
 # der Quarantaene, und auch nach unabhaengiger Bestaetigung deutlich kuerzer
 # als Server-Abrufe.
@@ -36,6 +38,7 @@ from kleinanzeigen_service import (
     parse_kleinanzeigen_html, looks_like_kleinanzeigen_listing,
 )
 from provider_fetch import fetch_listing
+from rate_limiter import SlidingWindowRateLimiter
 from listing_identity import (
     ListingBusy, ListingIdentityError, get_listing_identity,
     get_or_fetch_listing, peek_cached_listing, set_cache_snapshot,
@@ -465,12 +468,14 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
     from link_jobs import enqueue_job, process_one_now
     job = await enqueue_job(db, raw_url, dealer_id=user.get("dealer_id") or "")
     if job.get("status") == "queued":
-        # Sofort-Anstoss (parallel zur Antwort): der Abruf startet ohne
-        # die bis zu 0,3 s Wartezeit auf den Takt des Dauer-Workers.
-        import asyncio as _aio
-        _aio.get_running_loop().create_task(process_one_now(db))
+        # Sofort-Anstoss (begrenzt/dedupliziert, Audit 09/2026 Punkt 17)
+        from link_jobs import anstossen
+        anstossen(db)
     return {"status": job["status"], "job_id": job["id"],
             "source": source, "item_id": identity["item_id"]}
+
+
+_status_limiter = SlidingWindowRateLimiter(max_attempts=40, window_seconds=10)
 
 
 @router.get("/listings/check/{job_id}")
@@ -479,20 +484,28 @@ async def listings_check_status(job_id: str, user=Depends(current_firma)):
     failed. Bei completed liegt das Inserat im Cache — /mobile/compare
     liefert dann sofort.
 
-    Long-Poll: die Antwort kommt, SOBALD der Job fertig ist (bis ~2,4 s
-    gehalten) — das Frontend braucht keine blinden Wartepausen mehr und
-    zeigt das Ergebnis im Moment des Abschlusses."""
+    Long-Poll mit Backoff (Audit 09/2026, Punkt 16): statt ~20 DB-Lesungen
+    in 2,4 s jetzt hoechstens 6 (0,15 / 0,3 / 0,5 / 0,7 / 0,75 s), dazu ein
+    Limit je Konto. Mandantenbindung (Punkt 33): nur Firmen, die diesen
+    Link eingereicht haben, sehen den Status; sonst 404."""
     import asyncio as _aio
     from link_jobs import get_job
-    frist = datetime.now(timezone.utc) + timedelta(milliseconds=2400)
+    if not await _status_limiter.check(f"status:{user.get('id')}"):
+        raise HTTPException(429, "Zu viele Statusabfragen — bitte kurz warten")
+    pausen = (0.15, 0.3, 0.5, 0.7, 0.75)
+    schritt = 0
     while True:
         job = await get_job(db, job_id)
         if not job:
             raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
-        if job["status"] in ("completed", "failed") \
-                or datetime.now(timezone.utc) >= frist:
+        eigene = user.get("dealer_id")
+        if eigene not in (job.get("dealer_ids") or []) \
+                and job.get("requested_by_dealer") != eigene:
+            raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+        if job["status"] in ("completed", "failed") or schritt >= len(pausen):
             break
-        await _aio.sleep(0.12)
+        await _aio.sleep(pausen[schritt])
+        schritt += 1
     out = {"status": job["status"], "job_id": job["id"],
            "source": job.get("source"), "item_id": job.get("item_id"),
            "error": job.get("error")}

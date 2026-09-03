@@ -786,6 +786,13 @@ function SubscriptionPanel() {
   };
 
   useEffect(() => { load(); }, []);
+  // Audit 09/2026: nach Freischaltung durch den Betreiber aktualisiert sich
+  // die Seite selbst (alle 30 s, solange kein aktives Abo) — plus Button.
+  useEffect(() => {
+    if (!data || data.active) return undefined;
+    const t = setInterval(() => { api.get("/dealer/subscription").then((r) => setData(r.data)).catch(() => {}); }, 30000);
+    return () => clearInterval(t);
+  }, [data]);
 
   const cancel = async () => {
     setBusy("cancel");
@@ -834,7 +841,13 @@ function SubscriptionPanel() {
 
   return (
     <Section title="Abo & Zahlung"
-             subtitle="Übersicht zum aktuellen Abo, Verlängerung und Kündigung.">
+             subtitle="Das Sucher-Abo schaltet Suche & Vergleich frei. Bestand, Inserate, Verträge, Versand und Termine bleiben für die Firma kostenlos.">
+      <div className="flex justify-end -mt-2 mb-2">
+        <button onClick={load} data-testid="abo-status-aktualisieren"
+                className="text-xs text-zinc-400 hover:text-white underline underline-offset-2">
+          Status aktualisieren
+        </button>
+      </div>
       {/* Aktueller Status */}
       <div className="apple-card p-5 mb-4" data-testid="abo-status-card"
            style={{ background: "var(--hover-bg)", border: "1px solid var(--divider)" }}>
@@ -907,8 +920,8 @@ function SubscriptionPanel() {
             <PlanCard
               title="Monatsabo"
               price="150 €"
-              suffix="/ Monat"
-              tagline="Abrechnung per Rechnung — Freischaltung durch den Betreiber."
+              suffix="/ 30 Tage"
+              tagline="Netto zzgl. USt, Abrechnung per Rechnung — Freischaltung durch den Betreiber."
               testid="abo-renew-monthly"
               busy={busy === "monthly"}
               disabled={data.anfrage_offen}
@@ -918,8 +931,8 @@ function SubscriptionPanel() {
             <PlanCard
               title="Jahresabo"
               price="1.500 €"
-              suffix="/ Jahr"
-              tagline="Spart 300 € gegenüber monatlich (1.800 €)."
+              suffix="/ 365 Tage"
+              tagline="Spart 300 € gegenüber 12 Monatsabos (1.800 €), netto zzgl. USt."
               highlight
               testid="abo-renew-yearly"
               busy={busy === "yearly"}
@@ -1012,7 +1025,7 @@ function PlanCard({ title, price, suffix, tagline, highlight, busy, disabled, on
           className="absolute -top-2.5 left-4 px-2 py-0.5 text-[9px] uppercase tracking-[0.2em] font-bold rounded-sm"
           style={{ background: "var(--accent-red)", color: "white" }}
         >
-          2 Monate gratis
+          Spart 300 €
         </div>
       )}
       <div className="overline">{title}</div>

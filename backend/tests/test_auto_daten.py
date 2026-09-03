@@ -303,7 +303,7 @@ def test_08_vertrag_nach_90_tagen_vollstaendig_geloescht(welt):
     dbx.generated_pdfs.update_one({"id": cid}, {"$set": {"created_at": alt}})
     assert dbx.generated_pdf_versions.count_documents({"contract_id": cid}) >= 1
     now = datetime.now(timezone.utc)
-    n = _run(lambda mdb: vertraege_nach_frist_loeschen(mdb, now))
+    n = _run(lambda mdb: vertraege_nach_frist_loeschen(mdb, now, aktiv=True))
     assert n >= 1
     assert dbx.generated_pdfs.find_one({"id": cid}) is None
     assert dbx.generated_pdf_versions.count_documents({"contract_id": cid}) == 0

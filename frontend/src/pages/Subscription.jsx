@@ -6,8 +6,10 @@ import { Check, Bolt, ShieldCheck, Mail, Clock } from "lucide-react";
 /**
  * /abo — seit 09/2026 KEIN Stripe-Checkout mehr für Firmen/Sucher:
  * Der Betreiber schaltet Sucher-Zugänge nach Rechnungsstellung manuell
- * frei (150 €/Monat oder 1.500 €/Jahr je Nutzer). Diese Seite erklärt
- * das und zeigt den eigenen Abo-Stand.
+ * frei (150 € / 30 Tage oder 1.500 € / 365 Tage je Nutzer, zzgl. USt).
+ * Das Abo schaltet NUR Suche & Vergleich frei — Kaufverträge, Versand,
+ * Terminplaner, Bestand und Inserate bleiben für die Firma kostenlos.
+ * Diese Seite erklärt das und zeigt den eigenen Abo-Stand.
  */
 export default function Subscription() {
   const nav = useNavigate();
@@ -48,28 +50,32 @@ export default function Subscription() {
             Freischaltung läuft über uns.
           </h1>
           <p className="text-zinc-400 mt-3 max-w-xl mx-auto">
-            Vergleich, Suche, Kaufverträge, Versand &amp; Terminplaner brauchen
-            einen freigeschalteten Sucher-Zugang. Die Abrechnung läuft per
-            Rechnung — es gibt hier nichts online zu bezahlen.
+            Suche &amp; Vergleich brauchen einen freigeschalteten
+            Sucher-Zugang. Kaufverträge, Versand, Terminplaner, Bestand und
+            Inserate bleiben für die Firma kostenlos. Die Abrechnung läuft
+            per Rechnung — es gibt hier nichts online zu bezahlen.
           </p>
         </div>
 
         <div className="tactical-card p-8" data-testid="abo-info">
           <div className="grid sm:grid-cols-2 gap-6">
             <div>
-              <div className="overline">Monatlich</div>
+              <div className="overline">30 Tage</div>
               <div className="mt-2 flex items-baseline gap-2">
                 <span className="font-display font-black text-4xl">150 €</span>
-                <span className="text-zinc-400 text-sm">/ Monat je Sucher</span>
+                <span className="text-zinc-400 text-sm">/ 30 Tage je Sucher</span>
               </div>
             </div>
             <div>
-              <div className="overline">Jährlich</div>
+              <div className="overline">365 Tage</div>
               <div className="mt-2 flex items-baseline gap-2">
                 <span className="font-display font-black text-4xl">1.500 €</span>
-                <span className="text-zinc-400 text-sm">/ Jahr je Sucher</span>
+                <span className="text-zinc-400 text-sm">/ 365 Tage je Sucher</span>
               </div>
             </div>
+          </div>
+          <div className="mt-3 text-xs text-zinc-500" data-testid="abo-ust-hinweis">
+            Preise zzgl. gesetzlicher Umsatzsteuer · Abrechnung per Rechnung.
           </div>
 
           <div className="mt-8 space-y-3 text-sm text-zinc-300">
@@ -92,14 +98,15 @@ export default function Subscription() {
             <div className="flex items-start gap-3">
               <Check size={16} className="mt-0.5 shrink-0" style={{ color: "var(--accent-green)" }} />
               <div>
-                Verkaufen &amp; Verwalten (Bestand, Inserate, Termine, Verträge
-                ansehen) bleiben für den Firmen-Hauptaccount kostenlos —
-                dafür ist keine Freischaltung nötig.
+                Das Sucher-Abo schaltet ausschließlich Suche &amp; Vergleich
+                frei. Kaufverträge, Versand, Terminplaner, Bestand und
+                Inserate bleiben für die Firma kostenlos — dafür ist keine
+                Freischaltung nötig.
               </div>
             </div>
           </div>
 
-          <a href="mailto:support@autohandel.app?subject=Sucher-Zugang%20freischalten"
+          <a href="mailto:info@autoschnell.de?subject=Sucher-Zugang%20freischalten"
              data-testid="abo-kontakt"
              className="kinetic-button w-full mt-8 py-3 rounded-sm flex items-center justify-center gap-2">
             Betreiber kontaktieren

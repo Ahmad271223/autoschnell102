@@ -340,7 +340,7 @@ def test_09_netzwerk_mitglieder_und_widerruf(welt):
                       json={"validity_hours": 24, "max_uses": 1}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     token = r.json()["token"]
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
         "company_name": "RT Kaeufer", "contact_name": "K R",
         "email": f"rt_kaeufer_{SUF}@e2etest-mail.de", "password": PW,
         "invite_token": token}, timeout=30)
@@ -365,7 +365,7 @@ def test_09_netzwerk_mitglieder_und_widerruf(welt):
     r = requests.post(f"{API}/invites/{token}/redeem", headers=welt["K"], timeout=30)
     assert r.status_code == 400
     # Ungueltige Einladung -> ehrlich network_joined false
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
         "company_name": "RT Kaeufer 2", "contact_name": "K Z",
         "email": f"rt_kaeufer2_{SUF}@e2etest-mail.de", "password": PW,
         "invite_token": "gibt-es-nicht"}, timeout=30)
@@ -389,10 +389,10 @@ def test_11_abo_restlaufzeit_und_antrag_geschlossen(welt):
         "subject_user_id": welt["sucher_id"], "status": "offen",
         "created_at": datetime.now(timezone.utc).isoformat()})
     r1 = requests.post(f"{API}/admin/sucher/{welt['sucher_id']}/abo",
-                       headers=welt["A"], json={"plan": "monthly"}, timeout=30)
+                       headers=welt["SA"], json={"plan": "monthly"}, timeout=30)
     assert r1.status_code == 200, r1.text[:200]
     r2 = requests.post(f"{API}/admin/sucher/{welt['sucher_id']}/abo",
-                       headers=welt["A"], json={"plan": "monthly"}, timeout=30)
+                       headers=welt["SA"], json={"plan": "monthly"}, timeout=30)
     assert r2.status_code == 200
     e1 = datetime.fromisoformat(r1.json()["expires_at"])
     e2 = datetime.fromisoformat(r2.json()["expires_at"])

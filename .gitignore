@@ -108,3 +108,7 @@ matrix-fehler.log
 stoss-lauf.log
 stoss-fehler.log
 AutoSchnell-Abruf-Helfer.zip
+
+# Playwright (E2E)
+frontend/playwright-report/
+frontend/test-results/

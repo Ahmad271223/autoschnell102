@@ -85,12 +85,12 @@ def dealer_a():
     """Independent dealer account A."""
     email = f"{_unique('dealerA')}@example.com"
     r = requests.post(f"{API}/auth/register", json={
-        "email": email, "password": "Test1234!", "company_name": "Autohaus A",
+        "email": email, "password": "Test12345!x", "company_name": "Autohaus A",
         "contact_person": "Anna A", "phone": "+491110000",
     }, timeout=30)
     assert r.status_code == 200, r.text
     data = r.json()
-    return {"email": email, "password": "Test1234!", "token": data["token"],
+    return {"email": email, "password": "Test12345!x", "token": data["token"],
             "user": data["user"]}
 
 
@@ -108,13 +108,13 @@ def dealer_a_token(dealer_a):
 def dealer_b():
     email = f"{_unique('dealerB')}@example.com"
     r = requests.post(f"{API}/auth/register", json={
-        "email": email, "password": "Test1234!", "company_name": "Autohaus B",
+        "email": email, "password": "Test12345!x", "company_name": "Autohaus B",
         "phone": "+492220000",
     }, timeout=30)
     assert r.status_code == 200
     data = r.json()
     # Activate lifetime so dealer can hit protected endpoints if needed
-    return {"email": email, "password": "Test1234!", "token": data["token"],
+    return {"email": email, "password": "Test12345!x", "token": data["token"],
             "user": data["user"]}
 
 
@@ -132,7 +132,7 @@ class TestDriverRegisterLogin:
     def test_register_creates_account_and_token(self):
         email = f"{_unique('drv')}@example.com"
         r = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!",
+            "email": email, "password": "Drv12345!x",
             "display_name": "Max Mustermann",
         }, timeout=30)
         assert r.status_code == 200, r.text
@@ -146,7 +146,7 @@ class TestDriverRegisterLogin:
 
     def test_duplicate_email_returns_409(self):
         email = f"{_unique('dup')}@example.com"
-        payload = {"email": email, "password": "Drv1234!", "display_name": "Dup"}
+        payload = {"email": email, "password": "Drv12345!x", "display_name": "Dup"}
         r1 = requests.post(f"{API}/driver/register", json=payload, timeout=30)
         assert r1.status_code == 200
         r2 = requests.post(f"{API}/driver/register", json=payload, timeout=30)
@@ -155,10 +155,10 @@ class TestDriverRegisterLogin:
     def test_login_success(self):
         email = f"{_unique('lg')}@example.com"
         requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "L G",
+            "email": email, "password": "Drv12345!x", "display_name": "L G",
         }, timeout=30)
         r = requests.post(f"{API}/driver/login",
-                          json={"email": email, "password": "Drv1234!"},
+                          json={"email": email, "password": "Drv12345!x"},
                           timeout=30)
         assert r.status_code == 200
         assert r.json()["driver"]["email"] == email
@@ -166,7 +166,7 @@ class TestDriverRegisterLogin:
     def test_login_wrong_password(self):
         email = f"{_unique('wp')}@example.com"
         requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "W P",
+            "email": email, "password": "Drv12345!x", "display_name": "W P",
         }, timeout=30)
         r = requests.post(f"{API}/driver/login",
                           json={"email": email, "password": "wrong!!"},
@@ -179,11 +179,11 @@ class TestDriverRegisterLogin:
 def fresh_driver():
     email = f"{_unique('me')}@example.com"
     r = requests.post(f"{API}/driver/register", json={
-        "email": email, "password": "Drv1234!", "display_name": "Me Tester",
+        "email": email, "password": "Drv12345!x", "display_name": "Me Tester",
     }, timeout=30)
     assert r.status_code == 200
     data = r.json()
-    return {"email": email, "password": "Drv1234!",
+    return {"email": email, "password": "Drv12345!x",
             "token": data["token"], "driver": data["driver"]}
 
 
@@ -233,7 +233,7 @@ class TestDealerDrivers:
         # Create driver
         email = f"{_unique('linkdrv')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Link Drv",
+            "email": email, "password": "Drv12345!x", "display_name": "Link Drv",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
 
@@ -255,7 +255,7 @@ class TestDealerDrivers:
     def test_add_duplicate_409(self, dealer_a_token):
         email = f"{_unique('dupl')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Dupl",
+            "email": email, "password": "Drv12345!x", "display_name": "Dupl",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
         r1 = requests.post(f"{API}/drivers/add",
@@ -281,7 +281,7 @@ class TestDealerDrivers:
         # create + link
         email = f"{_unique('del')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Del",
+            "email": email, "password": "Drv12345!x", "display_name": "Del",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
         driver_id = rr["driver"]["id"]
@@ -307,7 +307,7 @@ class TestConflicts:
         # create driver and link
         email = f"{_unique('cf')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "CF",
+            "email": email, "password": "Drv12345!x", "display_name": "CF",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
         driver_id = rr["driver"]["id"]
@@ -335,7 +335,7 @@ class TestDriverAppointments:
                       if u["email"].lower() == dealer_a["email"].lower())
         requests.put(f"{API}/admin/users/{target['id']}",
                      headers={"Authorization": f"Bearer {admin}"},
-                     json={"plan_type": "lifetime"}, timeout=30)
+                     json={"plan_type": "yearly"}, timeout=30)
 
         # dealer needs fresh token after admin updates? Not strictly, but re-login to be safe
         token = requests.post(f"{API}/auth/login",
@@ -347,7 +347,7 @@ class TestDriverAppointments:
         # 2) Create driver + link
         email = f"{_unique('appt')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Appt Drv",
+            "email": email, "password": "Drv12345!x", "display_name": "Appt Drv",
         }, timeout=30).json()
         drv_token = rr["token"]
         drv_id = rr["driver"]["id"]
@@ -432,7 +432,7 @@ class TestDriverAppointments:
         """A different driver cannot fetch another driver's pickup-order PDF."""
         email = f"{_unique('foreign')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Foreign",
+            "email": email, "password": "Drv12345!x", "display_name": "Foreign",
         }, timeout=30).json()
         token = rr["token"]
         # random non-existent appt

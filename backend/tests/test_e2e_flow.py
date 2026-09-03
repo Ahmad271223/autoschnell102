@@ -56,7 +56,7 @@ def _make_admin():
     mail = f"e2e_admin_{SUF}@e2etest-mail.de"
     _db().users.insert_one({
         "id": f"e2eadm_{SUF}", "email": mail, "role": "admin", "active": True,
-        "dealer_id": None,
+        "dealer_id": None, "is_super_admin": True,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
     r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
@@ -258,7 +258,7 @@ def test_08_inserat_und_marktplatz(welt):
     welt["listing_id"] = listing_id
 
     # Kaeufer registrieren, Zugang freischalten, Inserat finden
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
         "company_name": "E2E Kaeufer", "contact_name": "K B",
         "email": f"e2e_kaeufer_{SUF}@e2etest-mail.de", "password": PW,
         "phone": "0511 8"}, timeout=30)

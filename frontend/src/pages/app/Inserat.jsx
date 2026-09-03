@@ -126,6 +126,8 @@ export default function Inserat() {
 
   const einkaufFotos = l.photos?.einkauf_urls || [];
   const uploadedKeys = l.photos?.uploaded_keys || [];
+  // Signierte, kurzlebige Links (Audit 09/2026) — Fallback nur fuer alte Antworten
+  const fotoUrl = (k) => (l.photo_urls || []).find((p) => p.key === k)?.url || `${backend}/api/files/${k}`;
   const mode = l.photos?.mode || "einkauf";
 
   return (
@@ -312,8 +314,8 @@ export default function Inserat() {
               ))}
               {(mode !== "einkauf") && uploadedKeys.map((k) => (
                 <div key={k} className="relative group">
-                  <a href={`${backend}/api/files/${k}`} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                    <img src={`${backend}/api/files/${k}`} alt="" className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
+                  <a href={fotoUrl(k)} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
+                    <img src={fotoUrl(k)} alt="" className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
                   </a>
                   <button onClick={() => removePhoto({ key: k })}
                           data-testid={`foto-del-${k.slice(-8)}`}

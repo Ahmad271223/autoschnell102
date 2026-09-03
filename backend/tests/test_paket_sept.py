@@ -285,7 +285,7 @@ def test_06_marktplatz_verhandlung_beide_seiten(welt):
                       json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     # Kaeufer mit Zugang
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
         "company_name": "Paket Kaeufer", "contact_name": "K P",
         "email": f"ps_kaeufer_{SUF}@{MAIL}", "password": PW, "phone": "0511 8"}, timeout=30)
     assert r.status_code == 200, r.text[:300]

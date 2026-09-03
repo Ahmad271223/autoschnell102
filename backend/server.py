@@ -16,6 +16,8 @@ Routern importiert.
 """
 import asyncio
 import logging
+from typing import Optional
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import uuid
@@ -68,16 +70,35 @@ load_dotenv(ROOT_DIR / ".env")
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
+# Audit 09/2026 (Punkt 44): E-Mails, Token, Schluessel und Passwort-Fragmente
+# werden in JEDER Log-Zeile maskiert (zentrale Redaktion).
+from redaktion import logging_redaktion_aktivieren, redigieren  # noqa: E402
+logging_redaktion_aktivieren()
 
 # OpenAPI-Docs (/docs, /redoc, /openapi.json) legen die komplette API-Struktur
 # offen — wertvoll fuer Angreifer-Recon. In Produktion deaktiviert; nur mit
 # ENABLE_DOCS=true (z.B. lokal/Staging) eingeschaltet.
 _DOCS_ENABLED = os.environ.get("ENABLE_DOCS", "").strip().lower() == "true"
+from contextlib import asynccontextmanager  # noqa: E402
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    """FastAPI-Lifespan (Audit 09/2026, Punkt 52): ersetzt die veralteten
+    on_event-Hooks; on_start/on_stop stehen weiter unten."""
+    await on_start()
+    try:
+        yield
+    finally:
+        await on_stop()
+
+
 app = FastAPI(
     title="Autohändler SaaS",
     docs_url="/docs" if _DOCS_ENABLED else None,
     redoc_url="/redoc" if _DOCS_ENABLED else None,
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+    lifespan=lifespan,
 )
 api = APIRouter(prefix="/api")
 
@@ -122,7 +143,7 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         except Exception as exc:
             err_id = str(uuid.uuid4())
-            tb = traceback.format_exc()
+            tb = redigieren(traceback.format_exc())
             log.exception("Unhandled error on %s %s (ref=%s)",
                           request.method, request.url.path, err_id[:8])
             try:
@@ -132,7 +153,7 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
                     "method": request.method,
                     "path": str(request.url.path)[:300],
                     "error_type": type(exc).__name__,
-                    "message": str(exc)[:1000],
+                    "message": redigieren(str(exc))[:1000],
                     "traceback": tb[-8000:],
                     "ip": (request.client.host if request.client else "") or "",
                     "status": "open",
@@ -148,8 +169,34 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
             )
 
 
+class WartungsmodusMiddleware(BaseHTTPMiddleware):
+    """Restore/Wartung (Audit 09/2026, Punkt 5): ist `system_flags`
+    {_id: "wartungsmodus", aktiv: true} gesetzt, antwortet die API mit 503
+    — ausser Health/Ready. Der Wert wird 5 s gecacht (kein DB-Zugriff je
+    Request)."""
+    _stand = {"aktiv": False, "bis": 0.0}
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        pfad = request.url.path
+        if pfad not in ("/api/health", "/api/ready", "/api/"):
+            import time as _t
+            if _t.monotonic() > self._stand["bis"]:
+                try:
+                    doc = await db.system_flags.find_one({"_id": "wartungsmodus"})
+                    self._stand["aktiv"] = bool((doc or {}).get("aktiv"))
+                except Exception:
+                    pass
+                self._stand["bis"] = _t.monotonic() + 5
+            if self._stand["aktiv"]:
+                return JSONResponse(status_code=503, headers={"Retry-After": "30"},
+                                    content={"detail": "Wartungsmodus — die Plattform "
+                                             "ist in wenigen Minuten wieder da."})
+        return await call_next(request)
+
+
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(ErrorReportingMiddleware)
+app.add_middleware(WartungsmodusMiddleware)
 
 
 @api.get("/")
@@ -171,6 +218,82 @@ async def health_check(response: Response):
         return {"status": "unhealthy", "db": "down"}
 
 
+@api.get("/ready")
+async def readiness_check(response: Response):
+    """Readiness (Audit 09/2026, Punkt 42) — getrennt von /health (Liveness).
+    Nicht bereit (503): Datenbank, Migrationsstand, Speicherplatz oder
+    Datei-Speicher fehlen. Warnungen (200): Backup-Alter, offene
+    Betriebsalarme, haengende Jobs, S3 nicht erreichbar."""
+    import shutil
+    from migrationen import ZIEL_VERSION, aktuelle_version
+    fehler, warnungen, info = [], [], {}
+    try:
+        await db.command("ping")
+        info["db"] = "up"
+    except Exception as exc:
+        fehler.append(f"db: {exc}")
+    try:
+        v = await aktuelle_version(db)
+        info["schema_version"] = v
+        if v < ZIEL_VERSION:
+            fehler.append(f"migration: Stand {v} < Ziel {ZIEL_VERSION}")
+    except Exception as exc:
+        fehler.append(f"migration: {exc}")
+    for name, pfad in (("uploads", ROOT_DIR / "uploads"),
+                       ("snapshots", ROOT_DIR / "local_storage"),
+                       ("backups", Path(os.environ.get("BACKUP_DIR") or (ROOT_DIR / "backups")))):
+        try:
+            pfad.mkdir(parents=True, exist_ok=True)
+            frei_mb = shutil.disk_usage(str(pfad)).free // (1024 * 1024)
+            info[f"frei_mb_{name}"] = frei_mb
+            if frei_mb < int(os.environ.get("MIN_FREI_MB", "500") or 500):
+                fehler.append(f"{name}: nur {frei_mb} MB frei")
+            probe = pfad / ".readiness"
+            probe.write_text("ok")
+            probe.unlink()
+        except Exception as exc:
+            fehler.append(f"{name}: nicht schreibbar ({exc})")
+    if os.environ.get("S3_BUCKET"):
+        try:
+            from storage_service import storage
+            head = getattr(storage, "erreichbar", None)
+            if callable(head):
+                ok = await asyncio.to_thread(head)
+                if not ok:
+                    warnungen.append("s3: nicht erreichbar")
+        except Exception as exc:
+            warnungen.append(f"s3: {exc}")
+    try:
+        from backup_service import letztes_backup_info
+        b = letztes_backup_info()
+        info["backup"] = b
+        alter = b.get("alter_stunden")
+        if alter is None or alter > 26:
+            warnungen.append("backup: kein vollstaendiges Backup in den letzten 26 h")
+    except Exception as exc:
+        warnungen.append(f"backup: {exc}")
+    try:
+        n = await db.betriebsalarme.count_documents({"offen": True})
+        info["alarme_offen"] = n
+        if n:
+            warnungen.append(f"{n} offene Betriebsalarme")
+        alt = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        haengend = await db.link_jobs.count_documents(
+            {"status": "queued", "created_at": {"$lt": datetime.now(timezone.utc) - timedelta(minutes=15)}})
+        info["link_jobs_haengend"] = haengend
+        if haengend:
+            warnungen.append(f"{haengend} Link-Jobs warten > 15 min")
+        wm = await db.system_flags.find_one({"_id": "wartungsmodus"})
+        info["wartungsmodus"] = bool((wm or {}).get("aktiv"))
+        _ = alt
+    except Exception as exc:
+        warnungen.append(f"queue: {exc}")
+    bereit = not fehler
+    if not bereit:
+        response.status_code = 503
+    return {"ready": bereit, "fehler": fehler, "warnungen": warnungen, **info}
+
+
 # ---------- Datei-Auslieferung (Storage-Abstraktion) ----------
 # Fotos/Videos aus dem Fahrzeug-/Verkaufsmodul. Keys enthalten eine
 # zufällige UUID (nicht erratbar) — Auslieferung erfolgt daher ohne Auth,
@@ -187,18 +310,32 @@ async def health_check(response: Response):
 _PRIVATE_FILE_PREFIXES = ("protocol/", "pickup/")
 
 
+# Audit 09/2026 (Punkt 45): nicht-oeffentliche Dateien (z.B. Fahrzeugfotos
+# unter resale/) nur noch mit kurzlebiger Signatur (?exp=&sig=), Cache
+# privat. Firmenlogos (logo/) bleiben oeffentlich. Uebergang: bis alle
+# Aufrufer signierte Links erzeugen, kann die Pflicht per
+# DATEI_SIGNATUR_PFLICHT=false ausgesetzt werden.
+_DATEI_SIGNATUR_PFLICHT = os.environ.get("DATEI_SIGNATUR_PFLICHT", "true").strip().lower() \
+    not in ("0", "false", "no")
+
+
 @app.get("/api/files/{key:path}")
-async def serve_file(key: str):
+async def serve_file(key: str, exp: Optional[str] = None, sig: Optional[str] = None):
     from storage_service import guess_media_type, load_async, StorageError
+    from dateien import signatur_gueltig, signatur_noetig
     if key.startswith(_PRIVATE_FILE_PREFIXES):
         return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
+    geschuetzt = signatur_noetig(key)
+    if geschuetzt and _DATEI_SIGNATUR_PFLICHT and not signatur_gueltig(key, exp, sig):
+        return JSONResponse(status_code=403, content={"detail": "Link abgelaufen oder ungültig"})
     try:
         # Heissester Pfad der App (jedes Foto/Video) — nie im Loop lesen.
         data = await load_async(key)
     except StorageError:
         return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
+    cache = "private, max-age=300" if geschuetzt else "public, max-age=86400"
     return Response(content=data, media_type=guess_media_type(key),
-                    headers={"Cache-Control": "public, max-age=86400"})
+                    headers={"Cache-Control": cache})
 
 
 # ---------- Frontend-Fehler-Meldung (landet im Admin-Bereich) ----------
@@ -219,18 +356,34 @@ async def report_client_error(body: ClientErrorIn, request: Request):
     ip = (request.client.host if request.client else None) or "unknown"
     if not await _client_error_limiter.check(ip):
         return {"ok": False}
+    import hashlib
+    pfad = body.url.split("?")[0].split("#")[0][:500]
+    nachricht = redigieren(body.message)[:1000]
+    # Audit 09/2026 (Punkt 30): Deduplizierung (gleiche Meldung + Pfad in 10
+    # Minuten wird hochgezaehlt), globale Obergrenze, Redaktion von
+    # E-Mail/Token; die Client-E-Mail ist unbestaetigt -> nur maskiert.
+    hash_ = hashlib.sha256(f"{pfad}|{nachricht}".encode("utf-8")).hexdigest()[:24]
+    frist = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    dup = await db.error_logs.find_one_and_update(
+        {"hash": hash_, "created_at": {"$gte": frist}},
+        {"$inc": {"anzahl": 1}, "$set": {"zuletzt": now_iso()}},
+        projection={"_id": 0, "id": 1})
+    if dup:
+        return {"ok": True, "ref": dup["id"][:8], "dedup": True}
+    maximum = int(os.environ.get("ERROR_LOG_MAX", "20000") or 20000)
+    if await db.error_logs.estimated_document_count() >= maximum:
+        return {"ok": False, "hinweis": "Fehlerarchiv voll"}
     err_id = str(uuid.uuid4())
     await db.error_logs.insert_one({
         "id": err_id,
         "source": "frontend",
         "method": "",
-        # Runde 5: Query + Fragment entfernen — Reset-Token (?token=) und
-        # Stripe-Session (?session_id=) landeten sonst im Fehlerarchiv.
-        "path": body.url.split("?")[0].split("#")[0][:500],
+        "path": pfad,
         "error_type": "ClientError",
-        "message": body.message,
-        "traceback": body.stack,
-        "user_email": body.user_email,
+        "message": nachricht,
+        "traceback": redigieren(body.stack)[:8000],
+        "user_email": redigieren(body.user_email)[:200],
+        "hash": hash_, "anzahl": 1,
         "ip": ip,
         "status": "open",
         "created_at": now_iso(),
@@ -522,7 +675,6 @@ async def seed_super_admin():
     log.info("seed_super_admin: created %s", username)
 
 
-@app.on_event("startup")
 async def on_start():
     # Robustheit: Nach einem PC-/Server-Neustart braucht MongoDB manchmal ein
     # paar Sekunden. Wir warten geduldig, statt den Backend-Prozess sterben zu
@@ -539,33 +691,25 @@ async def on_start():
         raise
     except Exception as exc:
         log.warning("production check failed to run: %s", exc)
+    # Audit 09/2026 (Punkt 18): GENAU EIN Prozess legt Indizes/Seeds an und
+    # fuehrt die versionierten Migrationen aus; die anderen warten auf den
+    # Zielstand. In Produktion bricht ein Fehler den Start ab.
+    from migrationen import ausfuehren_oder_warten
     for attempt in range(1, 31):
         try:
-            await ensure_indexes()
+            await db.command("ping")
             break
         except Exception as exc:
             if attempt >= 30:
-                log.error("MongoDB nach 60s nicht bereit — Indexe übersprungen: %s", exc)
+                log.error("MongoDB nach 60s nicht bereit: %s", exc)
+                if os.environ.get("APP_ENV", "").strip().lower() == "production":
+                    raise SystemExit(78)
             else:
                 log.warning("Warte auf MongoDB (%d/30): %s", attempt, exc)
                 await _asyncio.sleep(2)
-    try:
-        await seed_admin()
-        await seed_super_admin()
-    except Exception as exc:
-        log.warning("Admin-Seed übersprungen (DB nicht bereit?): %s", exc)
-    # B2B-Modul: Lebenszyklus-Status für Bestandsfahrzeuge nachziehen.
-    try:
-        from lifecycle import migrate_missing_lifecycles
-        n = await migrate_missing_lifecycles()
-        if n:
-            log.info("lifecycle migration: %d Fahrzeuge migriert", n)
-    except Exception as exc:
-        log.warning("lifecycle migration failed: %s", exc)
-    try:
-        await ensure_cache_indexes(db)
-    except Exception as exc:
-        log.warning("listings_cache index setup failed: %s", exc)
+    ergebnis = await ausfuehren_oder_warten(
+        db, indexe=_alle_indexe, seeds=(seed_admin, seed_super_admin))
+    log.info("Migration/Indizes: %s", ergebnis)
     # Object storage for listing snapshots (PDF + PNG proof archives).
     # Non-fatal if EMERGENT_LLM_KEY missing — snapshot endpoints will 503.
     try:
@@ -608,6 +752,10 @@ async def on_start():
         asyncio.create_task(run_cleanup_forever(db))
     except Exception as exc:
         log.warning("cleanup task start failed: %s", exc)
+    try:
+        asyncio.create_task(run_abgleich_forever())
+    except Exception as exc:
+        log.warning("abgleich task start failed: %s", exc)
     # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
     # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
     # nach, wenn das letzte Backup älter als 24h ist.
@@ -625,6 +773,54 @@ async def on_start():
         asyncio.create_task(_resume_stuck_snapshots())
     except Exception as exc:
         log.warning("snapshot resume task failed: %s", exc)
+
+
+async def _alle_indexe():
+    """Bestehende Indizes + Audit-Indizes (Punkt 36: Protokollversion eindeutig;
+    Abo-Vorgaenge/Zahlungen idempotent; Alarme; Fehler-Dedup)."""
+    await ensure_indexes()
+    try:
+        await ensure_cache_indexes(db)
+    except Exception as exc:
+        log.warning("listings_cache index setup failed: %s", exc)
+    try:
+        await db.pickup_protocols.create_index(
+            [("appointment_id", 1), ("version", 1)], unique=True,
+            name="protokollversion_eindeutig")
+    except Exception as exc:
+        log.error("Index protokollversion_eindeutig: %s", exc)
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            raise
+    await db.subscriptions.create_index([("subject_user_id", 1), ("status", 1), ("created_at", -1)])
+    await db.manual_payments.create_index("vorgang_id", unique=True, sparse=True,
+                                          name="zahlung_je_vorgang")
+    await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
+    await db.betriebsalarme.create_index([("offen", 1), ("created_at", -1)])
+    await db.betriebsalarme.create_index([("typ", 1), ("ref", 1), ("offen", 1)])
+    await db.error_logs.create_index([("hash", 1), ("created_at", -1)])
+    await db.zugangs_aenderungen.create_index([("subject_user_id", 1), ("created_at", -1)])
+    await db.payment_transactions.create_index([("status", 1), ("updated_at", 1)])
+    await db.storage_delete_retry.create_index("aufgegeben")
+
+
+async def run_abgleich_forever():
+    """Alle 10 Minuten (ein Prozess): abgebrochene Freischaltungs-Vorgaenge
+    nachholen, bezahlte Transaktionen ohne Zugang erneut aktivieren."""
+    import asyncio
+    from job_lock import acquire
+    await asyncio.sleep(20)
+    while True:
+        try:
+            if await acquire(db, "abgleich", ttl_seconds=540):
+                from routes.admin import abo_vorgaenge_nachholen
+                from routes.payments import zahlungen_abgleichen
+                a = await abo_vorgaenge_nachholen()
+                z = await zahlungen_abgleichen(db)
+                if a or (isinstance(z, dict) and any(z.values())):
+                    log.info("Abgleich: abo_vorgaenge=%s zahlungen=%s", a, z)
+        except Exception as exc:
+            log.warning("Abgleich fehlgeschlagen: %s", exc)
+        await asyncio.sleep(600)
 
 
 async def _resume_stuck_snapshots():
@@ -677,7 +873,6 @@ async def _resume_stuck_snapshots():
             log.warning("snapshot resume %s failed: %s", s["id"], exc)
 
 
-@app.on_event("shutdown")
 async def on_stop():
     client.close()
 

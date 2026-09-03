@@ -1,8 +1,12 @@
 # AutoSchnell — Produktions-Stack (ein Server).
 # Start:  docker compose up -d --build
-# Der Reverse-Proxy (nginx) terminiert HTTPS und reicht die ECHTE Client-IP
+# Der Reverse-Proxy (nginx) terminiert HTTPS, reicht die ECHTE Client-IP
 # an das Backend weiter (X-Forwarded-For) — deshalb greift der Rate-Limiter
 # korrekt (TRUST_PROXY=true im Backend).
+#
+# Audit 09/2026: Ressourcen-Limits je Dienst, weniger Worker/Snapshots als
+# Standard, Host-Allowlist im Proxy (PUBLIC_HOST), alle Betriebs-Schalter
+# aus der .env durchgereicht, Mongo-Verbindungspool begrenzt, Certbot-Volume.
 services:
   mongo:
     image: mongo:8.0
@@ -12,7 +16,11 @@ services:
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:?MONGO_USER in .env setzen}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?MONGO_PASSWORD in .env setzen}
-    command: ["mongod", "--auth"]
+    # Standalone. Fuer konsistente Backups (Snapshot-Session) und Mongo-
+    # Transaktionen kann ein Ein-Knoten-Replica-Set genutzt werden:
+    #   command: ["mongod", "--auth", "--replSet", "rs0", "--keyFile", "/etc/mongo-keyfile"]
+    # + einmalig rs.initiate() — siehe DEPLOYMENT.md (Abschnitt Replica Set).
+    command: ["mongod", "--auth", "--wiredTigerCacheSizeGB", "${MONGO_CACHE_GB:-1}"]
     volumes:
       - mongo_data:/data/db
     # Kein Port nach aussen — nur intern erreichbar.
@@ -21,6 +29,11 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    mem_limit: ${MONGO_MEM_LIMIT:-2g}
+    cpus: ${MONGO_CPUS:-1.5}
+    logging: &log
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
 
   backend:
     build: ./backend
@@ -30,10 +43,15 @@ services:
         condition: service_healthy
     environment:
       - APP_ENV=production
-      - SELF_SIGNUP=false
-      - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin}
+      - SELF_SIGNUP=${SELF_SIGNUP:-false}
+      # maxPoolSize begrenzt die Verbindungen JE Worker (Audit 09/2026, Punkt 19)
+      - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin&maxPoolSize=20}
       - DB_NAME=${DB_NAME:-autoschnell}
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
+      # Worker x SNAPSHOT_CONCURRENCY = gleichzeitige Chromium-Prozesse (~400 MB je).
+      # Default 4 x 1 = 4 (vorher 8 x 3 = 24 = ~9,6 GB nur fuer Chromium).
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      - SNAPSHOT_CONCURRENCY=${SNAPSHOT_CONCURRENCY:-1}
+      - SNAPSHOT_WORKER_TIMEOUT=${SNAPSHOT_WORKER_TIMEOUT:-90}
       - TRUST_PROXY=true
       - RATE_LIMIT_EXEMPT_LOOPBACK=false
       - JWT_SECRET=${JWT_SECRET}
@@ -48,8 +66,28 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-}
+      # Aufbewahrung / Loeschung (Audit 09/2026: Vertragsloeschung erst nach
+      # Freigabe scharf schalten — bis dahin Dry-Run mit Loeschvorschau)
+      - VERTRAG_AUFBEWAHRUNG_TAGE=${VERTRAG_AUFBEWAHRUNG_TAGE:-90}
+      - VERTRAG_LOESCHUNG_AKTIV=${VERTRAG_LOESCHUNG_AKTIV:-false}
+      - AUTO_DATEN_SCHAEDEN_FREITEXT=${AUTO_DATEN_SCHAEDEN_FREITEXT:-false}
       - SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-60}
+      - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-180}
+      - LOG_AUFBEWAHRUNG_TAGE_OFFEN=${LOG_AUFBEWAHRUNG_TAGE_OFFEN:-365}
+      - ERROR_LOG_MAX=${ERROR_LOG_MAX:-20000}
+      - ANFRAGEN_AUFBEWAHRUNG_TAGE=${ANFRAGEN_AUFBEWAHRUNG_TAGE:-90}
+      - LISTING_CACHE_TTL_HOURS=${LISTING_CACHE_TTL_HOURS:-2160}
+      - FAHRZEUGPOOL_MAX_VERGLEICHE=${FAHRZEUGPOOL_MAX_VERGLEICHE:-30}
+      - CLIENT_INGEST_PROMOTE_MIN_DEALERS=${CLIENT_INGEST_PROMOTE_MIN_DEALERS:-0}
+      - DATEI_SIGNATUR_PFLICHT=${DATEI_SIGNATUR_PFLICHT:-true}
+      # Backups: lokal im Volume + verschluesselte Offsite-Kopie (S3-kompatibel)
       - BACKUP_DIR=/backups
+      - BACKUP_HOUR=${BACKUP_HOUR:-3}
+      - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
+      - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
+      - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
+      - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}
       - STRIPE_API_KEY=${STRIPE_API_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
       # Anbieter-Abrufe (mobile.de + AutoScout24 via Apify; optional
@@ -64,9 +102,7 @@ services:
       - PROXY_ENABLED=${PROXY_ENABLED:-}
       # Kleinanzeigen ueber die Browser-Erweiterung der Nutzer abrufen
       - CLIENT_FETCH_KLEINANZEIGEN=${CLIENT_FETCH_KLEINANZEIGEN:-}
-      # Snapshots (Playwright) — Parallelitaet je Prozess; optional
-      # browserless.io statt lokalem Chromium
-      - SNAPSHOT_CONCURRENCY=${SNAPSHOT_CONCURRENCY:-3}
+      # optional browserless.io statt lokalem Chromium
       - BROWSERLESS_URL=${BROWSERLESS_URL:-}
       - BROWSERLESS_TOKEN=${BROWSERLESS_TOKEN:-}
       # Optionaler S3-kompatibler Objektspeicher (sonst lokales Volume)
@@ -77,9 +113,14 @@ services:
       - S3_REGION=${S3_REGION:-}
     volumes:
       - uploads_data:/app/uploads         # Fotos/Unterschriften/Protokolle
-      - snapshots_data:/app/local_storage # Beweis-Snapshots (Mobile Rebuild)
+      - snapshots_data:/app/local_storage # Beweis-Snapshots
       - backups_data:/backups             # taegliche Backups (backup_service.py)
     # Kein Port nach aussen — nur der Proxy spricht mit dem Backend.
+    # Limits an die Servergroesse anpassen: 4 Worker + 4 Chromium ~ 3-4 GB.
+    mem_limit: ${BACKEND_MEM_LIMIT:-4g}
+    cpus: ${BACKEND_CPUS:-2.0}
+    shm_size: "512m"    # Chromium braucht /dev/shm
+    logging: *log
 
   web:
     build:
@@ -90,6 +131,9 @@ services:
         # der nginx-Proxy leitet /api an das Backend weiter.
         REACT_APP_BACKEND_URL: ""
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *log
 
   proxy:
     image: nginx:alpine
@@ -98,12 +142,22 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      # Audit 09/2026 (Punkt 9): NUR diese Domain wird bedient (Host-Allowlist),
+      # unbekannte Hosts bekommen 444, HTTP leitet fest hierhin um.
+      - PUBLIC_HOST=${PUBLIC_HOST:?PUBLIC_HOST in .env setzen (z.B. app.autoschnell.de)}
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./deploy/certs:/etc/nginx/certs:ro   # hier landen die TLS-Zertifikate
+      - certbot_www:/var/www/certbot         # ACME-Challenge (Let's Encrypt)
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *log
 
 volumes:
   mongo_data:
   uploads_data:
   snapshots_data:
   backups_data:
+  certbot_www:

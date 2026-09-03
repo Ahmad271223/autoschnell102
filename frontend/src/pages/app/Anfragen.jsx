@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Check, Handshake, Inbox, MessageSquare, X } from "lucide-react";
@@ -50,6 +51,7 @@ function StatusBadge({ status }) {
 }
 
 export default function Anfragen() {
+  const { user } = useAuth();
   const [items, setItems] = useState(null);
   const [filter, setFilter] = useState("");
   const [busyId, setBusyId] = useState(null);
@@ -93,6 +95,8 @@ export default function Anfragen() {
     antworten(it, "gegenangebot", { counter_offer: betrag, message: counterMsg });
   };
 
+  // Nur der Haendler-Hauptaccount bearbeitet Kaufanfragen (Backend: current_haendler)
+  if (user && user.role !== "dealer") return <Navigate to="/app/vergleich" replace />;
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto" data-testid="anfragen-page">
       <div className="flex flex-wrap items-end justify-between gap-3">

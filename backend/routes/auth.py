@@ -29,18 +29,8 @@ router = APIRouter()
 
 
 # ---------- Models ----------
-_SPECIAL_CHARS = set("!@#$%^&*()_+-=[]{}|;':\",./<>?")
-
-
-def _check_password_strength(pw: str) -> str:
-    """Enforce minimum password security requirements (shared by all auth models)."""
-    if len(pw) < 8:
-        raise ValueError("Passwort muss mindestens 8 Zeichen lang sein")
-    has_digit = any(c.isdigit() for c in pw)
-    has_special = any(c in _SPECIAL_CHARS for c in pw)
-    if not has_digit and not has_special:
-        raise ValueError("Passwort muss mindestens eine Ziffer oder ein Sonderzeichen enthalten")
-    return pw
+# Zentrale Passwortregel (Audit 09/2026, Punkt 32) — gilt fuer ALLE Rollen.
+from passwoerter import pruefe_passwort as _check_password_strength  # noqa: E402
 
 
 class RegisterIn(BaseModel):
@@ -115,7 +105,7 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
 # (docker-compose setzt SELF_SIGNUP=false). In Entwicklung/CI bleibt die
 # Route aktiv, damit Tests und lokales Ausprobieren funktionieren.
 def _self_signup_enabled() -> bool:
-    return os.environ.get("SELF_SIGNUP", "true").strip().lower() not in (
+    return os.environ.get("SELF_SIGNUP", "false" if os.environ.get("APP_ENV", "").strip().lower() == "production" else "true").strip().lower() not in (
         "false", "0", "no", "off")
 
 
@@ -384,16 +374,33 @@ async def password_reset_confirm(body: ResetConfirmIn, request: Request):
     # ATOMAR entwerten — und zwar VOR der Passwortaenderung (Runde 5):
     # nur der ERSTE parallele Bestaetiger gewinnt; vorher wurde das
     # Passwort schon geaendert, bevor der Token endgueltig verbraucht war.
-    verbraucht = await db.password_resets.find_one_and_update(
-        {"id": doc["id"], "used": {"$ne": True}},
-        {"$set": {"used": True, "used_at": now_iso()}})
-    if not verbraucht:
+    # Claim-Zustand (Audit 09/2026, Punkt 31): das Token wird zuerst nur
+    # "beansprucht" (claimed_at); scheitert das Speichern des Passworts,
+    # wird der Claim zurueckgesetzt und der Link bleibt gueltig. Ein Claim
+    # aelter als 60 s gilt als haengengeblieben und darf uebernommen werden.
+    # Parallele Doppelnutzung bleibt ausgeschlossen (atomarer Claim).
+    claim_frist = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    beansprucht = await db.password_resets.find_one_and_update(
+        {"id": doc["id"], "used": {"$ne": True},
+         "$or": [{"claimed_at": {"$exists": False}}, {"claimed_at": None},
+                 {"claimed_at": {"$lt": claim_frist}}]},
+        {"$set": {"claimed_at": now_iso()}})
+    if not beansprucht:
         raise invalid
-    await konten.update_one(
-        {"id": u["id"]},
-        {"$set": {"password_hash": await hash_password_async(body.new_password),
-                  # Alle bestehenden Sessions beenden (Single-Session strikt)
-                  "current_session_id": None}})
+    try:
+        await konten.update_one(
+            {"id": u["id"]},
+            {"$set": {"password_hash": await hash_password_async(body.new_password),
+                      # Alle bestehenden Sessions beenden (Single-Session strikt)
+                      "current_session_id": None}})
+    except Exception:
+        await db.password_resets.update_one({"id": doc["id"]},
+                                            {"$set": {"claimed_at": None}})
+        log.exception("Passwort-Reset: Speichern fehlgeschlagen")
+        raise HTTPException(500, "Passwort konnte nicht gespeichert werden — "
+                                 "bitte den Link erneut verwenden")
+    await db.password_resets.update_one(
+        {"id": doc["id"]}, {"$set": {"used": True, "used_at": now_iso()}})
     await log_activity("", u["id"], "auth.passwort.reset.durchgefuehrt",
                        meta={"ip": ip})
     return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}

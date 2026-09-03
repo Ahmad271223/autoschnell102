@@ -122,7 +122,7 @@ def test_fahrzeug_und_kaufvertrag(chef):
 def test_rollentrennung(chef):
     """Kaeufer darf nicht in den Haendler-Bestand."""
     mail = f"smoke_b_{SUFFIX}@e2etest-mail.de"
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
         "company_name": "Smoke Kaeufer", "contact_name": "S K", "email": mail,
         "password": PW, "phone": "0511 1"}, timeout=30)
     if r.status_code != 200:
@@ -174,7 +174,7 @@ def test_sucher_loeschen_zerstoert_firma_nicht(chef):
     admin_mail = f"smoke_admin_{SUFFIX}@e2etest-mail.de"
     dbx.users.insert_one({
         "id": f"adm_{SUFFIX}", "email": admin_mail, "role": "admin",
-        "active": True, "dealer_id": None,
+        "active": True, "dealer_id": None, "is_super_admin": True,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
     try:

@@ -13,19 +13,23 @@ unveränderbares, ausgefülltes PDF im Storage, der Termin wird auf
 Korrekturen erzeugen eine NEUE Version (alte bleibt als Beweis).
 """
 import base64
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
+from pymongo.errors import DuplicateKeyError
 
 from deps import db, log_activity, now_iso
 from lifecycle import try_set_lifecycle
-from routes.drivers import current_driver
+from routes.drivers import current_driver, _zugriff_pruefen
 
 # Haendler-/Sucher-Zugriff auf die fertigen Protokolle (Fahrzeugakte).
 # current_firma = Chef UND seine Sucher; Admin/Kaeufer bleiben aussen vor.
 from routes.bestand import current_firma as _dealer_dep
+
+log = logging.getLogger("autohandel")
 
 router = APIRouter()
 
@@ -161,7 +165,36 @@ async def _appt_or_404(appt_id: str, driver: dict) -> dict:
         {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0})
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
+    # Zuweisung allein reicht nicht: der Fahrer muss bei dieser Firma noch
+    # in der Fahrerliste stehen (Pruefbericht 09/2026, routes.drivers).
+    await _zugriff_pruefen(appt, driver)
     return appt
+
+
+async def _dateien_verwerfen(keys: List[str], dealer_id: str) -> None:
+    """Beim Abbruch eines Abschlusses bereits geschriebene Dateien
+    (Unterschrift-PNGs, PDF) wieder entfernen — best effort. Schlaegt das
+    Loeschen fehl, landet der Key in storage_delete_retry, damit der
+    Aufraeum-Job die Loeschung nachholt statt die Datei verwaist liegen
+    zu lassen (Pruefbericht 09/2026)."""
+    from storage_service import delete_async
+    for key in list(keys):
+        try:
+            await delete_async(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Protokoll-Rollback: %s konnte nicht geloescht werden (%s)",
+                        key, exc)
+            try:
+                jetzt = now_iso()
+                await db.storage_delete_retry.insert_one({
+                    "id": str(uuid.uuid4()), "art": "key", "key": key,
+                    "grund": "protokoll-rollback", "dealer_id": dealer_id,
+                    "versuche": 0, "letzter_fehler": str(exc)[:300],
+                    "created_at": jetzt, "updated_at": jetzt,
+                })
+            except Exception:  # noqa: BLE001
+                log.exception("storage_delete_retry: Eintrag fuer %s "
+                              "fehlgeschlagen", key)
 
 
 async def _current(appt_id: str) -> Optional[dict]:
@@ -281,11 +314,21 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
     doc = await _current(appt_id)
     if not doc or doc.get("status") != "final":
         raise HTTPException(400, "Es gibt kein abgeschlossenes Protokoll zum Korrigieren")
-    await db.pickup_protocols.update_one({"id": doc["id"]},
-                                         {"$set": {"superseded": True}})
+    # ATOMAR abloesen (Pruefbericht 09/2026): zwei gleichzeitige Korrektur-
+    # Aufrufe lasen vorher beide dieselbe finale Version und legten ZWEI
+    # Folgeversionen an. Nur wer das superseded-Flag selbst setzt, darf die
+    # neue Version anlegen — jeder weitere Aufruf findet die Version nicht
+    # mehr als aktuell vor und bekommt 409.
+    abgeloest = await db.pickup_protocols.find_one_and_update(
+        {"id": doc["id"], "status": "final", "superseded": {"$ne": True}},
+        {"$set": {"superseded": True, "superseded_at": now_iso()}})
+    if abgeloest is None:
+        raise HTTPException(409, "Korrektur läuft bereits / Version nicht "
+                                 "mehr aktuell")
     new_doc = {k: v for k, v in doc.items()
                if k not in ("id", "status", "pdf_path", "finalized_at",
-                            "signature_driver_key", "signature_seller_key")}
+                            "signature_driver_key", "signature_seller_key",
+                            "superseded_at", "claim_bis")}
     new_doc.update({
         "id": str(uuid.uuid4()),
         "version": int(doc.get("version", 1)) + 1,
@@ -294,13 +337,30 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
         "corrects_version": doc.get("version", 1),
         "created_at": now_iso(), "updated_at": now_iso(),
     })
-    try:
-        await db.pickup_protocols.insert_one(new_doc)
-    except Exception:
+
+    async def _abloesung_zuruecknehmen():
         # Schlaegt der Insert fehl, darf der Termin nicht OHNE aktuelle
         # Version zurueckbleiben: alte Version wieder aktiv schalten.
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"]}, {"$set": {"superseded": False}})
+        try:
+            await db.pickup_protocols.update_one(
+                {"id": doc["id"]},
+                {"$set": {"superseded": False},
+                 "$unset": {"superseded_at": ""}})
+        except Exception:  # noqa: BLE001
+            log.exception("Protokoll-Korrektur: Abloesung von %s konnte "
+                          "nicht zurueckgenommen werden", doc["id"])
+
+    try:
+        await db.pickup_protocols.insert_one(new_doc)
+    except DuplicateKeyError:
+        # Unique-Index (appointment_id, version) bzw. "ein aktuelles
+        # Protokoll je Termin": ein paralleler Aufruf hat die Folgeversion
+        # bereits angelegt.
+        await _abloesung_zuruecknehmen()
+        raise HTTPException(409, "Korrektur läuft bereits / Version nicht "
+                                 "mehr aktuell")
+    except Exception:
+        await _abloesung_zuruecknehmen()
         raise HTTPException(500, "Korrektur konnte nicht angelegt werden — "
                                  "bitte erneut versuchen (alte Version ist "
                                  "weiterhin gültig).")
@@ -330,22 +390,26 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # mehreren Schritten (Protokoll final -> Termin abgeholt ->
         # Fahrzeug-Lebenszyklus). Brach er dazwischen ab, war das
         # Protokoll final, der Termin aber offen — und jeder neue Versuch
-        # scheiterte hier mit 409. Jetzt zieht ein Wiederholungsaufruf
-        # die fehlenden Status nach, statt dauerhaft zu blockieren.
+        # scheiterte hier mit 409. Ein Wiederholungsaufruf zieht die
+        # fehlenden Status nach, statt dauerhaft zu blockieren.
+        # Auch wenn der Termin schon "abgeholt" ist, gibt es KEIN 409 mehr
+        # (Pruefbericht 09/2026): der Aufruf ist idempotent — er stellt
+        # sicher, dass protocol_id am Termin und der Fahrzeug-Lebenszyklus
+        # gesetzt sind (try_set_lifecycle ist idempotent), und liefert das
+        # bestehende Ergebnis. Netzabbruch oder Doppeltipp in der App
+        # enden damit nicht mehr in einer Fehlermeldung.
+        setzen: Dict[str, Any] = {"protocol_id": doc["id"]}
         if (appt.get("status") or "") != "abgeholt":
-            await db.appointments.update_one(
-                {"id": appt_id},
-                {"$set": {"status": "abgeholt",
-                          "status_changed_at": now_iso(),
-                          "protocol_id": doc["id"]}})
-            if appt.get("vehicle_id"):
-                await try_set_lifecycle(appt["vehicle_id"],
-                                        appt.get("dealer_id", ""), "abgeholt")
-            return {"ok": True, "protocol_id": doc["id"],
-                    "version": doc.get("version", 1),
-                    "nachgezogen": True,
-                    "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
-        raise HTTPException(409, "Protokoll ist bereits abgeschlossen")
+            setzen.update({"status": "abgeholt",
+                           "status_changed_at": now_iso()})
+        await db.appointments.update_one({"id": appt_id}, {"$set": setzen})
+        if appt.get("vehicle_id"):
+            await try_set_lifecycle(appt["vehicle_id"],
+                                    appt.get("dealer_id", ""), "abgeholt")
+        return {"ok": True, "protocol_id": doc["id"],
+                "version": doc.get("version", 1),
+                "nachgezogen": True,
+                "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
 
     # ---- Pflichtfelder: das Backend verlaesst sich NICHT auf die App ----
     # Abschnitt 1: alle 12 Fahrzeugdaten-Zeilen muessen beantwortet sein.
@@ -392,16 +456,28 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         raise HTTPException(409, "Das Protokoll wird gerade abgeschlossen "
                                  "— bitte einen Moment warten.")
 
+    dealer_id = appt.get("dealer_id", "x")
+    # Alle in DIESEM Abschluss geschriebenen Storage-Keys (Unterschrift-
+    # PNGs, PDF). Bricht der Abschluss danach ab, werden sie im Rollback
+    # wieder entfernt — vorher blieben sie verwaist im Storage liegen
+    # (Pruefbericht 09/2026). Ein Key wird VOR dem Schreiben vorgemerkt,
+    # damit auch eine halb geschriebene Datei aufgeraeumt wird.
+    geschrieben: List[str] = []
+
     async def _rollback():
         """Claim freigeben — zurueck auf 'entwurf' (den einzigen Status,
         aus dem ein Claim moeglich ist), damit der Fahrer neu abschliessen
-        kann."""
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"], "status": "wird_abgeschlossen"},
-            {"$set": {"status": "entwurf"},
-             "$unset": {"claim_bis": ""}})
-
-    dealer_id = appt.get("dealer_id", "x")
+        kann — und bereits geschriebene Dateien verwerfen."""
+        try:
+            await db.pickup_protocols.update_one(
+                {"id": doc["id"], "status": "wird_abgeschlossen"},
+                {"$set": {"status": "entwurf"},
+                 "$unset": {"claim_bis": ""}})
+        except Exception:  # noqa: BLE001
+            log.exception("Protokoll-Rollback: Claim von %s konnte nicht "
+                          "freigegeben werden (laeuft nach 3 Min. ab)", doc["id"])
+        await _dateien_verwerfen(geschrieben, dealer_id)
+        geschrieben.clear()
 
     def _save_sig(b64: str, who: str) -> str:
         try:
@@ -414,6 +490,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             raise HTTPException(400, f"Unterschrift ({who}) ungültig oder zu groß")
         try:
             key = make_key("protocol", dealer_id, f"unterschrift-{who}.png")
+            geschrieben.append(key)
             storage.save(key, raw)
         except StorageError as exc:
             raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
@@ -423,7 +500,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     try:
         sig_driver = await _asyncio.to_thread(_save_sig, body.signature_driver_b64, "fahrer")
         sig_seller = await _asyncio.to_thread(_save_sig, body.signature_seller_b64, "verkaeufer")
-    except HTTPException:
+    except Exception:
         await _rollback()
         raise
 
@@ -472,6 +549,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             filled=filled,
         )
         pdf_key = make_key("protocol", dealer_id, "abholprotokoll.pdf")
+        geschrieben.append(pdf_key)
         from storage_service import save_async
         await save_async(pdf_key, pdf_bytes)
     except StorageError as exc:
@@ -481,15 +559,21 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         await _rollback()
         raise
 
-    await db.pickup_protocols.update_one(
-        {"id": doc["id"]},
-        {"$unset": {"claim_bis": ""},
-         "$set": {"status": "final", "pdf_path": pdf_key,
-                  "signature_driver_key": sig_driver,
-                  "signature_seller_key": sig_seller,
-                  "seller_name": filled["seller_name"],
-                  "place": filled["place"],
-                  "finalized_at": now_iso(), "updated_at": now_iso()}})
+    # Ab hier sind die Dateien im Protokoll referenziert — erst wenn DIESER
+    # Schritt fehlschlaegt, waeren sie verwaist, deshalb auch hier Rollback.
+    try:
+        await db.pickup_protocols.update_one(
+            {"id": doc["id"]},
+            {"$unset": {"claim_bis": ""},
+             "$set": {"status": "final", "pdf_path": pdf_key,
+                      "signature_driver_key": sig_driver,
+                      "signature_seller_key": sig_seller,
+                      "seller_name": filled["seller_name"],
+                      "place": filled["place"],
+                      "finalized_at": now_iso(), "updated_at": now_iso()}})
+    except Exception:
+        await _rollback()
+        raise
 
     # Termin + Fahrzeug-Lebenszyklus nachziehen: abgeschlossen = abgeholt.
     await db.appointments.update_one(

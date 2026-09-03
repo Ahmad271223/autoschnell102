@@ -135,6 +135,30 @@ def pruefe_produktion(log) -> None:
                       ", ".join(k for k, v in s3.items() if not v) +
                       " fehlt) — Storage wuerde still auf lokale Platte fallen.")
 
+    # Audit 09/2026 (Punkt 43): fail-closed fuer angebotene Pflichtfunktionen
+    stripe_key = os.environ.get("STRIPE_API_KEY", "").strip()
+    stripe_whsec = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    if bool(stripe_key) != bool(stripe_whsec):
+        (fehler if ist_prod else warnungen).append(
+            "Stripe nur halb konfiguriert (STRIPE_API_KEY und STRIPE_WEBHOOK_SECRET "
+            "beide setzen oder beide leer lassen — sonst ist Online-Zahlung aus).")
+    if os.environ.get("SELF_SIGNUP", "").strip().lower() in ("1", "true", "yes") and ist_prod:
+        warnungen.append("SELF_SIGNUP=true: offene Selbstregistrierung ist in Produktion aktiv.")
+    if os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "").strip().lower() in ("1", "true", "yes"):
+        warnungen.append("AUTO_DATEN_SCHAEDEN_FREITEXT=true: Freitext-Schaeden koennen "
+                         "Personendaten enthalten (Standard: false).")
+    if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() in ("1", "true", "yes"):
+        warnungen.append("VERTRAG_LOESCHUNG_AKTIV=true: automatische Vertragsloeschung ist scharf.")
+    try:
+        wc = int(os.environ.get("WEB_CONCURRENCY", "4") or 4)
+        sc = int(os.environ.get("SNAPSHOT_CONCURRENCY", "1") or 1)
+        if wc * sc > 8:
+            warnungen.append(f"WEB_CONCURRENCY x SNAPSHOT_CONCURRENCY = {wc * sc} Chromium-"
+                             "Prozesse (~400 MB je) — Serverspeicher pruefen.")
+    except ValueError:
+        (fehler if ist_prod else warnungen).append("WEB_CONCURRENCY/SNAPSHOT_CONCURRENCY muessen Zahlen sein")
+    if ist_prod and "maxPoolSize" not in os.environ.get("MONGO_URL", ""):
+        warnungen.append("MONGO_URL ohne maxPoolSize — je Worker bis zu 100 Verbindungen (Empfehlung: maxPoolSize=20).")
     for w in warnungen:
         log.warning("Produktions-Check (Hinweis): %s", w)
     if not fehler:

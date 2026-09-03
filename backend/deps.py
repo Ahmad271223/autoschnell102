@@ -28,16 +28,73 @@ log = logging.getLogger("autohandel")
 # dass ein langsamer DB-Call den Request unbegrenzt blockiert.
 _MONGO_MAX_POOL = int(os.environ.get("MONGO_MAX_POOL_SIZE", "100"))
 _MONGO_MIN_POOL = int(os.environ.get("MONGO_MIN_POOL_SIZE", "10"))
-client = AsyncIOMotorClient(
-    os.environ["MONGO_URL"],
-    maxPoolSize=_MONGO_MAX_POOL,
-    minPoolSize=_MONGO_MIN_POOL,
-    serverSelectionTimeoutMS=5000,
-    connectTimeoutMS=5000,
-    socketTimeoutMS=30000,
-    retryWrites=True,
-)
-db = client[os.environ["DB_NAME"]]
+def _neuer_client() -> AsyncIOMotorClient:
+    return AsyncIOMotorClient(
+        os.environ["MONGO_URL"],
+        maxPoolSize=_MONGO_MAX_POOL,
+        minPoolSize=_MONGO_MIN_POOL,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        socketTimeoutMS=30000,
+        retryWrites=True,
+    )
+
+
+class _MotorProxy:
+    """Motor-Client je Event-Loop (Audit 09/2026, Testrobustheit): ein Motor-
+    Client bindet sich an die erste Schleife, in der er benutzt wird. In-
+    Prozess-Tests (asyncio.run je Test) liefen danach in "Event loop is
+    closed". Der Proxy erzeugt den Client neu, sobald die gebundene Schleife
+    geschlossen ist — im Serverbetrieb (eine Schleife je Worker) passiert
+    das nie, es bleibt EIN Client mit EINEM Pool."""
+
+    def __init__(self):
+        self._client = None
+        self._loop = None
+
+    def _aktuell(self):
+        try:
+            loop = __import__("asyncio").get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._client is None or (self._loop is not None and self._loop.is_closed()
+                                    and loop is not None and loop is not self._loop):
+            self._client = _neuer_client()
+            self._loop = loop
+        elif self._loop is None and loop is not None:
+            self._loop = loop
+        return self._client
+
+    # Client-Schnittstelle
+    def __getattr__(self, name):
+        return getattr(self._aktuell(), name)
+
+    def __getitem__(self, name):
+        return self._aktuell()[name]
+
+    def close(self):
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+
+class _DbProxy:
+    def __init__(self, client_proxy, name):
+        self._client_proxy = client_proxy
+        self._name = name
+
+    def _aktuell(self):
+        return self._client_proxy._aktuell()[self._name]
+
+    def __getattr__(self, name):
+        return getattr(self._aktuell(), name)
+
+    def __getitem__(self, name):
+        return self._aktuell()[name]
+
+
+client = _MotorProxy()
+db = _DbProxy(client, os.environ["DB_NAME"])
 
 # ---------- Auth ----------
 bearer = HTTPBearer(auto_error=False)
@@ -125,31 +182,74 @@ async def current_super_admin(user=Depends(current_admin)):
     return user
 
 
+ABO_PLAENE_ERLAUBT = {"monthly", "yearly", "trial", "lifetime"}
+# Zustaende, in denen ein Abo (noch) Zugang gewaehrt: gekuendigt laeuft bis
+# zum Ablaufdatum weiter. Alles andere (ersetzt, expired, suspended,
+# revoked, unbekannt) ist fail-closed inaktiv.
+_ABO_STATUS_ZUGANG = ("active", "cancelled")
+
+
+def _ablauf_parsen(wert):
+    """ISO-String oder datetime -> zeitzonen-bewusstes datetime; naive Werte
+    gelten als UTC (Audit 09/2026: vorher warf der Vergleich naiver Werte
+    still eine Exception und das Abo blieb dauerhaft aktiv). None bei
+    unbrauchbarem Wert."""
+    if wert is None or wert == "":
+        return None
+    try:
+        if isinstance(wert, datetime):
+            ea = wert
+        else:
+            ea = datetime.fromisoformat(str(wert).strip().replace("Z", "+00:00"))
+        if ea.tzinfo is None:
+            ea = ea.replace(tzinfo=timezone.utc)
+        return ea
+    except Exception:
+        return None
+
+
 def sub_status_from_doc(sub) -> dict:
     """Abo-Status aus einem bereits geladenen Abo-Dokument berechnen.
-    EINZIGE Stelle fuer diese Geschaeftsregel — get_subscription_status,
-    die Admin-Nutzerliste und die Sucherverwaltung nutzen sie gemeinsam
-    (frueher existierte die Logik doppelt und konnte auseinanderlaufen)."""
+    EINZIGE Stelle fuer diese Geschaeftsregel (Anzeige, Zugriff, Abrechnung).
+
+    Fail-closed (Audit 09/2026):
+    - Sperr-/Endzustand (auch bei lifetime) -> inaktiv
+    - unbekannter Plan -> inaktiv
+    - kein Ablaufdatum bei einem befristeten Plan -> inaktiv
+    - unlesbares Ablaufdatum -> inaktiv (wird protokolliert)
+    - naives Datum -> als UTC interpretiert (nie "ewig aktiv")
+    """
     if not sub:
         return {"active": False, "plan": None, "expires_at": None, "status": "none"}
     plan = sub.get("plan")
-    status_ = sub.get("status", "active")
+    status_ = sub.get("status", "active") or "active"
     expires_at = sub.get("expires_at")
-    if plan == "lifetime":
+    out = {"active": False, "plan": plan, "expires_at": expires_at, "status": status_}
+    if status_ not in _ABO_STATUS_ZUGANG:
+        return out
+    if plan not in ABO_PLAENE_ERLAUBT:
+        log.error("Abo %s: unbekannter Plan %r -> inaktiv", sub.get("id"), plan)
+        out["status"] = "ungueltig"
+        return out
+    if plan == "lifetime" and not expires_at:
+        # Lifetime ohne gesetztes Ende: aktiv, solange der Status es erlaubt.
+        # "Abo aufheben" setzt cancelled + expires_at=jetzt -> unten inaktiv.
         return {"active": True, "plan": "lifetime", "expires_at": None,
-                "status": "active"}
-    # Gekündigte Abos bleiben aktiv, bis das Ablaufdatum erreicht ist.
-    active = status_ in ("active", "cancelled")
-    if expires_at:
-        try:
-            ea = datetime.fromisoformat(expires_at)
-            if ea < datetime.now(timezone.utc):
-                active = False
-                status_ = "expired"
-        except Exception:
-            pass
-    return {"active": active, "plan": plan, "expires_at": expires_at,
-            "status": status_}
+                "status": status_}
+    if not expires_at:
+        log.error("Abo %s (%s): kein Ablaufdatum -> inaktiv", sub.get("id"), plan)
+        out["status"] = "ungueltig"
+        return out
+    ea = _ablauf_parsen(expires_at)
+    if ea is None:
+        log.error("Abo %s: unlesbares Ablaufdatum %r -> inaktiv", sub.get("id"), expires_at)
+        out["status"] = "ungueltig"
+        return out
+    if ea < datetime.now(timezone.utc):
+        out["status"] = "expired"
+        return out
+    out["active"] = True
+    return out
 
 
 async def get_subscription_status(dealer_id: str,
@@ -157,11 +257,15 @@ async def get_subscription_status(dealer_id: str,
     """Abo-Status. Ohne subject_user_id: Händler-Abo (Bestandslogik).
     Mit subject_user_id: das persönliche Abo eines Sucher-Unteraccounts."""
     if subject_user_id:
+        # Abo-Historie bleibt erhalten (Audit 09/2026): ersetzte Zeilen
+        # (status "ersetzt") zaehlen nicht, das juengste andere gilt.
         sub = await db.subscriptions.find_one(
-            {"subject_user_id": subject_user_id}, sort=[("created_at", -1)])
+            {"subject_user_id": subject_user_id, "status": {"$ne": "ersetzt"}},
+            sort=[("created_at", -1)])
     else:
         sub = await db.subscriptions.find_one(
-            {"dealer_id": dealer_id, "subject_user_id": {"$exists": False}},
+            {"dealer_id": dealer_id, "subject_user_id": {"$exists": False},
+             "status": {"$ne": "ersetzt"}},
             sort=[("created_at", -1)])
         if not sub:
             # Fallback: alte Abos, bei denen das Feld explizit null ist.

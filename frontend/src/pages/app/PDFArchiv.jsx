@@ -32,7 +32,8 @@ export default function PDFArchiv() {
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [days]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [days]);
 
   const openPdf = (id) => openContractPdf(id);
 
@@ -209,24 +210,42 @@ function SpecsZeile({ cd }) {
 }
 
 function AbholZeile({ item }) {
-  // Abholtermin + Abhol-Adresse (= Verkäufer-Anschrift aus dem Vertrag).
+  // Abholtermin + Abhol-Ort (= Verkäufer-Anschrift aus dem Vertrag).
+  // Datenschutz (Pruefbericht 09/2026): In der Liste standardmaessig nur
+  // Datum/Uhrzeit und Ort (keine Strasse, keine PLZ) — die vollstaendige
+  // Anschrift erst nach Klick auf "Adresse anzeigen", Zustand je Karte.
+  const [adresseOffen, setAdresseOffen] = useState(false);
   const cd = item.contract_data || {};
-  const adresse = [
+  const ort = (cd.seller_city || "").trim();
+  const volleAdresse = [
     (cd.seller_address || "").trim(),
-    [(cd.seller_zip || "").trim(), (cd.seller_city || "").trim()]
-      .filter(Boolean).join(" "),
+    [(cd.seller_zip || "").trim(), ort].filter(Boolean).join(" "),
   ].filter(Boolean).join(", ");
-  if (!item.pickup_date && !adresse) return null;
+  if (!item.pickup_date && !volleAdresse) return null;
+  const termin = item.pickup_date
+    ? `Abholung ${item.pickup_date}${cd.pickup_time ? `, ${cd.pickup_time} Uhr` : ""}`
+    : "";
+  const ortText = adresseOffen ? volleAdresse : ort;
+  const hatMehr = Boolean(volleAdresse) && volleAdresse !== ort;
   return (
     <div className="mt-1 flex items-center gap-1.5 text-[13.5px] leading-relaxed"
          style={{ color: "var(--text-secondary)" }}>
       <MapPin size={13} className="shrink-0" style={{ color: "var(--text-muted)" }} />
       <span className="truncate">
-        {item.pickup_date && <>Abholung {item.pickup_date}
-          {cd.pickup_time ? `, ${cd.pickup_time} Uhr` : ""}</>}
-        {item.pickup_date && adresse && " · "}
-        {adresse}
+        {termin}
+        {termin && ortText && " · "}
+        {ortText}
       </span>
+      {hatMehr && (
+        <button type="button"
+                onClick={() => setAdresseOffen((o) => !o)}
+                data-testid={`adresse-toggle-${item.id}`}
+                className="shrink-0 text-[11px] font-semibold underline-offset-2 hover:underline"
+                style={{ color: "var(--text-muted)" }}
+                title={adresseOffen ? "Vollständige Anschrift ausblenden" : "Vollständige Anschrift des Verkäufers einblenden"}>
+          {adresseOffen ? "Adresse ausblenden" : "Adresse anzeigen"}
+        </button>
+      )}
     </div>
   );
 }

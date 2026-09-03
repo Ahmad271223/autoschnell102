@@ -134,9 +134,23 @@ async def list_appointments(user=Depends(current_firma), status: Optional[str] =
     vehicles_map = {}
     async for v in db.vehicles.find({"dealer_id": user["dealer_id"]}, {"_id": 0}):
         vehicles_map[v["id"]] = v
+    # Ehemalige Fahrer (Verknuepfung entfernt / Konto geloescht): nur noch
+    # Name aus der Historie, keine Live-Berechtigung (Audit 09/2026, Punkt 13).
+    hist_ids = [a["driver_id_hist"] for a in items
+                if a.get("driver_id_hist") and not str(a["driver_id_hist"]).startswith("geloescht:")]
+    hist_map = {}
+    if hist_ids:
+        async for d in db.driver_accounts.find({"id": {"$in": hist_ids}},
+                                               {"_id": 0, "id": 1, "display_name": 1}):
+            hist_map[d["id"]] = d.get("display_name")
     for a in items:
         if a.get("driver_id") and a["driver_id"] in drivers_map:
             a["driver"] = drivers_map[a["driver_id"]]
+        elif a.get("driver_id_hist"):
+            h = a["driver_id_hist"]
+            a["driver"] = {"id": None, "ehemalig": True,
+                           "name": ("Fahrer (gelöscht)" if str(h).startswith("geloescht:")
+                                    else (hist_map.get(h) or "ehemaliger Fahrer"))}
         if a.get("vehicle_id") and a["vehicle_id"] in vehicles_map:
             a["vehicle"] = vehicles_map[a["vehicle_id"]]
     return items

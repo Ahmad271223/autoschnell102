@@ -9,7 +9,9 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/pw-browsers \
 WORKDIR /app
 
 # System-Abhaengigkeiten fuer Chromium (Snapshots) + curl fuer Health-Check.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Audit 09/2026: Betriebssystem-Pakete auf den letzten Stand (Image-Scan
+# in CI blockiert bei bekannten, behebbaren Schwachstellen).
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     curl ca-certificates fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,4 +40,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # Produktion: mehrere Worker-Prozesse (Anzahl via WEB_CONCURRENCY, Default 8).
 # ProactorEventLoop-Wahl passiert in server.py nur auf Windows; unter Linux
 # ist der Default korrekt fuer Playwright-Subprozesse.
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-8} --proxy-headers --forwarded-allow-ips='*'"]
+# Audit 09/2026 (Punkt 18/19): ZUERST genau eine Migration (Indizes, Seeds,
+# versionierte Datenmigrationen — mit Sperre), DANN die Worker. Default 4
+# Worker (statt 8): Chromium-Snapshots brauchen ~400 MB je Prozess —
+# WEB_CONCURRENCY/SNAPSHOT_CONCURRENCY an die Servergroesse anpassen.
+CMD ["sh", "-c", "python migrationen.py && uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-4} --proxy-headers --forwarded-allow-ips='*'"]

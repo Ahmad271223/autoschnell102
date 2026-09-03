@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 import { Search, KeyRound, Lock, Unlock, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 
@@ -33,6 +34,8 @@ async function deleteUserSmart(u) {
 }
 
 export default function AdminUsers() {
+  const { user: ich } = useAuth();
+  const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -64,6 +67,13 @@ export default function AdminUsers() {
   }, [users, q]);
 
   const toggleActive = async (u) => {
+    if (u.active) {
+      const firma = u.role === "dealer";
+      const text = firma
+        ? `Firma "${u.company_name || u.email}" komplett sperren?\n\nDer Chef UND alle Sucher dieser Firma werden sofort abgemeldet und koennen sich nicht mehr anmelden (auch die kostenlosen Bereiche). Das ist etwas anderes als "Abo aufheben" (nur Suche/Vergleich).`
+        : `Konto "${u.email}" sperren?\n\nAnmeldung wird sofort unmoeglich, die Sitzung beendet. "Abo aufheben" (nur Suche/Vergleich) findest du in der Firmenansicht.`;
+      if (!window.confirm(text)) return;
+    }
     try {
       await api.post(`/admin/users/${u.id}/active`, { active: !u.active });
       toast.success(u.active ? "Account gesperrt" : "Account entsperrt");
@@ -106,7 +116,7 @@ export default function AdminUsers() {
         title="Nutzer"
         subtitle={`${users.length} Konten insgesamt`}
         action={
-          <Button
+          <Button disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin legt Firmen an"}
             data-testid="admin-create-user-btn"
             onClick={() => setCreating(true)}
             variant="primary"
@@ -159,9 +169,13 @@ export default function AdminUsers() {
                     <div className="text-[11.5px] text-zinc-500 mt-0.5">Erstellt: {fmtDate(u.created_at)}</div>
                   </Link>
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    {!superAdmin && <span className="text-[11px] text-zinc-500">nur lesen</span>}
+                    {superAdmin && (<>
                     <Button data-testid={`user-pw-btn-${u.id}`} variant="outline" size="sm" onClick={() => setResetUser(u)} title="Passwort setzen">
                       <KeyRound size={14} /> Passwort
                     </Button>
+                    </>)}
+                    {superAdmin && (<>
                     <Button
                       data-testid={`user-toggle-active-btn-${u.id}`}
                       variant={u.active ? "outline" : "primary"}
@@ -171,7 +185,8 @@ export default function AdminUsers() {
                     >
                       {u.active ? <><Lock size={14}/>Sperren</> : <><Unlock size={14}/>Entsperren</>}
                     </Button>
-                    {!u.is_super_admin && (
+                    </>)}
+                    {superAdmin && !u.is_super_admin && (
                       <Button
                         data-testid={`user-delete-btn-${u.id}`}
                         variant="danger"

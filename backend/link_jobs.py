@@ -98,6 +98,9 @@ async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:
         "attempts": 0,
         "error": None,
         "requested_by_dealer": dealer_id,
+        # Audit 09/2026 (Punkt 33): alle Firmen, die auf diesen Job warten —
+        # nur sie duerfen den Status abfragen.
+        "dealer_ids": [dealer_id] if dealer_id else [],
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -106,6 +109,10 @@ async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:
         job.pop("_id", None)
         return job
     except DuplicateKeyError:
+        if dealer_id:
+            await db.link_jobs.update_one(
+                {"cache_key": identity["cache_key"], "active": True},
+                {"$addToSet": {"dealer_ids": dealer_id}})
         existing = await db.link_jobs.find_one(
             {"cache_key": identity["cache_key"], "active": True}, {"_id": 0})
         if existing:
@@ -118,6 +125,28 @@ async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:
 
 async def get_job(db, job_id: str) -> Optional[dict]:
     return await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
+
+
+# Audit 09/2026 (Punkt 17): Sofort-Anstoesse sind je Prozess begrenzt und
+# dedupliziert — viele parallele Link-Einreichungen erzeugen keine
+# unbegrenzten Tasks mehr; der Dauer-Worker holt den Rest im 0,3-s-Takt.
+SOFORT_MAX = int(os.environ.get("LINK_JOB_SOFORT_MAX", "2") or 2)
+_sofort_laufend: set = set()
+
+
+def anstossen(db) -> bool:
+    """Einen wartenden Job sofort bearbeiten lassen — hoechstens SOFORT_MAX
+    gleichzeitig; sonst False (Worker-Schleife uebernimmt)."""
+    _sofort_laufend.difference_update({t for t in _sofort_laufend if t.done()})
+    if len(_sofort_laufend) >= SOFORT_MAX:
+        return False
+    try:
+        task = asyncio.get_running_loop().create_task(process_one_now(db))
+    except RuntimeError:
+        return False
+    _sofort_laufend.add(task)
+    task.add_done_callback(_sofort_laufend.discard)
+    return True
 
 
 async def process_one_now(db) -> None:

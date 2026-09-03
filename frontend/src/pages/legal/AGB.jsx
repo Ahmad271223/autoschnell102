@@ -16,8 +16,13 @@ export default function AGB() {
         B2B-Marktplatz, Fahrer-App). Das Angebot richtet sich ausschließlich
         an Unternehmer im Sinne von § 14 BGB (Autohändler, Zwischenhändler
         und deren Mitarbeiter). Eine Nutzung durch Verbraucher ist
-        ausgeschlossen. Mit der Registrierung bestätigt der Nutzer, als
-        Unternehmer zu handeln.
+        ausgeschlossen. Mit der Registrierung bestätigt der Nutzer
+        ausdrücklich, als Unternehmer (B2B) zu handeln, und akzeptiert diese
+        AGB sowie die Datenschutzerklärung. Bei der Registrierung als
+        Zwischenhändler auf dem Marktplatz erfolgt diese Bestätigung über
+        eine Pflicht-Checkbox; die Angabe der USt-IdNr. oder
+        Handelsregister-Nummer ist freiwillig und dient der Prüfung der
+        Unternehmereigenschaft.
       </p>
 
       <H2>2. Leistungen des Anbieters</H2>
@@ -45,18 +50,30 @@ export default function AGB() {
       </ul>
 
       <H2>4. Preise und Zahlung</H2>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Preis-/USt-Darstellung
+          bitte vor dem Live-Gang bestaetigen. Technischer Stand 09/2026:
+          Stripe zieht fuer den Marktplatz-Zugang exakt 20,00 € ein
+          (BUYER_ACCESS_PRICE in backend/routes/marketplace.py, kein
+          USt-Aufschlag) -> hier als Brutto-Endpreis ausgewiesen. Sucher-Abo
+          150/1.500 € und Verkaufspakete werden manuell per Rechnung
+          abgerechnet -> hier netto zzgl. USt. Gilt die
+          Kleinunternehmerregelung (§ 19 UStG), sind die USt-Aussagen und
+          die Rechnungsangaben anzupassen. */}
       <ul className="list-disc pl-6 space-y-1">
         <li>Der Händler-Hauptaccount (Verwalten &amp; Verkaufen) ist kostenlos.</li>
-        <li>Sucher-Abo (Vergleich/Suche, pro Nutzer): 150 € / Monat oder
-            1.500 € / Jahr — Abrechnung per Rechnung.</li>
-        <li>Marktplatz-Zugang für Zwischenhändler: 20 € / Monat (Zahlung über Stripe).</li>
+        <li>Sucher-Abo (Suche &amp; Vergleich, pro Nutzer): 150 € / Monat
+            (30 Tage) oder 1.500 € / Jahr (365 Tage) — jeweils netto zzgl.
+            gesetzlicher Umsatzsteuer, Abrechnung per Rechnung; die
+            Freischaltung erfolgt nach Zahlungseingang durch den Anbieter.</li>
+        <li>Marktplatz-Zugang für Zwischenhändler: 20 € / Monat (30 Tage) —
+            Endpreis inkl. gesetzlicher Umsatzsteuer, Zahlung im Voraus über
+            Stripe oder per Rechnung.</li>
         <li>Verkaufspakete (Anzahl Veröffentlichungen pro Monat) gemäß
-            aktueller Preisliste. Eine Veröffentlichung zählt auch dann,
-            wenn das Inserat im selben Zeitraum wieder gelöscht wird.</li>
-        <li>Alle Preise verstehen sich zzgl. gesetzlicher Umsatzsteuer,
-            soweit anwendbar. Die Zahlung erfolgt derzeit per
-            Rechnung/Überweisung; die Freischaltung erfolgt nach
-            Zahlungseingang durch den Anbieter.</li>
+            aktueller Preisliste, netto zzgl. gesetzlicher Umsatzsteuer.
+            Eine Veröffentlichung zählt auch dann, wenn das Inserat im
+            selben Zeitraum wieder gelöscht wird.</li>
+        <li>Rechnungen weisen die Umsatzsteuer gesondert aus. Die aktuell
+            gültigen Preise werden in der Anwendung angezeigt.</li>
       </ul>
 
       <H2>5. Laufzeit und Kündigung</H2>

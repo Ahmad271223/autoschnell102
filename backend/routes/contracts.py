@@ -28,6 +28,7 @@ from deps import (
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
 import auto_daten
+from cleanup_service import vertrag_endgueltig_loeschen
 from lifecycle import try_set_lifecycle
 from pdf_service import generate_contract_pdf
 
@@ -629,28 +630,29 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
 async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Berechtigungsmatrix (PR-Review 09/2026): Loeschen ist destruktiv —
     # der Chef darf alle Vertraege der Firma loeschen, ein Sucher NUR die
-    # von ihm selbst erstellten.
-    if user.get("role") == "sucher":
-        eigener = await db.generated_pdfs.find_one(
-            {"id": contract_id, "dealer_id": user["dealer_id"]},
-            {"_id": 0, "user_id": 1})
-        if not eigener:
-            raise HTTPException(404, "Vertrag nicht gefunden")
-        if eigener.get("user_id") != user["id"]:
-            raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
-                                     "löschen — fremde Verträge löscht der "
-                                     "Händler-Hauptaccount")
-    res = await db.generated_pdfs.delete_one({"id": contract_id, "dealer_id": user["dealer_id"]})
-    if not res.deleted_count:
+    # von ihm selbst erstellten. Existenz/Eigentum wird VOR der Loeschung
+    # geprueft (404/403 bleiben wie bisher).
+    vorhanden = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "user_id": 1, "contract_no": 1})
+    if not vorhanden:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    # Kaskade (PR-Review 09/2026): archivierte Versionen mitloeschen und
-    # Termin-Verweise kappen — sonst blieben verwaiste Versionen und
-    # Termine, deren "Kaufvertrag oeffnen" ins Leere zeigt.
-    await db.generated_pdf_versions.delete_many(
-        {"contract_id": contract_id, "dealer_id": user["dealer_id"]})
-    await db.appointments.update_many(
-        {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"contract_id": None, "updated_at": now_iso()}})
+    if user.get("role") == "sucher" and vorhanden.get("user_id") != user["id"]:
+        raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
+                                 "löschen — fremde Verträge löscht der "
+                                 "Händler-Hauptaccount")
+    # Kaskade ueber EINE idempotente, wiederaufnehmbare Funktion (Go-Live-
+    # Audit 09/2026): Grabstein am Vertrag, dann Versionen loeschen, Termin-
+    # Verweise kappen, zuletzt der Vertrag. Bricht der Vorgang ab, fuehrt
+    # der Aufraeumjob ihn zu Ende. Vorher wurde der Vertrag ZUERST geloescht
+    # und die Kaskade konnte verwaiste Versionen/Termine hinterlassen.
+    ok = await vertrag_endgueltig_loeschen(
+        db, contract_id, scrub_pii=False, grund="manuell", audit=False)
+    if not ok:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    await log_activity(user["dealer_id"], user["id"], "vertrag.geloescht.manuell",
+                       ref=contract_id,
+                       meta={"contract_no": vorhanden.get("contract_no")})
     return {"ok": True}
 
 

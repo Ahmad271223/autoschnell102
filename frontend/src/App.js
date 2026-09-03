@@ -31,6 +31,7 @@ import AdminFreischaltungen from "@/pages/admin_v2/Freischaltungen";
 import AdminSettings from "@/pages/admin_v2/Settings";
 import AdminAutoDaten from "@/pages/admin_v2/AutoDaten";
 import AdminFahrer from "@/pages/admin_v2/Fahrer";
+import AdminBetrieb from "@/pages/admin_v2/Betrieb";
 
 import Vergleich from "@/pages/app/Vergleich";
 import ManuelleSuche from "@/pages/app/ManuelleSuche";
@@ -148,6 +149,7 @@ export default function App() {
               <Route path="errors" element={<AdminErrors />} />
               <Route path="freischaltungen" element={<AdminFreischaltungen />} />
               <Route path="auto-daten" element={<AdminAutoDaten />} />
+              <Route path="betrieb" element={<AdminBetrieb />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>
 
