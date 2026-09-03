@@ -146,12 +146,21 @@ class TestSoftBlock:
         )
         assert r.status_code == 400, r.text
 
-    def test_cannot_block_self(self, legacy_admin_token):
+    def test_cannot_block_self(self, legacy_admin_token, super_admin_token):
+        # Audit 09/2026: Sperren ist Super-Admin-exklusiv -> normaler Admin 403 ...
         token, user = legacy_admin_token
         h = {"Authorization": f"Bearer {token}"}
         r = requests.post(
             f"{BASE_URL}/api/admin/users/{user['id']}/active",
             json={"active": False}, headers=h, timeout=20,
+        )
+        assert r.status_code == 403, r.text
+        # ... und der Super-Admin kann sich weiterhin nicht selbst sperren (400)
+        stoken, suser = super_admin_token
+        r = requests.post(
+            f"{BASE_URL}/api/admin/users/{suser['id']}/active",
+            json={"active": False},
+            headers={"Authorization": f"Bearer {stoken}"}, timeout=20,
         )
         assert r.status_code == 400, r.text
 
@@ -181,7 +190,7 @@ class TestAdminResetPassword:
             f"{BASE_URL}/api/admin/users/{test_dealer['id']}/password",
             json={"new_password": "abc"}, headers=admin_headers, timeout=20,
         )
-        assert r.status_code == 400, r.text
+        assert r.status_code in (400, 422), r.text   # zentrale Passwortregel (422 aus dem Modell)
 
 
 # --------------------- /admin/me/password ---------------------
