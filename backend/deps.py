@@ -237,6 +237,17 @@ async def require_active_sub(user=Depends(current_user)):
     return user
 
 
+async def naechste_kunden_nr() -> int:
+    """Fortlaufende Firmen-Kundennummer, automatisch und atomar vergeben.
+    Start bei 1001 (4-stellig) — Wunsch 09/2026: der Betreiber muss nichts
+    angeben und findet Firmen ueber die kurze Nummer wieder."""
+    doc = await db.counters.find_one_and_update(
+        {"_id": "kunden_nr"},
+        {"$inc": {"seq": 1}, "$setOnInsert": {"start": 1000}},
+        upsert=True, return_document=True)
+    return 1000 + int(doc["seq"] if doc else 1)
+
+
 async def log_activity(dealer_id: str, user_id: str, action: str,
                        ref: Optional[str] = None, meta: Optional[dict] = None):
     await db.activity_logs.insert_one({

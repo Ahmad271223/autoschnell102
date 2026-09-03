@@ -334,3 +334,110 @@ def test_11_self_signup_aus(welt):
         "email": f"bt_neu_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "N", "last_name": "S"}, timeout=30)
     assert r.status_code == 403 and "Betreiber" in r.text, r.text[:200]
+
+
+# ---------- Firmen-Verwaltung 09/2026: Kundennummer, Chef-Zeile, Gueltig-bis ----------
+def test_12_kundennummer_automatisch_vierstellig(welt):
+    """Jede Firma bekommt automatisch eine fortlaufende 4-stellige
+    Kundennummer (ab 1001) — nichts anzugeben, sichtbar in Liste + Detail."""
+    d = _db().dealers.find_one({"id": welt["dealer_id"]}, {"kunden_nr": 1})
+    assert d and isinstance(d.get("kunden_nr"), int), d
+    assert 1001 <= d["kunden_nr"] <= 9999
+    welt["kunden_nr"] = d["kunden_nr"]
+    # zweite Firma -> hoehere Nummer, nie dieselbe
+    r = requests.post(f"{API}/admin/users", headers=welt["A"], json={
+        "email": f"bt_chef2_{SUF}@e2etest-mail.de", "password": PW,
+        "company_name": f"Zweite Firma {SUF}", "plan_type": "none"}, timeout=30)
+    assert r.status_code == 200, r.text[:300]
+    welt["dealer2_id"] = r.json()["dealer_id"]
+    d2 = _db().dealers.find_one({"id": welt["dealer2_id"]}, {"kunden_nr": 1})
+    assert d2["kunden_nr"] > welt["kunden_nr"]
+    # Nutzerliste + Detail liefern die Nummer (Suche im Admin nach #Nummer)
+    liste = requests.get(f"{API}/admin/users", headers=welt["A"], timeout=30).json()
+    chef = next(x for x in liste if x["id"] == welt["chef_id"])
+    assert chef["kunden_nr"] == welt["kunden_nr"]
+    assert chef["company_name"] == f"Betreiber Autohaus {SUF}"
+    det = requests.get(f"{API}/admin/users/{welt['chef_id']}/contracts",
+                       headers=welt["A"], timeout=30).json()["user"]
+    assert det["kunden_nr"] == welt["kunden_nr"]
+    assert det["company_name"] == f"Betreiber Autohaus {SUF}"
+    # Aufraeumen der zweiten Firma
+    dbx = _db()
+    dbx.users.delete_many({"dealer_id": welt["dealer2_id"]})
+    dbx.dealers.delete_many({"id": welt["dealer2_id"]})
+
+
+def test_13_chef_steht_in_der_firmenliste(welt):
+    """Die Firmen-Karte zeigt den Chef zuerst (ist_chef) mit seinem
+    Sucher-Funktion-Status, danach die Sucher."""
+    r = requests.get(f"{API}/admin/dealers/{welt['dealer_id']}/sucher",
+                     headers=welt["A"], timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    rows = r.json()
+    assert rows[0]["id"] == welt["chef_id"] and rows[0]["ist_chef"] is True
+    assert "password_hash" not in rows[0]
+    assert rows[0]["subscription"]["active"] is True          # aus test_06
+    sucher = next(x for x in rows if x["id"] == welt["sucher_id"])
+    assert sucher["ist_chef"] is False
+
+
+def test_14_gueltig_bis_frei_waehlbar_und_automatische_sperre(welt):
+    """Freischalten mit 'gueltig_bis' setzt genau dieses Ablaufdatum; das
+    Datum ist spaeter ohne neue Zahlung aenderbar; nach Ablauf sperrt die
+    Sucher-Funktion automatisch (402)."""
+    dbx = _db()
+    heute = datetime.now(timezone.utc).date()
+    bis = (heute + timedelta(days=45)).isoformat()
+    vorher = dbx.manual_payments.count_documents({"subject_user_id": welt["sucher_id"]})
+    r = requests.post(f"{API}/admin/sucher/{welt['sucher_id']}/abo",
+                      headers=welt["A"], json={"plan": "monthly", "gueltig_bis": bis},
+                      timeout=30)
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["expires_at"].startswith(bis)
+    sub = dbx.subscriptions.find_one({"subject_user_id": welt["sucher_id"], "status": "active"})
+    assert sub["expires_at"].startswith(f"{bis}T23:59:59")   # Tagesende (Berlin)
+    # Freischalten erfasst weiterhin eine Zahlung, bezahlt bis = gueltig_bis
+    assert dbx.manual_payments.count_documents({"subject_user_id": welt["sucher_id"]}) == vorher + 1
+    assert dbx.manual_payments.find_one({"subject_user_id": welt["sucher_id"]},
+                                        sort=[("created_at", -1)])["period_until"].startswith(bis)
+    # Ungueltiges Datum -> 400
+    r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
+                       headers=welt["A"], json={"gueltig_bis": "31.12.2026"}, timeout=30)
+    assert r.status_code == 400, r.text[:200]
+    # Nur Datum aendern: KEINE neue Zahlung, Liste zeigt neues Datum
+    neu = (heute + timedelta(days=10)).isoformat()
+    r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
+                       headers=welt["A"], json={"gueltig_bis": neu}, timeout=30)
+    assert r.status_code == 200, r.text[:300]
+    assert dbx.manual_payments.count_documents({"subject_user_id": welt["sucher_id"]}) == vorher + 1
+    zeile = next(x for x in requests.get(
+        f"{API}/admin/dealers/{welt['dealer_id']}/sucher", headers=welt["A"],
+        timeout=30).json() if x["id"] == welt["sucher_id"])
+    assert zeile["naechste_zahlung_am"].startswith(neu)
+    assert zeile["subscription"]["active"] is True
+    # Datum in der Vergangenheit -> Sucher-Funktion automatisch gesperrt
+    gestern = (heute - timedelta(days=1)).isoformat()
+    r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
+                       headers=welt["A"], json={"gueltig_bis": gestern}, timeout=30)
+    assert r.status_code == 200, r.text[:300]
+    zeile = next(x for x in requests.get(
+        f"{API}/admin/dealers/{welt['dealer_id']}/sucher", headers=welt["A"],
+        timeout=30).json() if x["id"] == welt["sucher_id"])
+    assert zeile["subscription"]["active"] is False
+    r = requests.post(f"{API}/mobile/compare", headers=welt["S"],
+                      json={"url": f"https://www.kleinanzeigen.de/s-anzeige/x/96{uuid.uuid4().int % 10**8:08d}-216-1"},
+                      timeout=60)
+    assert r.status_code == 402, r.text[:200]
+    # Abgelaufen per Datum = weiterhin per neuem Datum verlaengerbar (ohne
+    # neue Zahlung) — der Betreiber steuert die Gueltigkeit frei.
+    r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
+                       headers=welt["A"], json={"gueltig_bis": bis}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    assert dbx.manual_payments.count_documents({"subject_user_id": welt["sucher_id"]}) == vorher + 1
+    # Aufgehobenes Abo (plan=null): kein Datum mehr setzbar (404)
+    r = requests.post(f"{API}/admin/sucher/{welt['sucher_id']}/abo",
+                      headers=welt["A"], json={"plan": None}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
+                       headers=welt["A"], json={"gueltig_bis": bis}, timeout=30)
+    assert r.status_code == 404, r.text[:200]

@@ -8,6 +8,10 @@ import {
 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum } from "./_ui";
 
+// Nur der Kalendertag (aus dem ISO-String, ohne Zeitzonen-Verschiebung):
+// "2026-12-31T23:59:59+01:00" -> "31.12.2026"
+const fmtTag = (iso) => (iso ? String(iso).slice(0, 10).split("-").reverse().join(".") : "—");
+
 export default function AdminUserDetail() {
   const { id } = useParams();
   const [data, setData] = useState(null);
@@ -15,6 +19,7 @@ export default function AdminUserDetail() {
   const [sucher, setSucher] = useState(null);
   const [zahlungen, setZahlungen] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [gueltigBis, setGueltigBis] = useState({});   // je Konto-Id das Datumsfeld
 
   const load = async () => {
     setLoading(true);
@@ -60,8 +65,22 @@ export default function AdminUserDetail() {
 
   const grantAbo = async (s, plan) => {
     try {
-      await api.post(`/admin/sucher/${s.id}/abo`, { plan });
-      toast.success(`Abo freigeschaltet (${plan === "yearly" ? "1.500 € / Jahr" : "150 € / Monat"}) — Zahlung erfasst`);
+      const datum = (gueltigBis[s.id] || "").trim();
+      await api.post(`/admin/sucher/${s.id}/abo`,
+        { plan, ...(datum ? { gueltig_bis: datum } : {}) });
+      toast.success(`Abo freigeschaltet (${plan === "yearly" ? "1.500 € / Jahr" : "150 € / Monat"})`
+        + (datum ? ` · gültig bis ${datum}` : "") + " — Zahlung erfasst");
+      setGueltigBis((g) => ({ ...g, [s.id]: "" }));
+      loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+  const saveGueltigBis = async (s) => {
+    const datum = (gueltigBis[s.id] || "").trim();
+    if (!datum) { toast.error("Bitte ein Datum wählen"); return; }
+    try {
+      await api.patch(`/admin/sucher/${s.id}/abo-gueltig-bis`, { gueltig_bis: datum });
+      toast.success(`Gültig bis ${datum} gespeichert — danach wird automatisch gesperrt`);
+      setGueltigBis((g) => ({ ...g, [s.id]: "" }));
       loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
   };
@@ -112,6 +131,7 @@ export default function AdminUserDetail() {
           </div>
           <Row icon={<Mail size={14} />}     label="E-Mail"        value={u.email} />
           <Row icon={<Building2 size={14} />} label="Firma"        value={u.company_name || "—"} />
+          {u.kunden_nr != null && <Row label="Kundennummer" value={<Badge tone="blue">#{u.kunden_nr}</Badge>} />}
           <Row icon={<Calendar size={14} />}  label="Erstellt"      value={fmtDate(u.created_at)} />
           <Row label="Rolle"        value={<Badge tone={u.role === "admin" ? "purple" : "gray"}>{u.role || "dealer"}</Badge>} />
           <Row label="Status"       value={u.active === false
@@ -167,7 +187,7 @@ export default function AdminUserDetail() {
           <Card className="lg:col-span-2" padded={false}>
             <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
               <div className="flex items-center gap-2">
-                <span className="text-[15px] font-semibold text-white">Sucher dieser Firma</span>
+                <span className="text-[15px] font-semibold text-white">Chef & Sucher — Freischaltung</span>
                 <Badge>{fmtNum((sucher || []).length)}</Badge>
               </div>
               <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher">
@@ -183,7 +203,7 @@ export default function AdminUserDetail() {
                     <tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
                       <th className="px-4 py-2.5 font-medium">Sucher</th>
                       <th className="px-4 py-2.5 font-medium">Abo</th>
-                      <th className="px-4 py-2.5 font-medium">Nächste Zahlung</th>
+                      <th className="px-4 py-2.5 font-medium">Gültig bis / nächste Zahlung</th>
                       <th className="px-4 py-2.5 font-medium">Status</th>
                       <th className="px-4 py-2.5 font-medium text-right">Aktion</th>
                     </tr>
@@ -192,25 +212,59 @@ export default function AdminUserDetail() {
                     {sucher.map((s) => (
                       <tr key={s.id} className="border-t border-white/5">
                         <td className="px-4 py-2.5">
-                          <div className="text-white font-medium">{s.first_name} {s.last_name}</div>
+                          <div className="text-white font-medium flex items-center gap-1.5">
+                            {s.ist_chef ? (u.contact_person || u.company_name || "Firmenchef") : `${s.first_name || ""} ${s.last_name || ""}`.trim() || "—"}
+                            {s.ist_chef && <Badge tone="yellow">Chef</Badge>}
+                          </div>
                           <div className="text-[11px] text-zinc-500">{s.email}</div>
                         </td>
                         <td className="px-4 py-2.5">
                           {s.subscription?.active ? (
-                            <Badge tone="green">{s.subscription.plan === "yearly" ? "jährlich · 1.500 €" : "monatlich · 150 €"}</Badge>
+                            <Badge tone="green">
+                              Sucher-Funktion: ja · {s.subscription.plan === "yearly" ? "jährlich · 1.500 €" : "monatlich · 150 €"}
+                            </Badge>
                           ) : (
-                            <div className="flex gap-1.5">
-                              <Button size="sm" onClick={() => grantAbo(s, "monthly")} title="30 Tage — erfasst 150 € Zahlung">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Badge tone="red">Sucher-Funktion: nein</Badge>
+                              <Button size="sm" onClick={() => grantAbo(s, "monthly")}
+                                      data-testid={`abo-monat-${s.id}`}
+                                      title="Freischalten — erfasst 150 € Zahlung; ohne Datum 30 Tage gültig">
                                 <Check size={13} /> 150 €/M
                               </Button>
-                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")} title="365 Tage — erfasst 1.500 € Zahlung">
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")}
+                                      data-testid={`abo-jahr-${s.id}`}
+                                      title="Freischalten — erfasst 1.500 € Zahlung; ohne Datum 365 Tage gültig">
                                 1.500 €/J
                               </Button>
                             </div>
                           )}
                         </td>
                         <td className="px-4 py-2.5 text-zinc-400 tabular-nums">
-                          {s.subscription?.active ? fmtDate(s.naechste_zahlung_am) : "—"}
+                          <div className="flex items-center gap-1.5">
+                            <input type="date" value={gueltigBis[s.id] || ""}
+                                   onChange={(e) => setGueltigBis((g) => ({ ...g, [s.id]: e.target.value }))}
+                                   data-testid={`gueltig-bis-${s.id}`}
+                                   title={s.subscription?.active
+                                     ? "Neues Ablaufdatum — Speichern ändert NUR das Datum (keine neue Zahlung)"
+                                     : "Optional: gilt beim Freischalten als Ablaufdatum"}
+                                   className="h-8 px-2 rounded-lg text-[12px] outline-none"
+                                   style={{ background: "#18181b", color: "#fff",
+                                            border: "1px solid rgba(255,255,255,0.12)", colorScheme: "dark" }} />
+                            {s.subscription?.active && (
+                              <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)}
+                                      data-testid={`gueltig-bis-speichern-${s.id}`}
+                                      title="Ablaufdatum speichern — danach automatisch gesperrt">
+                                Speichern
+                              </Button>
+                            )}
+                          </div>
+                          <div className="text-[11px] mt-1" style={{ color: "var(--text-muted, #71717a)" }}>
+                            {s.subscription?.active
+                              ? <>gültig bis {fmtTag(s.naechste_zahlung_am)} · danach automatisch gesperrt</>
+                              : (s.subscription?.status === "expired" && s.subscription?.expires_at
+                                ? <span className="text-red-300">abgelaufen am {fmtTag(s.subscription.expires_at)} · automatisch gesperrt</span>
+                                : "—")}
+                          </div>
                         </td>
                         <td className="px-4 py-2.5">
                           <Badge tone={s.active ? "green" : "red"}>{s.active ? "aktiv" : "gesperrt"}</Badge>
@@ -221,12 +275,16 @@ export default function AdminUserDetail() {
                               Abo aufheben
                             </Button>
                           )}
-                          <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} title={s.active ? "Sperren" : "Entsperren"}>
-                            <Ban size={13} /> {s.active ? "Sperren" : "Entsperren"}
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} title="Löschen">
-                            <Trash2 size={13} />
-                          </Button>
+                          {!s.ist_chef && (
+                            <>
+                              <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} title={s.active ? "Sperren" : "Entsperren"}>
+                                <Ban size={13} /> {s.active ? "Sperren" : "Entsperren"}
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} title="Löschen">
+                                <Trash2 size={13} />
+                              </Button>
+                            </>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -259,7 +317,7 @@ export default function AdminUserDetail() {
                     </div>
                     <div className="text-[12px] text-zinc-400">
                       {z.plan ? (z.plan === "yearly" ? "Jahres-Abo" : "Monats-Abo") : "manuell"}
-                      {z.period_until ? ` · bezahlt bis ${fmtDate(z.period_until)}` : ""}
+                      {z.period_until ? ` · bezahlt bis ${fmtTag(z.period_until)}` : ""}
                       {z.note ? ` · ${z.note}` : ""}
                     </div>
                   </li>

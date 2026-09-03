@@ -58,7 +58,9 @@ export default function AdminUsers() {
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return users;
-    return users.filter((u) => [u.email, u.username, u.company_name].join(" ").toLowerCase().includes(s));
+    return users.filter((u) => [u.email, u.username, u.company_name,
+      u.kunden_nr != null ? `#${u.kunden_nr}` : "", String(u.kunden_nr ?? "")]
+      .join(" ").toLowerCase().includes(s));
   }, [users, q]);
 
   const toggleActive = async (u) => {
@@ -121,7 +123,7 @@ export default function AdminUsers() {
             data-testid="admin-users-search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Nutzer suchen (E-Mail, Firma, Benutzername)"
+            placeholder="Firma suchen (Name, #Kundennummer, E-Mail)"
             className="flex-1 bg-transparent border-0 outline-none text-[14px] text-white placeholder:text-zinc-500"
           />
         </div>
@@ -141,6 +143,7 @@ export default function AdminUsers() {
                       <span className="text-[14.5px] font-semibold text-white truncate">
                         {u.company_name || u.username || u.email}
                       </span>
+                      {u.kunden_nr != null && <Badge tone="blue">#{u.kunden_nr}</Badge>}
                       {u.role === "admin" && <Badge tone="purple">Admin</Badge>}
                       {u.is_super_admin && <Crown size={13} className="text-amber-400" />}
                       {u.active === false ? <Badge tone="red">Gesperrt</Badge> : <Badge tone="green">Aktiv</Badge>}

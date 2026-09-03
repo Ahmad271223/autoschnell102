@@ -186,6 +186,8 @@ async def register(body: RegisterIn, request: Request):
     # profil, dann der Benutzer. Scheitert der Benutzer-Insert, wird das
     # Profil wieder entfernt — es bleibt nie ein aktives, aber unvollstaendiges
     # Konto zurueck (vorher: Benutzer ohne Haendlerprofil).
+    from deps import naechste_kunden_nr
+    dealer_doc["kunden_nr"] = await naechste_kunden_nr()
     await db.dealers.insert_one(dealer_doc)
     try:
         await db.users.insert_one(user_doc)

@@ -76,8 +76,10 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
         "dealer_id": dealer_id, "current_session_id": None,
         "created_at": now_iso(),
     })
+    from deps import naechste_kunden_nr
     await db.dealers.insert_one({
         "id": dealer_id, "user_id": user_id, "company_name": body.company_name,
+        "kunden_nr": await naechste_kunden_nr(),
         "contact_person": "", "phone": "", "email": body.email,
         "address": "", "zip_code": "", "city": "", "logo_url": "",
         "comparison_rules": DEFAULT_RULES,
@@ -128,7 +130,8 @@ async def admin_list_users(_=Depends(current_admin),
         .sort("created_at", -1).skip((page - 1) * limit).to_list(limit)
     dealer_ids = list({u.get("dealer_id") for u in users if u.get("dealer_id")})
     dealers = {d["id"]: d async for d in db.dealers.find(
-        {"id": {"$in": dealer_ids}}, {"_id": 0, "id": 1, "company_name": 1})}
+        {"id": {"$in": dealer_ids}},
+        {"_id": 0, "id": 1, "company_name": 1, "kunden_nr": 1})}
     # Juengstes HAENDLER-Abo je Firma — mit derselben Vorrang-Regel wie
     # deps.get_subscription_status: Dokumente OHNE subject_user_id-Feld
     # gewinnen gegen Alt-Dokumente mit explizitem null, egal wie alt.
@@ -156,6 +159,7 @@ async def admin_list_users(_=Depends(current_admin),
             persoenlich[row["_id"]] = row["sub"]
     return [{**u,
              "company_name": dealers.get(u.get("dealer_id"), {}).get("company_name"),
+             "kunden_nr": dealers.get(u.get("dealer_id"), {}).get("kunden_nr"),
              "subscription": sub_status_from_doc(
                  persoenlich.get(u["id"]) if u.get("role") == "sucher"
                  else newest_subs.get(u.get("dealer_id")))}
@@ -573,6 +577,14 @@ async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     if not user:
         raise HTTPException(404, "Nutzer nicht gefunden")
+    # Firmen-Kopf (Wunsch 09/2026): Firmenname + Kundennummer mitliefern.
+    if user.get("dealer_id"):
+        firma = await db.dealers.find_one(
+            {"id": user["dealer_id"]},
+            {"_id": 0, "company_name": 1, "kunden_nr": 1})
+        if firma:
+            user.setdefault("company_name", firma.get("company_name"))
+            user["kunden_nr"] = firma.get("kunden_nr")
     items = await db.generated_pdfs.find(
         {"$or": [{"user_id": user_id}, {"dealer_id": user.get("dealer_id")}]},
         {"_id": 0, "pdf_b64": 0},
@@ -862,13 +874,19 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
     if plan not in SUCHER_PLANS:
         raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {plan}")
     days = SUCHER_PLANS[plan]["days"]
-    # Restlaufzeit erhalten (PR-Review 09/2026): erneutes Freischalten
-    # verlaengert ab dem bisherigen Ablauf, nicht ab "jetzt".
-    basis = _restlaufzeit_basis(
-        (await db.subscriptions.find_one(
-            {"subject_user_id": sucher_id, "status": "active"},
-            {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
-    expires_at = (basis + timedelta(days=days)).isoformat()
+    gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
+    if gueltig_bis:
+        # Wunsch 09/2026: der Betreiber schreibt direkt "bis wann gueltig" —
+        # ab dann sperrt die Sucher-Funktion automatisch (Abo-Ablaufpruefung).
+        expires_at = gueltig_bis
+    else:
+        # Restlaufzeit erhalten (PR-Review 09/2026): erneutes Freischalten
+        # verlaengert ab dem bisherigen Ablauf, nicht ab "jetzt".
+        basis = _restlaufzeit_basis(
+            (await db.subscriptions.find_one(
+                {"subject_user_id": sucher_id, "status": "active"},
+                {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
+        expires_at = (basis + timedelta(days=days)).isoformat()
     await db.subscriptions.delete_many({"subject_user_id": sucher_id})
     await db.subscriptions.insert_one({
         "id": str(uuid.uuid4()),
@@ -910,6 +928,57 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
         {"$set": {"status": "erledigt", "updated_at": now_iso(),
                   "erledigt_durch": "freischaltung"}})
     return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at}
+
+
+def _gueltig_bis_parsen(wert) -> str:
+    """'JJJJ-MM-TT' -> Ablauf am ENDE dieses Tages (UTC); None/leer -> ''.
+    Vergangene Daten sind erlaubt (bewusstes Sofort-Sperren)."""
+    if not wert:
+        return ""
+    import re as _re
+    w = str(wert).strip()[:10]
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", w):
+        raise HTTPException(400, "gueltig_bis muss ein Datum JJJJ-MM-TT sein")
+    try:
+        tag = datetime.fromisoformat(w)
+    except ValueError:
+        raise HTTPException(400, "gueltig_bis ist kein gueltiges Datum")
+    # Tagesende in deutscher Zeit — sonst zeigt die Oberflaeche den Folgetag
+    # (UTC 23:59 = 00:59 Berlin). Ohne tzdata (Windows-Dev) Fallback +01:00.
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Berlin")
+    except Exception:
+        tz = timezone(timedelta(hours=1))
+    return tag.replace(hour=23, minute=59, second=59, tzinfo=tz).isoformat()
+
+
+@router.patch("/admin/sucher/{sucher_id}/abo-gueltig-bis")
+async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
+                                    admin=Depends(current_admin)):
+    """NUR das Ablaufdatum eines AKTIVEN Abos aendern (Wunsch 09/2026) —
+    ohne neue Zahlung zu erfassen. Nach dem Datum sperrt die
+    Sucher-Funktion automatisch."""
+    gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
+    if not gueltig_bis:
+        raise HTTPException(400, "gueltig_bis (JJJJ-MM-TT) fehlt")
+    r = await db.subscriptions.update_many(
+        {"subject_user_id": sucher_id, "status": "active"},
+        {"$set": {"expires_at": gueltig_bis, "updated_at": now_iso()}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
+    # Zahlungshistorie: "bezahlt bis" der letzten Zahlung nachziehen,
+    # damit Anzeige und Abo nicht auseinanderlaufen.
+    letzte = await db.manual_payments.find_one(
+        {"subject_user_id": sucher_id}, {"_id": 0, "id": 1},
+        sort=[("created_at", -1)])
+    if letzte:
+        await db.manual_payments.update_one(
+            {"id": letzte["id"]}, {"$set": {"period_until": gueltig_bis}})
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.sucher.abo.gueltig_bis", ref=sucher_id,
+                       meta={"gueltig_bis": gueltig_bis[:10]})
+    return {"ok": True, "expires_at": gueltig_bis}
 
 
 def _restlaufzeit_basis(expires_at) -> datetime:
@@ -977,17 +1046,21 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
 async def admin_list_dealer_sucher(dealer_id: str, _=Depends(current_admin)):
     """Alle Sucher einer Firma inkl. Abo-Status, letzter Zahlung und
     nächster Fälligkeit (= Abo-Ablauf) — für die Freischaltungs-Ansicht."""
+    # Chef ZUERST (Wunsch 09/2026: "Firmen-Chef Freischaltung Sucher-
+    # Funktion ja/nein" auf derselben Karte), danach die Sucher.
     items = await db.users.find(
-        {"dealer_id": dealer_id, "role": "sucher"},
+        {"dealer_id": dealer_id, "role": {"$in": ["dealer", "sucher"]}},
         {"_id": 0, "password_hash": 0},
     ).sort("created_at", 1).to_list(200)
+    items.sort(key=lambda x: 0 if x.get("role") == "dealer" else 1)
     out = []
     for s in items:
         sub = await get_subscription_status(dealer_id, subject_user_id=s["id"])
         letzte = await db.manual_payments.find_one(
             {"subject_user_id": s["id"]}, {"_id": 0},
             sort=[("created_at", -1)])
-        out.append({**s, "subscription": sub,
+        out.append({**s, "ist_chef": s.get("role") == "dealer",
+                    "subscription": sub,
                     "letzte_zahlung": letzte,
                     "naechste_zahlung_am": sub.get("expires_at")})
     return out

@@ -43,7 +43,7 @@ from listing_identity import ensure_cache_indexes
 from snapshot_service import init_storage
 
 # Shared deps (DB connection, helpers) — required for index/seed setup.
-from deps import client, db, log, now_iso
+from deps import client, db, log, naechste_kunden_nr, now_iso
 
 # Modular routers.
 from routes import admin as admin_routes
@@ -359,6 +359,15 @@ async def ensure_indexes():
     await db.listing_snapshots.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.listing_snapshots.create_index([("vehicle_id", 1), ("status", 1)])
     await db.listing_snapshots.create_index([("status", 1), ("created_at", 1)])
+    # Kundennummern (Wunsch 09/2026): Bestandsfirmen ohne Nummer bekommen
+    # eine — idempotent je Firma ($exists-Guard; parallele Worker erzeugen
+    # hoechstens Luecken, nie Dubletten), aelteste Firma zuerst.
+    async for d in db.dealers.find({"kunden_nr": {"$exists": False}},
+                                   {"_id": 0, "id": 1}).sort("created_at", 1):
+        await db.dealers.update_one(
+            {"id": d["id"], "kunden_nr": {"$exists": False}},
+            {"$set": {"kunden_nr": await naechste_kunden_nr()}})
+    await db.dealers.create_index("kunden_nr")
     # Auto-Daten (dauerhaft, anonym — auto_daten.py): eindeutige Zufalls-id,
     # Suche nach Marke/Modell, Filter; KEIN Index auf irgendeine Quell-ID,
     # weil es keine gibt. Vertraege: created_at fuer die 90-Tage-Loeschung.
@@ -413,6 +422,7 @@ async def seed_admin():
         "created_at": now_iso(),
     })
     await db.dealers.insert_one({
+        "kunden_nr": await naechste_kunden_nr(),
         "id": dealer_id, "user_id": user_id,
         "company_name": "Autohandel Admin", "contact_person": "Admin",
         "phone": "", "email": email, "address": "", "zip_code": "", "city": "",
@@ -470,6 +480,7 @@ async def seed_super_admin():
         "company_name": "Cash Car Hannover (Super-Admin)",
     })
     await db.dealers.insert_one({
+        "kunden_nr": await naechste_kunden_nr(),
         "id": dealer_id, "user_id": user_id,
         "company_name": "Cash Car Hannover", "contact_person": "Super Admin",
         "phone": "", "email": placeholder_email, "address": "", "zip_code": "",
