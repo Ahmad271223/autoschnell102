@@ -28,8 +28,10 @@ paths = [
 ]
 
 [allowlist]
-description = "Testdaten und Dokumentation"
+description = "Testdaten (Fake-Zugangsdaten), Lockfiles, Fonts"
 paths = [
   '''frontend/yarn\.lock$''',
   '''frontend/public/fonts/.*''',
+  '''backend/tests/.*\.py$''',
+  '''frontend/e2e/.*\.js$''',
 ]
