@@ -6,6 +6,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from pymongo.errors import DuplicateKeyError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
@@ -187,10 +188,14 @@ async def register(body: RegisterIn, request: Request):
     # Profil wieder entfernt — es bleibt nie ein aktives, aber unvollstaendiges
     # Konto zurueck (vorher: Benutzer ohne Haendlerprofil).
     from deps import naechste_kunden_nr
-    dealer_doc["kunden_nr"] = await naechste_kunden_nr()
-    await db.dealers.insert_one(dealer_doc)
+    from routes.admin import _dealer_anlegen_mit_kunden_nr
+    await _dealer_anlegen_mit_kunden_nr(dealer_doc, naechste_kunden_nr)
     try:
         await db.users.insert_one(user_doc)
+    except DuplicateKeyError:
+        # Rennen zweier Registrierungen mit derselben E-Mail
+        await db.dealers.delete_one({"id": dealer_id})
+        raise HTTPException(409, "E-Mail bereits registriert")
     except Exception:
         await db.dealers.delete_one({"id": dealer_id})
         log.exception("Registrierung: Benutzer-Insert fehlgeschlagen")

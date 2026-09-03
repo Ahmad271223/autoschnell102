@@ -240,12 +240,41 @@ async def require_active_sub(user=Depends(current_user)):
 async def naechste_kunden_nr() -> int:
     """Fortlaufende Firmen-Kundennummer, automatisch und atomar vergeben.
     Start bei 1001 (4-stellig) — Wunsch 09/2026: der Betreiber muss nichts
-    angeben und findet Firmen ueber die kurze Nummer wieder."""
-    doc = await db.counters.find_one_and_update(
-        {"_id": "kunden_nr"},
-        {"$inc": {"seq": 1}, "$setOnInsert": {"start": 1000}},
-        upsert=True, return_document=True)
-    return 1000 + int(doc["seq"] if doc else 1)
+    angeben und findet Firmen ueber die kurze Nummer wieder.
+
+    Selbstheilung (Haertung 09/2026): haengt der Zaehler hinter dem Bestand
+    (Restore ohne counters, alter Zaehler + neue Firmen), wird er auf die
+    hoechste vergebene Nummer gehoben — es entsteht nie eine Dublette."""
+    for _ in range(5):
+        doc = await db.counters.find_one_and_update(
+            {"_id": "kunden_nr"},
+            {"$inc": {"seq": 1}, "$setOnInsert": {"start": 1000}},
+            upsert=True, return_document=True)
+        nr = 1000 + int(doc["seq"])
+        if not await db.dealers.find_one({"kunden_nr": nr}, {"_id": 1}):
+            return nr
+        top = await db.dealers.find_one(
+            {"kunden_nr": {"$type": "number"}}, {"kunden_nr": 1},
+            sort=[("kunden_nr", -1)])
+        if top:
+            await db.counters.update_one(
+                {"_id": "kunden_nr"},
+                {"$max": {"seq": int(top["kunden_nr"]) - 1000}})
+    raise RuntimeError("Kundennummer: kein freier Wert gefunden")
+
+
+async def kunden_nummern_nachziehen() -> int:
+    """Bestandsfirmen ohne Kundennummer nummerieren (aelteste zuerst).
+    Idempotent je Firma ($exists-Guard): parallele Worker erzeugen
+    hoechstens Luecken, nie Dubletten. Liefert die Zahl neuer Nummern."""
+    n = 0
+    async for d in db.dealers.find({"kunden_nr": {"$exists": False}},
+                                   {"_id": 0, "id": 1}).sort("created_at", 1):
+        r = await db.dealers.update_one(
+            {"id": d["id"], "kunden_nr": {"$exists": False}},
+            {"$set": {"kunden_nr": await naechste_kunden_nr()}})
+        n += r.modified_count
+    return n
 
 
 async def log_activity(dealer_id: str, user_id: str, action: str,

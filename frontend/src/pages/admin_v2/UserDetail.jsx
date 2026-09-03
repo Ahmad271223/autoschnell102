@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
@@ -20,6 +20,10 @@ export default function AdminUserDetail() {
   const [zahlungen, setZahlungen] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [gueltigBis, setGueltigBis] = useState({});   // je Konto-Id das Datumsfeld
+  const [busy, setBusy] = useState(null);           // Doppelklick-Schutz je Konto
+  const busyRef = useRef(null);                     // synchroner Guard (State hinkt im selben Tick nach)
+  const sperren = (id) => { if (busyRef.current) return false; busyRef.current = id; setBusy(id); return true; };
+  const freigeben = () => { busyRef.current = null; setBusy(null); };
 
   const load = async () => {
     setLoading(true);
@@ -64,6 +68,7 @@ export default function AdminUserDetail() {
   };
 
   const grantAbo = async (s, plan) => {
+    if (!sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
     try {
       const datum = (gueltigBis[s.id] || "").trim();
       await api.post(`/admin/sucher/${s.id}/abo`,
@@ -73,21 +78,26 @@ export default function AdminUserDetail() {
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
       loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
   };
   const saveGueltigBis = async (s) => {
     const datum = (gueltigBis[s.id] || "").trim();
     if (!datum) { toast.error("Bitte ein Datum wählen"); return; }
+    if (!sperren(s.id)) return;
     try {
       await api.patch(`/admin/sucher/${s.id}/abo-gueltig-bis`, { gueltig_bis: datum });
       toast.success(`Gültig bis ${datum} gespeichert — danach wird automatisch gesperrt`);
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
       loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
   };
   const revokeAbo = async (s) => {
     if (!window.confirm(`Abo von ${s.email} aufheben?`)) return;
+    if (!sperren(s.id)) return;
     try { await api.post(`/admin/sucher/${s.id}/abo`, { plan: null }); toast.success("Abo aufgehoben"); loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
   };
   const toggleSucherActive = async (s) => {
     try {
@@ -226,12 +236,12 @@ export default function AdminUserDetail() {
                           ) : (
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <Badge tone="red">Sucher-Funktion: nein</Badge>
-                              <Button size="sm" onClick={() => grantAbo(s, "monthly")}
+                              <Button size="sm" onClick={() => grantAbo(s, "monthly")} disabled={busy === s.id}
                                       data-testid={`abo-monat-${s.id}`}
                                       title="Freischalten — erfasst 150 € Zahlung; ohne Datum 30 Tage gültig">
                                 <Check size={13} /> 150 €/M
                               </Button>
-                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")}
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")} disabled={busy === s.id}
                                       data-testid={`abo-jahr-${s.id}`}
                                       title="Freischalten — erfasst 1.500 € Zahlung; ohne Datum 365 Tage gültig">
                                 1.500 €/J
@@ -251,7 +261,7 @@ export default function AdminUserDetail() {
                                    style={{ background: "#18181b", color: "#fff",
                                             border: "1px solid rgba(255,255,255,0.12)", colorScheme: "dark" }} />
                             {s.subscription?.active && (
-                              <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)}
+                              <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)} disabled={busy === s.id}
                                       data-testid={`gueltig-bis-speichern-${s.id}`}
                                       title="Ablaufdatum speichern — danach automatisch gesperrt">
                                 Speichern
@@ -271,7 +281,7 @@ export default function AdminUserDetail() {
                         </td>
                         <td className="px-4 py-2.5 text-right whitespace-nowrap">
                           {s.subscription?.active && (
-                            <Button size="sm" variant="ghost" onClick={() => revokeAbo(s)} title="Abo aufheben">
+                            <Button size="sm" variant="ghost" onClick={() => revokeAbo(s)} disabled={busy === s.id} title="Abo aufheben">
                               Abo aufheben
                             </Button>
                           )}

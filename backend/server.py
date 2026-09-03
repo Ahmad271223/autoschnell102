@@ -43,7 +43,8 @@ from listing_identity import ensure_cache_indexes
 from snapshot_service import init_storage
 
 # Shared deps (DB connection, helpers) — required for index/seed setup.
-from deps import client, db, log, naechste_kunden_nr, now_iso
+from deps import (client, db, kunden_nummern_nachziehen, log,
+                  naechste_kunden_nr, now_iso)
 
 # Modular routers.
 from routes import admin as admin_routes
@@ -262,6 +263,32 @@ async def _unique_index_sicher(coll, feld: str) -> None:
     await coll.create_index(feld, unique=True)
 
 
+async def _kunden_nr_unique_index() -> None:
+    """Eindeutigkeit der Kundennummer auch auf DB-Ebene (Backstop gegen
+    Zaehler-Fehler). sparse: Firmen ohne Nummer (Migrationsmoment) stoeren
+    nicht. Ein aelterer nicht-eindeutiger Index gleicher Form wird ersetzt."""
+    dubletten = await db.dealers.aggregate([
+        {"$match": {"kunden_nr": {"$exists": True, "$ne": None}}},
+        {"$group": {"_id": "$kunden_nr", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+    if dubletten:
+        msg = ("dealers.kunden_nr: doppelte Kundennummern (%s) — Unique-Index "
+               "NICHT angelegt, bitte bereinigen" %
+               ", ".join(str(d["_id"]) for d in dubletten))
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            log.error("Start ABGEBROCHEN: %s", msg)
+            raise SystemExit(78)
+        log.error("ensure_indexes: %s", msg)
+        return
+    vorhandene = {i["name"]: i async for i in db.dealers.list_indexes()}
+    alt = vorhandene.get("kunden_nr_1")
+    if alt is not None and not alt.get("unique"):
+        await db.dealers.drop_index("kunden_nr_1")
+    if "kunden_nr_unique" not in vorhandene:
+        await db.dealers.create_index("kunden_nr", unique=True, sparse=True,
+                                      name="kunden_nr_unique")
+
+
 async def ensure_indexes():
     await _unique_index_sicher(db.users, "email")
     await _unique_index_sicher(db.dealers, "user_id")
@@ -362,12 +389,10 @@ async def ensure_indexes():
     # Kundennummern (Wunsch 09/2026): Bestandsfirmen ohne Nummer bekommen
     # eine — idempotent je Firma ($exists-Guard; parallele Worker erzeugen
     # hoechstens Luecken, nie Dubletten), aelteste Firma zuerst.
-    async for d in db.dealers.find({"kunden_nr": {"$exists": False}},
-                                   {"_id": 0, "id": 1}).sort("created_at", 1):
-        await db.dealers.update_one(
-            {"id": d["id"], "kunden_nr": {"$exists": False}},
-            {"$set": {"kunden_nr": await naechste_kunden_nr()}})
-    await db.dealers.create_index("kunden_nr")
+    neu = await kunden_nummern_nachziehen()
+    if neu:
+        log.info("Kundennummern nachgezogen: %d Firmen", neu)
+    await _kunden_nr_unique_index()
     # Auto-Daten (dauerhaft, anonym — auto_daten.py): eindeutige Zufalls-id,
     # Suche nach Marke/Modell, Filter; KEIN Index auf irgendeine Quell-ID,
     # weil es keine gibt. Vertraege: created_at fuer die 90-Tage-Loeschung.

@@ -13,6 +13,7 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     safe = re.sub(r'[\r\n\t"\\]', "", name).strip()
     return safe[:200] or fallback
 
+from pymongo.errors import DuplicateKeyError
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -61,26 +62,50 @@ async def admin_trigger_cleanup(user=Depends(current_admin)):
     return stats
 
 
+async def _dealer_anlegen_mit_kunden_nr(doc: dict, naechste_kunden_nr) -> None:
+    """Firmenprofil mit frischer Kundennummer einfuegen; bei DuplicateKey
+    (Unique-Index kunden_nr, nur im Rennen mit einem korrigierten Zaehler)
+    neue Nummer ziehen — max. 3 Versuche."""
+    for versuch in range(3):
+        doc.pop("_id", None)            # insert_one schreibt _id ins dict
+        doc["kunden_nr"] = await naechste_kunden_nr()
+        try:
+            await db.dealers.insert_one(doc)
+            return
+        except DuplicateKeyError as e:
+            if "kunden_nr" not in str(e) or versuch == 2:
+                raise
+
+
 # ---------- Users ----------
 @router.post("/admin/users")
 async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
-    existing = await db.users.find_one({"email": body.email})
+    # Haertung 09/2026: E-Mail wie bei Registrierung/Sucher normalisieren und
+    # schreibungsunabhaengig pruefen — vorher konnten "Chef@X.de" und
+    # "chef@x.de" als zwei Konten existieren (Login trifft dann das falsche).
+    email = body.email.strip().lower()
+    existing = await db.users.find_one(
+        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
     if existing:
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
-    await db.users.insert_one({
-        "id": user_id, "email": body.email,
-        "password_hash": await hash_password_async(body.password),
-        "role": "dealer", "active": body.active if body.active is not None else True,
-        "dealer_id": dealer_id, "current_session_id": None,
-        "created_at": now_iso(),
-    })
+    try:
+        await db.users.insert_one({
+            "id": user_id, "email": email,
+            "password_hash": await hash_password_async(body.password),
+            "role": "dealer", "active": body.active if body.active is not None else True,
+            "dealer_id": dealer_id, "current_session_id": None,
+            "created_at": now_iso(),
+        })
+    except DuplicateKeyError:
+        # Rennen zweier gleichzeitiger Anlagen: Unique-Index entscheidet.
+        raise HTTPException(409, "E-Mail bereits registriert")
     from deps import naechste_kunden_nr
-    await db.dealers.insert_one({
+    try:
+        await _dealer_anlegen_mit_kunden_nr({
         "id": dealer_id, "user_id": user_id, "company_name": body.company_name,
-        "kunden_nr": await naechste_kunden_nr(),
-        "contact_person": "", "phone": "", "email": body.email,
+        "contact_person": "", "phone": "", "email": email,
         "address": "", "zip_code": "", "city": "", "logo_url": "",
         "comparison_rules": DEFAULT_RULES,
         "export_rules": DEFAULT_EXPORT_RULES,
@@ -91,7 +116,13 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
         "default_terms": "",
         "default_special_agreements": "",
         "created_at": now_iso(),
-    })
+        }, naechste_kunden_nr)
+    except Exception:
+        # Kein Konto ohne Firmenprofil zuruecklassen (Login liefe sonst
+        # auf ein Profil-404) — Benutzer wieder entfernen.
+        await db.users.delete_one({"id": user_id})
+        log.exception("admin_create_user: Firmenprofil-Insert fehlgeschlagen")
+        raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
     # plan_type "none" (Betreiber-Modell 09/2026): Firmen-Hauptaccount ohne
     # jedes Abo anlegen — Verkaufen/Verwalten ist kostenlos, Sucher-Abos
     # werden einzeln nach Rechnungszahlung freigeschaltet.
@@ -873,6 +904,33 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
         return {"ok": True, "active": False}
     if plan not in SUCHER_PLANS:
         raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {plan}")
+    # Doppelklick-/Doppelanfrage-Schutz (Haertung 09/2026): zwei gleichzeitige
+    # Freischaltungen erzeugten zwei Zahlungen und zwei Abo-Zeilen. Atomare
+    # Sperre in Mongo (gilt ueber alle Worker), wird am Ende geloest.
+    sperre = f"abo:{sucher_id}"
+    try:
+        await db.sperren.insert_one({"_id": sperre, "seit": now_iso()})
+    except DuplicateKeyError:
+        alt = await db.sperren.find_one({"_id": sperre})
+        try:
+            alter = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(alt["seit"])).total_seconds()
+        except Exception:
+            alter = 999
+        if alter < 30:
+            raise HTTPException(409, "Freischaltung laeuft gerade — bitte "
+                                     "einen Moment warten (Doppelklick)")
+        await db.sperren.delete_one({"_id": sperre})   # verwaiste Sperre
+        await db.sperren.insert_one({"_id": sperre, "seit": now_iso()})
+    try:
+        return await _abo_freischalten(sucher, sucher_id, plan, body, admin)
+    finally:
+        await db.sperren.delete_one({"_id": sperre})
+
+
+async def _abo_freischalten(sucher: dict, sucher_id: str, plan: str,
+                            body: dict, admin: dict) -> dict:
+    from routes.team import SUCHER_PLANS
     days = SUCHER_PLANS[plan]["days"]
     gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
     if gueltig_bis:
