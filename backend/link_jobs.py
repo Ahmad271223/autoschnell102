@@ -58,13 +58,28 @@ async def ensure_job_indexes(db) -> None:
         partialFilterExpression={"active": True})
     await db.link_jobs.create_index("id", unique=True, name="uniq_job_id")
     await db.link_jobs.create_index("status", name="by_status")
-    # TTL: fertige Jobs raeumen sich selbst weg.
-    await db.link_jobs.create_index(
-        "finished_at", expireAfterSeconds=FINISHED_TTL_SECONDS,
-        name="ttl_finished")
+    # TTL: fertige Jobs raeumen sich selbst weg. Aendert sich die TTL per
+    # Umgebung, lehnt Mongo create_index mit "IndexOptionsConflict" ab —
+    # vorher fiel damit der Job-Worker in ALLEN Prozessen aus (Review
+    # 09/2026). Jetzt: alten Index verwerfen und neu anlegen.
+    await _ttl_index_sicher(db, "finished_at", FINISHED_TTL_SECONDS, "ttl_finished")
     # Notbremse: auch nie fertig gewordene Jobs verschwinden nach 24 h.
-    await db.link_jobs.create_index(
-        "created_at", expireAfterSeconds=24 * 3600, name="ttl_created")
+    await _ttl_index_sicher(db, "created_at", 24 * 3600, "ttl_created")
+
+
+async def _ttl_index_sicher(db, feld: str, sekunden: int, name: str) -> None:
+    from pymongo.errors import OperationFailure
+    try:
+        await db.link_jobs.create_index(feld, expireAfterSeconds=sekunden, name=name)
+    except OperationFailure as exc:
+        if exc.code not in (85, 86):        # IndexOptionsConflict / IndexKeySpecsConflict
+            raise
+        log.warning("link_jobs: TTL-Index %s hat andere Optionen — wird neu angelegt", name)
+        try:
+            await db.link_jobs.drop_index(name)
+        except OperationFailure:
+            pass
+        await db.link_jobs.create_index(feld, expireAfterSeconds=sekunden, name=name)
 
 
 async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:

@@ -17,7 +17,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from deps import db, log_activity, now_iso
 from lifecycle import try_set_lifecycle
@@ -76,6 +76,33 @@ CONDITION_FIELDS = [
 class ProtocolIn(BaseModel):
     """Alle Felder optional — der Fahrer speichert laufend Zwischenstände."""
     vehicle_check: Optional[Dict[str, Any]] = None      # Abschnitt 1 (Korrekturen)
+
+    @field_validator("vehicle_check", "condition", mode="before")
+    @classmethod
+    def _dict_deckeln(cls, v):
+        """Review 09/2026: freie Dicts hatten keine Groessengrenze — max. 60
+        Schluessel, Werte als Text bis 500 Zeichen (Zahlen/Bool/None ok)."""
+        if v is None:
+            return v
+        if not isinstance(v, dict) or len(v) > 60:
+            raise ValueError("zu viele oder ungueltige Felder (max. 60)")
+        def _wert(k, w, tiefe=0):
+            if isinstance(w, str):
+                return w[:500]
+            if isinstance(w, (int, float, bool)) or w is None:
+                return w
+            # Verschachtelte Eintraege wie {"make": {"status": "stimmt", "value": ...}}
+            if isinstance(w, dict) and tiefe == 0 and len(w) <= 20:
+                return {str(kk)[:80]: _wert(kk, ww, 1) for kk, ww in w.items()}
+            if isinstance(w, list) and tiefe == 0 and len(w) <= 50:
+                return [_wert(k, x, 1) for x in w]
+            raise ValueError(f"Feld {k}: nur Text, Zahl oder Ja/Nein")
+        out = {}
+        for k, w in v.items():
+            if not isinstance(k, str) or len(k) > 80:
+                raise ValueError("ungueltiger Feldname")
+            out[k] = _wert(k, w)
+        return out
     documents: Optional[Dict[str, bool]] = None         # Abschnitt 2
     keys_count: Optional[str] = Field(default=None, max_length=20)
     keys_expected: Optional[str] = Field(default=None, max_length=20)
@@ -287,6 +314,14 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     'abgeholt' setzen."""
     from storage_service import make_key, storage, StorageError
     appt = await _appt_or_404(appt_id, driver)
+    # Review 09/2026: Der Abschluss machte auch STORNIERTE (oder als "nicht
+    # abgeholt" beendete) Termine zu "abgeholt". Nur offene/verschobene
+    # Termine — oder die Selbstheilung eines bereits finalen Protokolls bei
+    # noch offenem Termin — duerfen hier durch.
+    if (appt.get("status") or "offen") in ("storniert", "nicht abgeholt", "erledigt"):
+        raise HTTPException(409, f"Termin ist '{appt.get('status')}' — ein Abschluss "
+                                 "ist nicht mehr moeglich. Bitte den Haendler "
+                                 "kontaktieren.")
     doc = await _current(appt_id)
     if not doc:
         raise HTTPException(400, "Bitte zuerst das Protokoll ausfüllen")

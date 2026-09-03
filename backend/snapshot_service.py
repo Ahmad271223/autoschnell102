@@ -73,6 +73,11 @@ SNAPSHOT_CONCURRENCY = int(
 # Semaphore statt Lock: erlaubt N gleichzeitige Snapshots (N=1 == altes Lock).
 _browser_lock = asyncio.Semaphore(max(1, SNAPSHOT_CONCURRENCY))
 
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
 WORKER_TIMEOUT_SECONDS = int(os.environ.get("SNAPSHOT_WORKER_TIMEOUT", "90"))
 
 
@@ -384,7 +389,7 @@ def _assert_allowed_snapshot_url(url: str) -> None:
         raise ValueError(f"Snapshot-Domain nicht erlaubt: {host!r}")
 
 
-async def _capture_with_playwright(url: str) -> tuple[bytes, bytes]:
+async def _capture_with_playwright(url: str, on_start=None) -> tuple[bytes, bytes]:
     """Render the URL in headless Chromium, return (png_bytes, pdf_bytes).
     Läuft in einem separaten Subprocess damit Playwright auf Windows sein
     eigenes ProactorEventLoop-kompatibles asyncio.run() bekommt."""
@@ -394,6 +399,8 @@ async def _capture_with_playwright(url: str) -> tuple[bytes, bytes]:
     if not _BROWSERLESS_URL:
         _ensure_browser_executable()
     async with _browser_lock:
+        if on_start is not None:
+            await on_start()          # Slot belegt -> jetzt wirklich 'running'
         worker = Path(__file__).parent / "_playwright_worker.py"
         loop = asyncio.get_running_loop()
 
@@ -611,7 +618,11 @@ async def _capture_with_retry(db, snap_id: str, url: str, attempts: int = 3):
     last_exc = None
     for i in range(1, attempts + 1):
         try:
-            return await _capture_with_playwright(url)
+            async def _jetzt_running():
+                await db.listing_snapshots.update_one(
+                    {"id": snap_id},
+                    {"$set": {"status": "running", "started_at": _now_iso()}})
+            return await _capture_with_playwright(url, on_start=_jetzt_running)
         except Exception as exc:
             last_exc = exc
             if i >= attempts or not _is_transient(exc):
@@ -748,10 +759,11 @@ async def run_snapshot_job(db, snap_id: str) -> None:
         log.warning("snapshot %s vanished before capture", snap_id)
         return
     url = doc["source_url"]
-    # Als 'running' markieren, damit Recovery laufende von verlorenen Jobs
-    # unterscheiden kann.
+    # 'queued' = wartet auf einen Browser-Slot; 'running' setzt erst der
+    # Capture, wenn der Slot wirklich belegt ist (Review 09/2026: unter Last
+    # markierte der Reaper wartende Jobs faelschlich als "failed").
     await db.listing_snapshots.update_one(
-        {"id": snap_id}, {"$set": {"status": "running"}})
+        {"id": snap_id}, {"$set": {"status": "queued", "queued_at": _now_iso()}})
 
     # Snapshot-Aufnahmen sind ECHTE Seitenaufrufe beim Anbieter und zaehlen
     # deshalb gegen dieselbe zentrale Begrenzung wie die Datenabrufe —

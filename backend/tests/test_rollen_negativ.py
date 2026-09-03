@@ -514,3 +514,30 @@ def test_05b_abholbericht_direkt_nach_abholung_erlaubt(welt):
     assert r.status_code == 409, r.text[:200]
     dbx.appointments.delete_many({"id": {"$in": [frisch, alt]}})
     dbx.pickup_reports.delete_many({"appointment_id": {"$in": [frisch, alt]}})
+
+
+def test_05c_paralleler_erstbericht_genau_einmal(welt):
+    """Runde 5: Zwei gleichzeitige Erstberichte nach 'abgeholt' — genau
+    einer wird gespeichert, kein zweiter als 'Korrekturversion'."""
+    import threading
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    dbx = _db()
+    now = datetime.now(timezone.utc)
+    aid = f"r5par_{_uuid.uuid4().hex[:8]}"
+    dbx.appointments.insert_one({
+        "id": aid, "dealer_id": welt["dealer_a"], "driver_id": welt["driver_id"],
+        "vehicle_id": welt["vehicle_id"], "status": "abgeholt",
+        "status_changed_at": now.isoformat(), "pickup_date": "2099-01-01",
+        "created_at": now.isoformat(), "updated_at": now.isoformat()})
+    codes = []
+    def go(i):
+        codes.append(requests.post(f"{API}/driver/appointments/{aid}/report",
+                                   headers=welt["D"], json={"notes": f"parallel {i}"},
+                                   timeout=60).status_code)
+    ts = [threading.Thread(target=go, args=(i,)) for i in range(6)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert codes.count(200) == 1, codes
+    assert dbx.pickup_reports.count_documents({"appointment_id": aid}) == 1
+    dbx.appointments.delete_one({"id": aid})
+    dbx.pickup_reports.delete_many({"appointment_id": aid})

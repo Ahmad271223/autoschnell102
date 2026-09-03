@@ -211,8 +211,13 @@ async def _cleanup_once(db) -> dict:
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
     stats["archived"] = await _archive_expired_bestand(db, now)
     # ---- 90-Tage-Regel: Kaufvertraege samt Personendaten loeschen ----
-    stats["contracts_deleted"] = await vertraege_nach_frist_loeschen(db, now)
+    # Reihenfolge (Runde 5): ZUERST fehlende Auto-Datensaetze nachtragen,
+    # DANN loeschen — sonst verschwanden Altvertraege beim allerersten
+    # Lauf, bevor ihr dauerhafter Datensatz je existierte.
     stats["auto_daten_repariert"] = await auto_daten_reparieren(db)
+    stats["contracts_deleted"] = await vertraege_nach_frist_loeschen(db, now)
+    stats["storage_nachgeholt"] = await storage_loeschungen_nachholen(db)
+    stats["logs_rotiert"] = await logs_rotieren(db, now)
 
     if any(stats.values()):
         log.info("cleanup run: %s", stats)
@@ -242,9 +247,39 @@ async def vertraege_nach_frist_loeschen(db, now: datetime) -> int:
     async for c in cursor:
         cid = c["id"]
         await db.generated_pdf_versions.delete_many({"contract_id": cid})
+        # Abhol-Protokolle dieser Termine: Verkaeufername, Ort, Unterschriften
+        # und das unterschriebene PDF entfernen (Review 09/2026: blieben
+        # unbefristet). Der technische Zustandsteil des Protokolls bleibt.
+        termin_ids = [a["id"] async for a in db.appointments.find(
+            {"contract_id": cid}, {"_id": 0, "id": 1})]
+        if termin_ids:
+            from storage_service import storage
+            async for p in db.pickup_protocols.find(
+                    {"appointment_id": {"$in": termin_ids}},
+                    {"_id": 0, "id": 1, "pdf_path": 1, "signature_driver_key": 1,
+                     "signature_seller_key": 1}):
+                for key in (p.get("pdf_path"), p.get("signature_driver_key"),
+                            p.get("signature_seller_key")):
+                    if key:
+                        try:
+                            storage.delete(key)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("protokoll-datei delete failed %s: %s", key, exc)
+                await db.pickup_protocols.update_one(
+                    {"id": p["id"]},
+                    {"$set": {"seller_name": "", "pickup_address": "",
+                              "pii_geloescht_at": now.isoformat()},
+                     "$unset": {"pdf_path": "", "signature_driver_key": "",
+                                "signature_seller_key": ""}})
+        # Termin: Verweis kappen UND die dort kopierten Verkaeuferdaten
+        # (Name, Telefon, E-Mail, Abholanschrift) entfernen — sie blieben
+        # sonst nach der Vertragsloeschung erhalten (Runde 5).
         await db.appointments.update_many(
             {"contract_id": cid},
-            {"$set": {"contract_id": None, "updated_at": now.isoformat()}})
+            {"$set": {"contract_id": None, "seller_name": "", "seller_phone": "",
+                      "seller_email": "", "pickup_address": "",
+                      "pii_geloescht_at": now.isoformat(),
+                      "updated_at": now.isoformat()}})
         res = await db.generated_pdfs.delete_one({"id": cid})
         if not res.deleted_count:
             continue
@@ -257,6 +292,47 @@ async def vertraege_nach_frist_loeschen(db, now: datetime) -> int:
         })
         geloescht += 1
     return geloescht
+
+
+# Audit-/Fehlerprotokolle und Job-Sperren wuchsen unbegrenzt (N3, Review
+# 09/2026). Aufbewahrung in Tagen; created_at ist ISO-String (lexikografisch
+# vergleichbar), deshalb Rotation hier statt TTL-Index.
+LOG_AUFBEWAHRUNG_TAGE = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE", "180"))
+
+
+async def logs_rotieren(db, now: datetime) -> int:
+    cutoff = (now - timedelta(days=LOG_AUFBEWAHRUNG_TAGE)).isoformat()
+    n = 0
+    r = await db.activity_logs.delete_many({"created_at": {"$lt": cutoff}})
+    n += r.deleted_count
+    # Offene Fehler bleiben, bis ein Admin sie schliesst; erledigte rotieren.
+    r = await db.error_logs.delete_many({"created_at": {"$lt": cutoff},
+                                         "status": {"$ne": "open"}})
+    n += r.deleted_count
+    r = await db.job_locks.delete_many(
+        {"expires_at": {"$lt": now - timedelta(days=1)}})
+    n += r.deleted_count
+    return n
+
+
+async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
+    """Fehlgeschlagene Datei-Loeschungen (Firmen-/Nutzerloeschung) erneut
+    versuchen — die Kontoloeschung meldet solche Faelle als 'unvollstaendig'
+    und stellt sie hier ein (Runde 5), statt sie stillschweigend zu verlieren."""
+    from storage_service import storage
+    erledigt = 0
+    async for e in db.storage_delete_retry.find({}, {"_id": 0}).limit(limit):
+        try:
+            storage.delete_prefix(e["prefix"])
+            await db.storage_delete_retry.delete_one({"id": e["id"]})
+            erledigt += 1
+        except Exception as exc:  # noqa: BLE001
+            await db.storage_delete_retry.update_one(
+                {"id": e["id"]},
+                {"$set": {"letzter_fehler": str(exc)[:300],
+                          "versuche": int(e.get("versuche", 0)) + 1,
+                          "updated_at": now_iso()}})
+    return erledigt
 
 
 async def auto_daten_reparieren(db, limit: int = 500) -> int:
@@ -372,10 +448,19 @@ async def _reap_stuck_snapshots(db) -> None:
     gestartet wurde), wird als failed markiert — das Frontend hoert auf zu
     pollen und der naechste Vergleich erzeugt einen frischen Job."""
     from datetime import datetime, timedelta, timezone
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+    # Review 09/2026: Wartende Jobs (queued/pending) bekommen 60 min — sie
+    # laufen ja noch gar nicht; nur echte 'running' gelten nach 15 min ab
+    # Start als haengend.
+    jetzt = datetime.now(timezone.utc)
+    cutoff = (jetzt - timedelta(minutes=15)).isoformat()
+    cutoff_wartend = (jetzt - timedelta(minutes=60)).isoformat()
     r = await db.listing_snapshots.update_many(
-        {"status": {"$in": ["pending", "running", "retrying"]},
-         "created_at": {"$lt": cutoff}},
+        {"$or": [
+            {"status": "running",
+             "$or": [{"started_at": {"$lt": cutoff}},
+                     {"started_at": {"$exists": False}, "created_at": {"$lt": cutoff}}]},
+            {"status": {"$in": ["pending", "queued", "retrying"]},
+             "created_at": {"$lt": cutoff_wartend}}]},
         {"$set": {"status": "failed",
                   "error": "Zeitueberschreitung — automatisch abgebrochen "
                            "(Backend-Neustart oder haengender Job).",

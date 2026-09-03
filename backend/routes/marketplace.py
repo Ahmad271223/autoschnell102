@@ -853,19 +853,29 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
         if body.counter_offer is None:
             raise HTTPException(400, "Gegenangebot benötigt einen Betrag")
         update["counter_offer"] = round(float(body.counter_offer), 2)
+    if body.action == "akzeptieren":
+        # ZUERST atomar reservieren (Review 09/2026): vorher wurde die Anfrage
+        # als "akzeptiert" gespeichert, selbst wenn das Fahrzeug laengst fuer
+        # einen anderen Interessenten reserviert oder verkauft war —
+        # zwei Kaeufer hielten sich fuer den Gewinner.
+        res = await db.resale_listings.find_one_and_update(
+            {"id": it["listing_id"], "dealer_id": user["dealer_id"],
+             "status": "veroeffentlicht"},
+            {"$set": {"status": "reserviert",
+                      "reserved_for": it["buyer_user_id"],
+                      "updated_at": now_iso()}})
+        if res is None:
+            l = await db.resale_listings.find_one(
+                {"id": it["listing_id"]}, {"_id": 0, "status": 1, "reserved_for": 1})
+            st = (l or {}).get("status", "unbekannt")
+            raise HTTPException(409, f"Fahrzeug ist nicht mehr verfuegbar (Status "
+                                     f"'{st}') — bereits reserviert oder verkauft.")
     await db.listing_interest.update_one(
         {"id": interest_id},
         {"$set": update,
          "$push": {"history": {"von": "haendler", "aktion": body.action,
                                "angebot": body.counter_offer,
                                "nachricht": body.message, "zeit": now_iso()}}})
-    if body.action == "akzeptieren":
-        # Fahrzeug für den Interessenten reservieren.
-        await db.resale_listings.update_one(
-            {"id": it["listing_id"], "status": "veroeffentlicht"},
-            {"$set": {"status": "reserviert",
-                      "reserved_for": it["buyer_user_id"],
-                      "updated_at": now_iso()}})
     await log_activity(user["dealer_id"], user["id"], f"interesse.{new_status}",
                        ref=interest_id)
     return {"ok": True, "status": new_status}

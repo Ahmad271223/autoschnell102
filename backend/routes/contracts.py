@@ -526,6 +526,38 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    # Idempotenz RESERVIEREND (Review 09/2026): Der Schluessel wurde vorher
+    # erst NACH dem Senden eingetragen — zwei gleichzeitige Anfragen mit
+    # demselben Schluessel konnten beide zustellen. Jetzt wird der Eintrag
+    # atomar VOR dem Versand angelegt; der Verlierer bekommt das Ergebnis
+    # des Gewinners, bei Sendefehler wird der Eintrag wieder entfernt.
+    reserviert = False
+    if body.idempotency_key:
+        vorhanden = next((e for e in (c.get("send_status") or [])
+                          if e.get("idempotency_key") == body.idempotency_key), None)
+        if vorhanden:
+            return {"channel": vorhanden.get("channel"), "status": "ok",
+                    "sent_at": vorhanden.get("sent_at"),
+                    "zustellung": vorhanden.get("zustellung", ""),
+                    "wa_url": vorhanden.get("wa_url"), "bereits_gesendet": True}
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, "dealer_id": user["dealer_id"],
+             "send_status.idempotency_key": {"$ne": body.idempotency_key}},
+            {"$push": {"send_status": {
+                "idempotency_key": body.idempotency_key, "channel": body.channel,
+                "recipient": body.recipient, "subject": body.subject,
+                "sent_at": now_iso(), "zustellung": "laeuft"}}})
+        if res.modified_count == 0:
+            return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
+                    "zustellung": "laeuft", "bereits_gesendet": True}
+        reserviert = True
+
+    async def _reservierung_zurueck():
+        if reserviert:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, "dealer_id": user["dealer_id"]},
+                {"$pull": {"send_status": {"idempotency_key": body.idempotency_key,
+                                           "zustellung": "laeuft"}}})
     # Ehrlicher Versand-Status (PR-Review 09/2026): "versendet" gibt es
     # NUR nach tatsaechlicher Zustellung an den Anbieter. WhatsApp oeffnet
     # lediglich den Chat (PDF haengt der Nutzer selbst an) -> der Vertrag
@@ -545,6 +577,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             out["zustellung"] = "mock"
             neuer_status = "versendet"
         elif not email_service.email_configured():
+            await _reservierung_zurueck()
             raise HTTPException(503,
                 "E-Mail-Versand ist nicht eingerichtet (SMTP_* in der .env "
                 "setzen) — der Vertrag wurde NICHT versendet. Alternativ per "
@@ -556,6 +589,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 body.message or "Anbei der Kaufvertrag als PDF.",
                 anhang=pdf_bytes, anhang_name=c.get("filename") or "Kaufvertrag.pdf")
             if not ok:
+                await _reservierung_zurueck()
                 raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
                                          "bitte in ein paar Minuten erneut "
                                          "versuchen. Der Vertrag wurde NICHT "
@@ -563,26 +597,24 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             out["zustellung"] = "versendet"
             neuer_status = "versendet"
     else:
+        await _reservierung_zurueck()
         raise HTTPException(400, "Unbekannter Kanal")
     send_entry = {
         "channel": body.channel, "recipient": body.recipient,
         "subject": body.subject, "sent_at": out["sent_at"],
         "zustellung": out.get("zustellung", ""),
     }
-    if body.idempotency_key:
+    if reserviert:
+        # Reservierten Eintrag mit dem Ergebnis fuellen (positional update).
         send_entry["idempotency_key"] = body.idempotency_key
-        # ATOMAR: nur wenn noch KEIN Eintrag diesen Schluessel traegt,
-        # wird gepusht — ein Retry mit demselben Schluessel erzeugt
-        # keinen zweiten Versandeintrag (Beweis: tests/test_send_idempotenz.py).
-        res = await db.generated_pdfs.update_one(
+        if out.get("wa_url"):
+            send_entry["wa_url"] = out["wa_url"]
+        await db.generated_pdfs.update_one(
             {"id": contract_id, "dealer_id": user["dealer_id"],
-             "send_status.idempotency_key": {"$ne": body.idempotency_key}},
-            {"$push": {"send_status": send_entry},
-             "$set": {"status": neuer_status, "updated_at": now_iso()}},
+             "send_status.idempotency_key": body.idempotency_key},
+            {"$set": {"send_status.$": send_entry,
+                      "status": neuer_status, "updated_at": now_iso()}},
         )
-        if res.modified_count == 0:
-            out["bereits_gesendet"] = True
-            return out
     else:
         await db.generated_pdfs.update_one(
             {"id": contract_id},

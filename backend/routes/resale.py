@@ -431,101 +431,126 @@ async def publish_listing(listing_id: str, body: PublishIn,
       zählt nicht erneut (counted_periods).
     - Kontingent voll → 402 mit Upgrade-Hinweis (kein Einzelkauf).
     """
-    l = await db.resale_listings.find_one(
-        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
-    if not l:
+    # SERIALISIERUNG je Inserat (Runde 5): Zwei gleichzeitige Publishes
+    # desselben Inserats konnten auseinanderlaufen — der zweite sah die
+    # Markierung des ersten und veroeffentlichte, waehrend der erste wegen
+    # ueberschrittener Quote zurueckrollte: Inserat live, aber ungezaehlt.
+    # Jetzt bekommt genau EINE Anfrage die Sperre; die andere wartet nicht,
+    # sondern bekommt 409 und wiederholt.
+    from datetime import datetime, timedelta, timezone
+    _jetzt = datetime.now(timezone.utc)
+    if not await db.resale_listings.count_documents(
+            {"id": listing_id, "dealer_id": user["dealer_id"]}):
         raise HTTPException(404, "Inserat nicht gefunden")
-    if l.get("status") not in ("verkaufsbereit", "zurueckgezogen"):
-        raise HTTPException(400, "Nur verkaufsbereite (oder zurückgezogene) "
-                                 "Inserate können veröffentlicht werden")
+    _sperre = await db.resale_listings.find_one_and_update(
+        {"id": listing_id, "dealer_id": user["dealer_id"],
+         "$or": [{"publish_lock_until": {"$exists": False}},
+                 {"publish_lock_until": None},
+                 {"publish_lock_until": {"$lt": _jetzt}}]},
+        {"$set": {"publish_lock_until": _jetzt + timedelta(seconds=30)}})
+    if _sperre is None:
+        raise HTTPException(409, "Dieses Inserat wird gerade veroeffentlicht — "
+                                 "bitte einen Moment warten und neu laden.")
+    try:
+        l = await db.resale_listings.find_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+        if not l:
+            raise HTTPException(404, "Inserat nicht gefunden")
+        if l.get("status") not in ("verkaufsbereit", "zurueckgezogen"):
+            raise HTTPException(400, "Nur verkaufsbereite (oder zurückgezogene) "
+                                     "Inserate können veröffentlicht werden")
 
-    from routes.team import get_sale_plan_status
-    plan = await get_sale_plan_status(user["dealer_id"])
-    if not plan.get("active"):
-        raise HTTPException(402, "Kein Verkaufspaket aktiv. Bitte im Bereich "
-                                 "'Mitarbeiter / Sucher' ein Paket anfragen.")
-    period_key = plan["period_key"]
-    already = period_key in (l.get("counted_periods") or [])
-    if not already:
-        # Schritt 1: Den Abrechnungszeitraum ATOMAR am Inserat markieren.
-        # Der $ne-Guard sorgt dafür, dass von BELIEBIG vielen gleichzeitigen
-        # Publishes desselben Inserats genau EINER die Markierung setzt —
-        # und nur DER beansprucht anschließend einen Kontingent-Slot.
-        # (Vorher konnten zwei parallele Publishes desselben Inserats zwei
-        # Slots ziehen — dauerhafte Überzählung.)
-        marker = await db.resale_listings.update_one(
-            {"id": listing_id, "dealer_id": user["dealer_id"],
-             "counted_periods": {"$ne": period_key}},
-            {"$addToSet": {"counted_periods": period_key}})
-        if not marker.modified_count:
-            # Ein GLEICHZEITIGER Publish hat die Markierung gesetzt. Zwei
-            # Faelle: (a) er hat den Slot bekommen — dann ist alles gezaehlt
-            # und wir duerfen mitveroeffentlichen; (b) er lag UEBER der
-            # Quota und hat Markierung + Slot gerade zurueckgegeben — dann
-            # duerfen wir NICHT einfach durchrutschen (vorher konnte so ein
-            # Inserat ueber der Quota live gehen, ohne je gezaehlt zu
-            # werden). Nachlesen entscheidet.
-            nachgelesen = await db.resale_listings.find_one(
-                {"id": listing_id, "dealer_id": user["dealer_id"]},
-                {"_id": 0, "counted_periods": 1})
-            if period_key not in (nachgelesen or {}).get("counted_periods", []):
-                raise HTTPException(402, "Dein monatliches Kontingent ist "
-                                         "erreicht. Upgrade auf ein größeres "
-                                         "Paket oder Enterprise anfragen.")
-        quota = plan.get("quota")
-        if marker.modified_count and quota:
-            # Schritt 2: ATOMARE Kontingent-Beanspruchung (race-fest, auch
-            # bei mehreren Worker-Prozessen): ein Zähler pro Händler+Zeitraum
-            # wird atomar erhöht — jeder Gewinner bekommt eine EINDEUTIGE
-            # Nummer. Wer über der Quota landet, gibt Slot UND Markierung
-            # zurück und wird abgelehnt.
-            did = user["dealer_id"]
-            field = f"quota_usage.{period_key}"
-            # Zähler einmalig aus dem Ist-Stand befüllen (idempotent, per
-            # $exists-Guard gegen paralleles Doppel-Seeding). Das EIGENE
-            # Inserat traegt schon die Markierung aus Schritt 1 — deshalb
-            # ausklammern, sonst zaehlte es doppelt (Seed + $inc).
-            seeded = await db.dealers.find_one(
-                {"id": did}, {field: 1})
-            if (seeded.get("quota_usage") or {}).get(period_key) is None:
-                cur = await db.resale_listings.count_documents(
-                    {"dealer_id": did, "counted_periods": period_key,
-                     "id": {"$ne": listing_id}})
-                await db.dealers.update_one(
-                    {"id": did, field: {"$exists": False}},
-                    {"$set": {field: cur}})
-            claimed = await db.dealers.find_one_and_update(
-                {"id": did},
-                {"$inc": {field: 1}},
-                projection={field: 1},
-                return_document=ReturnDocument.AFTER)
-            used_now = (claimed.get("quota_usage") or {}).get(period_key, 1)
-            if used_now > quota:
-                # Über der Quota → Slot und Markierung zurückgeben, ablehnen.
-                await db.dealers.update_one({"id": did}, {"$inc": {field: -1}})
-                await db.resale_listings.update_one(
+        from routes.team import get_sale_plan_status
+        plan = await get_sale_plan_status(user["dealer_id"])
+        if not plan.get("active"):
+            raise HTTPException(402, "Kein Verkaufspaket aktiv. Bitte im Bereich "
+                                     "'Mitarbeiter / Sucher' ein Paket anfragen.")
+        period_key = plan["period_key"]
+        already = period_key in (l.get("counted_periods") or [])
+        if not already:
+            # Schritt 1: Den Abrechnungszeitraum ATOMAR am Inserat markieren.
+            # Der $ne-Guard sorgt dafür, dass von BELIEBIG vielen gleichzeitigen
+            # Publishes desselben Inserats genau EINER die Markierung setzt —
+            # und nur DER beansprucht anschließend einen Kontingent-Slot.
+            # (Vorher konnten zwei parallele Publishes desselben Inserats zwei
+            # Slots ziehen — dauerhafte Überzählung.)
+            marker = await db.resale_listings.update_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"],
+                 "counted_periods": {"$ne": period_key}},
+                {"$addToSet": {"counted_periods": period_key}})
+            if not marker.modified_count:
+                # Ein GLEICHZEITIGER Publish hat die Markierung gesetzt. Zwei
+                # Faelle: (a) er hat den Slot bekommen — dann ist alles gezaehlt
+                # und wir duerfen mitveroeffentlichen; (b) er lag UEBER der
+                # Quota und hat Markierung + Slot gerade zurueckgegeben — dann
+                # duerfen wir NICHT einfach durchrutschen (vorher konnte so ein
+                # Inserat ueber der Quota live gehen, ohne je gezaehlt zu
+                # werden). Nachlesen entscheidet.
+                nachgelesen = await db.resale_listings.find_one(
                     {"id": listing_id, "dealer_id": user["dealer_id"]},
-                    {"$pull": {"counted_periods": period_key}})
-                raise HTTPException(402, f"Dein monatliches Kontingent von "
-                                         f"{quota} Fahrzeugen ist erreicht. "
-                                         "Upgrade auf ein größeres Paket oder "
-                                         "Enterprise anfragen.")
+                    {"_id": 0, "counted_periods": 1})
+                if period_key not in (nachgelesen or {}).get("counted_periods", []):
+                    raise HTTPException(402, "Dein monatliches Kontingent ist "
+                                             "erreicht. Upgrade auf ein größeres "
+                                             "Paket oder Enterprise anfragen.")
+            quota = plan.get("quota")
+            if marker.modified_count and quota:
+                # Schritt 2: ATOMARE Kontingent-Beanspruchung (race-fest, auch
+                # bei mehreren Worker-Prozessen): ein Zähler pro Händler+Zeitraum
+                # wird atomar erhöht — jeder Gewinner bekommt eine EINDEUTIGE
+                # Nummer. Wer über der Quota landet, gibt Slot UND Markierung
+                # zurück und wird abgelehnt.
+                did = user["dealer_id"]
+                field = f"quota_usage.{period_key}"
+                # Zähler einmalig aus dem Ist-Stand befüllen (idempotent, per
+                # $exists-Guard gegen paralleles Doppel-Seeding). Das EIGENE
+                # Inserat traegt schon die Markierung aus Schritt 1 — deshalb
+                # ausklammern, sonst zaehlte es doppelt (Seed + $inc).
+                seeded = await db.dealers.find_one(
+                    {"id": did}, {field: 1})
+                if (seeded.get("quota_usage") or {}).get(period_key) is None:
+                    cur = await db.resale_listings.count_documents(
+                        {"dealer_id": did, "counted_periods": period_key,
+                         "id": {"$ne": listing_id}})
+                    await db.dealers.update_one(
+                        {"id": did, field: {"$exists": False}},
+                        {"$set": {field: cur}})
+                claimed = await db.dealers.find_one_and_update(
+                    {"id": did},
+                    {"$inc": {field: 1}},
+                    projection={field: 1},
+                    return_document=ReturnDocument.AFTER)
+                used_now = (claimed.get("quota_usage") or {}).get(period_key, 1)
+                if used_now > quota:
+                    # Über der Quota → Slot und Markierung zurückgeben, ablehnen.
+                    await db.dealers.update_one({"id": did}, {"$inc": {field: -1}})
+                    await db.resale_listings.update_one(
+                        {"id": listing_id, "dealer_id": user["dealer_id"]},
+                        {"$pull": {"counted_periods": period_key}})
+                    raise HTTPException(402, f"Dein monatliches Kontingent von "
+                                             f"{quota} Fahrzeugen ist erreicht. "
+                                             "Upgrade auf ein größeres Paket oder "
+                                             "Enterprise anfragen.")
 
-    await db.resale_listings.update_one(
-        {"id": listing_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"status": "veroeffentlicht",
-                  "visibility": body.visibility,
-                  "published_at": l.get("published_at") or now_iso(),
-                  "updated_at": now_iso()}})
-    if l.get("vehicle_id"):
-        await try_set_lifecycle(l["vehicle_id"], user["dealer_id"],
-                                "veroeffentlicht", user=user)
-    await log_activity(user["dealer_id"], user["id"], "inserat.veroeffentlicht",
-                       ref=listing_id,
-                       meta={"sichtbarkeit": body.visibility,
-                             "kontingent": f"{plan.get('used', 0) + (0 if already else 1)}/{plan.get('quota')}"})
-    return {"ok": True, "status": "veroeffentlicht",
-            "visibility": body.visibility}
+        await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$set": {"status": "veroeffentlicht",
+                      "visibility": body.visibility,
+                      "published_at": l.get("published_at") or now_iso(),
+                      "updated_at": now_iso()}})
+        if l.get("vehicle_id"):
+            await try_set_lifecycle(l["vehicle_id"], user["dealer_id"],
+                                    "veroeffentlicht", user=user)
+        await log_activity(user["dealer_id"], user["id"], "inserat.veroeffentlicht",
+                           ref=listing_id,
+                           meta={"sichtbarkeit": body.visibility,
+                                 "kontingent": f"{plan.get('used', 0) + (0 if already else 1)}/{plan.get('quota')}"})
+        return {"ok": True, "status": "veroeffentlicht",
+                "visibility": body.visibility}
+    finally:
+        await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$unset": {"publish_lock_until": ""}})
 
 
 # =========================================================

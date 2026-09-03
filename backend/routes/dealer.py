@@ -275,12 +275,21 @@ async def dealer_subscription(user=Depends(current_firma)):
       - "expired"   : Bereits abgelaufen
       - "none"      : Kein Abo vorhanden
     """
+    # Review 09/2026: Vorher wurde das NEUESTE Abo der Firma angezeigt —
+    # also z.B. das Sucher-Abo eines Mitarbeiters mit fremder Laufzeit.
+    # Jetzt: erst das persoenliche Abo des Aufrufers, sonst das
+    # haendlerweite (ohne subject_user_id).
     sub_doc = await db.subscriptions.find_one(
-        {"dealer_id": user["dealer_id"]},
-        {"_id": 0},
-        sort=[("created_at", -1)],
-    )
-    status = await get_subscription_status(user["dealer_id"])
+        {"dealer_id": user["dealer_id"], "subject_user_id": user["id"]},
+        {"_id": 0}, sort=[("created_at", -1)])
+    if not sub_doc and user.get("role") != "sucher":
+        sub_doc = await db.subscriptions.find_one(
+            {"dealer_id": user["dealer_id"],
+             "$or": [{"subject_user_id": {"$exists": False}},
+                     {"subject_user_id": None}]},
+            {"_id": 0}, sort=[("created_at", -1)])
+    from deps import subscription_for
+    status = await subscription_for(user)
 
     days_remaining = None
     expires_at = sub_doc.get("expires_at") if sub_doc else None

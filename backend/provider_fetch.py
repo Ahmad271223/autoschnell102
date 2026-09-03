@@ -43,14 +43,22 @@ async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
     from pymongo import ReturnDocument
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     ablauf = datetime.now(timezone.utc) + timedelta(days=2)
-    for schluessel, limit in ((f"{tag}:gesamt", TAGESLIMIT_GESAMT),
-                              (f"{tag}:firma:{dealer_id or 'ohne'}",
-                               TAGESLIMIT_JE_FIRMA)):
+    # Reihenfolge (Runde 5): ZUERST das Firmenlimit, DANN das Gesamtbudget —
+    # und bei Ablehnung die Zaehlung zuruecknehmen. Vorher verbrauchte eine
+    # Firma, die ihr eigenes Limit laengst ueberschritten hatte, mit jedem
+    # abgelehnten Versuch weiter das GESAMTBUDGET aller anderen Firmen.
+    belastet = []
+    for schluessel, limit in ((f"{tag}:firma:{dealer_id or 'ohne'}",
+                               TAGESLIMIT_JE_FIRMA),
+                              (f"{tag}:gesamt", TAGESLIMIT_GESAMT)):
         doc = await db.provider_budget.find_one_and_update(
             {"_id": schluessel},
             {"$inc": {"n": 1}, "$setOnInsert": {"ablauf": ablauf}},
             upsert=True, return_document=ReturnDocument.AFTER)
+        belastet.append(schluessel)
         if doc["n"] > limit:
+            for s in belastet:
+                await db.provider_budget.update_one({"_id": s}, {"$inc": {"n": -1}})
             raise RuntimeError(
                 "Tageslimit für kostenpflichtige Anbieter-Abrufe erreicht "
                 f"({limit}/Tag). Bekannte Links kommen weiter aus dem "

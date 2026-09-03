@@ -48,7 +48,17 @@ _PII_MUSTER = (
     re.compile(r"\b\d{5}\s+[A-Z\u00c4\u00d6\u00dc][a-z\u00e4\u00f6\u00fc\u00df]{2,}"),   # PLZ + Ort
     re.compile(r"\b[A-Z\u00c4\u00d6\u00dc]{1,3}-[A-Z\u00c4\u00d6\u00dc]{1,2}\s?\d{1,4}[EH]?\b"),  # Kennzeichen
     re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}\b"),         # IBAN
+    # "Am Kanal 3a", "An der Weide 7", "Im Winkel 12" (Runde 5)
+    re.compile(r"\b(Am|An der|An den|Im|In der|Zum|Zur|Auf dem|Auf der|Hinter dem|Unter den)\s+[A-Z\u00c4\u00d6\u00dc][\w\u00e4\u00f6\u00fc\u00df-]+\s+\d{1,4}\s*[a-z]?\b"),
 )
+
+# Freitext-Schaeden (Notiz/Skizzen-Text) dauerhaft speichern? Namen oder
+# ungewoehnlich geschriebene Personendaten kann kein Filter sicher erkennen
+# (Pruefbericht Runde 5). Mit AUTO_DATEN_SCHAEDEN_FREITEXT=false werden nur
+# die vordefinierten Skizzen-Bezeichnungen uebernommen, kein Freitext.
+import os as _os
+SCHAEDEN_FREITEXT = _os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "true") \
+    .strip().lower() not in ("0", "false", "no", "nein")
 
 
 def _zahl(wert) -> Optional[int]:
@@ -137,11 +147,14 @@ def daten_extrahieren(contract_dict: Dict[str, Any],
         preis_cents = int(round(float(preis) * 100))
 
     schaeden_roh: List[Any] = []
-    for feld in ("vehicle_damage_note", "damages_text"):
-        if c.get(feld):
-            schaeden_roh.append(c[feld])
+    if SCHAEDEN_FREITEXT:
+        for feld in ("vehicle_damage_note", "damages_text"):
+            if c.get(feld):
+                schaeden_roh.append(c[feld])
     if isinstance(c.get("damages"), list):
-        schaeden_roh.extend(c["damages"])
+        # Skizzen-Eintraege (dict) immer; nackte Freitext-Strings nur mit Schalter
+        schaeden_roh.extend(d for d in c["damages"]
+                            if isinstance(d, dict) or SCHAEDEN_FREITEXT)
 
     daten = {
         "brand": erst(c.get("vehicle_make"), v.get("make_label"), v.get("make")),

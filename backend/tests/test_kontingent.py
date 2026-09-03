@@ -189,3 +189,36 @@ def test_05_neuer_monat_gibt_neue_fuenf(welt):
                       json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert _plan(welt["H"])["used"] == 1
+
+
+def test_06_parallele_veroeffentlichung_zaehlt_genau_einmal(welt):
+    """Runde 5: Zwei gleichzeitige Publishes desselben Inserats duerfen
+    nicht auseinanderlaufen (Inserat live, aber ungezaehlt). Die Sperre je
+    Inserat laesst genau EINE Anfrage durch; die anderen bekommen 409."""
+    import threading
+    H = welt["H"]
+    vid = _fahrzeug(welt["dealer_id"], 99)          # frisches Fahrzeug, noch ohne Entwurf
+    r = requests.post(f"{API}/resale/draft/{vid}", headers=H, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    lid = r.json()["id"]
+    assert requests.put(f"{API}/resale/{lid}", headers=H,
+                        json={"price_public": 9900, "price_b2b": 9000}, timeout=30).status_code == 200
+    assert requests.post(f"{API}/resale/{lid}/status", headers=H,
+                         json={"status": "verkaufsbereit"}, timeout=30).status_code == 200
+    vorher = _plan(H)["used"]
+    codes = []
+    def go():
+        codes.append(requests.post(f"{API}/resale/{lid}/publish", headers=H,
+                                   json={"visibility": "public"}, timeout=60).status_code)
+    ts = [threading.Thread(target=go) for _ in range(6)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    # Mindestens einer gewinnt; Nachzuegler nach Freigabe der Sperre duerfen
+    # das bereits veroeffentlichte Inserat idempotent "erneut" veroeffentlichen
+    # (200) — entscheidend ist: kein 5xx und genau EIN verbrauchter Slot.
+    assert codes.count(200) >= 1, codes
+    assert all(c in (200, 409) for c in codes), codes
+    p = _plan(H)
+    assert p["used"] == vorher + 1, p
+    l = _db().resale_listings.find_one({"id": lid})
+    assert l["status"] == "veroeffentlicht" and len(l.get("counted_periods") or []) == 1
+    assert "publish_lock_until" not in l
