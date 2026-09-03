@@ -61,6 +61,9 @@ export function DriverAuthProvider({ children }) {
   };
 
   const logout = () => {
+    // Serverseitig widerrufen (Runde 5): vorher blieb ein kopierter Token
+    // nach dem Abmelden bis zum Ablauf gueltig.
+    driverApi.post("/driver/logout").catch(() => {});
     localStorage.removeItem("ah_driver_token");
     setDriver(null);
   };

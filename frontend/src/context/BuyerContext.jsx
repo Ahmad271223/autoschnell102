@@ -8,7 +8,7 @@ import { API_BASE } from "@/lib/api";
  */
 const BuyerCtx = createContext(null);
 
-export const buyerApi = axios.create({ baseURL: API_BASE });
+export const buyerApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 buyerApi.interceptors.request.use((c) => {
   const t = localStorage.getItem("ah_buyer_token");
   if (t) c.headers.Authorization = `Bearer ${t}`;

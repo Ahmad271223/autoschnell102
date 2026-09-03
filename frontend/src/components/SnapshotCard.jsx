@@ -13,6 +13,8 @@ import { toast } from "sonner";
 const POLL_INTERVAL_MS = 4000;
 const MAX_POLL = 30;  // ~2 minutes total
 
+const MAX_POLLS = 150; // 150 x 4 s = 10 min
+
 export default function SnapshotCard({ snapshotId, vehicleId, compact = false }) {
   const [snap, setSnap] = useState(null);
   const [polls, setPolls] = useState(0);
@@ -24,6 +26,7 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
     setSnap(null);
     setPolls(0);
 
+    let versuche = 0;
     const tick = async () => {
       try {
         const { data } = await api.get(`/snapshots/${snapshotId}`);
@@ -34,6 +37,14 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
       } catch {
         if (cancelled) return;
         setPolls((p) => p + 1);
+      }
+      // Review 09/2026: nicht endlos pollen — nach MAX_POLLS aufhoeren und
+      // den Job als "Zeitueberschreitung" anzeigen (Reaper faengt ihn serverseitig).
+      versuche += 1;
+      if (versuche >= MAX_POLLS) {
+        if (!cancelled) setSnap((s) => ({ ...(s || {}), status: "failed",
+          error: "Zeitüberschreitung – bitte später erneut versuchen." }));
+        return;
       }
       if (!cancelled) setTimeout(tick, POLL_INTERVAL_MS);
     };

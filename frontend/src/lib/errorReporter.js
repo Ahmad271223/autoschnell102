@@ -22,7 +22,9 @@ function report(message, stack) {
       body: JSON.stringify({
         message: String(message).slice(0, 1000),
         stack: String(stack || "").slice(0, 8000),
-        url: window.location.href.slice(0, 500),
+        // Nur Origin + Pfad: Query/Fragment koennen Reset-Token oder
+        // Stripe-Session-IDs enthalten (Pruefbericht Runde 5).
+        url: (window.location.origin + window.location.pathname).slice(0, 500),
         user_email: "",
       }),
     }).catch(() => {});

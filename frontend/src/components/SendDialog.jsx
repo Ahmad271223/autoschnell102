@@ -34,7 +34,11 @@ export default function SendDialog({ open, contract, onClose }) {
         window.open(data.wa_url, "_blank", "noopener");
         toast.success("WhatsApp Chat geöffnet · PDF separat anhängen");
       } else {
-        toast.success("Versand registriert (E-Mail-Versand ist mocked)");
+        const z = data?.zustellung;
+        if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
+        else if (z === "versendet") toast.success("E-Mail mit Vertrag versendet");
+        else if (z === "mock") toast.success("Testmodus: Versand nur protokolliert, keine E-Mail");
+        else toast.success("Versand registriert");
       }
     } catch (err) {
       toast.error(errMsg(err, "Versand fehlgeschlagen"));
@@ -124,7 +128,7 @@ export default function SendDialog({ open, contract, onClose }) {
                           value={emailMsg} onChange={(e) => setEmailMsg(e.target.value)} />
               </div>
               <div className="text-[11px] text-zinc-500">
-                E-Mail-Versand ist <strong className="text-zinc-300">aktuell MOCKED</strong> – Versand wird im Archiv protokolliert.
+                Die E-Mail wird mit dem Vertrags-PDF im Anhang über den Server versendet und im Archiv protokolliert.
               </div>
               <button data-testid="send-email-btn" onClick={() => send("email")} disabled={busy || !email}
                       className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">

@@ -64,6 +64,15 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     except Exception:
         raise HTTPException(401, "Token ungültig")
     user = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
+    if user and user.get("role") == "sucher" and user.get("dealer_id"):
+        # Review 09/2026: Sperrt der Admin den Haendler-Hauptaccount, blieben
+        # dessen Sucher voll arbeitsfaehig. Gesperrter Chef = gesperrte Firma.
+        chef = await db.users.find_one(
+            {"dealer_id": user["dealer_id"], "role": "dealer"},
+            {"_id": 0, "active": 1})
+        if chef is not None and not chef.get("active", True):
+            raise HTTPException(403, "Die Firma ist gesperrt — bitte den "
+                                     "Administrator kontaktieren.")
     if not user or not user.get("active"):
         raise HTTPException(401, "Account deaktiviert")
     # Single-session enforcement (strikt): Das Token-sid MUSS der aktuell

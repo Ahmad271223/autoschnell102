@@ -135,9 +135,21 @@ async def admin_list_users(_=Depends(current_admin),
         {"$group": {"_id": "$dealer_id", "sub": {"$first": "$$ROOT"}}},
     ]):
         newest_subs[row["_id"]] = row["sub"]
+    # Sucher: persoenliches Abo (subject_user_id) statt Firmen-Abo (Review 09/2026)
+    sucher_ids = [u["id"] for u in users if u.get("role") == "sucher"]
+    persoenlich = {}
+    if sucher_ids:
+        async for row in db.subscriptions.aggregate([
+            {"$match": {"subject_user_id": {"$in": sucher_ids}}},
+            {"$sort": {"created_at": -1}},
+            {"$group": {"_id": "$subject_user_id", "sub": {"$first": "$$ROOT"}}},
+        ]):
+            persoenlich[row["_id"]] = row["sub"]
     return [{**u,
              "company_name": dealers.get(u.get("dealer_id"), {}).get("company_name"),
-             "subscription": sub_status_from_doc(newest_subs.get(u.get("dealer_id")))}
+             "subscription": sub_status_from_doc(
+                 persoenlich.get(u["id"]) if u.get("role") == "sucher"
+                 else newest_subs.get(u.get("dealer_id")))}
             for u in users]
 
 
@@ -281,7 +293,8 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.listing_interest.delete_many({"buyer_user_id": user_id})
         await db.plan_requests.delete_many({"buyer_user_id": user_id})
         if u.get("email"):
-            await db.password_resets.delete_many({"email": u["email"]})
+            # Reset-Dokumente tragen user_id, keine E-Mail (Runde 5).
+            await db.password_resets.delete_many({"user_id": user_id})
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.geloescht", ref=user_id,
                            meta={"email": u.get("email", ""),
@@ -326,6 +339,26 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         geloescht["dateien"] = dateien
         if datei_fehler:
             geloescht["datei_fehler"] = datei_fehler
+            # Runde 5: nicht stillschweigend "ok" — Wiederholung einplanen
+            # (cleanup_service.storage_loeschungen_nachholen) und im
+            # Fehlerarchiv sichtbar machen.
+            for kategorie in ("protocol", "pickup", "resale", "logo"):
+                await db.storage_delete_retry.update_one(
+                    {"prefix": f"{kategorie}/{dealer_id}/"},
+                    {"$setOnInsert": {"id": str(uuid.uuid4()),
+                                      "prefix": f"{kategorie}/{dealer_id}/",
+                                      "dealer_id": dealer_id,
+                                      "created_at": now_iso()},
+                     "$set": {"letzter_fehler": "; ".join(datei_fehler)[:300]}},
+                    upsert=True)
+            await db.error_logs.insert_one({
+                "id": str(uuid.uuid4()), "source": "backend", "method": "DELETE",
+                "path": f"/api/admin/users/{user_id}", "error_type": "StorageDelete",
+                "message": "Dateien der geloeschten Firma konnten nicht (vollstaendig) "
+                           "entfernt werden — Wiederholung eingeplant: "
+                           + "; ".join(datei_fehler)[:600],
+                "traceback": "", "ip": "", "status": "open",
+                "created_at": now_iso()})
         await db.dealers.delete_many({"id": dealer_id})
     else:
         await db.users.delete_one({"id": user_id})
@@ -354,6 +387,10 @@ async def admin_user_set_active(
         raise HTTPException(400, "Super-Admin kann nicht gesperrt werden")
     if u.get("id") == admin.get("id") and not body.active:
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
+    # Runde 5: ein normaler Admin konnte andere Admins sperren/entsperren.
+    if u.get("role") == "admin" and u.get("id") != admin.get("id") \
+            and not admin.get("is_super_admin"):
+        raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
     patch = {"active": bool(body.active), "updated_at": now_iso()}
     if not body.active:
         patch["current_session_id"] = None

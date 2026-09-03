@@ -267,17 +267,16 @@ export default function FahrzeugAkte() {
         {(akte.protocols || []).length > 0 && (
           <Section title="Unterlagen · Abhol-Protokoll">
             {akte.protocols.map((p) => (
-              <a key={p.id}
-                 href={`${process.env.REACT_APP_BACKEND_URL}/api/protocols/${p.id}.pdf`}
-                 target="_blank" rel="noreferrer"
-                 className="mt-2 flex items-center justify-between text-sm rounded-lg px-2 py-1.5 hover:bg-white/[0.04]">
+              <button key={p.id} type="button"
+                 onClick={() => openAuthedFile(`/protocols/${p.id}.pdf`).catch(() => toast.error("Protokoll konnte nicht geladen werden"))}
+                 className="mt-2 w-full flex items-center justify-between text-sm rounded-lg px-2 py-1.5 hover:bg-white/[0.04] text-left">
                 <span className="inline-flex items-center gap-1.5 text-zinc-200">
                   <PenLine size={13} className="text-[color:var(--accent-green,#34c759)]" />
                   Abhol-Protokoll (unterschrieben)
                   {p.version > 1 && <span className="text-[10px] text-zinc-500">v{p.version}</span>}
                 </span>
                 <span className="text-zinc-500 text-xs">{fmtDate(p.finalized_at)}</span>
-              </a>
+              </button>
             ))}
             <div className="mt-1.5 text-[11px] text-zinc-500">
               Unterschriften von Fahrer und Verkäufer/Kunde · beim Antippen als PDF öffnen

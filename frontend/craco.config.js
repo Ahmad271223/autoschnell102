@@ -1,3 +1,12 @@
+// Runde 5 (CSP script-src 'self'): kein Inline-Runtime-Chunk im Build und die
+// erlaubten API-Origins fuer connect-src — hier statt in .env-Dateien, weil die
+// per .gitignore ausgeschlossen sind und CI/Docker sie sonst nie saehen.
+process.env.INLINE_RUNTIME_CHUNK = process.env.INLINE_RUNTIME_CHUNK || "false";
+if (process.env.REACT_APP_CSP_CONNECT === undefined) {
+  process.env.REACT_APP_CSP_CONNECT =
+    process.env.NODE_ENV === "production" ? "" : "http://localhost:8001";
+}
+
 // craco.config.js
 const path = require("path");
 require("dotenv").config();

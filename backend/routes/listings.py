@@ -501,20 +501,31 @@ async def live_counter(ad_id: str, user=Depends(current_firma)):
 # =========================================================
 #                  LISTING SNAPSHOTS
 # =========================================================
-async def _load_snapshot_or_404(snap_id: str) -> dict:
-    # Snapshots dokumentieren OEFFENTLICHE Inserate und werden haendler-
-    # uebergreifend wiederverwendet -> lesbar fuer jeden eingeloggten Nutzer.
+async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> dict:
+    """Snapshot laden — NUR fuer die Firma, die das Inserat selbst fuehrt
+    (Vergleich/Fahrzeugpool/Vertrag) oder fuer Admins (Runde 5). Vorher
+    reichte "angemeldet" — eine bekannte Snapshot-ID lieferte fremde PDFs."""
     snap = await db.listing_snapshots.find_one(
         {"id": snap_id}, {"_id": 0},
     )
     if not snap:
         raise HTTPException(404, "Snapshot nicht gefunden")
+    if user is not None and user.get("role") != "admin":
+        dealer_id = user.get("dealer_id")
+        erlaubt = bool(dealer_id) and (
+            snap.get("dealer_id") == dealer_id
+            or await db.vehicles.count_documents(
+                {"id": snap.get("vehicle_id"), "dealer_id": dealer_id}) > 0
+            or await db.generated_pdfs.count_documents(
+                {"vehicle_id": snap.get("vehicle_id"), "dealer_id": dealer_id}) > 0)
+        if not erlaubt:
+            raise HTTPException(404, "Snapshot nicht gefunden")
     return snap
 
 
 @router.get("/snapshots/{snap_id}")
 async def snapshot_status(snap_id: str, user=Depends(current_user)):
-    snap = await _load_snapshot_or_404(snap_id)
+    snap = await _load_snapshot_or_404(snap_id, user)
     snap.pop("png_path", None)
     snap.pop("pdf_path", None)
     return snap
@@ -534,7 +545,7 @@ async def snapshot_download(snap_id: str, kind: str,
     if kind not in ("pdf", "png"):
         raise HTTPException(400, "kind muss 'pdf' oder 'png' sein")
 
-    snap = await _load_snapshot_or_404(snap_id)
+    snap = await _load_snapshot_or_404(snap_id, user)
     if snap.get("status") != "ready":
         raise HTTPException(409, f"Snapshot ist nicht bereit (status={snap.get('status')})")
     path = snap.get(f"{kind}_path")

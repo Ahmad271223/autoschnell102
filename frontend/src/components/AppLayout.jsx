@@ -5,7 +5,6 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
-import CookieConsent from "@/components/CookieConsent";
 
 const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
@@ -105,8 +104,6 @@ export default function AppLayout({ children }) {
         {children}
       </main>
 
-      {/* DSGVO cookie-consent banner — deferred PostHog init */}
-      <CookieConsent />
     </div>
   );
 }

@@ -358,6 +358,15 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     }
 
 
+@router.post("/driver/logout")
+async def driver_logout(driver=Depends(current_driver)):
+    """Sitzung serverseitig beenden (Runde 5): vorher loeschte die App nur
+    den lokalen Token — ein kopierter Token blieb bis zum Ablauf gueltig."""
+    await db.driver_accounts.update_one(
+        {"id": driver["id"]}, {"$set": {"current_session_id": None}})
+    return {"ok": True}
+
+
 @router.get("/driver/me")
 async def driver_me(driver=Depends(current_driver)):
     links = await db.dealer_drivers.find(
@@ -760,9 +769,8 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     # Erlaubt ist deshalb der ERSTE Bericht binnen 24 h nach "abgeholt";
     # Korrekturversionen danach nur ueber den Haendler (Termin wieder oeffnen).
     status = appt.get("status") or "offen"
+    reserviert = False
     if status == "abgeholt":
-        vorhanden = await db.pickup_reports.count_documents(
-            {"appointment_id": appt_id})
         seit = appt.get("status_changed_at") or ""
         frisch = False
         try:
@@ -773,11 +781,24 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
             frisch = datetime.now(timezone.utc) - t <= timedelta(hours=24)
         except (TypeError, ValueError):
             frisch = False
-        if vorhanden or not frisch:
+        # ATOMARE Reservierung des Erstberichts (Runde 5): zwei parallele
+        # Erstanfragen bestanden vorher beide die Vorpruefung, die zweite
+        # wurde als "Korrekturversion" gespeichert. Genau EINE gewinnt.
+        res = await db.appointments.find_one_and_update(
+            {"id": appt_id, "driver_id": driver["id"],
+             "erstbericht_reserviert_at": {"$exists": False}},
+            {"$set": {"erstbericht_reserviert_at": now_iso()}})
+        vorhanden = await db.pickup_reports.count_documents(
+            {"appointment_id": appt_id})
+        if res is None or vorhanden or not frisch:
+            if res is not None and not vorhanden and not frisch:
+                await db.appointments.update_one(
+                    {"id": appt_id}, {"$unset": {"erstbericht_reserviert_at": ""}})
             raise HTTPException(409, "Termin ist bereits 'abgeholt' — der "
                                      "Abholbericht kann nur einmal direkt nach "
                                      "der Abholung eingereicht werden; "
                                      "Korrekturen nur ueber den Haendler.")
+        reserviert = True
     else:
         _termin_offen_oder_409(appt)
 
@@ -834,6 +855,9 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
             # Bericht hat dieselbe Version belegt -> frisch lesen, neue
             # Versionsnummer nehmen und erneut versuchen.
             if versuch == 2:
+                if reserviert:
+                    await db.appointments.update_one(
+                        {"id": appt_id}, {"$unset": {"erstbericht_reserviert_at": ""}})
                 raise HTTPException(409, "Bericht wurde gerade parallel "
                                          "gespeichert — bitte neu laden.")
             doc.pop("_id", None)

@@ -274,6 +274,9 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
         "used": False,
         "requested_ip": ip,
         "created_at": now_iso(),
+        # TTL-Index (server.ensure_indexes): Token-Hash + IP verschwinden
+        # 7 Tage nach Anforderung automatisch (Runde 5).
+        "loeschen_ab": datetime.now(timezone.utc) + timedelta(days=7),
     })
     # Basis-Adresse NUR aus der Server-Konfiguration. Frueher kam sie aus
     # Origin/Referer — beides bestimmt der Aufrufer, wodurch ein Angreifer
@@ -316,18 +319,19 @@ async def password_reset_confirm(body: ResetConfirmIn, request: Request):
                               {"_id": 0, "id": 1, "role": 1, "active": 1})
     if not u or not u.get("active", True) or u.get("role") == "sucher":
         raise invalid
-    await konten.update_one(
-        {"id": u["id"]},
-        {"$set": {"password_hash": await hash_password_async(body.new_password),
-                  # Alle bestehenden Sessions beenden (Single-Session strikt)
-                  "current_session_id": None}})
-    # ATOMAR entwerten: nur der ERSTE parallele Bestaetiger gewinnt —
-    # vorher konnten zwei gleichzeitige Aufrufe denselben Token nutzen.
+    # ATOMAR entwerten — und zwar VOR der Passwortaenderung (Runde 5):
+    # nur der ERSTE parallele Bestaetiger gewinnt; vorher wurde das
+    # Passwort schon geaendert, bevor der Token endgueltig verbraucht war.
     verbraucht = await db.password_resets.find_one_and_update(
         {"id": doc["id"], "used": {"$ne": True}},
         {"$set": {"used": True, "used_at": now_iso()}})
     if not verbraucht:
         raise invalid
+    await konten.update_one(
+        {"id": u["id"]},
+        {"$set": {"password_hash": await hash_password_async(body.new_password),
+                  # Alle bestehenden Sessions beenden (Single-Session strikt)
+                  "current_session_id": None}})
     await log_activity("", u["id"], "auth.passwort.reset.durchgefuehrt",
                        meta={"ip": ip})
     return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}
