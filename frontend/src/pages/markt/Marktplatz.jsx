@@ -724,6 +724,8 @@ function InteresseForm({ v }) {
 function MeineAnfragen({ onClose }) {
   const [items, setItems] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  const [gegenFor, setGegenFor] = useState(null);      // Kaeufer-Gegenangebot (09/2026)
+  const [gegenVal, setGegenVal] = useState("");
 
   const load = () => {
     buyerApi.get("/buyer/interessen")
@@ -732,14 +734,15 @@ function MeineAnfragen({ onClose }) {
   };
   useEffect(() => { load(); }, []);
 
-  const antwort = async (it, action) => {
+  const antwort = async (it, action, extra = {}) => {
     if (busyId) return;
     setBusyId(it.id);
     try {
-      await buyerApi.post(`/interessen/${it.id}/kaeufer-antwort`, { action, message: "" });
+      await buyerApi.post(`/interessen/${it.id}/kaeufer-antwort`, { action, message: "", ...extra });
       toast.success(action === "annehmen"
         ? "Gegenangebot angenommen — das Fahrzeug ist für dich reserviert"
-        : "Gegenangebot abgelehnt");
+        : action === "ablehnen" ? "Gegenangebot abgelehnt" : "Dein Gegenangebot wurde an den Händler gesendet");
+      setGegenFor(null); setGegenVal("");
       load();
     } catch (e) {
       toast.error(errMsg(e, "Antwort fehlgeschlagen"));
@@ -749,7 +752,7 @@ function MeineAnfragen({ onClose }) {
   };
 
   const STATUS_FARBE = {
-    offen: "#fbbf24", gegenangebot: "#60a5fa", akzeptiert: "#34c759", abgelehnt: "#a1a1aa",
+    offen: "#fbbf24", gegenangebot: "#60a5fa", gegenangebot_kaeufer: "#3b82f6", akzeptiert: "#34c759", abgelehnt: "#a1a1aa",
   };
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
@@ -792,6 +795,12 @@ function MeineAnfragen({ onClose }) {
                     {it.status}
                   </span>
                 </div>
+                {it.status === "gegenangebot_kaeufer" && (
+                  <div className="mt-3 text-[12.5px]" style={{ color: "var(--text-muted)" }}
+                       data-testid={`kaeufer-wartet-${it.id}`}>
+                    Dein Gegenangebot ({fmtEur(it.buyer_counter_offer)}) liegt beim Händler — er kann annehmen, ablehnen oder ein neues Angebot schreiben.
+                  </div>
+                )}
                 {it.status === "gegenangebot" && (
                   <div className="mt-3 rounded-xl p-3" style={{ background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.3)" }}>
                     <div className="text-sm">
@@ -811,7 +820,29 @@ function MeineAnfragen({ onClose }) {
                               style={{ borderColor: "var(--border-default)" }}>
                         Ablehnen
                       </button>
+                      <button onClick={() => { setGegenFor(gegenFor === it.id ? null : it.id); setGegenVal(""); }} disabled={busyId === it.id}
+                              data-testid={`kaeufer-gegenangebot-${it.id}`}
+                              className="flex-1 rounded-lg py-2 text-sm font-semibold border text-sky-300 disabled:opacity-50"
+                              style={{ borderColor: "rgba(59,130,246,0.5)" }}>
+                        Gegenangebot
+                      </button>
                     </div>
+                    {gegenFor === it.id && (
+                      <div className="mt-2.5 flex gap-2 items-center">
+                        <input type="number" min="1" value={gegenVal} onChange={(e) => setGegenVal(e.target.value)}
+                               placeholder="Dein Preis in €" autoFocus
+                               data-testid={`kaeufer-gegenangebot-betrag-${it.id}`}
+                               className="h-9 px-2.5 rounded-lg border bg-transparent text-sm outline-none w-40"
+                               style={{ borderColor: "var(--border-default)" }} />
+                        <button onClick={() => { const b = Number(gegenVal); if (!b || b <= 0) { toast.error("Bitte einen Betrag eingeben"); return; } antwort(it, "gegenangebot", { counter_offer: b }); }}
+                                disabled={busyId === it.id}
+                                data-testid={`kaeufer-gegenangebot-senden-${it.id}`}
+                                className="h-9 rounded-lg px-4 text-sm font-semibold text-white disabled:opacity-50"
+                                style={{ background: "var(--accent-red)" }}>
+                          Senden
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                 {it.status === "akzeptiert" && (

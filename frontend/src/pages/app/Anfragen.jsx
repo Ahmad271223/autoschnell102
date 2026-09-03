@@ -25,6 +25,7 @@ const fmtZeit = (iso) => {
 const STATUS_META = {
   offen:        { label: "Offen",        fg: "#fbbf24", bg: "rgba(245,158,11,0.12)", bd: "rgba(245,158,11,0.35)" },
   gegenangebot: { label: "Gegenangebot", fg: "#60a5fa", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
+  gegenangebot_kaeufer: { label: "Gegenangebot Käufer", fg: "#93c5fd", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
   akzeptiert:   { label: "Akzeptiert",   fg: "#34c759", bg: "rgba(52,199,89,0.12)",  bd: "rgba(52,199,89,0.35)" },
   abgelehnt:    { label: "Abgelehnt",    fg: "#a1a1aa", bg: "rgba(255,255,255,0.05)", bd: "rgba(255,255,255,0.12)" },
 };
@@ -33,6 +34,7 @@ const FILTERS = [
   { key: "", label: "Alle" },
   { key: "offen", label: "Offen" },
   { key: "gegenangebot", label: "Gegenangebot" },
+  { key: "gegenangebot_kaeufer", label: "Gegenangebot Käufer" },
   { key: "akzeptiert", label: "Akzeptiert" },
   { key: "abgelehnt", label: "Abgelehnt" },
 ];
@@ -171,7 +173,15 @@ export default function Anfragen() {
                 </div>
               )}
 
-              {it.status === "offen" && (
+              {it.status === "gegenangebot_kaeufer" && (
+                <div className="mt-3 rounded-xl p-3 text-sm" data-testid={`kaeufer-gegenangebot-${it.id}`}
+                     style={{ background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.3)" }}>
+                  Gegenangebot des Käufers:{" "}
+                  <span className="font-bold text-sky-400">{fmtEur(it.buyer_counter_offer)}</span>
+                  <span className="text-[12px]" style={{ color: "var(--text-muted)" }}> — akzeptieren, ablehnen oder erneut ein Angebot schreiben.</span>
+                </div>
+              )}
+              {["offen", "gegenangebot", "gegenangebot_kaeufer"].includes(it.status) && (
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <button onClick={() => antworten(it, "akzeptieren")} disabled={busyId === it.id}
                           data-testid={`anfrage-akzeptieren-${it.id}`}
@@ -195,11 +205,11 @@ export default function Anfragen() {
               )}
               {it.status === "gegenangebot" && (
                 <div className="mt-3 text-[12.5px]" style={{ color: "var(--text-muted)" }}>
-                  Warte auf die Antwort des Käufers auf dein Gegenangebot.
+                  Dein Gegenangebot ({fmtEur(it.counter_offer)}) liegt beim Käufer — du kannst trotzdem jederzeit ein neues Angebot schreiben.
                 </div>
               )}
 
-              {counterFor === it.id && it.status === "offen" && (
+              {counterFor === it.id && ["offen", "gegenangebot", "gegenangebot_kaeufer"].includes(it.status) && (
                 <div className="mt-3 rounded-xl p-3 flex flex-wrap items-end gap-2"
                      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-default)" }}>
                   <div>

@@ -70,10 +70,14 @@ router = APIRouter()
 # ---------- Models ----------
 class CompareIn(BaseModel):
     url: str
+    # Rueckfall 09/2026: Browser ohne Abruf-Helfer -> Server holt selbst,
+    # statt den Nutzer mit "Erweiterung installieren" zu blockieren.
+    ohne_erweiterung: bool = False
 
 
 class ListingURLIn(BaseModel):
     url: str
+    ohne_erweiterung: bool = False
 
 
 # =========================================================
@@ -122,7 +126,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # holen und per /listings/ingest zu schicken. Danach ruft das Frontend
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
     client_hit = None
-    if source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN:
+    if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
+            and not body.ohne_erweiterung):
         client_hit = await peek_cached_listing(
             db, raw_url, dealer_id=user.get("dealer_id"))
         if client_hit is None:
@@ -205,13 +210,21 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         upsert=True,
     )
     await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id)
+    # Fahrzeugpool auf die neuesten 30 Vergleiche begrenzen (Wunsch 09/2026)
+    try:
+        from fahrzeugpool import fahrzeugpool_trimmen
+        entfernt = await fahrzeugpool_trimmen(db, user["dealer_id"])
+        if entfernt:
+            log.info("Fahrzeugpool %s: %d alte Vergleiche entfernt",
+                     user["dealer_id"], entfernt)
+    except Exception:
+        log.exception("Fahrzeugpool-Begrenzung fehlgeschlagen")
 
     # Proof-of-listing Snapshot.
     snap_id = None
-    is_web_url = raw_url.startswith("http") and (
-        "kleinanzeigen.de" in raw_url or "mobile.de" in raw_url
-        or "autoscout24." in raw_url
-    )
+    # Wunsch 09/2026: Beweis-Snapshots NUR fuer Kleinanzeigen — mobile.de
+    # und AutoScout24 (Datenblatt-Nachbau) werden vorerst nicht erzeugt.
+    is_web_url = source == "kleinanzeigen" and raw_url.startswith("http")
 
     async def _reuse_cached_snapshot(sid: str) -> Optional[str]:
         # Bewusst OHNE dealer-Filter: der ERSTE Snapshot einer Anzeige wird
@@ -443,7 +456,8 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         return {"status": "completed", "cached": True,
                 "source": source, "item_id": identity["item_id"]}
 
-    if source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN:
+    if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
+            and not body.ohne_erweiterung):
         return {"status": "needs_client_fetch", "url": raw_url,
                 "source": source,
                 "hint": "Bitte über die Browser-Erweiterung laden."}

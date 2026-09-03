@@ -842,8 +842,15 @@ async def buyer_interests(user=Depends(current_buyer)):
 
 
 class BuyerInterestAnswerIn(BaseModel):
-    action: Literal["annehmen", "ablehnen"]
+    # 09/2026: der Kaeufer kann jetzt auch selbst ein Gegenangebot machen
+    action: Literal["annehmen", "ablehnen", "gegenangebot"]
+    counter_offer: Optional[float] = Field(default=None, ge=0)
     message: str = Field(default="", max_length=2000)
+
+
+# Verhandlungszustaende (beide Seiten): offen -> gegenangebot (Haendler)
+# -> gegenangebot_kaeufer (Kaeufer) -> ... -> akzeptiert | abgelehnt
+INTERESSE_OFFEN = ("offen", "gegenangebot", "gegenangebot_kaeufer")
 
 
 @router.post("/interessen/{interest_id}/kaeufer-antwort")
@@ -858,6 +865,30 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
         {"id": interest_id, "buyer_user_id": user["id"]}, {"_id": 0})
     if not it:
         raise HTTPException(404, "Anfrage nicht gefunden")
+    if body.action == "gegenangebot":
+        # Kaeufer macht (erneut) ein Angebot — solange nichts abgeschlossen ist
+        # und der Haendler nicht gerade auf DIESES Kaeufer-Angebot antworten muss.
+        if it.get("status") not in ("offen", "gegenangebot"):
+            raise HTTPException(400, "Ein Gegenangebot ist jetzt nicht moeglich "
+                                     f"(Status '{it.get('status')}')")
+        if body.counter_offer is None or float(body.counter_offer) <= 0:
+            raise HTTPException(400, "Gegenangebot benoetigt einen Betrag")
+        betrag = round(float(body.counter_offer), 2)
+        upd = await db.listing_interest.update_one(
+            {"id": interest_id, "buyer_user_id": user["id"],
+             "status": it.get("status")},
+            {"$set": {"status": "gegenangebot_kaeufer",
+                      "buyer_counter_offer": betrag, "updated_at": now_iso()},
+             "$push": {"history": {"von": "kaeufer", "aktion": "gegenangebot",
+                                   "angebot": betrag, "nachricht": body.message,
+                                   "zeit": now_iso()}}})
+        if upd.modified_count == 0:
+            raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
+                                     "beantwortet — bitte neu laden.")
+        await log_activity(it.get("dealer_id", ""), user["id"],
+                           "interesse.kaeufer.gegenangebot", ref=interest_id,
+                           meta={"listing_id": it.get("listing_id"), "betrag": betrag})
+        return {"ok": True, "status": "gegenangebot_kaeufer", "betrag": betrag}
     if it.get("status") != "gegenangebot":
         raise HTTPException(400, "Nur ein Gegenangebot des Haendlers kann "
                                  "angenommen oder abgelehnt werden")
@@ -909,12 +940,17 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
         {"id": interest_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not it:
         raise HTTPException(404, "Anfrage nicht gefunden")
-    if it["status"] in ("akzeptiert", "abgelehnt"):
+    if it["status"] not in INTERESSE_OFFEN:
         raise HTTPException(400, "Anfrage ist bereits abgeschlossen")
     status_map = {"akzeptieren": "akzeptiert", "ablehnen": "abgelehnt",
                   "gegenangebot": "gegenangebot"}
     new_status = status_map[body.action]
     update: Dict[str, Any] = {"status": new_status, "updated_at": now_iso()}
+    if body.action == "akzeptieren":
+        # Vereinbarter Preis: Kaeufer-Gegenangebot > urspruengliches Angebot
+        update["agreed_price"] = (it.get("buyer_counter_offer")
+                                  if it["status"] == "gegenangebot_kaeufer"
+                                  else it.get("offer"))
     if body.action == "gegenangebot":
         if body.counter_offer is None:
             raise HTTPException(400, "Gegenangebot benötigt einen Betrag")

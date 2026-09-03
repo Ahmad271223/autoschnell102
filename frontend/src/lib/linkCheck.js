@@ -71,7 +71,8 @@ export async function checkLink(client, url, opts = {}) {
   const deadline = Date.now() + maxWaitMs;
 
   const { data: first } = await postWithRetry503(
-    client, "/listings/check", { url },
+    client, "/listings/check",
+    opts.ohneErweiterung ? { url, ohne_erweiterung: true } : { url },
     { ...opts, maxWaitMs: Math.max(1, deadline - Date.now()) });
   if (first.status === "completed") return first;
   if (first.status === "needs_client_fetch") return first;

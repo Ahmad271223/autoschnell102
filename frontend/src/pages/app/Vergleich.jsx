@@ -108,11 +108,16 @@ export default function Vergleich() {
       if (data?.needs_client_fetch) {
         const ready = await extensionReady();
         if (!ready) {
-          toast.error("Für diesen neuen Link wird der AutoSchnell Abruf-Helfer "
-            + "(Browser-Erweiterung) benötigt. Bitte installieren und erneut versuchen.");
-          setLoading(false);
-          return;
-        }
+          // Rueckfall (09/2026): ohne Abruf-Helfer holt der Server das
+          // Inserat selbst — vorher blockierte hier "Erweiterung installieren".
+          const check2 = await checkLink(api, ziel, { onWait: setWaitMsg, ohneErweiterung: true });
+          if (check2.status === "needs_client_fetch") {
+            throw new Error("Abruf ohne Erweiterung nicht möglich — bitte später erneut versuchen.");
+          }
+          ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                             { url: ziel, ohne_erweiterung: true },
+                                             { onWait: setWaitMsg }));
+        } else {
         try {
           const html = await fetchViaExtension(data.url || ziel);
           await api.post("/listings/ingest", { url: data.url || ziel, html });
@@ -123,6 +128,7 @@ export default function Vergleich() {
           toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
           setLoading(false);
           return;
+        }
         }
       }
 

@@ -18,7 +18,12 @@ const SECTIONS = [
 ];
 
 export default function Einstellungen() {
-  const { dealer, refresh } = useAuth();
+  const { dealer, refresh, user } = useAuth();
+  // Sucher sehen keinen Marktplatz-Reiter (nur der Chef verwaltet den
+  // Marktplatz; die Endpunkte antworten Suchern mit 403 -> ewig "Lädt…").
+  const sections = user?.role === "sucher"
+    ? SECTIONS.filter((s) => s.id !== "markt")
+    : SECTIONS;
   const [form, setForm] = useState(null);
   const [active, setActive] = useState("profile");
   const [savedFlash, setSavedFlash] = useState(false);
@@ -124,7 +129,7 @@ export default function Einstellungen() {
       <div className="grid lg:grid-cols-[220px_1fr] gap-5">
         {/* Sidebar nav */}
         <nav className="apple-surface p-2 self-start lg:sticky lg:top-6">
-          {SECTIONS.map((s) => {
+          {sections.map((s) => {
             const Icon = s.icon;
             const isActive = active === s.id;
             return (
@@ -801,8 +806,11 @@ function SubscriptionPanel() {
   const renew = async (plan) => {
     setBusy(plan);
     try {
-      await api.post("/dealer/abo-anfrage-selbst", { plan });
-      toast.success("Anfrage gesendet — nach Zahlungseingang schalten wir frei");
+      const { data: r } = await api.post("/dealer/abo-anfrage-selbst", { plan });
+      toast.success(r?.bereits_offen
+        ? "Deine Anfrage liegt bereits beim Betreiber — wir melden uns."
+        : "Anfrage an den Betreiber gesendet — nach Freigabe wird das Abo verlängert");
+      await load();
     } catch (err) {
       toast.error(errMsg(err, "Anfrage fehlgeschlagen"));
     } finally {
@@ -876,7 +884,18 @@ function SubscriptionPanel() {
           <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
                style={{ background: "rgba(255,69,58,0.10)", border: "1px solid rgba(255,69,58,0.25)", color: "#ffb3a8" }}>
             <X size={14} className="mt-0.5 shrink-0" />
-            <span>Kein aktives Abo. Bitte verlängere, um die Plattform weiter zu nutzen.</span>
+            <span>Kein aktives Abo. Bitte unten eine Verlängerung beim Betreiber anfragen — nach Freigabe geht es sofort weiter.</span>
+          </div>
+        )}
+        {data.anfrage_offen && (
+          <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
+               style={{ background: "rgba(10,132,255,0.10)", border: "1px solid rgba(10,132,255,0.25)", color: "#bcd9ff" }}
+               data-testid="abo-anfrage-offen">
+            <Check size={14} className="mt-0.5 shrink-0" />
+            <span>
+              Deine Verlängerungs-Anfrage ({data.anfrage?.wanted_plan === "yearly" ? "Jahr" : "Monat"}) liegt beim Betreiber
+              und wartet auf Freigabe. Du musst nichts weiter tun.
+            </span>
           </div>
         )}
       </div>
@@ -892,8 +911,9 @@ function SubscriptionPanel() {
               tagline="Abrechnung per Rechnung — Freischaltung durch den Betreiber."
               testid="abo-renew-monthly"
               busy={busy === "monthly"}
+              disabled={data.anfrage_offen}
               onClick={() => renew("monthly")}
-              ctaLabel="Verlängerung anfragen (Monat)"
+              ctaLabel={data.anfrage_offen ? "Anfrage liegt beim Betreiber" : "Verlängerung anfragen (Monat)"}
             />
             <PlanCard
               title="Jahresabo"
@@ -903,8 +923,9 @@ function SubscriptionPanel() {
               highlight
               testid="abo-renew-yearly"
               busy={busy === "yearly"}
+              disabled={data.anfrage_offen}
               onClick={() => renew("yearly")}
-              ctaLabel="Verlängerung anfragen (Jahr)"
+              ctaLabel={data.anfrage_offen ? "Anfrage liegt beim Betreiber" : "Verlängerung anfragen (Jahr)"}
             />
           </div>
 
@@ -978,7 +999,7 @@ function InfoRow({ icon, label, children }) {
   );
 }
 
-function PlanCard({ title, price, suffix, tagline, highlight, busy, onClick, testid, ctaLabel }) {
+function PlanCard({ title, price, suffix, tagline, highlight, busy, disabled, onClick, testid, ctaLabel }) {
   return (
     <div
       className="apple-card p-5 relative"
@@ -1002,7 +1023,7 @@ function PlanCard({ title, price, suffix, tagline, highlight, busy, onClick, tes
       <p className="text-zinc-400 text-xs mt-2">{tagline}</p>
       <button
         data-testid={testid}
-        disabled={busy}
+        disabled={busy || disabled}
         onClick={onClick}
         className={`apple-btn mt-4 w-full ${highlight ? "apple-btn-primary" : "apple-btn-secondary"}`}
       >

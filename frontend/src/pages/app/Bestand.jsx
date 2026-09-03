@@ -37,6 +37,7 @@ const FILTERS = [
   { key: "bestand",         label: "Im Bestand" },
   { key: "verkaufsentwurf", label: "Entwürfe" },
   { key: "verkaufsbereit",  label: "Verkaufsbereit" },
+  { key: "veroeffentlicht", label: "Auf dem Marktplatz" },
   { key: "reserviert",      label: "Reserviert" },
   { key: "verkauft",        label: "Verkauft" },
 ];

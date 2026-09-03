@@ -149,9 +149,10 @@ export default function FahrzeugAkte() {
               <Tag size={13} /> Jetzt inserieren
             </button>
           )}
-          {listing && ["entwurf", "verkaufsbereit", "reserviert"].includes(listing.status) && (
-            <Link to={`/app/inserat/${listing.id}`} className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
-              Inserat öffnen ({listing.status})
+          {listing && ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"].includes(listing.status) && (
+            <Link to={`/app/inserat/${listing.id}`} data-testid="akte-inserat-link"
+                  className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
+              {listing.status === "veroeffentlicht" ? "Inserat öffnen (live · vom Marktplatz nehmen / löschen)" : `Inserat öffnen (${listing.status})`}
             </Link>
           )}
         </div>

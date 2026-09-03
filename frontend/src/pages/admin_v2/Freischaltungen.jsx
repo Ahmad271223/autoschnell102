@@ -107,8 +107,23 @@ export default function AdminFreischaltungen() {
                         </Badge>
                         <div className="min-w-0">
                           <div className="text-[14px] text-white font-medium">
-                            {isSucher ? (r.sucher_name || r.sucher_email) : r.company_name}
-                            <span className="text-zinc-500 font-normal"> · {r.wanted || (r.wanted_tier ? `Verkaufspaket ${r.wanted_tier}` : "")}</span>
+                            {isSucher ? (
+                              <>
+                                {r.subject_role === "dealer" ? "Chef " : "Sucher "}
+                                {r.sucher_name || r.sucher_email}
+                                {r.company_name ? ` von Firma ${r.company_name}` : ""}
+                                {r.kunden_nr != null ? ` (#${r.kunden_nr})` : ""}
+                                {" möchte das Sucher-Abo verlängern"}
+                                <span className="text-zinc-500 font-normal">
+                                  {" · "}{r.wanted_plan === "yearly" ? "1 Jahr · 1.500 €" : "1 Monat · 150 €"}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                {r.company_name}
+                                <span className="text-zinc-500 font-normal"> · {r.wanted || (r.wanted_tier ? `Verkaufspaket ${r.wanted_tier}` : "")}</span>
+                              </>
+                            )}
                           </div>
                           <div className="text-[12px] text-zinc-500">
                             {isZugang ? (r.contact_person || "") : r.company_name}
@@ -126,13 +141,13 @@ export default function AdminFreischaltungen() {
                               <Building2 size={14} /> Firma anlegen
                             </Button>
                           )}
-                          {isSucher && <Button size="sm" onClick={() => grantSucher(r)}><Check size={14} /> Abo aktivieren</Button>}
+                          {isSucher && <Button size="sm" onClick={() => grantSucher(r)} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>}
                           {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)}><Check size={14} /> Zugang aktivieren</Button>}
                           {!isZugang && !isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
                             <Button size="sm" onClick={() => grantPlan(r)}><Check size={14} /> Paket aktivieren</Button>
                           )}
-                          <Button size="sm" variant="ghost" onClick={() => { closeReq(r.id, "abgelehnt").then(load); }}>
-                            <X size={14} /> Ablehnen
+                          <Button size="sm" variant="ghost" onClick={() => { closeReq(r.id, "abgelehnt").then(load); }} data-testid={`abo-nein-${r.id}`}>
+                            <X size={14} /> {isSucher ? "Nein, ablehnen" : "Ablehnen"}
                           </Button>
                         </div>
                       </div>

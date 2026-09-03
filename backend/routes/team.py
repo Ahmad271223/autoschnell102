@@ -17,8 +17,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 import re
 
 from auth import hash_password_async
-from deps import (
-    current_user, db, get_subscription_status, log_activity, now_iso,
+from deps import (current_firma, current_user, db, get_subscription_status, log_activity, now_iso,
 )
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
@@ -311,22 +310,44 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
 # ---------- Eigenes Abo des Chefs (Anfrage an den Betreiber) ----------
 @router.post("/dealer/abo-anfrage-selbst")
 async def eigenes_abo_anfrage(body: dict = Body(default={}),
-                              user=Depends(current_haendler)):
-    """Der Chef fragt sein EIGENES Sucher-Abo an (Verlängerung/Neustart).
-    Landet wie die Sucher-Anfragen beim Betreiber; Freischaltung nach
-    Rechnungszahlung über /admin/sucher/{chef_id}/abo."""
+                              user=Depends(current_firma)):
+    """Chef ODER Sucher fragt das EIGENE Sucher-Abo an (Verlängerung/
+    Neustart) — Wunsch 09/2026: der Sucher bekommt keine Fehlermeldung
+    mehr, sondern die Anfrage landet beim Betreiber ("Sucher X von Firma Y
+    will Abo verlängern — ja/nein"). Freischaltung ueber
+    /admin/sucher/{user_id}/abo; die offene Anfrage wird dabei geschlossen.
+    Idempotent: eine bereits offene Anfrage wird zurueckgegeben, nicht
+    verdoppelt."""
     plan = body.get("plan", "monthly")
     if plan not in SUCHER_PLANS:
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
+    offen = await db.plan_requests.find_one(
+        {"type": "sucher_abo", "subject_user_id": user["id"], "status": "offen"},
+        {"_id": 0, "id": 1, "wanted_plan": 1})
+    if offen:
+        if offen.get("wanted_plan") != plan:
+            await db.plan_requests.update_one(
+                {"id": offen["id"]},
+                {"$set": {"wanted_plan": plan,
+                          "wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
+                          "price": SUCHER_PLANS[plan]["price"],
+                          "updated_at": now_iso()}})
+        return {"ok": True, "request_id": offen["id"], "bereits_offen": True,
+                "hinweis": "Deine Anfrage liegt bereits beim Betreiber."}
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
+    ist_sucher = user.get("role") == "sucher"
+    name = (f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+            if ist_sucher else ((dealer or {}).get("contact_person") or "Chef"))
     req_id = str(uuid.uuid4())
     await db.plan_requests.insert_one({
         "id": req_id, "type": "sucher_abo",
         "dealer_id": user["dealer_id"],
         "subject_user_id": user["id"],
-        "sucher_name": (dealer or {}).get("contact_person") or "Chef",
+        "subject_role": user.get("role", "dealer"),
+        "sucher_name": name or user.get("email", ""),
         "sucher_email": user.get("email", ""),
         "company_name": (dealer or {}).get("company_name", ""),
+        "kunden_nr": (dealer or {}).get("kunden_nr"),
         "contact_email": user.get("email", ""),
         "contact_phone": (dealer or {}).get("phone", ""),
         "wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",

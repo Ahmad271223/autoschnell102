@@ -14,7 +14,7 @@ import SnapshotCard from "@/components/SnapshotCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
-  format, isSameMonth, isSameDay, addMonths, parseISO, isValid as isValidDate,
+  format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
 } from "date-fns";
 import { de } from "date-fns/locale";
 
@@ -330,8 +330,15 @@ function DayApptItem({ a, onEdit, compact }) {
             {a.status}
           </span>
           {a.driver?.name && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+            <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400" data-testid={`fahrer-${a.id}`}>
               <UserIcon size={10} /> {a.driver.name}
+              {a.zuteilung === "offen" && <span className="text-amber-300"> · wartet auf Annahme</span>}
+              {a.zuteilung === "angenommen" && <span className="text-emerald-300"> · angenommen</span>}
+            </span>
+          )}
+          {!a.driver?.name && a.zuteilung === "abgelehnt" && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-red-300" title={a.zuteilung_abgelehnt_grund || ""}>
+              <UserIcon size={10} /> vom Fahrer abgelehnt{a.zuteilung_abgelehnt_von ? ` (${a.zuteilung_abgelehnt_von})` : ""} — bitte neu zuteilen
             </span>
           )}
           {a.contract_id && (
@@ -352,6 +359,9 @@ function DayApptItem({ a, onEdit, compact }) {
 
 /* ───────────────────────── List View ───────────────────────── */
 
+// Abgeschlossene Zustaende — wandern in der Liste automatisch nach unten
+const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storniert"]);
+
 function ListView({ items, onEdit }) {
   if (!items.length) {
     return (
@@ -361,35 +371,71 @@ function ListView({ items, onEdit }) {
       </div>
     );
   }
-  // group by date
-  const groups = items.reduce((acc, a) => {
-    const k = a.pickup_date || "ohne Datum";
-    if (!acc[k]) acc[k] = [];
-    acc[k].push(a);
-    return acc;
-  }, {});
-  const keys = Object.keys(groups).sort();
+  // Wunsch 09/2026: der naechste Termin steht ganz oben (Heute / Morgen /
+  // Diese Woche / Spaeter), abgeschlossene und vergangene Termine darunter,
+  // neueste zuerst.
+  const jetzt = new Date();
+  const heute = format(jetzt, "yyyy-MM-dd");
+  const morgen = format(addDays(jetzt, 1), "yyyy-MM-dd");
+  const wocheEnde = format(endOfWeek(jetzt, { weekStartsOn: 1 }), "yyyy-MM-dd");
+  const byTime = (x, y) => (x.pickup_time || "").localeCompare(y.pickup_time || "");
+  const kommend = items
+    .filter((a) => a.pickup_date && a.pickup_date >= heute && !ABGESCHLOSSEN.has(a.status))
+    .sort((x, y) => x.pickup_date.localeCompare(y.pickup_date) || byTime(x, y));
+  const ohneDatum = items.filter((a) => !a.pickup_date && !ABGESCHLOSSEN.has(a.status));
+  const kommendIds = new Set([...kommend, ...ohneDatum].map((a) => a.id));
+  const vergangen = items
+    .filter((a) => !kommendIds.has(a.id))
+    .sort((x, y) => (y.pickup_date || "").localeCompare(x.pickup_date || "") || byTime(y, x));
+  const label = (d) => (d === heute ? "Heute" : d === morgen ? "Morgen" : d <= wocheEnde ? "Diese Woche" : "Später");
+  const gruppen = (list) => {
+    const out = [];
+    for (const a of list) {
+      const k = a.pickup_date || "ohne Datum";
+      if (!out.length || out[out.length - 1].k !== k) out.push({ k, items: [] });
+      out[out.length - 1].items.push(a);
+    }
+    return out;
+  };
+  const Gruppe = ({ k, list, prefix }) => {
+    const date = safeParse(k);
+    return (
+      <div>
+        <div className="flex items-center gap-3 mb-2">
+          {prefix && <span className="text-[11px] uppercase tracking-wide px-2 py-0.5 rounded-md bg-white/[0.08] text-zinc-300">{prefix}</span>}
+          <div className="font-display font-bold text-base">
+            {date ? format(date, "EEEE, d. LLLL yyyy", { locale: de }) : "ohne Datum"}
+          </div>
+          <div className="flex-1 h-px bg-white/[0.06]" />
+          <div className="text-xs text-zinc-500">{list.length} Termin{list.length !== 1 ? "e" : ""}</div>
+        </div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {list.map((a) => <DayApptItem key={a.id} a={a} onEdit={onEdit} />)}
+        </div>
+      </div>
+    );
+  };
+  const Abschnitt = ({ titel, anzahl, tone }) => (
+    <div className="flex items-center gap-3 pt-2" data-testid={`termine-abschnitt-${tone}`}>
+      <div className={`text-sm font-semibold ${tone === "kommend" ? "text-white" : "text-zinc-400"}`}>{titel}</div>
+      <div className="text-xs text-zinc-500">{anzahl}</div>
+      <div className="flex-1 h-px bg-white/[0.10]" />
+    </div>
+  );
   return (
     <div className="space-y-5">
-      {keys.map((k) => {
-        const date = safeParse(k);
-        return (
-          <div key={k}>
-            <div className="flex items-center gap-3 mb-2">
-              <div className="font-display font-bold text-base">
-                {date ? format(date, "EEEE, d. LLLL yyyy", { locale: de }) : "ohne Datum"}
-              </div>
-              <div className="flex-1 h-px bg-white/[0.06]" />
-              <div className="text-xs text-zinc-500">{groups[k].length} Termin{groups[k].length !== 1 ? "e" : ""}</div>
-            </div>
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {groups[k].sort((x, y) => (x.pickup_time || "").localeCompare(y.pickup_time || "")).map((a) => (
-                <DayApptItem key={a.id} a={a} onEdit={onEdit} />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      <Abschnitt titel="Kommende Termine" anzahl={kommend.length + ohneDatum.length} tone="kommend" />
+      {kommend.length === 0 && ohneDatum.length === 0 && (
+        <div className="text-sm text-zinc-500">Keine offenen Termine.</div>
+      )}
+      {gruppen(kommend).map((g) => <Gruppe key={`k-${g.k}`} k={g.k} list={g.items} prefix={label(g.k)} />)}
+      {ohneDatum.length > 0 && <Gruppe k="ohne Datum" list={ohneDatum} prefix="Ohne Datum" />}
+      {vergangen.length > 0 && (
+        <>
+          <Abschnitt titel="Abgeschlossen & vergangen" anzahl={vergangen.length} tone="vergangen" />
+          {gruppen(vergangen).map((g) => <Gruppe key={`v-${g.k}`} k={g.k} list={g.items} />)}
+        </>
+      )}
     </div>
   );
 }

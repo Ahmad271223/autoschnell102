@@ -797,7 +797,14 @@ async def run_snapshot_job(db, snap_id: str) -> None:
     # Anbieterseite). Kein Provider-Slot noetig: es wird nur das
     # Bilder-CDN angesprochen, nicht die Anbieterseite.
     if quelle in ("mobile", "autoscout24"):
-        await _mobile_datenblatt_job(db, snap_id, doc, quelle=quelle)
+        # Wunsch 09/2026: Snapshots nur fuer Kleinanzeigen. Alt-/Reaper-
+        # Zeilen fuer mobile.de/AutoScout24 werden sauber beendet statt
+        # ein Datenblatt zu bauen (SnapshotCard hoert bei "failed" auf).
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed",
+                      "error": "Snapshots derzeit nur fuer Kleinanzeigen",
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
         return
 
     slot_id = None

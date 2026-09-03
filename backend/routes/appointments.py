@@ -30,6 +30,7 @@ class AppointmentIn(BaseModel):
     status: Optional[Literal[
         "offen", "bestätigt", "in Bearbeitung",
         "abgeholt", "nicht abgeholt", "storniert",
+        "verschoben", "erledigt",       # Oberflaeche bietet beide an (09/2026)
     ]] = "offen"
     notes: Optional[str] = ""
     final_price: Optional[float] = None
@@ -91,6 +92,11 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
            "created_at": now_iso(), "updated_at": now_iso()}
     if "status" not in doc:
         doc["status"] = "offen"
+    if doc.get("driver_id"):
+        # Wunsch 09/2026: der Fahrer bekommt die Fahrt ZUGETEILT und nimmt
+        # sie in seiner App an oder lehnt sie ab.
+        doc["zuteilung"] = "offen"
+        doc["zuteilung_am"] = now_iso()
     await db.appointments.insert_one(doc)
     if body.contract_id:
         await db.generated_pdfs.update_one(
@@ -177,6 +183,11 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         raise HTTPException(404, "Vertrag nicht gefunden")
     if "driver_id" in update:
         await _fahrer_pruefen(user["dealer_id"], update.get("driver_id"))
+        if update.get("driver_id") and update["driver_id"] != existing.get("driver_id"):
+            update["zuteilung"] = "offen"           # neuer Fahrer -> neu anfragen
+            update["zuteilung_am"] = now_iso()
+        elif not update.get("driver_id"):
+            update["zuteilung"] = None
     update["updated_at"] = now_iso()
     pickup_changed = (
         update.get("pickup_date")

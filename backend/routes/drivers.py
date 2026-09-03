@@ -78,6 +78,12 @@ class DriverStatusIn(BaseModel):
     notes: Optional[str] = None
 
 
+class DriverZuteilungIn(BaseModel):
+    """Fahrer-App: zugeteilte Fahrt annehmen oder ablehnen (09/2026)."""
+    action: Literal["annehmen", "ablehnen"]
+    grund: Optional[str] = None
+
+
 class DeviationIn(BaseModel):
     """Eine bei der Abholung festgestellte Abweichung."""
     field: Literal["mileage", "keys", "tires", "damage", "warning_light",
@@ -515,6 +521,8 @@ async def driver_appointments(driver=Depends(current_driver)):
             "seller_name": a.get("seller_name"),
             "seller_phone": a.get("seller_phone"),
             "status": a.get("status", "offen"),
+            # Alt-Termine ohne Feld gelten als angenommen (Rueckwaertskompatibel)
+            "zuteilung": a.get("zuteilung") or "angenommen",
             "notes": a.get("notes"),
             "contract_id": a.get("contract_id"),
             "vehicle_id": vid,
@@ -650,6 +658,45 @@ async def driver_snapshot(snap_id: str, kind: str,
     )
 
 
+@router.put("/driver/appointments/{appt_id}/zuteilung")
+async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
+                           driver=Depends(current_driver)):
+    """Fahrer nimmt die zugeteilte Fahrt an oder lehnt sie ab (Wunsch
+    09/2026). Ablehnen gibt den Termin an den Haendler zurueck (Fahrer
+    wird entfernt, Termin bleibt 'offen', Grund landet in den Notizen)."""
+    appt = await db.appointments.find_one(
+        {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0})
+    if not appt:
+        raise HTTPException(404, "Termin nicht gefunden")
+    _termin_offen_oder_409(appt)
+    if (appt.get("zuteilung") or "angenommen") != "offen":
+        return {"ok": True, "zuteilung": appt.get("zuteilung") or "angenommen",
+                "unveraendert": True}
+    if body.action == "annehmen":
+        await db.appointments.update_one(
+            {"id": appt_id, "driver_id": driver["id"]},
+            {"$set": {"zuteilung": "angenommen",
+                      "zuteilung_beantwortet_am": now_iso(),
+                      "updated_at": now_iso()}})
+        await log_activity(appt.get("dealer_id"), driver["id"],
+                           "termin.fahrer.angenommen", ref=appt_id)
+        return {"ok": True, "zuteilung": "angenommen"}
+    grund = (body.grund or "").strip()[:500]
+    notiz = f"[Fahrer] Fahrt abgelehnt" + (f": {grund}" if grund else "")
+    await db.appointments.update_one(
+        {"id": appt_id, "driver_id": driver["id"]},
+        {"$set": {"zuteilung": "abgelehnt",
+                  "zuteilung_beantwortet_am": now_iso(),
+                  "zuteilung_abgelehnt_von": driver.get("name") or driver["id"],
+                  "zuteilung_abgelehnt_grund": grund,
+                  "updated_at": now_iso(),
+                  "notes": ((appt.get("notes") or "") + ("\n" if appt.get("notes") else "") + notiz)},
+         "$unset": {"driver_id": ""}})
+    await log_activity(appt.get("dealer_id"), driver["id"],
+                       "termin.fahrer.abgelehnt", ref=appt_id, meta={"grund": grund})
+    return {"ok": True, "zuteilung": "abgelehnt"}
+
+
 @router.put("/driver/appointments/{appt_id}/status")
 async def driver_set_status(appt_id: str, body: DriverStatusIn,
                             driver=Depends(current_driver)):
@@ -669,6 +716,8 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         return {"ok": True, "status": body.status, "unveraendert": True,
                 "auto_cleanup_days": 7 if body.status == "abgeholt" else 14}
     _termin_offen_oder_409(appt)
+    if appt.get("zuteilung") == "offen":
+        raise HTTPException(409, "Bitte zuerst die Fahrt annehmen (oder ablehnen).")
     # Vereinheitlichter Abschluss: "abgeholt" gibt es NUR mit unterschriebenem
     # Abholprotokoll (Beweiskette: Zustand + beide Unterschriften). Der alte
     # Schnellweg ohne Protokoll erzeugte "abgeholt"-Termine ohne jeden Beleg.

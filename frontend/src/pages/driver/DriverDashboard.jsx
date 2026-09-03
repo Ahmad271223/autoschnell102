@@ -35,6 +35,27 @@ export default function DriverDashboard() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Zugeteilte Fahrt annehmen / ablehnen (09/2026)
+  const zuteilung = async (id, action) => {
+    if (busy) return;
+    let grund = "";
+    if (action === "ablehnen") {
+      grund = window.prompt("Fahrt ablehnen — Grund (optional):") ?? null;
+      if (grund === null) return;
+    }
+    setBusy(id);
+    try {
+      await driverApi.put(`/driver/appointments/${id}/zuteilung`, { action, grund });
+      toast.success(action === "annehmen" ? "Fahrt angenommen" : "Fahrt abgelehnt — der Händler wurde informiert");
+      const r = await driverApi.get("/driver/appointments");
+      setItems(r.data);
+    } catch (e) {
+      toast.error(errMsg(e, "Antwort fehlgeschlagen"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const setStatus = async (id, status) => {
     if (busy) return;
     // "abgeholt" läuft über den Abhol-Check-Dialog (mit Abweichungsbericht).
@@ -184,11 +205,13 @@ export default function DriverDashboard() {
 
                         {/* Digitales Protokoll: dieselben Punkte wie im PDF,
                             direkt in der App ausfüllbar inkl. Unterschrift. */}
+                        {a.zuteilung !== "offen" && (
                         <Link to={`/fahrer/protokoll/${a.id}`}
                               data-testid={`protokoll-${a.id}`}
                               className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold kinetic-button mb-2">
                           <ClipboardCheck size={16} /> Protokoll ausfüllen
                         </Link>
+                        )}
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <button onClick={() => oeffnePdf(`/driver/appointments/${a.id}/pickup-order.pdf`)}
@@ -222,8 +245,31 @@ export default function DriverDashboard() {
                           </div>
                         )}
 
-                        {/* Status-Aktionen (Fahrer markiert Ergebnis) */}
-                        {a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
+                        {/* Zuteilung: erst annehmen oder ablehnen (09/2026) */}
+                        {a.zuteilung === "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
+                          <div className="pt-2 border-t" style={{ borderColor: "var(--border-default)" }}
+                               data-testid={`zuteilung-${a.id}`}>
+                            <div className="text-xs mb-2 font-semibold" style={{ color: "var(--accent-green)" }}>
+                              Neue Fahrt zugeteilt — annehmen?
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button onClick={() => zuteilung(a.id, "annehmen")} disabled={busy === a.id}
+                                      data-testid={`zuteilung-annehmen-${a.id}`}
+                                      className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold disabled:opacity-50"
+                                      style={{ background: "rgba(52,199,89,0.14)", color: "var(--accent-green)", border: "1px solid rgba(52,199,89,0.3)" }}>
+                                <CheckCircle2 size={15} /> Annehmen
+                              </button>
+                              <button onClick={() => zuteilung(a.id, "ablehnen")} disabled={busy === a.id}
+                                      data-testid={`zuteilung-ablehnen-${a.id}`}
+                                      className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold disabled:opacity-50"
+                                      style={{ background: "rgba(255,59,48,0.1)", color: "#ff6b5f", border: "1px solid rgba(255,59,48,0.25)" }}>
+                                <XCircle size={15} /> Ablehnen
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {/* Status-Aktionen (Fahrer markiert Ergebnis) — erst nach Annahme */}
+                        {a.zuteilung !== "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
                           <div className="grid grid-cols-2 gap-2 pt-2 border-t"
                                style={{ borderColor: "var(--border-default)" }}>
                             <button

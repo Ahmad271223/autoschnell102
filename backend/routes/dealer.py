@@ -304,8 +304,16 @@ async def dealer_subscription(user=Depends(current_firma)):
 
     is_lifetime = status.get("plan") == "lifetime"
     raw_status = (sub_doc or {}).get("status", "active") if sub_doc else "none"
+    # Offene Verlaengerungs-Anfrage beim Betreiber (09/2026) — die
+    # Oberflaeche zeigt dann "wartet auf Freigabe" statt neuer Buttons.
+    anfrage = await db.plan_requests.find_one(
+        {"type": "sucher_abo", "subject_user_id": user["id"], "status": "offen"},
+        {"_id": 0, "id": 1, "wanted_plan": 1, "created_at": 1})
+    ist_sucher = user.get("role") == "sucher"
 
     return {
+        "anfrage_offen": bool(anfrage),
+        "anfrage": anfrage,
         "plan": status.get("plan"),
         "status": status["status"],          # zusammengefasster Live-Status
         "raw_status": raw_status,             # roher DB-Status (active/cancelled/...)
@@ -315,6 +323,7 @@ async def dealer_subscription(user=Depends(current_firma)):
         "is_lifetime": is_lifetime,
         "can_cancel": bool(
             status["active"] and not is_lifetime and raw_status == "active"
+            and not ist_sucher          # Sucher-Abos verwaltet der Betreiber
         ),
         "can_renew": True,  # Verlängern ist immer erlaubt (neuer Checkout)
         "cancelled_at": (sub_doc or {}).get("cancelled_at"),
