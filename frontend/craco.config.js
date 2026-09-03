@@ -6,6 +6,13 @@ if (process.env.REACT_APP_CSP_CONNECT === undefined) {
   process.env.REACT_APP_CSP_CONNECT =
     process.env.NODE_ENV === "production" ? "" : "http://localhost:8001";
 }
+// Dev-Server braucht eval/inline (webpack-Runtime, react-refresh, Error-
+// Overlay) — sonst blockt die CSP das HMR-Skript und das unsichtbare
+// Overlay verschluckt Klicks. In Produktion bleibt script-src strikt 'self'.
+if (process.env.REACT_APP_CSP_SCRIPT === undefined) {
+  process.env.REACT_APP_CSP_SCRIPT =
+    process.env.NODE_ENV === "production" ? "" : "'unsafe-eval' 'unsafe-inline'";
+}
 
 // craco.config.js
 const path = require("path");

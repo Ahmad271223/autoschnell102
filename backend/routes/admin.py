@@ -1028,11 +1028,13 @@ async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
         "recorded_by": admin.get("email", ""),
         "created_at": now_iso(),
     }
-    await db.manual_payments.insert_one(doc)
+    # KOPIE einfuegen: insert_one haengt dem uebergebenen dict die Mongo-_id
+    # (ObjectId) an — die Antwort waere sonst nicht JSON-serialisierbar (500).
+    await db.manual_payments.insert_one(dict(doc))
     await log_activity(dealer_id, admin["id"], "admin.zahlung.erfasst",
                        meta={"betrag": doc["amount"], "sucher":
                              body.subject_user_id or ""})
-    return {"ok": True, "zahlung": {k: v for k, v in doc.items()}}
+    return {"ok": True, "zahlung": doc}
 
 
 # ---------- Zwischenhändler-Zugang freischalten (manuell) ----------
