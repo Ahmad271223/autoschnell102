@@ -18,9 +18,14 @@ router = APIRouter()
 # Module-scoped because Stripe webhook (POST /api/webhook/stripe) is mounted
 # on the FastAPI app directly (not under /api), so it needs `app` in server.py.
 
+# Beschluss 09/2026: Stripe gibt es NUR noch für Marktplatz-Käufer
+# (20 €/Monat). Firmen- und Sucher-Abos rechnet der Betreiber per Rechnung
+# ab und schaltet manuell frei (Admin → Freischaltungen). Die alten Pläne
+# "monthly"/"yearly" bleiben unten in der Aktivierung erhalten, damit noch
+# offene Alt-Transaktionen sauber abgeschlossen werden.
 PLAN_PRICES = {
-    "monthly": {"amount": 160.00, "currency": "eur", "label": "Monatsabo"},
-    "yearly":  {"amount": 1800.00, "currency": "eur", "label": "Jahresabo"},
+    "marktplatz": {"amount": 20.00, "currency": "eur",
+                   "label": "Marktplatz-Zugang (30 Tage)", "days": 30},
 }
 
 
@@ -54,12 +59,13 @@ class CheckoutIn(BaseModel):
 
 @router.post("/payments/checkout")
 async def create_checkout(body: CheckoutIn, request: Request, user=Depends(current_user)):
-    # Zwischenhaendler haben ein EIGENES Zugangs-Abo (Admin-Freischaltung) —
-    # der Haendler-/Sucher-Checkout waere fuer sie bezahlt, aber nutzlos.
-    if user.get("role") == "b2b_buyer":
-        raise HTTPException(400, "Für Marktplatz-Käufer läuft die "
-                                 "Freischaltung über den Admin (Menüpunkt "
-                                 "Zugang), nicht über diesen Checkout.")
+    # Nur Marktplatz-Käufer zahlen online. Firmen/Sucher: Rechnung + manuelle
+    # Freischaltung durch den Betreiber — der alte Stripe-Weg ist für sie zu.
+    if user.get("role") != "b2b_buyer":
+        raise HTTPException(403, "Sucher-Zugänge werden per Rechnung "
+                                 "abgerechnet und vom Betreiber "
+                                 "freigeschaltet — hier ist keine "
+                                 "Online-Zahlung nötig.")
     if body.plan not in PLAN_PRICES:
         raise HTTPException(400, "Unbekannter Plan")
     pkg = PLAN_PRICES[body.plan]
@@ -88,10 +94,11 @@ async def create_checkout(body: CheckoutIn, request: Request, user=Depends(curre
     webhook_url = f"{host_url}/api/webhook/stripe"
     sc = StripeCheckout(api_key=api_key, webhook_url=webhook_url)
     origin = body.origin_url.rstrip("/")
-    success_url = f"{origin}/abo/erfolg?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{origin}/abo"
+    success_url = f"{origin}/markt/zahlung-erfolg?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/markt"
     metadata = {
-        "user_id": user["id"], "dealer_id": user["dealer_id"], "plan": body.plan,
+        "user_id": user["id"], "dealer_id": user.get("dealer_id") or "",
+        "plan": body.plan,
     }
     req = CheckoutSessionRequest(
         amount=float(pkg["amount"]), currency=pkg["currency"],
@@ -100,12 +107,65 @@ async def create_checkout(body: CheckoutIn, request: Request, user=Depends(curre
     session = await sc.create_checkout_session(req)
     await db.payment_transactions.insert_one({
         "id": str(uuid.uuid4()), "session_id": session.session_id,
-        "user_id": user["id"], "dealer_id": user["dealer_id"],
+        "user_id": user["id"], "dealer_id": user.get("dealer_id"),
         "plan": body.plan, "amount": pkg["amount"], "currency": pkg["currency"],
         "payment_status": "initiated", "status": "pending",
         "metadata": metadata, "created_at": now_iso(),
     })
     return {"url": session.url, "session_id": session.session_id}
+
+
+async def _activate_paid_transaction(tx: dict, session_id: str) -> None:
+    """Schaltet nach bestätigter Zahlung frei — je nach Plan:
+
+    - "marktplatz": Marktplatz-Zugang des Käufers um 30 Tage verlängern
+      (ab jetzt bzw. ab bisherigem Ablauf, falls der in der Zukunft liegt).
+    - Alt-Pläne "monthly"/"yearly": persönliches Sucher-Abo (Bestand).
+
+    Idempotent: Der Aufrufer stellt über den atomaren payment_status-
+    Übergang sicher, dass die Aktivierung genau einmal läuft; das
+    subscriptions-Upsert ist zusätzlich per session_id geschützt.
+    """
+    plan = tx.get("plan")
+    now = datetime.now(timezone.utc)
+    if plan == "marktplatz":
+        days = PLAN_PRICES["marktplatz"]["days"]
+        u = await db.users.find_one({"id": tx.get("user_id")},
+                                    {"_id": 0, "marketplace_access": 1})
+        basis = now
+        alt = ((u or {}).get("marketplace_access") or {}).get("expires_at")
+        if alt:
+            try:
+                dt = datetime.fromisoformat(alt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > basis:
+                    basis = dt
+            except (TypeError, ValueError):
+                pass
+        await db.users.update_one(
+            {"id": tx.get("user_id")},
+            {"$set": {"marketplace_access": {
+                "active": True, "plan": "monthly",
+                "price": PLAN_PRICES["marktplatz"]["amount"],
+                "expires_at": (basis + timedelta(days=days)).isoformat(),
+                "activated_by": "stripe",
+                "session_id": session_id,
+                "updated_at": now_iso()}}})
+        return
+    # Alt-Pläne (Bestands-Transaktionen von vor 09/2026)
+    days = 30 if plan == "monthly" else 365
+    expires_at = (now + timedelta(days=days)).isoformat()
+    await db.subscriptions.update_one(
+        {"session_id": session_id},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()), "dealer_id": tx.get("dealer_id"),
+            "subject_user_id": tx.get("user_id"),
+            "plan": plan, "status": "active", "expires_at": expires_at,
+            "session_id": session_id, "created_at": now_iso(),
+        }},
+        upsert=True,
+    )
 
 
 @router.get("/payments/status/{session_id}")
@@ -162,26 +222,15 @@ async def payment_status(session_id: str, request: Request, user=Depends(current
         )
         return await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0}) or tx
 
-    # Stripe confirmed payment — activate subscription.
-    # Use upsert keyed on session_id to prevent duplicate subscriptions from
-    # concurrent status-poll calls (TOCTOU race between find_one and insert_one).
-    update = {"payment_status": "paid", "status": "complete", "updated_at": now_iso()}
-    await db.payment_transactions.update_one({"session_id": session_id}, {"$set": update})
-    plan = tx["plan"]
-    days = 30 if plan == "monthly" else 365
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-    await db.subscriptions.update_one(
-        {"session_id": session_id},
-        {"$setOnInsert": {
-            "id": str(uuid.uuid4()), "dealer_id": tx["dealer_id"],
-            # Personenbezogenes Sucher-Abo: gilt fuer den ZAHLENDEN Nutzer
-            # (Chef bucht sein eigenes, jeder Sucher seins).
-            "subject_user_id": tx.get("user_id"),
-            "plan": plan, "status": "active", "expires_at": expires_at,
-            "session_id": session_id, "created_at": now_iso(),
-        }},
-        upsert=True,
-    )
+    # Stripe confirmed payment — atomarer Übergang auf "paid": nur wer den
+    # Übergang gewinnt, aktiviert (verhindert Doppel-Aktivierung durch
+    # gleichzeitige Status-Polls und Webhook).
+    r = await db.payment_transactions.update_one(
+        {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+        {"$set": {"payment_status": "paid", "status": "complete",
+                  "updated_at": now_iso()}})
+    if r.modified_count:
+        await _activate_paid_transaction(tx, session_id)
     return await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
 
 
@@ -230,24 +279,14 @@ async def stripe_webhook(request: Request):
 
     if payment_status_str == "paid" and session_id:
         tx = await db.payment_transactions.find_one({"session_id": session_id})
-        if tx and tx.get("payment_status") != "paid":
-            await db.payment_transactions.update_one(
-                {"session_id": session_id},
+        if tx:
+            # Atomarer Übergang — genau EIN Gewinner aktiviert (Webhook kann
+            # mehrfach feuern, Status-Poll läuft parallel).
+            r = await db.payment_transactions.update_one(
+                {"session_id": session_id, "payment_status": {"$ne": "paid"}},
                 {"$set": {"payment_status": "paid", "status": "complete",
                           "updated_at": now_iso()}},
             )
-            plan = tx["plan"]
-            days = 30 if plan == "monthly" else 365
-            expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-            # Upsert prevents duplicate subscriptions if webhook fires multiple times.
-            await db.subscriptions.update_one(
-                {"session_id": session_id},
-                {"$setOnInsert": {
-                    "id": str(uuid.uuid4()), "dealer_id": tx["dealer_id"],
-                    "subject_user_id": tx.get("user_id"),
-                    "plan": plan, "status": "active", "expires_at": expires_at,
-                    "session_id": session_id, "created_at": now_iso(),
-                }},
-                upsert=True,
-            )
+            if r.modified_count:
+                await _activate_paid_transaction(tx, session_id)
     return {"ok": True}

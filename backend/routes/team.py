@@ -40,9 +40,11 @@ SALE_PLANS = {
 # ---------- Sucher-Abo (Preise Stand 07.08.2026) ----------
 # Der Händler zahlt pro Sucher ein Abo; erst mit aktivem Abo kann der Sucher
 # suchen & vergleichen. Freischaltung erfolgt manuell über den Admin.
+# Preise Stand 09/2026: 150 €/Monat oder 1.500 €/Jahr, Abrechnung per
+# Rechnung durch den Betreiber (kein Stripe für Firmen/Sucher).
 SUCHER_PLANS = {
-    "monthly": {"label": "Monatlich", "price": 160.00, "days": 30},
-    "yearly":  {"label": "Jährlich",  "price": 1800.00, "days": 365},
+    "monthly": {"label": "Monatlich", "price": 150.00, "days": 30},
+    "yearly":  {"label": "Jährlich",  "price": 1500.00, "days": 365},
 }
 
 
@@ -81,10 +83,29 @@ class UpgradeRequestIn(BaseModel):
 
 
 # =========================================================
-#                SUCHER-VERWALTUNG (nur Händler)
+#                SUCHER-VERWALTUNG
 # =========================================================
+# Beschluss 09/2026: Sucher-Konten legt NUR der Betreiber an (Admin-Bereich,
+# /admin/dealers/{id}/sucher) — inkl. Anmeldename + Passwort. Der Chef sieht
+# sein Team weiterhin (Liste + Statistik) und stellt Abo-Anfragen; Anlegen,
+# Löschen und Passwörter laufen über den Betreiber. In Entwicklung/CI
+# (SELF_SIGNUP nicht auf false) bleiben die Chef-Routen aktiv, damit die
+# bestehenden Tests und lokales Ausprobieren funktionieren.
+def _chef_verwaltung_erlaubt() -> bool:
+    import os
+    return os.environ.get("SELF_SIGNUP", "true").strip().lower() not in (
+        "false", "0", "no", "off")
+
+
+_NUR_BETREIBER = ("Sucher-Konten verwaltet der Betreiber. Bitte melde dich "
+                  "bei uns — wir legen Zugänge an, setzen Passwörter und "
+                  "entfernen Konten.")
+
+
 @router.post("/dealer/sucher")
 async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
+    if not _chef_verwaltung_erlaubt():
+        raise HTTPException(403, _NUR_BETREIBER)
     existing = await db.users.find_one(
         {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}})
     if existing:
@@ -152,6 +173,8 @@ async def list_sucher(user=Depends(current_haendler)):
 @router.put("/dealer/sucher/{sucher_id}")
 async def update_sucher(sucher_id: str, body: SucherUpdateIn,
                         user=Depends(current_haendler)):
+    if not _chef_verwaltung_erlaubt():
+        raise HTTPException(403, _NUR_BETREIBER)
     s = await db.users.find_one(
         {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"})
     if not s:
@@ -173,6 +196,8 @@ async def update_sucher(sucher_id: str, body: SucherUpdateIn,
 
 @router.delete("/dealer/sucher/{sucher_id}")
 async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
+    if not _chef_verwaltung_erlaubt():
+        raise HTTPException(403, _NUR_BETREIBER)
     s = await db.users.find_one(
         {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"})
     if not s:
@@ -281,6 +306,38 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
                        ref=req_id, meta={"wunsch": body.wanted_tier})
     return {"ok": True, "request_id": req_id,
             "hinweis": "Anfrage wurde an den Administrator übermittelt."}
+
+
+# ---------- Eigenes Abo des Chefs (Anfrage an den Betreiber) ----------
+@router.post("/dealer/abo-anfrage-selbst")
+async def eigenes_abo_anfrage(body: dict = Body(default={}),
+                              user=Depends(current_haendler)):
+    """Der Chef fragt sein EIGENES Sucher-Abo an (Verlängerung/Neustart).
+    Landet wie die Sucher-Anfragen beim Betreiber; Freischaltung nach
+    Rechnungszahlung über /admin/sucher/{chef_id}/abo."""
+    plan = body.get("plan", "monthly")
+    if plan not in SUCHER_PLANS:
+        raise HTTPException(400, "Unbekannter Abo-Zeitraum")
+    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
+    req_id = str(uuid.uuid4())
+    await db.plan_requests.insert_one({
+        "id": req_id, "type": "sucher_abo",
+        "dealer_id": user["dealer_id"],
+        "subject_user_id": user["id"],
+        "sucher_name": (dealer or {}).get("contact_person") or "Chef",
+        "sucher_email": user.get("email", ""),
+        "company_name": (dealer or {}).get("company_name", ""),
+        "contact_email": user.get("email", ""),
+        "contact_phone": (dealer or {}).get("phone", ""),
+        "wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
+        "wanted_plan": plan,
+        "price": SUCHER_PLANS[plan]["price"],
+        "status": "offen", "created_at": now_iso(),
+    })
+    await log_activity(user["dealer_id"], user["id"], "abo.anfrage.selbst",
+                       ref=req_id, meta={"plan": plan})
+    return {"ok": True, "request_id": req_id,
+            "hinweis": "Anfrage wurde an den Betreiber übermittelt."}
 
 
 # ---------- Sucher-Abo ----------

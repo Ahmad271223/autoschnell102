@@ -62,9 +62,9 @@ export default function Landing() {
             <Link to="/login" data-testid="nav-login" className="px-3 py-1.5 text-sm text-zinc-200 hover:text-white">
               Anmelden
             </Link>
-            <Link to="/register" data-testid="nav-register"
+            <Link to="/anfrage" data-testid="nav-register"
                   className="kinetic-button px-4 py-1.5 text-sm rounded-sm">
-              Jetzt starten
+              Zugang anfragen
             </Link>
           </div>
 
@@ -143,9 +143,9 @@ export default function Landing() {
                 style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)" }}>
             Anmelden
           </Link>
-          <Link to="/register" onClick={closeMenu} data-testid="nav-mobile-register"
+          <Link to="/anfrage" onClick={closeMenu} data-testid="nav-mobile-register"
                 className="kinetic-button w-full text-center px-4 py-3 text-[15px] rounded-sm">
-            Jetzt starten
+            Zugang anfragen
           </Link>
         </div>
       </aside>
@@ -188,10 +188,10 @@ export default function Landing() {
                     />
                     <button
                       data-testid="hero-cta-btn"
-                      onClick={() => nav("/register")}
+                      onClick={() => nav("/anfrage")}
                       className="kinetic-button px-6 flex items-center gap-2 text-sm font-bold whitespace-nowrap rounded-r-md"
                     >
-                      Vergleich starten <ArrowRight size={16} />
+                      Zugang anfragen <ArrowRight size={16} />
                     </button>
                   </div>
                 </div>
@@ -321,50 +321,92 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* PRICING */}
+      {/* PRICING — drei Zielgruppen (Stand 09/2026) */}
       <section id="pricing" className="py-24 border-t" style={{ borderColor: "var(--border-default)" }}>
-        <div className="max-w-5xl mx-auto px-6">
+        <div className="max-w-6xl mx-auto px-6">
           <div className="text-center mb-12">
             <div className="overline">Preise · Klar · Fair</div>
             <h2 className="font-display font-black text-3xl lg:text-5xl tracking-tighter mt-3">
-              Eine Lizenz. Alle Funktionen.
+              Für Firmen, Zwischenhändler und Fahrer.
             </h2>
+            <p className="text-zinc-400 mt-3 max-w-2xl mx-auto text-sm">
+              Firmen-Konten schalten wir persönlich frei — Zugang anfragen, wir melden uns,
+              legen dein Konto und deine Sucher an und rechnen per Rechnung ab.
+            </p>
           </div>
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="tactical-card p-8" data-testid="pricing-monthly">
-              <div className="overline">Monatsabo</div>
+          <div className="grid md:grid-cols-3 gap-6">
+            {/* Firmen / Autohändler */}
+            <div className="tactical-card p-8 relative" style={{ borderColor: "rgba(255,59,48,0.4)" }} data-testid="pricing-firma">
+              <div className="absolute -top-3 left-6 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] font-bold rounded-sm"
+                   style={{ background: "var(--accent-red)" }}>Für Autohändler</div>
+              <div className="overline">Firmen-Konto + Sucher</div>
               <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-5xl">160 €</span>
-                <span className="text-zinc-400 text-sm">/ Monat</span>
+                <span className="font-display font-black text-4xl">150 €</span>
+                <span className="text-zinc-400 text-sm">/ Monat je Sucher</span>
               </div>
-              <p className="text-zinc-400 text-sm mt-3">Flexibel, monatlich kündbar.</p>
-              <Link to="/register?plan=monthly" data-testid="cta-monthly"
-                    className="block text-center w-full mt-7 px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
-                    style={{ borderColor: "var(--border-default)" }}>
-                Monatlich starten
+              <p className="text-zinc-400 text-sm mt-2">oder 1.500 € / Jahr je Sucher — Abrechnung per Rechnung.
+                Verkaufen &amp; Verwalten für den Firmen-Hauptaccount kostenlos.</p>
+              <Link to="/anfrage" data-testid="cta-firma"
+                    className="block text-center w-full mt-6 kinetic-button px-5 py-3 rounded-sm">
+                Zugang anfragen
               </Link>
               <ul className="mt-6 space-y-2 text-sm">
-                {["Alle Funktionen freigeschaltet", "PDF-Archiv", "WhatsApp & E-Mail", "Terminplaner & Fahrer", "Live-Zähler"].map(t => (
-                  <li key={t} className="flex items-center gap-2 text-zinc-300"><Check size={14} style={{ color: "var(--accent-green)" }} /> {t}</li>
+                {["Freischaltung durch uns — kein Warten auf Zahlungsanbieter", "Sucher-Zugänge legen wir für dich an (jederzeit erweiterbar)", "Vergleich, Suche, Kaufverträge, Versand, Termine", "Bestand, Fahrzeugakte, Inserate & Marktplatz-Verkauf", "Zahlungsübersicht: was gezahlt wurde, wann die nächste fällig ist"].map(t => (
+                  <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
                 ))}
               </ul>
             </div>
-            <div className="tactical-card p-8 relative" style={{ borderColor: "rgba(255,59,48,0.4)" }} data-testid="pricing-yearly">
-              <div className="absolute -top-3 left-6 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] font-bold rounded-sm"
-                   style={{ background: "var(--accent-red)" }}>Spart 120 €</div>
-              <div className="overline">Jahresabo</div>
+
+            {/* B2B-Marktplatz */}
+            <div className="tactical-card p-8" data-testid="pricing-marktplatz">
+              <div className="overline">B2B-Marktplatz</div>
               <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-5xl">1.800 €</span>
-                <span className="text-zinc-400 text-sm">/ Jahr</span>
+                <span className="font-display font-black text-4xl">20 €</span>
+                <span className="text-zinc-400 text-sm">/ Monat</span>
               </div>
-              <p className="text-zinc-400 text-sm mt-3">Spart 120 € im Vergleich zum Monatsabo (1.920 €).</p>
-              <Link to="/register?plan=yearly" data-testid="cta-yearly"
-                    className="block text-center w-full mt-7 kinetic-button px-5 py-3 rounded-sm">
-                Jahresabo wählen
-              </Link>
-              <ul className="mt-6 space-y-2 text-sm">
-                {["Alle Funktionen freigeschaltet", "Priorisierter Support", "Kein Aufpreis bei Updates", "Volle Daten-Kontrolle", "Spart 120 € pro Jahr"].map(t => (
-                  <li key={t} className="flex items-center gap-2 text-zinc-300"><Check size={14} style={{ color: "var(--accent-green)" }} /> {t}</li>
+              <p className="text-zinc-400 text-sm mt-2">Für Zwischenhändler: geprüfte Fahrzeuge von Händlern kaufen.
+                Online zahlen, sofort loslegen.</p>
+              <div className="mt-6 flex flex-col gap-2">
+                <Link to="/markt/registrieren" data-testid="cta-markt-register"
+                      className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
+                      style={{ borderColor: "var(--border-default)" }}>
+                  Registrieren
+                </Link>
+                <Link to="/markt/login" data-testid="cta-markt-login"
+                      className="block text-center w-full px-5 py-2.5 rounded-sm text-sm text-zinc-300 hover:text-white">
+                  Anmelden
+                </Link>
+              </div>
+              <ul className="mt-5 space-y-2 text-sm">
+                {["Alle veröffentlichten Fahrzeuge + Händlerseiten", "B2B- und Netzwerk-Preise", "Favoriten-Merkliste", "Zahlung sicher über Stripe", "Monatlich, jederzeit beendbar"].map(t => (
+                  <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Fahrer-App */}
+            <div className="tactical-card p-8" data-testid="pricing-fahrer">
+              <div className="overline">Fahrer-App</div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="font-display font-black text-4xl">0 €</span>
+                <span className="text-zinc-400 text-sm">kostenlos</span>
+              </div>
+              <p className="text-zinc-400 text-sm mt-2">Für Abholfahrer: Termine, digitales Abholprotokoll mit
+                Unterschrift, fertiges PDF — direkt am Handy.</p>
+              <div className="mt-6 flex flex-col gap-2">
+                <Link to="/fahrer/register" data-testid="cta-fahrer-register"
+                      className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
+                      style={{ borderColor: "var(--border-default)" }}>
+                  Kostenlos registrieren
+                </Link>
+                <Link to="/fahrer/login" data-testid="cta-fahrer-login"
+                      className="block text-center w-full px-5 py-2.5 rounded-sm text-sm text-zinc-300 hover:text-white">
+                  Anmelden
+                </Link>
+              </div>
+              <ul className="mt-5 space-y-2 text-sm">
+                {["Zugeordnete Abholtermine im Überblick", "Abholprotokoll Schritt für Schritt am Handy", "Beide Unterschriften direkt auf dem Display", "Schäden per Tipp auf die Fahrzeug-Skizze", "Mit Fahrer-Code bei Händlern verknüpfen"].map(t => (
+                  <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
                 ))}
               </ul>
             </div>

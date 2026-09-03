@@ -796,15 +796,16 @@ function SubscriptionPanel() {
     }
   };
 
+  // 09/2026: Verlängerung läuft per Rechnung über den Betreiber — der Klick
+  // sendet nur noch eine Anfrage (kein Stripe für Firmen/Sucher).
   const renew = async (plan) => {
     setBusy(plan);
     try {
-      const { data } = await api.post("/payments/checkout", {
-        plan, origin_url: window.location.origin,
-      });
-      window.location.href = data.url;
+      await api.post("/dealer/abo-anfrage-selbst", { plan });
+      toast.success("Anfrage gesendet — nach Zahlungseingang schalten wir frei");
     } catch (err) {
-      toast.error(errMsg(err, "Checkout fehlgeschlagen"));
+      toast.error(errMsg(err, "Anfrage fehlgeschlagen"));
+    } finally {
       setBusy("");
     }
   };
@@ -886,24 +887,24 @@ function SubscriptionPanel() {
           <div className="grid md:grid-cols-2 gap-4 mb-4">
             <PlanCard
               title="Monatsabo"
-              price="160 €"
+              price="150 €"
               suffix="/ Monat"
-              tagline="Monatlich kündbar — flexibel bleiben."
+              tagline="Abrechnung per Rechnung — Freischaltung durch den Betreiber."
               testid="abo-renew-monthly"
               busy={busy === "monthly"}
               onClick={() => renew("monthly")}
-              ctaLabel={isCancelled || isExpired ? "Reaktivieren" : "Verlängern (1 Monat)"}
+              ctaLabel="Verlängerung anfragen (Monat)"
             />
             <PlanCard
               title="Jahresabo"
-              price="1.800 €"
+              price="1.500 €"
               suffix="/ Jahr"
-              tagline="2 Monate gratis · 240 € sparen."
+              tagline="Spart 300 € gegenüber monatlich (1.800 €)."
               highlight
               testid="abo-renew-yearly"
               busy={busy === "yearly"}
               onClick={() => renew("yearly")}
-              ctaLabel={isCancelled || isExpired ? "Auf Jahresabo wechseln" : "Auf Jahresabo upgraden"}
+              ctaLabel="Verlängerung anfragen (Jahr)"
             />
           </div>
 

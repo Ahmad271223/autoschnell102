@@ -2,17 +2,19 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
-import { RefreshCw, Check, X, Store, UserSearch } from "lucide-react";
+import { RefreshCw, Check, X, Store, Building2 } from "lucide-react";
 
 /**
- * Manuelle Freischaltungen (Bezahlung läuft aktuell außerhalb der App):
- * - Offene Anfragen: Sucher-Abo (160/1800) und Marktplatz-Zugang (9,99).
- * - Zwischenhändler-Liste mit Zugang aktivieren/sperren.
+ * Freischaltungen (Betreiber-Modell 09/2026):
+ * - Zugangs-Anfragen neuer Firmen (Startseite) -> Firma direkt anlegen.
+ * - Sucher-Abo-Anfragen (150/1500, Rechnung) -> freischalten (erfasst die Zahlung).
+ * - Marktplatz-Zugang: 20 EUR via Stripe automatisch; hier manuell aktivieren/sperren.
  */
 export default function AdminFreischaltungen() {
   const [requests, setRequests] = useState(null);
   const [buyers, setBuyers] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [firmaReq, setFirmaReq] = useState(null); // Zugangs-Anfrage -> Dialog
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -96,11 +98,12 @@ export default function AdminFreischaltungen() {
                 {requests.map((r) => {
                   const isSucher = r.type === "sucher_abo";
                   const isBuyer = r.type === "buyer_access";
+                  const isZugang = r.type === "zugang";
                   return (
                     <Card key={r.id} padded={false}>
                       <div className="p-4 flex flex-wrap items-center gap-3">
-                        <Badge tone={isSucher ? "purple" : isBuyer ? "blue" : "gray"}>
-                          {isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang" : (r.type || "Paket")}
+                        <Badge tone={isZugang ? "green" : isSucher ? "purple" : isBuyer ? "blue" : "gray"}>
+                          {isZugang ? "Neue Firma" : isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang" : (r.type || "Paket")}
                         </Badge>
                         <div className="min-w-0">
                           <div className="text-[14px] text-white font-medium">
@@ -108,13 +111,24 @@ export default function AdminFreischaltungen() {
                             <span className="text-zinc-500 font-normal"> · {r.wanted || (r.wanted_tier ? `Verkaufspaket ${r.wanted_tier}` : "")}</span>
                           </div>
                           <div className="text-[12px] text-zinc-500">
-                            {r.company_name}{r.contact_email ? ` · ${r.contact_email}` : ""} · {fmtDate(r.created_at)}
+                            {isZugang ? (r.contact_person || "") : r.company_name}
+                            {r.contact_email ? ` · ${r.contact_email}` : ""}
+                            {isZugang && r.contact_phone ? ` · ${r.contact_phone}` : ""}
+                            {" · "}{fmtDate(r.created_at)}
                           </div>
+                          {isZugang && r.message ? (
+                            <div className="text-[12px] text-zinc-400 mt-1 max-w-xl whitespace-pre-wrap">{r.message}</div>
+                          ) : null}
                         </div>
                         <div className="ml-auto flex gap-2">
+                          {isZugang && (
+                            <Button size="sm" onClick={() => setFirmaReq(r)}>
+                              <Building2 size={14} /> Firma anlegen
+                            </Button>
+                          )}
                           {isSucher && <Button size="sm" onClick={() => grantSucher(r)}><Check size={14} /> Abo aktivieren</Button>}
                           {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)}><Check size={14} /> Zugang aktivieren</Button>}
-                          {!isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
+                          {!isZugang && !isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
                             <Button size="sm" onClick={() => grantPlan(r)}><Check size={14} /> Paket aktivieren</Button>
                           )}
                           <Button size="sm" variant="ghost" onClick={() => { closeReq(r.id, "abgelehnt").then(load); }}>
@@ -167,7 +181,7 @@ export default function AdminFreischaltungen() {
                             {b.access?.active ? (
                               <Button size="sm" variant="ghost" onClick={() => setBuyerAccess(b, false)}>Sperren</Button>
                             ) : (
-                              <Button size="sm" onClick={() => setBuyerAccess(b, true)}>Freischalten (9,99 €)</Button>
+                              <Button size="sm" onClick={() => setBuyerAccess(b, true)}>Freischalten (20 €)</Button>
                             )}
                           </td>
                         </tr>
@@ -180,6 +194,68 @@ export default function AdminFreischaltungen() {
           </div>
         </div>
       )}
+
+      {firmaReq && (
+        <FirmaAnlegenDialog
+          request={firmaReq}
+          onClose={() => setFirmaReq(null)}
+          onDone={async () => { await closeReq(firmaReq.id); setFirmaReq(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+
+/** Firmen-Konto direkt aus einer Zugangs-Anfrage anlegen (plan_type "none":
+ *  der Hauptaccount ist kostenlos, Sucher-Abos werden separat freigeschaltet). */
+function FirmaAnlegenDialog({ request, onClose, onDone }) {
+  const [f, setF] = useState({
+    company_name: request.company_name || "",
+    email: request.contact_email || "",
+    password: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  const submit = async () => {
+    if (!f.company_name || !f.email || f.password.length < 8) {
+      toast.error("Firma, E-Mail und Passwort (min. 8 Zeichen) angeben"); return;
+    }
+    setBusy(true);
+    try {
+      await api.post("/admin/users", {
+        email: f.email, password: f.password,
+        company_name: f.company_name, plan_type: "none",
+      });
+      toast.success("Firmen-Konto angelegt — Zugangsdaten an den Kontakt geben");
+      onDone?.();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+
+  const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none";
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div className="w-full max-w-md rounded-2xl p-5 bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-lg font-bold">Firma anlegen</div>
+          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200"><X size={20} /></button>
+        </div>
+        <div className="text-[12px] text-zinc-500 mb-4">
+          Aus Anfrage: {request.contact_person || "—"}
+          {request.sucher_anzahl ? ` · gewünschte Sucher: ${request.sucher_anzahl}` : ""}
+          {" — Sucher danach über die Nutzer-Detailseite anlegen."}
+        </div>
+        <div className="space-y-3">
+          <input value={f.company_name} onChange={set("company_name")} placeholder="Firmenname *" className={inputCls} />
+          <input value={f.email} onChange={set("email")} placeholder="Login-E-Mail des Chefs *" className={inputCls} />
+          <input value={f.password} onChange={set("password")} placeholder="Start-Passwort (min. 8 Zeichen) *" className={inputCls} />
+        </div>
+        <Button className="mt-4 w-full" onClick={submit} disabled={busy}>
+          {busy ? "Wird angelegt…" : "Firmen-Konto anlegen"}
+        </Button>
+      </div>
     </div>
   );
 }

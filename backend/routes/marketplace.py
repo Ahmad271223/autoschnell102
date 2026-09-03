@@ -32,7 +32,7 @@ router = APIRouter()
 # angebotenen Fahrzeuge sehen zu können. Freischaltung erfolgt (wie beim
 # Sucher-Abo/Verkaufspaket) manuell über den Admin — Stripe ist ein
 # austauschbarer Baustein.
-BUYER_ACCESS_PRICE = 9.99          # € pro Monat
+BUYER_ACCESS_PRICE = 20.00         # € pro Monat (Stand 09/2026, Stripe)
 BUYER_ACCESS_DAYS = 30
 
 

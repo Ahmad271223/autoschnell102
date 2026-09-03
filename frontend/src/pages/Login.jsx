@@ -94,7 +94,7 @@ export default function Login() {
               <Link to="/passwort-vergessen" className="hover:text-white hover:underline">Passwort vergessen?</Link>
             </div>
             <div>
-              Noch kein Konto? <Link to="/register" className="text-white hover:underline">Jetzt registrieren</Link>
+              Noch kein Konto? <Link to="/anfrage" className="text-white hover:underline">Zugang anfragen — wir schalten dich frei</Link>
             </div>
           </div>
         </form>

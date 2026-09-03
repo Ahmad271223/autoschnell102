@@ -90,6 +90,14 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
         "default_special_agreements": "",
         "created_at": now_iso(),
     })
+    # plan_type "none" (Betreiber-Modell 09/2026): Firmen-Hauptaccount ohne
+    # jedes Abo anlegen — Verkaufen/Verwalten ist kostenlos, Sucher-Abos
+    # werden einzeln nach Rechnungszahlung freigeschaltet.
+    if body.plan_type == "none":
+        await log_activity(admin.get("dealer_id", ""), admin["id"],
+                           "admin.user.erstellt", ref=user_id,
+                           meta={"email": body.email, "plan": "none"})
+        return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
     expires = body.expires_at
     if not expires and body.plan_type in ("monthly", "trial"):
         expires = (datetime.now(timezone.utc) + timedelta(days=30 if body.plan_type == "monthly" else 14)).isoformat()
@@ -392,12 +400,13 @@ async def admin_user_set_active(
         raise HTTPException(404, "Nutzer nicht gefunden")
     if u.get("is_super_admin") and not body.active:
         raise HTTPException(400, "Super-Admin kann nicht gesperrt werden")
-    if u.get("id") == admin.get("id") and not body.active:
-        raise HTTPException(400, "Du kannst dich nicht selbst sperren")
-    # Runde 5: ein normaler Admin konnte andere Admins sperren/entsperren.
+    # Dieselbe Regel wie bei Passwort/PUT (Prüfbericht Runde 4): Admin-Konten
+    # sperrt/entsperrt nur der Super-Admin — nicht ein Admin-Kollege.
     if u.get("role") == "admin" and u.get("id") != admin.get("id") \
             and not admin.get("is_super_admin"):
         raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
+    if u.get("id") == admin.get("id") and not body.active:
+        raise HTTPException(400, "Du kannst dich nicht selbst sperren")
     patch = {"active": bool(body.active), "updated_at": now_iso()}
     if not body.active:
         patch["current_session_id"] = None
@@ -834,8 +843,11 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
     plan=null aufheben. Legt/aktualisiert eine subscriptions-Zeile mit
     subject_user_id an — damit gilt der Sucher als abo-berechtigt."""
     from routes.team import SUCHER_PLANS
+    # Auch der Chef kann einen persoenlichen Sucher-Zugang haben ("Chef als
+    # eigener Sucher") — Freischaltung laeuft ueber denselben Endpunkt.
     sucher = await db.users.find_one(
-        {"id": sucher_id, "role": "sucher"}, {"_id": 0, "id": 1, "dealer_id": 1})
+        {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
+        {"_id": 0, "id": 1, "dealer_id": 1})
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
     plan = body.get("plan")
@@ -868,9 +880,28 @@ async def admin_set_sucher_abo(sucher_id: str, body: dict = Body(...),
         "activated_by": admin.get("email", ""),
         "created_at": now_iso(),
     })
+    # Zahlung direkt mit erfassen (Abrechnung per Rechnung, 09/2026):
+    # Freischalten = "es wurde gezahlt". Betrag/Datum sind überschreibbar
+    # (body.betrag / body.gezahlt_am), Default = Listenpreis / heute.
+    try:
+        betrag = round(float(body.get("betrag", SUCHER_PLANS[plan]["price"])), 2)
+    except (TypeError, ValueError):
+        betrag = SUCHER_PLANS[plan]["price"]
+    await db.manual_payments.insert_one({
+        "id": str(uuid.uuid4()),
+        "dealer_id": sucher["dealer_id"],
+        "subject_user_id": sucher_id,
+        "plan": plan,
+        "amount": betrag,
+        "paid_at": str(body.get("gezahlt_am") or now_iso())[:10],
+        "period_until": expires_at,           # bezahlt bis = nächste Zahlung
+        "note": str(body.get("notiz", ""))[:500],
+        "recorded_by": admin.get("email", ""),
+        "created_at": now_iso(),
+    })
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.sucher.abo.freigeschaltet", ref=sucher_id,
-                       meta={"plan": plan})
+                       meta={"plan": plan, "betrag": betrag})
     # Offene Anfrage im selben Vorgang schliessen — vorher waren Freischalten
     # und Schliessen getrennt; scheiterte das Schliessen, blieb der erfuellte
     # Antrag offen und konnte doppelt bearbeitet werden.
@@ -894,6 +925,114 @@ def _restlaufzeit_basis(expires_at) -> datetime:
         return alt if alt > jetzt else jetzt
     except (ValueError, TypeError):
         return jetzt
+
+
+# ---------- Sucher-Konten anlegen/verwalten (Betreiber, 09/2026) ----------
+# Der Betreiber legt Sucher-Konten für eine Firma an (Anmeldename =
+# E-Mail + Passwort), auch nachträglich, und kann sie sperren/löschen
+# (Sperren/Löschen laufen über die bestehenden /admin/users-Routen).
+class AdminSucherIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=200)
+    first_name: str = Field(default="", max_length=80)
+    last_name: str = Field(default="", max_length=80)
+    phone: str = Field(default="", max_length=50)
+
+
+@router.post("/admin/dealers/{dealer_id}/sucher")
+async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
+                              admin=Depends(current_admin)):
+    dealer = await db.dealers.find_one({"id": dealer_id},
+                                       {"_id": 0, "id": 1, "company_name": 1})
+    if not dealer:
+        raise HTTPException(404, "Firma nicht gefunden")
+    email = body.email.strip().lower()
+    existing = await db.users.find_one(
+        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+    if existing:
+        raise HTTPException(409, "E-Mail ist bereits registriert")
+    sucher_id = str(uuid.uuid4())
+    await db.users.insert_one({
+        "id": sucher_id, "email": email,
+        "password_hash": await hash_password_async(body.password),
+        "role": "sucher", "active": True,
+        "dealer_id": dealer_id,
+        "first_name": body.first_name.strip(),
+        "last_name": body.last_name.strip(),
+        "phone": body.phone.strip(),
+        "created_by": admin["id"],
+        "current_session_id": None,
+        "created_at": now_iso(),
+    })
+    await log_activity(dealer_id, admin["id"], "admin.sucher.angelegt",
+                       ref=sucher_id, meta={"email": email,
+                                            "firma": dealer.get("company_name", "")})
+    return {"ok": True, "sucher_id": sucher_id, "email": email,
+            "hinweis": "Konto angelegt — zum Suchen/Vergleichen noch das "
+                       "Sucher-Abo freischalten (150 €/Monat bzw. "
+                       "1.500 €/Jahr)."}
+
+
+@router.get("/admin/dealers/{dealer_id}/sucher")
+async def admin_list_dealer_sucher(dealer_id: str, _=Depends(current_admin)):
+    """Alle Sucher einer Firma inkl. Abo-Status, letzter Zahlung und
+    nächster Fälligkeit (= Abo-Ablauf) — für die Freischaltungs-Ansicht."""
+    items = await db.users.find(
+        {"dealer_id": dealer_id, "role": "sucher"},
+        {"_id": 0, "password_hash": 0},
+    ).sort("created_at", 1).to_list(200)
+    out = []
+    for s in items:
+        sub = await get_subscription_status(dealer_id, subject_user_id=s["id"])
+        letzte = await db.manual_payments.find_one(
+            {"subject_user_id": s["id"]}, {"_id": 0},
+            sort=[("created_at", -1)])
+        out.append({**s, "subscription": sub,
+                    "letzte_zahlung": letzte,
+                    "naechste_zahlung_am": sub.get("expires_at")})
+    return out
+
+
+class AdminZahlungIn(BaseModel):
+    subject_user_id: Optional[str] = None   # Sucher; leer = Firmen-Ebene
+    amount: float = Field(ge=0, le=100000)
+    paid_at: Optional[str] = Field(default=None, max_length=10)  # JJJJ-MM-TT
+    note: str = Field(default="", max_length=500)
+
+
+@router.get("/admin/dealers/{dealer_id}/zahlungen")
+async def admin_list_zahlungen(dealer_id: str, _=Depends(current_admin)):
+    """Zahlungshistorie einer Firma (alle manuell erfassten Zahlungen,
+    neueste zuerst) — Grundlage für 'was wurde wann gezahlt'."""
+    return await db.manual_payments.find(
+        {"dealer_id": dealer_id}, {"_id": 0},
+    ).sort("created_at", -1).to_list(500)
+
+
+@router.post("/admin/dealers/{dealer_id}/zahlungen")
+async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
+                            admin=Depends(current_admin)):
+    """Zahlung nachtragen/korrigieren, OHNE am Abo etwas zu ändern
+    (Freischalten + Verlängern erfasst die Zahlung bereits automatisch)."""
+    dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "id": 1})
+    if not dealer:
+        raise HTTPException(404, "Firma nicht gefunden")
+    doc = {
+        "id": str(uuid.uuid4()), "dealer_id": dealer_id,
+        "subject_user_id": body.subject_user_id or None,
+        "plan": None,
+        "amount": round(float(body.amount), 2),
+        "paid_at": (body.paid_at or now_iso()[:10]),
+        "period_until": None,
+        "note": body.note.strip(),
+        "recorded_by": admin.get("email", ""),
+        "created_at": now_iso(),
+    }
+    await db.manual_payments.insert_one(doc)
+    await log_activity(dealer_id, admin["id"], "admin.zahlung.erfasst",
+                       meta={"betrag": doc["amount"], "sucher":
+                             body.subject_user_id or ""})
+    return {"ok": True, "zahlung": {k: v for k, v in doc.items()}}
 
 
 # ---------- Zwischenhändler-Zugang freischalten (manuell) ----------

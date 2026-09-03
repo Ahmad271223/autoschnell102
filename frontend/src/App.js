@@ -10,7 +10,8 @@ import AppLayout from "@/components/AppLayout";
 
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
-import Register from "@/pages/Register";
+import Anfrage from "@/pages/Anfrage";
+import MarktZahlungErfolg from "@/pages/markt/ZahlungErfolg";
 import PasswortVergessen from "@/pages/PasswortVergessen";
 import PasswortReset from "@/pages/PasswortReset";
 import Impressum from "@/pages/legal/Impressum";
@@ -88,7 +89,10 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
+            {/* Firmen registrieren sich nicht mehr selbst (09/2026) —
+                der alte Registrieren-Link landet auf der Zugangs-Anfrage. */}
+            <Route path="/register" element={<Navigate to="/anfrage" replace />} />
+            <Route path="/anfrage" element={<Anfrage />} />
             <Route path="/passwort-vergessen" element={<PasswortVergessen />} />
             <Route path="/passwort-reset" element={<PasswortReset />} />
             <Route path="/impressum" element={<Impressum />} />
@@ -117,6 +121,7 @@ export default function App() {
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
             <Route path="/markt/login" element={<BuyerLogin />} />
             <Route path="/markt/registrieren" element={<BuyerRegister />} />
+            <Route path="/markt/zahlung-erfolg" element={<MarktZahlungErfolg />} />
             <Route path="/markt" element={<Marktplatz />} />
 
             {/* Fahrer-App (eigenständig) */}

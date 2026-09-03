@@ -68,7 +68,7 @@ export default function BuyerRegister() {
         <p className="text-sm text-zinc-500 mt-1 mb-6">
           {invite
             ? "Du wurdest in ein Händler-Netzwerk eingeladen."
-            : "Zugang zu angebotenen Fahrzeugen erfordert ein Marktplatz-Abo (9,99 € / Monat)."}
+            : "Zugang zu angebotenen Fahrzeugen erfordert ein Marktplatz-Abo (20 € / Monat)."}
         </p>
         <form onSubmit={submit} className="grid grid-cols-2 gap-3">
           <div className="col-span-2">

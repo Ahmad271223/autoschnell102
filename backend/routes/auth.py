@@ -68,9 +68,64 @@ class TokenOut(BaseModel):
     user: dict
 
 
+class ZugangsAnfrageIn(BaseModel):
+    """Öffentliche Zugangs-Anfrage von der Startseite (Beschluss 09/2026):
+    Firmen registrieren sich nicht mehr selbst — sie stellen eine Anfrage,
+    der Betreiber legt danach das Firmen-Konto an und schaltet frei."""
+    company_name: str = Field(min_length=2, max_length=200)
+    contact_person: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+    phone: str = Field(default="", max_length=50)
+    message: str = Field(default="", max_length=2000)
+    sucher_anzahl: int = Field(default=0, ge=0, le=50)
+
+
+@router.post("/zugang-anfrage")
+async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
+    """Startseiten-Formular: 'Ich möchte das Programm nutzen.' Landet beim
+    Betreiber unter Freischaltungen. Kein Konto, kein Passwort — der
+    Betreiber legt das Firmen-Konto nach Kontaktaufnahme selbst an."""
+    ip = client_ip(request)
+    if not await register_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anfragen von dieser IP – bitte "
+                                 "später erneut versuchen.")
+    req_id = str(uuid.uuid4())
+    await db.plan_requests.insert_one({
+        "id": req_id, "type": "zugang",
+        "company_name": body.company_name.strip(),
+        "contact_person": body.contact_person.strip(),
+        "contact_email": body.email.strip().lower(),
+        "contact_phone": body.phone.strip(),
+        "message": body.message.strip(),
+        "sucher_anzahl": body.sucher_anzahl,
+        "wanted": ("Zugang zum Programm"
+                   + (f" + {body.sucher_anzahl} Sucher" if body.sucher_anzahl else "")),
+        "status": "offen", "created_at": now_iso(),
+    })
+    await log_activity("", "", "zugang.anfrage",
+                       ref=req_id, meta={"firma": body.company_name,
+                                         "email": body.email, "ip": ip})
+    return {"ok": True, "hinweis": "Anfrage ist eingegangen — wir melden uns "
+                                   "und schalten dein Firmen-Konto frei."}
+
+
+# Selbst-Registrierung von Firmen: seit 09/2026 standardmäßig AUS —
+# der Betreiber legt Firmen-Konten nach einer Zugangs-Anfrage selbst an
+# (docker-compose setzt SELF_SIGNUP=false). In Entwicklung/CI bleibt die
+# Route aktiv, damit Tests und lokales Ausprobieren funktionieren.
+def _self_signup_enabled() -> bool:
+    return os.environ.get("SELF_SIGNUP", "true").strip().lower() not in (
+        "false", "0", "no", "off")
+
+
 # ---------- Endpoints ----------
 @router.post("/auth/register", response_model=TokenOut)
 async def register(body: RegisterIn, request: Request):
+    if not _self_signup_enabled():
+        raise HTTPException(403, "Die Selbst-Registrierung ist deaktiviert. "
+                                 "Bitte stelle eine Zugangs-Anfrage — der "
+                                 "Betreiber legt dein Firmen-Konto an und "
+                                 "schaltet dich frei.")
     # Rate-limit: 5 registrations per IP per hour.
     ip = client_ip(request)
     if not await register_limiter.check(ip):

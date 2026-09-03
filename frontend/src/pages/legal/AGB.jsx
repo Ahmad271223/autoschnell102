@@ -47,9 +47,9 @@ export default function AGB() {
       <H2>4. Preise und Zahlung</H2>
       <ul className="list-disc pl-6 space-y-1">
         <li>Der Händler-Hauptaccount (Verwalten &amp; Verkaufen) ist kostenlos.</li>
-        <li>Sucher-Abo (Vergleich/Suche, pro Nutzer): 160 € / Monat oder
-            1.800 € / Jahr.</li>
-        <li>Marktplatz-Zugang für Zwischenhändler: 9,99 € / Monat.</li>
+        <li>Sucher-Abo (Vergleich/Suche, pro Nutzer): 150 € / Monat oder
+            1.500 € / Jahr — Abrechnung per Rechnung.</li>
+        <li>Marktplatz-Zugang für Zwischenhändler: 20 € / Monat (Zahlung über Stripe).</li>
         <li>Verkaufspakete (Anzahl Veröffentlichungen pro Monat) gemäß
             aktueller Preisliste. Eine Veröffentlichung zählt auch dann,
             wenn das Inserat im selben Zeitraum wieder gelöscht wird.</li>
