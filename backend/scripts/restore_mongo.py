@@ -265,6 +265,13 @@ def verzeichnisse_umschalten(staging: dict, live: dict, stamp: str):
         live_dir = live[name]
         vorher = (live_dir.parent / f"{live_dir.name}.vorher-{stamp}"
                   if live_dir.exists() else None)
+        # Kollision vermeiden (CI 09/2026): gleicher Zeitstempel innerhalb
+        # einer Sekunde -> Rename auf einen vorhandenen, nicht leeren Ordner
+        # scheitert unter Linux (ENOTEMPTY). Eindeutigen Namen waehlen.
+        n = 1
+        while vorher is not None and vorher.exists():
+            n += 1
+            vorher = live_dir.parent / f"{live_dir.name}.vorher-{stamp}-{n}"
         try:
             live_dir.parent.mkdir(parents=True, exist_ok=True)
             if vorher is not None:
