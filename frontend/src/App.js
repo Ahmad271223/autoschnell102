@@ -29,6 +29,7 @@ import AdminErrors from "@/pages/admin_v2/Errors";
 import AdminFreischaltungen from "@/pages/admin_v2/Freischaltungen";
 import AdminSettings from "@/pages/admin_v2/Settings";
 import AdminAutoDaten from "@/pages/admin_v2/AutoDaten";
+import AdminFahrer from "@/pages/admin_v2/Fahrer";
 
 import Vergleich from "@/pages/app/Vergleich";
 import ManuelleSuche from "@/pages/app/ManuelleSuche";
@@ -41,6 +42,7 @@ import Inserat from "@/pages/app/Inserat";
 import Fahrer from "@/pages/app/Fahrer";
 import Team from "@/pages/app/Team";
 import Einstellungen from "@/pages/app/Einstellungen";
+import Anfragen from "@/pages/app/Anfragen";
 
 import DriverLogin from "@/pages/driver/DriverLogin";
 import DriverRegister from "@/pages/driver/DriverRegister";
@@ -105,6 +107,7 @@ export default function App() {
             <Route path="/app/vertraege" element={<WrapFree><PDFArchiv /></WrapFree>} />
             <Route path="/app/termine" element={<WrapFree><Termine /></WrapFree>} />
             <Route path="/app/bestand" element={<WrapFree><Bestand /></WrapFree>} />
+            <Route path="/app/anfragen" element={<WrapFree><Anfragen /></WrapFree>} />
             <Route path="/app/akte/:id" element={<WrapFree><FahrzeugAkte /></WrapFree>} />
             <Route path="/app/inserat/:id" element={<WrapFree><Inserat /></WrapFree>} />
             <Route path="/app/fahrer" element={<WrapFree><Fahrer /></WrapFree>} />
@@ -133,6 +136,7 @@ export default function App() {
               <Route index element={<AdminOverview />} />
               <Route path="users" element={<AdminUsers />} />
               <Route path="users/:id" element={<AdminUserDetail />} />
+              <Route path="fahrer" element={<AdminFahrer />} />
               <Route path="comparisons" element={<AdminComparisons />} />
               <Route path="urls" element={<AdminUrlStats />} />
               <Route path="audit" element={<AdminAuditLog />} />

@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   LayoutDashboard, Users, GitCompareArrows, Activity, Settings, LogOut,
-  ScrollText, AlertTriangle, KeyRound, Car,
+  ScrollText, AlertTriangle, KeyRound, Car, Truck,
 } from "lucide-react";
 
 /**
@@ -20,6 +20,7 @@ const NAV = [
   { to: "/admin/audit",       label: "Audit-Log",     icon: ScrollText },
   { to: "/admin/errors",      label: "Fehler",        icon: AlertTriangle },
   { to: "/admin/freischaltungen", label: "Freischaltungen", icon: KeyRound },
+  { to: "/admin/fahrer",      label: "Fahrer",        icon: Truck },
   // Nur der Super-Admin sieht die anonymen Auto-Daten (Backend blockt
   // normale Admins zusätzlich mit 403).
   { to: "/admin/auto-daten",  label: "Auto-Daten",    icon: Car, superOnly: true },

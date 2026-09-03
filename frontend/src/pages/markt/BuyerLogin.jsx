@@ -18,7 +18,10 @@ export default function BuyerLogin() {
     setBusy(true);
     try {
       await login(email.trim(), password);
-      nav(sp.get("next") || "/markt");
+      // Einladung aus dem Registrierungs-Link ueberlebt den Umweg ueber
+      // den Login und wird im Marktplatz eingeloest (Review 09/2026).
+      const invite = sp.get("invite");
+      nav(invite ? `/markt?invite=${encodeURIComponent(invite)}` : (sp.get("next") || "/markt"));
     } catch (err) {
       toast.error(errMsg(err, "Anmeldung fehlgeschlagen"));
     } finally {
@@ -60,7 +63,7 @@ export default function BuyerLogin() {
         </form>
         <div className="mt-5 text-center text-sm text-zinc-500">
           Noch kein Zugang?{" "}
-          <Link to="/markt/registrieren" className="text-white font-semibold">Jetzt registrieren</Link>
+          <Link to={sp.get("invite") ? `/markt/registrieren?invite=${encodeURIComponent(sp.get("invite"))}` : "/markt/registrieren"} className="text-white font-semibold">Jetzt registrieren</Link>
         </div>
       </div>
     </div>

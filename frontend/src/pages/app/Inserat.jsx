@@ -377,6 +377,8 @@ export default function Inserat() {
               {busy ? "Speichert…" : "Änderungen speichern"}
             </button>
           )}
+          <AnfragenKarte listingId={id} />
+
           {l.status !== "verkauft" && (
             <button onClick={removeListing}
                     className="w-full rounded-xl py-2.5 text-xs text-zinc-500 hover:text-red-400 inline-flex items-center justify-center gap-1.5">
@@ -385,6 +387,41 @@ export default function Inserat() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/** Eingehende Marktplatz-Anfragen zu DIESEM Inserat (beantwortet werden
+ *  sie zentral unter /app/anfragen). Sucher bekommen auf dem dealer-only
+ *  Endpunkt 403 — die Karte bleibt dann einfach leer. */
+function AnfragenKarte({ listingId }) {
+  const [anfragen, setAnfragen] = useState(null);
+  useEffect(() => {
+    api.get("/dealer/interessen", { params: { listing_id: listingId } })
+      .then((r) => setAnfragen(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setAnfragen(null));
+  }, [listingId]);
+  if (!anfragen || anfragen.length === 0) return null;
+  const offen = anfragen.filter((a) => a.status === "offen").length;
+  return (
+    <div className="tactical-card p-4" data-testid="inserat-anfragen">
+      <div className="text-sm font-bold uppercase tracking-wide mb-2">Kaufanfragen</div>
+      <div className="space-y-1.5 text-sm">
+        {anfragen.slice(0, 4).map((a) => (
+          <div key={a.id} className="flex items-center justify-between gap-2">
+            <span className="truncate" style={{ color: "var(--text-secondary)" }}>{a.buyer_name}</span>
+            <span className="shrink-0 text-[12px]" style={{ color: "var(--text-muted)" }}>
+              {a.offer != null ? `${Number(a.offer).toLocaleString("de-DE")} €` : "ohne Angebot"} · {a.status}
+            </span>
+          </div>
+        ))}
+      </div>
+      <Link to="/app/anfragen"
+            className="mt-3 inline-block text-[12.5px] font-semibold hover:underline"
+            style={{ color: "var(--accent-red)" }}>
+        {offen > 0 ? `${offen} offene Anfrage(n) beantworten ›` : "Alle Anfragen ansehen ›"}
+      </Link>
     </div>
   );
 }

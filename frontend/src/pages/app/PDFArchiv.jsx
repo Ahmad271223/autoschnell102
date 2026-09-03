@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
+import { openAuthedFile } from "@/lib/api";
 import SnapshotCard from "@/components/SnapshotCard";
 
 const DAY_FILTERS = [
@@ -109,6 +110,15 @@ export default function PDFArchiv() {
                                      color: "var(--accent-green)" }}>
                         {it.status}
                       </span>
+                      {(it.version || 1) > 1 && (
+                        <span className="text-[11px] font-semibold px-2 py-1 rounded-full"
+                              title={`${it.version}. Fassung — ältere Fassungen unten abrufbar`}
+                              style={{ background: "rgba(10,132,255,0.12)",
+                                       border: "1px solid rgba(10,132,255,0.3)",
+                                       color: "#0a84ff" }}>
+                          v{it.version}
+                        </span>
+                      )}
                     </div>
                     <SpecsZeile cd={it.contract_data} />
                     <div className="mt-1.5 text-[13.5px] leading-relaxed"
@@ -132,6 +142,7 @@ export default function PDFArchiv() {
                         <span className="text-xs" style={{ color: "var(--text-muted)" }}>—</span>
                       )}
                     </div>
+                    {(it.version || 1) > 1 && <VersionenZeile contractId={it.id} />}
                   </div>
 
                   {/* Preis + Aktionen rechts */}
@@ -391,6 +402,68 @@ function GalleryViewer({ item, urls, startIndex = 0, onClose }) {
               <img src={u} alt="" loading="lazy" className="h-full w-full object-cover" />
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/** Ältere Vertragsfassungen (entstehen beim Verschieben des Abholtermins).
+ *  Lazy: die Liste wird erst beim Aufklappen geladen; jede Fassung öffnet
+ *  per Authorization-Abruf (Review 09/2026: Versionen existierten im
+ *  Backend, waren aber nirgends sichtbar). */
+function VersionenZeile({ contractId }) {
+  const [offen, setOffen] = useState(false);
+  const [versionen, setVersionen] = useState(null);
+
+  const toggle = async () => {
+    const jetzt = !offen;
+    setOffen(jetzt);
+    if (jetzt && versionen === null) {
+      try {
+        const { data } = await api.get(`/contracts/${contractId}/versions`);
+        setVersionen(Array.isArray(data) ? data : []);
+      } catch {
+        // Fehler nicht als "keine Fassungen" cachen — zuklappen, damit der
+        // naechste Klick neu laedt (Review-Workflow 09/2026).
+        setVersionen(null);
+        setOffen(false);
+        toast.error("Fassungen konnten nicht geladen werden");
+      }
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] uppercase font-bold tracking-wider"
+              style={{ color: "var(--text-muted)" }}>
+          Fassungen
+        </span>
+        <button onClick={toggle} data-testid={`versions-open-${contractId}`}
+                className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full">
+          {offen ? "ausblenden" : "ältere Fassungen anzeigen"}
+        </button>
+      </div>
+      {offen && (
+        <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+          {versionen === null ? (
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>lädt…</span>
+          ) : versionen.length === 0 ? (
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>Keine älteren Fassungen.</span>
+          ) : (
+            versionen.map((v) => (
+              <button key={v.id}
+                      data-testid={`version-pdf-${contractId}-${v.version}`}
+                      onClick={() => openAuthedFile(`/contracts/${contractId}/versions/${v.version}/pdf`)
+                        .catch(() => toast.error("Fassung konnte nicht geladen werden"))}
+                      title={`Archiviert ${new Date(v.archived_at).toLocaleString("de-DE")}${v.grund === "abholtermin_geaendert" ? " · Abholtermin geändert" : ""}`}
+                      className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full">
+                v{v.version}{v.pickup_date ? ` · Abholung ${v.pickup_date}` : ""}
+              </button>
+            ))
+          )}
         </div>
       )}
     </div>

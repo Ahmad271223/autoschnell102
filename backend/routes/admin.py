@@ -17,7 +17,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import hash_password, verify_password
+from auth import (hash_password, hash_password_async,
+                  verify_password, verify_password_async)
 from cleanup_service import _cleanup_once
 from deps import (
     current_admin, db, get_subscription_status, log, log_activity, now_iso,
@@ -70,7 +71,7 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_admin)):
     dealer_id = str(uuid.uuid4())
     await db.users.insert_one({
         "id": user_id, "email": body.email,
-        "password_hash": hash_password(body.password),
+        "password_hash": await hash_password_async(body.password),
         "role": "dealer", "active": body.active if body.active is not None else True,
         "dealer_id": dealer_id, "current_session_id": None,
         "created_at": now_iso(),
@@ -192,7 +193,7 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         pw = str(body["password"])
         if len(pw) < 8:
             raise HTTPException(400, "Passwort muss mindestens 8 Zeichen haben")
-        fields["password_hash"] = hash_password(pw)
+        fields["password_hash"] = await hash_password_async(pw)
         # Passwortwechsel beendet alle Sitzungen des Kontos — ein
         # gestohlener Token ueberlebt die Aenderung nicht (PR-Review).
         fields["current_session_id"] = None
@@ -233,7 +234,11 @@ _COMPANY_COLLECTIONS = (
     "users", "subscriptions", "vehicles", "appointments",
     "generated_pdfs", "generated_pdf_versions", "resale_listings",
     "listing_interest", "pickup_protocols", "pickup_reports",
-    "driver_accounts", "dealer_drivers", "dealer_invites",
+    # driver_accounts NICHT: Fahrer-Konten sind firmenneutral (kein
+    # dealer_id-Feld) — der alte Eintrag war ein No-Op und liess die
+    # Loeschvorschau faelschlich "0 Fahrer" zaehlen. Fahrer loescht der
+    # Admin ueber DELETE /admin/drivers/{id}.
+    "dealer_drivers", "dealer_invites",
     "plan_requests", "vehicle_comparisons",
 )
 
@@ -331,9 +336,11 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         from storage_service import storage
         dateien = 0
         datei_fehler = []
+        import asyncio as _asyncio
         for kategorie in ("protocol", "pickup", "resale", "logo"):
             try:
-                dateien += storage.delete_prefix(f"{kategorie}/{dealer_id}/")
+                dateien += await _asyncio.to_thread(
+                    storage.delete_prefix, f"{kategorie}/{dealer_id}/")
             except Exception as exc:
                 datei_fehler.append(f"{kategorie}: {exc}")
         geloescht["dateien"] = dateien
@@ -423,7 +430,7 @@ async def admin_user_set_password(
     await db.users.update_one(
         {"id": user_id},
         {"$set": {
-            "password_hash": hash_password(body.new_password),
+            "password_hash": await hash_password_async(body.new_password),
             "current_session_id": None,
             "updated_at": now_iso(),
         }},
@@ -432,6 +439,110 @@ async def admin_user_set_password(
                        "admin.passwort.zurueckgesetzt",
                        ref=user_id, meta={"email": u.get("email", "")})
     return {"ok": True}
+
+
+# ---------- Fahrer-Verwaltung (Review 09/2026: fehlte komplett) ----------
+# Fahrer-Konten sind firmenneutral (kein dealer_id) — die Liste ist
+# plattformweit; Firmenzugehoerigkeit ergibt sich aus dealer_drivers.
+@router.get("/admin/drivers")
+async def admin_list_drivers(_=Depends(current_admin)):
+    fahrer = await db.driver_accounts.find(
+        {}, {"_id": 0, "password_hash": 0, "current_session_id": 0},
+    ).sort("created_at", -1).to_list(2000)
+    links: Dict[str, dict] = {}
+    async for row in db.dealer_drivers.aggregate([
+        {"$group": {"_id": "$driver_account_id", "n": {"$sum": 1},
+                    "dealer_ids": {"$addToSet": "$dealer_id"}}},
+    ]):
+        links[row["_id"]] = row
+    dealer_ids = sorted({d for r in links.values() for d in r.get("dealer_ids") or []})
+    namen = {}
+    if dealer_ids:
+        async for d in db.dealers.find({"id": {"$in": dealer_ids}},
+                                       {"_id": 0, "id": 1, "company_name": 1}):
+            namen[d["id"]] = d.get("company_name") or d["id"][:8]
+    termine: Dict[str, dict] = {}
+    async for row in db.appointments.aggregate([
+        {"$match": {"driver_id": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$driver_id", "n": {"$sum": 1},
+                    "offen": {"$sum": {"$cond": [
+                        {"$in": ["$status", ["offen", "verschoben"]]}, 1, 0]}}}},
+    ]):
+        termine[row["_id"]] = row
+    return [{**f,
+             "firmen": sorted(namen.get(d, d[:8])
+                              for d in (links.get(f["id"], {}).get("dealer_ids") or [])),
+             "verknuepfungen": links.get(f["id"], {}).get("n", 0),
+             "termine": termine.get(f["id"], {}).get("n", 0),
+             "termine_offen": termine.get(f["id"], {}).get("offen", 0)}
+            for f in fahrer]
+
+
+async def _fahrer_or_404(driver_id: str) -> dict:
+    d = await db.driver_accounts.find_one({"id": driver_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Fahrer nicht gefunden")
+    return d
+
+
+@router.post("/admin/drivers/{driver_id}/active")
+async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
+                                  admin=Depends(current_admin)):
+    d = await _fahrer_or_404(driver_id)
+    fields = {"active": body.active, "updated_at": now_iso()}
+    if not body.active:
+        # Sperren beendet die laufende Sitzung sofort (Single-Session strikt).
+        fields["current_session_id"] = None
+    await db.driver_accounts.update_one({"id": driver_id}, {"$set": fields})
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.fahrer.entsperrt" if body.active else "admin.fahrer.gesperrt",
+                       ref=driver_id, meta={"email": d.get("email", "")})
+    return {"ok": True, "active": body.active}
+
+
+@router.post("/admin/drivers/{driver_id}/password")
+async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
+                                    admin=Depends(current_admin)):
+    d = await _fahrer_or_404(driver_id)
+    # Gleiche Staerke-Regel wie bei der Fahrer-Registrierung (wirft
+    # ValueError -> sauberer 400 statt 500).
+    from routes.drivers import _check_password_strength
+    try:
+        _check_password_strength(body.new_password or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    await db.driver_accounts.update_one(
+        {"id": driver_id},
+        {"$set": {"password_hash": await hash_password_async(body.new_password),
+                  "current_session_id": None, "updated_at": now_iso()}})
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.fahrer.passwort.zurueckgesetzt",
+                       ref=driver_id, meta={"email": d.get("email", "")})
+    return {"ok": True}
+
+
+@router.delete("/admin/drivers/{driver_id}")
+async def admin_delete_driver(driver_id: str, admin=Depends(current_admin)):
+    """Fahrer-Konto loeschen (DSGVO — vorher gab es dafuer KEINEN Weg):
+    Haendler-Verknuepfungen entfernen, OFFENE Termine vom Fahrer trennen
+    (abgeschlossene behalten die historische Zuordnung — nach der Loeschung
+    ist die driver_id keiner Person mehr zuzuordnen), Reset-Tokens weg,
+    dann das Konto selbst."""
+    d = await _fahrer_or_404(driver_id)
+    links = await db.dealer_drivers.delete_many({"driver_account_id": driver_id})
+    getrennt = await db.appointments.update_many(
+        {"driver_id": driver_id, "status": {"$in": ["offen", "verschoben"]}},
+        {"$unset": {"driver_id": ""}})
+    await db.password_resets.delete_many({"user_id": driver_id})
+    await db.driver_accounts.delete_one({"id": driver_id})
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.fahrer.geloescht", ref=driver_id,
+                       meta={"email": d.get("email", ""),
+                             "driver_code": d.get("driver_code", ""),
+                             "verknuepfungen": links.deleted_count,
+                             "offene_termine_getrennt": getrennt.modified_count})
+    return {"ok": True, "verknuepfungen_entfernt": links.deleted_count,
+            "offene_termine_getrennt": getrennt.modified_count}
 
 
 # ---------- Contracts (read-only admin views) ----------
@@ -984,10 +1095,11 @@ async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_a
     if len(body.new_password or "") < 8:
         raise HTTPException(400, "Neues Passwort muss mind. 8 Zeichen haben")
     user = await db.users.find_one({"id": admin["id"]})
-    if not user or not verify_password(body.current_password, user["password_hash"]):
+    if not user or not await verify_password_async(body.current_password, user["password_hash"]):
         raise HTTPException(401, "Aktuelles Passwort ist nicht korrekt")
     await db.users.update_one(
         {"id": admin["id"]},
-        {"$set": {"password_hash": hash_password(body.new_password)}},
+        {"$set": {"password_hash": await hash_password_async(body.new_password),
+          "current_session_id": None}},
     )
     return {"ok": True}

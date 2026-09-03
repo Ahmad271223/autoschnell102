@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { buyerApi, useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera, Heart } from "lucide-react";
+import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera, Heart, Handshake, Inbox, Check } from "lucide-react";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
 const fmtEur = (n) => (n == null ? "Preis auf Anfrage" : `${Number(n).toLocaleString("de-DE")} €`);
@@ -27,6 +27,7 @@ function FField({ label, children }) {
 export default function Marktplatz() {
   const { buyer, ready, logout, refresh } = useBuyer();
   const nav = useNavigate();
+  const [showAnfragen, setShowAnfragen] = useState(false);
   const [access, setAccess] = useState(null);
   const [items, setItems] = useState(null);
   const [q, setQ] = useState("");
@@ -102,7 +103,35 @@ export default function Marktplatz() {
     }
   }, [q, filters, sort, nurFavs, dealerView]);
 
-  useEffect(() => { if (ready && !buyer) nav("/markt/login"); }, [ready, buyer, nav]);
+  // Einladungslink eines BESTANDS-Kaeufers einloesen (Review 09/2026):
+  // /markt?invite=<token> — einmalig, Parameter danach aus der URL nehmen.
+  const [sp, setSp] = useSearchParams();
+  const inviteToken = sp.get("invite") || "";
+  const redeemed = useRef(false);
+  useEffect(() => {
+    if (!buyer || !inviteToken || redeemed.current) return;
+    redeemed.current = true;
+    buyerApi.post(`/invites/${encodeURIComponent(inviteToken)}/redeem`)
+      .then((r) => {
+        toast.success(`Netzwerk beigetreten: ${r.data.dealer}`, { duration: 6000 });
+        setTick((t) => t + 1);       // Listings neu laden (Netzwerkpreise!)
+      })
+      .catch((e) => toast.error(errMsg(e, "Einladung konnte nicht eingelöst werden")))
+      .finally(() => {
+        const neu = new URLSearchParams(sp);
+        neu.delete("invite");
+        setSp(neu, { replace: true });
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buyer, inviteToken]);
+
+  useEffect(() => {
+    if (ready && !buyer) {
+      nav(inviteToken
+        ? `/markt/login?invite=${encodeURIComponent(inviteToken)}`
+        : "/markt/login");
+    }
+  }, [ready, buyer, nav, inviteToken]);
   useEffect(() => { if (buyer) loadAccess(); }, [buyer, loadAccess]);
   useEffect(() => {
     if (!buyer) return;
@@ -255,6 +284,12 @@ export default function Marktplatz() {
                   <option value="km_auf">Wenigste km</option>
                   <option value="km_ab">Meiste km</option>
                 </select>
+                <button onClick={() => setShowAnfragen(true)}
+                        data-testid="meine-anfragen-btn"
+                        className="h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 text-zinc-400 hover:text-white transition"
+                        style={{ borderColor: "var(--border-default)" }}>
+                  <Inbox size={14} /> Meine Anfragen
+                </button>
                 <button onClick={() => setNurFavs((x) => !x)}
                         data-testid="filter-favoriten"
                         className={`h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 transition ${
@@ -401,6 +436,7 @@ export default function Marktplatz() {
                            isFav={favs.has(sel.id)}
                            onFav={(e) => toggleFav(e, sel.id)}
                            onDealer={() => openDealer(sel.dealer?.id)} />}
+      {showAnfragen && <MeineAnfragen onClose={() => setShowAnfragen(false)} />}
     </div>
   );
 }
@@ -549,6 +585,8 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
               <div className="mt-3 text-center text-xs text-zinc-600">Keine Telefonnummer hinterlegt.</div>
             )}
           </div>
+
+          <InteresseForm v={v} />
         </div>
       </div>
 
@@ -586,6 +624,195 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/** Interesse / Angebot zu einem Inserat senden (Review 09/2026: der
+ *  Backend-Endpunkt existierte, der Marktplatz bot nur den Telefon-Link). */
+function InteresseForm({ v }) {
+  const [offen, setOffen] = useState(false);
+  const [betrag, setBetrag] = useState("");
+  const [nachricht, setNachricht] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [gesendet, setGesendet] = useState(false);
+
+  const senden = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await buyerApi.post(`/marktplatz/listings/${v.id}/interesse`, {
+        offer: betrag ? Number(betrag) : undefined,
+        message: nachricht,
+      });
+      setGesendet(true);
+      toast.success("Anfrage gesendet — der Händler meldet sich");
+    } catch (e) {
+      toast.error(errMsg(e, "Anfrage konnte nicht gesendet werden"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (gesendet) {
+    return (
+      <div className="mt-3 rounded-2xl p-4 text-sm text-emerald-400 flex items-center gap-2"
+           style={{ background: "rgba(52,199,89,0.08)", border: "1px solid rgba(52,199,89,0.25)" }}
+           data-testid="interesse-gesendet">
+        <Check size={16} /> Anfrage gesendet. Antworten findest du unter „Meine Anfragen".
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3 rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+      {!offen ? (
+        <button onClick={() => setOffen(true)} data-testid={`interesse-btn-${v.id}`}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold border text-white hover:bg-white/5"
+                style={{ borderColor: "var(--border-default)" }}>
+          <Handshake size={17} /> Interesse / Angebot senden
+        </button>
+      ) : (
+        <div className="space-y-2.5">
+          <div className="text-sm font-semibold">Interesse / Angebot senden</div>
+          <FField label="Dein Angebot in € (optional)">
+            <input type="number" min="1" value={betrag} onChange={(e) => setBetrag(e.target.value)}
+                   data-testid="interesse-betrag"
+                   className={`${fInput} w-full`} style={fStyle} placeholder="z.B. 12500" />
+          </FField>
+          <FField label="Nachricht (optional)">
+            <textarea value={nachricht} onChange={(e) => setNachricht(e.target.value)}
+                      maxLength={2000} rows={3} data-testid="interesse-nachricht"
+                      className="w-full px-2.5 py-2 rounded-lg border bg-transparent text-sm outline-none focus:border-white/40"
+                      style={fStyle} placeholder="Kurze Nachricht an den Händler…" />
+          </FField>
+          <button onClick={senden} disabled={busy} data-testid="interesse-senden"
+                  className="w-full rounded-xl py-2.5 font-semibold text-white disabled:opacity-50"
+                  style={{ background: "var(--accent-red)" }}>
+            {busy ? "Wird gesendet…" : "Anfrage senden"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Eigene Anfragen des Kaeufers samt Haendler-Antworten. Auf ein
+ *  Gegenangebot kann hier geantwortet werden (annehmen/ablehnen). */
+function MeineAnfragen({ onClose }) {
+  const [items, setItems] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  const load = () => {
+    buyerApi.get("/buyer/interessen")
+      .then((r) => setItems(Array.isArray(r.data) ? r.data : []))
+      .catch((e) => { toast.error(errMsg(e)); setItems([]); });
+  };
+  useEffect(() => { load(); }, []);
+
+  const antwort = async (it, action) => {
+    if (busyId) return;
+    setBusyId(it.id);
+    try {
+      await buyerApi.post(`/interessen/${it.id}/kaeufer-antwort`, { action, message: "" });
+      toast.success(action === "annehmen"
+        ? "Gegenangebot angenommen — das Fahrzeug ist für dich reserviert"
+        : "Gegenangebot abgelehnt");
+      load();
+    } catch (e) {
+      toast.error(errMsg(e, "Antwort fehlgeschlagen"));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const STATUS_FARBE = {
+    offen: "#fbbf24", gegenangebot: "#60a5fa", akzeptiert: "#34c759", abgelehnt: "#a1a1aa",
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+         style={{ background: "rgba(0,0,0,0.7)" }} onClick={onClose}>
+      <div className="w-full sm:max-w-2xl max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5"
+           style={{ background: "#141416", color: "#fff" }} onClick={(e) => e.stopPropagation()}
+           data-testid="meine-anfragen-modal">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="overline">Marktplatz</div>
+            <div className="font-display font-black text-2xl tracking-tighter">Meine Anfragen</div>
+          </div>
+          <button onClick={onClose} className="text-zinc-400 hover:text-white" data-testid="close-meine-anfragen">
+            <X size={20} />
+          </button>
+        </div>
+        {items === null ? (
+          <div className="text-sm text-zinc-500 py-8 text-center">Lädt…</div>
+        ) : items.length === 0 ? (
+          <div className="text-sm text-zinc-500 py-8 text-center">
+            Noch keine Anfragen — öffne ein Fahrzeug und sende „Interesse / Angebot".
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {items.map((it) => (
+              <div key={it.id} className="rounded-2xl p-4" data-testid={`meine-anfrage-${it.id}`}
+                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{it.listing_title || "Inserat"}</div>
+                    <div className="text-xs text-zinc-500 mt-0.5">
+                      {it.offer != null ? `Dein Angebot: ${fmtEur(it.offer)}` : "Ohne Preisangebot"}
+                      {" · "}{new Date(it.created_at).toLocaleDateString("de-DE")}
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full shrink-0"
+                        style={{ color: STATUS_FARBE[it.status] || "#a1a1aa",
+                                 border: `1px solid ${STATUS_FARBE[it.status] || "#a1a1aa"}55`,
+                                 background: `${STATUS_FARBE[it.status] || "#a1a1aa"}14` }}>
+                    {it.status}
+                  </span>
+                </div>
+                {it.status === "gegenangebot" && (
+                  <div className="mt-3 rounded-xl p-3" style={{ background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.3)" }}>
+                    <div className="text-sm">
+                      Gegenangebot des Händlers:{" "}
+                      <span className="font-bold text-sky-400">{fmtEur(it.counter_offer)}</span>
+                    </div>
+                    <div className="mt-2.5 flex gap-2">
+                      <button onClick={() => antwort(it, "annehmen")} disabled={busyId === it.id}
+                              data-testid={`gegenangebot-annehmen-${it.id}`}
+                              className="flex-1 rounded-lg py-2 text-sm font-semibold text-white disabled:opacity-50"
+                              style={{ background: "#34c759" }}>
+                        Annehmen
+                      </button>
+                      <button onClick={() => antwort(it, "ablehnen")} disabled={busyId === it.id}
+                              data-testid={`gegenangebot-ablehnen-${it.id}`}
+                              className="flex-1 rounded-lg py-2 text-sm font-semibold border text-zinc-300 disabled:opacity-50"
+                              style={{ borderColor: "var(--border-default)" }}>
+                        Ablehnen
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {it.status === "akzeptiert" && (
+                  <div className="mt-2 text-[12.5px] text-emerald-400">
+                    Angenommen — das Fahrzeug ist für dich reserviert. Der Händler meldet sich zur Abwicklung.
+                  </div>
+                )}
+                {(it.history || []).length > 1 && (
+                  <div className="mt-2 space-y-0.5 text-[11.5px] text-zinc-500">
+                    {it.history.map((h, i) => (
+                      <div key={i}>
+                        {h.von === "kaeufer" ? "Du" : "Händler"} · {h.aktion}
+                        {h.angebot != null ? ` · ${fmtEur(h.angebot)}` : ""}
+                        {h.nachricht ? ` · „${h.nachricht}"` : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -819,13 +819,18 @@ async def send_interest(listing_id: str, body: InterestIn,
     return {"ok": True, "interest_id": doc["id"]}
 
 
-@router.get("/dealer/interessen")
-async def dealer_interests(user=Depends(current_haendler),
-                           status: Optional[str] = None):
-    query: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+@router.get("/dealer/interessen")  # noqa: E302
+async def dealer_list_interests(status: Optional[str] = None,
+                                listing_id: Optional[str] = None,
+                                user=Depends(current_haendler)):
+    """Kaufanfragen der Firma — optional nach Status und/oder Inserat
+    gefiltert (listing_id: Review 09/2026, fuer die Anzeige je Inserat)."""
+    q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if status:
-        query["status"] = status
-    return await db.listing_interest.find(query, {"_id": 0}) \
+        q["status"] = status
+    if listing_id:
+        q["listing_id"] = listing_id
+    return await db.listing_interest.find(q, {"_id": 0}) \
         .sort("created_at", -1).to_list(200)
 
 
@@ -834,6 +839,67 @@ async def buyer_interests(user=Depends(current_buyer)):
     return await db.listing_interest.find(
         {"buyer_user_id": user["id"]}, {"_id": 0},
     ).sort("created_at", -1).to_list(200)
+
+
+class BuyerInterestAnswerIn(BaseModel):
+    action: Literal["annehmen", "ablehnen"]
+    message: str = Field(default="", max_length=2000)
+
+
+@router.post("/interessen/{interest_id}/kaeufer-antwort")
+async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
+                                user=Depends(current_buyer)):
+    """Kaeufer reagiert auf ein GEGENANGEBOT des Haendlers (Review 09/2026:
+    der Kaeufer sah Gegenangebote, konnte aber nicht antworten).
+    annehmen: Inserat wird atomar fuer den Kaeufer reserviert, Status
+    'akzeptiert'. ablehnen: Status 'abgelehnt'. Beides nur einmal —
+    der Statuswechsel selbst ist atomar gegen parallele Antworten."""
+    it = await db.listing_interest.find_one(
+        {"id": interest_id, "buyer_user_id": user["id"]}, {"_id": 0})
+    if not it:
+        raise HTTPException(404, "Anfrage nicht gefunden")
+    if it.get("status") != "gegenangebot":
+        raise HTTPException(400, "Nur ein Gegenangebot des Haendlers kann "
+                                 "angenommen oder abgelehnt werden")
+    reserviert = False
+    if body.action == "annehmen":
+        res = await db.resale_listings.find_one_and_update(
+            {"id": it["listing_id"], "status": "veroeffentlicht"},
+            {"$set": {"status": "reserviert", "reserved_for": user["id"],
+                      "updated_at": now_iso()}})
+        if res is None:
+            l = await db.resale_listings.find_one(
+                {"id": it["listing_id"]}, {"_id": 0, "status": 1})
+            raise HTTPException(409, "Fahrzeug ist nicht mehr verfuegbar "
+                                     f"(Status '{(l or {}).get('status', 'unbekannt')}').")
+        reserviert = True
+    neuer_status = "akzeptiert" if body.action == "annehmen" else "abgelehnt"
+    upd = await db.listing_interest.update_one(
+        {"id": interest_id, "buyer_user_id": user["id"], "status": "gegenangebot",
+         # Preis festnageln: sendet der Haendler PARALLEL ein neues
+         # Gegenangebot, darf die Annahme des ALTEN Betrags nicht auf den
+         # neuen durchschlagen (Review-Workflow 09/2026).
+         "counter_offer": it.get("counter_offer")},
+        {"$set": {"status": neuer_status, "updated_at": now_iso()},
+         "$push": {"history": {"von": "kaeufer", "aktion": body.action,
+                               "angebot": it.get("counter_offer") if body.action == "annehmen" else None,
+                               "nachricht": body.message, "zeit": now_iso()}}})
+    if upd.modified_count == 0:
+        # Paralleler Statuswechsel (z.B. Haendler hat gerade geantwortet):
+        # Reservierung zurueckgeben und ehrlich ablehnen.
+        if reserviert:
+            await db.resale_listings.update_one(
+                {"id": it["listing_id"], "status": "reserviert",
+                 "reserved_for": user["id"]},
+                {"$set": {"status": "veroeffentlicht", "updated_at": now_iso()},
+                 "$unset": {"reserved_for": ""}})
+        raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
+                                 "beantwortet — bitte neu laden.")
+    await log_activity("", user["id"], f"interesse.kaeufer.{body.action}",
+                       ref=interest_id,
+                       meta={"listing_id": it.get("listing_id"),
+                             "betrag": it.get("counter_offer")})
+    return {"ok": True, "status": neuer_status}
 
 
 @router.post("/interessen/{interest_id}/antwort")
@@ -870,12 +936,28 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
             st = (l or {}).get("status", "unbekannt")
             raise HTTPException(409, f"Fahrzeug ist nicht mehr verfuegbar (Status "
                                      f"'{st}') — bereits reserviert oder verkauft.")
-    await db.listing_interest.update_one(
-        {"id": interest_id},
+    # Status-Guard (Review-Workflow 09/2026): der Schreibvorgang gilt nur,
+    # wenn die Anfrage noch im GELESENEN Zustand ist — sonst hat der Kaeufer
+    # parallel geantwortet (z.B. Gegenangebot angenommen) und ein
+    # ungefilterter Write wuerde dessen "akzeptiert" ueberschreiben,
+    # waehrend das Inserat reserviert bliebe (Lost Update).
+    upd = await db.listing_interest.update_one(
+        {"id": interest_id, "dealer_id": user["dealer_id"],
+         "status": it["status"]},
         {"$set": update,
          "$push": {"history": {"von": "haendler", "aktion": body.action,
                                "angebot": body.counter_offer,
                                "nachricht": body.message, "zeit": now_iso()}}})
+    if upd.modified_count == 0:
+        if body.action == "akzeptieren":
+            # Die eben gezogene Reservierung wieder freigeben.
+            await db.resale_listings.update_one(
+                {"id": it["listing_id"], "status": "reserviert",
+                 "reserved_for": it["buyer_user_id"]},
+                {"$set": {"status": "veroeffentlicht", "updated_at": now_iso()},
+                 "$unset": {"reserved_for": ""}})
+        raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
+                                 "beantwortet — bitte neu laden.")
     await log_activity(user["dealer_id"], user["id"], f"interesse.{new_status}",
                        ref=interest_id)
     return {"ok": True, "status": new_status}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X,
@@ -87,6 +88,17 @@ export default function Bestand() {
     }
   };
 
+  // Offene Marktplatz-Anfragen (nur Chef — der Endpunkt ist dealer-only,
+  // Sucher bekommen 403 und sehen still kein Banner).
+  const { user } = useAuth();
+  const [anfragenOffen, setAnfragenOffen] = useState(0);
+  useEffect(() => {
+    if (user?.role !== "dealer") return;
+    api.get("/dealer/interessen", { params: { status: "offen" } })
+      .then((r) => setAnfragenOffen(Array.isArray(r.data) ? r.data.length : 0))
+      .catch(() => {});
+  }, [user?.role]);
+
   const counts = data.counts || {};
   const pending = (counts["abgeholt"] || 0);
 
@@ -112,6 +124,15 @@ export default function Bestand() {
           <AlertTriangle size={16} />
           {pending} abgeholte(s) Fahrzeug(e) warten auf deine Entscheidung.
         </div>
+      )}
+
+      {anfragenOffen > 0 && (
+        <Link to="/app/anfragen" data-testid="bestand-anfragen-banner"
+              className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-sky-500/10 transition"
+              style={{ borderColor: "#38bdf855", background: "#38bdf814", color: "#7dd3fc" }}>
+          <AlertTriangle size={16} />
+          {anfragenOffen} offene Kaufanfrage(n) vom Marktplatz — jetzt beantworten ›
+        </Link>
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-2">

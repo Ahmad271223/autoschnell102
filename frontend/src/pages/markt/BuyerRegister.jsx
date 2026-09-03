@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
@@ -6,10 +6,20 @@ import { toast } from "sonner";
 import { Store, ArrowRight } from "lucide-react";
 
 export default function BuyerRegister() {
-  const { register } = useBuyer();
+  const { register, buyer, ready } = useBuyer();
   const nav = useNavigate();
   const [sp] = useSearchParams();
   const invite = sp.get("invite") || "";
+
+  // Bereits eingeloggte Kaeufer landen mit Einladungslink NICHT im
+  // Registrierungsformular (Sackgasse: eigene E-Mail -> 409), sondern
+  // direkt im Marktplatz, der die Einladung einloest (Review 09/2026).
+  useEffect(() => {
+    if (ready && buyer) {
+      nav(invite ? `/markt?invite=${encodeURIComponent(invite)}` : "/markt",
+          { replace: true });
+    }
+  }, [ready, buyer, invite, nav]);
   const [f, setF] = useState({
     company_name: "", contact_name: "", email: "", password: "", phone: "",
   });
@@ -80,7 +90,8 @@ export default function BuyerRegister() {
         </form>
         <div className="mt-5 text-center text-sm text-zinc-500">
           Bereits registriert?{" "}
-          <Link to="/markt/login" className="text-white font-semibold">Anmelden</Link>
+          <Link to={invite ? `/markt/login?invite=${encodeURIComponent(invite)}` : "/markt/login"}
+                className="text-white font-semibold">Anmelden</Link>
         </div>
       </div>
     </div>

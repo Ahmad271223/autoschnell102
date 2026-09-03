@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search, Warehouse,
+  Layers, LogOut, Activity, Search, Warehouse, Inbox,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -13,6 +13,7 @@ const NAV = [
   { to: "/app/termine", label: "Terminplaner", icon: Calendar },
   { to: "/app/fahrzeuge", label: "Fahrzeugpool", icon: Car },
   { to: "/app/bestand", label: "Bestand & Verkauf", icon: Warehouse, haendlerOnly: true },
+  { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true },
   { to: "/app/team", label: "Mitarbeiter / Sucher", icon: Users, haendlerOnly: true },
   { to: "/app/fahrer", label: "Fahrer", icon: Users },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon },
