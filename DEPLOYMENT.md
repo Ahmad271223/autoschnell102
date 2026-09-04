@@ -378,3 +378,61 @@ Jeder Restore legt den bisherigen Stand vollständig zur Seite: die Datenbank al
 python scripts/restore_mongo.py /backups/2026-09-04 --yes                       # 30 Tage (Standard)
 python scripts/restore_mongo.py /backups/2026-09-04 --yes --vorher-aufbewahrung 7
 ```
+
+## Inbetriebnahme auf zwei Servern bei Hetzner (Load Balancer, privates Netz)
+
+Ausgangslage: zwei Server im privaten Netz `10.0.0.0/16`, davor ein Load Balancer, eine Firewall.
+
+### Was auf mehreren Servern gleichzeitig läuft und was nicht
+
+| Teil | Mehrere Server? | Warum |
+|---|---|---|
+| Anmeldung, Sitzungen | ja | Sitzungskennung steht in der Datenbank |
+| Sperren gegen zu viele Anfragen | ja | liegen in der Datenbank, nicht im Arbeitsspeicher |
+| Aufräumjob, Sicherung, Snapshot-Wiederaufnahme | ja | durch eine Job-Sperre läuft jeder Lauf nur einmal |
+| Abruf-Warteschlange für Inserate | ja | jeder Auftrag wird atomar beansprucht |
+| **Hochgeladene Fotos und PDFs** | **nein, ohne Objektspeicher** | landen sonst auf der Platte des Servers, der sie angenommen hat |
+
+Der letzte Punkt ist die einzige echte Hürde. Mit zwei App-Servern **muss** `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY` und `S3_SECRET_KEY` gesetzt sein. Hetzner Object Storage ist dafür geeignet, gleicher Standort, S3-kompatibel.
+
+### Datenbank
+
+Beide App-Server verbinden sich über die **private** Adresse, niemals über das Internet. Die Datenbank darf keinen offenen Port nach außen haben; in der Firewall wird 27017 ausschließlich für das private Netz erlaubt.
+
+Empfohlen für den Start: MongoDB auf dem ersten Server als **Ein-Knoten-Replica-Set**. Das kostet nichts extra, erlaubt aber stimmige Sicherungen (Snapshot statt Collection für Collection):
+
+```bash
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD"   --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"10.0.0.2:27017"}]})'
+```
+
+Dann in der `.env` an die Verbindungszeichenfolge `&replicaSet=rs0` anhängen.
+
+### Ablauf
+
+```bash
+# 1) Konfiguration erzeugen (auf Server 1, im Projektverzeichnis)
+python backend/scripts/env_erzeugen.py --domain app.auto-schnellkauf.de     --admin-mail chef@auto-schnellkauf.de --mongo-host 10.0.0.2 > .env
+chmod 600 .env
+#    Danach die mit BITTE-AUSFUELLEN markierten Werte ergänzen.
+
+# 2) Datenbank vorher ansehen (liest nur, ändert nichts)
+python backend/scripts/verbindung_pruefen.py
+
+# 3) Stack starten
+docker compose up -d --build
+
+# 4) Von außen prüfen
+python backend/scripts/betriebsprobe.py app.auto-schnellkauf.de
+```
+
+Auf dem zweiten Server dieselbe `.env` verwenden, aber ohne den Dienst `mongo` starten:
+
+```bash
+docker compose up -d --build backend web proxy
+```
+
+### Load Balancer
+
+Der Load Balancer prüft die Gesundheit der Server. Als Prüfpfad `/api/health` eintragen, Protokoll HTTP, Port 80 oder 443. Solange nichts läuft, steht er auf „Unhealthy" — das ist vor dem ersten Start normal.
+
+Wichtig: Der Load Balancer beendet die Verschlüsselung oder reicht sie durch. In beiden Fällen muss die echte Adresse des Besuchers ankommen, sonst greifen die Anfragesperren nicht. Der Proxy ist darauf eingestellt (`TRUST_PROXY=true`).
