@@ -196,6 +196,34 @@ jobs:
           curl -fsSk https://localhost/api/health
           curl -fsSk -o /dev/null -w "SPA %{http_code}\n" https://localhost/
           docker compose logs backend | tail -20
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - name: Rauchtest im Browser gegen den ECHTEN Stack
+        # Pruefbericht 09/2026 (Befund 6): die grosse E2E-Suite laeuft gegen
+        # ein direkt gestartetes uvicorn und eine MongoDB ohne Passwort. Der
+        # Weg, den der Kunde spaeter nimmt — Browser, nginx mit HTTPS,
+        # Backend im Container, MongoDB mit Auth — war nie im Browser
+        # getestet. Genau das macht dieser kurze Rauchtest.
+        working-directory: frontend
+        env:
+          E2E_STACK: "1"
+          E2E_BASE_URL: https://localhost
+          E2E_SUPER_ADMIN_USERNAME: ci-stack-superadmin
+          E2E_SUPER_ADMIN_PASSWORD: Ci-Stack-Super-2026!x
+        run: |
+          yarn install --frozen-lockfile
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - name: Playwright-Report des Stack-Rauchtests bei Fehler
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-stack
+          path: frontend/playwright-report/
+          retention-days: 7
       - name: Stack-Logs bei Fehler
         if: failure()
         run: docker compose logs --tail 120 || true

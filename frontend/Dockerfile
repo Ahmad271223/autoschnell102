@@ -7,7 +7,12 @@ COPY package.json yarn.lock* ./
 RUN yarn install --frozen-lockfile
 COPY . .
 # Backend-URL wird zur Build-Zeit eingebacken (CRA/craco liest REACT_APP_*).
-ARG REACT_APP_BACKEND_URL=/api
+# LEER ist der richtige Standard: lib/api.js baut daraus `${BACKEND}/api`.
+# Stand hier "/api", rief ein ohne Build-Argument gebautes Image
+# "/api/api/..." auf und die ganze Oberflaeche waere tot. docker-compose
+# setzt den Wert ohnehin ausdruecklich auf leer — aber ein Image, das man
+# von Hand baut, darf nicht kaputt sein (Pruefbericht 09/2026).
+ARG REACT_APP_BACKEND_URL=
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
 # CI=true: Warnungen sind Fehler (Audit 09/2026, Punkt 50).
 RUN CI=true yarn build

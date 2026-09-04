@@ -16,12 +16,25 @@ const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:3100";
 const API_URL = process.env.E2E_API_URL || "http://localhost:8002/api";
 const CI = !!process.env.CI;
 
+// Stack-Modus (Pruefbericht Runde 7, Befund 6): derselbe Browser laeuft
+// gegen den ECHTEN Compose-Stack — nginx mit HTTPS, Backend im Container,
+// MongoDB mit Passwort. Dann darf Playwright keinen eigenen Test-Server
+// starten (nginx liefert schon aus), und das Zertifikat ist im CI
+// selbstsigniert, also muss der Browser es akzeptieren. Nur der Rauchtest
+// stack.spec.js laeuft in diesem Modus; die grosse Suite bleibt beim
+// schnellen Aufbau.
+const STACK = process.env.E2E_STACK === "1";
+
 module.exports = defineConfig({
   testDir: "./e2e",
-  testMatch: /.*\.spec\.js$/,
+  testMatch: STACK ? /stack\.spec\.js$/ : /.*\.spec\.js$/,
+  // Ohne Stack-Modus wuerde der Rauchtest gegen den Test-Server laufen
+  // und dort zu Recht scheitern (kein HTTPS, keine Proxy-Kopfzeilen).
+  testIgnore: STACK ? undefined : /stack\.spec\.js$/,
   // Reste frueherer Laeufe (@e2etest-mail.de) vor und nach dem Lauf entfernen.
-  globalSetup: "./e2e/global.js",
-  globalTeardown: "./e2e/global.js",
+  // Im Stack-Modus gibt es keine Testdaten zum Aufraeumen.
+  globalSetup: STACK ? undefined : "./e2e/global.js",
+  globalTeardown: STACK ? undefined : "./e2e/global.js",
   timeout: 60_000,
   expect: { timeout: 10_000 },
   // Single-Session-Backend: jede Anmeldung eines Kontos (v.a. Super-Admin)
@@ -39,11 +52,13 @@ module.exports = defineConfig({
     locale: "de-DE",
     // PWA-Service-Worker (public/service-worker.js) hat im Test nichts verloren.
     serviceWorkers: "block",
+    // Im CI traegt der Stack ein selbstsigniertes Zertifikat.
+    ignoreHTTPSErrors: STACK,
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
   ],
-  webServer: {
+  webServer: STACK ? undefined : {
     command: "node e2e/serve.js",
     url: BASE_URL,
     reuseExistingServer: !CI,
