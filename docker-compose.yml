@@ -16,13 +16,25 @@ services:
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:?MONGO_USER in .env setzen}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?MONGO_PASSWORD in .env setzen}
-    # Standalone. Fuer konsistente Backups (Snapshot-Session) und Mongo-
-    # Transaktionen kann ein Ein-Knoten-Replica-Set genutzt werden:
-    #   command: ["mongod", "--auth", "--replSet", "rs0", "--keyFile", "/etc/mongo-keyfile"]
-    # + einmalig rs.initiate() — siehe DEPLOYMENT.md (Abschnitt Replica Set).
-    command: ["mongod", "--auth", "--wiredTigerCacheSizeGB", "${MONGO_CACHE_GB:-1}"]
+    # MONGO_EXTRA_ARGS schaltet das Ein-Knoten-Replica-Set ein (noetig fuer
+    # stimmige Sicherungen — Snapshot statt Collection fuer Collection):
+    #   MONGO_EXTRA_ARGS=--replSet rs0 --keyFile /etc/mongo-keyfile
+    # Einmalig danach:
+    #   rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]})
+    # Der Name "mongo" ist der Dienstname in diesem Netz — er gilt fuer den
+    # Container selbst UND fuer das Backend. Eine Server-IP funktioniert hier
+    # NICHT: der Container erkennt sie nicht als eigene Adresse.
+    #
+    # WICHTIG: argv[0] muss "mongod" bleiben, sonst legt das Image beim ersten
+    # Start den Datenbank-Benutzer nicht an (der Einstiegspunkt prueft darauf).
+    command: mongod --auth --bind_ip_all --wiredTigerCacheSizeGB ${MONGO_CACHE_GB:-1} ${MONGO_EXTRA_ARGS:-}
     volumes:
       - mongo_data:/data/db
+      # Schluesseldatei fuer das Replica Set. VOR dem ersten Start anlegen:
+      #   openssl rand -base64 756 > deploy/mongo-keyfile
+      #   chmod 400 deploy/mongo-keyfile && chown 999:999 deploy/mongo-keyfile
+      # (Ohne Replica Set bleibt sie einfach ungenutzt.)
+      - ./deploy/mongo-keyfile:/etc/mongo-keyfile:ro
     # Kein Port nach aussen — nur intern erreichbar.
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"]

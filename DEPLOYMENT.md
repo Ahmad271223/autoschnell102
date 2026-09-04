@@ -379,125 +379,101 @@ python scripts/restore_mongo.py /backups/2026-09-04 --yes                       
 python scripts/restore_mongo.py /backups/2026-09-04 --yes --vorher-aufbewahrung 7
 ```
 
-## Inbetriebnahme auf zwei Servern bei Hetzner (Load Balancer, privates Netz)
+## Inbetriebnahme bei Hetzner (Load Balancer, privates Netz)
 
-Gewählte Aufstellung:
+Empfohlener Weg: **erst ein Server, dann der zweite.** Der Load Balancer bleibt davor, der zweite Server kommt dazu, sobald der Objektspeicher steht. Grund: Hochgeladene Fotos und PDFs liegen sonst auf der Platte des Servers, der sie angenommen hat, und der zweite Server sieht sie nicht.
 
-- **Load Balancer** beendet die Verschlüsselung (verwaltetes Zertifikat) und verteilt auf beide Server.
-- **Server 1** (10.0.0.2): MongoDB als Ein-Knoten-Replica-Set, nur im privaten Netz, plus Anwendung.
-- **Server 2** (10.0.0.3): nur Anwendung, verbindet sich über das private Netz zur Datenbank.
-- **Fotos und PDFs** liegen im Objektspeicher, damit beide Server dieselben Dateien sehen.
-- **Cloudflare** macht nur die Namensauflösung (graue Wolke), nicht den Verkehr.
+### Aufstellung Stufe 1
 
-### Was auf mehreren Servern gleichzeitig läuft und was nicht
+- **Load Balancer** beendet die Verschlüsselung (verwaltetes Zertifikat), Ziel: nur Server 1.
+- **Server 1** (10.0.0.2): kompletter Stack, Datenbank inklusive. Die Datenbank hat keinen Port nach außen; nur die Anwendung im selben Netz erreicht sie.
+- **Cloudflare** macht nur die Namensauflösung (graue Wolke).
 
-| Teil | Mehrere Server? | Warum |
-|---|---|---|
-| Anmeldung, Sitzungen | ja | Sitzungskennung steht in der Datenbank |
-| Sperren gegen zu viele Anfragen | ja | liegen in der Datenbank, nicht im Arbeitsspeicher |
-| Aufräumjob, Sicherung, Snapshot-Wiederaufnahme | ja | eine Job-Sperre sorgt dafür, dass jeder Lauf nur einmal passiert |
-| Abruf-Warteschlange für Inserate | ja | jeder Auftrag wird atomar beansprucht |
-| **Hochgeladene Fotos und PDFs** | **nur mit Objektspeicher** | landen sonst auf der Platte des Servers, der sie angenommen hat |
+### Schritt 1 — Namensauflösung
 
-### Schritt 1 — Objektspeicher anlegen (Hetzner Console)
+Cloudflare: Eintrag Typ **A**, Name **app**, Ziel **46.225.37.221** (Load Balancer), Proxy **aus** (graue Wolke). Die graue Wolke ist Absicht: der Load Balancer stellt das Zertifikat aus, es gibt keine Größenbeschränkung beim Hochladen, und die Besucheradresse kommt unverfälscht an.
 
-Object Storage → Bucket anlegen, Standort **Nürnberg**, Name z. B. `autoschnell-dateien`, Zugriff **privat**. Danach unter „Credentials" einen S3-Schlüssel erzeugen und beide Werte notieren. Endpunkt ist `https://nbg1.your-objectstorage.com`.
+### Schritt 2 — Load Balancer
 
-Für die Sicherungen einen zweiten Bucket `autoschnell-backups` anlegen (getrennt, damit ein Fehler in der Anwendung die Sicherungen nicht trifft).
+- Dienst **HTTPS 443 → HTTP 80**, verwaltetes Zertifikat für `app.auto-schnellkauf.de`.
+- Dienst **HTTP 80 → HTTP 80** (für die Zertifikatsausstellung).
+- Gesundheitsprüfung: HTTP, Port 80, Pfad **`/api/health`**, Intervall 15 s.
+- „Proxy Protocol" **aus**. Ziel: vorerst nur Server 1.
 
-### Schritt 2 — Namensauflösung (Cloudflare)
-
-Einen Eintrag anlegen: Typ **A**, Name **app**, Ziel **46.225.37.221** (der Load Balancer), Proxy **aus** (graue Wolke). Die graue Wolke ist Absicht: der Load Balancer stellt das Zertifikat selbst aus, es gibt keine Größenbeschränkung beim Hochladen, und die Besucheradresse kommt unverfälscht an.
-
-### Schritt 3 — Load Balancer einrichten (Hetzner Console)
-
-- Dienst: **HTTPS 443 → HTTP 80**, verwaltetes Zertifikat für `app.auto-schnellkauf.de`.
-- Zweiter Dienst: **HTTP 80 → HTTP 80** (damit die Zertifikatsausstellung funktioniert).
-- Gesundheitsprüfung: Protokoll **HTTP**, Port **80**, Pfad **`/api/health`**, Intervall 15 s.
-- „Proxy Protocol" **aus** lassen.
-
-### Schritt 4 — Firewall prüfen
-
-Nur diese Eingänge dürfen offen sein:
+### Schritt 3 — Firewall
 
 | Von | Nach | Zweck |
 |---|---|---|
-| Load Balancer / 10.0.0.0/16 | TCP 80 | Anwendung |
-| deine eigene IP | TCP 22 | Wartung |
-| 10.0.0.0/16 | TCP 27017 | Datenbank, nur intern |
+| 10.0.0.0/16 (Load Balancer) | TCP 80 | Anwendung |
+| deine IP | TCP 22 | Wartung |
 
-Port 27017 darf **niemals** aus dem Internet erreichbar sein.
+Port 27017 muss **nicht** offen sein, auch nicht intern: die Datenbank läuft im selben Stack.
 
-### Schritt 5 — Server 1 einrichten
+### Schritt 4 — Server 1 vorbereiten
 
 ```bash
 ssh root@2.28.66.8
-apt update && apt install -y docker.io docker-compose-plugin git python3-pip
+apt update && apt install -y docker.io docker-compose-plugin git python3-pip openssl
+pip3 install --break-system-packages python-dotenv pymongo requests
 git clone https://github.com/Ahmad271223/autoschnell102.git /opt/autoschnell
 cd /opt/autoschnell && git checkout feature/plattform-ausbau-2026-08
-pip3 install --break-system-packages python-dotenv pymongo requests
 ```
 
-Konfiguration erzeugen:
+### Schritt 5 — Konfiguration und Schlüsseldatei
+
+`.env` anlegen (Inhalt bekommst du fertig) und schützen, dann die Schlüsseldatei für das Replica Set:
 
 ```bash
-python3 backend/scripts/env_erzeugen.py --domain app.auto-schnellkauf.de     --admin-mail DEINE-MAIL@auto-schnellkauf.de --mongo-host 10.0.0.2 > .env
+nano .env            # Inhalt einfügen, speichern
 chmod 600 .env
+openssl rand -base64 756 > deploy/mongo-keyfile
+chmod 400 deploy/mongo-keyfile
+chown 999:999 deploy/mongo-keyfile
 ```
 
-Danach `nano .env` und die markierten Werte eintragen: `RESEND_API_KEY`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `BACKUP_S3_BUCKET`, bei Bedarf `APIFY_TOKEN`. **Die erzeugten Passwörter aus der Datei in deinen Passwortmanager kopieren** — sie stehen nur dort.
+Die Schlüsseldatei muss **vor** dem ersten Start existieren und dem Benutzer 999 gehören, sonst startet die Datenbank nicht („permissions are too open").
 
-Schlüsseldatei für das Replica Set und Start:
+### Schritt 6 — Starten und Replica Set einschalten
 
 ```bash
-openssl rand -base64 756 > deploy/mongo-keyfile && chmod 400 deploy/mongo-keyfile
 docker compose up -d --build
-docker compose exec -T mongo mongosh --quiet -u "$(grep ^MONGO_USER .env | cut -d= -f2)"   -p "$(grep ^MONGO_PASSWORD .env | cut -d= -f2)" --authenticationDatabase admin   --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"10.0.0.2:27017"}]})'
+docker compose logs -f backend      # mit Strg+C beenden, sobald "Uvicorn running" steht
 ```
 
-Dann in der `.env` an `MONGO_URL` noch `&replicaSet=rs0` anhängen und `docker compose up -d` erneut ausführen.
-
-Prüfen:
+Einmalig das Replica Set einrichten (sorgt für in sich stimmige Sicherungen):
 
 ```bash
-python3 backend/scripts/verbindung_pruefen.py
+docker compose exec -T mongo mongosh --quiet   -u "$(grep ^MONGO_USER .env | cut -d= -f2)"   -p "$(grep ^MONGO_PASSWORD .env | cut -d= -f2)"   --authenticationDatabase admin   --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]})'
+docker compose restart backend
+```
+
+Der Name `mongo` ist Absicht. Eine Server-IP funktioniert an dieser Stelle nicht, weil der Container sie nicht als eigene Adresse erkennt.
+
+### Schritt 7 — Prüfen
+
+```bash
+docker compose exec backend python scripts/verbindung_pruefen.py
 curl -s localhost/api/health
-```
-
-### Schritt 6 — Server 2 einrichten
-
-Gleich wie Schritt 5, aber **ohne** Datenbank und mit derselben `.env` (per `scp` kopieren):
-
-```bash
-ssh root@167.233.243.23
-# ... Docker und Git wie oben ...
-scp root@2.28.66.8:/opt/autoschnell/.env /opt/autoschnell/.env   # oder von deinem Rechner
-docker compose up -d --build backend web proxy
-```
-
-### Schritt 7 — Von außen prüfen
-
-```bash
 python3 backend/scripts/betriebsprobe.py app.auto-schnellkauf.de --dkim-selector resend
 ```
 
-Der Load Balancer muss jetzt „Healthy" zeigen und `https://app.auto-schnellkauf.de` die Anmeldeseite. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach sofort die Zwei-Faktor-Anmeldung einrichten.
+Der Load Balancer muss auf „Healthy" springen, `https://app.auto-schnellkauf.de` zeigt die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
 
-### Schritt 8 — Sicherungen scharf schalten
+### Stufe 2 — zweiter Server (später)
 
-```bash
-python3 backend/scripts/offsite_pruefen.py --laden
-```
-
-Die nächtliche Sicherung läuft ab dann automatisch um 3 Uhr (`BACKUP_HOUR`).
+1. Object Storage in Nürnberg anlegen, Schlüssel erzeugen, `S3_*` in der `.env` eintragen, `docker compose up -d` auf Server 1.
+2. Datenbank für Server 2 erreichbar machen: Mongo mit `network_mode: host` auf `10.0.0.2` binden, Firewall 27017 nur aus 10.0.0.0/16, Replica-Set-Mitglied auf `10.0.0.2:27017` umstellen.
+3. Auf Server 2 dieselbe `.env` ablegen, `MONGO_URL` auf `10.0.0.2` zeigen lassen, dann `docker compose up -d --build backend web proxy`.
+4. Server 2 im Load Balancer als zweites Ziel eintragen.
 
 ### Wenn es klemmt
 
 | Symptom | Ursache | Abhilfe |
 |---|---|---|
-| Load Balancer bleibt „Unhealthy" | Pfad der Gesundheitsprüfung falsch | muss `/api/health` auf Port 80 sein |
-| Endlose Weiterleitung im Browser | falsche Betriebsart des Webservers | `PROXY_TEMPLATE=hinter-loadbalancer.conf.template` in der `.env` |
-| Alle Nutzer werden gleichzeitig ausgesperrt | Besucheradresse kommt nicht an | `TRUSTED_PROXIES` und `PRIVATES_NETZ` auf `10.0.0.0/16` |
-| Fotos fehlen auf einem Server | Objektspeicher nicht gesetzt | `S3_*`-Werte in der `.env`, danach neu starten |
+| Datenbank startet nicht, „permissions are too open" | Schlüsseldatei falsch | `chmod 400` und `chown 999:999 deploy/mongo-keyfile` |
+| Load Balancer bleibt „Unhealthy" | Prüfpfad falsch | HTTP, Port 80, Pfad `/api/health` |
+| Endlose Weiterleitung im Browser | falsche Betriebsart | `PROXY_TEMPLATE=hinter-loadbalancer.conf.template` |
+| Alle Nutzer gleichzeitig ausgesperrt | Besucheradresse kommt nicht an | `TRUSTED_PROXIES` und `PRIVATES_NETZ` auf `10.0.0.0/16` |
 | Backend startet nicht | Produktionsprüfung meckert | die Meldung im Log nennt genau den fehlenden Wert |
+| „rs.initiate" meldet „maps to this node" | Server-IP statt `mongo` verwendet | mit `host:"mongo:27017"` wiederholen |
 
