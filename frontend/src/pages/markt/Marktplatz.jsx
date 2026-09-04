@@ -637,7 +637,7 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
             )}
           </div>
 
-          <InteresseForm v={v} angemeldet={!!buyer} />
+          <InteresseForm v={v} />
         </div>
       </div>
 
@@ -682,7 +682,10 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
 
 /** Interesse / Angebot zu einem Inserat senden (Review 09/2026: der
  *  Backend-Endpunkt existierte, der Marktplatz bot nur den Telefon-Link). */
-function InteresseForm({ v, angemeldet = true }) {
+function InteresseForm({ v }) {
+  // Anmeldezustand aus dem Kontext holen: dieses Bauteil steckt in
+  // DetailModal und bekommt "buyer" nicht durchgereicht.
+  const { buyer } = useBuyer();
   const nav = useNavigate();
   const [offen, setOffen] = useState(false);
   const [betrag, setBetrag] = useState("");
@@ -693,7 +696,7 @@ function InteresseForm({ v, angemeldet = true }) {
   const senden = async () => {
     if (busy) return;
     // Anfragen brauchen ein Konto — Ansehen nicht.
-    if (!angemeldet) {
+    if (!buyer) {
       toast.info("Für eine Anfrage kurz kostenlos registrieren");
       nav("/markt/registrieren");
       return;

@@ -299,10 +299,20 @@ async def _aktivieren(mdb, tx, sid):
         p.db = alt
 
 
-def test_10_kaeufer_zugangspreis_20(welt):
+def test_10_marktplatz_ist_kostenlos(welt):
+    """Beschluss 09/2026: Der Marktplatz kostet Zwischenhaendler nichts.
+
+    Frueher wurden hier 20,00 EUR je Monat geprueft. Die Abrechnung steckt
+    weiterhin im Code (MARKTPLATZ_KOSTENLOS=false) — die Sichtbarkeit
+    privater Inserate deckt tests/test_marktplatz_oeffentlich.py ab."""
     r = requests.get(f"{API}/marktplatz/zugang", headers=welt["K"], timeout=30)
     assert r.status_code == 200, r.text[:200]
-    assert float(r.json().get("price") or 0) == 20.00
+    d = r.json()
+    assert d.get("active") is True, d
+    assert float(d.get("price") or 0) == 0.0, d
+    # Und die Fahrzeugliste ist ohne Zugangs-Abo erreichbar (frueher 402)
+    r = requests.get(f"{API}/marktplatz/listings", headers=welt["K"], timeout=30)
+    assert r.status_code == 200, r.text[:200]
 
 
 # ---------- Produktionsverhalten: SELF_SIGNUP=false ----------
