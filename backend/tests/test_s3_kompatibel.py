@@ -95,3 +95,26 @@ def test_sicherung_schickt_r2_keine_verschluesselung():
               ).read_text(encoding="utf-8")
     assert "sse_optionen" in quelle
     assert '"ServerSideEncryption": "AES256"' not in quelle
+
+
+def test_produktion_weicht_nicht_still_auf_die_platte_aus(monkeypatch):
+    """Ist S3/R2 konfiguriert, aber unbrauchbar, darf der Datei-Speicher in
+    Produktion NICHT stillschweigend die lokale Platte nehmen — sonst lägen
+    Fotos auf einem Server, den der zweite nie sieht, und die Sicherung
+    erfasste sie nicht."""
+    import storage_service
+    monkeypatch.setenv("S3_ENDPOINT", R2)
+    monkeypatch.setenv("S3_BUCKET", "autoschnell")
+    monkeypatch.setenv("APP_ENV", "production")
+
+    def kaputt():
+        raise ImportError("No module named 's3_kompatibel'")
+    monkeypatch.setattr(storage_service, "S3Storage", kaputt)
+    with pytest.raises(RuntimeError) as e:
+        storage_service._build_storage()
+    assert "nicht nutzbar" in str(e.value)
+
+    # Ausserhalb der Produktion bleibt der Rueckfall erlaubt (lokale Arbeit)
+    monkeypatch.setenv("APP_ENV", "development")
+    speicher = storage_service._build_storage()
+    assert speicher.name == "local"

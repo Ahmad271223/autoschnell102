@@ -207,10 +207,24 @@ def _build_storage():
     if os.environ.get("S3_ENDPOINT") and os.environ.get("S3_BUCKET"):
         try:
             return S3Storage()
-        except Exception as exc:  # boto3 fehlt / Config kaputt → lokal weiter
+        except Exception as exc:  # boto3 fehlt / Config kaputt
             import logging
-            logging.getLogger("autohandel").warning(
-                "S3-Storage nicht verfügbar (%s) — nutze lokalen Storage.", exc)
+            log = logging.getLogger("autohandel")
+            if os.environ.get("APP_ENV", "").strip().lower() == "production":
+                # In Produktion NICHT still auf die lokale Platte ausweichen:
+                # Fotos und PDFs laegen dann auf EINEM Server, der zweite
+                # saehe sie nie, und die Sicherung wuerde sie nicht erfassen.
+                # Der Aufbau des Clients scheitert nur bei echten
+                # Konfigurationsfehlern (fehlendes boto3, kaputte Angaben) —
+                # eine voruebergehende Stoerung von S3 fuehrt NICHT hierher.
+                log.error("Datei-Speicher: S3/R2 ist konfiguriert, laesst sich "
+                          "aber nicht aufbauen (%s). Start abgebrochen — sonst "
+                          "landen Fotos unbemerkt auf der lokalen Platte.", exc)
+                raise RuntimeError(
+                    f"S3/R2 konfiguriert, aber nicht nutzbar: {exc}. "
+                    "Entweder die S3_*-Werte korrigieren oder sie leeren, "
+                    "wenn bewusst lokal gespeichert werden soll.") from exc
+            log.warning("S3-Storage nicht verfügbar (%s) — nutze lokalen Storage.", exc)
     return LocalDiskStorage()
 
 
