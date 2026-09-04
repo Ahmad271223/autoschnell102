@@ -60,12 +60,26 @@ server {
 
   # API ans Backend.
   location /api/ {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
     proxy_pass http://backend:8001;
     proxy_read_timeout 300s;   # Snapshots/PDF + synchrone Apify-Abrufe (bis 180 s)
   }
 
   # Statische Build-Dateien mit Hash im Namen: lange cachen.
   location /static/ {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
     proxy_pass http://web:80;
     add_header Cache-Control "public, max-age=31536000, immutable" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
@@ -77,6 +91,13 @@ server {
 
   # Alles andere ans Frontend (SPA).
   location / {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
     proxy_pass http://web:80;
   }
 }

@@ -92,6 +92,10 @@ def http_pruefen(host):
         ziel = r.headers.get("Location", "")
         if r.status_code in (301, 308) and ziel.startswith(f"https://{host}"):
             ok(f"HTTP leitet auf {ziel} um")
+        elif r.status_code == 200:
+            fehler("HTTP liefert die Seite AUS statt auf HTTPS umzuleiten — "
+                   "die Anmeldung waere unverschluesselt erreichbar. Hinter einem "
+                   "Load Balancer: X-Forwarded-Proto im Webserver auswerten.")
         else:
             fehler(f"HTTP-Umleitung fehlt/falsch: {r.status_code} {ziel}")
     except Exception as exc:  # noqa: BLE001
@@ -154,7 +158,18 @@ def api_pruefen(host):
         fehler(f"/api/ready: {exc}")
     try:
         r = requests.get(f"https://{host}/docs", timeout=10)
-        (ok if r.status_code in (404, 403) else fehler)(f"/docs -> {r.status_code} (in Produktion aus)")
+        # 404/403 = abgeschaltet. 200 ist nur dann ein Fehler, wenn dort
+        # WIRKLICH die API-Dokumentation steht — hinter der Oberflaeche
+        # liefert die Einseiten-Anwendung fuer jeden Pfad ihre Startseite.
+        text = (r.text or "")[:4000].lower()
+        doku = any(m in text for m in ("swagger", "redoc", "openapi.json"))
+        if r.status_code in (404, 403):
+            ok(f"/docs -> {r.status_code} (in Produktion aus)")
+        elif doku:
+            fehler(f"/docs -> {r.status_code}: API-Dokumentation ist oeffentlich "
+                   "erreichbar (ENABLE_DOCS=false setzen)")
+        else:
+            ok(f"/docs -> {r.status_code} (keine API-Dokumentation, nur die Oberflaeche)")
     except Exception as exc:  # noqa: BLE001
         warn(f"/docs nicht pruefbar: {exc}")
 

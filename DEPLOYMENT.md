@@ -413,10 +413,30 @@ Port 27017 muss **nicht** offen sein, auch nicht intern: die Datenbank läuft im
 
 ```bash
 ssh root@2.28.66.8
-apt update && apt install -y docker.io docker-compose-plugin git python3-pip openssl
-pip3 install --break-system-packages python-dotenv pymongo requests
+
+# Docker aus der offiziellen Quelle. Das Ubuntu-Paket "docker.io" bringt KEIN
+# "docker compose" mit, und "docker-compose-plugin" gibt es in Ubuntus eigenen
+# Quellen nicht — die Installation braechte sonst ab.
+apt update && apt install -y ca-certificates curl gnupg git openssl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+docker compose version        # muss eine Version anzeigen
+
 git clone https://github.com/Ahmad271223/autoschnell102.git /opt/autoschnell
 cd /opt/autoschnell && git checkout feature/plattform-ausbau-2026-08
+```
+
+Die Prüfskripte laufen im Container mit, dort sind alle Bibliotheken vorhanden. Auf dem Server selbst muss dafür nichts installiert werden:
+
+```bash
+docker compose run --rm backend python scripts/verbindung_pruefen.py
+docker compose run --rm backend python scripts/betriebsprobe.py app.auto-schnellkauf.de
 ```
 
 ### Schritt 5 — Konfiguration und Schlüsseldatei
@@ -435,16 +455,24 @@ Die Schlüsseldatei muss **vor** dem ersten Start existieren und dem Benutzer 99
 
 ### Schritt 6 — Starten und Replica Set einschalten
 
+Die Reihenfolge ist wichtig: **zuerst nur die Datenbank**, dann das Replica Set, dann der Rest. Startet alles gleichzeitig, sucht die Anwendung ein Replica Set, das es noch nicht gibt, und läuft in eine Neustartschleife.
+
 ```bash
-docker compose up -d --build
-docker compose logs -f backend      # mit Strg+C beenden, sobald "Uvicorn running" steht
+docker compose up -d mongo
+sleep 25
 ```
 
 Einmalig das Replica Set einrichten (sorgt für in sich stimmige Sicherungen):
 
 ```bash
 docker compose exec -T mongo mongosh --quiet   -u "$(grep ^MONGO_USER .env | cut -d= -f2)"   -p "$(grep ^MONGO_PASSWORD .env | cut -d= -f2)"   --authenticationDatabase admin   --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]})'
-docker compose restart backend
+```
+
+Erst jetzt der Rest:
+
+```bash
+docker compose up -d --build
+docker compose logs -f backend      # mit Strg+C beenden, sobald "Uvicorn running" steht
 ```
 
 Der Name `mongo` ist Absicht. Eine Server-IP funktioniert an dieser Stelle nicht, weil der Container sie nicht als eigene Adresse erkennt.
@@ -453,9 +481,11 @@ Der Name `mongo` ist Absicht. Eine Server-IP funktioniert an dieser Stelle nicht
 
 ```bash
 docker compose exec backend python scripts/verbindung_pruefen.py
-curl -s localhost/api/health
-python3 backend/scripts/betriebsprobe.py app.auto-schnellkauf.de --dkim-selector resend
+curl -s -H "Host: app.auto-schnellkauf.de" localhost/api/health
+docker compose run --rm backend python scripts/betriebsprobe.py app.auto-schnellkauf.de --dkim-selector resend
 ```
+
+Der Host-Kopf beim `curl` ist nötig, weil der Webserver nur die eingetragene Domain bedient. Die Gesundheitsprüfung selbst antwortet auch ohne ihn — sonst käme der Load Balancer nicht durch.
 
 Der Load Balancer muss auf „Healthy" springen, `https://app.auto-schnellkauf.de` zeigt die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
 

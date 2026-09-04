@@ -14,6 +14,7 @@ services:
     # Authentifizierung ab dem ERSTEN Start (der Produktions-Check des
     # Backends verlangt Zugangsdaten in MONGO_URL). Werte in .env setzen.
     environment:
+      - TZ=${TZ:-Europe/Berlin}
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:?MONGO_USER in .env setzen}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?MONGO_PASSWORD in .env setzen}
     # MONGO_EXTRA_ARGS schaltet das Ein-Knoten-Replica-Set ein (noetig fuer
@@ -54,11 +55,16 @@ services:
       mongo:
         condition: service_healthy
     environment:
+      - TZ=${TZ:-Europe/Berlin}
       - APP_ENV=production
       - SELF_SIGNUP=${SELF_SIGNUP:-false}
       # maxPoolSize begrenzt die Verbindungen JE Worker (Audit 09/2026, Punkt 19)
       - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin&maxPoolSize=20}
       - DB_NAME=${DB_NAME:-autoschnell}
+      # Verbindungen je Worker. Der Wert in der MONGO_URL ist wirkungslos —
+      # der Code setzt maxPoolSize ausdruecklich aus dieser Variablen.
+      - MONGO_MAX_POOL_SIZE=${MONGO_MAX_POOL_SIZE:-20}
+      - MONGO_MIN_POOL_SIZE=${MONGO_MIN_POOL_SIZE:-5}
       # Worker x SNAPSHOT_CONCURRENCY = gleichzeitige Chromium-Prozesse (~400 MB je).
       # Default 4 x 1 = 4 (vorher 8 x 3 = 24 = ~9,6 GB nur fuer Chromium).
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
@@ -79,6 +85,31 @@ services:
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASS=${SMTP_PASS:-}
       - SMTP_FROM=${SMTP_FROM:-}
+      # E-Mail ueber Resend (bevorzugt). OHNE diese Zeilen erreicht der
+      # Schluessel aus der .env den Container NICHT — die Produktionspruefung
+      # findet dann keinen Versandweg und bricht den Start ab (Exit 78).
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - MAIL_FROM=${MAIL_FROM:-}
+      - MAIL_ABSENDER_NAME=${MAIL_ABSENDER_NAME:-}
+      # Betriebsschalter — ohne Durchreichen wirken Aenderungen in der .env nicht.
+      - ENABLE_DOCS=${ENABLE_DOCS:-false}
+      - MOCK_PROVIDER_FETCH=${MOCK_PROVIDER_FETCH:-false}
+      - MOBILE_SANDBOX_MODE=${MOBILE_SANDBOX_MODE:-false}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      # Anbieter-Abrufe: Tageslimits und Gleichzeitigkeit
+      - ANBIETER_TAGESLIMIT_JE_FIRMA=${ANBIETER_TAGESLIMIT_JE_FIRMA:-200}
+      - ANBIETER_TAGESLIMIT_GESAMT=${ANBIETER_TAGESLIMIT_GESAMT:-2000}
+      - ABRUF_RUECKFALL_TAGESLIMIT=${ABRUF_RUECKFALL_TAGESLIMIT:-25}
+      - MAX_CONCURRENT_KLEINANZEIGEN=${MAX_CONCURRENT_KLEINANZEIGEN:-2}
+      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-2}
+      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-2}
+      - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-2}
+      # Eigenheiten S3-kompatibler Speicher (Cloudflare R2)
+      - S3_SSE=${S3_SSE:-auto}
+      - S3_PRUEFSUMMEN=${S3_PRUEFSUMMEN:-auto}
+      # Verkaufen kostenlos und unbegrenzt (false = Pakete/Kontingent)
+      - VERKAUF_KOSTENLOS=${VERKAUF_KOSTENLOS:-true}
+      - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-180}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
@@ -158,6 +189,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
+      - TZ=${TZ:-Europe/Berlin}
       # Audit 09/2026 (Punkt 9): NUR diese Domain wird bedient (Host-Allowlist),
       # unbekannte Hosts bekommen 444, HTTP leitet fest hierhin um.
       - PUBLIC_HOST=${PUBLIC_HOST:?PUBLIC_HOST in .env setzen (z.B. app.autoschnell.de)}
