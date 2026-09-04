@@ -149,9 +149,15 @@ services:
       # Audit 09/2026 (Punkt 9): NUR diese Domain wird bedient (Host-Allowlist),
       # unbekannte Hosts bekommen 444, HTTP leitet fest hierhin um.
       - PUBLIC_HOST=${PUBLIC_HOST:?PUBLIC_HOST in .env setzen (z.B. app.autoschnell.de)}
+      # Nur fuer die Betriebsart hinter einem Load Balancer: aus diesem Netz
+      # wird X-Forwarded-For geglaubt (privates Netz des Anbieters).
+      - PRIVATES_NETZ=${PRIVATES_NETZ:-127.0.0.1}
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./deploy/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      # PROXY_TEMPLATE waehlt die Betriebsart:
+      #   default.conf.template            = nginx macht TLS selbst (ein Server)
+      #   hinter-loadbalancer.conf.template = Load Balancer macht TLS
+      - ./deploy/${PROXY_TEMPLATE:-default.conf.template}:/etc/nginx/templates/default.conf.template:ro
       - ./deploy/certs:/etc/nginx/certs:ro   # hier landen die TLS-Zertifikate
       - certbot_www:/var/www/certbot         # ACME-Challenge (Let's Encrypt)
     mem_limit: 256m
