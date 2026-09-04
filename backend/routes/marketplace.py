@@ -8,6 +8,7 @@
 - Preisstufen: öffentlich < B2B (registrierte Zwischenhändler) <
   privates Netzwerk (per Einladung)
 """
+import os
 import re
 import secrets
 import uuid
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from auth import (hash_password_async, new_session_id, create_token,
@@ -28,17 +30,26 @@ from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 router = APIRouter()
 
 
-# ---------- Zugangs-Abo (Zwischenhändler) ----------
-# Zwischenhändler zahlen einen monatlichen Zugang, um die zum Verkauf
-# angebotenen Fahrzeuge sehen zu können. Freischaltung erfolgt (wie beim
-# Sucher-Abo/Verkaufspaket) manuell über den Admin — Stripe ist ein
-# austauschbarer Baustein.
-BUYER_ACCESS_PRICE = 20.00         # € pro Monat (Stand 09/2026, Stripe)
+# ---------- Zugang zum Marktplatz ----------
+# Beschluss 09/2026: Der Marktplatz ist KOSTENLOS und oeffentlich.
+#  * Zwischenhaendler brauchen kein Zugangs-Abo mehr.
+#  * Oeffentlich veroeffentlichte Fahrzeuge sieht JEDER, auch ohne
+#    Anmeldung. Merken, Anfragen und Netzwerk-Inserate bleiben
+#    angemeldeten Zwischenhaendlern vorbehalten.
+# Die Abrechnung bleibt im Code erhalten und laesst sich mit
+# MARKTPLATZ_KOSTENLOS=false wieder einschalten.
+MARKTPLATZ_KOSTENLOS = os.environ.get(
+    "MARKTPLATZ_KOSTENLOS", "true").strip().lower() not in ("0", "false", "no")
+
+BUYER_ACCESS_PRICE = 20.00         # € pro Monat, nur wenn nicht kostenlos
 BUYER_ACCESS_DAYS = 30
 
 
 def _access_status(user: dict) -> dict:
     """Zugangsstatus eines Zwischenhändlers. Händler/Admin haben immer Zugang."""
+    if MARKTPLATZ_KOSTENLOS:
+        return {"active": True, "plan": "kostenlos", "expires_at": None,
+                "price": 0.0, "kostenlos": True}
     if user.get("role") in ("dealer", "admin"):
         return {"active": True, "plan": "intern", "expires_at": None,
                 "price": BUYER_ACCESS_PRICE}
@@ -72,12 +83,43 @@ async def current_buyer(user=Depends(current_user)):
 
 async def require_marketplace_access(user=Depends(current_buyer)):
     """Wie current_buyer, aber Zwischenhändler brauchen ein aktives Zugangs-Abo,
-    um Fahrzeuge sehen zu können (Händler/Admin ausgenommen)."""
+    um Fahrzeuge sehen zu können (Händler/Admin ausgenommen).
+
+    Ist der Marktplatz kostenlos, faellt die Pruefung weg."""
     if not _access_status(user)["active"]:
         raise HTTPException(
             402, "Kein aktiver Marktplatz-Zugang – bitte Zugang freischalten "
                  f"({BUYER_ACCESS_PRICE:.2f} € / Monat).")
     return user
+
+
+async def marktplatz_besucher(
+        creds: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))):
+    """Angemeldeter Zwischenhaendler ODER oeffentlicher Besucher (None).
+
+    Ohne Anmeldung sind nur oeffentlich veroeffentlichte Fahrzeuge
+    oeffentlicher Haendler sichtbar. Ein ungueltiges oder abgelaufenes
+    Token gilt wie "nicht angemeldet" — der Marktplatz soll deswegen
+    nicht unbenutzbar werden.
+
+    Ist der Marktplatz NICHT kostenlos, gilt weiterhin: nur angemeldete
+    Zwischenhaendler mit aktivem Zugang."""
+    nutzer = None
+    if creds and creds.credentials:
+        try:
+            nutzer = await current_user(creds)
+        except HTTPException:
+            nutzer = None
+    if nutzer is not None and nutzer.get("role") != "b2b_buyer":
+        raise HTTPException(403, "Nur für registrierte Zwischenhändler")
+    if not MARKTPLATZ_KOSTENLOS:
+        if nutzer is None:
+            raise HTTPException(401, "Nicht authentifiziert")
+        if not _access_status(nutzer)["active"]:
+            raise HTTPException(
+                402, "Kein aktiver Marktplatz-Zugang – bitte Zugang freischalten "
+                     f"({BUYER_ACCESS_PRICE:.2f} € / Monat).")
+    return nutzer
 
 
 # ---------- Marken-Normalisierung (Filter-Matching) ----------
@@ -501,18 +543,19 @@ async def redeem_invite(token: str, user=Depends(current_buyer)):
 # =========================================================
 @router.get("/marktplatz/haendler")
 async def browse_dealers(q: Optional[str] = None,
-                         user=Depends(require_marketplace_access)):
+                         user=Depends(marktplatz_besucher)):
     """Öffentliche Händlersuche + private Händler, in deren Netzwerk der
-    Betrachter eingeladen wurde."""
-    my_networks = [m["dealer_id"] async for m in db.network_members.find(
-        {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
+    Betrachter eingeladen wurde. Ohne Anmeldung: nur öffentliche Händler."""
+    my_networks = [] if user is None else [
+        m["dealer_id"] async for m in db.network_members.find(
+            {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
     query: Dict[str, Any] = {"$or": [
         {"marketplace.public": True},
         {"id": {"$in": my_networks}},
     ]}
     if q:
         query["company_name"] = {"$regex": re.escape(q.strip()), "$options": "i"}
-    if user.get("dealer_id"):
+    if user is not None and user.get("dealer_id"):
         query["id"] = {"$ne": user["dealer_id"]}
     dealers = await db.dealers.find(
         query, {"_id": 0, "id": 1, "company_name": 1, "city": 1, "phone": 1,
@@ -548,7 +591,7 @@ async def browse_dealers(q: Optional[str] = None,
 
 @router.get("/marktplatz/listings")
 async def browse_listings(
-    user=Depends(require_marketplace_access),
+    user=Depends(marktplatz_besucher),
     q: Optional[str] = None, make: Optional[str] = None,
     model: Optional[str] = None, fuel: Optional[str] = None,
     price_min: Optional[float] = None, price_max: Optional[float] = None,
@@ -571,14 +614,21 @@ async def browse_listings(
     limit = max(1, min(int(limit or 300), 300))
     page = max(1, int(page or 1))
 
-    fav_ids = {f["listing_id"] async for f in db.buyer_favorites.find(
-        {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})}
-    my_networks = [m["dealer_id"] async for m in db.network_members.find(
-        {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
+    # Oeffentlicher Besucher (nicht angemeldet): kein Merkzettel, kein
+    # Netzwerk — er sieht ausschliesslich oeffentliche Haendler und dort
+    # nur oeffentliche Inserate.
+    if user is None:
+        fav_ids, my_networks = set(), []
+    else:
+        fav_ids = {f["listing_id"] async for f in db.buyer_favorites.find(
+            {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})}
+        my_networks = [m["dealer_id"] async for m in db.network_members.find(
+            {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
     public_dealer_ids = [d["id"] async for d in db.dealers.find(
         {"marketplace.public": True}, {"_id": 0, "id": 1})]
     visible_dealers = set(public_dealer_ids) | set(my_networks)
-    visible_dealers.discard(user.get("dealer_id"))
+    if user is not None:
+        visible_dealers.discard(user.get("dealer_id"))
 
     match: Dict[str, Any] = {
         "status": "veroeffentlicht",
@@ -753,7 +803,7 @@ async def list_favoriten(user=Depends(current_buyer)):
 
 
 @router.get("/marktplatz/haendler/{slug}")
-async def dealer_page(slug: str, user=Depends(require_marketplace_access)):
+async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
     # Erreichbar per Kurzname ODER Dealer-ID (nicht jeder Haendler hat
     # einen Kurznamen gesetzt — die Karte im Markt verlinkt per ID).
     dl = await db.dealers.find_one(
@@ -761,14 +811,16 @@ async def dealer_page(slug: str, user=Depends(require_marketplace_access)):
     if not dl:
         raise HTTPException(404, "Händler nicht gefunden")
     mp = dl.get("marketplace") or {}
-    member = await _is_network_member(dl["id"], user["id"])
-    if not mp.get("public") and not member and dl["id"] != user.get("dealer_id"):
+    # Oeffentlicher Besucher ist in keinem Netzwerk und besitzt keine Firma.
+    member = await _is_network_member(dl["id"], user["id"]) if user else False
+    eigene_firma = user.get("dealer_id") if user else None
+    if not mp.get("public") and not member and dl["id"] != eigene_firma:
         raise HTTPException(403, "Dieses Händlerprofil ist privat (nur auf Einladung)")
     listings = await db.resale_listings.find(
         {"dealer_id": dl["id"], "status": "veroeffentlicht"}, {"_id": 0},
     ).sort("published_at", -1).to_list(200)
     # Private Inserate nur für Netzwerk-Mitglieder (und den Händler selbst).
-    if not member and dl["id"] != user.get("dealer_id"):
+    if not member and dl["id"] != eigene_firma:
         listings = [l for l in listings
                     if (l.get("visibility") or "public") != "private"]
     return {

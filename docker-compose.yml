@@ -113,6 +113,8 @@ services:
       - S3_PRUEFSUMMEN=${S3_PRUEFSUMMEN:-auto}
       # Verkaufen kostenlos und unbegrenzt (false = Pakete/Kontingent)
       - VERKAUF_KOSTENLOS=${VERKAUF_KOSTENLOS:-true}
+      # Marktplatz kostenlos und ohne Anmeldung einsehbar
+      - MARKTPLATZ_KOSTENLOS=${MARKTPLATZ_KOSTENLOS:-true}
       - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-180}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}

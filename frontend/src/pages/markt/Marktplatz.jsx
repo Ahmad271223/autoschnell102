@@ -48,6 +48,12 @@ export default function Marktplatz() {
   // Herz-Klick: merken/entfernen — optimistisch, Server bestaetigt.
   const toggleFav = async (e, id) => {
     e.stopPropagation();
+    // Merken braucht ein Konto — der Marktplatz selbst ist offen.
+    if (!buyer) {
+      toast.info("Zum Merken kurz kostenlos registrieren");
+      nav("/markt/registrieren");
+      return;
+    }
     const was = favs.has(id);
     setFavs((f) => { const n = new Set(f); was ? n.delete(id) : n.add(id); return n; });
     try {
@@ -186,11 +192,23 @@ export default function Marktplatz() {
         <div className="font-black tracking-tight text-white">B2B-MARKTPLATZ</div>
       </div>
       <div className="flex items-center gap-3">
-        <span className="text-xs text-zinc-500 hidden sm:block">{buyer?.company_name}</span>
-        <button onClick={() => { logout(); nav("/markt/login"); }}
-                className="text-zinc-400 hover:text-white inline-flex items-center gap-1.5 text-sm">
-          <LogOut size={16} /> Abmelden
-        </button>
+        {buyer ? (
+          <>
+            <span className="text-xs text-zinc-500 hidden sm:block">{buyer?.company_name}</span>
+            <button onClick={() => { logout(); nav("/markt/login"); }}
+                    className="text-zinc-400 hover:text-white inline-flex items-center gap-1.5 text-sm">
+              <LogOut size={16} /> Abmelden
+            </button>
+          </>
+        ) : (
+          <>
+            <button onClick={() => nav("/markt/login")} data-testid="markt-anmelden"
+                    className="text-zinc-400 hover:text-white text-sm">Anmelden</button>
+            <button onClick={() => nav("/markt/registrieren")} data-testid="markt-registrieren"
+                    className="rounded-lg px-3 py-1.5 text-sm font-semibold text-white"
+                    style={{ background: "var(--accent-red)" }}>Kostenlos registrieren</button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -198,7 +216,9 @@ export default function Marktplatz() {
   if (!ready || (buyer && access === null)) {
     return <div className="min-h-screen flex items-center justify-center text-zinc-500" style={{ background: "#0a0a0a" }}>Lädt…</div>;
   }
-  if (!buyer) return null;
+  // Ohne Anmeldung sichtbar (09/2026): oeffentlich veroeffentlichte
+  // Fahrzeuge. Merken, Anfragen und Netzwerk-Bestand bleiben angemeldeten
+  // Zwischenhaendlern vorbehalten.
 
   return (
     <div className="min-h-screen" style={{ background: "#0a0a0a", color: "#fff" }} data-theme="dark" data-testid="markt-page">
@@ -617,7 +637,7 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
             )}
           </div>
 
-          <InteresseForm v={v} />
+          <InteresseForm v={v} angemeldet={!!buyer} />
         </div>
       </div>
 
@@ -662,7 +682,8 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
 
 /** Interesse / Angebot zu einem Inserat senden (Review 09/2026: der
  *  Backend-Endpunkt existierte, der Marktplatz bot nur den Telefon-Link). */
-function InteresseForm({ v }) {
+function InteresseForm({ v, angemeldet = true }) {
+  const nav = useNavigate();
   const [offen, setOffen] = useState(false);
   const [betrag, setBetrag] = useState("");
   const [nachricht, setNachricht] = useState("");
@@ -671,6 +692,12 @@ function InteresseForm({ v }) {
 
   const senden = async () => {
     if (busy) return;
+    // Anfragen brauchen ein Konto — Ansehen nicht.
+    if (!angemeldet) {
+      toast.info("Für eine Anfrage kurz kostenlos registrieren");
+      nav("/markt/registrieren");
+      return;
+    }
     setBusy(true);
     try {
       await buyerApi.post(`/marktplatz/listings/${v.id}/interesse`, {
