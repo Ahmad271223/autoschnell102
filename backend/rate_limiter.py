@@ -9,6 +9,7 @@ Usage:
     if not await login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 """
+import ipaddress
 import os
 import time
 from collections import defaultdict
@@ -45,21 +46,65 @@ _LOOPBACK_KEYS = {"127.0.0.1", "::1", "localhost", "testclient"}
 # setzt/ueberschreibt — sonst koennte ihn ein Angreifer selbst faelschen.
 _TRUST_PROXY = os.environ.get("TRUST_PROXY", "").strip().lower() in ("1", "true", "yes")
 
+# Sitzen MEHRERE Vermittler davor (z.B. Cloudflare -> Load Balancer ->
+# nginx), reicht "letzter Eintrag" nicht: der letzte stammt dann vom
+# Load Balancer, und ALLE Besucher landeten unter derselben Adresse —
+# eine einzige fehlgeschlagene Anmeldung wuerde alle anderen aussperren.
+# TRUSTED_PROXIES nennt die eigenen Vermittler als Netze (Komma-Liste,
+# z.B. "10.0.0.0/16,127.0.0.1"). Aus der Kette wird dann der letzte
+# Eintrag genommen, der NICHT zu den eigenen Vermittlern gehoert.
+_TRUSTED_PROXIES = []
+for _netz in os.environ.get("TRUSTED_PROXIES", "").split(","):
+    _netz = _netz.strip()
+    if not _netz:
+        continue
+    try:
+        _TRUSTED_PROXIES.append(ipaddress.ip_network(_netz, strict=False))
+    except ValueError:
+        pass
+
+
+def _ist_eigener_proxy(adresse: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(adresse)
+    except ValueError:
+        return False
+    return any(ip in netz for netz in _TRUSTED_PROXIES)
+
 
 def client_ip(request) -> str:
-    """Echte Client-IP fuer Rate-Limiting — proxy-bewusst."""
-    if _TRUST_PROXY:
-        fwd = request.headers.get("x-forwarded-for", "")
-        if fwd:
-            # LETZTEN Eintrag nehmen: der stammt vom EIGENEN Proxy. Der
-            # erste Eintrag ist vom Client faelschbar (mitgesendeter
-            # X-Forwarded-For) — damit liesse sich das Login-Rate-Limit
-            # mit je Anfrage neuer Fantasie-IP umgehen.
-            return fwd.split(",")[-1].strip()
-        real = request.headers.get("x-real-ip", "")
-        if real:
-            return real.strip()
-    return (request.client.host if request.client else None) or "unknown"
+    """Echte Besucher-Adresse fuer die Anfragesperren — proxy-bewusst.
+
+    Ohne TRUSTED_PROXIES gilt wie bisher: der LETZTE Eintrag in
+    X-Forwarded-For stammt vom eigenen Proxy und ist damit der einzige,
+    dem zu trauen ist (der erste ist vom Besucher faelschbar).
+
+    Mit TRUSTED_PROXIES werden die eigenen Vermittler von hinten
+    uebersprungen; genommen wird der letzte fremde Eintrag. Nur dann
+    wird auch CF-Connecting-IP akzeptiert, und nur wenn die Anfrage
+    wirklich ueber einen eigenen Vermittler hereinkam."""
+    if not _TRUST_PROXY:
+        return (request.client.host if request.client else None) or "unknown"
+    nachbar = (request.client.host if request.client else "") or ""
+    if _TRUSTED_PROXIES and _ist_eigener_proxy(nachbar):
+        # Cloudflare traegt die echte Adresse hier ein; der Header ist
+        # nur glaubwuerdig, weil die Anfrage ueber unseren Vermittler kam.
+        cf = request.headers.get("cf-connecting-ip", "").strip()
+        if cf:
+            return cf
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        kette = [t.strip() for t in fwd.split(",") if t.strip()]
+        if _TRUSTED_PROXIES:
+            for eintrag in reversed(kette):
+                if not _ist_eigener_proxy(eintrag):
+                    return eintrag
+            return kette[0]          # nur eigene Vermittler in der Kette
+        return kette[-1]
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real
+    return nachbar or "unknown"
 
 
 class SlidingWindowRateLimiter:

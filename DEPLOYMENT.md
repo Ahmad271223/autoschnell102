@@ -435,4 +435,11 @@ docker compose up -d --build backend web proxy
 
 Der Load Balancer prüft die Gesundheit der Server. Als Prüfpfad `/api/health` eintragen, Protokoll HTTP, Port 80 oder 443. Solange nichts läuft, steht er auf „Unhealthy" — das ist vor dem ersten Start normal.
 
-Wichtig: Der Load Balancer beendet die Verschlüsselung oder reicht sie durch. In beiden Fällen muss die echte Adresse des Besuchers ankommen, sonst greifen die Anfragesperren nicht. Der Proxy ist darauf eingestellt (`TRUST_PROXY=true`).
+Wichtig: Zwischen Besucher und Anwendung stehen bei dieser Aufstellung zwei oder drei Vermittler (Cloudflare, Load Balancer, nginx). Damit die Anfragesperren die **echte** Adresse zählen, müssen die eigenen Vermittler benannt sein:
+
+```
+TRUST_PROXY=true
+TRUSTED_PROXIES=10.0.0.0/16,127.0.0.1
+```
+
+Fehlt das, sieht die Anwendung nur noch den Load Balancer. Eine einzige fehlgeschlagene Anmeldung würde dann alle anderen Nutzer aussperren. Steht Cloudflare davor, wird dessen Adressangabe genutzt, aber nur wenn die Anfrage tatsächlich über einen der eigenen Vermittler hereinkam.

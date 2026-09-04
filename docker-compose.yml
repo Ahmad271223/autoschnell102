@@ -53,6 +53,9 @@ services:
       - SNAPSHOT_CONCURRENCY=${SNAPSHOT_CONCURRENCY:-1}
       - SNAPSHOT_WORKER_TIMEOUT=${SNAPSHOT_WORKER_TIMEOUT:-90}
       - TRUST_PROXY=true
+      # Eigene Vermittler (Load Balancer/Proxy) — sonst zaehlen die
+      # Anfragesperren alle Besucher als denselben.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1}
       - RATE_LIMIT_EXEMPT_LOOPBACK=false
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_EMAIL=${ADMIN_EMAIL}
