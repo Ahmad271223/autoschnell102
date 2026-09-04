@@ -15,7 +15,7 @@ Standalone-Server kann das nicht; dort wird Collection für Collection
 gelesen ("konsistenz": "best-effort (standalone)").
 
 Offsite-Kopie: Ist BACKUP_S3_BUCKET gesetzt, wird das fertige Backup als
-tar.gz (serverseitig AES256-verschlüsselt, optional mit Object Lock)
+tar.gz (serverseitig verschlüsselt, optional mit Object Lock)
 hochgeladen und im Manifest unter "offsite" vermerkt. Schlägt der Upload
 fehl, gilt das Backup als UNVOLLSTAENDIG.
 
@@ -306,7 +306,12 @@ def offsite_hochladen(final_dir: Path, logfile: Path) -> dict:
                 "bytes": groesse, "sha256": digest}
         if bis is not None:
             info["object_lock_bis"] = bis.isoformat()
-        log(f"  Offsite: s3://{bucket}/{key} ({groesse / 1e6:.1f} MB, AES256"
+        # Ehrlich benennen, WIE verschluesselt wurde: mit eigener Kopfzeile
+        # (AES256) oder durch den Anbieter selbst (R2 verschluesselt immer,
+        # nimmt die Kopfzeile aber nicht an).
+        verschluesselung = ("AES256" if extra.get("ServerSideEncryption")
+                            else "vom Anbieter verschluesselt")
+        log(f"  Offsite: s3://{bucket}/{key} ({groesse / 1e6:.1f} MB, {verschluesselung}"
             + (f", Object Lock bis {bis:%Y-%m-%d}" if bis else "") + ")", logfile)
         return info
     finally:
