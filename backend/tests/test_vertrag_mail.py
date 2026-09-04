@@ -119,6 +119,9 @@ def resend(monkeypatch):
     monkeypatch.setattr(email_service, "RESEND_API_KEY", "re_test_123", raising=False)
     monkeypatch.setattr(email_service, "MAIL_FROM",
                         "AutoSchnell <vertrag@autoschnell.de>", raising=False)
+    # Unabhaengig von der .env dieses Rechners pruefen
+    monkeypatch.setattr(email_service, "MAIL_ABSENDER_NAME", "AutoSchnell",
+                        raising=False)
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     return gesendet
 
@@ -190,6 +193,7 @@ def test_resend_fehler_wird_gemeldet(monkeypatch):
     import httpx
     monkeypatch.setattr(email_service, "RESEND_API_KEY", "re_test_123", raising=False)
     monkeypatch.setattr(email_service, "MAIL_FROM", "AutoSchnell <v@x.de>", raising=False)
+    monkeypatch.setattr(email_service, "MAIL_ABSENDER_NAME", "AutoSchnell", raising=False)
     monkeypatch.setattr(email_service, "SMTP_HOST", "", raising=False)
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     assert asyncio.run(email_service.send_email("a@b.de", "B", "T")) is False

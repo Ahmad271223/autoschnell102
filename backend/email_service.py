@@ -31,6 +31,16 @@ import os
 import re
 import smtplib
 import ssl
+from pathlib import Path as _Path
+
+# Eigene .env laden: dieses Modul liest die Einstellungen beim Import. Wird
+# es einmal VOR deps/auth importiert, waeren sie sonst leer und der Versand
+# gaelte faelschlich als nicht eingerichtet.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(__file__).parent / ".env")
+except ImportError:  # pragma: no cover
+    pass
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
 from typing import List, Optional, Sequence
