@@ -477,3 +477,25 @@ Der Load Balancer muss auf „Healthy" springen, `https://app.auto-schnellkauf.d
 | Backend startet nicht | Produktionsprüfung meckert | die Meldung im Log nennt genau den fehlenden Wert |
 | „rs.initiate" meldet „maps to this node" | Server-IP statt `mongo` verwendet | mit `host:"mongo:27017"` wiederholen |
 
+## Datei-Speicher mit Cloudflare R2
+
+R2 ist S3-kompatibel, weicht aber in zwei Punkten von AWS ab. Beides ist im Code berücksichtigt und wird an der Adresse automatisch erkannt:
+
+- **Prüfsummen:** Neuere boto3-Fassungen schicken bei jedem Hochladen zusätzliche Prüfsummen mit, die R2 ablehnt. Für R2-Adressen werden sie auf „nur wenn nötig" gestellt.
+- **Verschlüsselung:** `ServerSideEncryption: AES256` weist R2 zurück, weil es ohnehin selbst verschlüsselt. Die Kopfzeile entfällt für R2.
+
+Nötig sind in der `.env`:
+
+```
+S3_ENDPOINT=https://<konto-id>.r2.cloudflarestorage.com
+S3_BUCKET=autoschnell-dateien
+S3_ACCESS_KEY=<R2 Access Key ID>
+S3_SECRET_KEY=<R2 Secret Access Key>
+S3_REGION=auto
+```
+
+Die Zugangsdaten entstehen in Cloudflare unter **R2 → Manage API Tokens → Create API Token**, Berechtigung **Object Read & Write**, begrenzt auf den einen Bucket. Die Konto-Kennung steht in der R2-Übersicht.
+
+Für die Sicherungen einen **zweiten** Bucket anlegen und `BACKUP_S3_BUCKET` setzen. Getrennte Buckets, damit ein Fehler in der Anwendung die Sicherungen nicht mitreißt.
+
+Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern: `S3_SSE=auto|aes256|aus` und `S3_PRUEFSUMMEN=auto|immer|nur_noetig`.

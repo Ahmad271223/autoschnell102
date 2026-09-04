@@ -18,6 +18,7 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 import tarfile
 import tempfile
 from datetime import datetime, timezone
@@ -55,10 +56,14 @@ def main():
     key = f"{prefix.rstrip('/')}/probe-{datetime.now(timezone.utc):%Y%m%d%H%M%S}.txt"
     inhalt = b"autoschnell offsite-probe"
     try:
-        s3.put_object(Bucket=bucket, Key=key, Body=inhalt, ServerSideEncryption="AES256")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from s3_kompatibel import sse_optionen
+        sse = sse_optionen(os.environ.get("S3_ENDPOINT", ""))
+        s3.put_object(Bucket=bucket, Key=key, Body=inhalt, **sse)
         zurueck = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         assert zurueck == inhalt
-        print("OK   Schreiben/Lesen mit Verschluesselung (AES256)")
+        print("OK   Schreiben/Lesen" + (" mit Verschluesselung (AES256)" if sse
+              else " (Anbieter verschluesselt selbst, keine Kopfzeile noetig)"))
     except Exception as exc:  # noqa: BLE001
         print(f"FEHLER Schreib-/Lesetest: {exc}"); fehler += 1
     try:

@@ -152,15 +152,11 @@ class S3Storage:
     name = "s3"
 
     def __init__(self):
-        import boto3  # lazy — nur nötig, wenn S3 konfiguriert ist
+        # Gemeinsamer Zugang: setzt bei Cloudflare R2 & Co. die noetigen
+        # Eigenheiten (Pruefsummen, Verschluesselungs-Kopfzeile).
+        from s3_kompatibel import s3_client
         self.bucket = os.environ["S3_BUCKET"]
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=os.environ["S3_ENDPOINT"],
-            aws_access_key_id=os.environ["S3_ACCESS_KEY"],
-            aws_secret_access_key=os.environ["S3_SECRET_KEY"],
-            region_name=os.environ.get("S3_REGION", "auto"),
-        )
+        self.client = s3_client(endpoint=os.environ["S3_ENDPOINT"])
 
     def save(self, key: str, data: bytes) -> str:
         _validate_key(key)

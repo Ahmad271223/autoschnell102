@@ -268,7 +268,11 @@ def offsite_hochladen(final_dir: Path, logfile: Path) -> dict:
             tar.add(final_dir, arcname=final_dir.name)
         groesse = archiv.stat().st_size
         digest = sha256_datei(archiv)
-        extra = {"ServerSideEncryption": "AES256", "Metadata": {"sha256": digest}}
+        # AES256 nur, wo der Anbieter die Kopfzeile akzeptiert (R2 nicht —
+        # R2 verschluesselt ohnehin selbst).
+        from s3_kompatibel import sse_optionen
+        extra = {"Metadata": {"sha256": digest}}
+        extra.update(sse_optionen(os.environ.get("S3_ENDPOINT", "")))
         bis = None
         lock_tage = _object_lock_tage()
         if lock_tage:
