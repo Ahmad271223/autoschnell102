@@ -197,3 +197,59 @@ def test_resend_fehler_wird_gemeldet(monkeypatch):
     monkeypatch.setattr(email_service, "SMTP_HOST", "", raising=False)
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     assert asyncio.run(email_service.send_email("a@b.de", "B", "T")) is False
+
+
+# ------------------------------------------------- Ladereihenfolge (.env)
+def test_einstellungen_kommen_aus_der_env_auch_ohne_vorlauf(tmp_path):
+    """email_service wird in einem FRISCHEN Prozess importiert — ohne deps,
+    ohne auth, ohne gesetzte Umgebungsvariablen.
+
+    Das Modul liest seine Einstellungen beim Import. Laedt es die .env nicht
+    selbst, waeren sie leer und der Versand gaelte faelschlich als nicht
+    eingerichtet (Befund 09/2026). Der Test legt dafuer notfalls eine
+    Wegwerf-.env an und entfernt sie wieder; eine VORHANDENE .env wird nur
+    gelesen, nie veraendert."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    backend = Path(__file__).resolve().parents[1]
+    env_datei = backend / ".env"
+    eigene = not env_datei.exists()
+    if eigene:
+        env_datei.write_text(
+            chr(10).join([
+                "RESEND_API_KEY=re_probe_ladereihenfolge",
+                "MAIL_FROM=Probe <probe@example.invalid>",
+                "MAIL_ABSENDER_NAME=Probe Marke",
+            ]) + chr(10), encoding="utf-8")
+    try:
+        werte = {}
+        for zeile in env_datei.read_text(encoding="utf-8").splitlines():
+            if "=" in zeile and not zeile.strip().startswith("#"):
+                k, _, v = zeile.partition("=")
+                werte.setdefault(k.strip(), v.strip())
+        if not (werte.get("RESEND_API_KEY") or werte.get("SMTP_HOST")):
+            pytest.skip("keine Mail-Einstellungen in backend/.env hinterlegt")
+
+        umgebung = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("RESEND_", "MAIL_", "SMTP_"))}
+        ergebnis = subprocess.run(
+            [sys.executable, "-c",
+             "import json, email_service as e;"
+             "print(json.dumps({'konfiguriert': e.email_configured(),"
+             " 'resend': e.resend_aktiv(), 'adresse': e.absender_adresse(),"
+             " 'name': e.MAIL_ABSENDER_NAME}))"],
+            cwd=str(backend), env=umgebung, capture_output=True, text=True, timeout=120)
+        assert ergebnis.returncode == 0, ergebnis.stderr[-500:]
+        d = json.loads(ergebnis.stdout.strip().splitlines()[-1])
+        assert d["konfiguriert"] is True, d
+        if werte.get("RESEND_API_KEY"):
+            assert d["resend"] is True, d
+        assert "@" in d["adresse"], d
+        if werte.get("MAIL_ABSENDER_NAME"):
+            assert d["name"] == werte["MAIL_ABSENDER_NAME"], d
+    finally:
+        if eigene:
+            env_datei.unlink(missing_ok=True)

@@ -68,6 +68,26 @@ def _vorher_dbs(c):
     return sorted(n for n in c.list_database_names() if n.startswith(f"{ZIEL}__vorher_"))
 
 
+def _sicherungs_db_aus_ausgabe(out: str):
+    """Namen der in DIESEM Lauf angelegten `__vorher_`-Datenbank aus der
+    Ausgabe lesen (Schritt "5/6 Umschalten (bisheriger Stand -> ...)")."""
+    import re
+    treffer = re.findall(rf"{ZIEL}__vorher_\d{{8}}_\d{{6}}", out)
+    return treffer[0] if treffer else None
+
+
+def _rollback_hat_nichts_geparkt(c, out):
+    """Nach einem abgebrochenen Restore darf die Sicherungs-Datenbank dieses
+    Laufs KEINE Daten mehr enthalten — der Ruecktausch muss alles in die
+    Live-Datenbank zurueckgeholt haben. Genau darauf kommt es an; die reine
+    Namensliste taugt nicht, weil MongoDB leere Datenbanken ausblendet."""
+    name = _sicherungs_db_aus_ausgabe(out)
+    assert name, f"Sicherungs-Datenbank nicht aus der Ausgabe lesbar: {out[-600:]}"
+    inhalt = {k: c[name][k].count_documents({}) for k in c[name].list_collection_names()}
+    assert not any(inhalt.values()), f"Datenkopie in {name} liegengeblieben: {inhalt}"
+    assert not _restore_dbs(c), _restore_dbs(c)
+
+
 def _kein_neuer_datenbestand_geparkt(c, vorher_dbs):
     """Nach einem abgebrochenen Restore darf kein LIVE-Datenbestand in einer
     Sicherungs-Datenbank haengenbleiben.
@@ -274,6 +294,7 @@ def test_06_rollback_bei_fehler_beim_umschalten(welt, monkeypatch, capsys):
     assert c[ZIEL].users.find_one({"id": "marker06"}) is not None
     assert c[ZIEL].users.count_documents({}) == 51
     assert any(i.get("unique") for i in c[ZIEL].users.list_indexes())
+    _rollback_hat_nichts_geparkt(c, out)
     _kein_neuer_datenbestand_geparkt(c, vorher_dbs)
     # Datei-Speicher zurueckgetauscht, keine Staging-/vorher-Reste
     assert _dateien(welt["live_uploads"]) == dateien_vorher
@@ -541,3 +562,43 @@ def test_12_wiederherstellung_testen_probe(welt):
     assert "Wiederherstellung bewiesen" in out and "Konsistenz:" in out
     c = _client()
     assert not [n for n in c.list_database_names() if n.startswith("autoschnell_restore_test")]
+
+
+def test_13_alte_sicherungskopien_werden_aufgeraeumt(welt):
+    """Audit 09/2026: Jeder Restore legt den bisherigen Stand vollstaendig
+    zur Seite. Ohne Aufraeumen sammeln sich Kopien personenbezogener Daten.
+    Geprueft: alte Kopien verschwinden, die juengste bleibt, 0 = nie loeschen."""
+    import restore_mongo
+    from datetime import datetime, timedelta
+    c = _client()
+    alt_tage = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d_%H%M%S")
+    mittel = (datetime.now() - timedelta(days=40)).strftime("%Y%m%d_%H%M%S")
+    neu = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d_%H%M%S")
+    namen = [f"{ZIEL}__vorher_{s}" for s in (alt_tage, mittel, neu)]
+    for n in namen:
+        c[n].users.insert_one({"id": f"kopie_{n[-6:]}"})
+    # Passende Datei-Ordner
+    live = welt["live_uploads"]
+    ordner = []
+    for stempel in (alt_tage, mittel, neu):
+        d = live.parent / f"{live.name}.vorher-{stempel}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "foto.jpg").write_text("x", encoding="utf-8")
+        ordner.append(d)
+    try:
+        # 0 = nie loeschen
+        assert restore_mongo.alte_sicherungen_aufraeumen(c, ZIEL, 0, live_ordner=[live]) == []
+        assert all(n in c.list_database_names() for n in namen)
+        # 30 Tage: die beiden aelteren gehen, die juengste bleibt
+        weg = restore_mongo.alte_sicherungen_aufraeumen(c, ZIEL, 30, live_ordner=[live])
+        vorhanden = c.list_database_names()
+        assert namen[0] not in vorhanden and namen[1] not in vorhanden, weg
+        assert namen[2] in vorhanden, "juengster Stand muss erhalten bleiben"
+        assert not ordner[0].exists() and not ordner[1].exists()
+        assert ordner[2].exists(), "juengster Ordner muss erhalten bleiben"
+        assert len(weg) == 4, weg
+    finally:
+        for n in namen:
+            c.drop_database(n)
+        for d in ordner:
+            shutil.rmtree(d, ignore_errors=True)

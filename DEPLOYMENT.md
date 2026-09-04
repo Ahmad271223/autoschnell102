@@ -367,3 +367,14 @@ Ist `RESEND_API_KEY` nicht gesetzt, wird auf SMTP zurückgefallen (`SMTP_HOST`, 
 ## Fahrzeuge verkaufen ist kostenlos
 
 `VERKAUF_KOSTENLOS=true` (Standard) bedeutet: Jede Firma kann unbegrenzt viele Fahrzeuge veröffentlichen, ohne Paket und ohne Monatskontingent. Die Paketverwaltung bleibt im Code erhalten; mit `VERKAUF_KOSTENLOS=false` gelten wieder Pakete und Kontingente wie zuvor.
+
+## Alte Sicherungskopien nach einem Restore
+
+Jeder Restore legt den bisherigen Stand vollständig zur Seite: die Datenbank als `<db>__vorher_<zeitpunkt>`, die Datei-Ordner als `<ordner>.vorher-<zeitpunkt>`. Das ist das Sicherheitsnetz, falls die Wiederherstellung doch nicht passt — es sind aber vollständige Kopien mit Kundendaten, Verträgen und Fotos.
+
+`restore_mongo.py` räumt sie deshalb nach einem erfolgreichen Lauf selbst auf: Kopien älter als 30 Tage werden gelöscht, die jüngste bleibt immer erhalten. Anpassen mit `--vorher-aufbewahrung TAGE`, `0` schaltet das Aufräumen ab.
+
+```bash
+python scripts/restore_mongo.py /backups/2026-09-04 --yes                       # 30 Tage (Standard)
+python scripts/restore_mongo.py /backups/2026-09-04 --yes --vorher-aufbewahrung 7
+```

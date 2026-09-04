@@ -580,9 +580,76 @@ def wiederherstellen(args) -> int:
           + ("".join(f", Ordner {e['vorher']}" for e in geschaltet if e["vorher"]))
           + ". Wenn alles passt, entfernen mit:  mongosh --eval "
           f"\"db.getSiblingDB('{alt_name}').dropDatabase()\"")
+    # Aeltere Sicherungskopien entfernen — sonst sammeln sich mit jedem
+    # Restore vollstaendige Kopien personenbezogener Daten an.
+    try:
+        weg = alte_sicherungen_aufraeumen(
+            client, args.db, args.vorher_aufbewahrung,
+            live_ordner=[e["live"] for e in geschaltet])
+        if weg:
+            print(f"Aufgeraeumt (aelter als {args.vorher_aufbewahrung} Tage): "
+                  + ", ".join(weg))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Hinweis: Aufraeumen alter Sicherungskopien fehlgeschlagen ({exc}) "
+              f"— sie liegen weiterhin bereit und koennen von Hand entfernt werden.")
     print("HINWEIS: Eindeutigkeits-Indizes prueft das Backend beim naechsten "
           "Start (ensure_indexes) — nach dem Restore einmal neu starten.")
     return 0
+
+
+def alte_sicherungen_aufraeumen(client, db_name: str, tage: int,
+                                behalte: int = 1, live_ordner=None) -> list:
+    """Alte `<db>__vorher_<stamp>`-Datenbanken und `<live>.vorher-<stamp>`-
+    Ordner entfernen (Audit 09/2026).
+
+    Jeder Restore legt den BISHERIGEN Stand vollstaendig zur Seite — inklusive
+    Kundendaten, Vertraegen und Fotos. Bisher blieb das fuer immer liegen:
+    unnoetige Speicherung personenbezogener Daten und wachsender Platzbedarf.
+    Aufgeraeumt wird nur, was aelter als `tage` ist; die juengsten `behalte`
+    Staende bleiben immer erhalten (Sicherheitsnetz direkt nach dem Restore).
+    `tage <= 0` schaltet das Aufraeumen ab. Liefert die entfernten Namen."""
+    from datetime import datetime, timedelta
+    entfernt = []
+    if tage <= 0:
+        return entfernt
+    grenze = datetime.now() - timedelta(days=tage)
+
+    def _stempel(text: str):
+        try:
+            return datetime.strptime(text, "%Y%m%d_%H%M%S")
+        except ValueError:
+            return None
+
+    # --- Datenbanken
+    kandidaten = []
+    for name in client.list_database_names():
+        if name.startswith(f"{db_name}__vorher_"):
+            st = _stempel(name[len(f"{db_name}__vorher_"):])
+            if st:
+                kandidaten.append((st, name))
+    kandidaten.sort(reverse=True)                      # neueste zuerst
+    for st, name in kandidaten[behalte:]:
+        if st < grenze:
+            client.drop_database(name)
+            entfernt.append(name)
+
+    # --- Datei-Ordner (<live>.vorher-<stamp>)
+    ordner = []
+    for basis in (live_ordner or []):
+        elternteil = Path(basis).parent
+        if not elternteil.is_dir():
+            continue
+        for eintrag in elternteil.iterdir():
+            if eintrag.is_dir() and f"{Path(basis).name}.vorher-" in eintrag.name:
+                st = _stempel(eintrag.name.split(".vorher-")[-1])
+                if st:
+                    ordner.append((st, eintrag))
+    ordner.sort(reverse=True)
+    for st, eintrag in ordner[behalte:]:
+        if st < grenze:
+            shutil.rmtree(eintrag, ignore_errors=True)
+            entfernt.append(str(eintrag))
+    return entfernt
 
 
 def main(argv=None) -> int:
@@ -595,6 +662,12 @@ def main(argv=None) -> int:
     ap.add_argument("--allow-no-manifest", action="store_true")
     ap.add_argument("--keep-old", action="store_true", default=True,
                     help="bisherige Collections als <db>__vorher_<stamp> behalten (Standard)")
+    ap.add_argument("--vorher-aufbewahrung", type=int, default=30,
+                    metavar="TAGE",
+                    help="nach erfolgreichem Restore aeltere Sicherungskopien "
+                         "(<db>__vorher_<stamp> und <live>.vorher-<stamp>) "
+                         "loeschen; der juengste Stand bleibt immer erhalten. "
+                         "0 = nie loeschen (Standard: 30 Tage)")
     ap.add_argument("--notfall-unvollstaendig-akzeptieren", action="store_true",
                     help="ein als UNVOLLSTAENDIG markiertes Backup trotzdem "
                          "einspielen (nur im Notfall)")
