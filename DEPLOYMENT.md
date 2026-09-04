@@ -432,13 +432,20 @@ cp deploy/certs/live/app.auto-schnellkauf.de/fullchain.pem deploy/certs/fullchai
 cp deploy/certs/live/app.auto-schnellkauf.de/privkey.pem  deploy/certs/privkey.pem
 ```
 
-Erneuerung einmal einrichten (Zertifikate laufen nach 90 Tagen ab):
+Erneuerung einmal einrichten (Zertifikate laufen nach 90 Tagen ab). Das mitgelieferte Skript stoppt den Proxy nur kurz und startet ihn **in jedem Fall** wieder — auch wenn die Erneuerung scheitert:
 
 ```bash
-cat > /etc/cron.d/autoschnell-zertifikat <<'CRON'
-0 4 * * 1 root cd /opt/autoschnell && docker run --rm -p 80:80 -v "/opt/autoschnell/deploy/certs:/etc/letsencrypt" certbot/certbot renew --standalone --pre-hook "docker compose stop proxy" --post-hook "cp /opt/autoschnell/deploy/certs/live/app.auto-schnellkauf.de/fullchain.pem /opt/autoschnell/deploy/certs/fullchain.pem; cp /opt/autoschnell/deploy/certs/live/app.auto-schnellkauf.de/privkey.pem /opt/autoschnell/deploy/certs/privkey.pem; docker compose start proxy" >> /var/log/autoschnell-zertifikat.log 2>&1
-CRON
+chmod +x /opt/autoschnell/deploy/zertifikat-erneuern.sh
+echo '0 4 * * 1 root DOMAIN=app.auto-schnellkauf.de /opt/autoschnell/deploy/zertifikat-erneuern.sh >> /var/log/autoschnell-zertifikat.log 2>&1' > /etc/cron.d/autoschnell-zertifikat
 ```
+
+Einmal gefahrlos ausprobieren (ändert nichts):
+
+```bash
+DOMAIN=app.auto-schnellkauf.de PROBE=1 /opt/autoschnell/deploy/zertifikat-erneuern.sh
+```
+
+Bitte **keine** lange Befehlskette mit `&&` in den cron schreiben: Schlägt die Erneuerung mittendrin fehl, bleibt der Proxy gestoppt und die Seite ist dauerhaft offline.
 
 ### Schritt 4 — Server 1 vorbereiten
 
