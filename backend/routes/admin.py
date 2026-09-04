@@ -1656,11 +1656,30 @@ async def admin_mfa_einrichten(admin=Depends(current_admin)):
     """Neues Geheimnis erzeugen (noch NICHT aktiv) — Anzeige als otpauth-Link
     bzw. Klartext fuer die manuelle Eingabe in der Authenticator-App."""
     import mfa as _mfa
-    secret = _mfa.secret_erzeugen()
+    # Ein bereits erzeugtes, frisches Geheimnis WIEDERVERWENDEN. Sonst
+    # erzeugt jeder erneute Klick auf "Einrichten" ein neues, waehrend in der
+    # Authenticator-App noch das erste steht — der Code passt dann nie, und
+    # die Meldung "Code ungueltig" fuehrt in die Irre.
+    voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
+    vorhanden = (voll or {}).get("mfa") or {}
+    secret = None
+    if vorhanden.get("pending_secret") and not vorhanden.get("aktiv"):
+        try:
+            alter = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(vorhanden.get("pending_seit", ""))
+                     ).total_seconds()
+        except (TypeError, ValueError):
+            alter = 10 ** 9
+        if alter < 3600:                       # eine Stunde lang dasselbe
+            secret = _mfa.entschluesseln(vorhanden["pending_secret"]) or None
+    neu_erzeugt = secret is None
+    if neu_erzeugt:
+        secret = _mfa.secret_erzeugen()
     await db.users.update_one(
         {"id": admin["id"]},
         {"$set": {"mfa.pending_secret": _mfa.verschluesseln(secret),
-                  "mfa.pending_seit": now_iso()}})
+                  "mfa.pending_seit": now_iso() if neu_erzeugt
+                  else vorhanden.get("pending_seit", now_iso())}})
     return {"secret": secret, "otpauth_uri": _mfa.provisioning_uri(secret, admin.get("email") or admin.get("username") or admin["id"]),
             "hinweis": "Code aus der App eingeben, um die Zwei-Faktor-Anmeldung zu aktivieren."}
 
@@ -1675,7 +1694,12 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
         raise HTTPException(400, "Zuerst einrichten (Geheimnis erzeugen)")
     zaehler = _mfa.code_pruefen(secret, body.code)
     if zaehler is None:
-        raise HTTPException(400, "Code ungültig — Uhrzeit des Geräts prüfen und erneut versuchen")
+        raise HTTPException(
+            400, "Code ungültig. Zwei häufige Gründe: die Uhrzeit des Geräts "
+                 "weicht ab (auf automatische Zeit stellen), oder in der App "
+                 "steht noch ein älterer Eintrag für dieses Konto — dann den "
+                 "Eintrag dort löschen und den hier angezeigten Schlüssel neu "
+                 "übernehmen.")
     codes, hashes = _mfa.wiederherstellungscodes()
     await db.users.update_one(
         {"id": admin["id"]},

@@ -201,3 +201,36 @@ def test_05_abschalten_nur_mit_code_und_zuruecksetzen(welt):
     # Betrieb-Uebersicht nennt Super-Admins ohne 2FA
     b = requests.get(f"{API}/admin/betrieb", headers=_hdr(_login(f"mfa_super_{SUF}@{MAIL}").json()["token"]), timeout=30).json()
     assert f"mfa_super_{SUF}@{MAIL}" in b["super_admins_ohne_mfa"]
+
+
+def test_06_einrichten_mehrfach_liefert_dasselbe_geheimnis():
+    """Wichtig fuer die Praxis: Wer zweimal auf "Einrichten" klickt, hatte
+    frueher ein NEUES Geheimnis auf dem Server, waehrend die App noch das
+    erste kannte — der Code passte dann nie und die Meldung "Code ungueltig"
+    fuehrte in die Irre."""
+    import bcrypt
+    dbx = _db()
+    mail = f"mfa_wiederholt_{SUF}@{MAIL}"
+    uid = f"mfa_wdh_{uuid.uuid4().hex[:8]}"
+    dbx.users.delete_many({"email": mail})
+    dbx.users.insert_one({
+        "id": uid, "email": mail, "role": "admin", "active": True,
+        "dealer_id": None, "is_super_admin": True,
+        "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
+        "created_at": "2026-01-01T00:00:00+00:00"})
+    try:
+        tok = _login(mail).json()["token"]
+        H = _hdr(tok)
+        erstes = requests.post(f"{API}/admin/me/mfa/einrichten", headers=H, timeout=30).json()["secret"]
+        zweites = requests.post(f"{API}/admin/me/mfa/einrichten", headers=H, timeout=30).json()["secret"]
+        assert erstes == zweites, "zweiter Klick erzeugt ein anderes Geheimnis"
+        # Und der Code zum ERSTEN Schluessel aktiviert weiterhin
+        import mfa
+        r = requests.post(f"{API}/admin/me/mfa/aktivieren", headers=H,
+                          json={"code": _frischer_code(erstes, uid)}, timeout=30)
+        assert r.status_code == 200, r.text[:200]
+        # Nach der Aktivierung wird ein NEUES Geheimnis erzeugt (Neueinrichtung)
+        drittes = requests.post(f"{API}/admin/me/mfa/einrichten", headers=H, timeout=30).json()["secret"]
+        assert drittes != erstes
+    finally:
+        dbx.users.delete_many({"email": mail})
