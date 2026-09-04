@@ -118,3 +118,22 @@ def test_produktion_weicht_nicht_still_auf_die_platte_aus(monkeypatch):
     monkeypatch.setenv("APP_ENV", "development")
     speicher = storage_service._build_storage()
     assert speicher.name == "local"
+
+
+def test_skripte_finden_ihre_module_beim_direkten_start():
+    """Als Skript gestartet kennt Python nur den scripts-Ordner. Fehlt die
+    Einrichtung des Suchpfads, scheitert der Offsite-Upload erst mitten im
+    naechtlichen Lauf mit "No module named" — genau so auf dem Server
+    passiert. Geprueft wird der Start aus BEIDEN Verzeichnissen."""
+    import subprocess
+    import sys as _sys
+    backend = Path(__file__).resolve().parents[1]
+    for wo in (backend, backend / 'scripts'):
+        for skript in ('backup_mongo.py', 'offsite_pruefen.py', 'verbindung_pruefen.py'):
+            pfad = 'scripts/' + skript if wo == backend else skript
+            e = subprocess.run([_sys.executable, pfad, '--help'], cwd=str(wo),
+                               capture_output=True, text=True, timeout=120)
+            ausgabe = (e.stdout or '') + (e.stderr or '')
+            hinweis = skript + ' aus ' + wo.name + ': ' + ausgabe[-300:]
+            assert 'No module named' not in ausgabe, hinweis
+            assert e.returncode == 0, hinweis

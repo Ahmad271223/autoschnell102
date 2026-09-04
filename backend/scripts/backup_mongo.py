@@ -56,8 +56,14 @@ import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Als Skript gestartet kennt Python nur den scripts-Ordner. Damit
+# Module aus dem Projektordner (s3_kompatibel) importierbar sind, muss
+# er VOR dem ersten solchen Import im Suchpfad stehen.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import bson
 from bson import json_util
+from s3_kompatibel import s3_client, sse_optionen
 from pymongo import MongoClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -248,10 +254,6 @@ def backup_endpoint() -> str:
 def _backup_s3_client():
     """S3-Client fuer die Offsite-Kopie (gleiche Zugangsdaten wie der
     Datei-Speicher, ggf. eigene Adresse; in Tests austauschbar)."""
-    import sys as _sys
-    from pathlib import Path as _Path
-    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-    from s3_kompatibel import s3_client
     return s3_client(endpoint=backup_endpoint())
 
 
@@ -285,7 +287,6 @@ def offsite_hochladen(final_dir: Path, logfile: Path) -> dict:
         digest = sha256_datei(archiv)
         # AES256 nur, wo der Anbieter die Kopfzeile akzeptiert (R2 nicht —
         # R2 verschluesselt ohnehin selbst).
-        from s3_kompatibel import sse_optionen
         extra = {"Metadata": {"sha256": digest}}
         extra.update(sse_optionen(backup_endpoint()))
         bis = None
