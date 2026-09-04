@@ -356,9 +356,19 @@ class BuyerRegisterIn(BaseModel):
     # B2B-Bestaetigung (AGB §1): Pflicht-Checkbox "Ich handle als Unternehmer
     # ... und akzeptiere AGB + Datenschutz". Pflichtfeld; False -> 400.
     gewerblich_bestaetigt: bool
-    # USt-IdNr. oder Handelsregister-Nr. — freiwillige Angabe, wird nur
-    # gespeichert (keine Online-Pruefung).
+    # USt-IdNr. oder Handelsregister-Nr. — freiwillig. Sieht der Wert wie
+    # eine USt-IdNr. aus, wird das Landesformat geprueft (Audit 09/2026,
+    # Punkt 40); die Online-Pruefung (VIES) stoesst der Admin an.
     ust_id: str = Field(default="", max_length=40)
+
+    @field_validator("ust_id")
+    @classmethod
+    def _ustid(cls, v):
+        from ustid import format_pruefen
+        fehler, wert = format_pruefen(v or "")
+        if fehler:
+            raise ValueError(fehler)
+        return wert
 
     @field_validator("password")
     @classmethod

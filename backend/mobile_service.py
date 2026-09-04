@@ -27,6 +27,7 @@ from urllib.parse import urlencode, quote
 import ssl
 import certifi
 import httpx
+from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
 import xmltodict
 
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -540,18 +541,23 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
                 params={"format": "json", "clean": "1"},
                 json={"startUrls": [{"url": detail_url}], "maxItems": 1},
             )
-            if r.status_code not in (200, 201):
+            fehler = aus_http_antwort(r.status_code, r.text, "mobile.de")
+            if fehler is not None:
                 log.warning("Apify mobile.de: HTTP %s fuer %s: %s",
                             r.status_code, ad_id, r.text[:300])
-                return None
+                raise fehler
             items = r.json()
             if not isinstance(items, list) or not items or not isinstance(items[0], dict):
                 log.warning("Apify mobile.de: leere/unerwartete Antwort fuer %s", ad_id)
                 return None
             return _parse_apify_item(items[0], ad_id, url=detail_url)
-    except Exception:
+    except AnbieterFehler:
+        raise
+    except Exception as exc:
+        # Zeitueberschreitung / Netz / kaputte Antwort: klarer Text statt
+        # "konnte nicht geladen werden" (Audit 09/2026, Punkt 48).
         log.exception("Apify mobile.de: Abruf fehlgeschlagen fuer %s", ad_id)
-        return None
+        raise aus_ausnahme(exc, "mobile.de")
 
 
 def detail_looks_like_listing(url: str) -> bool:

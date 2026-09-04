@@ -12,8 +12,8 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
 
 from auth import (
-    create_token, hash_password_async, new_session_id,
-    verify_password_async, _DUMMY_HASH,
+    create_mfa_token, create_token, decode_mfa_token, hash_password_async,
+    new_session_id, verify_password_async, _DUMMY_HASH,
 )
 from deps import (
     current_user, db, get_subscription_status, now_iso, clean_doc,
@@ -198,7 +198,79 @@ async def register(body: RegisterIn, request: Request):
     return TokenOut(token=token, user=user)
 
 
-@router.post("/auth/login", response_model=TokenOut)
+async def _sitzung_ausstellen(user: dict, ip: str) -> dict:
+    """Passwort (und ggf. 2. Faktor) sind geprueft: neue Einzel-Sitzung,
+    Token, Audit."""
+    sid = new_session_id()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": sid}})
+    await log_activity(user.get("dealer_id", ""), user["id"], "auth.login",
+                       meta={"email": user.get("email", ""), "ip": ip})
+    token = create_token(user["id"], sid)
+    user_clean = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "mfa")}
+    user_clean["current_session_id"] = sid
+    user_clean["mfa_aktiv"] = bool((user.get("mfa") or {}).get("aktiv"))
+    return {"token": token, "user": user_clean}
+
+
+class MfaLoginIn(BaseModel):
+    mfa_token: str = Field(min_length=20, max_length=1000)
+    code: str = Field(min_length=6, max_length=40)
+
+
+@router.post("/auth/login/mfa")
+async def login_mfa(body: MfaLoginIn, request: Request):
+    """Zweiter Schritt der Anmeldung fuer Konten mit Zwei-Faktor (Admin/
+    Super-Admin): Authenticator-Code oder einmaliger Wiederherstellungscode.
+    5 Fehlversuche -> 15 Minuten Sperre fuer den zweiten Faktor."""
+    import mfa as _mfa
+    ip = client_ip(request)
+    if not await login_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
+    try:
+        payload = decode_mfa_token(body.mfa_token)
+    except Exception:
+        raise HTTPException(401, "Anmeldung abgelaufen — bitte erneut mit Passwort anmelden")
+    user = await db.users.find_one({"id": payload.get("sub")})
+    if not user or not user.get("active"):
+        raise HTTPException(401, "Anmeldung abgelaufen — bitte erneut mit Passwort anmelden")
+    m = user.get("mfa") or {}
+    if not m.get("aktiv"):
+        return await _sitzung_ausstellen(user, ip)
+    sperre = m.get("gesperrt_bis")
+    if sperre and sperre > now_iso():
+        raise HTTPException(429, "Zweiter Faktor vorübergehend gesperrt — bitte in 15 Minuten erneut versuchen")
+    secret = _mfa.entschluesseln(m.get("secret", "")) or ""
+    code = body.code.strip()
+    zaehler = _mfa.code_pruefen(secret, code, int(m.get("letzter_zaehler", -1))) if secret else None
+    if zaehler is not None:
+        await db.users.update_one({"id": user["id"]},
+                                  {"$set": {"mfa.letzter_zaehler": zaehler, "mfa.fehlversuche": 0}})
+    elif secret and _mfa.code_pruefen(secret, code, -1) is not None:
+        # Richtiger, aber schon benutzter Code (z.B. direkt nach der
+        # Einrichtung): kein Fehlversuch, sondern klarer Hinweis.
+        raise HTTPException(401, "Dieser Code wurde gerade schon verwendet — bitte den nächsten Code aus der App abwarten")
+    else:
+        h = _mfa.code_hash(code)
+        hashes = list(m.get("wiederherstellung") or [])
+        if h in hashes:
+            hashes.remove(h)
+            await db.users.update_one({"id": user["id"]},
+                                      {"$set": {"mfa.wiederherstellung": hashes, "mfa.fehlversuche": 0}})
+            await log_activity("", user["id"], "auth.login.mfa.wiederherstellungscode",
+                               meta={"uebrig": len(hashes), "ip": ip})
+        else:
+            fehl = int(m.get("fehlversuche", 0)) + 1
+            upd = {"mfa.fehlversuche": fehl}
+            if fehl >= 5:
+                upd["mfa.gesperrt_bis"] = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+                upd["mfa.fehlversuche"] = 0
+            await db.users.update_one({"id": user["id"]}, {"$set": upd})
+            await log_activity("", user["id"], "auth.login.mfa.fehlgeschlagen", meta={"ip": ip})
+            raise HTTPException(401, "Code ungültig")
+    return await _sitzung_ausstellen(user, ip)
+
+
+@router.post("/auth/login")
 async def login(body: LoginIn, request: Request):
     # Rate-limit by client IP (10 attempts / 60 s).
     ip = client_ip(request)
@@ -226,14 +298,13 @@ async def login(body: LoginIn, request: Request):
         raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
-    sid = new_session_id()
-    await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": sid}})
-    await log_activity(user.get("dealer_id", ""), user["id"], "auth.login",
-                       meta={"email": user.get("email", ""), "ip": ip})
-    token = create_token(user["id"], sid)
-    user_clean = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
-    user_clean["current_session_id"] = sid
-    return TokenOut(token=token, user=user_clean)
+    if (user.get("mfa") or {}).get("aktiv"):
+        # Zwei-Faktor (Abo-Audit 09/2026): noch KEINE Sitzung — erst der
+        # zweite Faktor in /auth/login/mfa stellt das Sitzungs-Token aus.
+        await log_activity("", user["id"], "auth.login.mfa.angefordert", meta={"ip": ip})
+        return {"mfa_erforderlich": True, "mfa_token": create_mfa_token(user["id"]),
+                "hinweis": "Bitte den 6-stelligen Code aus der Authenticator-App eingeben."}
+    return await _sitzung_ausstellen(user, ip)
 
 
 @router.post("/auth/logout")

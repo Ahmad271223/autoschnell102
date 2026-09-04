@@ -6,7 +6,9 @@ import { toast } from "sonner";
 import { Bolt, ArrowRight } from "lucide-react";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, loginMfa } = useAuth();
+  const [mfaToken, setMfaToken] = useState(null);   // Zwei-Faktor-Schritt (Admin)
+  const [mfaCode, setMfaCode] = useState("");
   const nav = useNavigate();
   const [params] = useSearchParams();
   const [email, setEmail] = useState("");
@@ -20,7 +22,12 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      const u = await login(email, pw);
+      let u = mfaToken ? await loginMfa(mfaToken, mfaCode) : await login(email, pw);
+      if (u?.mfa_erforderlich) {
+        setMfaToken(u.mfa_token);
+        toast.message("Bitte den Code aus deiner Authenticator-App eingeben");
+        return;
+      }
       toast.success("Willkommen zurück");
       const isAdmin = u?.role === "admin" || u?.is_super_admin;
       const fallback = isAdmin ? "/admin" : "/app";
@@ -82,6 +89,16 @@ export default function Login() {
                      autoComplete="current-password"
                      className="input-base w-full mt-1" placeholder="••••••••" />
             </div>
+            {mfaToken && (
+              <div data-testid="mfa-schritt">
+                <label className="overline">Code aus der Authenticator-App</label>
+                <input value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code"
+                       placeholder="123456 oder Wiederherstellungscode" autoFocus data-testid="mfa-code"
+                       className="input-base w-full mt-1" />
+                <button type="button" onClick={() => { setMfaToken(null); setMfaCode(""); }}
+                        className="mt-2 text-xs text-zinc-500 underline underline-offset-2">Zurück zum Passwort</button>
+              </div>
+            )}
           </div>
 
           <button data-testid="login-submit" type="submit" disabled={loading}

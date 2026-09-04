@@ -67,7 +67,8 @@ export const errMsg = (err, fallback = "Ein Fehler ist aufgetreten") => {
   const d = err?.response?.data?.detail;
   if (typeof d === "string") return d;
   if (Array.isArray(d)) {
-    const parts = d.map((it) => (typeof it === "string" ? it : it?.msg || JSON.stringify(it)));
+    const parts = d.map((it) => (typeof it === "string" ? it
+      : (it?.msg || JSON.stringify(it)).replace(/^Value error, /, "")));
     return parts.filter(Boolean).join(" · ") || fallback;
   }
   if (d && typeof d === "object") return d.msg || JSON.stringify(d);

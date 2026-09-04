@@ -6,6 +6,7 @@ Lasttest-Mock galt deshalb nur fuer /mobile/compare, waehrend
 EINMAL, damit kein Pfad daran vorbeikommt.
 """
 import asyncio
+from anbieter_fehler import AnbieterFehler, melden
 import os
 from typing import Any, Dict
 
@@ -74,6 +75,16 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
         await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
     await _budget_pruefen(db, source, dealer_id)
+    try:
+        return await _abrufen(db, source, item_id, url)
+    except AnbieterFehler as exc:
+        # Token/Guthaben -> Betriebsalarm (gedrosselt), Text geht 1:1 an
+        # den Nutzer (Route: RuntimeError -> 502).
+        await melden(db, exc)
+        raise
+
+
+async def _abrufen(db, source: str, item_id: str, url: str) -> Dict[str, Any]:
     if source == "kleinanzeigen":
         from kleinanzeigen_service import fetch_kleinanzeigen_vehicle
         v = await fetch_kleinanzeigen_vehicle(url)

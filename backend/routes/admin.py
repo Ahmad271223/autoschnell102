@@ -170,8 +170,11 @@ async def admin_list_users(_=Depends(current_admin),
     stehen fuer kuenftige Pagination bereit."""
     limit = max(1, min(int(limit or 1000), 1000))
     page = max(1, int(page or 1))
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}) \
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
+                                      "mfa.pending_secret": 0, "mfa.wiederherstellung": 0}) \
         .sort("created_at", -1).skip((page - 1) * limit).to_list(limit)
+    for u in users:                     # nur der Schalter, nie das Geheimnis
+        u["mfa_aktiv"] = bool((u.pop("mfa", None) or {}).get("aktiv"))
     dealer_ids = list({u.get("dealer_id") for u in users if u.get("dealer_id")})
     dealers = {d["id"]: d async for d in db.dealers.find(
         {"id": {"$in": dealer_ids}},
@@ -642,7 +645,7 @@ async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
     damit die Liste schnell lädt. PDF kann separat über
     /api/admin/contracts/{id}/pdf abgerufen werden (falls benötigt).
     """
-    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "mfa": 0})
     if not user:
         raise HTTPException(404, "Nutzer nicht gefunden")
     # Firmen-Kopf (Wunsch 09/2026): Firmenname + Kundennummer mitliefern.
@@ -1557,6 +1560,10 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "backup": backup,
         "wartungsmodus": bool(((await db.system_flags.find_one(
             {"_id": "wartungsmodus"})) or {}).get("aktiv")),
+        # Abo-Audit: Super-Admins ohne Zwei-Faktor sichtbar machen
+        "super_admins_ohne_mfa": [u.get("email") or u.get("username") async for u in db.users.find(
+            {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
+             "mfa.aktiv": {"$ne": True}}, {"_id": 0, "email": 1, "username": 1})],
     }
 
 
@@ -1574,3 +1581,100 @@ async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
     from routes.payments import zahlungen_abgleichen
     return {"abo_vorgaenge": await abo_vorgaenge_nachholen(),
             "zahlungen": await zahlungen_abgleichen(db)}
+
+
+# ---------- Zwei-Faktor-Anmeldung (Admin / Super-Admin) ----------
+class MfaCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=40)
+
+
+@router.get("/admin/me/mfa")
+async def admin_mfa_status(admin=Depends(current_admin)):
+    voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
+    m = (voll or {}).get("mfa") or {}
+    return {"aktiv": bool(m.get("aktiv")), "aktiviert_am": m.get("aktiviert_am"),
+            "wiederherstellungscodes_uebrig": len(m.get("wiederherstellung") or []),
+            "einrichtung_offen": bool(m.get("pending_secret"))}
+
+
+@router.post("/admin/me/mfa/einrichten")
+async def admin_mfa_einrichten(admin=Depends(current_admin)):
+    """Neues Geheimnis erzeugen (noch NICHT aktiv) — Anzeige als otpauth-Link
+    bzw. Klartext fuer die manuelle Eingabe in der Authenticator-App."""
+    import mfa as _mfa
+    secret = _mfa.secret_erzeugen()
+    await db.users.update_one(
+        {"id": admin["id"]},
+        {"$set": {"mfa.pending_secret": _mfa.verschluesseln(secret),
+                  "mfa.pending_seit": now_iso()}})
+    return {"secret": secret, "otpauth_uri": _mfa.provisioning_uri(secret, admin.get("email") or admin.get("username") or admin["id"]),
+            "hinweis": "Code aus der App eingeben, um die Zwei-Faktor-Anmeldung zu aktivieren."}
+
+
+@router.post("/admin/me/mfa/aktivieren")
+async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
+    import mfa as _mfa
+    voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
+    m = (voll or {}).get("mfa") or {}
+    secret = _mfa.entschluesseln(m.get("pending_secret", "")) if m.get("pending_secret") else None
+    if not secret:
+        raise HTTPException(400, "Zuerst einrichten (Geheimnis erzeugen)")
+    zaehler = _mfa.code_pruefen(secret, body.code)
+    if zaehler is None:
+        raise HTTPException(400, "Code ungültig — Uhrzeit des Geräts prüfen und erneut versuchen")
+    codes, hashes = _mfa.wiederherstellungscodes()
+    await db.users.update_one(
+        {"id": admin["id"]},
+        {"$set": {"mfa": {"aktiv": True, "secret": _mfa.verschluesseln(secret),
+                          "letzter_zaehler": zaehler, "fehlversuche": 0,
+                          "wiederherstellung": hashes, "aktiviert_am": now_iso()}}})
+    await log_activity("", admin["id"], "admin.mfa.aktiviert")
+    return {"ok": True, "aktiv": True, "wiederherstellungscodes": codes,
+            "hinweis": "Diese Codes jetzt sicher aufbewahren — sie werden nur einmal angezeigt."}
+
+
+@router.post("/admin/me/mfa/deaktivieren")
+async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
+    import mfa as _mfa
+    voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
+    m = (voll or {}).get("mfa") or {}
+    if not m.get("aktiv"):
+        raise HTTPException(400, "Zwei-Faktor ist nicht aktiv")
+    secret = _mfa.entschluesseln(m.get("secret", "")) or ""
+    if _mfa.code_pruefen(secret, body.code, int(m.get("letzter_zaehler", -1))) is None:
+        raise HTTPException(401, "Code ungültig")
+    await db.users.update_one({"id": admin["id"]}, {"$unset": {"mfa": ""}})
+    await log_activity("", admin["id"], "admin.mfa.deaktiviert")
+    return {"ok": True, "aktiv": False}
+
+
+@router.post("/admin/users/{user_id}/mfa-zuruecksetzen")
+async def admin_mfa_zuruecksetzen(user_id: str, admin=Depends(current_super_admin)):
+    """Nur Super-Admin: Zwei-Faktor eines (ausgesperrten) Admins entfernen —
+    der Betroffene richtet sie danach neu ein."""
+    u = await db.users.find_one({"id": user_id, "role": "admin"}, {"_id": 0, "id": 1, "email": 1})
+    if not u:
+        raise HTTPException(404, "Admin-Konto nicht gefunden")
+    await db.users.update_one({"id": user_id},
+                              {"$unset": {"mfa": ""}, "$set": {"current_session_id": None}})
+    await log_activity("", admin["id"], "admin.mfa.zurueckgesetzt", ref=user_id,
+                       meta={"email": u.get("email", "")})
+    return {"ok": True}
+
+
+@router.post("/admin/buyers/{buyer_id}/ustid-pruefen")
+async def admin_buyer_ustid_pruefen(buyer_id: str, admin=Depends(current_admin)):
+    """USt-IdNr. eines Zwischenhaendlers beim EU-Dienst VIES pruefen (Audit
+    09/2026, Punkt 40). Ergebnis wird am Kaeufer gespeichert; Nicht-
+    erreichbarkeit ist ein Ergebnis ('nicht_pruefbar'), kein Fehler."""
+    from ustid import vies_pruefen
+    buyer = await db.users.find_one({"id": buyer_id, "role": "b2b_buyer"},
+                                    {"_id": 0, "id": 1, "ust_id": 1})
+    if not buyer:
+        raise HTTPException(404, "Zwischenhändler nicht gefunden")
+    ergebnis = await vies_pruefen(buyer.get("ust_id") or "")
+    ergebnis["geprueft_von"] = admin.get("email", "")
+    await db.users.update_one({"id": buyer_id}, {"$set": {"ust_id_pruefung": ergebnis}})
+    await log_activity("", admin["id"], "admin.buyer.ustid.geprueft", ref=buyer_id,
+                       meta={"status": ergebnis["status"], "ust_id": ergebnis.get("ust_id")})
+    return ergebnis

@@ -73,6 +73,13 @@ export default function AdminBetrieb() {
         <Kachel label="Zahlungen ohne Zugang" wert={data.zahlungen_ohne_zugang} tone={data.zahlungen_ohne_zugang ? "red" : "green"} />
         <Kachel label="Wartungsmodus" wert={data.wartungsmodus ? "AKTIV" : "aus"} tone={data.wartungsmodus ? "red" : "green"} />
       </div>
+      {(data.super_admins_ohne_mfa || []).length > 0 && (
+        <Card className="mb-4" data-testid="mfa-hinweis">
+          <div className="text-[13.5px] text-amber-200">
+            Zwei-Faktor-Anmeldung fehlt bei: {data.super_admins_ohne_mfa.join(", ")} — unter Einstellungen einrichten.
+          </div>
+        </Card>
+      )}
 
       <Card className="mb-4">
         <div className="flex items-center gap-2 mb-2">

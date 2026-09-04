@@ -34,6 +34,19 @@ export default function AdminFreischaltungen() {
 
   useEffect(() => { load(); }, [load]);
 
+  // USt-IdNr. beim EU-Dienst VIES pruefen (Audit 09/2026, Punkt 40)
+  const pruefeUstId = async (b) => {
+    try {
+      const r = await api.post(`/admin/buyers/${b.id}/ustid-pruefen`);
+      const e = r.data || {};
+      const txt = e.status === "gueltig"
+        ? `USt-IdNr. ${e.ust_id} gültig${e.name ? ` · ${e.name}` : ""}${e.adresse ? ` · ${e.adresse}` : ""}`
+        : (e.hinweis || e.status);
+      (e.status === "gueltig" ? toast.success : e.status === "ungueltig" ? toast.error : toast.warning)(txt, { duration: 9000 });
+      load();
+    } catch (e) { toast.error(errMsg(e, "Prüfung fehlgeschlagen")); }
+  };
+
   const closeReq = async (id, status = "erledigt") => {
     try { await api.put(`/admin/plan-requests/${id}`, { status }); } catch (e) { /* egal */ }
   };
@@ -173,6 +186,7 @@ export default function AdminFreischaltungen() {
                       <tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
                         <th className="px-4 py-3 font-medium">Firma</th>
                         <th className="px-4 py-3 font-medium">E-Mail</th>
+                        <th className="px-4 py-3 font-medium">USt-IdNr.</th>
                         <th className="px-4 py-3 font-medium">Zugang</th>
                         <th className="px-4 py-3 font-medium">Läuft ab</th>
                         <th className="px-4 py-3 font-medium text-right">Aktion</th>
@@ -186,6 +200,21 @@ export default function AdminFreischaltungen() {
                             <div className="text-[11px] text-zinc-500 font-normal">{b.contact_name}</div>
                           </td>
                           <td className="px-4 py-2.5 text-zinc-400">{b.email}</td>
+                          <td className="px-4 py-2.5 text-zinc-400" data-testid={`ustid-${b.id}`}>
+                            {b.ust_id ? (
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-[12px]">{b.ust_id}</span>
+                                {b.ust_id_pruefung && (
+                                  <span title={b.ust_id_pruefung.hinweis || b.ust_id_pruefung.name || ""}>
+                                    <Badge tone={b.ust_id_pruefung.status === "gueltig" ? "green" : b.ust_id_pruefung.status === "ungueltig" ? "red" : "yellow"}>
+                                      {b.ust_id_pruefung.status === "gueltig" ? "VIES ok" : b.ust_id_pruefung.status === "ungueltig" ? "VIES ungültig" : "nicht prüfbar"}
+                                    </Badge>
+                                  </span>
+                                )}
+                                <Button size="sm" variant="ghost" onClick={() => pruefeUstId(b)} title="Beim EU-Dienst VIES prüfen">Prüfen</Button>
+                              </div>
+                            ) : <span className="text-zinc-600">—</span>}
+                          </td>
                           <td className="px-4 py-2.5">
                             <Badge tone={b.access?.active ? "green" : "red"}>
                               {b.access?.active ? "aktiv" : "gesperrt"}

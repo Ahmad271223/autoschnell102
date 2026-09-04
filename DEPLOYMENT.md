@@ -319,3 +319,19 @@ Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`).
 5. Stripe im Testmodus: Checkout, Webhook (Dashboard: `/api/webhook/stripe`),
    Wiederholungs-Webhook, Betrieb-Seite ohne "Zahlung ohne Zugang".
 6. Rollen-/Mandantentests und Lasttest (Vergleiche + Snapshots + PDFs gleichzeitig).
+
+## Zwei-Faktor-Anmeldung für Admins (TOTP)
+
+- Jeder Admin/Super-Admin richtet sie selbst ein: **Einstellungen → Zwei-Faktor-Anmeldung → Einrichten**, Geheimnis bzw. `otpauth://`-Link in eine Authenticator-App (Google Authenticator, Aegis, 1Password …) übernehmen, Code eingeben → **8 Wiederherstellungscodes** erscheinen genau einmal — sicher ablegen.
+- Danach fragt die Anmeldung nach dem Passwort zusätzlich den 6-stelligen Code (5 Minuten Zeit, 5 Fehlversuche → 15 Minuten Sperre). Ein Wiederherstellungscode gilt je einmal.
+- App verloren: ein anderer Super-Admin setzt unter **Nutzer → 2FA zurücksetzen** die Zwei-Faktor-Anmeldung zurück (Sitzung wird beendet).
+- `/api/ready` und der Bereich **Betrieb** zeigen, welche Super-Admin-Konten noch ohne Zwei-Faktor sind — vor dem Go-Live alle einrichten.
+- Sucher/Fahrer/Zwischenhändler sind nicht betroffen (nur Admin-Rollen).
+
+## Prüfskripte vor dem Go-Live (im Backend-Container bzw. mit Backend-Abhängigkeiten)
+
+```bash
+python scripts/betriebsprobe.py app.deine-domain.de --dkim-selector resend   # DNS, TLS, Header, Health, SPF/DMARC/DKIM, Ports
+python scripts/offsite_pruefen.py --laden                                     # Offsite-Backup: Bucket, Object Lock, jüngstes Backup laden + prüfen
+python scripts/lasttest.py --users 100 --duration 120                         # nur gegen Staging mit MOCK_PROVIDER_FETCH=true
+```

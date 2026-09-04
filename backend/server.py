@@ -285,6 +285,12 @@ async def readiness_check(response: Response):
             warnungen.append(f"{haengend} Link-Jobs warten > 15 min")
         wm = await db.system_flags.find_one({"_id": "wartungsmodus"})
         info["wartungsmodus"] = bool((wm or {}).get("aktiv"))
+        ohne_mfa = await db.users.count_documents(
+            {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
+             "mfa.aktiv": {"$ne": True}})
+        info["super_admins_ohne_mfa"] = ohne_mfa
+        if ohne_mfa:
+            warnungen.append(f"{ohne_mfa} Super-Admin-Konto/Konten ohne Zwei-Faktor-Anmeldung")
         _ = alt
     except Exception as exc:
         warnungen.append(f"queue: {exc}")

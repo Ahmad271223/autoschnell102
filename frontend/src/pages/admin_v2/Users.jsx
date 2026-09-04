@@ -186,6 +186,19 @@ export default function AdminUsers() {
                       {u.active ? <><Lock size={14}/>Sperren</> : <><Unlock size={14}/>Entsperren</>}
                     </Button>
                     </>)}
+                    {superAdmin && u.role === "admin" && u.mfa_aktiv && (
+
+                      <Button variant="outline" size="sm" data-testid={`user-mfa-reset-${u.id}`}
+
+                              title="Zwei-Faktor zurücksetzen (ausgesperrter Admin richtet neu ein)"
+
+                              onClick={async () => { if (!window.confirm(`Zwei-Faktor von ${u.email} zurücksetzen?`)) return; try { await api.post(`/admin/users/${u.id}/mfa-zuruecksetzen`); toast.success("Zwei-Faktor zurückgesetzt"); load(); } catch (e) { toast.error(errMsg(e)); } }}>
+
+                        2FA zurücksetzen
+
+                      </Button>
+
+                    )}
                     {superAdmin && !u.is_super_admin && (
                       <Button
                         data-testid={`user-delete-btn-${u.id}`}

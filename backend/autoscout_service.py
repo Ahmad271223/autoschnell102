@@ -389,6 +389,7 @@ import logging as _logging
 import os as _os
 
 import httpx as _httpx
+from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
 
 _log = _logging.getLogger("autoscout_service")
 
@@ -520,16 +521,19 @@ async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
                 params={"format": "json", "clean": "1"},
                 json={"urls": [{"url": url}], "maxRecords": 1},
             )
-            if r.status_code not in (200, 201):
+            fehler = aus_http_antwort(r.status_code, r.text, "AutoScout24")
+            if fehler is not None:
                 _log.warning("Apify AutoScout: HTTP %s fuer %s: %s",
                              r.status_code, item_id, r.text[:300])
-                return None
+                raise fehler
             items = r.json()
             if not isinstance(items, list) or not items \
                     or not isinstance(items[0], dict):
                 _log.warning("Apify AutoScout: leere Antwort fuer %s", item_id)
                 return None
             return parse_autoscout_item(items[0], item_id, url=url)
-    except Exception:
+    except AnbieterFehler:
+        raise
+    except Exception as exc:
         _log.exception("Apify AutoScout: Abruf fehlgeschlagen fuer %s", item_id)
-        return None
+        raise aus_ausnahme(exc, "AutoScout24")

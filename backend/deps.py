@@ -120,7 +120,12 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
         payload = decode_token(creds.credentials)
     except Exception:
         raise HTTPException(401, "Token ungültig")
-    user = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
+    if payload.get("typ") == "mfa":
+        # Zwischen-Token der Zwei-Faktor-Anmeldung: nur fuer /auth/login/mfa
+        raise HTTPException(401, "Zweiter Faktor fehlt — bitte Anmeldung abschliessen")
+    user = await db.users.find_one({"id": payload.get("sub")},
+                                   {"_id": 0, "password_hash": 0, "mfa.secret": 0,
+                                    "mfa.pending_secret": 0, "mfa.wiederherstellung": 0})
     if user and user.get("role") == "sucher" and user.get("dealer_id"):
         # Review 09/2026: Sperrt der Admin den Haendler-Hauptaccount, blieben
         # dessen Sucher voll arbeitsfaehig. Gesperrter Chef = gesperrte Firma.

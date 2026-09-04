@@ -29,9 +29,9 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 16 | Long-Polling DB-Last | ✅ | Backoff (max. 6 Lesungen), Limit je Konto. |
 | 17 | Unbegrenzte Hintergrundaufgaben | ✅ | Sofort-Anstöße begrenzt/dedupliziert (`LINK_JOB_SOFORT_MAX`). |
 | 18 | Startmigrationen in 8 Workern | ✅ | `migrationen.py` mit Sperre + Versionierung, vor den Workern; Fehler bricht in Produktion ab. |
-| 19 | Ressourcenbedarf | ✅ | 4 Worker × 1 Snapshot, Limits in Compose, `maxPoolSize`; **Lasttest auf Staging 🔧**. |
+| 19 | Ressourcenbedarf | ✅ | 4 Worker × 1 Snapshot, Limits in Compose, `maxPoolSize`; Lasttest-Skript `backend/scripts/lasttest.py` (gegen Staging mit `MOCK_PROVIDER_FETCH=true`) — **Lauf auf Staging 🔧 Betreiber**. |
 | 20 | Datenschutz/AGB widersprechen Code | 🔧 | Texte angeglichen (90 Tage, Empfänger, Fristen, USt), Fonts lokal, B2B-Bestätigung. **Platzhalter `[…]` ausfüllen + juristische Prüfung.** |
-| 21 | Backups nur lokal | 🔧 | Verschlüsselte Offsite-Kopie mit Object-Lock-Option (`BACKUP_S3_*`), Alter/Vollständigkeit in `/api/ready` und Betrieb. **Bucket anlegen + Restore-Probe monatlich.** |
+| 21 | Backups nur lokal | 🔧 | Verschlüsselte Offsite-Kopie mit Object-Lock-Option (`BACKUP_S3_*`), Alter/Vollständigkeit in `/api/ready` und Betrieb; Prüfskript `python scripts/offsite_pruefen.py [--laden]` (Bucket erreichbar, Verschlüsselung, Object Lock, jüngstes Backup, Prüfsumme, Manifest). **Bucket anlegen + Skript monatlich.** |
 
 ## Mittel
 
@@ -47,7 +47,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 29 | Zugangs-Anfragen ohne Frist | ✅ `ANFRAGEN_AUFBEWAHRUNG_TAGE` |
 | 30 | Fehlerberichte unbegrenzt | ✅ Dedup, Obergrenze, Frist auch für offene, Redaktion |
 | 31 | Reset-Token vor Passwortänderung verbraucht | ✅ Claim-Zustand mit Rücksetzung |
-| 32 | Passwortregeln uneinheitlich | ✅ `passwoerter.py` für alle Rollen (min. 10, max. 72 Byte, Blockliste); MFA Super-Admin ⏳ |
+| 32 | Passwortregeln uneinheitlich | ✅ `passwoerter.py` für alle Rollen (min. 10, max. 72 Byte, Blockliste); Zwei-Faktor (TOTP) für Admin/Super-Admin ✅ — Einstellungen → Zwei-Faktor; Betrieb und `/api/ready` warnen bei Super-Admins ohne 2FA |
 | 33 | Job-Status nicht mandantengebunden | ✅ `dealer_ids` |
 | 34 | Protokollabschluss verwaist Dateien | ✅ Rollback löscht/vormerkt |
 | 35 | Selbstheilung unvollständig | ✅ idempotente Wiederholung |
@@ -55,7 +55,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 37 | Fahrer-Konfliktsuche | ✅ echte Endzustände |
 | 38 | Kundennummer >9999 | ✅ läuft 5-stellig weiter (kein Abbruch), Unique-Index |
 | 39 | Aufbewahrung Cache/Marktplatz | ✅ Cache 90 Tage, Interessen 180 Tage, gelöschte Inserate 90 Tage; Datenverzeichnis in Datenschutz §5 |
-| 40 | B2B ohne Verifikation | ✅ Pflicht-Bestätigung + USt-ID-Feld; Handelsregister-Prüfung ⏳ (fachliche Entscheidung) |
+| 40 | B2B ohne Verifikation | ✅ Pflicht-Bestätigung + USt-IdNr. mit Landesformat-Prüfung bei der Registrierung (`ustid.py`, 29 Länder; Handelsregister-Nr. weiter erlaubt) + Online-Prüfung beim EU-Dienst VIES durch den Admin (Freischaltungen → Prüfen, Ergebnis mit Firmenname/Adresse am Käufer gespeichert) |
 | 41 | Verkäuferadresse in Übersicht | ✅ standardmäßig eingeklappt |
 | 42 | Readiness nur Mongo | ✅ `/api/ready` |
 | 43 | Konfiguration nicht fail-closed | ✅ SELF_SIGNUP prod-Default false, Stripe halb → Abbruch, Prod-Test läuft in CI |
@@ -68,12 +68,12 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 |---|--------|-------|
 | 46 | Frontend ungetestet | ✅ Playwright-E2E (Rollen, Logins, Freischaltung, Fahrer, Marktplatz, Mobile) im CI-Job `e2e` |
 | 47 | Stripe-Erfolgsfall | ✅ Tests mit echter Signatur/Wiederholung; echter Testmodus-Kauf 🔧 |
-| 48 | Providerintegration | ⏳ nur mit echten Zugängen auf Staging prüfbar |
+| 48 | Providerintegration | ✅ Ausfallpfade simuliert (`tests/test_anbieter_fehlerfaelle.py`): Token ungültig, Guthaben leer, Anbieter-Limit, Zeitüberschreitung, Anbieter-5xx, kaputte Antwort, Tagesbudget → klare Nutzertexte (`anbieter_fehler.py`) und Betriebsalarm bei Token/Guthaben (max. 1/Std.); Probelauf mit echten Zugängen auf Staging ⏳ Betreiber |
 | 49 | Frontend-Audit wirkungslos | ✅ Gate im richtigen Ordner, blockierend |
 | 50 | Buildwarnungen unterdrückt | ✅ `CI=true`, Warnungen bereinigt |
 | 51 | Peer-Konflikte | ✅ `react-day-picker` entfernt, Auflösungen gepinnt |
-| 52 | Veraltete Mechanismen | ✅ FastAPI-Lifespan; Actions-Versionen 🔧 bei Bedarf |
-| 53 | Betriebsproben | ⏳ DNS, TLS-Labs, SPF/DKIM/DMARC, Uptime-Check, Alarmierung — Betreiber |
+| 52 | Veraltete Mechanismen | ✅ FastAPI-Lifespan; GitHub Actions auf v7 (checkout, setup-python, setup-node, upload-artifact) |
+| 53 | Betriebsproben | 🔧 Skript `python scripts/betriebsprobe.py app.<domain> [--dkim-selector …]` prüft DNS, TLS (Ablauf, TLS 1.0/1.1 abgelehnt), HTTP→HTTPS, Host-Allowlist, Security-Header, `/api/health` + `/api/ready`, SPF/DMARC/DKIM, offene Mongo-/Backend-Ports — **vor Go-Live vom Betreiber ausführen**; Uptime-Check/Alarmierung extern einrichten |
 
 ## Abo-Verwaltung (zweiter Bericht)
 
@@ -93,7 +93,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | Doppelklick-Race | ✅ Besitzer-Token |
 | Zahlungsdaten schwach validiert | ✅ s. 26, Kulanz getrennt mit Pflichtgrund |
 | Marktplatz ohne Zahlungshistorie | ✅ Zahlungsdatensatz auch manuell/Stripe |
-| Passwortregeln Admin-Anlage | ✅ zentral; MFA Super-Admin ⏳ |
+| Passwortregeln Admin-Anlage | ✅ zentral; Zwei-Faktor Super-Admin ✅ (TOTP, 8 Wiederherstellungscodes, Sperre nach 5 Fehlversuchen, Reset durch Super-Admin) |
 | Normaler Admin ungetestet | ✅ `tests/test_super_admin_only.py` |
 | Firmenweites Abo anders angezeigt | ✅ zentrale Auflösung + Migration |
 | Monat/Jahr ungenau | ✅ „30 Tage / 365 Tage“ |

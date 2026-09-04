@@ -41,6 +41,17 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
+    if (data?.mfa_erforderlich) {
+      // Zwei-Faktor (Admin/Super-Admin): noch kein Sitzungs-Token — die
+      // Login-Seite fragt jetzt den Code aus der Authenticator-App ab.
+      return { mfa_erforderlich: true, mfa_token: data.mfa_token };
+    }
+    localStorage.setItem("ah_token", data.token);
+    await refresh();
+    return data.user;
+  };
+  const loginMfa = async (mfaToken, code) => {
+    const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code });
     localStorage.setItem("ah_token", data.token);
     await refresh();
     return data.user;
@@ -65,7 +76,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthCtx.Provider value={{ user, dealer, subscription, loading, login, register, logout, refresh, setDealer }}>
+    <AuthCtx.Provider value={{ user, dealer, subscription, loading, login, loginMfa, register, logout, refresh, setDealer }}>
       {children}
     </AuthCtx.Provider>
   );

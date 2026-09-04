@@ -74,6 +74,24 @@ def decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
 
 
+MFA_TOKEN_TTL_MINUTES = 5
+
+
+def create_mfa_token(user_id: str) -> str:
+    """Kurzlebiges Zwischen-Token nach korrektem Passwort — berechtigt NUR
+    zur Eingabe des zweiten Faktors, nie zu API-Aufrufen (typ=mfa)."""
+    exp = datetime.now(timezone.utc) + timedelta(minutes=MFA_TOKEN_TTL_MINUTES)
+    return jwt.encode({"sub": user_id, "typ": "mfa", "nonce": uuid.uuid4().hex[:12],
+                       "exp": exp}, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def decode_mfa_token(token: str) -> dict:
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    if payload.get("typ") != "mfa":
+        raise JWTError("kein MFA-Token")
+    return payload
+
+
 def new_session_id() -> str:
     return str(uuid.uuid4())
 
