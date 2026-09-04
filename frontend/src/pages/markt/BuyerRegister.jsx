@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useBuyer } from "@/context/BuyerContext";
-import { errMsg } from "@/lib/api";
+import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Store, ArrowRight } from "lucide-react";
 
@@ -20,6 +20,20 @@ export default function BuyerRegister() {
           { replace: true });
     }
   }, [ready, buyer, invite, nav]);
+  // Ob der Zugang Geld kostet, sagt der Server — sonst steht hier ein
+  // Preis, den seit der Umstellung auf kostenlos niemand mehr zahlt.
+  const [kostenlos, setKostenlos] = useState(true);
+  const [preis, setPreis] = useState(20);
+  useEffect(() => {
+    let aktiv = true;
+    api.get("/payments/config").then((r) => {
+      if (!aktiv || !r.data) return;
+      setKostenlos(r.data.marktplatz_kostenlos !== false);
+      setPreis(r.data.preis ?? 20);
+    }).catch(() => {});
+    return () => { aktiv = false; };
+  }, []);
+
   const [f, setF] = useState({
     company_name: "", contact_name: "", email: "", password: "", phone: "",
     ust_id: "",
@@ -78,7 +92,9 @@ export default function BuyerRegister() {
         <p className="text-sm text-zinc-500 mt-1 mb-6">
           {invite
             ? "Du wurdest in ein Händler-Netzwerk eingeladen."
-            : "Zugang zu angebotenen Fahrzeugen erfordert ein Marktplatz-Abo (20 € je 30 Tage, inkl. USt)."}
+            : kostenlos
+              ? "Der Zugang zum Marktplatz ist kostenlos. Nach der Registrierung siehst du sofort alle angebotenen Fahrzeuge."
+              : `Zugang zu angebotenen Fahrzeugen erfordert ein Marktplatz-Abo (${Number(preis).toLocaleString("de-DE")} € je 30 Tage, inkl. USt).`}
         </p>
         <form onSubmit={submit} className="grid grid-cols-2 gap-3">
           <div className="col-span-2">

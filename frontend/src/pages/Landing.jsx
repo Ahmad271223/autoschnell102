@@ -1,6 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { ArrowRight, Bolt, Check, FileText, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
+import { api } from "../lib/api";
 
 const HERO_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png";
 const SECTION_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/dd3f3682a6a7806bf9c8c9664b184e0728edf5f897bc17bdf2836ddfb7e76644.png";
@@ -10,6 +11,19 @@ const KEYS_IMG = "https://images.pexels.com/photos/4173191/pexels-photo-4173191.
 export default function Landing() {
   const nav = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
+  // Preis des Marktplatz-Zugangs beim Server erfragen, statt ihn hier
+  // festzuschreiben. Sonst wirbt die Startseite mit 20 Euro weiter,
+  // obwohl der Betreiber den Zugang laengst kostenlos gestellt hat.
+  // Vorbelegung = der Standard im Code (kostenlos).
+  const [markt, setMarkt] = useState({ marktplatz_kostenlos: true, preis: 20 });
+
+  useEffect(() => {
+    let aktiv = true;
+    api.get("/payments/config")
+      .then((r) => { if (aktiv && r.data) setMarkt(r.data); })
+      .catch(() => {});
+    return () => { aktiv = false; };
+  }, []);
 
   // Schließt das Mobile-Menü, wenn der Browser gross wird oder Escape kommt
   useEffect(() => {
@@ -360,12 +374,22 @@ export default function Landing() {
             {/* B2B-Marktplatz */}
             <div className="tactical-card p-8" data-testid="pricing-marktplatz">
               <div className="overline">B2B-Marktplatz</div>
-              <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-4xl">20 €</span>
-                <span className="text-zinc-400 text-sm">/ Monat</span>
+              <div className="mt-3 flex items-baseline gap-2" data-testid="markt-preis">
+                {markt.marktplatz_kostenlos ? (
+                  <span className="font-display font-black text-4xl">Kostenlos</span>
+                ) : (
+                  <>
+                    <span className="font-display font-black text-4xl">
+                      {Number(markt.preis ?? 20).toLocaleString("de-DE")} €
+                    </span>
+                    <span className="text-zinc-400 text-sm">/ Monat</span>
+                  </>
+                )}
               </div>
               <p className="text-zinc-400 text-sm mt-2">Für Zwischenhändler: geprüfte Fahrzeuge von Händlern kaufen.
-                Online zahlen, sofort loslegen.</p>
+                {markt.marktplatz_kostenlos
+                  ? " Registrieren und sofort loslegen."
+                  : " Online zahlen, sofort loslegen."}</p>
               <div className="mt-6 flex flex-col gap-2">
                 <Link to="/markt/registrieren" data-testid="cta-markt-register"
                       className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"

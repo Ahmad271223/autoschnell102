@@ -150,10 +150,17 @@ class CheckoutIn(BaseModel):
 async def payments_config():
     """Oeffentlich (keine Geheimnisse): Ist die Online-Zahlung aktiv, und was
     kostet der Marktplatz-Zugang? Das Frontend blendet den Stripe-Button
-    aus und verweist auf die Rechnung, wenn stripe_aktiv false ist."""
+    aus und verweist auf die Rechnung, wenn stripe_aktiv false ist.
+
+    `marktplatz_kostenlos` sagt der Startseite und der Registrierung, ob der
+    Zugang derzeit gratis ist. Ohne diese Angabe wirbt die Startseite weiter
+    mit einem Preis, den niemand zahlt (Befund 09/2026) — und beim Umlegen
+    des Schalters muesste jemand daran denken, den Text zu aendern."""
     pkg = PLAN_PRICES["marktplatz"]
+    from routes.marketplace import MARKTPLATZ_KOSTENLOS
     return {"stripe_aktiv": stripe_aktiv(), "preis": pkg["amount"],
-            "waehrung": pkg["currency"], "tage": pkg["days"]}
+            "waehrung": pkg["currency"], "tage": pkg["days"],
+            "marktplatz_kostenlos": bool(MARKTPLATZ_KOSTENLOS)}
 
 
 @router.post("/payments/checkout")

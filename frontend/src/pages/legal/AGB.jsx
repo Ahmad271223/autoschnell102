@@ -50,30 +50,34 @@ export default function AGB() {
       </ul>
 
       <H2>4. Preise und Zahlung</H2>
-      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Preis-/USt-Darstellung
-          bitte vor dem Live-Gang bestaetigen. Technischer Stand 09/2026:
-          Stripe zieht fuer den Marktplatz-Zugang exakt 20,00 € ein
-          (BUYER_ACCESS_PRICE in backend/routes/marketplace.py, kein
-          USt-Aufschlag) -> hier als Brutto-Endpreis ausgewiesen. Sucher-Abo
-          150/1.500 € und Verkaufspakete werden manuell per Rechnung
-          abgerechnet -> hier netto zzgl. USt. Gilt die
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Stand 05.09.2026 — die
+          Liste bildet die TATSAECHLICH eingestellten Preise ab. Kostenlos
+          sind Marktplatz-Zugang (MARKTPLATZ_KOSTENLOS=true in
+          backend/routes/marketplace.py) und das Verkaufen/Veroeffentlichen
+          von Fahrzeugen (VERKAUF_KOSTENLOS=true in backend/routes/team.py).
+          Bezahlt wird nur das Sucher-Abo, manuell per Rechnung -> netto
+          zzgl. USt. Werden die Schalter auf false gestellt, muessen die
+          Preise fuer Marktplatz-Zugang (BUYER_ACCESS_PRICE, aktuell 20,00 €
+          brutto) und Verkaufspakete hier WIEDER aufgenommen werden. Gilt die
           Kleinunternehmerregelung (§ 19 UStG), sind die USt-Aussagen und
           die Rechnungsangaben anzupassen. */}
       <ul className="list-disc pl-6 space-y-1">
         <li>Der Händler-Hauptaccount (Verwalten &amp; Verkaufen) ist kostenlos.</li>
+        <li>Das Einstellen und Veröffentlichen von Fahrzeugen ist kostenlos
+            und in der Anzahl nicht begrenzt.</li>
+        <li>Der Zugang zum B2B-Marktplatz ist kostenlos. Eine Registrierung
+            als Käufer ist ohne Freischaltung durch den Anbieter möglich.</li>
         <li>Sucher-Abo (Suche &amp; Vergleich, pro Nutzer): 150 € / Monat
             (30 Tage) oder 1.500 € / Jahr (365 Tage) — jeweils netto zzgl.
             gesetzlicher Umsatzsteuer, Abrechnung per Rechnung; die
-            Freischaltung erfolgt nach Zahlungseingang durch den Anbieter.</li>
-        <li>Marktplatz-Zugang für Zwischenhändler: 20 € / Monat (30 Tage) —
-            Endpreis inkl. gesetzlicher Umsatzsteuer, Zahlung im Voraus über
-            Stripe oder per Rechnung.</li>
-        <li>Verkaufspakete (Anzahl Veröffentlichungen pro Monat) gemäß
-            aktueller Preisliste, netto zzgl. gesetzlicher Umsatzsteuer.
-            Eine Veröffentlichung zählt auch dann, wenn das Inserat im
-            selben Zeitraum wieder gelöscht wird.</li>
+            Freischaltung erfolgt nach Zahlungseingang durch den Anbieter.
+            Innerhalb des Abos ist die Zahl der Abrufe und Vergleiche nicht
+            begrenzt.</li>
         <li>Rechnungen weisen die Umsatzsteuer gesondert aus. Die aktuell
-            gültigen Preise werden in der Anwendung angezeigt.</li>
+            gültigen Preise werden in der Anwendung angezeigt. Kostenlose
+            Leistungen können mit einer Ankündigungsfrist von einem Monat
+            kostenpflichtig gestellt werden; laufende Abos bleiben davon bis
+            zum Ende der bezahlten Laufzeit unberührt.</li>
       </ul>
 
       <H2>5. Laufzeit und Kündigung</H2>

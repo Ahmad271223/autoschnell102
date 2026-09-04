@@ -40,15 +40,16 @@ export default function Datenschutz() {
       </ul>
 
       <H2>4. Auftragsverarbeitung / Empfänger</H2>
-      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Angaben in [eckigen
-          Klammern] vor dem Live-Gang durch die echten Vertragspartner
-          ersetzen (Hosting, SMTP-Anbieter, ggf. S3-Speicher, browserless).
-          Herkunft der Liste: backend/email_service.py (SMTP),
-          routes/payments.py (Stripe Checkout), mobile_service.py +
-          autoscout_service.py (Apify), storage_service.py (S3 optional),
-          snapshot_service.py (BROWSERLESS_URL optional). Nicht genutzte
-          optionale Dienste bitte streichen oder als "nicht im Einsatz"
-          kennzeichnen. */}
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Stand 04.09.2026 —
+          die Liste bildet den TATSAECHLICHEN Produktionsbetrieb ab:
+          Hetzner (Hosting), Resend (E-Mail), Cloudflare R2 (Dateien),
+          Apify (Inserats-Abruf). Stripe und browserless sind aktuell NICHT
+          im Einsatz und deshalb als solche gekennzeichnet — werden sie
+          eingeschaltet, muss der jeweilige Absatz wieder aktiv formuliert
+          werden. Herkunft: backend/email_service.py, storage_service.py,
+          mobile_service.py + autoscout_service.py, routes/payments.py,
+          snapshot_service.py (BROWSERLESS_URL). Der EINZIGE offene Punkt
+          ist der Rechenzentrums-Standort in eckigen Klammern. */}
       <p>
         Für den Betrieb der Plattform setzen wir die folgenden Dienstleister
         ein. Soweit sie personenbezogene Daten in unserem Auftrag
@@ -59,22 +60,26 @@ export default function Datenschutz() {
         (Art. 44 ff. DSGVO).
       </p>
       <ul className="list-disc pl-6 space-y-1">
-        <li><b>Server-Hosting und Datenbank:</b> [Hosting-Anbieter, Anschrift,
-            Deutschland] — Betrieb der Anwendung und Speicherung sämtlicher
-            Plattformdaten (Account-, Geschäfts- und Nutzungsdaten).</li>
-        <li><b>E-Mail-Versand:</b> System-E-Mails (z.B. Passwort zurücksetzen,
-            Einladungen, Benachrichtigungen) werden per SMTP über
-            [SMTP-/E-Mail-Anbieter, Standort] versendet. Übermittelt werden
-            die Empfänger-Adresse und der Inhalt der jeweiligen Nachricht.</li>
-        <li><b>Zahlungsabwicklung Marktplatz-Zugang:</b> Stripe Payments
-            Europe Ltd., 1 Grand Canal Street Lower, Dublin 2, Irland.
-            Zahlungsdaten (Karten-/Kontodaten) werden ausschließlich auf der
-            Bezahlseite von Stripe eingegeben und erreichen unsere Server
-            nicht; wir erhalten von Stripe nur Zahlungsstatus, Betrag und
-            eine Vorgangs-Kennung. Stripe kann Daten an seine
-            Konzerngesellschaft in den USA übermitteln
-            (EU-Standardvertragsklauseln bzw. EU-US Data Privacy Framework).
-            Datenschutzhinweise: stripe.com/de/privacy.</li>
+        <li><b>Server-Hosting und Datenbank:</b> Hetzner Online GmbH,
+            Industriestr. 25, 91710 Gunzenhausen, Deutschland. Betrieb der
+            Anwendung und Speicherung sämtlicher Plattformdaten (Account-,
+            Geschäfts- und Nutzungsdaten). Rechenzentrum:
+            [Standort eintragen, z.&nbsp;B. Falkenstein oder Nürnberg].</li>
+        <li><b>E-Mail-Versand:</b> System- und Vertrags-E-Mails (z.&nbsp;B.
+            Passwort zurücksetzen, Einladungen, Kaufvertrag an den Verkäufer)
+            versenden wir über Resend, Inc., 2261 Market Street #5039,
+            San Francisco, CA 94114, USA. Der Versand läuft über die
+            EU-Region des Anbieters (Irland). Übermittelt werden die
+            Empfänger-Adresse, der Betreff, der Inhalt der Nachricht und
+            etwaige Anhänge (z.&nbsp;B. das Vertrags-PDF). Grundlage für die
+            Übermittlung in die USA sind EU-Standardvertragsklauseln
+            (Art.&nbsp;46 DSGVO). Datenschutzhinweise: resend.com/legal/privacy-policy.</li>
+        <li><b>Zahlungsabwicklung:</b> derzeit nicht im Einsatz. Der
+            Marktplatz und das Einstellen von Fahrzeugen sind kostenlos; es
+            werden keine Zahlungsdaten erhoben und keine an einen
+            Zahlungsdienstleister übermittelt. Sollte künftig eine
+            kostenpflichtige Funktion hinzukommen, wird der dann eingesetzte
+            Zahlungsdienstleister hier vorab benannt.</li>
         <li><b>Abruf von Fahrzeug-Inseraten:</b> Öffentlich zugängliche
             Inserate von mobile.de und AutoScout24 laden wir über den
             Abrufdienst der Apify Technologies s.r.o., Vodičkova 704/36,
@@ -82,17 +87,18 @@ export default function Datenschutz() {
             Inserats-URL bzw. die Suchparameter — keine Daten unserer Nutzer.
             Inserate von kleinanzeigen.de werden je nach Konfiguration von
             unserem Server oder direkt aus dem Browser des Nutzers abgerufen.</li>
-        <li><b>Dateispeicher (optional):</b> Fotos, Abholberichte und
-            Dokumente können statt auf unserem Server in einem
-            S3-kompatiblen Objektspeicher abgelegt werden:
-            [Speicher-Anbieter, Standort — oder „derzeit nicht im Einsatz,
-            Speicherung auf dem eigenen Server“].</li>
-        <li><b>Browser-Rendering für Beweis-Snapshots (optional):</b> Für die
-            Screenshot-/PDF-Sicherung von Inseraten kann ein externer
-            Browser-Dienst (browserless) eingesetzt werden: [Anbieter,
-            Standort — oder „derzeit nicht im Einsatz, Rendering auf dem
-            eigenen Server“]. Übermittelt wird nur die öffentliche
-            Inserats-URL.</li>
+        <li><b>Dateispeicher:</b> Fotos, Abholberichte, Vertrags-PDFs und
+            die verschlüsselten Datensicherungen liegen im Objektspeicher
+            Cloudflare R2. Vertragspartner ist die Cloudflare Germany GmbH,
+            Rosental 7, 80331 München, Deutschland, für die Cloudflare, Inc.,
+            101 Townsend St., San Francisco, CA 94107, USA. Grundlage für die
+            Übermittlung in die USA sind EU-Standardvertragsklauseln
+            (Art.&nbsp;46 DSGVO). Datenschutzhinweise:
+            cloudflare.com/de-de/privacypolicy.</li>
+        <li><b>Browser-Rendering für Beweis-Snapshots:</b> derzeit kein
+            externer Dienst im Einsatz. Screenshots und PDF-Sicherungen von
+            Inseraten erzeugt unser eigener Server; es wird dafür nichts an
+            Dritte übermittelt.</li>
       </ul>
       <p>
         Schriftarten liefern wir lokal von unserem eigenen Server aus — es

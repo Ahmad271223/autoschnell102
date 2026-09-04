@@ -223,3 +223,28 @@ def test_11_einladung_gilt_nur_fuer_diesen_haendler(welt):
     r = requests.get(f"{API}/marktplatz/haendler/{welt['h2']['dealer_id']}",
                      headers=welt["kaeufer"], timeout=30)
     assert r.status_code == 403
+
+def test_12_startseite_erfaehrt_dass_der_zugang_kostenlos_ist():
+    """Die Startseite und die Kaeufer-Registrierung warben mit "20 Euro je
+    Monat", obwohl der Marktplatz laengst kostenlos ist. Damit der Text nie
+    wieder auseinanderlaeuft, holt sich das Frontend die Angabe hier — der
+    Endpunkt ist oeffentlich und darf keine Geheimnisse enthalten."""
+    r = requests.get(f"{API}/payments/config", timeout=20)
+    assert r.status_code == 200, r.text
+    daten = r.json()
+    assert "marktplatz_kostenlos" in daten, daten
+    assert isinstance(daten["marktplatz_kostenlos"], bool)
+    # Kein Schluessel, kein Geheimnis nach aussen.
+    text = r.text.lower()
+    for verboten in ("sk_", "secret", "key", "token", "password"):
+        assert verboten not in text, f"{verboten} steht in der oeffentlichen Antwort"
+
+
+def test_13_werbetexte_nennen_keinen_festen_preis():
+    """Regressionsschutz im Frontend: der Preis darf nicht wieder fest im
+    Text stehen, sonst wirbt die Seite beim naechsten Umschalten falsch."""
+    basis = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    for datei in ("pages/Landing.jsx", "pages/markt/BuyerRegister.jsx"):
+        quelle = (basis / datei).read_text(encoding="utf-8")
+        assert "marktplatz_kostenlos" in quelle, f"{datei} fragt den Server nicht"
+        assert "20 €" not in quelle, f"{datei} nennt weiter einen festen Preis"
