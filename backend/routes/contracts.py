@@ -580,15 +580,31 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         elif not email_service.email_configured():
             await _reservierung_zurueck()
             raise HTTPException(503,
-                "E-Mail-Versand ist nicht eingerichtet (SMTP_* in der .env "
-                "setzen) — der Vertrag wurde NICHT versendet. Alternativ per "
-                "WhatsApp teilen oder das PDF herunterladen.")
+                "E-Mail-Versand ist nicht eingerichtet (RESEND_API_KEY oder "
+                "SMTP_* in der .env setzen) — der Vertrag wurde NICHT "
+                "versendet. Alternativ per WhatsApp teilen oder das PDF "
+                "herunterladen.")
         else:
+            # Versand IMMER von unserer eigenen Adresse (nur die ist beim
+            # Mail-Anbieter freigeschaltet). Der Anzeigename nennt die Firma,
+            # und die Antwortadresse ist der Sucher: antwortet der Verkaeufer,
+            # landet die Antwort direkt bei ihm (Wunsch 09/2026).
+            from vertrag_mail import kopie_mail, vertrag_mail
             pdf_bytes = base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+            dateiname = c.get("filename") or "Kaufvertrag.pdf"
+            firma = await db.dealers.find_one(
+                {"id": user["dealer_id"]},
+                {"_id": 0, "company_name": 1, "logo_url": 1, "phone": 1,
+                 "email": 1}) or {}
+            betreff, text, html = vertrag_mail(
+                vertrag=c, firma=firma, sucher=user,
+                nachricht=body.message, betreff=body.subject)
+            sucher_mail = (user.get("email") or "").strip()
             ok = await email_service.send_email(
-                body.recipient, body.subject or "Ihr Kaufvertrag",
-                body.message or "Anbei der Kaufvertrag als PDF.",
-                anhang=pdf_bytes, anhang_name=c.get("filename") or "Kaufvertrag.pdf")
+                body.recipient, betreff, text, anhang=pdf_bytes,
+                anhang_name=dateiname, html=html,
+                reply_to=sucher_mail,
+                absender_name=firma.get("company_name") or "")
             if not ok:
                 await _reservierung_zurueck()
                 raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
@@ -597,6 +613,22 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                                          "als versendet markiert.")
             out["zustellung"] = "versendet"
             neuer_status = "versendet"
+            # Kopie an den Sucher — als Beleg, mit demselben PDF. Schlaegt
+            # sie fehl, bleibt der Hauptversand gueltig; das Ergebnis steht
+            # in der Antwort ("kopie").
+            out["kopie"] = "nicht_moeglich"
+            if email_service.gueltige_adresse(sucher_mail):
+                k_betreff, k_text, k_html = kopie_mail(
+                    vertrag=c, firma=firma, sucher=user,
+                    empfaenger_adresse=body.recipient,
+                    betreff_original=betreff, nachricht=body.message)
+                out["kopie"] = "gesendet" if await email_service.send_email(
+                    sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
+                    anhang_name=dateiname, html=k_html,
+                    absender_name=firma.get("company_name") or "") else "fehlgeschlagen"
+                if out["kopie"] != "gesendet":
+                    log.warning("Kopie des Vertrags %s an %s fehlgeschlagen",
+                                contract_id, sucher_mail)
     else:
         await _reservierung_zurueck()
         raise HTTPException(400, "Unbekannter Kanal")

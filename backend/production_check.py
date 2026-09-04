@@ -113,13 +113,22 @@ def pruefe_produktion(log) -> None:
             fehler.append(f"{var} muss eine positive Zahl (Tage) sein — "
                           "0 oder negativ wuerde SOFORT loeschen.")
 
+    # Versandweg: Resend (bevorzugt) ODER vollstaendiges SMTP.
+    resend_da = bool(os.environ.get("RESEND_API_KEY", "").strip()
+                     and (os.environ.get("MAIL_FROM", "").strip()
+                          or os.environ.get("SMTP_FROM", "").strip()))
     smtp_fehlt = [v for v in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM")
                   if not os.environ.get(v, "").strip()]
-    if smtp_fehlt:
+    if resend_da and "@" not in (os.environ.get("MAIL_FROM", "")
+                                 or os.environ.get("SMTP_FROM", "")):
+        fehler.append("MAIL_FROM enthaelt keine Absenderadresse — erwartet "
+                      "z.B. 'AutoSchnell <vertrag@deine-domain.de>'.")
+    if smtp_fehlt and not resend_da:
         (fehler if ist_prod else warnungen).append(
-            "SMTP unvollstaendig (" + ", ".join(smtp_fehlt) + ") — Passwort-"
-            "Reset-Mails und Vertragsversand per E-Mail koennen nicht gesendet "
-            "werden.")
+            "Kein E-Mail-Versandweg eingerichtet: entweder RESEND_API_KEY + "
+            "MAIL_FROM setzen oder SMTP vervollstaendigen (" +
+            ", ".join(smtp_fehlt) + ") — sonst koennen Passwort-Reset-Mails "
+            "und der Vertragsversand nicht gesendet werden.")
 
     if not os.environ.get("STRIPE_API_KEY", "").strip() or \
             not os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip():

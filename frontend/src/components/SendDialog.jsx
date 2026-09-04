@@ -36,7 +36,16 @@ export default function SendDialog({ open, contract, onClose }) {
       } else {
         const z = data?.zustellung;
         if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
-        else if (z === "versendet") toast.success("E-Mail mit Vertrag versendet");
+        else if (z === "versendet") {
+          // Der Sucher bekommt immer eine Kopie mit dem PDF (09/2026).
+          toast.success(data?.kopie === "gesendet"
+            ? "E-Mail mit Vertrag versendet · Kopie liegt in deinem Postfach"
+            : "E-Mail mit Vertrag versendet");
+          if (data?.kopie === "fehlgeschlagen") {
+            toast.warning("Die Kopie an dich konnte nicht zugestellt werden — "
+              + "der Vertrag ist beim Kunden angekommen.");
+          }
+        }
         else if (z === "mock") toast.success("Testmodus: Versand nur protokolliert, keine E-Mail");
         else toast.success("Versand registriert");
       }
@@ -122,6 +131,7 @@ export default function SendDialog({ open, contract, onClose }) {
             <>
               <Field label="E-Mail-Empfänger" value={email} onChange={setEmail} type="email" testid="email-to" />
               <Field label="Betreff" value={subject} onChange={setSubject} testid="email-subject" />
+              <div className="text-[11px] text-zinc-500 mt-1">Versand über AutoSchnell mit deinem Firmennamen. Antwortet der Verkäufer, landet die Antwort in deinem Postfach — du bekommst zusätzlich eine Kopie mit PDF.</div>
               <div>
                 <label className="text-xs text-zinc-400">Nachricht</label>
                 <textarea data-testid="email-message" rows={5} className="input-base w-full mt-1"

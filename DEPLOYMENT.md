@@ -346,3 +346,24 @@ MongoDB läuft in der Standard-Zusammenstellung ohne Replica Set. Dann liest die
 ```bash
 python scripts/backup_mongo.py --wartung
 ```
+
+## E-Mail-Versand über Resend
+
+Alle Mails (Kaufverträge, Passwort-Reset) gehen über **eine eigene Absenderadresse**, nicht über die Adresse des Händlers. Nur so bleiben die Mails zustellbar, weil nur die eigene Domain bei Resend verifiziert ist.
+
+1. Domain in Resend anlegen und die drei DNS-Einträge (SPF, DKIM, DMARC) setzen, bis der Status „verified" ist.
+2. In der `.env`:
+
+```
+RESEND_API_KEY=re_xxxxxxxxxxxx
+MAIL_FROM=AutoSchnell <vertrag@deine-domain.de>
+MAIL_ABSENDER_NAME=AutoSchnell
+```
+
+So sieht der Kunde die Mail: Absender **„Autohaus Muster über AutoSchnell"**, Adresse `vertrag@deine-domain.de`. Antwortet er, geht die Antwort an den **Sucher**, der den Vertrag verschickt hat (Reply-To). Der Sucher bekommt außerdem automatisch eine **Kopie mit dem PDF** als Beleg.
+
+Ist `RESEND_API_KEY` nicht gesetzt, wird auf SMTP zurückgefallen (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`); Resend lässt sich auch als SMTP-Anbieter eintragen. Ohne beides meldet der Vertragsversand einen klaren Fehler statt still zu scheitern.
+
+## Fahrzeuge verkaufen ist kostenlos
+
+`VERKAUF_KOSTENLOS=true` (Standard) bedeutet: Jede Firma kann unbegrenzt viele Fahrzeuge veröffentlichen, ohne Paket und ohne Monatskontingent. Die Paketverwaltung bleibt im Code erhalten; mit `VERKAUF_KOSTENLOS=false` gelten wieder Pakete und Kontingente wie zuvor.

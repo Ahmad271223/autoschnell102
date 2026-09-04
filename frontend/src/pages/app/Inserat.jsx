@@ -74,7 +74,7 @@ export default function Inserat() {
   const removeListing = async () => {
     if (!window.confirm(
       "Inserat wirklich löschen?\n\nHinweis: Bereits veröffentlichte Inserate "
-      + "zählen im laufenden Monat weiterhin auf dein Kontingent.")) return;
+      + "können jederzeit wieder veröffentlicht werden.")) return;
     try {
       await api.delete(`/resale/${l.id}`);
       toast.success("Inserat gelöscht");

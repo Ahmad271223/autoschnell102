@@ -617,7 +617,7 @@ function MarketplacePanel() {
 
       <div className="text-[11px] text-zinc-600">
         Fahrzeuge veröffentlichst du im jeweiligen Inserat (Bestand → Inserat → „Öffentlich
-        veröffentlichen" oder „Nur Netzwerk (privat)"). Dafür ist ein aktives Verkaufspaket nötig.
+        veröffentlichen" oder „Nur Netzwerk (privat)"). Das Verkaufen ist kostenlos und unbegrenzt.
       </div>
     </Section>
   );

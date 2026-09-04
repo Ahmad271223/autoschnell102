@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import os
+
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -25,7 +27,14 @@ from routes.bestand import current_haendler
 router = APIRouter()
 
 
-# ---------- Verkaufspakete (Preise Stand 05.08.2026) ----------
+# ---------- Verkaufspakete ----------
+# Beschluss 09/2026: Das VERKAUFEN von Fahrzeugen ist kostenlos und
+# unbegrenzt — jede Firma darf beliebig viele Fahrzeuge veroeffentlichen.
+# Die Paket-Verwaltung bleibt im Code erhalten und laesst sich mit
+# VERKAUF_KOSTENLOS=false wieder einschalten (Preise Stand 05.08.2026).
+VERKAUF_KOSTENLOS = os.environ.get(
+    "VERKAUF_KOSTENLOS", "true").strip().lower() not in ("0", "false", "no")
+
 SALE_PLANS = {
     "s5":  {"label": "Verkauf 5",  "quota": 5,  "price": 10.00},
     "s10": {"label": "Verkauf 10", "quota": 10, "price": 19.99},
@@ -229,7 +238,17 @@ def _current_period(period_start_iso: str) -> tuple:
 
 
 async def get_sale_plan_status(dealer_id: str) -> dict:
-    """Paket + Verbrauch des aktuellen Abrechnungszeitraums."""
+    """Paket + Verbrauch des aktuellen Abrechnungszeitraums.
+
+    Solange VERKAUF_KOSTENLOS gilt, ist jede Firma freigeschaltet und hat
+    KEIN Limit (quota None) — das Veroeffentlichen zaehlt dann nichts ab."""
+    if VERKAUF_KOSTENLOS:
+        period_key, p_start, p_end = _current_period(now_iso())
+        return {"active": True, "tier": "kostenlos", "label": "Kostenlos",
+                "kostenlos": True, "quota": None, "used": 0, "remaining": None,
+                "period_key": period_key, "period_start": p_start,
+                "period_end": p_end, "valid_until": None, "price": 0.0,
+                "plans": {}}
     dealer = await db.dealers.find_one(
         {"id": dealer_id}, {"_id": 0, "sale_plan": 1, "quota_usage": 1})
     plan = (dealer or {}).get("sale_plan")
@@ -285,6 +304,10 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
                                     user=Depends(current_haendler)):
     """Upgrade-/Enterprise-Anfrage — landet beim Admin mit Händler-ID,
     aktuellem Verbrauch, Wunschvolumen und Kontaktdaten."""
+    if VERKAUF_KOSTENLOS:
+        raise HTTPException(400, "Das Verkaufen von Fahrzeugen ist derzeit "
+                                 "kostenlos und unbegrenzt — es ist kein Paket "
+                                 "noetig.")
     status = await get_sale_plan_status(user["dealer_id"])
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     req_id = str(uuid.uuid4())

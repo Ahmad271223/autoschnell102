@@ -28,6 +28,31 @@ SUF = uuid.uuid4().hex[:8]
 PW = "Kontingent123!"
 
 
+def _verkauf_kostenlos() -> bool:
+    """Seit 09/2026 ist das Verkaufen kostenlos und unbegrenzt
+    (VERKAUF_KOSTENLOS). Die Kontingent-Regeln bleiben im Code und werden
+    hier weiter geprueft, sobald der Schalter wieder auf false steht."""
+    try:
+        import requests as _r
+        from auth import create_token  # noqa: F401  (nur zur Verfuegbarkeitspruefung)
+    except Exception:
+        return False
+    try:
+        r = _r.get(f"{API}/health", timeout=5)
+        if r.status_code != 200:
+            return False
+    except Exception:
+        return False
+    import os as _os
+    return (_os.environ.get("VERKAUF_KOSTENLOS", "true").strip().lower()
+            not in ("0", "false", "no"))
+
+
+pytestmark = pytest.mark.skipif(
+    _verkauf_kostenlos(),
+    reason="Verkaufen ist derzeit kostenlos und unbegrenzt (VERKAUF_KOSTENLOS=true)")
+
+
 def _db():
     from pymongo import MongoClient
     return MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME]

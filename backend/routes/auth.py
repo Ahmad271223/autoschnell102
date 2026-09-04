@@ -415,6 +415,7 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
         f"(gültig {RESET_TOKEN_TTL_MINUTES} Minuten):\n\n{link}\n\n"
         "Wenn du das nicht angefordert hast, ignoriere diese E-Mail einfach — "
         "dein Passwort bleibt unverändert.",
+        absender_name="AutoSchnell",
     )
     await log_activity("", u["id"], "auth.passwort.reset.angefordert",
                        meta={"ip": ip})

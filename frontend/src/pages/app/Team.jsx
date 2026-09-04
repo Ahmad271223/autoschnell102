@@ -97,7 +97,11 @@ export default function Team() {
             <div className="text-sm font-bold uppercase tracking-wide inline-flex items-center gap-2">
               <TrendingUp size={15} /> Weiterverkaufsplan
             </div>
-            {plan?.active ? (
+            {plan?.kostenlos ? (
+              <div className="mt-1 text-xs text-zinc-500">
+                Fahrzeuge verkaufen ist kostenlos — du kannst beliebig viele veröffentlichen.
+              </div>
+            ) : plan?.active ? (
               <div className="mt-1 text-xs text-zinc-500">
                 Abrechnungszeitraum {plan.period_start?.slice(0, 10)} – {plan.period_end?.slice(0, 10)}
               </div>
@@ -107,7 +111,12 @@ export default function Team() {
               </div>
             )}
           </div>
-          {plan?.active ? (
+          {plan?.kostenlos ? (
+            <div className="text-right">
+              <div className="text-2xl font-black">kostenlos</div>
+              <div className="text-[11px] text-zinc-500">unbegrenzt viele Fahrzeuge</div>
+            </div>
+          ) : plan?.active ? (
             <div className="text-right">
               <div className="text-2xl font-black tabular-nums">
                 {plan.used} / {plan.quota ?? "∞"}
@@ -132,8 +141,9 @@ export default function Team() {
           ))}
         </div>
         <div className="mt-2 text-[10px] text-zinc-600">
-          Paketwechsel erfolgt über den Betreiber — dein Klick sendet eine Anfrage.
-          Gezählt werden nur neu veröffentlichte Fahrzeuge im Zeitraum; Entwürfe zählen nie.
+          {plan?.kostenlos
+            ? "Das Veröffentlichen und Verkaufen von Fahrzeugen kostet derzeit nichts und ist nicht begrenzt."
+            : "Paketwechsel erfolgt über den Betreiber — dein Klick sendet eine Anfrage. Gezählt werden nur neu veröffentlichte Fahrzeuge im Zeitraum; Entwürfe zählen nie."}
         </div>
       </div>
 
