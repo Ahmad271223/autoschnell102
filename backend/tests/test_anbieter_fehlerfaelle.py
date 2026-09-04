@@ -209,3 +209,57 @@ def test_tagesbudget_klarer_text_und_zaehler_zurueck(monkeypatch):
             await db.provider_budget.delete_one({"_id": f"{tag}:firma:{dealer}"})
             await db.provider_budget.update_one({"_id": f"{tag}:gesamt"}, {"$inc": {"n": -1}})
     _mit_db(_lauf)
+
+
+def test_ohne_limit_wird_nie_gebremst(monkeypatch):
+    """Betreiber-Entscheidung 09/2026: Sucher duerfen unbegrenzt bei
+    mobile.de und AutoScout abrufen. 0 heisst KEIN Limit — nicht "alles
+    gesperrt". Gezaehlt wird trotzdem, davon lebt die Warnung."""
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_FIRMA", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_GESAMT", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESWARNUNG", 0)
+    dealer = f"firma-{uuid.uuid4().hex[:8]}"
+
+    async def _lauf(db):
+        from datetime import datetime, timezone
+        tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            for _ in range(25):
+                await provider_fetch._budget_pruefen(db, "mobile", dealer)
+            doc = await db.provider_budget.find_one({"_id": f"{tag}:firma:{dealer}"})
+            assert doc and doc["n"] == 25, doc
+        finally:
+            await db.provider_budget.delete_one({"_id": f"{tag}:firma:{dealer}"})
+            await db.provider_budget.update_one({"_id": f"{tag}:gesamt"},
+                                                {"$inc": {"n": -25}})
+    _mit_db(_lauf)
+
+
+def test_warnung_meldet_einmal_und_bremst_nicht(monkeypatch):
+    """Die Warnschwelle darf niemals einen Abruf verhindern."""
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_FIRMA", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_GESAMT", 0)
+    dealer = f"firma-{uuid.uuid4().hex[:8]}"
+
+    async def _lauf(db):
+        from datetime import datetime, timezone
+        tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        gesamt = await db.provider_budget.find_one({"_id": f"{tag}:gesamt"}) or {}
+        stand = int(gesamt.get("n", 0))
+        monkeypatch.setattr(provider_fetch, "TAGESWARNUNG", stand + 2)
+        try:
+            await provider_fetch._budget_pruefen(db, "mobile", dealer)   # stand+1
+            await provider_fetch._budget_pruefen(db, "mobile", dealer)   # stand+2 -> Warnung
+            await provider_fetch._budget_pruefen(db, "mobile", dealer)   # laeuft weiter
+            doc = await db.provider_budget.find_one({"_id": f"{tag}:firma:{dealer}"})
+            assert doc["n"] == 3, doc
+            n = await db.betriebsalarme.count_documents(
+                {"typ": "anbieter_viele_abrufe", "ref": tag})
+            assert n == 1, f"erwartet genau eine Warnung, gefunden {n}"
+        finally:
+            await db.provider_budget.delete_one({"_id": f"{tag}:firma:{dealer}"})
+            await db.provider_budget.update_one({"_id": f"{tag}:gesamt"},
+                                                {"$inc": {"n": -3}})
+            await db.betriebsalarme.delete_many(
+                {"typ": "anbieter_viele_abrufe", "ref": tag})
+    _mit_db(_lauf)

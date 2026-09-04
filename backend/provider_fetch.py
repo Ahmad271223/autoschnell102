@@ -29,12 +29,37 @@ def mock_vehicle(item_id: str) -> Dict[str, Any]:
 
 
 # Tagesbudget fuer KOSTENPFLICHTIGE Abrufe (mobile.de/AutoScout via Apify,
-# ~0,4-0,6 Cent je Abruf). Begrenzt je Firma und gesamt, damit ein
-# kompromittierter oder boeswilliger Account keine unbegrenzten Apify-/
-# Proxy-Kosten erzeugen kann (PR-Review 09/2026). Cache-Treffer kosten
-# nichts und zaehlen nicht — nur echte Frisch-Abrufe landen hier.
-TAGESLIMIT_JE_FIRMA = int(os.environ.get("ANBIETER_TAGESLIMIT_JE_FIRMA", "200"))
-TAGESLIMIT_GESAMT = int(os.environ.get("ANBIETER_TAGESLIMIT_GESAMT", "2000"))
+# ~0,4-0,6 Cent je Abruf). Cache-Treffer kosten nichts und zaehlen nicht —
+# nur echte Frisch-Abrufe landen hier.
+#
+# 0 (oder kleiner) = KEIN Limit. Betreiber-Entscheidung 09/2026: Sucher
+# sollen unbegrenzt bei mobile.de und AutoScout abrufen duerfen. Gezaehlt
+# wird trotzdem weiter — davon leben die Auswertung und die Warnung.
+TAGESLIMIT_JE_FIRMA = int(os.environ.get("ANBIETER_TAGESLIMIT_JE_FIRMA", "0"))
+TAGESLIMIT_GESAMT = int(os.environ.get("ANBIETER_TAGESLIMIT_GESAMT", "0"))
+# Ab dieser Zahl Abrufe an einem Tag gibt es EINEN Betriebsalarm — ein
+# Hinweis, kein Riegel. So faellt ein Ausreisser auf, bevor die Rechnung
+# kommt. 0 schaltet auch die Warnung ab.
+TAGESWARNUNG = int(os.environ.get("ANBIETER_TAGESWARNUNG", "500"))
+
+
+async def _warnen_wenn_viel(db, tag: str, stand: int) -> None:
+    """Einmal je Tag einen Betriebsalarm, wenn ungewoehnlich viel
+    abgerufen wurde. Bremst nichts — meldet nur, damit eine unerwartet
+    hohe Rechnung nicht unbemerkt entsteht."""
+    if TAGESWARNUNG <= 0 or stand != TAGESWARNUNG:
+        return
+    try:
+        from betrieb import alarm
+        kosten = stand * 0.005
+        await alarm(db, "anbieter_viele_abrufe", ref=tag,
+                    abrufe=stand, tag=tag,
+                    geschaetzte_kosten_eur=f"{kosten:.2f}",
+                    hinweis="Kostenpflichtige Abrufe bei mobile.de/AutoScout. "
+                            "Kein Limit gesetzt (ANBIETER_TAGESLIMIT_*=0) — "
+                            "bei Bedarf Guthaben bei Apify pruefen.")
+    except Exception:                       # noqa: BLE001
+        pass                                # Warnung darf nie bremsen
 
 
 async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
@@ -49,6 +74,7 @@ async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
     # Firma, die ihr eigenes Limit laengst ueberschritten hatte, mit jedem
     # abgelehnten Versuch weiter das GESAMTBUDGET aller anderen Firmen.
     belastet = []
+    gesamt_stand = 0
     for schluessel, limit in ((f"{tag}:firma:{dealer_id or 'ohne'}",
                                TAGESLIMIT_JE_FIRMA),
                               (f"{tag}:gesamt", TAGESLIMIT_GESAMT)):
@@ -57,7 +83,9 @@ async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
             {"$inc": {"n": 1}, "$setOnInsert": {"ablauf": ablauf}},
             upsert=True, return_document=ReturnDocument.AFTER)
         belastet.append(schluessel)
-        if doc["n"] > limit:
+        if schluessel.endswith(":gesamt"):
+            gesamt_stand = doc["n"]
+        if limit > 0 and doc["n"] > limit:
             for s in belastet:
                 await db.provider_budget.update_one({"_id": s}, {"$inc": {"n": -1}})
             raise RuntimeError(
@@ -65,6 +93,7 @@ async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
                 f"({limit}/Tag). Bekannte Links kommen weiter aus dem "
                 "Speicher; neue Links bitte morgen erneut — oder das Limit "
                 "in der .env erhöhen (ANBIETER_TAGESLIMIT_*).")
+    await _warnen_wenn_viel(db, tag, gesamt_stand)
 
 
 async def fetch_listing(db, source: str, item_id: str, url: str,
