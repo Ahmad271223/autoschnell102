@@ -3,7 +3,9 @@ self-password, cleanup trigger.
 """
 import base64
 import re
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, Literal, Optional
@@ -287,6 +289,12 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         # Sucher-Unteraccounts haben ein PERSÖNLICHES Abo (Phase 2).
         if u.get("role") == "sucher":
             sub_doc["subject_user_id"] = u["id"]
+            # Genau EIN aktives Abo je Konto (Index): vorheriges zuerst
+            # als "ersetzt" markieren, Historie bleibt.
+            await db.subscriptions.update_many(
+                {"subject_user_id": u["id"], "status": "active"},
+                {"$set": {"status": "ersetzt", "ersetzt_durch": sub_doc["id"],
+                          "updated_at": now_iso()}})
         await db.subscriptions.insert_one(sub_doc)
         await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.abo.vergeben",
                            ref=user_id, meta={"plan": plan, "expires_at": expires,
@@ -983,29 +991,70 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
     # Compare-and-Swap uebernommen, nie blind geloescht.
     sperre = f"abo:{sucher_id}"
     besitzer = str(uuid.uuid4())
-    try:
-        await db.sperren.insert_one({"_id": sperre, "owner": besitzer,
-                                     "seit": now_iso()})
-    except DuplicateKeyError:
-        alt = await db.sperren.find_one({"_id": sperre}) or {}
-        try:
-            alter = (datetime.now(timezone.utc)
-                     - datetime.fromisoformat(alt["seit"])).total_seconds()
-        except Exception:
-            alter = 999
-        if alter < 60:
-            raise HTTPException(409, "Freischaltung laeuft gerade — bitte "
-                                     "einen Moment warten (Doppelklick)")
-        r = await db.sperren.update_one(
-            {"_id": sperre, "owner": alt.get("owner")},
-            {"$set": {"owner": besitzer, "seit": now_iso()}})
-        if r.modified_count == 0:
-            raise HTTPException(409, "Freischaltung laeuft gerade — bitte "
-                                     "einen Moment warten (Doppelklick)")
-    try:
+    async with _sperre(sperre, besitzer):
         return await _abo_freischalten(sucher, sucher_id, body, gezahlt_am, admin)
+
+
+SPERRE_FRIST_S = 45           # so lange gilt eine Sperre ohne Herzschlag
+SPERRE_HERZSCHLAG_S = 15      # so oft wird sie waehrend der Arbeit verlaengert
+
+
+@asynccontextmanager
+async def _sperre(name: str, besitzer: str):
+    """Sperre mit Ablauf und Herzschlag (Audit 09/2026).
+
+    Vorher galt eine feste Frist von 60 s ab Beginn: dauerte eine
+    Freischaltung laenger, konnte ein zweiter Vorgang die Sperre
+    uebernehmen, waehrend der erste noch schrieb — doppelte
+    Verlaengerungen und Zahlungen waren moeglich. Jetzt traegt die Sperre
+    ein Ablaufdatum, das ein Hintergrund-Herzschlag alle 15 s
+    weiterschiebt; uebernommen wird nur eine wirklich abgelaufene Sperre."""
+    def _bis(sekunden: int) -> str:
+        return (datetime.now(timezone.utc)
+                + timedelta(seconds=sekunden)).isoformat()
+    belegt = HTTPException(409, "Freischaltung laeuft gerade — bitte einen "
+                                "Moment warten (Doppelklick)")
+    try:
+        await db.sperren.insert_one({"_id": name, "owner": besitzer,
+                                     "seit": now_iso(),
+                                     "bis": _bis(SPERRE_FRIST_S)})
+    except DuplicateKeyError:
+        alt = await db.sperren.find_one({"_id": name}) or {}
+        # Alte Sperren ohne "bis": auf die frueheren 60 s ab "seit" abbilden.
+        frist = alt.get("bis")
+        if not frist and alt.get("seit"):
+            try:
+                frist = (datetime.fromisoformat(alt["seit"])
+                         + timedelta(seconds=60)).isoformat()
+            except ValueError:
+                frist = None
+        if frist and frist > now_iso():
+            raise belegt
+        r = await db.sperren.update_one(
+            {"_id": name, "owner": alt.get("owner")},
+            {"$set": {"owner": besitzer, "seit": now_iso(),
+                      "bis": _bis(SPERRE_FRIST_S)}})
+        if r.modified_count == 0:
+            raise belegt
+
+    async def _herzschlag():
+        while True:
+            await asyncio.sleep(SPERRE_HERZSCHLAG_S)
+            r = await db.sperren.update_one(
+                {"_id": name, "owner": besitzer},
+                {"$set": {"bis": _bis(SPERRE_FRIST_S)}})
+            if r.matched_count == 0:
+                return                      # Sperre gehoert uns nicht mehr
+    schlag = asyncio.create_task(_herzschlag())
+    try:
+        yield
     finally:
-        await db.sperren.delete_one({"_id": sperre, "owner": besitzer})
+        schlag.cancel()
+        try:
+            await schlag
+        except (asyncio.CancelledError, Exception):   # noqa: B014
+            pass
+        await db.sperren.delete_one({"_id": name, "owner": besitzer})
 
 
 async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenIn,
@@ -1147,6 +1196,11 @@ async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
     gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
     if not gueltig_bis:
         raise HTTPException(400, "gueltig_bis (JJJJ-MM-TT) fehlt")
+    # Audit 09/2026: eine Laufzeitaenderung ohne Zahlung ist immer eine
+    # Ausnahme — sie braucht eine Begruendung im unveraenderlichen Verlauf.
+    grund = str(body.get("grund", ""))[:300].strip()
+    if not grund:
+        raise HTTPException(400, "Bitte einen Grund fuer die Laufzeitaenderung angeben")
     aktiv = await db.subscriptions.find_one(
         {"subject_user_id": sucher_id, "status": "active"},
         {"_id": 0, "id": 1, "expires_at": 1, "dealer_id": 1, "plan": 1},
@@ -1161,7 +1215,7 @@ async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
         "dealer_id": aktiv.get("dealer_id"), "abo_id": aktiv.get("id"),
         "plan": aktiv.get("plan"),
         "alt": aktiv.get("expires_at"), "neu": gueltig_bis,
-        "grund": str(body.get("grund", ""))[:300],
+        "art": "laufzeit_geaendert", "grund": grund,
         "admin_id": admin["id"], "admin_email": admin.get("email", ""),
         "created_at": now_iso(),
     })
@@ -1649,16 +1703,52 @@ async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
 
 
 @router.post("/admin/users/{user_id}/mfa-zuruecksetzen")
-async def admin_mfa_zuruecksetzen(user_id: str, admin=Depends(current_super_admin)):
-    """Nur Super-Admin: Zwei-Faktor eines (ausgesperrten) Admins entfernen —
-    der Betroffene richtet sie danach neu ein."""
-    u = await db.users.find_one({"id": user_id, "role": "admin"}, {"_id": 0, "id": 1, "email": 1})
+async def admin_mfa_zuruecksetzen(user_id: str, body: dict = Body(default={}),
+                                  admin=Depends(current_super_admin)):
+    """Nur Super-Admin: Zwei-Faktor eines AUSGESPERRTEN Admins entfernen —
+    der Betroffene richtet sie danach neu ein.
+
+    Audit 09/2026: Ein Selbstreset ist verboten — sonst koennte eine
+    gestohlene Super-Admin-Sitzung den zweiten Faktor einfach abschalten.
+    Wird das Konto eines ANDEREN Super-Admins zurueckgesetzt, muss der
+    Handelnde sein eigenes Passwort bestaetigen und einen Grund angeben;
+    der Vorgang loest zusaetzlich einen Betriebsalarm aus."""
+    if user_id == admin["id"]:
+        raise HTTPException(
+            400, "Die eigene Zwei-Faktor-Anmeldung kann hier nicht "
+                 "zurueckgesetzt werden. Zum Abschalten den Weg "
+                 "Einstellungen -> Abschalten mit gueltigem Code nutzen; "
+                 "bei Verlust des Geraets muss ein anderer Super-Admin "
+                 "zuruecksetzen.")
+    u = await db.users.find_one({"id": user_id, "role": "admin"},
+                                {"_id": 0, "id": 1, "email": 1, "is_super_admin": 1})
     if not u:
         raise HTTPException(404, "Admin-Konto nicht gefunden")
+    grund = str(body.get("grund", ""))[:300].strip()
+    if u.get("is_super_admin"):
+        passwort = str(body.get("passwort", ""))
+        eigener = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "password_hash": 1})
+        if not passwort or not verify_password(passwort, (eigener or {}).get("password_hash", "")):
+            raise HTTPException(401, "Zum Zuruecksetzen eines Super-Admin-Kontos "
+                                     "bitte das eigene Passwort bestaetigen")
+        if not grund:
+            raise HTTPException(400, "Bitte einen Grund angeben (wird protokolliert)")
     await db.users.update_one({"id": user_id},
                               {"$unset": {"mfa": ""}, "$set": {"current_session_id": None}})
+    await db.zugangs_aenderungen.insert_one({
+        "id": str(uuid.uuid4()), "art": "mfa_zurueckgesetzt",
+        "subject_user_id": user_id, "subject_email": u.get("email", ""),
+        "subject_super_admin": bool(u.get("is_super_admin")),
+        "alt": "zwei_faktor_aktiv", "neu": "zwei_faktor_entfernt",
+        "grund": grund, "admin_id": admin["id"],
+        "admin_email": admin.get("email", ""), "created_at": now_iso()})
     await log_activity("", admin["id"], "admin.mfa.zurueckgesetzt", ref=user_id,
-                       meta={"email": u.get("email", "")})
+                       meta={"email": u.get("email", ""), "grund": grund,
+                             "super_admin": bool(u.get("is_super_admin"))})
+    if u.get("is_super_admin"):
+        from betrieb import alarm
+        await alarm(db, "mfa_zurueckgesetzt", ref=u.get("email", user_id),
+                    von=admin.get("email", ""), grund=grund or "ohne Angabe")
     return {"ok": True}
 
 

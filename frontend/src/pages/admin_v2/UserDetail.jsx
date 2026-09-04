@@ -89,7 +89,11 @@ export default function AdminUserDetail() {
     if (!datum) { toast.error("Bitte ein Datum wählen"); return; }
     if (!sperren(s.id)) return;
     try {
-      await api.patch(`/admin/sucher/${s.id}/abo-gueltig-bis`, { gueltig_bis: datum });
+      // Der Server verlangt seit dem Audit 09/2026 einen Grund — die
+      // Änderung ohne Zahlung landet unveränderbar im Zugangsverlauf.
+      const grund = window.prompt("Grund für die Laufzeitänderung (wird protokolliert):");
+      if (!grund) return;
+      await api.patch(`/admin/sucher/${s.id}/abo-gueltig-bis`, { gueltig_bis: datum, grund });
       toast.success(`Gültig bis ${datum} gespeichert — danach wird automatisch gesperrt`);
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
       loadFirma();

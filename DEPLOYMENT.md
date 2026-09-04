@@ -335,3 +335,14 @@ python scripts/betriebsprobe.py app.deine-domain.de --dkim-selector resend   # D
 python scripts/offsite_pruefen.py --laden                                     # Offsite-Backup: Bucket, Object Lock, jüngstes Backup laden + prüfen
 python scripts/lasttest.py --users 100 --duration 120                         # nur gegen Staging mit MOCK_PROVIDER_FETCH=true
 ```
+
+## Stimmige Datensicherung ohne Replica Set
+
+MongoDB läuft in der Standard-Zusammenstellung ohne Replica Set. Dann liest die Sicherung eine Collection nach der anderen: laufende Buchungen oder Terminänderungen können dazwischenliegen, die Dateien passen also nicht auf die Sekunde zusammen. Zwei Wege:
+
+1. **Replica Set einrichten** (empfohlen): `mongod --replSet rs0` plus einmalig `rs.initiate()`. Die Sicherung nutzt dann automatisch einen Snapshot; das Manifest meldet `"konsistenz": "snapshot"`.
+2. **Schreibpause**: den nächtlichen Lauf mit `--wartung` starten. Für die Dauer der Sicherung antwortet die API auf schreibende Aufrufe mit 503 (Wartungsmodus), danach wird er automatisch wieder abgeschaltet.
+
+```bash
+python scripts/backup_mongo.py --wartung
+```

@@ -806,25 +806,38 @@ async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
         return {"ok": True, "zuteilung": appt.get("zuteilung") or "angenommen",
                 "unveraendert": True}
     if body.action == "annehmen":
-        await db.appointments.update_one(
-            {"id": appt_id, "driver_id": driver["id"]},
+        # Audit 09/2026: Compare-and-set auf "offen" — gleichzeitiges
+        # Annehmen und Ablehnen darf nicht beides erfolgreich melden.
+        r = await db.appointments.update_one(
+            {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"},
             {"$set": {"zuteilung": "angenommen",
                       "zuteilung_beantwortet_am": now_iso(),
-                      "updated_at": now_iso()}})
+                      "updated_at": now_iso()},
+             "$unset": {"zuteilung_neu_wegen_aenderung": ""}})
+        if r.modified_count == 0:
+            jetzt = await db.appointments.find_one(
+                {"id": appt_id}, {"_id": 0, "zuteilung": 1}) or {}
+            return {"ok": True, "zuteilung": jetzt.get("zuteilung") or "abgelehnt",
+                    "unveraendert": True}
         await log_activity(appt.get("dealer_id"), driver["id"],
                            "termin.fahrer.angenommen", ref=appt_id)
         return {"ok": True, "zuteilung": "angenommen"}
     grund = (body.grund or "").strip()[:500]
     notiz = f"[Fahrer] Fahrt abgelehnt" + (f": {grund}" if grund else "")
-    await db.appointments.update_one(
-        {"id": appt_id, "driver_id": driver["id"]},
+    r = await db.appointments.update_one(
+        {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"},
         {"$set": {"zuteilung": "abgelehnt",
                   "zuteilung_beantwortet_am": now_iso(),
                   "zuteilung_abgelehnt_von": driver.get("name") or driver["id"],
                   "zuteilung_abgelehnt_grund": grund,
                   "updated_at": now_iso(),
                   "notes": ((appt.get("notes") or "") + ("\n" if appt.get("notes") else "") + notiz)},
-         "$unset": {"driver_id": ""}})
+         "$unset": {"driver_id": "", "zuteilung_neu_wegen_aenderung": ""}})
+    if r.modified_count == 0:
+        jetzt = await db.appointments.find_one(
+            {"id": appt_id}, {"_id": 0, "zuteilung": 1}) or {}
+        return {"ok": True, "zuteilung": jetzt.get("zuteilung") or "angenommen",
+                "unveraendert": True}
     await log_activity(appt.get("dealer_id"), driver["id"],
                        "termin.fahrer.abgelehnt", ref=appt_id, meta={"grund": grund})
     return {"ok": True, "zuteilung": "abgelehnt"}

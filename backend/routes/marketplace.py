@@ -932,7 +932,11 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
          # Gegenangebot, darf die Annahme des ALTEN Betrags nicht auf den
          # neuen durchschlagen (Review-Workflow 09/2026).
          "counter_offer": it.get("counter_offer")},
-        {"$set": {"status": neuer_status, "updated_at": now_iso()},
+        {"$set": {"status": neuer_status, "updated_at": now_iso(),
+                  # Audit 09/2026: vereinbarter Preis verbindlich festhalten —
+                  # aus GENAU dem Gegenangebot, das der Kaeufer gelesen hat.
+                  **({"agreed_price": round(float(it.get("counter_offer") or 0), 2)}
+                     if body.action == "annehmen" else {})},
          "$push": {"history": {"von": "kaeufer", "aktion": body.action,
                                "angebot": it.get("counter_offer") if body.action == "annehmen" else None,
                                "nachricht": body.message, "zeit": now_iso()}}})

@@ -29,6 +29,8 @@ import asyncio
 import logging
 import os
 import uuid
+
+from pymongo import ReturnDocument
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -232,13 +234,33 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
     if plan == "marktplatz":
         days = PLAN_PRICES["marktplatz"]["days"]
         u = await db.users.find_one({"id": tx.get("user_id")},
-                                    {"_id": 0, "marketplace_access": 1})
+                                    {"_id": 0, "id": 1, "marketplace_access": 1})
+        # Achtung: bei einem Konto OHNE marketplace_access liefert die
+        # Projektion sonst ein leeres Dokument — deshalb auf None pruefen,
+        # nicht auf "leer".
+        if u is None:
+            raise RuntimeError(
+                f"Kein Konto zu Zahlung {session_id} gefunden "
+                f"(user_id={tx.get('user_id')})")
         basis = now
         alt = _parse_ts(((u or {}).get("marketplace_access") or {}).get("expires_at"))
         if alt and alt > basis:
             basis = alt
-        expires_at = (basis + timedelta(days=days)).isoformat()
-        await db.users.update_one(
+        # Audit 09/2026: Das Ablaufdatum wird EINMALIG je Stripe-Session
+        # festgeschrieben. Scheitert danach etwas (z.B. der Beleg) und der
+        # Reparaturlauf wiederholt die Freischaltung, wird derselbe Wert
+        # erneut gesetzt statt ein zweites Mal um 30 Tage verlaengert.
+        grant = await db.zugang_grants.find_one_and_update(
+            {"session_id": session_id},
+            {"$setOnInsert": {
+                "id": str(uuid.uuid4()), "session_id": session_id,
+                "user_id": tx.get("user_id"), "plan": "marktplatz",
+                "tage": days, "basis": basis.isoformat(),
+                "expires_at": (basis + timedelta(days=days)).isoformat(),
+                "created_at": now_iso()}},
+            upsert=True, return_document=ReturnDocument.AFTER)
+        expires_at = grant["expires_at"]
+        r = await db.users.update_one(
             {"id": tx.get("user_id")},
             {"$set": {"marketplace_access": {
                 "active": True, "plan": "monthly",
@@ -247,10 +269,24 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
                 "activated_by": "stripe",
                 "session_id": session_id,
                 "updated_at": now_iso()}}})
+        if r.matched_count == 0:
+            raise RuntimeError(
+                f"Zugang zu Zahlung {session_id} konnte keinem Konto "
+                f"zugeordnet werden (user_id={tx.get('user_id')})")
         return expires_at
     # Alt-Pläne (Bestands-Transaktionen von vor 09/2026)
     days = 30 if plan == "monthly" else 365
     expires_at = (now + timedelta(days=days)).isoformat()
+    # Es gilt genau EIN aktives Abo je Konto (Index
+    # ein_aktives_abo_je_konto). Ein bisheriges Abo wird deshalb ZUERST
+    # als "ersetzt" markiert — die Historie bleibt erhalten, die eigene
+    # Session ist ausgenommen (Wiederholungslauf).
+    if tx.get("user_id"):
+        await db.subscriptions.update_many(
+            {"subject_user_id": tx["user_id"], "status": "active",
+             "session_id": {"$ne": session_id}},
+            {"$set": {"status": "ersetzt", "ersetzt_durch": session_id,
+                      "updated_at": now_iso()}})
     await db.subscriptions.update_one(
         {"session_id": session_id},
         {"$setOnInsert": {

@@ -187,7 +187,20 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     )
     if not existing:
         raise HTTPException(404, "Termin nicht gefunden")
-    update = body.model_dump(exclude_none=True)
+    # Audit 09/2026 (Befund "Terminaenderungen loeschen Daten"): NUR die
+    # tatsaechlich mitgesendeten Felder schreiben. exclude_none=True hat
+    # die Modell-Standardwerte ("" / status "offen") mitgeschrieben, sodass
+    # eine Teilaenderung (z.B. nur driver_id) Verkaeuferdaten, Adresse,
+    # Datum, Uhrzeit und Notizen geleert und den Status zurueckgesetzt hat.
+    update = body.model_dump(exclude_unset=True)
+    # Ein ausdruecklich gesendetes null bleibt nur dort erhalten, wo es
+    # etwas bedeutet (driver_id = Fahrer entfernen); sonst wuerde null
+    # Pflichtfelder auf None setzen.
+    for feld in ("title", "seller_name", "seller_phone", "seller_email",
+                 "pickup_address", "pickup_date", "pickup_time", "notes",
+                 "status", "vehicle_id", "contract_id"):
+        if feld in update and update[feld] is None:
+            update.pop(feld)
     # Auch beim Aendern: verknuepfte IDs muessen dem Haendler gehoeren.
     if update.get("vehicle_id") and not await db.vehicles.find_one(
             {"id": update["vehicle_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
@@ -202,6 +215,17 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             update["zuteilung_am"] = now_iso()
         elif not update.get("driver_id"):
             update["zuteilung"] = None
+    # Audit 09/2026: Aendert sich nach der Zusage des Fahrers etwas
+    # Wesentliches (Datum, Uhrzeit, Abholadresse), gilt die alte Zusage
+    # nicht mehr — der Fahrer muss die geaenderte Fahrt neu bestaetigen.
+    if (existing.get("zuteilung") == "angenommen"
+            and "driver_id" not in update
+            and any(f in update and (update[f] or "") != (existing.get(f) or "")
+                    for f in ("pickup_date", "pickup_time", "pickup_address"))):
+        update["zuteilung"] = "offen"
+        update["zuteilung_am"] = now_iso()
+        update["zuteilung_neu_wegen_aenderung"] = True
+        update.pop("zuteilung_beantwortet_am", None)
     update["updated_at"] = now_iso()
     pickup_changed = (
         update.get("pickup_date")

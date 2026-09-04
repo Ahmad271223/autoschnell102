@@ -66,6 +66,27 @@ export default function AdminUsers() {
       .join(" ").toLowerCase().includes(s));
   }, [users, q]);
 
+  // Zwei-Faktor eines AUSGESPERRTEN Admins zurücksetzen. Das eigene Konto
+  // ist ausgenommen; bei einem anderen Super-Admin verlangt der Server das
+  // eigene Passwort und einen Grund (Audit 09/2026).
+  const mfaZuruecksetzen = async (u) => {
+    if (!window.confirm(`Zwei-Faktor von ${u.email} zurücksetzen? Das Konto wird abgemeldet.`)) return;
+    const daten = {};
+    if (u.is_super_admin) {
+      const grund = window.prompt(`${u.email} ist Super-Admin. Bitte einen Grund angeben (wird protokolliert):`);
+      if (!grund) return;
+      const passwort = window.prompt("Zur Bestätigung dein eigenes Passwort:");
+      if (!passwort) return;
+      daten.grund = grund;
+      daten.passwort = passwort;
+    }
+    try {
+      await api.post(`/admin/users/${u.id}/mfa-zuruecksetzen`, daten);
+      toast.success("Zwei-Faktor zurückgesetzt");
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
   const toggleActive = async (u) => {
     if (u.active) {
       const firma = u.role === "dealer";
@@ -186,13 +207,13 @@ export default function AdminUsers() {
                       {u.active ? <><Lock size={14}/>Sperren</> : <><Unlock size={14}/>Entsperren</>}
                     </Button>
                     </>)}
-                    {superAdmin && u.role === "admin" && u.mfa_aktiv && (
+                    {superAdmin && u.role === "admin" && u.mfa_aktiv && u.id !== ich?.id && (
 
                       <Button variant="outline" size="sm" data-testid={`user-mfa-reset-${u.id}`}
 
                               title="Zwei-Faktor zurücksetzen (ausgesperrter Admin richtet neu ein)"
 
-                              onClick={async () => { if (!window.confirm(`Zwei-Faktor von ${u.email} zurücksetzen?`)) return; try { await api.post(`/admin/users/${u.id}/mfa-zuruecksetzen`); toast.success("Zwei-Faktor zurückgesetzt"); load(); } catch (e) { toast.error(errMsg(e)); } }}>
+                              onClick={() => mfaZuruecksetzen(u)}>
 
                         2FA zurücksetzen
 

@@ -402,12 +402,12 @@ def test_14_gueltig_bis_frei_waehlbar_und_automatische_sperre(welt):
                                         sort=[("created_at", -1)])["period_until"].startswith(bis)
     # Ungueltiges Datum -> 400
     r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
-                       headers=welt["A"], json={"gueltig_bis": "31.12.2026"}, timeout=30)
+                       headers=welt["A"], json={"gueltig_bis": "31.12.2026", "grund": "Test: Laufzeit angepasst"}, timeout=30)
     assert r.status_code == 400, r.text[:200]
     # Nur Datum aendern: KEINE neue Zahlung, Liste zeigt neues Datum
     neu = (heute + timedelta(days=10)).isoformat()
     r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
-                       headers=welt["A"], json={"gueltig_bis": neu}, timeout=30)
+                       headers=welt["A"], json={"gueltig_bis": neu, "grund": "Test: Laufzeit angepasst"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     assert dbx.manual_payments.count_documents({"subject_user_id": welt["sucher_id"]}) == vorher + 1
     zeile = next(x for x in requests.get(
@@ -418,7 +418,7 @@ def test_14_gueltig_bis_frei_waehlbar_und_automatische_sperre(welt):
     # Datum in der Vergangenheit -> Sucher-Funktion automatisch gesperrt
     gestern = (heute - timedelta(days=1)).isoformat()
     r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
-                       headers=welt["A"], json={"gueltig_bis": gestern}, timeout=30)
+                       headers=welt["A"], json={"gueltig_bis": gestern, "grund": "Test: Laufzeit angepasst"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     zeile = next(x for x in requests.get(
         f"{API}/admin/dealers/{welt['dealer_id']}/sucher", headers=welt["A"],
@@ -431,7 +431,7 @@ def test_14_gueltig_bis_frei_waehlbar_und_automatische_sperre(welt):
     # Abgelaufen per Datum = weiterhin per neuem Datum verlaengerbar (ohne
     # neue Zahlung) — der Betreiber steuert die Gueltigkeit frei.
     r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
-                       headers=welt["A"], json={"gueltig_bis": bis}, timeout=30)
+                       headers=welt["A"], json={"gueltig_bis": bis, "grund": "Test: Laufzeit angepasst"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert dbx.manual_payments.count_documents({"subject_user_id": welt["sucher_id"]}) == vorher + 1
     # Aufgehobenes Abo (plan=null): kein Datum mehr setzbar (404)
@@ -439,5 +439,5 @@ def test_14_gueltig_bis_frei_waehlbar_und_automatische_sperre(welt):
                       headers=welt["A"], json={"plan": None}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     r = requests.patch(f"{API}/admin/sucher/{welt['sucher_id']}/abo-gueltig-bis",
-                       headers=welt["A"], json={"gueltig_bis": bis}, timeout=30)
+                       headers=welt["A"], json={"gueltig_bis": bis, "grund": "Test: Laufzeit angepasst"}, timeout=30)
     assert r.status_code == 404, r.text[:200]

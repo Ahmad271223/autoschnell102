@@ -249,8 +249,11 @@ export default function DriverDashboard() {
                         {a.zuteilung === "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
                           <div className="pt-2 border-t" style={{ borderColor: "var(--border-default)" }}
                                data-testid={`zuteilung-${a.id}`}>
-                            <div className="text-xs mb-2 font-semibold" style={{ color: "var(--accent-green)" }}>
-                              Neue Fahrt zugeteilt — annehmen?
+                            <div className="text-xs mb-2 font-semibold"
+                                 style={{ color: a.zuteilung_neu_wegen_aenderung ? "var(--accent-red)" : "var(--accent-green)" }}>
+                              {a.zuteilung_neu_wegen_aenderung
+                                ? "Fahrt wurde geändert (Datum, Uhrzeit oder Adresse) — bitte erneut bestätigen"
+                                : "Neue Fahrt zugeteilt — annehmen?"}
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <button onClick={() => zuteilung(a.id, "annehmen")} disabled={busy === a.id}

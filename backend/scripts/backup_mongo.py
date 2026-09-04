@@ -121,6 +121,26 @@ def dump_collection(coll, out_dir: Path, session=None) -> int:
     return n
 
 
+def wartung_setzen(db, an: bool, logfile: Path) -> bool:
+    """Wartungsmodus schalten (Audit 09/2026, Befund "Backup nicht stimmig").
+
+    Ohne Replica Set gibt es keine Snapshot-Sicht. Mit --wartung pausiert das
+    Backend fuer die Dauer des Laufs alle Schreibzugriffe (die Middleware
+    antwortet mit 503), sodass die einzelnen Collections zusammenpassen.
+    Liefert True, wenn geschaltet werden konnte."""
+    try:
+        db.system_flags.update_one(
+            {"_id": "wartungsmodus"},
+            {"$set": {"aktiv": bool(an), "grund": "Datensicherung laeuft",
+                      "gesetzt_am": datetime.now(timezone.utc).isoformat()}},
+            upsert=True)
+        log(f"  Wartungsmodus {'AN' if an else 'AUS'} (Schreibpause)", logfile)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"  WARNUNG: Wartungsmodus konnte nicht geschaltet werden: {exc}", logfile)
+        return False
+
+
 def dump_datenbank(client, db, names, target: Path, logfile: Path):
     """Alle Collections nach target schreiben. Liefert (counts, konsistenz).
 
@@ -144,6 +164,11 @@ def dump_datenbank(client, db, names, target: Path, logfile: Path):
             konsistenz = "best-effort (snapshot fehlgeschlagen)"
     else:
         konsistenz = "best-effort (standalone)"
+        log("  WARNUNG: MongoDB laeuft OHNE Replica Set — die Sicherung wird "
+            "Collection fuer Collection gelesen und ist damit nicht auf eine "
+            "Sekunde genau in sich stimmig. Abhilfe: Replica Set einrichten "
+            "(mongod --replSet rs0) ODER die Sicherung mit --wartung starten "
+            "(pausiert Schreibzugriffe fuer die Dauer des Laufs).", logfile)
     counts = {}
     for name in names:
         counts[name] = dump_collection(db[name], target)
@@ -304,7 +329,8 @@ def rotate(base: Path, logfile: Path) -> None:
         log(f"Altes Backup entfernt: {old.name}", logfile)
 
 
-def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None) -> int:
+def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
+                     wartung: bool = False) -> int:
     """Ein komplettes Backup nach base/autoschnell-<stamp>. Exit-Code wie main()."""
     db_name = db_name or DB_NAME
     mongo_url = mongo_url or MONGO_URL
@@ -332,12 +358,21 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None) -> 
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
 
+    # Schreibpause nur, wenn ausdruecklich gewuenscht (Standalone-Mongo):
+    # dann pausiert das Backend Schreibzugriffe, damit die Collections
+    # zusammenpassen (Audit 09/2026).
+    pause = wartung and wartung_setzen(db, True, logfile)
     try:
         counts, konsistenz = dump_datenbank(client, db, names, target, logfile)
     except Exception as exc:  # noqa: BLE001
         log(f"FEHLER beim Sichern der Datenbank: {exc}", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
+    finally:
+        if pause:
+            wartung_setzen(db, False, logfile)
+    if pause:
+        konsistenz = "stimmig (Schreibpause)"
     log(f"  Konsistenz: {konsistenz}", logfile)
 
     # ---- Datei-Speicher ----
@@ -418,8 +453,11 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None) -> 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="AutoSchnell-Backup: MongoDB + Datei-Speicher")
     ap.add_argument("--dir", default=str(DEFAULT_DIR))
+    ap.add_argument("--wartung", action="store_true",
+                    help="Schreibzugriffe waehrend der Sicherung pausieren "
+                         "(noetig fuer eine stimmige Sicherung ohne Replica Set)")
     args = ap.parse_args(argv)
-    return backup_erstellen(Path(args.dir))
+    return backup_erstellen(Path(args.dir), wartung=args.wartung)
 
 
 if __name__ == "__main__":

@@ -338,7 +338,7 @@ def test_07_gueltig_bis_grenzfaelle(welt):
                           json={"plan": "monthly", "gueltig_bis": kaputt}, timeout=60)
         assert r.status_code == 400, (kaputt, r.text[:200])
         r = requests.patch(f"{API}/admin/sucher/{sid}/abo-gueltig-bis", headers=welt["A"],
-                           json={"gueltig_bis": kaputt}, timeout=60)
+                           json={"gueltig_bis": kaputt, "grund": "Test: Laufzeit angepasst"}, timeout=60)
         assert r.status_code == 400, (kaputt, r.text[:200])
     # nichts gebucht, Abo unveraendert
     assert dbx.manual_payments.count_documents({"subject_user_id": sid}) == zahlungen
@@ -361,7 +361,7 @@ def test_07_gueltig_bis_grenzfaelle(welt):
     assert zeile["subscription"]["status"] == "expired"
     # unbekanntes Konto
     assert requests.patch(f"{API}/admin/sucher/gibtesnicht/abo-gueltig-bis", headers=welt["A"],
-                          json={"gueltig_bis": "2030-01-01"}, timeout=60).status_code == 404
+                          json={"gueltig_bis": "2030-01-01", "grund": "Test: Laufzeit angepasst"}, timeout=60).status_code == 404
     assert requests.post(f"{API}/admin/sucher/gibtesnicht/abo", headers=welt["A"],
                          json={"plan": "monthly"}, timeout=60).status_code == 404
 

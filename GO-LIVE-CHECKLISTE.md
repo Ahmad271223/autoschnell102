@@ -104,3 +104,20 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 3. Datenschutz/AGB: Platzhalter `[…]` ausfüllen, USt-Entscheidung bestätigen, juristische Prüfung.
 4. Staging-Abnahme nach DEPLOYMENT.md (Update, Rollback, Backup/Restore, Stripe-Testkauf, Lasttest).
 5. Erst danach: Merge + Deploy; `VERTRAG_LOESCHUNG_AKTIV` erst nach Backup + Bestandsprüfung scharf schalten.
+
+## Pruefbericht Runde 6 (09/2026)
+
+| Befund | Stand | Was/Wo |
+|--------|-------|--------|
+| Terminänderung löschte vorhandene Daten | ✅ | `PUT /appointments/{id}` schreibt nur noch mitgesendete Felder (`exclude_unset`); ausdrückliches `null` wirkt nur bei `driver_id`. Test: `test_befunde_runde6.py::test_01`. |
+| Stripe-Freischaltung nicht genau einmal | ✅ | Ablaufdatum je Stripe-Session einmalig in `zugang_grants` festgeschrieben, danach nur noch übernommen; `matched_count` wird geprüft, fehlendes Konto meldet einen Fehler statt still zu verpuffen. Tests: `test_05`, `test_06`. |
+| Super-Admin konnte eigene 2FA zurücksetzen | ✅ | Selbstreset gesperrt; fremdes Super-Admin-Konto nur mit eigenem Passwort **und** Grund, mit Eintrag in `zugangs_aenderungen` und Betriebsalarm. Test: `test_04`. |
+| Produktionsprüfung lief zu spät | ✅ | `pruefe_produktion` läuft jetzt am Anfang von `migrationen.py`, also vor Indizes und Seeds — das Image startet Migration vor uvicorn. |
+| Backup ohne Replica Set nicht stimmig | ✅ 🔧 | Warnung im Backup-Lauf; neuer Schalter `--wartung` pausiert Schreibzugriffe für die Dauer der Sicherung (Manifest: „stimmig (Schreibpause)“). **Betreiber:** Replica Set einrichten *oder* nächtlichen Lauf mit `--wartung` starten. |
+| Fahrerbestätigung nicht race-sicher | ✅ | Annehmen/Ablehnen schreibt nur noch mit `zuteilung: "offen"` im Filter; die zweite Antwort meldet `unveraendert`. Test: `test_02`. |
+| Geänderte Fahrt blieb angenommen | ✅ | Ändern sich Datum, Uhrzeit oder Abholadresse nach der Zusage, springt die Zuteilung auf „offen“ (`zuteilung_neu_wegen_aenderung`), der Fahrer muss neu bestätigen. Test: `test_03`. |
+| Angenommener Gegenvorschlag ohne Preis | ✅ | Nimmt der Käufer an, wird `agreed_price` aus genau dem gelesenen Gegenangebot verbindlich gespeichert. |
+| Server-Abruf per Feld erzwingbar | ✅ | Der Rückfall ohne Browser-Erweiterung bleibt, ist aber serverseitig je Firma und Tag gedeckelt (`ABRUF_RUECKFALL_TAGESLIMIT`, Standard 25) und wird protokolliert. |
+| Abo-Sperre lief nach 60 s ab | ✅ | Sperre mit Ablaufdatum und Herzschlag (alle 15 s verlängert); übernommen wird nur eine wirklich abgelaufene Sperre. |
+| „Genau ein aktives Abo“ nicht in der DB erzwungen | ✅ | Eindeutiger Teil-Index `ein_aktives_abo_je_konto` (nur `status=active` mit echter Konto-ID); scheitert die Anlage wegen Altbestand, nennt ein Betriebsalarm die Konten. |
+| Sperren/Laufzeitänderungen ohne Verlauf | ✅ | Laufzeitänderung ohne Zahlung verlangt einen Grund; alt/neu/Grund/Admin liegen unveränderbar in `zugangs_aenderungen` (auch beim 2FA-Reset). Test: `test_07`. |

@@ -798,6 +798,30 @@ async def _alle_indexe():
         if os.environ.get("APP_ENV", "").strip().lower() == "production":
             raise
     await db.subscriptions.create_index([("subject_user_id", 1), ("status", 1), ("created_at", -1)])
+    # Audit 09/2026: "genau ein aktives Abo je Konto" gilt jetzt auch in
+    # der Datenbank. Findet sich Altbestand mit mehreren aktiven Abos,
+    # scheitert die Indexanlage — dann bleibt es bei der Pruefung im Code
+    # und ein Betriebsalarm nennt die betroffenen Konten.
+    try:
+        # Nur echte Konto-Zuordnungen: Alt-Abos ohne subject_user_id (reine
+        # Firmen-Abos aus der Anfangszeit) sind vom Index ausgenommen.
+        await db.subscriptions.create_index(
+            [("subject_user_id", 1)], unique=True,
+            partialFilterExpression={"status": "active",
+                                     "subject_user_id": {"$type": "string"}},
+            name="ein_aktives_abo_je_konto")
+    except Exception as exc:            # noqa: BLE001
+        log.error("Index ein_aktives_abo_je_konto nicht anlegbar: %s", exc)
+        doppelte = await db.subscriptions.aggregate([
+            {"$match": {"status": "active", "subject_user_id": {"$type": "string"}}},
+            {"$group": {"_id": "$subject_user_id", "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}}, {"$limit": 20}]).to_list(20)
+        if doppelte:
+            from betrieb import alarm
+            await alarm(db, "mehrfache_aktive_abos", ref="subscriptions",
+                        konten=", ".join(str(d["_id"]) for d in doppelte),
+                        hinweis="Alt-Abos auf status=ersetzt setzen, danach "
+                                "startet der Index automatisch")
     await db.manual_payments.create_index("vorgang_id", unique=True, sparse=True,
                                           name="zahlung_je_vorgang")
     await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])

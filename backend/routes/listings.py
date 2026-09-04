@@ -86,6 +86,35 @@ class ListingURLIn(BaseModel):
 # =========================================================
 #                  MOBILE.DE COMPARE
 # =========================================================
+# Rueckfall ohne Browser-Erweiterung (Audit 09/2026): Der Helfer holt
+# Kleinanzeigen-Seiten normalerweise ueber den Browser des Nutzers, damit
+# die Server-IP nicht auffaellt. Wer den Helfer nicht installiert hat,
+# darf trotzdem arbeiten — aber wie oft, entscheidet der SERVER: pro Firma
+# und Tag gedeckelt und protokolliert. Vorher genuegte ein Feld in der
+# Anfrage ("ohne_erweiterung"), um den Schutz beliebig oft auszuhebeln.
+RUECKFALL_TAGESLIMIT = int(os.environ.get("ABRUF_RUECKFALL_TAGESLIMIT", "25"))
+
+
+async def _rueckfall_erlaubt(gewuenscht: bool, user: dict) -> bool:
+    """True = der Server darf dieses eine Mal selbst abrufen."""
+    if not gewuenscht:
+        return False
+    if RUECKFALL_TAGESLIMIT <= 0:
+        return False
+    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    schluessel = f"{tag}:rueckfall:{user.get('dealer_id') or user.get('id') or 'ohne'}"
+    doc = await db.provider_budget.find_one_and_update(
+        {"_id": schluessel},
+        {"$inc": {"n": 1},
+         "$setOnInsert": {"ablauf": datetime.now(timezone.utc) + timedelta(days=2)}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    if doc["n"] > RUECKFALL_TAGESLIMIT:
+        await db.provider_budget.update_one({"_id": schluessel}, {"$inc": {"n": -1}})
+        log.warning("Rueckfall-Limit erreicht fuer %s", schluessel)
+        return False
+    return True
+
+
 @router.post("/mobile/compare")
 async def compare(body: CompareIn, background: BackgroundTasks,
                   user=Depends(require_active_sub)):
@@ -130,7 +159,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
     client_hit = None
     if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
-            and not body.ohne_erweiterung):
+            and not await _rueckfall_erlaubt(body.ohne_erweiterung, user)):
         client_hit = await peek_cached_listing(
             db, raw_url, dealer_id=user.get("dealer_id"))
         if client_hit is None:
@@ -460,7 +489,7 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
                 "source": source, "item_id": identity["item_id"]}
 
     if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
-            and not body.ohne_erweiterung):
+            and not await _rueckfall_erlaubt(body.ohne_erweiterung, user)):
         return {"status": "needs_client_fetch", "url": raw_url,
                 "source": source,
                 "hint": "Bitte über die Browser-Erweiterung laden."}

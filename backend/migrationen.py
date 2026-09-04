@@ -179,6 +179,14 @@ def _main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s - %(levelname)s - %(message)s")
 
+    # Audit 09/2026: Die strenge Produktionspruefung MUSS vor jeder
+    # Datenbankaenderung laufen. Das Image startet erst migrationen.py
+    # (Indizes + Seeds) und danach uvicorn — eine unsichere Konfiguration
+    # haette also bereits Migrationen und Seeds ausgefuehrt, bevor der
+    # Serverstart abbricht.
+    from production_check import pruefe_produktion
+    pruefe_produktion(log)
+
     async def lauf():
         import server  # registriert ensure_indexes/seeds
         from deps import db
