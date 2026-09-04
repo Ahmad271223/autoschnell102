@@ -208,8 +208,19 @@ def test_01_config_spiegelt_flag(env, welt):
         async with _client(_app()) as c:
             r = await c.get("/api/payments/config")
             assert r.status_code == 200, r.text
-            assert r.json() == {"stripe_aktiv": True, "preis": 20.0,
-                                "waehrung": "eur", "tage": 30}
+            daten = r.json()
+            # Feldweise pruefen statt die ganze Antwort zu vergleichen: ein
+            # zusaetzliches Feld ist kein Fehler, ein falscher Wert schon.
+            # (Die Gleichheitspruefung brach beim Ergaenzen von
+            # marktplatz_kostenlos, obwohl nichts kaputt war.)
+            for feld, wert in (("stripe_aktiv", True), ("preis", 20.0),
+                               ("waehrung", "eur"), ("tage", 30)):
+                assert daten[feld] == wert, (feld, daten)
+            # Die Startseite braucht die Angabe, ob der Zugang Geld kostet.
+            assert isinstance(daten["marktplatz_kostenlos"], bool), daten
+            # Nichts Geheimes in einer oeffentlichen Antwort.
+            for verboten in ("sk_", "secret", "key", "password"):
+                assert verboten not in r.text.lower(), (verboten, r.text)
             env.delenv("STRIPE_WEBHOOK_SECRET")
             assert (await c.get("/api/payments/config")).json()["stripe_aktiv"] is False
             env.setenv("STRIPE_WEBHOOK_SECRET", SECRET)
