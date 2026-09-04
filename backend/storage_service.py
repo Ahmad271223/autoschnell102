@@ -17,11 +17,15 @@ Keys sind relative Pfade wie "resale/<dealer_id>/<uuid>.jpg".
 """
 from __future__ import annotations
 
+import io
+import logging
 import os
 import re
 import uuid
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("autohandel.storage")
 
 _UPLOAD_ROOT = Path(__file__).resolve().parent / "uploads"
 
@@ -74,6 +78,77 @@ def validate_image_bytes(raw: bytes, wo: str = "Foto") -> None:
             return
     raise StorageError(f"{wo}: kein gueltiges Bildformat "
                        "(erlaubt: JPEG, PNG, WebP, GIF)")
+
+
+# ---------- Fotos verkleinern (Speicher-Audit 09/2026) ----------
+# Handyfotos kommen mit 4000 Bildpunkten Kantenlaenge und 3-8 MB an. Fuer
+# ein Inserat, ein Abhol-Protokoll oder ein Vertrags-PDF reicht ein
+# Bruchteil davon. Ungefiltert waren nach kurzer Zeit ueber 11 GB Fotos im
+# Speicher — das kostet Geld, verlangsamt Sicherungen und macht das Laden
+# der Seite langsam. Deshalb wird JEDES Foto beim Hochladen einmal
+# verkleinert; das Original wird nicht aufgehoben, es wird nirgends
+# gebraucht.
+MAX_BILD_KANTE = int(os.environ.get("MAX_IMAGE_EDGE", "2000"))
+BILD_QUALITAET = int(os.environ.get("IMAGE_QUALITY", "82"))
+# Schutz vor "Bildbomben": eine 2 MB grosse PNG-Datei kann entpackt
+# mehrere Gigabyte Arbeitsspeicher belegen. Die Groesse steht im Kopf der
+# Datei und wird geprueft, BEVOR ein Bildpunkt entpackt wird.
+MAX_BILD_PIXEL = int(os.environ.get("MAX_IMAGE_PIXELS", str(80 * 1000 * 1000)))
+
+
+def bild_verkleinern(raw: bytes, wo: str = "Foto",
+                     ziel_format: str = "JPEG") -> bytes:
+    """Verkleinert ein Foto auf MAX_BILD_KANTE und liefert die neuen Bytes.
+
+    `ziel_format` muss zur Datei-Endung des Keys passen ("JPEG" fuer
+    .jpg, "PNG" fuer .png) — sonst behauptet der Server beim Ausliefern
+    ein anderes Format als die Datei wirklich hat.
+
+    Bewusst fehlertolerant: laesst sich das Bild nicht umwandeln, kommt
+    das Original zurueck. Ein Foto darf nie daran scheitern, dass die
+    Verkleinerung nicht klappt — es wurde vorher schon als echtes Bild
+    geprueft. Die EINE Ausnahme ist die Bildbombe: die wird abgelehnt.
+    """
+    ziel_format = ziel_format.upper()
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:                     # Pillow fehlt -> unveraendert
+        return raw
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            breite, hoehe = im.size
+            if breite * hoehe > MAX_BILD_PIXEL:
+                raise StorageError(
+                    f"{wo}: Bild hat zu viele Bildpunkte "
+                    f"({breite}x{hoehe}). Bitte ein normales Foto verwenden.")
+            passt_schon = (im.format or "").upper() == ziel_format
+            if passt_schon and max(breite, hoehe) <= MAX_BILD_KANTE:
+                return raw                  # schon klein genug und richtig
+            # Drehung aus den Aufnahme-Daten anwenden, sonst liegen Fotos
+            # vom Handy nach dem Umwandeln auf der Seite.
+            bild = ImageOps.exif_transpose(im) or im
+            bild.thumbnail((MAX_BILD_KANTE, MAX_BILD_KANTE), Image.LANCZOS)
+            ziel = io.BytesIO()
+            if ziel_format == "PNG":
+                bild.convert("RGBA").save(ziel, format="PNG", optimize=True)
+            else:
+                bild.convert("RGB").save(ziel, format="JPEG",
+                                         quality=BILD_QUALITAET, optimize=True,
+                                         progressive=True)
+            klein = ziel.getvalue()
+    except StorageError:
+        raise
+    except Exception:                       # noqa: BLE001
+        log.warning("%s: Verkleinern nicht moeglich, Original wird gespeichert", wo)
+        return raw
+    if not klein:
+        return raw
+    # Musste das Format ohnehin gewechselt werden, wird das Ergebnis auch
+    # dann genommen, wenn es zufaellig ein paar Bytes groesser ist — sonst
+    # laege eine PNG-Datei unter einem .jpg-Namen.
+    if not passt_schon:
+        return klein
+    return klein if len(klein) < len(raw) else raw
 
 
 def make_key(category: str, dealer_id: str, filename: str) -> str:

@@ -1014,8 +1014,14 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         if d.photo_b64:
             try:
                 raw = base64.b64decode(d.photo_b64.split(",")[-1], validate=False)
-                from storage_service import validate_image_bytes
+                from storage_service import (validate_image_bytes,
+                                             bild_verkleinern)
                 validate_image_bytes(raw, wo="Abweichungsfoto")
+                # Verkleinern kostet Rechenzeit -> in einen eigenen
+                # Faden, damit der Server waehrenddessen antwortet.
+                import asyncio as _aio_bild
+                raw = await _aio_bild.to_thread(
+                    bild_verkleinern, raw, "Abweichungsfoto")
                 key = make_key("pickup", appt.get("dealer_id", "x"), "foto.jpg")
                 from storage_service import save_async
                 await save_async(key, raw)

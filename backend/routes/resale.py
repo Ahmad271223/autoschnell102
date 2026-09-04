@@ -325,7 +325,8 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
     from storage_service import (make_key, storage, StorageError,
-                                 validate_image_bytes, loeschen_oder_vormerken)
+                                 validate_image_bytes, bild_verkleinern,
+                                 loeschen_oder_vormerken)
     keys = list((l.get("photos") or {}).get("uploaded_keys", []))
     if len(keys) + len(body.photos_b64) > 40:
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
@@ -341,6 +342,10 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
                 # Groesse + Magic Bytes: nur echte Bilder, kein 20-MB-Blob,
                 # keine umbenannten ausfuehrbaren Dateien.
                 validate_image_bytes(raw, wo="Inserats-Foto")
+                # Handyfotos kommen mit 4000 Bildpunkten Kante und
+                # mehreren MB. Einmal verkleinern spart rund 90 Prozent
+                # Speicher, ohne dass man im Inserat etwas sieht.
+                raw = bild_verkleinern(raw, wo="Inserats-Foto")
                 key = make_key("resale", user["dealer_id"], "foto.jpg")
                 storage.save(key, raw)
                 neu.append(key)

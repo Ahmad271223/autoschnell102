@@ -245,8 +245,12 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     except StorageError as exc:
         raise HTTPException(400, str(exc))
     try:
+        # Der Key endet auf .png, also muss auch PNG herauskommen —
+        # sonst liefert der Server spaeter den falschen Dateityp aus.
+        from storage_service import bild_verkleinern, save_async
+        import asyncio as _aio_bild
+        raw = await _aio_bild.to_thread(bild_verkleinern, raw, "Logo", "PNG")
         key = make_key("logo", user["dealer_id"], "logo.png")
-        from storage_service import save_async
         await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, f"Logo konnte nicht gespeichert werden: {exc}")
