@@ -234,10 +234,25 @@ def offsite_prefix() -> str:
     return os.environ.get("BACKUP_S3_PREFIX", OFFSITE_PREFIX_DEFAULT)
 
 
+def backup_endpoint() -> str:
+    """Adresse fuer die Offsite-Kopie. Faellt auf S3_ENDPOINT zurueck.
+
+    Eigene Angabe noetig, wenn der Sicherungs-Bucket in einer anderen
+    Zone liegt: bei Cloudflare R2 hat ein Bucket mit EU-Zone die Adresse
+    <konto>.eu.r2.cloudflarestorage.com und ist ueber die Standard-
+    Adresse NICHT erreichbar (404)."""
+    return (os.environ.get("BACKUP_S3_ENDPOINT", "").strip()
+            or os.environ.get("S3_ENDPOINT", "").strip())
+
+
 def _backup_s3_client():
     """S3-Client fuer die Offsite-Kopie (gleiche Zugangsdaten wie der
-    Datei-Speicher; in Tests austauschbar)."""
-    return _s3_client(endpoint_pflicht=False)
+    Datei-Speicher, ggf. eigene Adresse; in Tests austauschbar)."""
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+    from s3_kompatibel import s3_client
+    return s3_client(endpoint=backup_endpoint())
 
 
 def _object_lock_tage() -> int:
@@ -272,7 +287,7 @@ def offsite_hochladen(final_dir: Path, logfile: Path) -> dict:
         # R2 verschluesselt ohnehin selbst).
         from s3_kompatibel import sse_optionen
         extra = {"Metadata": {"sha256": digest}}
-        extra.update(sse_optionen(os.environ.get("S3_ENDPOINT", "")))
+        extra.update(sse_optionen(backup_endpoint()))
         bis = None
         lock_tage = _object_lock_tage()
         if lock_tage:

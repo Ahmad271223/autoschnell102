@@ -131,6 +131,9 @@ services:
       - BACKUP_DIR=/backups
       - BACKUP_HOUR=${BACKUP_HOUR:-3}
       - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
+      # Eigene Adresse, falls der Sicherungs-Bucket in einer anderen Zone
+      # liegt (bei Cloudflare R2 hat die EU-Zone eine eigene Adresse).
+      - BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT:-}
       - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
       - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
       - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}

@@ -38,13 +38,14 @@ def main():
         from botocore.exceptions import ClientError
     except ImportError:
         print("FEHLER: boto3 fehlt"); return 1
-    kw = {}
-    if os.environ.get("S3_ENDPOINT"):
-        kw["endpoint_url"] = os.environ["S3_ENDPOINT"]
-    if os.environ.get("S3_REGION"):
-        kw["region_name"] = os.environ["S3_REGION"]
-    s3 = boto3.client("s3", aws_access_key_id=os.environ.get("S3_ACCESS_KEY"),
-                      aws_secret_access_key=os.environ.get("S3_SECRET_KEY"), **kw)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from s3_kompatibel import s3_client
+    # Eigene Adresse fuer die Sicherung, falls der Bucket in einer anderen
+    # Zone liegt (bei R2 hat die EU-Zone eine eigene Adresse).
+    endpoint = (os.environ.get("BACKUP_S3_ENDPOINT", "").strip()
+                or os.environ.get("S3_ENDPOINT", "").strip())
+    print(f"Adresse: {endpoint or '(Standard von AWS)'}")
+    s3 = s3_client(endpoint=endpoint)
     fehler = 0
     # 1) Erreichbarkeit
     try:
@@ -56,9 +57,8 @@ def main():
     key = f"{prefix.rstrip('/')}/probe-{datetime.now(timezone.utc):%Y%m%d%H%M%S}.txt"
     inhalt = b"autoschnell offsite-probe"
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from s3_kompatibel import sse_optionen
-        sse = sse_optionen(os.environ.get("S3_ENDPOINT", ""))
+        sse = sse_optionen(endpoint)
         s3.put_object(Bucket=bucket, Key=key, Body=inhalt, **sse)
         zurueck = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         assert zurueck == inhalt
