@@ -385,29 +385,60 @@ Empfohlener Weg: **erst ein Server, dann der zweite.** Der Load Balancer bleibt 
 
 ### Aufstellung Stufe 1
 
-- **Load Balancer** beendet die Verschlüsselung (verwaltetes Zertifikat), Ziel: nur Server 1.
-- **Server 1** (10.0.0.2): kompletter Stack, Datenbank inklusive. Die Datenbank hat keinen Port nach außen; nur die Anwendung im selben Netz erreicht sie.
+- **Server 1** (2.28.66.8) bedient die Domain direkt. nginx stellt das Zertifikat
+  selbst aus (Let's Encrypt) und erneuert es automatisch.
+- **Datenbank** läuft im selben Paket, ohne Port nach außen.
+- **Fotos und PDFs** liegen in Cloudflare R2.
 - **Cloudflare** macht nur die Namensauflösung (graue Wolke).
+- Der **Load Balancer** bleibt vorerst ungenutzt. Er kommt mit dem zweiten
+  Server dazu (Stufe 2).
+
+Warum nicht gleich über den Load Balancer? Dessen verwaltetes Zertifikat wird
+über einen DNS-Eintrag geprüft und setzt voraus, dass die Domain bei Hetzner
+DNS liegt. Solange die Domain bei Cloudflare liegt, bräuchte es dafür eine
+zusätzliche Delegation. Für den Start ist der direkte Weg schneller und hat
+weniger Teile, die schiefgehen können.
 
 ### Schritt 1 — Namensauflösung
 
-Cloudflare: Eintrag Typ **A**, Name **app**, Ziel **46.225.37.221** (Load Balancer), Proxy **aus** (graue Wolke). Die graue Wolke ist Absicht: der Load Balancer stellt das Zertifikat aus, es gibt keine Größenbeschränkung beim Hochladen, und die Besucheradresse kommt unverfälscht an.
+Cloudflare: Eintrag Typ **A**, Name **app**, Ziel **2.28.66.8** (Server 1),
+Proxy **aus** (graue Wolke). Die graue Wolke ist nötig, weil der Server das
+Zertifikat selbst holt und dafür direkt erreichbar sein muss.
 
-### Schritt 2 — Load Balancer
+### Schritt 2 — Firewall
 
-- Dienst **HTTPS 443 → HTTP 80**, verwaltetes Zertifikat für `app.auto-schnellkauf.de`.
-- Dienst **HTTP 80 → HTTP 80** (für die Zertifikatsausstellung).
-- Gesundheitsprüfung: HTTP, Port 80, Pfad **`/api/health`**, Intervall 15 s.
-- „Proxy Protocol" **aus**. Ziel: vorerst nur Server 1.
+In der Hetzner Console unter **Firewalls → auto-spider-production-firewall →
+Rules** müssen eingehend genau diese drei Regeln stehen:
 
-### Schritt 3 — Firewall
+| Protokoll | Port | Quelle | Zweck |
+|---|---|---|---|
+| TCP | 22 | deine eigene IP (oder `0.0.0.0/0`, wenn wechselnd) | Wartung |
+| TCP | 80 | `0.0.0.0/0` und `::/0` | Zertifikat und Umleitung |
+| TCP | 443 | `0.0.0.0/0` und `::/0` | die Anwendung |
 
-| Von | Nach | Zweck |
-|---|---|---|
-| 10.0.0.0/16 (Load Balancer) | TCP 80 | Anwendung |
-| deine IP | TCP 22 | Wartung |
+Port 27017 bleibt zu. Ausgehend kann alles offen bleiben.
 
-Port 27017 muss **nicht** offen sein, auch nicht intern: die Datenbank läuft im selben Stack.
+### Schritt 3 — Zertifikat holen
+
+Erst wenn die Namensauflösung greift (`ping app.auto-schnellkauf.de` zeigt
+2.28.66.8), auf dem Server:
+
+```bash
+cd /opt/autoschnell
+docker run --rm -p 80:80 -v "$PWD/deploy/certs:/etc/letsencrypt" \
+  certbot/certbot certonly --standalone --agree-tos --no-eff-email \
+  -m DEINE-MAIL@auto-schnellkauf.de -d app.auto-schnellkauf.de
+cp deploy/certs/live/app.auto-schnellkauf.de/fullchain.pem deploy/certs/fullchain.pem
+cp deploy/certs/live/app.auto-schnellkauf.de/privkey.pem  deploy/certs/privkey.pem
+```
+
+Erneuerung einmal einrichten (Zertifikate laufen nach 90 Tagen ab):
+
+```bash
+cat > /etc/cron.d/autoschnell-zertifikat <<'CRON'
+0 4 * * 1 root cd /opt/autoschnell && docker run --rm -p 80:80 -v "/opt/autoschnell/deploy/certs:/etc/letsencrypt" certbot/certbot renew --standalone --pre-hook "docker compose stop proxy" --post-hook "cp /opt/autoschnell/deploy/certs/live/app.auto-schnellkauf.de/fullchain.pem /opt/autoschnell/deploy/certs/fullchain.pem; cp /opt/autoschnell/deploy/certs/live/app.auto-schnellkauf.de/privkey.pem /opt/autoschnell/deploy/certs/privkey.pem; docker compose start proxy" >> /var/log/autoschnell-zertifikat.log 2>&1
+CRON
+```
 
 ### Schritt 4 — Server 1 vorbereiten
 
@@ -481,20 +512,32 @@ Der Name `mongo` ist Absicht. Eine Server-IP funktioniert an dieser Stelle nicht
 
 ```bash
 docker compose exec backend python scripts/verbindung_pruefen.py
-curl -s -H "Host: app.auto-schnellkauf.de" localhost/api/health
+curl -sk -H "Host: app.auto-schnellkauf.de" https://localhost/api/health
 docker compose run --rm backend python scripts/betriebsprobe.py app.auto-schnellkauf.de --dkim-selector resend
 ```
 
-Der Host-Kopf beim `curl` ist nötig, weil der Webserver nur die eingetragene Domain bedient. Die Gesundheitsprüfung selbst antwortet auch ohne ihn — sonst käme der Load Balancer nicht durch.
+Der Host-Kopf ist nötig, weil der Webserver nur die eingetragene Domain bedient; `-k` überspringt die Zertifikatsprüfung, weil `localhost` nicht im Zertifikat steht.
 
-Der Load Balancer muss auf „Healthy" springen, `https://app.auto-schnellkauf.de` zeigt die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
+Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
 
-### Stufe 2 — zweiter Server (später)
+### Stufe 2 — zweiter Server und Load Balancer (später)
 
-1. Object Storage in Nürnberg anlegen, Schlüssel erzeugen, `S3_*` in der `.env` eintragen, `docker compose up -d` auf Server 1.
-2. Datenbank für Server 2 erreichbar machen: Mongo mit `network_mode: host` auf `10.0.0.2` binden, Firewall 27017 nur aus 10.0.0.0/16, Replica-Set-Mitglied auf `10.0.0.2:27017` umstellen.
-3. Auf Server 2 dieselbe `.env` ablegen, `MONGO_URL` auf `10.0.0.2` zeigen lassen, dann `docker compose up -d --build backend web proxy`.
-4. Server 2 im Load Balancer als zweites Ziel eintragen.
+1. **Zertifikat auf den Load Balancer verlagern.** Damit Hetzner ein
+   verwaltetes Zertifikat ausstellen kann, in Cloudflare drei NS-Einträge für
+   `_acme-challenge.app` auf die Hetzner-Nameserver setzen und in der Hetzner
+   DNS Console die passende Zone anlegen. Danach im Load Balancer den Dienst
+   **HTTPS 443 → HTTP 80** mit verwaltetem Zertifikat anlegen, dazu
+   **HTTP 80 → HTTP 80**, Gesundheitsprüfung HTTP Port 80 Pfad `/api/health`.
+2. In der `.env` umstellen auf `PROXY_TEMPLATE=hinter-loadbalancer.conf.template`
+   und `TRUSTED_PROXIES=10.0.0.0/16,127.0.0.1`, dann `docker compose up -d`.
+3. DNS-Eintrag `app` von der Server-Adresse auf die des Load Balancers ändern.
+4. Firewall umstellen: Port 80 und 443 nur noch aus `10.0.0.0/16`.
+5. **Datenbank für Server 2 erreichbar machen:** Mongo mit `network_mode: host`
+   an `10.0.0.2` binden, Firewall 27017 nur aus `10.0.0.0/16`, das
+   Replica-Set-Mitglied auf `10.0.0.2:27017` umstellen.
+6. Auf Server 2 dieselbe `.env` ablegen, `MONGO_URL` auf `10.0.0.2` zeigen
+   lassen, dann `docker compose up -d --build backend web proxy`.
+7. Server 2 im Load Balancer als zweites Ziel eintragen.
 
 ### Wenn es klemmt
 
