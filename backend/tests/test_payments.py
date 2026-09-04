@@ -96,6 +96,13 @@ def env(monkeypatch):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("CORS_ORIGINS", ORIGIN)
     monkeypatch.delenv("MOCK_PROVIDER_FETCH", raising=False)
+    # Diese Datei prueft den BEZAHLTEN Marktplatz-Zugang. Seit dem
+    # Pruefbericht 09/2026 lehnt der Server die Zahlung ab, solange der
+    # Zugang kostenlos ist — hier wird der Schalter also bewusst
+    # ausgeschaltet. Dass die Zahlung bei "kostenlos" NICHT geht, prueft
+    # test_10 weiter unten.
+    import routes.marketplace as _mp
+    monkeypatch.setattr(_mp, "MARKTPLATZ_KOSTENLOS", False)
     return monkeypatch
 
 
@@ -564,4 +571,31 @@ def test_09_fehlgeschlagen_abgelaufen_und_fremde_ereignisse(env, stripe_fake, we
             assert r.status_code == 200 and r.json()["status"] == "expired"
             r = await c.get(f"/api/payments/status/{s_fail}")
             assert r.json()["status"] == "failed"
+    _lauf(sz)
+
+
+# ---------- Kostenloser Marktplatz darf nicht kassieren ----------
+def test_10_kostenloser_zugang_laesst_keine_zahlung_zu(env, stripe_fake, welt):
+    """Pruefbericht 09/2026, roter Befund: Solange der Marktplatz kostenlos
+    ist, konnte ein Kaeufer trotzdem 20 Euro bezahlen — fuer etwas, das er
+    bereits gratis hatte. Beide Zustaende duerfen nie gleichzeitig gelten."""
+    import routes.marketplace as _mp
+    env.setattr(_mp, "MARKTPLATZ_KOSTENLOS", True)
+
+    async def sz(mdb):
+        # Die Testwelt lebt ueber mehrere Tests hinweg — deshalb wird der
+        # Stand VOR dem Aufruf gemerkt und nur die Veraenderung geprueft.
+        vorher_stripe = len(stripe_fake.create_calls)
+        vorher_tx = await mdb.payment_transactions.count_documents(
+            {"user_id": welt["K1"]["id"]})
+        async with _client(_app(welt["K1"])) as c:
+            r = await c.post("/api/payments/checkout",
+                             json={"plan": "marktplatz", "origin_url": ORIGIN + "/"})
+            assert r.status_code == 409, r.text
+            assert "kostenlos" in r.json()["detail"].lower()
+            # Es darf KEINE neue Stripe-Sitzung und KEINE Zahlung entstehen.
+            assert len(stripe_fake.create_calls) == vorher_stripe,                 "es wurde trotzdem eine Stripe-Sitzung angelegt"
+            nachher_tx = await mdb.payment_transactions.count_documents(
+                {"user_id": welt["K1"]["id"]})
+            assert nachher_tx == vorher_tx, "es wurde trotzdem eine Zahlung gebucht"
     _lauf(sz)

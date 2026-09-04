@@ -201,6 +201,19 @@ class LocalDiskStorage:
             return False
         return (self.root / key).is_file()
 
+    def erreichbar(self) -> bool:
+        """Ist der Speicher gerade wirklich benutzbar? Wird von /api/ready
+        aufgerufen. Vorher gab es diese Methode nirgends — die Bereitschafts-
+        pruefung suchte sie, fand nichts und uebersprang den Speicher
+        stillschweigend (Pruefbericht 09/2026, roter Befund)."""
+        try:
+            probe = self.root / ".erreichbar"
+            probe.write_bytes(b"ok")
+            probe.unlink()
+            return True
+        except Exception:                       # noqa: BLE001
+            return False
+
     def delete_prefix(self, prefix: str) -> int:
         """Alle Dateien unter einem Praefix loeschen (DSGVO-Firmenloeschung,
         z.B. 'protocol/<dealer_id>/'). Liefert die Anzahl geloeschter
@@ -275,6 +288,17 @@ class S3Storage:
             self.client.head_object(Bucket=self.bucket, Key=key)
             return True
         except Exception:
+            return False
+
+    def erreichbar(self) -> bool:
+        """Antwortet der Objektspeicher, und darf dieser Schluessel den
+        Eimer sehen? head_bucket kostet fast nichts und eignet sich fuer
+        die Bereitschaftspruefung bei jedem Aufruf. Ob auch geschrieben
+        werden darf, prueft production_check einmal beim Start."""
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+            return True
+        except Exception:                       # noqa: BLE001
             return False
 
 

@@ -46,6 +46,64 @@ def _int_env(name: str, default: str) -> int:
         return -1
 
 
+# Fehlerkennungen, die eindeutig auf falsche Zugangsdaten oder einen
+# falschen Eimernamen hindeuten — dagegen hilft kein Abwarten, das muss
+# der Betreiber korrigieren. Alles andere (Netz, Zeitueberschreitung)
+# kann voruebergehend sein und ist deshalb nur eine Warnung.
+_S3_DAUERFEHLER = {
+    "AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch",
+    "NoSuchBucket", "AllAccessDisabled", "InvalidBucketName",
+    "AuthorizationHeaderMalformed", "403", "401", "404",
+}
+
+
+def _s3_wirklich_pruefen(bucket: str):
+    """Schreibt eine winzige Probedatei, liest sie zurueck und loescht sie.
+
+    Liefert (art, meldung) mit art aus "ok", "warnung", "fehler".
+    Aendert nichts an echten Daten: der Schluessel liegt unter
+    systempruefung/ und wird sofort wieder entfernt.
+    """
+    # Der Schluessel muss den eigenen Regeln aus storage_service genuegen,
+    # damit ihn im Notfall auch delete_prefix wieder wegraeumen kann.
+    schluessel = "systempruefung/start-probe.txt"
+    try:
+        from s3_kompatibel import s3_client, sse_optionen
+        endpoint = os.environ["S3_ENDPOINT"].strip()
+        client = s3_client(endpoint=endpoint)
+        inhalt = b"autoschnell-startpruefung"
+        client.put_object(Bucket=bucket, Key=schluessel, Body=inhalt,
+                          **sse_optionen(endpoint))
+        zurueck = client.get_object(Bucket=bucket, Key=schluessel)["Body"].read()
+        client.delete_object(Bucket=bucket, Key=schluessel)
+        if zurueck != inhalt:
+            return ("fehler",
+                    f"Datei-Speicher '{bucket}': zurueckgelesener Inhalt weicht ab "
+                    "— der Eimer verhaelt sich nicht wie erwartet.")
+        return ("ok", "")
+    except Exception as exc:                        # noqa: BLE001
+        text = f"{type(exc).__name__}: {exc}"
+        code = ""
+        antwort = getattr(exc, "response", None)
+        if isinstance(antwort, dict):
+            code = str((antwort.get("Error") or {}).get("Code") or "")
+            if not code:
+                code = str((antwort.get("ResponseMetadata") or {})
+                           .get("HTTPStatusCode") or "")
+        dauerhaft = code in _S3_DAUERFEHLER or any(
+            w in text for w in ("AccessDenied", "InvalidAccessKeyId",
+                                "SignatureDoesNotMatch", "NoSuchBucket"))
+        if dauerhaft:
+            return ("fehler",
+                    f"Datei-Speicher '{bucket}' nicht benutzbar ({code or 'Fehler'}): "
+                    f"{text}. Zugangsdaten oder Eimername pruefen — Fotos, "
+                    "Protokolle und Sicherungen wuerden sonst nicht abgelegt.")
+        return ("warnung",
+                f"Datei-Speicher '{bucket}' antwortete beim Start nicht ({text}). "
+                "Sieht nach einer voruebergehenden Stoerung aus; wenn das bleibt, "
+                "Zugangsdaten und Netz pruefen.")
+
+
 def pruefe_produktion(log) -> None:
     ist_prod = os.environ.get("APP_ENV", "").strip().lower() == "production"
     fehler = []
@@ -143,6 +201,17 @@ def pruefe_produktion(log) -> None:
         fehler.append("S3 ist nur teilweise konfiguriert (" +
                       ", ".join(k for k, v in s3.items() if not v) +
                       " fehlt) — Storage wuerde still auf lokale Platte fallen.")
+    elif all(s3.values()):
+        # Pruefbericht 09/2026: bisher wurde nur geprueft, ob die vier
+        # Angaben DA sind — nicht, ob sie funktionieren. Ein vertippter
+        # Eimername oder ein Schluessel ohne Schreibrecht waere erst
+        # aufgefallen, wenn der erste Nutzer ein Foto hochlaedt. Deshalb
+        # einmal beim Start wirklich schreiben, lesen und wieder loeschen.
+        art, meldung = _s3_wirklich_pruefen(s3["S3_BUCKET"])
+        if art == "fehler":
+            (fehler if ist_prod else warnungen).append(meldung)
+        elif art == "warnung":
+            warnungen.append(meldung)
 
     # Audit 09/2026 (Punkt 43): fail-closed fuer angebotene Pflichtfunktionen
     stripe_key = os.environ.get("STRIPE_API_KEY", "").strip()

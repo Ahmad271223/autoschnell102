@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from deps import clean_doc, current_user, db, log_activity, now_iso
+from deps import (clean_doc, current_chef, current_firma, db,
+                  log_activity, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
 
 router = APIRouter()
@@ -21,24 +22,24 @@ router = APIRouter()
 BESTAND_RETENTION_DAYS = 50
 
 
-async def current_haendler(user=Depends(current_user)):
+async def current_haendler(user=Depends(current_chef)):
     """NUR der Händler-Hauptaccount. Strikte Rollentrennung (08/2026):
     Admins verwalten die Plattform, handeln aber nicht — sonst landen z.B.
     Sucher versehentlich unter der Admin-Firma. Sucher haben hier ebenfalls
-    keinen Zugriff: Bestands-/Verkaufsentscheidungen sind Chefsache."""
-    if user.get("role") != "dealer":
-        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das "
-                                 "(Admins bitte mit einem Händler-Account arbeiten)")
+    keinen Zugriff: Bestands-/Verkaufsentscheidungen sind Chefsache.
+
+    Pruefbericht 09/2026: die Regel stand hier frueher noch einmal eigens
+    im Code und prueft nur die Rolle, nicht die Zugehoerigkeit zu einer
+    echten Firma. Jetzt haengt sie an current_chef aus deps.py — es gibt
+    genau EINE Fassung dieser Regel, und sie verlangt beides."""
     return user
 
 
-async def current_firma(user=Depends(current_user)):
-    """Lese-Zugriff auf Bestand/Akte: Chef UND seine Sucher. Admins und
-    Zwischenhändler (b2b_buyer) haben hier nichts zu suchen — strikte
-    Rollentrennung, auch wenn die Liste für sie ohnehin leer wäre."""
-    if user.get("role") not in ("dealer", "sucher"):
-        raise HTTPException(403, "Nur für Händler-Accounts (Chef und Sucher)")
-    return user
+# Pruefbericht 09/2026: hier stand eine ZWEITE, eigene Fassung von
+# current_firma. Sie pruefte nur die Rolle, nicht die Zugehoerigkeit zu
+# einer echten Firma (dealer_id). Zwei Fassungen derselben Sicherheitsregel
+# laufen mit der Zeit auseinander — ein Fix in deps.py haette diese Datei
+# nicht erreicht. Es gilt jetzt ueberall dieselbe Regel aus deps.py.
 
 
 # ---------- Models ----------

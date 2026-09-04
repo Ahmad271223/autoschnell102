@@ -254,14 +254,25 @@ async def readiness_check(response: Response):
         except Exception as exc:
             fehler.append(f"{name}: nicht schreibbar ({exc})")
     if os.environ.get("S3_BUCKET"):
+        # Pruefbericht 09/2026 (roter Befund): hier wurde eine Methode
+        # gesucht, die es nirgends gab. Fehlte sie, wurde der Datei-Speicher
+        # KOMMENTARLOS uebersprungen — die Bereitschaftspruefung meldete
+        # "bereit", obwohl R2 unerreichbar sein konnte. Jetzt gibt es die
+        # Methode, ihr Ergebnis steht in der Antwort, und ein Fehlen faellt
+        # als Warnung auf statt still zu verschwinden.
         try:
             from storage_service import storage
             head = getattr(storage, "erreichbar", None)
-            if callable(head):
+            if not callable(head):
+                info["s3"] = "ungeprueft"
+                warnungen.append("s3: keine Erreichbarkeitspruefung vorhanden")
+            else:
                 ok = await asyncio.to_thread(head)
+                info["s3"] = "up" if ok else "nicht erreichbar"
                 if not ok:
                     warnungen.append("s3: nicht erreichbar")
         except Exception as exc:
+            info["s3"] = "fehler"
             warnungen.append(f"s3: {exc}")
     try:
         from backup_service import letztes_backup_info
@@ -359,7 +370,13 @@ class ClientErrorIn(BaseModel):
 
 @api.post("/client-errors")
 async def report_client_error(body: ClientErrorIn, request: Request):
-    ip = (request.client.host if request.client else None) or "unknown"
+    # Pruefbericht 09/2026: hier stand request.client.host statt der
+    # proxy-bewussten client_ip(). Hinter nginx ist das IMMER die Adresse
+    # des Proxys. Das war nicht nur im Archiv unbrauchbar — alle Nutzer
+    # teilten sich dadurch EINEN Zaehler, ein einziger kaputter Browser
+    # haette die Fehlermeldung fuer alle anderen blockiert.
+    from rate_limiter import client_ip
+    ip = client_ip(request)
     if not await _client_error_limiter.check(ip):
         return {"ok": False}
     import hashlib

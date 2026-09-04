@@ -174,6 +174,18 @@ async def create_checkout(body: CheckoutIn, user=Depends(current_user)):
                                  "Online-Zahlung nötig.")
     if body.plan not in PLAN_PRICES:
         raise HTTPException(400, "Unbekannter Plan")
+    # Pruefbericht 09/2026, roter Befund: Solange der Marktplatz kostenlos
+    # ist, darf hier NIEMAND bezahlen. Vorher konnte ein Kaeufer, der den
+    # Zugang laengst gratis hatte, trotzdem 20 Euro ueber Stripe loswerden —
+    # als Gegenleistung fuer etwas, das er schon besass. Der Schalter und
+    # die Zahlung duerfen nie gleichzeitig gelten.
+    if body.plan == "marktplatz":
+        from routes.marketplace import MARKTPLATZ_KOSTENLOS
+        if MARKTPLATZ_KOSTENLOS:
+            raise HTTPException(
+                409, "Der Zugang zum Marktplatz ist derzeit kostenlos — "
+                     "es ist nichts zu bezahlen. Du kannst die angebotenen "
+                     "Fahrzeuge sofort ansehen.")
     if not stripe_aktiv():
         raise HTTPException(503, NICHT_AKTIV_MELDUNG)
     pkg = PLAN_PRICES[body.plan]

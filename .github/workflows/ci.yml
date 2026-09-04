@@ -185,7 +185,14 @@ jobs:
           done
           docker compose ps
           docker compose exec -T backend curl -fsS http://localhost:8001/api/health
-          docker compose exec -T backend curl -fsS http://localhost:8001/api/ready || true
+          # Pruefbericht 09/2026: hier stand "|| true". Damit blieb die CI
+          # gruen, selbst wenn /api/ready mit 503 antwortete — die Probe
+          # bewies nur "Container starten", nicht "Plattform ist bereit".
+          # Jetzt blockiert sie. Bei Fehlschlag wird die Antwort gezeigt,
+          # damit man sofort sieht, WAS nicht bereit ist.
+          docker compose exec -T backend curl -fsS http://localhost:8001/api/ready             || { echo "READY-PRUEFUNG FEHLGESCHLAGEN:";
+                 docker compose exec -T backend curl -s http://localhost:8001/api/ready;
+                 exit 1; }
           curl -fsSk https://localhost/api/health
           curl -fsSk -o /dev/null -w "SPA %{http_code}\n" https://localhost/
           docker compose logs backend | tail -20

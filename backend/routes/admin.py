@@ -244,6 +244,32 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
             raise HTTPException(403, "Rollen ändern darf nur der Super-Admin")
         if fields["role"] not in ("dealer", "sucher", "admin", "b2b_buyer"):
             raise HTTPException(400, "Unbekannte Rolle")
+        # Pruefbericht 09/2026: bisher wurde nur der NAME der Zielrolle
+        # geprueft, nicht ob das Konto dazu passt. Aus einem Zwischen-
+        # haendler (gehoert zu keiner Firma) liess sich so ein "Sucher ohne
+        # Firma" machen: formal Sucher, praktisch ueberall ausgesperrt.
+        # Und ein Chef liess sich degradieren, obwohl seine Firma dann
+        # ohne Chef dastand.
+        neue_rolle = fields["role"]
+        alte_rolle = target.get("role")
+        if neue_rolle != alte_rolle:
+            if neue_rolle in ("dealer", "sucher") and not target.get("dealer_id"):
+                raise HTTPException(
+                    400, "Dieses Konto gehört zu keiner Firma. Ein Wechsel zu "
+                         "Händler oder Sucher würde ein Konto erzeugen, das "
+                         "sich nirgends anmelden kann. Bitte stattdessen eine "
+                         "Firma anlegen und den Zugang dort einrichten.")
+            if alte_rolle == "dealer" and target.get("dealer_id"):
+                rest = await db.users.count_documents(
+                    {"dealer_id": target["dealer_id"],
+                     "id": {"$ne": target["id"]},
+                     "role": {"$in": ["dealer", "sucher"]}})
+                if rest:
+                    raise HTTPException(
+                        400, f"Diese Firma hat noch {rest} weitere Zugänge. "
+                             "Ohne Hauptaccount könnte niemand mehr Sucher, "
+                             "Fahrer oder Verkäufe verwalten. Bitte zuerst "
+                             "einen anderen Hauptaccount bestimmen.")
     # Admin-Konten verwalten nur Super-Admins: Passwort-Reset, Sperren
     # oder Loeschen eines Admins durch einen NORMALEN Admin waere eine
     # Kontouebernahme auf gleicher Stufe.
