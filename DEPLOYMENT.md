@@ -471,7 +471,7 @@ Der Load Balancer muss auf „Healthy" springen, `https://app.auto-schnellkauf.d
 | Symptom | Ursache | Abhilfe |
 |---|---|---|
 | Datenbank startet nicht, „permissions are too open" | Schlüsseldatei falsch | `chmod 400` und `chown 999:999 deploy/mongo-keyfile` |
-| Load Balancer bleibt „Unhealthy" | Prüfpfad falsch | HTTP, Port 80, Pfad `/api/health` |
+| Load Balancer bleibt „Unhealthy" | Prüfpfad falsch oder Backend startet nicht | HTTP, Port 80, Pfad `/api/health`. Die Prüfung antwortet auch, wenn der Load Balancer mit der Server-IP statt der Domain anfragt; sie kommt aber vom Backend, „healthy" heißt also wirklich lauffähig. |
 | Endlose Weiterleitung im Browser | falsche Betriebsart | `PROXY_TEMPLATE=hinter-loadbalancer.conf.template` |
 | Alle Nutzer gleichzeitig ausgesperrt | Besucheradresse kommt nicht an | `TRUSTED_PROXIES` und `PRIVATES_NETZ` auf `10.0.0.0/16` |
 | Backend startet nicht | Produktionsprüfung meckert | die Meldung im Log nennt genau den fehlenden Wert |

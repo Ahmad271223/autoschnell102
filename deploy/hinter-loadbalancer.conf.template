@@ -13,10 +13,21 @@
 # Ohne Load Balancer bleibt default.conf.template (nginx macht dann TLS).
 
 # ---- Unbekannte Hosts: Verbindung wortlos schliessen ----
+# Ausnahme: die Gesundheitspruefung. Der Load Balancer fragt je nach
+# Einstellung mit der SERVER-IP als Host an, nicht mit der Domain — ohne
+# diese Ausnahme bekaeme er 444 und wuerde den Server dauerhaft als
+# "unhealthy" fuehren. Die Antwort kommt vom Backend, nicht fest von nginx:
+# so bedeutet "healthy" auch wirklich, dass die Anwendung laeuft.
 server {
   listen 80 default_server;
   server_name _;
-  return 444;
+
+  location = /api/health {
+    proxy_pass http://backend:8001;
+    access_log off;
+  }
+
+  location / { return 444; }
 }
 
 # ---- Die eigene Domain ----
