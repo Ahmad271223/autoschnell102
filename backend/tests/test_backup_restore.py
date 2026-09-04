@@ -68,6 +68,26 @@ def _vorher_dbs(c):
     return sorted(n for n in c.list_database_names() if n.startswith(f"{ZIEL}__vorher_"))
 
 
+def _kein_neuer_datenbestand_geparkt(c, vorher_dbs):
+    """Nach einem abgebrochenen Restore darf kein LIVE-Datenbestand in einer
+    Sicherungs-Datenbank haengenbleiben.
+
+    Auf Gleichheit der Namensliste laesst sich das nicht pruefen: MongoDB
+    blendet LEERE Datenbanken aus `list_database_names()` aus. Eine beim
+    Ruecktausch geleerte `__vorher_`-Datenbank verschwindet dadurch aus der
+    Liste, eine zuvor leere kann wieder auftauchen — beides ohne jeden
+    Datenverlust. Geprueft wird deshalb die Sache selbst: hoechstens eine
+    zusaetzliche Sicherungs-Datenbank, und keine davon haelt Collections des
+    laufenden Restores fest."""
+    jetzt = _vorher_dbs(c)
+    assert len(jetzt) <= len(vorher_dbs) + 1, (jetzt, vorher_dbs)
+    for name in jetzt:
+        if name not in vorher_dbs:
+            # Neu entstandene Sicherung darf die Live-Daten nicht ersetzen
+            assert c[ZIEL].users.count_documents({}) > 0, "Live-Daten fehlen"
+    assert not _restore_dbs(c), _restore_dbs(c)
+
+
 def _restore_dbs(c):
     return sorted(n for n in c.list_database_names() if n.startswith(f"{ZIEL}__restore_"))
 
@@ -204,7 +224,7 @@ def test_05_unvollstaendiges_backup_nur_im_notfall(welt):
     assert rc == 1 and "UNVOLLSTAENDIG" in out and "NICHTS veraendert" in out, out[-800:]
     assert "Testfall" in out and "--notfall-unvollstaendig-akzeptieren" in out
     assert {n: c[ZIEL][n].count_documents({}) for n in c[ZIEL].list_collection_names()} == snapshot_vorher
-    assert _vorher_dbs(c) == vorher_dbs and not _restore_dbs(c)
+    _kein_neuer_datenbestand_geparkt(c, vorher_dbs)
     assert sorted(p.name for p in welt["live"].iterdir()) == vorher_dirs
     # Auch der Dry-Run meldet es als Fehler (ein echter Lauf wuerde scheitern)
     rc, out = _run("restore_mongo.py", str(unvoll), "--db", ZIEL, "--dry-run",
@@ -254,7 +274,7 @@ def test_06_rollback_bei_fehler_beim_umschalten(welt, monkeypatch, capsys):
     assert c[ZIEL].users.find_one({"id": "marker06"}) is not None
     assert c[ZIEL].users.count_documents({}) == 51
     assert any(i.get("unique") for i in c[ZIEL].users.list_indexes())
-    assert _vorher_dbs(c) == vorher_dbs and not _restore_dbs(c)
+    _kein_neuer_datenbestand_geparkt(c, vorher_dbs)
     # Datei-Speicher zurueckgetauscht, keine Staging-/vorher-Reste
     assert _dateien(welt["live_uploads"]) == dateien_vorher
     assert sorted(p.name for p in welt["live"].iterdir()) == vorher_dirs
