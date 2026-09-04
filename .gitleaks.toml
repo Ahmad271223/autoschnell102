@@ -18,6 +18,10 @@ keywords = ["JWT_SECRET", "ADMIN_PASSWORD", "SUPER_ADMIN_PASSWORD", "MONGO_PASSW
 regexes = [
   '''(?i)(BITTE|ERSETZEN|changeme|ci-only|ci-nur|beispiel|example|platzhalter|dev-secret|\$\{[A-Z_]+|<[^>]+>)''',
   '''(?i)(os\.environ|process\.env|getenv|environ\.get)''',
+  # Der Wert wird erst ZUSAMMENGEBAUT statt hingeschrieben: f-String-
+  # Platzhalter wie f"MONGO_PASSWORD={mongo_pw}" im Konfigurations-Erzeuger.
+  # Ein echtes Geheimnis beginnt nie mit einer geschweiften Klammer.
+  '''^\{''',
 ]
 paths = [
   '''\.env\.example$''',
