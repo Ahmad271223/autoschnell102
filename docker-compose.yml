@@ -9,7 +9,11 @@
 # aus der .env durchgereicht, Mongo-Verbindungspool begrenzt, Certbot-Volume.
 services:
   mongo:
-    image: mongo:8.0
+    # 8.2, nicht 8.0: MongoDB 8.0 verweigert den Start auf Linux-Kernen ab
+    # 6.19 (bekannte Unvertraeglichkeit einer Speicherverwaltung, MongoDB-
+    # Ticket SERVER-121912). Ubuntu 26.04 bringt Kernel 7.0 mit. 8.2 laeuft
+    # dort einwandfrei.
+    image: mongo:8.2
     restart: unless-stopped
     # Authentifizierung ab dem ERSTEN Start (der Produktions-Check des
     # Backends verlangt Zugangsdaten in MONGO_URL). Werte in .env setzen.
