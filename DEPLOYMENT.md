@@ -353,27 +353,92 @@ weglassen, MONGO_URL wieder auf `mongo:27017` — fertig.
 Erst sinnvoll, wenn Schritt 2 laeuft — sonst schreibt prod2 in eine
 Datenbank, die prod1 nicht sieht.
 
-1. Load Balancer im privaten Netz anlegen, beide Server als Ziele ueber
-   das private Netz, Dienst HTTPS→HTTP (Port 443 → 80), Gesundheits-
-   pruefung `HTTP GET /api/health` (Erklaerung zur Wahl in
-   `deploy/hinter-loadbalancer.conf.template`).
-2. Zertifikat am Load Balancer: Hetzner stellt es automatisch aus, wenn
-   die Domain bei Hetzner DNS liegt. Deine Zone liegt bei Cloudflare —
-   dann entweder `_acme-challenge.app.auto-schnellkauf.de` als NS-Eintrag
-   an Hetzner delegieren (einmalig, danach automatisch) oder das
-   Zertifikat als "eigenes Zertifikat" hochladen (alle 90 Tage).
-3. Auf beiden Servern in der `.env`: `PROXY_TEMPLATE=hinter-loadbalancer.conf.template`,
-   `PRIVATES_NETZ=10.0.0.0/16`, `TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.0/16`;
-   dann `docker compose ... up -d`. nginx macht dann kein TLS mehr
-   (Port 443 bleibt geschlossen), die echte Besucheradresse kommt aus
-   X-Forwarded-For — nur aus dem privaten Netz.
-4. DNS `app.auto-schnellkauf.de` auf die Adresse des Load Balancers.
-5. Firewall: 80/443 nur noch vom Load Balancer (privates Netz), nicht
-   mehr aus dem Internet.
+**Die Reihenfolge ist so gewaehlt, dass die Seite nie laenger als eine
+Minute weg ist.** Der Kern: Die Domain zieht ZUERST zu Hetzner DNS um,
+zeigt dabei aber weiter auf prod1. Dann kann Hetzner das Zertifikat fuer
+den Load Balancer ausstellen, waehrend alles normal laeuft. Erst ganz am
+Ende wird auf den Load Balancer umgeschaltet.
 
-Kontrolle: `python scripts/betriebsprobe.py app.auto-schnellkauf.de`
-von aussen (TLS 1.3, Kopfzeilen, 27017 zu), und `replikat_pruefen.py`
-auf beiden Servern.
+Warum Hetzner DNS: Hetzner stellt das Zertifikat am Load Balancer nur
+automatisch aus (und erneuert es), wenn die Domain in einer Hetzner-DNS-
+Zone liegt. Die Hauptdomain bleibt bei Cloudflare; nur die Unterdomain
+`app.` wird als eigene Zone an Hetzner delegiert.
+
+**3a. Hetzner DNS: Zone fuer die Unterdomain anlegen.**
+Hetzner Konsole -> DNS -> Zone hinzufuegen: `app.auto-schnellkauf.de`.
+Darin einen A-Eintrag `@` -> `2.28.66.8` (prod1, wie bisher), TTL 60.
+Hetzner nennt drei Nameserver (hydrogen/oxygen/helium.ns.hetzner.com).
+
+**3b. Cloudflare: Unterdomain delegieren.**
+Bei Cloudflare den A-Eintrag `app` loeschen und stattdessen drei
+NS-Eintraege `app` anlegen, je einer fuer die drei Hetzner-Nameserver,
+NICHT ueber den Cloudflare-Proxy (graue Wolke). Ab jetzt beantwortet
+Hetzner alle Fragen zu `app.auto-schnellkauf.de` — mit derselben
+Antwort wie vorher (prod1). Kontrolle nach ein paar Minuten:
+
+```bash
+nslookup -type=NS app.auto-schnellkauf.de 1.1.1.1     # Hetzner-Nameserver
+nslookup app.auto-schnellkauf.de 1.1.1.1              # weiterhin 2.28.66.8
+curl -sS https://app.auto-schnellkauf.de/api/health   # weiterhin healthy
+```
+
+**3c. Load Balancer anlegen.** Hetzner Konsole -> Load Balancer:
+Standort Nuernberg, Typ LB11 (reicht lange), privates Netz auswaehlen.
+Ziele: prod1 und prod2, jeweils "ueber privates Netz". Dienst: Protokoll
+HTTPS, Port 443 -> Zielport 80, Zertifikat "verwaltetes Zertifikat
+erstellen" fuer `app.auto-schnellkauf.de` (wird ueber die Hetzner-Zone
+bestaetigt, dauert Minuten). Gesundheitspruefung: HTTP, Port 80, Pfad
+`/api/health`, Intervall 15 s. Zweiter Dienst: HTTP 80 -> 80 mit
+"Umleitung auf HTTPS" — dann leitet der LB selbst um. Die Ziele zeigen
+jetzt noch "unhealthy": prod1 antwortet auf 80 mit einer Umleitung,
+prod2 hat noch keinen Web-Stack. Das ist in diesem Schritt richtig.
+
+**3d. prod2: Web-Stack im LB-Modus starten** (nach dem Lasttest).
+In der `.env` auf prod2:
+
+```
+PROXY_TEMPLATE=hinter-loadbalancer.conf.template
+PRIVATES_NETZ=10.0.0.0/16
+TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.0/16
+```
+
+```bash
+cd /opt/autoschnell && docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --build
+```
+
+Im Load Balancer wird prod2 nach spaetestens 30 s "healthy".
+
+**3e. Umschalten** (die eine Minute): prod1 auf den LB-Modus umstellen —
+dieselben drei Zeilen in die `.env` von prod1, dann nur den Proxy neu
+starten:
+
+```bash
+cd /opt/autoschnell && docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --force-recreate proxy
+```
+
+Sofort danach in der Hetzner-DNS-Zone den A-Eintrag `@` von 2.28.66.8
+auf die oeffentliche IP des Load Balancers aendern. Wegen TTL 60 sehen
+Besucher innerhalb einer Minute den Load Balancer; wer in dieser Minute
+noch prod1 direkt anspricht, bekommt einen Fehler — laenger dauert es
+nicht. Beide Ziele im LB sind jetzt "healthy".
+
+**3f. Firewall zuziehen.** In der Hetzner-Firewall der beiden Server die
+Regeln fuer 80 und 443 aus dem Internet entfernen. Der Load Balancer
+spricht ueber das private Netz, das die Cloud-Firewall nicht filtert.
+Direkt am Server kommt ab jetzt niemand mehr vorbei.
+
+**3g. Aufraeumen und pruefen.** Der cron `/etc/cron.d/autoschnell-zertifikat`
+auf prod1 ist ueberfluessig (das Zertifikat liegt jetzt am LB) und wird
+geloescht. Kontrolle von aussen und innen:
+
+```bash
+python scripts/betriebsprobe.py app.auto-schnellkauf.de --mail-domain auto-schnellkauf.de --dkim-selector resend
+docker compose exec -T backend python scripts/replikat_pruefen.py
+```
+
+**Rueckbau:** A-Eintrag wieder auf 2.28.66.8, prod1 wieder auf
+`default.conf.template`, Proxy neu starten. Zertifikat auf prod1 bleibt
+bis zu seinem Ablauf gueltig.
 
 ## Sicherheits-Checkliste vor dem Live-Gang
 - [ ] `JWT_SECRET` auf langen Zufallswert gesetzt
