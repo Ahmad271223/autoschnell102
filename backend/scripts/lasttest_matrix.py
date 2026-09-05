@@ -162,7 +162,8 @@ async def welt_aufbauen(sess) -> Welt:
     import bcrypt
     dbx.users.insert_one({
         "id": f"mxadm_{SUF}", "email": f"mx_admin_{SUF}@e2etest-mail.de",
-        "role": "admin", "active": True, "dealer_id": None,
+        # Seit Runde 7 (09/2026) sind Verkaufsplan und Rollen Super-Admin-Sache.
+        "role": "admin", "is_super_admin": True, "active": True, "dealer_id": None,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
     st, js = await _post_json(sess, f"{API}/auth/login",
