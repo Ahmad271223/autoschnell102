@@ -312,11 +312,23 @@ Umschalten braucht es einen dritten Waehler, der NICHT auf prod1 oder
 prod2 liegt: ein Schiedsrichter (Arbiter) auf einem kleinen dritten
 Server (CX23, rund 4 Euro), ohne Daten, ohne Last.
 
+Gemacht am 05.09.2026 (auto-spider-arbiter, 10.0.0.5). Zwei Dinge, die
+man wissen muss: der Schiedsrichter muss die anderen Mitglieder unter
+ihren NAMEN erreichen (`--add-host`), und MongoDB verlangt vor dem
+Aufnehmen eine ausdrueckliche Schreibbestaetigungs-Regel. `{w: 1}` ist
+fuer diesen Aufbau die richtige: bestaetigt der schreibende Server, gilt
+es — mit `majority` muessten BEIDE Datenserver bestaetigen, und ein
+Ausfall von prod2 liesse alle Schreibvorgaenge haengen.
+
 ```bash
-# auf dem dritten Server, nach Kopie des Keyfiles:
-docker run -d --name mongo-arbiter --restart unless-stopped   -p 10.0.0.4:27017:27017 -v /opt/mongo-keyfile:/etc/mongo-keyfile:ro   mongo:8.2 mongod --replSet rs0 --keyFile /etc/mongo-keyfile --bind_ip_all
+# auf dem dritten Server, nach Kopie des Keyfiles nach /opt/mongo/:
+chmod 400 /opt/mongo/mongo-keyfile && chown 999:999 /opt/mongo/mongo-keyfile
+docker run -d --name mongo-arbiter --restart unless-stopped   -p 10.0.0.5:27017:27017   --add-host mongo-prod1:10.0.0.2 --add-host mongo-prod2:10.0.0.3   -v /opt/mongo/mongo-keyfile:/etc/mongo-keyfile:ro -v mongo_arbiter:/data/db   mongo:8.2 mongod --replSet rs0 --keyFile /etc/mongo-keyfile --bind_ip_all
 # auf prod1:
-docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD"   --eval 'rs.addArb("10.0.0.4:27017")'
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval '
+  db.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}});
+  rs.addArb("10.0.0.5:27017")'
+docker compose exec -T backend python scripts/replikat_pruefen.py   # 3 Waehler
 ```
 
 Ohne Schiedsrichter — manuelles Umschalten, wenn prod1 tot ist (auf
