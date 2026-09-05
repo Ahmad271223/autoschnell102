@@ -52,6 +52,10 @@ regexes = [
   '''(?i)apify_test_token''',
   '''@e2etest-mail\.de''',
   '''Ci-Stack-Super-2026!x''',
+  # Wegwerf-Werte des Lasttest-Stacks auf prod2 (deploy/lasttest-auf-prod2.sh):
+  # eigenes Docker-Netz, eigene Datenbank, nach dem Lauf geloescht.
+  '''(?i)last-only-[a-z0-9-]+''',
+  '''(?i)lasttest-nur-wegwerf[a-z-]*''',
   # Zwei weitere Testwerte, die der scharfe Lauf ueber die Historie
   # gefunden hat (Fahrer-Passwortpruefung, Test-Admin). Gegen die
   # Produktionswerte geprueft: keine Uebereinstimmung.
