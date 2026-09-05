@@ -1,0 +1,312 @@
+# Continuous Integration — laeuft bei jedem Push und Pull Request.
+# Prueft: Backend bootet gegen echte MongoDB, Selbsttest-Suite gruen,
+# Frontend baut fehlerfrei. Erst wenn alles gruen ist, sollte gemergt werden.
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (Boot + Tests)
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:8.2
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017
+      DB_NAME: autoschnell_ci
+      JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
+      TEST_BASE_URL: http://127.0.0.1:8001
+      BETREIBER_PROD_URL: http://127.0.0.1:8003
+      # Freitext-Schaeden nur im Test aktiv (Produktions-Default: false)
+      AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
+      # Anbieter-Mock: E2E-, Job- und Mandantentests vergleichen echte
+      # Ablaeufe, ohne Kleinanzeigen/mobile.de zu belasten.
+      MOCK_PROVIDER_FETCH: "true"
+      # Admin-/Super-Admin-Seeds fuer tests/test_admin_dashboard.py
+      # (nur CI-Testwerte — Produktion setzt eigene in der .env).
+      ADMIN_EMAIL: ci-admin@ci.invalid
+      ADMIN_PASSWORD: "ci-only-admin-pw-1"
+      SUPER_ADMIN_USERNAME: ci-superadmin
+      SUPER_ADMIN_PASSWORD: "ci-only-superadmin-pw-1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # gitleaks scannt die ganze Historie
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Abhaengigkeiten installieren
+        run: pip install -r backend/requirements-dev.txt
+      - name: Abhaengigkeiten auf bekannte Schwachstellen pruefen (pip-audit)
+        # Audit 09/2026 (Blocker 1): BLOCKIEREND. Ausnahmen nur einzeln,
+        # begruendet und befristet in backend/audit-ausnahmen.txt
+        # (--ignore-vuln je Zeile "ID  # Grund, bis JJJJ-MM-TT").
+        run: |
+          pip install pip-audit
+          IGNORES=""
+          if [ -f backend/audit-ausnahmen.txt ]; then
+            HEUTE=$(date +%F)
+            while read -r ID REST; do
+              case "$ID" in ""|\#*) continue;; esac
+              BIS=$(printf '%s' "$REST" | grep -o 'bis [0-9-]\{10\}' | cut -d' ' -f2)
+              if [ -n "$BIS" ] && [ "$BIS" \< "$HEUTE" ]; then
+                echo "Ausnahme $ID ist abgelaufen ($BIS) — blockiert wieder."
+                continue
+              fi
+              IGNORES="$IGNORES --ignore-vuln $ID"
+            done < backend/audit-ausnahmen.txt
+          fi
+          pip-audit -r backend/requirements.txt --progress-spinner off $IGNORES
+      - name: Geheimnisse in der GESAMTEN Git-Historie suchen (gitleaks)
+        # Audit 09/2026 (Blocker 2): --no-git entfernt — die volle Historie
+        # wird gescannt (fetch-depth: 0 beim Checkout), Version gepinnt. Die
+        # 4 bekannten Alt-Funde (Zugangsdaten, die ROTIERT werden muessen)
+        # stehen in .gitleaks-baseline.json; jeder NEUE Fund blockiert.
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.24.3 detect -s /repo -c /repo/.gitleaks.toml --baseline-path /repo/.gitleaks-baseline.json --redact -v
+      - name: Backend starten
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8001 \
+            --loop asyncio > /tmp/backend.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8001/api/health && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8001/api/health
+      - name: Backend im Betreiber-Modus starten (SELF_SIGNUP=false)
+        # Audit 09/2026 (Punkt 43): der Produktionstest fuer deaktivierte
+        # Selbstregistrierung wird nicht mehr uebersprungen.
+        working-directory: backend
+        env:
+          SELF_SIGNUP: "false"
+        run: |
+          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8003             --loop asyncio > /tmp/backend-prod.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8003/api/health && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8003/api/health
+      - name: Selbsttest-Suite
+        working-directory: backend
+        # Audit 09/2026: automatische Discovery — neue Testdateien koennen
+        # nicht mehr vergessen werden (vorher: handgepflegte Dateiliste).
+        run: |
+          python -m pytest -v tests/ --ignore=tests/backend_test.py
+      - name: Backend-Log bei Fehler zeigen
+        if: failure()
+        run: tail -100 /tmp/backend.log || true
+
+  frontend:
+    name: Frontend (Build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - name: Abhaengigkeiten installieren
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+      - name: Abhaengigkeiten auf bekannte Schwachstellen pruefen (Gate)
+        # Audit 09/2026 (Punkt 49): laeuft jetzt IM frontend-Ordner und
+        # blockiert ab "high"; Ausnahmen begruendet+befristet in
+        # frontend/audit-ausnahmen.json.
+        working-directory: frontend
+        run: node audit-pruefen.js
+      - name: Frontend-Tests
+        working-directory: frontend
+        run: CI=true yarn test --watchAll=false
+      - name: Produktions-Build
+        working-directory: frontend
+        # Audit 09/2026 (Punkt 50): Warnungen sind Fehler.
+        run: CI=true yarn build
+
+  docker:
+    name: Produktions-Images + Stack-Probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Backend-Image bauen
+        run: docker build -t autoschnell-backend:ci ./backend
+      - name: Frontend-Image bauen
+        run: docker build -t autoschnell-web:ci ./frontend
+      - name: Backend-Image auf OS-/Paket-Schwachstellen scannen (Trivy)
+        # Audit 09/2026 (Blocker 1): blockiert bei behebbaren CRITICAL/HIGH.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: autoschnell-backend:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Compose-Stack real starten (Mongo 8 + Auth + Migration + Proxy)
+        # Audit 09/2026 (Blocker 7): der echte docker-compose-Stack bootet,
+        # die Migration laeuft als eigener Schritt, /api/health und
+        # /api/ready antworten durch den Proxy.
+        run: |
+          set -e
+          mkdir -p deploy/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout deploy/certs/privkey.pem -out deploy/certs/fullchain.pem \
+            -subj "/CN=localhost" 2>/dev/null
+          cat > .env <<'ENV'
+          MONGO_USER=ci_mongo
+          MONGO_PASSWORD=ci-mongo-passwort-nur-fuer-ci-123
+          JWT_SECRET=ci-stack-probe-jwt-geheimnis-abcdefghijklmnop
+          ADMIN_EMAIL=stack-admin@ci.invalid
+          ADMIN_PASSWORD=Ci-Stack-Admin-2026!x
+          SUPER_ADMIN_USERNAME=ci-stack-superadmin
+          SUPER_ADMIN_PASSWORD=Ci-Stack-Super-2026!x
+          FRONTEND_URL=https://stackprobe.ci.invalid
+          CORS_ORIGINS=https://stackprobe.ci.invalid
+          SMTP_HOST=smtp.ci.invalid
+          SMTP_USER=ci
+          SMTP_PASS=ci-smtp-pass
+          SMTP_FROM=noreply@ci.invalid
+          PUBLIC_HOST=localhost
+          WEB_CONCURRENCY=2
+          ENV
+          docker compose up -d --quiet-pull
+          for i in $(seq 1 60); do
+            docker compose ps backend | grep -q "healthy" && break
+            sleep 5
+          done
+          docker compose ps
+          docker compose exec -T backend curl -fsS http://localhost:8001/api/health
+          # Pruefbericht 09/2026: hier stand "|| true". Damit blieb die CI
+          # gruen, selbst wenn /api/ready mit 503 antwortete — die Probe
+          # bewies nur "Container starten", nicht "Plattform ist bereit".
+          # Jetzt blockiert sie. Bei Fehlschlag wird die Antwort gezeigt,
+          # damit man sofort sieht, WAS nicht bereit ist.
+          docker compose exec -T backend curl -fsS http://localhost:8001/api/ready             || { echo "READY-PRUEFUNG FEHLGESCHLAGEN:";
+                 docker compose exec -T backend curl -s http://localhost:8001/api/ready;
+                 exit 1; }
+          curl -fsSk https://localhost/api/health
+          curl -fsSk -o /dev/null -w "SPA %{http_code}\n" https://localhost/
+          docker compose logs backend | tail -20
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - name: Rauchtest im Browser gegen den ECHTEN Stack
+        # Pruefbericht 09/2026 (Befund 6): die grosse E2E-Suite laeuft gegen
+        # ein direkt gestartetes uvicorn und eine MongoDB ohne Passwort. Der
+        # Weg, den der Kunde spaeter nimmt — Browser, nginx mit HTTPS,
+        # Backend im Container, MongoDB mit Auth — war nie im Browser
+        # getestet. Genau das macht dieser kurze Rauchtest.
+        working-directory: frontend
+        env:
+          E2E_STACK: "1"
+          E2E_BASE_URL: https://localhost
+          E2E_SUPER_ADMIN_USERNAME: ci-stack-superadmin
+          E2E_SUPER_ADMIN_PASSWORD: Ci-Stack-Super-2026!x
+        run: |
+          yarn install --frozen-lockfile
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - name: Playwright-Report des Stack-Rauchtests bei Fehler
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-stack
+          path: frontend/playwright-report/
+          retention-days: 7
+      - name: Stack-Logs bei Fehler
+        if: failure()
+        run: docker compose logs --tail 120 || true
+      - name: Stack stoppen
+        if: always()
+        run: docker compose down -v || true
+
+  e2e:
+    name: "E2E (Playwright, Produktions-Build gegen echtes Backend)"
+    # Audit 09/2026 ("Frontend praktisch ungetestet"): kompakte Browser-Suite
+    # (frontend/e2e) — Anmeldung aller Rollen, Rollentrennung, Freischaltung,
+    # Fahrer-App, Terminplaner, Marktplatz-Verhandlung, Handy-Ansicht.
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:8.2
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017
+      DB_NAME: autoschnell_e2e
+      JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
+      AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
+      MOCK_PROVIDER_FETCH: "true"
+      # Seeds (nur CI-Testwerte, siehe Backend-Job) — die Suite meldet sich
+      # als Super-Admin an und legt alle weiteren Testkonten selbst an.
+      ADMIN_EMAIL: ci-admin@ci.invalid
+      ADMIN_PASSWORD: "ci-only-admin-pw-1"
+      SUPER_ADMIN_USERNAME: ci-superadmin
+      SUPER_ADMIN_PASSWORD: "ci-only-superadmin-pw-1"
+      E2E_API_URL: http://127.0.0.1:8002/api
+      E2E_BASE_URL: http://127.0.0.1:3100
+      PLAYWRIGHT_HTML_OPEN: never
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Backend-Abhaengigkeiten installieren
+        run: pip install -r backend/requirements-dev.txt
+      - name: Backend starten (Port 8002, Anbieter-Mock)
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8002 \
+            --loop asyncio > /tmp/backend-e2e.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8002/api/health && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8002/api/health
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - name: Frontend-Abhaengigkeiten installieren
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+      - name: Produktions-Build fuer die E2E-Suite
+        working-directory: frontend
+        # REACT_APP_BACKEND_URL leer = API unter derselben Herkunft ("/api",
+        # api.js haengt /api an) — wie in Produktion hinter nginx. Der
+        # Test-Server e2e/serve.js reicht /api an :8002 weiter; so braucht
+        # das Backend keine CORS-Freigabe und die CSP (connect-src 'self')
+        # bleibt unveraendert.
+        run: REACT_APP_BACKEND_URL= CI=true yarn build
+      - name: Chromium installieren
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: E2E-Suite
+        working-directory: frontend
+        run: yarn e2e:ci
+      - name: Playwright-Report bei Fehler sichern
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+      - name: Backend-Log bei Fehler zeigen
+        if: failure()
+        run: tail -100 /tmp/backend-e2e.log || true

@@ -12,19 +12,20 @@
         <meta name="apple-mobile-web-app-title" content="Autohandel" />
         <!--
           Content-Security-Policy (defense-in-depth for XSS / localStorage token theft).
-          'unsafe-inline' for script-src is required because the PostHog bootstrap
-          below is an inline script. For a stricter policy, move PostHog init to a
-          separate .js file and remove 'unsafe-inline'.
+          script-src ist auf 'self' beschraenkt (kein unsafe-inline, keine Dritt-
+          Skripte): Analyse-Tracking wurde entfernt (Pruefbericht Runde 5, DSGVO), und der
+          CRA-Runtime-Chunk wird nicht mehr inline eingebettet (INLINE_RUNTIME_CHUNK=false).
+          %REACT_APP_CSP_CONNECT% ist nur in der Entwicklung gesetzt (localhost:8001).
+          Schriften (IBM Plex, Cabinet Grotesk) liegen seit 09/2026 lokal unter
+          public/fonts/ -> style-src/font-src ohne Google/Fontshare-Origins, keine
+          preconnect-Hints mehr (Datenschutz: kein Drittland-Transfer der Besucher-IP).
           Note: frame-ancestors is intentionally omitted here — it is ignored in
           <meta> tags (browser spec). It is enforced via the HTTP header set by
           SecurityHeadersMiddleware in server.py.
         -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://us-assets.i.posthog.com; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://api.fontshare.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://api.fontshare.com; font-src 'self' https://fonts.gstatic.com https://cdn.fontshare.com https://fonts.fontshare.com https://api.fontshare.com; img-src 'self' data: blob: https:; connect-src 'self' http://localhost:8001 https://us.i.posthog.com https://us-assets.i.posthog.com https://api.stripe.com https://integrations.emergentagent.com; object-src 'none'; base-uri 'self';" />
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' %REACT_APP_CSP_SCRIPT%; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self' %REACT_APP_CSP_CONNECT% https://api.stripe.com; object-src 'none'; base-uri 'self';" />
         <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
         <link rel="apple-touch-icon" href="%PUBLIC_URL%/favicon.ico" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap" rel="stylesheet" />
         <!--
         manifest.json provides metadata used when your web app is installed on a
         user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
@@ -39,7 +40,6 @@
         Learn how to configure a non-root public URL by running `npm run build`.
         -->
         <title>AutoSchnell</title>
-        <script>window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);</script>
     </head>
     <body>
         <noscript>You need to enable JavaScript to run this app.</noscript>
@@ -54,80 +54,7 @@
       To begin the development, run `npm start` or `yarn start`.
       To create a production bundle, use `npm run build` or `yarn build`.
     -->
-        <!-- PostHog analytics — initialised only after the user grants analytics
-             consent (DSGVO / GDPR Art. 6 I lit. a).  The React app calls
-             window.__initPosthog() from its consent-handler.  Until then no
-             tracking script is loaded and no cookies / localStorage keys are set. -->
-        <script>
-            window.__initPosthog = function () {
-                if (window.__posthogLoaded) return;
-                window.__posthogLoaded = true;
-                !(function (t, e) {
-                    var o, n, p, r;
-                    e.__SV ||
-                        ((window.posthog = e),
-                        (e._i = []),
-                        (e.init = function (i, s, a) {
-                            function g(t, e) {
-                                var o = e.split(".");
-                                2 == o.length && ((t = t[o[0]]), (e = o[1])),
-                                    (t[e] = function () {
-                                        t.push(
-                                            [e].concat(
-                                                Array.prototype.slice.call(arguments, 0),
-                                            ),
-                                        );
-                                    });
-                            }
-                            ((p = t.createElement("script")).type = "text/javascript"),
-                                (p.crossOrigin = "anonymous"),
-                                (p.async = !0),
-                                (p.src =
-                                    s.api_host.replace(".i.posthog.com", "-assets.i.posthog.com") +
-                                    "/static/array.js"),
-                                (r = t.getElementsByTagName("script")[0]).parentNode.insertBefore(p, r);
-                            var u = e;
-                            for (
-                                void 0 !== a ? (u = e[a] = []) : (a = "posthog"),
-                                    u.people = u.people || [],
-                                    u.toString = function (t) {
-                                        var e = "posthog";
-                                        return "posthog" !== a && (e += "." + a), t || (e += " (stub)"), e;
-                                    },
-                                    u.people.toString = function () {
-                                        return u.toString(1) + ".people (stub)";
-                                    },
-                                    o = "init me ws ys ps bs capture je Di ks register register_once register_for_session unregister unregister_for_session Ps getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSurveysLoaded onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey canRenderSurveyAsync identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty Es $s createPersonProfile Is opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing Ss debug xs getPageViewId captureTraceFeedback captureTraceMetric".split(" "),
-                                    n = 0;
-                                n < o.length;
-                                n++
-                            )
-                                g(u, o[n]);
-                            e._i.push([i, s, a]);
-                        }),
-                        (e.__SV = 1));
-                })(document, window.posthog || []);
-                posthog.init("phc_xAvL2Iq4tFmANRE7kzbKwaSqp1HJjN7x48s3vr0CMjs", {
-                    api_host: "https://us.i.posthog.com",
-                    person_profiles: "identified_only",
-                    opt_out_capturing_by_default: false,
-                    session_recording: {
-                        recordCrossOriginIframes: true,
-                        capturePerformance: false,
-                    },
-                });
-            };
-            // Auto-init only if the user has previously given consent.
-            if (localStorage.getItem("ah_analytics_consent") === "1") {
-                window.__initPosthog();
-            }
-        </script>
-        <script>
-          if ("serviceWorker" in navigator) {
-            window.addEventListener("load", () => {
-              navigator.serviceWorker.register("/service-worker.js").catch(() => {});
-            });
-          }
-        </script>
+            <!-- Runde 5: keine Inline-Skripte (CSP script-src 'self') -> boot.js -->
+        <script src="%PUBLIC_URL%/boot.js"></script>
     </body>
 </html>

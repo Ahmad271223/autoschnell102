@@ -8,7 +8,14 @@ from typing import Optional
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
+import jwt                                   # PyJWT (python-jose entfernt: ecdsa ohne Fix)
+from jwt import PyJWTError as JWTError
+
+# .env muss geladen sein, BEVOR JWT_SECRET gelesen wird — sonst wird bei jedem
+# Start ein Zufalls-Secret erzeugt und alle Sessions werden ungültig.
+from pathlib import Path as _Path
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(_Path(__file__).parent / ".env")
 
 _jwt_secret_env = os.environ.get("JWT_SECRET", "")
 if not _jwt_secret_env or _jwt_secret_env == "dev-secret":
@@ -65,6 +72,24 @@ def create_token(user_id: str, session_id: str) -> str:
 
 def decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+
+
+MFA_TOKEN_TTL_MINUTES = 5
+
+
+def create_mfa_token(user_id: str) -> str:
+    """Kurzlebiges Zwischen-Token nach korrektem Passwort — berechtigt NUR
+    zur Eingabe des zweiten Faktors, nie zu API-Aufrufen (typ=mfa)."""
+    exp = datetime.now(timezone.utc) + timedelta(minutes=MFA_TOKEN_TTL_MINUTES)
+    return jwt.encode({"sub": user_id, "typ": "mfa", "nonce": uuid.uuid4().hex[:12],
+                       "exp": exp}, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def decode_mfa_token(token: str) -> dict:
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    if payload.get("typ") != "mfa":
+        raise JWTError("kein MFA-Token")
+    return payload
 
 
 def new_session_id() -> str:

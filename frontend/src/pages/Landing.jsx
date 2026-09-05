@@ -1,6 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { ArrowRight, Bolt, Check, FileText, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
+import { api } from "../lib/api";
 
 const HERO_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png";
 const SECTION_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/dd3f3682a6a7806bf9c8c9664b184e0728edf5f897bc17bdf2836ddfb7e76644.png";
@@ -10,6 +11,19 @@ const KEYS_IMG = "https://images.pexels.com/photos/4173191/pexels-photo-4173191.
 export default function Landing() {
   const nav = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
+  // Preis des Marktplatz-Zugangs beim Server erfragen, statt ihn hier
+  // festzuschreiben. Sonst wirbt die Startseite mit 20 Euro weiter,
+  // obwohl der Betreiber den Zugang laengst kostenlos gestellt hat.
+  // Vorbelegung = der Standard im Code (kostenlos).
+  const [markt, setMarkt] = useState({ marktplatz_kostenlos: true, preis: 20 });
+
+  useEffect(() => {
+    let aktiv = true;
+    api.get("/payments/config")
+      .then((r) => { if (aktiv && r.data) setMarkt(r.data); })
+      .catch(() => {});
+    return () => { aktiv = false; };
+  }, []);
 
   // Schließt das Mobile-Menü, wenn der Browser gross wird oder Escape kommt
   useEffect(() => {
@@ -51,6 +65,10 @@ export default function Landing() {
 
           {/* Desktop-CTAs */}
           <div className="hidden md:flex items-center gap-2">
+            <Link to="/markt/login" data-testid="nav-b2b"
+                  className="px-3 py-1.5 text-sm text-zinc-300 hover:text-white">
+              B2B-Marktplatz
+            </Link>
             <Link to="/fahrer/login" data-testid="nav-driver-login"
                   className="px-3 py-1.5 text-sm text-zinc-300 hover:text-white">
               Fahrer-App
@@ -58,9 +76,9 @@ export default function Landing() {
             <Link to="/login" data-testid="nav-login" className="px-3 py-1.5 text-sm text-zinc-200 hover:text-white">
               Anmelden
             </Link>
-            <Link to="/register" data-testid="nav-register"
+            <Link to="/anfrage" data-testid="nav-register"
                   className="kinetic-button px-4 py-1.5 text-sm rounded-sm">
-              Jetzt starten
+              Zugang anfragen
             </Link>
           </div>
 
@@ -122,6 +140,10 @@ export default function Landing() {
              className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
             Kontakt
           </a>
+          <Link to="/markt/login" onClick={closeMenu} data-testid="nav-mobile-b2b"
+                className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
+            B2B-Marktplatz
+          </Link>
           <Link to="/fahrer/login" onClick={closeMenu} data-testid="nav-mobile-driver"
                 className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
             Fahrer-App
@@ -135,9 +157,9 @@ export default function Landing() {
                 style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)" }}>
             Anmelden
           </Link>
-          <Link to="/register" onClick={closeMenu} data-testid="nav-mobile-register"
+          <Link to="/anfrage" onClick={closeMenu} data-testid="nav-mobile-register"
                 className="kinetic-button w-full text-center px-4 py-3 text-[15px] rounded-sm">
-            Jetzt starten
+            Zugang anfragen
           </Link>
         </div>
       </aside>
@@ -180,10 +202,10 @@ export default function Landing() {
                     />
                     <button
                       data-testid="hero-cta-btn"
-                      onClick={() => nav("/register")}
+                      onClick={() => nav("/anfrage")}
                       className="kinetic-button px-6 flex items-center gap-2 text-sm font-bold whitespace-nowrap rounded-r-md"
                     >
-                      Vergleich starten <ArrowRight size={16} />
+                      Zugang anfragen <ArrowRight size={16} />
                     </button>
                   </div>
                 </div>
@@ -313,50 +335,102 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* PRICING */}
+      {/* PRICING — drei Zielgruppen (Stand 09/2026) */}
       <section id="pricing" className="py-24 border-t" style={{ borderColor: "var(--border-default)" }}>
-        <div className="max-w-5xl mx-auto px-6">
+        <div className="max-w-6xl mx-auto px-6">
           <div className="text-center mb-12">
             <div className="overline">Preise · Klar · Fair</div>
             <h2 className="font-display font-black text-3xl lg:text-5xl tracking-tighter mt-3">
-              Eine Lizenz. Alle Funktionen.
+              Für Firmen, Zwischenhändler und Fahrer.
             </h2>
+            <p className="text-zinc-400 mt-3 max-w-2xl mx-auto text-sm">
+              Firmen-Konten schalten wir persönlich frei — Zugang anfragen, wir melden uns,
+              legen dein Konto und deine Sucher an und rechnen per Rechnung ab.
+            </p>
           </div>
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="tactical-card p-8" data-testid="pricing-monthly">
-              <div className="overline">Monatsabo</div>
+          <div className="grid md:grid-cols-3 gap-6">
+            {/* Firmen / Autohändler */}
+            <div className="tactical-card p-8 relative" style={{ borderColor: "rgba(255,59,48,0.4)" }} data-testid="pricing-firma">
+              <div className="absolute -top-3 left-6 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] font-bold rounded-sm"
+                   style={{ background: "var(--accent-red)" }}>Für Autohändler</div>
+              <div className="overline">Firmen-Konto + Sucher</div>
               <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-5xl">120 €</span>
-                <span className="text-zinc-400 text-sm">/ Monat</span>
+                <span className="font-display font-black text-4xl">150 €</span>
+                <span className="text-zinc-400 text-sm">/ Monat je Sucher</span>
               </div>
-              <p className="text-zinc-400 text-sm mt-3">Flexibel, monatlich kündbar.</p>
-              <Link to="/register?plan=monthly" data-testid="cta-monthly"
-                    className="block text-center w-full mt-7 px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
-                    style={{ borderColor: "var(--border-default)" }}>
-                Monatlich starten
+              <p className="text-zinc-400 text-sm mt-2">oder 1.500 € / Jahr je Sucher — Abrechnung per Rechnung.
+                Verkaufen &amp; Verwalten für den Firmen-Hauptaccount kostenlos.</p>
+              <Link to="/anfrage" data-testid="cta-firma"
+                    className="block text-center w-full mt-6 kinetic-button px-5 py-3 rounded-sm">
+                Zugang anfragen
               </Link>
               <ul className="mt-6 space-y-2 text-sm">
-                {["Alle Funktionen freigeschaltet", "PDF-Archiv", "WhatsApp & E-Mail", "Terminplaner & Fahrer", "Live-Zähler"].map(t => (
-                  <li key={t} className="flex items-center gap-2 text-zinc-300"><Check size={14} style={{ color: "var(--accent-green)" }} /> {t}</li>
+                {["Freischaltung durch uns — kein Warten auf Zahlungsanbieter", "Sucher-Zugänge legen wir für dich an (jederzeit erweiterbar)", "Vergleich, Suche, Kaufverträge, Versand, Termine", "Bestand, Fahrzeugakte, Inserate & Marktplatz-Verkauf", "Zahlungsübersicht: was gezahlt wurde, wann die nächste fällig ist"].map(t => (
+                  <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
                 ))}
               </ul>
             </div>
-            <div className="tactical-card p-8 relative" style={{ borderColor: "rgba(255,59,48,0.4)" }} data-testid="pricing-yearly">
-              <div className="absolute -top-3 left-6 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] font-bold rounded-sm"
-                   style={{ background: "var(--accent-red)" }}>2 Monate gratis</div>
-              <div className="overline">Jahresabo</div>
-              <div className="mt-3 flex items-baseline gap-2">
-                <span className="font-display font-black text-5xl">1.200 €</span>
-                <span className="text-zinc-400 text-sm">/ Jahr</span>
+
+            {/* B2B-Marktplatz */}
+            <div className="tactical-card p-8" data-testid="pricing-marktplatz">
+              <div className="overline">B2B-Marktplatz</div>
+              <div className="mt-3 flex items-baseline gap-2" data-testid="markt-preis">
+                {markt.marktplatz_kostenlos ? (
+                  <span className="font-display font-black text-4xl">Kostenlos</span>
+                ) : (
+                  <>
+                    <span className="font-display font-black text-4xl">
+                      {Number(markt.preis ?? 20).toLocaleString("de-DE")} €
+                    </span>
+                    <span className="text-zinc-400 text-sm">/ Monat</span>
+                  </>
+                )}
               </div>
-              <p className="text-zinc-400 text-sm mt-3">Spart 240 € im Vergleich zum Monatsabo.</p>
-              <Link to="/register?plan=yearly" data-testid="cta-yearly"
-                    className="block text-center w-full mt-7 kinetic-button px-5 py-3 rounded-sm">
-                Jahresabo wählen
-              </Link>
-              <ul className="mt-6 space-y-2 text-sm">
-                {["Alle Funktionen freigeschaltet", "Priorisierter Support", "Kein Aufpreis bei Updates", "Volle Daten-Kontrolle", "Spart 2 Monate"].map(t => (
-                  <li key={t} className="flex items-center gap-2 text-zinc-300"><Check size={14} style={{ color: "var(--accent-green)" }} /> {t}</li>
+              <p className="text-zinc-400 text-sm mt-2">Für Zwischenhändler: geprüfte Fahrzeuge von Händlern kaufen.
+                {markt.marktplatz_kostenlos
+                  ? " Registrieren und sofort loslegen."
+                  : " Online zahlen, sofort loslegen."}</p>
+              <div className="mt-6 flex flex-col gap-2">
+                <Link to="/markt/registrieren" data-testid="cta-markt-register"
+                      className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
+                      style={{ borderColor: "var(--border-default)" }}>
+                  Registrieren
+                </Link>
+                <Link to="/markt/login" data-testid="cta-markt-login"
+                      className="block text-center w-full px-5 py-2.5 rounded-sm text-sm text-zinc-300 hover:text-white">
+                  Anmelden
+                </Link>
+              </div>
+              <ul className="mt-5 space-y-2 text-sm">
+                {["Alle veröffentlichten Fahrzeuge + Händlerseiten", "B2B- und Netzwerk-Preise", "Favoriten-Merkliste", "Zahlung sicher über Stripe", "Monatlich, jederzeit beendbar"].map(t => (
+                  <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Fahrer-App */}
+            <div className="tactical-card p-8" data-testid="pricing-fahrer">
+              <div className="overline">Fahrer-App</div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="font-display font-black text-4xl">0 €</span>
+                <span className="text-zinc-400 text-sm">kostenlos</span>
+              </div>
+              <p className="text-zinc-400 text-sm mt-2">Für Abholfahrer: Termine, digitales Abholprotokoll mit
+                Unterschrift, fertiges PDF — direkt am Handy.</p>
+              <div className="mt-6 flex flex-col gap-2">
+                <Link to="/fahrer/register" data-testid="cta-fahrer-register"
+                      className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
+                      style={{ borderColor: "var(--border-default)" }}>
+                  Kostenlos registrieren
+                </Link>
+                <Link to="/fahrer/login" data-testid="cta-fahrer-login"
+                      className="block text-center w-full px-5 py-2.5 rounded-sm text-sm text-zinc-300 hover:text-white">
+                  Anmelden
+                </Link>
+              </div>
+              <ul className="mt-5 space-y-2 text-sm">
+                {["Zugeordnete Abholtermine im Überblick", "Abholprotokoll Schritt für Schritt am Handy", "Beide Unterschriften direkt auf dem Display", "Schäden per Tipp auf die Fahrzeug-Skizze", "Mit Fahrer-Code bei Händlern verknüpfen"].map(t => (
+                  <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
                 ))}
               </ul>
             </div>
@@ -369,9 +443,9 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="text-zinc-500 text-sm">© {new Date().getFullYear()} Autohandel SaaS · Alle Rechte vorbehalten.</div>
           <div className="flex gap-6 text-sm text-zinc-400">
-            <a href="#" className="hover:text-white">Datenschutz</a>
-            <a href="#" className="hover:text-white">AGB</a>
-            <a href="#" className="hover:text-white">Impressum</a>
+            <Link to="/datenschutz" className="hover:text-white">Datenschutz</Link>
+            <Link to="/impressum" className="hover:text-white">Impressum</Link>
+            <Link to="/agb" className="hover:text-white">AGB</Link>
             <a href="mailto:support@autohandel.app" className="hover:text-white">Support</a>
           </div>
         </div>

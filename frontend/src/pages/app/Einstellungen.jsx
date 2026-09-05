@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
-  CreditCard, Calendar, X, ArrowRight, Bolt,
+  CreditCard, Calendar, X, ArrowRight, Bolt, Store,
 } from "lucide-react";
 import CountryPicker from "@/components/CountryPicker";
 
@@ -12,12 +12,18 @@ const SECTIONS = [
   { id: "profile",    label: "Profil",         icon: Building2 },
   { id: "rules",      label: "Vergleich",      icon: Sliders },
   { id: "templates",  label: "Versand",        icon: Mail },
+  { id: "markt",      label: "Marktplatz",     icon: Store },
   { id: "agb",        label: "AGB & Vereinb.", icon: ShieldCheck },
   { id: "abo",        label: "Abo",            icon: CreditCard },
 ];
 
 export default function Einstellungen() {
-  const { dealer, refresh } = useAuth();
+  const { dealer, refresh, user } = useAuth();
+  // Sucher sehen keinen Marktplatz-Reiter (nur der Chef verwaltet den
+  // Marktplatz; die Endpunkte antworten Suchern mit 403 -> ewig "Lädt…").
+  const sections = user?.role === "sucher"
+    ? SECTIONS.filter((s) => s.id !== "markt")
+    : SECTIONS;
   const [form, setForm] = useState(null);
   const [active, setActive] = useState("profile");
   const [savedFlash, setSavedFlash] = useState(false);
@@ -29,6 +35,7 @@ export default function Einstellungen() {
         phone: dealer.phone || "", whatsapp_number: dealer.whatsapp_number || dealer.phone || "",
         email: dealer.email || "", address: dealer.address || "",
         zip_code: dealer.zip_code || "", city: dealer.city || "",
+        opening_hours: dealer.opening_hours || "", logo_url: dealer.logo_url || "",
       },
       comparison_rules: dealer.comparison_rules || {},
       export_rules: dealer.export_rules || {},
@@ -51,6 +58,21 @@ export default function Einstellungen() {
   const rulesKey = editProfile === "export" ? "export_rules" : "comparison_rules";
 
   const setProfile = (k, v) => setForm({ ...form, profile: { ...form.profile, [k]: v } });
+
+  const uploadLogo = async (file) => {
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { toast.error("Logo zu groß (max. 2 MB)"); return; }
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+      });
+      const { data } = await api.post("/dealer/logo", { logo_b64: b64 });
+      setProfile("logo_url", data.logo_url);
+      await refresh();
+      toast.success("Logo hochgeladen");
+    } catch (e) { toast.error(errMsg(e, "Logo konnte nicht hochgeladen werden")); }
+  };
   const setRule = (key, val) => setForm({
     ...form,
     [rulesKey]: { ...(form[rulesKey] || {}), [key]: val },
@@ -107,7 +129,7 @@ export default function Einstellungen() {
       <div className="grid lg:grid-cols-[220px_1fr] gap-5">
         {/* Sidebar nav */}
         <nav className="apple-surface p-2 self-start lg:sticky lg:top-6">
-          {SECTIONS.map((s) => {
+          {sections.map((s) => {
             const Icon = s.icon;
             const isActive = active === s.id;
             return (
@@ -128,7 +150,31 @@ export default function Einstellungen() {
         {/* Content */}
         <div className="space-y-5">
           {active === "profile" && (
-            <Section title="Händlerprofil" subtitle="Diese Angaben erscheinen auf jedem Kaufvertrag und in den Versand-Vorlagen.">
+            <Section title="Händlerprofil" subtitle="Diese Angaben erscheinen auf jedem Kaufvertrag, in den Versand-Vorlagen und – für Zwischenhändler – auf dem Marktplatz.">
+              {/* Firmenlogo */}
+              <div className="flex items-center gap-4 mb-4">
+                <div className="w-20 h-20 rounded-2xl overflow-hidden flex items-center justify-center shrink-0"
+                     style={{ background: "rgba(255,255,255,0.05)", border: "1px solid var(--divider)" }}>
+                  {form.profile.logo_url
+                    ? <img src={form.profile.logo_url.startsWith("http") ? form.profile.logo_url : `${process.env.REACT_APP_BACKEND_URL}${form.profile.logo_url}`}
+                           alt="Logo" className="w-full h-full object-contain" />
+                    : <Building2 size={26} className="text-zinc-600" />}
+                </div>
+                <div>
+                  <label className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white cursor-pointer"
+                         style={{ background: "var(--accent-red)" }} data-testid="set-logo">
+                    Logo hochladen
+                    <input type="file" accept="image/*" className="hidden"
+                           onChange={(e) => uploadLogo(e.target.files?.[0])} />
+                  </label>
+                  <div className="text-[11px] text-zinc-500 mt-1.5">PNG/JPG, max. 2 MB. Erscheint auf Vertrag & Marktplatz.</div>
+                  {form.profile.logo_url && (
+                    <button type="button" onClick={() => setProfile("logo_url", "")}
+                            className="text-[11px] text-zinc-500 hover:text-red-400 mt-1">Logo entfernen</button>
+                  )}
+                </div>
+              </div>
+
               <div className="grid md:grid-cols-2 gap-3">
                 <AppleField label="Firmenname" value={form.profile.company_name} onChange={(v) => setProfile("company_name", v)} testid="set-company" />
                 <AppleField label="Ansprechpartner" value={form.profile.contact_person} onChange={(v) => setProfile("contact_person", v)} testid="set-contact" />
@@ -138,6 +184,17 @@ export default function Einstellungen() {
                 <AppleField label="Adresse" value={form.profile.address} onChange={(v) => setProfile("address", v)} testid="set-address" />
                 <AppleField label="PLZ" value={form.profile.zip_code} onChange={(v) => setProfile("zip_code", v)} testid="set-zip" />
                 <AppleField label="Ort" value={form.profile.city} onChange={(v) => setProfile("city", v)} testid="set-city" />
+              </div>
+
+              {/* Öffnungszeiten */}
+              <div className="mt-3">
+                <label className="block text-[13px] font-medium text-zinc-300 mb-1">Öffnungszeiten</label>
+                <textarea value={form.profile.opening_hours} onChange={(e) => setProfile("opening_hours", e.target.value)}
+                          rows={3} data-testid="set-hours"
+                          placeholder={"Mo–Fr: 08:00–18:00\nSa: 09:00–13:00\nSo: geschlossen"}
+                          className="w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40"
+                          style={{ borderColor: "var(--divider)" }} />
+                <div className="text-[11px] text-zinc-500 mt-1">Wird Zwischenhändlern im Marktplatz angezeigt.</div>
               </div>
             </Section>
           )}
@@ -200,6 +257,7 @@ export default function Einstellungen() {
                              onChange={(v) => setRule("first_registration", { ...r.first_registration, mode: v })}
                              options={[
                                { v: "ignore", l: "Nicht übernehmen" },
+                               { v: "any", l: "Beliebig (Export-Standard)" },
                                { v: "exact", l: "1:1 (gleiches Jahr)" },
                                { v: "older_exact", l: "X Jahre älter" },
                              ]} />
@@ -368,6 +426,7 @@ export default function Einstellungen() {
             </Section>
           )}
 
+          {active === "markt" && <MarketplacePanel />}
           {active === "abo" && <SubscriptionPanel />}
         </div>
       </div>
@@ -479,6 +538,235 @@ function fmtGermanDate(iso) {
   } catch { return iso; }
 }
 
+function MarketplacePanel() {
+  const [mp, setMp] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try { const { data } = await api.get("/dealer/marketplace-profile"); setMp(data); }
+    catch (e) { toast.error(errMsg(e, "Marktplatz-Profil konnte nicht geladen werden")); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const setPublic = async (val) => {
+    setBusy(true);
+    try {
+      const { data } = await api.put("/dealer/marketplace-profile", { public: val });
+      setMp((s) => ({ ...s, public: data.public }));
+      toast.success(val ? "Marktplatz-Profil ist jetzt öffentlich" : "Marktplatz-Profil ist privat");
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+
+  const saveDesc = async () => {
+    try { await api.put("/dealer/marketplace-profile", { description: mp.description || "" }); toast.success("Beschreibung gespeichert"); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+
+  if (!mp) return <Section title="Marktplatz"><div className="text-sm text-zinc-500">Lädt…</div></Section>;
+
+  return (
+    <Section title="Marktplatz" subtitle="Steuert, ob deine veröffentlichten Fahrzeuge für registrierte Zwischenhändler sichtbar sind.">
+      {/* Öffentlich-Schalter */}
+      <div className="flex items-center justify-between rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+        <div className="flex items-start gap-3">
+          <Globe size={18} className={mp.public ? "text-emerald-400 mt-0.5" : "text-zinc-500 mt-0.5"} />
+          <div>
+            <div className="text-sm font-semibold">Profil öffentlich sichtbar</div>
+            <div className="text-xs text-zinc-500 mt-0.5">
+              {mp.public
+                ? "Aktiv — veröffentlichte Fahrzeuge erscheinen im B2B-Marktplatz."
+                : "Aus — nur eingeladene Netzwerk-Partner sehen deine Fahrzeuge."}
+            </div>
+          </div>
+        </div>
+        <button onClick={() => setPublic(!mp.public)} disabled={busy}
+                className={`relative w-12 h-7 rounded-full transition ${mp.public ? "bg-emerald-500" : "bg-white/15"}`}
+                title="Umschalten" data-testid="markt-public-toggle">
+          <span className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-all ${mp.public ? "left-6" : "left-1"}`} />
+        </button>
+      </div>
+
+      {/* Kennzahlen */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+          <div className="text-2xl font-black tabular-nums">{mp.published_count ?? 0}</div>
+          <div className="text-xs text-zinc-500">veröffentlichte Fahrzeuge</div>
+        </div>
+        <div className="rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+          <div className="text-2xl font-black tabular-nums">{mp.network_members ?? 0}</div>
+          <div className="text-xs text-zinc-500">Netzwerk-Partner</div>
+        </div>
+      </div>
+
+      {/* Kurzbeschreibung */}
+      <div>
+        <label className="block text-[13px] font-medium text-zinc-300 mb-1">Kurzbeschreibung (für deine Marktplatz-Seite)</label>
+        <textarea value={mp.description || ""} onChange={(e) => setMp((s) => ({ ...s, description: e.target.value }))}
+                  rows={3} placeholder="z.B. Gepflegte Gebrauchtwagen aus Hannover, faire B2B-Preise."
+                  className="w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40"
+                  style={{ borderColor: "var(--divider)" }} />
+        <button onClick={saveDesc} className="mt-2 inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white"
+                style={{ background: "var(--accent-red)" }}>
+          <Save size={14} /> Beschreibung speichern
+        </button>
+      </div>
+
+      {/* Einladungslinks (privates Netzwerk) */}
+      <InvitePanel />
+
+      <div className="text-[11px] text-zinc-600">
+        Fahrzeuge veröffentlichst du im jeweiligen Inserat (Bestand → Inserat → „Öffentlich
+        veröffentlichen" oder „Nur Netzwerk (privat)"). Das Verkaufen ist kostenlos und unbegrenzt.
+      </div>
+    </Section>
+  );
+}
+
+function InvitePanel() {
+  const [invites, setInvites] = useState(null);
+  const [validity, setValidity] = useState(168);
+  const [uses, setUses] = useState(1);
+
+  const load = async () => {
+    try { const { data } = await api.get("/dealer/invites"); setInvites(data); }
+    catch (e) { setInvites([]); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    try {
+      const { data } = await api.post("/dealer/invites", {
+        validity_hours: Number(validity), max_uses: Number(uses),
+      });
+      const link = `${window.location.origin}${data.link}`;
+      try { await navigator.clipboard.writeText(link); toast.success("Einladungslink erstellt & kopiert"); }
+      catch { toast.success("Einladungslink erstellt"); }
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
+  const copy = async (inv) => {
+    const link = `${window.location.origin}/markt/registrieren?invite=${inv.token}`;
+    try { await navigator.clipboard.writeText(link); toast.success("Link kopiert"); }
+    catch { window.prompt("Link kopieren:", link); }
+  };
+
+  const remove = async (inv) => {
+    try { await api.delete(`/dealer/invites/${inv.id}`); toast.success("Einladung gelöscht"); load(); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+
+  return (
+    <div className="rounded-xl border p-4" style={{ borderColor: "var(--divider)" }}>
+      <div className="text-sm font-semibold mb-1">Einladungslinks (privates Netzwerk)</div>
+      <div className="text-xs text-zinc-500 mb-3">
+        Eingeladene Zwischenhändler treten deinem Netzwerk bei und sehen auch deine
+        <b> privaten</b> Inserate und Netzwerkpreise.
+      </div>
+      <div className="flex flex-wrap items-end gap-2 mb-3">
+        <div>
+          <label className="block text-[10px] text-zinc-500 mb-1 uppercase">Gültig</label>
+          <select value={validity} onChange={(e) => setValidity(e.target.value)}
+                  className="h-9 px-2 rounded-lg border bg-[var(--bg-surface)] text-sm" style={{ borderColor: "var(--divider)" }}>
+            <option value={24}>24 Stunden</option>
+            <option value={168}>7 Tage</option>
+            <option value={720}>30 Tage</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] text-zinc-500 mb-1 uppercase">Nutzungen</label>
+          <select value={uses} onChange={(e) => setUses(e.target.value)}
+                  className="h-9 px-2 rounded-lg border bg-[var(--bg-surface)] text-sm" style={{ borderColor: "var(--divider)" }}>
+            <option value={1}>1×</option>
+            <option value={5}>5×</option>
+            <option value={10}>10×</option>
+          </select>
+        </div>
+        <button onClick={create} data-testid="invite-create"
+                className="h-9 px-4 rounded-lg text-sm font-semibold text-white"
+                style={{ background: "var(--accent-red)" }}>
+          + Einladungslink erstellen
+        </button>
+      </div>
+      {invites === null ? (
+        <div className="text-xs text-zinc-500">Lädt…</div>
+      ) : invites.length === 0 ? (
+        <div className="text-xs text-zinc-500">Noch keine Einladungen erstellt.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {invites.map((inv) => (
+            <div key={inv.id} className="flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2"
+                 style={{ borderColor: "var(--divider)" }}>
+              <span className={inv.valid ? "text-emerald-400" : "text-zinc-500"}>
+                {inv.valid ? "● aktiv" : "○ abgelaufen/verbraucht"}
+              </span>
+              <span className="text-zinc-400">{inv.used_count}/{inv.max_uses} genutzt</span>
+              <span className="text-zinc-600">bis {new Date(inv.expires_at).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+              <span className="ml-auto flex gap-2">
+                {inv.valid && (
+                  <button onClick={() => copy(inv)} className="text-zinc-300 hover:text-white underline">Link kopieren</button>
+                )}
+                <button onClick={() => remove(inv)} className="text-zinc-500 hover:text-red-400">löschen</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <NetzwerkMitglieder />
+    </div>
+  );
+}
+
+// Mitglieder des privaten Netzwerks: sichtbar und widerrufbar. Ein
+// Widerruf nimmt dem Zwischenhaendler sofort den Zugang zu privaten
+// Inseraten und Netzwerkpreisen (Backend: DELETE /dealer/network/members).
+function NetzwerkMitglieder() {
+  const [members, setMembers] = useState(null);
+
+  const load = async () => {
+    try { const { data } = await api.get("/dealer/network/members"); setMembers(data); }
+    catch (e) { setMembers([]); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const revoke = async (m) => {
+    if (!window.confirm(`${m.company_name || m.email} aus dem Netzwerk entfernen? Er sieht deine privaten Inserate danach nicht mehr.`)) return;
+    try { await api.delete(`/dealer/network/members/${m.buyer_user_id}`); toast.success("Zugang widerrufen"); load(); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+
+  return (
+    <div className="mt-4 pt-4 border-t" style={{ borderColor: "var(--divider)" }} data-testid="network-members">
+      <div className="text-sm font-semibold mb-1">Netzwerk-Mitglieder ({members?.length ?? "…"})</div>
+      <div className="text-xs text-zinc-500 mb-2">
+        Zwischenhändler, die über eine Einladung beigetreten sind. Zugang jederzeit widerrufbar.
+      </div>
+      {members === null ? (
+        <div className="text-xs text-zinc-500">Lädt…</div>
+      ) : members.length === 0 ? (
+        <div className="text-xs text-zinc-500">Noch keine Mitglieder.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {members.map((m) => (
+            <div key={m.buyer_user_id} className="flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2"
+                 style={{ borderColor: "var(--divider)" }}>
+              <span className="font-semibold">{m.company_name || "—"}</span>
+              <span className="text-zinc-400">{m.contact_name}</span>
+              <span className="text-zinc-500">{m.email}</span>
+              {m.joined_at && (
+                <span className="text-zinc-600">seit {new Date(m.joined_at).toLocaleDateString("de-DE")}</span>
+              )}
+              <button onClick={() => revoke(m)} className="ml-auto text-zinc-500 hover:text-red-400"
+                      data-testid={`revoke-${m.buyer_user_id}`}>Zugang widerrufen</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SubscriptionPanel() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -498,6 +786,13 @@ function SubscriptionPanel() {
   };
 
   useEffect(() => { load(); }, []);
+  // Audit 09/2026: nach Freischaltung durch den Betreiber aktualisiert sich
+  // die Seite selbst (alle 30 s, solange kein aktives Abo) — plus Button.
+  useEffect(() => {
+    if (!data || data.active) return undefined;
+    const t = setInterval(() => { api.get("/dealer/subscription").then((r) => setData(r.data)).catch(() => {}); }, 30000);
+    return () => clearInterval(t);
+  }, [data]);
 
   const cancel = async () => {
     setBusy("cancel");
@@ -513,15 +808,19 @@ function SubscriptionPanel() {
     }
   };
 
+  // 09/2026: Verlängerung läuft per Rechnung über den Betreiber — der Klick
+  // sendet nur noch eine Anfrage (kein Stripe für Firmen/Sucher).
   const renew = async (plan) => {
     setBusy(plan);
     try {
-      const { data } = await api.post("/payments/checkout", {
-        plan, origin_url: window.location.origin,
-      });
-      window.location.href = data.url;
+      const { data: r } = await api.post("/dealer/abo-anfrage-selbst", { plan });
+      toast.success(r?.bereits_offen
+        ? "Deine Anfrage liegt bereits beim Betreiber — wir melden uns."
+        : "Anfrage an den Betreiber gesendet — nach Freigabe wird das Abo verlängert");
+      await load();
     } catch (err) {
-      toast.error(errMsg(err, "Checkout fehlgeschlagen"));
+      toast.error(errMsg(err, "Anfrage fehlgeschlagen"));
+    } finally {
       setBusy("");
     }
   };
@@ -542,7 +841,13 @@ function SubscriptionPanel() {
 
   return (
     <Section title="Abo & Zahlung"
-             subtitle="Übersicht zum aktuellen Abo, Verlängerung und Kündigung.">
+             subtitle="Das Sucher-Abo schaltet Suche & Vergleich frei. Bestand, Inserate, Verträge, Versand und Termine bleiben für die Firma kostenlos.">
+      <div className="flex justify-end -mt-2 mb-2">
+        <button onClick={load} data-testid="abo-status-aktualisieren"
+                className="text-xs text-zinc-400 hover:text-white underline underline-offset-2">
+          Status aktualisieren
+        </button>
+      </div>
       {/* Aktueller Status */}
       <div className="apple-card p-5 mb-4" data-testid="abo-status-card"
            style={{ background: "var(--hover-bg)", border: "1px solid var(--divider)" }}>
@@ -592,7 +897,18 @@ function SubscriptionPanel() {
           <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
                style={{ background: "rgba(255,69,58,0.10)", border: "1px solid rgba(255,69,58,0.25)", color: "#ffb3a8" }}>
             <X size={14} className="mt-0.5 shrink-0" />
-            <span>Kein aktives Abo. Bitte verlängere, um die Plattform weiter zu nutzen.</span>
+            <span>Kein aktives Abo. Bitte unten eine Verlängerung beim Betreiber anfragen — nach Freigabe geht es sofort weiter.</span>
+          </div>
+        )}
+        {data.anfrage_offen && (
+          <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
+               style={{ background: "rgba(10,132,255,0.10)", border: "1px solid rgba(10,132,255,0.25)", color: "#bcd9ff" }}
+               data-testid="abo-anfrage-offen">
+            <Check size={14} className="mt-0.5 shrink-0" />
+            <span>
+              Deine Verlängerungs-Anfrage ({data.anfrage?.wanted_plan === "yearly" ? "Jahr" : "Monat"}) liegt beim Betreiber
+              und wartet auf Freigabe. Du musst nichts weiter tun.
+            </span>
           </div>
         )}
       </div>
@@ -603,24 +919,26 @@ function SubscriptionPanel() {
           <div className="grid md:grid-cols-2 gap-4 mb-4">
             <PlanCard
               title="Monatsabo"
-              price="120 €"
-              suffix="/ Monat"
-              tagline="Monatlich kündbar — flexibel bleiben."
+              price="150 €"
+              suffix="/ 30 Tage"
+              tagline="Netto zzgl. USt, Abrechnung per Rechnung — Freischaltung durch den Betreiber."
               testid="abo-renew-monthly"
               busy={busy === "monthly"}
+              disabled={data.anfrage_offen}
               onClick={() => renew("monthly")}
-              ctaLabel={isCancelled || isExpired ? "Reaktivieren" : "Verlängern (1 Monat)"}
+              ctaLabel={data.anfrage_offen ? "Anfrage liegt beim Betreiber" : "Verlängerung anfragen (Monat)"}
             />
             <PlanCard
               title="Jahresabo"
-              price="1.200 €"
-              suffix="/ Jahr"
-              tagline="2 Monate gratis · 240 € sparen."
+              price="1.500 €"
+              suffix="/ 365 Tage"
+              tagline="Spart 300 € gegenüber 12 Monatsabos (1.800 €), netto zzgl. USt."
               highlight
               testid="abo-renew-yearly"
               busy={busy === "yearly"}
+              disabled={data.anfrage_offen}
               onClick={() => renew("yearly")}
-              ctaLabel={isCancelled || isExpired ? "Auf Jahresabo wechseln" : "Auf Jahresabo upgraden"}
+              ctaLabel={data.anfrage_offen ? "Anfrage liegt beim Betreiber" : "Verlängerung anfragen (Jahr)"}
             />
           </div>
 
@@ -694,7 +1012,7 @@ function InfoRow({ icon, label, children }) {
   );
 }
 
-function PlanCard({ title, price, suffix, tagline, highlight, busy, onClick, testid, ctaLabel }) {
+function PlanCard({ title, price, suffix, tagline, highlight, busy, disabled, onClick, testid, ctaLabel }) {
   return (
     <div
       className="apple-card p-5 relative"
@@ -707,7 +1025,7 @@ function PlanCard({ title, price, suffix, tagline, highlight, busy, onClick, tes
           className="absolute -top-2.5 left-4 px-2 py-0.5 text-[9px] uppercase tracking-[0.2em] font-bold rounded-sm"
           style={{ background: "var(--accent-red)", color: "white" }}
         >
-          2 Monate gratis
+          Spart 300 €
         </div>
       )}
       <div className="overline">{title}</div>
@@ -718,7 +1036,7 @@ function PlanCard({ title, price, suffix, tagline, highlight, busy, onClick, tes
       <p className="text-zinc-400 text-xs mt-2">{tagline}</p>
       <button
         data-testid={testid}
-        disabled={busy}
+        disabled={busy || disabled}
         onClick={onClick}
         className={`apple-btn mt-4 w-full ${highlight ? "apple-btn-primary" : "apple-btn-secondary"}`}
       >

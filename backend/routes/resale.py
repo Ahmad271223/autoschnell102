@@ -1,0 +1,649 @@
+"""Weiterverkauf: Inseratsentwürfe, Margen-Rechner, Status-Workflow.
+
+Phase 1: entwurf → verkaufsbereit (kein Marktplatz, kein Kontingent).
+Phase 3 ergänzt: veroeffentlicht (erst DANN zählt das Monatskontingent,
+pro Inserat nur einmal je Abrechnungszeitraum — `counted_periods`).
+
+`data` ist bewusst eine KOPIE der Fahrzeugdaten: spätere Änderungen an der
+Fahrzeugakte dürfen ein bestehendes Inserat nicht unbemerkt verändern.
+"""
+import base64
+import uuid
+from typing import Any, Dict, List, Literal, Optional
+
+from pymongo import ReturnDocument
+from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from deps import clean_doc, current_user, db, log_activity, now_iso
+from lifecycle import LifecycleError, set_lifecycle, try_set_lifecycle
+from routes.bestand import current_haendler, _clean_costs
+
+router = APIRouter()
+
+
+# ---------- Models ----------
+class ListingUpdateIn(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=30000)
+    known_defects: Optional[List[str]] = Field(default=None, max_length=50)
+    photo_mode: Optional[Literal["einkauf", "neu", "beide"]] = None
+    price_public: Optional[float] = Field(default=None, ge=0)
+    price_b2b: Optional[float] = Field(default=None, ge=0)
+    price_network: Optional[float] = Field(default=None, ge=0)
+    costs: Optional[List[Dict[str, Any]]] = None
+    data: Optional[Dict[str, Any]] = None  # korrigierte Fahrzeugdaten
+
+
+class PhotoUploadIn(BaseModel):
+    photos_b64: List[str] = Field(min_length=1, max_length=20)
+
+
+class ListingStatusIn(BaseModel):
+    status: Literal["entwurf", "verkaufsbereit", "reserviert", "verkauft",
+                    "zurueckgezogen"]
+    sold_price: Optional[float] = Field(default=None, ge=0)
+
+
+# ---------- Helpers ----------
+def _build_title(data: dict) -> str:
+    model = data.get("model_label") or data.get("model") or ""
+    desc = data.get("model_description") or ""
+    # Doppelung vermeiden, wenn die Modellbezeichnung den Modellnamen enthält.
+    if model and desc and desc.lower().startswith(model.lower()):
+        model = ""
+    bits = [
+        data.get("make_label") or data.get("make") or "",
+        model,
+        desc,
+        data.get("gearbox_label") or "",
+    ]
+    feats = [f for f in (data.get("features") or [])
+             if any(k in str(f).lower() for k in ("led", "navi", "pano", "ahk", "leder"))]
+    title = " ".join(b for b in bits if b).strip()
+    if feats:
+        title += " " + " ".join(str(f).split("/")[0].strip() for f in feats[:3])
+    return title[:200] or "Fahrzeug"
+
+
+def _build_description(data: dict, known_defects: List[str]) -> str:
+    lines = []
+    name = f"{data.get('make_label') or ''} {data.get('model_label') or ''}".strip()
+    if name:
+        lines.append(f"{name} {data.get('model_description') or ''}".strip())
+        lines.append("")
+    facts = [
+        ("Erstzulassung", data.get("first_registration")),
+        ("Kilometerstand", f"{data.get('mileage'):,} km".replace(",", ".")
+            if isinstance(data.get("mileage"), (int, float)) else data.get("mileage")),
+        ("Kraftstoff", data.get("fuel_label") or data.get("fuel")),
+        ("Getriebe", data.get("gearbox_label") or data.get("gearbox")),
+        # Nur vorhandene Teile ausgeben — sonst stand bei fehlendem kW
+        # woertlich "None kW / 110 PS" im Inserat.
+        ("Leistung", " / ".join(t for t in (
+            f"{data.get('power_kw')} kW" if data.get("power_kw") else None,
+            f"{data.get('power_ps')} PS" if data.get("power_ps") else None,
+        ) if t) or None),
+        ("Farbe", data.get("color")),
+        ("Vorbesitzer", data.get("previous_owners")),
+    ]
+    for label, value in facts:
+        if value not in (None, "", "None kW / None PS"):
+            lines.append(f"• {label}: {value}")
+    feats = data.get("features") or []
+    if feats:
+        lines.append("")
+        lines.append("Ausstattung:")
+        lines.extend(f"• {f}" for f in feats[:40])
+    if data.get("description"):
+        lines.append("")
+        lines.append(str(data["description"])[:5000])
+    if known_defects:
+        lines.append("")
+        lines.append("Bekannte Mängel:")
+        lines.extend(f"• {m}" for m in known_defects[:30])
+    return "\n".join(lines)[:30000]
+
+
+def _margin(listing: dict) -> dict:
+    """Berechnet Kosten + erwartete Marge für die Anzeige."""
+    purchase = listing.get("purchase_price") or 0
+    costs = sum(c.get("amount", 0) for c in (listing.get("costs") or []))
+    price = (listing.get("prices") or {}).get("public") or 0
+    total_cost = round(purchase + costs, 2)
+    return {
+        "purchase_price": purchase,
+        "costs_total": round(costs, 2),
+        "total_cost": total_cost,
+        "expected_margin": round(price - total_cost, 2) if price else None,
+    }
+
+
+def _with_margin(listing: dict) -> dict:
+    listing["margin"] = _margin(listing)
+    return listing
+
+
+# =========================================================
+#                 ENTWURF ERZEUGEN
+# =========================================================
+@router.post("/resale/draft/{vehicle_id}")
+async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
+    """Erzeugt aus Fahrzeugakte + Abholbericht einen fertigen Inserats-
+    entwurf (Titel, Beschreibung, Ausstattung, Fotos, bekannte Mängel).
+    Existiert bereits ein aktiver Entwurf, wird dieser zurückgegeben."""
+    v = await db.vehicles.find_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not v:
+        raise HTTPException(404, "Fahrzeug nicht gefunden")
+    if v.get("lifecycle") not in ("vertrag_erstellt", "gekauft",
+                                  "abholung_geplant", "abgeholt", "bestand",
+                                  "verkaufsentwurf", "verkaufsbereit"):
+        raise HTTPException(400, "Fahrzeug ist nicht im verkaufsfähigen Zustand "
+                                 f"(Status: {v.get('lifecycle')})")
+
+    existing = await db.resale_listings.find_one(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+         "status": {"$in": ["entwurf", "verkaufsbereit"]}}, {"_id": 0})
+    if existing:
+        return _with_margin(existing)
+
+    data = dict(v.get("data") or {})
+
+    # Abweichungen aus dem Abholbericht automatisch einarbeiten.
+    report = await db.pickup_reports.find_one(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+         "superseded": {"$ne": True}}, {"_id": 0})
+    known_defects = list(v.get("known_defects") or [])
+    auto_notes = []
+    if report:
+        if report.get("mileage_at_pickup"):
+            old_km = data.get("mileage")
+            data["mileage"] = report["mileage_at_pickup"]
+            if old_km and old_km != report["mileage_at_pickup"]:
+                auto_notes.append(
+                    f"Kilometerstand wurde von {old_km} auf "
+                    f"{report['mileage_at_pickup']} aktualisiert (Abholung).")
+        for d in report.get("deviations", []):
+            if d.get("field") in ("damage", "tires", "warning_light", "other",
+                                  "equipment", "documents"):
+                txt = d.get("label") or "Abweichung"
+                if d.get("actual"):
+                    txt += f": {d['actual']}"
+                if txt not in known_defects:
+                    known_defects.append(txt)
+
+    listing = {
+        "id": str(uuid.uuid4()),
+        "dealer_id": user["dealer_id"],
+        "vehicle_id": vehicle_id,
+        "status": "entwurf",
+        "title": _build_title(data),
+        "description": _build_description(data, known_defects),
+        "data": data,                      # Kopie — bewusst entkoppelt
+        "known_defects": known_defects,
+        "auto_notes": auto_notes,
+        "photos": {
+            "mode": "einkauf",
+            # Kleinanzeigen-Fahrzeuge speichern Fotos unter "images",
+            # mobile.de/manuelle unter "image_urls" — beide Quellen nutzen.
+            "einkauf_urls": list((data.get("image_urls")
+                                  or data.get("images") or []))[:40],
+            "uploaded_keys": [],
+        },
+        "prices": {"public": None, "b2b": None, "network": None},
+        "purchase_price": v.get("purchase_price"),
+        "costs": (v.get("bestand") or {}).get("costs") or [],
+        "visibility": "public",
+        "published_at": None,
+        "counted_periods": [],
+        "created_by": user["id"],
+        "created_at": now_iso(), "updated_at": now_iso(),
+    }
+    await db.resale_listings.insert_one(listing)
+    await try_set_lifecycle(vehicle_id, user["dealer_id"], "verkaufsentwurf",
+                            user=user)
+    await log_activity(user["dealer_id"], user["id"], "inserat.entwurf",
+                       ref=listing["id"], meta={"vehicle_id": vehicle_id})
+    return _with_margin(clean_doc(listing))
+
+
+# =========================================================
+#                 LESEN / BEARBEITEN
+# =========================================================
+@router.get("/resale")
+async def list_listings(user=Depends(current_haendler), status: Optional[str] = None):
+    query: Dict[str, Any] = {"dealer_id": user["dealer_id"],
+                             "status": {"$ne": "geloescht"}}
+    if status:
+        query["status"] = status
+    items = await db.resale_listings.find(query, {"_id": 0}) \
+        .sort("updated_at", -1).to_list(300)
+    return [_mit_foto_urls(_with_margin(i)) for i in items]
+
+
+@router.get("/resale/{listing_id}")
+async def get_listing(listing_id: str, user=Depends(current_haendler)):
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    return _mit_foto_urls(_with_margin(l))
+
+
+def _mit_foto_urls(doc: dict) -> dict:
+    """Signierte, kurzlebige Links zu den hochgeladenen Fotos (Audit 09/2026,
+    Punkt 45) — die Oberflaeche baut keine /api/files-Pfade mehr selbst."""
+    keys = ((doc.get("photos") or {}).get("uploaded_keys") or [])
+    doc["photo_urls"] = [{"key": k, "url": signierte_datei_url(k)} for k in keys]
+    return doc
+
+
+@router.put("/resale/{listing_id}")
+async def update_listing(listing_id: str, body: ListingUpdateIn,
+                         user=Depends(current_haendler)):
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    if l.get("status") in ("verkauft",):
+        raise HTTPException(400, "Verkaufte Inserate können nicht bearbeitet werden")
+    update: Dict[str, Any] = {"updated_at": now_iso()}
+    if body.title is not None:
+        update["title"] = body.title.strip()
+    if body.description is not None:
+        update["description"] = body.description
+    if body.known_defects is not None:
+        update["known_defects"] = [str(m)[:300] for m in body.known_defects]
+    if body.photo_mode is not None:
+        update["photos.mode"] = body.photo_mode
+    prices = dict(l.get("prices") or {})
+    for src, key in ((body.price_public, "public"), (body.price_b2b, "b2b"),
+                     (body.price_network, "network")):
+        if src is not None:
+            prices[key] = round(float(src), 2) or None
+    update["prices"] = prices
+    if body.costs is not None:
+        update["costs"] = _clean_costs(body.costs)
+    if body.data is not None:
+        # Nur bekannte Felder übernehmen, keine beliebigen Keys.
+        allowed = {"make_label", "model_label", "model_description",
+                   "first_registration", "mileage", "fuel_label",
+                   "gearbox_label", "power_kw", "power_ps", "color", "vin",
+                   "previous_owners", "features", "description",
+                   "accident_free"}
+        merged = dict(l.get("data") or {})
+        for k, val in body.data.items():
+            if k in allowed:
+                merged[k] = val
+        update["data"] = merged
+    await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"$set": update})
+    fresh = await db.resale_listings.find_one(
+        {"id": listing_id}, {"_id": 0})
+    return _with_margin(fresh)
+
+
+@router.delete("/resale/{listing_id}")
+async def delete_listing(listing_id: str, user=Depends(current_haendler)):
+    """Inserat loeschen (Soft-Delete). WICHTIG (Beschluss 08/2026): einmal
+    veroeffentlichte Inserate zaehlen im Abrechnungszeitraum WEITER auf das
+    Kontingent — Loeschen gibt den Slot NICHT frei (counted_periods bleibt).
+    Verkaufte Inserate bleiben als Historie erhalten (kein Loeschen)."""
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    if l.get("status") == "verkauft":
+        raise HTTPException(400, "Verkaufte Inserate koennen nicht geloescht "
+                                 "werden (Verkaufs-Historie).")
+    await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"$set": {"status": "geloescht", "deleted_at": now_iso(),
+                  "updated_at": now_iso()}})
+    # Fahrzeug zurueck in den Bestand (falls Uebergang erlaubt).
+    if l.get("vehicle_id"):
+        await try_set_lifecycle(l["vehicle_id"], user["dealer_id"], "bestand",
+                                user=user)
+    await log_activity(user["dealer_id"], user["id"], "inserat.geloescht",
+                       ref=listing_id,
+                       meta={"war_status": l.get("status"),
+                             "kontingent_bleibt": bool(l.get("counted_periods"))})
+    return {"ok": True, "hinweis": "Inserat geloescht. Bereits veroeffentlichte "
+                                   "Inserate zaehlen im laufenden Monat weiter "
+                                   "auf dein Kontingent."}
+
+
+@router.post("/resale/{listing_id}/photos")
+async def upload_photos(listing_id: str, body: PhotoUploadIn,
+                        user=Depends(current_haendler)):
+    """Neue Fotos hochladen (Storage-Abstraktion, kein Base64 in Mongo)."""
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "photos": 1})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    from storage_service import (make_key, storage, StorageError,
+                                 validate_image_bytes, bild_verkleinern,
+                                 loeschen_oder_vormerken)
+    keys = list((l.get("photos") or {}).get("uploaded_keys", []))
+    if len(keys) + len(body.photos_b64) > 40:
+        raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
+    def _alle_speichern() -> tuple:
+        """Decode+Validierung+Save fuer bis zu 40 Fotos — als EIN Thread-Hop,
+        damit der Event-Loop nicht sekundenlang steht (Review 09/2026).
+        Liefert (gespeicherte Keys, Fehler|None); bei Fehler raeumt der
+        Aufrufer die halb gespeicherten Dateien weg."""
+        neu = []
+        try:
+            for b64 in body.photos_b64:
+                raw = base64.b64decode(b64.split(",")[-1], validate=False)
+                # Groesse + Magic Bytes: nur echte Bilder, kein 20-MB-Blob,
+                # keine umbenannten ausfuehrbaren Dateien.
+                validate_image_bytes(raw, wo="Inserats-Foto")
+                # Handyfotos kommen mit 4000 Bildpunkten Kante und
+                # mehreren MB. Einmal verkleinern spart rund 90 Prozent
+                # Speicher, ohne dass man im Inserat etwas sieht.
+                raw = bild_verkleinern(raw, wo="Inserats-Foto")
+                key = make_key("resale", user["dealer_id"], "foto.jpg")
+                storage.save(key, raw)
+                neu.append(key)
+        except (StorageError, ValueError) as exc:
+            return neu, exc
+        return neu, None
+
+    import asyncio as _asyncio
+    added, fehler = await _asyncio.to_thread(_alle_speichern)
+    if fehler is not None:
+        # Halb gespeicherte wieder wegraeumen. Fehlschlaege werden NICHT
+        # mehr verschluckt, sondern vorgemerkt (storage_delete_retry) und
+        # vom Aufraeumjob nachgeholt (Go-Live-Audit 09/2026).
+        for k in added:
+            await loeschen_oder_vormerken(
+                db, key=k, grund="inserat_upload_abbruch",
+                dealer_id=user["dealer_id"])
+        raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {fehler}")
+    # ATOMAR anhaengen ($push $each) statt die ganze Liste zu ueberschreiben:
+    # das alte Lesen-Aendern-Schreiben verlor bei PARALLELEN Uploads aufs
+    # selbe Inserat Referenzen (im Lasttest: hunderte Dateien ohne
+    # DB-Eintrag). Das 40er-Limit prueft dieselbe Bedingung atomar mit —
+    # der Verlierer eines Rennens raeumt seine Dateien wieder weg.
+    res = await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"],
+         f"photos.uploaded_keys.{40 - len(added)}": {"$exists": False}},
+        {"$push": {"photos.uploaded_keys": {"$each": added}},
+         "$set": {"updated_at": now_iso()}})
+    if res.modified_count == 0:
+        for k in added:
+            await loeschen_oder_vormerken(
+                db, key=k, grund="inserat_foto_limit", dealer_id=user["dealer_id"])
+        raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
+    doc = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "photos.uploaded_keys": 1})
+    total = len((doc.get("photos") or {}).get("uploaded_keys") or [])
+    return {"ok": True, "uploaded": [signierte_datei_url(k) for k in added],
+            "total": total}
+
+
+# =========================================================
+#                 VERÖFFENTLICHEN (Phase 3 — Kontingent)
+# =========================================================
+class PublishIn(BaseModel):
+    visibility: Literal["public", "private"] = "public"
+
+
+class PhotoRemoveIn(BaseModel):
+    # Entweder ein hochgeladener Storage-Key ODER eine Einkaufsfoto-URL.
+    key: Optional[str] = Field(default=None, max_length=500)
+    url: Optional[str] = Field(default=None, max_length=1000)
+
+
+@router.post("/resale/{listing_id}/photos/remove")
+async def remove_photo(listing_id: str, body: PhotoRemoveIn,
+                       user=Depends(current_haendler)):
+    """Einzelnes Bild aus dem Inserat entfernen — auch NACH der
+    Veroeffentlichung (Aenderung ist sofort live). Hochgeladene Fotos
+    werden zusaetzlich aus dem Storage geloescht; Einkaufsfotos werden
+    nur aus dem Inserat genommen (das Original bleibt in der Akte)."""
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "photos": 1})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    photos = l.get("photos") or {}
+    if body.key:
+        keys = list(photos.get("uploaded_keys", []))
+        if body.key not in keys:
+            raise HTTPException(404, "Foto nicht gefunden")
+        keys.remove(body.key)
+        from storage_service import loeschen_oder_vormerken
+        # Laesst sich die Datei nicht loeschen, wird sie vorgemerkt; der Key
+        # bleibt im Inserat unter photos.loeschung_offen_keys erhalten (nicht
+        # mehr sichtbar, aber nicht verloren) — die Nachholung entfernt ihn.
+        ok = await loeschen_oder_vormerken(
+            db, key=body.key, grund="inserat_foto_entfernt",
+            dealer_id=user["dealer_id"],
+            ref={"collection": "resale_listings", "id": listing_id,
+                 "pull_key_from": "photos.loeschung_offen_keys"})
+        # ATOMAR entfernen ($pull) — gleiche Lost-Update-Gefahr wie beim
+        # Upload (parallele Loeschungen verdraengten sich gegenseitig).
+        update = {"$pull": {"photos.uploaded_keys": body.key},
+                  "$set": {"updated_at": now_iso()}}
+        if not ok:
+            update["$addToSet"] = {"photos.loeschung_offen_keys": body.key}
+        await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]}, update)
+        doc = await db.resale_listings.find_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "photos.uploaded_keys": 1})
+        return {"ok": True, "uploaded_keys":
+                (doc.get("photos") or {}).get("uploaded_keys") or []}
+    if body.url:
+        urls = list(photos.get("einkauf_urls", []))
+        if body.url not in urls:
+            raise HTTPException(404, "Foto nicht gefunden")
+        await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$pull": {"photos.einkauf_urls": body.url},
+             "$set": {"updated_at": now_iso()}})
+        doc = await db.resale_listings.find_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "photos.einkauf_urls": 1})
+        return {"ok": True, "einkauf_urls":
+                (doc.get("photos") or {}).get("einkauf_urls") or []}
+    raise HTTPException(400, "key oder url angeben")
+
+
+@router.post("/resale/{listing_id}/publish")
+async def publish_listing(listing_id: str, body: PublishIn,
+                          user=Depends(current_haendler)):
+    """Veröffentlicht ein verkaufsbereites Inserat auf dem Marktplatz.
+
+    Kontingent-Regeln (Beschluss 05.08.2026):
+    - Zählt NUR beim tatsächlichen ersten Publish im Abrechnungszeitraum.
+    - Entwürfe zählen nie; Zurückziehen + Reaktivieren im selben Zeitraum
+      zählt nicht erneut (counted_periods).
+    - Kontingent voll → 402 mit Upgrade-Hinweis (kein Einzelkauf).
+    """
+    # SERIALISIERUNG je Inserat (Runde 5): Zwei gleichzeitige Publishes
+    # desselben Inserats konnten auseinanderlaufen — der zweite sah die
+    # Markierung des ersten und veroeffentlichte, waehrend der erste wegen
+    # ueberschrittener Quote zurueckrollte: Inserat live, aber ungezaehlt.
+    # Jetzt bekommt genau EINE Anfrage die Sperre; die andere wartet nicht,
+    # sondern bekommt 409 und wiederholt.
+    from datetime import datetime, timedelta, timezone
+    _jetzt = datetime.now(timezone.utc)
+    if not await db.resale_listings.count_documents(
+            {"id": listing_id, "dealer_id": user["dealer_id"]}):
+        raise HTTPException(404, "Inserat nicht gefunden")
+    _sperre = await db.resale_listings.find_one_and_update(
+        {"id": listing_id, "dealer_id": user["dealer_id"],
+         "$or": [{"publish_lock_until": {"$exists": False}},
+                 {"publish_lock_until": None},
+                 {"publish_lock_until": {"$lt": _jetzt}}]},
+        {"$set": {"publish_lock_until": _jetzt + timedelta(seconds=30)}})
+    if _sperre is None:
+        raise HTTPException(409, "Dieses Inserat wird gerade veroeffentlicht — "
+                                 "bitte einen Moment warten und neu laden.")
+    try:
+        l = await db.resale_listings.find_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+        if not l:
+            raise HTTPException(404, "Inserat nicht gefunden")
+        if l.get("status") == "veroeffentlicht":
+            # Idempotent (Review 09/2026): Doppelklick oder parallele
+            # Anfrage NACH dem erfolgreichen Publish ist kein Fehler.
+            return {"ok": True, "status": "veroeffentlicht",
+                    "visibility": l.get("visibility") or body.visibility,
+                    "bereits_veroeffentlicht": True}
+        if l.get("status") not in ("verkaufsbereit", "zurueckgezogen"):
+            raise HTTPException(400, "Nur verkaufsbereite (oder zurückgezogene) "
+                                     "Inserate können veröffentlicht werden")
+
+        from routes.team import get_sale_plan_status
+        plan = await get_sale_plan_status(user["dealer_id"])
+        if not plan.get("active"):
+            raise HTTPException(402, "Kein Verkaufspaket aktiv. Bitte im Bereich "
+                                     "'Mitarbeiter / Sucher' ein Paket anfragen.")
+        period_key = plan["period_key"]
+        already = period_key in (l.get("counted_periods") or [])
+        if not already:
+            # Schritt 1: Den Abrechnungszeitraum ATOMAR am Inserat markieren.
+            # Der $ne-Guard sorgt dafür, dass von BELIEBIG vielen gleichzeitigen
+            # Publishes desselben Inserats genau EINER die Markierung setzt —
+            # und nur DER beansprucht anschließend einen Kontingent-Slot.
+            # (Vorher konnten zwei parallele Publishes desselben Inserats zwei
+            # Slots ziehen — dauerhafte Überzählung.)
+            marker = await db.resale_listings.update_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"],
+                 "counted_periods": {"$ne": period_key}},
+                {"$addToSet": {"counted_periods": period_key}})
+            if not marker.modified_count:
+                # Ein GLEICHZEITIGER Publish hat die Markierung gesetzt. Zwei
+                # Faelle: (a) er hat den Slot bekommen — dann ist alles gezaehlt
+                # und wir duerfen mitveroeffentlichen; (b) er lag UEBER der
+                # Quota und hat Markierung + Slot gerade zurueckgegeben — dann
+                # duerfen wir NICHT einfach durchrutschen (vorher konnte so ein
+                # Inserat ueber der Quota live gehen, ohne je gezaehlt zu
+                # werden). Nachlesen entscheidet.
+                nachgelesen = await db.resale_listings.find_one(
+                    {"id": listing_id, "dealer_id": user["dealer_id"]},
+                    {"_id": 0, "counted_periods": 1})
+                if period_key not in (nachgelesen or {}).get("counted_periods", []):
+                    raise HTTPException(402, "Dein monatliches Kontingent ist "
+                                             "erreicht. Upgrade auf ein größeres "
+                                             "Paket oder Enterprise anfragen.")
+            quota = plan.get("quota")
+            if marker.modified_count and quota:
+                # Schritt 2: ATOMARE Kontingent-Beanspruchung (race-fest, auch
+                # bei mehreren Worker-Prozessen): ein Zähler pro Händler+Zeitraum
+                # wird atomar erhöht — jeder Gewinner bekommt eine EINDEUTIGE
+                # Nummer. Wer über der Quota landet, gibt Slot UND Markierung
+                # zurück und wird abgelehnt.
+                did = user["dealer_id"]
+                field = f"quota_usage.{period_key}"
+                # Zähler einmalig aus dem Ist-Stand befüllen (idempotent, per
+                # $exists-Guard gegen paralleles Doppel-Seeding). Das EIGENE
+                # Inserat traegt schon die Markierung aus Schritt 1 — deshalb
+                # ausklammern, sonst zaehlte es doppelt (Seed + $inc).
+                seeded = await db.dealers.find_one(
+                    {"id": did}, {field: 1})
+                if (seeded.get("quota_usage") or {}).get(period_key) is None:
+                    cur = await db.resale_listings.count_documents(
+                        {"dealer_id": did, "counted_periods": period_key,
+                         "id": {"$ne": listing_id}})
+                    await db.dealers.update_one(
+                        {"id": did, field: {"$exists": False}},
+                        {"$set": {field: cur}})
+                claimed = await db.dealers.find_one_and_update(
+                    {"id": did},
+                    {"$inc": {field: 1}},
+                    projection={field: 1},
+                    return_document=ReturnDocument.AFTER)
+                used_now = (claimed.get("quota_usage") or {}).get(period_key, 1)
+                if used_now > quota:
+                    # Über der Quota → Slot und Markierung zurückgeben, ablehnen.
+                    await db.dealers.update_one({"id": did}, {"$inc": {field: -1}})
+                    await db.resale_listings.update_one(
+                        {"id": listing_id, "dealer_id": user["dealer_id"]},
+                        {"$pull": {"counted_periods": period_key}})
+                    raise HTTPException(402, f"Dein monatliches Kontingent von "
+                                             f"{quota} Fahrzeugen ist erreicht. "
+                                             "Upgrade auf ein größeres Paket oder "
+                                             "Enterprise anfragen.")
+
+        await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$set": {"status": "veroeffentlicht",
+                      "visibility": body.visibility,
+                      "published_at": l.get("published_at") or now_iso(),
+                      "updated_at": now_iso()}})
+        if l.get("vehicle_id"):
+            await try_set_lifecycle(l["vehicle_id"], user["dealer_id"],
+                                    "veroeffentlicht", user=user)
+        await log_activity(user["dealer_id"], user["id"], "inserat.veroeffentlicht",
+                           ref=listing_id,
+                           meta={"sichtbarkeit": body.visibility,
+                                 "kontingent": f"{plan.get('used', 0) + (0 if already else 1)}/{plan.get('quota')}"})
+        return {"ok": True, "status": "veroeffentlicht",
+                "visibility": body.visibility}
+    finally:
+        await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"]},
+            {"$unset": {"publish_lock_until": ""}})
+
+
+# =========================================================
+#                 STATUS-WORKFLOW
+# =========================================================
+_LISTING_TO_LIFECYCLE = {
+    "entwurf": "verkaufsentwurf",
+    "verkaufsbereit": "verkaufsbereit",
+    "reserviert": "reserviert",
+    "verkauft": "verkauft",
+    "zurueckgezogen": "verkaufsbereit",
+}
+
+
+@router.post("/resale/{listing_id}/status")
+async def set_listing_status(listing_id: str, body: ListingStatusIn,
+                             user=Depends(current_haendler)):
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    current = l.get("status")
+    new = body.status
+    allowed = {
+        "entwurf": {"verkaufsbereit"},
+        "verkaufsbereit": {"entwurf", "reserviert", "verkauft", "zurueckgezogen"},
+        "veroeffentlicht": {"reserviert", "verkauft", "zurueckgezogen"},
+        "reserviert": {"verkauft", "verkaufsbereit"},
+        "zurueckgezogen": {"verkaufsbereit", "entwurf"},
+    }
+    if new not in allowed.get(current, set()):
+        raise HTTPException(400, f"Übergang '{current}' → '{new}' nicht erlaubt")
+
+    if new == "verkaufsbereit" and current == "entwurf":
+        # Mindestangaben prüfen, bevor das Inserat verkaufsfertig wird.
+        if not (l.get("prices") or {}).get("public"):
+            raise HTTPException(400, "Bitte zuerst einen Verkaufspreis eintragen")
+
+    update: Dict[str, Any] = {"status": new, "updated_at": now_iso()}
+    if new == "verkauft":
+        update["sold_at"] = now_iso()
+        if body.sold_price is not None:
+            update["sold_price"] = round(float(body.sold_price), 2)
+    await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"$set": update})
+
+    # Fahrzeug-Lebenszyklus synchron halten.
+    vehicle_id = l.get("vehicle_id")
+    if vehicle_id and new in _LISTING_TO_LIFECYCLE:
+        await try_set_lifecycle(vehicle_id, user["dealer_id"],
+                                _LISTING_TO_LIFECYCLE[new], user=user)
+    await log_activity(user["dealer_id"], user["id"], f"inserat.{new}",
+                       ref=listing_id)
+    return {"ok": True, "status": new}

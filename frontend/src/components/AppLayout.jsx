@@ -1,11 +1,10 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search,
+  Layers, LogOut, Activity, Search, Warehouse, Inbox,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
-import CookieConsent from "@/components/CookieConsent";
 
 const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
@@ -13,6 +12,9 @@ const NAV = [
   { to: "/app/vertraege", label: "Verträge / PDFs", icon: FileText },
   { to: "/app/termine", label: "Terminplaner", icon: Calendar },
   { to: "/app/fahrzeuge", label: "Fahrzeugpool", icon: Car },
+  { to: "/app/bestand", label: "Bestand & Verkauf", icon: Warehouse, haendlerOnly: true },
+  { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true },
+  { to: "/app/team", label: "Mitarbeiter / Sucher", icon: Users, haendlerOnly: true },
   { to: "/app/fahrer", label: "Fahrer", icon: Users },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon },
 ];
@@ -27,8 +29,12 @@ export default function AppLayout({ children }) {
   const nav = useNavigate();
   const { user, subscription, logout } = useAuth();
 
-  const items = [...NAV];
-  if (user?.role === "admin") items.push({ to: "/admin", label: "Admin", icon: ShieldCheck });
+  // Sucher-Unteraccounts sehen keine Händler-Funktionen (Bestand, Team).
+  // Strikte Rollentrennung: Admin-Konten verwalten nur — die Händler-/
+  // Sucher-Funktionen würden im Backend ohnehin blockiert.
+  const items = user?.role === "admin"
+    ? [{ to: "/admin", label: "Admin", icon: ShieldCheck }]
+    : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher"));
 
   return (
     <div className="min-h-screen flex" style={{ background: "var(--bg-app)", color: "var(--text-primary)" }}>
@@ -99,8 +105,6 @@ export default function AppLayout({ children }) {
         {children}
       </main>
 
-      {/* DSGVO cookie-consent banner — deferred PostHog init */}
-      <CookieConsent />
     </div>
   );
 }

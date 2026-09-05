@@ -158,6 +158,13 @@ def _parse_first_registration(raw) -> Optional[int]:
 
 
 # ---------- Public: URL builder ----------
+# ISO-Laendercode -> AutoScout24 "cy"-Code
+_AUTOSCOUT_COUNTRY = {
+    "DE": "D", "AT": "A", "BE": "B", "ES": "E", "FR": "F", "IT": "I",
+    "LU": "L", "NL": "NL",
+}
+
+
 def build_search_url(vehicle: dict, rules: dict) -> str:
     """Erzeugt eine AutoScout24-Suchurl, die zum übergebenen Fahrzeug passt.
 
@@ -193,10 +200,23 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     path = f"/lst/{slug}" if slug else "/lst"
 
     # ---- Query-Parameter ------------------------------------------------
-    params: list = [
-        ("atype", "C"),       # Car
-        ("cy", "D"),          # Country: Germany
-    ]
+    params: list = [("atype", "C")]        # Car
+    # Land aus dem Regelwerk (PR-Review 09/2026): vorher immer "D", sodass
+    # "Export – alle Laender" auf AutoScout eine Deutschland-Suche blieb.
+    country_rule = rules.get("country") or {"mode": "exact", "codes": ["DE"]}
+    if country_rule.get("mode") == "exact":
+        codes = [_AUTOSCOUT_COUNTRY.get(str(c).upper())
+                 for c in (country_rule.get("codes") or ["DE"])]
+        codes = [c for c in codes if c]
+        if codes:
+            params.append(("cy", ",".join(codes)))
+    # mode "all"/"any": kein cy-Parameter -> alle Laender
+    # Verkaeufertyp (Haendler/Privat) wie bei mobile.de
+    seller_mode = (rules.get("seller") or {}).get("mode", "all")
+    if seller_mode == "dealer":
+        params.append(("custtype", "D"))
+    elif seller_mode == "private":
+        params.append(("custtype", "P"))
 
     # Marke+Modell-Kombi (mawXmoY) — nur wenn beide bekannt
     if make and model:
@@ -290,11 +310,13 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         if gb_code:
             params.append(("gear", gb_code))
 
-    # Schaden
-    if rules.get("damage", {}).get("mode") == "no_accident":
+    # Schaden: NUR ausschliessen, wenn das Regelwerk es sagt. Vorher wurde
+    # immer ausgeschlossen — auch wenn das Exportprofil "Schaeden
+    # einschliessen" vorgab (PR-Review 09/2026). Fehlt die Regel, gilt der
+    # Inland-Default (keine Unfallwagen).
+    damage_mode = (rules.get("damage") or {}).get("mode", "no_accident")
+    if damage_mode == "no_accident":
         params.append(("damaged_listing", "exclude"))
-    else:
-        params.append(("damaged_listing", "exclude"))  # default: keine Unfaller
 
     # Default-Polish: passt zum vom Nutzer geschickten Beispiel
     params.append(("ocs_listing", "include"))
@@ -354,3 +376,170 @@ def resolve(make_name: str, model_name: str) -> Tuple[Optional[int], Optional[in
         return None, None
     model = _find_model(make, model_name or "")
     return make["makeId"], model["modelId"] if model else None
+
+
+# =========================================================
+#        Apify-Scraper (ivanvs/autoscout-scraper)
+# =========================================================
+# AutoScout24 als QUELLE: Ein einzelnes Inserat wird ueber die
+# Apify-Plattform ausgelesen (ca. $0.004 je frischem Abruf; der
+# Listing-Cache verhindert Doppelabrufe). Gleicher Aufbau wie der
+# mobile.de-Scraper in mobile_service.py.
+import logging as _logging
+import os as _os
+
+import httpx as _httpx
+from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
+
+_log = _logging.getLogger("autoscout_service")
+
+APIFY_TOKEN = _os.environ.get("APIFY_TOKEN", "").strip()
+APIFY_AUTOSCOUT_ACTOR = _os.environ.get(
+    "APIFY_AUTOSCOUT_ACTOR", "ivanvs~autoscout-scraper").strip()
+
+
+def autoscout_quelle_verfuegbar() -> bool:
+    return bool(APIFY_TOKEN)
+
+
+def detail_looks_like_autoscout_listing(url: str) -> bool:
+    """Nur echte Inserats-URLs (/angebote/...) duerfen an den Actor —
+    eine Suchseiten-URL (/lst/...) wuerde hunderte Ergebnisse abrufen
+    und unnoetig Geld kosten."""
+    return bool(url) and "autoscout24." in url and "/angebote/" in url
+
+
+def parse_autoscout_item(item: dict, item_id: str,
+                         url: Optional[str] = None) -> dict:
+    """Ein Datensatz des Actors -> internes Fahrzeug-Schema.
+
+    Der Actor liefert flache Felder mit deutschen Werten ("Schaltgetriebe",
+    "Benzin", "242.000 km") und fertige Bild-URLs — deutlich einfacher als
+    bei mobile.de."""
+    from mobile_service import _apify_leistung, _apify_zahl
+
+    adresse = item.get("address") or {}
+    kw, ps = _apify_leistung(item.get("power"))
+
+    verkaeufer = (item.get("contactName") or "").strip()
+    if not verkaeufer:
+        art = (item.get("seller") or "").strip().lower()
+        verkaeufer = "Privatverkäufer" if art.startswith("privat") else "Händler"
+
+    telefone = item.get("phones") or []
+    telefon = ""
+    if telefone:
+        telefon = telefone[0].get("number", "") if isinstance(telefone[0], dict) \
+            else str(telefone[0])
+
+    beschreibung = (item.get("descriptionText") or "").strip()
+    if not beschreibung and item.get("description"):
+        import html as _h
+        beschreibung = _h.unescape(re.sub(r"<[^>]+>", " ", item["description"])).strip()
+
+    # comfort/media/safety/extras: je nach Inserat Liste oder Text.
+    features: list = []
+    for k in ("comfort", "media", "safety", "extras"):
+        v = item.get(k)
+        if isinstance(v, list):
+            features.extend(str(x) for x in v if x)
+        elif isinstance(v, str) and v.strip():
+            features.extend(t.strip() for t in v.split(",") if t.strip())
+
+    detail_url = (item.get("url") or url or "").split("?")[0]
+    farbe = (item.get("colour") or item.get("manufacturerColour") or "").strip()
+
+    preis = item.get("rawPrice")
+    if not isinstance(preis, (int, float)):
+        preis = _apify_zahl(item.get("price"))
+
+    halter = item.get("numberOfPreviousOwners")
+
+    return {
+        "mobile_ad_id": str(item.get("uniqueRef") or item_id),
+        "detail_url": detail_url,
+        "make": (item.get("manufacturer") or "").upper(),
+        "make_label": item.get("manufacturer") or "",
+        "model": item.get("model") or "",
+        "model_label": item.get("model") or "",
+        "model_description": item.get("modelVersion") or item.get("title") or "",
+        "category": item.get("bodyType") or "",
+        "category_label": item.get("bodyType") or "",
+        "first_registration": item.get("firstRegistration") or None,
+        "mileage": _apify_zahl(item.get("milage") or item.get("mileage")),
+        "fuel": (item.get("fuelType") or "").upper(),
+        "fuel_label": item.get("fuelType") or "",
+        "gearbox": (item.get("gearbox") or "").upper(),
+        "gearbox_label": item.get("gearbox") or "",
+        "power_kw": kw,
+        "power_ps": ps,
+        "displacement": _apify_zahl(item.get("engineSize")),
+        "doors": item.get("doors") or None,
+        "seats": _apify_zahl(item.get("seats")),
+        "color": farbe or None,
+        "vin": None,
+        "license_plate": None,
+        "hu": (item.get("generalInspection") or "").strip() or None,
+        "previous_owners": str(halter) if halter not in (None, "") else None,
+        # Der Actor liefert keine belastbare Unfall-/Fahrbereit-Angabe —
+        # ehrlich leer lassen statt "unfallfrei" zu erfinden.
+        "accident_damaged": None,
+        "roadworthy": None,
+        "features": features,
+        "description": beschreibung,
+        "list_price": float(preis) if preis is not None else None,
+        "currency": item.get("currency") or "EUR",
+        "seller_name": verkaeufer,
+        "seller_address": (adresse.get("street") or "") or None,
+        "seller_zip": adresse.get("zip") or None,
+        "seller_city": adresse.get("city") or None,
+        "seller_phone": telefon,
+        "seller_email": "",
+        "image_urls": [u for u in item.get("images") or []
+                       if isinstance(u, str) and u.startswith("http")],
+        "images": [u for u in item.get("images") or []
+                   if isinstance(u, str) and u.startswith("http")],
+        "image_count": len(item.get("images") or []),
+    }
+
+
+async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
+    """Einzelnes AutoScout24-Inserat ueber den Apify-Actor abrufen."""
+    if not autoscout_quelle_verfuegbar():
+        return None
+    if not detail_looks_like_autoscout_listing(url):
+        _log.warning("AutoScout: keine Inserats-URL, Abruf verweigert: %s", url[:120])
+        return None
+    endpoint = (f"https://api.apify.com/v2/acts/{APIFY_AUTOSCOUT_ACTOR}"
+                f"/run-sync-get-dataset-items")
+    try:
+        async with _httpx.AsyncClient(
+                timeout=_httpx.Timeout(180.0, connect=20.0)) as client:
+            r = await client.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+                params={"format": "json", "clean": "1"},
+                json={"urls": [{"url": url}], "maxRecords": 1},
+            )
+            fehler = aus_http_antwort(r.status_code, r.text, "AutoScout24")
+            if fehler is not None:
+                _log.warning("Apify AutoScout: HTTP %s fuer %s: %s",
+                             r.status_code, item_id, r.text[:300])
+                raise fehler
+            items = r.json()
+            if not isinstance(items, list) or not items \
+                    or not isinstance(items[0], dict):
+                _log.warning("Apify AutoScout: leere Antwort fuer %s", item_id)
+                return None
+            v = parse_autoscout_item(items[0], item_id, url=url)
+            # Wie bei mobile.de: ein Element ohne Inhalt bedeutet, das
+            # Inserat gibt es nicht (mehr) — nicht "leeres Fahrzeug".
+            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+                _log.warning("Apify AutoScout: Antwort ohne Inhalt fuer %s — Inserat weg", item_id)
+                return None
+            return v
+    except AnbieterFehler:
+        raise
+    except Exception as exc:
+        _log.exception("Apify AutoScout: Abruf fehlgeschlagen fuer %s", item_id)
+        raise aus_ausnahme(exc, "AutoScout24")

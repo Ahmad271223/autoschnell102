@@ -307,7 +307,10 @@ function YearSelect({ value, onChange, years, placeholder, testid }) {
         onChange={(e) => onChange(e.target.value)}
         className="w-full h-11 px-4 pr-9 rounded-xl outline-none text-[14px] appearance-none"
         style={{
-          background: "var(--input-bg)",
+          // Deckend statt var(--input-bg) (rgba 5%): Chromium nutzt diese
+          // Farbe auch fuer den Rahmen der aufgeklappten Options-Liste —
+          // halbtransparent ergab dort einen weisslichen Kasten.
+          background: "var(--bg-surface)",
           border: "1px solid var(--divider)",
           color: value ? "var(--text-primary)" : "var(--text-muted)",
         }}

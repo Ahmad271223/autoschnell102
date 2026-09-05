@@ -3,12 +3,12 @@ import unicodedata
 import re
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from autoscout_service import _load_data as _load_autoscout
 from autoscout_service import build_search_url as build_autoscout_url
-from deps import current_user, db
+from deps import current_user, db, require_active_sub
 from mobile_service import DEFAULT_RULES
 from mobile_service import build_search_url as build_mobile_url
 
@@ -111,14 +111,25 @@ async def list_makes(_=Depends(current_user)):
 
 
 @router.post("/manual/search")
-async def manual_search(body: ManualSearchIn, user=Depends(current_user)):
+async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
+    # require_active_sub prueft Rolle UND aktives Abo — vorher genuegte die
+    # Rolle, wodurch die Bezahlschranke per direktem API-Aufruf umgangen
+    # werden konnte.
     """Wandelt die manuelle Eingabe in ein „virtuelles Fahrzeug" um und nutzt
     die existierenden mobile_service / autoscout_service Url-Builder.
     Übernimmt damit automatisch die Vergleichs-Regeln des Händlers (KM-Toleranz,
     Leistungs-Toleranz, Schaden-Ausschluss, …).
     """
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
-    base_rules = dealer.get("comparison_rules") or DEFAULT_RULES
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
+    # Dasselbe Regelpaket wie der Vergleich (PR-Review 09/2026): vorher
+    # nutzte die manuelle Suche IMMER die Inland-Regeln — das aktive
+    # Export-Profil samt export_rules wurde komplett ignoriert.
+    if (dealer.get("active_profile") or "inland") == "export":
+        from mobile_service import DEFAULT_EXPORT_RULES
+        base_rules = dealer.get("export_rules") or DEFAULT_EXPORT_RULES
+    else:
+        base_rules = dealer.get("comparison_rules") or DEFAULT_RULES
 
     # ---- Regeln aus dem manuellen Formular überschreiben ----
     rules = {**base_rules}

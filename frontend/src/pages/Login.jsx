@@ -3,10 +3,13 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
+import { sicheresZiel } from "@/lib/rollen";
 import { Bolt, ArrowRight } from "lucide-react";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, loginMfa } = useAuth();
+  const [mfaToken, setMfaToken] = useState(null);   // Zwei-Faktor-Schritt (Admin)
+  const [mfaCode, setMfaCode] = useState("");
   const nav = useNavigate();
   const [params] = useSearchParams();
   const [email, setEmail] = useState("");
@@ -14,17 +17,25 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
 
   const reason = params.get("reason");
-  const next = params.get("next") || "/app/vergleich";
+  const next = params.get("next") || "/app";
 
   const submit = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
-      const u = await login(email, pw);
+      let u = mfaToken ? await loginMfa(mfaToken, mfaCode) : await login(email, pw);
+      if (u?.mfa_erforderlich) {
+        setMfaToken(u.mfa_token);
+        toast.message("Bitte den Code aus deiner Authenticator-App eingeben");
+        return;
+      }
       toast.success("Willkommen zurück");
-      const isAdmin = u?.role === "admin" || u?.is_super_admin;
-      const fallback = isAdmin ? "/admin" : "/app/vergleich";
-      nav(params.get("next") || fallback);
+      // Dem ?next aus der Adresszeile wird nur gefolgt, wenn das Ziel zur
+      // Rolle passt. Sonst landete ein Super-Admin, der sich auf
+      // /login?next=/app/bestand anmeldet, auf einer Haendler-Seite —
+      // mit Admin-Seitenleiste und der Meldung "Nur fuer Haendler-
+      // Accounts" (Befund 05.09.2026).
+      nav(sicheresZiel(u, params.get("next")));
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {
@@ -82,6 +93,16 @@ export default function Login() {
                      autoComplete="current-password"
                      className="input-base w-full mt-1" placeholder="••••••••" />
             </div>
+            {mfaToken && (
+              <div data-testid="mfa-schritt">
+                <label className="overline">Code aus der Authenticator-App</label>
+                <input value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code"
+                       placeholder="123456 oder Wiederherstellungscode" autoFocus data-testid="mfa-code"
+                       className="input-base w-full mt-1" />
+                <button type="button" onClick={() => { setMfaToken(null); setMfaCode(""); }}
+                        className="mt-2 text-xs text-zinc-500 underline underline-offset-2">Zurück zum Passwort</button>
+              </div>
+            )}
           </div>
 
           <button data-testid="login-submit" type="submit" disabled={loading}
@@ -89,8 +110,13 @@ export default function Login() {
             {loading ? "..." : <>Anmelden <ArrowRight size={15} /></>}
           </button>
 
-          <div className="mt-6 text-sm text-zinc-400 text-center">
-            Noch kein Konto? <Link to="/register" className="text-white hover:underline">Jetzt registrieren</Link>
+          <div className="mt-6 text-sm text-zinc-400 text-center space-y-2">
+            <div>
+              <Link to="/passwort-vergessen" className="hover:text-white hover:underline">Passwort vergessen?</Link>
+            </div>
+            <div>
+              Noch kein Konto? <Link to="/anfrage" className="text-white hover:underline">Zugang anfragen — wir schalten dich frei</Link>
+            </div>
           </div>
         </form>
       </div>

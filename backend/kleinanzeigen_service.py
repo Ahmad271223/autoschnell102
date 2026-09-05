@@ -10,12 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import html as html_lib
+import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import os
 import httpx
 from bs4 import BeautifulSoup
+
+
+def _make_soup(markup: str) -> "BeautifulSoup":
+    """Robustes Parsen: kleinanzeigen.de liefert teils kaputte Entities
+    (z.B. `&#8203` ohne Semikolon), an denen Pythons eingebauter
+    html.parser ab 3.14 mit ValueError crasht. lxml verkraftet das."""
+    try:
+        return BeautifulSoup(markup, "lxml")
+    except Exception:
+        return BeautifulSoup(markup, "html.parser")
 
 from proxy_config import get_proxy_url, random_user_agent, SCRAPE_MAX_RETRIES
 
@@ -90,10 +101,14 @@ def _cut_at_stop(text: str) -> str:
 
 
 def _visible_text(soup: BeautifulSoup) -> str:
-    copy = BeautifulSoup(str(soup), "html.parser")
-    for tag in copy(["script", "style", "noscript", "svg"]):
+    # copy.copy() dupliziert den Baum direkt — der alte Weg
+    # (_make_soup(str(soup))) serialisierte und parste die komplette
+    # Seite ein ZWEITES Mal (Review 09/2026: halbiert die CPU-Zeit).
+    import copy as _copy
+    kopie = _copy.copy(soup)
+    for tag in kopie(["script", "style", "noscript", "svg"]):
         tag.decompose()
-    return _clean(copy.get_text("\n")) or ""
+    return _clean(kopie.get_text("\n")) or ""
 
 
 def _meta(soup: BeautifulSoup, *names: str) -> Optional[str]:
@@ -357,7 +372,7 @@ def _extract_images(html_text: str, max_images: int = 60) -> List[str]:
     cut = _cut_at_stop(html_text)
     seen: set = set()
     images: List[str] = []
-    soup = BeautifulSoup(cut, "html.parser")
+    soup = _make_soup(cut)
 
     def add(src: Optional[str]) -> None:
         if not src:
@@ -462,6 +477,10 @@ async def _assert_public_host(url: str) -> None:
     _assert_ip_public(host, infos)
 
 
+class ListingGone(RuntimeError):
+    """Inserat existiert nicht mehr (404/410) - kein Retry, saubere Meldung."""
+
+
 async def _fetch_html(url: str) -> str:
     await _assert_public_host(url)
     proxy = get_proxy_url()  # rotierender Proxy-Endpoint (oder None = direkt)
@@ -483,23 +502,44 @@ async def _fetch_html(url: str) -> str:
                     await client.get("https://www.kleinanzeigen.de/", timeout=15.0)
                 except Exception:
                     pass
+            is_last = attempt >= max(1, SCRAPE_MAX_RETRIES) - 1
+
+            async def _backoff():
+                # Jitter verhindert synchronisierte Retries unter Last;
+                # nach dem LETZTEN Versuch nicht mehr sinnlos schlafen.
+                if not is_last:
+                    await asyncio.sleep((2 ** attempt) * random.uniform(0.6, 1.4))
+
             try:
                 r = await client.get(url)
             except Exception as exc:
                 last_exc = exc
-                await asyncio.sleep(2 ** attempt)
+                await _backoff()
                 continue
             # Nach Redirects erneut pruefen: die finale URL darf ebenfalls
             # nicht auf eine interne Adresse zeigen.
             final_url = str(r.url)
             if final_url != url:
                 await _assert_public_host(final_url)
-            if r.status_code in (403, 429):
-                # Block / Rate-Limit -> mit neuer IP + UA erneut versuchen.
+                # Geloeschte Anzeigen werden von Kleinanzeigen mit HTTP 200
+                # auf die Kategorie-/Suchseite umgeleitet: der /s-anzeige/-
+                # Pfad verschwindet aus der URL -> Anzeige existiert nicht mehr.
+                if "/s-anzeige/" in url and "/s-anzeige/" not in final_url:
+                    raise ListingGone(
+                        "Das Inserat ist bei Kleinanzeigen nicht mehr verfügbar "
+                        "(gelöscht, beendet oder verkauft).")
+            if r.status_code in (404, 410):
+                # Inserat geloescht/deaktiviert - Retry ist sinnlos.
+                raise ListingGone(
+                    "Das Inserat ist bei Kleinanzeigen nicht mehr verfügbar "
+                    "(gelöscht oder deaktiviert).")
+            if r.status_code in (403, 429, 500, 502, 503, 504):
+                # Block / Rate-Limit / CDN-Wackler -> erneut versuchen
+                # (mit rotierendem Proxy = neue IP pro Versuch).
                 last_exc = RuntimeError(
-                    f"Kleinanzeigen blockiert (HTTP {r.status_code})."
+                    f"Kleinanzeigen antwortet mit HTTP {r.status_code}."
                 )
-                await asyncio.sleep(2 ** attempt)
+                await _backoff()
                 continue
             r.raise_for_status()
             return r.text
@@ -517,12 +557,68 @@ def is_kleinanzeigen_url(url: str) -> bool:
 
 
 async def fetch_kleinanzeigen_vehicle(url: str) -> Dict[str, Any]:
-    """Return a dict shaped like the mobile_service vehicle output, so the
-    same `build_search_url(...)` and downstream code (PDF, contracts) work
-    unchanged."""
+    """Holt die Seite (Server-Abruf) UND wertet sie aus. Für den normalen
+    server-seitigen Weg (mobile.de/AutoScout brauchen das ohnehin)."""
     html_text = await _fetch_html(url)
-    soup = BeautifulSoup(html_text, "html.parser")
+    # CPU-Parse (BS4/lxml) in den Threadpool — der Fetch-Pfad laeuft in
+    # /mobile/compare, /listings/resolve UND im Link-Job-Worker; sync
+    # blockierte jeder Parse alle gleichzeitigen Requests (Review 09/2026).
+    return await asyncio.to_thread(parse_kleinanzeigen_html, url, html_text)
+
+
+# Marker, an denen wir eine ECHTE Kleinanzeigen-Fahrzeug-Detailseite
+# erkennen — schützt den Client-Ingest gegen untergeschobenes Fremd-HTML.
+# Wichtig: Die Daten landen im GLOBALEN Speicher, den alle Händler sehen.
+# Ein zu lascher Check würde erlauben, fremde Inserate mit gefälschten
+# Preisen zu "vergiften". Darum: mehrere strukturelle Marker UND die
+# Anzeigen-Nummer aus der URL muss im HTML selbst vorkommen.
+_KA_STRUCTURE_MARKERS = (
+    "kleinanzeigen.de/s-anzeige",   # kanonischer Link der Detailseite
+    "viewad-title",                 # Titel-Element der echten Seite
+    "viewad-price",                 # Preis-Element der echten Seite
+    "viewad-details",               # Detail-Tabelle (Marke, Modell, EZ …)
+    "viewad-locality",              # Standort-Element
+    "gsm_ad",                       # internes Tracking der echten Seite
+)
+
+
+def looks_like_kleinanzeigen_listing(html_text: str, url: str = "") -> bool:
+    """Strenge Plausibilitätsprüfung: Ist das wirklich DIE Kleinanzeigen-
+    Detailseite zu DIESER URL? (Der Nutzer-Browser liefert das HTML — wir
+    vertrauen ihm nicht.)"""
+    if not html_text or len(html_text) < 500:
+        return False
+    low = html_text.lower()
+    # 1) Mindestens 3 der strukturellen Marker der echten Detailseite.
+    if sum(1 for m in _KA_STRUCTURE_MARKERS if m in low) < 3:
+        return False
+    # 2) Die Anzeigen-Nummer aus der URL muss im HTML vorkommen (kanonischer
+    #    Link, Tracking, Teilen-Knopf …) — sonst gehört das HTML zu einer
+    #    ANDEREN Anzeige oder ist frei erfunden.
+    item_id = _extract_item_id(url) if url else None
+    if item_id and item_id not in html_text:
+        return False
+    return True
+
+
+def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
+    """Wertet BEREITS geladenes HTML aus (egal ob vom Server oder vom
+    Browser des Nutzers geholt). Return-Form identisch zum mobile_service-
+    Fahrzeug, damit PDF/Verträge/Cache unverändert weiterlaufen."""
+    soup = _make_soup(html_text)
     visible = _cut_at_stop(_visible_text(soup))
+
+    # Geloeschte/beendete Anzeigen liefern oft HTTP 200 mit einer Hinweis-
+    # Seite. Am Seitenanfang erkennen -> saubere Meldung statt Muell-Daten.
+    _head = visible[:600].lower()
+    _GONE = ("nicht mehr verfügbar", "nicht mehr verfugbar",
+             "anzeige wurde gelöscht", "anzeige wurde geloscht",
+             "anzeige ist leider nicht mehr", "wurde bereits verkauft",
+             "anzeige nicht gefunden")
+    if any(m in _head for m in _GONE):
+        raise ListingGone(
+            "Das Inserat ist bei Kleinanzeigen nicht mehr verfügbar "
+            "(gelöscht, beendet oder verkauft).")
 
     title = _parse_title(soup, visible)
     price, price_amount = _parse_price(visible)

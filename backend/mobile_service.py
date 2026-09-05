@@ -12,8 +12,11 @@ Strategy:
   `mobile_makes_models.json` (178 makes, 2721 models, sourced from the user's
   verified `allemodellefinal.txt` upload).
 """
+import html as _htmllib
 import json
+import logging
 import os
+import asyncio
 import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
@@ -24,6 +27,7 @@ from urllib.parse import urlencode, quote
 import ssl
 import certifi
 import httpx
+from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
 import xmltodict
 
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -35,6 +39,33 @@ from proxy_config import get_proxy_url, random_user_agent
 MOBILE_BASE = os.environ.get("MOBILE_API_BASE", "https://services.sandbox.mobile.de")
 MOBILE_USER = os.environ.get("MOBILE_API_USER", "")
 MOBILE_PASS = os.environ.get("MOBILE_API_PASS", "")
+# Apify-Scraper als mobile.de-Quelle (memo23/mobile-de-scraper): liest ein
+# einzelnes Inserat ueber die Apify-Plattform aus — kein offizieller
+# API-Zugang noetig. Kostet ca. $0.006 je frischem Abruf; der Cache
+# (vehicle_cache + listings_cache) verhindert Doppelabrufe.
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+APIFY_MOBILE_ACTOR = os.environ.get(
+    "APIFY_MOBILE_ACTOR", "memo23~mobile-de-scraper").strip()
+# Sandbox-/Demo-Daten NUR ausliefern, wenn ausdrücklich aktiviert. Sonst würde
+# jeder fehlgeschlagene mobile.de-Abruf still ein erfundenes Fahrzeug liefern
+# (und es 24 h cachen + in Verträge übernehmen). Default: ehrlicher Fehler.
+MOBILE_SANDBOX_MODE = os.environ.get("MOBILE_SANDBOX_MODE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
+class MobileUnavailable(RuntimeError):
+    """mobile.de-Fahrzeug konnte nicht echt geladen werden (Route -> HTTP 502)."""
+
+
+def apify_enabled() -> bool:
+    return bool(APIFY_TOKEN)
+
+
+def mobile_quelle_verfuegbar() -> bool:
+    """Ist mobile.de als Quelle nutzbar? (offizielle API, Apify-Scraper
+    oder ausdruecklicher Sandbox-Modus)"""
+    return bool(MOBILE_USER and MOBILE_PASS) or apify_enabled() or MOBILE_SANDBOX_MODE
 
 FUEL_LABELS = {
     "DIESEL": "Diesel", "PETROL": "Benzin", "ELECTRICITY": "Elektro",
@@ -52,7 +83,8 @@ CATEGORY_LABELS = {
     "SportsCar": "Sportwagen / Coupé", "Van": "Van / Kleinbus",
 }
 
-AD_ID_RE = re.compile(r"(?:id=|details\.html\?id=|/)(\d{6,12})")
+# {6,16}: neuere mobile.de-Inserate haben 14-stellige IDs (z.B. 42196329136896).
+AD_ID_RE = re.compile(r"(?:id=|details\.html\?id=|/)(\d{6,16})")
 
 
 def extract_ad_id(url_or_id: str) -> Optional[str]:
@@ -255,7 +287,7 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
                                           "User-Agent": random_user_agent()})
             if r.status_code != 200:
                 return None
-            data = xmltodict.parse(r.text)
+            data = await asyncio.to_thread(xmltodict.parse, r.text)
             ad = data.get("ad:ad") or data.get("ad") or {}
             if not ad:
                 return None
@@ -268,6 +300,279 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
             return parsed
     except Exception:
         return None
+
+
+# -------------------- Apify-Scraper (memo23/mobile-de-scraper) --------------------
+log = logging.getLogger("mobile_service")
+
+# Lokalisierte Actor-Werte -> deutsche Labels der App. Der Actor liefert je
+# nach Proxy-Land Englisch ("Petrol", "Automatic") oder Deutsch ("Benzin");
+# unbekannte Werte gehen unveraendert durch.
+_APIFY_FUEL_DE = {
+    "petrol": "Benzin", "gasoline": "Benzin", "benzin": "Benzin",
+    "diesel": "Diesel", "electric": "Elektro", "elektro": "Elektro",
+    "electricity": "Elektro", "hybrid": "Hybrid",
+    "hybrid (petrol/electric)": "Hybrid (Benzin/Elektro)",
+    "hybrid (diesel/electric)": "Hybrid (Diesel/Elektro)",
+    "lpg": "LPG", "natural gas": "Erdgas (CNG)", "cng": "Erdgas (CNG)",
+    "hydrogen": "Wasserstoff", "other": "Andere",
+}
+_APIFY_GEAR_DE = {
+    "automatic": "Automatik", "automatik": "Automatik",
+    "manual": "Schaltgetriebe", "manual gearbox": "Schaltgetriebe",
+    "schaltgetriebe": "Schaltgetriebe",
+    "semi-automatic": "Halbautomatik", "halbautomatik": "Halbautomatik",
+}
+_APIFY_COLOR_DE = {
+    "white": "Weiß", "black": "Schwarz", "grey": "Grau", "gray": "Grau",
+    "silver": "Silber", "blue": "Blau", "red": "Rot", "green": "Grün",
+    "yellow": "Gelb", "orange": "Orange", "brown": "Braun", "beige": "Beige",
+    "purple": "Violett", "violet": "Violett", "gold": "Gold",
+    "bronze": "Bronze",
+}
+_APIFY_CATEGORY_DE = {
+    "saloon": "Limousine", "sedan": "Limousine",
+    "estate car": "Kombi", "station wagon": "Kombi",
+    "small car": "Kleinwagen", "cabriolet": "Cabrio / Roadster",
+    "convertible": "Cabrio / Roadster", "sports car": "Sportwagen / Coupé",
+    "coupe": "Sportwagen / Coupé", "suv": "SUV / Geländewagen",
+    "off-road vehicle": "SUV / Geländewagen", "van": "Van / Kleinbus",
+    "minibus": "Van / Kleinbus", "other": "Sonstiges",
+}
+
+
+def _apify_attr(item: dict, *tags: str) -> Optional[str]:
+    """Attributwert aus dem Actor-Datensatz. `attributes` ist eine Liste
+    von {label, tag, value}; value kann auch eine Liste sein."""
+    attrs = item.get("attributes") or []
+    if isinstance(attrs, dict):
+        attrs = [{"tag": k, "value": v} for k, v in attrs.items()]
+    wanted = {t.lower() for t in tags}
+    for a in attrs:
+        if not isinstance(a, dict):
+            continue
+        key = str(a.get("tag") or a.get("label") or "").strip().lower()
+        if key in wanted:
+            v = a.get("value")
+            if isinstance(v, list):
+                v = ", ".join(str(x) for x in v)
+            if v not in (None, ""):
+                return str(v).strip()
+    return None
+
+
+def _apify_zahl(text: Optional[str]) -> Optional[int]:
+    """'111,016 km' / '111.016 km' / '1,984 ccm' -> 111016 / 1984."""
+    if not text:
+        return None
+    ziffern = re.sub(r"[^0-9]", "", str(text))
+    return int(ziffern) if ziffern else None
+
+
+def _apify_leistung(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    """'213 kW (290 hp)' / '213 kW (290 PS)' -> (213, 290)."""
+    if not text:
+        return None, None
+    kw = ps = None
+    m = re.search(r"(\d[\d.,]*)\s*kW", text, re.I)
+    if m:
+        kw = _apify_zahl(m.group(1))
+    m = re.search(r"(\d[\d.,]*)\s*(?:hp|PS)", text, re.I)
+    if m:
+        ps = _apify_zahl(m.group(1))
+    if kw and not ps:
+        ps = kw_to_ps(kw)
+    if ps and not kw:
+        kw = ps_to_kw(ps)
+    return kw, ps
+
+
+def _apify_bild_url(eintrag) -> Optional[str]:
+    """Bildeintrag -> volle URL. Der Actor liefert {'uri':
+    'img.classistatic.de/api/v1/mo-prod/images/<hash>'} ohne Schema und
+    ohne Groessen-Regel; mobile.de erwartet '?rule=mo-1024.jpg'."""
+    u = eintrag if isinstance(eintrag, str) else (
+        (eintrag or {}).get("uri") or (eintrag or {}).get("src")
+        or (eintrag or {}).get("url"))
+    if not u or not isinstance(u, str):
+        return None
+    u = u.strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    elif not u.startswith("http"):
+        u = "https://" + u
+    letzter = u.rsplit("/", 1)[-1]
+    if "?" not in u and "." not in letzter:
+        u += "?rule=mo-1024.jpg"
+    return u
+
+
+def _apify_html_zu_text(html_text: str) -> str:
+    """htmlDescription -> lesbarer Text (Listenpunkte/Umbrueche erhalten)."""
+    if not html_text:
+        return ""
+    t = re.sub(r"(?i)<\s*(br|/li|/p|/ul|/ol)\s*/?>", "\n", html_text)
+    t = re.sub(r"(?i)<\s*li[^>]*>", "- ", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = _htmllib.unescape(t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict[str, Any]:
+    """Ein Datensatz des Actors -> internes Fahrzeug-Schema (wie _parse_ad_xml)."""
+    make_label = ((item.get("make") or {}).get("localized")
+                  if isinstance(item.get("make"), dict) else item.get("make")) \
+                 or item.get("makeKey") or ""
+    model_label = ((item.get("model") or {}).get("localized")
+                   if isinstance(item.get("model"), dict) else item.get("model")) \
+                  or item.get("modelKey") or ""
+
+    preis = None
+    p = item.get("price")
+    if isinstance(p, dict):
+        for knoten in (p.get("grs"), p.get("gross"), p.get("nettoAmount"), p):
+            if isinstance(knoten, dict) and isinstance(
+                    knoten.get("amount"), (int, float)):
+                preis = float(knoten["amount"])
+                break
+    elif isinstance(p, (int, float)):
+        preis = float(p)
+
+    kw, ps = _apify_leistung(_apify_attr(item, "power"))
+    fuel_raw = _apify_attr(item, "fuel") or ""
+    gear_raw = _apify_attr(item, "transmission", "gearbox") or ""
+    cat_raw = str(item.get("category") or _apify_attr(item, "category") or "")
+
+    bilder = [b for b in (_apify_bild_url(e) for e in item.get("images") or [])
+              if b]
+
+    kontakt = item.get("contact") or {}
+    plz = stadt = None
+    # address2 kommt als 'DE-97078 Würzburg' (oder '97078 Würzburg').
+    adr2 = str(kontakt.get("address2") or "")
+    m = re.search(r"(\d{5})\s+(.+)", adr2)
+    if m:
+        plz, stadt = m.group(1), m.group(2).strip()
+    telefone = kontakt.get("phones") or []
+    telefon = ""
+    if telefone and isinstance(telefone[0], dict):
+        telefon = telefone[0].get("number") or ""
+
+    beschreibung = _apify_html_zu_text(item.get("htmlDescription") or "")
+
+    schaden_text = (_apify_attr(item, "damageCondition") or "").lower()
+    unfall = bool(item.get("isDamageCase")) or "damaged" in schaden_text \
+        or "unfall" in schaden_text.replace("unfallfrei", "")
+
+    halter = _apify_zahl(_apify_attr(item, "numberOfPreviousOwners"))
+
+    return {
+        "mobile_ad_id": str(item.get("id") or ad_id),
+        "detail_url": item.get("url") or url
+                      or f"https://suchen.mobile.de/fahrzeuge/details.html?id={ad_id}",
+        "make": (item.get("makeKey") or make_label or "").upper(),
+        "make_label": make_label,
+        "model": item.get("modelKey") or model_label,
+        "model_label": model_label,
+        "model_description": item.get("subTitle") or item.get("title") or "",
+        "category": cat_raw,
+        "category_label": CATEGORY_LABELS.get(
+            cat_raw, _APIFY_CATEGORY_DE.get(cat_raw.lower(), cat_raw)),
+        "first_registration": _apify_attr(item, "firstRegistration"),
+        "mileage": _apify_zahl(_apify_attr(item, "mileage")),
+        "fuel": fuel_raw.upper(),
+        "fuel_label": _APIFY_FUEL_DE.get(fuel_raw.lower(), fuel_raw),
+        "gearbox": gear_raw.upper(),
+        "gearbox_label": _APIFY_GEAR_DE.get(gear_raw.lower(), gear_raw),
+        "power_kw": kw,
+        "power_ps": ps,
+        "displacement": _apify_zahl(_apify_attr(item, "cubicCapacity")),
+        "doors": _apify_attr(item, "doorCount"),
+        "seats": _apify_zahl(_apify_attr(item, "numSeats")),
+        "color": _APIFY_COLOR_DE.get(
+            (_apify_attr(item, "color") or "").lower(),
+            _apify_attr(item, "color") or _apify_attr(item, "manufacturerColorName")),
+        "vin": None,
+        "license_plate": None,
+        "hu": {"new": "Neu"}.get((_apify_attr(item, "hu") or "").lower(),
+                                 _apify_attr(item, "hu")),
+        "previous_owners": str(halter) if halter is not None
+                           else extract_owners_from_text(beschreibung),
+        "accident_damaged": unfall,
+        "roadworthy": item.get("readyToDrive") is not False,
+        "features": [str(f) for f in item.get("features") or []],
+        "description": beschreibung,
+        "list_price": preis,
+        "currency": "EUR",
+        "seller_name": kontakt.get("name")
+                       or ((kontakt.get("person") or {}).get("name") if isinstance(kontakt.get("person"), dict) else None)
+                       or ("Händler" if str(kontakt.get("enumType") or "").upper() == "DEALER"
+                           else "Privatverkäufer"),
+        "seller_address": kontakt.get("address1"),
+        "seller_zip": plz,
+        "seller_city": stadt,
+        "seller_phone": telefon,
+        "seller_email": "",
+        "image_urls": bilder,
+        "images": bilder,
+        "image_count": len(bilder),
+    }
+
+
+async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[dict]:
+    """Einzelnes Inserat ueber den Apify-Actor abrufen (run-sync)."""
+    if not apify_enabled():
+        return None
+    if url and detail_looks_like_listing(url):
+        detail_url = url
+    else:
+        detail_url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={ad_id}"
+    endpoint = (f"https://api.apify.com/v2/acts/{APIFY_MOBILE_ACTOR}"
+                f"/run-sync-get-dataset-items")
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(180.0, connect=20.0), verify=_SSL_CONTEXT,
+        ) as client:
+            r = await client.post(
+                endpoint,
+                # Token im Header statt als ?token=: sonst landet er ueber
+                # die httpx-Request-Logzeile im Backend-Log.
+                headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+                params={"format": "json", "clean": "1"},
+                json={"startUrls": [{"url": detail_url}], "maxItems": 1},
+            )
+            fehler = aus_http_antwort(r.status_code, r.text, "mobile.de")
+            if fehler is not None:
+                log.warning("Apify mobile.de: HTTP %s fuer %s: %s",
+                            r.status_code, ad_id, r.text[:300])
+                raise fehler
+            items = r.json()
+            if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+                log.warning("Apify mobile.de: leere/unerwartete Antwort fuer %s", ad_id)
+                return None
+            v = _parse_apify_item(items[0], ad_id, url=detail_url)
+            # Echter Lauf 09/2026: fuer eine nicht existierende Nummer liefert
+            # Apify EIN Element ohne Inhalt. Daraus wurde ein leeres Fahrzeug
+            # statt "Inserat nicht mehr online". Leer heisst: weg.
+            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+                log.warning("Apify mobile.de: Antwort ohne Inhalt fuer %s — Inserat weg", ad_id)
+                return None
+            return v
+    except AnbieterFehler:
+        raise
+    except Exception as exc:
+        # Zeitueberschreitung / Netz / kaputte Antwort: klarer Text statt
+        # "konnte nicht geladen werden" (Audit 09/2026, Punkt 48).
+        log.exception("Apify mobile.de: Abruf fehlgeschlagen fuer %s", ad_id)
+        raise aus_ausnahme(exc, "mobile.de")
+
+
+def detail_looks_like_listing(url: str) -> bool:
+    """True fuer echte mobile.de-Inserats-URLs (nicht Suchseiten) — nur die
+    duerfen 1:1 an den Actor gehen, sonst wuerde eine eingefuegte SUCH-URL
+    hunderte Ergebnisse abrufen (Kosten!)."""
+    return bool(url) and "mobile.de" in url and (
+        "details.html" in url or "/auto-inserat/" in url)
 
 
 # -------------------- Mock fallback --------------------
@@ -330,7 +635,7 @@ async def cache_set(db, ad_id: str, data: dict, ttl_minutes: int = 30):
     )
 
 
-async def get_vehicle(db, ad_id: str) -> dict:
+async def get_vehicle(db, ad_id: str, url: Optional[str] = None) -> dict:
     cached = await cache_get(db, ad_id)
     if cached:
         # Run the generic-model recovery on cached entries too — earlier
@@ -341,11 +646,31 @@ async def get_vehicle(db, ad_id: str) -> dict:
             pass
         return {**cached, "_source": "cache"}
     fresh = await _fetch_from_mobile_api(ad_id)
-    if not fresh:
-        fresh = _mock_vehicle(ad_id)
-        fresh["_source"] = "sandbox" if ad_id in _SANDBOX_BUNDLE else "mock"
-    else:
+    if fresh:
         fresh["_source"] = "api"
+    elif apify_enabled():
+        # Kein offizieller API-Zugang (oder Abruf leer): Apify-Scraper.
+        fresh = await _fetch_from_apify(ad_id, url)
+        if fresh:
+            fresh["_source"] = "apify"
+    if not fresh:
+        # Kein echtes Ergebnis. Nur im ausdrücklichen Sandbox-Modus dürfen
+        # Demo-Daten zurückgehen — sonst ehrlicher Fehler statt Fake-Daten.
+        if MOBILE_SANDBOX_MODE:
+            fresh = _mock_vehicle(ad_id)
+            fresh["_source"] = "sandbox" if ad_id in _SANDBOX_BUNDLE else "mock"
+        elif not mobile_quelle_verfuegbar():
+            raise MobileUnavailable(
+                "mobile.de ist nicht angebunden (Zugangsdaten fehlen). Bitte eine "
+                "kleinanzeigen.de-URL verwenden oder APIFY_TOKEN bzw. "
+                "MOBILE_API_USER/MOBILE_API_PASS in der .env setzen. "
+                "(Zum lokalen Testen: MOBILE_SANDBOX_MODE=true)"
+            )
+        else:
+            raise MobileUnavailable(
+                "Fahrzeug konnte bei mobile.de nicht geladen werden — Inserat evtl. "
+                "entfernt oder Abruf vorübergehend nicht möglich."
+            )
     # Defensive — _fetch_from_mobile_api already does this, but applying
     # again on mock/sandbox returns is harmless and keeps behavior uniform.
     try:

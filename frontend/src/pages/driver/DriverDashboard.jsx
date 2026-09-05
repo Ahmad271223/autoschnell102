@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { driverApi } from "@/context/DriverContext";
-import { errMsg, API_BASE } from "@/lib/api";
+import { Link } from "react-router-dom";
+import { driverApi, openDriverPdf } from "@/context/DriverContext";
+import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import {
-  Calendar, MapPin, Phone, FileText,
+  Calendar, MapPin, Phone, FileText, ClipboardCheck,
   CheckCircle2, Car, ChevronDown, ChevronUp, Building2, XCircle,
 } from "lucide-react";
 import PhotoGallery from "@/components/PhotoGallery";
+import AbholCheckDialog from "@/components/AbholCheckDialog";
 
 const fmtDate = (s) => {
   if (!s) return "—";
@@ -24,6 +26,7 @@ export default function DriverDashboard() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState({});
   const [busy, setBusy] = useState(null);
+  const [checkAppt, setCheckAppt] = useState(null); // Abhol-Check-Dialog
 
   useEffect(() => {
     driverApi.get("/driver/appointments")
@@ -32,11 +35,37 @@ export default function DriverDashboard() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Zugeteilte Fahrt annehmen / ablehnen (09/2026)
+  const zuteilung = async (id, action) => {
+    if (busy) return;
+    let grund = "";
+    if (action === "ablehnen") {
+      grund = window.prompt("Fahrt ablehnen — Grund (optional):") ?? null;
+      if (grund === null) return;
+    }
+    setBusy(id);
+    try {
+      await driverApi.put(`/driver/appointments/${id}/zuteilung`, { action, grund });
+      toast.success(action === "annehmen" ? "Fahrt angenommen" : "Fahrt abgelehnt — der Händler wurde informiert");
+      const r = await driverApi.get("/driver/appointments");
+      setItems(r.data);
+    } catch (e) {
+      toast.error(errMsg(e, "Antwort fehlgeschlagen"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const setStatus = async (id, status) => {
     if (busy) return;
-    const confirmMsg = status === "abgeholt"
-      ? "Abholung bestätigen?\nHinweis: Fotos & Beweis-Archiv werden nach 7 Tagen automatisch gelöscht."
-      : "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Fotos & Beweis-Archiv werden nach 14 Tagen automatisch gelöscht.";
+    // "abgeholt" läuft über den Abhol-Check-Dialog (mit Abweichungsbericht).
+    if (status === "abgeholt") {
+      const appt = items.find((a) => a.id === id);
+      if (appt) setCheckAppt(appt);
+      return;
+    }
+    const confirmMsg =
+      "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Fotos & Beweis-Archiv werden nach 14 Tagen automatisch gelöscht.";
     if (!window.confirm(confirmMsg)) return;
     setBusy(id);
     try {
@@ -60,8 +89,8 @@ export default function DriverDashboard() {
     return Object.entries(g).sort(([a], [b]) => a.localeCompare(b));
   }, [items]);
 
-  const token = localStorage.getItem("ah_driver_token");
-  const authQ = token ? `?auth=${encodeURIComponent(token)}` : "";
+  const oeffnePdf = (path) =>
+    openDriverPdf(path).catch((e) => toast.error(errMsg(e)));
 
   return (
     <div data-testid="driver-dashboard">
@@ -174,30 +203,38 @@ export default function DriverDashboard() {
                           <PhotoGallery photos={photos} label="Fahrzeug-Fotos" />
                         )}
 
+                        {/* Digitales Protokoll: dieselben Punkte wie im PDF,
+                            direkt in der App ausfüllbar inkl. Unterschrift. */}
+                        {a.zuteilung !== "offen" && (
+                        <Link to={`/fahrer/protokoll/${a.id}`}
+                              data-testid={`protokoll-${a.id}`}
+                              className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold kinetic-button mb-2">
+                          <ClipboardCheck size={16} /> Protokoll ausfüllen
+                        </Link>
+                        )}
+
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <a href={`${API_BASE}/driver/appointments/${a.id}/pickup-order.pdf${authQ}`}
-                             target="_blank" rel="noreferrer"
-                             data-testid={`pickup-pdf-${a.id}`}
-                             className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold kinetic-button">
-                            <FileText size={15} /> Abholauftrag
-                          </a>
+                          <button onClick={() => oeffnePdf(`/driver/appointments/${a.id}/pickup-order.pdf`)}
+                                  data-testid={`pickup-pdf-${a.id}`}
+                                  className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm border"
+                                  style={{ borderColor: "var(--border-default)" }}>
+                            <FileText size={15} /> Papier-PDF
+                          </button>
                           {a.contract_id && (
-                            <a href={`${API_BASE}/driver/contracts/${a.contract_id}/pdf${authQ}`}
-                               target="_blank" rel="noreferrer"
-                               data-testid={`contract-pdf-${a.id}`}
-                               className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold bg-white/5 hover:bg-white/10">
+                            <button onClick={() => oeffnePdf(`/driver/contracts/${a.contract_id}/pdf`)}
+                                    data-testid={`contract-pdf-${a.id}`}
+                                    className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold bg-white/5 hover:bg-white/10">
                               <FileText size={15} /> Kaufvertrag
-                            </a>
+                            </button>
                           )}
                         </div>
 
                         {a.snapshot_id && (
-                          <a href={`${API_BASE}/driver/snapshots/${a.snapshot_id}/pdf${authQ}`}
-                             target="_blank" rel="noreferrer"
-                             data-testid={`snapshot-pdf-${a.id}`}
-                             className="flex items-center justify-center gap-2 px-4 py-2 rounded-sm text-xs font-semibold bg-white/5 hover:bg-white/10">
+                          <button onClick={() => oeffnePdf(`/driver/snapshots/${a.snapshot_id}/pdf`)}
+                                  data-testid={`snapshot-pdf-${a.id}`}
+                                  className="flex items-center justify-center gap-2 px-4 py-2 rounded-sm text-xs font-semibold bg-white/5 hover:bg-white/10">
                             <CheckCircle2 size={13} /> Beweis-Archiv (Inserat-PDF)
-                          </a>
+                          </button>
                         )}
 
                         {a.notes && (
@@ -208,8 +245,34 @@ export default function DriverDashboard() {
                           </div>
                         )}
 
-                        {/* Status-Aktionen (Fahrer markiert Ergebnis) */}
-                        {a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
+                        {/* Zuteilung: erst annehmen oder ablehnen (09/2026) */}
+                        {a.zuteilung === "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
+                          <div className="pt-2 border-t" style={{ borderColor: "var(--border-default)" }}
+                               data-testid={`zuteilung-${a.id}`}>
+                            <div className="text-xs mb-2 font-semibold"
+                                 style={{ color: a.zuteilung_neu_wegen_aenderung ? "var(--accent-red)" : "var(--accent-green)" }}>
+                              {a.zuteilung_neu_wegen_aenderung
+                                ? "Fahrt wurde geändert (Datum, Uhrzeit oder Adresse) — bitte erneut bestätigen"
+                                : "Neue Fahrt zugeteilt — annehmen?"}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button onClick={() => zuteilung(a.id, "annehmen")} disabled={busy === a.id}
+                                      data-testid={`zuteilung-annehmen-${a.id}`}
+                                      className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold disabled:opacity-50"
+                                      style={{ background: "rgba(52,199,89,0.14)", color: "var(--accent-green)", border: "1px solid rgba(52,199,89,0.3)" }}>
+                                <CheckCircle2 size={15} /> Annehmen
+                              </button>
+                              <button onClick={() => zuteilung(a.id, "ablehnen")} disabled={busy === a.id}
+                                      data-testid={`zuteilung-ablehnen-${a.id}`}
+                                      className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold disabled:opacity-50"
+                                      style={{ background: "rgba(255,59,48,0.1)", color: "#ff6b5f", border: "1px solid rgba(255,59,48,0.25)" }}>
+                                <XCircle size={15} /> Ablehnen
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {/* Status-Aktionen (Fahrer markiert Ergebnis) — erst nach Annahme */}
+                        {a.zuteilung !== "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
                           <div className="grid grid-cols-2 gap-2 pt-2 border-t"
                                style={{ borderColor: "var(--border-default)" }}>
                             <button
@@ -252,6 +315,20 @@ export default function DriverDashboard() {
           </section>
         ))}
       </div>
+
+      {checkAppt && (
+        <AbholCheckDialog
+          appointment={checkAppt}
+          onClose={() => setCheckAppt(null)}
+          onDone={async () => {
+            setCheckAppt(null);
+            try {
+              const r = await driverApi.get("/driver/appointments");
+              setItems(r.data);
+            } catch { /* Liste wird beim nächsten Laden aktualisiert */ }
+          }}
+        />
+      )}
     </div>
   );
 }

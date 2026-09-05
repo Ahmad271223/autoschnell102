@@ -1,0 +1,15 @@
+{
+  "hinweis": "Zeitlich befristete, begruendete Ausnahmen fuer audit-pruefen.js (Audit 09/2026, Blocker 1). Abgelaufene Ausnahmen blockieren wieder. Format: {modul oder id, grund, bis JJJJ-MM-TT}.",
+  "ausnahmen": [
+    {
+      "modul": "js-yaml",
+      "grund": "Nur Build-Werkzeugkette (react-scripts > eslint/svgo); laeuft nie im Browser und verarbeitet keine fremden Eingaben. Fix erfordert Ausstieg aus react-scripts 5 (CRA ist eingestellt) — geplant: Umstieg auf Vite.",
+      "bis": "2026-12-31"
+    },
+    {
+      "modul": "svgo",
+      "grund": "Nur Build-Werkzeugkette (react-scripts > @svgr, cssnano); verarbeitet ausschliesslich eigene SVG/CSS beim Build. Fix erfordert Ausstieg aus react-scripts 5 — geplant: Umstieg auf Vite.",
+      "bis": "2026-12-31"
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "konfiguration": {
+    "nutzer": 500,
+    "dauer_s": 180,
+    "verschiedene_inserate": 300,
+    "ziel": "http://localhost:8001",
+    "zeitpunkt": "2026-08-29T07:05:20.485799+00:00"
+  },
+  "anfragen_gesamt": 46813,
+  "endpunkte": {
+    "abo_status": {
+      "ok": 2939,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 683,
+      "p95_ms": 1000,
+      "p99_ms": 1247,
+      "max_ms": 1480,
+      "fehler_nach_status": {}
+    },
+    "bestand": {
+      "ok": 4490,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 744,
+      "p95_ms": 1078,
+      "p99_ms": 1273,
+      "max_ms": 1495,
+      "fehler_nach_status": {}
+    },
+    "job_status": {
+      "ok": 8700,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 96,
+      "p95_ms": 470,
+      "p99_ms": 637,
+      "max_ms": 889,
+      "fehler_nach_status": {}
+    },
+    "job_wartezeit": {
+      "ok": 876,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 20752,
+      "p95_ms": 41388,
+      "p99_ms": 46283,
+      "max_ms": 69940,
+      "fehler_nach_status": {}
+    },
+    "link_check": {
+      "ok": 7554,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 881,
+      "p95_ms": 1279,
+      "p99_ms": 1443,
+      "max_ms": 1740,
+      "fehler_nach_status": {}
+    },
+    "vergleich_bekannter_link": {
+      "ok": 14669,
+      "fehler": 31,
+      "fehlerrate_prozent": 0.21,
+      "p50_ms": 1604,
+      "p95_ms": 2378,
+      "p99_ms": 16751,
+      "max_ms": 34122,
+      "fehler_nach_status": {
+        "503": 31
+      }
+    },
+    "vergleich_neuer_link": {
+      "ok": 7554,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 1581,
+      "p95_ms": 2212,
+      "p99_ms": 2412,
+      "max_ms": 2642,
+      "fehler_nach_status": {}
+    }
+  },
+  "system": {
+    "externe_provider_abrufe_im_test": 299,
+    "inserate_mehrfach_extern_geholt": 0,
+    "max_abrufe_pro_inserat": 1,
+    "mongo_verbindungen_aktuell": 192,
+    "mongo_verbindungen_verfuegbar": 999808,
+    "cpu_prozent_p50": 78,
+    "cpu_prozent_max": 89,
+    "ram_prozent_max": 54
+  }
+}

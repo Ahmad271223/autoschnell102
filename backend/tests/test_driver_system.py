@@ -14,11 +14,53 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
+# REACT_APP_BACKEND_URL ist seit dem Proxy-Umbau bewusst LEER (relative
+# /api-Aufrufe). Fuer Tests brauchen wir eine absolute Adresse -> lokales
+# Backend, per TEST_BASE_URL ueberschreibbar.
+BASE_URL = (os.environ.get("TEST_BASE_URL")
+            or os.environ.get("REACT_APP_BACKEND_URL")
+            or "http://localhost:8001").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@autohandel.app"
-ADMIN_PASSWORD = "Admin123!"
+# Die Tests haengen NICHT mehr an einem fest eingerichteten Demo-Admin
+# ("Admin123!") — der existiert weder in CI noch auf frischen Rechnern.
+# Stattdessen legt _make_admin() einen Wegwerf-Admin direkt in der
+# Datenbank an (dieselbe DB wie das laufende Backend, siehe MONGO_URL/
+# DB_NAME) und raeumt ihn am Ende wieder weg.
+MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
+DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
+_ADMIN_SUFFIX = uuid.uuid4().hex[:8]
+ADMIN_EMAIL = f"test_admin_{_ADMIN_SUFFIX}@e2etest-mail.de"
+ADMIN_PASSWORD = "TestAdmin123!"
+
+
+def _make_admin():
+    """Wegwerf-Admin in der DB anlegen (idempotent)."""
+    import bcrypt
+    from pymongo import MongoClient
+    dbx = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME]
+    if not dbx.users.find_one({"email": ADMIN_EMAIL}):
+        dbx.users.insert_one({
+            "id": f"testadm_{_ADMIN_SUFFIX}", "email": ADMIN_EMAIL,
+            "role": "admin", "active": True, "dealer_id": None,
+            "password_hash": bcrypt.hashpw(ADMIN_PASSWORD.encode(),
+                                           bcrypt.gensalt()).decode(),
+            "created_at": "2026-01-01T00:00:00+00:00"})
+
+
+def _drop_admin():
+    from pymongo import MongoClient
+    MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME] \
+        .users.delete_many({"email": ADMIN_EMAIL})
+
+
+def _admin_login():
+    _make_admin()
+    r = requests.post(f"{API}/auth/login",
+                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+                      timeout=30)
+    assert r.status_code == 200, f"Admin-Login: {r.status_code} {r.text[:200]}"
+    return r.json()["token"]
 
 
 # ---------------- helpers ----------------
@@ -27,13 +69,15 @@ def _unique(prefix="test"):
     return f"test_{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _admin_lifecycle():
+    yield
+    _drop_admin()
+
+
 @pytest.fixture(scope="module")
 def admin_token():
-    r = requests.post(f"{API}/auth/login",
-                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
-                      timeout=30)
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+    return _admin_login()
 
 
 @pytest.fixture(scope="module")
@@ -41,12 +85,12 @@ def dealer_a():
     """Independent dealer account A."""
     email = f"{_unique('dealerA')}@example.com"
     r = requests.post(f"{API}/auth/register", json={
-        "email": email, "password": "Test1234!", "company_name": "Autohaus A",
+        "email": email, "password": "Test12345!x", "company_name": "Autohaus A",
         "contact_person": "Anna A", "phone": "+491110000",
     }, timeout=30)
     assert r.status_code == 200, r.text
     data = r.json()
-    return {"email": email, "password": "Test1234!", "token": data["token"],
+    return {"email": email, "password": "Test12345!x", "token": data["token"],
             "user": data["user"]}
 
 
@@ -64,13 +108,13 @@ def dealer_a_token(dealer_a):
 def dealer_b():
     email = f"{_unique('dealerB')}@example.com"
     r = requests.post(f"{API}/auth/register", json={
-        "email": email, "password": "Test1234!", "company_name": "Autohaus B",
+        "email": email, "password": "Test12345!x", "company_name": "Autohaus B",
         "phone": "+492220000",
     }, timeout=30)
     assert r.status_code == 200
     data = r.json()
     # Activate lifetime so dealer can hit protected endpoints if needed
-    return {"email": email, "password": "Test1234!", "token": data["token"],
+    return {"email": email, "password": "Test12345!x", "token": data["token"],
             "user": data["user"]}
 
 
@@ -88,7 +132,7 @@ class TestDriverRegisterLogin:
     def test_register_creates_account_and_token(self):
         email = f"{_unique('drv')}@example.com"
         r = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!",
+            "email": email, "password": "Drv12345!x",
             "display_name": "Max Mustermann",
         }, timeout=30)
         assert r.status_code == 200, r.text
@@ -102,7 +146,7 @@ class TestDriverRegisterLogin:
 
     def test_duplicate_email_returns_409(self):
         email = f"{_unique('dup')}@example.com"
-        payload = {"email": email, "password": "Drv1234!", "display_name": "Dup"}
+        payload = {"email": email, "password": "Drv12345!x", "display_name": "Dup"}
         r1 = requests.post(f"{API}/driver/register", json=payload, timeout=30)
         assert r1.status_code == 200
         r2 = requests.post(f"{API}/driver/register", json=payload, timeout=30)
@@ -111,10 +155,10 @@ class TestDriverRegisterLogin:
     def test_login_success(self):
         email = f"{_unique('lg')}@example.com"
         requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "L G",
+            "email": email, "password": "Drv12345!x", "display_name": "L G",
         }, timeout=30)
         r = requests.post(f"{API}/driver/login",
-                          json={"email": email, "password": "Drv1234!"},
+                          json={"email": email, "password": "Drv12345!x"},
                           timeout=30)
         assert r.status_code == 200
         assert r.json()["driver"]["email"] == email
@@ -122,7 +166,7 @@ class TestDriverRegisterLogin:
     def test_login_wrong_password(self):
         email = f"{_unique('wp')}@example.com"
         requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "W P",
+            "email": email, "password": "Drv12345!x", "display_name": "W P",
         }, timeout=30)
         r = requests.post(f"{API}/driver/login",
                           json={"email": email, "password": "wrong!!"},
@@ -135,11 +179,11 @@ class TestDriverRegisterLogin:
 def fresh_driver():
     email = f"{_unique('me')}@example.com"
     r = requests.post(f"{API}/driver/register", json={
-        "email": email, "password": "Drv1234!", "display_name": "Me Tester",
+        "email": email, "password": "Drv12345!x", "display_name": "Me Tester",
     }, timeout=30)
     assert r.status_code == 200
     data = r.json()
-    return {"email": email, "password": "Drv1234!",
+    return {"email": email, "password": "Drv12345!x",
             "token": data["token"], "driver": data["driver"]}
 
 
@@ -189,7 +233,7 @@ class TestDealerDrivers:
         # Create driver
         email = f"{_unique('linkdrv')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Link Drv",
+            "email": email, "password": "Drv12345!x", "display_name": "Link Drv",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
 
@@ -211,7 +255,7 @@ class TestDealerDrivers:
     def test_add_duplicate_409(self, dealer_a_token):
         email = f"{_unique('dupl')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Dupl",
+            "email": email, "password": "Drv12345!x", "display_name": "Dupl",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
         r1 = requests.post(f"{API}/drivers/add",
@@ -237,7 +281,7 @@ class TestDealerDrivers:
         # create + link
         email = f"{_unique('del')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Del",
+            "email": email, "password": "Drv12345!x", "display_name": "Del",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
         driver_id = rr["driver"]["id"]
@@ -263,7 +307,7 @@ class TestConflicts:
         # create driver and link
         email = f"{_unique('cf')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "CF",
+            "email": email, "password": "Drv12345!x", "display_name": "CF",
         }, timeout=30).json()
         code = rr["driver"]["driver_code"]
         driver_id = rr["driver"]["id"]
@@ -283,17 +327,15 @@ class TestConflicts:
 class TestDriverAppointments:
     def test_driver_sees_assigned_appointments(self, dealer_a_token, dealer_a):
         # 1) Activate lifetime for dealer_a (admin)
-        admin = requests.post(f"{API}/auth/login",
-                              json={"email": ADMIN_EMAIL,
-                                    "password": ADMIN_PASSWORD},
-                              timeout=30).json()["token"]
+        admin = _admin_login()
         ulist = requests.get(f"{API}/admin/users",
                              headers={"Authorization": f"Bearer {admin}"},
                              timeout=30).json()
-        target = next(u for u in ulist if u["email"] == dealer_a["email"])
+        target = next(u for u in ulist
+                      if u["email"].lower() == dealer_a["email"].lower())
         requests.put(f"{API}/admin/users/{target['id']}",
                      headers={"Authorization": f"Bearer {admin}"},
-                     json={"plan_type": "lifetime"}, timeout=30)
+                     json={"plan_type": "yearly"}, timeout=30)
 
         # dealer needs fresh token after admin updates? Not strictly, but re-login to be safe
         token = requests.post(f"{API}/auth/login",
@@ -305,7 +347,7 @@ class TestDriverAppointments:
         # 2) Create driver + link
         email = f"{_unique('appt')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Appt Drv",
+            "email": email, "password": "Drv12345!x", "display_name": "Appt Drv",
         }, timeout=30).json()
         drv_token = rr["token"]
         drv_id = rr["driver"]["id"]
@@ -313,16 +355,20 @@ class TestDriverAppointments:
         requests.post(f"{API}/drivers/add", headers=H,
                       json={"driver_code": code}, timeout=30)
 
-        # 3) Create a contract on mobile.de mock URL → auto-creates appointment
-        # Use mock vehicle URL pattern from existing tests
+        # 3) Vergleich -> Fahrzeug -> Vertrag -> Termin. Laeuft das Backend
+        # im Mock-Modus (CI: MOCK_PROVIDER_FETCH=true), nutzen wir einen
+        # synthetischen Kleinanzeigen-Link — der Test laeuft dann WIRKLICH
+        # durch. Ohne Mock (lokal, um echte Anbieter-Abrufe zu vermeiden)
+        # wird sauber uebersprungen.
+        ka_url = ("https://www.kleinanzeigen.de/s-anzeige/drvtest/"
+                  f"97{uuid.uuid4().int % 10**8:08d}-216-1")
         r = requests.post(f"{API}/mobile/compare", headers=H,
-                          json={"url": "https://www.mobile.de/fahrzeuge/details.html?id=448228023"},
-                          timeout=60)
-        if r.status_code != 200:
-            pytest.skip(f"mobile compare unavailable: {r.status_code}")
+                          json={"url": ka_url}, timeout=90)
+        if r.status_code != 200 or not (r.json().get("vehicle") or {}).get("_mock"):
+            pytest.skip("Backend ohne MOCK_PROVIDER_FETCH — Test wuerde "
+                        "einen echten Kleinanzeigen-Abruf ausloesen")
         vehicle_id = r.json().get("vehicle_id") or r.json().get("vehicle", {}).get("id")
-        if not vehicle_id:
-            pytest.skip("vehicle_id missing from compare response")
+        assert vehicle_id, f"vehicle_id fehlt in Antwort: {str(r.json())[:200]}"
 
         # Create contract
         cr = requests.post(f"{API}/contracts", headers=H, json={
@@ -386,7 +432,7 @@ class TestDriverAppointments:
         """A different driver cannot fetch another driver's pickup-order PDF."""
         email = f"{_unique('foreign')}@example.com"
         rr = requests.post(f"{API}/driver/register", json={
-            "email": email, "password": "Drv1234!", "display_name": "Foreign",
+            "email": email, "password": "Drv12345!x", "display_name": "Foreign",
         }, timeout=30).json()
         token = rr["token"]
         # random non-existent appt

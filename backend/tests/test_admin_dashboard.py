@@ -19,13 +19,17 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
-assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+# REACT_APP_BACKEND_URL ist seit dem Proxy-Umbau bewusst LEER (relative
+# /api-Aufrufe). Fuer Tests brauchen wir eine absolute Adresse -> lokales
+# Backend, per TEST_BASE_URL ueberschreibbar.
+BASE_URL = (os.environ.get("TEST_BASE_URL")
+            or os.environ.get("REACT_APP_BACKEND_URL")
+            or "http://localhost:8001").rstrip("/")
 
-SUPER_USERNAME = "CashCarHannover2025"
-SUPER_PASSWORD = "MaW34543WaM"
-LEGACY_ADMIN_EMAIL = "admin@autohandel.app"
-LEGACY_ADMIN_PASSWORD = "Admin123!"
+SUPER_USERNAME = os.environ.get("SUPER_ADMIN_USERNAME", "ci-superadmin")
+SUPER_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD", "ci-only-superadmin-pw-1")
+LEGACY_ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "ci-admin@ci.invalid")
+LEGACY_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 
 
 # --------------------- helpers / fixtures ---------------------
@@ -142,12 +146,21 @@ class TestSoftBlock:
         )
         assert r.status_code == 400, r.text
 
-    def test_cannot_block_self(self, legacy_admin_token):
+    def test_cannot_block_self(self, legacy_admin_token, super_admin_token):
+        # Audit 09/2026: Sperren ist Super-Admin-exklusiv -> normaler Admin 403 ...
         token, user = legacy_admin_token
         h = {"Authorization": f"Bearer {token}"}
         r = requests.post(
             f"{BASE_URL}/api/admin/users/{user['id']}/active",
             json={"active": False}, headers=h, timeout=20,
+        )
+        assert r.status_code == 403, r.text
+        # ... und der Super-Admin kann sich weiterhin nicht selbst sperren (400)
+        stoken, suser = super_admin_token
+        r = requests.post(
+            f"{BASE_URL}/api/admin/users/{suser['id']}/active",
+            json={"active": False},
+            headers={"Authorization": f"Bearer {stoken}"}, timeout=20,
         )
         assert r.status_code == 400, r.text
 
@@ -177,7 +190,7 @@ class TestAdminResetPassword:
             f"{BASE_URL}/api/admin/users/{test_dealer['id']}/password",
             json={"new_password": "abc"}, headers=admin_headers, timeout=20,
         )
-        assert r.status_code == 400, r.text
+        assert r.status_code in (400, 422), r.text   # zentrale Passwortregel (422 aus dem Modell)
 
 
 # --------------------- /admin/me/password ---------------------

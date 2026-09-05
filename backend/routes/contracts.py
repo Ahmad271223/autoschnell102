@@ -1,6 +1,8 @@
 """Contract endpoints: preview, create, list, get, pdf, send, delete."""
+import os
 import asyncio
 import base64
+import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,6 +10,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+log = logging.getLogger("autohandel")
 
 
 def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
@@ -21,8 +25,12 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     return safe[:200] or fallback
 
 from deps import (
+    current_firma,
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
+import auto_daten
+from cleanup_service import vertrag_endgueltig_loeschen
+from lifecycle import try_set_lifecycle
 from pdf_service import generate_contract_pdf
 
 router = APIRouter()
@@ -67,6 +75,9 @@ class ContractIn(BaseModel):
     # Schäden / Beschädigungen aus der interaktiven Skizze
     damages_text: Optional[str] = ""
     damages: Optional[list] = []
+    # Gewerblicher Verkauf: MwSt (19 %) im Vertrag ausweisen —
+    # der Kaufpreis gilt dann als Brutto, das PDF rechnet Netto/MwSt aus.
+    show_vat: Optional[bool] = False
     # Fahrzeugdaten — werden im Vertrags-Dialog editierbar vorbefüllt.
     # Wenn ein Feld leer ist, fällt das PDF auf den Wert aus dem
     # Vehicle-Dokument zurück, sodass alte Verträge weiter funktionieren.
@@ -123,6 +134,10 @@ class SendIn(BaseModel):
     recipient: str = Field(max_length=200)
     subject: Optional[str] = Field(default=None, max_length=500)
     message: str = Field(max_length=20000)
+    # Doppelversand-Schutz: gleicher Schluessel -> garantiert nur EIN
+    # Eintrag, auch bei Doppelklick, Netz-Wiederholung oder verlorener
+    # Antwort. Das Frontend erzeugt je Klick eine UUID.
+    idempotency_key: Optional[str] = Field(default=None, max_length=100)
 
 
 # ---------- Helpers ----------
@@ -190,6 +205,13 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
     return v, d
 
 
+def _vehicle_bild_urls(vehicle: dict) -> list:
+    """Foto-URLs eines Fahrzeugs — ausgelesene Inserate speichern sie je
+    nach Quelle unter `images` (Kleinanzeigen-Scraper) oder `image_urls`."""
+    urls = vehicle.get("image_urls") or vehicle.get("images") or []
+    return [u for u in urls if isinstance(u, str) and u.startswith("http")]
+
+
 # ---------- Endpoints ----------
 @router.post("/contracts/preview")
 async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
@@ -200,7 +222,8 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     )
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
     contract_dict = body.model_dump()
     if not (contract_dict.get("additional_terms") or "").strip():
@@ -242,7 +265,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     v = await db.vehicles.find_one({"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
     # Apply dealer defaults if the form didn't override them. Both
     # special_agreements and agb_text now support a per-contract override
@@ -257,6 +281,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
+    # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
+    # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.
+    pdf_id = str(uuid.uuid4())
+    contract_no = f"KV-{datetime.now().strftime('%Y%m%d')}-{pdf_id[:6].upper()}"
+    contract_dict["contract_no"] = contract_no
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
     # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
@@ -269,14 +298,14 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     except Exception:
         raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
     pdf_b64 = base64.b64encode(pdf_bytes).decode()
-    pdf_id = str(uuid.uuid4())
     # Snapshot vehicle photo URLs at the moment the contract was created.
     # This way the dealer can still see the listing photos retrospectively
     # next to the contract PDF + Beweis-Archiv even if the original ad
     # is deleted by the seller.
-    vehicle_image_urls = list(vehicle.get("image_urls") or [])
+    vehicle_image_urls = _vehicle_bild_urls(vehicle)
     doc = {
-        "id": pdf_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
+        "id": pdf_id, "contract_no": contract_no,
+        "dealer_id": user["dealer_id"], "user_id": user["id"],
         "vehicle_id": body.vehicle_id, "mobile_ad_id": v.get("mobile_ad_id"),
         "make": vehicle.get("make_label") or vehicle.get("make"),
         "model": vehicle.get("model_description") or vehicle.get("model_label"),
@@ -296,11 +325,24 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
-    await db.generated_pdfs.insert_one(doc)
+    # Dauerhafte, anonyme Auto-Daten (siehe auto_daten.py): ZUERST der
+    # Datensatz, dann der Vertrag mit dessen zufaelliger id. Scheitert der
+    # Vertrags-Insert, wird der Datensatz sofort wieder entfernt — es gibt
+    # nie einen Vertrag ohne Auto-Daten und keinen Datensatz ohne Vertrag.
+    auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+    doc["admin_vehicle_data_id"] = auto_daten_id
+    try:
+        await db.generated_pdfs.insert_one(doc)
+    except Exception:
+        await auto_daten.zurueckrollen(db, auto_daten_id)
+        raise
     await db.vehicles.update_one(
         {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
         {"$set": {"status": "Vertrag erstellt", "purchase_price": body.purchase_price}},
     )
+    # Lebenszyklus: Vertrag erstellt → gekauft (Kaufpreis liegt vor).
+    await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "vertrag_erstellt", user=user)
+    await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "gekauft", user=user)
     await log_activity(user["dealer_id"], user["id"], "pdf.erstellt", ref=pdf_id)
 
     # Auto-create appointment if pickup_date was provided so the PDF
@@ -343,19 +385,58 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             )
             doc["appointment_id"] = appt_id
             doc["status"] = "Termin erstellt"
+            await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
+                                    "abholung_geplant", user=user)
             await log_activity(user["dealer_id"], user["id"], "termin.auto-erstellt", ref=appt_id)
 
     return {**clean_doc(doc), "pdf_b64": pdf_b64}
 
 
+# Nach so vielen Sekunden gilt eine Zustellung "laeuft" als abgebrochen.
+# Ein Versand dauert Sekunden; drei Minuten sind grosszuegig.
+ZUSTELLUNG_HAENGT_NACH_SEK = int(os.environ.get("ZUSTELLUNG_HAENGT_NACH_SEK", "180"))
+
+
+def _zustellung_haengt(eintrag: dict, jetzt=None) -> bool:
+    """True, wenn eine Reservierung aelter ist als ZUSTELLUNG_HAENGT_NACH_SEK
+    (oder schon als "unklar" markiert wurde)."""
+    if eintrag.get("zustellung") == "unklar":
+        return True
+    try:
+        start = datetime.fromisoformat(str(eintrag.get("sent_at") or ""))
+    except ValueError:
+        return True
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    jetzt = jetzt or datetime.now(timezone.utc)
+    return (jetzt - start).total_seconds() > ZUSTELLUNG_HAENGT_NACH_SEK
+
+
+def _vertrag_bereich(user) -> Dict[str, Any]:
+    """Welche Vertraege darf dieses Konto sehen?
+
+    Betreiber-Entscheidung 09/2026: Der Chef sieht alle Vertraege seiner
+    Firma, ein Sucher nur die, die er selbst angelegt hat. Vorher sah
+    jeder Sucher die Verkaeuferdaten und PDFs seiner Kollegen — bei
+    groesseren Haendlern weder gewollt noch datenschutzrechtlich sauber.
+
+    Bewusst streng: fehlt einem alten Vertrag die Angabe, wer ihn angelegt
+    hat, sieht ihn der Sucher NICHT (der Chef weiterhin schon). Lieber
+    einmal zu wenig zeigen als fremde Verkaeuferdaten preisgeben."""
+    bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if user.get("role") == "sucher":
+        bereich["user_id"] = user["id"]
+    return bereich
+
+
 @router.get("/contracts")
 async def list_contracts(
-    user=Depends(current_user),
+    user=Depends(current_firma),
     q: Optional[str] = None,
     days: Optional[int] = None,
     channel: Optional[str] = None,
 ):
-    query: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    query: Dict[str, Any] = _vertrag_bereich(user)
     if days:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         query["created_at"] = {"$gte": since}
@@ -375,13 +456,52 @@ async def list_contracts(
             i for i in items
             if any(s.get("channel") == channel for s in i.get("send_status", []))
         ]
+    # Alt-Verträge heilen: früher wurde `vehicle_image_urls` leer gespeichert,
+    # weil die Fotos beim Fahrzeug unter `data.images` liegen (nicht
+    # `image_urls`). Fehlende Listen hier einmalig aus dem Fahrzeug
+    # nachziehen und dauerhaft am Vertrag speichern — so bleiben die Fotos
+    # auch sichtbar, wenn das Fahrzeug später gelöscht wird.
+    ohne_fotos = [i for i in items if not i.get("vehicle_image_urls") and i.get("vehicle_id")]
+    if ohne_fotos:
+        vids = list({i["vehicle_id"] for i in ohne_fotos})
+        bilder = {}
+        async for v in db.vehicles.find(
+                {"id": {"$in": vids}, "dealer_id": user["dealer_id"]},
+                {"_id": 0, "id": 1, "data.images": 1, "data.image_urls": 1}):
+            urls = _vehicle_bild_urls(v.get("data") or {})
+            if urls:
+                bilder[v["id"]] = urls
+        for i in ohne_fotos:
+            urls = bilder.get(i["vehicle_id"])
+            if urls:
+                i["vehicle_image_urls"] = urls
+                await db.generated_pdfs.update_one(
+                    {"id": i["id"], "dealer_id": user["dealer_id"],
+                     "vehicle_image_urls": {"$in": [None, []]}},
+                    {"$set": {"vehicle_image_urls": urls}})
+    # Ersteller anreichern: der Chef sieht so, WELCHER Sucher den Vertrag
+    # (= Einkauf) gemacht hat.
+    creator_ids = list({i.get("user_id") for i in items if i.get("user_id")})
+    if creator_ids:
+        names = {}
+        async for u in db.users.find({"id": {"$in": creator_ids}},
+                                     {"_id": 0, "id": 1, "email": 1,
+                                      "first_name": 1, "last_name": 1, "role": 1}):
+            label = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() \
+                    or u.get("email", "")
+            names[u["id"]] = {"name": label, "role": u.get("role")}
+        for i in items:
+            c = names.get(i.get("user_id"))
+            if c:
+                i["created_by_name"] = c["name"]
+                i["created_by_role"] = c["role"]
     return items
 
 
 @router.get("/contracts/{contract_id}")
-async def get_contract(contract_id: str, user=Depends(current_user)):
+async def get_contract(contract_id: str, user=Depends(current_firma)):
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0},
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
@@ -389,9 +509,9 @@ async def get_contract(contract_id: str, user=Depends(current_user)):
 
 
 @router.get("/contracts/{contract_id}/pdf")
-async def get_contract_pdf(contract_id: str, user=Depends(current_user)):
+async def get_contract_pdf(contract_id: str, user=Depends(current_firma)):
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]},
+        {"id": contract_id, **_vertrag_bereich(user)},
         {"_id": 0, "pdf_b64": 1, "filename": 1},
     )
     if not c:
@@ -405,39 +525,350 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_user)):
     )
 
 
-@router.post("/contracts/{contract_id}/send")
-async def send_contract(contract_id: str, body: SendIn, user=Depends(require_active_sub)):
+@router.get("/contracts/{contract_id}/versions")
+async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
+    """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten)."""
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
-    )
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0, "id": 1})
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    # Prepare share targets (mocked for now – real provider integration later)
+    return await db.generated_pdf_versions.find(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "pdf_b64": 0, "contract_data": 0},
+    ).sort("version", 1).to_list(100)
+
+
+@router.get("/contracts/{contract_id}/versions/{version}/pdf")
+async def get_contract_version_pdf(contract_id: str, version: int,
+                                   user=Depends(current_firma)):
+    """Archivierte PDF-Fassung herunterladen (Beweissicherung)."""
+    # Auch die alten Fassungen nur, wenn der Vertrag selbst sichtbar ist.
+    haupt = await db.generated_pdfs.find_one(
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0, "id": 1})
+    if not haupt:
+        raise HTTPException(404, "Vertragsfassung nicht gefunden")
+    v = await db.generated_pdf_versions.find_one(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"],
+         "version": version},
+        {"_id": 0, "pdf_b64": 1, "filename": 1})
+    if not v or not v.get("pdf_b64"):
+        raise HTTPException(404, "Vertragsfassung nicht gefunden")
+    pdf_bytes = base64.b64decode(v["pdf_b64"])
+    fname = _safe_filename(v.get("filename") or "",
+                           fallback=f"kaufvertrag-v{version}.pdf")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+    )
+
+
+@router.post("/contracts/{contract_id}/send")
+async def send_contract(contract_id: str, body: SendIn, user=Depends(require_active_sub)):
+    # Pruefbericht Runde 8 (09/2026), hoher Befund: Lesen und PDF gingen
+    # laengst ueber _vertrag_bereich, der VERSAND aber nur ueber die Firma.
+    # Ein Sucher mit der Vertrags-ID eines Kollegen konnte dessen Vertrag
+    # samt PDF an eine beliebige Adresse schicken und den Versandstatus
+    # veraendern. Jetzt gilt beim Versand derselbe Bereich wie beim Lesen —
+    # und JEDE Schreibabfrage in dieser Funktion nutzt ihn ebenfalls.
+    bereich = _vertrag_bereich(user)
+    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    # Idempotenz RESERVIEREND (Review 09/2026): Der Schluessel wurde vorher
+    # erst NACH dem Senden eingetragen — zwei gleichzeitige Anfragen mit
+    # demselben Schluessel konnten beide zustellen. Jetzt wird der Eintrag
+    # atomar VOR dem Versand angelegt; der Verlierer bekommt das Ergebnis
+    # des Gewinners, bei Sendefehler wird der Eintrag wieder entfernt.
+    # Pruefbericht Runde 8, Befund 3: Ohne Schluessel gab es keinerlei
+    # Schutz — zwei identische Aufrufe stellten zweimal zu. Fehlt der
+    # Schluessel, wird er jetzt aus dem Inhalt abgeleitet: dieselbe Mail an
+    # denselben Empfaenger innerhalb derselben Minute ist EIN Versand.
+    if not body.idempotency_key:
+        import hashlib
+        minute = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        roh = "|".join([contract_id, body.channel, body.recipient or "",
+                        body.subject or "", body.message or "", minute])
+        body.idempotency_key = "auto-" + hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
+    reserviert = False
+    wiederaufnahme = False
+    if body.idempotency_key:
+        vorhanden = next((e for e in (c.get("send_status") or [])
+                          if e.get("idempotency_key") == body.idempotency_key), None)
+        if (vorhanden and vorhanden.get("zustellung") in ("laeuft", "unklar")
+                and _zustellung_haengt(vorhanden)):
+            # Der Prozess ist zwischen Reservierung und Ergebnis gestorben.
+            # Frueher hiess es hier dauerhaft "bereits gesendet" — obwohl
+            # womoeglich nie etwas rausging. Jetzt wird der Versand unter
+            # DEMSELBEN Schluessel wiederholt; Resend erkennt den Schluessel
+            # und stellt nicht doppelt zu.
+            wiederaufnahme = True
+            reserviert = True
+            vorhanden = None
+        if vorhanden:
+            return {"channel": vorhanden.get("channel"), "status": "ok",
+                    "sent_at": vorhanden.get("sent_at"),
+                    "zustellung": vorhanden.get("zustellung", ""),
+                    "wa_url": vorhanden.get("wa_url"), "bereits_gesendet": True}
+    if body.idempotency_key and not wiederaufnahme:
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status.idempotency_key": {"$ne": body.idempotency_key}},
+            {"$push": {"send_status": {
+                "idempotency_key": body.idempotency_key, "channel": body.channel,
+                "recipient": body.recipient, "subject": body.subject,
+                "sent_at": now_iso(), "zustellung": "laeuft"}}})
+        if res.modified_count == 0:
+            return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
+                    "zustellung": "laeuft", "bereits_gesendet": True}
+        reserviert = True
+
+    async def _reservierung_zurueck():
+        # Bei einer Wiederaufnahme bleibt der Eintrag stehen: er traegt
+        # "unklar", damit der naechste Versuch wieder hier landet.
+        if reserviert and wiederaufnahme:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status.idempotency_key": body.idempotency_key},
+                {"$set": {"send_status.$.zustellung": "unklar"}})
+            return
+        if reserviert:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich},
+                {"$pull": {"send_status": {"idempotency_key": body.idempotency_key,
+                                           "zustellung": "laeuft"}}})
+    # Ehrlicher Versand-Status (PR-Review 09/2026): "versendet" gibt es
+    # NUR nach tatsaechlicher Zustellung an den Anbieter. WhatsApp oeffnet
+    # lediglich den Chat (PDF haengt der Nutzer selbst an) -> der Vertrag
+    # wird als "versand_vorbereitet" gefuehrt, nicht als versendet.
     out: dict = {"channel": body.channel, "status": "ok", "sent_at": now_iso()}
     if body.channel == "whatsapp":
         digits = "".join(ch for ch in (body.recipient or "") if ch.isdigit())
         from urllib.parse import quote_plus
         out["wa_url"] = f"https://wa.me/{digits}?text={quote_plus(body.message)}"
+        out["zustellung"] = "chat_geoeffnet"
+        neuer_status = "versand_vorbereitet"
     elif body.channel == "email":
-        out["mocked"] = True  # MOCKED until SMTP/Resend key provided
+        from provider_fetch import MOCK_PROVIDER_FETCH
+        import email_service
+        if MOCK_PROVIDER_FETCH:
+            # Last-/CI-Tests: kein echter Versand, aber ehrlich markiert.
+            out["zustellung"] = "mock"
+            neuer_status = "versendet"
+        elif not email_service.email_configured():
+            await _reservierung_zurueck()
+            raise HTTPException(503,
+                "E-Mail-Versand ist nicht eingerichtet (RESEND_API_KEY oder "
+                "SMTP_* in der .env setzen) — der Vertrag wurde NICHT "
+                "versendet. Alternativ per WhatsApp teilen oder das PDF "
+                "herunterladen.")
+        else:
+            # Versand IMMER von unserer eigenen Adresse (nur die ist beim
+            # Mail-Anbieter freigeschaltet). Der Anzeigename nennt die Firma,
+            # und die Antwortadresse ist der Sucher: antwortet der Verkaeufer,
+            # landet die Antwort direkt bei ihm (Wunsch 09/2026).
+            from vertrag_mail import kopie_mail, vertrag_mail
+            pdf_bytes = base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+            dateiname = c.get("filename") or "Kaufvertrag.pdf"
+            firma = await db.dealers.find_one(
+                {"id": user["dealer_id"]},
+                {"_id": 0, "company_name": 1, "logo_url": 1, "phone": 1,
+                 "email": 1}) or {}
+            betreff, text, html = vertrag_mail(
+                vertrag=c, firma=firma, sucher=user,
+                nachricht=body.message, betreff=body.subject)
+            sucher_mail = (user.get("email") or "").strip()
+            ok, beleg = await email_service.send_email_mit_beleg(
+                body.recipient, betreff, text, anhang=pdf_bytes,
+                anhang_name=dateiname, html=html,
+                reply_to=sucher_mail,
+                absender_name=firma.get("company_name") or "",
+                idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}")
+            if ok and beleg:
+                out["beleg"] = beleg
+            if not ok:
+                await _reservierung_zurueck()
+                raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
+                                         "bitte in ein paar Minuten erneut "
+                                         "versuchen. Der Vertrag wurde NICHT "
+                                         "als versendet markiert.")
+            out["zustellung"] = "versendet"
+            neuer_status = "versendet"
+            # Kopie an den Sucher — als Beleg, mit demselben PDF. Schlaegt
+            # sie fehl, bleibt der Hauptversand gueltig; das Ergebnis steht
+            # in der Antwort ("kopie").
+            out["kopie"] = "nicht_moeglich"
+            if email_service.gueltige_adresse(sucher_mail):
+                k_betreff, k_text, k_html = kopie_mail(
+                    vertrag=c, firma=firma, sucher=user,
+                    empfaenger_adresse=body.recipient,
+                    betreff_original=betreff, nachricht=body.message)
+                out["kopie"] = "gesendet" if await email_service.send_email(
+                    sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
+                    anhang_name=dateiname, html=k_html,
+                    absender_name=firma.get("company_name") or "") else "fehlgeschlagen"
+                if out["kopie"] != "gesendet":
+                    log.warning("Kopie des Vertrags %s an %s fehlgeschlagen",
+                                contract_id, sucher_mail)
     else:
+        await _reservierung_zurueck()
         raise HTTPException(400, "Unbekannter Kanal")
     send_entry = {
         "channel": body.channel, "recipient": body.recipient,
         "subject": body.subject, "sent_at": out["sent_at"],
+        "zustellung": out.get("zustellung", ""),
     }
-    await db.generated_pdfs.update_one(
-        {"id": contract_id},
-        {"$push": {"send_status": send_entry},
-         "$set": {"status": "versendet", "updated_at": now_iso()}},
-    )
+    if reserviert:
+        # Reservierten Eintrag mit dem Ergebnis fuellen (positional update).
+        send_entry["idempotency_key"] = body.idempotency_key
+        if out.get("wa_url"):
+            send_entry["wa_url"] = out["wa_url"]
+        if out.get("beleg"):
+            send_entry["beleg"] = out["beleg"]
+        if wiederaufnahme:
+            send_entry["wiederaufgenommen"] = True
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status.idempotency_key": body.idempotency_key},
+            {"$set": {"send_status.$": send_entry,
+                      "status": neuer_status, "updated_at": now_iso()}},
+        )
+    else:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich},
+            {"$push": {"send_status": send_entry},
+             "$set": {"status": neuer_status, "updated_at": now_iso()}},
+        )
     await log_activity(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
     return out
 
 
 @router.delete("/contracts/{contract_id}")
-async def delete_contract(contract_id: str, user=Depends(current_user)):
-    res = await db.generated_pdfs.delete_one({"id": contract_id, "dealer_id": user["dealer_id"]})
-    if not res.deleted_count:
+async def delete_contract(contract_id: str, user=Depends(current_firma)):
+    # Berechtigungsmatrix (PR-Review 09/2026): Loeschen ist destruktiv —
+    # der Chef darf alle Vertraege der Firma loeschen, ein Sucher NUR die
+    # von ihm selbst erstellten. Existenz/Eigentum wird VOR der Loeschung
+    # geprueft (404/403 bleiben wie bisher).
+    vorhanden = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "user_id": 1, "contract_no": 1})
+    if not vorhanden:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    if user.get("role") == "sucher" and vorhanden.get("user_id") != user["id"]:
+        raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
+                                 "löschen — fremde Verträge löscht der "
+                                 "Händler-Hauptaccount")
+    # Kaskade ueber EINE idempotente, wiederaufnehmbare Funktion (Go-Live-
+    # Audit 09/2026): Grabstein am Vertrag, dann Versionen loeschen, Termin-
+    # Verweise kappen, zuletzt der Vertrag. Bricht der Vorgang ab, fuehrt
+    # der Aufraeumjob ihn zu Ende. Vorher wurde der Vertrag ZUERST geloescht
+    # und die Kaskade konnte verwaiste Versionen/Termine hinterlassen.
+    ok = await vertrag_endgueltig_loeschen(
+        db, contract_id, scrub_pii=False, grund="manuell", audit=False)
+    if not ok:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    await log_activity(user["dealer_id"], user["id"], "vertrag.geloescht.manuell",
+                       ref=contract_id,
+                       meta={"contract_no": vorhanden.get("contract_no")})
     return {"ok": True}
+
+
+async def regenerate_contract_for_pickup(
+    *, contract_id: str, dealer_id: str, user: dict,
+    pickup_date: Optional[str] = None, pickup_time: Optional[str] = None,
+) -> bool:
+    """Erzeugt das Kaufvertrags-PDF mit GEAENDERTEM Abholtermin neu.
+
+    Wird aufgerufen, wenn im Terminkalender das Abholdatum verschoben wird —
+    der Vertrag ist eine gespeicherte Datei und wuerde sonst das alte Datum
+    zeigen. Der bisherige Termin wird in `pickup_history` mitgeschrieben,
+    damit nachvollziehbar bleibt, was wann geaendert wurde.
+    Rueckgabe: True, wenn das PDF neu erzeugt wurde.
+    """
+    if not contract_id or (pickup_date is None and pickup_time is None):
+        return False
+    doc = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": dealer_id}, {"_id": 0})
+    if not doc:
+        return False
+
+    alt_datum = doc.get("pickup_date")
+    alt_zeit = doc.get("pickup_time")
+    # Leere Werte bedeuten "nicht angegeben" — sie duerfen einen
+    # vorhandenen Termin NICHT loeschen (sonst wuerde z.B. das Speichern
+    # ohne Uhrzeit die Uhrzeit im Vertrag entfernen).
+    neu_datum = pickup_date if (pickup_date or "").strip() else alt_datum
+    neu_zeit = pickup_time if (pickup_time or "").strip() else alt_zeit
+    if neu_datum == alt_datum and neu_zeit == alt_zeit:
+        return False
+
+    contract_dict = dict(doc.get("contract_data") or {})
+    contract_dict["pickup_date"] = neu_datum or ""
+    contract_dict["pickup_time"] = neu_zeit or ""
+
+    v = await db.vehicles.find_one(
+        {"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
+    vehicle = dict(v.get("data") or {})
+    from deps import effective_dealer
+    dealer = await effective_dealer(user) or {}
+    vehicle, dealer = _apply_contract_overrides(
+        contract=contract_dict, vehicle=vehicle, dealer=dealer)
+
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            generate_contract_pdf,
+            dealer=dealer, vehicle=vehicle, contract=contract_dict,
+        )
+    except Exception:
+        log.exception("Kaufvertrag konnte mit neuem Abholtermin nicht neu "
+                      "erzeugt werden (contract=%s)", contract_id)
+        return False
+
+    # BEWEISSICHERUNG: Die bisherige PDF-Fassung wird NICHT ueberschrieben,
+    # sondern als eigene Version archiviert. So bleibt belegbar, welcher
+    # Vertragstext (mit welchem Abholtermin) zu jedem Zeitpunkt galt.
+    alte_version = int(doc.get("version") or 1)
+    await db.generated_pdf_versions.insert_one({
+        "id": str(uuid.uuid4()),
+        "contract_id": contract_id,
+        "dealer_id": dealer_id,
+        "version": alte_version,
+        "pdf_b64": doc.get("pdf_b64"),
+        "contract_data": doc.get("contract_data"),
+        "pickup_date": alt_datum,
+        "pickup_time": alt_zeit,
+        "filename": doc.get("filename"),
+        "archived_at": now_iso(),
+        "archived_by": user.get("id"),
+        "grund": "abholtermin_geaendert",
+    })
+
+    await db.generated_pdfs.update_one(
+        {"id": contract_id, "dealer_id": dealer_id},
+        {"$set": {
+            "pdf_b64": base64.b64encode(pdf_bytes).decode(),
+            "contract_data": contract_dict,
+            "pickup_date": neu_datum,
+            "pickup_time": neu_zeit,
+            "version": alte_version + 1,
+            "updated_at": now_iso(),
+        },
+         "$push": {"pickup_history": {
+             "von_datum": alt_datum, "von_zeit": alt_zeit,
+             "auf_datum": neu_datum, "auf_zeit": neu_zeit,
+             "geaendert_von": user.get("id"), "geaendert_am": now_iso(),
+             "version_vorher": alte_version,
+         }}},
+    )
+    # Vertragskorrektur innerhalb der Frist: den BESTEHENDEN Auto-Datensatz
+    # aktualisieren (nie ein zweiter); Altvertraege ohne id bekommen ihn
+    # hier nachgetragen.
+    if doc.get("admin_vehicle_data_id"):
+        await auto_daten.aktualisieren(db, doc["admin_vehicle_data_id"],
+                                       contract_dict, vehicle)
+    else:
+        await auto_daten.nachtragen(db, {**doc, "contract_data": contract_dict})
+    await log_activity(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
+                       ref=contract_id,
+                       meta={"von": alt_datum, "auf": neu_datum})
+    return True

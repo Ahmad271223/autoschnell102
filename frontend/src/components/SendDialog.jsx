@@ -21,15 +21,41 @@ export default function SendDialog({ open, contract, onClose }) {
   const send = async (channel) => {
     setBusy(true);
     try {
+      // Je Klick ein eigener Schluessel: Doppelklick oder Netz-
+      // Wiederholung erzeugt serverseitig garantiert nur EINEN Eintrag.
+      const idempotency_key = (crypto.randomUUID && crypto.randomUUID())
+        || `${Date.now()}-${Math.random()}`;
       const body = channel === "whatsapp"
-        ? { channel, recipient: phone, message: waMsg }
-        : { channel, recipient: email, subject, message: emailMsg };
+        ? { channel, recipient: phone, message: waMsg, idempotency_key }
+        : { channel, recipient: email, subject, message: emailMsg,
+            idempotency_key };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       if (channel === "whatsapp" && data.wa_url) {
         window.open(data.wa_url, "_blank", "noopener");
         toast.success("WhatsApp Chat geöffnet · PDF separat anhängen");
       } else {
-        toast.success("Versand registriert (E-Mail-Versand ist mocked)");
+        const z = data?.zustellung;
+        // Runde 8: "bereits registriert" hiess frueher auch dann, wenn der
+        // Versand noch lief oder abgebrochen war. Jetzt sagt der Server,
+        // was wirklich ist — und der Nutzer sieht es.
+        if (data?.bereits_gesendet && z === "laeuft") {
+          toast.info("Dieser Versand läuft gerade noch — bitte einen Moment warten.");
+        } else if (z === "unklar") {
+          toast.warning("Der Versand hat kein Ergebnis gemeldet. Bitte noch einmal "
+            + "auf Senden klicken — es wird garantiert nicht doppelt zugestellt.");
+        } else if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
+        else if (z === "versendet") {
+          // Der Sucher bekommt immer eine Kopie mit dem PDF (09/2026).
+          toast.success(data?.kopie === "gesendet"
+            ? "E-Mail mit Vertrag versendet · Kopie liegt in deinem Postfach"
+            : "E-Mail mit Vertrag versendet");
+          if (data?.kopie === "fehlgeschlagen") {
+            toast.warning("Die Kopie an dich konnte nicht zugestellt werden — "
+              + "der Vertrag ist beim Kunden angekommen.");
+          }
+        }
+        else if (z === "mock") toast.success("Testmodus: Versand nur protokolliert, keine E-Mail");
+        else toast.success("Versand registriert");
       }
     } catch (err) {
       toast.error(errMsg(err, "Versand fehlgeschlagen"));
@@ -113,13 +139,14 @@ export default function SendDialog({ open, contract, onClose }) {
             <>
               <Field label="E-Mail-Empfänger" value={email} onChange={setEmail} type="email" testid="email-to" />
               <Field label="Betreff" value={subject} onChange={setSubject} testid="email-subject" />
+              <div className="text-[11px] text-zinc-500 mt-1">Versand über AutoSchnell mit deinem Firmennamen. Antwortet der Verkäufer, landet die Antwort in deinem Postfach — du bekommst zusätzlich eine Kopie mit PDF.</div>
               <div>
                 <label className="text-xs text-zinc-400">Nachricht</label>
                 <textarea data-testid="email-message" rows={5} className="input-base w-full mt-1"
                           value={emailMsg} onChange={(e) => setEmailMsg(e.target.value)} />
               </div>
               <div className="text-[11px] text-zinc-500">
-                E-Mail-Versand ist <strong className="text-zinc-300">aktuell MOCKED</strong> – Versand wird im Archiv protokolliert.
+                Die E-Mail wird mit dem Vertrags-PDF im Anhang über den Server versendet und im Archiv protokolliert.
               </div>
               <button data-testid="send-email-btn" onClick={() => send("email")} disabled={busy || !email}
                       className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">

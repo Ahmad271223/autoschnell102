@@ -88,3 +88,27 @@ credentials.json
 # Runtime data — Snapshot-PDF/JPG-Archive der App
 backend/local_storage/
 **/local_storage/
+
+# Hochgeladene Nutzerdateien (Logos, Fotos) - nicht ins Repo
+backend/uploads/
+uploads/
+
+# Generierter PDF-Skizzen-Cache (wird zur Laufzeit erzeugt)
+backend/assets/sketch_pdf_cache/
+
+# Beispiel-Config MUSS ins Repo
+!.env.example
+
+# Diagnose-Protokolle der lokalen Server (nicht ins Repository)
+backend-log.txt
+backend-err.txt
+frontend-log.txt
+matrix-lauf.log
+matrix-fehler.log
+stoss-lauf.log
+stoss-fehler.log
+AutoSchnell-Abruf-Helfer.zip
+
+# Playwright (E2E)
+frontend/playwright-report/
+frontend/test-results/

@@ -1,0 +1,45 @@
+# Zweiter Server (Umbau 09/2026): MongoDB als Replica Set ueber ZWEI Server.
+#
+# Diese Datei ist eine Ergaenzung zu docker-compose.yml und wird auf BEIDEN
+# Servern mitgegeben:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d
+#
+# Was sie aendert:
+#   * MongoDB ist zusaetzlich auf der PRIVATEN Adresse des Servers erreichbar
+#     (nur dort — nie auf der oeffentlichen). Ueber diese Adresse reden die
+#     beiden Mongo-Mitglieder und die Backends miteinander.
+#   * Jedes Mitglied bekommt einen festen Namen (mongo-prod1, mongo-prod2),
+#     den beide Server aufloesen koennen. Der alte Name "mongo" gilt nur im
+#     Docker-Netz EINES Servers und taugt deshalb nicht fuer ein Replica Set
+#     ueber zwei Maschinen.
+#
+# Warum ueber den veroeffentlichten Port statt Host-Netz: mongod erkennt
+# sich selbst, indem es die Adresse aus der Replica-Set-Konfiguration
+# anspricht und die Antwort mit sich vergleicht. Das funktioniert ueber die
+# Port-Weiterleitung von Docker — und die Container-Konfiguration bleibt
+# ansonsten unveraendert.
+#
+# In der .env (auf jedem Server EIGENE Werte fuer PRIVATE_IP und MONGO_NAME):
+#   PRIVATE_IP=10.0.0.2          # eigene private Adresse dieses Servers
+#   MONGO_NAME=mongo-prod1       # eigener Mitgliedsname (prod2: mongo-prod2)
+#   PROD1_IP=10.0.0.2
+#   PROD2_IP=10.0.0.3
+#   MONGO_URL=mongodb://USER:PASSWORT@mongo-prod1:27017,mongo-prod2:27017/?authSource=admin&replicaSet=rs0&maxPoolSize=20
+#
+# Sicherheit: Port 27017 nur auf der privaten Adresse. Die Hetzner-Firewall
+# muss 27017 aus dem Internet weiterhin blocken (wie bisher); im privaten
+# Netz (10.0.0.0/16) ist er erreichbar.
+services:
+  mongo:
+    hostname: ${MONGO_NAME:?MONGO_NAME in .env setzen (mongo-prod1 oder mongo-prod2)}
+    ports:
+      - "${PRIVATE_IP:?PRIVATE_IP in .env setzen}:27017:27017"
+    extra_hosts:
+      - "mongo-prod1:${PROD1_IP:?PROD1_IP in .env setzen}"
+      - "mongo-prod2:${PROD2_IP:?PROD2_IP in .env setzen}"
+
+  backend:
+    extra_hosts:
+      - "mongo-prod1:${PROD1_IP}"
+      - "mongo-prod2:${PROD2_IP}"

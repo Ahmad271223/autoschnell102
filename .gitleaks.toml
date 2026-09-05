@@ -1,0 +1,64 @@
+# gitleaks-Konfiguration (Audit 09/2026, Punkt 2): CI scannt die GESAMTE
+# Git-Historie (nicht nur den Arbeitsbaum). Zusaetzlich zu den Standard-
+# regeln werden Zuweisungen der Plattform-Geheimnisse erkannt, sofern der
+# Wert kein offensichtlicher Platzhalter ist.
+title = "AutoSchnell gitleaks"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "autoschnell-env-secret"
+description = "Plattform-Geheimnis als Klartext (JWT_SECRET, Admin-Passwoerter, Mongo-Passwort, Stripe/Apify)"
+regex = '''(?i)\b(JWT_SECRET|ADMIN_PASSWORD|SUPER_ADMIN_PASSWORD|MONGO_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|APIFY_TOKEN|S3_SECRET_KEY|SMTP_PASS|BROWSERLESS_TOKEN)\s*[:=]\s*["']?([^\s"'#]{8,})'''
+secretGroup = 2
+keywords = ["JWT_SECRET", "ADMIN_PASSWORD", "SUPER_ADMIN_PASSWORD", "MONGO_PASSWORD", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "APIFY_TOKEN", "S3_SECRET_KEY", "SMTP_PASS", "BROWSERLESS_TOKEN"]
+
+[rules.allowlist]
+regexes = [
+  '''(?i)(BITTE|ERSETZEN|changeme|ci-only|ci-nur|beispiel|example|platzhalter|dev-secret|\$\{[A-Z_]+|<[^>]+>)''',
+  '''(?i)(os\.environ|process\.env|getenv|environ\.get)''',
+  # Der Wert wird erst ZUSAMMENGEBAUT statt hingeschrieben: f-String-
+  # Platzhalter wie f"MONGO_PASSWORD={mongo_pw}" im Konfigurations-Erzeuger.
+  # Ein echtes Geheimnis beginnt nie mit einer geschweiften Klammer.
+  '''^\{''',
+]
+paths = [
+  '''\.env\.example$''',
+  '''\.gitleaks\.toml$''',
+  '''\.github/workflows/.*\.yml$''',
+  '''backend/production_check\.py$''',
+]
+
+# Pruefbericht Runde 8, Befund 6: Frueher waren backend/tests und
+# frontend/e2e KOMPLETT ausgenommen — ein dort eingechecktes echtes
+# Geheimnis waere nie aufgefallen. Jetzt werden nur die bekannten
+# Testwerte ausgenommen, einzeln und nachpruefbar. Jeder andere Fund in
+# diesen Ordnern blockiert die CI wie ueberall.
+[allowlist]
+description = "Lockfiles, Fonts und die konkreten Testwerte der Testsuiten"
+paths = [
+  '''frontend/yarn\.lock$''',
+  '''frontend/public/fonts/.*''',
+]
+regexes = [
+  '''TestAdmin123!''',
+  '''E2eTest123!x''',
+  '''IdemTest123!''',
+  '''(?i)ci-only-[a-z0-9-]+''',
+  '''(?i)ci-nur-zum-testen[a-z-]*''',
+  '''(?i)sk_test_dummy''',
+  '''(?i)whsec_test[a-z0-9_]*''',
+  '''(?i)apify_test_token''',
+  '''@e2etest-mail\.de''',
+  '''Ci-Stack-Super-2026!x''',
+  # Wegwerf-Werte des Lasttest-Stacks auf prod2 (deploy/lasttest-auf-prod2.sh):
+  # eigenes Docker-Netz, eigene Datenbank, nach dem Lauf geloescht.
+  '''(?i)last-only-[a-z0-9-]+''',
+  '''(?i)lasttest-nur-wegwerf[a-z-]*''',
+  # Zwei weitere Testwerte, die der scharfe Lauf ueber die Historie
+  # gefunden hat (Fahrer-Passwortpruefung, Test-Admin). Gegen die
+  # Produktionswerte geprueft: keine Uebereinstimmung.
+  '''Sicher\-Fahrt\-2026''',
+  '''Admin123!''',
+]

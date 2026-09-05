@@ -1,0 +1,125 @@
+# Betriebsart "hinter dem Load Balancer".
+#
+# Der Hetzner Load Balancer beendet die Verschluesselung und spricht mit den
+# Servern ueber das private Netz per HTTP. Deshalb:
+#   * nginx hoert NUR auf Port 80 (kein eigenes Zertifikat noetig)
+#   * KEINE Umleitung auf https — die wuerde eine Endlosschleife erzeugen,
+#     weil der Load Balancer die naechste Anfrage wieder als HTTP zustellt
+#   * die echte Besucher-Adresse kommt aus X-Forwarded-For, aber NUR wenn
+#     die Anfrage aus dem privaten Netz stammt (set_real_ip_from)
+#
+# Gewaehlt wird diese Datei ueber PROXY_TEMPLATE in der .env:
+#   PROXY_TEMPLATE=hinter-loadbalancer.conf.template
+# Ohne Load Balancer bleibt default.conf.template (nginx macht dann TLS).
+
+# ---- Unbekannte Hosts: Verbindung wortlos schliessen ----
+# Ausnahme: die Gesundheitspruefung. Der Load Balancer fragt je nach
+# Einstellung mit der SERVER-IP als Host an, nicht mit der Domain — ohne
+# diese Ausnahme bekaeme er 444 und wuerde den Server dauerhaft als
+# "unhealthy" fuehren. Die Antwort kommt vom Backend, nicht fest von nginx:
+# so bedeutet "healthy" auch wirklich, dass die Anwendung laeuft.
+# Runde 9: Hinter dem Load Balancer darf NIEMAND direkt an Port 80 —
+# sonst liesse sich mit einer selbst gesetzten Kopfzeile X-Forwarded-Proto
+# die HTTPS-Umleitung umgehen. Die Firewall muss das ohnehin sperren;
+# nginx sperrt es zusaetzlich (Verteidigung in der Tiefe).
+server {
+  listen 80 default_server;
+  server_name _;
+  allow ${PRIVATES_NETZ};
+  allow 127.0.0.1;
+  deny all;
+
+  location = /api/health {
+    proxy_pass http://backend:8001;
+    access_log off;
+  }
+  # Runde 8, Befund 5: Der Load Balancer darf WAHLWEISE /api/ready als
+  # Gesundheitspruefung nehmen. Entscheidung fuer den Standard: /api/health.
+  # Grund: /api/ready meldet 503 auch bei Migrationsstand oder vollem
+  # Speicher — dann wuerde der LB ALLE Server rausnehmen und die Seite
+  # waere komplett weg, obwohl sie Vertraege weiterhin ausliefern koennte.
+  # Ein Ausfall von R2 ist in /api/ready nur eine Warnung (200) und loest
+  # einen Betriebsalarm aus. Wer strenger fahren will, stellt den LB-Check
+  # auf /api/ready um; der Pfad ist hier dafuer freigegeben.
+  location = /api/ready {
+    proxy_pass http://backend:8001;
+    access_log off;
+  }
+
+  location / { return 444; }
+}
+
+# ---- Die eigene Domain ----
+server {
+  listen 80;
+  server_name ${PUBLIC_HOST};
+  allow ${PRIVATES_NETZ};
+  allow 127.0.0.1;
+  deny all;
+
+  # Echte Besucher-Adresse: Der Load Balancer traegt sie in X-Forwarded-For
+  # ein. Vertraut wird dieser Angabe nur aus dem privaten Netz — eine von
+  # aussen mitgeschickte Kette bleibt wirkungslos.
+  set_real_ip_from ${PRIVATES_NETZ};
+  real_ip_header X-Forwarded-For;
+  real_ip_recursive on;
+
+  # Sicherheits-Header fuer ALLE Antworten (API und Oberflaeche) — "always",
+  # damit sie auch bei Fehlerseiten gesetzt werden. HSTS ist richtig, weil
+  # der Besucher die Seite ueber HTTPS erreicht (der Load Balancer terminiert).
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(self)" always;
+  add_header Content-Security-Policy "frame-ancestors 'none'" always;
+
+  # Gesundheitspruefung des Load Balancers — ohne Umweg ans Backend.
+  location = /api/health {
+    proxy_pass http://backend:8001;
+    access_log off;
+  }
+
+  # API ans Backend.
+  location /api/ {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
+    proxy_pass http://backend:8001;
+    proxy_read_timeout 300s;   # Snapshots/PDF + synchrone Apify-Abrufe (bis 180 s)
+  }
+
+  # Statische Build-Dateien mit Hash im Namen: lange cachen.
+  location /static/ {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
+    proxy_pass http://web:80;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+
+  # Alles andere ans Frontend (SPA).
+  location / {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
+    proxy_pass http://web:80;
+  }
+}

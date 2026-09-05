@@ -66,6 +66,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     vehicle_description: v.description || "",
     damages: [],
     damages_text: "",
+    show_vat: false,
 
     // Fahrzeugdaten — vom Inserat vorbefüllt, vor Vertrags-Erstellung
     // editierbar (z.B. wenn Verkäufer abweichende Angaben macht).
@@ -244,7 +245,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="FIN" value={form.vehicle_vin} onChange={(v) => set("vehicle_vin", v)} testid="contract-veh-fin" />
               <Field label="Kennzeichen" value={form.vehicle_license_plate} onChange={(v) => set("vehicle_license_plate", v)} testid="contract-veh-plate" />
             </div>
-            <Field label="Bekannter Schaden / Hinweis" value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)} testid="contract-veh-damage" placeholder="z.B. Motorschaden, Hagelschaden" />
+            <Field label="Sonstige Schäden / Hinweis (erscheint im Vertrag)" value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)} testid="contract-veh-damage" placeholder="z.B. Motorschaden, Hagelschaden" />
           </Section>
 
           {/* Zusicherungen & Zustand */}
@@ -335,6 +336,24 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               />
               <Field label="Zahlungsart" value={form.payment_method} onChange={(v) => set("payment_method", v)} testid="contract-payment" />
             </div>
+            <label className="flex items-start gap-2 rounded-lg border px-3 py-2.5 cursor-pointer"
+                   style={{ borderColor: "var(--border-default)" }}
+                   data-testid="contract-show-vat">
+              <input type="checkbox" checked={!!form.show_vat}
+                     onChange={(e) => set("show_vat", e.target.checked)}
+                     className="mt-0.5 accent-red-500" />
+              <span className="text-sm">
+                <span className="font-semibold">MwSt (19 %) im Vertrag ausweisen</span>
+                <span className="block text-[11px] text-zinc-500">
+                  Für gewerbliche Verkäufe (Regelbesteuerung): der Kaufpreis gilt
+                  als Brutto, der Vertrag zeigt Netto und Steuer.
+                  {form.show_vat && form.purchase_price > 0 && (
+                    <> {" "}Netto {(form.purchase_price / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} € ·
+                    MwSt {(form.purchase_price - form.purchase_price / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</>
+                  )}
+                </span>
+              </span>
+            </label>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date" />
               <Field label="Abholuhrzeit" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time" />

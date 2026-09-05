@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { TOKEN_FAHRER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, openAuthedFile } from "@/lib/api";
 
 /**
  * Fahrer-Auth (eigenständige Accounts, separat vom Händler-Auth).
@@ -8,29 +9,36 @@ import { API_BASE } from "@/lib/api";
  */
 const DriverCtx = createContext(null);
 
-export const driverApi = axios.create({ baseURL: API_BASE });
+export const driverApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 driverApi.interceptors.request.use((c) => {
-  const t = localStorage.getItem("ah_driver_token");
+  const t = tokenLesen(TOKEN_FAHRER);
   if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
+
+// PDF in neuem Tab oeffnen — Abruf per Authorization-Header statt
+// ?auth=<token> in der URL (der Token landete sonst in Browser-Verlauf
+// und Server-Logs). Nutzt denselben Oeffner wie die Haendler-App, damit
+// Popup-Verhalten und Freigabe-Zeiten nur an EINER Stelle gepflegt werden.
+export const openDriverPdf = (path) =>
+  openAuthedFile(path, "application/pdf", driverApi);
 
 export function DriverAuthProvider({ children }) {
   const [driver, setDriver] = useState(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const t = localStorage.getItem("ah_driver_token");
+    const t = tokenLesen(TOKEN_FAHRER);
     if (!t) { setReady(true); return; }
     driverApi.get("/driver/me")
       .then((r) => setDriver(r.data))
-      .catch(() => localStorage.removeItem("ah_driver_token"))
+      .catch(() => tokenLoeschen(TOKEN_FAHRER))
       .finally(() => setReady(true));
   }, []);
 
   const login = async (email, password) => {
     const { data } = await driverApi.post("/driver/login", { email, password });
-    localStorage.setItem("ah_driver_token", data.token);
+    tokenSetzen(TOKEN_FAHRER, data.token);
     // volle /me-Payload holen (inkl. dealers)
     const me = await driverApi.get("/driver/me");
     setDriver(me.data);
@@ -41,7 +49,7 @@ export function DriverAuthProvider({ children }) {
     const { data } = await driverApi.post("/driver/register", {
       email, password, display_name,
     });
-    localStorage.setItem("ah_driver_token", data.token);
+    tokenSetzen(TOKEN_FAHRER, data.token);
     const me = await driverApi.get("/driver/me");
     setDriver(me.data);
     return me.data;
@@ -54,7 +62,10 @@ export function DriverAuthProvider({ children }) {
   };
 
   const logout = () => {
-    localStorage.removeItem("ah_driver_token");
+    // Serverseitig widerrufen (Runde 5): vorher blieb ein kopierter Token
+    // nach dem Abmelden bis zum Ablauf gueltig.
+    driverApi.post("/driver/logout").catch(() => {});
+    tokenLoeschen(TOKEN_FAHRER);
     setDriver(null);
   };
 

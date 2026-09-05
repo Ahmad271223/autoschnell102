@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { TOKEN_APP, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 
 const AuthCtx = createContext(null);
 
@@ -10,7 +11,7 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    const token = localStorage.getItem("ah_token");
+    const token = tokenLesen(TOKEN_APP);
     if (!token) {
       setUser(null);
       setDealer(null);
@@ -26,7 +27,7 @@ export const AuthProvider = ({ children }) => {
       setLoading(false);
       return data;
     } catch {
-      localStorage.removeItem("ah_token");
+      tokenLoeschen(TOKEN_APP);
       setUser(null);
       setDealer(null);
       setSubscription(null);
@@ -41,14 +42,25 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
-    localStorage.setItem("ah_token", data.token);
+    if (data?.mfa_erforderlich) {
+      // Zwei-Faktor (Admin/Super-Admin): noch kein Sitzungs-Token — die
+      // Login-Seite fragt jetzt den Code aus der Authenticator-App ab.
+      return { mfa_erforderlich: true, mfa_token: data.mfa_token };
+    }
+    tokenSetzen(TOKEN_APP, data.token);
+    await refresh();
+    return data.user;
+  };
+  const loginMfa = async (mfaToken, code) => {
+    const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code });
+    tokenSetzen(TOKEN_APP, data.token);
     await refresh();
     return data.user;
   };
 
   const register = async (payload) => {
     const { data } = await api.post("/auth/register", payload);
-    localStorage.setItem("ah_token", data.token);
+    tokenSetzen(TOKEN_APP, data.token);
     await refresh();
     return data.user;
   };
@@ -57,7 +69,7 @@ export const AuthProvider = ({ children }) => {
     try {
       await api.post("/auth/logout");
     } catch (_) {}
-    localStorage.removeItem("ah_token");
+    tokenLoeschen(TOKEN_APP);
     sessionStorage.removeItem("ah_vergleich_state");
     setUser(null);
     setDealer(null);
@@ -65,7 +77,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthCtx.Provider value={{ user, dealer, subscription, loading, login, register, logout, refresh, setDealer }}>
+    <AuthCtx.Provider value={{ user, dealer, subscription, loading, login, loginMfa, register, logout, refresh, setDealer }}>
       {children}
     </AuthCtx.Provider>
   );

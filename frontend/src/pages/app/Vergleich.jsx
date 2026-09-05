@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { checkLink, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
+import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
   ArrowRight, ExternalLink, Activity, Gauge, Calendar as CalendarIcon, Fuel,
@@ -14,9 +16,9 @@ import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { openInPopup, openMultiple } from "@/lib/popup";
 
+// Aktuell ist nur Kleinanzeigen als Daten-Quelle freigeschaltet;
+// mobile.de-/AutoScout-Links folgen, sobald der API-Zugang vorliegt.
 const SAMPLE_URLS = [
-  "https://m.mobile.de/fahrzeuge/details.html?id=448228023",
-  "https://suchen.mobile.de/fahrzeuge/details.html?id=391155421",
   "https://www.kleinanzeigen.de/s-anzeige/...",
 ];
 
@@ -36,6 +38,7 @@ export default function Vergleich() {
 
   const [url, setUrl] = useState(restored?.url || "");
   const [loading, setLoading] = useState(false);
+  const [waitMsg, setWaitMsg] = useState(null);
   const [result, setResult] = useState(restored?.result || null);
   const [counter, setCounter] = useState(restored?.counter || null);
   const [showContract, setShowContract] = useState(false);
@@ -69,16 +72,66 @@ export default function Vergleich() {
     } catch { /* quota/private mode — silent */ }
   }, [url, result, counter, contract]);
 
-  const startCompare = async (e) => {
+  const startCompare = async (e, direktUrl) => {
     e?.preventDefault?.();
-    if (!url.trim()) return;
+    const ziel = (direktUrl ?? url).trim();
+    if (!ziel) return;
+    if (loading) return;               // Mehrfachklicks abfangen
     setLoading(true);
+    setWaitMsg(null);
     setResult(null);
     setCounter(null);
     setContract(null);
     try {
       const t0 = Date.now();
-      const { data } = await api.post("/mobile/compare", { url });
+
+      // Schritt 1: Vorab-Check. Bekannte Inserate sind sofort da; neue
+      // laufen als Hintergrundjob — wir zeigen die Wartemeldung und
+      // fragen den Status ab, statt die Anfrage minutenlang zu halten.
+      const check = await checkLink(api, ziel, { onWait: setWaitMsg });
+      let data;
+      if (check.status === "needs_client_fetch") {
+        data = { needs_client_fetch: true, url: check.url };
+      } else {
+        // Schritt 2: eigentlicher Vergleich (trifft jetzt den Cache).
+        // Ein 503 (Rueckstau) wird automatisch wiederholt — der Nutzer
+        // sieht nur die Wartemeldung, keine technische Fehlermeldung.
+        ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                           { url: ziel },
+                                           { onWait: setWaitMsg }));
+      }
+
+      // Client-seitiges Abrufen (nur Kleinanzeigen, wenn serverseitig aktiv):
+      // Der Server kennt den Link noch nicht und bittet den Browser des
+      // Nutzers, die Seite zu holen. Wir laden sie über die Erweiterung,
+      // schicken das HTML an den Server und fragen erneut ab.
+      if (data?.needs_client_fetch) {
+        const ready = await extensionReady();
+        if (!ready) {
+          // Rueckfall (09/2026): ohne Abruf-Helfer holt der Server das
+          // Inserat selbst — vorher blockierte hier "Erweiterung installieren".
+          const check2 = await checkLink(api, ziel, { onWait: setWaitMsg, ohneErweiterung: true });
+          if (check2.status === "needs_client_fetch") {
+            throw new Error("Abruf ohne Erweiterung nicht möglich — bitte später erneut versuchen.");
+          }
+          ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                             { url: ziel, ohne_erweiterung: true },
+                                             { onWait: setWaitMsg }));
+        } else {
+        try {
+          const html = await fetchViaExtension(data.url || ziel);
+          await api.post("/listings/ingest", { url: data.url || ziel, html });
+          ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                             { url: ziel },
+                                             { onWait: setWaitMsg }));
+        } catch (fe) {
+          toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
+          setLoading(false);
+          return;
+        }
+        }
+      }
+
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0 });
       try {
@@ -86,9 +139,14 @@ export default function Vergleich() {
         setCounter(cnt);
       } catch (_) { /* ignore */ }
     } catch (err) {
-      toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
+      if (err?.code === "timeout") {
+        toast.info(TIMEOUT_MESSAGE);
+      } else {
+        toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
+      }
     } finally {
       setLoading(false);
+      setWaitMsg(null);
     }
   };
 
@@ -112,10 +170,20 @@ export default function Vergleich() {
             URL einfügen. <span style={{ color: "var(--accent-red)" }}>Vergleich starten.</span>
           </h1>
           <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            Mobile.de- oder Kleinanzeigen-Link einfügen — Daten laden, Regeln anwenden, mobile.de mit fertigem Filter öffnen.
+            Kleinanzeigen-, mobile.de- oder AutoScout24-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
           </p>
         </div>
-        <ProfileBadge onChange={(p) => setResult((r) => r ? { ...r, active_profile: p } : r)} />
+        {/* Profilwechsel: die Portal-Links werden serverseitig aus dem
+            aktiven Regelwerk gebaut — deshalb den Vergleich neu laufen
+            lassen, statt nur das Badge umzuschalten (die alten Links
+            truegen sonst die Filter des vorherigen Profils). */}
+        <ProfileBadge onChange={(p) => {
+          if (result && url.trim() && !loading) {
+            startCompare(null, url);
+          } else {
+            setResult((r) => r ? { ...r, active_profile: p } : r);
+          }
+        }} />
       </div>
 
       {/* Search bar */}
@@ -130,7 +198,23 @@ export default function Vergleich() {
               required
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="mobile.de- oder kleinanzeigen.de-URL einfügen…"
+              onPaste={(e) => {
+                // Einfuegen genuegt: erkennt der Text einen gueltigen
+                // Inserats-Link (Kleinanzeigen ODER mobile.de), startet das
+                // Auslesen sofort — der Knopf bleibt fuers manuelle
+                // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
+                const text = (e.clipboardData?.getData("text") || "").trim();
+                const istInserat =
+                  /kleinanzeigen\.de\/s-anzeige\//i.test(text) ||
+                  /mobile\.de\/(?:[^\s]*\bauto-inserat\/|fahrzeuge\/details\.html\?)/i.test(text) ||
+                  /autoscout24\.[a-z.]{2,6}\/(?:angebote|offers)\//i.test(text);
+                if (istInserat && !loading) {
+                  e.preventDefault();
+                  setUrl(text);
+                  startCompare(null, text);
+                }
+              }}
+              placeholder="Inserats-Link einfügen (Kleinanzeigen, mobile.de, AutoScout24) – Auslesen startet automatisch…"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus
@@ -228,6 +312,15 @@ export default function Vergleich() {
       </form>
 
       {/* Loading skeleton */}
+      {waitMsg && loading && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-center gap-2"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}
+             data-testid="linkcheck-wait">
+          <Loader2 size={15} className="animate-spin shrink-0" />
+          {waitMsg}
+        </div>
+      )}
+
       {loading && !result && (
         <div className="mt-10 grid lg:grid-cols-12 gap-5">
           <div className="lg:col-span-8 space-y-5">

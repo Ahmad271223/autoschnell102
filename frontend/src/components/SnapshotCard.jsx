@@ -5,13 +5,15 @@
 //   <SnapshotCard snapshotId="..." />           — live polling for a job
 //   <SnapshotCard vehicleId="..." compact />    — show latest ready snapshot for a car
 import { useEffect, useState } from "react";
-import { api, API_BASE } from "@/lib/api";
+import { api, openAuthedFile } from "@/lib/api";
 import { Camera, FileText, ImageIcon, Loader2, AlertTriangle, CheckCircle2, ExternalLink, Printer } from "lucide-react";
 import { printSnapshot } from "@/lib/pdf";
 import { toast } from "sonner";
 
 const POLL_INTERVAL_MS = 4000;
 const MAX_POLL = 30;  // ~2 minutes total
+
+const MAX_POLLS = 150; // 150 x 4 s = 10 min
 
 export default function SnapshotCard({ snapshotId, vehicleId, compact = false }) {
   const [snap, setSnap] = useState(null);
@@ -24,6 +26,7 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
     setSnap(null);
     setPolls(0);
 
+    let versuche = 0;
     const tick = async () => {
       try {
         const { data } = await api.get(`/snapshots/${snapshotId}`);
@@ -34,6 +37,14 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
       } catch {
         if (cancelled) return;
         setPolls((p) => p + 1);
+      }
+      // Review 09/2026: nicht endlos pollen — nach MAX_POLLS aufhoeren und
+      // den Job als "Zeitueberschreitung" anzeigen (Reaper faengt ihn serverseitig).
+      versuche += 1;
+      if (versuche >= MAX_POLLS) {
+        if (!cancelled) setSnap((s) => ({ ...(s || {}), status: "failed",
+          error: "Zeitüberschreitung – bitte später erneut versuchen." }));
+        return;
       }
       if (!cancelled) setTimeout(tick, POLL_INTERVAL_MS);
     };
@@ -63,10 +74,11 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
   if (!snapshotId && !vehicleId) return null;
   if (vehicleId && !snap) return null;  // nothing archived for this car
   const status = snap?.status || "pending";
-  const token = localStorage.getItem("ah_token") || "";
   const id = snap?.id || snapshotId;
-  const pdfUrl = `${API_BASE}/snapshots/${id}/pdf?auth=${token}`;
-  const pngUrl = `${API_BASE}/snapshots/${id}/png?auth=${token}`;
+  const openFile = (kind) =>
+    openAuthedFile(`/snapshots/${id}/${kind}`,
+                   kind === "pdf" ? "application/pdf" : "image/png")
+      .catch(() => toast.error("Datei konnte nicht geladen werden"));
 
   const handlePrint = async () => {
     if (!id) return;
@@ -86,16 +98,16 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
         </div>
         {status === "ready" ? (
           <>
-            <a href={pdfUrl} target="_blank" rel="noopener noreferrer"
+            <button type="button" onClick={() => openFile("pdf")}
                className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
                data-testid="snapshot-pdf-inline">
               <FileText size={11} /> PDF
-            </a>
-            <a href={pngUrl} target="_blank" rel="noopener noreferrer"
+            </button>
+            <button type="button" onClick={() => openFile("png")}
                className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
                data-testid="snapshot-png-inline">
               <ImageIcon size={11} /> Foto
-            </a>
+            </button>
             <button type="button" onClick={handlePrint}
                     className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
                     data-testid="snapshot-print-inline"
@@ -128,20 +140,22 @@ export default function SnapshotCard({ snapshotId, vehicleId, compact = false })
       {status === "ready" ? (
         <>
           <div className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-            Vollständiges Snapshot der Inserat-Seite — datiert auf{" "}
+            {snap?.art === "datenblatt"
+              ? "Mobile Rebuild — nachgebaute Inserats-Ansicht aus den automatisch ausgelesenen Daten (mobile.de blockt Seiten-Screenshots) — erstellt am "
+              : "Vollständiges Snapshot der Inserat-Seite — datiert auf "}
             {snap?.completed_at ? new Date(snap.completed_at).toLocaleString("de-DE") : "—"}.
           </div>
           <div className="grid grid-cols-3 gap-2">
-            <a href={pdfUrl} target="_blank" rel="noopener noreferrer"
+            <button type="button" onClick={() => openFile("pdf")}
                className="apple-btn apple-btn-primary !py-2.5 !text-[12px]"
                data-testid="snapshot-pdf-btn">
               <FileText size={13} /> PDF <ExternalLink size={10} />
-            </a>
-            <a href={pngUrl} target="_blank" rel="noopener noreferrer"
+            </button>
+            <button type="button" onClick={() => openFile("png")}
                className="apple-btn apple-btn-secondary !py-2.5 !text-[12px]"
                data-testid="snapshot-png-btn">
               <ImageIcon size={13} /> Foto <ExternalLink size={10} />
-            </a>
+            </button>
             <button type="button" onClick={handlePrint}
                     className="apple-btn apple-btn-secondary !py-2.5 !text-[12px]"
                     data-testid="snapshot-print-btn"

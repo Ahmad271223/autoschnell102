@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import os
+import random
 import subprocess
 import sys
 import uuid
@@ -41,10 +42,31 @@ log = logging.getLogger("autohandel.snapshot")
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = "autohandel"
 
-# Lokaler Speicher-Fallback: wenn kein EMERGENT_LLM_KEY gesetzt ist,
-# werden Snapshots lokal unter backend/local_storage/ abgelegt.
+# Wo liegen die Snapshot-Dateien (JPG + PDF je Inserat)?
+#   1. Objektspeicher (R2/S3), sobald S3_ENDPOINT und S3_BUCKET gesetzt sind
+#      — derselbe Eimer wie fuer Fotos. Seit 09/2026 der Normalfall:
+#      Erst damit sehen ZWEI Anwendungsserver dieselben Dateien, und die
+#      Dateien ueberleben den Verlust des Servers ohne Rueckgriff auf die
+#      Sicherung.
+#   2. sonst der externe Dienst (EMERGENT_LLM_KEY) — Altweg, in Produktion aus
+#   3. sonst die lokale Platte unter backend/local_storage/ (Entwicklung)
+# Alte Dateien, die noch lokal liegen, werden beim Lesen weiterhin gefunden
+# (Rueckfall), bis scripts/snapshots_nach_r2.py sie verschoben hat.
 _LOCAL_STORAGE = Path(__file__).parent / "local_storage"
-_USE_LOCAL = not os.environ.get("EMERGENT_LLM_KEY")
+_USE_S3 = bool(os.environ.get("S3_ENDPOINT", "").strip()
+               and os.environ.get("S3_BUCKET", "").strip())
+_USE_LOCAL = not _USE_S3 and not os.environ.get("EMERGENT_LLM_KEY")
+
+
+def _s3_speicher():
+    """Der gemeinsame Datei-Speicher (storage_service) — nur bei _USE_S3."""
+    from storage_service import storage
+    return storage
+
+
+def speicherort() -> str:
+    """Fuer Diagnose und Tests: "s3", "extern" oder "lokal"."""
+    return "s3" if _USE_S3 else ("lokal" if _USE_LOCAL else "extern")
 
 # Runtime state
 _storage_key: Optional[str] = None
@@ -71,6 +93,52 @@ SNAPSHOT_CONCURRENCY = int(
 )
 # Semaphore statt Lock: erlaubt N gleichzeitige Snapshots (N=1 == altes Lock).
 _browser_lock = asyncio.Semaphore(max(1, SNAPSHOT_CONCURRENCY))
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+WORKER_TIMEOUT_SECONDS = int(os.environ.get("SNAPSHOT_WORKER_TIMEOUT", "90"))
+
+
+def _run_worker(args, stdin_text=None, timeout=None):
+    """Playwright-Worker als EIGENE Prozessgruppe starten und bei Timeout
+    die GANZE Gruppe beenden (Pruefbericht Runde 4): subprocess.run
+    killte nur den Python-Worker, die von ihm gestarteten Chromium-
+    Prozesse liefen als Waisen weiter und frassen RAM/CPU."""
+    import signal
+    env = os.environ.copy()
+    if sys.platform == "win32":
+        env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        flags = {"start_new_session": True}
+    proc = subprocess.Popen(
+        args, stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **flags)
+    try:
+        out, err = proc.communicate(
+            input=stdin_text.encode("utf-8") if stdin_text is not None else None,
+            timeout=timeout or WORKER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=15)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        proc.communicate(timeout=10)
+        raise RuntimeError("Playwright-Worker: Zeitlimit ueberschritten, "
+                           "Prozessgruppe beendet")
+    return (out.decode("utf-8", "replace"), err.decode("utf-8", "replace"),
+            proc.returncode)
 
 
 # -------------------- Object Storage --------------------
@@ -113,6 +181,10 @@ def _safe_local_path(path: str) -> Path:
 
 
 def _put_object(path: str, data: bytes, content_type: str) -> dict:
+    if _USE_S3:
+        _s3_speicher().save(path, data)
+        log.info("snapshot -> objektspeicher: %s (%d bytes)", path, len(data))
+        return {"path": path}
     if _USE_LOCAL:
         dest = _safe_local_path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +206,17 @@ def _put_object(path: str, data: bytes, content_type: str) -> dict:
 
 def get_object(path: str) -> tuple[bytes, str]:
     """Read object back. Returns (bytes, content_type)."""
+    if _USE_S3:
+        ext = path.lower().rsplit(".", 1)[-1]
+        ct = "application/pdf" if ext == "pdf" else "image/jpeg"
+        try:
+            return _s3_speicher().load(path), ct
+        except Exception as exc:                        # noqa: BLE001
+            # Alte Datei, die noch nicht verschoben wurde? Lokal nachsehen.
+            dest = _safe_local_path(path)
+            if dest.exists():
+                return dest.read_bytes(), ct
+            raise FileNotFoundError(f"snapshot {path}: {exc}") from exc
     if _USE_LOCAL:
         dest = _safe_local_path(path)
         if not dest.exists():
@@ -153,9 +236,32 @@ def get_object(path: str) -> tuple[bytes, str]:
     return r.content, r.headers.get("Content-Type", "application/octet-stream")
 
 
+async def get_object_async(path: str) -> tuple[bytes, str]:
+    """get_object ohne Loop-Block (sync requests, Timeout 60 s)."""
+    return await asyncio.to_thread(get_object, path)
+
+
+async def delete_object_async(path: str) -> bool:
+    """delete_object ohne Loop-Block (sync requests, Timeout 30 s)."""
+    return await asyncio.to_thread(delete_object, path)
+
+
 def delete_object(path: str) -> bool:
     """Best-effort object-delete. Returns True bei 2xx/404, False sonst.
     404 gilt als OK, weil das Objekt eh weg ist."""
+    if _USE_S3:
+        ok = True
+        try:
+            ok = bool(_s3_speicher().delete(path))
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("snapshot-loeschung %s im objektspeicher: %s", path, exc)
+            ok = False
+        # Eine eventuell noch lokal liegende Altkopie ebenfalls entfernen.
+        try:
+            _safe_local_path(path).unlink(missing_ok=True)
+        except Exception:                               # noqa: BLE001
+            pass
+        return ok
     if _USE_LOCAL:
         dest = _LOCAL_STORAGE / path
         try:
@@ -201,32 +307,55 @@ _PAGE_HEADERS = {
 # reicht das vollkommen; Schrift und Bild-Details bleiben erkennbar.
 MAX_WIDTH = 1100
 JPEG_QUALITY = 55
+# Harte Zielgrösse pro Artefakt (Wunsch 08/2026): unter ~600 KB. Die
+# Kompressionsstufen unten werden durchprobiert, bis das JPEG darunter
+# liegt — erst Qualität senken, dann zusätzlich die Breite reduzieren.
+TARGET_BYTES = 600 * 1024
+_COMPRESSION_STEPS = (
+    (MAX_WIDTH, JPEG_QUALITY),
+    (MAX_WIDTH, 45),
+    (MAX_WIDTH, 35),
+    (900, 40),
+    (900, 32),
+    (750, 30),
+    (640, 26),
+)
 
 
 def _compress_artifacts(png_bytes: bytes, pdf_fallback: bytes) -> tuple[bytes, bytes]:
     """Re-encode the raw PNG screenshot as a JPEG (much smaller) and build
-    a 1-page image-PDF from the same JPEG. Falls back to the original
-    Playwright PDF if Pillow rejects the screenshot for any reason."""
+    a 1-page image-PDF from the same JPEG. Probiert Stufen durch, bis das
+    JPEG unter TARGET_BYTES liegt (lange Inserats-Seiten brauchen mehr
+    Kompression als kurze). Falls back to the original Playwright PDF if
+    Pillow rejects the screenshot for any reason."""
     try:
         from PIL import Image  # local import — Pillow is heavy
         import io
         with Image.open(io.BytesIO(png_bytes)) as im:
             im = im.convert("RGB")
-            if im.width > MAX_WIDTH:
-                ratio = MAX_WIDTH / im.width
-                new_size = (MAX_WIDTH, int(im.height * ratio))
-                im = im.resize(new_size, Image.LANCZOS)
-            jpg_buf = io.BytesIO()
-            im.save(jpg_buf, format="JPEG", quality=JPEG_QUALITY,
-                    optimize=True, progressive=True)
-            jpg_bytes = jpg_buf.getvalue()
-            pdf_buf = io.BytesIO()
-            # resolution=72 (statt 100) lässt ReportLab die Seite
-            # entsprechend grösser anlegen -> gleiches Bild, weniger
-            # Meta-Overhead, und vor allem keine Neu-Kompression des
-            # Bildes (PIL bettet JPEG direkt ein).
-            im.save(pdf_buf, format="PDF", resolution=72.0)
-            pdf_bytes = pdf_buf.getvalue()
+
+            jpg_bytes = b""
+            pdf_bytes = b""
+            for width, quality in _COMPRESSION_STEPS:
+                # Immer vom Original skalieren (kein doppeltes Resampling).
+                step_im = im
+                if step_im.width > width:
+                    ratio = width / step_im.width
+                    step_im = step_im.resize(
+                        (width, int(step_im.height * ratio)), Image.LANCZOS)
+                buf = io.BytesIO()
+                step_im.save(buf, format="JPEG", quality=quality,
+                             optimize=True, progressive=True)
+                jpg_bytes = buf.getvalue()
+                # resolution=72 (statt 100) -> weniger Meta-Overhead; quality
+                # mitgeben, sonst kodiert Pillow das PDF-Bild mit Default-75
+                # neu und das PDF wird deutlich groesser als das JPEG.
+                pdf_buf = io.BytesIO()
+                step_im.save(pdf_buf, format="PDF", resolution=72.0,
+                             quality=quality)
+                pdf_bytes = pdf_buf.getvalue()
+                if len(jpg_bytes) <= TARGET_BYTES and len(pdf_bytes) <= TARGET_BYTES:
+                    break
         return jpg_bytes, pdf_bytes
     except Exception as exc:
         log.warning("artifact compression failed (%s) — using raw outputs", exc)
@@ -319,7 +448,7 @@ def _assert_allowed_snapshot_url(url: str) -> None:
         raise ValueError(f"Snapshot-Domain nicht erlaubt: {host!r}")
 
 
-async def _capture_with_playwright(url: str) -> tuple[bytes, bytes]:
+async def _capture_with_playwright(url: str, on_start=None) -> tuple[bytes, bytes]:
     """Render the URL in headless Chromium, return (png_bytes, pdf_bytes).
     Läuft in einem separaten Subprocess damit Playwright auf Windows sein
     eigenes ProactorEventLoop-kompatibles asyncio.run() bekommt."""
@@ -329,24 +458,14 @@ async def _capture_with_playwright(url: str) -> tuple[bytes, bytes]:
     if not _BROWSERLESS_URL:
         _ensure_browser_executable()
     async with _browser_lock:
+        if on_start is not None:
+            await on_start()          # Slot belegt -> jetzt wirklich 'running'
         worker = Path(__file__).parent / "_playwright_worker.py"
         loop = asyncio.get_running_loop()
 
-        def _run():
-            # Auf Windows zeigt PLAYWRIGHT_BROWSERS_PATH auf den Linux-Pfad
-            # /pw-browsers (aus server.py). Wir entfernen ihn damit Playwright
-            # seinen eigenen Windows-Default-Pfad nutzt.
-            env = os.environ.copy()
-            if sys.platform == "win32":
-                env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-            result = subprocess.run(
-                [sys.executable, str(worker), url],
-                capture_output=True, text=True, timeout=90,
-                env=env,
-            )
-            return result.stdout, result.stderr, result.returncode
-
-        stdout, stderr, rc = await loop.run_in_executor(None, _run)
+        # Eigene Prozessgruppe + Gruppen-Kill bei Timeout (siehe _run_worker).
+        stdout, stderr, rc = await loop.run_in_executor(
+            None, _run_worker, [sys.executable, str(worker), url])
         try:
             data = json.loads(stdout)
         except Exception:
@@ -512,10 +631,15 @@ async def create_snapshot(
     vehicle_id: Optional[str],
     mobile_ad_id: Optional[str],
     source_url: str,
+    snapshot_id: Optional[str] = None,
 ) -> str:
     """Create a `listing_snapshots` row in 'pending' state and return its id.
-    Capture/upload runs as a background task via `run_snapshot_job`."""
-    snap_id = str(uuid.uuid4())
+    Capture/upload runs as a background task via `run_snapshot_job`.
+
+    `snapshot_id` erlaubt es, eine VORHER reservierte ID zu verwenden — so
+    kann der Aufrufer sich den Snapshot atomar sichern, bevor er ihn
+    anlegt (verhindert Doppel-Snapshots bei gleichzeitigen Vergleichen)."""
+    snap_id = snapshot_id or str(uuid.uuid4())
     await db.listing_snapshots.insert_one({
         "id": snap_id,
         "dealer_id": dealer_id,
@@ -533,16 +657,235 @@ async def create_snapshot(
     return snap_id
 
 
+# Fehler, die ein erneuter Versuch NICHT heilt (kein Retry).
+_PERMANENT_HINTS = ("nicht erlaubt", "not allowed", "ungültige url", "invalid url",
+                    "keine url")
+
+
+def _is_transient(exc: Exception) -> bool:
+    """True, wenn ein erneuter Versuch sinnvoll ist. Netzwerk-/Timeout-/Bot-
+    Block-Fehler dominieren bei Snapshots und sind vorübergehend — daher
+    Default: wiederholen. Nur klar permanente Fehler brechen sofort ab."""
+    m = str(exc).lower()
+    return not any(h in m for h in _PERMANENT_HINTS)
+
+
+async def _capture_with_retry(db, snap_id: str, url: str, attempts: int = 3):
+    """Capture mit Backoff. Der Browser-Lock wird zwischen den Versuchen
+    freigegeben (Sleep passiert außerhalb von _capture_with_playwright), damit
+    andere Snapshots währenddessen laufen können."""
+    last_exc = None
+    for i in range(1, attempts + 1):
+        try:
+            async def _jetzt_running():
+                await db.listing_snapshots.update_one(
+                    {"id": snap_id},
+                    {"$set": {"status": "running", "started_at": _now_iso()}})
+            return await _capture_with_playwright(url, on_start=_jetzt_running)
+        except Exception as exc:
+            last_exc = exc
+            if i >= attempts or not _is_transient(exc):
+                raise
+            delay = min(45.0, 5.0 * (3 ** (i - 1))) * random.uniform(0.7, 1.3)
+            log.warning("snapshot %s Versuch %d/%d fehlgeschlagen (%s) — neuer "
+                        "Versuch in %.0fs", snap_id, i, attempts,
+                        str(exc).splitlines()[0][:100], delay)
+            try:
+                await db.listing_snapshots.update_one(
+                    {"id": snap_id},
+                    {"$set": {"status": "retrying", "attempts": i,
+                              "last_error": str(exc)[:300]}})
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+    raise last_exc
+
+
+async def _render_rebuild_html(html: str) -> tuple[bytes, bytes]:
+    """Lokal erzeugtes HTML (Mobile Rebuild) im Playwright-Worker rendern.
+    Kein Domain-Guard noetig: die Seite kommt per stdin/set_content, alle
+    Bilder sind data-URIs — es findet kein Netzwerkzugriff statt."""
+    if not _BROWSERLESS_URL:
+        _ensure_browser_executable()
+    async with _browser_lock:
+        worker = Path(__file__).parent / "_playwright_worker.py"
+        loop = asyncio.get_running_loop()
+
+        stdout, stderr, _rc = await loop.run_in_executor(
+            None, _run_worker, [sys.executable, str(worker), "--html-stdin"], html)
+        try:
+            data = json.loads(stdout)
+        except Exception:
+            raise RuntimeError(f"Rebuild-Worker ungültige Ausgabe: {stderr[:300]}")
+        if "error" in data:
+            raise RuntimeError(f"Rebuild-Worker Fehler: {data['error']}")
+        return base64.b64decode(data["png"]), base64.b64decode(data["pdf"])
+
+
+async def _mobile_datenblatt_job(db, snap_id: str, doc: dict,
+                                 quelle: str = "mobile") -> None:
+    """Mobile-Rebuild-Variante des Snapshots (mobile.de + AutoScout24).
+
+    Datenquelle (in dieser Reihenfolge): listings_cache (1 Jahr TTL) ->
+    vehicle_cache (nur mobile) -> gespeichertes Fahrzeug. Die
+    Original-Fotos werden vom Bilder-CDN geladen und mit eingebettet."""
+    from datenblatt_service import datenblatt_bild, datenblatt_pdf, fotos_laden
+    url = doc["source_url"]
+    ad_id = doc.get("mobile_ad_id") or ""
+    quelle_label = {"mobile": "mobile.de",
+                    "autoscout24": "autoscout24.de"}.get(quelle, quelle)
+    try:
+        daten = None
+        abgerufen = None
+        ce = await db.listings_cache.find_one(
+            {"cache_key": f"{quelle}:{ad_id}"},
+            {"_id": 0, "data": 1, "fetched_at": 1})
+        if ce and ce.get("data"):
+            daten, abgerufen = ce["data"], ce.get("fetched_at")
+        if not daten and quelle == "mobile":
+            vc = await db.vehicle_cache.find_one(
+                {"mobile_ad_id": ad_id}, {"_id": 0, "data": 1, "updated_at": 1})
+            if vc and vc.get("data"):
+                daten, abgerufen = vc["data"], vc.get("updated_at")
+        if not daten and doc.get("vehicle_id"):
+            v = await db.vehicles.find_one(
+                {"id": doc["vehicle_id"]}, {"_id": 0, "data": 1, "updated_at": 1})
+            if v and v.get("data"):
+                daten, abgerufen = v["data"], v.get("updated_at")
+        if not daten:
+            raise RuntimeError("Keine ausgelesenen Inserats-Daten vorhanden — "
+                               "Datenblatt nicht moeglich.")
+
+        foto_urls = daten.get("images") or daten.get("image_urls") or []
+        fotos = await fotos_laden(foto_urls, max_n=9)
+
+        loop = asyncio.get_running_loop()
+        # 1. Wahl: dunkle Inserats-Ansicht ("Mobile Rebuild", Wunsch 08/2026)
+        # im Playwright-Worker rendern — JPG + PDF entstehen wie bei den
+        # Kleinanzeigen-Snapshots aus dem Seiten-Rendering. Faellt das
+        # Rendering aus (z.B. Browser kaputt), springt das helle
+        # ReportLab-Datenblatt ein — lieber ein schlichter Beweis als keiner.
+        from datenblatt_service import rebuild_html
+        try:
+            html = await asyncio.to_thread(
+                rebuild_html, daten, url, abgerufen, fotos,
+                quelle_label=quelle_label)
+            png, pdf = await _render_rebuild_html(html)
+            jpg, pdf = await loop.run_in_executor(
+                None, _compress_artifacts, png, pdf)
+        except Exception:
+            log.exception("Mobile-Rebuild-Rendering fehlgeschlagen — "
+                          "Ausweich-Datenblatt (ReportLab) fuer %s", snap_id)
+            pdf = await loop.run_in_executor(
+                None, lambda: datenblatt_pdf(daten, url, abgerufen, fotos,
+                                             quelle_label=quelle_label))
+            jpg = await loop.run_in_executor(
+                None, lambda: datenblatt_bild(daten, url, abgerufen, fotos,
+                                              quelle_label=quelle_label))
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        base = f"{APP_NAME}/snapshots/{doc['dealer_id']}/{snap_id}-{ts}"
+        png_path = f"{base}.jpg"
+        pdf_path = f"{base}.pdf"
+        await loop.run_in_executor(None, _put_object, png_path, jpg, "image/jpeg")
+        await loop.run_in_executor(None, _put_object, pdf_path, pdf, "application/pdf")
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {
+                "status": "ready",
+                "art": "datenblatt",
+                "png_path": png_path,
+                "pdf_path": pdf_path,
+                "png_bytes": len(jpg),
+                "pdf_bytes": len(pdf),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }})
+        log.info("snapshot %s ready als Datenblatt (%d KB jpg, %d KB pdf, %d Fotos)",
+                 snap_id, len(jpg) // 1024, len(pdf) // 1024, len(fotos))
+    except Exception as exc:
+        log.exception("Datenblatt-Snapshot %s fehlgeschlagen", snap_id)
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed", "error": str(exc)[:500],
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+
+
 async def run_snapshot_job(db, snap_id: str) -> None:
-    """Background-task entry point. Captures the page, uploads both
-    artifacts to object storage, and flips the row to 'ready'/'failed'."""
+    """Background-task entry point. Captures the page (mit Retry bei
+    vorübergehenden Fehlern), uploads both artifacts to object storage, and
+    flips the row to 'ready'/'failed'."""
     doc = await db.listing_snapshots.find_one({"id": snap_id}, {"_id": 0})
     if not doc:
         log.warning("snapshot %s vanished before capture", snap_id)
         return
     url = doc["source_url"]
+    # 'queued' = wartet auf einen Browser-Slot; 'running' setzt erst der
+    # Capture, wenn der Slot wirklich belegt ist (Review 09/2026: unter Last
+    # markierte der Reaper wartende Jobs faelschlich als "failed").
+    await db.listing_snapshots.update_one(
+        {"id": snap_id}, {"$set": {"status": "queued", "queued_at": _now_iso()}})
+
+    # Snapshot-Aufnahmen sind ECHTE Seitenaufrufe beim Anbieter und zaehlen
+    # deshalb gegen dieselbe zentrale Begrenzung wie die Datenabrufe —
+    # sonst umginge der Beweis-Snapshot das Limit vollstaendig.
+    from listing_identity import detect_source
+    from provider_fetch import MOCK_PROVIDER_FETCH
+    from provider_limiter import acquire_slot, extend_slot, release_slot
+    quelle = detect_source(url) or "kleinanzeigen"
+    if MOCK_PROVIDER_FETCH:
+        # Im Lasttest keine echten Seitenaufrufe.
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed", "error": "Mock-Modus: kein Abruf",
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+        return
+    # mobile.de und AutoScout24 blocken automatisierte Browser — ein
+    # Playwright-Foto zeigt dort nur eine Fehlerseite. Fuer beide wird
+    # deshalb das Mobile Rebuild aus den bereits ausgelesenen
+    # Inserats-Daten erzeugt (klar gekennzeichnet, KEIN Nachbau der
+    # Anbieterseite). Kein Provider-Slot noetig: es wird nur das
+    # Bilder-CDN angesprochen, nicht die Anbieterseite.
+    if quelle in ("mobile", "autoscout24"):
+        # Wunsch 09/2026: Snapshots nur fuer Kleinanzeigen. Alt-/Reaper-
+        # Zeilen fuer mobile.de/AutoScout24 werden sauber beendet statt
+        # ein Datenblatt zu bauen (SnapshotCard hoert bei "failed" auf).
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed",
+                      "error": "Snapshots derzeit nur fuer Kleinanzeigen",
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+        return
+
+    slot_id = None
+    for _ in range(40):                       # bis zu ~60 s auf einen Slot warten
+        slot_id = await acquire_slot(db, quelle)
+        if slot_id:
+            break
+        await asyncio.sleep(1.5)
+    if not slot_id:
+        await db.listing_snapshots.update_one(
+            {"id": snap_id},
+            {"$set": {"status": "failed",
+                      "error": "Anbieter gerade ausgelastet - bitte spaeter",
+                      "completed_at": datetime.now(timezone.utc).isoformat()}})
+        return
+    async def _slot_frisch_halten():
+        # Aufnahmen mit Wiederholungen koennen laenger dauern als die
+        # Slot-Frist. Ohne Herzschlag wuerde die Frist den Slot entfernen,
+        # waehrend der Seitenaufruf noch laeuft — der Zaehler bliebe zu
+        # hoch und die Kapazitaet dauerhaft kleiner.
+        while True:
+            try:
+                await asyncio.sleep(30)
+                await extend_slot(db, slot_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    _puls = asyncio.create_task(_slot_frisch_halten())
     try:
-        png, pdf = await _capture_with_playwright(url)
+        png, pdf = await _capture_with_retry(db, snap_id, url)
         # Compress PNG → JPEG and rebuild a 1-page image-PDF (much smaller).
         loop = asyncio.get_running_loop()
         png, pdf = await loop.run_in_executor(None, _compress_artifacts, png, pdf)
@@ -575,3 +918,8 @@ async def run_snapshot_job(db, snap_id: str) -> None:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }},
         )
+    finally:
+        _puls.cancel()
+        # Quelle mitgeben: hat die Frist das Slot-Dokument bereits entfernt,
+        # koennte der Zaehler sonst nicht zurueckgesetzt werden.
+        await release_slot(db, slot_id, quelle)
