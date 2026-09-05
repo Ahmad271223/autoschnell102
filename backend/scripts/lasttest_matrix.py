@@ -213,7 +213,7 @@ async def welt_aufbauen(sess) -> Welt:
         dmail = f"mx_drv_{i}_{SUF}@e2etest-mail.de"
         st, js = await _post_json(sess, f"{API}/driver/register", {
             "email": dmail, "password": PW, "display_name": f"Fahrer {i}"})
-        assert st == 200
+        assert st == 200, f"Fahrer registrieren {st}: {str(js)[:200]}"
         firma["drv_h"] = {"Authorization": f"Bearer {js['token']}"}
         firma["drv_id"] = js["driver"]["id"]
         await _post_json(sess, f"{API}/drivers/add",
@@ -242,7 +242,7 @@ async def welt_aufbauen(sess) -> Welt:
         async with sess.put(f"{API}/appointments/{appt['id']}",
                             json={"driver_id": firma["drv_id"]},
                             headers=h) as r:
-            assert r.status == 200
+            assert r.status == 200, f"Fahrer zuweisen {r.status}: {(await r.text())[:200]}"
 
         st, js = await _post_json(
             sess, f"{API}/resale/draft/{firma['vehicle_id']}", {}, h=h)
@@ -251,18 +251,18 @@ async def welt_aufbauen(sess) -> Welt:
         async with sess.put(f"{API}/resale/{firma['listing_id']}",
                             json={"price_public": 15000 + i,
                                   "price_b2b": 14000 + i}, headers=h) as r:
-            assert r.status == 200
+            assert r.status == 200, f"Inserat aendern {r.status}: {(await r.text())[:200]}"
         await _post_json(sess, f"{API}/resale/{firma['listing_id']}/status",
                          {"status": "verkaufsbereit"}, h=h)
         async with sess.put(f"{API}/admin/dealers/{me['dealer_id']}/sale-plan",
                             json={"tier": "s5", "months": 1},
                             headers=w.admin_h) as r:
-            assert r.status == 200
+            assert r.status == 200, f"Verkaufsplan {r.status}: {(await r.text())[:200]}"
         await _post_json(sess, f"{API}/resale/{firma['listing_id']}/publish",
                          {"visibility": "public"}, h=h)
         async with sess.put(f"{API}/dealer/marketplace-profile",
                             json={"public": True}, headers=h) as r:
-            assert r.status == 200
+            assert r.status == 200, f"Marktplatz-Profil {r.status}: {(await r.text())[:200]}"
 
         # Protokoll einmal regulaer abschliessen (Basis fuer Korrektur-Zyklen)
         await protokoll_abschliessen(sess, firma, erste_runde=True)
@@ -271,8 +271,8 @@ async def welt_aufbauen(sess) -> Welt:
     st, js = await _post_json(sess, f"{API}/buyer/register", {
         "company_name": "Mx Kaeufer", "contact_name": "Kaeufer M",
         "email": f"mx_kauf_{SUF}@e2etest-mail.de", "password": PW,
-        "phone": "0511 3"})
-    assert st == 200
+        "phone": "0511 3", "gewerblich_bestaetigt": True})
+    assert st == 200, f"Kaeufer registrieren {st}: {str(js)[:200]}"
     ktok = js["token"]
     async with sess.get(f"{API}/buyer/me",
                         headers={"Authorization": f"Bearer {ktok}"}) as r:
