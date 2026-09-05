@@ -19,6 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Zustand des MongoDB-Replica-Sets nachsehen (nur lesend)")
+    ap.add_argument("--url", default="", help="MONGO_URL (Standard: aus Umgebung/.env)")
+    args = ap.parse_args()
     try:
         from dotenv import load_dotenv
         load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -27,7 +32,7 @@ def main() -> int:
     from pymongo import MongoClient
     from pymongo.errors import OperationFailure, PyMongoError
 
-    url = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
+    url = args.url or os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
     try:
         cl = MongoClient(url, serverSelectionTimeoutMS=8000)
         st = cl.admin.command("replSetGetStatus")
