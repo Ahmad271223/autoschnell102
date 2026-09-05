@@ -69,7 +69,8 @@ echo "   Backend bereit."
 echo "== 3/4 Lasttest laeuft (Ergebnisse: docs/lasttests/)"
 # Die Lasttest-Programme sind absichtlich NICHT im Produktions-Image
 # (.dockerignore: scripts/lasttest*) — sie kommen vom Server in den Container.
-docker run --rm --network "$NETZ" \
+# --user 0: das Image laeuft als Nutzer "app", der Ergebnisordner gehoert root.
+docker run --rm --user 0 --network "$NETZ" \
     -v "$VERZ/backend/scripts:/app/scripts:ro" \
     -v "$VERZ/docs/lasttests:/docs/lasttests" \
     -e TEST_BASE_URL=http://last-backend:8001 \
@@ -82,7 +83,7 @@ docker run --rm --network "$NETZ" \
         python -X utf8 scripts/lasttest_stoss.py"
 ERG=$?
 # Auswertung ist Beiwerk: darf fehlen, aendert das Ergebnis nicht.
-[ $ERG -eq 0 ] && docker run --rm -v "$VERZ/backend/scripts:/app/scripts:ro" \
+[ $ERG -eq 0 ] && docker run --rm --user 0 -v "$VERZ/backend/scripts:/app/scripts:ro" \
     -v "$VERZ/docs/lasttests:/docs/lasttests" "$IMAGE" \
     python -X utf8 scripts/matrix_auswertung.py 2>/dev/null || true
 
