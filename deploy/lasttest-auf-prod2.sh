@@ -67,7 +67,10 @@ done
 echo "   Backend bereit."
 
 echo "== 3/4 Lasttest laeuft (Ergebnisse: docs/lasttests/)"
+# Die Lasttest-Programme sind absichtlich NICHT im Produktions-Image
+# (.dockerignore: scripts/lasttest*) — sie kommen vom Server in den Container.
 docker run --rm --network "$NETZ" \
+    -v "$VERZ/backend/scripts:/app/scripts:ro" \
     -v "$VERZ/docs/lasttests:/docs/lasttests" \
     -e TEST_BASE_URL=http://last-backend:8001 \
     -e MONGO_URL=mongodb://last-mongo:27017 -e DB_NAME=autoschnell_last \
@@ -76,9 +79,12 @@ docker run --rm --network "$NETZ" \
     -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" \
     "$IMAGE" sh -c "pip install -q psutil >/dev/null 2>&1; \
         python -X utf8 scripts/lasttest_matrix.py --alle --szenario T1,T2,T3,T8,T9 $KURZ && \
-        python -X utf8 scripts/lasttest_stoss.py && \
-        python -X utf8 scripts/matrix_auswertung.py 2>/dev/null || true"
+        python -X utf8 scripts/lasttest_stoss.py"
 ERG=$?
+# Auswertung ist Beiwerk: darf fehlen, aendert das Ergebnis nicht.
+[ $ERG -eq 0 ] && docker run --rm -v "$VERZ/backend/scripts:/app/scripts:ro" \
+    -v "$VERZ/docs/lasttests:/docs/lasttests" "$IMAGE" \
+    python -X utf8 scripts/matrix_auswertung.py 2>/dev/null || true
 
 echo "== 4/4 Aufraeumen"
 aufraeumen
