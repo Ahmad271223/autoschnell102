@@ -52,4 +52,9 @@ regexes = [
   '''(?i)apify_test_token''',
   '''@e2etest-mail\.de''',
   '''Ci-Stack-Super-2026!x''',
+  # Zwei weitere Testwerte, die der scharfe Lauf ueber die Historie
+  # gefunden hat (Fahrer-Passwortpruefung, Test-Admin). Gegen die
+  # Produktionswerte geprueft: keine Uebereinstimmung.
+  '''Sicher\-Fahrt\-2026''',
+  '''Admin123!''',
 ]
