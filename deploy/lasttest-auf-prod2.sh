@@ -23,15 +23,18 @@
 #   sh deploy/lasttest-auf-prod2.sh --kurz     # 45-Sekunden-Probelauf (~10 min)
 #   sh deploy/lasttest-auf-prod2.sh            # komplette Messung (~90 min)
 #   sh deploy/lasttest-auf-prod2.sh --nur-stoss # nur der Stosstest (~15 min)
+#   SZENARIEN=T3 sh deploy/lasttest-auf-prod2.sh --nur-matrix  # nur ein Szenario
 set -u
 
 VERZ="${VERZEICHNIS:-/opt/autoschnell}"
 NETZ=lasttest
 KURZ=""
 NUR_STOSS=""
+NUR_MATRIX=""
 for arg in "$@"; do
     [ "$arg" = "--kurz" ] && KURZ="--kurz"
     [ "$arg" = "--nur-stoss" ] && NUR_STOSS=1
+    [ "$arg" = "--nur-matrix" ] && NUR_MATRIX=1
 done
 
 cd "$VERZ" || { echo "FEHLER: $VERZ fehlt"; exit 2; }
@@ -84,8 +87,8 @@ docker run --rm --user 0 --network "$NETZ" \
     -e SUPER_ADMIN_USERNAME=last-superadmin -e SUPER_ADMIN_PASSWORD=last-only-superadmin-pw-1 \
     -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" \
     "$IMAGE" sh -c "pip install -q psutil >/dev/null 2>&1; \
-        if [ -z '$NUR_STOSS' ]; then python -X utf8 scripts/lasttest_matrix.py --alle --szenario T1,T2,T3,T8,T9 $KURZ; fi && \
-        python -X utf8 scripts/lasttest_stoss.py"
+        if [ -z '$NUR_STOSS' ]; then python -X utf8 scripts/lasttest_matrix.py --alle --szenario ${SZENARIEN:-T1,T2,T3,T8,T9} $KURZ; fi && \
+        if [ -z '$NUR_MATRIX' ]; then python -X utf8 scripts/lasttest_stoss.py; fi"
 ERG=$?
 # Auswertung ist Beiwerk: darf fehlen, aendert das Ergebnis nicht.
 [ $ERG -eq 0 ] && docker run --rm --user 0 -v "$VERZ/backend/scripts:/app/scripts:ro" \

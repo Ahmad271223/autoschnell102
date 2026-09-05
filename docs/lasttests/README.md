@@ -150,10 +150,24 @@ MongoDB, Backend mit 4 Workern und Anbieter-Attrappe, eigenes Docker-Netz.
 Die Produktion auf demselben Server wurde nicht berührt. Rohdaten:
 [prod2/matrix/](prod2/matrix/) und [prod2/stoss/](prod2/stoss/).
 
-**Ehrlichkeit zuerst:** Die Matrix lief im Kurzmodus (45 s Messung statt
-300 s, 100 Nutzer, 3 Wiederholungen). Ein zweiter Satz Matrix-Läufe
-(11:32–12:02 UTC) lief versehentlich gleichzeitig mit dem ersten und
-ist NICHT ausgewertet. Der Stoßtest lief danach allein und vollständig.
+**Ehrlichkeit zuerst, drei Einschränkungen:**
+
+1. Die Matrix lief zuerst im Kurzmodus (45 s statt 300 s); der volle
+   Lauf (300 s) folgte am Nachmittag, Tabelle weiter unten.
+2. Ein zweiter Satz Kurz-Läufe (11:32–12:02 UTC) lief versehentlich
+   gleichzeitig mit dem ersten und ist NICHT ausgewertet.
+3. **T3 (Fotos) ist auf prod2 nicht gültig und muss wiederholt werden.**
+   Ursache: ein Fehler im Testskript, nicht im Produkt. Seit die
+   Foto-Adressen signiert sind (`?exp=…&sig=…`), schnitt der Test beim
+   Löschen die Signatur nicht ab, fand das Foto nicht (404), gab nie
+   einen Platz frei und lief dauerhaft ins 40-Fotos-Limit — jede
+   Ablehnung wurde als "fachlich erwartet" verbucht. Nachgestellt: 40
+   Uploads gehen durch, der 41. wird korrekt abgelehnt. Der Test ist
+   korrigiert und hält jetzt je Ablehnung den Antworttext des Servers
+   fest, damit so etwas nicht wieder unter "erwartet" verschwindet.
+   Dieselbe Ursache blähte die Spalte "fachliche Ablehnungen" bei T2
+   und T9 auf; Fehlerrate und Antwortzeiten der Hauptfunktionen sind
+   davon nicht betroffen.
 
 ## Matrix (Kurzmodus, 100 Nutzer, 45 s, je 3×)
 
@@ -176,6 +190,30 @@ parallel gelöscht wurde): 0–251 je Lauf, wie im August ausgewiesen.
 hier 284–310 ms. Fotos dort 142–192 ms, hier 54–105 ms. Links dort
 34–36 ms, hier 14–16 ms. Die echte Hardware ist bei den
 Hauptfunktionen rund doppelt so schnell.
+
+## Matrix, voller Lauf (100 Nutzer, 300 s, je 3×; T9: 140 Nutzer, 60 s)
+
+Rohdaten: [prod2/matrix-lang/](prod2/matrix-lang/).
+
+| Szenario | Anfragen je Lauf | techn. Fehler | Hauptfunktion p95 (ms) | p99 (ms) | max. Rückstau | Doppel-Abrufe | CPU-Spitze | RAM Spitze | RAM nach Drain | Reste |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| T1 Links | 6482/6948/7518 | 0/0/0 | Warten auf neue Links 25–33 s¹ | 37–42 s¹ | 96 | 0 | 32–35 % | 16 % | 14,4–14,8 % | 0/0 |
+| T2 PDF | 36659/36198/36473 | 0/0/0 | 380/425/398 | 518/613/558 | 6 | 0 | 95–96 % | 21 % | 18,9–20,3 % | 0/0 |
+| T3 Fotos | 29535/27872/29067 | 0/0/0 | (ungültig, siehe oben) | — | 6 | 0 | 64–83 % | 23 % | 20,7–21,4 % | 0/0 |
+| T8 Gesamt | 8259/8106/8266 | 0/0/0 | 37/35/39 (bekannte Links) | 83/75/92 | 93 | 0 | 32–41 % | 21 % | 20,1–20,2 % | 0/0 |
+| T9 Spitze 140 | 6069/6031/6096 | 0/0/0 | 127/127/138 (PDF) | 188/187/185 | 74 | 0 | 60–63 % | 22 % | 19,9–20,5 % | 0/0 |
+
+¹ T1 misst mit Absicht die Warteschlange neuer Links hinter der
+Anbieter-Drossel (3 gleichzeitige Abrufe, Attrappe 0,4 s): der
+Rückstau von bis zu 96 Jobs wird vollständig abgearbeitet; die
+Annahme selbst dauert 14–16 ms.
+
+**Was der lange Lauf zusätzlich beweist:** Über 15 Läufe à 300 s
+(zusammen rund 75 Minuten Dauerlast) bleibt die technische Fehlerrate
+bei 0,00 %, und der Arbeitsspeicher fällt nach jedem Lauf auf den
+Ausgangswert zurück (14–21 %) — kein Speicherleck. PDF-Erzeugung mit
+100 Nutzern ohne Pause treibt die CPU auf 95 %; die Antwortzeit bleibt
+dabei unter 0,45 s (p95).
 
 ## Stoßtest (alle 24 Stöße, jeweils allein)
 
@@ -211,9 +249,8 @@ Sekunde; 500 in derselben Sekunde ein bis fünf Sekunden, verlustfrei.
 - Stoßfest bis 500 gleichzeitige Einreichungen, verlustfrei.
 - Empfehlung: Normalbetrieb bis 100–150 gleichzeitig aktive Nutzer mit
   sehr guten Antwortzeiten, Spitzen bis 500 gleichzeitige Klicks sicher.
-- Noch offen: der lange Lauf (300 s statt 45 s) für den Nachweis der
-  Stabilität über Zeit — `sh deploy/lasttest-auf-prod2.sh` ohne `--kurz`,
-  rund 90 Minuten, am besten nachts.
+- Noch offen: T3 (Fotos) auf prod2 mit dem korrigierten Test —
+  `SZENARIEN=T3 sh deploy/lasttest-auf-prod2.sh`, rund 20 Minuten.
 
 ## 5. Status-Kennzeichnung
 

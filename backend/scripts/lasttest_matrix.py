@@ -82,14 +82,21 @@ class Stats:
         self.job_annahme, self.job_warte = [], []
         self.unfertig = 0
         self.resets = []          # [{zeit, endpunkt}] je 599
+        # Erster Antworttext je (Endpunkt, Status): eine 400 ist nicht
+        # gleich der anderen. Ohne diesen Text lief am 05.09.2026 ein
+        # Testfehler (Foto-Schluessel mit Signatur) stundenlang unter
+        # "40-Fotos-Limit greift" — der Server hatte etwas anderes gesagt.
+        self.beispiel = {}
 
-    def add(self, name, ms, status, erwartet_4xx=False):
+    def add(self, name, ms, status, erwartet_4xx=False, text=""):
         self.total += 1
         if 200 <= status < 300 or (erwartet_4xx and 400 <= status < 500):
             self.ok.setdefault(name, []).append(ms)
         else:
             self.err.setdefault(name, {}).setdefault(status, 0)
             self.err[name][status] += 1
+            if text and (name, status) not in self.beispiel:
+                self.beispiel[(name, status)] = str(text)[:160]
             if status == 599:
                 self.resets.append({
                     "zeit": datetime.now(timezone.utc).isoformat(),
@@ -105,11 +112,13 @@ class Stats:
                       "p50_ms": round(_pct(v, 50) or 0),
                       "p95_ms": round(_pct(v, 95) or 0),
                       "p99_ms": round(_pct(v, 99) or 0),
-                      "fehler_nach_status": e}
+                      "fehler_nach_status": e,
+                      "antwort_beispiel": {str(st): t for (nn, st), t in self.beispiel.items() if nn == n}}
         for n, e in self.err.items():
             if n not in out:
                 out[n] = {"ok": 0, "fehler": sum(e.values()),
-                          "fehlerrate_prozent": 100.0, "fehler_nach_status": e}
+                          "fehlerrate_prozent": 100.0, "fehler_nach_status": e,
+                          "antwort_beispiel": {str(st): t for (nn, st), t in self.beispiel.items() if nn == n}}
         return out
 
 
@@ -140,7 +149,7 @@ async def _timed(sess, stats, name, method, url, erwartet_4xx=False, **kw):
         async with sess.request(method, url, **kw) as r:
             body = await r.read()
             stats.add(name, (time.monotonic() - t0) * 1000, r.status,
-                      erwartet_4xx)
+                      erwartet_4xx, text=body.decode("utf-8", "replace") if r.status >= 400 else "")
             return r.status, body
     except Exception:
         stats.add(name, (time.monotonic() - t0) * 1000, 599)
@@ -447,7 +456,8 @@ async def op_foto(sess, stats, w, firma):
                 await _timed(sess, stats, "foto_loeschen", "POST",
                              f"{API}/resale/{firma['listing_id']}"
                              f"/photos/remove", headers=firma["h"],
-                             json={"key": alt.replace("/api/files/", "")})
+                             # Signierte Adresse (?exp=…&sig=…) -> nur der Schluessel zaehlt
+                             json={"key": alt.replace("/api/files/", "").split("?")[0]})
     elif d < 0.875:    # 20/80: oeffnen
         urls = firma.get("foto_urls") or []
         if urls:
@@ -460,7 +470,7 @@ async def op_foto(sess, stats, w, firma):
             await _timed(sess, stats, "foto_loeschen", "POST",
                          f"{API}/resale/{firma['listing_id']}/photos/remove",
                          headers=firma["h"],
-                         json={"key": u.replace("/api/files/", "")})
+                         json={"key": u.replace("/api/files/", "").split("?")[0]})
 
 
 async def op_foto_ungueltig(sess, stats, w, firma):
@@ -688,7 +698,8 @@ def klassifiziere(endpunkte):
                 k["verbindungsabbruch_client"] += n
             elif st_i in (ERWARTETE_ABLEHNUNG.get(name) or {}):
                 k["fachlich_erwartet"] += n
-                details.setdefault(name, {})[st] =                     f"{n}x {ERWARTETE_ABLEHNUNG[name][st_i]}"
+                probe = (v.get("antwort_beispiel") or {}).get(str(st), "")
+                details.setdefault(name, {})[st] =                     f"{n}x {ERWARTETE_ABLEHNUNG[name][st_i]}" + (f" | Server: {probe}" if probe else "")
             elif st_i in (RACE_UX.get(name) or set()):
                 k["race_ux_befund"] += n
                 details.setdefault(name, {})[st] = f"{n}x Race/UX-Befund"
