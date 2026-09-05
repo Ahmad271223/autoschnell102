@@ -58,4 +58,45 @@ test.describe("Rollen-Navigation", () => {
     await expect(page.getByTestId("admin-create-user-btn")).toBeEnabled();
     await expect(page.getByTestId(`user-pw-btn-${firma.userId}`)).toBeVisible();
   });
+
+  test("Admin landet NIE auf einer Haendler-Seite", async ({ page }) => {
+    // Befund 05.09.2026: Der Super-Admin sah "Fahrzeugbestand &
+    // Weiterverkauf" mit der Admin-Seitenleiste daneben und der Meldung
+    // "Nur fuer Haendler-Accounts". Direkter Aufruf, Startseite und der
+    // Weg ueber ?next werden hier alle drei geprueft.
+    await h.authPage(page, "app", await h.superAdmin());
+
+    for (const ziel of ["/app/bestand", "/app/vertraege", "/app/team",
+                        "/app/termine", "/abo"]) {
+      await page.goto(ziel);
+      await expect(page, `${ziel} war fuer den Admin erreichbar`)
+        .toHaveURL(/\/admin\/?$/);
+      await expect(page.getByText("Nur für Händler-Accounts")).toHaveCount(0);
+      await expect(page.getByText("Fahrzeugbestand & Weiterverkauf")).toHaveCount(0);
+    }
+
+    await page.goto("/app");
+    await expect(page).toHaveURL(/\/admin\/?$/);
+  });
+
+  test("Haendler landet NIE im Admin-Bereich", async ({ page }) => {
+    await h.authPage(page, "app", firma.token);
+    for (const ziel of ["/admin", "/admin/users", "/admin/betrieb"]) {
+      await page.goto(ziel);
+      await expect(page, `${ziel} war fuer den Haendler erreichbar`)
+        .toHaveURL(/\/app\/bestand/);
+    }
+  });
+
+  test("Anmeldung folgt keinem Ziel aus einem fremden Bereich", async ({ page }) => {
+    // Genau der Weg aus dem Befund: jemand wird auf einer Haendler-Seite
+    // abgemeldet, danach meldet sich der Betreiber auf derselben
+    // Anmeldeseite an.
+    await page.goto("/login?next=%2Fapp%2Fbestand");
+    await page.getByTestId("login-email").fill(h.SUPER_ADMIN.username);
+    await page.getByTestId("login-password").fill(h.SUPER_ADMIN.password);
+    await page.getByTestId("login-submit").click();
+    await expect(page).toHaveURL(/\/admin\/?$/);
+    await expect(page.getByText("Fahrzeugbestand & Weiterverkauf")).toHaveCount(0);
+  });
 });

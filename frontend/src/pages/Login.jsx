@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
+import { sicheresZiel } from "@/lib/rollen";
 import { Bolt, ArrowRight } from "lucide-react";
 
 export default function Login() {
@@ -29,9 +30,12 @@ export default function Login() {
         return;
       }
       toast.success("Willkommen zurück");
-      const isAdmin = u?.role === "admin" || u?.is_super_admin;
-      const fallback = isAdmin ? "/admin" : "/app";
-      nav(params.get("next") || fallback);
+      // Dem ?next aus der Adresszeile wird nur gefolgt, wenn das Ziel zur
+      // Rolle passt. Sonst landete ein Super-Admin, der sich auf
+      // /login?next=/app/bestand anmeldet, auf einer Haendler-Seite —
+      // mit Admin-Seitenleiste und der Meldung "Nur fuer Haendler-
+      // Accounts" (Befund 05.09.2026).
+      nav(sicheresZiel(u, params.get("next")));
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {

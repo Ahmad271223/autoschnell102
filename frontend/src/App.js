@@ -6,6 +6,7 @@ import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { DriverAuthProvider } from "@/context/DriverContext";
 import { BuyerAuthProvider } from "@/context/BuyerContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { startseite } from "@/lib/rollen";
 import AppLayout from "@/components/AppLayout";
 
 import Landing from "@/pages/Landing";
@@ -76,8 +77,7 @@ const WrapFree = ({ children }) => (
 // direkt auf die Abo-Seite umgeleitet).
 function AppHome() {
   const { user } = useAuth();
-  if (user?.role === "admin") return <Navigate to="/admin" replace />;
-  return <Navigate to={user?.role === "sucher" ? "/app/vergleich" : "/app/bestand"} replace />;
+  return <Navigate to={startseite(user)} replace />;
 }
 
 export default function App() {
