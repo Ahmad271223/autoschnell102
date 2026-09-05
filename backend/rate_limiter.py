@@ -68,7 +68,15 @@ for _netz in os.environ.get("TRUSTED_PROXIES", "").split(","):
 # jetzt nur die Netze, in denen ein eigener Vermittler ueberhaupt stehen
 # kann: der eigene Rechner und die privaten Bereiche (Docker, Hetzner-
 # Privatnetz). Ein oeffentlicher Nachbar ist nie ein Vermittler.
-_VERMITTLER_NETZE = _TRUSTED_PROXIES or [ipaddress.ip_network(n) for n in (
+# Runde 9: Die Nachbar-Sperre nimmt die konfigurierte Liste UND die privaten
+# Netze. Vorher galt bei gesetzter Liste NUR die Liste — stand dort z.B.
+# "127.0.0.1" oder "10.0.0.0/16", war der nginx-Container (172.x im
+# Docker-Netz) kein Vermittler mehr, und ALLE Besucher landeten unter der
+# Adresse des Containers in EINEM Zaehler: zehn Fehlversuche eines
+# Nutzers haetten alle anderen fuer eine Minute ausgesperrt. Ein Nachbar
+# aus einem privaten Netz ist nie ein Angreifer von aussen; wer im
+# privaten Netz sitzt, koennte ohnehin Schlimmeres.
+_VERMITTLER_NETZE = list(_TRUSTED_PROXIES) + [ipaddress.ip_network(n) for n in (
     "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 
 

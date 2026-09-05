@@ -150,6 +150,26 @@ def test_02_login_verlangt_zweiten_faktor(welt):
     assert r.status_code == 401
 
 
+def test_02b_gleicher_code_parallel_geht_genau_einmal_durch(welt):
+    """Runde 9: Zwei gleichzeitige Anfragen mit demselben gueltigen Code
+    sahen frueher beide den alten Zaehler und kamen beide durch. Jetzt
+    wird der Code atomar verbraucht — von acht gleichzeitigen Versuchen
+    darf genau EINER eine Sitzung bekommen."""
+    import concurrent.futures
+    r = _login(f"mfa_super_{SUF}@{MAIL}")
+    assert r.status_code == 200 and r.json().get("mfa_erforderlich"), r.text[:200]
+    zt = r.json()["mfa_token"]
+    code = _frischer_code(welt["secret"], welt["super_id"])
+
+    def _versuch(_):
+        return requests.post(f"{API}/auth/login/mfa",
+                             json={"mfa_token": zt, "code": code}, timeout=30).status_code
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        stati = list(ex.map(_versuch, range(8)))
+    assert stati.count(200) == 1, stati
+    assert all(s in (200, 401) for s in stati), stati
+
+
 def test_03_wiederherstellungscode_einmalig(welt):
     zt = _login(f"mfa_super_{SUF}@{MAIL}").json()["mfa_token"]
     code = welt["codes"][0]
@@ -234,3 +254,4 @@ def test_06_einrichten_mehrfach_liefert_dasselbe_geheimnis():
         assert drittes != erstes
     finally:
         dbx.users.delete_many({"email": mail})
+

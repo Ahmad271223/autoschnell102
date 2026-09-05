@@ -146,3 +146,17 @@ def test_eigener_vermittler_aus_privatem_netz_bleibt_erlaubt(monkeypatch):
     for nachbar in ("127.0.0.1", "172.18.0.5", "10.0.1.7", "192.168.1.2"):
         a = _Anfrage(nachbar, x_forwarded_for="203.0.113.9")
         assert rl.client_ip(a) == "203.0.113.9", nachbar
+
+
+# ------------------------------------------ Runde 9
+def test_docker_nachbar_zaehlt_auch_mit_gesetzter_liste(monkeypatch):
+    """Der Fall aus dem Pruefbericht: TRUSTED_PROXIES=127.0.0.1 (compose-
+    Standard von frueher), der Nachbar ist aber der nginx-Container mit
+    172.19.0.4. Vorher: Kopfzeile ignoriert, ALLE Besucher unter 172.19.0.4
+    in einem Zaehler. Jetzt: die echte Besucheradresse."""
+    rl = _modul(monkeypatch, proxies="127.0.0.1")
+    a = _Anfrage("172.19.0.4", x_forwarded_for="203.0.113.9")
+    assert rl.client_ip(a) == "203.0.113.9"
+    rl = _modul(monkeypatch, proxies="10.0.0.0/16")
+    b = _Anfrage("172.19.0.4", x_forwarded_for="198.51.100.7, 10.0.0.9")
+    assert rl.client_ip(b) == "198.51.100.7"

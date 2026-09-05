@@ -243,21 +243,33 @@ async def login_mfa(body: MfaLoginIn, request: Request):
     code = body.code.strip()
     zaehler = _mfa.code_pruefen(secret, code, int(m.get("letzter_zaehler", -1))) if secret else None
     if zaehler is not None:
-        await db.users.update_one({"id": user["id"]},
-                                  {"$set": {"mfa.letzter_zaehler": zaehler, "mfa.fehlversuche": 0}})
+        # Runde 9: Verbrauch des Codes ATOMAR. Zwei gleichzeitige Anfragen
+        # mit demselben Code sahen vorher beide den alten Zaehler und kamen
+        # beide durch. Jetzt gewinnt genau eine: nur wer den Zaehler
+        # wirklich hochsetzt, bekommt eine Sitzung.
+        res = await db.users.update_one(
+            {"id": user["id"],
+             "$or": [{"mfa.letzter_zaehler": {"$lt": zaehler}},
+                     {"mfa.letzter_zaehler": {"$exists": False}}]},
+            {"$set": {"mfa.letzter_zaehler": zaehler, "mfa.fehlversuche": 0}})
+        if res.modified_count == 0:
+            raise HTTPException(401, "Dieser Code wurde gerade schon verwendet — bitte den nächsten Code aus der App abwarten")
     elif secret and _mfa.code_pruefen(secret, code, -1) is not None:
         # Richtiger, aber schon benutzter Code (z.B. direkt nach der
         # Einrichtung): kein Fehlversuch, sondern klarer Hinweis.
         raise HTTPException(401, "Dieser Code wurde gerade schon verwendet — bitte den nächsten Code aus der App abwarten")
     else:
         h = _mfa.code_hash(code)
-        hashes = list(m.get("wiederherstellung") or [])
-        if h in hashes:
-            hashes.remove(h)
-            await db.users.update_one({"id": user["id"]},
-                                      {"$set": {"mfa.wiederherstellung": hashes, "mfa.fehlversuche": 0}})
+        # Wiederherstellungscode ebenfalls atomar verbrauchen ($pull mit
+        # Bedingung): der Code kann nur EINMAL durchgehen, auch bei zwei
+        # gleichzeitigen Anfragen.
+        res = await db.users.update_one(
+            {"id": user["id"], "mfa.wiederherstellung": h},
+            {"$pull": {"mfa.wiederherstellung": h}, "$set": {"mfa.fehlversuche": 0}})
+        if res.modified_count == 1:
+            uebrig = len([x for x in (m.get("wiederherstellung") or []) if x != h])
             await log_activity("", user["id"], "auth.login.mfa.wiederherstellungscode",
-                               meta={"uebrig": len(hashes), "ip": ip})
+                               meta={"uebrig": uebrig, "ip": ip})
         else:
             fehl = int(m.get("fehlversuche", 0)) + 1
             upd = {"mfa.fehlversuche": fehl}

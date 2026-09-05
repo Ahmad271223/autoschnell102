@@ -1,4 +1,5 @@
 import axios from "axios";
+import { TOKEN_APP, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND}/api`;
@@ -8,7 +9,7 @@ export const API_BASE = `${BACKEND}/api`;
 export const api = axios.create({ baseURL: API_BASE, timeout: 60000 });
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("ah_token");
+  const token = tokenLesen(TOKEN_APP);
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -19,7 +20,7 @@ api.interceptors.response.use(
     if (err?.response?.status === 401) {
       const url = err?.config?.url || "";
       if (!url.includes("/auth/login") && !url.includes("/auth/register")) {
-        localStorage.removeItem("ah_token");
+        tokenLoeschen(TOKEN_APP);
         if (window.location.pathname.startsWith("/app") || window.location.pathname.startsWith("/admin")) {
           window.location.href = "/login?reason=session";
         }

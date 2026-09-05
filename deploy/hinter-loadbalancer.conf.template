@@ -18,9 +18,16 @@
 # diese Ausnahme bekaeme er 444 und wuerde den Server dauerhaft als
 # "unhealthy" fuehren. Die Antwort kommt vom Backend, nicht fest von nginx:
 # so bedeutet "healthy" auch wirklich, dass die Anwendung laeuft.
+# Runde 9: Hinter dem Load Balancer darf NIEMAND direkt an Port 80 —
+# sonst liesse sich mit einer selbst gesetzten Kopfzeile X-Forwarded-Proto
+# die HTTPS-Umleitung umgehen. Die Firewall muss das ohnehin sperren;
+# nginx sperrt es zusaetzlich (Verteidigung in der Tiefe).
 server {
   listen 80 default_server;
   server_name _;
+  allow ${PRIVATES_NETZ};
+  allow 127.0.0.1;
+  deny all;
 
   location = /api/health {
     proxy_pass http://backend:8001;
@@ -46,6 +53,9 @@ server {
 server {
   listen 80;
   server_name ${PUBLIC_HOST};
+  allow ${PRIVATES_NETZ};
+  allow 127.0.0.1;
+  deny all;
 
   # Echte Besucher-Adresse: Der Load Balancer traegt sie in X-Forwarded-For
   # ein. Vertraut wird dieser Angabe nur aus dem privaten Netz — eine von

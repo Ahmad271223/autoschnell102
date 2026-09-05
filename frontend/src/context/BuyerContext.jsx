@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
 import { API_BASE } from "@/lib/api";
 
@@ -10,7 +11,7 @@ const BuyerCtx = createContext(null);
 
 export const buyerApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 buyerApi.interceptors.request.use((c) => {
-  const t = localStorage.getItem("ah_buyer_token");
+  const t = tokenLesen(TOKEN_KAEUFER);
   if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
@@ -20,9 +21,9 @@ buyerApi.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err?.response?.status === 401
-        && localStorage.getItem("ah_buyer_token")
+        && tokenLesen(TOKEN_KAEUFER)
         && !String(err?.config?.url || "").includes("/buyer/login")) {
-      localStorage.removeItem("ah_buyer_token");
+      tokenLoeschen(TOKEN_KAEUFER);
       if (window.location.pathname.startsWith("/markt")
           && !window.location.pathname.startsWith("/markt/login")) {
         window.location.href = "/markt/login?reason=session";
@@ -43,21 +44,21 @@ export function BuyerAuthProvider({ children }) {
   };
 
   useEffect(() => {
-    const t = localStorage.getItem("ah_buyer_token");
+    const t = tokenLesen(TOKEN_KAEUFER);
     if (!t) { setReady(true); return; }
     buyerApi.get("/buyer/me")
       .then((r) => setBuyer(r.data))
       .catch((e) => {
         // Nur bei 401 (Session tot) ausloggen — bei Netz-/Serverfehlern
         // Token behalten, sonst wirft ein kurzer Backend-Aussetzer alle raus.
-        if (e?.response?.status === 401) localStorage.removeItem("ah_buyer_token");
+        if (e?.response?.status === 401) tokenLoeschen(TOKEN_KAEUFER);
       })
       .finally(() => setReady(true));
   }, []);
 
   const login = async (email, password) => {
     const { data } = await buyerApi.post("/buyer/login", { email, password });
-    localStorage.setItem("ah_buyer_token", data.token);
+    tokenSetzen(TOKEN_KAEUFER, data.token);
     // Login war erfolgreich — ein Fehler beim Nachladen des Profils darf
     // NICHT als "Anmeldung fehlgeschlagen" erscheinen.
     try { return await refresh(); }
@@ -66,7 +67,7 @@ export function BuyerAuthProvider({ children }) {
 
   const register = async (payload) => {
     const { data } = await buyerApi.post("/buyer/register", payload);
-    localStorage.setItem("ah_buyer_token", data.token);
+    tokenSetzen(TOKEN_KAEUFER, data.token);
     let u = data.user || null;
     try { u = await refresh(); }
     catch { setBuyer(data.user || null); }
@@ -78,7 +79,7 @@ export function BuyerAuthProvider({ children }) {
   const logout = () => {
     // Server-Session mit beenden (Single-Session: Token wird ungültig).
     buyerApi.post("/auth/logout").catch(() => {});
-    localStorage.removeItem("ah_buyer_token");
+    tokenLoeschen(TOKEN_KAEUFER);
     setBuyer(null);
   };
 

@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { TOKEN_FAHRER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
 import { API_BASE, openAuthedFile } from "@/lib/api";
 
@@ -10,7 +11,7 @@ const DriverCtx = createContext(null);
 
 export const driverApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 driverApi.interceptors.request.use((c) => {
-  const t = localStorage.getItem("ah_driver_token");
+  const t = tokenLesen(TOKEN_FAHRER);
   if (t) c.headers.Authorization = `Bearer ${t}`;
   return c;
 });
@@ -27,17 +28,17 @@ export function DriverAuthProvider({ children }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const t = localStorage.getItem("ah_driver_token");
+    const t = tokenLesen(TOKEN_FAHRER);
     if (!t) { setReady(true); return; }
     driverApi.get("/driver/me")
       .then((r) => setDriver(r.data))
-      .catch(() => localStorage.removeItem("ah_driver_token"))
+      .catch(() => tokenLoeschen(TOKEN_FAHRER))
       .finally(() => setReady(true));
   }, []);
 
   const login = async (email, password) => {
     const { data } = await driverApi.post("/driver/login", { email, password });
-    localStorage.setItem("ah_driver_token", data.token);
+    tokenSetzen(TOKEN_FAHRER, data.token);
     // volle /me-Payload holen (inkl. dealers)
     const me = await driverApi.get("/driver/me");
     setDriver(me.data);
@@ -48,7 +49,7 @@ export function DriverAuthProvider({ children }) {
     const { data } = await driverApi.post("/driver/register", {
       email, password, display_name,
     });
-    localStorage.setItem("ah_driver_token", data.token);
+    tokenSetzen(TOKEN_FAHRER, data.token);
     const me = await driverApi.get("/driver/me");
     setDriver(me.data);
     return me.data;
@@ -64,7 +65,7 @@ export function DriverAuthProvider({ children }) {
     // Serverseitig widerrufen (Runde 5): vorher blieb ein kopierter Token
     // nach dem Abmelden bis zum Ablauf gueltig.
     driverApi.post("/driver/logout").catch(() => {});
-    localStorage.removeItem("ah_driver_token");
+    tokenLoeschen(TOKEN_FAHRER);
     setDriver(null);
   };
 
