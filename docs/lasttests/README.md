@@ -141,13 +141,87 @@ nie Anfragen verloren — es dauert nur länger.
   gleichzeitig aktive Nutzer mit sehr guten Antwortzeiten; Spitzen bis
   500 gleichzeitige Einreichungen werden sicher gepuffert.
 
+# Lauf auf der echten Hardware: prod2, 05.09.2026
+
+Die Läufe oben stammen vom Windows-PC. Am 05.09.2026 lief dieselbe Suite
+auf **prod2** (Hetzner CCX23, 4 dedizierte Kerne, 16 GB — baugleich mit
+prod1) in einem Wegwerf-Stack (`deploy/lasttest-auf-prod2.sh`): eigene
+MongoDB, Backend mit 4 Workern und Anbieter-Attrappe, eigenes Docker-Netz.
+Die Produktion auf demselben Server wurde nicht berührt. Rohdaten:
+[prod2/matrix/](prod2/matrix/) und [prod2/stoss/](prod2/stoss/).
+
+**Ehrlichkeit zuerst:** Die Matrix lief im Kurzmodus (45 s Messung statt
+300 s, 100 Nutzer, 3 Wiederholungen). Ein zweiter Satz Matrix-Läufe
+(11:32–12:02 UTC) lief versehentlich gleichzeitig mit dem ersten und
+ist NICHT ausgewertet. Der Stoßtest lief danach allein und vollständig.
+
+## Matrix (Kurzmodus, 100 Nutzer, 45 s, je 3×)
+
+| Szenario | Anfragen je Lauf | techn. Fehler | fachl. Ablehnungen | Hauptfunktion p95 (ms) | p99 (ms) | max. Rückstau | Doppel-Abrufe | CPU-Spitze | RAM | Reste |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| T1 Links | 1163/1445/1199 | 0/0/0 | 0/0/0 | 14/14/16 | 52/70/28 | 92 | 0 | 32/100/27 % | 15 % | 0/0 |
+| T2 PDF | 5613/5672/5639 | 0/0/0 | 963/1047/1014¹ | 310/309/284 | 466/438/363 | 4 | 0 | 82 % | 19 % | 0/0 |
+| T3 Fotos | 5004/5055/4953 | 0/0/0 | 2727/2650/2588¹ | 54/67/105 | 54/77/105 | 6 | 0 | 74 % | 21 % | 0/0 |
+| T8 Gesamt | 1208/1207/1348 | 0/0/0 | 14/13/15 | 29/37/(28494²) | 47/94/(33397²) | 91 | 0 | 36–68 % | 20 % | 0/0 |
+| T9 Spitze 140 | 6142/6061/6118 | 0/0/0 | 1607/1648/1609¹ | 115 (PDF) | 170 | 74 | 0 | 57 % | 20 % | 0/0 |
+
+¹ Fachlich erwartete Ablehnungen sind Schutzmechanismen, die greifen
+sollen: 40-Fotos-Limit, Doppelabschluss-Schutz (400/409). Keine davon
+ist ein Fehler. ² In T8 #3 war die meistgenutzte Funktion die Wartezeit
+auf neue Links — die gewollte Anbieter-Drossel (Rückstau bis 91 Jobs,
+alle abgearbeitet, Drain 0 s). Race-/UX-Befunde (404, wenn ein Foto
+parallel gelöscht wurde): 0–251 je Lauf, wie im August ausgewiesen.
+
+**Vergleich mit dem PC vom August (300 s):** PDF p95 dort 548–563 ms,
+hier 284–310 ms. Fotos dort 142–192 ms, hier 54–105 ms. Links dort
+34–36 ms, hier 14–16 ms. Die echte Hardware ist bei den
+Hauptfunktionen rund doppelt so schnell.
+
+## Stoßtest (alle 24 Stöße, jeweils allein)
+
+| Szenario | n | Spannweite | Annahme p95 | sofort | über Queue | verloren | Doppel-Abrufe | hängend | Drain | normale Seite während Spitze |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| S1 gleicher neuer Link | 100/300/500 | 5/59/108 ms | 338/944/1360 ms | 0/234/282 | Rest | 0 | 0 | 0 | 0 s | 8–13 ms |
+| S2 verschiedene neue | 100/300/500 | 17/12/21 ms | 435/737/1558 ms | 0 | alle | 0 | 0 | 0 | 0 s | 4–12 ms |
+| S3 bekannte Links | 100/300/500 | 6/24/21 ms | **222/641/1018 ms** | **alle** | 0 | 0 | 0 | 0 | 0 s | 9–11 ms |
+| S4 50/50 | 100/300/500 | 5/14/34 ms | 342/1166/1272 ms | exakt 50 % | exakt 50 % | 0 | 0 | 0 | 0 s | 6–8 ms |
+| S5 eine Firma, ein Link | 100/300/500 | 4/53/97 ms | 494/724/1208 ms | — | — | 0 | 0 | 0 | 0 s | 8–16 ms |
+| S6 zehn Firmen, ein Link | 100/300/500 | 17/64/78 ms | 400/905/1611 ms | — | — | 0 | 0 | 0 | 0 s | 8–12 ms |
+| S7 Doppelklick (2× je Nutzer) | 100/300/500 | 33/21/35 ms | 809/2349/4898 ms | 0/3/11 | alle | 0 | 0 | 0 | 0 s | 6–9 ms |
+| S8 + 20 PDF + 20 Foto | 100/300/500 | 4/11/18 ms | 804/2210/2723 ms | 0 | alle | 0 | 0 | 0 | 0 s | 6–7 ms |
+
+Gesamtbilanz: **8.100 von 8.100 Anfragen angenommen**, 0 verloren,
+0 doppelte Anbieter-Abrufe, 0 hängende Jobs, jede Warteschlange in 0 s
+geleert, und die normale Seite blieb während jeder Spitze unter 20 ms.
+CPU-Spitzen in den 500er-Stößen: 80–92 %.
+
+**Vergleich mit dem PC:** Bei 100 gleichzeitigen Nutzern ist prod2
+schneller (222–809 ms gegenüber 399–963 ms). Bei 500 gleichzeitigen
+Doppelklicks (S7 = 1.000 Anfragen in einer Sekunde) ist prod2 langsamer
+(4,9 s gegenüber 2,8 s): vier dedizierte Kerne sind bei 1.000
+gleichzeitigen Anfragen ausgelastet, der PC hatte mehr Kerne. Es geht
+dabei nichts verloren — es dauert länger. Für den Betrieb heißt das:
+100 gleichzeitige Klicks in derselben Sekunde unter einer halben
+Sekunde; 500 in derselben Sekunde ein bis fünf Sekunden, verlustfrei.
+
+## Freigabe-Aussage (echte Hardware)
+
+- Technische Fehlerrate in allen 15 Matrix-Läufen: **0,00 %**.
+- Kein Doppel-Abruf, kein Datenrest, kein Dateirest, RAM stabil um 20 %.
+- Stoßfest bis 500 gleichzeitige Einreichungen, verlustfrei.
+- Empfehlung: Normalbetrieb bis 100–150 gleichzeitig aktive Nutzer mit
+  sehr guten Antwortzeiten, Spitzen bis 500 gleichzeitige Klicks sicher.
+- Noch offen: der lange Lauf (300 s statt 45 s) für den Nachweis der
+  Stabilität über Zeit — `sh deploy/lasttest-auf-prod2.sh` ohne `--kurz`,
+  rund 90 Minuten, am besten nachts.
+
 ## 5. Status-Kennzeichnung
 
 | Bereich | Status |
 | --- | --- |
 | Matrix T1–T9, Stoß S1–S8, Regression 56 Tests | ✅ lokal auf Windows bestanden |
 | Anbieter-Abrufe, E-Mail, WhatsApp, Stripe-Versandweg | ⚠️ nur mit Mock getestet (E-Mail/WhatsApp sind auch in der App serverseitig Mock/wa.me — kein Queue-/Zustellsystem vorhanden) |
-| Linux-Staging (T1/T2/T3/T8/T9 + Stoß) | ⬜ noch nicht geprüft — Anleitung unten |
+| Linux-Staging (T1/T2/T3/T8/T9 + Stoß) | ✅ auf prod2 (CCX23) am 05.09.2026, Kurzmodus + voller Stoßtest, siehe unten |
 | Echte Testdienste (SMTP-Sandbox, Stripe-Testmodus, mobile.de-API) | ⬜ noch nicht geprüft |
 | Volle Platte, echter Anbieter-Ratelimit | ⬜ noch nicht geprüft |
 | T3 nach Foto-Fix (3 finale Läufe mit reparierter App) | ✅ bestanden (Audit 0/0) |
