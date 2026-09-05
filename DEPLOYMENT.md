@@ -211,6 +211,158 @@ Prüfung läuft **vor** Indexanlage und Admin-Seeding.
   (Browser-Erweiterung der Nutzer) geplant — verteilt die Abrufe auf
   hunderte IPs statt einer Server-IP.
 
+## Zweiter Server (prod2): Replikat, Snapshots in R2, Load Balancer
+
+Stand 09/2026: zwei gleich starke Server (CCX23). Der Umbau geschieht in
+drei Schritten, jeder fuer sich nuetzlich, jeder fuer sich rueckbaubar.
+Reihenfolge einhalten — Schritt 2 setzt Schritt 1 voraus, Schritt 3
+setzt beide voraus.
+
+Was danach gilt: Jede Aenderung in der Datenbank liegt sofort auf beiden
+Servern. Faellt prod1 aus, gehen keine Daten verloren. Ob das Umschalten
+automatisch passiert, haengt vom Schiedsrichter ab (siehe 2c).
+
+### 1. Beweis-Snapshots in den Objektspeicher (R2)
+
+Fotos liegen laengst in R2. Die Snapshot-Dateien (JPG + PDF je Inserat)
+lagen bis jetzt nur auf der Platte von prod1 — ein zweiter Server saehe
+sie nicht. Seit diesem Stand schreibt das Backend neue Snapshots
+automatisch nach R2, sobald `S3_ENDPOINT` und `S3_BUCKET` gesetzt sind
+(sind sie). Die alten Dateien einmal hinterhertragen:
+
+```bash
+cd /opt/autoschnell && git pull && docker compose up -d --build
+docker compose exec -T backend python scripts/snapshots_nach_r2.py
+```
+
+Das ist ein Probelauf und zeigt nur, was passieren wuerde. Dann:
+
+```bash
+docker compose exec -T backend python scripts/snapshots_nach_r2.py --wirklich
+```
+
+Beliebig oft wiederholbar; was schon in R2 liegt, wird uebersprungen. Die
+lokalen Kopien bleiben liegen, bis du sie ausdruecklich mit `--loeschen`
+entfernst (nur nach bestaetigtem Upload). Kontrolle: `/api/ready` zeigt
+weiterhin `s3: up`, und ein alter Snapshot laesst sich in der Oberflaeche
+oeffnen.
+
+### 2. MongoDB als Replikat ueber beide Server
+
+Voraussetzungen: beide Server im selben privaten Hetzner-Netz
+(10.0.0.0/16), die Hetzner-Firewall blockt 27017 aus dem Internet (wie
+bisher), und **derselbe** `deploy/mongo-keyfile` liegt auf beiden Servern
+(von prod1 kopieren, Rechte `chmod 400`, `chown 999:999`).
+
+**2a. prod2 vorbereiten.** Projekt wie in Abschnitt 1 auf prod2 laden, die
+`.env` von prod1 uebernehmen — mit diesen Unterschieden auf jedem Server:
+
+```
+# prod1                          # prod2
+PRIVATE_IP=10.0.0.2              PRIVATE_IP=10.0.0.3
+MONGO_NAME=mongo-prod1           MONGO_NAME=mongo-prod2
+PROD1_IP=10.0.0.2                PROD1_IP=10.0.0.2
+PROD2_IP=10.0.0.3                PROD2_IP=10.0.0.3
+```
+
+(Die privaten Adressen stehen in der Hetzner-Konsole unter Netzwerke.)
+Auf **beiden** Servern die MONGO_URL auf beide Mitglieder umstellen:
+
+```
+MONGO_URL=mongodb://autoschnell_app:PASSWORT@mongo-prod1:27017,mongo-prod2:27017/?authSource=admin&replicaSet=rs0&maxPoolSize=20
+```
+
+Ab jetzt wird auf beiden Servern IMMER mit der Ergaenzungsdatei
+gestartet:
+
+```bash
+docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d
+```
+
+**2b. Mitglied umbenennen und zweites Mitglied aufnehmen** (auf prod1; das
+Umbenennen dauert Sekunden, in denen nicht geschrieben werden kann):
+
+```bash
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval '
+  cfg = rs.conf();
+  cfg.members[0].host = "mongo-prod1:27017";
+  rs.reconfig(cfg, {force: true});
+  rs.add({host: "mongo-prod2:27017", priority: 0.5});
+  rs.status().members.map(m => m.name + " " + m.stateStr)'
+```
+
+`priority: 0.5` heisst: prod1 bleibt bevorzugt der schreibende Server,
+solange er lebt. Danach auf prod2 den Stack starten (Befehl aus 2a) — der
+Mongo-Container dort ist leer und holt sich den kompletten Stand von
+prod1 (bei deiner Datenmenge Sekunden).
+
+Kontrolle, auf beiden Servern:
+
+```bash
+docker compose exec -T backend python scripts/replikat_pruefen.py
+```
+
+Erwartet: `mongo-prod1 PRIMARY`, `mongo-prod2 SECONDARY`, Rueckstand 0 s.
+
+**2c. Schiedsrichter — die ehrliche Einschraenkung.** Zwei Mitglieder
+koennen bei Ausfall eines Servers keine Mehrheit bilden: der uebrige
+Server stellt das Schreiben ein, bis jemand eingreift (die Daten sind
+sicher, die Seite ist bis dahin nur lesend). Fuer automatisches
+Umschalten braucht es einen dritten Waehler, der NICHT auf prod1 oder
+prod2 liegt: ein Schiedsrichter (Arbiter) auf einem kleinen dritten
+Server (CX23, rund 4 Euro), ohne Daten, ohne Last.
+
+```bash
+# auf dem dritten Server, nach Kopie des Keyfiles:
+docker run -d --name mongo-arbiter --restart unless-stopped   -p 10.0.0.4:27017:27017 -v /opt/mongo-keyfile:/etc/mongo-keyfile:ro   mongo:8.2 mongod --replSet rs0 --keyFile /etc/mongo-keyfile --bind_ip_all
+# auf prod1:
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD"   --eval 'rs.addArb("10.0.0.4:27017")'
+```
+
+Ohne Schiedsrichter — manuelles Umschalten, wenn prod1 tot ist (auf
+prod2):
+
+```bash
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval '
+  cfg = rs.conf(); cfg.members = cfg.members.filter(m => m.host.startsWith("mongo-prod2"));
+  rs.reconfig(cfg, {force: true})'
+```
+
+**Was serveruebergreifend schon stimmt:** Sicherung, Aufraeumer und
+Sperren laufen ueber Sperren in der Datenbank (`job_locks`) — sie laufen
+auch mit zwei Backends genau einmal. Anfragesperren (Login-Versuche)
+liegen in `rate_limits`. Fotos und Snapshots liegen in R2.
+
+**Rueckbau:** `rs.remove("mongo-prod2:27017")` auf prod1, Ergaenzungsdatei
+weglassen, MONGO_URL wieder auf `mongo:27017` — fertig.
+
+### 3. Beide Server hinter dem Hetzner Load Balancer
+
+Erst sinnvoll, wenn Schritt 2 laeuft — sonst schreibt prod2 in eine
+Datenbank, die prod1 nicht sieht.
+
+1. Load Balancer im privaten Netz anlegen, beide Server als Ziele ueber
+   das private Netz, Dienst HTTPS→HTTP (Port 443 → 80), Gesundheits-
+   pruefung `HTTP GET /api/health` (Erklaerung zur Wahl in
+   `deploy/hinter-loadbalancer.conf.template`).
+2. Zertifikat am Load Balancer: Hetzner stellt es automatisch aus, wenn
+   die Domain bei Hetzner DNS liegt. Deine Zone liegt bei Cloudflare —
+   dann entweder `_acme-challenge.app.auto-schnellkauf.de` als NS-Eintrag
+   an Hetzner delegieren (einmalig, danach automatisch) oder das
+   Zertifikat als "eigenes Zertifikat" hochladen (alle 90 Tage).
+3. Auf beiden Servern in der `.env`: `PROXY_TEMPLATE=hinter-loadbalancer.conf.template`,
+   `PRIVATES_NETZ=10.0.0.0/16`, `TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.0/16`;
+   dann `docker compose ... up -d`. nginx macht dann kein TLS mehr
+   (Port 443 bleibt geschlossen), die echte Besucheradresse kommt aus
+   X-Forwarded-For — nur aus dem privaten Netz.
+4. DNS `app.auto-schnellkauf.de` auf die Adresse des Load Balancers.
+5. Firewall: 80/443 nur noch vom Load Balancer (privates Netz), nicht
+   mehr aus dem Internet.
+
+Kontrolle: `python scripts/betriebsprobe.py app.auto-schnellkauf.de`
+von aussen (TLS 1.3, Kopfzeilen, 27017 zu), und `replikat_pruefen.py`
+auf beiden Servern.
+
 ## Sicherheits-Checkliste vor dem Live-Gang
 - [ ] `JWT_SECRET` auf langen Zufallswert gesetzt
 - [ ] `ADMIN_PASSWORD` stark und geändert (nicht der Entwicklungswert)

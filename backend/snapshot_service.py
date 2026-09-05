@@ -42,10 +42,31 @@ log = logging.getLogger("autohandel.snapshot")
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = "autohandel"
 
-# Lokaler Speicher-Fallback: wenn kein EMERGENT_LLM_KEY gesetzt ist,
-# werden Snapshots lokal unter backend/local_storage/ abgelegt.
+# Wo liegen die Snapshot-Dateien (JPG + PDF je Inserat)?
+#   1. Objektspeicher (R2/S3), sobald S3_ENDPOINT und S3_BUCKET gesetzt sind
+#      — derselbe Eimer wie fuer Fotos. Seit 09/2026 der Normalfall:
+#      Erst damit sehen ZWEI Anwendungsserver dieselben Dateien, und die
+#      Dateien ueberleben den Verlust des Servers ohne Rueckgriff auf die
+#      Sicherung.
+#   2. sonst der externe Dienst (EMERGENT_LLM_KEY) — Altweg, in Produktion aus
+#   3. sonst die lokale Platte unter backend/local_storage/ (Entwicklung)
+# Alte Dateien, die noch lokal liegen, werden beim Lesen weiterhin gefunden
+# (Rueckfall), bis scripts/snapshots_nach_r2.py sie verschoben hat.
 _LOCAL_STORAGE = Path(__file__).parent / "local_storage"
-_USE_LOCAL = not os.environ.get("EMERGENT_LLM_KEY")
+_USE_S3 = bool(os.environ.get("S3_ENDPOINT", "").strip()
+               and os.environ.get("S3_BUCKET", "").strip())
+_USE_LOCAL = not _USE_S3 and not os.environ.get("EMERGENT_LLM_KEY")
+
+
+def _s3_speicher():
+    """Der gemeinsame Datei-Speicher (storage_service) — nur bei _USE_S3."""
+    from storage_service import storage
+    return storage
+
+
+def speicherort() -> str:
+    """Fuer Diagnose und Tests: "s3", "extern" oder "lokal"."""
+    return "s3" if _USE_S3 else ("lokal" if _USE_LOCAL else "extern")
 
 # Runtime state
 _storage_key: Optional[str] = None
@@ -160,6 +181,10 @@ def _safe_local_path(path: str) -> Path:
 
 
 def _put_object(path: str, data: bytes, content_type: str) -> dict:
+    if _USE_S3:
+        _s3_speicher().save(path, data)
+        log.info("snapshot -> objektspeicher: %s (%d bytes)", path, len(data))
+        return {"path": path}
     if _USE_LOCAL:
         dest = _safe_local_path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +206,17 @@ def _put_object(path: str, data: bytes, content_type: str) -> dict:
 
 def get_object(path: str) -> tuple[bytes, str]:
     """Read object back. Returns (bytes, content_type)."""
+    if _USE_S3:
+        ext = path.lower().rsplit(".", 1)[-1]
+        ct = "application/pdf" if ext == "pdf" else "image/jpeg"
+        try:
+            return _s3_speicher().load(path), ct
+        except Exception as exc:                        # noqa: BLE001
+            # Alte Datei, die noch nicht verschoben wurde? Lokal nachsehen.
+            dest = _safe_local_path(path)
+            if dest.exists():
+                return dest.read_bytes(), ct
+            raise FileNotFoundError(f"snapshot {path}: {exc}") from exc
     if _USE_LOCAL:
         dest = _safe_local_path(path)
         if not dest.exists():
@@ -213,6 +249,19 @@ async def delete_object_async(path: str) -> bool:
 def delete_object(path: str) -> bool:
     """Best-effort object-delete. Returns True bei 2xx/404, False sonst.
     404 gilt als OK, weil das Objekt eh weg ist."""
+    if _USE_S3:
+        ok = True
+        try:
+            ok = bool(_s3_speicher().delete(path))
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("snapshot-loeschung %s im objektspeicher: %s", path, exc)
+            ok = False
+        # Eine eventuell noch lokal liegende Altkopie ebenfalls entfernen.
+        try:
+            _safe_local_path(path).unlink(missing_ok=True)
+        except Exception:                               # noqa: BLE001
+            pass
+        return ok
     if _USE_LOCAL:
         dest = _LOCAL_STORAGE / path
         try:

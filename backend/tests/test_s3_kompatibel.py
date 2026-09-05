@@ -132,7 +132,8 @@ def test_skripte_finden_ihre_module_beim_direkten_start():
         for skript in ('backup_mongo.py', 'offsite_pruefen.py',
                        'verbindung_pruefen.py',
                        'bilder_verkleinern_nachtraeglich.py',
-                       'anbieter_probe.py'):
+                       'anbieter_probe.py', 'snapshots_nach_r2.py',
+                       'replikat_pruefen.py'):
             pfad = 'scripts/' + skript if wo == backend else skript
             e = subprocess.run([_sys.executable, pfad, '--help'], cwd=str(wo),
                                capture_output=True, text=True, timeout=120)
