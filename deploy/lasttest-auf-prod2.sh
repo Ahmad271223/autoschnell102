@@ -22,12 +22,17 @@
 # Aufruf auf prod2, im Ordner /opt/autoschnell:
 #   sh deploy/lasttest-auf-prod2.sh --kurz     # 45-Sekunden-Probelauf (~10 min)
 #   sh deploy/lasttest-auf-prod2.sh            # komplette Messung (~90 min)
+#   sh deploy/lasttest-auf-prod2.sh --nur-stoss # nur der Stosstest (~15 min)
 set -u
 
 VERZ="${VERZEICHNIS:-/opt/autoschnell}"
 NETZ=lasttest
 KURZ=""
-[ "${1:-}" = "--kurz" ] && KURZ="--kurz"
+NUR_STOSS=""
+for arg in "$@"; do
+    [ "$arg" = "--kurz" ] && KURZ="--kurz"
+    [ "$arg" = "--nur-stoss" ] && NUR_STOSS=1
+done
 
 cd "$VERZ" || { echo "FEHLER: $VERZ fehlt"; exit 2; }
 mkdir -p docs/lasttests/matrix docs/lasttests/stoss
@@ -45,7 +50,7 @@ IMAGE=$(docker compose images backend --format '{{.Repository}}:{{.Tag}}' 2>/dev
 [ -n "$IMAGE" ] || IMAGE=autoschnell-backend:latest
 
 echo "== 2/4 Wegwerf-Stack starten ($IMAGE)"
-docker network create "$NETZ" >/dev/null
+docker network inspect "$NETZ" >/dev/null 2>&1 || docker network create "$NETZ" >/dev/null
 docker run -d --name last-mongo --network "$NETZ" \
     --memory 3g mongo:8.2 mongod --bind_ip_all --wiredTigerCacheSizeGB 1 >/dev/null
 docker run -d --name last-backend --network "$NETZ" --memory 4g --shm-size 512m \
@@ -79,7 +84,7 @@ docker run --rm --user 0 --network "$NETZ" \
     -e SUPER_ADMIN_USERNAME=last-superadmin -e SUPER_ADMIN_PASSWORD=last-only-superadmin-pw-1 \
     -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" \
     "$IMAGE" sh -c "pip install -q psutil >/dev/null 2>&1; \
-        python -X utf8 scripts/lasttest_matrix.py --alle --szenario T1,T2,T3,T8,T9 $KURZ && \
+        if [ -z '$NUR_STOSS' ]; then python -X utf8 scripts/lasttest_matrix.py --alle --szenario T1,T2,T3,T8,T9 $KURZ; fi && \
         python -X utf8 scripts/lasttest_stoss.py"
 ERG=$?
 # Auswertung ist Beiwerk: darf fehlen, aendert das Ergebnis nicht.

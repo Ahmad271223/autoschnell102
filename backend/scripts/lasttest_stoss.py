@@ -40,7 +40,7 @@ DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 AUSGABE = Path(__file__).resolve().parent.parent.parent / "docs" / "lasttests" / "stoss"
 
 SUF = uuid.uuid4().hex[:6]
-PW = "Stoss123!"
+PW = "StossTest123!"      # Passwortregel: mindestens 10 Zeichen
 N_FIRMEN = 10
 FOTO = "data:image/jpeg;base64," + base64.b64encode(
     b"\xff\xd8\xff\xe0" + os.urandom(512 * 1024) + b"\xff\xd9").decode()
@@ -90,7 +90,7 @@ async def welt(sess):
         st, js = await _post(sess, f"{API}/auth/register", {
             "email": mail, "password": PW, "company_name": f"Stoss {i}",
             "contact_person": f"C {i}", "phone": "0511 5"}, None)
-        assert st == 200, f"Register {st}"
+        assert st == 200, f"Register {st}: {str(js)[:300]}"
         h = {"Authorization": f"Bearer {js['token']}"}
         async with sess.get(f"{API}/auth/me", headers=h) as r:
             me = (await r.json())["user"]
