@@ -263,3 +263,14 @@ def test_warnung_meldet_einmal_und_bremst_nicht(monkeypatch):
             await db.betriebsalarme.delete_many(
                 {"typ": "anbieter_viele_abrufe", "ref": tag})
     _mit_db(_lauf)
+
+
+def test_antwort_ohne_inhalt_heisst_inserat_weg(apify):
+    """Echter Lauf auf prod1 (09/2026): fuer eine erfundene Nummer liefert
+    Apify EIN Element ohne Daten. Das darf kein leeres Fahrzeug werden,
+    sondern muss wie ein verschwundenes Inserat behandelt werden (None)."""
+    _FakeClient.antwort = _Antwort(200, "[{}]", daten=[{}])
+    assert _mobile() is None
+    _FakeClient.antwort = _Antwort(200, "[{}]", daten=[{"url": "https://www.autoscout24.de/x"}])
+    assert asyncio.run(autoscout_service.fetch_autoscout_vehicle(
+        "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123")) is None

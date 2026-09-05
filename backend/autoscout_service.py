@@ -531,7 +531,13 @@ async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
                     or not isinstance(items[0], dict):
                 _log.warning("Apify AutoScout: leere Antwort fuer %s", item_id)
                 return None
-            return parse_autoscout_item(items[0], item_id, url=url)
+            v = parse_autoscout_item(items[0], item_id, url=url)
+            # Wie bei mobile.de: ein Element ohne Inhalt bedeutet, das
+            # Inserat gibt es nicht (mehr) — nicht "leeres Fahrzeug".
+            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+                _log.warning("Apify AutoScout: Antwort ohne Inhalt fuer %s — Inserat weg", item_id)
+                return None
+            return v
     except AnbieterFehler:
         raise
     except Exception as exc:

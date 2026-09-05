@@ -550,7 +550,14 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
             if not isinstance(items, list) or not items or not isinstance(items[0], dict):
                 log.warning("Apify mobile.de: leere/unerwartete Antwort fuer %s", ad_id)
                 return None
-            return _parse_apify_item(items[0], ad_id, url=detail_url)
+            v = _parse_apify_item(items[0], ad_id, url=detail_url)
+            # Echter Lauf 09/2026: fuer eine nicht existierende Nummer liefert
+            # Apify EIN Element ohne Inhalt. Daraus wurde ein leeres Fahrzeug
+            # statt "Inserat nicht mehr online". Leer heisst: weg.
+            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+                log.warning("Apify mobile.de: Antwort ohne Inhalt fuer %s — Inserat weg", ad_id)
+                return None
+            return v
     except AnbieterFehler:
         raise
     except Exception as exc:
