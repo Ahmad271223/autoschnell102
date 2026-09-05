@@ -41,7 +41,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 FEHLER = []
-WICHTIGE_FELDER = ("make", "model", "price", "first_registration", "mileage")
+# Alle drei Anbieter liefern den Preis als list_price (nicht "price").
+WICHTIGE_FELDER = ("make", "model", "list_price", "first_registration", "mileage")
 
 
 def ok(text):
@@ -73,12 +74,21 @@ async def _eine_quelle(db, name, url, wirklich):
 
     import provider_fetch
     from anbieter_fehler import AnbieterFehler
+    from listing_identity import get_or_fetch_listing
+
+    # Ueber denselben Weg wie die Anwendung (Speicher davor), nicht am
+    # Speicher vorbei — sonst ist der Punkt "zweiter Abruf aus dem Speicher"
+    # nie erfuellbar.
+    async def _holen(src, iid, u):
+        return await provider_fetch.fetch_listing(db, src, iid, u, dealer_id="probe")
 
     # --- 1. echter Abruf ---
     start = time.monotonic()
     try:
-        daten = await provider_fetch.fetch_listing(
-            db, kennung["source"], kennung["item_id"], url, dealer_id="probe")
+        daten, aus_speicher, _ = await get_or_fetch_listing(db, url, _holen)
+        if aus_speicher:
+            warn("dieses Inserat lag schon im Speicher — kein echter Abruf; "
+                 "fuer einen echten Abruf ein anderes Inserat nehmen")
     except AnbieterFehler as exc:
         fehler(f"Abruf fehlgeschlagen ({exc.art}): {exc}")
         return
@@ -130,11 +140,15 @@ async def _falscher_link(db, wirklich):
     import provider_fetch
     from anbieter_fehler import AnbieterFehler
     try:
-        await provider_fetch.fetch_listing(
+        d = await provider_fetch.fetch_listing(
             db, "mobile", "000000000",
             "https://suchen.mobile.de/fahrzeuge/details.html?id=000000000",
             dealer_id="probe")
-        warn("erfundene Inserats-Nummer lieferte trotzdem etwas")
+        if not d:
+            ok("erfundene Inserats-Nummer -> leer (Inserat weg), wie erwartet")
+        else:
+            gefuellt = {k: d.get(k) for k in WICHTIGE_FELDER if d.get(k) not in (None, "", 0)}
+            warn(f"erfundene Inserats-Nummer lieferte trotzdem etwas: {gefuellt or 'nur leere Felder'}")
     except AnbieterFehler as exc:
         ok(f"sauberer Anbieter-Fehler ({exc.art}): {str(exc)[:80]}")
     except Exception as exc:                        # noqa: BLE001
