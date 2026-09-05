@@ -15,7 +15,7 @@ export default function Impressum() {
       <H2>Kontakt</H2>
       <p>
         Telefon: 0178 3563025<br />
-        E-Mail: info@autoschnell.de
+        E-Mail: info@auto-schnellkauf.de
       </p>
 
       <H2>Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</H2>

@@ -197,3 +197,39 @@ def test_11b_client_ip_beachtet_die_weiterleitungs_kopfzeile(monkeypatch):
 def test_keine_rueckkehr_der_doppelten_regel(datei, verboten):
     quelle = (Path(__file__).resolve().parents[1] / datei).read_text(encoding="utf-8")
     assert verboten not in quelle
+
+
+# --------------------------------------------------------------- Befund 10
+# Betreiber-Entscheidung 09/2026: Ein Sucher sieht nur seine EIGENEN
+# Vertraege, der Chef weiterhin alle seiner Firma. Vorher sah jeder Sucher
+# die Verkaeuferdaten und PDFs seiner Kollegen.
+def test_10_sucher_sieht_nur_eigene_vertraege():
+    import routes.contracts as c
+    chef = {"role": "dealer", "id": "chef-1", "dealer_id": "firma-1"}
+    sucher = {"role": "sucher", "id": "sucher-7", "dealer_id": "firma-1"}
+    assert c._vertrag_bereich(chef) == {"dealer_id": "firma-1"}
+    assert c._vertrag_bereich(sucher) == {"dealer_id": "firma-1",
+                                          "user_id": "sucher-7"}
+
+
+def test_10b_alle_lesewege_nutzen_denselben_bereich():
+    """Ein vergessener Leseweg waere ein Leck. Geprueft wird deshalb, dass
+    JEDE Vertrags-Leseroute ueber _vertrag_bereich geht."""
+    quelle = (Path(__file__).resolve().parents[1] / "routes" / "contracts.py"
+              ).read_text(encoding="utf-8")
+    for name in ("async def list_contracts", "async def get_contract(",
+                 "async def get_contract_pdf", "async def list_contract_versions",
+                 "async def get_contract_version_pdf"):
+        start = quelle.index(name)
+        rumpf = quelle[start:start + 900]
+        assert "_vertrag_bereich" in rumpf, f"{name} filtert nicht nach Ersteller"
+
+
+def test_10c_impressum_nennt_die_betriebene_domain():
+    """Die Pflichtangabe im Impressum muss auf der Domain liegen, die auch
+    wirklich betrieben wird — sonst kommt dort nie eine Mail an."""
+    datei = (Path(__file__).resolve().parents[2] / "frontend" / "src" /
+             "pages" / "legal" / "Impressum.jsx")
+    text = datei.read_text(encoding="utf-8")
+    assert "info@auto-schnellkauf.de" in text
+    assert "info@autoschnell.de" not in text

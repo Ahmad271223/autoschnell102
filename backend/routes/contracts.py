@@ -391,6 +391,23 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     return {**clean_doc(doc), "pdf_b64": pdf_b64}
 
 
+def _vertrag_bereich(user) -> Dict[str, Any]:
+    """Welche Vertraege darf dieses Konto sehen?
+
+    Betreiber-Entscheidung 09/2026: Der Chef sieht alle Vertraege seiner
+    Firma, ein Sucher nur die, die er selbst angelegt hat. Vorher sah
+    jeder Sucher die Verkaeuferdaten und PDFs seiner Kollegen — bei
+    groesseren Haendlern weder gewollt noch datenschutzrechtlich sauber.
+
+    Bewusst streng: fehlt einem alten Vertrag die Angabe, wer ihn angelegt
+    hat, sieht ihn der Sucher NICHT (der Chef weiterhin schon). Lieber
+    einmal zu wenig zeigen als fremde Verkaeuferdaten preisgeben."""
+    bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if user.get("role") == "sucher":
+        bereich["user_id"] = user["id"]
+    return bereich
+
+
 @router.get("/contracts")
 async def list_contracts(
     user=Depends(current_firma),
@@ -398,7 +415,7 @@ async def list_contracts(
     days: Optional[int] = None,
     channel: Optional[str] = None,
 ):
-    query: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    query: Dict[str, Any] = _vertrag_bereich(user)
     if days:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         query["created_at"] = {"$gte": since}
@@ -463,7 +480,7 @@ async def list_contracts(
 @router.get("/contracts/{contract_id}")
 async def get_contract(contract_id: str, user=Depends(current_firma)):
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0},
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
@@ -473,7 +490,7 @@ async def get_contract(contract_id: str, user=Depends(current_firma)):
 @router.get("/contracts/{contract_id}/pdf")
 async def get_contract_pdf(contract_id: str, user=Depends(current_firma)):
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]},
+        {"id": contract_id, **_vertrag_bereich(user)},
         {"_id": 0, "pdf_b64": 1, "filename": 1},
     )
     if not c:
@@ -491,7 +508,7 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma)):
 async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
     """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten)."""
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0, "id": 1})
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
     return await db.generated_pdf_versions.find(
@@ -504,6 +521,11 @@ async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
 async def get_contract_version_pdf(contract_id: str, version: int,
                                    user=Depends(current_firma)):
     """Archivierte PDF-Fassung herunterladen (Beweissicherung)."""
+    # Auch die alten Fassungen nur, wenn der Vertrag selbst sichtbar ist.
+    haupt = await db.generated_pdfs.find_one(
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0, "id": 1})
+    if not haupt:
+        raise HTTPException(404, "Vertragsfassung nicht gefunden")
     v = await db.generated_pdf_versions.find_one(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"],
          "version": version},
