@@ -190,9 +190,13 @@ async def _cleanup_once(db) -> dict:
             # Händler hat bereits über das Fahrzeug entschieden? Dann regelt
             # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt
             # (nur fuer Inserats-Fotos/Snapshots, NICHT fuer Berichts-Fotos).
+            # Pruefbericht Runde 8: Fahrzeug-IDs sind "v_<Inserat>" und damit
+            # bei zwei Firmen mit demselben Inserat IDENTISCH. Ohne Firma in
+            # der Abfrage traf der Aufraeumer das Fahrzeug der falschen Firma.
+            firma = appt.get("dealer_id", "")
             if vehicle_id:
                 v_state = await db.vehicles.find_one(
-                    {"id": vehicle_id}, {"_id": 0, "lifecycle": 1})
+                    {"id": vehicle_id, "dealer_id": firma}, {"_id": 0, "lifecycle": 1})
                 if v_state and v_state.get("lifecycle") in _DECIDED_STATES:
                     await db.appointments.update_one(
                         {"id": appt["id"]},
@@ -209,7 +213,8 @@ async def _cleanup_once(db) -> dict:
 
                 # 2) Fotos aus dem Vehicle-Cache räumen
                 v = await db.vehicles.find_one(
-                    {"id": vehicle_id}, {"_id": 0, "data": 1, "mobile_ad_id": 1})
+                    {"id": vehicle_id, "dealer_id": firma},
+                    {"_id": 0, "data": 1, "mobile_ad_id": 1})
                 if v and isinstance(v.get("data"), dict):
                     data = v["data"]
                     changed = False
@@ -219,7 +224,7 @@ async def _cleanup_once(db) -> dict:
                             changed = True
                     if changed:
                         await db.vehicles.update_one(
-                            {"id": vehicle_id},
+                            {"id": vehicle_id, "dealer_id": firma},
                             {"$set": {"data": data, "assets_cleaned_at": now.isoformat()}},
                         )
                         stats["photos_cleared"] += 1
@@ -243,6 +248,8 @@ async def _cleanup_once(db) -> dict:
 
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
     stats["archived"] = await _archive_expired_bestand(db, now)
+    # ---- Versand, der nie ein Ergebnis bekam (Runde 8, Befund 3) ----
+    stats["zustellungen_unklar"] = await haengende_zustellungen_markieren(db, now)
     # ---- 90-Tage-Regel: Kaufvertraege samt Personendaten loeschen ----
     # Reihenfolge (Runde 5): ZUERST fehlende Auto-Datensaetze nachtragen,
     # DANN loeschen — sonst verschwanden Altvertraege beim allerersten
@@ -799,6 +806,48 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
     return repariert
 
 
+async def haengende_zustellungen_markieren(db, now: datetime,
+                                           nach_minuten: int = 15) -> int:
+    """Versand-Eintraege, die seit `nach_minuten` auf "laeuft" stehen, auf
+    "unklar" setzen und einen Betriebsalarm ausloesen.
+
+    So ein Eintrag entsteht, wenn der Prozess zwischen Reservierung und
+    Ergebnis gestorben ist. Ob die Mail rausging, weiss der Server dann
+    nicht — deshalb wird hier NICHT erneut gesendet. Der Nutzer sieht
+    "unklar" am Vertrag; klickt er erneut auf Senden, laeuft der Versand
+    unter demselben Schluessel weiter, und Resend stellt nicht doppelt zu.
+    """
+    grenze = (now - timedelta(minutes=nach_minuten)).isoformat()
+    n = 0
+    cursor = db.generated_pdfs.find(
+        {"send_status": {"$elemMatch": {"zustellung": "laeuft",
+                                        "sent_at": {"$lt": grenze}}}},
+        {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1, "send_status": 1})
+    async for c in cursor:
+        for e in c.get("send_status") or []:
+            if e.get("zustellung") != "laeuft" or (e.get("sent_at") or "") >= grenze:
+                continue
+            res = await db.generated_pdfs.update_one(
+                {"id": c["id"], "send_status": {"$elemMatch": {
+                    "idempotency_key": e.get("idempotency_key"),
+                    "zustellung": "laeuft"}}},
+                {"$set": {"send_status.$.zustellung": "unklar"}})
+            if res.modified_count:
+                n += 1
+                try:
+                    from betrieb import alarm
+                    await alarm(db, "zustellung_unklar", ref=c["id"],
+                                dealer_id=c.get("dealer_id"),
+                                vertrag=c.get("contract_no"),
+                                empfaenger=e.get("recipient"),
+                                hinweis="Versand bekam kein Ergebnis (Prozess "
+                                        "abgebrochen?). Nutzer kann erneut senden — "
+                                        "kein Doppelversand dank Idempotency-Key.")
+                except Exception:                       # noqa: BLE001
+                    pass
+    return n
+
+
 async def _archive_expired_bestand(db, now: datetime) -> int:
     """Bestand > 50 Tage: löscht NUR Fotos + Inserats-Entwürfe. Vertrag,
     Abholbericht, Einkaufspreis und Historie bleiben — Fahrzeug wird
@@ -811,6 +860,11 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
     )
     async for v in cursor:
         vid = v["id"]
+        # Pruefbericht Runde 8: dieselbe Fahrzeug-ID kann bei mehreren
+        # Firmen existieren (v_<Inserat>). Entwuerfe und das Fahrzeug selbst
+        # werden deshalb NUR innerhalb der eigenen Firma angefasst — sonst
+        # verlor Firma B ihre Inserats-Fotos, weil bei Firma A die Frist ablief.
+        firma = v.get("dealer_id", "")
         # Fotos aus den Fahrzeugdaten räumen
         data = v.get("data") or {}
         for key in _iter_photo_keys():
@@ -821,17 +875,17 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
         # bis zur Nachholung mit `loeschung_offen` stehen (kein Key geht verloren).
         try:
             async for listing in db.resale_listings.find(
-                {"vehicle_id": vid, "status": {"$in": ["entwurf", "verkaufsbereit"]}},
+                {"vehicle_id": vid, "dealer_id": firma,
+                 "status": {"$in": ["entwurf", "verkaufsbereit"]}},
                 {"_id": 0, "id": 1, "photos": 1},
             ):
                 await _inserat_mit_fotos_loeschen(
-                    db, listing, grund="bestand_archiv_inserat",
-                    dealer_id=v.get("dealer_id", ""))
+                    db, listing, grund="bestand_archiv_inserat", dealer_id=firma)
         except Exception as exc:  # noqa: BLE001
             log.warning("bestand archive: listing cleanup failed for %s: %s", vid, exc)
         await _delete_snapshots_for_vehicle(db, vid, dealer_id=v.get("dealer_id", ""))
         await db.vehicles.update_one(
-            {"id": vid},
+            {"id": vid, "dealer_id": firma},
             {"$set": {"data": data, "lifecycle": "archiviert",
                       "lifecycle_changed_at": now.isoformat(),
                       "archived_at": now.isoformat()}},

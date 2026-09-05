@@ -26,6 +26,18 @@ server {
     proxy_pass http://backend:8001;
     access_log off;
   }
+  # Runde 8, Befund 5: Der Load Balancer darf WAHLWEISE /api/ready als
+  # Gesundheitspruefung nehmen. Entscheidung fuer den Standard: /api/health.
+  # Grund: /api/ready meldet 503 auch bei Migrationsstand oder vollem
+  # Speicher — dann wuerde der LB ALLE Server rausnehmen und die Seite
+  # waere komplett weg, obwohl sie Vertraege weiterhin ausliefern koennte.
+  # Ein Ausfall von R2 ist in /api/ready nur eine Warnung (200) und loest
+  # einen Betriebsalarm aus. Wer strenger fahren will, stellt den LB-Check
+  # auf /api/ready um; der Pfad ist hier dafuer freigegeben.
+  location = /api/ready {
+    proxy_pass http://backend:8001;
+    access_log off;
+  }
 
   location / { return 444; }
 }

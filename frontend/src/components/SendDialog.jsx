@@ -35,7 +35,15 @@ export default function SendDialog({ open, contract, onClose }) {
         toast.success("WhatsApp Chat geöffnet · PDF separat anhängen");
       } else {
         const z = data?.zustellung;
-        if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
+        // Runde 8: "bereits registriert" hiess frueher auch dann, wenn der
+        // Versand noch lief oder abgebrochen war. Jetzt sagt der Server,
+        // was wirklich ist — und der Nutzer sieht es.
+        if (data?.bereits_gesendet && z === "laeuft") {
+          toast.info("Dieser Versand läuft gerade noch — bitte einen Moment warten.");
+        } else if (z === "unklar") {
+          toast.warning("Der Versand hat kein Ergebnis gemeldet. Bitte noch einmal "
+            + "auf Senden klicken — es wird garantiert nicht doppelt zugestellt.");
+        } else if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
         else if (z === "versendet") {
           // Der Sucher bekommt immer eine Kopie mit dem PDF (09/2026).
           toast.success(data?.kopie === "gesendet"

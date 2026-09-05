@@ -271,6 +271,24 @@ async def readiness_check(response: Response):
                 info["s3"] = "up" if ok else "nicht erreichbar"
                 if not ok:
                     warnungen.append("s3: nicht erreichbar")
+                    # Runde 8, Befund 5 — bewusste Entscheidung: Ein Ausfall
+                    # des Datei-Speichers nimmt den Server NICHT aus dem
+                    # Betrieb. Vertraege, Vergleiche, Termine und PDFs liegen
+                    # in der Datenbank und funktionieren weiter; nur Fotos
+                    # und Protokoll-Dateien haengen an R2. Ein 503 wuerde
+                    # ALLES abschalten, um einen Teil zu schuetzen. Dafuer
+                    # darf der Ausfall nicht stumm bleiben: Betriebsalarm
+                    # (einmal je Ausfall, hochgezaehlt statt dupliziert).
+                    try:
+                        from betrieb import alarm
+                        await alarm(db, "datei_speicher_nicht_erreichbar",
+                                    ref=os.environ.get("S3_BUCKET", ""),
+                                    hinweis="R2/S3 antwortet nicht. Foto-Upload und "
+                                            "Datei-Auslieferung sind gestoert; alles "
+                                            "andere laeuft. Zugangsdaten, Eimer und "
+                                            "Netz pruefen.")
+                    except Exception:               # noqa: BLE001
+                        pass
         except Exception as exc:
             info["s3"] = "fehler"
             warnungen.append(f"s3: {exc}")

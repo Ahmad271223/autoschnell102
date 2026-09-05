@@ -28,14 +28,28 @@ paths = [
   '''\.gitleaks\.toml$''',
   '''\.github/workflows/.*\.yml$''',
   '''backend/production_check\.py$''',
-  '''backend/tests/.*\.py$''',
 ]
 
+# Pruefbericht Runde 8, Befund 6: Frueher waren backend/tests und
+# frontend/e2e KOMPLETT ausgenommen — ein dort eingechecktes echtes
+# Geheimnis waere nie aufgefallen. Jetzt werden nur die bekannten
+# Testwerte ausgenommen, einzeln und nachpruefbar. Jeder andere Fund in
+# diesen Ordnern blockiert die CI wie ueberall.
 [allowlist]
-description = "Testdaten (Fake-Zugangsdaten), Lockfiles, Fonts"
+description = "Lockfiles, Fonts und die konkreten Testwerte der Testsuiten"
 paths = [
   '''frontend/yarn\.lock$''',
   '''frontend/public/fonts/.*''',
-  '''backend/tests/.*\.py$''',
-  '''frontend/e2e/.*\.js$''',
+]
+regexes = [
+  '''TestAdmin123!''',
+  '''E2eTest123!x''',
+  '''IdemTest123!''',
+  '''(?i)ci-only-[a-z0-9-]+''',
+  '''(?i)ci-nur-zum-testen[a-z-]*''',
+  '''(?i)sk_test_dummy''',
+  '''(?i)whsec_test[a-z0-9_]*''',
+  '''(?i)apify_test_token''',
+  '''@e2etest-mail\.de''',
+  '''Ci-Stack-Super-2026!x''',
 ]

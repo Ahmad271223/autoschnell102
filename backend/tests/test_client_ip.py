@@ -114,3 +114,35 @@ def test_unsinnige_netze_werden_ignoriert(monkeypatch):
     assert len(rl._TRUSTED_PROXIES) == 1
     a = _Anfrage("10.0.0.4", x_forwarded_for="203.0.113.7, 10.0.0.4")
     assert rl.client_ip(a) == "203.0.113.7"
+
+
+# ------------------------------------------ Runde 8, Befund 4
+def test_fremder_nachbar_darf_keine_kopfzeilen_setzen(monkeypatch):
+    """Erreicht jemand das Backend OHNE nginx davor (oeffentliche Adresse
+    als direkter Nachbar), zaehlen seine Kopfzeilen nicht — er IST der
+    Besucher. Vorher galt bei TRUST_PROXY=true jede Kopfzeile, egal von wem."""
+    rl = _modul(monkeypatch)
+    a = _Anfrage("203.0.113.9", x_forwarded_for="1.2.3.4", x_real_ip="5.6.7.8")
+    assert rl.client_ip(a) == "203.0.113.9"
+    rl = _modul(monkeypatch, proxies="10.0.0.0/16")
+    assert rl.client_ip(a) == "203.0.113.9"
+
+
+def test_unsinn_in_kopfzeilen_wird_nicht_zur_adresse(monkeypatch):
+    """"not-an-ip" landete frueher als Schluessel im Zaehler."""
+    rl = _modul(monkeypatch)
+    a = _Anfrage("127.0.0.1", x_forwarded_for="not-an-ip", x_real_ip="auch nicht")
+    assert rl.client_ip(a) == "127.0.0.1"
+    a = _Anfrage("127.0.0.1", x_forwarded_for="not-an-ip, 203.0.113.9")
+    assert rl.client_ip(a) == "203.0.113.9"
+    a = _Anfrage("127.0.0.1", x_real_ip="203.0.113.9:4711")
+    assert rl.client_ip(a) == "203.0.113.9"
+
+
+def test_eigener_vermittler_aus_privatem_netz_bleibt_erlaubt(monkeypatch):
+    """Docker-Netz, Hetzner-Privatnetz, Loopback: das sind die Orte, an
+    denen nginx oder der Load Balancer stehen — ohne Liste gelten genau die."""
+    rl = _modul(monkeypatch)
+    for nachbar in ("127.0.0.1", "172.18.0.5", "10.0.1.7", "192.168.1.2"):
+        a = _Anfrage(nachbar, x_forwarded_for="203.0.113.9")
+        assert rl.client_ip(a) == "203.0.113.9", nachbar

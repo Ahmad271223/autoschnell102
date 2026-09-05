@@ -1,4 +1,5 @@
 """Contract endpoints: preview, create, list, get, pdf, send, delete."""
+import os
 import asyncio
 import base64
 import logging
@@ -391,6 +392,26 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     return {**clean_doc(doc), "pdf_b64": pdf_b64}
 
 
+# Nach so vielen Sekunden gilt eine Zustellung "laeuft" als abgebrochen.
+# Ein Versand dauert Sekunden; drei Minuten sind grosszuegig.
+ZUSTELLUNG_HAENGT_NACH_SEK = int(os.environ.get("ZUSTELLUNG_HAENGT_NACH_SEK", "180"))
+
+
+def _zustellung_haengt(eintrag: dict, jetzt=None) -> bool:
+    """True, wenn eine Reservierung aelter ist als ZUSTELLUNG_HAENGT_NACH_SEK
+    (oder schon als "unklar" markiert wurde)."""
+    if eintrag.get("zustellung") == "unklar":
+        return True
+    try:
+        start = datetime.fromisoformat(str(eintrag.get("sent_at") or ""))
+    except ValueError:
+        return True
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    jetzt = jetzt or datetime.now(timezone.utc)
+    return (jetzt - start).total_seconds() > ZUSTELLUNG_HAENGT_NACH_SEK
+
+
 def _vertrag_bereich(user) -> Dict[str, Any]:
     """Welche Vertraege darf dieses Konto sehen?
 
@@ -544,9 +565,14 @@ async def get_contract_version_pdf(contract_id: str, version: int,
 
 @router.post("/contracts/{contract_id}/send")
 async def send_contract(contract_id: str, body: SendIn, user=Depends(require_active_sub)):
-    c = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
-    )
+    # Pruefbericht Runde 8 (09/2026), hoher Befund: Lesen und PDF gingen
+    # laengst ueber _vertrag_bereich, der VERSAND aber nur ueber die Firma.
+    # Ein Sucher mit der Vertrags-ID eines Kollegen konnte dessen Vertrag
+    # samt PDF an eine beliebige Adresse schicken und den Versandstatus
+    # veraendern. Jetzt gilt beim Versand derselbe Bereich wie beim Lesen —
+    # und JEDE Schreibabfrage in dieser Funktion nutzt ihn ebenfalls.
+    bereich = _vertrag_bereich(user)
+    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
     # Idempotenz RESERVIEREND (Review 09/2026): Der Schluessel wurde vorher
@@ -554,17 +580,39 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # demselben Schluessel konnten beide zustellen. Jetzt wird der Eintrag
     # atomar VOR dem Versand angelegt; der Verlierer bekommt das Ergebnis
     # des Gewinners, bei Sendefehler wird der Eintrag wieder entfernt.
+    # Pruefbericht Runde 8, Befund 3: Ohne Schluessel gab es keinerlei
+    # Schutz — zwei identische Aufrufe stellten zweimal zu. Fehlt der
+    # Schluessel, wird er jetzt aus dem Inhalt abgeleitet: dieselbe Mail an
+    # denselben Empfaenger innerhalb derselben Minute ist EIN Versand.
+    if not body.idempotency_key:
+        import hashlib
+        minute = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        roh = "|".join([contract_id, body.channel, body.recipient or "",
+                        body.subject or "", body.message or "", minute])
+        body.idempotency_key = "auto-" + hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
     reserviert = False
+    wiederaufnahme = False
     if body.idempotency_key:
         vorhanden = next((e for e in (c.get("send_status") or [])
                           if e.get("idempotency_key") == body.idempotency_key), None)
+        if (vorhanden and vorhanden.get("zustellung") in ("laeuft", "unklar")
+                and _zustellung_haengt(vorhanden)):
+            # Der Prozess ist zwischen Reservierung und Ergebnis gestorben.
+            # Frueher hiess es hier dauerhaft "bereits gesendet" — obwohl
+            # womoeglich nie etwas rausging. Jetzt wird der Versand unter
+            # DEMSELBEN Schluessel wiederholt; Resend erkennt den Schluessel
+            # und stellt nicht doppelt zu.
+            wiederaufnahme = True
+            reserviert = True
+            vorhanden = None
         if vorhanden:
             return {"channel": vorhanden.get("channel"), "status": "ok",
                     "sent_at": vorhanden.get("sent_at"),
                     "zustellung": vorhanden.get("zustellung", ""),
                     "wa_url": vorhanden.get("wa_url"), "bereits_gesendet": True}
+    if body.idempotency_key and not wiederaufnahme:
         res = await db.generated_pdfs.update_one(
-            {"id": contract_id, "dealer_id": user["dealer_id"],
+            {"id": contract_id, **bereich,
              "send_status.idempotency_key": {"$ne": body.idempotency_key}},
             {"$push": {"send_status": {
                 "idempotency_key": body.idempotency_key, "channel": body.channel,
@@ -576,9 +624,17 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         reserviert = True
 
     async def _reservierung_zurueck():
+        # Bei einer Wiederaufnahme bleibt der Eintrag stehen: er traegt
+        # "unklar", damit der naechste Versuch wieder hier landet.
+        if reserviert and wiederaufnahme:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status.idempotency_key": body.idempotency_key},
+                {"$set": {"send_status.$.zustellung": "unklar"}})
+            return
         if reserviert:
             await db.generated_pdfs.update_one(
-                {"id": contract_id, "dealer_id": user["dealer_id"]},
+                {"id": contract_id, **bereich},
                 {"$pull": {"send_status": {"idempotency_key": body.idempotency_key,
                                            "zustellung": "laeuft"}}})
     # Ehrlicher Versand-Status (PR-Review 09/2026): "versendet" gibt es
@@ -622,11 +678,14 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 vertrag=c, firma=firma, sucher=user,
                 nachricht=body.message, betreff=body.subject)
             sucher_mail = (user.get("email") or "").strip()
-            ok = await email_service.send_email(
+            ok, beleg = await email_service.send_email_mit_beleg(
                 body.recipient, betreff, text, anhang=pdf_bytes,
                 anhang_name=dateiname, html=html,
                 reply_to=sucher_mail,
-                absender_name=firma.get("company_name") or "")
+                absender_name=firma.get("company_name") or "",
+                idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}")
+            if ok and beleg:
+                out["beleg"] = beleg
             if not ok:
                 await _reservierung_zurueck()
                 raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
@@ -664,15 +723,19 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         send_entry["idempotency_key"] = body.idempotency_key
         if out.get("wa_url"):
             send_entry["wa_url"] = out["wa_url"]
+        if out.get("beleg"):
+            send_entry["beleg"] = out["beleg"]
+        if wiederaufnahme:
+            send_entry["wiederaufgenommen"] = True
         await db.generated_pdfs.update_one(
-            {"id": contract_id, "dealer_id": user["dealer_id"],
+            {"id": contract_id, **bereich,
              "send_status.idempotency_key": body.idempotency_key},
             {"$set": {"send_status.$": send_entry,
                       "status": neuer_status, "updated_at": now_iso()}},
         )
     else:
         await db.generated_pdfs.update_one(
-            {"id": contract_id},
+            {"id": contract_id, **bereich},
             {"$push": {"send_status": send_entry},
              "$set": {"status": neuer_status, "updated_at": now_iso()}},
         )

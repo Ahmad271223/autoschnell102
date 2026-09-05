@@ -116,7 +116,9 @@ def _liste(wert) -> List[str]:
 async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
                        anhang: Optional[bytes], anhang_name: str,
                        reply_to: Sequence[str], kopie: Sequence[str],
-                       absender_name: Optional[str]) -> bool:
+                       absender_name: Optional[str],
+                       idempotency_key: Optional[str] = None) -> str:
+    """Liefert die Resend-Kennung der Mail, "" bei Ablehnung."""
     import httpx
     daten = {
         "from": _absender(absender_name, kodiert=False),
@@ -135,17 +137,23 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
             "filename": anhang_name or "Dokument.pdf",
             "content": base64.b64encode(anhang).decode("ascii"),
         }]
+    kopf = {"Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json"}
+    if idempotency_key:
+        # Resend haelt den Schluessel 24 h: gleicher Schluessel = keine
+        # zweite Zustellung, sondern die Antwort der ersten.
+        kopf["Idempotency-Key"] = str(idempotency_key)[:256]
     async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(
-            RESEND_URL, json=daten,
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}",
-                     "Content-Type": "application/json"})
+        r = await client.post(RESEND_URL, json=daten, headers=kopf)
     if r.status_code in (200, 201, 202):
-        return True
+        try:
+            return str(r.json().get("id") or "angenommen")
+        except ValueError:
+            return "angenommen"
     # Resend meldet Fehler klar (unverifizierte Domain, falscher Schlüssel …)
     log.error("email_service: Resend lehnt ab (HTTP %s): %s",
               r.status_code, r.text[:300])
-    return False
+    return ""
 
 
 # ----------------------------------------------------------------- SMTP
@@ -183,8 +191,10 @@ def _send_sync(*, to: str, subject: str, text: str, html: Optional[str],
 async def send_email(to: str, subject: str, text: str,
                      anhang: bytes = None, anhang_name: str = "",
                      *, html: str = None, reply_to=None, kopie=None,
-                     absender_name: str = None) -> bool:
+                     absender_name: str = None,
+                     idempotency_key: str = None) -> bool:
     """Verschickt eine Mail. True bei Erfolg, False bei Fehler (geloggt).
+    Fuer den Beleg des Anbieters siehe send_email_mit_beleg.
 
     to            Empfänger
     text/html     Textfassung (Pflicht) und optionale HTML-Fassung
@@ -194,10 +204,33 @@ async def send_email(to: str, subject: str, text: str,
     kopie         stille Kopie (Bcc), z. B. an den Sucher selbst
     absender_name Anzeigename vor unserer Adresse (z. B. die Firma)
     """
+    ok, _beleg = await send_email_mit_beleg(
+        to, subject, text, anhang, anhang_name, html=html, reply_to=reply_to,
+        kopie=kopie, absender_name=absender_name, idempotency_key=idempotency_key)
+    return ok
+
+
+async def send_email_mit_beleg(to: str, subject: str, text: str,
+                               anhang: bytes = None, anhang_name: str = "",
+                               *, html: str = None, reply_to=None, kopie=None,
+                               absender_name: str = None,
+                               idempotency_key: str = None):
+    """Wie send_email, liefert aber (ok, beleg).
+
+    beleg ist die Kennung, unter der der Anbieter die Mail fuehrt
+    ("resend:<id>" oder "smtp"). Sie wird am Vertrag gespeichert, damit
+    spaeter nachweisbar ist, DASS und WO die Mail abgegeben wurde.
+
+    idempotency_key geht als Idempotency-Key an Resend: schickt der
+    Server dieselbe Mail unter demselben Schluessel noch einmal — etwa
+    weil er zwischen Abgabe und Speichern abgestuerzt war — liefert
+    Resend die erste Abgabe zurueck, statt ein zweites Mal zuzustellen
+    (Pruefbericht Runde 8, Befund 3: "nicht einfach erneut senden").
+    """
     if not email_configured():
         log.warning("email_service: kein Versandweg eingerichtet (RESEND_API_KEY "
                     "oder SMTP_*) — '%s' an %s NICHT gesendet", subject, to)
-        return False
+        return False, ""
     reply_to = [a for a in _liste(reply_to) if gueltige_adresse(a)]
     kopie = [a for a in _liste(kopie) if gueltige_adresse(a) and a.lower() != (to or "").lower()]
     argumente = dict(to=to, subject=subject, text=text, html=html, anhang=anhang,
@@ -205,16 +238,17 @@ async def send_email(to: str, subject: str, text: str,
                      absender_name=absender_name)
     try:
         if resend_aktiv():
-            ok = await _send_resend(**argumente)
-            if ok:
-                log.info("email_service: '%s' an %s über Resend gesendet", subject, to)
-                return True
+            beleg = await _send_resend(**argumente, idempotency_key=idempotency_key)
+            if beleg:
+                log.info("email_service: '%s' an %s über Resend gesendet (%s)",
+                         subject, to, beleg)
+                return True, f"resend:{beleg}"
             if not smtp_aktiv():
-                return False
+                return False, ""
             log.warning("email_service: Resend fehlgeschlagen — versuche SMTP")
         await asyncio.to_thread(lambda: _send_sync(**argumente))
         log.info("email_service: '%s' an %s über SMTP gesendet", subject, to)
-        return True
+        return True, "smtp"
     except Exception as exc:  # noqa: BLE001
         log.error("email_service: Versand an %s fehlgeschlagen: %s", to, exc)
-        return False
+        return False, ""

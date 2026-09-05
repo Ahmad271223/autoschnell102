@@ -101,7 +101,11 @@ def test_zehn_parallele_retries_ein_eintrag(vertrag):
     assert len(treffer) == 1, f"{len(treffer)} Eintraege statt 1"
 
 
-def test_ohne_key_bleibt_altes_verhalten(vertrag):
+def test_ohne_key_schuetzt_der_server_selbst(vertrag):
+    """Pruefbericht Runde 8, Befund 3: Ohne Schluessel gab es KEINEN Schutz —
+    zwei identische Aufrufe stellten zweimal zu. Jetzt leitet der Server den
+    Schluessel aus dem Inhalt ab: dieselbe Mail an denselben Empfaenger in
+    derselben Minute ist EIN Versand. Eine andere Mail bleibt ein eigener."""
     js = {"channel": "email", "recipient": "idem2@e2etest-mail.de",
           "subject": "V", "message": "Hallo"}
     vorher = len(_eintraege(vertrag["cid"]))
@@ -109,4 +113,9 @@ def test_ohne_key_bleibt_altes_verhalten(vertrag):
         r = requests.post(f"{API}/contracts/{vertrag['cid']}/send",
                           headers=vertrag["h"], json=js, timeout=30)
         assert r.status_code == 200
+    assert len(_eintraege(vertrag["cid"])) == vorher + 1
+    js["message"] = "Hallo, anderer Text"
+    r = requests.post(f"{API}/contracts/{vertrag['cid']}/send",
+                      headers=vertrag["h"], json=js, timeout=30)
+    assert r.status_code == 200
     assert len(_eintraege(vertrag["cid"])) == vorher + 2

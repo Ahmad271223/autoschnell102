@@ -62,6 +62,37 @@ for _netz in os.environ.get("TRUSTED_PROXIES", "").split(","):
         _TRUSTED_PROXIES.append(ipaddress.ip_network(_netz, strict=False))
     except ValueError:
         pass
+# Pruefbericht Runde 8, Befund 4: Ist TRUST_PROXY an, aber keine Liste
+# gesetzt, galten die Kopfzeilen von JEDEM direkten Nachbarn — auch von
+# einem Angreifer, der das Backend ohne nginx erreicht. Ohne Liste gelten
+# jetzt nur die Netze, in denen ein eigener Vermittler ueberhaupt stehen
+# kann: der eigene Rechner und die privaten Bereiche (Docker, Hetzner-
+# Privatnetz). Ein oeffentlicher Nachbar ist nie ein Vermittler.
+_VERMITTLER_NETZE = _TRUSTED_PROXIES or [ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+
+
+def _gueltige_ip(wert: str) -> str:
+    """Nur echte Adressen zaehlen — sonst landet "not-an-ip" oder ein
+    beliebiger Text als Schluessel im Zaehler und im Fehlerarchiv."""
+    w = (wert or "").strip()
+    if w.startswith("[") and "]" in w:            # [::1]:1234
+        w = w[1:w.index("]")]
+    elif w.count(":") == 1:                       # 1.2.3.4:5678
+        w = w.split(":")[0]
+    try:
+        return str(ipaddress.ip_address(w))
+    except ValueError:
+        return ""
+
+
+def _ist_vermittler(adresse: str) -> bool:
+    """Darf dieser direkte Nachbar ueberhaupt Kopfzeilen setzen?"""
+    try:
+        ip = ipaddress.ip_address(adresse)
+    except ValueError:
+        return False
+    return any(ip in netz for netz in _VERMITTLER_NETZE)
 
 
 def _ist_eigener_proxy(adresse: str) -> bool:
@@ -86,22 +117,29 @@ def client_ip(request) -> str:
     if not _TRUST_PROXY:
         return (request.client.host if request.client else None) or "unknown"
     nachbar = (request.client.host if request.client else "") or ""
-    if _TRUSTED_PROXIES and _ist_eigener_proxy(nachbar):
-        # Cloudflare traegt die echte Adresse hier ein; der Header ist
-        # nur glaubwuerdig, weil die Anfrage ueber unseren Vermittler kam.
-        cf = request.headers.get("cf-connecting-ip", "").strip()
-        if cf:
-            return cf
+    # Zuerst der direkte Nachbar: Kommt die Anfrage NICHT von einem eigenen
+    # Vermittler, zaehlen die Kopfzeilen gar nicht — der Nachbar ist der
+    # Besucher, und was er in X-Forwarded-For schreibt, ist seine Sache.
+    if not _ist_vermittler(nachbar):
+        return nachbar or "unknown"
+    # Cloudflare traegt die echte Adresse hier ein; der Header ist nur
+    # glaubwuerdig, weil die Anfrage ueber unseren Vermittler kam.
+    cf = _gueltige_ip(request.headers.get("cf-connecting-ip", ""))
+    if cf:
+        return cf
     fwd = request.headers.get("x-forwarded-for", "")
     if fwd:
-        kette = [t.strip() for t in fwd.split(",") if t.strip()]
-        if _TRUSTED_PROXIES:
+        kette = [_gueltige_ip(t) for t in fwd.split(",")]
+        kette = [t for t in kette if t]
+        if kette and _TRUSTED_PROXIES:
+            # Liste gesetzt: eigene Vermittler von hinten ueberspringen.
             for eintrag in reversed(kette):
                 if not _ist_eigener_proxy(eintrag):
                     return eintrag
             return kette[0]          # nur eigene Vermittler in der Kette
-        return kette[-1]
-    real = request.headers.get("x-real-ip", "").strip()
+        if kette:
+            return kette[-1]         # ohne Liste: was der Vermittler anhing
+    real = _gueltige_ip(request.headers.get("x-real-ip", ""))
     if real:
         return real
     return nachbar or "unknown"
