@@ -22,12 +22,21 @@
 # sonst liesse sich mit einer selbst gesetzten Kopfzeile X-Forwarded-Proto
 # die HTTPS-Umleitung umgehen. Die Firewall muss das ohnehin sperren;
 # nginx sperrt es zusaetzlich (Verteidigung in der Tiefe).
+# Direktzugriff am Load Balancer vorbei erkennen. WICHTIG: nicht mit
+# allow/deny — die pruefen $remote_addr, und das ist nach real_ip schon
+# die Besucheradresse (05.09.2026: jeder Besucher bekam 403). Geprueft
+# wird die URSPRUENGLICHE Adresse des direkten Nachbarn: nur der Load
+# Balancer aus dem privaten Netz darf hereinkommen.
+geo $realip_remote_addr $direktzugriff {
+  default 1;
+  ${PRIVATES_NETZ} 0;
+  127.0.0.1 0;
+}
+
 server {
   listen 80 default_server;
   server_name _;
-  allow ${PRIVATES_NETZ};
-  allow 127.0.0.1;
-  deny all;
+  if ($direktzugriff) { return 444; }
 
   location = /api/health {
     proxy_pass http://backend:8001;
@@ -53,9 +62,7 @@ server {
 server {
   listen 80;
   server_name ${PUBLIC_HOST};
-  allow ${PRIVATES_NETZ};
-  allow 127.0.0.1;
-  deny all;
+  if ($direktzugriff) { return 444; }
 
   # Echte Besucher-Adresse: Der Load Balancer traegt sie in X-Forwarded-For
   # ein. Vertraut wird dieser Angabe nur aus dem privaten Netz — eine von
