@@ -353,45 +353,39 @@ weglassen, MONGO_URL wieder auf `mongo:27017` — fertig.
 Erst sinnvoll, wenn Schritt 2 laeuft — sonst schreibt prod2 in eine
 Datenbank, die prod1 nicht sieht.
 
-**Die Reihenfolge ist so gewaehlt, dass die Seite nie laenger als eine
-Minute weg ist.** Der Kern: Die Domain zieht ZUERST zu Hetzner DNS um,
-zeigt dabei aber weiter auf prod1. Dann kann Hetzner das Zertifikat fuer
-den Load Balancer ausstellen, waehrend alles normal laeuft. Erst ganz am
-Ende wird auf den Load Balancer umgeschaltet.
+**Zertifikat: von Cloudflare, nicht von Hetzner.** Hetzners verwaltetes
+Zertifikat braeuchte die Domain in einer Hetzner-DNS-Zone; die Konsole
+nimmt nur Hauptdomains, und die Hauptdomain soll bei Cloudflare bleiben
+(E-Mail-Eintraege!). Stattdessen: ein Cloudflare-Origin-Zertifikat
+(15 Jahre gueltig, keine Erneuerung) am Load Balancer, und `app.` laeuft
+ueber den Cloudflare-Proxy. Weg: Besucher -> Cloudflare (TLS) -> Load
+Balancer (TLS mit Origin-Zertifikat) -> nginx (HTTP, privates Netz).
+Die LB-Vorlage kennt die Cloudflare-Netze, damit nginx die echte
+Besucheradresse sieht.
 
-Warum Hetzner DNS: Hetzner stellt das Zertifikat am Load Balancer nur
-automatisch aus (und erneuert es), wenn die Domain in einer Hetzner-DNS-
-Zone liegt. Die Hauptdomain bleibt bei Cloudflare; nur die Unterdomain
-`app.` wird als eigene Zone an Hetzner delegiert.
+**3a. Cloudflare: Origin-Zertifikat erzeugen.** Zone auto-schnellkauf.de
+-> SSL/TLS -> Origin Server -> "Create Certificate": RSA 2048, Hostnames
+`app.auto-schnellkauf.de` (Vorschlag `*.auto-schnellkauf.de` und
+`auto-schnellkauf.de` kann bleiben), Gueltigkeit 15 Jahre. Zertifikat
+UND privaten Schluessel sofort kopieren — der Schluessel wird nur einmal
+angezeigt.
 
-**3a. Hetzner DNS: Zone fuer die Unterdomain anlegen.**
-Hetzner Konsole -> DNS -> Zone hinzufuegen: `app.auto-schnellkauf.de`.
-Darin einen A-Eintrag `@` -> `2.28.66.8` (prod1, wie bisher), TTL 60.
-Hetzner nennt drei Nameserver (hydrogen/oxygen/helium.ns.hetzner.com).
+**3b. Hetzner: Zertifikat hochladen.** Konsole -> Sicherheit ->
+Zertifikate -> "Zertifikat hochladen": Name `cloudflare-origin-app`,
+Zertifikat und Schluessel einfuegen.
 
-**3b. Cloudflare: Unterdomain delegieren.**
-Bei Cloudflare den A-Eintrag `app` loeschen und stattdessen drei
-NS-Eintraege `app` anlegen, je einer fuer die drei Hetzner-Nameserver,
-NICHT ueber den Cloudflare-Proxy (graue Wolke). Ab jetzt beantwortet
-Hetzner alle Fragen zu `app.auto-schnellkauf.de` — mit derselben
-Antwort wie vorher (prod1). Kontrolle nach ein paar Minuten:
+**3c. Load Balancer anlegen.** Konsole -> Load Balancer: Standort
+Nuernberg, Typ LB11, privates Netz auswaehlen. Ziele: prod1 und prod2,
+jeweils "ueber privates Netz". Dienst 1: HTTPS, Port 443 -> Zielport 80,
+Zertifikat `cloudflare-origin-app`. Dienst 2: HTTP 80 -> 80 mit
+"Umleitung auf HTTPS". Gesundheitspruefung: HTTP, Port 80, Pfad
+`/api/health`, Intervall 15 s. Die Ziele zeigen jetzt noch "unhealthy"
+— prod1 antwortet auf 80 mit einer Umleitung, prod2 hat noch keinen
+Web-Stack. Richtig so.
 
-```bash
-nslookup -type=NS app.auto-schnellkauf.de 1.1.1.1     # Hetzner-Nameserver
-nslookup app.auto-schnellkauf.de 1.1.1.1              # weiterhin 2.28.66.8
-curl -sS https://app.auto-schnellkauf.de/api/health   # weiterhin healthy
-```
-
-**3c. Load Balancer anlegen.** Hetzner Konsole -> Load Balancer:
-Standort Nuernberg, Typ LB11 (reicht lange), privates Netz auswaehlen.
-Ziele: prod1 und prod2, jeweils "ueber privates Netz". Dienst: Protokoll
-HTTPS, Port 443 -> Zielport 80, Zertifikat "verwaltetes Zertifikat
-erstellen" fuer `app.auto-schnellkauf.de` (wird ueber die Hetzner-Zone
-bestaetigt, dauert Minuten). Gesundheitspruefung: HTTP, Port 80, Pfad
-`/api/health`, Intervall 15 s. Zweiter Dienst: HTTP 80 -> 80 mit
-"Umleitung auf HTTPS" — dann leitet der LB selbst um. Die Ziele zeigen
-jetzt noch "unhealthy": prod1 antwortet auf 80 mit einer Umleitung,
-prod2 hat noch keinen Web-Stack. Das ist in diesem Schritt richtig.
+**Cloudflare SSL-Modus pruefen:** SSL/TLS -> Overview muss auf "Full"
+oder "Full (strict)" stehen. Bei "Flexible" spraeche Cloudflare
+unverschluesselt mit dem LB, der auf HTTPS umleitet — Endlosschleife.
 
 **3d. prod2: Web-Stack im LB-Modus starten** (nach dem Lasttest).
 In der `.env` auf prod2:
@@ -416,11 +410,11 @@ starten:
 cd /opt/autoschnell && docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --force-recreate proxy
 ```
 
-Sofort danach in der Hetzner-DNS-Zone den A-Eintrag `@` von 2.28.66.8
-auf die oeffentliche IP des Load Balancers aendern. Wegen TTL 60 sehen
-Besucher innerhalb einer Minute den Load Balancer; wer in dieser Minute
-noch prod1 direkt anspricht, bekommt einen Fehler — laenger dauert es
-nicht. Beide Ziele im LB sind jetzt "healthy".
+Sofort danach bei Cloudflare den A-Eintrag `app` von 2.28.66.8 auf die
+oeffentliche IP des Load Balancers aendern und den Proxy EINSCHALTEN
+(orange Wolke). Cloudflare-Aenderungen greifen in Sekunden; wer in
+dieser Minute noch prod1 direkt anspricht, bekommt einen Fehler —
+laenger dauert es nicht. Beide Ziele im LB sind jetzt "healthy".
 
 **3f. Firewall zuziehen.** In der Hetzner-Firewall der beiden Server die
 Regeln fuer 80 und 443 aus dem Internet entfernen. Der Load Balancer
@@ -436,8 +430,8 @@ python scripts/betriebsprobe.py app.auto-schnellkauf.de --mail-domain auto-schne
 docker compose exec -T backend python scripts/replikat_pruefen.py
 ```
 
-**Rueckbau:** A-Eintrag wieder auf 2.28.66.8, prod1 wieder auf
-`default.conf.template`, Proxy neu starten. Zertifikat auf prod1 bleibt
+**Rueckbau:** A-Eintrag `app` bei Cloudflare wieder auf 2.28.66.8 mit
+Proxy AUS, prod1 wieder auf `default.conf.template`, Proxy neu starten. Zertifikat auf prod1 bleibt
 bis zu seinem Ablauf gueltig.
 
 ## Sicherheits-Checkliste vor dem Live-Gang
