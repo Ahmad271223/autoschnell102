@@ -584,12 +584,15 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # Pruefbericht Runde 8, Befund 3: Ohne Schluessel gab es keinerlei
     # Schutz — zwei identische Aufrufe stellten zweimal zu. Fehlt der
     # Schluessel, wird er jetzt aus dem Inhalt abgeleitet: dieselbe Mail an
-    # denselben Empfaenger innerhalb derselben Minute ist EIN Versand.
+    # denselben Empfaenger ist EIN Versand.
+    # Runde 10: vorher steckte die Minute im Schluessel — ein Doppelklick um
+    # 12:00:59 und 12:01:00 stellte zweimal zu. Jetzt zaehlt nur der Inhalt;
+    # wer denselben Vertrag bewusst noch einmal schicken will, gibt eine
+    # andere Nachricht oder einen eigenen Schluessel mit.
     if not body.idempotency_key:
         import hashlib
-        minute = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
         roh = "|".join([contract_id, body.channel, body.recipient or "",
-                        body.subject or "", body.message or "", minute])
+                        body.subject or "", body.message or ""])
         body.idempotency_key = "auto-" + hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
     reserviert = False
     wiederaufnahme = False
@@ -707,7 +710,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 out["kopie"] = "gesendet" if await email_service.send_email(
                     sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
                     anhang_name=dateiname, html=k_html,
-                    absender_name=firma.get("company_name") or "") else "fehlgeschlagen"
+                    absender_name=firma.get("company_name") or "",
+                    idempotency_key=f"kopie-{contract_id}-{body.idempotency_key}") else "fehlgeschlagen"
                 if out["kopie"] != "gesendet":
                     log.warning("Kopie des Vertrags %s an %s fehlgeschlagen",
                                 contract_id, sucher_mail)

@@ -304,6 +304,16 @@ docker compose exec -T backend python scripts/replikat_pruefen.py
 
 Erwartet: `mongo-prod1 PRIMARY`, `mongo-prod2 SECONDARY`, Rueckstand 0 s.
 
+**Was `{w: 1}` bedeutet (bewusste Entscheidung):** Ein Schreibvorgang
+gilt als erledigt, sobald der PRIMARY ihn hat — noch bevor prod2 ihn
+kopiert hat (Rueckstand normalerweise unter einer Sekunde). Faellt prod1
+in genau diesem Augenblick endgueltig aus, koennen die letzten Sekunden
+Schreibarbeit fehlen (ein gerade angelegter Vertrag muesste noch einmal
+angelegt werden). Die Alternative `majority` wuerde dafuer bei JEDEM
+Ausfall von prod2 alle Schreibvorgaenge anhalten. Fuer einen Zwei-Server-
+Betrieb ist `{w: 1}` die uebliche Wahl; die stuendliche Sicherung und die
+Belege (Resend-Kennung, Stripe-Ereignisse) decken den Rest.
+
 **2c. Schiedsrichter — die ehrliche Einschraenkung.** Zwei Mitglieder
 koennen bei Ausfall eines Servers keine Mehrheit bilden: der uebrige
 Server stellt das Schreiben ein, bis jemand eingreift (die Daten sind
@@ -383,18 +393,37 @@ Zertifikat `cloudflare-origin-app`. Dienst 2: HTTP 80 -> 80 mit
 — prod1 antwortet auf 80 mit einer Umleitung, prod2 hat noch keinen
 Web-Stack. Richtig so.
 
-**Cloudflare SSL-Modus pruefen:** SSL/TLS -> Overview muss auf "Full"
-oder "Full (strict)" stehen. Bei "Flexible" spraeche Cloudflare
-unverschluesselt mit dem LB, der auf HTTPS umleitet — Endlosschleife.
+**Cloudflare SSL-Modus pruefen:** SSL/TLS -> Overview auf "Full (strict)"
+stellen — das Origin-Zertifikat ist von Cloudflare selbst ausgestellt,
+"strict" prueft es also sauber. "Full" liefe auch, prueft das Zertifikat
+aber nicht (ein Angreifer im Weg zum LB koennte sich mit irgendeinem
+Zertifikat ausgeben). Bei "Flexible" spraeche Cloudflare unverschluesselt
+mit dem LB, der auf HTTPS umleitet — Endlosschleife.
+
+**Vorbereitung ohne Ausfall:** Den A-Eintrag `app` bei Cloudflare
+mindestens eine Stunde VOR dem Umschalten auf TTL "Auto"/2 Minuten
+setzen (bei eingeschaltetem Proxy gilt Cloudflare-TTL ohnehin). Und:
+prod1 waehrend des Umschaltens NICHT abschalten — der alte Weg (direkt
+auf prod1, Port 443) bleibt offen, bis der neue Weg nachweislich laeuft
+(Schritt 3f kommt zuletzt).
 
 **3d. prod2: Web-Stack im LB-Modus starten** (nach dem Lasttest).
 In der `.env` auf prod2:
 
 ```
 PROXY_TEMPLATE=hinter-loadbalancer.conf.template
-PRIVATES_NETZ=10.0.0.0/16
-TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.0/16
+PRIVATES_NETZ=10.0.0.4/32
+TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.4/32
 ```
+
+`PRIVATES_NETZ` ist die Adresse, von der nginx Anfragen ueberhaupt
+annimmt: nur der Load Balancer (10.0.0.4), nicht das ganze private Netz
+— sonst koennte jeder weitere Server im selben Netz (auch ein fremder,
+wenn das Netz einmal geteilt wird) an Cloudflare vorbei direkt auf die
+Seite. Dasselbe fuer `TRUSTED_PROXIES`: Kopfzeilen mit der
+Besucheradresse gelten nur vom LB und vom eigenen nginx-Container.
+Wer die privaten Netze ganz abschalten will: `TRUSTED_PROXIES_NUR_LISTE=true`
+(dann zaehlt ausschliesslich die Liste).
 
 ```bash
 cd /opt/autoschnell && docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --build
@@ -430,9 +459,17 @@ python scripts/betriebsprobe.py app.auto-schnellkauf.de --mail-domain auto-schne
 docker compose exec -T backend python scripts/replikat_pruefen.py
 ```
 
-**Rueckbau:** A-Eintrag `app` bei Cloudflare wieder auf 2.28.66.8 mit
-Proxy AUS, prod1 wieder auf `default.conf.template`, Proxy neu starten. Zertifikat auf prod1 bleibt
-bis zu seinem Ablauf gueltig.
+**Rueckbau (vollstaendig, in dieser Reihenfolge):**
+1. Hetzner-Firewall von prod1: Regeln fuer 80 und 443 aus dem Internet
+   WIEDER anlegen (Schritt 3f hat sie entfernt — ohne das kommt niemand an).
+2. prod1 `.env`: `PROXY_TEMPLATE=default.conf.template`, `PRIVATES_NETZ`
+   und `TRUSTED_PROXIES` wie vor dem LB; Proxy neu starten.
+3. Pruefen, dass das Let's-Encrypt-Zertifikat auf prod1 noch gueltig ist
+   (`openssl x509 -enddate -noout -in deploy/certs/fullchain.pem`); den in
+   3g geloeschten cron `/etc/cron.d/autoschnell-zertifikat` wieder anlegen
+   (siehe oben "Zertifikat erneuern"), sonst laeuft es nach 90 Tagen ab.
+4. Cloudflare: A-Eintrag `app` auf 2.28.66.8, Proxy AUS (grau).
+5. `python scripts/betriebsprobe.py app.auto-schnellkauf.de` von aussen.
 
 ## Sicherheits-Checkliste vor dem Live-Gang
 - [ ] `JWT_SECRET` auf langen Zufallswert gesetzt

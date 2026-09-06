@@ -487,7 +487,11 @@ async def op_versand(sess, stats, w, firma, kanal, zaehler):
                  headers=firma["h"],
                  json={"channel": kanal, "recipient": "+491700000000"
                        if kanal == "whatsapp" else "mx@e2etest-mail.de",
-                       "subject": "Vertrag", "message": "Hier der Vertrag."})
+                       "subject": "Vertrag", "message": "Hier der Vertrag.",
+                       # eigener Schluessel je Versand: ohne ihn faltet das
+                       # Backend gleiche Sendungen zusammen (Doppelschutz),
+                       # und der Lasttest wuerde nur EINEN echten Versand messen.
+                       "idempotency_key": f"last-{uuid.uuid4().hex[:16]}"})
     if st == 200:
         zaehler[0] += 1
 
@@ -821,6 +825,13 @@ def foto_audit(w):
     """Punkt 10: Dateien<->Datenbank-Abgleich fuer die Matrix-Firmen."""
     dbx = _db()
     befunde = {"dateien_ohne_db": 0, "db_ohne_datei": 0}
+    # Runde 10: Laeuft die Pruefung in einem anderen Container als das
+    # Backend (ohne --volumes-from), sieht sie dessen Dateien nicht und
+    # wuerde JEDES Foto als fehlend melden. Dann lieber "nicht pruefbar"
+    # als ein falscher Befund.
+    if not (UPLOAD_ROOT / "resale").exists():
+        return {"nicht_pruefbar": "Foto-Ordner des Backends nicht sichtbar "
+                                  "(Wrapper ohne --volumes-from?)"}
     for f in w.firmen:
         did = f["chef"]["dealer_id"]
         db_keys = set()

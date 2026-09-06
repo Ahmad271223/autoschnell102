@@ -87,8 +87,10 @@ async def _eine_quelle(db, name, url, wirklich):
     try:
         daten, aus_speicher, _ = await get_or_fetch_listing(db, url, _holen)
         if aus_speicher:
-            warn("dieses Inserat lag schon im Speicher — kein echter Abruf; "
-                 "fuer einen echten Abruf ein anderes Inserat nehmen")
+            fehler("dieses Inserat lag schon im Speicher — der Anbieter wurde NICHT "
+                   "erreicht, der Zugangstest ist damit nicht gueltig. Ein anderes, "
+                   "gerade online stehendes Inserat nehmen.")
+            return
     except AnbieterFehler as exc:
         fehler(f"Abruf fehlgeschlagen ({exc.art}): {exc}")
         return
@@ -111,13 +113,19 @@ async def _eine_quelle(db, name, url, wirklich):
     if fehlend:
         warn(f"leer geblieben: {', '.join(fehlend)}")
 
-    # --- 2. zweiter Abruf muss aus dem Speicher kommen ---
-    from listing_identity import peek_cached_listing
-    treffer = await peek_cached_listing(db, url, dealer_id="probe")
-    if treffer is not None:
-        ok("zweiter Abruf kaeme aus dem Speicher — keine weiteren Kosten")
+    # --- 2. zweiter Abruf: WIRKLICH noch einmal ueber denselben Weg, mit einem
+    # Abrufer, der sich meldet, falls er doch angerufen wird ---
+    angerufen = []
+
+    async def _darf_nicht(src, iid, u):
+        angerufen.append(iid)
+        return await provider_fetch.fetch_listing(db, src, iid, u, dealer_id="probe")
+
+    daten2, aus_speicher2, _ = await get_or_fetch_listing(db, url, _darf_nicht)
+    if aus_speicher2 and not angerufen and daten2:
+        ok("zweiter Abruf kam aus dem Speicher — Anbieter nicht angerufen, keine Kosten")
     else:
-        warn("kein Speicher-Eintrag gefunden — jeder Aufruf wuerde erneut kosten")
+        fehler("zweiter Abruf ging erneut zum Anbieter — jeder Aufruf wuerde kosten")
 
 
 async def _falscher_link(db, wirklich):
@@ -152,7 +160,9 @@ async def _falscher_link(db, wirklich):
     except AnbieterFehler as exc:
         ok(f"sauberer Anbieter-Fehler ({exc.art}): {str(exc)[:80]}")
     except Exception as exc:                        # noqa: BLE001
-        ok(f"sauber abgefangen ({type(exc).__name__}): {str(exc)[:80]}")
+        # Runde 10: Datenbank weg, Parser kaputt, Programmierfehler — das
+        # ist KEIN Erfolg, auch wenn es "abgefangen" wurde.
+        fehler(f"unerwarteter Fehler beim Abruf ({type(exc).__name__}): {str(exc)[:120]}")
 
 
 async def main_async(args) -> int:

@@ -76,8 +76,17 @@ for _netz in os.environ.get("TRUSTED_PROXIES", "").split(","):
 # Nutzers haetten alle anderen fuer eine Minute ausgesperrt. Ein Nachbar
 # aus einem privaten Netz ist nie ein Angreifer von aussen; wer im
 # privaten Netz sitzt, koennte ohnehin Schlimmeres.
-_VERMITTLER_NETZE = list(_TRUSTED_PROXIES) + [ipaddress.ip_network(n) for n in (
+# Runde 10: Wer im privaten Netz weitere Mieter hat (geteiltes Hetzner-
+# Netz, fremde Container), kann mit TRUSTED_PROXIES_NUR_LISTE=true die
+# privaten Netze ausschalten — dann gelten Kopfzeilen NUR von den
+# ausdruecklich genannten Vermittlern. Achtung: dann muss der eigene
+# nginx-Container (Docker-Netz 172.x) in TRUSTED_PROXIES stehen.
+_NUR_LISTE = (os.environ.get("TRUSTED_PROXIES_NUR_LISTE") or "").strip().lower() in (
+    "1", "true", "ja", "yes")
+_PRIVATE_NETZE = [ipaddress.ip_network(n) for n in (
     "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+_VERMITTLER_NETZE = list(_TRUSTED_PROXIES) + ([] if (_NUR_LISTE and _TRUSTED_PROXIES)
+                                              else _PRIVATE_NETZE)
 
 
 def _gueltige_ip(wert: str) -> str:

@@ -986,5 +986,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=_cors_origins,
-    allow_methods=["*"], allow_headers=["*"],
+    # Runde 10: kein Freibrief mehr — nur was die Oberflaeche wirklich nutzt.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With",
+                   "Idempotency-Key", "X-CSRF-Token"],
 )

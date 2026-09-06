@@ -78,7 +78,10 @@ echo "== 3/4 Lasttest laeuft (Ergebnisse: docs/lasttests/)"
 # Die Lasttest-Programme sind absichtlich NICHT im Produktions-Image
 # (.dockerignore: scripts/lasttest*) — sie kommen vom Server in den Container.
 # --user 0: das Image laeuft als Nutzer "app", der Ergebnisordner gehoert root.
-docker run --rm --user 0 --network "$NETZ" \
+# --volumes-from: der Foto-Abgleich (Dateien <-> Datenbank) muss dieselben
+# Dateien sehen, die das Backend geschrieben hat — sonst zaehlt er jedes
+# Foto als "in der Datenbank, aber nicht auf der Platte".
+docker run --rm --user 0 --network "$NETZ" --volumes-from last-backend \
     -v "$VERZ/backend/scripts:/app/scripts:ro" \
     -v "$VERZ/docs/lasttests:/docs/lasttests" \
     -e TEST_BASE_URL=http://last-backend:8001 \
