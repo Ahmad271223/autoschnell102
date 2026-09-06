@@ -293,8 +293,8 @@ async def readiness_check(response: Response):
             info["s3"] = "fehler"
             warnungen.append(f"s3: {exc}")
     try:
-        from backup_service import letztes_backup_info
-        b = letztes_backup_info()
+        from backup_service import letztes_backup_info_global
+        b = await letztes_backup_info_global(db)
         info["backup"] = b
         alter = b.get("alter_stunden")
         if alter is None or alter > 26:

@@ -156,6 +156,56 @@ async def _run_backup(db=None) -> None:
         log.error("[backup] FEHLGESCHLAGEN (Code %s): %s", proc.returncode, tail)
         await _alarm(db, "backup_fehlgeschlagen", ref or f"code-{proc.returncode}",
                      ausgabe=ausgabe, code=proc.returncode)
+    await stand_speichern(db)
+
+
+# ---- Zwei Server (06.09.2026) ----
+# Die Sicherung laeuft auf EINEM der beiden Server (Sperre in der
+# Datenbank); ihr Manifest liegt auf dessen Platte. Fragt der Load
+# Balancer den ANDEREN Server nach /api/ready, fand der dort keine
+# Sicherung und warnte. Deshalb steht der Stand der letzten Sicherung
+# zusaetzlich in der Datenbank, die beide sehen.
+_STAND_ID = "letztes_backup"
+
+
+async def stand_speichern(db) -> None:
+    """Nach jedem Lauf: Ergebnis der juengsten Sicherung in system_flags."""
+    if db is None:
+        return
+    try:
+        import socket
+        info = letztes_backup_info()
+        info["server"] = socket.gethostname()
+        info["gespeichert"] = datetime.now(timezone.utc).isoformat()
+        await db.system_flags.update_one({"_id": _STAND_ID}, {"$set": info}, upsert=True)
+    except Exception as exc:                        # noqa: BLE001
+        log.warning("[backup] Stand konnte nicht gespeichert werden: %s", exc)
+
+
+async def letztes_backup_info_global(db) -> dict:
+    """Wie letztes_backup_info(), aber serveruebergreifend: die juengere
+    von lokaler Platte und Datenbank-Eintrag gewinnt. Das Alter wird aus
+    dem Erstellzeitpunkt neu berechnet, nicht aus dem gespeicherten Wert."""
+    lokal = letztes_backup_info()
+    if db is None:
+        return lokal
+    try:
+        doc = await db.system_flags.find_one({"_id": _STAND_ID}, {"_id": 0})
+    except Exception:                               # noqa: BLE001
+        doc = None
+    if not doc or not doc.get("erstellt"):
+        return lokal
+    try:
+        zeit = datetime.fromisoformat(doc["erstellt"])
+        if zeit.tzinfo is None:
+            zeit = zeit.replace(tzinfo=timezone.utc)
+        doc["alter_stunden"] = round(_alter_stunden(zeit), 2)
+    except (TypeError, ValueError):
+        return lokal
+    if lokal.get("alter_stunden") is not None and lokal["alter_stunden"] <= doc["alter_stunden"]:
+        return lokal
+    doc["quelle"] = f"Datenbank (Sicherung lief auf {doc.get('server', '?')})"
+    return doc
 
 
 def _seconds_until_next_run() -> float:
@@ -182,7 +232,9 @@ async def run_backup_forever(db=None) -> None:
     # Nachholen: wenn das letzte VOLLSTAENDIGE Backup >24h alt ist, sofort
     # eins ziehen (PC koennte zur geplanten Zeit ausgeschaltet gewesen sein).
     await asyncio.sleep(30)  # Backend erst in Ruhe hochfahren lassen
-    if _last_backup_age_hours() > 24 and await _may_run(
+    alter_global = (await letztes_backup_info_global(db)).get("alter_stunden") if db is not None else None
+    alter = alter_global if alter_global is not None else _last_backup_age_hours()
+    if alter > 24 and await _may_run(
             datetime.now().strftime("%Y-%m-%d")):
         log.info("[backup] Letztes vollstaendiges Backup >24h alt — hole nach …")
         await _run_backup(db)
