@@ -260,6 +260,7 @@ async def _cleanup_once(db) -> dict:
         await vertragsloeschungen_wiederaufnehmen(db, now)
     stats["contracts_deleted"] = await vertraege_nach_frist_loeschen(
         db, now, stats=stats)
+    stats["termine_ohne_vertrag_bereinigt"] = await termine_ohne_vertrag_bereinigen(db, now)
     stats["storage_nachgeholt"] = await storage_loeschungen_nachholen(db)
     stats["logs_rotiert"] = await logs_rotieren(db, now)
     # ---- Aufbewahrungsfristen (Go-Live-Audit 09/2026) ----
@@ -804,6 +805,45 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
                               "schema_version": auto_daten.SCHEMA_VERSION}})
                 repariert += r.modified_count
     return repariert
+
+
+async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 90) -> int:
+    """Runde 10: Wird ein Vertrag von Hand geloescht, kappt das den Verweis
+    am Termin — die 90-Tage-Bereinigung fand diesen Termin danach nie mehr,
+    Verkaeuferdaten und Protokoll-Dateien blieben ewig. Hier bekommen
+    Termine OHNE Vertrag ihre eigene Frist: aelter als frist_tage (nach
+    Abholdatum, sonst Anlagedatum) -> Personendaten und Protokoll-Dateien weg."""
+    if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() not in ("1", "true", "yes"):
+        return 0
+    grenze = (now - timedelta(days=frist_tage))
+    grenze_iso = grenze.isoformat()
+    n = 0
+    cursor = db.appointments.find(
+        {"$and": [
+            {"$or": [{"contract_id": None}, {"contract_id": {"$exists": False}}]},
+            {"pii_geloescht_at": {"$in": [None, ""]}},
+            {"$or": [{"seller_name": {"$nin": [None, ""]}},
+                     {"seller_phone": {"$nin": [None, ""]}},
+                     {"seller_email": {"$nin": [None, ""]}},
+                     {"pickup_address": {"$nin": [None, ""]}}]},
+        ]},
+        {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1, "created_at": 1})
+    async for a in cursor:
+        stichtag = (a.get("pickup_date") or a.get("created_at") or "")[:10]
+        if not stichtag or stichtag > grenze_iso[:10]:
+            continue
+        jetzt = now.isoformat()
+        try:
+            await _protokolle_pii_entfernen(db, [a["id"]], a.get("dealer_id", ""), jetzt)
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("termine_ohne_vertrag: Protokolle zu %s: %s", a["id"], exc)
+        await db.appointments.update_one(
+            {"id": a["id"]},
+            {"$set": {"seller_name": "", "seller_phone": "", "seller_email": "",
+                      "pickup_address": "", "pii_geloescht_at": jetzt,
+                      "pii_grund": "termin_ohne_vertrag_frist", "updated_at": jetzt}})
+        n += 1
+    return n
 
 
 async def haengende_zustellungen_markieren(db, now: datetime,

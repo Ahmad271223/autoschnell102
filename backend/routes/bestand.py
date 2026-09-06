@@ -215,6 +215,9 @@ async def list_bestand(user=Depends(current_firma),
 # =========================================================
 @router.get("/vehicles/{vehicle_id}/akte")
 async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
+    # Runde 10: Vertraege nur im Bereich des Kontos (Sucher: eigene) —
+    # sonst umging die Akte die Sucher-Trennung des Vertragsarchivs.
+    from routes.contracts import _vertrag_bereich
     """Durchgehende Fahrzeugakte: aggregiert alle vorhandenen Informationen
     zu einem Fahrzeug — ohne Datendopplung, direkt aus den Quell-Collections."""
     v = await db.vehicles.find_one(
@@ -223,7 +226,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         raise HTTPException(404, "Fahrzeug nicht gefunden")
 
     contracts = await db.generated_pdfs.find(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"vehicle_id": vehicle_id, **_vertrag_bereich(user)},
         {"_id": 0, "pdf_b64": 0},
     ).sort("created_at", -1).to_list(10)
 

@@ -279,6 +279,13 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
                 "created_at": now_iso()}},
             upsert=True, return_document=ReturnDocument.AFTER)
         expires_at = grant["expires_at"]
+        # Runde 10: Ein SPAETERER Reparaturlauf einer aelteren Zahlung darf
+        # ein inzwischen laengeres Ablaufdatum nicht zurueckdrehen. Ist der
+        # bestehende Zugang schon laenger gueltig, bleibt er — die Zahlung
+        # gilt als verbucht, die Laufzeit wird nie kuerzer.
+        aktuell = ((u or {}).get("marketplace_access") or {}).get("expires_at")
+        if aktuell and str(aktuell) > str(expires_at):
+            expires_at = aktuell
         r = await db.users.update_one(
             {"id": tx.get("user_id")},
             {"$set": {"marketplace_access": {

@@ -297,8 +297,14 @@ async def readiness_check(response: Response):
         b = await letztes_backup_info_global(db)
         info["backup"] = b
         alter = b.get("alter_stunden")
-        if alter is None or alter > 26:
+        # Runde 10: jung reicht nicht — vollstaendig und (wenn eingerichtet)
+        # offsite muss es sein. Ein gerade fehlgeschlagener Lauf darf die
+        # Warnung nicht unterdruecken.
+        offsite_noetig = bool(os.environ.get("BACKUP_S3_BUCKET", "").strip())
+        if alter is None or alter > 26 or not b.get("vollstaendig"):
             warnungen.append("backup: kein vollstaendiges Backup in den letzten 26 h")
+        elif offsite_noetig and not b.get("offsite"):
+            warnungen.append("backup: letzte Sicherung ohne Offsite-Kopie")
     except Exception as exc:
         warnungen.append(f"backup: {exc}")
     try:

@@ -180,6 +180,23 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
     return a
 
 
+async def _sucher_darf(user: dict, appt: dict) -> bool:
+    """Ein Sucher darf nur Termine anfassen, die er angelegt hat oder deren
+    Vertrag ihm gehoert (Runde 10: vorher genuegte die Firma — damit
+    liess sich ueber die Terminaenderung das Vertrags-PDF eines Kollegen
+    neu erzeugen und die Sucher-Trennung umgehen)."""
+    if user.get("role") != "sucher":
+        return True
+    if appt.get("created_by") == user["id"]:
+        return True
+    cid = appt.get("contract_id")
+    if cid:
+        c = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0, "user_id": 1})
+        if c and c.get("user_id") == user["id"]:
+            return True
+    return False
+
+
 @router.put("/appointments/{appt_id}")
 async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(current_firma)):
     existing = await db.appointments.find_one(
@@ -187,6 +204,9 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     )
     if not existing:
         raise HTTPException(404, "Termin nicht gefunden")
+    if not await _sucher_darf(user, existing):
+        raise HTTPException(403, "Sucher dürfen nur ihre eigenen Termine ändern "
+                                 "(oder Termine zu ihren eigenen Verträgen)")
     # Audit 09/2026 (Befund "Terminaenderungen loeschen Daten"): NUR die
     # tatsaechlich mitgesendeten Felder schreiben. exclude_none=True hat
     # die Modell-Standardwerte ("" / status "offen") mitgeschrieben, sodass
@@ -317,10 +337,10 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     if user.get("role") == "sucher":
         appt = await db.appointments.find_one(
             {"id": appt_id, "dealer_id": user["dealer_id"]},
-            {"_id": 0, "created_by": 1, "status": 1})
+            {"_id": 0, "created_by": 1, "status": 1, "contract_id": 1})
         if not appt:
             raise HTTPException(404, "Termin nicht gefunden")
-        if appt.get("created_by") != user["id"]:
+        if not await _sucher_darf(user, appt):
             raise HTTPException(403, "Sucher dürfen nur ihre eigenen Termine "
                                      "löschen — andere löscht der Händler-"
                                      "Hauptaccount")

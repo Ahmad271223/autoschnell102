@@ -273,8 +273,16 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
                                  "Korrektur-Version starten.")
     payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if doc:
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"]}, {"$set": {**payload, "updated_at": now_iso()}})
+        # Runde 10: Bedingt auf den Entwurf-Status schreiben. Zwischen der
+        # Pruefung oben und dem Schreiben kann das Protokoll unterschrieben
+        # und abgeschlossen worden sein — ein verspaetetes Autospeichern
+        # haette dann Felder des FERTIGEN Protokolls ueberschrieben.
+        res = await db.pickup_protocols.update_one(
+            {"id": doc["id"], "status": "entwurf"},
+            {"$set": {**payload, "updated_at": now_iso()}})
+        if res.matched_count == 0:
+            raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
+                                     "Korrektur-Version starten.")
         return await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0})
     new_doc = {
         "id": str(uuid.uuid4()),
@@ -298,9 +306,12 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         vorhandenes = await _current(appt_id)
         if not vorhandenes:
             raise
-        await db.pickup_protocols.update_one(
-            {"id": vorhandenes["id"]},
+        res = await db.pickup_protocols.update_one(
+            {"id": vorhandenes["id"], "status": "entwurf"},
             {"$set": {**payload, "updated_at": now_iso()}})
+        if res.matched_count == 0:
+            raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
+                                     "Korrektur-Version starten.")
         return await db.pickup_protocols.find_one(
             {"id": vorhandenes["id"]}, {"_id": 0})
     return {k: v for k, v in new_doc.items() if k != "_id"}

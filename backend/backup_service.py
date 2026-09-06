@@ -141,6 +141,7 @@ async def _run_backup(db=None) -> None:
                   "Prozess beendet")
         await _alarm(db, "backup_fehlgeschlagen", "zeitlimit",
                      ausgabe="Zeitlimit (3 h) ueberschritten, Prozess beendet")
+        await stand_speichern(db)
         return
     zeilen = (out or b"").decode("utf-8", "replace").strip().splitlines()
     tail = zeilen[-1] if zeilen else ""
@@ -168,8 +169,16 @@ async def _run_backup(db=None) -> None:
 _STAND_ID = "letztes_backup"
 
 
+_STAND_VOLL_ID = "letztes_vollstaendiges_backup"
+
+
 async def stand_speichern(db) -> None:
-    """Nach jedem Lauf: Ergebnis der juengsten Sicherung in system_flags."""
+    """Nach jedem Lauf: Ergebnis der juengsten Sicherung in system_flags.
+
+    Runde 10: Der letzte VERSUCH und die letzte VOLLSTAENDIGE Sicherung
+    werden getrennt gefuehrt. Sonst ueberschrieb ein fehlgeschlagener Lauf
+    den gueltigen Stand, und die Nachholung glaubte, es gaebe eine junge
+    Sicherung."""
     if db is None:
         return
     try:
@@ -178,8 +187,28 @@ async def stand_speichern(db) -> None:
         info["server"] = socket.gethostname()
         info["gespeichert"] = datetime.now(timezone.utc).isoformat()
         await db.system_flags.update_one({"_id": _STAND_ID}, {"$set": info}, upsert=True)
+        if info.get("vollstaendig"):
+            await db.system_flags.update_one({"_id": _STAND_VOLL_ID}, {"$set": info}, upsert=True)
     except Exception as exc:                        # noqa: BLE001
         log.warning("[backup] Stand konnte nicht gespeichert werden: %s", exc)
+
+
+async def letztes_vollstaendiges_alter_global(db) -> float:
+    """Alter (Stunden) der letzten VOLLSTAENDIGEN Sicherung, egal auf
+    welchem Server — fuer die Nachhol-Entscheidung. Unbekannt = sehr alt."""
+    lokal = _last_backup_age_hours()
+    if db is None:
+        return lokal
+    try:
+        doc = await db.system_flags.find_one({"_id": _STAND_VOLL_ID}, {"_id": 0, "erstellt": 1})
+        if doc and doc.get("erstellt"):
+            zeit = datetime.fromisoformat(doc["erstellt"])
+            if zeit.tzinfo is None:
+                zeit = zeit.replace(tzinfo=timezone.utc)
+            return min(lokal, _alter_stunden(zeit))
+    except Exception:                               # noqa: BLE001
+        pass
+    return lokal
 
 
 async def letztes_backup_info_global(db) -> dict:
@@ -232,8 +261,8 @@ async def run_backup_forever(db=None) -> None:
     # Nachholen: wenn das letzte VOLLSTAENDIGE Backup >24h alt ist, sofort
     # eins ziehen (PC koennte zur geplanten Zeit ausgeschaltet gewesen sein).
     await asyncio.sleep(30)  # Backend erst in Ruhe hochfahren lassen
-    alter_global = (await letztes_backup_info_global(db)).get("alter_stunden") if db is not None else None
-    alter = alter_global if alter_global is not None else _last_backup_age_hours()
+    # Runde 10: fuer das Nachholen zaehlt nur eine VOLLSTAENDIGE Sicherung.
+    alter = await letztes_vollstaendiges_alter_global(db)
     if alter > 24 and await _may_run(
             datetime.now().strftime("%Y-%m-%d")):
         log.info("[backup] Letztes vollstaendiges Backup >24h alt — hole nach …")

@@ -234,8 +234,14 @@ async def login_mfa(body: MfaLoginIn, request: Request):
     if not user or not user.get("active"):
         raise HTTPException(401, "Anmeldung abgelaufen — bitte erneut mit Passwort anmelden")
     m = user.get("mfa") or {}
-    if not m.get("aktiv"):
-        return await _sitzung_ausstellen(user, ip)
+    # Runde 10: Das Zwischen-Token muss zum HEUTIGEN Kontozustand passen.
+    # Vorher stellte ein altes Token nach MFA-Reset oder -Abschaltung eine
+    # Sitzung ohne zweiten Faktor aus, und ein Passwortwechsel entwertete
+    # es nicht. Jetzt: Zustand abweichend oder MFA inzwischen aus -> neu
+    # mit Passwort anmelden.
+    from auth import mfa_zustand
+    if payload.get("z") != mfa_zustand(user) or not m.get("aktiv"):
+        raise HTTPException(401, "Anmeldung abgelaufen — bitte erneut mit Passwort anmelden")
     sperre = m.get("gesperrt_bis")
     if sperre and sperre > now_iso():
         raise HTTPException(429, "Zweiter Faktor vorübergehend gesperrt — bitte in 15 Minuten erneut versuchen")
@@ -314,7 +320,7 @@ async def login(body: LoginIn, request: Request):
         # Zwei-Faktor (Abo-Audit 09/2026): noch KEINE Sitzung — erst der
         # zweite Faktor in /auth/login/mfa stellt das Sitzungs-Token aus.
         await log_activity("", user["id"], "auth.login.mfa.angefordert", meta={"ip": ip})
-        return {"mfa_erforderlich": True, "mfa_token": create_mfa_token(user["id"]),
+        return {"mfa_erforderlich": True, "mfa_token": create_mfa_token(user),
                 "hinweis": "Bitte den 6-stelligen Code aus der Authenticator-App eingeben."}
     return await _sitzung_ausstellen(user, ip)
 

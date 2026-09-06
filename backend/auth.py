@@ -77,12 +77,24 @@ def decode_token(token: str) -> dict:
 MFA_TOKEN_TTL_MINUTES = 5
 
 
-def create_mfa_token(user_id: str) -> str:
+def mfa_zustand(user: dict) -> str:
+    """Kurzer Fingerabdruck von Passwort und Zwei-Faktor-Geheimnis. Aendert
+    sich eines davon (Passwortwechsel, MFA zurueckgesetzt oder abgeschaltet),
+    passt ein vorher ausgestelltes Zwischen-Token nicht mehr (Runde 10)."""
+    import hashlib
+    m = user.get("mfa") or {}
+    roh = f"{user.get('password_hash', '')}|{m.get('secret', '')}|{int(bool(m.get('aktiv')))}"
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:16]
+
+
+def create_mfa_token(user: dict) -> str:
     """Kurzlebiges Zwischen-Token nach korrektem Passwort — berechtigt NUR
-    zur Eingabe des zweiten Faktors, nie zu API-Aufrufen (typ=mfa)."""
+    zur Eingabe des zweiten Faktors, nie zu API-Aufrufen (typ=mfa). Traegt
+    den Kontozustand mit: nach Passwort- oder MFA-Aenderung ist es wertlos."""
     exp = datetime.now(timezone.utc) + timedelta(minutes=MFA_TOKEN_TTL_MINUTES)
-    return jwt.encode({"sub": user_id, "typ": "mfa", "nonce": uuid.uuid4().hex[:12],
-                       "exp": exp}, JWT_SECRET, algorithm=JWT_ALG)
+    return jwt.encode({"sub": user["id"], "typ": "mfa", "z": mfa_zustand(user),
+                       "nonce": uuid.uuid4().hex[:12], "exp": exp},
+                      JWT_SECRET, algorithm=JWT_ALG)
 
 
 def decode_mfa_token(token: str) -> dict:

@@ -366,6 +366,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             await db.appointments.insert_one({
                 "id": appt_id,
                 "dealer_id": user["dealer_id"],
+                "created_by": user["id"],     # Runde 10: sonst kann der Sucher ihn nie loeschen
                 "title": title,
                 "vehicle_id": body.vehicle_id,
                 "contract_id": pdf_id,
@@ -787,8 +788,10 @@ async def regenerate_contract_for_pickup(
     """
     if not contract_id or (pickup_date is None and pickup_time is None):
         return False
-    doc = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": dealer_id}, {"_id": 0})
+    # Runde 10: derselbe Bereich wie beim Lesen — ein Sucher erzeugt kein
+    # PDF fuer den Vertrag eines Kollegen, auch nicht ueber den Termin.
+    bereich = _vertrag_bereich(user) if user else {"dealer_id": dealer_id}
+    doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not doc:
         return False
 

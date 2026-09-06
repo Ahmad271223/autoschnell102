@@ -229,18 +229,32 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     # Persist vehicle for re-use (PDF, Termine)
     vid = f"v_{ad_id}"
-    await db.vehicles.update_one(
-        {"id": vid, "dealer_id": user["dealer_id"]},
-        {"$set": {
-            "id": vid, "dealer_id": user["dealer_id"],
-            "mobile_ad_id": ad_id, "data": {k: v for k, v in vehicle.items() if not k.startswith("_")},
-            "updated_at": now_iso(),
-        },
-         "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
-                          "lifecycle": "verglichen", "source": "plattform",
-                          "lifecycle_changed_at": now_iso()}},
-        upsert=True,
-    )
+    frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
+    # Runde 10: Ist das Fahrzeug schon ueber "verglichen" hinaus (Bestand,
+    # Verkauf, abgeholt …), tragen seine Daten Korrekturen des Haendlers
+    # (z.B. echter Kilometerstand nach der Abholung). Ein erneuter Vergleich
+    # desselben Inserats darf die nicht mit den Inseratsdaten ueberschreiben.
+    # Die frischen Inseratsdaten landen dann getrennt unter inserat_aktuell.
+    vorhanden = await db.vehicles.find_one(
+        {"id": vid, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
+    if vorhanden and (vorhanden.get("lifecycle") or "verglichen") != "verglichen":
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": user["dealer_id"]},
+            {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
+                      "updated_at": now_iso()}})
+    else:
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": user["dealer_id"]},
+            {"$set": {
+                "id": vid, "dealer_id": user["dealer_id"],
+                "mobile_ad_id": ad_id, "data": frisch,
+                "updated_at": now_iso(),
+            },
+             "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
+                              "lifecycle": "verglichen", "source": "plattform",
+                              "lifecycle_changed_at": now_iso()}},
+            upsert=True,
+        )
     await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id)
     # Fahrzeugpool auf die neuesten 30 Vergleiche begrenzen (Wunsch 09/2026)
     try:
