@@ -15,7 +15,7 @@
   J2  Sucher-Loeschung liess offene Abo-Anfragen zurueck; Reset-Loeschung traf nie
   J3  Sucher-Liste lieferte "alles ausser Passwort"
   K1  Selbst-Registrierung fail-open ohne APP_ENV
-  K2  fehlendes JWT_SECRET: Zufalls-Secret je Prozess (Load Balancer!)
+  K2  JWT_SECRET fehlte -> Zufallswert je Prozess (Load Balancer!)
   K3  MFA-Schritt verbrauchte Passwort-Login-Versuche
   K4  Passwort-Reset: alte Links vor dem Versand entwertet; kein Limit je Konto
   K5  Freischaltungs-Status frei waehlbar

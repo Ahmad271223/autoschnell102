@@ -1,18 +1,19 @@
-// Rollentrennung in der Navigation: Sucher, normaler Admin, Super-Admin.
+// Rollentrennung in der Navigation: Sucher und Super-Admin. Einen
+// "normalen Admin" gibt es seit Runde 12 nicht mehr (Beschluss: nur der
+// Super-Admin ist Betreiber) — die Rolle ist nicht mehr vergebbar.
 const { test, expect } = require("@playwright/test");
 const h = require("./helpers");
 
 test.describe("Rollen-Navigation", () => {
-  let firma, sucher, normalAdmin;
+  let firma, sucher;
 
   test.beforeAll(async () => {
     firma = await h.createFirma();
     sucher = await h.createSucher(firma, { abo: true });
-    normalAdmin = await h.createNormalAdmin();
   });
 
   test.afterAll(async () => {
-    await h.cleanup({ firmen: [firma], admins: [normalAdmin] });
+    await h.cleanup({ firmen: [firma] });
   });
 
   test("Sucher sieht keine Haendler-Funktionen", async ({ page }) => {
@@ -33,19 +34,13 @@ test.describe("Rollen-Navigation", () => {
     await expect(page).toHaveURL(/\/app\/vergleich/);
   });
 
-  test("Normaler Admin: keine Betreiber-Funktionen, Nutzerliste nur lesen", async ({ page }) => {
-    await h.authPage(page, "app", normalAdmin.token);
-    await page.goto("/admin");
-    await expect(page.locator('a[href="/admin/users"]').first()).toBeVisible();
-    await expect(page.locator('a[href="/admin/freischaltungen"]')).toHaveCount(0);
-    await expect(page.locator('a[href="/admin/betrieb"]')).toHaveCount(0);
-
-    await page.goto("/admin/users");
-    await expect(page.getByText("nur lesen").first()).toBeVisible();
-    await expect(page.getByTestId("admin-create-user-btn")).toBeDisabled();
-    await expect(page.locator('[data-testid^="user-pw-btn-"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid^="user-toggle-active-btn-"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid^="user-delete-btn-"]')).toHaveCount(0);
+  test("Rolle 'admin' ist nicht mehr vergebbar (nur der Super-Admin)", async () => {
+    // Runde 12: Der Versuch, einen Haendler zum Admin zu machen, wird mit
+    // 400 abgelehnt — der Haendler bleibt Haendler.
+    await expect(h.superPut(`/admin/users/${firma.userId}`, { role: "admin" }))
+      .rejects.toThrow(/nur den Super-Admin/);
+    const me = await h.get("/auth/me", { token: firma.token });
+    expect((me.user || me).role).toBe("dealer");
   });
 
   test("Super-Admin sieht Freischaltungen und Betrieb", async ({ page }) => {

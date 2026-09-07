@@ -136,13 +136,8 @@ async function createSucher(firma, { s = suffix(), abo = false } = {}) {
   return { s, email, password: PASSWORD, userId: r.sucher_id, dealerId: firma.dealerId, name: `${firstName} ${lastName}`, token };
 }
 
-/** Normaler Admin (kein Betreiber): Firma anlegen, Rolle auf admin setzen. */
-async function createNormalAdmin({ s = suffix() } = {}) {
-  const firma = await createFirma({ s, companyName: `E2E Admin ${s}` });
-  await superPut(`/admin/users/${firma.userId}`, { role: "admin" });
-  const token = await login(firma.email, PASSWORD);
-  return { ...firma, token, role: "admin" };
-}
+// createNormalAdmin gibt es nicht mehr: seit Runde 12 ist die Rolle "admin"
+// nicht vergebbar (Beschluss: nur der Super-Admin ist Betreiber).
 
 async function createDriver({ s = suffix() } = {}) {
   const email = mail("e2e-fahrer", s);
@@ -262,7 +257,7 @@ module.exports = {
   api, get, post, put, del, login,
   superAdmin, superGet, superPost, superPut, superDel,
   suffix, isoDate,
-  createFirma, createSucher, createNormalAdmin, createDriver, createBuyer,
+  createFirma, createSucher, createDriver, createBuyer,
   createAppointment, publishListing, cleanup, sweepLeftovers,
   authPage, newAuthedPage,
 };
