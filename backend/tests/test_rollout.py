@@ -30,6 +30,12 @@ def test_lb_vorlage_hat_drain_marker_in_beiden_health_locations():
     assert "proxy_pass http://" not in t, "feste Upstream-Adressen veralten nach einem Container-Neustart"
     d = (WURZEL / "deploy" / "default.conf.template").read_text(encoding="utf-8")
     assert "resolver 127.0.0.11" in d and "proxy_pass http://" not in d
+    # Fehlerantworten duerfen nie als "ein Jahr cachebar" markiert sein — sonst
+    # haelt Cloudflare einen 502 fest (Vorfall 07.09.2026: schwarzer Bildschirm)
+    for text in (t, d):
+        for zeile in text.splitlines():
+            if "add_header Cache-Control" in zeile and "max-age=31536000" in zeile:
+                assert "always" not in zeile, zeile
     compose = (WURZEL / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./deploy/drain:/etc/nginx/drain:ro" in compose, "Host-Marker muss eingehaengt sein"
     assert (WURZEL / "deploy" / "drain" / ".gitkeep").exists()
