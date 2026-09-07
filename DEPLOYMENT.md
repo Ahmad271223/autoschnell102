@@ -311,8 +311,11 @@ in genau diesem Augenblick endgueltig aus, koennen die letzten Sekunden
 Schreibarbeit fehlen (ein gerade angelegter Vertrag muesste noch einmal
 angelegt werden). Die Alternative `majority` wuerde dafuer bei JEDEM
 Ausfall von prod2 alle Schreibvorgaenge anhalten. Fuer einen Zwei-Server-
-Betrieb ist `{w: 1}` die uebliche Wahl; die stuendliche Sicherung und die
-Belege (Resend-Kennung, Stripe-Ereignisse) decken den Rest.
+Betrieb ist `{w: 1}` die uebliche Wahl. Ehrlich dazu: die Sicherung laeuft
+EINMAL naechtlich (BACKUP_HOUR, Standard 03:00) — sie faengt den Totalverlust
+BEIDER Server auf, nicht die letzten Sekunden vor einem Ausfall von prod1;
+die deckt die Replikation auf prod2. Was dazwischen fehlen koennte, laesst
+sich ueber die Belege (Resend-Kennung, Stripe-Ereignisse) nachvollziehen.
 
 **2c. Schiedsrichter — die ehrliche Einschraenkung.** Zwei Mitglieder
 koennen bei Ausfall eines Servers keine Mehrheit bilden: der uebrige
@@ -401,8 +404,9 @@ Zertifikat ausgeben). Bei "Flexible" spraeche Cloudflare unverschluesselt
 mit dem LB, der auf HTTPS umleitet — Endlosschleife.
 
 **Vorbereitung ohne Ausfall:** Den A-Eintrag `app` bei Cloudflare
-mindestens eine Stunde VOR dem Umschalten auf TTL "Auto"/2 Minuten
-setzen (bei eingeschaltetem Proxy gilt Cloudflare-TTL ohnehin). Und:
+mindestens eine Stunde VOR dem Umschalten auf TTL "2 min" setzen — NICHT
+"Auto": Auto bedeutet bei Cloudflare 300 s, also fuenf Minuten (bei
+eingeschaltetem Proxy erzwingt Cloudflare ohnehin Auto). Und:
 prod1 waehrend des Umschaltens NICHT abschalten — der alte Weg (direkt
 auf prod1, Port 443) bleibt offen, bis der neue Weg nachweislich laeuft
 (Schritt 3f kommt zuletzt).
@@ -420,10 +424,16 @@ TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.4/32
 annimmt: nur der Load Balancer (10.0.0.4), nicht das ganze private Netz
 — sonst koennte jeder weitere Server im selben Netz (auch ein fremder,
 wenn das Netz einmal geteilt wird) an Cloudflare vorbei direkt auf die
-Seite. Dasselbe fuer `TRUSTED_PROXIES`: Kopfzeilen mit der
-Besucheradresse gelten nur vom LB und vom eigenen nginx-Container.
-Wer die privaten Netze ganz abschalten will: `TRUSTED_PROXIES_NUR_LISTE=true`
-(dann zaehlt ausschliesslich die Liste).
+Seite. `TRUSTED_PROXIES` nennt die eigenen Vermittler fuer die
+Besucheradresse (X-Forwarded-For). Ohne weiteren Schalter zaehlen daneben
+IMMER die privaten Netze (10/8, 172.16/12, 192.168/16, Loopback) als
+Vermittler — der direkte Nachbar des Backends ist ohnehin stets der eigene
+nginx-Container. Wer wirklich nur die Liste gelten lassen will:
+`TRUSTED_PROXIES_NUR_LISTE=true` in die `.env` (docker-compose.yml reicht
+den Schalter durch; dann MUSS das Docker-Netz des nginx-Containers, z.B.
+`172.16.0.0/12`, in der Liste stehen). Cloudflare-Kopfzeilen
+(CF-Connecting-IP) reicht nginx seit Runde 10 nicht mehr durch — die
+Besucheradresse kommt aus real_ip.
 
 ```bash
 cd /opt/autoschnell && docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --build
@@ -441,9 +451,10 @@ cd /opt/autoschnell && docker compose -f docker-compose.yml -f deploy/docker-com
 
 Sofort danach bei Cloudflare den A-Eintrag `app` von 2.28.66.8 auf die
 oeffentliche IP des Load Balancers aendern und den Proxy EINSCHALTEN
-(orange Wolke). Cloudflare-Aenderungen greifen in Sekunden; wer in
-dieser Minute noch prod1 direkt anspricht, bekommt einen Fehler —
-laenger dauert es nicht. Beide Ziele im LB sind jetzt "healthy".
+(orange Wolke). Cloudflare-Aenderungen greifen in Sekunden; wer bis zum
+Ablauf der TTL (hoechstens 2 Minuten, siehe Vorbereitung) noch prod1
+direkt anspricht, bekommt einen Fehler — laenger dauert es nicht. Beide
+Ziele im LB sind jetzt "healthy".
 
 **3f. Firewall zuziehen.** In der Hetzner-Firewall der beiden Server die
 Regeln fuer 80 und 443 aus dem Internet entfernen. Der Load Balancer

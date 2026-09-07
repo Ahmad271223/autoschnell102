@@ -145,8 +145,9 @@ def test_e2_zahlungswiederholung_verkuerzt_laufzeit_nicht():
 def test_f1_protokoll_wird_nur_im_entwurf_beschrieben():
     import routes.protocols as p
     quelle = inspect.getsource(p.save_protocol)
-    assert quelle.count('"status": "entwurf"}') >= 2, "Schreibabfrage nicht an den Entwurf gebunden"
-    assert "res.matched_count == 0" in quelle
+    # Nachpruefung: Filter "Entwurf ODER abgelaufener Claim" (_entwurf_filter)
+    assert quelle.count("_entwurf_filter(") >= 2, "Schreibabfrage nicht an den Entwurf gebunden"
+    assert "res.matched_count == 0" in quelle and "_speichern_abgelehnt(" in quelle
 
 
 def test_f1b_finales_protokoll_bleibt_unveraendert_bei_verspaetetem_schreiben():

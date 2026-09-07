@@ -10,6 +10,7 @@ Usage:
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 """
 import ipaddress
+import logging
 import os
 import time
 from collections import defaultdict
@@ -85,6 +86,10 @@ _NUR_LISTE = (os.environ.get("TRUSTED_PROXIES_NUR_LISTE") or "").strip().lower()
     "1", "true", "ja", "yes")
 _PRIVATE_NETZE = [ipaddress.ip_network(n) for n in (
     "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+if _NUR_LISTE and not _TRUSTED_PROXIES:
+    logging.getLogger("rate_limiter").warning(
+        "TRUSTED_PROXIES_NUR_LISTE=true, aber TRUSTED_PROXIES ist leer oder unlesbar — "
+        "es gelten weiterhin die privaten Netze als Vermittler")
 _VERMITTLER_NETZE = list(_TRUSTED_PROXIES) + ([] if (_NUR_LISTE and _TRUSTED_PROXIES)
                                               else _PRIVATE_NETZE)
 
@@ -139,11 +144,21 @@ def client_ip(request) -> str:
     # Besucher, und was er in X-Forwarded-For schreibt, ist seine Sache.
     if not _ist_vermittler(nachbar):
         return nachbar or "unknown"
-    # Cloudflare traegt die echte Adresse hier ein; der Header ist nur
-    # glaubwuerdig, weil die Anfrage ueber unseren Vermittler kam.
+    # Cloudflare traegt die echte Adresse hier ein. Nachpruefung Runde 10:
+    # Die Kopfzeile zaehlt nur, wenn sie zu der Adresse passt, die die
+    # eigene Kette (X-Forwarded-For / X-Real-IP vom eigenen nginx) ergibt —
+    # oder wenn es gar keine Kette gibt. Sonst koennte ein Besucher sie
+    # selbst setzen (nginx reicht fremde Kopfzeilen durch) und je Anfrage
+    # eine andere Adresse vortaeuschen.
     cf = _gueltige_ip(request.headers.get("cf-connecting-ip", ""))
-    if cf:
+    aus_kette = _aus_kette(request)
+    if cf and (not aus_kette or cf == aus_kette):
         return cf
+    return aus_kette or nachbar or "unknown"
+
+
+def _aus_kette(request) -> str:
+    """Besucheradresse aus X-Forwarded-For / X-Real-IP; "" wenn nichts da."""
     fwd = request.headers.get("x-forwarded-for", "")
     if fwd:
         kette = [_gueltige_ip(t) for t in fwd.split(",")]
@@ -159,7 +174,7 @@ def client_ip(request) -> str:
     real = _gueltige_ip(request.headers.get("x-real-ip", ""))
     if real:
         return real
-    return nachbar or "unknown"
+    return ""
 
 
 class SlidingWindowRateLimiter:

@@ -42,6 +42,7 @@ mkdir -p docs/lasttests/matrix docs/lasttests/stoss
 
 aufraeumen() {
     docker rm -f last-backend last-mongo >/dev/null 2>&1
+    docker volume rm last-uploads >/dev/null 2>&1
     docker network rm "$NETZ" >/dev/null 2>&1
 }
 trap aufraeumen EXIT INT TERM
@@ -57,6 +58,7 @@ docker network inspect "$NETZ" >/dev/null 2>&1 || docker network create "$NETZ" 
 docker run -d --name last-mongo --network "$NETZ" \
     --memory 3g mongo:8.2 mongod --bind_ip_all --wiredTigerCacheSizeGB 1 >/dev/null
 docker run -d --name last-backend --network "$NETZ" --memory 4g --shm-size 512m \
+    -v last-uploads:/app/uploads \
     -e MONGO_URL=mongodb://last-mongo:27017 -e DB_NAME=autoschnell_last \
     -e APP_ENV=development -e MOCK_PROVIDER_FETCH=true -e RATE_LIMIT_ENABLED=false \
     -e SELF_SIGNUP=true -e AUTO_DATEN_SCHAEDEN_FREITEXT=true \
@@ -78,6 +80,8 @@ echo "== 3/4 Lasttest laeuft (Ergebnisse: docs/lasttests/)"
 # Die Lasttest-Programme sind absichtlich NICHT im Produktions-Image
 # (.dockerignore: scripts/lasttest*) — sie kommen vom Server in den Container.
 # --user 0: das Image laeuft als Nutzer "app", der Ergebnisordner gehoert root.
+# --volumes-from uebernimmt das benannte Volume last-uploads (ohne eigenes
+# Volume haette der Backend-Container nichts zu teilen — Nachpruefung Runde 10).
 # --volumes-from: der Foto-Abgleich (Dateien <-> Datenbank) muss dieselben
 # Dateien sehen, die das Backend geschrieben hat — sonst zaehlt er jedes
 # Foto als "in der Datenbank, aber nicht auf der Platte".

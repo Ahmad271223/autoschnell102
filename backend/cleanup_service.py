@@ -813,30 +813,40 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 9
     Verkaeuferdaten und Protokoll-Dateien blieben ewig. Hier bekommen
     Termine OHNE Vertrag ihre eigene Frist: aelter als frist_tage (nach
     Abholdatum, sonst Anlagedatum) -> Personendaten und Protokoll-Dateien weg."""
-    if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() not in ("1", "true", "yes"):
+    if not vertrag_loeschung_aktiv():        # gleiche Lesart wie die Vertragsloeschung
         return 0
     grenze = (now - timedelta(days=frist_tage))
     grenze_iso = grenze.isoformat()
     n = 0
     cursor = db.appointments.find(
         {"$and": [
-            {"$or": [{"contract_id": None}, {"contract_id": {"$exists": False}}]},
             {"pii_geloescht_at": {"$in": [None, ""]}},
             {"$or": [{"seller_name": {"$nin": [None, ""]}},
                      {"seller_phone": {"$nin": [None, ""]}},
                      {"seller_email": {"$nin": [None, ""]}},
                      {"pickup_address": {"$nin": [None, ""]}}]},
         ]},
-        {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1, "created_at": 1})
+        {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1, "created_at": 1,
+         "contract_id": 1})
     async for a in cursor:
         stichtag = (a.get("pickup_date") or a.get("created_at") or "")[:10]
         if not stichtag or stichtag > grenze_iso[:10]:
             continue
+        if a.get("contract_id"):
+            # Nachpruefung Runde 10: Verweis auf einen Vertrag, den es nicht
+            # mehr gibt (Loeschung ohne Kappen des Verweises), zaehlt wie
+            # "ohne Vertrag". Existiert der Vertrag, gilt dessen eigene Frist.
+            if await db.generated_pdfs.count_documents({"id": a["contract_id"]}, limit=1):
+                continue
         jetzt = now.isoformat()
         try:
             await _protokolle_pii_entfernen(db, [a["id"]], a.get("dealer_id", ""), jetzt)
         except Exception as exc:                        # noqa: BLE001
-            log.warning("termine_ohne_vertrag: Protokolle zu %s: %s", a["id"], exc)
+            # Nachpruefung Runde 10: NICHT als bereinigt markieren — sonst
+            # blieben die Protokoll-Dateien fuer immer liegen. Naechster Lauf.
+            log.warning("termine_ohne_vertrag: Protokolle zu %s: %s — naechster Lauf",
+                        a["id"], exc)
+            continue
         await db.appointments.update_one(
             {"id": a["id"]},
             {"$set": {"seller_name": "", "seller_phone": "", "seller_email": "",

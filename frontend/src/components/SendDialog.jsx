@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
@@ -15,21 +15,28 @@ export default function SendDialog({ open, contract, onClose }) {
   const [waMsg, setWaMsg] = useState((dealer?.whatsapp_template || "").replaceAll("{händler_name}", dealer?.company_name || ""));
   const [emailMsg, setEmailMsg] = useState((dealer?.email_template || "").replaceAll("{händler_name}", dealer?.company_name || ""));
   const [busy, setBusy] = useState(false);
+  // Nachpruefung Runde 10: EIN Schluessel je geoeffnetem Dialog. Ein erneuter
+  // Klick nach Fehler oder Timeout traegt denselben Schluessel und laeuft
+  // serverseitig in die Wiederaufnahme statt in eine zweite Zustellung.
+  // Nach einem erfolgreichen Versand gibt es einen neuen Schluessel, damit
+  // ein bewusster zweiter Versand moeglich bleibt.
+  const neuerSchluessel = () => (crypto.randomUUID && crypto.randomUUID())
+    || `${Date.now()}-${Math.random()}`;
+  const keyRef = useRef(neuerSchluessel());
+  useEffect(() => { if (open) keyRef.current = neuerSchluessel(); }, [open]);
 
   if (!open) return null;
 
   const send = async (channel) => {
     setBusy(true);
     try {
-      // Je Klick ein eigener Schluessel: Doppelklick oder Netz-
-      // Wiederholung erzeugt serverseitig garantiert nur EINEN Eintrag.
-      const idempotency_key = (crypto.randomUUID && crypto.randomUUID())
-        || `${Date.now()}-${Math.random()}`;
+      const idempotency_key = keyRef.current;
       const body = channel === "whatsapp"
         ? { channel, recipient: phone, message: waMsg, idempotency_key }
         : { channel, recipient: email, subject, message: emailMsg,
             idempotency_key };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
+      keyRef.current = neuerSchluessel();
       if (channel === "whatsapp" && data.wa_url) {
         window.open(data.wa_url, "_blank", "noopener");
         toast.success("WhatsApp Chat geöffnet · PDF separat anhängen");

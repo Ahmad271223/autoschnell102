@@ -214,13 +214,26 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
 
 def kopie_mail(*, vertrag: dict, firma: dict, sucher: dict,
                empfaenger_adresse: str, betreff_original: str,
-               nachricht: str) -> Tuple[str, str, str]:
-    """Beleg-E-Mail an den Sucher: was wurde wann an wen geschickt."""
+               nachricht: str, zeitpunkt: str = None) -> Tuple[str, str, str]:
+    """Beleg-E-Mail an den Sucher: was wurde wann an wen geschickt.
+
+    zeitpunkt (ISO): Zeit des Versandeintrags. Nachpruefung Runde 10: Bei
+    einer Wiederaufnahme muss die Kopie denselben Inhalt haben wie beim
+    ersten Versuch — Resend lehnt einen wiederverwendeten Idempotenz-
+    Schluessel mit anderem Inhalt ab. Ohne Angabe gilt die Uhr."""
     firmenname = (firma.get("company_name") or "").strip() or "Autohaus"
     titel = _fahrzeug_titel(vertrag)
     nummer = (vertrag.get("contract_no") or "").strip()
     empfaenger_name = (vertrag.get("seller_name") or "").strip()
-    zeitpunkt = datetime.now().strftime("%d.%m.%Y um %H:%M Uhr")
+    _dt = None
+    if zeitpunkt:
+        try:
+            _dt = datetime.fromisoformat(str(zeitpunkt).replace("Z", "+00:00"))
+            if _dt.tzinfo is not None:
+                _dt = _dt.astimezone()
+        except ValueError:
+            _dt = None
+    zeitpunkt = (_dt or datetime.now()).strftime("%d.%m.%Y um %H:%M Uhr")
     ziel = f"{empfaenger_name} <{empfaenger_adresse}>" if empfaenger_name else empfaenger_adresse
 
     betreff = f"Kopie: Kaufvertrag an {empfaenger_name or empfaenger_adresse} gesendet"

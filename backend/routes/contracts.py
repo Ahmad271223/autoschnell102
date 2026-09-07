@@ -564,6 +564,18 @@ async def get_contract_version_pdf(contract_id: str, version: int,
     )
 
 
+def _auto_schluessel(contract_id: str, c: dict, body) -> str:
+    """Inhaltsschluessel fuer Aufrufer ohne eigenen Schluessel. Runde 10 nahm
+    die Minute heraus (Doppelklick ueber die Minutengrenze); die Nachpruefung
+    ergaenzt die Vertrags-VERSION: nach einer Neuerzeugung des PDFs
+    (Terminverschiebung) ist derselbe Text ein neuer Versand — vorher hiess
+    es fuer immer "bereits gesendet"."""
+    import hashlib
+    roh = "|".join([contract_id, str(c.get("version") or 1), body.channel,
+                    body.recipient or "", body.subject or "", body.message or ""])
+    return "auto-" + hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
+
+
 @router.post("/contracts/{contract_id}/send")
 async def send_contract(contract_id: str, body: SendIn, user=Depends(require_active_sub)):
     # Pruefbericht Runde 8 (09/2026), hoher Befund: Lesen und PDF gingen
@@ -590,17 +602,35 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # wer denselben Vertrag bewusst noch einmal schicken will, gibt eine
     # andere Nachricht oder einen eigenen Schluessel mit.
     if not body.idempotency_key:
-        import hashlib
-        roh = "|".join([contract_id, body.channel, body.recipient or "",
-                        body.subject or "", body.message or ""])
-        body.idempotency_key = "auto-" + hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
+        body.idempotency_key = _auto_schluessel(contract_id, c, body)
     reserviert = False
     wiederaufnahme = False
+    reserviert_am = now_iso()
     if body.idempotency_key:
-        vorhanden = next((e for e in (c.get("send_status") or [])
+        eintraege = c.get("send_status") or []
+        vorhanden = next((e for e in eintraege
                           if e.get("idempotency_key") == body.idempotency_key), None)
+        if vorhanden is None:
+            # Nachpruefung Runde 10: Die Oberflaeche schickt je Klick einen
+            # NEUEN Schluessel. Haengt zu demselben Kanal und Empfaenger noch
+            # ein Versand ohne Ergebnis (Prozess starb, Timeout), haette der
+            # zweite Klick ein zweites Mal zugestellt. Er uebernimmt jetzt
+            # den haengenden Eintrag — unter DESSEN Schluessel, damit auch
+            # Resend nicht doppelt zustellt.
+            haengend = next((e for e in eintraege
+                             if e.get("idempotency_key")
+                             and e.get("channel") == body.channel
+                             and (e.get("recipient") or "") == (body.recipient or "")
+                             and e.get("zustellung") in ("laeuft", "unklar")
+                             and _zustellung_haengt(e)), None)
+            if haengend:
+                body.idempotency_key = haengend["idempotency_key"]
+                vorhanden = haengend
         if (vorhanden and vorhanden.get("zustellung") in ("laeuft", "unklar")
                 and _zustellung_haengt(vorhanden)):
+            # Zeitpunkt des ersten Versuchs behalten: die Kopie an den Sucher
+            # muss bei der Wiederaufnahme denselben Inhalt haben (Resend).
+            reserviert_am = vorhanden.get("sent_at") or reserviert_am
             # Der Prozess ist zwischen Reservierung und Ergebnis gestorben.
             # Frueher hiess es hier dauerhaft "bereits gesendet" — obwohl
             # womoeglich nie etwas rausging. Jetzt wird der Versand unter
@@ -621,7 +651,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             {"$push": {"send_status": {
                 "idempotency_key": body.idempotency_key, "channel": body.channel,
                 "recipient": body.recipient, "subject": body.subject,
-                "sent_at": now_iso(), "zustellung": "laeuft"}}})
+                "sent_at": reserviert_am, "zustellung": "laeuft"}}})
         if res.modified_count == 0:
             return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
                     "zustellung": "laeuft", "bereits_gesendet": True}
@@ -706,7 +736,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 k_betreff, k_text, k_html = kopie_mail(
                     vertrag=c, firma=firma, sucher=user,
                     empfaenger_adresse=body.recipient,
-                    betreff_original=betreff, nachricht=body.message)
+                    betreff_original=betreff, nachricht=body.message,
+                    zeitpunkt=reserviert_am)
                 out["kopie"] = "gesendet" if await email_service.send_email(
                     sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
                     anhang_name=dateiname, html=k_html,

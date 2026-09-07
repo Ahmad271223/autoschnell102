@@ -72,6 +72,20 @@ def test_cloudflare_kopfzeile_wird_genutzt(monkeypatch):
     assert rl.client_ip(a) == "198.51.100.5"
 
 
+def test_cloudflare_kopfzeile_hinter_eigenem_nginx_nicht_faelschbar(monkeypatch):
+    """Nachpruefung Runde 10: Der Nachbar ist immer der eigene nginx (also
+    Vermittler). Schickt der BESUCHER selbst CF-Connecting-IP mit, darf sie
+    nicht ueber die von nginx ermittelte Adresse gewinnen."""
+    rl = _modul(monkeypatch, proxies="172.16.0.0/12,10.0.0.4/32")
+    a = _Anfrage("172.18.0.2", x_forwarded_for="203.0.113.9", cf_connecting_ip="1.2.3.4")
+    assert rl.client_ip(a) == "203.0.113.9"
+    b = _Anfrage("172.18.0.2", x_real_ip="203.0.113.9", cf_connecting_ip="1.2.3.4")
+    assert rl.client_ip(b) == "203.0.113.9"
+    # stimmt die Kopfzeile mit der Kette ueberein (echter Cloudflare-Weg), zaehlt sie
+    c = _Anfrage("172.18.0.2", x_forwarded_for="198.51.100.5", cf_connecting_ip="198.51.100.5")
+    assert rl.client_ip(c) == "198.51.100.5"
+
+
 def test_cloudflare_kopfzeile_von_fremd_wird_ignoriert(monkeypatch):
     """Kommt die Anfrage NICHT ueber einen eigenen Vermittler, darf die
     Kopfzeile nicht zaehlen — sonst faelscht sie jeder selbst."""

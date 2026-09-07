@@ -55,6 +55,10 @@ def vorlage_anpassen(text, soll):
 
 def main(argv):
     schreiben = "--schreiben" in argv
+    if not VORLAGE.exists():
+        print(f"FEHLER: Vorlage nicht gefunden: {VORLAGE} — dieses Programm laeuft "
+              "auf dem Host im Repo (deploy/ liegt nicht im Backend-Image)")
+        return 2
     text = VORLAGE.read_text(encoding="utf-8")
     ist = netze_in_vorlage(text)
     try:

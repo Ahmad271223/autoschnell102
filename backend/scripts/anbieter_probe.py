@@ -121,7 +121,11 @@ async def _eine_quelle(db, name, url, wirklich):
         angerufen.append(iid)
         return await provider_fetch.fetch_listing(db, src, iid, u, dealer_id="probe")
 
-    daten2, aus_speicher2, _ = await get_or_fetch_listing(db, url, _darf_nicht)
+    try:
+        daten2, aus_speicher2, _ = await get_or_fetch_listing(db, url, _darf_nicht)
+    except Exception as exc:                        # noqa: BLE001
+        fehler(f"zweiter Abruf brach ab ({type(exc).__name__}): {str(exc)[:120]}")
+        return
     if aus_speicher2 and not angerufen and daten2:
         ok("zweiter Abruf kam aus dem Speicher — Anbieter nicht angerufen, keine Kosten")
     else:

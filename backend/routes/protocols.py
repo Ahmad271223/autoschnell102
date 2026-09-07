@@ -254,6 +254,36 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
 _ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
 
 
+def _entwurf_filter(proto_id: str) -> dict:
+    """Nachpruefung Runde 10: Schreiben darf, wer den ENTWURF trifft — oder
+    ein 'wird_abgeschlossen', dessen Claim abgelaufen ist. Stirbt der
+    Prozess mitten im Abschluss, blieb der Status sonst fuer immer stehen:
+    jedes Zwischenspeichern der Fahrer-App bekam 409 "bereits
+    abgeschlossen", und das Finalize (das den Ablauf kennt) wurde nie
+    erreicht, weil die App vor dem Abschluss immer erst speichert."""
+    from datetime import datetime as _dt, timezone as _tz
+    jetzt = _dt.now(_tz.utc).isoformat()
+    return {"id": proto_id,
+            "$or": [{"status": "entwurf"},
+                    {"status": "wird_abgeschlossen", "claim_bis": {"$lt": jetzt}}]}
+
+
+def _entwurf_update(payload: dict) -> dict:
+    return {"$set": {**payload, "status": "entwurf", "updated_at": now_iso()},
+            "$unset": {"claim_bis": ""}}
+
+
+async def _speichern_abgelehnt(proto_id: str):
+    """Warum ging das Schreiben nicht durch? Laufender Abschluss -> warten,
+    sonst ist das Protokoll fertig -> Korrektur-Version."""
+    akt = await db.pickup_protocols.find_one({"id": proto_id}, {"_id": 0, "status": 1})
+    if akt and akt.get("status") == "wird_abgeschlossen":
+        raise HTTPException(409, "Das Protokoll wird gerade abgeschlossen "
+                                 "— bitte einen Moment warten.")
+    raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
+                             "Korrektur-Version starten.")
+
+
 def _termin_offen_oder_409(appt: dict) -> None:
     if (appt.get("status") or "offen") in _ABGESCHLOSSEN:
         raise HTTPException(409, f"Termin ist '{appt.get('status')}' — das "
@@ -278,11 +308,9 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         # und abgeschlossen worden sein — ein verspaetetes Autospeichern
         # haette dann Felder des FERTIGEN Protokolls ueberschrieben.
         res = await db.pickup_protocols.update_one(
-            {"id": doc["id"], "status": "entwurf"},
-            {"$set": {**payload, "updated_at": now_iso()}})
+            _entwurf_filter(doc["id"]), _entwurf_update(payload))
         if res.matched_count == 0:
-            raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
-                                     "Korrektur-Version starten.")
+            await _speichern_abgelehnt(doc["id"])
         return await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0})
     new_doc = {
         "id": str(uuid.uuid4()),
@@ -307,11 +335,9 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         if not vorhandenes:
             raise
         res = await db.pickup_protocols.update_one(
-            {"id": vorhandenes["id"], "status": "entwurf"},
-            {"$set": {**payload, "updated_at": now_iso()}})
+            _entwurf_filter(vorhandenes["id"]), _entwurf_update(payload))
         if res.matched_count == 0:
-            raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
-                                     "Korrektur-Version starten.")
+            await _speichern_abgelehnt(vorhandenes["id"])
         return await db.pickup_protocols.find_one(
             {"id": vorhandenes["id"]}, {"_id": 0})
     return {k: v for k, v in new_doc.items() if k != "_id"}
