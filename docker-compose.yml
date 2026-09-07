@@ -210,6 +210,10 @@ services:
       - PRIVATES_NETZ=${PRIVATES_NETZ:-127.0.0.1}
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Drain-Marker fuer deploy/rollout.sh (Datei deploy/drain/aktiv auf dem
+      # Host): liegt sie, meldet /api/health 503 — auch nach einem Neustart
+      # des Proxy-Containers. Nur die LB-Vorlage wertet sie aus.
+      - ./deploy/drain:/etc/nginx/drain:ro
       # PROXY_TEMPLATE waehlt die Betriebsart:
       #   default.conf.template            = nginx macht TLS selbst (ein Server)
       #   hinter-loadbalancer.conf.template = Load Balancer macht TLS

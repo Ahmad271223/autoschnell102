@@ -19,8 +19,16 @@ def test_lb_vorlage_hat_drain_marker_in_beiden_health_locations():
     bloecke = re.findall(r"location = /api/health \{(.*?)\n  \}", t, re.S)
     assert len(bloecke) == 2, "default_server- und Domain-Block brauchen je einen Health-Block"
     for b in bloecke:
+        assert "if (-f /etc/nginx/drain/aktiv) { return 503; }" in b, b
         assert "if (-f /tmp/drain) { return 503; }" in b, b
+        assert "auth_request /_oberflaeche_ok;" in b, "Health muss die Oberflaeche mitpruefen"
         assert "proxy_pass http://backend:8001;" in b
+    assert t.count("location = /_oberflaeche_ok {") == 2
+    assert "proxy_pass http://web:80/;" in t and "proxy_method HEAD;" in t
+    compose = (WURZEL / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "./deploy/drain:/etc/nginx/drain:ro" in compose, "Host-Marker muss eingehaengt sein"
+    assert (WURZEL / "deploy" / "drain" / ".gitkeep").exists()
+    assert "deploy/drain/aktiv" in (WURZEL / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_rollout_skript_setzt_drain_baut_und_hebt_auf():
@@ -29,6 +37,8 @@ def test_rollout_skript_setzt_drain_baut_und_hebt_auf():
     # nur ausfuehrbare Zeilen (der Kopfkommentar nennt die Befehle ebenfalls)
     s = "\n".join(z for z in roh.splitlines() if not z.lstrip().startswith("#"))
     assert "touch /tmp/drain" in s and "rm -f /tmp/drain" in s
+    assert "touch deploy/drain/aktiv" in s and "rm -f deploy/drain/aktiv" in s, \
+        "Host-Marker muss gesetzt und entfernt werden (ueberlebt Proxy-Neustart)"
     assert s.index("touch /tmp/drain") < s.index("git pull --ff-only") < s.index("up -d --build")
     assert "/api/ready" in s, "Backend-Bereitschaft wird abgewartet"
     assert "http://127.0.0.1/" in s, "Oberflaeche wird ueber den Proxy geprueft"

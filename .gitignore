@@ -116,3 +116,6 @@ AutoSchnell-Abruf-Helfer.zip
 # Playwright (E2E)
 frontend/playwright-report/
 frontend/test-results/
+
+# Drain-Marker des Rollout-Skripts (nur zur Laufzeit auf dem Server)
+deploy/drain/aktiv

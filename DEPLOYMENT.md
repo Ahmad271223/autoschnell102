@@ -63,6 +63,16 @@ cd /opt/autoschnell && sh deploy/rollout.sh     # zuerst prod2, nach "FERTIG" pr
 
 Dauer je Server rund drei Minuten (zweimal 60 s Wartezeit fuer den Load
 Balancer). Waehrenddessen traegt der andere Server die Last allein.
+
+Zwei Sicherungen stecken dahinter: Der Drain-Marker liegt auf dem Host
+(`deploy/drain/aktiv`, per Volume im Proxy sichtbar) und ueberlebt damit
+auch den Neustart des Proxy-Containers, den `up -d --build` ausloesen
+kann. Und `/api/health` meldet nur dann "gesund", wenn Backend UND
+Oberflaeche antworten (Unteranfrage an den web-Container) — ein Server
+mit gerade neu gebauter Oberflaeche faellt so auch ohne Drain aus der
+Rotation. Beides gilt nur fuer die LB-Vorlage; nach dem ersten `git pull`
+mit dieser Aenderung einmal `docker compose up -d --force-recreate --no-deps proxy`,
+damit Volume und Vorlage geladen sind (ein bis zwei Sekunden Unterbrechung).
 Bei Fehler bricht das Skript ab und hebt den Drain wieder auf; Rueckweg:
 `git checkout <alter Stand>` und erneut `sh deploy/rollout.sh`.
 

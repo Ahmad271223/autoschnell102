@@ -43,8 +43,26 @@ server {
     # gesund", BEVOR der Server neu gebaut wird — sonst schickt der LB
     # waehrend des Neubaus des Oberflaechen-Containers weiter Besucher
     # hierher und die bekommen 502 (Vorfall 07.09.2026, 15:04 UTC).
+    # Zwei Orte: die Datei auf dem Host (deploy/drain/aktiv, per Volume
+    # eingehaengt — ueberlebt einen Neustart des Proxy-Containers) und
+    # /tmp/drain im Container (Uebergang fuer Proxys ohne das Volume).
+    if (-f /etc/nginx/drain/aktiv) { return 503; }
     if (-f /tmp/drain) { return 503; }
+    # Gesund heisst: Backend UND Oberflaeche antworten. Ist der web-Container
+    # weg (Neubau, Absturz), scheitert die Unteranfrage und der Load
+    # Balancer nimmt den Server aus der Rotation (500 statt 200).
+    auth_request /_oberflaeche_ok;
     proxy_pass http://backend:8001;
+    access_log off;
+  }
+  location = /_oberflaeche_ok {
+    internal;
+    proxy_pass http://web:80/;
+    proxy_method HEAD;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 3s;
     access_log off;
   }
   # Runde 8, Befund 5: Der Load Balancer darf WAHLWEISE /api/ready als
@@ -121,8 +139,26 @@ server {
     # gesund", BEVOR der Server neu gebaut wird — sonst schickt der LB
     # waehrend des Neubaus des Oberflaechen-Containers weiter Besucher
     # hierher und die bekommen 502 (Vorfall 07.09.2026, 15:04 UTC).
+    # Zwei Orte: die Datei auf dem Host (deploy/drain/aktiv, per Volume
+    # eingehaengt — ueberlebt einen Neustart des Proxy-Containers) und
+    # /tmp/drain im Container (Uebergang fuer Proxys ohne das Volume).
+    if (-f /etc/nginx/drain/aktiv) { return 503; }
     if (-f /tmp/drain) { return 503; }
+    # Gesund heisst: Backend UND Oberflaeche antworten. Ist der web-Container
+    # weg (Neubau, Absturz), scheitert die Unteranfrage und der Load
+    # Balancer nimmt den Server aus der Rotation (500 statt 200).
+    auth_request /_oberflaeche_ok;
     proxy_pass http://backend:8001;
+    access_log off;
+  }
+  location = /_oberflaeche_ok {
+    internal;
+    proxy_pass http://web:80/;
+    proxy_method HEAD;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 3s;
     access_log off;
   }
 

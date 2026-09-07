@@ -258,6 +258,25 @@ jobs:
           [ "$CODE" = 503 ] || { echo "Drain wirkt nicht (HTTP $CODE)"; exit 1; }
           docker compose exec -T proxy sh -c 'rm -f /tmp/drain'
           curl -fsS --max-time 5 -H "Host: localhost" http://localhost/api/health
+          # Host-Marker (ueberlebt einen Proxy-Neustart): deploy/drain/aktiv
+          touch deploy/drain/aktiv
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost" http://localhost/api/health)
+          [ "$CODE" = 503 ] || { echo "Host-Drain wirkt nicht (HTTP $CODE)"; exit 1; }
+          rm -f deploy/drain/aktiv
+          curl -fsS --max-time 5 -H "Host: localhost" http://localhost/api/health
+          # Oberflaeche weg -> Health darf NICHT 200 liefern (Vorfall 07.09.2026:
+          # der LB schickte Besucher auf einen Server, dessen web-Container
+          # gerade neu gebaut wurde — 502 fuer alle Seitendateien).
+          docker compose stop web
+          sleep 2
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost" http://localhost/api/health)
+          [ "$CODE" != 200 ] || { echo "Health meldet gesund ohne Oberflaeche"; exit 1; }
+          docker compose start web
+          for i in $(seq 1 20); do
+            curl -fsS --max-time 5 -o /dev/null -H "Host: localhost" http://localhost/api/health && break
+            sleep 2
+          done
+          curl -fsS --max-time 5 -H "Host: localhost" http://localhost/api/health
       - name: Playwright-Report des Stack-Rauchtests bei Fehler
         if: failure()
         uses: actions/upload-artifact@v7

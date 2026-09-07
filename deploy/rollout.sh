@@ -33,11 +33,16 @@ fi
 PUBLIC_HOST=$(grep '^PUBLIC_HOST=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' )
 [ -n "$PUBLIC_HOST" ] || { echo "FEHLER: PUBLIC_HOST fehlt in .env"; exit 2; }
 
+# Marker auf dem Host (deploy/drain/aktiv, per Volume im Proxy sichtbar —
+# ueberlebt einen Neustart des Proxy-Containers waehrend "up -d --build")
+# UND im Container (/tmp/drain, Uebergang fuer Proxys ohne das Volume).
 drain() {
-    docker compose exec -T proxy sh -c 'touch /tmp/drain' \
-        && echo "   Drain gesetzt — der Load Balancer nimmt diesen Server in ca. 45 s aus der Rotation"
+    mkdir -p deploy/drain && touch deploy/drain/aktiv
+    docker compose exec -T proxy sh -c 'touch /tmp/drain' >/dev/null 2>&1 || true
+    echo "   Drain gesetzt — der Load Balancer nimmt diesen Server in ca. 45 s aus der Rotation"
 }
 undrain() {
+    rm -f deploy/drain/aktiv
     docker compose exec -T proxy sh -c 'rm -f /tmp/drain' >/dev/null 2>&1 || true
 }
 trap undrain EXIT INT TERM
