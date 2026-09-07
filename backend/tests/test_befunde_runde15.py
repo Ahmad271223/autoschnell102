@@ -7,6 +7,7 @@ Modul-`db` zeigt auf einen Test-Client (nur Mongo noetig).
 """
 import asyncio
 import inspect
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -18,8 +19,8 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-MONGO_URL = "mongodb://127.0.0.1:27017"
-DB_NAME = "autoschnell"
+MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
+DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 WURZEL = Path(__file__).resolve().parents[2]
 
 
@@ -190,6 +191,10 @@ def test_02_doppeltes_hinzufuegen_gibt_409_ohne_vorabpruefung(welt):
     code = f"C{w.s[:6].upper()}"
 
     async def lauf():
+        # derselbe Index wie in server.py — in der CI laeuft der Test gegen
+        # eine frische Datenbank
+        await db.dealer_drivers.create_index(
+            [("dealer_id", 1), ("driver_account_id", 1)], unique=True)
         await db.driver_accounts.insert_one({"id": w.driver_id, "display_name": "F", "active": True,
                                              "email": f"{w.driver_id}@e2etest-mail.de", "driver_code": code})
         r1 = await D.add_driver_by_code(D.DriverLinkIn(driver_code=code), w.chef)
@@ -412,6 +417,11 @@ def test_b3_abo_anfrage_selbst_aendert_keine_anfrage_anderer_firma(welt):
     w, db = welt.w, welt.db
 
     async def lauf():
+        # Teil-Unique-Index wie server.py (_plan_requests_unique_indizes)
+        await db.plan_requests.create_index(
+            [("type", 1), ("subject_user_id", 1)], unique=True,
+            name="uniq_offene_sucher_abo_anfrage",
+            partialFilterExpression={"type": "sucher_abo", "status": "offen"})
         await db.dealers.insert_one({"id": w.dealer_id, "company_name": "Neu GmbH"})
         # Altanfrage unter einer ANDEREN Firma (nur per DB-Eingriff erreichbar)
         await db.plan_requests.insert_one(
