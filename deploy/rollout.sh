@@ -81,8 +81,17 @@ until docker compose exec -T proxy sh -c "wget -q -O /dev/null --header='Host: $
 done
 echo "   Backend bereit, Oberflaeche antwortet."
 
-echo "== 5/5 Drain aufheben, warte ${WARTE_LB}s bis der Load Balancer den Server wieder fuehrt"
+echo "== 5/6 Drain aufheben, warte ${WARTE_LB}s bis der Load Balancer den Server wieder fuehrt"
 undrain
 trap - EXIT INT TERM
 sleep "$WARTE_LB"
+
+echo "== 6/6 Probe von aussen (ueber Cloudflare und Load Balancer, wie ein Besucher)"
+# Erkennt u.a. einen im Cloudflare-Cache festgehaltenen 502 fuer das
+# Oberflaechen-Skript (Vorfall 07.09.2026: schwarzer Bildschirm trotz
+# gesunder Server). Ein Fehler hier bricht das Rollout nicht ab — der
+# andere Server laeuft ja — wird aber laut gemeldet.
+if ! docker compose exec -T backend python scripts/betriebsprobe.py "$PUBLIC_HOST"; then
+    echo "ACHTUNG: Probe von aussen meldet Fehler — siehe oben (Cloudflare-Cache leeren? anderer Server?)"
+fi
 echo "FERTIG auf $(hostname) — jetzt denselben Befehl auf dem anderen Server."

@@ -58,6 +58,23 @@ def test_rollout_skript_setzt_drain_baut_und_hebt_auf():
     assert "PUBLIC_HOST" in s
 
 
+def test_probe_von_aussen_prueft_die_oberflaeche_wie_der_browser():
+    """Vorfall 07.09.2026: Server gesund, Cloudflare lieferte trotzdem einen
+    gecachten 502 fuer das Skript der Oberflaeche. Die Betriebsprobe muss
+    das erkennen, und das Rollout ruft sie am Ende auf."""
+    import importlib.util
+    pfad = WURZEL / "backend" / "scripts" / "betriebsprobe.py"
+    spec = importlib.util.spec_from_file_location("betriebsprobe", pfad)
+    modul = importlib.util.module_from_spec(spec); spec.loader.exec_module(modul)
+    assert callable(getattr(modul, "oberflaeche_pruefen", None))
+    quelle = pfad.read_text(encoding="utf-8")
+    assert "Purge Everything" in quelle and "?probe=" in quelle, "Cache-Umgehung zur Unterscheidung fehlt"
+    assert "oberflaeche_pruefen(host)" in quelle[quelle.index("def main()"):]
+    roh = (WURZEL / "deploy" / "rollout.sh").read_text(encoding="utf-8")
+    s = "\n".join(z for z in roh.splitlines() if not z.lstrip().startswith("#"))
+    assert "scripts/betriebsprobe.py" in s and s.index("rm -f deploy/drain/aktiv") < s.index("scripts/betriebsprobe.py")
+
+
 def test_doku_und_ci_kennen_den_rollout():
     d = (WURZEL / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "sh deploy/rollout.sh" in d and "Drain" in d

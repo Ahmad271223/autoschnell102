@@ -8,6 +8,8 @@ Prueft von aussen — ohne Zugangsdaten — was vor dem Live-Gang stimmen muss:
   4. Sicherheits-Header (HSTS, X-Frame-Options, nosniff, Referrer-Policy,
      Permissions-Policy, frame-ancestors) auf API UND Oberflaeche
   5. /api/health (Liveness) und /api/ready (Readiness inkl. Warnungen)
+  5b. Oberflaeche wie der Browser: Startseite UND ihr Skript ueber Cloudflare
+      (erkennt einen im Cloudflare-Cache festgehaltenen 502 — Vorfall 07.09.2026)
   6. Mail-Domain: SPF, DMARC, DKIM-Selector (optional --dkim-selector)
   7. Kein offener Mongo-Port (27017) von aussen
 
@@ -18,6 +20,8 @@ TXT-Abfragen ueber dnspython (bereits Abhaengigkeit).
 """
 import argparse
 import datetime as dt
+import re
+import time
 import socket
 import ssl
 import sys
@@ -174,6 +178,37 @@ def api_pruefen(host):
         warn(f"/docs nicht pruefbar: {exc}")
 
 
+def oberflaeche_pruefen(host):
+    """Vorfall 07.09.2026: Beide Server gesund, /api/health 200 — aber Cloudflare
+    lieferte fuer /static/js/main.*.js einen gecachten 502 (schwarzer Bildschirm).
+    Diese Probe macht, was der Browser macht: Startseite laden, Skript laden."""
+    print("5b. Oberflaeche komplett (Startseite + Skript, wie der Browser)")
+    try:
+        r = requests.get(f"https://{host}/", timeout=15)
+        if r.status_code != 200:
+            fehler(f"Startseite antwortet {r.status_code}")
+            return
+        m = re.search(r'src="(/static/js/main\.[a-f0-9]+\.js)"', r.text)
+        if not m:
+            fehler("Startseite enthaelt keinen Skript-Verweis (kein Build ausgeliefert?)")
+            return
+        pfad = m.group(1)
+        s = requests.get(f"https://{host}{pfad}", timeout=15)
+        cache = s.headers.get("cf-cache-status", "")
+        if s.status_code == 200:
+            ok(f"Skript {pfad}: 200" + (f" (Cloudflare-Cache: {cache})" if cache else ""))
+            return
+        # Am Cache vorbei: liefert der Server 200, haelt Cloudflare einen Fehler fest.
+        f = requests.get(f"https://{host}{pfad}?probe={int(time.time())}", timeout=15)
+        if f.status_code == 200:
+            fehler(f"Skript {pfad}: {s.status_code} aus dem Cloudflare-Cache, der Server liefert 200 "
+                   "— Cloudflare: Caching -> Configuration -> Purge Everything")
+        else:
+            fehler(f"Skript {pfad}: {s.status_code} (auch frisch: {f.status_code}) — Oberflaeche defekt")
+    except Exception as exc:  # noqa: BLE001
+        fehler(f"Oberflaeche nicht pruefbar: {exc}")
+
+
 def mail_pruefen(domain, dkim_selector):
     print("6. Mail-Domain (SPF / DMARC / DKIM)")
     try:
@@ -226,6 +261,7 @@ def main():
     http_pruefen(host)
     header_pruefen(host)
     api_pruefen(host)
+    oberflaeche_pruefen(host)
     mail_pruefen(mail_domain, args.dkim_selector)
     ports_pruefen(ips)
     print(f"\nERGEBNIS: {len(OK)} ok, {len(WARNUNGEN)} Warnungen, {len(FEHLER)} Fehler")
