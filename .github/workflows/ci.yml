@@ -277,6 +277,15 @@ jobs:
             sleep 2
           done
           curl -fsS --max-time 5 -H "Host: localhost" http://localhost/api/health
+          # web-Container NEU erzeugen (andere Adresse moeglich): der Proxy muss
+          # ohne eigenen Neustart weiter ausliefern (Docker-DNS-Resolver,
+          # Vorfall 07.09.2026 15:36 UTC: 502 bis zum Proxy-Neustart).
+          docker compose up -d --force-recreate --no-deps web
+          for i in $(seq 1 20); do
+            curl -fsS --max-time 5 -o /dev/null -H "Host: localhost" http://localhost/ && break
+            sleep 2
+          done
+          curl -fsS --max-time 5 -o /dev/null -w "Startseite nach web-Neubau: %{http_code}\n" -H "Host: localhost" http://localhost/
       - name: Playwright-Report des Stack-Rauchtests bei Fehler
         if: failure()
         uses: actions/upload-artifact@v7

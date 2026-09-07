@@ -34,6 +34,14 @@ geo $realip_remote_addr $direktzugriff {
 }
 
 server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
   listen 80 default_server;
   server_name _;
   if ($direktzugriff) { return 444; }
@@ -52,12 +60,12 @@ server {
     # weg (Neubau, Absturz), scheitert die Unteranfrage und der Load
     # Balancer nimmt den Server aus der Rotation (500 statt 200).
     auth_request /_oberflaeche_ok;
-    proxy_pass http://backend:8001;
+    proxy_pass $backend_up;
     access_log off;
   }
   location = /_oberflaeche_ok {
     internal;
-    proxy_pass http://web:80/;
+    proxy_pass $web_up/;
     proxy_method HEAD;
     proxy_pass_request_body off;
     proxy_set_header Content-Length "";
@@ -74,7 +82,7 @@ server {
   # einen Betriebsalarm aus. Wer strenger fahren will, stellt den LB-Check
   # auf /api/ready um; der Pfad ist hier dafuer freigegeben.
   location = /api/ready {
-    proxy_pass http://backend:8001;
+    proxy_pass $backend_up;
     access_log off;
   }
 
@@ -83,6 +91,14 @@ server {
 
 # ---- Die eigene Domain ----
 server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
   listen 80;
   server_name ${PUBLIC_HOST};
   if ($direktzugriff) { return 444; }
@@ -148,12 +164,12 @@ server {
     # weg (Neubau, Absturz), scheitert die Unteranfrage und der Load
     # Balancer nimmt den Server aus der Rotation (500 statt 200).
     auth_request /_oberflaeche_ok;
-    proxy_pass http://backend:8001;
+    proxy_pass $backend_up;
     access_log off;
   }
   location = /_oberflaeche_ok {
     internal;
-    proxy_pass http://web:80/;
+    proxy_pass $web_up/;
     proxy_method HEAD;
     proxy_pass_request_body off;
     proxy_set_header Content-Length "";
@@ -171,7 +187,7 @@ server {
     if ($http_x_forwarded_proto = "http") {
       return 301 https://$host$request_uri;
     }
-    proxy_pass http://backend:8001;
+    proxy_pass $backend_up;
     proxy_read_timeout 300s;   # Snapshots/PDF + synchrone Apify-Abrufe (bis 180 s)
   }
 
@@ -184,7 +200,7 @@ server {
     if ($http_x_forwarded_proto = "http") {
       return 301 https://$host$request_uri;
     }
-    proxy_pass http://web:80;
+    proxy_pass $web_up;
     add_header Cache-Control "public, max-age=31536000, immutable" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
@@ -202,6 +218,6 @@ server {
     if ($http_x_forwarded_proto = "http") {
       return 301 https://$host$request_uri;
     }
-    proxy_pass http://web:80;
+    proxy_pass $web_up;
   }
 }

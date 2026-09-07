@@ -22,9 +22,14 @@ def test_lb_vorlage_hat_drain_marker_in_beiden_health_locations():
         assert "if (-f /etc/nginx/drain/aktiv) { return 503; }" in b, b
         assert "if (-f /tmp/drain) { return 503; }" in b, b
         assert "auth_request /_oberflaeche_ok;" in b, "Health muss die Oberflaeche mitpruefen"
-        assert "proxy_pass http://backend:8001;" in b
+        assert "proxy_pass $backend_up;" in b
     assert t.count("location = /_oberflaeche_ok {") == 2
-    assert "proxy_pass http://web:80/;" in t and "proxy_method HEAD;" in t
+    assert "proxy_pass $web_up/;" in t and "proxy_method HEAD;" in t
+    # Docker-DNS: nginx darf die Container-Adressen nicht nur beim Start aufloesen
+    assert t.count("resolver 127.0.0.11 valid=10s ipv6=off;") == 2
+    assert "proxy_pass http://" not in t, "feste Upstream-Adressen veralten nach einem Container-Neustart"
+    d = (WURZEL / "deploy" / "default.conf.template").read_text(encoding="utf-8")
+    assert "resolver 127.0.0.11" in d and "proxy_pass http://" not in d
     compose = (WURZEL / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./deploy/drain:/etc/nginx/drain:ro" in compose, "Host-Marker muss eingehaengt sein"
     assert (WURZEL / "deploy" / "drain" / ".gitkeep").exists()

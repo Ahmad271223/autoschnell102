@@ -69,6 +69,13 @@ i=0
 # den Proxy holen — das prueft auch den neu gebauten Oberflaechen-Container.
 until docker compose exec -T proxy sh -c "wget -q -O /dev/null --header='Host: $PUBLIC_HOST' http://127.0.0.1/" >/dev/null 2>&1; do
     i=$((i+1))
+    if [ $i -eq 10 ]; then
+        # Proxy mit alter Vorlage (ohne Docker-DNS-Resolver) kennt nach dem
+        # Neubau des web-Containers noch dessen alte Adresse -> 502. Ein
+        # Neustart loest neu auf; der Drain-Marker auf dem Host bleibt.
+        echo "   Oberflaeche antwortet nicht ueber den Proxy — Proxy wird neu gestartet"
+        docker compose restart proxy >/dev/null 2>&1 || true
+    fi
     [ $i -gt 40 ] && { echo "FEHLER: Oberflaeche antwortet nicht"; docker compose logs --tail 20 web proxy; exit 1; }
     sleep 3
 done
