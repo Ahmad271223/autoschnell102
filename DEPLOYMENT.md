@@ -307,9 +307,11 @@ Erwartet: `mongo-prod1 PRIMARY`, `mongo-prod2 SECONDARY`, Rueckstand 0 s.
 **Was `{w: 1}` bedeutet (bewusste Entscheidung):** Ein Schreibvorgang
 gilt als erledigt, sobald der PRIMARY ihn hat — noch bevor prod2 ihn
 kopiert hat (Rueckstand normalerweise unter einer Sekunde). Faellt prod1
-in genau diesem Augenblick endgueltig aus, koennen die letzten Sekunden
-Schreibarbeit fehlen (ein gerade angelegter Vertrag muesste noch einmal
-angelegt werden). Die Alternative `majority` wuerde dafuer bei JEDEM
+in genau diesem Augenblick aus (endgueltig ODER nur kurz, wenn prod2
+inzwischen PRIMARY wurde), koennen die letzten Sekunden Schreibarbeit
+fehlen (ein gerade angelegter Vertrag muesste noch einmal angelegt
+werden); MongoDB legt sie beim Wiederanschluss von prod1 unter
+`/data/db/rollback/` als BSON ab, von Hand zurueckspielbar. Die Alternative `majority` wuerde dafuer bei JEDEM
 Ausfall von prod2 alle Schreibvorgaenge anhalten. Fuer einen Zwei-Server-
 Betrieb ist `{w: 1}` die uebliche Wahl. Ehrlich dazu: die Sicherung laeuft
 EINMAL naechtlich (BACKUP_HOUR, Standard 03:00) — sie faengt den Totalverlust
@@ -807,7 +809,7 @@ Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mi
    **HTTPS 443 → HTTP 80** mit verwaltetem Zertifikat anlegen, dazu
    **HTTP 80 → HTTP 80**, Gesundheitsprüfung HTTP Port 80 Pfad `/api/health`.
 2. In der `.env` umstellen auf `PROXY_TEMPLATE=hinter-loadbalancer.conf.template`
-   und `TRUSTED_PROXIES=10.0.0.0/16,127.0.0.1`, dann `docker compose up -d`.
+   und `TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.0/16`, dann `docker compose up -d`.
 3. DNS-Eintrag `app` von der Server-Adresse auf die des Load Balancers ändern.
 4. Firewall umstellen: Port 80 und 443 nur noch aus `10.0.0.0/16`.
 5. **Datenbank für Server 2 erreichbar machen:** Mongo mit `network_mode: host`
@@ -825,7 +827,7 @@ Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mi
 | Datenbank startet nicht, Meldung mit `Linux kernel versions 6.19 and newer` | MongoDB 8.0 laeuft nicht auf neuen Kernen; Ubuntu 26.04 bringt Kernel 7.0 mit | Ist bereits auf `mongo:8.2` umgestellt. Kontrolle: `grep 'image: mongo' docker-compose.yml` |
 | Load Balancer bleibt „Unhealthy" | Prüfpfad falsch oder Backend startet nicht | HTTP, Port 80, Pfad `/api/health`. Die Prüfung antwortet auch, wenn der Load Balancer mit der Server-IP statt der Domain anfragt; sie kommt aber vom Backend, „healthy" heißt also wirklich lauffähig. |
 | Endlose Weiterleitung im Browser | falsche Betriebsart | `PROXY_TEMPLATE=hinter-loadbalancer.conf.template` |
-| Alle Nutzer gleichzeitig ausgesperrt | Besucheradresse kommt nicht an | `TRUSTED_PROXIES` und `PRIVATES_NETZ` auf `10.0.0.0/16` |
+| Alle Nutzer gleichzeitig ausgesperrt | Besucheradresse kommt nicht an | `TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12,10.0.0.4/32` und `PRIVATES_NETZ=10.0.0.4/32` (LB-Adresse) |
 | Nach `git pull` wirken Änderungen nicht | Abbilder wurden nicht neu gebaut | Immer `docker compose up -d --build` — `up -d` allein startet nur die ALTEN Abbilder neu |
 | Backend startet nicht | Produktionsprüfung meckert | die Meldung im Log nennt genau den fehlenden Wert |
 | „rs.initiate" meldet „maps to this node" | Server-IP statt `mongo` verwendet | mit `host:"mongo:27017"` wiederholen |

@@ -103,10 +103,17 @@ def main():
         # tests/test_send_idempotenz.py.
         ohne_antwort = 0
         integ = 0
+        zusammengefaltet = 0     # Nachpruefung Runde 10: nicht mehr weggeklemmt
         for d in bewertet:
             k = d.get("klassen") or {}
             resets = k.get("verbindungsabbruch_client", 0)
-            dv = max(0, d["integritaet"].get("doppel_versand", 0))
+            roh = d["integritaet"].get("doppel_versand", 0)
+            if roh < 0:
+                # Der Client sah mehr 200er als der Server Eintraege anlegte:
+                # Wiederaufnahme oder "bereits gesendet" — ein frueherer
+                # Versand hing. Sichtbar machen statt verstecken.
+                zusammengefaltet += -roh
+            dv = max(0, roh)
             ohne_antwort += min(dv, resets)
             integ += (d["integritaet"]["doppelte_anbieter_abrufe"]
                       + max(0, dv - resets)
@@ -126,6 +133,8 @@ def main():
             probleme.append(f"Drain {drain}s")
         if not ram_ok:
             probleme.append("RAM faellt nicht zurueck")
+        if zusammengefaltet:
+            probleme.append(f"{zusammengefaltet} Versand-Wiederaufnahmen (haengender Alt-Eintrag)")
         bestanden = "JA" if not probleme else "NEIN: " + "; ".join(probleme)
 
         zeilen.append({
@@ -137,6 +146,7 @@ def main():
             "queue_max": queue, "drain_s": drain,
             "integritaetsfehler": integ,
             "versand_ohne_client_antwort": ohne_antwort,
+            "versand_zusammengefaltet": zusammengefaltet,
             "ram_faellt_zurueck": ram_ok,
             "bestanden": bestanden,
         })

@@ -8,7 +8,7 @@ import { ExternalLink, X } from "lucide-react";
 import { openInPopup, openMultiple } from "@/lib/popup";
 import PortalBadge from "@/components/PortalBadge";
 
-export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
+export default function PortalSheet({ mobileUrl, autoscoutUrl, aufgeloest, onClose }) {
   if (!mobileUrl && !autoscoutUrl) return null;
 
   const openMobile = () => {
@@ -113,6 +113,34 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
             </button>
           )}
         </div>
+
+        {/* Aufloesung (manuelle Suche): bleibt sichtbar, anders als der Toast */}
+        {aufgeloest && (
+          <div className="px-5 pb-3" data-testid="portal-aufloesung">
+            <p className="overline mb-1.5">So wurde die Auswahl aufgelöst</p>
+            <div className="text-[12px] space-y-1" style={{ color: "var(--text-secondary)" }}>
+              <div className="flex items-center gap-2">
+                <PortalBadge kind="autoscout" size="sm" />
+                <span>
+                  {aufgeloest.autoscout?.make}
+                  {aufgeloest.autoscout?.model ? ` · ${aufgeloest.autoscout.model}` : " · alle Modelle"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <PortalBadge kind="mobile" size="sm" />
+                <span style={{ color: aufgeloest.mobile?.make ? "inherit" : "var(--accent-red)" }}>
+                  {!aufgeloest.mobile?.make
+                    ? "Marke unbekannt — Suche ohne Markenfilter"
+                    : aufgeloest.mobile?.model === false
+                      ? "Modell unbekannt — Suche zeigt die ganze Marke"
+                      : aufgeloest.mobile?.model === null
+                        ? "Marke erkannt · alle Modelle"
+                        : "Marke und Modell erkannt"}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="px-5 pb-4">

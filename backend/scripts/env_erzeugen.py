@@ -114,7 +114,7 @@ def main() -> int:
         "TRUST_PROXY=true",
         "# Eigene Vermittler (Load Balancer, Proxy). Pflicht, sobald mehr als",
         "# ein Vermittler davorsteht - sonst sehen alle Besucher gleich aus.",
-        f"TRUSTED_PROXIES={alt.get('TRUSTED_PROXIES') or '10.0.0.0/16,127.0.0.1'}",
+        f"TRUSTED_PROXIES={alt.get('TRUSTED_PROXIES') or '127.0.0.1,172.16.0.0/12,10.0.0.4/32'}",
         "# Betriebsart des Webservers. Hinter einem Load Balancer terminiert",
         "# dieser die Verschluesselung; nginx laeuft dann nur auf Port 80.",
         f"PROXY_TEMPLATE={alt.get('PROXY_TEMPLATE') or 'hinter-loadbalancer.conf.template'}",

@@ -30,6 +30,7 @@ import base64
 import json
 import os
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -76,9 +77,25 @@ def _pct(v, p):
     return v[max(0, min(len(v) - 1, int(round(p / 100 * len(v))) - 1))]
 
 
+def _grund(text):
+    """Kurzgrund aus {"detail": ...}; Zahlen -> '#', damit Varianten
+    zusammenfallen ("Maximal 40 Fotos" und "Maximal 20 Fotos" = ein Grund)."""
+    try:
+        d = json.loads(text).get("detail", "")
+    except Exception:                               # noqa: BLE001
+        d = text
+    if isinstance(d, list):                          # Pydantic-422
+        d = ";".join(str(e.get("msg", "")) for e in d[:2] if isinstance(e, dict))
+    return re.sub(r"\d+", "#", str(d))[:40]
+
+
 class Stats:
     def __init__(self):
         self.ok, self.err, self.total = {}, {}, 0
+        # Nachpruefung Runde 10: je Endpunkt Zaehler nach "Status Grund" —
+        # eine 400 ist nicht gleich der anderen, und 429/402/422 duerfen
+        # nicht pauschal als "technisch" untergehen.
+        self.gruende = {}
         self.job_annahme, self.job_warte = [], []
         self.unfertig = 0
         self.resets = []          # [{zeit, endpunkt}] je 599
@@ -88,11 +105,17 @@ class Stats:
         # "40-Fotos-Limit greift" — der Server hatte etwas anderes gesagt.
         self.beispiel = {}
 
-    def add(self, name, ms, status, erwartet_4xx=False, text=""):
+    def add(self, name, ms, status, erwartet_4xx=(), text=""):
         self.total += 1
-        if 200 <= status < 300 or (erwartet_4xx and 400 <= status < 500):
+        # erwartet_4xx: Menge der Statuscodes, die fachlich erwartet sind
+        # (True = jeder 4xx, alte Lesart). 401 statt 404 ist KEIN Erfolg.
+        erwartet = (400 <= status < 500) if erwartet_4xx is True else (status in (erwartet_4xx or ()))
+        if 200 <= status < 300 or erwartet:
             self.ok.setdefault(name, []).append(ms)
+            if status >= 400:
+                self._grund_zaehlen(name, status, text)
         else:
+            self._grund_zaehlen(name, status, text)
             self.err.setdefault(name, {}).setdefault(status, 0)
             self.err[name][status] += 1
             if text and (name, status) not in self.beispiel:
@@ -101,6 +124,11 @@ class Stats:
                 self.resets.append({
                     "zeit": datetime.now(timezone.utc).isoformat(),
                     "endpunkt": name})
+
+    def _grund_zaehlen(self, name, status, text):
+        key = f"{status} {_grund(text)}".strip()
+        g = self.gruende.setdefault(name, {})
+        g[key] = g.get(key, 0) + 1
 
     def report(self):
         out = {}
@@ -113,11 +141,13 @@ class Stats:
                       "p95_ms": round(_pct(v, 95) or 0),
                       "p99_ms": round(_pct(v, 99) or 0),
                       "fehler_nach_status": e,
+                      "fehler_nach_grund": self.gruende.get(n, {}),
                       "antwort_beispiel": {str(st): t for (nn, st), t in self.beispiel.items() if nn == n}}
         for n, e in self.err.items():
             if n not in out:
                 out[n] = {"ok": 0, "fehler": sum(e.values()),
                           "fehlerrate_prozent": 100.0, "fehler_nach_status": e,
+                          "fehler_nach_grund": self.gruende.get(n, {}),
                           "antwort_beispiel": {str(st): t for (nn, st), t in self.beispiel.items() if nn == n}}
         return out
 
@@ -410,7 +440,7 @@ async def op_pdf_download(sess, stats, w, firma):
         await _timed(sess, stats, "pdf_download_protokoll", "GET",
                      f"{API}/driver/appointments/{firma['appt_id']}"
                      f"/protocol.pdf", headers=firma["drv_h"],
-                     erwartet_4xx=True)
+                     erwartet_4xx={404})
 
 
 async def op_protokoll(sess, stats, w, firma):
@@ -478,11 +508,11 @@ async def op_foto_ungueltig(sess, stats, w, firma):
     await _timed(sess, stats, "foto_ungueltig_abgelehnt", "POST",
                  f"{API}/resale/{firma['listing_id']}/photos",
                  headers=firma["h"], json={"photos_b64": [FOTO_UNGUELTIG]},
-                 erwartet_4xx=True)
+                 erwartet_4xx={400})
 
 
 async def op_versand(sess, stats, w, firma, kanal, zaehler):
-    st, _ = await _timed(sess, stats, f"versand_{kanal}", "POST",
+    st, body = await _timed(sess, stats, f"versand_{kanal}", "POST",
                  f"{API}/contracts/{firma['send_contract']}/send",
                  headers=firma["h"],
                  json={"channel": kanal, "recipient": "+491700000000"
@@ -494,6 +524,15 @@ async def op_versand(sess, stats, w, firma, kanal, zaehler):
                        "idempotency_key": f"last-{uuid.uuid4().hex[:16]}"})
     if st == 200:
         zaehler[0] += 1
+        # Nachpruefung Runde 10: 200 ohne neuen Eintrag (Wiederaufnahme /
+        # bereits gesendet) getrennt zaehlen — sonst wird "doppel_versand"
+        # negativ und die Auswertung klemmte das still weg.
+        try:
+            js = json.loads(body)
+        except Exception:                           # noqa: BLE001
+            js = {}
+        if isinstance(js, dict) and (js.get("bereits_gesendet") or js.get("wiederaufgenommen")):
+            zaehler[1] += 1
 
 
 async def op_markt(sess, stats, w):
@@ -667,13 +706,25 @@ UPLOAD_ROOT = Path(__file__).resolve().parent.parent / "uploads"
 
 # Fachlich ERWARTETE Ablehnungen je Endpunkt (Auftrag Punkt 7: nichts
 # pauschal werten). Alles andere an 4xx ist ein auszuweisender Befund.
+# Nachpruefung Runde 10: Schluessel = (Status, Textanfang des Servergrunds,
+# Zahlen als '#'). Eine 400 mit anderem Text ist ein Befund, kein Erfolg.
 ERWARTETE_ABLEHNUNG = {
-    "foto_upload_klein": {400: "40-Fotos-Limit greift"},
-    "foto_upload_normal": {400: "40-Fotos-Limit greift"},
-    "foto_upload_gross": {400: "40-Fotos-Limit greift"},
-    "protokoll_abschluss": {400: "Schutz: Abschluss ohne frischen Entwurf",
-                             409: "Schutz: atomarer Doppelabschluss"},
+    "foto_upload_klein": {(400, "Maximal # Fotos"): "40-Fotos-Limit greift"},
+    "foto_upload_normal": {(400, "Maximal # Fotos"): "40-Fotos-Limit greift"},
+    "foto_upload_gross": {(400, "Maximal # Fotos"): "40-Fotos-Limit greift"},
+    "protokoll_abschluss": {(400, "Protokoll"): "Schutz: Abschluss ohne frischen Entwurf",
+                            (409, ""): "Schutz: atomarer Doppelabschluss"},
 }
+# Unerwartete 4xx nach Art — damit 429 (Limiter), 402 (Abo) und 422
+# (Testfehler) im Bericht nicht als eine Zahl "technisch" untergehen.
+UNERWARTET_ART = {429: "limiter", 402: "abo", 422: "validierung_testfehler"}
+
+
+def _erwartet(name, st_i, grund):
+    for (st, praefix), text in (ERWARTETE_ABLEHNUNG.get(name) or {}).items():
+        if st == st_i and (grund or "").startswith(praefix):
+            return text
+    return None
 SICHERHEITSTEST = {"foto_ungueltig_abgelehnt": {400}}
 # 404 in echter Nutzeraktion = Race/UX-Befund (Punkt 7), KEIN Erfolg:
 RACE_UX = {"foto_loeschen": {404}, "pdf_download_protokoll": {404},
@@ -696,20 +747,43 @@ def klassifiziere(endpunkte):
             # erwartet_4xx zaehlte 404 als ok — fuer die Klassenrechnung
             # bleibt es Erfolg der Messung, wird aber als Befund gelistet.
             pass
-        for st, n in (v.get("fehler_nach_status") or {}).items():
-            st_i = int(st)
+        nach_grund = v.get("fehler_nach_grund")
+        if nach_grund:
+            # nur die NICHT als ok gezaehlten Antworten (erwartete 4xx sind
+            # in 'ok' und stehen hier zusaetzlich mit ihrem Grund)
+            fehler_status = {int(st): n for st, n in (v.get("fehler_nach_status") or {}).items()}
+            eintraege = []
+            for key, n in nach_grund.items():
+                st_s, _, grund = key.partition(" ")
+                st_i = int(st_s)
+                if st_i in fehler_status:
+                    eintraege.append((st_i, grund, n))
+        else:                                        # alte Berichte ohne Grund
+            eintraege = [(int(st), "", n) for st, n in (v.get("fehler_nach_status") or {}).items()]
+        for st_i, grund, n in eintraege:
+            st = str(st_i)
             if st_i == 599:
                 k["verbindungsabbruch_client"] += n
-            elif st_i in (ERWARTETE_ABLEHNUNG.get(name) or {}):
+                continue
+            if nach_grund:
+                erwartet = _erwartet(name, st_i, grund)
+            else:
+                erwartet = next((t for (s_, _p), t in (ERWARTETE_ABLEHNUNG.get(name) or {}).items()
+                                 if s_ == st_i), None)
+            if erwartet:
                 k["fachlich_erwartet"] += n
-                probe = (v.get("antwort_beispiel") or {}).get(str(st), "")
-                details.setdefault(name, {})[st] =                     f"{n}x {ERWARTETE_ABLEHNUNG[name][st_i]}" + (f" | Server: {probe}" if probe else "")
+                probe = grund or (v.get("antwort_beispiel") or {}).get(st, "")
+                details.setdefault(name, {})[f"{st} {grund}".strip()] = \
+                    f"{n}x {erwartet}" + (f" | Server: {probe}" if probe else "")
             elif st_i in (RACE_UX.get(name) or set()):
                 k["race_ux_befund"] += n
                 details.setdefault(name, {})[st] = f"{n}x Race/UX-Befund"
             else:
                 k["technisch_unerwartet"] += n
-                details.setdefault(name, {})[st] = f"{n}x UNERWARTET"
+                art = UNERWARTET_ART.get(st_i, "sonstige")
+                k.setdefault("technisch_unerwartet_nach_art", {})
+                k["technisch_unerwartet_nach_art"][art] = k["technisch_unerwartet_nach_art"].get(art, 0) + n
+                details.setdefault(name, {})[f"{st} {grund}".strip()] = f"{n}x UNERWARTET ({art})"
     return k, details
 
 
@@ -909,7 +983,7 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
         geteilte = w.neue_links(max(10, nutzer // 5)) * 5  # mehrfach im Pool
 
         stats = Stats()
-        vz = [0]              # Versand-Zaehler inkl. Warmup (Doppelversand-Beweis)
+        vz = [0, 0]           # [200er, davon zusammengefaltet] inkl. Warmup
         pdf_zaehler = [0]     # Vertrags-200er inkl. Warmup (Abschluss-Nachweis)
         cpu, queues, ticks = [], [], []
         speicher_vorher = speicher_snapshot()
@@ -992,6 +1066,7 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
             "integritaet": {
                 "doppelte_anbieter_abrufe": doppelte_abrufe(),
                 "versand_gesendet": vz[0],
+                "versand_zusammengefaltet": vz[1],
                 "versand_eintraege_delta": versand_zaehlung(w) - versand_vorher,
                 "doppel_versand": (versand_zaehlung(w) - versand_vorher) - vz[0],
                 "jobs_nicht_fertig_im_messfenster": stats.unfertig,

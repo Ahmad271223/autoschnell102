@@ -58,7 +58,33 @@ def fehler(text):
     print(f"  FEHLER {text}")
 
 
-async def _eine_quelle(db, name, url, wirklich):
+async def _eintrag_entwerten(db, kennung) -> None:
+    """Genau EINEN Speichereintrag ungueltig machen (--frisch). Schluessel
+    ist source:item_id (listing_identity), weder URL noch dealer_id.
+    Entwerten statt loeschen: Zaehler und Historie bleiben, der naechste
+    Abruf holt neu. Ein gerade laufender Lease (fetching_until in der
+    Zukunft) wird nicht angefasst — sonst stoerte die Probe einen Nutzer."""
+    from datetime import datetime, timedelta, timezone
+    jetzt = datetime.now(timezone.utc)
+    r = await db.listings_cache.update_one(
+        {"cache_key": kennung["cache_key"],
+         "$or": [{"fetching_until": None}, {"fetching_until": {"$exists": False}},
+                 {"fetching_until": {"$lt": jetzt}}]},
+        {"$set": {"expires_at": jetzt - timedelta(seconds=1)}})
+    if r.matched_count:
+        ok(f"Speichereintrag {kennung['cache_key']} entwertet (--frisch)")
+    else:
+        warn("kein (freier) Speichereintrag zum Entwerten — wird ohnehin neu abgerufen")
+    if kennung["source"] == "mobile":
+        # Zweiter Speicher nur bei mobile.de: get_vehicle liest vehicle_cache
+        # (30 min) VOR dem Apify-Aufruf — ohne diesen Schritt waere der
+        # "echte" Abruf keiner.
+        r2 = await db.vehicle_cache.delete_one({"mobile_ad_id": kennung["item_id"]})
+        if r2.deleted_count:
+            ok("vehicle_cache-Eintrag (mobile.de-Zwischenspeicher) entfernt")
+
+
+async def _eine_quelle(db, name, url, wirklich, frisch=False):
     print(f"\n{name}")
     from listing_identity import get_listing_identity, ListingIdentityError
     try:
@@ -71,6 +97,8 @@ async def _eine_quelle(db, name, url, wirklich):
     if not wirklich:
         warn("Probelauf — es wird NICHT wirklich abgerufen (--wirklich fehlt)")
         return
+    if frisch:
+        await _eintrag_entwerten(db, kennung)
 
     import provider_fetch
     from anbieter_fehler import AnbieterFehler
@@ -191,7 +219,7 @@ async def main_async(args) -> int:
         for name, url in aufgaben:
             if url:
                 gemacht = True
-                await _eine_quelle(db, name, url, args.wirklich)
+                await _eine_quelle(db, name, url, args.wirklich, frisch=args.frisch)
         if not gemacht:
             print("Kein Link angegeben. Mindestens einen von --mobile,")
             print("--autoscout, --kleinanzeigen setzen.")
@@ -222,6 +250,9 @@ def main() -> int:
     ap.add_argument("--kleinanzeigen", default="", help="echte Kleinanzeigen-URL")
     ap.add_argument("--wirklich", action="store_true",
                     help="wirklich abrufen (kostet Geld ueber Apify)")
+    ap.add_argument("--frisch", action="store_true",
+                    help="vorhandenen Speichereintrag NUR dieses Inserats vorher entwerten, "
+                         "damit der Anbieter wirklich angerufen wird (kostet dann sicher)")
     args = ap.parse_args()
     try:
         from dotenv import load_dotenv

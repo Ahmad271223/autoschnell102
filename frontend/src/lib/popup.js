@@ -20,13 +20,27 @@ export function openInPopup(url, name = "filterWindow", width = 1280, height = 1
     "menubar=no", "toolbar=no", "location=yes",
     "status=no", "scrollbars=yes", "resizable=yes", "popup=yes",
   ].join(",");
+  // Bewusst KEIN "noopener" in den Features: damit liefert window.open null,
+  // die Blocker-Erkennung unten hielte jeden Aufruf fuer geblockt (Doppel-
+  // Oeffnung ueber den _blank-Fallback), das benannte Fenster wuerde beim
+  // naechsten Klick nicht wiederverwendet und focus() entfiele. Stattdessen
+  // (OWASP-Reihenfolge): leeres Fenster oeffnen, opener kappen — das setzt
+  // das "disowned"-Flag des Browsing Context und ueberlebt die Navigation
+  // zu mobile.de/AutoScout — und erst dann navigieren.
   let popup = null;
-  try { popup = window.open(url, name, features); } catch { popup = null; }
+  try { popup = window.open("", name, features); } catch { popup = null; }
   if (!popup || popup.closed || typeof popup.closed === "undefined") {
     window.open(url, "_blank", "noopener,noreferrer");
     return null;
   }
-  try { popup.opener = null; } catch { /* ignore */ }
+  try { popup.opener = null; } catch { /* Fenster zeigt schon Fremd-Origin: Flag ist vom ersten Oeffnen gesetzt */ }
+  try {
+    popup.location.href = url;
+  } catch {
+    try { popup.close(); } catch { /* ignore */ }
+    window.open(url, "_blank", "noopener,noreferrer");
+    return null;
+  }
   try { popup.focus(); } catch { /* ignore */ }
   return popup;
 }

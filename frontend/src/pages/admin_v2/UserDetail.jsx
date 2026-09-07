@@ -66,7 +66,7 @@ export default function AdminUserDetail() {
     try {
       const r = await api.get(`/admin/contracts/${c.id}/pdf`, { responseType: "blob" });
       const url = URL.createObjectURL(r.data);
-      window.open(url, "_blank");
+      window.open(url, "_blank", "noopener,noreferrer");
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (e) { toast.error(errMsg(e, "PDF nicht verfügbar")); }
   };

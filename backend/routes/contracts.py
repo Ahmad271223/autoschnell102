@@ -404,7 +404,11 @@ def _zustellung_haengt(eintrag: dict, jetzt=None) -> bool:
     if eintrag.get("zustellung") == "unklar":
         return True
     try:
-        start = datetime.fromisoformat(str(eintrag.get("sent_at") or ""))
+        # Nachpruefung Runde 10: Ein frischer Wiederaufnahme-Claim zaehlt wie
+        # ein frischer Erstversand — sonst nehmen zehn gleichzeitige Klicks
+        # denselben Eintrag alle wieder auf.
+        start = datetime.fromisoformat(str(eintrag.get("wiederaufnahme_am")
+                                           or eintrag.get("sent_at") or ""))
     except ValueError:
         return True
     if start.tzinfo is None:
@@ -606,6 +610,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     reserviert = False
     wiederaufnahme = False
     reserviert_am = now_iso()
+    claim_am = None
     if body.idempotency_key:
         eintraege = c.get("send_status") or []
         vorhanden = next((e for e in eintraege
@@ -636,6 +641,23 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # womoeglich nie etwas rausging. Jetzt wird der Versand unter
             # DEMSELBEN Schluessel wiederholt; Resend erkennt den Schluessel
             # und stellt nicht doppelt zu.
+            # Nachpruefung Runde 10: Die Wiederaufnahme wird ATOMAR beansprucht
+            # (Compare-and-Swap auf den gelesenen Stand). Von zehn gleich-
+            # zeitigen Klicks gewinnt genau einer; die anderen bekommen
+            # "laeuft / bereits_gesendet" — vorher stellten alle zu.
+            claim_am = now_iso()
+            res = await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status": {"$elemMatch": {
+                     "idempotency_key": body.idempotency_key,
+                     "zustellung": {"$in": ["laeuft", "unklar"]},
+                     "wiederaufnahme_am": vorhanden.get("wiederaufnahme_am")}}},
+                {"$set": {"send_status.$.zustellung": "laeuft",
+                          "send_status.$.wiederaufnahme_am": claim_am}})
+            if res.modified_count == 0:
+                return {"channel": vorhanden.get("channel"), "status": "ok",
+                        "sent_at": vorhanden.get("sent_at"),
+                        "zustellung": "laeuft", "bereits_gesendet": True}
             wiederaufnahme = True
             reserviert = True
             vorhanden = None
@@ -661,9 +683,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         # Bei einer Wiederaufnahme bleibt der Eintrag stehen: er traegt
         # "unklar", damit der naechste Versuch wieder hier landet.
         if reserviert and wiederaufnahme:
+            # nur den EIGENEN Claim zuruecksetzen — nie das Ergebnis eines
+            # anderen Aufrufers ueberschreiben
             await db.generated_pdfs.update_one(
                 {"id": contract_id, **bereich,
-                 "send_status.idempotency_key": body.idempotency_key},
+                 "send_status": {"$elemMatch": {"idempotency_key": body.idempotency_key,
+                                                "wiederaufnahme_am": claim_am}}},
                 {"$set": {"send_status.$.zustellung": "unklar"}})
             return
         if reserviert:
@@ -763,9 +788,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             send_entry["beleg"] = out["beleg"]
         if wiederaufnahme:
             send_entry["wiederaufgenommen"] = True
+            send_entry["wiederaufnahme_am"] = claim_am
         await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
-             "send_status.idempotency_key": body.idempotency_key},
+             "send_status": {"$elemMatch": {
+                 "idempotency_key": body.idempotency_key,
+                 **({"wiederaufnahme_am": claim_am} if wiederaufnahme else {})}}},
             {"$set": {"send_status.$": send_entry,
                       "status": neuer_status, "updated_at": now_iso()}},
         )

@@ -19,6 +19,13 @@
 # angefasst: der Wegwerf-Stack hat ein eigenes Netz und eine eigene
 # MongoDB.
 #
+# Bewusste Messeinschraenkungen (Nachpruefung Runde 10): RATE_LIMIT_ENABLED=false
+# (alle virtuellen Nutzer kommen von EINER Adresse — sonst wuerde die
+# Anmeldesperre gemessen statt der Kapazitaet), APP_ENV=development (die
+# Produktionspruefung wertet den Anbieter-Mock als Startfehler; leistungs-
+# relevanten Code schaltet APP_ENV nicht um), MongoDB ohne Replikat (die
+# Zahlen sind geringfuegig optimistisch).
+#
 # Aufruf auf prod2, im Ordner /opt/autoschnell:
 #   sh deploy/lasttest-auf-prod2.sh --kurz     # 45-Sekunden-Probelauf (~10 min)
 #   sh deploy/lasttest-auf-prod2.sh            # komplette Messung (~90 min)

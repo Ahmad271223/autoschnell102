@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buyerApi, useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
+import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera, Heart, Handshake, Inbox, Check } from "lucide-react";
 
@@ -141,7 +142,7 @@ export default function Marktplatz() {
   useEffect(() => { if (buyer) loadAccess(); }, [buyer, loadAccess]);
   useEffect(() => {
     if (!buyer) return;
-    buyerApi.get("/manual/makes").then((r) => setMakes(r.data)).catch(() => {});
+    ladeMakes(buyerApi).then(setMakes).catch(() => {});
     buyerApi.get("/marktplatz/favoriten")
       .then((r) => setFavs(new Set(r.data.listing_ids || [])))
       .catch(() => {});

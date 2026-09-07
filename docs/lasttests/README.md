@@ -147,7 +147,15 @@ Die Läufe oben stammen vom Windows-PC. Am 05.09.2026 lief dieselbe Suite
 auf **prod2** (Hetzner CCX23, 4 dedizierte Kerne, 16 GB — baugleich mit
 prod1) in einem Wegwerf-Stack (`deploy/lasttest-auf-prod2.sh`): eigene
 MongoDB, Backend mit 4 Workern und Anbieter-Attrappe, eigenes Docker-Netz.
-Die Produktion auf demselben Server wurde nicht berührt. Rohdaten:
+Die Produktion auf demselben Server wurde nicht berührt. Drei
+Messeinschränkungen des Wegwerf-Stacks: (1) Rate-Limiter aus
+(`RATE_LIMIT_ENABLED=false`), weil alle virtuellen Nutzer von einer Adresse
+kommen — sonst würde die Anmeldesperre gemessen statt der Kapazität.
+(2) `APP_ENV=development`, weil die Produktionsprüfung den Anbieter-Mock
+als Startfehler wertet; leistungsrelevanten Code schaltet APP_ENV nicht um.
+(3) MongoDB ohne Replikat: mit `{w:1}` ist die Schreiblatenz gleich, der
+Replikationsaufwand fehlt — die Zahlen sind geringfügig optimistisch.
+Rohdaten:
 [prod2/matrix/](prod2/matrix/) und [prod2/stoss/](prod2/stoss/).
 
 **Ehrlichkeit zuerst, drei Einschränkungen:**
@@ -250,7 +258,8 @@ Sekunde; 500 in derselben Sekunde ein bis fünf Sekunden, verlustfrei.
 - Empfehlung: Normalbetrieb bis 100–150 gleichzeitig aktive Nutzer mit
   sehr guten Antwortzeiten, Spitzen bis 500 gleichzeitige Klicks sicher.
 - Noch offen: T3 (Fotos) auf prod2 mit dem korrigierten Test —
-  `SZENARIEN=T3 sh deploy/lasttest-auf-prod2.sh`, rund 20 Minuten.
+  `SZENARIEN=T3 sh deploy/lasttest-auf-prod2.sh --nur-matrix`, rund
+  20 Minuten (ohne `--nur-matrix` liefe zusätzlich der Stoßtest).
 
 ## 5. Status-Kennzeichnung
 
@@ -258,7 +267,8 @@ Sekunde; 500 in derselben Sekunde ein bis fünf Sekunden, verlustfrei.
 | --- | --- |
 | Matrix T1–T9, Stoß S1–S8, Regression 56 Tests | ✅ lokal auf Windows bestanden |
 | Anbieter-Abrufe, E-Mail, WhatsApp, Stripe-Versandweg | ⚠️ nur mit Mock getestet (E-Mail/WhatsApp sind auch in der App serverseitig Mock/wa.me — kein Queue-/Zustellsystem vorhanden) |
-| Linux-Staging (T1/T2/T3/T8/T9 + Stoß) | ✅ auf prod2 (CCX23) am 05.09.2026, Kurzmodus + voller Stoßtest, siehe unten |
+| Linux-Staging (T1/T2/T8/T9 + Stoß) | ✅ auf prod2 (CCX23) am 05.09.2026, Kurzmodus + voller Stoßtest, siehe unten |
+| T3 (Fotos) auf prod2 mit korrigiertem Test | ⬜ offen — Wiederholung nach dem Signatur-Fix, Ergebnis vom Server holen |
 | Echte Testdienste (SMTP-Sandbox, Stripe-Testmodus, mobile.de-API) | ⬜ noch nicht geprüft |
 | Volle Platte, echter Anbieter-Ratelimit | ⬜ noch nicht geprüft |
 | T3 nach Foto-Fix (3 finale Läufe mit reparierter App) | ✅ bestanden (Audit 0/0) |
