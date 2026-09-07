@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response  # Request already imported
 from fastapi.security import HTTPAuthorizationCredentials
+from pymongo.errors import DuplicateKeyError
 import jwt                                   # PyJWT
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -431,9 +432,17 @@ async def driver_register(body: DriverAccountRegister, request: Request):
     if not await driver_register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
     email = body.email.lower().strip()
-    existing = await db.driver_accounts.find_one({"email": email})
-    if existing:
+    # Runde 13: B5 — vorher nur driver_accounts geprueft; dieselbe Adresse
+    # konnte zusaetzlich Firmen-/Sucher-/Kaeuferkonto sein (der gemeinsame
+    # Passwort-Reset fand dann nur das users-Konto). Jetzt plattformweit.
+    from deps import email_vergeben
+    vergeben = await email_vergeben(email)
+    if vergeben == "driver":
         raise HTTPException(409, "E-Mail ist bereits als Fahrer registriert")
+    if vergeben:
+        raise HTTPException(409, "E-Mail ist bereits registriert (Firmen-, "
+                                 "Sucher- oder Käuferkonto). Bitte eine andere "
+                                 "Adresse verwenden.")
     code = await ensure_unique_driver_code()
     did = str(uuid.uuid4())
     sid = str(uuid.uuid4())
@@ -445,7 +454,12 @@ async def driver_register(body: DriverAccountRegister, request: Request):
         "current_session_id": sid,
         "created_at": now_iso(),
     }
-    await db.driver_accounts.insert_one(doc)
+    try:
+        await db.driver_accounts.insert_one(doc)
+    except DuplicateKeyError:
+        # Runde 13: B5 — Rennen zweier Registrierungen: der Unique-Index
+        # driver_accounts.email entscheidet (vorher 500).
+        raise HTTPException(409, "E-Mail ist bereits als Fahrer registriert")
     token = create_driver_token(did, sid)
     return {
         "token": token,
@@ -919,6 +933,16 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
         raise HTTPException(404, "Datei nicht gefunden")
     teile = key.split("/")
     if len(teile) < 3 or teile[1] != user.get("dealer_id"):
+        raise HTTPException(404, "Datei nicht gefunden")
+    # Runde 13: B1 — Berechtigung ueber die DB-Ressource, nicht nur ueber den
+    # Firmen-Praefix im Pfad: das Foto muss zu einem Abholbericht der eigenen
+    # Firma gehoeren (wie die Fahrer-Variante unten). Termine und Berichte
+    # sind lesend firmenweit (Beschluss offen, ob je Sucher getrennt) — die
+    # Foto-Route ist damit mit ihrer Elternressource konsistent.
+    bericht = await db.pickup_reports.find_one(
+        {"deviations.photo_key": key, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "id": 1})
+    if not bericht:
         raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, load_async, StorageError
     try:

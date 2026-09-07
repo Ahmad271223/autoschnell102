@@ -134,6 +134,9 @@ export default function Vergleich() {
 
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0 });
+      // Runde 11: Firmenregeln, die der AutoScout-Link nicht umsetzt (z.B.
+      // Land CH, Hubraum, Navi) — vorher sahen beide Links "gleich" aus.
+      for (const h of data.hinweise || []) toast.warning(h, { duration: 8000 });
       try {
         const { data: cnt } = await api.get(`/mobile/live-counter/${data.ad_id}`);
         setCounter(cnt);

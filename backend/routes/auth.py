@@ -16,7 +16,7 @@ from auth import (
     new_session_id, verify_password_async, _DUMMY_HASH,
 )
 from deps import (
-    current_user, db, get_subscription_status, now_iso, clean_doc,
+    current_user, db, email_vergeben, get_subscription_status, now_iso, clean_doc,
     log_activity, log,
 )
 from mobile_service import DEFAULT_RULES
@@ -24,6 +24,12 @@ from rate_limiter import client_ip, SlidingWindowRateLimiter, login_limiter, reg
 
 # Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
 reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="passwort-reset")
+# Runde 11: zusaetzlich je KONTO (nicht nur je IP) — sonst konnte jeder,
+# der die E-Mail kennt, mit immer neuen Anfragen den gueltigen Reset-Link
+# des echten Nutzers laufend entwerten (Reset-DoS).
+reset_konto_limiter = SlidingWindowRateLimiter(max_attempts=3, window_seconds=3600, name="passwort-reset-konto")
+# Zweiter Anmeldeschritt (Authenticator-Code) mit eigenem Zaehler.
+login_mfa_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login-mfa")
 
 router = APIRouter()
 
@@ -104,9 +110,19 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
 # der Betreiber legt Firmen-Konten nach einer Zugangs-Anfrage selbst an
 # (docker-compose setzt SELF_SIGNUP=false). In Entwicklung/CI bleibt die
 # Route aktiv, damit Tests und lokales Ausprobieren funktionieren.
+_ENTWICKLUNGS_UMGEBUNGEN = {"development", "dev", "local", "test", "ci"}
+
+
 def _self_signup_enabled() -> bool:
-    return os.environ.get("SELF_SIGNUP", "false" if os.environ.get("APP_ENV", "").strip().lower() == "production" else "true").strip().lower() not in (
-        "false", "0", "no", "off")
+    """Runde 11: fail-closed. Vorher war die Selbst-Registrierung AN, sobald
+    APP_ENV auf einem neuen Server fehlte — jeder konnte sich per
+    POST /api/auth/register ein aktives Firmen-Konto samt JWT holen.
+    Jetzt: nur mit ausdruecklichem SELF_SIGNUP=true oder in einer
+    ausdruecklich als Entwicklung/Test benannten Umgebung."""
+    wert = os.environ.get("SELF_SIGNUP", "").strip().lower()
+    if wert:
+        return wert in ("true", "1", "yes", "on")
+    return os.environ.get("APP_ENV", "").strip().lower() in _ENTWICKLUNGS_UMGEBUNGEN
 
 
 # ---------- Endpoints ----------
@@ -125,9 +141,9 @@ async def register(body: RegisterIn, request: Request):
     # Duplikate pruefen — vorher konnten User@x.de und user@x.de als zwei
     # Konten entstehen, waehrend der Login case-insensitiv irgendeins fand.
     email = body.email.strip().lower()
-    existing = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
-    if existing:
+    # Runde 13: B5 — vorher nur users; jetzt plattformweit (auch
+    # driver_accounts), Meldung bewusst ohne Kontotyp.
+    if await email_vergeben(email):
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
@@ -224,7 +240,10 @@ async def login_mfa(body: MfaLoginIn, request: Request):
     5 Fehlversuche -> 15 Minuten Sperre fuer den zweiten Faktor."""
     import mfa as _mfa
     ip = client_ip(request)
-    if not await login_limiter.check(ip):
+    # Runde 11: eigener Zaehler fuer den zweiten Schritt. Vorher kostete
+    # ein Admin-Login mit MFA zwei der zehn Passwort-Versuche je Minute —
+    # hinter einer Firmen-NAT sperrten sich korrekte Logins gegenseitig.
+    if not await login_mfa_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     try:
         payload = decode_mfa_token(body.mfa_token)
@@ -277,12 +296,22 @@ async def login_mfa(body: MfaLoginIn, request: Request):
             await log_activity("", user["id"], "auth.login.mfa.wiederherstellungscode",
                                meta={"uebrig": uebrig, "ip": ip})
         else:
-            fehl = int(m.get("fehlversuche", 0)) + 1
-            upd = {"mfa.fehlversuche": fehl}
+            # Runde 11: Fehlversuche ATOMAR zaehlen ($inc). Vorher las jeder
+            # Request den alten Stand und schrieb "alt + 1" zurueck — fuenf
+            # gleichzeitige falsche Codes zaehlten als einer, die Sperre
+            # nach fuenf Fehlern liess sich mit parallelen Anfragen umgehen.
+            from pymongo import ReturnDocument
+            doc = await db.users.find_one_and_update(
+                {"id": user["id"]}, {"$inc": {"mfa.fehlversuche": 1}},
+                projection={"_id": 0, "mfa.fehlversuche": 1},
+                return_document=ReturnDocument.AFTER)
+            fehl = int(((doc or {}).get("mfa") or {}).get("fehlversuche", 1))
             if fehl >= 5:
-                upd["mfa.gesperrt_bis"] = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
-                upd["mfa.fehlversuche"] = 0
-            await db.users.update_one({"id": user["id"]}, {"$set": upd})
+                await db.users.update_one(
+                    {"id": user["id"], "mfa.fehlversuche": {"$gte": 5}},
+                    {"$set": {"mfa.gesperrt_bis": (datetime.now(timezone.utc)
+                                                   + timedelta(minutes=15)).isoformat(),
+                              "mfa.fehlversuche": 0}})
             await log_activity("", user["id"], "auth.login.mfa.fehlgeschlagen", meta={"ip": ip})
             raise HTTPException(401, "Code ungültig")
     return await _sitzung_ausstellen(user, ip)
@@ -338,6 +367,10 @@ async def me(user=Depends(current_user)):
     from deps import effective_dealer, subscription_for
     sub = await subscription_for(user)
     dealer = await effective_dealer(user)
+    if user.get("role") == "sucher":
+        # Runde 12: Sucher sehen vom Haendler-Dokument nur ihre Einstellungsfelder.
+        from routes.dealer import _sucher_sicht
+        dealer = _sucher_sicht(dealer)
     return {"user": user, "subscription": sub, "dealer": dealer}
 
 
@@ -384,59 +417,97 @@ async def password_reset_request(body: ResetRequestIn, request: Request):
 
     generic = {"ok": True, "hinweis": "Falls die Adresse registriert ist, wurde "
                                       "eine E-Mail mit dem Reset-Link versendet."}
+    # Runde 13: B6 Passwort-Reset-Konflikt — vorher wurde driver_accounts nur
+    # befragt, wenn users KEINEN Treffer hatte; wer mit derselben Adresse
+    # Sucher/Haendler UND Fahrer war, konnte sein Fahrerkonto nie
+    # zuruecksetzen. Jetzt: beide Sammlungen unabhaengig, jedes berechtigte
+    # Konto bekommt seinen eigenen Link (Altbestand; neue Doppelkonten
+    # verhindert B5). Antwort bleibt in allen Faellen generisch.
+    filt = {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}}
+    kandidaten = []
     u = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}},
-        {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1})
-    konto_typ = "user"
-    if not u:
-        # Fahrer-Konten leben in driver_accounts (PR-Review 09/2026: vorher
-        # hatten Fahrer keinerlei Wiederherstellungsweg).
-        d = await db.driver_accounts.find_one(
-            {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}},
-            {"_id": 0, "id": 1, "email": 1, "active": 1})
-        if d:
-            u, konto_typ = {**d, "role": "driver"}, "driver"
-    if not u or not u.get("active", True):
-        return generic
-    if u.get("role") == "sucher":
-        # Kein Selbst-Reset für Sucher — aber die gleiche generische Antwort,
-        # damit Außenstehende Rollen nicht erraten können.
+        filt, {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1})
+    # Kein Selbst-Reset fuer Sucher — aber die gleiche generische Antwort,
+    # damit Aussenstehende Rollen nicht erraten koennen; das Sucher-Konto
+    # blockiert aber nicht mehr das Fahrerkonto derselben Adresse.
+    if u and u.get("active", True) and u.get("role") != "sucher":
+        kandidaten.append((u, "user"))
+    # Fahrer-Konten leben in driver_accounts (PR-Review 09/2026: vorher
+    # hatten Fahrer keinerlei Wiederherstellungsweg).
+    d = await db.driver_accounts.find_one(
+        filt, {"_id": 0, "id": 1, "email": 1, "active": 1})
+    if d and d.get("active", True):
+        kandidaten.append(({**d, "role": "driver"}, "driver"))
+    if not kandidaten:
         return generic
 
-    token = secrets.token_urlsafe(32)
-    await db.password_resets.delete_many({"user_id": u["id"]})
-    await db.password_resets.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": u["id"],
-        "account_type": konto_typ,
-        "token_hash": _hash_reset_token(token),
-        "expires_at": (datetime.now(timezone.utc)
-                       + timedelta(minutes=RESET_TOKEN_TTL_MINUTES)).isoformat(),
-        "used": False,
-        "requested_ip": ip,
-        "created_at": now_iso(),
-        # TTL-Index (server.ensure_indexes): Token-Hash + IP verschwinden
-        # 7 Tage nach Anforderung automatisch (Runde 5).
-        "loeschen_ab": datetime.now(timezone.utc) + timedelta(days=7),
-    })
     # Basis-Adresse NUR aus der Server-Konfiguration. Frueher kam sie aus
     # Origin/Referer — beides bestimmt der Aufrufer, wodurch ein Angreifer
     # den Reset-Link in einer fremden E-Mail auf seine eigene Seite lenken
     # konnte (Reset-Link-Poisoning).
     frontend = (os.environ.get("FRONTEND_URL")
                 or "http://localhost:3000").split("?")[0].rstrip("/")
-    link = f"{frontend}/passwort-reset?token={token}"
-    await send_email(
-        u["email"],
-        "Passwort zurücksetzen – AutoSchnell",
-        f"Hallo,\n\nüber diesen Link kannst du ein neues Passwort setzen "
-        f"(gültig {RESET_TOKEN_TTL_MINUTES} Minuten):\n\n{link}\n\n"
-        "Wenn du das nicht angefordert hast, ignoriere diese E-Mail einfach — "
-        "dein Passwort bleibt unverändert.",
-        absender_name="AutoSchnell",
-    )
-    await log_activity("", u["id"], "auth.passwort.reset.angefordert",
-                       meta={"ip": ip})
+    versendet = 0
+    versand_fehler = False
+    for u, konto_typ in kandidaten:
+        # Je Konto begrenzt — und ZAEHLT erst hier, damit Anfragen fuer
+        # unbekannte Adressen den Zaehler eines echten Kontos nicht treffen.
+        # (Die IDs beider Sammlungen sind eigene UUIDs — kein Schluessel-
+        # Konflikt.) Scheitert ein Konto am Limit, wird das andere trotzdem
+        # bedient.
+        if not await reset_konto_limiter.check(f"konto:{u['id']}"):
+            continue
+        token = secrets.token_urlsafe(32)
+        neu_id = str(uuid.uuid4())
+        await db.password_resets.insert_one({
+            "id": neu_id,
+            "user_id": u["id"],
+            "account_type": konto_typ,
+            "token_hash": _hash_reset_token(token),
+            "expires_at": (datetime.now(timezone.utc)
+                           + timedelta(minutes=RESET_TOKEN_TTL_MINUTES)).isoformat(),
+            "used": False,
+            "requested_ip": ip,
+            "created_at": now_iso(),
+            # TTL-Index (server.ensure_indexes): Token-Hash + IP verschwinden
+            # 7 Tage nach Anforderung automatisch (Runde 5).
+            "loeschen_ab": datetime.now(timezone.utc) + timedelta(days=7),
+        })
+        link = f"{frontend}/passwort-reset?token={token}"
+        # Mailtext je Kontotyp kennzeichnen, damit der Empfaenger zwei
+        # Links auseinanderhalten kann.
+        if konto_typ == "driver":
+            betreff = "Passwort zurücksetzen – AutoSchnell Fahrer-App"
+            wofuer = " für dein Fahrer-Konto"
+        else:
+            betreff = "Passwort zurücksetzen – AutoSchnell"
+            wofuer = ""
+        # Runde 11: ERST senden, DANN die aelteren Links entwerten. Vorher wurden
+        # die alten Links zuerst geloescht — fiel danach der Mailversand aus,
+        # hatte der Nutzer weder den alten noch einen neuen Link.
+        try:
+            await send_email(
+                u["email"],
+                betreff,
+                f"Hallo,\n\nüber diesen Link kannst du{wofuer} ein neues Passwort "
+                f"setzen (gültig {RESET_TOKEN_TTL_MINUTES} Minuten):\n\n{link}\n\n"
+                "Wenn du das nicht angefordert hast, ignoriere diese E-Mail einfach — "
+                "dein Passwort bleibt unverändert.",
+                absender_name="AutoSchnell",
+            )
+        except Exception:
+            await db.password_resets.delete_one({"id": neu_id})
+            log.exception("Passwort-Reset: E-Mail-Versand fehlgeschlagen (%s)", konto_typ)
+            versand_fehler = True
+            continue
+        versendet += 1
+        await db.password_resets.delete_many(
+            {"user_id": u["id"], "account_type": konto_typ, "id": {"$ne": neu_id}})
+        await log_activity("", u["id"], "auth.passwort.reset.angefordert",
+                           meta={"ip": ip, "konto": konto_typ})
+    if versand_fehler and not versendet:
+        raise HTTPException(503, "Die E-Mail konnte gerade nicht versendet werden — "
+                                 "bitte in ein paar Minuten erneut versuchen.")
     return generic
 
 

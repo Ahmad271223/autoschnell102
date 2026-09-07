@@ -149,6 +149,25 @@ def pruefe_produktion(log) -> None:
         fehler.append(
             "MOCK_PROVIDER_FETCH ist aktiv — der Lasttest-Mock liefert "
             "erfundene Fahrzeugdaten und hat in Produktion nichts verloren.")
+    if os.environ.get("RATE_LIMIT_ENABLED", "true").strip().lower() == "false":
+        # Nachpruefung Runde 10: der Lasttest schaltet die Sperren ab —
+        # in Produktion waere das ein offenes Scheunentor fuer Passwortraten.
+        fehler.append(
+            "RATE_LIMIT_ENABLED=false: Anmelde-/Registrierungssperren sind aus — "
+            "nur fuer Tests/Lasttest, in Produktion nicht erlaubt.")
+
+    # Runde 13: Befund B4 — DATEI_SIGNATUR_PFLICHT=false schaltete die
+    # Signaturpruefung fuer resale/-Fotos in server.serve_file komplett ab
+    # (vorher: reiner Uebergangsschalter, nirgends geprueft — der zufaellige
+    # Storage-Key genuegte dann ohne Login; jetzt: in Produktion ist der
+    # Schalter ein Startfehler, ausserhalb eine Warnung). Alle Erzeuger
+    # signieren laengst (resale.py, marketplace.py), der Uebergang ist vorbei.
+    if os.environ.get("DATEI_SIGNATUR_PFLICHT", "true").strip().lower() in ("0", "false", "no"):
+        (fehler if ist_prod else warnungen).append(
+            "DATEI_SIGNATUR_PFLICHT=false: Fahrzeugfotos unter resale/ waeren "
+            "ohne Login und ohne Signatur fuer jeden abrufbar, der den "
+            "Schluessel kennt. In Produktion nicht erlaubt — Schalter "
+            "entfernen oder auf true setzen.")
 
     # --- Runde 5: Betriebsvoraussetzungen ---
     backend = Path(__file__).resolve().parent

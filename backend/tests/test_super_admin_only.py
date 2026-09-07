@@ -116,11 +116,14 @@ def test_01_normaler_admin_darf_nicht_verwalten(welt):
     assert dbx.users.count_documents({"email": {"$regex": f"^sa_neu"}}) == 0
     assert dbx.subscriptions.count_documents({"subject_user_id": s}) == 0
     assert dbx.users.find_one({"id": s})["active"] is True
-    # Lesen bleibt erlaubt
-    assert requests.get(f"{API}/admin/users", headers=N, timeout=30).status_code == 200
-    assert requests.get(f"{API}/admin/users/{c}/contracts", headers=N, timeout=30).status_code == 200
-    assert requests.get(f"{API}/admin/plan-requests", headers=N, timeout=30).status_code == 200
-    assert requests.get(f"{API}/admin/dealers/{d}/sucher", headers=N, timeout=30).status_code == 200
+    # Runde 12 (Beschluss 06.09.2026): Es gibt nur den Super-Admin. Ein
+    # Konto mit Rolle admin ohne is_super_admin darf auch nichts mehr LESEN.
+    for pfad in (f"/admin/users", f"/admin/users/{c}/contracts",
+                 f"/admin/plan-requests", f"/admin/dealers/{d}/sucher"):
+        assert requests.get(f"{API}{pfad}", headers=N, timeout=30).status_code == 403, pfad
+    # ... und die Rolle admin ist nicht mehr vergebbar
+    r = requests.put(f"{API}/admin/users/{s}", headers=welt["S"], json={"role": "admin"}, timeout=30)
+    assert r.status_code == 400 and "Super-Admin" in r.text, r.text[:200]
     # Super-Admin darf
     assert requests.get(f"{API}/admin/betrieb", headers=welt["S"], timeout=30).status_code == 200
 

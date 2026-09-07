@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import PortalSheet from "@/components/PortalSheet";
+import { useAuth } from "@/context/AuthContext";
 import {
   Search, Car, Calendar, Gauge, Zap, Fuel, Cog, Eye, ExternalLink,
   ChevronDown, X,
@@ -14,6 +16,11 @@ const FUELS = [
 const GEARBOXES = ["Automatik", "Manuell"];
 
 export default function ManuelleSuche() {
+  const { dealer } = useAuth();
+  // Runde 11: Das aktive Regelprofil (Inland/Export) bestimmt Land,
+  // Unfallwagen, Anbieter usw. der Suche — vorher stand es nirgends auf
+  // dieser Seite, zwei gleiche Eingaben konnten voellig verschieden suchen.
+  const aktivesProfil = dealer?.active_profile === "export" ? "Export" : "Inland";
   const [makes, setMakes] = useState([]);
   const [makeId, setMakeId] = useState(null);
   const [modelId, setModelId] = useState(null);
@@ -31,12 +38,12 @@ export default function ManuelleSuche() {
   const [fuel, setFuel] = useState("");
   const [gearbox, setGearbox] = useState("");
   const [busy, setBusy] = useState(false);
-  const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout }
+  const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout, aufgeloest, profil }
 
-  // Marken laden — einmal beim Mount
+  // Marken laden — einmal je Sitzung (Modul-Cache, Nachpruefung Runde 10)
   useEffect(() => {
-    api.get("/manual/makes")
-      .then(({ data }) => setMakes(data))
+    ladeMakes(api)
+      .then((data) => setMakes(data))
       .catch((e) => toast.error(errMsg(e, "Marken konnten nicht geladen werden")));
   }, []);
 
@@ -96,7 +103,15 @@ export default function ManuelleSuche() {
         gearbox: gearbox || null,
       });
       // Dialog anzeigen — User wählt welches Portal er öffnen will
-      setPortalUrls({ mobile: data.mobile_url, autoscout: data.autoscout_url });
+      setPortalUrls({
+        mobile: data.mobile_url,
+        autoscout: data.autoscout_url,
+        aufgeloest: data.aufgeloest || null,
+        profil: data.profil,
+      });
+      // Runde 10: Der Server sagt, wenn ein Portal Marke oder Modell nicht
+      // kennt — vorher lief die Suche dann still ueber die ganze Marke.
+      for (const h of data.hinweise || []) toast.warning(h, { duration: 8000 });
     } catch (e) {
       toast.error(errMsg(e, "Suche fehlgeschlagen"));
     } finally {
@@ -108,6 +123,8 @@ export default function ManuelleSuche() {
     setMakeId(null); setModelId(null); setMakeSearch(""); setModelSearch("");
     setEzFrom(""); setEzTo(""); setKmMin(""); setKmMax("");
     setKw(""); setPs(""); setFuel(""); setGearbox("");
+    // Runde 11: Links der VORHERIGEN Suche gehoeren nicht zu leeren Feldern.
+    setPortalUrls(null);
   };
 
   const years = useMemo(() => {
@@ -128,6 +145,10 @@ export default function ManuelleSuche() {
         <p className="text-sm mt-2 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
           Wähle Marke, Modell und Filter aus — wir öffnen mobile.de und AutoScout24
           gleichzeitig in zwei Tabs mit fertigem Filter.
+        </p>
+        <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }} data-testid="suche-profil">
+          Aktives Regelprofil: <strong>{aktivesProfil}</strong> — Land, Unfallwagen und Anbieter
+          kommen aus diesem Profil (Einstellungen).
         </p>
       </div>
 
@@ -216,6 +237,7 @@ export default function ManuelleSuche() {
           <PortalSheet
             mobileUrl={portalUrls.mobile}
             autoscoutUrl={portalUrls.autoscout}
+            aufgeloest={portalUrls.aufgeloest}
             onClose={() => setPortalUrls(null)}
           />
         )}

@@ -18,7 +18,14 @@
  *     -> nur Tab B verliert seinen Token; die "letzte Anmeldung" wird nur
  *        geloescht, wenn sie zu genau diesem Konto gehoerte.
  *
- * Alle Zugriffe auf die drei Token-Schluessel laufen ueber diese Datei.
+ * Runde 11 (06.09.2026): Ein Tab, der sich abgemeldet hat oder dessen
+ * Sitzung beendet wurde (401), uebernimmt die "letzte Anmeldung" NICHT
+ * mehr. Vorher: Tab A meldet den Admin ab, in localStorage liegt noch der
+ * Firmen-Token aus Tab B — beim naechsten Laden war Tab A ploetzlich das
+ * Firmenkonto. Der Tab merkt sich "abgemeldet", bis in ihm wieder jemand
+ * anmeldet. Ein NEUER Tab macht weiterhin bei der letzten Anmeldung weiter.
+ *
+ * Alle Zugriffe auf die Token-Schluessel laufen ueber diese Datei.
  * Storage kann fehlen oder gesperrt sein (privater Modus, Vorschau) —
  * deshalb ist jeder Zugriff abgesichert.
  */
@@ -35,10 +42,17 @@ function sicher(fn, sonst = null) {
   }
 }
 
-/** Token dieses Tabs; fehlt er, wird die letzte Anmeldung uebernommen. */
+/** Marker "dieser Tab hat sich abgemeldet" — je Token-Schluessel. */
+function abgemeldetKey(key) {
+  return `${key}_abgemeldet`;
+}
+
+/** Token dieses Tabs; fehlt er, wird die letzte Anmeldung uebernommen —
+ *  ausser dieser Tab hat sich abgemeldet oder wurde abgemeldet. */
 export function tokenLesen(key = TOKEN_APP) {
   const eigener = sicher(() => window.sessionStorage.getItem(key));
   if (eigener) return eigener;
+  if (sicher(() => window.sessionStorage.getItem(abgemeldetKey(key)))) return null;
   const letzter = sicher(() => window.localStorage.getItem(key));
   if (letzter) {
     sicher(() => window.sessionStorage.setItem(key, letzter));
@@ -49,15 +63,18 @@ export function tokenLesen(key = TOKEN_APP) {
 
 /** Nach einer Anmeldung: dieser Tab UND "letzte Anmeldung". */
 export function tokenSetzen(key, wert) {
+  sicher(() => window.sessionStorage.removeItem(abgemeldetKey(key)));
   sicher(() => window.sessionStorage.setItem(key, wert));
   sicher(() => window.localStorage.setItem(key, wert));
 }
 
 /** Nach Abmeldung oder abgelaufener Sitzung: nur dieser Tab — und die
- *  "letzte Anmeldung" nur, wenn sie zu diesem Token gehoerte. */
+ *  "letzte Anmeldung" nur, wenn sie zu diesem Token gehoerte. Der Tab
+ *  uebernimmt danach keine fremde letzte Anmeldung mehr. */
 export function tokenLoeschen(key = TOKEN_APP) {
   const eigener = sicher(() => window.sessionStorage.getItem(key));
   sicher(() => window.sessionStorage.removeItem(key));
+  sicher(() => window.sessionStorage.setItem(abgemeldetKey(key), "1"));
   const letzter = sicher(() => window.localStorage.getItem(key));
   if (letzter && (!eigener || letzter === eigener)) {
     sicher(() => window.localStorage.removeItem(key));

@@ -78,7 +78,9 @@ def welt():
 
 def test_00_aufbau(welt):
     _admin_anlegen(f"mfa_super_{SUF}@{MAIL}", True)
-    _admin_anlegen(f"mfa_admin_{SUF}@{MAIL}", False)
+    # Runde 12: es gibt nur Super-Admins als Betreiber — das zweite Konto
+    # ist ebenfalls Super-Admin (ein "normaler Admin" kann nichts mehr).
+    _admin_anlegen(f"mfa_admin_{SUF}@{MAIL}", True)
     r = _login(f"mfa_super_{SUF}@{MAIL}")
     assert r.status_code == 200 and r.json().get("token"), r.text[:200]
     welt["S"] = _hdr(r.json()["token"])
@@ -207,9 +209,13 @@ def test_05_abschalten_nur_mit_code_und_zuruecksetzen(welt):
     sec = requests.post(f"{API}/admin/me/mfa/einrichten", headers=A, timeout=30).json()["secret"]
     assert requests.post(f"{API}/admin/me/mfa/aktivieren", headers=A, json={"code": mfa.totp(sec)}, timeout=30).status_code == 200
     assert _login(f"mfa_admin_{SUF}@{MAIL}").json().get("mfa_erforderlich") is True
-    # normaler Admin darf NICHT zuruecksetzen
-    assert requests.post(f"{API}/admin/users/{welt['super_id']}/mfa-zuruecksetzen", headers=A, timeout=30).status_code in (401, 403)
-    r = requests.post(f"{API}/admin/users/{welt['admin_id']}/mfa-zuruecksetzen", headers=S, timeout=30)
+    # (Runde 12: der Fall "normaler Admin darf nicht zuruecksetzen" entfaellt —
+    # ein Konto ohne Super-Admin kommt gar nicht mehr in den Betreiberbereich,
+    # siehe test_super_admin_only.)
+    # Das zweite Konto ist jetzt selbst Super-Admin: Zuruecksetzen verlangt
+    # das eigene Passwort und einen Grund.
+    r = requests.post(f"{API}/admin/users/{welt['admin_id']}/mfa-zuruecksetzen", headers=S,
+                      json={"passwort": PW, "grund": "Test Runde 12"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     r = _login(f"mfa_admin_{SUF}@{MAIL}")
     assert r.status_code == 200 and r.json().get("token"), "nach Zuruecksetzen normal anmeldbar"

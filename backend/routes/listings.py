@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from auth import decode_token
 from autoscout_service import build_search_url as build_autoscout_url
+from autoscout_service import regeln_nicht_abgebildet
 from autoscout_service import autoscout_quelle_verfuegbar
 from deps import (
     current_firma,
@@ -207,10 +208,13 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     from deps import effective_dealer
     dealer = await effective_dealer(user)
     active = (dealer or {}).get("active_profile", "inland")
+    from regeln import regeln_lesen
+    # Nachpruefung Runde 10: Lesepfad heilt Alt-Dokumente (z.B. damage als
+    # String) statt mit 500 abzubrechen — der Schreibpfad bleibt streng.
     if active == "export":
-        rules = (dealer or {}).get("export_rules") or DEFAULT_EXPORT_RULES
+        rules = regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES)
     else:
-        rules = (dealer or {}).get("comparison_rules") or DEFAULT_RULES
+        rules = regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES)
     search_url = build_search_url(vehicle, rules)
     autoscout_url = build_autoscout_url(vehicle, rules)
 
@@ -237,7 +241,11 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # Die frischen Inseratsdaten landen dann getrennt unter inserat_aktuell.
     vorhanden = await db.vehicles.find_one(
         {"id": vid, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
-    if vorhanden and (vorhanden.get("lifecycle") or "verglichen") != "verglichen":
+    # Nachpruefung Runde 10: Nach einem Seitenausgang (storniert, nicht
+    # abgeholt) ist ein erneuter Vergleich ein Neuanfang — die Daten duerfen
+    # wieder frisch sein, sonst nutzte der naechste Vertrag veraltete Werte.
+    if vorhanden and (vorhanden.get("lifecycle") or "verglichen") not in (
+            "verglichen", "gefunden", "storniert", "nicht_abgeholt"):
         await db.vehicles.update_one(
             {"id": vid, "dealer_id": user["dealer_id"]},
             {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
@@ -382,6 +390,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "vehicle": vehicle,
         "search_url": search_url,
         "autoscout_url": autoscout_url,
+        # Runde 11: welche Firmenregeln der AutoScout-Link nicht umsetzt
+        "hinweise": regeln_nicht_abgebildet(vehicle, rules),
         "rules_applied": rules,
         "active_profile": active,
         "source": source,

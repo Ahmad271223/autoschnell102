@@ -23,6 +23,9 @@ jobs:
       MONGO_URL: mongodb://127.0.0.1:27017
       DB_NAME: autoschnell_ci
       JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
+      # Runde 11: Selbst-Registrierung ist fail-closed — Tests legen ihre
+      # Firmenkonten ueber /auth/register an, deshalb hier ausdruecklich an.
+      SELF_SIGNUP: "true"
       TEST_BASE_URL: http://127.0.0.1:8001
       BETREIBER_PROD_URL: http://127.0.0.1:8003
       # Freitext-Schaeden nur im Test aktiv (Produktions-Default: false)
@@ -217,6 +220,37 @@ jobs:
           yarn install --frozen-lockfile
           npx playwright install --with-deps chromium
           npx playwright test
+      - name: Direktzugriffssperre hinter dem Load Balancer (funktional)
+        # Nachpruefung Runde 10: geo $realip_remote_addr $direktzugriff -> 444.
+        # Bisher wurde nur der Vorlagentext geprueft. Laeuft NACH dem
+        # Browser-Rauchtest, weil nginx im LB-Modus nur auf Port 80 hoert.
+        run: |
+          set -e
+          PROXY_ID=$(docker compose ps -q proxy)
+          NETZ_ID=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' "$PROXY_ID")
+          NETZ=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$NETZ_ID")
+          echo "Compose-Netz: $NETZ"
+          # Fall 1: PRIVATES_NETZ enthaelt das Docker-Netz NICHT -> die
+          #         Verbindung wird wortlos geschlossen (444, curl-Exit 52),
+          #         auch mit gefaelschter Besucheradresse in X-Forwarded-For.
+          PROXY_TEMPLATE=hinter-loadbalancer.conf.template PRIVATES_NETZ=203.0.113.0/24 \
+            docker compose up -d --force-recreate --no-deps proxy
+          sleep 3
+          docker compose exec -T proxy nginx -t
+          RC=0; docker compose exec -T backend curl -sS --max-time 5 -o /dev/null \
+            -H "Host: localhost" -H "X-Forwarded-For: 10.0.0.4" http://proxy/api/health || RC=$?
+          [ "$RC" = 52 ] || { echo "DIREKTZUGRIFF NICHT GESPERRT (curl-Exit $RC)"; docker compose logs --tail 30 proxy; exit 1; }
+          RC=0; curl -sS --max-time 5 -o /dev/null -H "Host: localhost" http://localhost/api/health || RC=$?
+          [ "$RC" = 52 ] || { echo "DIREKTZUGRIFF vom Host NICHT GESPERRT (curl-Exit $RC)"; exit 1; }
+          # Fall 2: PRIVATES_NETZ = Docker-Netz (Rolle des Load Balancers) -> 200,
+          #         auch mit oeffentlicher Besucheradresse in X-Forwarded-For
+          #         (Vorfall 05.09.2026: allow/deny sperrte nach real_ip jeden Besucher).
+          PROXY_TEMPLATE=hinter-loadbalancer.conf.template PRIVATES_NETZ="$NETZ" \
+            docker compose up -d --force-recreate --no-deps proxy
+          sleep 3
+          docker compose exec -T backend curl -fsS --max-time 5 \
+            -H "Host: localhost" -H "X-Forwarded-For: 198.51.100.7" http://proxy/api/health
+          curl -fsS --max-time 5 -H "Host: localhost" -H "X-Forwarded-For: 198.51.100.7" http://localhost/api/health
       - name: Playwright-Report des Stack-Rauchtests bei Fehler
         if: failure()
         uses: actions/upload-artifact@v7
@@ -248,6 +282,9 @@ jobs:
       MONGO_URL: mongodb://127.0.0.1:27017
       DB_NAME: autoschnell_e2e
       JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
+      # Runde 11: Selbst-Registrierung ist fail-closed — Tests legen ihre
+      # Firmenkonten ueber /auth/register an, deshalb hier ausdruecklich an.
+      SELF_SIGNUP: "true"
       AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
       MOCK_PROVIDER_FETCH: "true"
       # Seeds (nur CI-Testwerte, siehe Backend-Job) — die Suite meldet sich
@@ -310,3 +347,26 @@ jobs:
       - name: Backend-Log bei Fehler zeigen
         if: failure()
         run: tail -100 /tmp/backend-e2e.log || true
+
+  cloudflare:
+    name: Cloudflare-Netze in der LB-Vorlage
+    # Die LB-Vorlage traegt die Cloudflare-Bereiche fest ein
+    # (set_real_ip_from). Weicht die Liste bei Cloudflare ab, blockiert
+    # dieser Job (Exit 1). Ist cloudflare.com/ips nicht erreichbar
+    # (Exit 2), gibt es nur eine Warnung — ein Netzproblem des Runners
+    # darf keinen Merge verhindern.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Vorlage muss im Repo liegen (sonst waere Exit 2 mehrdeutig)
+        run: test -f deploy/hinter-loadbalancer.conf.template
+      - name: Cloudflare-Netze abgleichen
+        run: |
+          RC=0
+          python3 backend/scripts/cloudflare_netze_pruefen.py || RC=$?
+          case "$RC" in
+            0) ;;
+            2) echo "::warning title=Cloudflare-Netze::Cloudflare-Liste nicht erreichbar — Abgleich uebersprungen (Exit 2)" ;;
+            *) echo "::error title=Cloudflare-Netze::Vorlage weicht ab (Exit $RC) — lokal 'python backend/scripts/cloudflare_netze_pruefen.py --schreiben' ausfuehren, committen, Proxy neu starten"
+               exit 1 ;;
+          esac

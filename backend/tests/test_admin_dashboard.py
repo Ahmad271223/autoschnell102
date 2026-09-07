@@ -100,9 +100,18 @@ class TestLogin:
         assert body["user"].get("is_super_admin") is True
 
     def test_login_legacy_admin_email(self):
+        # Runde 12 (06.09.2026): Es gibt nur den Super-Admin. Der fruehere
+        # Bootstrap-Admin aus ADMIN_EMAIL wird nicht mehr angelegt; existiert
+        # er noch aus alten Laeufen, kommt er in keine Betreiber-Route.
         r = _login(LEGACY_ADMIN_EMAIL, LEGACY_ADMIN_PASSWORD)
-        assert r.status_code == 200, r.text
-        assert r.json()["user"]["role"] == "admin"
+        if r.status_code != 200:
+            assert r.status_code in (401, 403), r.text
+            return
+        u = r.json()["user"]
+        if u.get("is_super_admin"):
+            return                      # ADMIN_EMAIL zeigt auf den Super-Admin selbst
+        h = {"Authorization": f"Bearer {r.json()['token']}"}
+        assert requests.get(f"{BASE_URL}/api/admin/users", headers=h, timeout=20).status_code == 403
 
     def test_login_wrong_password(self):
         r = _login(SUPER_USERNAME, "definitely-wrong")
@@ -146,16 +155,9 @@ class TestSoftBlock:
         )
         assert r.status_code == 400, r.text
 
-    def test_cannot_block_self(self, legacy_admin_token, super_admin_token):
-        # Audit 09/2026: Sperren ist Super-Admin-exklusiv -> normaler Admin 403 ...
-        token, user = legacy_admin_token
-        h = {"Authorization": f"Bearer {token}"}
-        r = requests.post(
-            f"{BASE_URL}/api/admin/users/{user['id']}/active",
-            json={"active": False}, headers=h, timeout=20,
-        )
-        assert r.status_code == 403, r.text
-        # ... und der Super-Admin kann sich weiterhin nicht selbst sperren (400)
+    def test_cannot_block_self(self, super_admin_token):
+        # Der Super-Admin kann sich nicht selbst sperren (400). (Runde 12: den
+        # "normalen Admin" gibt es nicht mehr, siehe test_super_admin_only.)
         stoken, suser = super_admin_token
         r = requests.post(
             f"{BASE_URL}/api/admin/users/{suser['id']}/active",
@@ -195,50 +197,63 @@ class TestAdminResetPassword:
 
 # --------------------- /admin/me/password ---------------------
 class TestAdminSelfPassword:
-    def test_wrong_current_password_returns_401(self, legacy_admin_token):
-        token, _ = legacy_admin_token
-        h = {"Authorization": f"Bearer {token}"}
+    """Runde 12: eigener, direkt gesaeter Super-Admin (den "normalen Admin"
+    gibt es nicht mehr) — so bleibt das Passwort des echten Super-Admins
+    unangetastet."""
+    MAIL = f"dash_pw_{uuid.uuid4().hex[:8]}@e2etest-mail.de"
+    PW = "DashAdminPw12345!"
+
+    @pytest.fixture(scope="class")
+    def eigener_admin(self):
+        import bcrypt
+        from pymongo import MongoClient
+        dbx = MongoClient(os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017",
+                          serverSelectionTimeoutMS=5000)[os.environ.get("DB_NAME") or "autoschnell"]
+        dbx.users.insert_one({
+            "id": f"dashpw_{uuid.uuid4().hex[:8]}", "email": self.MAIL, "role": "admin",
+            "active": True, "dealer_id": None, "is_super_admin": True,
+            "password_hash": bcrypt.hashpw(self.PW.encode(), bcrypt.gensalt()).decode(),
+            "created_at": "2026-01-01T00:00:00+00:00"})
+        r = _login(self.MAIL, self.PW)
+        assert r.status_code == 200, r.text
+        yield {"Authorization": f"Bearer {r.json()['token']}"}
+        dbx.users.delete_many({"email": self.MAIL})
+
+    def test_wrong_current_password_returns_401(self, eigener_admin):
         r = requests.post(
             f"{BASE_URL}/api/admin/me/password",
             json={"current_password": "wrong-current", "new_password": "Whatever12345"},
-            headers=h, timeout=20,
+            headers=eigener_admin, timeout=20,
         )
         assert r.status_code == 401, r.text
 
-    def test_change_then_change_back(self, legacy_admin_token):
-        token, _ = legacy_admin_token
-        h = {"Authorization": f"Bearer {token}"}
+    def test_change_then_change_back(self, eigener_admin):
         new_pw = "TempAdminPw12345"
         r = requests.post(
             f"{BASE_URL}/api/admin/me/password",
-            json={"current_password": LEGACY_ADMIN_PASSWORD, "new_password": new_pw},
-            headers=h, timeout=20,
+            json={"current_password": self.PW, "new_password": new_pw},
+            headers=eigener_admin, timeout=20,
         )
         assert r.status_code == 200, r.text
-
-        # confirm new pw works
-        login = _login(LEGACY_ADMIN_EMAIL, new_pw)
+        login = _login(self.MAIL, new_pw)
         assert login.status_code == 200
-
-        # restore original so other tests / future runs are stable
-        token2 = login.json()["token"]
-        h2 = {"Authorization": f"Bearer {token2}"}
+        h2 = {"Authorization": f"Bearer {login.json()['token']}"}
         r2 = requests.post(
             f"{BASE_URL}/api/admin/me/password",
-            json={"current_password": new_pw, "new_password": LEGACY_ADMIN_PASSWORD},
+            json={"current_password": new_pw, "new_password": self.PW},
             headers=h2, timeout=20,
         )
         assert r2.status_code == 200, r2.text
 
-    def test_too_short_password_returns_400(self):
+    def test_too_short_password_returns_400(self, eigener_admin):
         # Re-login fresh because previous tests in this class changed/restored
         # the password and the single-session guard invalidates the stale token.
-        r0 = _login(LEGACY_ADMIN_EMAIL, LEGACY_ADMIN_PASSWORD)
+        r0 = _login(self.MAIL, self.PW)
         assert r0.status_code == 200, r0.text
         h = {"Authorization": f"Bearer {r0.json()['token']}"}
         r = requests.post(
             f"{BASE_URL}/api/admin/me/password",
-            json={"current_password": LEGACY_ADMIN_PASSWORD, "new_password": "abc"},
+            json={"current_password": self.PW, "new_password": "abc"},
             headers=h, timeout=20,
         )
         assert r.status_code == 400, r.text

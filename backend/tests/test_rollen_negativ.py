@@ -185,12 +185,13 @@ def test_01_admin_kann_superadmin_nicht_uebernehmen(welt):
     r = requests.put(f"{API}/admin/users/{welt['sucher_id']}", headers=welt["SA"],
                      json={"role": "hacker"}, timeout=30)
     assert r.status_code == 400
+    # Runde 12: "admin" ist keine vergebbare Rolle mehr (nur der Super-Admin
+    # ist Betreiber) — auch der Super-Admin bekommt 400, der Sucher bleibt Sucher.
     r = requests.put(f"{API}/admin/users/{welt['sucher_id']}", headers=welt["SA"],
                      json={"role": "admin"}, timeout=30)
-    assert r.status_code == 200, r.text[:200]
-    r = requests.put(f"{API}/admin/users/{welt['sucher_id']}", headers=welt["SA"],
-                     json={"role": "sucher"}, timeout=30)
-    assert r.status_code == 200
+    assert r.status_code == 400, r.text[:200]
+    assert _db().users.find_one({"id": welt["sucher_id"]})["role"] == "sucher"
+    assert requests.get(f"{API}/auth/me", headers=welt["HS"], timeout=30).status_code == 200
     # Normaler Admin darf keinen anderen Admin sperren/loeschen
     r = requests.put(f"{API}/admin/users/{welt['sa_id']}", headers=welt["A"],
                      json={"active": False}, timeout=30)

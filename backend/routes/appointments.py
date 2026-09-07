@@ -79,8 +79,12 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         if not vehicle_doc:
             raise HTTPException(404, "Fahrzeug nicht gefunden")
     if body.contract_id:
+        # Runde 12: der Vertrag muss im BEREICH des Kontos liegen (Sucher:
+        # nur eigene). Vorher genuegte die Firma — ein Sucher konnte seinen
+        # Termin an den Vertrag eines Kollegen haengen.
+        from routes.contracts import _vertrag_bereich
         if not await db.generated_pdfs.find_one(
-                {"id": body.contract_id, "dealer_id": user["dealer_id"]}, {"_id": 1}):
+                {"id": body.contract_id, **_vertrag_bereich(user)}, {"_id": 1}):
             raise HTTPException(404, "Vertrag nicht gefunden")
     await _fahrer_pruefen(user["dealer_id"], body.driver_id)
     if vehicle_doc and not body.title:
@@ -225,9 +229,14 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     if update.get("vehicle_id") and not await db.vehicles.find_one(
             {"id": update["vehicle_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    if update.get("contract_id") and not await db.generated_pdfs.find_one(
-            {"id": update["contract_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
-        raise HTTPException(404, "Vertrag nicht gefunden")
+    if update.get("contract_id"):
+        # Runde 12: auch nachtraeglich nur Vertraege im eigenen Bereich —
+        # vorher liess sich ein sauberer eigener Termin spaeter auf den
+        # Vertrag eines Kollegen umbiegen.
+        from routes.contracts import _vertrag_bereich
+        if not await db.generated_pdfs.find_one(
+                {"id": update["contract_id"], **_vertrag_bereich(user)}, {"_id": 1}):
+            raise HTTPException(404, "Vertrag nicht gefunden")
     if "driver_id" in update:
         await _fahrer_pruefen(user["dealer_id"], update.get("driver_id"))
         if update.get("driver_id") and update["driver_id"] != existing.get("driver_id"):

@@ -99,9 +99,9 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     # schreibungsunabhaengig pruefen — vorher konnten "Chef@X.de" und
     # "chef@x.de" als zwei Konten existieren (Login trifft dann das falsche).
     email = body.email.strip().lower()
-    existing = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
-    if existing:
+    # Runde 13: B5 — plattformweit (users UND driver_accounts) statt nur users.
+    from deps import email_vergeben
+    if await email_vergeben(email):
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
@@ -172,8 +172,10 @@ async def admin_list_users(_=Depends(current_admin),
     stehen fuer kuenftige Pagination bereit."""
     limit = max(1, min(int(limit or 1000), 1000))
     page = max(1, int(page or 1))
+    # Runde 12: Sitzungs-ID gehoert nicht in Admin-Antworten.
     users = await db.users.find({}, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
-                                      "mfa.pending_secret": 0, "mfa.wiederherstellung": 0}) \
+                                      "mfa.pending_secret": 0, "mfa.wiederherstellung": 0,
+                                      "current_session_id": 0}) \
         .sort("created_at", -1).skip((page - 1) * limit).to_list(limit)
     for u in users:                     # nur der Schalter, nie das Geheimnis
         u["mfa_aktiv"] = bool((u.pop("mfa", None) or {}).get("aktiv"))
@@ -242,7 +244,12 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     if "role" in fields:
         if not admin.get("is_super_admin"):
             raise HTTPException(403, "Rollen ändern darf nur der Super-Admin")
-        if fields["role"] not in ("dealer", "sucher", "admin", "b2b_buyer"):
+        # Runde 12: "admin" ist keine vergebbare Rolle mehr — es gibt genau
+        # einen Betreiber (Super-Admin), weitere Admin-Konten sind abgeschafft.
+        if fields["role"] == "admin":
+            raise HTTPException(400, "Es gibt nur den Super-Admin als Betreiber — "
+                                     "weitere Admin-Konten sind nicht vorgesehen.")
+        if fields["role"] not in ("dealer", "sucher", "b2b_buyer"):
             raise HTTPException(400, "Unbekannte Rolle")
         # Pruefbericht 09/2026: bisher wurde nur der NAME der Zielrolle
         # geprueft, nicht ob das Konto dazu passt. Aus einem Zwischen-
@@ -259,17 +266,57 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                          "Händler oder Sucher würde ein Konto erzeugen, das "
                          "sich nirgends anmelden kann. Bitte stattdessen eine "
                          "Firma anlegen und den Zugang dort einrichten.")
-            if alte_rolle == "dealer" and target.get("dealer_id"):
-                rest = await db.users.count_documents(
-                    {"dealer_id": target["dealer_id"],
-                     "id": {"$ne": target["id"]},
-                     "role": {"$in": ["dealer", "sucher"]}})
-                if rest:
+            if neue_rolle == "dealer" and target.get("dealer_id"):
+                # Runde 11: GENAU EIN Hauptaccount je Firma. current_chef()
+                # erkennt den Chef an der Rolle — ein zweites dealer-Konto
+                # haette sofort volle Chef-Rechte, und die Firmensperre
+                # ("gesperrter Chef = gesperrte Firma") wuerde je nach
+                # gefundenem Datensatz zufaellig greifen oder nicht.
+                chef = await db.users.find_one(
+                    {"dealer_id": target["dealer_id"], "role": "dealer",
+                     "id": {"$ne": target["id"]}},
+                    {"_id": 0, "id": 1, "email": 1})
+                if chef and not body.get("chef_wechsel"):
                     raise HTTPException(
-                        400, f"Diese Firma hat noch {rest} weitere Zugänge. "
-                             "Ohne Hauptaccount könnte niemand mehr Sucher, "
-                             "Fahrer oder Verkäufe verwalten. Bitte zuerst "
-                             "einen anderen Hauptaccount bestimmen.")
+                        400, "Diese Firma hat bereits einen Hauptaccount "
+                             f"({chef.get('email', '')}). Eine Firma hat genau "
+                             "einen Chef. Soll dieses Konto der neue Chef werden "
+                             "und der bisherige zum Sucher, dann chef_wechsel=true "
+                             "mitschicken.")
+                if chef:
+                    # Chefwechsel: bisheriger Chef wird Sucher (seine Sitzung
+                    # endet), das Firmenprofil zeigt auf den neuen Chef.
+                    await db.users.update_one(
+                        {"id": chef["id"], "role": "dealer"},
+                        {"$set": {"role": "sucher", "current_session_id": None,
+                                  "updated_at": now_iso()}})
+                    await db.dealers.update_one(
+                        {"id": target["dealer_id"]},
+                        {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
+                    await log_activity(
+                        admin.get("dealer_id", ""), admin["id"], "admin.firma.chefwechsel",
+                        ref=target["dealer_id"],
+                        meta={"alter_chef": chef.get("email", ""),
+                              "neuer_chef": target.get("email", "")})
+            if alte_rolle == "dealer" and target.get("dealer_id"):
+                # Runde 12: Der Hauptaccount wird NIE direkt herabgestuft.
+                # Vorher war es erlaubt, sobald kein weiterer Zugang
+                # existierte — genau dann blieb die Firma ohne Chef zurueck;
+                # und ein Sucher zaehlte faelschlich als "Ersatz". Der
+                # einzige Weg ist der Chefwechsel (Nachfolger mit
+                # chef_wechsel=true befoerdern), der den alten Chef selbst
+                # zum Sucher macht.
+                raise HTTPException(
+                    400, "Der Händler-Hauptaccount kann nicht herabgestuft "
+                         "werden — die Firma braucht immer genau einen Chef. "
+                         "Nachfolger bestimmen: dessen Konto mit role=dealer "
+                         "und chef_wechsel=true befördern; der bisherige Chef "
+                         "wird dabei zum Sucher.")
+            # Runde 12: Jede Rollenaenderung beendet die laufende Sitzung.
+            # current_user() liest die Rolle bei jedem Request frisch — ein
+            # bestehendes Haendler-Token bekam so ohne neue Anmeldung (und
+            # ohne zweiten Faktor) Admin-Rechte.
+            fields["current_session_id"] = None
     # Admin-Konten verwalten nur Super-Admins: Passwort-Reset, Sperren
     # oder Loeschen eines Admins durch einen NORMALEN Admin waere eine
     # Kontouebernahme auf gleicher Stufe.
@@ -406,6 +453,9 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         if u.get("email"):
             # Reset-Dokumente tragen user_id, keine E-Mail (Runde 5).
             await db.password_resets.delete_many({"user_id": user_id})
+        # Runde 13: B8 — Nutzerkennung in Beweis-Snapshots pseudonymisieren.
+        from snapshot_service import snapshots_pseudonymisieren
+        await snapshots_pseudonymisieren(db, user_id=user_id)
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.geloescht", ref=user_id,
                            meta={"email": u.get("email", ""),
@@ -421,6 +471,11 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             f"die Löschvorschau ansehen (/admin/dealers/{dealer_id}/"
             "loeschvorschau) und dann mit ?firma_loeschen=true bestätigen.")
 
+    # Runde 12: Audit VOR dem ersten destruktiven Schritt. Bricht die
+    # Loeschung mittendrin ab, steht sonst nirgends, wer sie ausgeloest hat.
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.firma.loeschung.gestartet", ref=dealer_id or user_id,
+                       meta={"email": u.get("email", ""), "dealer_id": dealer_id})
     geloescht = {}
     if dealer_id:
         # Beweis-Snapshots bleiben BEWUSST stehen: Snapshots sind
@@ -434,6 +489,13 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
                 geloescht[coll] = res.deleted_count
+        # Runde 13: B8 — die Snapshot-Zeilen bleiben (Beweiszweck), aber die
+        # Zuordnung "welche Firma, welcher Nutzer hat gesichert" wird
+        # pseudonymisiert; vorher blieben dealer_id/user_id unbegrenzt stehen.
+        from snapshot_service import snapshots_pseudonymisieren
+        n_snap = await snapshots_pseudonymisieren(db, dealer_id=dealer_id)
+        if n_snap:
+            geloescht["listing_snapshots_pseudonymisiert"] = n_snap
         # GESPEICHERTE DATEIEN der Firma mitloeschen (DSGVO): Unterschriften
         # + Protokoll-PDFs (protocol/), Abhol-/Schadenfotos (pickup/),
         # Inserats-Fotos (resale/), Logo (logo/). Beweis-Snapshots bleiben
@@ -679,7 +741,8 @@ async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
     damit die Liste schnell lädt. PDF kann separat über
     /api/admin/contracts/{id}/pdf abgerufen werden (falls benötigt).
     """
-    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "mfa": 0})
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "mfa": 0,
+                                                     "current_session_id": 0})
     if not user:
         raise HTTPException(404, "Nutzer nicht gefunden")
     # Firmen-Kopf (Wunsch 09/2026): Firmenname + Kundennummer mitliefern.
@@ -942,7 +1005,10 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
 @router.get("/admin/plan-requests")
 async def admin_plan_requests(status: Optional[str] = None,
                               type: Optional[str] = None,
-                              _=Depends(current_admin)):
+                              _=Depends(current_super_admin)):
+    # Runde 12: Freischaltungen sind Super-Admin-Sache (Oberflaeche:
+    # superOnly). Firmenname, Ansprechpartner, E-Mail, Telefon und
+    # Nachricht der Anfragen lasen vorher auch normale Admins.
     query: Dict = {}
     if status:
         query["status"] = status
@@ -1410,13 +1476,20 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
         raise HTTPException(404, "Zwischenhändler nicht gefunden")
     plan = body.get("plan")
     if plan is None:
+        # Runde 13: C6 — die Sperre ist ein EIGENER Zustand (gesperrt), der
+        # auch im Kostenlos-Modus gilt und den eine Stripe-Zahlung nicht
+        # loescht (marketplace._access_status, payments._zugang_freischalten).
+        # active=False bleibt fuer den Altbestand als Sperr-Signal erhalten.
         await db.users.update_one(
             {"id": buyer_id},
             {"$set": {"marketplace_access.active": False,
+                      "marketplace_access.gesperrt": True,
+                      "marketplace_access.gesperrt_am": now_iso(),
+                      "marketplace_access.gesperrt_von": admin.get("email", ""),
                       "marketplace_access.updated_at": now_iso()}})
         await log_activity("", admin["id"], "admin.buyer.zugang.gesperrt",
                            ref=buyer_id)
-        return {"ok": True, "active": False}
+        return {"ok": True, "active": False, "gesperrt": True}
     if plan != "monthly":
         raise HTTPException(400, "Nur 'monthly' unterstützt")
     zahlungsart = body.get("zahlungsart", "rechnung_bezahlt")
@@ -1458,13 +1531,20 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
 @router.put("/admin/plan-requests/{req_id}")
 async def admin_close_plan_request(req_id: str, body: dict = Body(default={}),
                                    _=Depends(current_super_admin)):
+    # Runde 11: feste Zustaende. Ein Tippfehler wie "offen " liess eine
+    # Anfrage vorher aus der Oberflaeche verschwinden (die laedt status=offen).
+    status = body.get("status", "erledigt")
+    if status not in PLAN_REQUEST_STATUS:
+        raise HTTPException(400, f"status muss einer von {sorted(PLAN_REQUEST_STATUS)} sein")
     r = await db.plan_requests.update_one(
         {"id": req_id},
-        {"$set": {"status": body.get("status", "erledigt"),
-                  "updated_at": now_iso()}})
+        {"$set": {"status": status, "updated_at": now_iso()}})
     if not r.matched_count:
         raise HTTPException(404, "Anfrage nicht gefunden")
     return {"ok": True}
+
+
+PLAN_REQUEST_STATUS = {"offen", "erledigt", "abgelehnt"}
 
 
 # ---------- Vehicle comparisons ----------
@@ -1509,13 +1589,32 @@ async def admin_comparisons(limit: int = 200, _=Depends(current_admin)):
             {"_id": 0, "id": 1, "company_name": 1},
         ):
             dealers_by_id[d["id"]] = d
+    # Runde 13: B3 — je (Inserat, Firma) gibt es ein eigenes Fahrzeugdokument
+    # mit derselben mobile_ad_id. Vorher gewann "das letzte Dokument", also
+    # konnten Haendlerkorrekturen (Kilometer nach Abholung, Preis) von Firma B
+    # neben den Nutzern von Firma A stehen. Jetzt: nur REINE Inseratsdaten
+    # (data solange "verglichen", danach inserat_aktuell), davon das neueste.
     vehicles_by_ad = {}
     if ad_ids:
         async for v in db.vehicles.find(
             {"mobile_ad_id": {"$in": ad_ids}},
-            {"_id": 0, "mobile_ad_id": 1, "data": 1, "updated_at": 1},
+            {"_id": 0, "mobile_ad_id": 1, "dealer_id": 1, "lifecycle": 1, "data": 1,
+             "inserat_aktuell": 1, "inserat_aktuell_am": 1, "updated_at": 1},
         ):
-            vehicles_by_ad[v["mobile_ad_id"]] = v
+            lc = v.get("lifecycle") or "verglichen"
+            if lc == "verglichen":
+                inserat, stand, korrigiert = v.get("data") or {}, v.get("updated_at") or "", False
+            elif v.get("inserat_aktuell"):
+                inserat, stand, korrigiert = v["inserat_aktuell"], v.get("inserat_aktuell_am") or "", False
+            else:
+                # data kann Haendlerkorrekturen tragen — nur als Notnagel,
+                # wenn keine andere Firma reine Inseratsdaten hat.
+                inserat, stand, korrigiert = v.get("data") or {}, "", True
+            bisher = vehicles_by_ad.get(v["mobile_ad_id"])
+            if bisher is None or (bisher["korrigiert"] and not korrigiert) \
+                    or (bisher["korrigiert"] == korrigiert and str(stand) > str(bisher["stand"])):
+                vehicles_by_ad[v["mobile_ad_id"]] = {
+                    "data": inserat, "stand": stand, "korrigiert": korrigiert}
 
     out = []
     for r in rows:
@@ -1551,7 +1650,13 @@ async def admin_comparisons(limit: int = 200, _=Depends(current_admin)):
                 "fuel": vd.get("fuel"),
                 "vin": vd.get("vin") or vd.get("fin"),
                 "url": vd.get("url") or vd.get("listing_url"),
+                # Runde 13: B3 — von wann die Inseratsdaten sind und ob sie
+                # notgedrungen aus einem korrigierten Datensatz stammen
+                "stand": v.get("stand") or None,
+                "korrigiert": bool(v.get("korrigiert")),
             } if vd else None,
+            # Runde 13: B3 — wie viele Firmen dasselbe Inserat halten
+            "firmen": len([d for d in (r.get("dealer_ids") or []) if d]),
         })
     return {"items": out, "total": len(out)}
 
@@ -1644,6 +1749,11 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "super_admins_ohne_mfa": [u.get("email") or u.get("username") async for u in db.users.find(
             {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
              "mfa.aktiv": {"$ne": True}}, {"_id": 0, "email": 1, "username": 1})],
+        # Runde 12: Es gibt nur den Super-Admin. Alte Konten mit Rolle admin
+        # ohne is_super_admin koennen nichts mehr und gehoeren geloescht.
+        "admin_konten_ohne_super_admin": [u.get("email") or u.get("username") async for u in db.users.find(
+            {"role": "admin", "is_super_admin": {"$ne": True}},
+            {"_id": 0, "email": 1, "username": 1})],
     }
 
 

@@ -974,7 +974,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Erstzulassung (compact: fr=YYYY:YYYY or fr=YYYY:)
     fr_year = _parse_first_registration(vehicle.get("first_registration", ""))
-    fr_rule = rules.get("first_registration", {"mode": "older_exact", "years": 1})
+    fr_rule = rules.get("first_registration") or {"mode": "older_exact", "years": 1}
     if fr_rule.get("mode") == "year_range":
         from_y = fr_rule.get("from")
         to_y = fr_rule.get("to")
@@ -991,8 +991,15 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Kilometer (compact: ml=MIN:MAX)
     km = vehicle.get("mileage")
-    km_rule = rules.get("mileage", {"mode": "plus", "value": 30000})
-    if km and km_rule.get("mode") != "ignore":
+    km_rule = rules.get("mileage") or {"mode": "plus", "value": 30000}
+    if km_rule.get("mode") == "custom":
+        # Nachpruefung Runde 10: Ein fester Bereich braucht keinen Fahrzeug-
+        # km — vorher fiel der Filter bei km=0 (falsy) still weg.
+        mn = int(km_rule["min"]) if km_rule.get("min") is not None else ""
+        mx = int(km_rule["max"]) if km_rule.get("max") is not None else ""
+        if mn != "" or mx != "":
+            params.append(("ml", f"{mn}:{mx}"))
+    elif km and km_rule.get("mode") != "ignore":
         mode = km_rule.get("mode")
         v = int(km_rule.get("value", 30000))
         if mode == "exact":
@@ -1001,14 +1008,10 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("ml", f":{km + v}"))
         elif mode == "range":
             params.append(("ml", f"{max(0, km - v)}:{km + v}"))
-        elif mode == "custom":
-            mn = int(km_rule["min"]) if km_rule.get("min") is not None else ""
-            mx = int(km_rule["max"]) if km_rule.get("max") is not None else ""
-            params.append(("ml", f"{mn}:{mx}"))
 
     # Leistung (compact: pw=MIN:MAX in kW)
     kw = vehicle.get("power_kw")
-    pwr_rule = rules.get("power", {"mode": "tolerance_ps", "value": 5})
+    pwr_rule = (rules.get("power") or {"mode": "tolerance_ps", "value": 5})
     if kw and pwr_rule.get("mode") != "ignore":
         mode = pwr_rule.get("mode")
         if mode == "exact":
@@ -1024,18 +1027,18 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("pw", f"{mn}:{mx}"))
 
     # Kraftstoff / Getriebe / Kategorie (compact)
-    if rules.get("fuel", {}).get("mode") == "exact" and vehicle.get("fuel"):
+    if (rules.get("fuel") or {}).get("mode") == "exact" and vehicle.get("fuel"):
         params.append(("ft", vehicle["fuel"]))
-    if rules.get("gearbox", {}).get("mode") == "exact" and vehicle.get("gearbox"):
+    if (rules.get("gearbox") or {}).get("mode") == "exact" and vehicle.get("gearbox"):
         params.append(("tr", vehicle["gearbox"]))
-    if rules.get("category", {}).get("mode") == "exact" and vehicle.get("category"):
+    if (rules.get("category") or {}).get("mode") == "exact" and vehicle.get("category"):
         params.append(("c", vehicle["category"]))
-    if rules.get("doors", {}).get("mode") == "exact" and vehicle.get("doors"):
+    if (rules.get("doors") or {}).get("mode") == "exact" and vehicle.get("doors"):
         params.append(("doors", str(vehicle["doors"])))
 
     # Hubraum (kept long form — no documented compact equivalent)
     cc = vehicle.get("displacement")
-    cc_rule = rules.get("displacement", {"mode": "ignore"})
+    cc_rule = (rules.get("displacement") or {"mode": "ignore"})
     if cc and cc_rule.get("mode") in ("exact", "tolerance"):
         if cc_rule.get("mode") == "exact":
             params.append(("minCubicCapacity", str(cc)))
@@ -1046,11 +1049,11 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("maxCubicCapacity", str(cc + v)))
 
     # Schaden (compact: dam=0 = nicht anzeigen, dam=1 = anzeigen)
-    if rules.get("damage", {}).get("mode") == "no_accident":
+    if (rules.get("damage") or {}).get("mode") == "no_accident":
         params.append(("dam", "0"))
 
     # Anbieter (kept long — no documented compact equivalent)
-    seller_mode = rules.get("seller", {}).get("mode", "all")
+    seller_mode = (rules.get("seller") or {}).get("mode", "all")
     if seller_mode == "dealer":
         params.append(("sellerType", "DEALER"))
     elif seller_mode == "private":
@@ -1106,11 +1109,24 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         elif any("klimaanl" in vf or "klima" in vf for vf in vehicle_features):
             params.append(("climatisation", "MANUAL_CLIMATISATION"))
 
-    # Sortierung – billigste zuerst (mobile.de UI uses sb=p&od=up)
-    params.append(("sb", "p"))
-    params.append(("od", "up"))
+    # Sortierung aus dem Regelpaket (Runde 11: vorher immer sb=p&od=up,
+    # obwohl "Kilometer zuerst" o.ae. gespeichert werden konnte).
+    # mobile.de: sb=p Preis, sb=ml Kilometer, sb=fr Erstzulassung, sb=rel
+    # Relevanz; od=up/down.
+    params.extend(_MOBILE_SORT.get(rules.get("sort") or "price_asc", _MOBILE_SORT["price_asc"]))
 
     return f"https://suchen.mobile.de/fahrzeuge/search.html?{urlencode(params, quote_via=quote)}"
+
+
+_MOBILE_SORT = {
+    "price_asc": [("sb", "p"), ("od", "up")],
+    "price_desc": [("sb", "p"), ("od", "down")],
+    "mileage_asc": [("sb", "ml"), ("od", "up")],
+    "mileage_desc": [("sb", "ml"), ("od", "down")],
+    "first_registration_desc": [("sb", "fr"), ("od", "down")],
+    "first_registration_asc": [("sb", "fr"), ("od", "up")],
+    "relevance": [("sb", "rel")],
+}
 
 
 DEFAULT_RULES = {
@@ -1125,7 +1141,6 @@ DEFAULT_RULES = {
     "damage": {"mode": "no_accident"},
     "seller": {"mode": "all"},
     "country": {"mode": "exact", "codes": ["DE"]},
-    "radius": {"mode": "country"},
     "sort": "price_asc",
     "result_count": 4,
     "features": {
@@ -1149,7 +1164,6 @@ DEFAULT_EXPORT_RULES = {
     "damage": {"mode": "ignore"},
     "seller": {"mode": "all"},
     "country": {"mode": "all"},
-    "radius": {"mode": "country"},
     "sort": "price_asc",
     "result_count": 4,
     "features": {

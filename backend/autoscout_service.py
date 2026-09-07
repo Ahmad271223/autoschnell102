@@ -226,7 +226,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Erstzulassung (fregfrom / fregto)
     fr_year = _parse_first_registration(vehicle.get("first_registration"))
-    fr_rule = rules.get("first_registration", {"mode": "older_exact", "years": 1})
+    fr_rule = rules.get("first_registration") or {"mode": "older_exact", "years": 1}
     if fr_rule.get("mode") == "year_range":
         from_y = fr_rule.get("from")
         to_y = fr_rule.get("to")
@@ -251,8 +251,15 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             km = int(re.sub(r"\D", "", km))
         except Exception:
             km = None
-    km_rule = rules.get("mileage", {"mode": "plus", "value": 30000})
-    if km and km_rule.get("mode") != "ignore":
+    km_rule = rules.get("mileage") or {"mode": "plus", "value": 30000}
+    if km_rule.get("mode") == "custom":
+        # Nachpruefung Runde 10: fester Bereich unabhaengig vom Fahrzeug-km
+        # (km=0 liess den Filter vorher still wegfallen).
+        if km_rule.get("min") is not None:
+            params.append(("kmfrom", str(int(km_rule["min"]))))
+        if km_rule.get("max") is not None:
+            params.append(("kmto", str(int(km_rule["max"]))))
+    elif km and km_rule.get("mode") != "ignore":
         mode = km_rule.get("mode")
         v = int(km_rule.get("value", 30000))
         if mode == "exact":
@@ -262,11 +269,6 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         elif mode == "range":
             params.append(("kmfrom", str(max(0, km - v))))
             params.append(("kmto", str(km + v)))
-        elif mode == "custom":
-            if km_rule.get("min") is not None:
-                params.append(("kmfrom", str(int(km_rule["min"]))))
-            if km_rule.get("max") is not None:
-                params.append(("kmto", str(int(km_rule["max"]))))
 
     # Leistung in kW (powerfrom / powerto)
     kw = vehicle.get("power_kw")
@@ -274,7 +276,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         kw = int(kw) if kw not in (None, "") else None
     except Exception:
         kw = None
-    pwr_rule = rules.get("power", {"mode": "tolerance_ps", "value": 5})
+    pwr_rule = (rules.get("power") or {"mode": "tolerance_ps", "value": 5})
     if kw and pwr_rule.get("mode") != "ignore":
         mode = pwr_rule.get("mode")
         if mode == "exact":
@@ -296,14 +298,14 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("powertype", "kw"))
 
     # Kraftstoff
-    fuel_rule = rules.get("fuel", {}).get("mode")
+    fuel_rule = (rules.get("fuel") or {}).get("mode")
     if fuel_rule == "exact":
         fuel = vehicle.get("fuel_label") or vehicle.get("fuel")
         if fuel:
             params.append(("fuel", _autoscout_fuel(fuel)))
 
     # Getriebe
-    gear_rule = rules.get("gearbox", {}).get("mode")
+    gear_rule = (rules.get("gearbox") or {}).get("mode")
     if gear_rule == "exact":
         gb = vehicle.get("gearbox_label") or vehicle.get("gearbox")
         gb_code = _autoscout_gearbox(gb)
@@ -318,13 +320,94 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     if damage_mode == "no_accident":
         params.append(("damaged_listing", "exclude"))
 
-    # Default-Polish: passt zum vom Nutzer geschickten Beispiel
+    # Kategorie (body=) und Tueren (doorfrom/doorto) — Runde 11: vorher
+    # endete die Regelverarbeitung nach Kraftstoff/Getriebe/Schaden, und
+    # beide Links sahen nach "derselben Suche" aus, obwohl AutoScout die
+    # Firmenregeln fuer Kategorie und Tueren nie umsetzte.
+    if (rules.get("category") or {}).get("mode") == "exact":
+        body = _AUTOSCOUT_BODY.get(str(vehicle.get("category") or ""))
+        if body:
+            params.append(("body", body))
+    if (rules.get("doors") or {}).get("mode") == "exact":
+        tueren = _autoscout_tueren(vehicle.get("doors"))
+        if tueren:
+            params.append(("doorfrom", str(tueren[0])))
+            params.append(("doorto", str(tueren[1])))
+
     params.append(("ocs_listing", "include"))
-    params.append(("sort", "price"))
-    params.append(("desc", "0"))
+    # Sortierung aus dem Regelpaket (Runde 11: vorher starr sort=price&desc=0).
+    params.extend(_AUTOSCOUT_SORT.get(rules.get("sort") or "price_asc",
+                                      _AUTOSCOUT_SORT["price_asc"]))
     params.append(("ustate", "N,U"))
 
     return f"{base}{path}?{urlencode(params, safe=',')}"
+
+
+def _autoscout_tueren(wert) -> Optional[Tuple[int, int]]:
+    """mobile.de-Tuerenschluessel (TWO_OR_THREE …) oder Zahl -> (von, bis)."""
+    if wert in (None, ""):
+        return None
+    s = str(wert).strip().upper()
+    bereiche = {"TWO_OR_THREE": (2, 3), "FOUR_OR_FIVE": (4, 5), "SIX_OR_SEVEN": (6, 7)}
+    if s in bereiche:
+        return bereiche[s]
+    m = re.match(r"(\d)", s)
+    if m:
+        n = int(m.group(1))
+        return (n, n) if 1 <= n <= 7 else None
+    return None
+
+
+# mobile.de-Kategorie -> AutoScout24 body-Code
+_AUTOSCOUT_BODY = {
+    "SmallCar": "1", "Cabrio": "2", "SportsCar": "3", "OffRoad": "4",
+    "EstateCar": "5", "Limousine": "6", "Van": "7",
+}
+_AUTOSCOUT_SORT = {
+    "price_asc": [("sort", "price"), ("desc", "0")],
+    "price_desc": [("sort", "price"), ("desc", "1")],
+    "mileage_asc": [("sort", "mileage"), ("desc", "0")],
+    "mileage_desc": [("sort", "mileage"), ("desc", "1")],
+    "first_registration_desc": [("sort", "year"), ("desc", "1")],
+    "first_registration_asc": [("sort", "year"), ("desc", "0")],
+    "relevance": [("sort", "standard"), ("desc", "0")],
+}
+
+
+def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
+    """Welche Firmenregeln kann der AutoScout-Link NICHT umsetzen?
+    Liefert lesbare Hinweise fuer den Nutzer (Runde 11) — vorher bekam er
+    zwei Links "nach denselben Regeln", die stillschweigend verschieden
+    filterten."""
+    from regeln import laender_ohne_autoscout
+    rules = rules or {}
+    hinweise = []
+    fehlend = laender_ohne_autoscout(rules)
+    if fehlend:
+        country = rules.get("country") or {}
+        alle = [str(c).upper() for c in (country.get("codes") or [])]
+        uebrig = [c for c in alle if c not in fehlend]
+        if uebrig:
+            hinweise.append(f"AutoScout24 kennt {', '.join(fehlend)} nicht als Land — "
+                            f"der AutoScout-Link sucht nur in {', '.join(uebrig)}.")
+        else:
+            hinweise.append(f"AutoScout24 bietet {', '.join(fehlend)} nicht als Land an — "
+                            "der AutoScout-Link sucht in ALLEN AutoScout-Laendern.")
+    if (rules.get("category") or {}).get("mode") == "exact" and vehicle.get("category") \
+            and str(vehicle["category"]) not in _AUTOSCOUT_BODY:
+        hinweise.append("AutoScout24 hat keine passende Kategorie fuer "
+                        f"'{vehicle.get('category_label') or vehicle['category']}' — "
+                        "der AutoScout-Link filtert nicht nach Kategorie.")
+    cc_mode = (rules.get("displacement") or {}).get("mode")
+    if cc_mode in ("exact", "tolerance") and vehicle.get("displacement"):
+        hinweise.append("Hubraum filtert nur mobile.de — der AutoScout-Link zeigt alle Hubraeume.")
+    nav_mode = ((rules.get("features") or {}).get("navigation") or {}).get("mode", "ignore")
+    if nav_mode != "ignore":
+        hinweise.append("Navigation filtert nur mobile.de — der AutoScout-Link zeigt auch Fahrzeuge ohne Navi.")
+    klima = (rules.get("climatisation") or {}).get("mode", "ignore")
+    if klima != "ignore":
+        hinweise.append("Klimatisierung filtert nur mobile.de — der AutoScout-Link zeigt auch Fahrzeuge ohne Klima.")
+    return hinweise
 
 
 # ---------- Fuel/Gearbox-Mappings ----------
@@ -339,9 +422,15 @@ def _autoscout_fuel(s: str) -> str:
         "diesel": "D",
         "elektro": "E",
         "electric": "E",
+        "electricity": "E",      # Nachpruefung Runde 10: mobile.de-Codes und
+        "strom": "E",            # Labels, die nur mobile.de kannte
+        "super": "B",
+        "hybridbenzin": "2",
         "hybrid": "2",  # Autoscout: 2 = hybrid (benz/E)
         "hybriddiesel": "3",
         "plugin": "2",
+        "pluginhybrid": "2",     # Runde 10: "Plug-in-Hybrid" normalisiert zu pluginhybrid
+        "plugin-hybrid": "2",
         "lpg": "L",
         "autogas": "L",
         "cng": "C",

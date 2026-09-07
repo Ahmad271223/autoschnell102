@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -655,6 +656,53 @@ async def create_snapshot(
         "completed_at": None,
     })
     return snap_id
+
+
+def snapshot_pseudonym(kennung: str) -> str:
+    """Runde 13: B8 — deterministisches Pseudonym fuer dealer_id/user_id in
+    listing_snapshots. Wie fahrer_konto_anonymisieren (SHA-256 der alten ID,
+    12 Hex-Zeichen), aber mit BINDESTRICH statt Doppelpunkt: run_snapshot_job
+    schreibt dealer_id in den Storage-Pfad, und ein Doppelpunkt ist dort
+    (Windows-Dateisystem, Objekt-Schluessel) unzulaessig."""
+    return "geloescht-" + hashlib.sha256(
+        str(kennung).encode("utf-8")).hexdigest()[:12]
+
+
+async def snapshots_pseudonymisieren(db, *, dealer_id: Optional[str] = None,
+                                     user_id: Optional[str] = None) -> int:
+    """Runde 13: B8 — Firmen-/Nutzerkennung in Beweis-Snapshots
+    pseudonymisieren, die Snapshots selbst bleiben (Beweiszweck,
+    haendlerneutral geteilt). Vorher blieben dealer_id/user_id nach der
+    Firmenloeschung unbegrenzt stehen — der Verfall (cleanup_service)
+    loescht nur Dateien, nie Zeilen.
+
+    Immer $set, nie $unset: ein noch wartender Job liest doc['dealer_id']
+    fuer den Storage-Pfad. png_path/pdf_path (enthalten die alte dealer_id
+    im Objekt-Schluessel) werden bewusst NICHT umbenannt — interne
+    Schluessel, keine Route liefert sie aus. Liefert die Zahl geaenderter
+    Zeilen."""
+    if not dealer_id and not user_id:
+        return 0
+    jetzt = _now_iso()
+    n = 0
+    if dealer_id:
+        pseudo_dealer = snapshot_pseudonym(dealer_id)
+        async for snap in db.listing_snapshots.find(
+                {"dealer_id": dealer_id}, {"_id": 0, "id": 1, "user_id": 1}):
+            ersatz = {"dealer_id": pseudo_dealer, "pseudonymisiert_at": jetzt}
+            alt_user = snap.get("user_id")
+            if alt_user and not str(alt_user).startswith("geloescht-"):
+                ersatz["user_id"] = snapshot_pseudonym(alt_user)
+            r = await db.listing_snapshots.update_one(
+                {"id": snap["id"], "dealer_id": dealer_id}, {"$set": ersatz})
+            n += r.modified_count
+    if user_id:
+        r = await db.listing_snapshots.update_many(
+            {"user_id": user_id},
+            {"$set": {"user_id": snapshot_pseudonym(user_id),
+                      "pseudonymisiert_at": jetzt}})
+        n += r.modified_count
+    return n
 
 
 # Fehler, die ein erneuter Versuch NICHT heilt (kein Retry).

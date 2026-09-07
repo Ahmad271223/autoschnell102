@@ -74,3 +74,46 @@ test("Ohne Storage bricht nichts", () => {
   expect(() => tokenLoeschen()).not.toThrow();
   Object.defineProperty(window, "sessionStorage", { configurable: true, value: orig });
 });
+
+// ---- Runde 11: abgemeldeter Tab uebernimmt kein fremdes Konto ----
+
+test("Befund: Admin meldet sich in Tab A ab, Tab A wird NICHT zur Firma aus Tab B", () => {
+  tokenSetzen(TOKEN_APP, "admin");            // Tab A
+  neuerTab();
+  tokenSetzen(TOKEN_APP, "firma");            // Tab B, letzte Anmeldung = firma
+  window.sessionStorage.setItem(TOKEN_APP, "admin"); // zurueck in Tab A
+  tokenLoeschen();                             // Admin meldet sich ab
+  expect(window.localStorage.getItem(TOKEN_APP)).toBe("firma"); // Firma bleibt letzte
+  // Seite laedt neu / refresh(): vorher kam hier "firma" zurueck.
+  expect(tokenLesen()).toBeNull();
+  expect(window.sessionStorage.getItem(TOKEN_APP)).toBeNull();
+});
+
+test("Sitzung durch 401 beendet: Tab bleibt leer, auch wenn ein anderes Konto die letzte Anmeldung ist", () => {
+  tokenSetzen(TOKEN_APP, "admin");            // Tab A
+  neuerTab();
+  tokenSetzen(TOKEN_APP, "firma");            // Tab B
+  window.sessionStorage.setItem(TOKEN_APP, "admin"); // Tab A
+  tokenLoeschen();                             // Interceptor nach 401
+  expect(tokenLesen()).toBeNull();
+  expect(tokenLesen()).toBeNull();             // bleibt so, nicht nur einmal
+});
+
+test("Nach erneuter Anmeldung im selben Tab gilt der neue Token wieder", () => {
+  tokenSetzen(TOKEN_APP, "admin");
+  tokenLoeschen();
+  expect(tokenLesen()).toBeNull();
+  tokenSetzen(TOKEN_APP, "admin2");
+  expect(tokenLesen()).toBe("admin2");
+  expect(window.localStorage.getItem(TOKEN_APP)).toBe("admin2");
+});
+
+test("Ein NEUER Tab macht trotzdem bei der letzten Anmeldung weiter", () => {
+  tokenSetzen(TOKEN_APP, "admin");            // Tab A
+  neuerTab();
+  tokenSetzen(TOKEN_APP, "firma");            // Tab B
+  window.sessionStorage.setItem(TOKEN_APP, "admin");
+  tokenLoeschen();                             // Tab A meldet Admin ab
+  neuerTab();                                  // Tab C: frischer sessionStorage
+  expect(tokenLesen()).toBe("firma");
+});

@@ -356,8 +356,12 @@ _PRIVATE_FILE_PREFIXES = ("protocol/", "pickup/")
 # privat. Firmenlogos (logo/) bleiben oeffentlich. Uebergang: bis alle
 # Aufrufer signierte Links erzeugen, kann die Pflicht per
 # DATEI_SIGNATUR_PFLICHT=false ausgesetzt werden.
-_DATEI_SIGNATUR_PFLICHT = os.environ.get("DATEI_SIGNATUR_PFLICHT", "true").strip().lower() \
-    not in ("0", "false", "no")
+# Runde 13: B4 — in Produktion gilt die Pflicht IMMER; der Schalter kann sie
+# nur noch ausserhalb (Entwicklung/Test) aussetzen. production_check bricht
+# den Start bei =false in Produktion ohnehin ab — das hier ist der zweite Riegel.
+_DATEI_SIGNATUR_PFLICHT = (
+    os.environ.get("APP_ENV", "").strip().lower() == "production"
+    or os.environ.get("DATEI_SIGNATUR_PFLICHT", "true").strip().lower() not in ("0", "false", "no"))
 
 
 @app.get("/api/files/{key:path}")
@@ -616,7 +620,17 @@ async def ensure_indexes():
 
 
 async def seed_admin():
-    email = os.environ.get("ADMIN_EMAIL", "admin@autohandel.app")
+    """Runde 12 (Beschluss 06.09.2026): Es gibt nur den Super-Admin
+    (seed_super_admin). Der fruehere Bootstrap-"normale Admin" aus
+    ADMIN_EMAIL wird nicht mehr angelegt; ein vorhandenes Altkonto wird
+    weder geaendert noch reaktiviert und bekommt ueberall 403
+    (deps.current_admin). Es erscheint unter /admin/betrieb zum Loeschen."""
+    email = os.environ.get("ADMIN_EMAIL", "")
+    if email and await db.users.find_one({"email": email, "role": "admin",
+                                          "is_super_admin": {"$ne": True}}, {"_id": 1}):
+        log.warning("seed_admin: Altkonto %s hat Rolle admin ohne Super-Admin — "
+                    "es kann nichts mehr und sollte im Betrieb geloescht werden.", email)
+    return
     password = os.environ.get("ADMIN_PASSWORD", "")
     if not password:
         log.warning(

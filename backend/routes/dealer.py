@@ -66,6 +66,13 @@ class ActiveProfileIn(BaseModel):
 
 
 # ---------- Endpoints ----------
+# Standardwerte fuer Bestandshaendler ohne Regelpakete — eine Liste fuer
+# Chef- und Sucher-Zweig von get_settings (Runde 13, C5).
+_SETTINGS_STANDARDS = (("comparison_rules", DEFAULT_RULES),
+                       ("export_rules", DEFAULT_EXPORT_RULES),
+                       ("active_profile", "inland"))
+
+
 @router.get("/dealer/settings")
 async def get_settings(user=Depends(current_firma)):
     """Wirksame Einstellungen aus Sicht des Nutzers: Chef-Vorgaben,
@@ -73,23 +80,49 @@ async def get_settings(user=Depends(current_firma)):
     from deps import effective_dealer
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     # Back-fill neuer Felder für Bestandshändler, damit das Frontend sich
-    # keine Sorgen um Legacy-Dokumente machen muss.
+    # keine Sorgen um Legacy-Dokumente machen muss. Runde 11: jedes Feld
+    # wird nur geschrieben, wenn es in der Datenbank WEITERHIN fehlt —
+    # vorher konnte ein Lesezugriff auf einen alten Stand ein gerade vom
+    # Chef gespeichertes Regelpaket wieder mit dem Standard ueberschreiben.
+    # Runde 13: C5 — Ein GET eines Suchers schrieb fehlende Regelpakete in das
+    # gemeinsame dealers-Dokument. Jetzt: Backfill in der Datenbank nur durch
+    # den Chef; ein Sucher bekommt die Standardwerte nur in der Antwort.
+    ist_chef = user.get("role") == "dealer"
     if dealer:
-        patch = {}
-        if not dealer.get("comparison_rules"):
-            dealer["comparison_rules"] = DEFAULT_RULES
-            patch["comparison_rules"] = DEFAULT_RULES
-        if not dealer.get("export_rules"):
-            dealer["export_rules"] = DEFAULT_EXPORT_RULES
-            patch["export_rules"] = DEFAULT_EXPORT_RULES
-        if not dealer.get("active_profile"):
-            dealer["active_profile"] = "inland"
-            patch["active_profile"] = "inland"
-        if patch:
-            await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": patch})
+        for feld, standard in _SETTINGS_STANDARDS:
+            if dealer.get(feld):
+                continue
+            dealer[feld] = standard
+            if not ist_chef:
+                continue
+            await db.dealers.update_one(
+                {"id": user["dealer_id"],
+                 "$or": [{feld: {"$exists": False}}, {feld: None},
+                         {feld: {}}, {feld: ""}]},
+                {"$set": {feld: standard}})
     if user.get("role") == "sucher":
-        return await effective_dealer(user)
+        # effective_dealer liest das Haendler-Dokument NEU aus der Datenbank —
+        # die oben nur im Speicher gesetzten Standardwerte muessen deshalb
+        # hier in die Antwort gemischt werden, ohne etwas zu schreiben.
+        merged = await effective_dealer(user)
+        for feld, standard in _SETTINGS_STANDARDS:
+            if not merged.get(feld):
+                merged[feld] = standard
+        return _sucher_sicht(merged)
     return dealer
+
+
+# Runde 12: Ein Sucher bekommt aus dem Haendler-Dokument NUR die Felder,
+# die er selbst einstellen darf, plus Kennung. Vorher kam das ganze
+# Dokument (samt allem, was kuenftig dazukommt: Kontingente, Marktplatz,
+# interne Vermerke) mit den Overrides obendrauf zurueck.
+_SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "created_at", "updated_at"}
+
+
+def _sucher_sicht(dealer: dict) -> dict:
+    from deps import SUCHER_SETTINGS_FIELDS
+    erlaubt = SUCHER_SETTINGS_FIELDS | _SUCHER_SICHT_ZUSATZ
+    return {k: v for k, v in (dealer or {}).items() if k in erlaubt}
 
 
 @router.put("/dealer/active-profile")
@@ -98,6 +131,7 @@ async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma))
     Sucher wechseln nur IHR eigenes Profil (Override), nicht das des Chefs."""
     if body.active_profile not in ("inland", "export"):
         raise HTTPException(400, "active_profile muss 'inland' oder 'export' sein")
+    from deps import log_activity
     if user.get("role") == "sucher":
         await db.users.update_one(
             {"id": user["id"]},
@@ -108,6 +142,11 @@ async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma))
             {"id": user["dealer_id"]},
             {"$set": {"active_profile": body.active_profile, "updated_at": now_iso()}},
         )
+    # Runde 11: Dieses eine Feld entscheidet, welches komplette Regelpaket
+    # Vergleich und manuelle Suche verwenden — der Wechsel gehoert ins Protokoll.
+    await log_activity(user["dealer_id"], user["id"], "einstellungen.profil.gewechselt",
+                       meta={"active_profile": body.active_profile,
+                             "bereich": "persoenlich" if user.get("role") == "sucher" else "firma"})
     return {"active_profile": body.active_profile}
 
 
@@ -211,9 +250,15 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
                 meta={"gesetzt": sorted(k.split(".", 1)[1] for k in setzen),
                       "zurueckgesetzt": sorted(k.split(".", 1)[1] for k in loeschen)})
         fresh_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
-        return await effective_dealer(fresh_user)
+        return _sucher_sicht(await effective_dealer(fresh_user))
     update["updated_at"] = now_iso()
     await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": update})
+    # Runde 11: Firmenweite Aenderungen des Chefs ins Protokoll — vorher
+    # war nur der persoenliche Sucher-Override nachvollziehbar, nicht wann
+    # der Chef die Vergleichsregeln der ganzen Firma geaendert hat.
+    from deps import log_activity
+    await log_activity(user["dealer_id"], user["id"], "einstellungen.firma.geaendert",
+                       meta={"felder": sorted(k for k in update if k != "updated_at")})
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     return dealer
 
@@ -284,12 +329,16 @@ async def dealer_subscription(user=Depends(current_firma)):
     # also z.B. das Sucher-Abo eines Mitarbeiters mit fremder Laufzeit.
     # Jetzt: erst das persoenliche Abo des Aufrufers, sonst das
     # haendlerweite (ohne subject_user_id).
+    # Runde 11: DIESELBE Auswahl wie die Zugriffspruefung (deps): ersetzte
+    # Abos zaehlen nicht. Vorher konnte die Anzeige Plan/Status aus dem
+    # neuen Abo, Ablaufdatum aber aus dem bereits ersetzten alten mischen.
     sub_doc = await db.subscriptions.find_one(
-        {"dealer_id": user["dealer_id"], "subject_user_id": user["id"]},
+        {"dealer_id": user["dealer_id"], "subject_user_id": user["id"],
+         "status": {"$ne": "ersetzt"}},
         {"_id": 0}, sort=[("created_at", -1)])
     if not sub_doc and user.get("role") != "sucher":
         sub_doc = await db.subscriptions.find_one(
-            {"dealer_id": user["dealer_id"],
+            {"dealer_id": user["dealer_id"], "status": {"$ne": "ersetzt"},
              "$or": [{"subject_user_id": {"$exists": False}},
                      {"subject_user_id": None}]},
             {"_id": 0}, sort=[("created_at", -1)])

@@ -8,6 +8,7 @@
 - Preisstufen: öffentlich < B2B (registrierte Zwischenhändler) <
   privates Netzwerk (per Einladung)
 """
+import logging
 import os
 import re
 import secrets
@@ -21,11 +22,14 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from auth import (hash_password_async, new_session_id, create_token,
                   verify_password_async, _DUMMY_HASH)
-from deps import current_user, db, log_activity, now_iso
+from deps import (_ablauf_parsen, current_user, db, email_vergeben,
+                  firma_gesperrt, gesperrte_firmen_ids, log_activity, now_iso)
 from rate_limiter import client_ip, register_limiter, login_limiter
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
+
+log = logging.getLogger("autohandel")
 
 router = APIRouter()
 
@@ -45,28 +49,68 @@ BUYER_ACCESS_PRICE = 20.00         # € pro Monat, nur wenn nicht kostenlos
 BUYER_ACCESS_DAYS = 30
 
 
+GESPERRT_MELDUNG = ("Dein Marktplatz-Zugang wurde vom Betreiber gesperrt — "
+                    "bitte den Betreiber kontaktieren.")
+
+
 def _access_status(user: dict) -> dict:
-    """Zugangsstatus eines Zwischenhändlers. Händler/Admin haben immer Zugang."""
+    """Zugangsstatus eines Zwischenhändlers. Händler haben immer Zugang.
+
+    Zwei getrennte Zustaende (Runde 13: C6): "kostenlos" sagt nur, dass
+    kein Geld noetig ist; "gesperrt" ist eine Betreiber-Entscheidung und
+    gewinnt immer."""
+    acc = user.get("marketplace_access") or {}
+    # Runde 13: C6 — vorher gewann der Kostenlos-Schalter vor der Betreiber-
+    # Sperre (Sperren war wirkungslos, Oberflaeche zeigte weiter "aktiv");
+    # jetzt gewinnt die Sperre immer, "kostenlos" betrifft nur das Geld.
+    # Altbestand: active=False ohne "gesperrt" stammt ausschliesslich von
+    # der Admin-Sperre und gilt weiter als Sperre.
+    gesperrt = bool(acc.get("gesperrt")) or acc.get("active") is False
+    if gesperrt:
+        return {"active": False, "plan": None, "expires_at": None,
+                "price": 0.0 if MARKTPLATZ_KOSTENLOS else BUYER_ACCESS_PRICE,
+                "kostenlos": MARKTPLATZ_KOSTENLOS, "gesperrt": True,
+                "gesperrt_am": acc.get("gesperrt_am")}
     if MARKTPLATZ_KOSTENLOS:
         return {"active": True, "plan": "kostenlos", "expires_at": None,
-                "price": 0.0, "kostenlos": True}
-    if user.get("role") in ("dealer", "admin"):
+                "price": 0.0, "kostenlos": True, "gesperrt": False}
+    # Runde 13: die Rolle admin existiert nicht mehr (Runde 12) — nur noch
+    # Haendler haben internen Zugang.
+    if user.get("role") == "dealer":
         return {"active": True, "plan": "intern", "expires_at": None,
-                "price": BUYER_ACCESS_PRICE}
-    acc = user.get("marketplace_access") or {}
+                "price": BUYER_ACCESS_PRICE, "gesperrt": False}
     active = bool(acc.get("active"))
     exp = acc.get("expires_at")
-    if active and exp:
-        try:
-            dt = datetime.fromisoformat(exp)
-            if dt.tzinfo is None:                      # naive Alt-Werte tolerieren
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt < datetime.now(timezone.utc):
-                active = False
-        except (ValueError, TypeError):
-            pass
+    # Runde 13: A2 — vorher blieb ein Zugang bei fehlendem oder unlesbarem
+    # Ablaufdatum dauerhaft aktiv (except: pass; fehlendes Datum wurde gar
+    # nicht geprueft). Jetzt fail-closed wie sub_status_from_doc: der
+    # Marktplatz-Zugang ist immer befristet (30 Tage), also kein oder
+    # unlesbares Ablaufdatum -> inaktiv, protokolliert; nur ein lesbares
+    # Datum in der Zukunft gewaehrt Zugang.
+    if active:
+        ea = _ablauf_parsen(exp)
+        if ea is None:
+            log.error("Marktplatz-Zugang %s: fehlendes/unlesbares Ablaufdatum "
+                      "%r -> inaktiv", user.get("id"), exp)
+            active = False
+        elif ea < datetime.now(timezone.utc):
+            active = False
     return {"active": active, "plan": acc.get("plan"),
-            "expires_at": exp, "price": BUYER_ACCESS_PRICE}
+            "expires_at": exp, "price": BUYER_ACCESS_PRICE, "gesperrt": False}
+
+
+def _zugang_erzwingen(user: dict) -> None:
+    """Runde 13: C2/C6 — gemeinsame Zugangspruefung fuer Dependencies und
+    Inline-Aufrufe (der 402-Text stand vorher dreimal im Code):
+    Betreiber-Sperre -> 403 (gewinnt immer, auch im Kostenlos-Modus),
+    fehlendes/abgelaufenes Abo -> 402 (nur im Bezahlmodus erreichbar)."""
+    status = _access_status(user)
+    if status.get("gesperrt"):
+        raise HTTPException(403, GESPERRT_MELDUNG)
+    if not status["active"]:
+        raise HTTPException(
+            402, "Kein aktiver Marktplatz-Zugang – bitte Zugang freischalten "
+                 f"({BUYER_ACCESS_PRICE:.2f} € / Monat).")
 
 
 # ---------- Auth-Hilfen ----------
@@ -81,15 +125,23 @@ async def current_buyer(user=Depends(current_user)):
     return user
 
 
-async def require_marketplace_access(user=Depends(current_buyer)):
-    """Wie current_buyer, aber Zwischenhändler brauchen ein aktives Zugangs-Abo,
-    um Fahrzeuge sehen zu können (Händler/Admin ausgenommen).
+async def buyer_nicht_gesperrt(user=Depends(current_buyer)):
+    """Runde 13: C6 — Zwischenhaendler, dessen Marktplatz-Zugang der
+    Betreiber NICHT gesperrt hat (Merken, Anfragen, Netzwerk). Ob der
+    Zugang kostenlos oder bezahlt ist, spielt hier keine Rolle; vorher war
+    die Sperre im Kostenlos-Modus wirkungslos."""
+    if _access_status(user).get("gesperrt"):
+        raise HTTPException(403, GESPERRT_MELDUNG)
+    return user
 
-    Ist der Marktplatz kostenlos, faellt die Pruefung weg."""
-    if not _access_status(user)["active"]:
-        raise HTTPException(
-            402, "Kein aktiver Marktplatz-Zugang – bitte Zugang freischalten "
-                 f"({BUYER_ACCESS_PRICE:.2f} € / Monat).")
+
+async def require_marketplace_access(user=Depends(buyer_nicht_gesperrt)):
+    """Wie current_buyer, aber Zwischenhändler brauchen ein aktives Zugangs-Abo,
+    um Fahrzeuge sehen zu können (Händler ausgenommen). Gesperrt -> 403
+    (buyer_nicht_gesperrt), ohne Abo -> 402.
+
+    Ist der Marktplatz kostenlos, faellt die Abo-Pruefung weg."""
+    _zugang_erzwingen(user)
     return user
 
 
@@ -112,13 +164,15 @@ async def marktplatz_besucher(
             nutzer = None
     if nutzer is not None and nutzer.get("role") != "b2b_buyer":
         raise HTTPException(403, "Nur für registrierte Zwischenhändler")
+    # Runde 13: C6 — die Betreiber-Sperre gilt auch im Kostenlos-Modus
+    # (vorher wurde dieser Block dort komplett uebersprungen). Die
+    # oeffentliche Liste OHNE Token bleibt oeffentlich — gewollt.
+    if nutzer is not None and _access_status(nutzer).get("gesperrt"):
+        raise HTTPException(403, GESPERRT_MELDUNG)
     if not MARKTPLATZ_KOSTENLOS:
         if nutzer is None:
             raise HTTPException(401, "Nicht authentifiziert")
-        if not _access_status(nutzer)["active"]:
-            raise HTTPException(
-                402, "Kein aktiver Marktplatz-Zugang – bitte Zugang freischalten "
-                     f"({BUYER_ACCESS_PRICE:.2f} € / Monat).")
+        _zugang_erzwingen(nutzer)
     return nutzer
 
 
@@ -350,6 +404,27 @@ async def remove_network_member(buyer_user_id: str,
         raise HTTPException(404, "Mitglied nicht gefunden")
     # Einmal-Einladungen des Kaeufers nicht wieder freigeben: der Widerruf
     # soll nicht ueber denselben alten Link umgehbar sein.
+    # Runde 13: C4 — Merkliste des entfernten Kaeufers bereinigen: vorher
+    # blieben die IDs privater Inserate nach dem Widerruf in
+    # GET /marktplatz/favoriten stehen. Oeffentlicher Haendler: nur die
+    # privaten Inserate fallen weg; nicht oeffentliches Profil: der Kaeufer
+    # sieht ab jetzt gar nichts mehr von dieser Firma.
+    dealer = await db.dealers.find_one({"id": user["dealer_id"]},
+                                       {"_id": 0, "marketplace.public": 1})
+    oeffentlich = bool(((dealer or {}).get("marketplace") or {}).get("public"))
+    filt: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if oeffentlich:
+        filt["visibility"] = "private"
+    weg = [l["id"] async for l in db.resale_listings.find(filt, {"_id": 0, "id": 1})]
+    fav_filter: Dict[str, Any] = {"buyer_user_id": buyer_user_id,
+                                  "listing_id": {"$in": weg}}
+    if not oeffentlich:
+        # Alt-Favoriten ohne dealer_id-Feld ueber die Inserats-IDs erwischen.
+        fav_filter = {"buyer_user_id": buyer_user_id,
+                      "$or": [{"dealer_id": user["dealer_id"]},
+                              {"listing_id": {"$in": weg}}]}
+    if weg or not oeffentlich:
+        await db.buyer_favorites.delete_many(fav_filter)
     await log_activity(user["dealer_id"], user["id"], "netzwerk.mitglied.entfernt",
                        ref=buyer_user_id)
     return {"ok": True}
@@ -359,6 +434,15 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     """Löst eine Einladung ein. Liefert dealer_id oder None."""
     inv = await db.dealer_invites.find_one({"token": token})
     if not inv:
+        return None
+    # Runde 13: A9 — Einladungen einer gesperrten Firma waren weiter
+    # einloesbar (Sperre setzt nur users.active des Chefs, Links blieben bis
+    # zu 30 Tage gueltig). Vorher: Token/Ablauf/Nutzungen; jetzt zusaetzlich
+    # fail-closed, solange der Haendler-Hauptaccount gesperrt ist — vor
+    # BEIDEN Zweigen, damit auch "bereits eingeloest" keine Mitgliedschaft
+    # mehr bestaetigt. Die Nutzung wird dabei NICHT verbraucht: nach dem
+    # Entsperren funktioniert der Link wieder.
+    if await firma_gesperrt(inv["dealer_id"]):
         return None
     if buyer_user_id in (inv.get("used_by") or []):
         # Bereits eingeloest: nur dann noch Mitglied, wenn der Haendler den
@@ -425,14 +509,15 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
     ip = client_ip(request)
     if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
-    existing = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}})
-    if existing:
+    email = body.email.strip().lower()
+    # Runde 13: B5 — vorher nur users; jetzt plattformweit (auch
+    # driver_accounts), Meldung bewusst ohne Kontotyp.
+    if await email_vergeben(email):
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     sid = new_session_id()
     await db.users.insert_one({
-        "id": user_id, "email": body.email.strip().lower(),
+        "id": user_id, "email": email,
         "password_hash": await hash_password_async(body.password),
         "role": "b2b_buyer", "active": True,
         "dealer_id": None,
@@ -530,7 +615,7 @@ async def request_marketplace_access(user=Depends(current_buyer)):
 
 
 @router.post("/invites/{token}/redeem")
-async def redeem_invite(token: str, user=Depends(current_buyer)):
+async def redeem_invite(token: str, user=Depends(buyer_nicht_gesperrt)):
     dealer_id = await _redeem_invite(token, user["id"])
     if not dealer_id:
         raise HTTPException(400, "Einladung ist abgelaufen oder bereits verwendet")
@@ -557,14 +642,25 @@ async def browse_dealers(q: Optional[str] = None,
         query["company_name"] = {"$regex": re.escape(q.strip()), "$options": "i"}
     if user is not None and user.get("dealer_id"):
         query["id"] = {"$ne": user["dealer_id"]}
+    # Runde 13: A8 — gesperrte Firmen (Hauptaccount active=False) blieben im
+    # oeffentlichen Marktplatz sichtbar; jetzt dieselbe Regel wie beim Login.
+    gesperrt = await gesperrte_firmen_ids()
+    if gesperrt:
+        query.setdefault("id", {})["$nin"] = list(gesperrt)
     dealers = await db.dealers.find(
         query, {"_id": 0, "id": 1, "company_name": 1, "city": 1, "phone": 1,
                 "logo_url": 1, "marketplace": 1}).to_list(1000)
     # Inseratszahlen ALLER Haendler in EINER Aggregation statt
     # count_documents je Haendler (kein N+1 mehr).
+    # Runde 13: A7 — vorher zaehlte die Uebersicht auch private Inserate
+    # (Bestandsgroesse fuer jeden Besucher sichtbar, sogar Sortierkriterium);
+    # jetzt wie /marktplatz/listings und die Haendlerseite: private Inserate
+    # zaehlen nur fuer Netzwerk-Mitglieder des jeweiligen Haendlers.
     counts = {row["_id"]: row["n"] async for row in db.resale_listings.aggregate([
         {"$match": {"dealer_id": {"$in": [dl["id"] for dl in dealers]},
-                    "status": "veroeffentlicht"}},
+                    "status": "veroeffentlicht",
+                    "$or": [{"visibility": {"$ne": "private"}},
+                            {"dealer_id": {"$in": my_networks}}]}},
         {"$group": {"_id": "$dealer_id", "n": {"$sum": 1}}},
     ])}
     out = []
@@ -618,24 +714,17 @@ async def browse_listings(
     # Netzwerk — er sieht ausschliesslich oeffentliche Haendler und dort
     # nur oeffentliche Inserate.
     if user is None:
-        fav_ids, my_networks = set(), []
+        fav_ids = set()
     else:
         fav_ids = {f["listing_id"] async for f in db.buyer_favorites.find(
             {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})}
-        my_networks = [m["dealer_id"] async for m in db.network_members.find(
-            {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
-    public_dealer_ids = [d["id"] async for d in db.dealers.find(
-        {"marketplace.public": True}, {"_id": 0, "id": 1})]
-    visible_dealers = set(public_dealer_ids) | set(my_networks)
-    if user is not None:
-        visible_dealers.discard(user.get("dealer_id"))
+    my_networks, visible_dealers = await _sichtbare_haendler(user)
 
     match: Dict[str, Any] = {
         "status": "veroeffentlicht",
         "dealer_id": {"$in": list(visible_dealers)},
         # Sichtbarkeit "private": nur für eingeladene Netzwerk-Mitglieder.
-        "$and": [{"$or": [{"visibility": {"$ne": "private"}},
-                          {"dealer_id": {"$in": my_networks}}]}],
+        "$and": [_sichtbarkeits_klausel(my_networks)],
     }
     if dealer:
         match["dealer_id"] = dealer if dealer in visible_dealers else "___none"
@@ -750,6 +839,30 @@ async def browse_listings(
     return out
 
 
+async def _sichtbare_haendler(user: Optional[dict]) -> tuple:
+    """Runde 13: A8/C4 — (my_networks, visible_dealers) fuer Fahrzeugliste
+    und Merkliste aus EINER Regel: oeffentliche Haendler + eigenes Netzwerk,
+    minus die eigene Firma, minus gesperrte Firmen (vorher blieben Inserate
+    gesperrter Firmen in der Liste)."""
+    my_networks = [] if user is None else [
+        m["dealer_id"] async for m in db.network_members.find(
+            {"buyer_user_id": user["id"]}, {"_id": 0, "dealer_id": 1})]
+    public_dealer_ids = [d["id"] async for d in db.dealers.find(
+        {"marketplace.public": True}, {"_id": 0, "id": 1})]
+    visible_dealers = set(public_dealer_ids) | set(my_networks)
+    visible_dealers -= await gesperrte_firmen_ids()
+    if user is not None:
+        visible_dealers.discard(user.get("dealer_id"))
+    return my_networks, visible_dealers
+
+
+def _sichtbarkeits_klausel(my_networks: list) -> dict:
+    """Mongo-Klausel "privates Inserat nur im Netzwerk" (Liste, Merkliste,
+    Haendleruebersicht — Runde 13: A7/C4 nutzen dieselbe Regel)."""
+    return {"$or": [{"visibility": {"$ne": "private"}},
+                    {"dealer_id": {"$in": my_networks}}]}
+
+
 async def _inserat_sichtbar_fuer(user: dict, listing: dict) -> bool:
     """Darf DIESER Betrachter das Inserat sehen? (oeffentlicher Haendler
     oder eigenes Netzwerk; visibility=private nur im Netzwerk). Vorher
@@ -758,6 +871,10 @@ async def _inserat_sichtbar_fuer(user: dict, listing: dict) -> bool:
     dealer_id = listing.get("dealer_id")
     if dealer_id == user.get("dealer_id"):
         return False                      # eigene Inserate: kein Selbst-Interesse
+    # Runde 13: A8 — gesperrte Firma: nichts merken, nichts anfragen; die
+    # Netzwerkmitgliedschaft uebersteuert die Sperre nicht.
+    if await firma_gesperrt(dealer_id):
+        return False
     im_netzwerk = await db.network_members.find_one(
         {"dealer_id": dealer_id, "buyer_user_id": user["id"]}, {"_id": 1})
     if (listing.get("visibility") or "") == "private" and not im_netzwerk:
@@ -771,14 +888,21 @@ async def _inserat_sichtbar_fuer(user: dict, listing: dict) -> bool:
 
 # ---------- Favoriten (Merkliste) ----------
 @router.post("/marktplatz/favoriten/{listing_id}")
-async def toggle_favorit(listing_id: str, user=Depends(current_buyer)):
+async def toggle_favorit(listing_id: str, user=Depends(buyer_nicht_gesperrt)):
     """Fahrzeug merken / Merken aufheben (Toggle). Bewusst ohne Zugangs-Abo-
-    Pflicht beim ENTFERNEN; zum Setzen muss das Inserat sichtbar sein."""
+    Pflicht beim ENTFERNEN; zum Setzen muss der Zugang aktiv und das
+    Inserat sichtbar sein (Betreiber-Sperre: gar nichts, Runde 13 C6)."""
     existing = await db.buyer_favorites.find_one(
         {"buyer_user_id": user["id"], "listing_id": listing_id})
     if existing:
         await db.buyer_favorites.delete_one({"_id": existing["_id"]})
         return {"favorit": False}
+    # Runde 13: C2 — abgelaufener Marktplatz-Zugang konnte weiterhin
+    # Favoriten SETZEN (nur current_buyer; _inserat_sichtbar_fuer prueft den
+    # Zugang nicht). Vorher: 200 {"favorit": true} per bekannter Inserats-ID;
+    # jetzt: 402 wie bei Fahrzeugliste und Anfrage. Entfernen bleibt bewusst
+    # ohne Zugangspflicht. Wirkt nur bei MARKTPLATZ_KOSTENLOS=false.
+    _zugang_erzwingen(user)
     l = await db.resale_listings.find_one(
         {"id": listing_id, "status": "veroeffentlicht"},
         {"_id": 0, "dealer_id": 1, "visibility": 1})
@@ -795,11 +919,24 @@ async def toggle_favorit(listing_id: str, user=Depends(current_buyer)):
 
 
 @router.get("/marktplatz/favoriten")
-async def list_favoriten(user=Depends(current_buyer)):
+async def list_favoriten(user=Depends(buyer_nicht_gesperrt)):
     """IDs der gemerkten Fahrzeuge (fuers Herz-Icon)."""
     ids = [f["listing_id"] async for f in db.buyer_favorites.find(
         {"buyer_user_id": user["id"]}, {"_id": 0, "listing_id": 1})]
-    return {"listing_ids": ids}
+    if not ids:
+        return {"listing_ids": []}
+    # Runde 13: C4 — nur Favoriten zurueckgeben, die der Kaeufer JETZT sehen
+    # darf (Netzwerk-Widerruf, Haendler nicht mehr oeffentlich, Inserat
+    # privat/zurueckgezogen, Firma gesperrt). Vorher kamen die rohen IDs der
+    # Merkliste zurueck. Die DB-Zeilen bleiben (Herz erscheint wieder,
+    # sobald das Inserat wieder sichtbar ist); nur der Widerruf loescht.
+    my_networks, visible_dealers = await _sichtbare_haendler(user)
+    sichtbar = [l["id"] async for l in db.resale_listings.find(
+        {"id": {"$in": ids}, "status": "veroeffentlicht",
+         "dealer_id": {"$in": list(visible_dealers)},
+         **_sichtbarkeits_klausel(my_networks)},
+        {"_id": 0, "id": 1})]
+    return {"listing_ids": sichtbar}
 
 
 @router.get("/marktplatz/haendler/{slug}")
@@ -809,6 +946,11 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
     dl = await db.dealers.find_one(
         {"$or": [{"marketplace.slug": slug}, {"id": slug}]}, {"_id": 0})
     if not dl:
+        raise HTTPException(404, "Händler nicht gefunden")
+    # Runde 13: A8 — gesperrte Firma: Verkaufsseite wie "nicht vorhanden"
+    # (404 statt 403, damit die Sperre nach aussen nicht erkennbar ist);
+    # gilt auch fuer Netzwerkmitglieder.
+    if await firma_gesperrt(dl["id"]):
         raise HTTPException(404, "Händler nicht gefunden")
     mp = dl.get("marketplace") or {}
     # Oeffentlicher Besucher ist in keinem Netzwerk und besitzt keine Firma.
@@ -908,7 +1050,7 @@ async def dealer_list_interests(status: Optional[str] = None,
 
 
 @router.get("/buyer/interessen")
-async def buyer_interests(user=Depends(current_buyer)):
+async def buyer_interests(user=Depends(buyer_nicht_gesperrt)):
     return await db.listing_interest.find(
         {"buyer_user_id": user["id"]}, {"_id": 0},
     ).sort("created_at", -1).to_list(200)
@@ -926,9 +1068,15 @@ class BuyerInterestAnswerIn(BaseModel):
 INTERESSE_OFFEN = ("offen", "gegenangebot", "gegenangebot_kaeufer")
 
 
+# Runde 13: C1 — vorher hing nur die ERSTE Anfrage (send_interest) am
+# Marktplatz-Zugang; ein gesperrter/abgelaufener Zwischenhaendler konnte bei
+# MARKTPLATZ_KOSTENLOS=false eine laufende Verhandlung weiterfuehren und per
+# "annehmen" ein Fahrzeug reservieren. Jetzt: 403 gesperrt / 402 ohne
+# aktiven Zugang — fuer alle drei Aktionen (auch "ablehnen" schreibt eine
+# Nachricht in die Historie beim Haendler).
 @router.post("/interessen/{interest_id}/kaeufer-antwort")
 async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
-                                user=Depends(current_buyer)):
+                                user=Depends(require_marketplace_access)):
     """Kaeufer reagiert auf ein GEGENANGEBOT des Haendlers (Review 09/2026:
     der Kaeufer sah Gegenangebote, konnte aber nicht antworten).
     annehmen: Inserat wird atomar fuer den Kaeufer reserviert, Status
@@ -938,6 +1086,17 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
         {"id": interest_id, "buyer_user_id": user["id"]}, {"_id": 0})
     if not it:
         raise HTTPException(404, "Anfrage nicht gefunden")
+    # Runde 13: A10 — vorher reichte buyer_user_id + Status, jetzt muss der
+    # Kaeufer das Inserat AKTUELL sehen duerfen (Netzwerk-Widerruf, privates
+    # Inserat, privater/gesperrter Haendler) — sonst keine Fortfuehrung und
+    # keine Reservierung. Bewusst 403 statt 404: der Kaeufer kennt die
+    # Anfrage, es geht um entzogenen Zugang. Kein Status-Filter beim Laden,
+    # damit die Pruefung auch beim Kaeufer-Gegenangebot greift.
+    l = await db.resale_listings.find_one(
+        {"id": it["listing_id"]}, {"_id": 0, "dealer_id": 1, "visibility": 1})
+    if not l or not await _inserat_sichtbar_fuer(user, l):
+        raise HTTPException(403, "Kein Zugang mehr zu diesem Inserat — die "
+                                 "Anfrage kann nicht weitergeführt werden")
     if body.action == "gegenangebot":
         # Kaeufer macht (erneut) ein Angebot — solange nichts abgeschlossen ist
         # und der Haendler nicht gerade auf DIESES Kaeufer-Angebot antworten muss.

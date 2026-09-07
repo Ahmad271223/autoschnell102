@@ -244,7 +244,11 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0, "created_at": 1, "source": 1},
     ).sort("created_at", -1).to_list(20) if v.get("mobile_ad_id") else []
 
-    listings = await db.resale_listings.find(
+    ist_sucher = user.get("role") == "sucher"
+    # Runde 12: Weiterverkauf ist Chefsache (/resale: current_haendler).
+    # Die Akte lieferte Suchern trotzdem Einkaufspreis, Kosten, Status und
+    # Inseratsdaten — ein zweiter Weg in den gesperrten Verkaufsbereich.
+    listings = [] if ist_sucher else await db.resale_listings.find(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
          "status": {"$ne": "geloescht"}},
         {"_id": 0},
@@ -259,10 +263,13 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
          "seller_name": 1, "place": 1, "corrects_version": 1},
     ).sort("version", -1).to_list(20)
 
-    history = await db.activity_logs.find(
-        {"ref": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(100)
+    # Runde 12: Sucher sehen nur ihre eigenen Aktionen zum Fahrzeug —
+    # nicht, was Chef oder Kollegen damit gemacht haben.
+    history_filter = {"ref": vehicle_id, "dealer_id": user["dealer_id"]}
+    if ist_sucher:
+        history_filter["user_id"] = user["id"]
+    history = await db.activity_logs.find(history_filter, {"_id": 0}) \
+        .sort("created_at", -1).to_list(100)
 
     # Restlaufzeit
     retention_days_left = None

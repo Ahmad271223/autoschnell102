@@ -42,7 +42,8 @@ def _make_admin():
     if not dbx.users.find_one({"email": ADMIN_EMAIL}):
         dbx.users.insert_one({
             "id": f"testadm_{_ADMIN_SUFFIX}", "email": ADMIN_EMAIL,
-            "role": "admin", "active": True, "dealer_id": None,
+            # Runde 12: es gibt nur den Super-Admin als Betreiber
+            "role": "admin", "active": True, "dealer_id": None, "is_super_admin": True,
             "password_hash": bcrypt.hashpw(ADMIN_PASSWORD.encode(),
                                            bcrypt.gensalt()).decode(),
             "created_at": "2026-01-01T00:00:00+00:00"})

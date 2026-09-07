@@ -19,7 +19,8 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 import re
 
 from auth import hash_password_async
-from deps import (current_firma, current_user, db, get_subscription_status, log_activity, now_iso,
+from deps import (current_firma, current_user, db, email_vergeben, get_subscription_status,
+                  log_activity, now_iso,
 )
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
@@ -100,9 +101,10 @@ class UpgradeRequestIn(BaseModel):
 # (SELF_SIGNUP nicht auf false) bleiben die Chef-Routen aktiv, damit die
 # bestehenden Tests und lokales Ausprobieren funktionieren.
 def _chef_verwaltung_erlaubt() -> bool:
-    import os
-    return os.environ.get("SELF_SIGNUP", "false" if os.environ.get("APP_ENV", "").strip().lower() == "production" else "true").strip().lower() not in (
-        "false", "0", "no", "off")
+    # Runde 11: dieselbe fail-closed Regel wie die Selbst-Registrierung
+    # (vorher hier eine zweite Kopie der alten fail-open Logik).
+    from routes.auth import _self_signup_enabled
+    return _self_signup_enabled()
 
 
 _NUR_BETREIBER = ("Sucher-Konten verwaltet der Betreiber. Bitte melde dich "
@@ -114,14 +116,15 @@ _NUR_BETREIBER = ("Sucher-Konten verwaltet der Betreiber. Bitte melde dich "
 async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
     if not _chef_verwaltung_erlaubt():
         raise HTTPException(403, _NUR_BETREIBER)
-    existing = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}})
-    if existing:
+    # Runde 13: B5 — E-Mail wie in auth.py normalisieren und plattformweit
+    # (users UND driver_accounts) pruefen; vorher nur users, unnormalisiert.
+    email = body.email.strip().lower()
+    if await email_vergeben(email):
         raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
     await db.users.insert_one({
         "id": sucher_id,
-        "email": body.email,
+        "email": email,
         "password_hash": await hash_password_async(body.password),
         "role": "sucher",
         "active": True,
@@ -144,9 +147,14 @@ async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
 @router.get("/dealer/sucher")
 async def list_sucher(user=Depends(current_haendler)):
     """Alle Sucher des Händlers inkl. Abo-Status und Monats-Statistik."""
+    # Runde 11: feste Feldliste statt "alles ausser Passwort" — sonst
+    # landen Sitzungs-ID, persoenliche Overrides und jedes kuenftige
+    # Benutzerfeld automatisch beim Chef.
     items = await db.users.find(
         {"dealer_id": user["dealer_id"], "role": "sucher"},
-        {"_id": 0, "password_hash": 0},
+        {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1, "dealer_id": 1,
+         "first_name": 1, "last_name": 1, "phone": 1, "employee_id": 1,
+         "created_by": 1, "created_at": 1, "updated_at": 1},
     ).sort("created_at", 1).to_list(100)
     month_start = datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -214,8 +222,15 @@ async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
     # Persoenliche Reste mitloeschen (PR-Review 09/2026): das Sucher-Abo
     # blieb sonst bestehen und konnte Status-/Kuendigungslogik verwirren.
     await db.subscriptions.delete_many({"subject_user_id": sucher_id})
-    if s.get("email"):
-        await db.password_resets.delete_many({"email": s["email"]})
+    # Runde 11: password_resets tragen user_id, keine E-Mail — der alte
+    # Filter nach E-Mail traf nie. Offene Abo-Anfragen des Suchers blieben
+    # beim Betreiber als verwaiste "offene" Anfrage stehen.
+    await db.password_resets.delete_many({"user_id": sucher_id})
+    await db.plan_requests.delete_many({"subject_user_id": sucher_id, "status": "offen"})
+    # Runde 13: B8 — Nutzerkennung in Beweis-Snapshots pseudonymisieren
+    # (die Snapshots selbst bleiben, s. snapshot_service).
+    from snapshot_service import snapshots_pseudonymisieren
+    await snapshots_pseudonymisieren(db, user_id=sucher_id)
     await log_activity(user["dealer_id"], user["id"], "sucher.geloescht",
                        ref=sucher_id, meta={"email": s.get("email", "")})
     return {"ok": True}

@@ -172,6 +172,12 @@ async def create_checkout(body: CheckoutIn, user=Depends(current_user)):
                                  "abgerechnet und vom Betreiber "
                                  "freigeschaltet — hier ist keine "
                                  "Online-Zahlung nötig.")
+    # Runde 13: C6 — ein vom Betreiber gesperrter Kaeufer darf nicht
+    # bezahlen (vorher: Zahlung moeglich, Sperre danach still ueberschrieben).
+    from routes.marketplace import _access_status
+    if _access_status(user).get("gesperrt"):
+        raise HTTPException(403, "Dein Marktplatz-Zugang ist vom Betreiber "
+                                 "gesperrt — eine Zahlung ist nicht möglich.")
     if body.plan not in PLAN_PRICES:
         raise HTTPException(400, "Unbekannter Plan")
     # Pruefbericht 09/2026, roter Befund: Solange der Marktplatz kostenlos
@@ -253,7 +259,8 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
     if plan == "marktplatz":
         days = PLAN_PRICES["marktplatz"]["days"]
         u = await db.users.find_one({"id": tx.get("user_id")},
-                                    {"_id": 0, "id": 1, "marketplace_access": 1})
+                                    {"_id": 0, "id": 1, "role": 1, "active": 1,
+                                     "marketplace_access": 1})
         # Achtung: bei einem Konto OHNE marketplace_access liefert die
         # Projektion sonst ein leeres Dokument — deshalb auf None pruefen,
         # nicht auf "leer".
@@ -261,8 +268,33 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
             raise RuntimeError(
                 f"Kein Konto zu Zahlung {session_id} gefunden "
                 f"(user_id={tx.get('user_id')})")
+        # Runde 13: A5 — vorher wurde nur beim Checkout auf b2b_buyer geprueft;
+        # der Webhook/Poll/Abgleich schrieb den Zugang spaeter blind an jede
+        # Rolle. Jetzt: keine Kaeufer-Rolle mehr -> RuntimeError, damit
+        # _activate_paid_transaction auf activation_failed geht und der
+        # Betriebsalarm zahlung_ohne_zugang einen Menschen holt.
+        if u.get("role") != "b2b_buyer":
+            raise RuntimeError(
+                f"Konto zu Zahlung {session_id} ist kein Zwischenhaendler mehr "
+                f"(Rolle={u.get('role')!r}, user_id={tx.get('user_id')}) — "
+                "Zugang nicht freigeschaltet")
+        # Runde 13: A6 — vorher setzte die Stripe-Freischaltung marketplace_access
+        # auch auf ein gesperrtes Konto (active=False): Laufzeit lief waehrend der
+        # Sperre ab, Transaktion ging still auf "active", der Betreiber erfuhr
+        # nichts. Jetzt fail-closed wie beim fehlenden Konto: activation_failed +
+        # Alarm zahlung_ohne_zugang; nach dem Entsperren holt der stuendliche
+        # Abgleich (bzw. der Poll des Kaeufers) die Freischaltung nach, die 30
+        # Tage beginnen erst dann (Grant entsteht erst bei Erfolg).
+        if not u.get("active"):
+            raise RuntimeError(
+                f"Konto zu Zahlung {session_id} ist gesperrt "
+                f"(user_id={tx.get('user_id')}) — Freischaltung zurueckgestellt, "
+                f"bis der Betreiber das Konto entsperrt")
+        acc = u.get("marketplace_access") or {}
         basis = now
-        alt = _parse_ts(((u or {}).get("marketplace_access") or {}).get("expires_at"))
+        # Runde 13: A6 — gesperrter Zugang (Betreiber, plan=null) wird nicht
+        # mehr als Restlaufzeit gutgeschrieben (wie admin._restlaufzeit_basis).
+        alt = _parse_ts(acc.get("expires_at")) if acc.get("active") else None
         if alt and alt > basis:
             basis = alt
         # Audit 09/2026: Das Ablaufdatum wird EINMALIG je Stripe-Session
@@ -283,18 +315,25 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
         # ein inzwischen laengeres Ablaufdatum nicht zurueckdrehen. Ist der
         # bestehende Zugang schon laenger gueltig, bleibt er — die Zahlung
         # gilt als verbucht, die Laufzeit wird nie kuerzer.
-        aktuell = ((u or {}).get("marketplace_access") or {}).get("expires_at")
+        aktuell = acc.get("expires_at") if acc.get("active") else None
         if aktuell and str(aktuell) > str(expires_at):
             expires_at = aktuell
+        neu = {"active": True, "plan": "monthly",
+               "price": PLAN_PRICES["marktplatz"]["amount"],
+               "expires_at": expires_at,
+               "activated_by": "stripe",
+               "session_id": session_id,
+               "updated_at": now_iso()}
+        # Runde 13: C6 — Zahlung loescht keine Betreiber-Sperre: die Laufzeit
+        # wird verlaengert, die Sperrfelder bleiben erhalten.
+        for k in ("gesperrt", "gesperrt_am", "gesperrt_von"):
+            if acc.get(k) is not None:
+                neu[k] = acc[k]
+        # Runde 13: A5 — rennsicher: Rollenwechsel zwischen find_one und
+        # update_one faengt matched_count == 0 unten ab.
         r = await db.users.update_one(
-            {"id": tx.get("user_id")},
-            {"$set": {"marketplace_access": {
-                "active": True, "plan": "monthly",
-                "price": PLAN_PRICES["marktplatz"]["amount"],
-                "expires_at": expires_at,
-                "activated_by": "stripe",
-                "session_id": session_id,
-                "updated_at": now_iso()}}})
+            {"id": tx.get("user_id"), "role": "b2b_buyer"},
+            {"$set": {"marketplace_access": neu}})
         if r.matched_count == 0:
             raise RuntimeError(
                 f"Zugang zu Zahlung {session_id} konnte keinem Konto "
@@ -443,8 +482,19 @@ async def payment_status(session_id: str, user=Depends(current_user)):
     # (Vorher wurden bereits bezahlte Transaktionen vor dieser Pruefung
     # zurueckgegeben: wer eine fremde Session-ID kannte, sah fremde
     # Zahlungs-Metadaten.)
-    if tx.get("user_id") != user["id"] and user.get("role") != "admin":
+    # Runde 13: A3/A4 — vorher genuegte die Rolle admin (auch ohne
+    # is_super_admin), um fremde Zahlungen samt Betrag, Plan und Stripe-IDs
+    # zu lesen und deren Freischaltung anzustossen; jetzt wie
+    # deps.current_admin: nur der Eigentuemer oder der Super-Admin (Betreiber).
+    ist_betreiber = user.get("role") == "admin" and bool(user.get("is_super_admin"))
+    if tx.get("user_id") != user["id"] and not ist_betreiber:
         raise HTTPException(403, "Diese Zahlung gehört dir nicht")
+    if tx.get("user_id") != user["id"]:
+        # Runde 13: A4 — der Betreiber liest hier nur. Freischaltung stossen
+        # allein der Kaeufer-Poll, der Stripe-Webhook und der stuendliche
+        # Abgleich (zahlungen_abgleichen) an; fuer Handarbeit gibt es
+        # Admin -> Freischaltungen.
+        return tx
 
     status = tx.get("status")
     if status in _ABGESCHLOSSEN or status in ("failed", "expired"):

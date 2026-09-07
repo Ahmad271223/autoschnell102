@@ -19,6 +19,19 @@ _load_dotenv(_Path(__file__).parent / ".env")
 
 _jwt_secret_env = os.environ.get("JWT_SECRET", "")
 if not _jwt_secret_env or _jwt_secret_env == "dev-secret":
+    # Runde 11: Ein Zufalls-Secret je Prozess ist bei mehreren Workern oder
+    # zwei Servern hinter dem Load Balancer KEIN "Logout nach Neustart",
+    # sondern staendige "Token ungueltig"-Fehler, sobald ein Request auf
+    # einem anderen Prozess landet. Ohne ausdrueckliche Entwicklungs-
+    # umgebung startet das Backend deshalb gar nicht erst.
+    _umgebung = os.environ.get("APP_ENV", "").strip().lower()
+    if _umgebung not in ("development", "dev", "local", "test", "ci"):
+        raise SystemExit(
+            "JWT_SECRET fehlt (oder ist 'dev-secret'). Auf jedem Server und in "
+            "jedem Worker muss DASSELBE Secret gesetzt sein — sonst gelten "
+            "Anmeldungen nur auf dem Prozess, der sie ausgestellt hat. "
+            "Erzeugen mit: openssl rand -hex 32; fuer lokale Entwicklung "
+            "ohne Secret APP_ENV=development setzen.")
     import secrets as _secrets
     import warnings as _warnings
     _jwt_secret_env = _secrets.token_hex(32)

@@ -15,6 +15,32 @@ PRUEFUNGEN = (("users", "email"), ("dealers", "user_id"),
               ("driver_accounts", "email"), ("driver_accounts", "driver_code"))
 
 
+def kreuz_dubletten(db) -> int:
+    """Runde 13: B5 — dieselbe Login-E-Mail in users UND driver_accounts.
+    Vorher wurde jede Sammlung nur fuer sich geprueft; seit Runde 13 lehnen
+    alle Anlagepfade ein solches Doppelkonto ab, ein Altbestand muss aber
+    von Hand bereinigt werden (Fahrer loeschen via DELETE /admin/drivers/{id}
+    oder der Fahrer nimmt eine andere Adresse) — sonst findet der gemeinsame
+    Passwort-Reset weiterhin beide Konten. Vergleich schreibungsunabhaengig
+    (klein, getrimmt). Liefert die Zahl betroffener Adressen."""
+    fahrer = {}
+    for d in db.driver_accounts.find({"email": {"$type": "string"}},
+                                     {"_id": 0, "id": 1, "email": 1, "created_at": 1}):
+        fahrer.setdefault(d["email"].strip().lower(), []).append(d)
+    n = 0
+    for u in db.users.find({"email": {"$type": "string"}},
+                           {"_id": 0, "id": 1, "email": 1, "role": 1, "created_at": 1}):
+        schluessel = u["email"].strip().lower()
+        if schluessel not in fahrer:
+            continue
+        n += 1
+        print(f"users+driver_accounts.email = {schluessel!r}: Konto in BEIDEN Sammlungen")
+        print(f"    users id={u.get('id')}  role={u.get('role')}  created_at={u.get('created_at')}")
+        for e in fahrer[schluessel]:
+            print(f"    driver_accounts id={e.get('id')}  created_at={e.get('created_at')}")
+    return n
+
+
 def main() -> int:
     db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
     gefunden = 0
@@ -28,6 +54,7 @@ def main() -> int:
             print(f"{coll}.{feld} = {d['_id']!r}: {d['n']}x")
             for e in d["ids"]:
                 print(f"    id={e.get('id')}  created_at={e.get('created_at')}")
+    gefunden += kreuz_dubletten(db)
     print("Keine Dubletten." if not gefunden else f"{gefunden} doppelte Werte — bitte bereinigen.")
     return 0 if not gefunden else 1
 

@@ -3,6 +3,7 @@ importiert. Vermeidet Zirkular-Imports.
 """
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,10 +130,9 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     if user and user.get("role") == "sucher" and user.get("dealer_id"):
         # Review 09/2026: Sperrt der Admin den Haendler-Hauptaccount, blieben
         # dessen Sucher voll arbeitsfaehig. Gesperrter Chef = gesperrte Firma.
-        chef = await db.users.find_one(
-            {"dealer_id": user["dealer_id"], "role": "dealer"},
-            {"_id": 0, "active": 1})
-        if chef is not None and not chef.get("active", True):
+        # Runde 13: A8/A9 — die Regel steht jetzt EINMAL in firma_gesperrt
+        # (Login, Marktplatz und Einladungen teilen sie sich).
+        if await firma_gesperrt(user["dealer_id"]):
             raise HTTPException(403, "Die Firma ist gesperrt — bitte den "
                                      "Administrator kontaktieren.")
     if not user or not user.get("active"):
@@ -145,6 +145,49 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     if payload.get("sid") != user.get("current_session_id"):
         raise HTTPException(401, "Session beendet (anderes Gerät aktiv oder abgemeldet)")
     return user
+
+
+async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
+    """Runde 13: A8/A9 — gesperrter Chef = gesperrte Firma, EINE Fassung der
+    Regel fuer Login (current_user), oeffentlichen Marktplatz und
+    Einladungen. Vorher pruefte nur current_user den Hauptaccount; der
+    Marktplatz zeigte eine gesperrte Firma weiter, _redeem_invite legte
+    weiter Mitgliedschaften an. Hauptaccount = aeltestes dealer-Konto je
+    Firma (Runde 11); fehlendes active-Feld gilt wie bisher als aktiv."""
+    if not dealer_id:
+        return False
+    chef = await db.users.find_one(
+        {"dealer_id": dealer_id, "role": "dealer"},
+        {"_id": 0, "active": 1}, sort=[("created_at", 1)])
+    return chef is not None and not chef.get("active", True)
+
+
+async def gesperrte_firmen_ids() -> set:
+    """Runde 13: A8 — alle Firmen, deren Hauptaccount (aeltestes dealer-Konto)
+    gesperrt ist, in EINER Abfrage — fuer die Listenfilter des Marktplatzes.
+    Sperre = active explizit False (fehlendes Feld = aktiv, wie
+    firma_gesperrt)."""
+    rows = db.users.aggregate([
+        {"$match": {"role": "dealer", "dealer_id": {"$nin": [None, ""]}}},
+        {"$sort": {"created_at": 1}},
+        {"$group": {"_id": "$dealer_id", "active": {"$first": "$active"}}},
+        {"$match": {"active": False}},
+    ])
+    return {r["_id"] async for r in rows}
+
+
+async def email_vergeben(email: str) -> Optional[str]:
+    """Runde 13: B5 — Login-E-Mail plattformweit eindeutig ueber users UND
+    driver_accounts. Vorher prueften alle Anlagepfade nur ihre eigene
+    Sammlung: dieselbe Adresse konnte Firmen-/Sucher-/Kaeuferkonto UND
+    Fahrerkonto sein, und der gemeinsame Passwort-Reset fand dann immer nur
+    das users-Konto. Liefert "user", "driver" oder None (Adresse frei)."""
+    muster = {"$regex": f"^{re.escape((email or '').strip())}$", "$options": "i"}
+    if await db.users.find_one({"email": muster}, {"_id": 1}):
+        return "user"
+    if await db.driver_accounts.find_one({"email": muster}, {"_id": 1}):
+        return "driver"
+    return None
 
 
 async def current_firma(user=Depends(current_user)):
@@ -171,8 +214,12 @@ async def current_chef(user=Depends(current_firma)):
 
 
 async def current_admin(user=Depends(current_user)):
-    if user.get("role") != "admin":
-        raise HTTPException(403, "Admin erforderlich")
+    """Betreiber-Routen. Beschluss 06.09.2026 (Runde 12): Es gibt GENAU EINEN
+    Betreiber — den Super-Admin. Die frueehere Zwischenstufe "normaler
+    Admin" (lesen, aber nicht verwalten) ist abgeschafft; ein Konto mit
+    Rolle admin ohne is_super_admin bekommt ueberall 403."""
+    if user.get("role") != "admin" or not user.get("is_super_admin"):
+        raise HTTPException(403, "Nur der Super-Admin (Betreiber) darf das")
     return user
 
 
