@@ -98,9 +98,11 @@ def test_protokoll_nach_prozessabbruch_wieder_speicherbar(fahrer):
     doc = dbx.pickup_protocols.find_one({"id": pid}, {"_id": 0})
     assert doc["status"] == "entwurf" and doc["notes"] == "b" and "claim_bis" not in doc
     # laufender Claim -> 409 "gerade abgeschlossen", Dokument unveraendert
+    # Zeit JETZT bestimmen, nicht beim Import — in einem langen Gesamtlauf
+    # waere ein Claim "in 3 Minuten" sonst laengst abgelaufen.
     dbx.pickup_protocols.update_one({"id": pid}, {"$set": {
         "status": "wird_abgeschlossen",
-        "claim_bis": (JETZT + timedelta(minutes=3)).isoformat()}})
+        "claim_bis": (datetime.now(timezone.utc) + timedelta(minutes=3)).isoformat()}})
     r = requests.put(url, headers=fahrer["h"], json={"notes": "c"}, timeout=30)
     assert r.status_code == 409 and "gerade abgeschlossen" in r.text, r.text[:200]
     doc = dbx.pickup_protocols.find_one({"id": pid}, {"_id": 0})

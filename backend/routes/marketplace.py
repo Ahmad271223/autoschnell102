@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from pymongo.errors import DuplicateKeyError
 
 from auth import (hash_password_async, new_session_id, create_token,
                   verify_password_async, _DUMMY_HASH)
@@ -308,20 +309,36 @@ async def get_marketplace_profile(user=Depends(current_haendler)):
 
 @router.put("/dealer/marketplace-profile")
 async def update_marketplace_profile(body: ProfileIn, user=Depends(current_haendler)):
-    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
-    mp = dealer.get("marketplace") or {}
-    mp.setdefault("slug", _slugify(dealer.get("company_name", ""), user["dealer_id"]))
+    # Nachpruefung Runde 14 (Nr. 119): vorher wurde das ganze marketplace-
+    # Objekt gelesen, lokal geaendert und komplett zurueckgeschrieben. Das
+    # Frontend schickt public und description in ZWEI getrennten PUTs —
+    # der spaetere Schreiber ueberschrieb den frueheren (Lost Update, in
+    # 29 von 30 Laeufen blieb public=False). Jetzt: nur die tatsaechlich
+    # gesendeten Felder per Dotted-Path setzen; slug/member_since nur
+    # anlegen, wenn sie noch fehlen.
+    did = user["dealer_id"]
+    dealer = await db.dealers.find_one(
+        {"id": did}, {"_id": 0, "company_name": 1, "marketplace.slug": 1})
+    slug = (((dealer or {}).get("marketplace") or {}).get("slug")
+            or _slugify((dealer or {}).get("company_name", ""), did))
+    await db.dealers.update_one(
+        {"id": did, "marketplace.slug": {"$in": [None, ""]}},
+        {"$set": {"marketplace.slug": slug,
+                  "marketplace.member_since": now_iso()}})
+    sets: Dict[str, Any] = {}
     if body.public is not None:
-        mp["public"] = bool(body.public)
+        sets["marketplace.public"] = bool(body.public)
     if body.description is not None:
-        mp["description"] = body.description
-    mp.setdefault("member_since", now_iso())
-    await db.dealers.update_one({"id": user["dealer_id"]},
-                                {"$set": {"marketplace": mp}})
-    await log_activity(user["dealer_id"], user["id"],
+        sets["marketplace.description"] = body.description
+    if sets:
+        await db.dealers.update_one({"id": did}, {"$set": sets})
+    mp = ((await db.dealers.find_one({"id": did}, {"_id": 0, "marketplace": 1}))
+          or {}).get("marketplace") or {}
+    await log_activity(did, user["id"],
                        "marktplatz.profil.aktualisiert",
                        meta={"public": mp.get("public", False)})
-    return {"ok": True, "public": mp.get("public", False), "slug": mp["slug"]}
+    return {"ok": True, "public": mp.get("public", False),
+            "slug": mp.get("slug") or slug}
 
 
 # =========================================================
@@ -354,10 +371,22 @@ async def create_invite(body: InviteIn, user=Depends(current_haendler)):
 
 @router.get("/dealer/invites")
 async def list_invites(user=Depends(current_haendler)):
-    items = await db.dealer_invites.find(
-        {"dealer_id": user["dealer_id"]}, {"_id": 0},
-    ).sort("created_at", -1).to_list(50)
+    # Nachpruefung Runde 14 (Nr. 87): vorher pauschal die neuesten 50 —
+    # ab der 51. Einladung in 30 Tagen fiel eine aeltere, noch einloesbare
+    # Einladung aus der Oberflaeche, blieb aber gueltig und war ohne ihre
+    # id nicht mehr loeschbar. Jetzt: ALLE noch gueltigen (Deckel 500 nur
+    # als Notbremse), dazu die neuesten 50 abgelaufenen/verbrauchten.
+    # Antwort bleibt eine Liste (Einstellungen.jsx erwartet invites.map).
     now = now_iso()
+    basis: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    gueltig = {"expires_at": {"$gt": now},
+               "$expr": {"$lt": ["$used_count", "$max_uses"]}}
+    ungueltig = {"$or": [{"expires_at": {"$lte": now}},
+                         {"$expr": {"$gte": ["$used_count", "$max_uses"]}}]}
+    items = await db.dealer_invites.find(
+        {**basis, **gueltig}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    items += await db.dealer_invites.find(
+        {**basis, **ungueltig}, {"_id": 0}).sort("created_at", -1).to_list(50)
     for i in items:
         i["valid"] = i["used_count"] < i["max_uses"] and i["expires_at"] > now
     return items
@@ -383,12 +412,19 @@ async def list_network_members(user=Depends(current_haendler)):
         b = await db.users.find_one(
             {"id": m["buyer_user_id"]},
             {"_id": 0, "company_name": 1, "contact_name": 1, "email": 1,
-             "active": 1}) or {}
+             "active": 1})
+        # Nachpruefung Runde 14 (Nr. 66): fehlt das Kaeuferkonto (Altbestand,
+        # manuelle Loeschung), meldete die Liste active=True mit leerem
+        # Namen. Ohne users-Dokument ist kein Login moeglich, also ehrlich
+        # active=False plus fehlt=True; der Eintrag bleibt widerrufbar.
+        fehlt = b is None
+        b = b or {}
         out.append({"buyer_user_id": m["buyer_user_id"],
                     "company_name": b.get("company_name", ""),
                     "contact_name": b.get("contact_name", ""),
                     "email": b.get("email", ""),
-                    "active": b.get("active", True),
+                    "active": False if fehlt else b.get("active", True),
+                    "fehlt": fehlt,
                     "joined_at": m.get("created_at")})
     return out
 
@@ -451,6 +487,28 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
             {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
             {"_id": 1})
         return inv["dealer_id"] if noch else None
+    # Offensichtlich ungueltig (abgelaufen/verbraucht): gar nicht erst
+    # schreiben. Die verbindliche Pruefung bleibt der atomare Schritt unten.
+    if (inv.get("expires_at", "") <= now_iso()
+            or (inv.get("used_count") or 0) >= (inv.get("max_uses") or 0)):
+        return None
+    # Nachpruefung Runde 14 (Nr. 64/115): Reihenfolge gedreht — ZUERST die
+    # Mitgliedschaft anlegen (Upsert, No-op wenn sie schon besteht), DANN
+    # die Einladung atomar verbrauchen. Vorher wurde erst verbraucht und
+    # dann die Mitgliedschaft geschrieben: brach es dazwischen ab, war der
+    # Einmal-Link verloren (used_by voll, keine Mitgliedschaft -> Zweig oben
+    # deutete das als Widerruf); und ein DELETE /dealer/invites in diesem
+    # Fenster antwortete ok:true, obwohl danach noch ein Mitglied entstand.
+    # Jetzt: bricht es nach dem Upsert ab, ist used_by beim naechsten
+    # Versuch leer, der Upsert ein No-op und der Link wird regulaer
+    # verbraucht. Wird die Einladung zwischen Upsert und Verbrauch
+    # geloescht (oder ist sie doch ungueltig), findet find_one_and_update
+    # nichts und die eben angelegte Mitgliedschaft wird zurueckgenommen —
+    # nach ok:true des DELETE bleibt also keine neue Mitgliedschaft.
+    r = await db.network_members.update_one(
+        {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
+        {"$setOnInsert": {"via_invite_id": inv["id"], "created_at": now_iso()}},
+        upsert=True)
     # ATOMAR pruefen UND verbrauchen: Gueltigkeit, Restnutzungen und die
     # Erhoehung passieren in EINEM Schritt. Vorher (lesen, dann erhoehen)
     # konnten zwei GLEICHZEITIGE Aufrufe denselben Einmal-Link beide
@@ -461,11 +519,11 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
          "$expr": {"$lt": ["$used_count", "$max_uses"]}},
         {"$inc": {"used_count": 1}, "$push": {"used_by": buyer_user_id}})
     if not verbraucht:
+        if r.upserted_id is not None:
+            # Nur die EBEN angelegte Mitgliedschaft zuruecknehmen — eine
+            # aeltere ueber eine andere Einladung bleibt unberuehrt.
+            await db.network_members.delete_one({"_id": r.upserted_id})
         return None
-    await db.network_members.update_one(
-        {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
-        {"$setOnInsert": {"via_invite_id": inv["id"], "created_at": now_iso()}},
-        upsert=True)
     return inv["dealer_id"]
 
 
@@ -516,22 +574,41 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     sid = new_session_id()
-    await db.users.insert_one({
-        "id": user_id, "email": email,
-        "password_hash": await hash_password_async(body.password),
-        "role": "b2b_buyer", "active": True,
-        "dealer_id": None,
-        "company_name": body.company_name,
-        "contact_name": body.contact_name,
-        "phone": body.phone,
-        "ust_id": body.ust_id.strip(),
-        "gewerblich_bestaetigt_am": now_iso(),
-        "current_session_id": sid,
-        "created_at": now_iso(),
-    })
+    try:
+        await db.users.insert_one({
+            "id": user_id, "email": email,
+            "password_hash": await hash_password_async(body.password),
+            "role": "b2b_buyer", "active": True,
+            "dealer_id": None,
+            "company_name": body.company_name,
+            "contact_name": body.contact_name,
+            "phone": body.phone,
+            "ust_id": body.ust_id.strip(),
+            "gewerblich_bestaetigt_am": now_iso(),
+            "current_session_id": sid,
+            "created_at": now_iso(),
+        })
+    except DuplicateKeyError:
+        # Nachpruefung Runde 14 (Nr. 62): Rennen zweier Registrierungen mit
+        # derselben E-Mail — der Unique-Index faengt die Dublette, vorher
+        # wurde daraus ein 500 samt Fehlerlog-Eintrag. Jetzt 409 wie in
+        # routes/auth.py.
+        raise HTTPException(409, "E-Mail bereits registriert")
     joined = None
     if body.invite_token:
-        joined = await _redeem_invite(body.invite_token, user_id)
+        # Nachpruefung Runde 14 (Nr. 63): das Konto ist nach dem Insert
+        # vollstaendig — ein Fehler beim Einloesen der Einladung darf die
+        # Registrierung nicht kippen (vorher 500, Konto existierte trotzdem,
+        # erneute Registrierung 409). Kein Rollback des Kontos: der waere
+        # bei bereits verbrauchtem Einmal-Link schlimmer (Link verloren).
+        # Der Beitritt ist ueber POST /invites/{token}/redeem nachholbar;
+        # das Frontend warnt bei network_joined=False.
+        try:
+            joined = await _redeem_invite(body.invite_token, user_id)
+        except Exception:
+            log.exception("Einladung nach Registrierung nicht einloesbar "
+                          "(Kaeufer %s)", user_id)
+            joined = None
     await log_activity(joined or "", user_id, "buyer.registriert",
                        meta={"email": body.email, "ip": ip,
                              "einladung": bool(joined)})
@@ -1169,6 +1246,32 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
     return {"ok": True, "status": neuer_status}
 
 
+async def _kaeufer_darf_noch(it: dict) -> None:
+    """Nachpruefung Runde 14 (Nr. 1/2/3): Darf der Kaeufer dieser Anfrage
+    die Verhandlung AKTUELL noch fuehren? Vorher pruefte answer_interest nur
+    die Anfrage selbst — der Haendler konnte ein Fahrzeug fuer einen
+    gesperrten, deaktivierten oder geloeschten Kaeufer reservieren (Nr. 1)
+    und fuer einen aus dem Netzwerk entfernten Kaeufer bzw. ein inzwischen
+    privates Inserat (Nr. 2/3); die Kaeuferseite war seit Runde 13 (C1,
+    A10) dicht. Kaeufer NEU laden (nicht aus der Anfrage) und dieselbe
+    Sichtbarkeitsregel wie beim Kaeufer anwenden. 409, weil die Anfrage
+    existiert, aber ihr Zustand die Aktion nicht mehr zulaesst."""
+    k = await db.users.find_one(
+        {"id": it.get("buyer_user_id")},
+        {"_id": 0, "id": 1, "role": 1, "active": 1, "dealer_id": 1,
+         "marketplace_access": 1})
+    if (not k or k.get("role") != "b2b_buyer" or k.get("active") is False
+            or _access_status(k).get("gesperrt")):
+        raise HTTPException(409, "Der Käufer ist nicht mehr aktiv — die "
+                                 "Anfrage kann nicht weitergeführt werden")
+    l = await db.resale_listings.find_one(
+        {"id": it.get("listing_id")}, {"_id": 0, "dealer_id": 1, "visibility": 1})
+    if not l or not await _inserat_sichtbar_fuer(k, l):
+        raise HTTPException(409, "Der Käufer hat keinen Zugang mehr zu diesem "
+                                 "Inserat — die Anfrage kann nicht "
+                                 "weitergeführt werden")
+
+
 @router.post("/interessen/{interest_id}/antwort")
 async def answer_interest(interest_id: str, body: InterestAnswerIn,
                           user=Depends(current_haendler)):
@@ -1178,6 +1281,20 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
         raise HTTPException(404, "Anfrage nicht gefunden")
     if it["status"] not in INTERESSE_OFFEN:
         raise HTTPException(400, "Anfrage ist bereits abgeschlossen")
+    # Nachpruefung Runde 14 (Nr. 48): im Status 'gegenangebot' liegt das
+    # eigene Gegenangebot beim Kaeufer — "akzeptieren" haette den
+    # URSPRUNGSPREIS als agreed_price festgeschrieben, waehrend der Knopf
+    # den Abschluss zum eigenen Gegenangebot suggerierte. Der Haendler kann
+    # sein eigenes Angebot nicht einseitig annehmen; Ablehnen und ein neues
+    # Gegenangebot bleiben moeglich.
+    if body.action == "akzeptieren" and it["status"] == "gegenangebot":
+        raise HTTPException(400, "Dein Gegenangebot liegt beim Käufer — warte "
+                                 "auf seine Antwort oder schreibe ein neues "
+                                 "Angebot")
+    # Nr. 1/2/3: Ablehnen darf der Haendler immer (schliesst nur ab);
+    # Annehmen und Gegenangebot nur, wenn der Kaeufer noch darf.
+    if body.action in ("akzeptieren", "gegenangebot"):
+        await _kaeufer_darf_noch(it)
     status_map = {"akzeptieren": "akzeptiert", "ablehnen": "abgelehnt",
                   "gegenangebot": "gegenangebot"}
     new_status = status_map[body.action]

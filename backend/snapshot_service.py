@@ -796,8 +796,16 @@ async def _mobile_datenblatt_job(db, snap_id: str, doc: dict,
             if vc and vc.get("data"):
                 daten, abgerufen = vc["data"], vc.get("updated_at")
         if not daten and doc.get("vehicle_id"):
+            # Nachpruefung Runde 14 (Nr. 4): Fahrzeug-IDs (v_<Anzeigen-ID>)
+            # sind bei mehreren Firmen identisch — ohne dealer_id konnte das
+            # Datenblatt der einen Firma die (z.B. korrigierten) Daten der
+            # anderen verwenden. Derzeit toter Pfad (Snapshots nur fuer
+            # Kleinanzeigen), aber mandantengebunden, falls er reaktiviert wird.
+            filt = {"id": doc["vehicle_id"]}
+            if doc.get("dealer_id"):
+                filt["dealer_id"] = doc["dealer_id"]
             v = await db.vehicles.find_one(
-                {"id": doc["vehicle_id"]}, {"_id": 0, "data": 1, "updated_at": 1})
+                filt, {"_id": 0, "data": 1, "updated_at": 1})
             if v and v.get("data"):
                 daten, abgerufen = v["data"], v.get("updated_at")
         if not daten:

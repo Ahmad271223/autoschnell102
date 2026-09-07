@@ -187,12 +187,17 @@ export default function Anfragen() {
               )}
               {["offen", "gegenangebot", "gegenangebot_kaeufer"].includes(it.status) && (
                 <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button onClick={() => antworten(it, "akzeptieren")} disabled={busyId === it.id}
-                          data-testid={`anfrage-akzeptieren-${it.id}`}
-                          className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                          style={{ background: "#34c759" }}>
-                    <Check size={15} /> Akzeptieren & reservieren
-                  </button>
+                  {/* Nachpruefung Runde 14 (Nr. 48): im Status "gegenangebot" liegt das eigene
+                      Gegenangebot beim Kaeufer — der Haendler kann es nicht selbst annehmen
+                      (Backend antwortet 400). Akzeptieren nur fuer offen / gegenangebot_kaeufer. */}
+                  {["offen", "gegenangebot_kaeufer"].includes(it.status) && (
+                    <button onClick={() => antworten(it, "akzeptieren")} disabled={busyId === it.id}
+                            data-testid={`anfrage-akzeptieren-${it.id}`}
+                            className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            style={{ background: "#34c759" }}>
+                      <Check size={15} /> Akzeptieren & reservieren
+                    </button>
+                  )}
                   <button onClick={() => { setCounterFor(counterFor === it.id ? null : it.id); setCounterVal(""); setCounterMsg(""); }}
                           disabled={busyId === it.id}
                           data-testid={`anfrage-gegenangebot-${it.id}`}
@@ -209,7 +214,7 @@ export default function Anfragen() {
               )}
               {it.status === "gegenangebot" && (
                 <div className="mt-3 text-[12.5px]" style={{ color: "var(--text-muted)" }}>
-                  Dein Gegenangebot ({fmtEur(it.counter_offer)}) liegt beim Käufer — du kannst trotzdem jederzeit ein neues Angebot schreiben.
+                  Dein Gegenangebot ({fmtEur(it.counter_offer)}) liegt beim Käufer — warte auf seine Antwort oder schreibe jederzeit ein neues Angebot.
                 </div>
               )}
 

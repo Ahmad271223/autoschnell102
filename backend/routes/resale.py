@@ -9,41 +9,61 @@ Fahrzeugakte dürfen ein bestehendes Inserat nicht unbemerkt verändern.
 """
 import base64
 import uuid
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pymongo import ReturnDocument
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from deps import clean_doc, current_user, db, log_activity, now_iso
-from lifecycle import LifecycleError, set_lifecycle, try_set_lifecycle
+from lifecycle import (ALLOWED_TRANSITIONS, LifecycleError, set_lifecycle,
+                       try_set_lifecycle)
 from routes.bestand import current_haendler, _clean_costs
 
 router = APIRouter()
 
+# Nachpruefung Runde 14 (Nr. 28/29/67/89/90): verkaufte und geloeschte
+# Inserate sind abgeschlossen — keine Bearbeitung, keine Fotos rein/raus.
+# Verkaufte Inserate sind Beweis-Historie (Fotos, Preise, Maengel), geloeschte
+# duerfen nicht "durch die Hintertuer" weiterleben.
+_ABGESCHLOSSEN = ("verkauft", "geloescht")
+# Nachpruefung Runde 14 (Nr. 106): alles, was noch kein Abschluss ist, gilt
+# als aktives Inserat — je Fahrzeug darf es davon nur EINES geben.
+_AKTIV = ("entwurf", "verkaufsbereit", "veroeffentlicht", "reserviert",
+          "zurueckgezogen")
+# Ein Foto ist im Storage auf MAX_IMAGE_BYTES (8 MB) begrenzt; Base64 ist
+# 4/3 so gross, plus Data-URL-Praefix. Nachpruefung Runde 14 (Nr. 117):
+# ohne Deckel je Einzelstring wurden 25-MB-Bloecke erst dekodiert und dann
+# verworfen — jetzt scheitert der Riesenblock schon an der Validierung.
+_B64_MAX_LEN = 12_000_000
+
 
 # ---------- Models ----------
+# Nachpruefung Runde 14 (Nr. 80): ohne allow_inf_nan=False nahm Pydantic
+# Infinity/1e400 an; der Wert landete in Mongo und jede JSON-Antwort mit dem
+# Inserat (auch die Liste der Firma) brach danach mit 500 ab.
 class ListingUpdateIn(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=30000)
     known_defects: Optional[List[str]] = Field(default=None, max_length=50)
     photo_mode: Optional[Literal["einkauf", "neu", "beide"]] = None
-    price_public: Optional[float] = Field(default=None, ge=0)
-    price_b2b: Optional[float] = Field(default=None, ge=0)
-    price_network: Optional[float] = Field(default=None, ge=0)
+    price_public: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    price_b2b: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    price_network: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     costs: Optional[List[Dict[str, Any]]] = None
     data: Optional[Dict[str, Any]] = None  # korrigierte Fahrzeugdaten
 
 
 class PhotoUploadIn(BaseModel):
-    photos_b64: List[str] = Field(min_length=1, max_length=20)
+    photos_b64: List[Annotated[str, StringConstraints(max_length=_B64_MAX_LEN)]] = \
+        Field(min_length=1, max_length=20)
 
 
 class ListingStatusIn(BaseModel):
     status: Literal["entwurf", "verkaufsbereit", "reserviert", "verkauft",
                     "zurueckgezogen"]
-    sold_price: Optional[float] = Field(default=None, ge=0)
+    sold_price: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 # ---------- Helpers ----------
@@ -125,6 +145,103 @@ def _with_margin(listing: dict) -> dict:
     return listing
 
 
+# ---------- Fahrzeug-Lebenszyklus (Nachpruefung Runde 14, Nr. 52/53/81) ----------
+# Vorher lief jeder Inserats-Statuswechsel ueber try_set_lifecycle, das den
+# LifecycleError schluckt: Inserat wechselte, Fahrzeug blieb haengen (z.B.
+# dauerhaft "reserviert" ohne Inserat — kein neuer Entwurf mehr moeglich).
+# Jetzt wird der Weg VOR dem Schreiben geprueft (409, wenn es keinen gibt)
+# und danach mit set_lifecycle gesetzt, damit Fehler sichtbar bleiben.
+#
+# lifecycle.py kennt aus "reserviert" nur verkauft/veroeffentlicht. Die
+# Freigabe einer Reservierung (Inserat reserviert -> verkaufsbereit bzw.
+# Loeschen -> bestand) laeuft deshalb ueber den erlaubten Zwischenschritt
+# "veroeffentlicht" — zwei Audit-Eintraege, aber kein stiller Desync.
+# Fahrzeuge VOR dem Verkaufsblock (Altbestand ohne Entwurfs-Hook) holen den
+# Schritt "verkaufsentwurf" nach; von dort aus fuehrt kein Weg direkt zu
+# veroeffentlicht/reserviert — ein echter Desync bleibt also ein 409.
+_LIFECYCLE_ZWISCHENSCHRITT = {
+    "reserviert": "veroeffentlicht",
+    "vertrag_erstellt": "verkaufsentwurf",
+    "gekauft": "verkaufsentwurf",
+    "abholung_geplant": "verkaufsentwurf",
+    "abgeholt": "verkaufsentwurf",
+    "bestand": "verkaufsentwurf",
+}
+# Nur in diesen Fahrzeugzustaenden gehoert das Fahrzeug "dem Inserat"; beim
+# Loeschen eines Inserats wird sonst nichts zurueckgesetzt (Fahrzeug wurde
+# z.B. schon archiviert/geloescht — ein 409 waere dann eine Sackgasse).
+_RESALE_LIFECYCLES = ("verkaufsentwurf", "verkaufsbereit", "veroeffentlicht",
+                      "reserviert")
+
+
+def _lifecycle_pfad(current: Optional[str], ziel: str) -> List[str]:
+    """Schrittfolge vom Fahrzeugstatus `current` zum Ziel; leer, wenn schon
+    erreicht. Wirft LifecycleError, wenn weder direkt noch ueber den
+    erlaubten Zwischenschritt ein Weg existiert (reine Funktion, testbar)."""
+    current = current or "verglichen"
+    if current == ziel:
+        return []
+    direkt = ALLOWED_TRANSITIONS.get(current, set())
+    if ziel in direkt:
+        return [ziel]
+    zwischen = _LIFECYCLE_ZWISCHENSCHRITT.get(current)
+    if zwischen and zwischen in direkt \
+            and ziel in ALLOWED_TRANSITIONS.get(zwischen, set()):
+        return [zwischen, ziel]
+    raise LifecycleError(f"Übergang '{current}' → '{ziel}' ist nicht erlaubt")
+
+
+async def _fahrzeug_lifecycle(vehicle_id: str, dealer_id: str) -> Optional[str]:
+    """Aktueller Lebenszyklus des Fahrzeugs; None, wenn es das Fahrzeug nicht
+    (mehr) gibt — dann ist nichts zu synchronisieren."""
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                   {"_id": 0, "lifecycle": 1})
+    if not v:
+        return None
+    return v.get("lifecycle") or "verglichen"
+
+
+async def _lifecycle_pfad_oder_409(vehicle_id: Optional[str], dealer_id: str,
+                                   ziel: str) -> List[str]:
+    """Weg zum Ziel ermitteln, bevor am Inserat geschrieben wird."""
+    if not vehicle_id:
+        return []
+    cur = await _fahrzeug_lifecycle(vehicle_id, dealer_id)
+    if cur is None:
+        return []
+    try:
+        return _lifecycle_pfad(cur, ziel)
+    except LifecycleError as exc:
+        raise HTTPException(409, "Fahrzeugstatus passt nicht zum Inserat: "
+                                 f"{exc}")
+
+
+async def _lifecycle_anwenden(vehicle_id: str, dealer_id: str,
+                              pfad: List[str], user: dict) -> None:
+    for schritt in pfad:
+        await set_lifecycle(vehicle_id, dealer_id, schritt, user=user)
+
+
+async def _anfragen_schliessen(listing_id: str, grund: str, *,
+                               auch_akzeptierte: bool = False) -> int:
+    """Nachpruefung Runde 14 (Nr. 54/26): Kaufanfragen eines Inserats
+    beenden, das verkauft/geloescht/zurueckgezogen wird. Vorher blieben
+    Verhandlungen auf geloeschten Inseraten dauerhaft "laufend" (beide
+    Seiten konnten weiter kontern), und nach dem Aufheben einer Reservierung
+    sah der Kaeufer weiter "fuer dich reserviert" (Status akzeptiert)."""
+    from routes.marketplace import INTERESSE_OFFEN
+    stati = list(INTERESSE_OFFEN)
+    if auch_akzeptierte:
+        stati.append("akzeptiert")
+    res = await db.listing_interest.update_many(
+        {"listing_id": listing_id, "status": {"$in": stati}},
+        {"$set": {"status": "abgelehnt", "beendet_grund": grund,
+                  "updated_at": now_iso()},
+         "$push": {"history": {"von": "system", "aktion": grund,
+                               "zeit": now_iso()}}})
+    return res.modified_count
+
+
 # =========================================================
 #                 ENTWURF ERZEUGEN
 # =========================================================
@@ -137,24 +254,45 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    # Nachpruefung Runde 14 (Nr. 106): vorher wurden nur entwurf/verkaufs-
+    # bereit gesucht — ueber "zurueckgezogen" (Fahrzeug wieder verkaufsbereit)
+    # entstand ein zweites Inserat, und beide liessen sich veroeffentlichen.
+    # Jetzt zaehlt jedes aktive Inserat: reaktivierbare werden zurueck-
+    # gegeben, live/reservierte blockieren mit 409. Diese Pruefung steht VOR
+    # der Lebenszyklus-Pruefung, damit ein bestehendes Inserat nie hinter
+    # einer irrefuehrenden "nicht verkaufsfaehig"-Meldung verschwindet.
+    existing = await db.resale_listings.find_one(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+         "status": {"$in": list(_AKTIV)}}, {"_id": 0})
+    if existing:
+        if existing.get("status") in ("veroeffentlicht", "reserviert"):
+            raise HTTPException(409, "Fuer dieses Fahrzeug gibt es bereits ein "
+                                     f"aktives Inserat (Status "
+                                     f"'{existing['status']}')")
+        return _with_margin(existing)
+
     if v.get("lifecycle") not in ("vertrag_erstellt", "gekauft",
                                   "abholung_geplant", "abgeholt", "bestand",
                                   "verkaufsentwurf", "verkaufsbereit"):
         raise HTTPException(400, "Fahrzeug ist nicht im verkaufsfähigen Zustand "
                                  f"(Status: {v.get('lifecycle')})")
 
-    existing = await db.resale_listings.find_one(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "status": {"$in": ["entwurf", "verkaufsbereit"]}}, {"_id": 0})
-    if existing:
-        return _with_margin(existing)
-
     data = dict(v.get("data") or {})
 
     # Abweichungen aus dem Abholbericht automatisch einarbeiten.
-    report = await db.pickup_reports.find_one(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "superseded": {"$ne": True}}, {"_id": 0})
+    # Nachpruefung Runde 14 (Nr. 45): find_one ohne Termin-/Versionsbezug
+    # nahm bei mehreren Terminen den aeltesten Bericht (Kilometer/Schaeden
+    # des falschen Termins). Der massgebliche Bericht (abgeholter Termin,
+    # sonst juengster; hoechste Version) kommt aus abholbericht.py.
+    report = None
+    try:
+        from abholbericht import massgeblicher_bericht
+    except ImportError:            # Modul noch nicht ausgeliefert: alter Weg
+        report = await db.pickup_reports.find_one(
+            {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+             "superseded": {"$ne": True}}, {"_id": 0})
+    else:
+        report = await massgeblicher_bericht(db, vehicle_id, user["dealer_id"])
     known_defects = list(v.get("known_defects") or [])
     auto_notes = []
     if report:
@@ -225,8 +363,11 @@ async def list_listings(user=Depends(current_haendler), status: Optional[str] = 
 
 @router.get("/resale/{listing_id}")
 async def get_listing(listing_id: str, user=Depends(current_haendler)):
+    # Nachpruefung Runde 14 (Nr. 28): geloeschte Inserate sind wie in der
+    # Liste auch einzeln nicht mehr abrufbar.
     l = await db.resale_listings.find_one(
-        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+        {"id": listing_id, "dealer_id": user["dealer_id"],
+         "status": {"$ne": "geloescht"}}, {"_id": 0})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
     return _mit_foto_urls(_with_margin(l))
@@ -247,8 +388,24 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
         {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
-    if l.get("status") in ("verkauft",):
-        raise HTTPException(400, "Verkaufte Inserate können nicht bearbeitet werden")
+    status = l.get("status")
+    # Nachpruefung Runde 14 (Nr. 28): geloeschte Inserate waren weiter
+    # bearbeitbar (Titel, Preis, VIN) — jetzt wie verkaufte gesperrt.
+    if status in _ABGESCHLOSSEN:
+        raise HTTPException(400, "Verkaufte oder geloeschte Inserate können "
+                                 "nicht bearbeitet werden")
+    preis_gesendet = any(p is not None for p in (body.price_public,
+                                                 body.price_b2b,
+                                                 body.price_network))
+    # Nachpruefung Runde 14 (Nr. 108): waehrend einer Reservierung ist der
+    # Kaeufer an das gesehene Angebot gebunden — Preis, Fahrzeugdaten und
+    # Maengel bleiben eingefroren; Titel/Beschreibung/Fotomodus/Kosten sind
+    # weiter aenderbar. Ein Zustands-Snapshot waere ein eigenes Feature.
+    if status == "reserviert" and (preis_gesendet or body.known_defects is not None
+                                   or body.data is not None):
+        raise HTTPException(400, "Preis, Fahrzeugdaten und Maengel sind waehrend "
+                                 "einer Reservierung nicht aenderbar — zuerst die "
+                                 "Reservierung aufheben")
     update: Dict[str, Any] = {"updated_at": now_iso()}
     if body.title is not None:
         update["title"] = body.title.strip()
@@ -258,12 +415,23 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
         update["known_defects"] = [str(m)[:300] for m in body.known_defects]
     if body.photo_mode is not None:
         update["photos.mode"] = body.photo_mode
+    # Nachpruefung Runde 14 (Nr. 91): Preise einzeln per Pfad schreiben statt
+    # den ganzen Block aus dem gelesenen Stand zurueckzusetzen — zwei
+    # parallele PUTs (public / network) loeschten sich sonst gegenseitig.
     prices = dict(l.get("prices") or {})
     for src, key in ((body.price_public, "public"), (body.price_b2b, "b2b"),
                      (body.price_network, "network")):
         if src is not None:
             prices[key] = round(float(src), 2) or None
-    update["prices"] = prices
+            update[f"prices.{key}"] = prices[key]
+    # Nachpruefung Runde 14 (Nr. 107): die Preispflicht galt nur beim Schritt
+    # entwurf -> verkaufsbereit; danach machte price_public=0 aus einem
+    # live sichtbaren Inserat eines "ohne Preis". Gilt fuer den gemergten
+    # Wert (auch wenn nur ein anderes Preisfeld gesendet wurde).
+    if status in ("verkaufsbereit", "veroeffentlicht", "reserviert") \
+            and preis_gesendet and not prices.get("public"):
+        raise HTTPException(400, "Ein verkaufsbereites oder veroeffentlichtes "
+                                 "Inserat braucht einen oeffentlichen Verkaufspreis")
     if body.costs is not None:
         update["costs"] = _clean_costs(body.costs)
     if body.data is not None:
@@ -278,8 +446,16 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
             if k in allowed:
                 merged[k] = val
         update["data"] = merged
-    await db.resale_listings.update_one(
-        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"$set": update})
+    # Nachpruefung Runde 14 (Nr. 89): bedingter Write auf den GELESENEN
+    # Status — ein paralleler Verkauf/Loeschung/Reservierung zwischen Lesen
+    # und Schreiben wird nicht mehr ueberschrieben (Lost Update).
+    res = await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"], "status": status},
+        {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Inserat wurde zwischenzeitlich geaendert "
+                                 "(verkauft, geloescht oder reserviert) — "
+                                 "bitte neu laden")
     fresh = await db.resale_listings.find_one(
         {"id": listing_id}, {"_id": 0})
     return _with_margin(fresh)
@@ -295,20 +471,54 @@ async def delete_listing(listing_id: str, user=Depends(current_haendler)):
         {"id": listing_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
-    if l.get("status") == "verkauft":
+    current = l.get("status")
+    if current == "verkauft":
         raise HTTPException(400, "Verkaufte Inserate koennen nicht geloescht "
                                  "werden (Verkaufs-Historie).")
-    await db.resale_listings.update_one(
-        {"id": listing_id, "dealer_id": user["dealer_id"]},
+    if current == "geloescht":
+        raise HTTPException(409, "Inserat ist bereits geloescht")
+    # Nachpruefung Runde 14 (Nr. 53): Fahrzeug zurueck in den Bestand — den
+    # Weg VOR dem Loeschen pruefen (aus "reserviert" ueber den
+    # Zwischenschritt), statt den Fehler zu schlucken und das Fahrzeug ohne
+    # Inserat in "reserviert" haengen zu lassen. Fahrzeuge ausserhalb des
+    # Verkaufsblocks (archiviert, geloescht ...) werden nicht angefasst.
+    vehicle_id = l.get("vehicle_id")
+    pfad: List[str] = []
+    if vehicle_id:
+        cur = await _fahrzeug_lifecycle(vehicle_id, user["dealer_id"])
+        if cur in _RESALE_LIFECYCLES:
+            pfad = await _lifecycle_pfad_oder_409(vehicle_id, user["dealer_id"],
+                                                  "bestand")
+    # Nachpruefung Runde 14 (Nr. 90): bedingt auf den gelesenen Status — ein
+    # paralleler Verkauf zwischen Lesen und Schreiben wuerde sonst durch
+    # "geloescht" ueberschrieben (und das verkaufte Fahrzeug auf bestand
+    # zurueckgesetzt). Lifecycle und Protokoll erst nach erfolgreichem Write.
+    res = await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"], "status": current},
         {"$set": {"status": "geloescht", "deleted_at": now_iso(),
                   "updated_at": now_iso()}})
-    # Fahrzeug zurueck in den Bestand (falls Uebergang erlaubt).
-    if l.get("vehicle_id"):
-        await try_set_lifecycle(l["vehicle_id"], user["dealer_id"], "bestand",
-                                user=user)
+    if res.matched_count == 0:
+        raise HTTPException(409, "Inserat wurde zwischenzeitlich verkauft oder "
+                                 "geloescht — bitte neu laden")
+    if pfad:
+        try:
+            await _lifecycle_anwenden(vehicle_id, user["dealer_id"], pfad, user)
+        except LifecycleError as exc:
+            # Rennen am Fahrzeug: Loeschung zuruecknehmen, Fehler sichtbar.
+            await db.resale_listings.update_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"],
+                 "status": "geloescht"},
+                {"$set": {"status": current, "updated_at": now_iso()},
+                 "$unset": {"deleted_at": ""}})
+            raise HTTPException(409, "Fahrzeugstatus passt nicht zum Inserat: "
+                                     f"{exc}")
+    # Nachpruefung Runde 14 (Nr. 54): laufende Verhandlungen und eine
+    # akzeptierte Reservierung enden mit dem Inserat.
+    await _anfragen_schliessen(listing_id, "inserat_geloescht",
+                               auch_akzeptierte=True)
     await log_activity(user["dealer_id"], user["id"], "inserat.geloescht",
                        ref=listing_id,
-                       meta={"war_status": l.get("status"),
+                       meta={"war_status": current,
                              "kontingent_bleibt": bool(l.get("counted_periods"))})
     return {"ok": True, "hinweis": "Inserat geloescht. Bereits veroeffentlichte "
                                    "Inserate zaehlen im laufenden Monat weiter "
@@ -321,12 +531,17 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     """Neue Fotos hochladen (Storage-Abstraktion, kein Base64 in Mongo)."""
     l = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "photos": 1})
+        {"_id": 0, "photos": 1, "status": 1})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
+    # Nachpruefung Runde 14 (Nr. 29): Fotos landeten auch auf geloeschten und
+    # verkauften Inseraten im Storage — ohne Aufraeumer, dauerhaft.
+    if l.get("status") in _ABGESCHLOSSEN:
+        raise HTTPException(400, "Fuer verkaufte oder geloeschte Inserate koennen "
+                                 "keine Fotos mehr hochgeladen werden")
     from storage_service import (make_key, storage, StorageError,
                                  validate_image_bytes, bild_verkleinern,
-                                 loeschen_oder_vormerken)
+                                 loeschen_oder_vormerken, MAX_IMAGE_BYTES)
     keys = list((l.get("photos") or {}).get("uploaded_keys", []))
     if len(keys) + len(body.photos_b64) > 40:
         raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
@@ -338,6 +553,11 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         neu = []
         try:
             for b64 in body.photos_b64:
+                # Nachpruefung Runde 14 (Nr. 117): Groesse VOR dem Decode
+                # pruefen — ein zu grosser Block wird nicht erst dekodiert.
+                if len(b64) > MAX_IMAGE_BYTES * 4 // 3 + 1024:
+                    raise StorageError("Inserats-Foto zu gross (erlaubt "
+                                       f"{MAX_IMAGE_BYTES // (1024 * 1024)} MB)")
                 raw = base64.b64decode(b64.split(",")[-1], validate=False)
                 # Groesse + Magic Bytes: nur echte Bilder, kein 20-MB-Blob,
                 # keine umbenannten ausfuehrbaren Dateien.
@@ -369,8 +589,12 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     # selbe Inserat Referenzen (im Lasttest: hunderte Dateien ohne
     # DB-Eintrag). Das 40er-Limit prueft dieselbe Bedingung atomar mit —
     # der Verlierer eines Rennens raeumt seine Dateien wieder weg.
+    # Nachpruefung Runde 14 (Nr. 29): Statusfilter im atomaren Write — wird
+    # das Inserat waehrend des Uploads verkauft/geloescht, raeumt der
+    # Verlierer seine Dateien wie beim 40er-Limit wieder weg.
     res = await db.resale_listings.update_one(
         {"id": listing_id, "dealer_id": user["dealer_id"],
+         "status": {"$nin": list(_ABGESCHLOSSEN)},
          f"photos.uploaded_keys.{40 - len(added)}": {"$exists": False}},
         {"$push": {"photos.uploaded_keys": {"$each": added}},
          "$set": {"updated_at": now_iso()}})
@@ -378,7 +602,8 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         for k in added:
             await loeschen_oder_vormerken(
                 db, key=k, grund="inserat_foto_limit", dealer_id=user["dealer_id"])
-        raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
+        raise HTTPException(400, "Maximal 40 Fotos pro Inserat — oder das Inserat "
+                                 "ist inzwischen verkauft/geloescht")
     doc = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "photos.uploaded_keys": 1})
@@ -409,9 +634,15 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
     nur aus dem Inserat genommen (das Original bleibt in der Akte)."""
     l = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "photos": 1})
+        {"_id": 0, "photos": 1, "status": 1})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
+    # Nachpruefung Runde 14 (Nr. 67, hoch): nach dem Verkauf sind die Fotos
+    # Beweismaterial (Zustand bei Uebergabe) — sie duerfen weder aus dem
+    # Inserat noch aus dem Storage verschwinden. Gilt auch fuer geloeschte.
+    if l.get("status") in _ABGESCHLOSSEN:
+        raise HTTPException(400, "Fotos verkaufter oder geloeschter Inserate "
+                                 "bleiben als Historie erhalten")
     photos = l.get("photos") or {}
     if body.key:
         keys = list(photos.get("uploaded_keys", []))
@@ -419,6 +650,20 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
             raise HTTPException(404, "Foto nicht gefunden")
         keys.remove(body.key)
         from storage_service import loeschen_oder_vormerken
+        # Nachpruefung Runde 14 (Nr. 67): ERST bedingt aus dem Inserat nehmen
+        # ($pull mit Statusfilter, matched_count pruefen), DANN die Datei
+        # loeschen — sonst loescht ein Rennen mit dem Verkauf die Datei
+        # trotzdem. ATOMAR ($pull), weil parallele Loeschungen sich sonst
+        # gegenseitig verdraengten.
+        res = await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"],
+             "status": {"$nin": list(_ABGESCHLOSSEN)},
+             "photos.uploaded_keys": body.key},
+            {"$pull": {"photos.uploaded_keys": body.key},
+             "$set": {"updated_at": now_iso()}})
+        if res.matched_count == 0:
+            raise HTTPException(409, "Inserat wurde zwischenzeitlich verkauft "
+                                     "oder geloescht — Foto bleibt erhalten")
         # Laesst sich die Datei nicht loeschen, wird sie vorgemerkt; der Key
         # bleibt im Inserat unter photos.loeschung_offen_keys erhalten (nicht
         # mehr sichtbar, aber nicht verloren) — die Nachholung entfernt ihn.
@@ -427,14 +672,10 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
             dealer_id=user["dealer_id"],
             ref={"collection": "resale_listings", "id": listing_id,
                  "pull_key_from": "photos.loeschung_offen_keys"})
-        # ATOMAR entfernen ($pull) — gleiche Lost-Update-Gefahr wie beim
-        # Upload (parallele Loeschungen verdraengten sich gegenseitig).
-        update = {"$pull": {"photos.uploaded_keys": body.key},
-                  "$set": {"updated_at": now_iso()}}
         if not ok:
-            update["$addToSet"] = {"photos.loeschung_offen_keys": body.key}
-        await db.resale_listings.update_one(
-            {"id": listing_id, "dealer_id": user["dealer_id"]}, update)
+            await db.resale_listings.update_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"]},
+                {"$addToSet": {"photos.loeschung_offen_keys": body.key}})
         doc = await db.resale_listings.find_one(
             {"id": listing_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "photos.uploaded_keys": 1})
@@ -444,10 +685,14 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         urls = list(photos.get("einkauf_urls", []))
         if body.url not in urls:
             raise HTTPException(404, "Foto nicht gefunden")
-        await db.resale_listings.update_one(
-            {"id": listing_id, "dealer_id": user["dealer_id"]},
+        res = await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"],
+             "status": {"$nin": list(_ABGESCHLOSSEN)}},
             {"$pull": {"photos.einkauf_urls": body.url},
              "$set": {"updated_at": now_iso()}})
+        if res.matched_count == 0:
+            raise HTTPException(409, "Inserat wurde zwischenzeitlich verkauft "
+                                     "oder geloescht — Foto bleibt erhalten")
         doc = await db.resale_listings.find_one(
             {"id": listing_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "photos.einkauf_urls": 1})
@@ -501,6 +746,17 @@ async def publish_listing(listing_id: str, body: PublishIn,
         if l.get("status") not in ("verkaufsbereit", "zurueckgezogen"):
             raise HTTPException(400, "Nur verkaufsbereite (oder zurückgezogene) "
                                      "Inserate können veröffentlicht werden")
+        # Nachpruefung Runde 14 (Nr. 107): die Preispflicht greift sonst nur
+        # bei entwurf -> verkaufsbereit; ueber zurueckgezogen -> publish kam
+        # ein Inserat ohne oeffentlichen Preis live.
+        if not (l.get("prices") or {}).get("public"):
+            raise HTTPException(400, "Bitte zuerst einen oeffentlichen "
+                                     "Verkaufspreis eintragen")
+        # Nachpruefung Runde 14 (Nr. 81): Fahrzeugweg VOR Kontingent und
+        # Statuswechsel pruefen — bei Desync 409 statt Inserat live und
+        # Fahrzeug unveraendert (try_set_lifecycle schluckte den Fehler).
+        pfad = await _lifecycle_pfad_oder_409(l.get("vehicle_id"),
+                                              user["dealer_id"], "veroeffentlicht")
 
         from routes.team import get_sale_plan_status
         plan = await get_sale_plan_status(user["dealer_id"])
@@ -509,6 +765,22 @@ async def publish_listing(listing_id: str, body: PublishIn,
                                      "'Mitarbeiter / Sucher' ein Paket anfragen.")
         period_key = plan["period_key"]
         already = period_key in (l.get("counted_periods") or [])
+        # Nachpruefung Runde 14 (Nr. 81): merken, was DIESER Aufruf am
+        # Kontingent beansprucht hat, um es bei einem spaeteren Abbruch
+        # (Rennen am Inserat oder Fahrzeug) wieder zurueckzugeben.
+        markiert = False
+        slot_geholt = False
+
+        async def _kontingent_zurueckgeben() -> None:
+            if slot_geholt:
+                await db.dealers.update_one(
+                    {"id": user["dealer_id"]},
+                    {"$inc": {f"quota_usage.{period_key}": -1}})
+            if markiert:
+                await db.resale_listings.update_one(
+                    {"id": listing_id, "dealer_id": user["dealer_id"]},
+                    {"$pull": {"counted_periods": period_key}})
+
         if not already:
             # Schritt 1: Den Abrechnungszeitraum ATOMAR am Inserat markieren.
             # Der $ne-Guard sorgt dafür, dass von BELIEBIG vielen gleichzeitigen
@@ -520,6 +792,7 @@ async def publish_listing(listing_id: str, body: PublishIn,
                 {"id": listing_id, "dealer_id": user["dealer_id"],
                  "counted_periods": {"$ne": period_key}},
                 {"$addToSet": {"counted_periods": period_key}})
+            markiert = bool(marker.modified_count)
             if not marker.modified_count:
                 # Ein GLEICHZEITIGER Publish hat die Markierung gesetzt. Zwei
                 # Faelle: (a) er hat den Slot bekommen — dann ist alles gezaehlt
@@ -562,27 +835,45 @@ async def publish_listing(listing_id: str, body: PublishIn,
                     {"$inc": {field: 1}},
                     projection={field: 1},
                     return_document=ReturnDocument.AFTER)
+                slot_geholt = True
                 used_now = (claimed.get("quota_usage") or {}).get(period_key, 1)
                 if used_now > quota:
                     # Über der Quota → Slot und Markierung zurückgeben, ablehnen.
-                    await db.dealers.update_one({"id": did}, {"$inc": {field: -1}})
-                    await db.resale_listings.update_one(
-                        {"id": listing_id, "dealer_id": user["dealer_id"]},
-                        {"$pull": {"counted_periods": period_key}})
+                    await _kontingent_zurueckgeben()
                     raise HTTPException(402, f"Dein monatliches Kontingent von "
                                              f"{quota} Fahrzeugen ist erreicht. "
                                              "Upgrade auf ein größeres Paket oder "
                                              "Enterprise anfragen.")
 
-        await db.resale_listings.update_one(
-            {"id": listing_id, "dealer_id": user["dealer_id"]},
+        # Nachpruefung Runde 14 (Nr. 81/89): bedingt auf den gelesenen Status
+        # — ein paralleler Statuswechsel (verkauft/geloescht) darf nicht
+        # durch "veroeffentlicht" ueberschrieben werden.
+        res = await db.resale_listings.update_one(
+            {"id": listing_id, "dealer_id": user["dealer_id"],
+             "status": l.get("status")},
             {"$set": {"status": "veroeffentlicht",
                       "visibility": body.visibility,
                       "published_at": l.get("published_at") or now_iso(),
                       "updated_at": now_iso()}})
-        if l.get("vehicle_id"):
-            await try_set_lifecycle(l["vehicle_id"], user["dealer_id"],
-                                    "veroeffentlicht", user=user)
+        if res.matched_count == 0:
+            await _kontingent_zurueckgeben()
+            raise HTTPException(409, "Inserat wurde zwischenzeitlich geaendert "
+                                     "— bitte neu laden")
+        if pfad:
+            try:
+                await _lifecycle_anwenden(l["vehicle_id"], user["dealer_id"],
+                                          pfad, user)
+            except LifecycleError as exc:
+                # Rennen am Fahrzeug: Veroeffentlichung zuruecknehmen.
+                await db.resale_listings.update_one(
+                    {"id": listing_id, "dealer_id": user["dealer_id"],
+                     "status": "veroeffentlicht"},
+                    {"$set": {"status": l.get("status"),
+                              "published_at": l.get("published_at"),
+                              "updated_at": now_iso()}})
+                await _kontingent_zurueckgeben()
+                raise HTTPException(409, "Fahrzeugstatus passt nicht zum "
+                                         f"Inserat: {exc}")
         await log_activity(user["dealer_id"], user["id"], "inserat.veroeffentlicht",
                            ref=listing_id,
                            meta={"sichtbarkeit": body.visibility,
@@ -632,18 +923,67 @@ async def set_listing_status(listing_id: str, body: ListingStatusIn,
             raise HTTPException(400, "Bitte zuerst einen Verkaufspreis eintragen")
 
     update: Dict[str, Any] = {"status": new, "updated_at": now_iso()}
+    unset: Dict[str, Any] = {}
     if new == "verkauft":
+        # Nachpruefung Runde 14 (Nr. 79): ohne Verkaufspreis blieb sold_price
+        # null — Marge/Auswertung leer, keine dokumentierte Entscheidung dazu.
+        if body.sold_price is None:
+            raise HTTPException(400, "Bitte den tatsaechlichen Verkaufspreis "
+                                     "angeben")
         update["sold_at"] = now_iso()
-        if body.sold_price is not None:
-            update["sold_price"] = round(float(body.sold_price), 2)
-    await db.resale_listings.update_one(
-        {"id": listing_id, "dealer_id": user["dealer_id"]}, {"$set": update})
+        update["sold_price"] = round(float(body.sold_price), 2)
+        # Nachpruefung Runde 14 (Nr. 27): Semantik explizit — der reservierte
+        # Kaeufer wird als Kaeufer festgehalten, reserved_for verschwindet.
+        if current == "reserviert" and l.get("reserved_for"):
+            update["sold_to_user_id"] = l["reserved_for"]
+    if current == "reserviert":
+        # Nachpruefung Runde 14 (Nr. 26): reserved_for blieb beim Verlassen
+        # von "reserviert" stehen und wanderte bis in die Veroeffentlichung.
+        unset["reserved_for"] = ""
 
-    # Fahrzeug-Lebenszyklus synchron halten.
+    # Nachpruefung Runde 14 (Nr. 52/81): Fahrzeugweg VOR dem Schreiben
+    # pruefen (409 bei Desync) — vorher schluckte try_set_lifecycle den
+    # Fehler und das Fahrzeug blieb z.B. dauerhaft "reserviert".
     vehicle_id = l.get("vehicle_id")
-    if vehicle_id and new in _LISTING_TO_LIFECYCLE:
-        await try_set_lifecycle(vehicle_id, user["dealer_id"],
-                                _LISTING_TO_LIFECYCLE[new], user=user)
+    pfad = await _lifecycle_pfad_oder_409(vehicle_id, user["dealer_id"],
+                                          _LISTING_TO_LIFECYCLE[new])
+
+    op: Dict[str, Any] = {"$set": update}
+    if unset:
+        op["$unset"] = unset
+    # Bedingt auf den gelesenen Status (Nr. 89/90): paralleler Wechsel -> 409.
+    res = await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"], "status": current}, op)
+    if res.matched_count == 0:
+        raise HTTPException(409, "Inserat wurde zwischenzeitlich geaendert — "
+                                 "bitte neu laden")
+
+    # Fahrzeug-Lebenszyklus synchron halten — Fehler sichtbar (Nr. 81).
+    if pfad:
+        try:
+            await _lifecycle_anwenden(vehicle_id, user["dealer_id"], pfad, user)
+        except LifecycleError as exc:
+            # Rennen am Fahrzeug: Inserat auf den alten Status zuruecksetzen
+            # (reserved_for laesst sich nicht wiederherstellen — Hinweis im 409).
+            await db.resale_listings.update_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"], "status": new},
+                {"$set": {"status": current, "updated_at": now_iso()},
+                 "$unset": {"sold_at": "", "sold_price": "",
+                            "sold_to_user_id": ""}})
+            raise HTTPException(409, "Fahrzeugstatus passt nicht zum Inserat: "
+                                     f"{exc}")
+
+    # Nachpruefung Runde 14 (Nr. 54/26): Kaufanfragen mit dem Inserat
+    # abschliessen. Beim Verkauf bleibt eine akzeptierte Anfrage (der
+    # Kaeufer) stehen, alle offenen Verhandlungen enden; beim Aufheben einer
+    # Reservierung endet auch die akzeptierte.
+    if new == "verkauft":
+        await _anfragen_schliessen(listing_id, "inserat_verkauft")
+    elif current == "reserviert":
+        await _anfragen_schliessen(listing_id, "reservierung_aufgehoben",
+                                   auch_akzeptierte=True)
+    elif new in ("zurueckgezogen", "entwurf"):
+        await _anfragen_schliessen(listing_id, f"inserat_{new}")
     await log_activity(user["dealer_id"], user["id"], f"inserat.{new}",
                        ref=listing_id)
     return {"ok": True, "status": new}

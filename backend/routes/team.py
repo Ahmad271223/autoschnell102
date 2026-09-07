@@ -7,6 +7,7 @@
   gezählt werden NUR tatsächlich veröffentlichte Fahrzeuge (Phase 3),
   pro Inserat höchstens einmal je Zeitraum (counted_periods).
 """
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -15,6 +16,8 @@ import os
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 import re
 
@@ -26,6 +29,7 @@ from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 
 router = APIRouter()
+log = logging.getLogger("autohandel")
 
 
 # ---------- Verkaufspakete ----------
@@ -150,32 +154,42 @@ async def list_sucher(user=Depends(current_haendler)):
     # Runde 11: feste Feldliste statt "alles ausser Passwort" — sonst
     # landen Sitzungs-ID, persoenliche Overrides und jedes kuenftige
     # Benutzerfeld automatisch beim Chef.
+    # Nachpruefung Runde 14 (Nr. 72): to_list(100) liess ab dem 101. Sucher
+    # Konten still verschwinden — es gibt kein Sucher-Limit je Firma. Die
+    # Projektion ist klein, die Sammelabfragen skalieren ueber $in.
     items = await db.users.find(
         {"dealer_id": user["dealer_id"], "role": "sucher"},
         {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1, "dealer_id": 1,
          "first_name": 1, "last_name": 1, "phone": 1, "employee_id": 1,
          "created_by": 1, "created_at": 1, "updated_at": 1},
-    ).sort("created_at", 1).to_list(100)
+    ).sort("created_at", 1).to_list(1000)
     month_start = datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
     # ALLE Zusatzdaten in 3 Sammelabfragen statt 3 Abfragen JE SUCHER
     # (vorher: ~301 Einzelabfragen bei 100 Suchern).
+    # Nachpruefung Runde 14 (Nr. 92): jede Sammelabfrage zusaetzlich auf die
+    # eigene dealer_id eingrenzen — Abos, Vertraege und Vergleiche eines
+    # Suchers, die (z.B. nach einem Firmenwechsel per Datenbank) noch einer
+    # anderen Firma gehoeren, duerfen dem Chef nicht angezeigt werden.
     ids = [s["id"] for s in items]
     from deps import sub_status_from_doc
     subs = {}
     async for row in db.subscriptions.aggregate([
-        {"$match": {"subject_user_id": {"$in": ids}}},
+        {"$match": {"dealer_id": user["dealer_id"],
+                    "subject_user_id": {"$in": ids}}},
         {"$sort": {"created_at": -1}},
         {"$group": {"_id": "$subject_user_id", "sub": {"$first": "$$ROOT"}}},
     ]):
         subs[row["_id"]] = row["sub"]
     purchases = {row["_id"]: row["n"] async for row in db.generated_pdfs.aggregate([
-        {"$match": {"user_id": {"$in": ids},
+        {"$match": {"dealer_id": user["dealer_id"],
+                    "user_id": {"$in": ids},
                     "created_at": {"$gte": month_start}}},
         {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
     ])}
     comparisons = {row["_id"]: row["n"] async for row in db.vehicle_comparisons.aggregate([
-        {"$match": {"user_id": {"$in": ids},
+        {"$match": {"dealer_id": user["dealer_id"],
+                    "user_id": {"$in": ids},
                     "created_at": {"$gte": month_start}}},
         {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
     ])}
@@ -241,8 +255,18 @@ async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
 # =========================================================
 def _current_period(period_start_iso: str) -> tuple:
     """Rollierender 30-Tage-Zeitraum ab Buchungsdatum. Liefert
-    (period_key, start_iso, end_iso) für JETZT."""
-    start = datetime.fromisoformat(period_start_iso)
+    (period_key, start_iso, end_iso) für JETZT.
+
+    Nachpruefung Runde 14 (Nr. 31): ein unlesbarer Startwert (kaputter
+    Datensatz, Migration) fuehrt zu ValueError — der Aufrufer behandelt das
+    Paket dann als ungueltig statt mit 500 auszusteigen. Fehlender Wert
+    (None/leer) = heute."""
+    if not period_start_iso:
+        period_start_iso = now_iso()
+    try:
+        start = datetime.fromisoformat(str(period_start_iso).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Paketzeitraum ungueltig: {period_start_iso!r}") from exc
     now = datetime.now(timezone.utc)
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
@@ -292,7 +316,20 @@ async def get_sale_plan_status(dealer_id: str) -> dict:
         except (TypeError, ValueError):
             pass
     quota = plan.get("custom_quota") or meta.get("quota") or 0
-    period_key, p_start, p_end = _current_period(plan.get("period_start", now_iso()))
+    try:
+        period_key, p_start, p_end = _current_period(plan.get("period_start"))
+    except ValueError:
+        # Nachpruefung Runde 14 (Nr. 31): kaputtes period_start warf bisher
+        # bis in /dealer/sale-plan und publish_listing durch (500). Jetzt
+        # fail-closed: Paket ungueltig, kein Publish, Betreiber repariert.
+        log.error("Verkaufspaket %s: period_start %r unlesbar -> ungueltig",
+                  dealer_id, plan.get("period_start"))
+        return {"active": False, "tier": tier, "label": meta.get("label", tier),
+                "fehler": "Paketzeitraum ungueltig — bitte den Betreiber "
+                          "kontaktieren",
+                "quota": 0, "used": 0, "remaining": 0,
+                "period_start": None, "period_end": None,
+                "valid_until": plan.get("valid_until"), "plans": SALE_PLANS}
     # Verbrauch: bevorzugt der atomare Zähler (race-fest, siehe publish_listing).
     # Fallback auf die abgeleitete Zählung, solange der Zähler in diesem
     # Zeitraum noch nie gesetzt wurde (vor der ersten Veröffentlichung).
@@ -314,11 +351,40 @@ async def sale_plan_status(user=Depends(current_haendler)):
     return await get_sale_plan_status(user["dealer_id"])
 
 
+# ---------- Offene Anfragen: genau EINE je Schluessel ----------
+# Nachpruefung Runde 14 (Nr. 33, 56, 57): "find_one, dann insert_one" war
+# nicht rennfest — 16 gleichzeitige Klicks legten bis zu 16 offene Anfragen
+# an, und zwei der drei Anfrage-Routen prueften gar nicht. Jetzt EIN Weg:
+# atomarer Upsert auf den Schluessel der offenen Anfrage. Die Felder des
+# Schluessels ({type, subject_user_id bzw. dealer_id, status: "offen"})
+# tragen die Teil-Unique-Indizes aus server.ensure_indexes; ein
+# DuplicateKeyError (zwei Upserts im selben Augenblick) wird durch einen
+# zweiten Versuch aufgeloest, der dann die bestehende Zeile trifft.
+async def _offene_anfrage_upsert(schluessel: dict, neu: dict,
+                                 wunsch: dict) -> tuple:
+    """Liefert (Anfrage-Dokument, neu_angelegt). `neu` wird nur beim Anlegen
+    geschrieben, `wunsch` (Wunschplan/-paket) immer — eine bereits offene
+    Anfrage uebernimmt so den zuletzt geaeusserten Wunsch."""
+    for versuch in (1, 2):
+        try:
+            doc = await db.plan_requests.find_one_and_update(
+                schluessel,
+                {"$setOnInsert": neu, "$set": wunsch},
+                upsert=True, projection={"_id": 0},
+                return_document=ReturnDocument.AFTER)
+            break
+        except DuplicateKeyError:
+            if versuch == 2:
+                raise
+    return doc, doc.get("id") == neu.get("id")
+
+
 @router.post("/dealer/sale-plan/upgrade-request")
 async def sale_plan_upgrade_request(body: UpgradeRequestIn,
                                     user=Depends(current_haendler)):
     """Upgrade-/Enterprise-Anfrage — landet beim Admin mit Händler-ID,
-    aktuellem Verbrauch, Wunschvolumen und Kontaktdaten."""
+    aktuellem Verbrauch, Wunschvolumen und Kontaktdaten. Idempotent: eine
+    offene Anfrage der Firma wird aktualisiert, nicht verdoppelt (Nr. 57)."""
     if VERKAUF_KOSTENLOS:
         raise HTTPException(400, "Das Verkaufen von Fahrzeugen ist derzeit "
                                  "kostenlos und unbegrenzt — es ist kein Paket "
@@ -326,19 +392,20 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
     status = await get_sale_plan_status(user["dealer_id"])
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     req_id = str(uuid.uuid4())
-    await db.plan_requests.insert_one({
-        "id": req_id,
-        "dealer_id": user["dealer_id"],
-        "company_name": (dealer or {}).get("company_name", ""),
-        "contact_email": user.get("email", ""),
-        "contact_phone": (dealer or {}).get("phone", ""),
-        "current_tier": status.get("tier"),
-        "current_usage": status.get("used"),
-        "wanted_tier": body.wanted_tier,
-        "message": body.message,
-        "status": "offen",
-        "created_at": now_iso(),
-    })
+    doc, neu = await _offene_anfrage_upsert(
+        {"type": "verkaufspaket", "dealer_id": user["dealer_id"], "status": "offen"},
+        {"id": req_id,
+         "company_name": (dealer or {}).get("company_name", ""),
+         "contact_email": user.get("email", ""),
+         "contact_phone": (dealer or {}).get("phone", ""),
+         "current_tier": status.get("tier"),
+         "current_usage": status.get("used"),
+         "created_at": now_iso()},
+        {"wanted_tier": body.wanted_tier, "message": body.message,
+         "updated_at": now_iso()})
+    if not neu:
+        return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
+                "hinweis": "Eine Anfrage liegt bereits beim Administrator."}
     await log_activity(user["dealer_id"], user["id"], "verkaufsplan.anfrage",
                        ref=req_id, meta={"wunsch": body.wanted_tier})
     return {"ok": True, "request_id": req_id,
@@ -359,40 +426,31 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
     plan = body.get("plan", "monthly")
     if plan not in SUCHER_PLANS:
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
-    offen = await db.plan_requests.find_one(
-        {"type": "sucher_abo", "subject_user_id": user["id"], "status": "offen"},
-        {"_id": 0, "id": 1, "wanted_plan": 1})
-    if offen:
-        if offen.get("wanted_plan") != plan:
-            await db.plan_requests.update_one(
-                {"id": offen["id"]},
-                {"$set": {"wanted_plan": plan,
-                          "wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
-                          "price": SUCHER_PLANS[plan]["price"],
-                          "updated_at": now_iso()}})
-        return {"ok": True, "request_id": offen["id"], "bereits_offen": True,
-                "hinweis": "Deine Anfrage liegt bereits beim Betreiber."}
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     ist_sucher = user.get("role") == "sucher"
     name = (f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
             if ist_sucher else ((dealer or {}).get("contact_person") or "Chef"))
     req_id = str(uuid.uuid4())
-    await db.plan_requests.insert_one({
-        "id": req_id, "type": "sucher_abo",
-        "dealer_id": user["dealer_id"],
-        "subject_user_id": user["id"],
-        "subject_role": user.get("role", "dealer"),
-        "sucher_name": name or user.get("email", ""),
-        "sucher_email": user.get("email", ""),
-        "company_name": (dealer or {}).get("company_name", ""),
-        "kunden_nr": (dealer or {}).get("kunden_nr"),
-        "contact_email": user.get("email", ""),
-        "contact_phone": (dealer or {}).get("phone", ""),
-        "wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
-        "wanted_plan": plan,
-        "price": SUCHER_PLANS[plan]["price"],
-        "status": "offen", "created_at": now_iso(),
-    })
+    # Nachpruefung Runde 14 (Nr. 56): atomarer Upsert statt find_one+insert.
+    doc, neu = await _offene_anfrage_upsert(
+        {"type": "sucher_abo", "subject_user_id": user["id"], "status": "offen"},
+        {"id": req_id,
+         "dealer_id": user["dealer_id"],
+         "subject_role": user.get("role", "dealer"),
+         "sucher_name": name or user.get("email", ""),
+         "sucher_email": user.get("email", ""),
+         "company_name": (dealer or {}).get("company_name", ""),
+         "kunden_nr": (dealer or {}).get("kunden_nr"),
+         "contact_email": user.get("email", ""),
+         "contact_phone": (dealer or {}).get("phone", ""),
+         "created_at": now_iso()},
+        {"wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
+         "wanted_plan": plan,
+         "price": SUCHER_PLANS[plan]["price"],
+         "updated_at": now_iso()})
+    if not neu:
+        return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
+                "hinweis": "Deine Anfrage liegt bereits beim Betreiber."}
     await log_activity(user["dealer_id"], user["id"], "abo.anfrage.selbst",
                        ref=req_id, meta={"plan": plan})
     return {"ok": True, "request_id": req_id,
@@ -409,31 +467,43 @@ async def sucher_plans(user=Depends(current_haendler)):
 async def sucher_abo_request(sucher_id: str, body: dict = Body(default={}),
                              user=Depends(current_haendler)):
     """Händler fragt die Freischaltung eines Sucher-Abos an — landet beim
-    Admin (manuelle Bezahlung/Freischaltung)."""
+    Admin (manuelle Bezahlung/Freischaltung). Idempotent wie die eigene
+    Anfrage: eine offene Anfrage fuer den Sucher wird zurueckgegeben, nicht
+    verdoppelt (Nr. 33)."""
     plan = body.get("plan", "monthly")
     if plan not in SUCHER_PLANS:
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
     sucher = await db.users.find_one(
         {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"},
-        {"_id": 0, "email": 1, "first_name": 1, "last_name": 1})
+        {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "active": 1})
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
+    # Nachpruefung Runde 14 (Nr. 104): fuer ein deaktiviertes Konto landete
+    # eine Abo-Anfrage beim Betreiber, der sie freischalten (und abrechnen)
+    # konnte, obwohl der Sucher gar nicht arbeiten darf.
+    if sucher.get("active") is False:
+        raise HTTPException(400, "Der Sucher ist deaktiviert — erst wieder "
+                                 "aktivieren, dann Abo anfragen")
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     req_id = str(uuid.uuid4())
-    await db.plan_requests.insert_one({
-        "id": req_id, "type": "sucher_abo",
-        "dealer_id": user["dealer_id"],
-        "subject_user_id": sucher_id,
-        "sucher_name": f"{sucher.get('first_name','')} {sucher.get('last_name','')}".strip(),
-        "sucher_email": sucher.get("email", ""),
-        "company_name": (dealer or {}).get("company_name", ""),
-        "contact_email": user.get("email", ""),
-        "contact_phone": (dealer or {}).get("phone", ""),
-        "wanted": SUCHER_PLANS[plan]["label"],
-        "wanted_plan": plan,
-        "price": SUCHER_PLANS[plan]["price"],
-        "status": "offen", "created_at": now_iso(),
-    })
+    doc, neu = await _offene_anfrage_upsert(
+        {"type": "sucher_abo", "subject_user_id": sucher_id, "status": "offen"},
+        {"id": req_id,
+         "dealer_id": user["dealer_id"],
+         "sucher_name": f"{sucher.get('first_name','')} {sucher.get('last_name','')}".strip(),
+         "sucher_email": sucher.get("email", ""),
+         "company_name": (dealer or {}).get("company_name", ""),
+         "contact_email": user.get("email", ""),
+         "contact_phone": (dealer or {}).get("phone", ""),
+         "created_at": now_iso()},
+        {"wanted": SUCHER_PLANS[plan]["label"],
+         "wanted_plan": plan,
+         "price": SUCHER_PLANS[plan]["price"],
+         "updated_at": now_iso()})
+    if not neu:
+        return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
+                "hinweis": "Eine Anfrage fuer diesen Sucher liegt bereits beim "
+                           "Administrator."}
     await log_activity(user["dealer_id"], user["id"], "sucher.abo.anfrage",
                        ref=req_id, meta={"sucher": sucher_id, "plan": plan})
     return {"ok": True, "request_id": req_id,

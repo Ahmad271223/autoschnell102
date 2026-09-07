@@ -36,9 +36,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 # (status, Tage bis Löschung)
+# Nachpruefung Runde 14 (Nr. 100): "erledigt" gilt in drivers.py/protocols.py
+# als abgeschlossen, fehlte hier aber — Berichts- und Inseratsfotos solcher
+# Termine wurden nie ueber die Termin-Frist geloescht (nur ueber die
+# 90-Tage-Regeln). Jetzt wie "abgeholt" nach 7 Tagen. Offen (Produkt-
+# entscheidung, hier NICHT umgesetzt): Lifecycle-Mapping fuer "erledigt"
+# in appointments.py und eine Frist fuer "storniert".
 CLEANUP_RULES = (
     ("abgeholt", 7),
     ("nicht abgeholt", 14),
+    ("erledigt", 7),
 )
 
 # Lebenszyklus-Status, in denen der Händler bereits entschieden hat —
@@ -166,16 +173,23 @@ async def _cleanup_once(db) -> dict:
 
     for status_name, days in CLEANUP_RULES:
         cutoff_iso = (now - timedelta(days=days)).isoformat()
-        # Kandidaten: Termin hat den Status, status_changed_at ist älter
-        # als cutoff, und assets wurden noch nicht bereits gecleant.
+        # Kandidaten: Termin hat den Status, der Abschluss ist älter als
+        # cutoff, und assets wurden noch nicht bereits gecleant.
+        # Nachpruefung Runde 14 (Nr. 100): Frist ab abgeschlossen_seit
+        # (Zeitpunkt des Abschlusses), ersatzweise status_changed_at
+        # (Altbestand / Termine ohne das Feld).
         cursor = db.appointments.find(
             {
                 "status": status_name,
-                "status_changed_at": {"$lte": cutoff_iso},
                 "assets_cleaned_at": {"$in": [None, ""]},
+                "$or": [
+                    {"abgeschlossen_seit": {"$lte": cutoff_iso}},
+                    {"abgeschlossen_seit": {"$in": [None, ""]},
+                     "status_changed_at": {"$lte": cutoff_iso}},
+                ],
             },
             {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1,
-             "status_changed_at": 1},
+             "status_changed_at": 1, "abgeschlossen_seit": 1},
         )
         async for appt in cursor:
             stats["checked"] += 1
@@ -261,6 +275,8 @@ async def _cleanup_once(db) -> dict:
     stats["contracts_deleted"] = await vertraege_nach_frist_loeschen(
         db, now, stats=stats)
     stats["termine_ohne_vertrag_bereinigt"] = await termine_ohne_vertrag_bereinigen(db, now)
+    stats["protokoll_orte_nachgezogen"] = await protokoll_orte_nachziehen(db)
+    stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)
     stats["storage_nachgeholt"] = await storage_loeschungen_nachholen(db)
     stats["logs_rotiert"] = await logs_rotieren(db, now)
     # ---- Aufbewahrungsfristen (Go-Live-Audit 09/2026) ----
@@ -332,6 +348,17 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
              "created_at": now.isoformat(), "anzahl": len(ids),
              "ids": ids[:_LOESCHVORSCHAU_MAX_IDS], "cutoff": cutoff},
             upsert=True)
+        if ids:
+            # Nachpruefung Runde 14 (Nr. 97): der Trockenlauf ist gewollt
+            # (Go-Live-Entscheidung), aber ein vergessenes Flag darf nicht
+            # still bleiben — sonst laeuft die versprochene 90-Tage-Frist nie.
+            # Ein Alarm je (typ, ref) wird nur hochgezaehlt, nicht dupliziert.
+            await alarm(db, "vertrag_loeschung_trockenlauf",
+                        ref="vertrag_loeschvorschau", anzahl=len(ids),
+                        cutoff=cutoff,
+                        hinweis="VERTRAG_LOESCHUNG_AKTIV ist aus: Vertraege "
+                                "ueber der Frist werden nur gezaehlt, nicht "
+                                "geloescht (siehe DEPLOYMENT.md, Scharfschalten)")
         if stats is not None:
             stats["contracts_vorschau"] = len(ids)
         return 0
@@ -381,11 +408,25 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
                 unset[f"{feld}_loeschung_offen"] = ""
             else:
                 offen[f"{feld}_loeschung_offen"] = True
-        upd = {"$set": {"seller_name": "", "pickup_address": "",
+        # Nachpruefung Runde 14 (Nr. 23): der Ort steht im Protokoll unter
+        # `place` (protocols.py), nicht `pickup_address` — der Docstring
+        # versprach "Ort", geleert wurde ein Feld, das es nicht gibt.
+        upd = {"$set": {"seller_name": "", "place": "", "pickup_address": "",
                         "pii_geloescht_at": jetzt, **offen}}
         if unset:
             upd["$unset"] = unset
         await db.pickup_protocols.update_one({"id": p["id"]}, upd)
+
+
+async def protokoll_orte_nachziehen(db) -> int:
+    """Nachpruefung Runde 14 (Nr. 23), Altbestand: Protokolle, die schon als
+    bereinigt markiert sind (pii_geloescht_at), aber den Ort noch tragen,
+    nachtraeglich leeren. Idempotent, laeuft in jedem Aufraeumzyklus mit."""
+    r = await db.pickup_protocols.update_many(
+        {"pii_geloescht_at": {"$nin": [None, ""]},
+         "place": {"$nin": [None, ""]}},
+        {"$set": {"place": ""}})
+    return r.modified_count
 
 
 async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
@@ -600,7 +641,27 @@ async def marktplatz_rotieren(db, now: datetime) -> dict:
     Tagen, geloeschte Inserate (Soft-Delete) samt Fotos nach 90 Tagen,
     verwaiste Merklisten-Eintraege (Inserat existiert nicht mehr)."""
     stats = {"interessen_geloescht": 0, "inserate_geloescht": 0,
-             "favoriten_geloescht": 0}
+             "favoriten_geloescht": 0, "interessen_verwaist_geschlossen": 0}
+    # Nachpruefung Runde 14 (Befund 54): Verhandlungen zu Inseraten, die
+    # verkauft oder geloescht sind (Altbestand vor dem Fix in resale.py),
+    # werden geschlossen — sonst zeigten Kaeufer und Haendler ewig eine
+    # "laufende" Verhandlung zu einem Auto, das es nicht mehr gibt.
+    offene = await db.listing_interest.find(
+        {"status": {"$in": ["offen", "gegenangebot", "gegenangebot_kaeufer"]}},
+        {"_id": 0, "id": 1, "listing_id": 1}).to_list(5000)
+    if offene:
+        ids = list({o.get("listing_id") for o in offene if o.get("listing_id")})
+        vorhanden = {l["id"] async for l in db.resale_listings.find(
+            {"id": {"$in": ids}, "status": {"$nin": ["verkauft", "geloescht"]}}, {"_id": 0, "id": 1})}
+        verwaist = [o["id"] for o in offene if o.get("listing_id") not in vorhanden]
+        if verwaist:
+            r = await db.listing_interest.update_many(
+                {"id": {"$in": verwaist}},
+                {"$set": {"status": "abgelehnt", "beendet_grund": "inserat_weg",
+                          "updated_at": now.isoformat()},
+                 "$push": {"history": {"von": "system", "aktion": "inserat_weg",
+                                       "zeit": now.isoformat()}}})
+            stats["interessen_verwaist_geschlossen"] = r.modified_count
     cutoff = (now - timedelta(days=INTERESSEN_AUFBEWAHRUNG_TAGE)).isoformat()
     r = await db.listing_interest.delete_many(
         {"status": {"$in": ["akzeptiert", "abgelehnt"]}, **_aelter_als(cutoff)})
@@ -853,6 +914,57 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 9
                       "pickup_address": "", "pii_geloescht_at": jetzt,
                       "pii_grund": "termin_ohne_vertrag_frist", "updated_at": jetzt}})
         n += 1
+    return n
+
+
+async def firmenreste_bereinigen(db) -> int:
+    """Nachpruefung Runde 14 (Nr. 15/13/14): Die Firmenloeschung (admin.py)
+    raeumt nur die dealer_id-gebundenen _COMPANY_COLLECTIONS. Uebrig blieben
+    Firmen-IDs in link_jobs (dealer_ids, requested_by_dealer), die
+    Quarantaene listings_cache_client (samt ingested_by_*-Herkunft) und
+    im geteilten listings_cache (confirmed_by, data.ingested_by_*) — bis
+    zur TTL bzw. bei listings_cache unbefristet. Hier laeuft je Zyklus ein
+    Nachlauf fuer alle Firmen-IDs, die nicht mehr in dealers existieren.
+    Liefert die Zahl der bereinigten Dokumente."""
+    kandidaten: set = set()
+    for coll, feld in (("link_jobs", "dealer_ids"),
+                       ("link_jobs", "requested_by_dealer"),
+                       ("listings_cache_client", "dealer_id"),
+                       ("listings_cache", "confirmed_by"),
+                       ("listings_cache", "data.ingested_by_dealer")):
+        try:
+            werte = await db[coll].distinct(feld)
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("firmenreste: %s.%s nicht lesbar: %s", coll, feld, exc)
+            continue
+        kandidaten.update(v for v in werte if isinstance(v, str) and v)
+    if not kandidaten:
+        return 0
+    vorhanden = set(await db.dealers.distinct("id", {"id": {"$in": list(kandidaten)}}))
+    weg = sorted(kandidaten - vorhanden)
+    if not weg:
+        return 0
+    n = 0
+    r = await db.link_jobs.update_many(
+        {"dealer_ids": {"$in": weg}}, {"$pull": {"dealer_ids": {"$in": weg}}})
+    n += r.modified_count
+    # _process nutzt requested_by_dealer nur fuer fetch_listing(dealer_id=…),
+    # leer ist dort zulaessig.
+    r = await db.link_jobs.update_many(
+        {"requested_by_dealer": {"$in": weg}}, {"$set": {"requested_by_dealer": ""}})
+    n += r.modified_count
+    r = await db.listings_cache_client.delete_many({"dealer_id": {"$in": weg}})
+    n += r.deleted_count
+    r = await db.listings_cache.update_many(
+        {"confirmed_by": {"$in": weg}}, {"$pull": {"confirmed_by": {"$in": weg}}})
+    n += r.modified_count
+    r = await db.listings_cache.update_many(
+        {"data.ingested_by_dealer": {"$in": weg}},
+        {"$unset": {"data.ingested_by_dealer": "", "data.ingested_by_user": ""}})
+    n += r.modified_count
+    if n:
+        log.info("firmenreste_bereinigen: %d Dokumente fuer %d geloeschte Firmen",
+                 n, len(weg))
     return n
 
 

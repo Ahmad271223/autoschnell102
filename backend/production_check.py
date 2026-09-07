@@ -244,8 +244,16 @@ def pruefe_produktion(log) -> None:
     if os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "").strip().lower() in ("1", "true", "yes"):
         warnungen.append("AUTO_DATEN_SCHAEDEN_FREITEXT=true: Freitext-Schaeden koennen "
                          "Personendaten enthalten (Standard: false).")
-    if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() in ("1", "true", "yes"):
+    if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() in ("1", "true", "yes", "ja"):
         warnungen.append("VERTRAG_LOESCHUNG_AKTIV=true: automatische Vertragsloeschung ist scharf.")
+    elif ist_prod:
+        # Nachpruefung Runde 14 (Nr. 97): der Trockenlauf ist die dokumentierte
+        # Go-Live-Voreinstellung — wird das Scharfschalten aber vergessen,
+        # laeuft die versprochene 90-Tage-Loeschung (und die Termin-Frist
+        # ohne Vertrag) in Produktion nie. Deshalb laut sagen, nicht abbrechen.
+        warnungen.append("VERTRAG_LOESCHUNG_AKTIV fehlt/false: 90-Tage-Loeschung von "
+                         "Vertraegen laeuft nur als Vorschau (Trockenlauf) — nach "
+                         "Bestandspruefung und Backup auf true setzen (DEPLOYMENT.md).")
     try:
         wc = int(os.environ.get("WEB_CONCURRENCY", "4") or 4)
         sc = int(os.environ.get("SNAPSHOT_CONCURRENCY", "1") or 1)

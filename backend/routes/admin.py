@@ -2,6 +2,7 @@
 self-password, cleanup trigger.
 """
 import base64
+import hashlib
 import re
 import asyncio
 import uuid
@@ -92,6 +93,33 @@ async def _dealer_anlegen_mit_kunden_nr(doc: dict, naechste_kunden_nr) -> None:
                 raise
 
 
+def _ablaufdatum_pruefen_400(wert, feld: str = "expires_at"):
+    """Nachpruefung Runde 14 (Befund 50): Abo-Ablauf aus der Admin-Eingabe
+    pruefen — vorher wurde der Rohwert ("31.12.2027", "irgendwann")
+    ungeprueft ins Abo geschrieben; deps.sub_status_from_doc wertet ein
+    unlesbares Datum fail-closed als "ungueltig", die Firma stand also
+    stillschweigend OHNE wirksames Abo da, der Admin bekam 200.
+    Erlaubt: leer (-> None), 'JJJJ-MM-TT' (Ablauf am Tagesende wie bei
+    _gueltig_bis_parsen) oder ein ISO-Zeitpunkt (naiv = UTC). Sonst 400
+    (nicht 422), damit die Oberflaeche die deutsche Meldung zeigt."""
+    if wert is None or str(wert).strip() == "":
+        return None
+    w = str(wert).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", w):
+        try:
+            return _gueltig_bis_parsen(w)
+        except HTTPException:
+            raise HTTPException(400, f"{feld} ist kein gueltiges Datum (JJJJ-MM-TT)")
+    try:
+        d = datetime.fromisoformat(w.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, f"{feld} muss ein ISO-Datum (JJJJ-MM-TT) "
+                                 "oder ein ISO-Zeitpunkt sein")
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.isoformat()
+
+
 # ---------- Users ----------
 @router.post("/admin/users")
 async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin)):
@@ -103,6 +131,9 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     from deps import email_vergeben
     if await email_vergeben(email):
         raise HTTPException(409, "E-Mail bereits registriert")
+    # Nachpruefung Runde 14 (Befund 50): Ablauf VOR dem ersten Insert
+    # pruefen — ein 400 hier laesst weder Konto noch Firmenprofil zurueck.
+    ablauf_eingabe = _ablaufdatum_pruefen_400(body.expires_at)
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
     try:
@@ -146,17 +177,29 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
                            "admin.user.erstellt", ref=user_id,
                            meta={"email": body.email, "plan": "none"})
         return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
-    expires = body.expires_at
+    expires = ablauf_eingabe
     if not expires and body.plan_type in ("monthly", "trial"):
         expires = (datetime.now(timezone.utc) + timedelta(days=30 if body.plan_type == "monthly" else 14)).isoformat()
     if not expires and body.plan_type == "yearly":
         expires = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
-    await db.subscriptions.insert_one({
-        "id": str(uuid.uuid4()), "dealer_id": dealer_id,
-        "plan": body.plan_type, "status": "active",
-        "expires_at": None if body.plan_type == "lifetime" else expires,
-        "created_at": now_iso(),
-    })
+    # Nachpruefung Runde 14 (Befund 49): Abo-Insert mit Rollback wie beim
+    # Firmenprofil — vorher blieb bei einem Fehler hier (DB-Ausfall
+    # zwischen zwei Inserts) eine Firma OHNE Abo stehen, und der zweite
+    # Versuch lief auf 409 "E-Mail bereits registriert". Der tote
+    # "lifetime"-Zweig ist entfernt (Literal erlaubt nur none/monthly/
+    # yearly/trial).
+    try:
+        await db.subscriptions.insert_one({
+            "id": str(uuid.uuid4()), "dealer_id": dealer_id,
+            "plan": body.plan_type, "status": "active",
+            "expires_at": expires,
+            "created_at": now_iso(),
+        })
+    except Exception:
+        await db.dealers.delete_one({"id": dealer_id})
+        await db.users.delete_one({"id": user_id})
+        log.exception("admin_create_user: Abo-Insert fehlgeschlagen")
+        raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
     await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.erstellt",
                        ref=user_id, meta={"email": body.email, "plan": body.plan_type})
     return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
@@ -344,14 +387,37 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         # Passwortwechsel beendet alle Sitzungen des Kontos — ein
         # gestohlener Token ueberlebt die Aenderung nicht (PR-Review).
         fields["current_session_id"] = None
+    # Nachpruefung Runde 14 (Befund 18): Sperren ueber PUT muss dasselbe
+    # tun wie POST /active — vorher blieb current_session_id stehen, das
+    # alte Token war nach dem Entsperren wieder gueltig (auch ein
+    # gestohlenes), und die Sucher einer per PUT gesperrten Firma
+    # behielten ihre Sitzungen. Beim Entsperren eines gesperrten Kontos
+    # wird die Sitzung ebenfalls verworfen (Altbestand, der noch ueber den
+    # alten PUT gesperrt wurde): eine Sperre darf nie eine Sitzung
+    # "konservieren".
+    sucher_abgemeldet = 0
+    if "active" in fields:
+        fields["active"] = bool(fields["active"])
+        if not fields["active"]:
+            fields["current_session_id"] = None
+            if target.get("role") == "dealer" and target.get("dealer_id"):
+                r = await db.users.update_many(
+                    {"dealer_id": target["dealer_id"], "role": "sucher"},
+                    {"$set": {"current_session_id": None, "updated_at": now_iso()}})
+                sucher_abgemeldet = r.modified_count
+        elif not target.get("active", True):
+            fields["current_session_id"] = None
     if fields:
-        await db.users.update_one({"id": user_id}, {"$set": fields})
+        await db.users.update_one({"id": user_id},
+                                  {"$set": {**fields, "updated_at": now_iso()}})
     if "plan_type" in body:
         u = await db.users.find_one({"id": user_id})
         if not u:
             raise HTTPException(404)
         plan = body["plan_type"]
-        expires = body.get("expires_at")
+        # Nachpruefung Runde 14 (Befund 50): derselbe Altpfad wie bei der
+        # Firmenanlage — Rohwert nie ungeprueft ins Abo schreiben.
+        expires = _ablaufdatum_pruefen_400(body.get("expires_at"))
         if plan == "lifetime":
             expires = None
         sub_doc = {
@@ -375,8 +441,9 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     if fields:
         await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.aktualisiert",
                            ref=user_id, meta={"felder": sorted(fields.keys()),
-                                              "email": target.get("email", "")})
-    return {"ok": True}
+                                              "email": target.get("email", ""),
+                                              "sucher_abgemeldet": sucher_abgemeldet})
+    return {"ok": True, "sucher_abgemeldet": sucher_abgemeldet}
 
 
 # Alles, was einer Firma gehoert (dealer_id-Verweis) — Grundlage fuer
@@ -384,7 +451,7 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
 # activity_logs (Plattform-Nachvollziehbarkeit) und payment_transactions
 # (Buchhaltungs-/Aufbewahrungspflicht).
 _COMPANY_COLLECTIONS = (
-    "users", "subscriptions", "vehicles", "appointments",
+    "subscriptions", "vehicles", "appointments",
     "generated_pdfs", "generated_pdf_versions", "resale_listings",
     "listing_interest", "pickup_protocols", "pickup_reports",
     # driver_accounts NICHT: Fahrer-Konten sind firmenneutral (kein
@@ -393,6 +460,10 @@ _COMPANY_COLLECTIONS = (
     # Admin ueber DELETE /admin/drivers/{id}.
     "dealer_drivers", "dealer_invites",
     "plan_requests", "vehicle_comparisons",
+    # Nachpruefung Runde 14 (Befund 58): users ZULETZT — bricht die
+    # Firmenloeschung mittendrin ab, findet der erneute Aufruf ueber den
+    # Chef-Account den Vorgang noch (vorher: 404, Rest blieb verwaist).
+    "users",
 )
 
 
@@ -444,22 +515,62 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # seiner personenbezogenen Reste (DSGVO): Netzwerk-Mitgliedschaften,
         # Favoriten, Kaufanfragen und offene Passwort-Resets. Vorher blieb
         # all das nach der "vollstaendigen" Loeschung zurueck.
-        await db.users.delete_one({"id": user_id})
+        #
+        # Nachpruefung Runde 14 (Befund 58): Reihenfolge wie bei
+        # cleanup_service.vertrag_endgueltig_loeschen — Grabstein zuerst,
+        # Nebendaten danach, das users-Dokument ZULETZT. Vorher wurde das
+        # Konto als Erstes geloescht; brach der Prozess danach ab, blieben
+        # Abo/Favoriten/Resets ohne Bezugskonto zurueck und ein erneuter
+        # Aufruf lief auf 404 statt nachzuholen. Jetzt ist jeder Schritt
+        # wiederholbar: der Grabstein sperrt das Konto sofort (kein Login,
+        # keine Sitzung), ein zweiter Aufruf fuehrt die Loeschung zu Ende.
+        jetzt = now_iso()
+        grab = u.get("loeschung") or {}
+        if grab.get("status") == "laeuft":
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {"loeschung.gestartet": jetzt, "active": False,
+                          "current_session_id": None, "updated_at": jetzt},
+                 "$inc": {"loeschung.wiederaufnahmen": 1}})
+        else:
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
+                                        "grund": "admin", "durch": admin["id"]},
+                          "active": False, "current_session_id": None,
+                          "updated_at": jetzt}})
         await db.subscriptions.delete_many({"subject_user_id": user_id})
         await db.network_members.delete_many({"buyer_user_id": user_id})
         await db.buyer_favorites.delete_many({"buyer_user_id": user_id})
         await db.listing_interest.delete_many({"buyer_user_id": user_id})
         await db.plan_requests.delete_many({"buyer_user_id": user_id})
-        if u.get("email"):
-            # Reset-Dokumente tragen user_id, keine E-Mail (Runde 5).
-            await db.password_resets.delete_many({"user_id": user_id})
+        # Reset-Dokumente tragen user_id, keine E-Mail (Runde 5).
+        await db.password_resets.delete_many({"user_id": user_id})
+        # Nachpruefung Runde 14 (Befund 24): zugang_grants (Stripe-
+        # Freischaltungen, routes/payments.py) blieben mit der user_id
+        # stehen — die Collection raeumte sonst niemand auf. Sie werden
+        # NICHT geloescht, sondern pseudonymisiert: der Grant gehoert zur
+        # Zahlung (session_id) und ist wie payment_transactions Teil der
+        # Buchhaltung (Beleg, welche Laufzeit fuer welche Zahlung gutge-
+        # schrieben wurde) — nur der Personenbezug faellt weg. Pseudonym
+        # deterministisch (SHA-256 der Konto-ID, 8 Hex) wie bei
+        # fahrer_konto_anonymisieren: mehrfach laufende Loeschung ergibt
+        # denselben Wert, mehrere Grants desselben Kontos bleiben als
+        # zusammengehoerig erkennbar, ohne Rueckschluss auf die Person.
+        pseudonym = "geloescht:" + hashlib.sha256(
+            user_id.encode("utf-8")).hexdigest()[:8]
+        await db.zugang_grants.update_many(
+            {"user_id": user_id},
+            {"$set": {"user_id": pseudonym, "pseudonymisiert_at": jetzt}})
         # Runde 13: B8 — Nutzerkennung in Beweis-Snapshots pseudonymisieren.
         from snapshot_service import snapshots_pseudonymisieren
         await snapshots_pseudonymisieren(db, user_id=user_id)
+        await db.users.delete_one({"id": user_id})
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.geloescht", ref=user_id,
                            meta={"email": u.get("email", ""),
-                                 "rolle": u.get("role", "")})
+                                 "rolle": u.get("role", ""),
+                                 "wiederaufnahme": grab.get("status") == "laeuft"})
         return {"ok": True, "geloescht": "nur_nutzer"}
 
     dealer_id = u.get("dealer_id")
@@ -485,10 +596,32 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # Beweisarchive ANDERER Firmen zerstoeren. Sie enthalten nur
         # oeffentliche Inseratsdaten und verfallen ueber die
         # SNAPSHOT_RETENTION_DAYS-Aufraeumlogik.
+        #
+        # Nachpruefung Runde 14 (Befund 58): Grabstein am Firmenprofil
+        # (Muster cleanup_service.vertrag_endgueltig_loeschen) — die
+        # Firma ist ab jetzt als "in Loeschung" erkennbar; dealers wird
+        # weiterhin als Letztes entfernt, users (in _COMPANY_COLLECTIONS)
+        # erst nach allen Nebendaten.
+        jetzt = now_iso()
+        await db.dealers.update_one(
+            {"id": dealer_id},
+            {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
+                                    "grund": "admin", "durch": admin["id"]},
+                      "updated_at": jetzt}})
+        # Nachpruefung Runde 14 (Befund 12): password_resets tragen user_id,
+        # kein dealer_id — die Konto-IDs der Firma VOR dem Loeschen der
+        # users einsammeln, sonst bleiben die Reset-Dokumente (token_hash,
+        # requested_ip) bis zum TTL-Ablauf (7 Tage) stehen.
+        user_ids = [x["id"] async for x in db.users.find(
+            {"dealer_id": dealer_id}, {"_id": 0, "id": 1})]
         for coll in _COMPANY_COLLECTIONS:
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
                 geloescht[coll] = res.deleted_count
+        if user_ids:
+            res = await db.password_resets.delete_many({"user_id": {"$in": user_ids}})
+            if res.deleted_count:
+                geloescht["password_resets"] = res.deleted_count
         # Runde 13: B8 — die Snapshot-Zeilen bleiben (Beweiszweck), aber die
         # Zuordnung "welche Firma, welcher Nutzer hat gesichert" wird
         # pseudonymisiert; vorher blieben dealer_id/user_id unbegrenzt stehen.
@@ -571,6 +704,17 @@ async def admin_user_set_active(
     if not body.active:
         patch["current_session_id"] = None
     await db.users.update_one({"id": user_id}, {"$set": patch})
+    if not body.active and u.get("role") == "b2b_buyer":
+        # Nachpruefung Runde 14 (Befund 1): Ein gesperrter Kaeufer darf keine
+        # laufende Verhandlung behalten — sonst koennte der Haendler seine
+        # alte Anfrage spaeter noch annehmen und fuer ihn reservieren.
+        await db.listing_interest.update_many(
+            {"buyer_user_id": user_id,
+             "status": {"$in": ["offen", "gegenangebot", "gegenangebot_kaeufer"]}},
+            {"$set": {"status": "abgelehnt", "beendet_grund": "kaeufer_gesperrt",
+                      "updated_at": now_iso()},
+             "$push": {"history": {"von": "system", "aktion": "kaeufer_gesperrt",
+                                   "zeit": now_iso()}}})
     sucher_abgemeldet = 0
     if not body.active and u.get("role") == "dealer" and u.get("dealer_id"):
         # Firmensperre (Audit 09/2026): auch die Sitzungen aller Sucher der
@@ -668,15 +812,48 @@ async def _fahrer_or_404(driver_id: str) -> dict:
 async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
                                   admin=Depends(current_super_admin)):
     d = await _fahrer_or_404(driver_id)
-    fields = {"active": body.active, "updated_at": now_iso()}
+    jetzt = now_iso()
+    fields = {"active": body.active, "updated_at": jetzt}
     if not body.active:
         # Sperren beendet die laufende Sitzung sofort (Single-Session strikt).
         fields["current_session_id"] = None
     await db.driver_accounts.update_one({"id": driver_id}, {"$set": fields})
+    termine_getrennt = 0
+    if not body.active:
+        # Nachpruefung Runde 14 (Befund 17): offene Fahrten (offen/
+        # bestaetigt/verschoben/in Bearbeitung, leerer Status = offen) vom
+        # gesperrten Fahrer trennen — er kommt nicht mehr an die Fahrer-
+        # App, und der Firmenkalender zeigt keinen Sperrstatus: die Fahrten
+        # hingen unsichtbar an einem Fahrer, der sie nie abholt. Dieselbe
+        # Regel wie DELETE /drivers/{id} (routes/drivers.py): Zuweisung weg,
+        # offene Annahme-Anfrage verworfen (zuteilung=None), der Chef
+        # teilt neu zu. Abgeschlossene Fahrten behalten ihre Zuordnung.
+        # Jede betroffene Firma bekommt einen Eintrag in ihrem Audit-Log,
+        # damit der Chef die neu zuzuteilenden Termine findet.
+        from routes.drivers import _OFFEN_WERTE
+        filt = {"driver_id": driver_id, "status": {"$in": _OFFEN_WERTE}}
+        betroffen = [a async for a in db.appointments.find(
+            filt, {"_id": 0, "id": 1, "dealer_id": 1})]
+        if betroffen:
+            r = await db.appointments.update_many(
+                filt, {"$unset": {"driver_id": ""},
+                       "$set": {"zuteilung": None, "updated_at": jetzt}})
+            termine_getrennt = r.modified_count
+            je_firma: Dict[str, list] = {}
+            for a in betroffen:
+                je_firma.setdefault(a.get("dealer_id") or "", []).append(a["id"])
+            for firma_id, termin_ids in je_firma.items():
+                await log_activity(firma_id, admin["id"],
+                                   "fahrer.gesperrt.termine_freigegeben",
+                                   ref=driver_id,
+                                   meta={"driver_code": d.get("driver_code", ""),
+                                         "termine": termin_ids})
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.entsperrt" if body.active else "admin.fahrer.gesperrt",
-                       ref=driver_id, meta={"email": d.get("email", "")})
-    return {"ok": True, "active": body.active}
+                       ref=driver_id, meta={"email": d.get("email", ""),
+                                            "offene_termine_getrennt": termine_getrennt})
+    return {"ok": True, "active": body.active,
+            "offene_termine_getrennt": termine_getrennt}
 
 
 @router.post("/admin/drivers/{driver_id}/password")
@@ -991,10 +1168,26 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
     elif old.get("valid_until"):
         plan["valid_until"] = old["valid_until"]
     if tier == "enterprise":
-        try:
-            plan["custom_quota"] = int(body.get("custom_quota") or 0) or None
-        except (TypeError, ValueError):
+        # Nachpruefung Runde 14 (Befund 32): ungueltige Eingabe ("abc",
+        # "1o0", negativ) wurde still zu custom_quota=None — mit
+        # VERKAUF_KOSTENLOS=false hiess das quota=0, und resale.py
+        # ueberspringt bei 0 die Kontingentpruefung (= unbegrenzt). Jetzt
+        # 400; leer/None bleibt erlaubt (Enterprise ohne feste Zahl).
+        cq = body.get("custom_quota")
+        if cq is None or (isinstance(cq, str) and cq.strip() == ""):
             plan["custom_quota"] = None
+        else:
+            if isinstance(cq, bool):
+                raise HTTPException(400, "custom_quota muss eine ganze Zahl sein")
+            if isinstance(cq, float) and cq.is_integer():
+                cq = int(cq)
+            try:
+                n = int(cq) if isinstance(cq, int) else int(str(cq).strip())
+            except (TypeError, ValueError):
+                raise HTTPException(400, "custom_quota muss eine ganze Zahl sein")
+            if n < 0:
+                raise HTTPException(400, "custom_quota darf nicht negativ sein")
+            plan["custom_quota"] = n or None
     await db.dealers.update_one({"id": dealer_id}, {"$set": {"sale_plan": plan}})
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.verkaufsplan.gesetzt", ref=dealer_id,

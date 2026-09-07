@@ -32,6 +32,7 @@ import traceback
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -100,6 +101,37 @@ app = FastAPI(
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
     lifespan=lifespan,
 )
+
+
+def _json_sicher(wert):
+    """Nachpruefung Runde 14 (Nr. 80/95): Pydantic haengt an jeden
+    Validierungsfehler das Eingabe-Echo. Enthaelt es Unendlich oder NaN
+    (JSON-Token "Infinity"), scheitert die 422-Antwort selbst an
+    json.dumps (allow_nan=False) und der Client sah 500 statt 422."""
+    if isinstance(wert, float) and (wert != wert or wert in (float("inf"), float("-inf"))):
+        return str(wert)
+    if isinstance(wert, dict):
+        return {k: _json_sicher(v) for k, v in wert.items()}
+    if isinstance(wert, (list, tuple)):
+        return [_json_sicher(v) for v in wert]
+    if isinstance(wert, (str, int, bool)) or wert is None:
+        return wert
+    return str(wert)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validierungsfehler(request: Request, exc: RequestValidationError):
+    from fastapi.responses import JSONResponse
+    fehler = []
+    for e in exc.errors():
+        e = dict(e)
+        e.pop("url", None)
+        if "ctx" in e:
+            e["ctx"] = _json_sicher({k: (str(v) if isinstance(v, Exception) else v)
+                                     for k, v in e["ctx"].items()})
+        e["input"] = _json_sicher(e.get("input"))
+        fehler.append(e)
+    return JSONResponse(status_code=422, content={"detail": fehler})
 api = APIRouter(prefix="/api")
 
 
@@ -493,6 +525,86 @@ async def _kunden_nr_unique_index() -> None:
                                       name="kunden_nr_unique")
 
 
+async def _storage_retry_unique_index() -> None:
+    """Nachpruefung Runde 14 (Nr. 61): storage_delete_retry hatte nur einen
+    Index auf `aufgegeben`; der Upsert in storage_service (Filter art/key/
+    prefix) lief ohne Unique-Index und erzeugte unter Last mehrere Zeilen je
+    Ziel — getrennte Versuchszaehler und doppelte Alarme
+    datei_loeschung_aufgegeben. Dazu zwei feste Dublettenquellen: die
+    Firmenloeschung (admin.py) schrieb Praefix-Eintraege OHNE art/key, der
+    Protokoll-Rollback per insert_one ohne Deduplizierung.
+
+    Ablauf (idempotent): Alt-Eintraege ohne `art` auf die storage_service-
+    Form normalisieren, Dubletten je (art, key, prefix) auf die aelteste
+    Zeile zusammenlegen (reine Nachhol-Buchhaltung — es geht nichts
+    verloren, das Ziel ist dasselbe), dann Unique-Index `retry_je_ziel`."""
+    try:
+        # Altzeilen einzeln normalisieren: Existiert der Unique-Index schon
+        # (zweiter Start) und liegt bereits eine normalisierte Zwillingszeile
+        # vor, wuerde ein pauschales update_many am Index scheitern und die
+        # ganze Nachhol-Buchhaltung abbrechen.
+        async for alt in db.storage_delete_retry.find({"art": {"$exists": False}}):
+            zwilling = await db.storage_delete_retry.find_one(
+                {"art": "prefix", "key": None, "prefix": alt.get("prefix"),
+                 "_id": {"$ne": alt["_id"]}}, {"_id": 1, "created_at": 1})
+            if zwilling and str(zwilling.get("created_at") or "") <= str(alt.get("created_at") or ""):
+                # Zwilling ist aelter (oder gleich alt): Altzeile weg
+                await db.storage_delete_retry.delete_one({"_id": alt["_id"]})
+                continue
+            if zwilling:
+                # Altzeile ist die aeltere: Zwilling weg, Altzeile normalisieren
+                await db.storage_delete_retry.delete_one({"_id": zwilling["_id"]})
+            await db.storage_delete_retry.update_one(
+                {"_id": alt["_id"]}, {"$set": {"art": "prefix", "key": None}})
+        await db.storage_delete_retry.update_many(
+            {"prefix": {"$exists": False}}, {"$set": {"prefix": None}})
+        async for row in db.storage_delete_retry.aggregate([
+                {"$sort": {"created_at": 1}},
+                {"$group": {"_id": {"art": "$art", "key": "$key",
+                                    "prefix": "$prefix"},
+                            "keep": {"$first": "$_id"}, "n": {"$sum": 1}}},
+                {"$match": {"n": {"$gt": 1}}}]):
+            z = row["_id"]
+            await db.storage_delete_retry.delete_many(
+                {"art": z.get("art"), "key": z.get("key"),
+                 "prefix": z.get("prefix"), "_id": {"$ne": row["keep"]}})
+            log.warning("ensure_indexes: storage_delete_retry-Dubletten "
+                        "zusammengelegt: %s (%d Zeilen)", z, row["n"])
+        await db.storage_delete_retry.create_index(
+            [("art", 1), ("key", 1), ("prefix", 1)], unique=True,
+            name="retry_je_ziel")
+    except Exception as exc:
+        log.warning("ensure_indexes: storage_delete_retry.retry_je_ziel: %s", exc)
+
+
+async def _plan_requests_unique_indizes() -> None:
+    """Nachpruefung Runde 14 (Nr. 56/57, Vorarbeit fuer den atomaren Upsert
+    in routes/team.py): hoechstens EINE offene Anfrage je Sucher (sucher_abo)
+    bzw. je Firma (verkaufspaket) — als Teil-Unique-Index, damit erledigte/
+    abgelehnte Anfragen die Historie behalten. Altbestand mit mehreren
+    offenen Anfragen wird nicht automatisch veraendert (das ist eine
+    Betreiber-Entscheidung): dann bleibt es beim Fehlerhinweis mit den
+    betroffenen Schluesseln, und der Code-Pfad (find_one vor insert) gilt
+    weiter."""
+    for name, felder, typ in (
+            ("uniq_offene_sucher_abo_anfrage", "subject_user_id", "sucher_abo"),
+            ("uniq_offene_verkaufspaket_anfrage", "dealer_id", "verkaufspaket")):
+        try:
+            await db.plan_requests.create_index(
+                [("type", 1), (felder, 1)], unique=True, name=name,
+                partialFilterExpression={"type": typ, "status": "offen"})
+        except Exception as exc:
+            doppelte = await db.plan_requests.aggregate([
+                {"$match": {"type": typ, "status": "offen"}},
+                {"$group": {"_id": f"${felder}", "n": {"$sum": 1}}},
+                {"$match": {"n": {"$gt": 1}}}, {"$limit": 10}]).to_list(10)
+            log.error("ensure_indexes: plan_requests.%s nicht anlegbar: %s — "
+                      "mehrfach offene Anfragen fuer %s: %s (aeltere auf "
+                      "erledigt/abgelehnt setzen, dann greift der Index)",
+                      name, exc, felder,
+                      ", ".join(str(d["_id"]) for d in doppelte) or "?")
+
+
 async def ensure_indexes():
     await _unique_index_sicher(db.users, "email")
     await _unique_index_sicher(db.dealers, "user_id")
@@ -537,6 +649,22 @@ async def ensure_indexes():
     except Exception as exc:
         log.warning("ensure_indexes: Index konnte nicht angelegt werden "
                        "— Eindeutigkeits-Garantie fehlt! %s", exc)
+    # Nachpruefung Runde 14 (Nr. 60): zugang_grants ist der Idempotenz-
+    # Schluessel der Stripe-Freischaltung (find_one_and_update mit upsert je
+    # session_id). Ohne Unique-Index erzeugen parallele Upserts nachweislich
+    # Dubletten (Abgleich startet eine haengende Aktivierung neu, waehrend
+    # der alte Aufruf noch laeuft). Mongo wiederholt einen Upsert bei
+    # DuplicateKey auf Gleichheitsfilter selbst — payments.py bleibt gleich.
+    # Altbestand mit Dubletten wird NICHT automatisch geloescht (Geld-Belege):
+    # dann bleibt es beim Warnhinweis, bereinigen mit scripts/dubletten_pruefen.py.
+    try:
+        await db.zugang_grants.create_index("session_id", unique=True,
+                                            name="grant_je_session")
+    except Exception as exc:
+        log.warning("ensure_indexes: zugang_grants.session_id (Dubletten im "
+                    "Altbestand? scripts/dubletten_pruefen.py): %s", exc)
+    await _storage_retry_unique_index()
+    await _plan_requests_unique_indizes()
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
     # Audit-Log + Fehler-Meldungen (Admin-Bereich)
     await db.activity_logs.create_index([("created_at", -1)])

@@ -379,6 +379,12 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
             bestaetiger.append(other)
     if len(bestaetiger) + 1 >= min_dealers:
         other = bestaetiger[0]
+        # Nachpruefung Runde 14 (Nr. 14): die Herkunftsfelder
+        # ingested_by_user/ingested_by_dealer (routes/listings.py) gehoeren
+        # in die Quarantaene des Einreichers — nicht in den geteilten Cache,
+        # den peek_cached_listing ALLEN Firmen liefert.
+        freigabe = {k: v for k, v in (other.get("data") or data).items()
+                    if not str(k).startswith("ingested_by_")}
         if True:
             await db.listings_cache.update_one(
                 {"cache_key": cache_key},
@@ -388,7 +394,7 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
                           # Die AELTERE Einreichung wird veroeffentlicht:
                           # wer als Zweiter bestaetigt, bestimmt nicht den
                           # Inhalt, den alle Haendler sehen.
-                          "url": url, "data": other.get("data") or data,
+                          "url": url, "data": freigabe,
                           "fetched_at": now,
                           # Kuerzere TTL als Server-Abrufe: Client-Daten
                           # sind Momentaufnahmen zweier Browser, keine

@@ -24,7 +24,13 @@ STANDARD_TTL = int(os.environ.get("DATEI_LINK_TTL_SEKUNDEN", "3600") or 3600)
 
 
 def _geheimnis() -> bytes:
-    return (os.environ.get("JWT_SECRET") or "dev-secret").encode("utf-8")
+    # Nachpruefung Runde 14 (Nr. 25): dasselbe Geheimnis wie die Anmeldung
+    # (auth.JWT_SECRET) — auch in Dev/Test ohne gesetztes JWT_SECRET, wo
+    # auth.py ein Zufalls-Secret erzeugt und os.environ leer bleibt. Der
+    # Import liegt in der Funktion, damit ein zur Laufzeit geaendertes
+    # auth.JWT_SECRET (Tests) sofort gilt; auth importiert dateien nicht.
+    import auth
+    return str(auth.JWT_SECRET).encode("utf-8")
 
 
 def _mac(key: str, exp: int) -> str:

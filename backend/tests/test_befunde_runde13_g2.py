@@ -198,7 +198,10 @@ def test_b4_env_vorlage_nennt_die_pflicht():
 
 def test_b4_dateien_signatur_regeln(monkeypatch):
     """Gegenprobe der Signaturlogik, die der Schalter aushebelte."""
-    monkeypatch.setenv("JWT_SECRET", "r13-" + uuid.uuid4().hex + uuid.uuid4().hex)
+    # Runde 14 (Nr. 25): dateien.py rechnet mit auth.JWT_SECRET, nicht mehr
+    # mit os.environ — deshalb das Modul-Attribut patchen.
+    import auth
+    monkeypatch.setattr(auth, "JWT_SECRET", "r13-" + uuid.uuid4().hex + uuid.uuid4().hex)
     import dateien
     key = f"resale/d_{SUF}/{uuid.uuid4().hex}.jpg"
     assert dateien.signatur_noetig(key) is True
@@ -221,7 +224,7 @@ def test_b4_dateien_signatur_regeln(monkeypatch):
         "Signatur gilt nur fuer genau diesen Schluessel"
     assert dateien.signierte_datei_url("logo/firma.png") == "/api/files/logo/firma.png"
     # anderes Geheimnis -> Signatur wertlos (Load Balancer: gleiches JWT_SECRET!)
-    monkeypatch.setenv("JWT_SECRET", "r13-anderes-" + uuid.uuid4().hex + uuid.uuid4().hex)
+    monkeypatch.setattr(auth, "JWT_SECRET", "r13-anderes-" + uuid.uuid4().hex + uuid.uuid4().hex)
     assert dateien.signatur_gueltig(key, exp, sig) is False
 
 

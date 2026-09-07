@@ -440,6 +440,11 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             setzen.update({"status": "abgeholt",
                            "status_changed_at": now_iso()})
         await db.appointments.update_one({"id": appt_id}, {"$set": setzen})
+        # Nachpruefung Runde 14 (Befund 114): Aufraeum-Frist ab dem ERSTEN
+        # Abschluss — nur setzen, wenn noch leer.
+        await db.appointments.update_one(
+            {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
+            {"$set": {"abgeschlossen_seit": now_iso()}})
         if appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"],
                                     appt.get("dealer_id", ""), "abgeholt")
@@ -617,6 +622,11 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         {"id": appt_id},
         {"$set": {"status": "abgeholt", "status_changed_at": now_iso(),
                   "protocol_id": doc["id"]}})
+    # Nachpruefung Runde 14 (Befund 114): Aufraeum-Frist ab dem ERSTEN
+    # Abschluss — nur setzen, wenn noch leer.
+    await db.appointments.update_one(
+        {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
+        {"$set": {"abgeschlossen_seit": now_iso()}})
     if appt.get("vehicle_id"):
         await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
     await log_activity(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",

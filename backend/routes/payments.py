@@ -257,88 +257,28 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
     plan = tx.get("plan")
     now = datetime.now(timezone.utc)
     if plan == "marktplatz":
-        days = PLAN_PRICES["marktplatz"]["days"]
-        u = await db.users.find_one({"id": tx.get("user_id")},
-                                    {"_id": 0, "id": 1, "role": 1, "active": 1,
-                                     "marketplace_access": 1})
-        # Achtung: bei einem Konto OHNE marketplace_access liefert die
-        # Projektion sonst ein leeres Dokument — deshalb auf None pruefen,
-        # nicht auf "leer".
-        if u is None:
+        # Nachpruefung Runde 14 (Nr. 59): _activate_paid_transaction
+        # serialisiert nur je session_id. Zwei bezahlte Sessions DESSELBEN
+        # Kaeufers (Webhook + Poll + Abgleich) lasen bisher gleichzeitig den
+        # alten Ablauf, schrieben beide "+30 Tage" ab derselben Basis — zwei
+        # Zahlungen, nur einmal verlaengert. Deshalb der Block lesen -> Grant
+        # -> schreiben jetzt je Kaeufer hinter der Job-Sperre (job_lock);
+        # dazu unten ein Compare-and-Swap auf den gelesenen Ablauf als
+        # Backstop, falls die Sperre ausfaellt.
+        from job_lock import acquire, release
+        sperre = f"zugang_freischalten:{tx.get('user_id')}"
+        for _ in range(100):
+            if await acquire(db, sperre, ttl_seconds=30):
+                break
+            await asyncio.sleep(0.1)
+        else:
             raise RuntimeError(
-                f"Kein Konto zu Zahlung {session_id} gefunden "
+                f"Freischaltung {session_id}: Kontosperre nicht erhalten "
                 f"(user_id={tx.get('user_id')})")
-        # Runde 13: A5 — vorher wurde nur beim Checkout auf b2b_buyer geprueft;
-        # der Webhook/Poll/Abgleich schrieb den Zugang spaeter blind an jede
-        # Rolle. Jetzt: keine Kaeufer-Rolle mehr -> RuntimeError, damit
-        # _activate_paid_transaction auf activation_failed geht und der
-        # Betriebsalarm zahlung_ohne_zugang einen Menschen holt.
-        if u.get("role") != "b2b_buyer":
-            raise RuntimeError(
-                f"Konto zu Zahlung {session_id} ist kein Zwischenhaendler mehr "
-                f"(Rolle={u.get('role')!r}, user_id={tx.get('user_id')}) — "
-                "Zugang nicht freigeschaltet")
-        # Runde 13: A6 — vorher setzte die Stripe-Freischaltung marketplace_access
-        # auch auf ein gesperrtes Konto (active=False): Laufzeit lief waehrend der
-        # Sperre ab, Transaktion ging still auf "active", der Betreiber erfuhr
-        # nichts. Jetzt fail-closed wie beim fehlenden Konto: activation_failed +
-        # Alarm zahlung_ohne_zugang; nach dem Entsperren holt der stuendliche
-        # Abgleich (bzw. der Poll des Kaeufers) die Freischaltung nach, die 30
-        # Tage beginnen erst dann (Grant entsteht erst bei Erfolg).
-        if not u.get("active"):
-            raise RuntimeError(
-                f"Konto zu Zahlung {session_id} ist gesperrt "
-                f"(user_id={tx.get('user_id')}) — Freischaltung zurueckgestellt, "
-                f"bis der Betreiber das Konto entsperrt")
-        acc = u.get("marketplace_access") or {}
-        basis = now
-        # Runde 13: A6 — gesperrter Zugang (Betreiber, plan=null) wird nicht
-        # mehr als Restlaufzeit gutgeschrieben (wie admin._restlaufzeit_basis).
-        alt = _parse_ts(acc.get("expires_at")) if acc.get("active") else None
-        if alt and alt > basis:
-            basis = alt
-        # Audit 09/2026: Das Ablaufdatum wird EINMALIG je Stripe-Session
-        # festgeschrieben. Scheitert danach etwas (z.B. der Beleg) und der
-        # Reparaturlauf wiederholt die Freischaltung, wird derselbe Wert
-        # erneut gesetzt statt ein zweites Mal um 30 Tage verlaengert.
-        grant = await db.zugang_grants.find_one_and_update(
-            {"session_id": session_id},
-            {"$setOnInsert": {
-                "id": str(uuid.uuid4()), "session_id": session_id,
-                "user_id": tx.get("user_id"), "plan": "marktplatz",
-                "tage": days, "basis": basis.isoformat(),
-                "expires_at": (basis + timedelta(days=days)).isoformat(),
-                "created_at": now_iso()}},
-            upsert=True, return_document=ReturnDocument.AFTER)
-        expires_at = grant["expires_at"]
-        # Runde 10: Ein SPAETERER Reparaturlauf einer aelteren Zahlung darf
-        # ein inzwischen laengeres Ablaufdatum nicht zurueckdrehen. Ist der
-        # bestehende Zugang schon laenger gueltig, bleibt er — die Zahlung
-        # gilt als verbucht, die Laufzeit wird nie kuerzer.
-        aktuell = acc.get("expires_at") if acc.get("active") else None
-        if aktuell and str(aktuell) > str(expires_at):
-            expires_at = aktuell
-        neu = {"active": True, "plan": "monthly",
-               "price": PLAN_PRICES["marktplatz"]["amount"],
-               "expires_at": expires_at,
-               "activated_by": "stripe",
-               "session_id": session_id,
-               "updated_at": now_iso()}
-        # Runde 13: C6 — Zahlung loescht keine Betreiber-Sperre: die Laufzeit
-        # wird verlaengert, die Sperrfelder bleiben erhalten.
-        for k in ("gesperrt", "gesperrt_am", "gesperrt_von"):
-            if acc.get(k) is not None:
-                neu[k] = acc[k]
-        # Runde 13: A5 — rennsicher: Rollenwechsel zwischen find_one und
-        # update_one faengt matched_count == 0 unten ab.
-        r = await db.users.update_one(
-            {"id": tx.get("user_id"), "role": "b2b_buyer"},
-            {"$set": {"marketplace_access": neu}})
-        if r.matched_count == 0:
-            raise RuntimeError(
-                f"Zugang zu Zahlung {session_id} konnte keinem Konto "
-                f"zugeordnet werden (user_id={tx.get('user_id')})")
-        return expires_at
+        try:
+            return await _marktplatz_zugang_verlaengern(tx, session_id, now)
+        finally:
+            await release(db, sperre)
     # Alt-Pläne (Bestands-Transaktionen von vor 09/2026)
     days = 30 if plan == "monthly" else 365
     expires_at = (now + timedelta(days=days)).isoformat()
@@ -362,6 +302,105 @@ async def _zugang_freischalten(tx: dict, session_id: str) -> str:
         }},
         upsert=True,
     )
+    return expires_at
+
+
+async def _marktplatz_zugang_verlaengern(tx: dict, session_id: str,
+                                        now: datetime) -> str:
+    """Marktplatz-Zweig von _zugang_freischalten — laeuft hinter der
+    Kontosperre (Runde 14, Nr. 59). Liefert das Ablaufdatum (ISO)."""
+    days = PLAN_PRICES["marktplatz"]["days"]
+    u = await db.users.find_one({"id": tx.get("user_id")},
+                                {"_id": 0, "id": 1, "role": 1, "active": 1,
+                                 "marketplace_access": 1})
+    # Achtung: bei einem Konto OHNE marketplace_access liefert die
+    # Projektion sonst ein leeres Dokument — deshalb auf None pruefen,
+    # nicht auf "leer".
+    if u is None:
+        raise RuntimeError(
+            f"Kein Konto zu Zahlung {session_id} gefunden "
+            f"(user_id={tx.get('user_id')})")
+    # Runde 13: A5 — vorher wurde nur beim Checkout auf b2b_buyer geprueft;
+    # der Webhook/Poll/Abgleich schrieb den Zugang spaeter blind an jede
+    # Rolle. Jetzt: keine Kaeufer-Rolle mehr -> RuntimeError, damit
+    # _activate_paid_transaction auf activation_failed geht und der
+    # Betriebsalarm zahlung_ohne_zugang einen Menschen holt.
+    if u.get("role") != "b2b_buyer":
+        raise RuntimeError(
+            f"Konto zu Zahlung {session_id} ist kein Zwischenhaendler mehr "
+            f"(Rolle={u.get('role')!r}, user_id={tx.get('user_id')}) — "
+            "Zugang nicht freigeschaltet")
+    # Runde 13: A6 — vorher setzte die Stripe-Freischaltung marketplace_access
+    # auch auf ein gesperrtes Konto (active=False): Laufzeit lief waehrend der
+    # Sperre ab, Transaktion ging still auf "active", der Betreiber erfuhr
+    # nichts. Jetzt fail-closed wie beim fehlenden Konto: activation_failed +
+    # Alarm zahlung_ohne_zugang; nach dem Entsperren holt der stuendliche
+    # Abgleich (bzw. der Poll des Kaeufers) die Freischaltung nach, die 30
+    # Tage beginnen erst dann (Grant entsteht erst bei Erfolg).
+    if not u.get("active"):
+        raise RuntimeError(
+            f"Konto zu Zahlung {session_id} ist gesperrt "
+            f"(user_id={tx.get('user_id')}) — Freischaltung zurueckgestellt, "
+            f"bis der Betreiber das Konto entsperrt")
+    acc = u.get("marketplace_access") or {}
+    basis = now
+    # Runde 13: A6 — gesperrter Zugang (Betreiber, plan=null) wird nicht
+    # mehr als Restlaufzeit gutgeschrieben (wie admin._restlaufzeit_basis).
+    alt = _parse_ts(acc.get("expires_at")) if acc.get("active") else None
+    if alt and alt > basis:
+        basis = alt
+    # Audit 09/2026: Das Ablaufdatum wird EINMALIG je Stripe-Session
+    # festgeschrieben. Scheitert danach etwas (z.B. der Beleg) und der
+    # Reparaturlauf wiederholt die Freischaltung, wird derselbe Wert
+    # erneut gesetzt statt ein zweites Mal um 30 Tage verlaengert.
+    grant_neu_id = str(uuid.uuid4())
+    grant = await db.zugang_grants.find_one_and_update(
+        {"session_id": session_id},
+        {"$setOnInsert": {
+            "id": grant_neu_id, "session_id": session_id,
+            "user_id": tx.get("user_id"), "plan": "marktplatz",
+            "tage": days, "basis": basis.isoformat(),
+            "expires_at": (basis + timedelta(days=days)).isoformat(),
+            "created_at": now_iso()}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    expires_at = grant["expires_at"]
+    # Runde 10: Ein SPAETERER Reparaturlauf einer aelteren Zahlung darf
+    # ein inzwischen laengeres Ablaufdatum nicht zurueckdrehen. Ist der
+    # bestehende Zugang schon laenger gueltig, bleibt er — die Zahlung
+    # gilt als verbucht, die Laufzeit wird nie kuerzer.
+    aktuell = acc.get("expires_at") if acc.get("active") else None
+    if aktuell and str(aktuell) > str(expires_at):
+        expires_at = aktuell
+    neu = {"active": True, "plan": "monthly",
+           "price": PLAN_PRICES["marktplatz"]["amount"],
+           "expires_at": expires_at,
+           "activated_by": "stripe",
+           "session_id": session_id,
+           "updated_at": now_iso()}
+    # Runde 13: C6 — Zahlung loescht keine Betreiber-Sperre: die Laufzeit
+    # wird verlaengert, die Sperrfelder bleiben erhalten.
+    for k in ("gesperrt", "gesperrt_am", "gesperrt_von"):
+        if acc.get(k) is not None:
+            neu[k] = acc[k]
+    # Runde 13: A5 — rennsicher: Rollenwechsel zwischen find_one und
+    # update_one faengt matched_count == 0 unten ab.
+    # Nachpruefung Runde 14 (Nr. 59): Compare-and-Swap auf den GELESENEN
+    # Ablauf (None trifft auch "kein marketplace_access"). Hat ein anderer
+    # Aufruf den Zugang zwischen Lesen und Schreiben veraendert, wird nichts
+    # geschrieben; der in DIESEM Aufruf angelegte Grant wird wieder
+    # entfernt, damit der Reparaturlauf die Basis neu berechnet (sonst
+    # schriebe er den veralteten Grant-Wert und die Laufzeit ginge verloren).
+    r = await db.users.update_one(
+        {"id": tx.get("user_id"), "role": "b2b_buyer",
+         "marketplace_access.expires_at": acc.get("expires_at")},
+        {"$set": {"marketplace_access": neu}})
+    if r.matched_count == 0:
+        if grant.get("id") == grant_neu_id:
+            await db.zugang_grants.delete_one({"id": grant_neu_id})
+        raise RuntimeError(
+            f"Zugang zu Zahlung {session_id} konnte nicht geschrieben werden "
+            f"(Konto/Rolle geaendert oder Ablauf zwischenzeitlich verschoben, "
+            f"user_id={tx.get('user_id')}) — Abgleich holt es nach")
     return expires_at
 
 

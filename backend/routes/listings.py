@@ -159,11 +159,17 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # holen und per /listings/ingest zu schicken. Danach ruft das Frontend
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
     client_hit = None
-    if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
-            and not await _rueckfall_erlaubt(body.ohne_erweiterung, user)):
+    if source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN:
+        # Nachpruefung Runde 14 (Nr. 86): ERST den Cache pruefen, DANN den
+        # Rueckfall zaehlen. Vorher zaehlte _rueckfall_erlaubt sofort ($inc),
+        # auch wenn das Inserat laengst im Cache lag und gar kein Abruf
+        # noetig war — jeder Cache-Treffer frass einen der 25 Firmenabrufe
+        # (das Frontend sendet ohne_erweiterung=true, sobald der Helfer
+        # fehlt). /listings/check macht es seit jeher in dieser Reihenfolge.
         client_hit = await peek_cached_listing(
             db, raw_url, dealer_id=user.get("dealer_id"))
-        if client_hit is None:
+        if client_hit is None and not await _rueckfall_erlaubt(
+                body.ohne_erweiterung, user):
             return {
                 "needs_client_fetch": True,
                 "url": raw_url,
@@ -563,8 +569,12 @@ async def listings_check_status(job_id: str, user=Depends(current_firma)):
            "source": job.get("source"), "item_id": job.get("item_id"),
            "error": job.get("error")}
     if job["status"] == "queued":
+        # Nachpruefung Runde 14 (Nr. 11): nur die EIGENEN wartenden Jobs
+        # zaehlen. Die globale Position verriet die Plattformauslastung
+        # (fremde Firmen), das Frontend wertet den Wert ohnehin nicht aus.
         out["vor_dir"] = await db.link_jobs.count_documents(
-            {"status": "queued", "created_at": {"$lt": job["created_at"]}})
+            {"status": "queued", "dealer_ids": eigene,
+             "created_at": {"$lt": job["created_at"]}})
     return out
 
 
@@ -612,6 +622,17 @@ async def snapshot_status(snap_id: str, user=Depends(current_user)):
     snap = await _load_snapshot_or_404(snap_id, user)
     snap.pop("png_path", None)
     snap.pop("pdf_path", None)
+    # Nachpruefung Runde 14 (Nr. 10): Snapshots sind je Inserat geteilt
+    # (v_<Anzeigen-ID> bei mehreren Firmen identisch). Eine FREMDE Firma,
+    # die dasselbe Fahrzeug fuehrt, darf den Stand sehen — aber nicht, WER
+    # (dealer_id/user_id) den Snapshot erzeugt hat. Deshalb fuer fremde
+    # Firmen nur die Sachfelder (SnapshotCard braucht status/error/
+    # completed_at); die eigene Firma und Admins sehen wie bisher alles.
+    if user.get("role") != "admin" and snap.get("dealer_id") != user.get("dealer_id"):
+        felder = ("id", "vehicle_id", "mobile_ad_id", "source_url", "status",
+                  "art", "error", "created_at", "completed_at",
+                  "png_bytes", "pdf_bytes")
+        snap = {k: snap.get(k) for k in felder if k in snap}
     return snap
 
 

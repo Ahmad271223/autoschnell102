@@ -1,10 +1,11 @@
 """Dealer endpoints: settings GET/PUT, active-profile, subscription info/cancel."""
+import os
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from deps import current_user, db, get_subscription_status, now_iso, current_firma
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
@@ -150,12 +151,37 @@ async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma))
     return {"active_profile": body.active_profile}
 
 
+def _eigene_logo_hosts() -> set:
+    """Hosts, von denen ein Logo per absoluter URL stammen darf: die eigene
+    Oberflaeche (FRONTEND_URL, Standard wie beim Passwort-Reset) und ein
+    eigener oeffentlicher Storage-Host (S3_PUBLIC_URL, falls gesetzt)."""
+    hosts = set()
+    for env, standard in (("FRONTEND_URL", "http://localhost:3000"),
+                          ("S3_PUBLIC_URL", "")):
+        wert = (os.environ.get(env) or standard).strip()
+        if not wert:
+            continue
+        try:
+            host = (urlparse(wert).hostname or "").lower()
+        except Exception:
+            host = ""
+        if host:
+            hosts.add(host)
+    return hosts
+
+
 def _validate_logo_url(url: Optional[str]) -> Optional[str]:
     """Only allow http/https URLs (or empty) for logo_url.
 
     Blocks javascript:, data:, file: and other schemes that could be used
     for XSS or SSRF once the URL is rendered in the frontend or fetched
     server-side (e.g. for PDF generation).
+
+    Nachpruefung Runde 14 (Nr. 103): absolute URLs nur noch vom eigenen
+    Host. Ein fremder https-Host wurde vorher als <img> in Vertrags- und
+    Kopie-Mails eingebettet und bekam so Abruf, IP und Zeitpunkt jedes
+    Empfaengers (Tracking-Pixel). Eigene Logos kommen per Upload
+    (/api/files/...) — das bleibt der Normalweg.
     """
     if not url:
         return url
@@ -164,11 +190,17 @@ def _validate_logo_url(url: Optional[str]) -> Optional[str]:
     if url.startswith("/api/files/"):
         return url
     try:
-        scheme = urlparse(url).scheme.lower()
+        teile = urlparse(url)
+        scheme = teile.scheme.lower()
+        host = (teile.hostname or "").lower()
     except Exception:
         raise HTTPException(400, "logo_url ist keine gültige URL")
     if scheme not in ("http", "https"):
         raise HTTPException(400, "logo_url muss mit http:// oder https:// beginnen")
+    if not host or host not in _eigene_logo_hosts():
+        raise HTTPException(400, "logo_url darf nur auf ein hochgeladenes Logo "
+                                 "(/api/files/...) oder den eigenen Server zeigen "
+                                 "— bitte das Logo hochladen")
     return url
 
 
@@ -263,8 +295,15 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
     return dealer
 
 
+# Nachpruefung Runde 14 (Nr. 116): 2 MB Bild sind als Base64 ~2,8 MB plus
+# data-URL-Praefix. Alles darueber lehnt Pydantic (422) ab, BEVOR der
+# komplette String dekodiert wird — vorher wurden bis zu 25 MB (nginx-Limit)
+# erst dekodiert und dann an der 2-MB-Grenze verworfen.
+LOGO_B64_MAX = 2_900_000
+
+
 class LogoUploadIn(BaseModel):
-    logo_b64: str  # data-URL oder reines Base64
+    logo_b64: str = Field(max_length=LOGO_B64_MAX)  # data-URL oder reines Base64
 
 
 @router.post("/dealer/logo")
@@ -273,7 +312,7 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     logo_url auf den ausgelieferten /api/files/<key>-Pfad. Sucher setzen
     damit nur IHR persönliches Logo (Override), nicht das des Chefs."""
     import base64
-    from storage_service import make_key, storage, StorageError
+    from storage_service import make_key, storage, StorageError, loeschen_oder_vormerken
     try:
         raw = base64.b64decode(body.logo_b64.split(",")[-1], validate=False)
     except (ValueError, TypeError):
@@ -300,20 +339,78 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     except StorageError as exc:
         raise HTTPException(400, f"Logo konnte nicht gespeichert werden: {exc}")
     logo_url = f"/api/files/{key}"
-    if user.get("role") == "sucher":
-        await db.users.update_one(
-            {"id": user["id"]},
-            {"$set": {"settings_override.logo_url": logo_url}})
-    else:
-        await db.dealers.update_one(
-            {"id": user["dealer_id"]},
-            {"$set": {"logo_url": logo_url, "updated_at": now_iso()}})
+    ist_sucher = user.get("role") == "sucher"
+    # Nachpruefung Runde 14 (Nr. 96): Datei lag bereits im Storage, wenn die
+    # Datenbank hier scheiterte — die Referenz fehlte, die Datei blieb als
+    # Waise liegen. Jetzt derselbe Weg wie beim Inserat-Upload: loeschen oder
+    # fuer den Aufraeumjob vormerken, dann sauberer Fehler. Ausserdem wird
+    # das vorherige hochgeladene Logo nach dem Wechsel weggeraeumt (vorher
+    # bei JEDEM Logowechsel eine Waise), sofern es nirgends sonst haengt.
+    try:
+        if ist_sucher:
+            vorher = (user.get("settings_override") or {}).get("logo_url")
+            await db.users.update_one(
+                {"id": user["id"]},
+                {"$set": {"settings_override.logo_url": logo_url}})
+        else:
+            alt = await db.dealers.find_one({"id": user["dealer_id"]},
+                                            {"_id": 0, "logo_url": 1})
+            vorher = (alt or {}).get("logo_url")
+            await db.dealers.update_one(
+                {"id": user["dealer_id"]},
+                {"$set": {"logo_url": logo_url, "updated_at": now_iso()}})
+    except Exception as exc:  # noqa: BLE001
+        await loeschen_oder_vormerken(db, key=key, grund="logo_upload_abbruch",
+                                      dealer_id=user["dealer_id"])
+        raise HTTPException(500, f"Logo konnte nicht gespeichert werden: {exc}")
+    await _altes_logo_wegraeumen(vorher, user["dealer_id"])
     return {"ok": True, "logo_url": logo_url}
+
+
+async def _altes_logo_wegraeumen(alte_url: Optional[str], dealer_id: str) -> None:
+    """Vorheriges hochgeladenes Logo (logo/<firma>/...) loeschen, wenn kein
+    anderes Dokument (Firma oder Sucher-Override) es mehr referenziert —
+    ein Sucher kann per Einstellungen die Chef-URL uebernommen haben."""
+    if not alte_url or not alte_url.startswith(f"/api/files/logo/{dealer_id}/"):
+        return
+    alte_url = alte_url.split("?")[0].split("#")[0]
+    noch_genutzt = (await db.dealers.count_documents({"logo_url": alte_url})
+                    or await db.users.count_documents(
+                        {"settings_override.logo_url": alte_url}))
+    if noch_genutzt:
+        return
+    from storage_service import loeschen_oder_vormerken
+    await loeschen_oder_vormerken(db, key=alte_url[len("/api/files/"):],
+                                  grund="logo_ersetzt", dealer_id=dealer_id)
 
 
 # =========================================================
 #                  ABO / SUBSCRIPTION
 # =========================================================
+# Nachpruefung Runde 14 (Nr. 70, 71): Anzeige und Kuendigung waehlten ihr
+# Abo-Dokument unterschiedlich (Anzeige: juengstes persoenliches, auch
+# abgelaufen; Kuendigung: nur Firmenabo) und die Anzeige mischte Felder aus
+# zwei Dokumenten. Jetzt EINE Auswahl fuer beide, deckungsgleich mit der
+# Zugriffspruefung (deps.subscription_for): zuerst ein AKTIVES persoenliches
+# Abo, sonst das Firmenabo. Sucher: immer nur das persoenliche.
+async def massgebliches_abo(user: dict) -> Optional[dict]:
+    from deps import sub_status_from_doc
+    persoenlich = await db.subscriptions.find_one(
+        {"subject_user_id": user["id"], "status": {"$ne": "ersetzt"}},
+        {"_id": 0}, sort=[("created_at", -1)])
+    if user.get("role") == "sucher" or sub_status_from_doc(persoenlich)["active"]:
+        return persoenlich
+    firma = await db.subscriptions.find_one(
+        {"dealer_id": user["dealer_id"], "status": {"$ne": "ersetzt"},
+         "$or": [{"subject_user_id": {"$exists": False}},
+                 {"subject_user_id": None}]},
+        {"_id": 0}, sort=[("created_at", -1)])
+    # Ohne Firmenabo bleibt das (inaktive) persoenliche Abo die Anzeige-
+    # grundlage — beide Wege ergeben "inaktiv", die Felder stammen aber aus
+    # EINEM Dokument (Ablaufdatum, roher Status).
+    return firma or persoenlich
+
+
 @router.get("/dealer/subscription")
 async def dealer_subscription(user=Depends(current_firma)):
     """Liefert dem Händler den aktuellen Abo-Stand: Plan, Status, Ablaufdatum,
@@ -332,18 +429,13 @@ async def dealer_subscription(user=Depends(current_firma)):
     # Runde 11: DIESELBE Auswahl wie die Zugriffspruefung (deps): ersetzte
     # Abos zaehlen nicht. Vorher konnte die Anzeige Plan/Status aus dem
     # neuen Abo, Ablaufdatum aber aus dem bereits ersetzten alten mischen.
-    sub_doc = await db.subscriptions.find_one(
-        {"dealer_id": user["dealer_id"], "subject_user_id": user["id"],
-         "status": {"$ne": "ersetzt"}},
-        {"_id": 0}, sort=[("created_at", -1)])
-    if not sub_doc and user.get("role") != "sucher":
-        sub_doc = await db.subscriptions.find_one(
-            {"dealer_id": user["dealer_id"], "status": {"$ne": "ersetzt"},
-             "$or": [{"subject_user_id": {"$exists": False}},
-                     {"subject_user_id": None}]},
-            {"_id": 0}, sort=[("created_at", -1)])
-    from deps import subscription_for
-    status = await subscription_for(user)
+    # Nachpruefung Runde 14 (Nr. 71): Runde 11 deckte nur "ersetzt" ab — ein
+    # ABGELAUFENES persoenliches Abo lieferte weiter Ablaufdatum/Rohstatus,
+    # waehrend Plan/aktiv vom Firmenabo kamen. Jetzt stammen ALLE Felder aus
+    # dem einen Dokument von massgebliches_abo.
+    from deps import sub_status_from_doc
+    sub_doc = await massgebliches_abo(user)
+    status = sub_status_from_doc(sub_doc)
 
     days_remaining = None
     expires_at = sub_doc.get("expires_at") if sub_doc else None
@@ -391,19 +483,13 @@ async def dealer_cancel_subscription(user=Depends(current_firma)):
     Sperre. Verlängern bleibt jederzeit möglich (neuer Checkout)."""
     if user.get("role") == "sucher":
         raise HTTPException(403, "Nur der Händler-Hauptaccount darf Abos verwalten")
-    # DIESELBE Auswahlregel wie die Statusberechnung (deps): das
-    # FIRMEN-Abo hat kein subject_user_id — sonst konnte die Kuendigung
-    # versehentlich das juengste PERSOENLICHE Sucher-Abo treffen.
-    sub = await db.subscriptions.find_one(
-        {"dealer_id": user["dealer_id"],
-         "subject_user_id": {"$exists": False}},
-        sort=[("created_at", -1)],
-    )
-    if not sub:
-        sub = await db.subscriptions.find_one(
-            {"dealer_id": user["dealer_id"], "subject_user_id": None},
-            sort=[("created_at", -1)],
-        )
+    # Nachpruefung Runde 14 (Nr. 70): GENAU das Abo kuendigen, das die
+    # Anzeige zeigt (massgebliches_abo). Vorher suchte die Kuendigung nur das
+    # Firmenabo: ein Chef mit aktivem persoenlichem Abo bekam 404 bzw. es
+    # wurde ein altes Firmenabo gekuendigt, waehrend sein angezeigtes
+    # persoenliches Abo weiterlief. Ein Sucher-Abo eines Mitarbeiters wird
+    # hier weiterhin nie getroffen (nur eigene subject_user_id oder Firma).
+    sub = await massgebliches_abo(user)
     if not sub:
         raise HTTPException(404, "Kein Abo vorhanden")
     if sub.get("plan") == "lifetime":

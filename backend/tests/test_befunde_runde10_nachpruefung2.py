@@ -166,9 +166,10 @@ def test_verlierer_ueberschreibt_kein_ergebnis(vertrag):
 
 def test_zustellung_haengt_respektiert_frischen_claim():
     from routes.contracts import _zustellung_haengt, ZUSTELLUNG_HAENGT_NACH_SEK
-    alt = (JETZT - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK + 60)).isoformat()
+    jetzt = datetime.now(timezone.utc)          # nicht JETZT (Importzeit): langer Gesamtlauf
+    alt = (jetzt - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK + 60)).isoformat()
     assert _zustellung_haengt({"zustellung": "laeuft", "sent_at": alt}) is True
-    frisch = {"zustellung": "laeuft", "sent_at": alt, "wiederaufnahme_am": JETZT.isoformat()}
+    frisch = {"zustellung": "laeuft", "sent_at": alt, "wiederaufnahme_am": jetzt.isoformat()}
     assert _zustellung_haengt(frisch) is False, "frischer Claim darf nicht erneut uebernommen werden"
     assert _zustellung_haengt({"zustellung": "unklar", "sent_at": alt}) is True
 

@@ -385,9 +385,16 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
         elif damages_list:
             # Fallback if only the array was sent.
             for d in damages_list:
-                tl = _xml_escape(str(d.get("type_label") or d.get("type_key") or "Schaden"))
-                zone = _xml_escape(str(d.get("zone") or ""))
-                story.append(Paragraph(f"• {tl}: {zone}", st["body"]))
+                if not isinstance(d, dict):
+                    # Nachpruefung Runde 14: Freitext-Eintraege (Strings) sind
+                    # erlaubt — vorher stuerzte `d.get` hier mit 500 ab.
+                    story.append(Paragraph(f"• {_xml_escape(str(d or ''))}", st["body"]))
+                    story.append(Spacer(1, 1))
+                    continue
+                tl = _xml_escape(str(d.get("type_label") or d.get("type_key")
+                                     or d.get("label") or d.get("type") or "Schaden"))
+                zone = _xml_escape(str(d.get("zone") or d.get("part_label") or d.get("part") or ""))
+                story.append(Paragraph(f"• {tl}: {zone}" if zone else f"• {tl}", st["body"]))
                 story.append(Spacer(1, 1))
         if damage_note:
             # Freitextfeld "Sonstige Schäden / Hinweis" aus dem Formular —

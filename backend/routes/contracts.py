@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -37,6 +37,39 @@ router = APIRouter()
 
 
 # ---------- Models ----------
+class DamageIn(BaseModel):
+    """Ein Eintrag der Schadens-Skizze (DamageSelector.jsx).
+
+    Nachpruefung Runde 14: `damages` war eine ungepruefte `list` — ein
+    String-Element liess pdf_service (`d.get(...)`) mit 500 abstuerzen, und
+    Anzahl/Laenge waren unbegrenzt (3000 Eintraege mit 200k-Zeichen-Zone
+    wanderten komplett in contract_data). Jetzt: nur Objekte, nur die
+    Schluessel, die Skizze/PDF/auto_daten/Abholprotokoll tatsaechlich lesen
+    (type_label, type_key, zone; id/view/abbr/color/x/y fuer die Anzeige),
+    Strings gedeckelt wie die uebrigen Tabellenfelder. Unbekannte Schluessel
+    werden ignoriert, nicht abgelehnt (aeltere Oberflaechen)."""
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+
+    id: Optional[str] = Field(default=None, max_length=500)
+    view: Optional[str] = Field(default=None, max_length=500)
+    type_key: Optional[str] = Field(default="", max_length=500)
+    type_label: Optional[str] = Field(default="", max_length=500)
+    # Aeltere Oberflaechen/Tests schicken Freitext-Eintraege mit diesen
+    # Schluesseln; auto_daten.schaeden_bereinigen liest sie weiterhin.
+    label: Optional[str] = Field(default=None, max_length=500)
+    type: Optional[str] = Field(default=None, max_length=500)
+    kategorie: Optional[str] = Field(default=None, max_length=500)
+    part_label: Optional[str] = Field(default=None, max_length=500)
+    part: Optional[str] = Field(default=None, max_length=500)
+    note: Optional[str] = Field(default=None, max_length=500)
+    text: Optional[str] = Field(default=None, max_length=500)
+    abbr: Optional[str] = Field(default=None, max_length=500)
+    color: Optional[str] = Field(default=None, max_length=500)
+    zone: Optional[str] = Field(default="", max_length=500)
+    x: Optional[float] = None
+    y: Optional[float] = None
+
+
 class ContractIn(BaseModel):
     # Numbers from listings (e.g. mileage, power_kw, doors, seats) arrive
     # as JSON numbers from the frontend. Coerce them to strings instead
@@ -74,7 +107,22 @@ class ContractIn(BaseModel):
     agb_text: Optional[str] = ""
     # Schäden / Beschädigungen aus der interaktiven Skizze
     damages_text: Optional[str] = ""
-    damages: Optional[list] = []
+    # Nachpruefung Runde 14: geprueftes Schema statt roher Liste — siehe
+    # DamageIn. Erlaubt sind Skizzen-Eintraege (DamageIn) ODER reiner
+    # Freitext je Schaden (beides liest auto_daten.schaeden_bereinigen, das
+    # selbst auf 300 Zeichen kuerzt). Deckel: 200 Eintraege, Freitext 5000
+    # Zeichen (Validator unten) — reine DoS-Bremse, bestehende Ablaeufe
+    # schicken bis zu ~80 Eintraege mit bis zu 1000 Zeichen.
+    damages: Optional[List[Union[DamageIn, str]]] = Field(default_factory=list, max_length=200)
+
+    @field_validator("damages")
+    @classmethod
+    def _schaeden_freitext_deckeln(cls, v):
+        for eintrag in v or []:
+            if isinstance(eintrag, str) and len(eintrag) > 5000:
+                # auto_daten kuerzt selbst auf 300 Zeichen; hier nur die DoS-Bremse
+                raise ValueError("Schaden-Text zu lang (hoechstens 5000 Zeichen)")
+        return v
     # Gewerblicher Verkauf: MwSt (19 %) im Vertrag ausweisen —
     # der Kaufpreis gilt dann als Brutto, das PDF rechnet Netto/MwSt aus.
     show_vat: Optional[bool] = False
@@ -398,6 +446,17 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
 ZUSTELLUNG_HAENGT_NACH_SEK = int(os.environ.get("ZUSTELLUNG_HAENGT_NACH_SEK", "180"))
 
 
+# Nachpruefung Runde 14: send_status waechst je Versand um einen Eintrag,
+# ohne Obergrenze — bei mutwilligem Dauerversand (je Klick ein neuer
+# Schluessel, kein Limiter) naeherte sich das Vertragsdokument samt pdf_b64
+# der 16-MB-Grenze, und jede Vertragsliste lieferte die ganze Historie mit.
+# $slice -N behaelt die juengsten N Eintraege (aelteste fallen raus); der
+# frisch angehaengte Eintrag ist immer der letzte, das positionale $set und
+# die Idempotenz-/Wiederaufnahme-Suche finden ihn weiter. Die vollstaendige
+# Historie steht ohnehin in activity_logs (pdf.gesendet.<channel>).
+SEND_STATUS_MAX = 200
+
+
 def _zustellung_haengt(eintrag: dict, jetzt=None) -> bool:
     """True, wenn eine Reservierung aelter ist als ZUSTELLUNG_HAENGT_NACH_SEK
     (oder schon als "unklar" markiert wurde)."""
@@ -434,8 +493,15 @@ def _vertrag_bereich(user) -> Dict[str, Any]:
     return bereich
 
 
+# Nachpruefung Runde 14: vorher stille 500 — bei mehr Vertraegen in 90 Tagen
+# fehlten die aeltesten kommentarlos. Jetzt 2000, und ein Abschneiden wird
+# per Kopfzeile X-Truncated signalisiert (Antwort bleibt eine Liste).
+CONTRACTS_LIST_MAX = 2000
+
+
 @router.get("/contracts")
 async def list_contracts(
+    response: Response,
     user=Depends(current_firma),
     q: Optional[str] = None,
     days: Optional[int] = None,
@@ -455,17 +521,24 @@ async def list_contracts(
         ]
     items = await db.generated_pdfs.find(
         query, {"_id": 0, "pdf_b64": 0},
-    ).sort("created_at", -1).to_list(500)
+    ).sort("created_at", -1).to_list(CONTRACTS_LIST_MAX + 1)
+    abgeschnitten = len(items) > CONTRACTS_LIST_MAX
+    items = items[:CONTRACTS_LIST_MAX]
+    response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
     if channel:
         items = [
             i for i in items
             if any(s.get("channel") == channel for s in i.get("send_status", []))
         ]
-    # Alt-Verträge heilen: früher wurde `vehicle_image_urls` leer gespeichert,
-    # weil die Fotos beim Fahrzeug unter `data.images` liegen (nicht
-    # `image_urls`). Fehlende Listen hier einmalig aus dem Fahrzeug
-    # nachziehen und dauerhaft am Vertrag speichern — so bleiben die Fotos
-    # auch sichtbar, wenn das Fahrzeug später gelöscht wird.
+    # Alt-Vertraege ohne `vehicle_image_urls` (frueher lagen die Fotos beim
+    # Fahrzeug unter `data.images`, nicht `image_urls`): die Fotos werden
+    # NUR fuer die Anzeige aus dem Fahrzeug ergaenzt und als nachgetragen
+    # gekennzeichnet (`bilder_nachgetragen`).
+    # Nachpruefung Runde 14: vorher schrieb dieses GET den HEUTIGEN
+    # Bilderstand dauerhaft an den Vertrag — ein Lesezugriff verewigte
+    # Fotos, die beim Vertragsschluss womoeglich anders aussahen, als
+    # unmarkierten Vertragsbeweis. Lesen bleibt Lesen; gespeichert wird der
+    # Bilderstand nur noch beim Anlegen (create_contract).
     ohne_fotos = [i for i in items if not i.get("vehicle_image_urls") and i.get("vehicle_id")]
     if ohne_fotos:
         vids = list({i["vehicle_id"] for i in ohne_fotos})
@@ -480,10 +553,7 @@ async def list_contracts(
             urls = bilder.get(i["vehicle_id"])
             if urls:
                 i["vehicle_image_urls"] = urls
-                await db.generated_pdfs.update_one(
-                    {"id": i["id"], "dealer_id": user["dealer_id"],
-                     "vehicle_image_urls": {"$in": [None, []]}},
-                    {"$set": {"vehicle_image_urls": urls}})
+                i["bilder_nachgetragen"] = True
     # Ersteller anreichern: der Chef sieht so, WELCHER Sucher den Vertrag
     # (= Einkauf) gemacht hat.
     creator_ids = list({i.get("user_id") for i in items if i.get("user_id")})
@@ -670,10 +740,11 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
              "send_status.idempotency_key": {"$ne": body.idempotency_key}},
-            {"$push": {"send_status": {
+            {"$push": {"send_status": {"$each": [{
                 "idempotency_key": body.idempotency_key, "channel": body.channel,
                 "recipient": body.recipient, "subject": body.subject,
-                "sent_at": reserviert_am, "zustellung": "laeuft"}}})
+                "sent_at": reserviert_am, "zustellung": "laeuft"}],
+                "$slice": -SEND_STATUS_MAX}}})
         if res.modified_count == 0:
             return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
                     "zustellung": "laeuft", "bereits_gesendet": True}
@@ -729,10 +800,14 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             from vertrag_mail import kopie_mail, vertrag_mail
             pdf_bytes = base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
             dateiname = c.get("filename") or "Kaufvertrag.pdf"
-            firma = await db.dealers.find_one(
-                {"id": user["dealer_id"]},
-                {"_id": 0, "company_name": 1, "logo_url": 1, "phone": 1,
-                 "email": 1}) or {}
+            # Nachpruefung Runde 14: dieselbe Firmenidentitaet wie im PDF —
+            # effective_dealer legt die gewollten Sucher-Overrides (Firmen-
+            # name, Telefon, Logo, E-Mail) ueber die Chef-Vorgaben. Vorher
+            # las der Versand das rohe Haendler-Dokument, und Betreff, Kopf
+            # und Absendername der Mail nannten den Chef statt der Filiale,
+            # die auf dem angehaengten Vertrag steht.
+            from deps import effective_dealer
+            firma = await effective_dealer(user) or {}
             betreff, text, html = vertrag_mail(
                 vertrag=c, firma=firma, sucher=user,
                 nachricht=body.message, betreff=body.subject)
@@ -800,7 +875,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     else:
         await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich},
-            {"$push": {"send_status": send_entry},
+            {"$push": {"send_status": {"$each": [send_entry],
+                                       "$slice": -SEND_STATUS_MAX}},
              "$set": {"status": neuer_status, "updated_at": now_iso()}},
         )
     await log_activity(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
@@ -840,8 +916,14 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
 async def regenerate_contract_for_pickup(
     *, contract_id: str, dealer_id: str, user: dict,
     pickup_date: Optional[str] = None, pickup_time: Optional[str] = None,
+    leeren_erlaubt: bool = False,
 ) -> bool:
     """Erzeugt das Kaufvertrags-PDF mit GEAENDERTEM Abholtermin neu.
+
+    leeren_erlaubt (Nachpruefung Runde 14, Befund 84): Der Terminkalender
+    unterscheidet "nicht gesendet" (None) von "bewusst geleert" (""). Nur
+    mit diesem Schalter loescht ein leerer Wert Datum/Uhrzeit auch im
+    Vertrag — andere Aufrufer behalten die alte Lesart "leer = unveraendert".
 
     Wird aufgerufen, wenn im Terminkalender das Abholdatum verschoben wird —
     der Vertrag ist eine gespeicherte Datei und wuerde sonst das alte Datum
@@ -863,9 +945,16 @@ async def regenerate_contract_for_pickup(
     # Leere Werte bedeuten "nicht angegeben" — sie duerfen einen
     # vorhandenen Termin NICHT loeschen (sonst wuerde z.B. das Speichern
     # ohne Uhrzeit die Uhrzeit im Vertrag entfernen).
-    neu_datum = pickup_date if (pickup_date or "").strip() else alt_datum
-    neu_zeit = pickup_time if (pickup_time or "").strip() else alt_zeit
-    if neu_datum == alt_datum and neu_zeit == alt_zeit:
+    def _neu(wert, alt):
+        if wert is None:
+            return alt
+        if (wert or "").strip():
+            return wert.strip()
+        return "" if leeren_erlaubt else alt
+
+    neu_datum = _neu(pickup_date, alt_datum)
+    neu_zeit = _neu(pickup_time, alt_zeit)
+    if (neu_datum or "") == (alt_datum or "") and (neu_zeit or "") == (alt_zeit or ""):
         return False
 
     contract_dict = dict(doc.get("contract_data") or {})

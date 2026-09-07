@@ -200,6 +200,14 @@ async def current_firma(user=Depends(current_user)):
     samt Verkaeuferdaten anlegen und lesen."""
     if user.get("role") not in ("dealer", "sucher") or not user.get("dealer_id"):
         raise HTTPException(403, "Nur für Händler-Accounts (Chef und Sucher)")
+    # Nachpruefung Runde 14 (Nr. 85): fail-closed, wenn das dealers-Dokument
+    # fehlt (Absturzfenster bei der Anlage, manueller DB-Eingriff). Vorher
+    # lieferte effective_dealer {} und Termine/Vertraege/Versand liefen mit
+    # leerer Firmenidentitaet und Default-Regeln weiter. Eine indexierte
+    # find_one je Firmen-Request.
+    if not await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 1}):
+        raise HTTPException(403, "Kein Händlerprofil — bitte den "
+                                 "Administrator kontaktieren")
     return user
 
 

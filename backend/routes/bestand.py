@@ -8,10 +8,10 @@
 """
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from deps import (clean_doc, current_chef, current_firma, db,
                   log_activity, now_iso)
@@ -20,6 +20,30 @@ from lifecycle import LifecycleError, set_lifecycle
 router = APIRouter()
 
 BESTAND_RETENTION_DAYS = 50
+
+# Nachpruefung Runde 14 (Nr. 39/40/41): nach diesen Lifecycles ist das
+# Fahrzeug abgeschlossen — Bestandsdaten, Abweichungen und manuelle
+# Stammdaten sind dann eingefroren. Das Frontend blendet die Formulare
+# zwar aus, die API liess Aenderungen aber weiterhin zu (Akte/Historie
+# eines verkauften Fahrzeugs veraenderbar). "storniert" bleibt offen,
+# weil es laut lifecycle.py wieder in den Zyklus zurueckfuehren kann.
+_ABGESCHLOSSEN = ("verkauft", "archiviert", "geloescht")
+
+
+def _abgeschlossen_sperren(v: Dict[str, Any], meldung: str) -> None:
+    if (v or {}).get("lifecycle") in _ABGESCHLOSSEN:
+        raise HTTPException(409, meldung)
+
+
+def _als_aware(d: datetime) -> datetime:
+    """Nachpruefung Runde 14 (Nr. 93/94): naive ISO-Zeitstempel (Alt-/
+    Import-/Restore-Daten) als UTC annehmen — sonst scheitert die Differenz
+    zu einem aware `now` mit TypeError und die ganze Liste/Akte wird 500."""
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _resttage(exp: str, now: datetime) -> int:
+    return max(0, (_als_aware(datetime.fromisoformat(exp)) - now).days)
 
 
 async def current_haendler(user=Depends(current_chef)):
@@ -70,9 +94,15 @@ class ManualVehicleIn(BaseModel):
     color: str = Field(default="", max_length=80)
     vin: str = Field(default="", max_length=30)
     previous_owners: str = Field(default="", max_length=10)
-    features: List[str] = Field(default_factory=list, max_length=80)
+    # Nachpruefung Runde 14 (Nr. 110): jeder Eintrag gedeckelt — sonst
+    # landeten Megabyte-Strings je Ausstattungsmerkmal in vehicles.data
+    # und von dort im Inserat (resale.py) und Marktplatz.
+    features: List[Annotated[str, StringConstraints(max_length=120)]] = Field(
+        default_factory=list, max_length=80)
     description: str = Field(default="", max_length=20000)
-    purchase_price: Optional[float] = Field(default=None, ge=0)
+    # Nachpruefung Runde 14 (Nr. 95): Infinity/NaN kamen durch ge=0 hindurch,
+    # das Dokument stand mit inf in der DB und jede Antwort/Marge dazu war 500.
+    purchase_price: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 def _clean_costs(costs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -155,9 +185,14 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
 async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
                          user=Depends(current_haendler)):
     v = await db.vehicles.find_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "bestand": 1})
+        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "bestand": 1, "lifecycle": 1})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    # Nachpruefung Runde 14 (Nr. 39): Standort/Notizen/Kosten eines
+    # verkauften oder archivierten Fahrzeugs sind Teil der Akte — eingefroren.
+    _abgeschlossen_sperren(
+        v, "Fahrzeug ist abgeschlossen — Bestandsdaten sind eingefroren")
     b = v.get("bestand") or {}
     if body.location is not None:
         b["location"] = body.location.strip()
@@ -194,10 +229,10 @@ async def list_bestand(user=Depends(current_firma),
     for it in items:
         exp = (it.get("bestand") or {}).get("expires_at")
         if it.get("lifecycle") == "bestand" and exp:
+            # Nachpruefung Runde 14 (Nr. 93): naiv -> UTC, TypeError mitfangen.
             try:
-                days_left = (datetime.fromisoformat(exp) - now).days
-                it["retention_days_left"] = max(0, days_left)
-            except ValueError:
+                it["retention_days_left"] = _resttage(exp, now)
+            except (ValueError, TypeError):
                 pass
 
     counts: Dict[str, int] = {}
@@ -235,9 +270,24 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0},
     ).sort("created_at", -1).to_list(10)
 
-    report = await db.pickup_reports.find_one(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "superseded": {"$ne": True}}, {"_id": 0})
+    # Nachpruefung Runde 14 (Nr. 47): Versionierung/superseded gilt je
+    # Termin — bei mehreren Terminen je Fahrzeug lieferte find_one den
+    # Bericht des aeltesten (offenen) Termins statt des abgeholten. Die
+    # Auswahl liegt jetzt zentral in abholbericht.py (gleiche Regel wie im
+    # Verkaufsentwurf, Nr. 45/46); Import in der Funktion, weil das Modul
+    # parallel entsteht und keinen Import-Zyklus mit den Routen bilden soll.
+    from abholbericht import massgeblicher_bericht
+    report = await massgeblicher_bericht(db, vehicle_id, user["dealer_id"])
+    # Zusaetzlich alle Berichte je Termin (auch ersetzte), damit die Akte
+    # jedem Termin seinen Bericht zuordnen kann.
+    pickup_reports = await db.pickup_reports.find(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "id": 1, "appointment_id": 1, "version": 1, "status": 1,
+         "created_at": 1, "superseded": 1, "mileage_at_pickup": 1,
+         "driver_name": 1},
+    ).sort("created_at", -1).to_list(20)
+    for r in pickup_reports:
+        r["massgeblich"] = bool(report) and r.get("id") == report.get("id")
 
     comparisons = await db.vehicle_comparisons.find(
         {"mobile_ad_id": v.get("mobile_ad_id"), "dealer_id": user["dealer_id"]},
@@ -256,11 +306,15 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
 
     # Abgeschlossene Abhol-Protokolle (vom Fahrer, mit Unterschriften) —
     # in der Akte als Unterlage sichtbar für Chef UND Sucher.
+    # Nachpruefung Runde 14 (Nr. 35): nur nicht-abgeloeste finale Versionen
+    # und das Feld superseded mitliefern — die ersetzte v1 stand sonst
+    # gleichwertig neben v2 (der Schwester-Endpunkt in protocols.py liefert
+    # superseded bereits).
     protocols = await db.pickup_protocols.find(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "status": "final"},
+         "status": "final", "superseded": {"$ne": True}},
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
-         "seller_name": 1, "place": 1, "corrects_version": 1},
+         "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1},
     ).sort("version", -1).to_list(20)
 
     # Runde 12: Sucher sehen nur ihre eigenen Aktionen zum Fahrzeug —
@@ -275,10 +329,10 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     retention_days_left = None
     exp = (v.get("bestand") or {}).get("expires_at")
     if v.get("lifecycle") == "bestand" and exp:
+        # Nachpruefung Runde 14 (Nr. 94): gleicher Helfer wie in der Liste.
         try:
-            retention_days_left = max(
-                0, (datetime.fromisoformat(exp) - datetime.now(timezone.utc)).days)
-        except ValueError:
+            retention_days_left = _resttage(exp, datetime.now(timezone.utc))
+        except (ValueError, TypeError):
             pass
 
     return {
@@ -287,6 +341,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "contracts": contracts,
         "appointments": appointments,
         "pickup_report": report,
+        "pickup_reports": pickup_reports,
         "comparisons": comparisons,
         "listings": listings,
         "protocols": protocols,
@@ -311,9 +366,16 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
         {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
-    report = await db.pickup_reports.find_one(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "superseded": {"$ne": True}}, {"_id": 0})
+    # Nachpruefung Runde 14 (Nr. 40): nach dem Verkauf aenderten sich km
+    # und known_defects der Akte noch — das Inserat haelt zwar eine Kopie,
+    # die Fahrzeughistorie aber nicht.
+    _abgeschlossen_sperren(
+        v, "Fahrzeug abgeschlossen — Abweichungen nur bis zum Verkauf uebernehmbar")
+    # Nachpruefung Runde 14 (Nr. 46): derselbe Bericht wie in der Akte
+    # (massgeblicher Termin), sonst waren die dort gezeigten Abweichungs-IDs
+    # hier unbekannt (applied=[]) oder ein alter Termin ueberschrieb die Daten.
+    from abholbericht import massgeblicher_bericht
+    report = await massgeblicher_bericht(db, vehicle_id, user["dealer_id"])
     if not report:
         raise HTTPException(404, "Kein Abholbericht vorhanden")
 
@@ -349,7 +411,8 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
                   "updated_at": now_iso()}})
     await log_activity(user["dealer_id"], user["id"],
                        "fahrzeug.abweichungen.uebernommen", ref=vehicle_id,
-                       meta={"anzahl": len(applied)})
+                       meta={"anzahl": len(applied), "bericht": report.get("id"),
+                             "termin": report.get("appointment_id")})
     return {"ok": True, "applied": applied, "known_defects": known_defects}
 
 
@@ -390,12 +453,23 @@ async def update_manual_vehicle(vehicle_id: str, body: ManualVehicleIn,
                                 user=Depends(current_haendler)):
     v = await db.vehicles.find_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"], "source": "manuell"},
-        {"_id": 0, "id": 1})
+        {"_id": 0, "id": 1, "lifecycle": 1, "purchase_price": 1})
     if not v:
         raise HTTPException(404, "Manuelles Fahrzeug nicht gefunden")
+    # Nachpruefung Runde 14 (Nr. 41): Stammdaten und Einkaufspreis eines
+    # verkauften/archivierten Fahrzeugs blieben per API aenderbar — die
+    # Akte/Historie wich dann vom verkauften Inserat ab. Dazu ein
+    # Audit-Eintrag mit dem alten Preis, den es hier bisher nicht gab.
+    _abgeschlossen_sperren(
+        v, "Verkaufte/archivierte Fahrzeuge koennen nicht mehr bearbeitet werden")
     await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"]},
         {"$set": {"data": body.model_dump(exclude={"purchase_price"}),
                   "purchase_price": body.purchase_price,
                   "updated_at": now_iso()}})
+    await log_activity(user["dealer_id"], user["id"],
+                       "fahrzeug.manuell.geaendert", ref=vehicle_id,
+                       meta={"fahrzeug": f"{body.make_label} {body.model_label}",
+                             "einkaufspreis_alt": v.get("purchase_price"),
+                             "einkaufspreis_neu": body.purchase_price})
     return {"ok": True}

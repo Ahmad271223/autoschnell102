@@ -16,7 +16,8 @@ from auth import (
     JWT_ALG, JWT_SECRET, _DUMMY_HASH, decode_token,
     hash_password_async, verify_password_async,
 )
-from deps import bearer, current_user, db, log_activity, now_iso, current_firma
+from deps import (bearer, current_user, db, log_activity, now_iso, current_firma,
+                  firma_gesperrt, gesperrte_firmen_ids)
 # Zentrale Passwortregeln (Pruefbericht 09/2026, Punkt 32): dieselbe
 # Pruefung wie fuer Firma/Sucher/Admin — vorher hatte drivers.py eine
 # eigene, schwaechere Kopie (8 Zeichen, keine Blockliste, keine 72-Byte-
@@ -184,11 +185,19 @@ _OFFEN_WERTE: List[Any] = sorted(_TERMIN_OFFEN) + ["", None]
 
 
 async def _verknuepfte_dealer_ids(driver_id: str) -> List[str]:
-    """Firmen, in deren Fahrerliste der Fahrer AKTUELL steht."""
+    """Firmen, in deren Fahrerliste der Fahrer AKTUELL steht — ohne
+    gesperrte Firmen (Nachpruefung Runde 14, Nr. 9): die Sperre des
+    Chefs sperrt die Firma (deps.firma_gesperrt) fuer Chef und Sucher,
+    die Fahrer-Verknuepfung blieb aber bestehen, und damit Termine,
+    Status, Bericht und PDFs der gesperrten Firma fuer den Fahrer offen."""
     links = await db.dealer_drivers.find(
         {"driver_account_id": driver_id}, {"_id": 0, "dealer_id": 1},
     ).to_list(500)
-    return [link["dealer_id"] for link in links if link.get("dealer_id")]
+    ids = [link["dealer_id"] for link in links if link.get("dealer_id")]
+    if not ids:
+        return []
+    gesperrt = await gesperrte_firmen_ids()
+    return [d for d in ids if d not in gesperrt]
 
 
 async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
@@ -206,6 +215,12 @@ async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
     )
     if not link:
         raise HTTPException(404, "Termin nicht gefunden")
+    # Nachpruefung Runde 14, Nr. 9: gesperrte Firma = kein Fahrer-Zugriff,
+    # dieselbe Antwort wie fuer Sucher der Firma (deps.current_user). Nach
+    # dem Entsperren ist alles wieder da — die Verknuepfung bleibt.
+    if await firma_gesperrt(appt.get("dealer_id")):
+        raise HTTPException(403, "Die Firma ist gesperrt — bitte den "
+                                 "Administrator kontaktieren.")
 
 
 # =========================================================
@@ -337,19 +352,25 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma
     # Abgeschlossene/stornierte Fahrten belegen den Fahrer nicht mehr. Der
     # alte Filter schloss nur den nie benutzten Status "abgeschlossen" aus
     # und meldete damit jede erledigte Fahrt als Konflikt (Pruefbericht 09/2026).
+    filt = {"driver_id": driver_id, "pickup_date": date,
+            "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}}
+    # Nachpruefung Runde 14, Nr. 111: count aus der Datenbank, nicht aus
+    # der auf 50 gekappten Liste — sonst stimmt die Warnung ab dem 51.
+    # offenen Termin nicht mehr; has_more sagt, dass die Liste gekappt ist.
+    total = await db.appointments.count_documents(filt)
     conflicts = await db.appointments.find(
-        {"driver_id": driver_id, "pickup_date": date,
-         "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}},
+        filt,
         {"_id": 0, "id": 1, "dealer_id": 1, "pickup_time": 1,
          "pickup_address": 1, "title": 1},
-    ).to_list(50)
+    ).sort("pickup_time", 1).to_list(50)
     for c in conflicts:
         c["is_own"] = c.get("dealer_id") == user["dealer_id"]
         if not c["is_own"]:
             c.pop("pickup_address", None)
             c["title"] = "Andere Fahrt"
         c.pop("dealer_id", None)
-    return {"conflicts": conflicts, "count": len(conflicts)}
+    return {"conflicts": conflicts, "count": total,
+            "has_more": total > len(conflicts)}
 
 
 async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
@@ -894,13 +915,20 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         "status": body.status,
         "status_changed_at": now_iso(),
         "updated_at": now_iso(),
-        "assets_cleaned_at": None,  # Timer startet neu
     }
+    # Nachpruefung Runde 14 (Befund 114): assets_cleaned_at wird NICHT mehr
+    # zurueckgesetzt (bereits geloeschte Fotos kommen nicht wieder), und die
+    # Aufraeum-Frist rechnet ab dem ERSTEN Erreichen eines Endstatus
+    # (abgeschlossen_seit) — ein Statuswechsel hin und her startet sie nicht neu.
     if body.notes:
         update["notes"] = (appt.get("notes") or "") + (
             "\n" if appt.get("notes") else ""
         ) + f"[Fahrer] {body.notes}"
     await db.appointments.update_one({"id": appt_id}, {"$set": update})
+    if body.status in ("abgeholt", "nicht abgeholt", "erledigt", "storniert"):
+        await db.appointments.update_one(
+            {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
+            {"$set": {"abgeschlossen_seit": update["status_changed_at"]}})
     # Fahrzeug-Lebenszyklus nachziehen.
     if appt.get("vehicle_id"):
         from lifecycle import try_set_lifecycle
@@ -1029,80 +1057,123 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     else:
         _termin_offen_oder_409(appt)
 
-    # Fotos aus base64 in den Storage auslagern (nie in Mongo speichern).
-    from storage_service import make_key, storage, StorageError
-    deviations = []
-    for d in body.deviations:
-        entry = d.model_dump(exclude={"photo_b64"})
-        entry["id"] = str(uuid.uuid4())
-        if d.photo_b64:
-            try:
-                raw = base64.b64decode(d.photo_b64.split(",")[-1], validate=False)
-                from storage_service import (validate_image_bytes,
-                                             bild_verkleinern)
-                validate_image_bytes(raw, wo="Abweichungsfoto")
-                # Verkleinern kostet Rechenzeit -> in einen eigenen
-                # Faden, damit der Server waehrenddessen antwortet.
-                import asyncio as _aio_bild
-                raw = await _aio_bild.to_thread(
-                    bild_verkleinern, raw, "Abweichungsfoto")
-                key = make_key("pickup", appt.get("dealer_id", "x"), "foto.jpg")
-                from storage_service import save_async
-                await save_async(key, raw)
-                entry["photo_key"] = key
-            except (StorageError, ValueError) as exc:
-                raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
-        deviations.append(entry)
+    # Nachpruefung Runde 14, Nr. 36/37/43: alles ab hier laeuft unter EINEM
+    # Rollback. Vorher blieb bei jedem Fehlerpfad der Foto-Schleife (400)
+    # oder des Inserts (409) die Erstbericht-Reservierung stehen (Fahrer
+    # dauerhaft 409, Nr. 43) und bereits gespeicherte Fotos lagen verwaist
+    # im Storage (Nr. 36/37). Jetzt: geschriebene Keys werden VOR dem
+    # Schreiben vorgemerkt (auch eine halb geschriebene Datei wird
+    # aufgeraeumt), und erst der erfolgreiche insert_one macht Reservierung
+    # und Dateien endgueltig — wie routes.protocols.finalize_protocol.
+    from storage_service import (make_key, StorageError, save_async,
+                                 validate_image_bytes, bild_verkleinern,
+                                 loeschen_oder_vormerken)
+    dealer_id = appt.get("dealer_id", "x")
+    geschrieben: List[str] = []
+    deviations: List[dict] = []
+    erfolg = False
+    try:
+        # Fotos aus base64 in den Storage auslagern (nie in Mongo speichern).
+        for d in body.deviations:
+            entry = d.model_dump(exclude={"photo_b64"})
+            entry["id"] = str(uuid.uuid4())
+            if d.photo_b64:
+                try:
+                    raw = base64.b64decode(d.photo_b64.split(",")[-1], validate=False)
+                    validate_image_bytes(raw, wo="Abweichungsfoto")
+                    # Verkleinern kostet Rechenzeit -> in einen eigenen
+                    # Faden, damit der Server waehrenddessen antwortet.
+                    import asyncio as _aio_bild
+                    raw = await _aio_bild.to_thread(
+                        bild_verkleinern, raw, "Abweichungsfoto")
+                    key = make_key("pickup", dealer_id, "foto.jpg")
+                    geschrieben.append(key)
+                    await save_async(key, raw)
+                    entry["photo_key"] = key
+                except (StorageError, ValueError) as exc:
+                    raise HTTPException(400, f"Foto konnte nicht gespeichert werden: {exc}")
+            deviations.append(entry)
 
-    # Versionierung: existiert schon ein Bericht, wird er ersetzt (nicht geändert).
-    prev = await db.pickup_reports.find_one(
-        {"appointment_id": appt_id, "superseded": {"$ne": True}},
-        {"_id": 0, "id": 1, "version": 1},
-        sort=[("version", -1)],
-    )
-    version = (prev or {}).get("version", 0) + 1
-    report_id = str(uuid.uuid4())
-    doc = {
-        "id": report_id,
-        "appointment_id": appt_id,
-        "vehicle_id": appt.get("vehicle_id"),
-        "dealer_id": appt.get("dealer_id"),
-        "driver_account_id": driver["id"],
-        "driver_name": driver.get("display_name", ""),
-        "mileage_at_pickup": body.mileage_at_pickup,
-        "keys_count": body.keys_count,
-        "fuel_level": body.fuel_level,
-        "deviations": deviations,
-        "notes": body.notes,
-        "version": version,
-        "replaces_id": (prev or {}).get("id"),
-        "superseded": False,
-        "status": "bestaetigt",
-        "created_at": now_iso(),
-    }
-    for versuch in range(3):
-        try:
-            await db.pickup_reports.insert_one(doc)
-            break
-        except Exception:
-            # Unique-Index (appointment_id, version): ein paralleler
-            # Bericht hat dieselbe Version belegt -> frisch lesen, neue
-            # Versionsnummer nehmen und erneut versuchen.
-            if versuch == 2:
-                if reserviert:
-                    await db.appointments.update_one(
-                        {"id": appt_id}, {"$unset": {"erstbericht_reserviert_at": ""}})
-                raise HTTPException(409, "Bericht wurde gerade parallel "
-                                         "gespeichert — bitte neu laden.")
-            doc.pop("_id", None)
+        # Versionierung: existiert schon ein Bericht, wird er ersetzt (nicht
+        # geaendert). Nachpruefung Runde 14, Nr. 37: die Versionsnummer kommt
+        # aus ALLEN Versionen (auch ersetzten) — vorher aus dem aktuellen
+        # Bericht; blieb nur eine ersetzte Version 1 uebrig, kollidierte
+        # "version 1" dauerhaft mit dem Unique-Index berichtsversion_eindeutig.
+        # replaces_id zeigt weiter auf den zuletzt aktuellen Bericht.
+        async def _naechste_version():
             prev = await db.pickup_reports.find_one(
                 {"appointment_id": appt_id, "superseded": {"$ne": True}},
                 {"_id": 0, "id": 1, "version": 1}, sort=[("version", -1)])
-            doc["version"] = (prev or {}).get("version", 0) + 1
-            doc["replaces_id"] = (prev or {}).get("id")
-    if prev:
-        await db.pickup_reports.update_one(
-            {"id": prev["id"]}, {"$set": {"superseded": True}})
+            hoechste = await db.pickup_reports.find_one(
+                {"appointment_id": appt_id}, {"_id": 0, "version": 1},
+                sort=[("version", -1)])
+            return ((hoechste or {}).get("version") or 0) + 1, (prev or {}).get("id")
+
+        version, replaces_id = await _naechste_version()
+        report_id = str(uuid.uuid4())
+        doc = {
+            "id": report_id,
+            "appointment_id": appt_id,
+            "vehicle_id": appt.get("vehicle_id"),
+            "dealer_id": appt.get("dealer_id"),
+            "driver_account_id": driver["id"],
+            "driver_name": driver.get("display_name", ""),
+            "mileage_at_pickup": body.mileage_at_pickup,
+            "keys_count": body.keys_count,
+            "fuel_level": body.fuel_level,
+            "deviations": deviations,
+            "notes": body.notes,
+            "version": version,
+            "replaces_id": replaces_id,
+            "superseded": False,
+            "status": "bestaetigt",
+            "created_at": now_iso(),
+        }
+        for versuch in range(3):
+            try:
+                await db.pickup_reports.insert_one(doc)
+                break
+            except Exception:
+                # Unique-Index (appointment_id, version): ein paralleler
+                # Bericht hat dieselbe Version belegt -> frisch lesen, neue
+                # Versionsnummer nehmen und erneut versuchen.
+                if versuch == 2:
+                    raise HTTPException(409, "Bericht wurde gerade parallel "
+                                             "gespeichert — bitte neu laden.")
+                doc.pop("_id", None)
+                version, replaces_id = await _naechste_version()
+                doc["version"], doc["replaces_id"] = version, replaces_id
+        erfolg = True
+    finally:
+        if not erfolg:
+            # Rollback (Nr. 36/37/43): Reservierung loesen, Dateien
+            # verwerfen — schlaegt eine Loeschung fehl, merkt
+            # loeschen_oder_vormerken sie in storage_delete_retry vor.
+            if reserviert:
+                try:
+                    await db.appointments.update_one(
+                        {"id": appt_id},
+                        {"$unset": {"erstbericht_reserviert_at": ""}})
+                except Exception:  # noqa: BLE001
+                    log.exception("Abholbericht-Rollback: Reservierung an %s "
+                                  "konnte nicht geloest werden", appt_id)
+            for key in geschrieben:
+                await loeschen_oder_vormerken(
+                    db, key=key, grund="abholbericht-rollback",
+                    dealer_id=dealer_id,
+                    ref={"collection": "appointments", "id": appt_id})
+    # Nachpruefung Runde 14, Nr. 38: alle aelteren, noch aktuellen Versionen
+    # in EINEM Schritt ersetzen (vorher nur der vorher gelesene prev):
+    # heilt Doppelzustaende aus abgebrochenen Laeufen selbst. Nur Versionen
+    # KLEINER als die eigene — ein parallel gespeicherter juengerer Bericht
+    # darf nicht vom aelteren ersetzt werden, sonst blieben null aktuelle.
+    # Leser sortieren zusaetzlich nach version absteigend (driver_get_report,
+    # abholbericht.massgeblicher_bericht), damit die Reihenfolge nie vom
+    # gewaehlten Index abhaengt.
+    await db.pickup_reports.update_many(
+        {"appointment_id": appt_id, "id": {"$ne": report_id},
+         "version": {"$lt": version}, "superseded": {"$ne": True}},
+        {"$set": {"superseded": True}})
     # Badge-Daten am Termin denormalisieren (schnelle Anzeige beim Händler).
     await db.appointments.update_one(
         {"id": appt_id},
@@ -1129,7 +1200,10 @@ async def driver_get_report(appt_id: str, driver=Depends(current_driver)):
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
     await _zugriff_pruefen(appt, driver)
+    # Nachpruefung Runde 14, Nr. 38: hoechste Version explizit — die
+    # Reihenfolge ohne sort hing vom Index ab, den der Planer waehlte.
     report = await db.pickup_reports.find_one(
         {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
+        sort=[("version", -1)],
     )
     return report or {}
