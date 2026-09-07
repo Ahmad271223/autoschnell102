@@ -24,8 +24,10 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     safe = safe.strip()
     return safe[:200] or fallback
 
+from pymongo.errors import DuplicateKeyError
+
 from deps import (
-    current_firma,
+    TERMIN_OFFEN_WERTE, current_firma,
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
 import auto_daten
@@ -393,52 +395,100 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "gekauft", user=user)
     await log_activity(user["dealer_id"], user["id"], "pdf.erstellt", ref=pdf_id)
 
-    # Auto-create appointment if pickup_date was provided so the PDF
-    # automatically appears in the Terminplaner. Avoid duplicates if an
-    # appointment for the same contract already exists.
+    # Abholtermin automatisch anlegen, wenn ein Abholdatum angegeben wurde,
+    # damit der Vertrag im Terminplaner erscheint.
+    # Runde 15 (Nr. 5): Der Vertrag ist gespeichert — scheitert der Termin,
+    # bleibt der Vertrag gueltig und die Antwort traegt einen Hinweis; vorher
+    # brach der Request mit 500 ab, und ein Wiederholen legte einen ZWEITEN
+    # Vertrag an.
+    termin_hinweis = None
     if body.pickup_date:
-        already = await db.appointments.find_one(
-            {"dealer_id": user["dealer_id"], "contract_id": pdf_id}, {"_id": 0},
-        )
-        if not already:
-            appt_id = str(uuid.uuid4())
-            title = (
-                f"{vehicle.get('make_label','')} {vehicle.get('model_label','')} abholen".strip()
-                or "Fahrzeug abholen"
-            )
-            pickup_address = " ".join([
-                body.seller_address or "",
-                body.seller_zip or "",
-                body.seller_city or "",
-            ]).strip()
-            await db.appointments.insert_one({
-                "id": appt_id,
-                "dealer_id": user["dealer_id"],
-                "created_by": user["id"],     # Runde 10: sonst kann der Sucher ihn nie loeschen
-                "title": title,
-                "vehicle_id": body.vehicle_id,
-                "contract_id": pdf_id,
-                "seller_name": body.seller_name,
-                "seller_phone": body.seller_phone,
-                "seller_email": body.seller_email,
-                "pickup_address": pickup_address,
-                "pickup_date": body.pickup_date,
-                "pickup_time": body.pickup_time or "",
-                "status": "offen",
-                "created_at": now_iso(),
-                "updated_at": now_iso(),
-            })
-            await db.generated_pdfs.update_one(
-                {"id": pdf_id},
-                {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
-            )
+        try:
+            appt_id, termin_hinweis = await _abholtermin_fuer_vertrag(
+                user, body, vehicle, pdf_id)
+        except Exception:
+            log.exception("Auto-Termin fuer Vertrag %s fehlgeschlagen", pdf_id)
+            appt_id = None
+            termin_hinweis = ("Der Vertrag ist gespeichert, der Abholtermin konnte "
+                              "aber nicht angelegt werden — bitte im Terminplaner "
+                              "von Hand anlegen.")
+        if appt_id:
             doc["appointment_id"] = appt_id
             doc["status"] = "Termin erstellt"
-            await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
-                                    "abholung_geplant", user=user)
-            await log_activity(user["dealer_id"], user["id"], "termin.auto-erstellt", ref=appt_id)
 
-    return {**clean_doc(doc), "pdf_b64": pdf_b64}
+    out = {**clean_doc(doc), "pdf_b64": pdf_b64}
+    if termin_hinweis:
+        out["termin_hinweis"] = termin_hinweis
+    return out
+
+
+async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str):
+    """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug.
+
+    Die alte Dubletten-Pruefung suchte nach der soeben erzeugten contract_id
+    und fand deshalb nie etwas — zwei Vertraege fuer dasselbe Auto (Doppel-
+    klick, Korrektur, zwei Sucher) ergaben zwei Termine. Jetzt: existiert
+    ein offener Termin zum Fahrzeug, wird er auf den neuen Vertrag
+    umgehaengt (Datum/Uhrzeit/Verkaeufer aus dem neuen Vertrag, Fahrer
+    bleibt); der alte Vertrag verliert den Verweis. Gehoert der Termin einem
+    Kollegen (Sucher-Bereich), bleibt er unangetastet und der Vertrag
+    bekommt nur einen Hinweis. Das Rennen zweier gleichzeitiger Anlagen
+    faengt der Teil-Unique-Index termin_offen_je_fahrzeug (server.py).
+    Liefert (appointment_id | None, hinweis | None)."""
+    from routes.appointments import _sucher_darf
+    dealer_id = user["dealer_id"]
+    pickup_address = " ".join([
+        body.seller_address or "", body.seller_zip or "", body.seller_city or "",
+    ]).strip()
+    felder = {"seller_name": body.seller_name, "seller_phone": body.seller_phone,
+              "seller_email": body.seller_email, "pickup_address": pickup_address,
+              "pickup_date": body.pickup_date, "pickup_time": body.pickup_time or ""}
+    for versuch in (1, 2):
+        offen = await db.appointments.find_one(
+            {"dealer_id": dealer_id, "vehicle_id": body.vehicle_id,
+             "status": {"$in": TERMIN_OFFEN_WERTE}},
+            {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1})
+        if offen:
+            if not await _sucher_darf(user, offen):
+                return None, ("Für dieses Fahrzeug besteht bereits ein offener "
+                              "Abholtermin eines Kollegen — der Vertrag wurde ohne "
+                              "eigenen Termin gespeichert.")
+            await db.appointments.update_one(
+                {"id": offen["id"], "dealer_id": dealer_id},
+                {"$set": {**felder, "contract_id": pdf_id, "updated_at": now_iso()}})
+            alt = offen.get("contract_id")
+            if alt and alt != pdf_id:
+                await db.generated_pdfs.update_one(
+                    {"id": alt, "appointment_id": offen["id"]},
+                    {"$set": {"appointment_id": None}})
+            appt_id = offen["id"]
+            aktion = "termin.auto-umgehaengt"
+            break
+        appt_id = str(uuid.uuid4())
+        title = (f"{vehicle.get('make_label','')} {vehicle.get('model_label','')} abholen".strip()
+                 or "Fahrzeug abholen")
+        try:
+            await db.appointments.insert_one({
+                "id": appt_id, "dealer_id": dealer_id,
+                "created_by": user["id"],     # Runde 10: sonst kann der Sucher ihn nie loeschen
+                "title": title, "vehicle_id": body.vehicle_id, "contract_id": pdf_id,
+                **felder, "status": "offen",
+                "created_at": now_iso(), "updated_at": now_iso(),
+            })
+            aktion = "termin.auto-erstellt"
+            break
+        except DuplicateKeyError:
+            if versuch == 2:
+                raise
+            continue                        # paralleler Termin gewann -> umhaengen
+    await db.generated_pdfs.update_one(
+        {"id": pdf_id},
+        {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
+    )
+    await try_set_lifecycle(body.vehicle_id, dealer_id, "abholung_geplant", user=user)
+    await log_activity(dealer_id, user["id"], aktion, ref=appt_id,
+                       meta={"contract_id": pdf_id, "vehicle_id": body.vehicle_id})
+    return appt_id, None
 
 
 # Nach so vielen Sekunden gilt eine Zustellung "laeuft" als abgebrochen.

@@ -227,19 +227,8 @@ async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
 #   DEALER → FAHRER  (Händler verwaltet seine Fahrer-Liste
 #   über die öffentlichen Fahrer-Codes der Fahrer-Accounts)
 # =========================================================
-async def _load_dealer_driver(dealer_id: str, driver_account_id: str) -> Optional[dict]:
-    """Fahrer-Account + Dealer-Override (falls vorhanden) zusammenführen."""
-    da = await db.driver_accounts.find_one(
-        {"id": driver_account_id}, {"_id": 0, "password_hash": 0},
-    )
-    if not da:
-        return None
-    link = await db.dealer_drivers.find_one(
-        {"dealer_id": dealer_id, "driver_account_id": driver_account_id},
-        {"_id": 0},
-    )
-    if not link:
-        return None
+def _fahrer_eintrag(da: dict, link: dict) -> dict:
+    """Fahrer-Account + Firmen-Verknuepfung zu EINEM Listeneintrag."""
     return {
         "id": da["id"],
         "driver_code": da.get("driver_code"),
@@ -248,6 +237,25 @@ async def _load_dealer_driver(dealer_id: str, driver_account_id: str) -> Optiona
         "active": da.get("active", True),
         "added_at": link.get("added_at"),
     }
+
+
+async def _load_dealer_driver(dealer_id: str, driver_account_id: str,
+                              link: Optional[dict] = None) -> Optional[dict]:
+    """Fahrer-Account + Dealer-Override (falls vorhanden) zusammenführen.
+    `link` darf mitgegeben werden, wenn die Verknuepfung schon geladen ist."""
+    da = await db.driver_accounts.find_one(
+        {"id": driver_account_id}, {"_id": 0, "password_hash": 0},
+    )
+    if not da:
+        return None
+    if link is None:
+        link = await db.dealer_drivers.find_one(
+            {"dealer_id": dealer_id, "driver_account_id": driver_account_id},
+            {"_id": 0},
+        )
+    if not link:
+        return None
+    return _fahrer_eintrag(da, link)
 
 
 @router.post("/drivers/add")
@@ -266,18 +274,19 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
         raise HTTPException(404, "Kein Fahrer mit diesem Code gefunden")
     if not da.get("active", True):
         raise HTTPException(409, "Dieser Fahrer-Account ist deaktiviert")
-    existing = await db.dealer_drivers.find_one(
-        {"dealer_id": user["dealer_id"], "driver_account_id": da["id"]},
-    )
-    if existing:
+    # Runde 15 (Nr. 2): kein find_one+insert mehr — der Unique-Index
+    # (dealer_id, driver_account_id) entscheidet atomar; vorher lieferten
+    # zwei gleichzeitige Hinzufuegen-Klicks einen 500 statt 409.
+    try:
+        await db.dealer_drivers.insert_one({
+            "id": str(uuid.uuid4()),
+            "dealer_id": user["dealer_id"],
+            "driver_account_id": da["id"],
+            "display_name": da.get("display_name"),
+            "added_at": now_iso(),
+        })
+    except DuplicateKeyError:
         raise HTTPException(409, "Fahrer ist bereits in deiner Liste")
-    await db.dealer_drivers.insert_one({
-        "id": str(uuid.uuid4()),
-        "dealer_id": user["dealer_id"],
-        "driver_account_id": da["id"],
-        "display_name": da.get("display_name"),
-        "added_at": now_iso(),
-    })
     return await _load_dealer_driver(user["dealer_id"], da["id"]) or {}
 
 
@@ -286,11 +295,16 @@ async def list_drivers(user=Depends(current_firma)):
     links = await db.dealer_drivers.find(
         {"dealer_id": user["dealer_id"]}, {"_id": 0},
     ).to_list(500)
-    out = []
-    for link in links:
-        info = await _load_dealer_driver(user["dealer_id"], link["driver_account_id"])
-        if info:
-            out.append(info)
+    # Runde 15 (Nr. 4): Konten in EINER Abfrage statt 2 je Fahrer (bei 500
+    # Fahrern 1001 Abfragen je Listenaufruf, auch fuer Sucher erreichbar).
+    konten: Dict[str, dict] = {}
+    ids = [l["driver_account_id"] for l in links if l.get("driver_account_id")]
+    if ids:
+        async for da in db.driver_accounts.find(
+                {"id": {"$in": ids}}, {"_id": 0, "password_hash": 0}):
+            konten[da["id"]] = da
+    out = [_fahrer_eintrag(konten[l["driver_account_id"]], l)
+           for l in links if l.get("driver_account_id") in konten]
     out.sort(key=lambda d: (d.get("name") or "").lower())
     return out
 

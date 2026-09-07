@@ -228,6 +228,16 @@ Aufbewahrungsfristen ≤ 0, halb konfiguriertem S3 sowie bei doppelten Werten
 in Feldern mit Eindeutigkeits-Index (`scripts/dubletten_pruefen.py`). Die
 Prüfung läuft **vor** Indexanlage und Admin-Seeding.
 
+Seit Runde 15 gilt zusätzlich: **höchstens ein offener Abholtermin je
+Fahrzeug und Firma** (Teil-Unique-Index `termin_offen_je_fahrzeug`). Gibt es
+im Bestand noch mehrere offene Termine zum selben Fahrzeug, startet das
+Backend trotzdem, legt den Index aber nicht an und schreibt eine Warnung ins
+Log (`ensure_indexes: appointments: mehrere OFFENE Termine je Fahrzeug`).
+Dann `python -X utf8 scripts/dubletten_pruefen.py` im Backend-Container
+ausführen, die genannten Termine im Terminplaner abschließen oder löschen
+und das Backend einmal neu starten. Bis dahin greift nur die Vorabprüfung
+der Routen (409 „bereits ein offener Abholtermin"), nicht der Index.
+
 ## Auto-Daten & 90-Tage-Löschung
 - Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)
   werden nach `VERTRAG_AUFBEWAHRUNG_TAGE` (Standard 90) vom stündlichen

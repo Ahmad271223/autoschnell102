@@ -72,15 +72,22 @@ router = APIRouter()
 
 
 # ---------- Models ----------
+# Runde 15 (Nr. 6): Inserats-Adressen sind serverseitig begrenzt — vorher
+# lief ein beliebig langer String (bis client_max_body_size) durch Regex,
+# Cache-Schluessel und Snapshot-Speicherung. Echte Inserats-URLs haben
+# unter 500 Zeichen; 2048 laesst Tracking-Parameter zu.
+URL_MAX = 2048
+
+
 class CompareIn(BaseModel):
-    url: str
+    url: str = Field(min_length=1, max_length=URL_MAX)
     # Rueckfall 09/2026: Browser ohne Abruf-Helfer -> Server holt selbst,
     # statt den Nutzer mit "Erweiterung installieren" zu blockieren.
     ohne_erweiterung: bool = False
 
 
 class ListingURLIn(BaseModel):
-    url: str
+    url: str = Field(min_length=1, max_length=URL_MAX)
     ohne_erweiterung: bool = False
 
 
@@ -409,7 +416,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
 
 class IngestIn(BaseModel):
-    url: str
+    url: str = Field(min_length=1, max_length=URL_MAX)
     html: str = Field(min_length=500, max_length=6_000_000)
 
 
@@ -538,10 +545,13 @@ _status_limiter = SlidingWindowRateLimiter(max_attempts=40, window_seconds=10)
 
 
 @router.get("/listings/check/{job_id}")
-async def listings_check_status(job_id: str, user=Depends(current_firma)):
+async def listings_check_status(job_id: str, user=Depends(require_active_sub)):
     """Status eines Linkpruefungs-Jobs: queued | processing | completed |
     failed. Bei completed liegt das Inserat im Cache — /mobile/compare
     liefert dann sofort.
+
+    Runde 15 (Nr. 7): dieselbe Bezahlschranke wie beim Anlegen des Jobs
+    (require_active_sub) — vorher konnte ein abgelaufenes Abo weiter pollen.
 
     Long-Poll mit Backoff (Audit 09/2026, Punkt 16): statt ~20 DB-Lesungen
     in 2,4 s jetzt hoechstens 6 (0,15 / 0,3 / 0,5 / 0,7 / 0,75 s), dazu ein

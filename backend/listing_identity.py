@@ -58,6 +58,9 @@ _RE_AS24_UUID = re.compile(
 )
 
 
+URL_MAX_LAENGE = 2048
+
+
 class ListingIdentityError(ValueError):
     """Wird geworfen, wenn keine Inserats-ID extrahiert werden konnte."""
 
@@ -184,6 +187,11 @@ def get_listing_identity(url: str) -> dict:
     Gibt {"source", "item_id", "cache_key"} zurück.
     Wirft ListingIdentityError, wenn nichts erkannt werden kann.
     """
+    # Runde 15 (Nr. 6): fail-fast fuer alle Aufrufer (Routen, Link-Jobs,
+    # Erweiterungs-Ingest) — auch die Fehlermeldung unten zitiert die URL.
+    if not isinstance(url, str) or len(url) > URL_MAX_LAENGE:
+        raise ListingIdentityError(
+            f"Adresse zu lang (max. {URL_MAX_LAENGE} Zeichen)")
     source = detect_source(url)
     if not source:
         raise ListingIdentityError(

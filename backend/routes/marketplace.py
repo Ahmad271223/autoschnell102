@@ -398,6 +398,8 @@ async def delete_invite(invite_id: str, user=Depends(current_haendler)):
         {"id": invite_id, "dealer_id": user["dealer_id"]})
     if not r.deleted_count:
         raise HTTPException(404, "Einladung nicht gefunden")
+    # Runde 15 (Nr. 8): Erstellen war geloggt, Loeschen nicht.
+    await log_activity(user["dealer_id"], user["id"], "einladung.geloescht", ref=invite_id)
     return {"ok": True}
 
 
@@ -407,12 +409,21 @@ async def list_network_members(user=Depends(current_haendler)):
     weder Liste noch Widerruf — ein beigetretener Kaeufer behielt den
     Zugang dauerhaft, das Loeschen der Einladung entfernte nur den Link)."""
     out = []
-    async for m in db.network_members.find(
-            {"dealer_id": user["dealer_id"]}, {"_id": 0}).sort("created_at", -1):
-        b = await db.users.find_one(
-            {"id": m["buyer_user_id"]},
-            {"_id": 0, "company_name": 1, "contact_name": 1, "email": 1,
-             "active": 1})
+    # Runde 15 (Nr. 4): begrenzt und Konten in EINER Abfrage — vorher ohne
+    # Limit und ein users.find_one je Mitglied (5.000 Mitglieder = 5.001
+    # Abfragen je Seitenaufruf).
+    mitglieder = await db.network_members.find(
+        {"dealer_id": user["dealer_id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    konten: Dict[str, dict] = {}
+    ids = [m["buyer_user_id"] for m in mitglieder if m.get("buyer_user_id")]
+    if ids:
+        async for u in db.users.find(
+                {"id": {"$in": ids}},
+                {"_id": 0, "id": 1, "company_name": 1, "contact_name": 1,
+                 "email": 1, "active": 1}):
+            konten[u["id"]] = u
+    for m in mitglieder:
+        b = konten.get(m.get("buyer_user_id"))
         # Nachpruefung Runde 14 (Nr. 66): fehlt das Kaeuferkonto (Altbestand,
         # manuelle Loeschung), meldete die Liste active=True mit leerem
         # Namen. Ohne users-Dokument ist kein Login moeglich, also ehrlich

@@ -441,6 +441,15 @@ async def kunden_nummern_nachziehen() -> int:
     return n
 
 
+# Termin-Zustaende, in denen eine Abholung noch AUSSTEHT (Gegenstueck zu
+# ABGESCHLOSSEN in routes/appointments.py). Runde 15 (Nr. 6): Grundlage fuer
+# die Regel "hoechstens ein offener Abholtermin je Fahrzeug" (Teil-Unique-
+# Index in server.py, Vorabpruefung beim Anlegen, Auto-Termin beim Vertrag).
+TERMIN_OFFEN = ("offen", "verschoben", "bestätigt", "in Bearbeitung")
+# Fuer Abfragen: fehlender oder leerer Status zaehlt ebenfalls als offen.
+TERMIN_OFFEN_WERTE = list(TERMIN_OFFEN) + ["", None]
+
+
 async def log_activity(dealer_id: str, user_id: str, action: str,
                        ref: Optional[str] = None, meta: Optional[dict] = None):
     await db.activity_logs.insert_one({

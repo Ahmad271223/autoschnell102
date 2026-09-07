@@ -456,6 +456,20 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
         raise HTTPException(409, "Inserat wurde zwischenzeitlich geaendert "
                                  "(verkauft, geloescht oder reserviert) — "
                                  "bitte neu laden")
+    # Runde 15 (Nr. 6): Preis, Kosten, Maengel und Fahrzeugdaten eines
+    # (auch live veroeffentlichten) Inserats aenderten sich ohne Spur —
+    # Veroeffentlichung und Statuswechsel waren dagegen geloggt.
+    felder = sorted(k for k in update if k != "updated_at")
+    meta: Dict[str, Any] = {"felder": felder, "status": status}
+    if any(k.startswith("prices.") for k in felder):
+        meta["preise_alt"] = l.get("prices") or {}
+        meta["preise_neu"] = prices
+    if "data" in update:
+        alt = l.get("data") or {}
+        meta["fahrzeugdaten_geaendert"] = sorted(
+            k for k, val in body.data.items() if k in allowed and alt.get(k) != val)
+    await log_activity(user["dealer_id"], user["id"], "inserat.geaendert",
+                       ref=listing_id, meta=meta)
     fresh = await db.resale_listings.find_one(
         {"id": listing_id}, {"_id": 0})
     return _with_margin(fresh)
@@ -608,6 +622,9 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         {"id": listing_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "photos.uploaded_keys": 1})
     total = len((doc.get("photos") or {}).get("uploaded_keys") or [])
+    await log_activity(user["dealer_id"], user["id"], "inserat.foto.hinzugefuegt",
+                       ref=listing_id, meta={"anzahl": len(added), "gesamt": total,
+                                             "status": l.get("status")})
     return {"ok": True, "uploaded": [signierte_datei_url(k) for k in added],
             "total": total}
 
@@ -679,6 +696,11 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         doc = await db.resale_listings.find_one(
             {"id": listing_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "photos.uploaded_keys": 1})
+        # Runde 15 (Nr. 6): Foto-Entfernen ist sofort live und war nicht
+        # nachvollziehbar (Hochladen ebenfalls).
+        await log_activity(user["dealer_id"], user["id"], "inserat.foto.entfernt",
+                           ref=listing_id, meta={"art": "upload", "key": body.key,
+                                                 "status": l.get("status")})
         return {"ok": True, "uploaded_keys":
                 (doc.get("photos") or {}).get("uploaded_keys") or []}
     if body.url:
@@ -696,6 +718,9 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         doc = await db.resale_listings.find_one(
             {"id": listing_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "photos.einkauf_urls": 1})
+        await log_activity(user["dealer_id"], user["id"], "inserat.foto.entfernt",
+                           ref=listing_id, meta={"art": "einkauf", "url": body.url[:300],
+                                                 "status": l.get("status")})
         return {"ok": True, "einkauf_urls":
                 (doc.get("photos") or {}).get("einkauf_urls") or []}
     raise HTTPException(400, "key oder url angeben")

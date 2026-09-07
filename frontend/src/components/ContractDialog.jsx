@@ -143,6 +143,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     setLoading(true);
     try {
       const { data } = await api.post("/contracts", buildPayload());
+      // Runde 15: der Vertrag ist gespeichert, auch wenn der automatische
+      // Abholtermin nicht angelegt werden konnte — der Server sagt es.
+      if (data?.termin_hinweis) toast.warning(data.termin_hinweis, { duration: 8000 });
       onCreated?.(data);
     } catch (err) {
       toast.error(errMsg(err, "PDF konnte nicht erstellt werden"));

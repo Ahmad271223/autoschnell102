@@ -432,11 +432,15 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
             if ist_sucher else ((dealer or {}).get("contact_person") or "Chef"))
     req_id = str(uuid.uuid4())
     # Nachpruefung Runde 14 (Nr. 56): atomarer Upsert statt find_one+insert.
-    doc, neu = await _offene_anfrage_upsert(
-        {"type": "sucher_abo", "subject_user_id": user["id"], "status": "offen"},
-        {"id": req_id,
-         "dealer_id": user["dealer_id"],
-         "subject_role": user.get("role", "dealer"),
+    # Runde 15 (Nr. 3): dealer_id gehoert in den Schluessel — eine offene
+    # Altanfrage unter einer anderen Firma wird nie mitgeaendert; stattdessen
+    # 409 (der Teil-Unique-Index laesst nur EINE offene Anfrage je Konto zu).
+    try:
+        doc, neu = await _offene_anfrage_upsert(
+            {"type": "sucher_abo", "subject_user_id": user["id"],
+             "dealer_id": user["dealer_id"], "status": "offen"},
+            {"id": req_id,
+             "subject_role": user.get("role", "dealer"),
          "sucher_name": name or user.get("email", ""),
          "sucher_email": user.get("email", ""),
          "company_name": (dealer or {}).get("company_name", ""),
@@ -444,10 +448,14 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
          "contact_email": user.get("email", ""),
          "contact_phone": (dealer or {}).get("phone", ""),
          "created_at": now_iso()},
-        {"wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
-         "wanted_plan": plan,
-         "price": SUCHER_PLANS[plan]["price"],
-         "updated_at": now_iso()})
+            {"wanted": SUCHER_PLANS[plan]["label"] + " (eigener Zugang)",
+             "wanted_plan": plan,
+             "price": SUCHER_PLANS[plan]["price"],
+             "updated_at": now_iso()})
+    except DuplicateKeyError:
+        raise HTTPException(409, "Für dieses Konto liegt noch eine offene Anfrage "
+                                 "aus einer früheren Firmenzuordnung vor — bitte "
+                                 "den Betreiber kontaktieren.")
     if not neu:
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Deine Anfrage liegt bereits beim Betreiber."}

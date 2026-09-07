@@ -6,6 +6,7 @@
 - Abweichungs-Übernahme (Diff Einkauf vs. Abholung)
 - Manuell hinzugefügte Fahrzeuge (source: "manuell")
 """
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -108,11 +109,20 @@ class ManualVehicleIn(BaseModel):
 def _clean_costs(costs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for c in (costs or [])[:30]:
+        if not isinstance(c, dict):
+            continue
         label = str(c.get("label", "")).strip()[:100]
         try:
             amount = round(float(c.get("amount", 0)), 2)
         except (TypeError, ValueError):
             amount = 0.0
+        # Runde 15 (Nr. 4): Infinity/NaN kamen als `Any` an Pydantic vorbei,
+        # standen als inf in bestand.costs und liessen jede Antwort mit
+        # diesem Fahrzeug (Bestand, Akte, Termine) sowie die Marge mit 500
+        # scheitern. Klar ablehnen statt still nullen.
+        if not math.isfinite(amount) or abs(amount) > 1e9:
+            raise HTTPException(422, f"Ungültiger Betrag bei '{label or 'Kosten'}' — "
+                                     "bitte eine Zahl bis 1.000.000.000 eingeben")
         if label:
             out.append({"label": label, "amount": amount})
     return out
@@ -198,11 +208,20 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
         b["location"] = body.location.strip()
     if body.notes is not None:
         b["notes"] = body.notes.strip()
+    kosten_alt = sum(float(c.get("amount") or 0) for c in (b.get("costs") or [])
+                     if isinstance(c, dict) and math.isfinite(float(c.get("amount") or 0)))
     if body.costs is not None:
         b["costs"] = _clean_costs(body.costs)
     await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"]},
         {"$set": {"bestand": b, "updated_at": now_iso()}})
+    # Runde 15 (Nr. 5): Kosten beeinflussen die Marge — wer wann aus 500 EUR
+    # Aufbereitung 5.000 gemacht hat, muss nachvollziehbar bleiben.
+    felder = [f for f in ("location", "notes", "costs") if getattr(body, f) is not None]
+    await log_activity(user["dealer_id"], user["id"], "bestand.geaendert", ref=vehicle_id,
+                       meta={"felder": felder,
+                             "kosten_summe_alt": round(kosten_alt, 2),
+                             "kosten_summe_neu": round(sum(c["amount"] for c in (b.get("costs") or [])), 2)})
     return {"ok": True, "bestand": b}
 
 

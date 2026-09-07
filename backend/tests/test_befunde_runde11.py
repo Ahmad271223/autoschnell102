@@ -491,7 +491,13 @@ def test_m5_termin_nur_mit_vertrag_im_eigenen_bereich(welt, sucher2):
     r = requests.put(f"{API}/appointments/{appt_id}", headers=sucher2["S"],
                      json={"contract_id": cid}, timeout=30)
     assert r.status_code == 404, f"auch nachtraeglich nicht: {r.text[:200]}"
+    # Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug — der
+    # Chef bekommt fuer dasselbe Auto keinen zweiten, haengt seinen Vertrag
+    # aber an den bestehenden Termin (Chef darf jeden Termin aendern).
     r = requests.post(f"{API}/appointments", headers=welt["C"], json=body, timeout=30)
+    assert r.status_code == 409, r.text[:200]
+    r = requests.put(f"{API}/appointments/{appt_id}", headers=welt["C"],
+                     json={"contract_id": cid}, timeout=30)
     assert r.status_code == 200, r.text[:200]
 
 

@@ -451,8 +451,12 @@ async def dealer_subscription(user=Depends(current_firma)):
     raw_status = (sub_doc or {}).get("status", "active") if sub_doc else "none"
     # Offene Verlaengerungs-Anfrage beim Betreiber (09/2026) — die
     # Oberflaeche zeigt dann "wartet auf Freigabe" statt neuer Buttons.
+    # Runde 15 (Nr. 2): nur Anfragen der EIGENEN Firma — ein Konto kann
+    # heute zwar nicht die Firma wechseln, aber eine Altanfrage einer
+    # anderen dealer_id darf hier nie als "offen" erscheinen.
     anfrage = await db.plan_requests.find_one(
-        {"type": "sucher_abo", "subject_user_id": user["id"], "status": "offen"},
+        {"type": "sucher_abo", "subject_user_id": user["id"],
+         "dealer_id": user["dealer_id"], "status": "offen"},
         {"_id": 0, "id": 1, "wanted_plan": 1, "created_at": 1})
     ist_sucher = user.get("role") == "sucher"
 
@@ -504,6 +508,12 @@ async def dealer_cancel_subscription(user=Depends(current_firma)):
             "cancelled_at": now_iso(),
         }},
     )
+    # Runde 15 (Nr. 8): finanz- und zugriffsrelevanter Zustandswechsel —
+    # bisher ohne Audit-Eintrag.
+    from deps import log_activity
+    await log_activity(user["dealer_id"], user["id"], "abo.gekuendigt", ref=sub["id"],
+                       meta={"plan": sub.get("plan"), "expires_at": sub.get("expires_at"),
+                             "subject_user_id": sub.get("subject_user_id")})
     return {
         "ok": True,
         "expires_at": sub.get("expires_at"),

@@ -68,9 +68,12 @@ export default function Termine() {
         toast.success(data.contract_updated
           ? "Termin gespeichert — Kaufvertrag trägt jetzt das neue Abholdatum"
           : "Termin gespeichert");
+        // Runde 15: Fahrer wurde waehrend des Speicherns aus der Firma entfernt
+        if (data?.hinweis) toast.warning(data.hinweis, { duration: 8000 });
       } else {
-        await api.post(`/appointments`, a);
+        const { data } = await api.post(`/appointments`, a);
         toast.success("Termin angelegt");
+        if (data?.hinweis) toast.warning(data.hinweis, { duration: 8000 });
       }
       setEditing(null);
       setCreating(false);

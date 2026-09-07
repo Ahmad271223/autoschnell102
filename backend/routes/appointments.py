@@ -9,7 +9,10 @@ from typing import Any, Dict, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, field_validator
 
-from deps import clean_doc, current_user, db, log_activity, now_iso, current_firma
+from pymongo.errors import DuplicateKeyError
+
+from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, db, log_activity,
+                  now_iso, current_firma)
 from lifecycle import try_set_lifecycle
 
 log = logging.getLogger("autohandel")
@@ -101,6 +104,47 @@ async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
                                  "'Fahrer' per Code hinzufügen.")
 
 
+async def _fahrer_nachpruefen(appt_id: str, dealer_id: str,
+                              driver_id: Optional[str]) -> bool:
+    """Runde 15 (Nr. 1): _fahrer_pruefen und der Termin-Write sind zwei
+    Schritte. Entfernt der Chef den Fahrer GENAU dazwischen, laeuft seine
+    Terminbereinigung (drivers.py) VOR unserem Write, und der Termin traegt
+    danach einen nicht mehr verknuepften Fahrer. Deshalb nach dem Write ein
+    zweites Mal pruefen und die Zuweisung zuruecknehmen, wenn die
+    Verknuepfung inzwischen fehlt. Liefert False, wenn zurueckgenommen."""
+    if not driver_id:
+        return True
+    if await db.dealer_drivers.find_one(
+            {"dealer_id": dealer_id, "driver_account_id": driver_id}, {"_id": 1}):
+        return True
+    await db.appointments.update_one(
+        {"id": appt_id, "dealer_id": dealer_id, "driver_id": driver_id},
+        {"$unset": {"driver_id": ""},
+         "$set": {"zuteilung": None, "updated_at": now_iso()}})
+    return False
+
+
+FAHRER_ENTFERNT_HINWEIS = ("Der Fahrer wurde soeben aus der Firma entfernt — "
+                           "der Termin ist ohne Fahrer gespeichert.")
+TERMIN_DOPPELT_HINWEIS = ("Für dieses Fahrzeug gibt es bereits einen offenen "
+                          "Abholtermin — bitte den bestehenden Termin ändern "
+                          "oder zuerst abschließen.")
+
+
+async def _offener_termin_zum_fahrzeug(dealer_id: str, vehicle_id: Optional[str],
+                                       ausser: Optional[str] = None) -> Optional[dict]:
+    """Runde 15 (Nr. 6): offener Abholtermin derselben Firma zu diesem
+    Fahrzeug (ohne den Termin `ausser`, z.B. den gerade bearbeiteten)."""
+    if not vehicle_id:
+        return None
+    q: Dict[str, Any] = {"dealer_id": dealer_id, "vehicle_id": vehicle_id,
+                         "status": {"$in": TERMIN_OFFEN_WERTE}}
+    if ausser:
+        q["id"] = {"$ne": ausser}
+    return await db.appointments.find_one(
+        q, {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1, "status": 1})
+
+
 @router.post("/appointments")
 async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     appt_id = str(uuid.uuid4())
@@ -124,6 +168,11 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
                 {"id": body.contract_id, **_vertrag_bereich(user)}, {"_id": 1}):
             raise HTTPException(404, "Vertrag nicht gefunden")
     await _fahrer_pruefen(user["dealer_id"], body.driver_id)
+    # Runde 15 (Nr. 6): ein offener Abholtermin je Fahrzeug. Vorabpruefung
+    # (klare Meldung), der Teil-Unique-Index faengt das Rennen.
+    if (body.status or "offen") in TERMIN_OFFEN_WERTE \
+            and await _offener_termin_zum_fahrzeug(user["dealer_id"], body.vehicle_id):
+        raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
     if vehicle_doc and not body.title:
         d = vehicle_doc["data"]
         title = f"{d.get('make_label','')} {d.get('model_label','')} abholen".strip()
@@ -138,7 +187,16 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         # sie in seiner App an oder lehnt sie ab.
         doc["zuteilung"] = "offen"
         doc["zuteilung_am"] = now_iso()
-    await db.appointments.insert_one(doc)
+    try:
+        await db.appointments.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
+    hinweis = None
+    if doc.get("driver_id") and not await _fahrer_nachpruefen(
+            appt_id, user["dealer_id"], doc["driver_id"]):
+        doc.pop("driver_id", None)
+        doc["zuteilung"] = None
+        hinweis = FAHRER_ENTFERNT_HINWEIS
     if body.contract_id:
         await db.generated_pdfs.update_one(
             {"id": body.contract_id, "dealer_id": user["dealer_id"]},
@@ -148,7 +206,10 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
                                 "abholung_geplant", user=user)
     await log_activity(user["dealer_id"], user["id"], "termin.erstellt", ref=appt_id)
-    return clean_doc(doc)
+    out = clean_doc(doc)
+    if hinweis:
+        out["hinweis"] = hinweis
+    return out
 
 
 @router.get("/appointments")
@@ -179,9 +240,18 @@ async def list_appointments(response: Response, user=Depends(current_firma),
                 "id": d["id"], "name": d.get("display_name"),
                 "driver_code": d.get("driver_code"), "email": d.get("email"),
             }
+    # Runde 15 (Nr. 3): nur die Fahrzeuge der gelisteten Termine und nur
+    # die Felder, die Termine.jsx liest (vehicle.data) — vorher wurde der
+    # komplette Fahrzeugbestand der Firma je Aufruf in den Speicher geladen
+    # (inkl. Bestandsnotizen, Kosten, Inseratskopie).
     vehicles_map = {}
-    async for v in db.vehicles.find({"dealer_id": user["dealer_id"]}, {"_id": 0}):
-        vehicles_map[v["id"]] = v
+    fahrzeug_ids = list({a["vehicle_id"] for a in items if a.get("vehicle_id")})
+    if fahrzeug_ids:
+        async for v in db.vehicles.find(
+                {"dealer_id": user["dealer_id"], "id": {"$in": fahrzeug_ids}},
+                {"_id": 0, "id": 1, "data": 1, "status": 1, "lifecycle": 1,
+                 "source": 1, "mobile_ad_id": 1}):
+            vehicles_map[v["id"]] = v
     # Ehemalige Fahrer (Verknuepfung entfernt / Konto geloescht): nur noch
     # Name aus der Historie, keine Live-Berechtigung (Audit 09/2026, Punkt 13).
     hist_ids = [a["driver_id_hist"] for a in items
@@ -360,7 +430,19 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         # weg, ein Zuruecksetzen machte den Termin erneut zum Kandidaten.
         if update["status"] in ABGESCHLOSSEN and not existing.get("abgeschlossen_seit"):
             update["abgeschlossen_seit"] = update["status_changed_at"]
-    await db.appointments.update_one({"id": appt_id}, {"$set": update})
+    # Runde 15 (Nr. 6): Fahrzeugwechsel oder Wieder-Oeffnen darf keinen
+    # zweiten offenen Termin zum selben Fahrzeug ergeben.
+    vehicle_neu = update.get("vehicle_id") or existing.get("vehicle_id")
+    if vehicle_neu and status_neu in TERMIN_OFFEN_WERTE \
+            and ("vehicle_id" in update or "status" in update) \
+            and await _offener_termin_zum_fahrzeug(user["dealer_id"], vehicle_neu, ausser=appt_id):
+        raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
+    try:
+        await db.appointments.update_one({"id": appt_id}, {"$set": update})
+    except DuplicateKeyError:
+        raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
+    fahrer_entfernt = bool(update.get("driver_id")) and not await _fahrer_nachpruefen(
+        appt_id, user["dealer_id"], update.get("driver_id"))
     # Nachpruefung Runde 14 (Nr. 113): Vertragsverweise beim Wechsel der
     # contract_id nachziehen — sonst zeigte der alte Vertrag weiter auf den
     # Termin und der neue auf keinen (SendDialog legte einen zweiten an).
@@ -420,8 +502,11 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         meta["status_nach"] = update["status"]
     await log_activity(user["dealer_id"], user["id"], "termin.aktualisiert", ref=appt_id,
                        meta=meta)
-    return {"ok": True, "pickup_date_changed": pickup_changed,
-            "contract_updated": vertrag_aktualisiert}
+    out = {"ok": True, "pickup_date_changed": pickup_changed,
+           "contract_updated": vertrag_aktualisiert}
+    if fahrer_entfernt:
+        out["hinweis"] = FAHRER_ENTFERNT_HINWEIS
+    return out
 
 
 @router.get("/appointments/{appt_id}/report")
@@ -452,12 +537,15 @@ async def get_pickup_report(appt_id: str, versions: int = 0,
 async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     # Berechtigungsmatrix (PR-Review 09/2026): firmenweite Termine loescht
     # der Chef; ein Sucher nur seine eigenen, noch offenen Termine.
+    # Runde 15 (Nr. 7): fuer beide Rollen laden — der Audit-Eintrag braucht
+    # den Stand VOR dem Loeschen (Status, Fahrzeug, Vertrag, Fahrer, Datum).
+    appt = await db.appointments.find_one(
+        {"id": appt_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "created_by": 1, "status": 1, "contract_id": 1,
+         "vehicle_id": 1, "driver_id": 1, "pickup_date": 1, "pickup_time": 1})
+    if not appt:
+        raise HTTPException(404, "Termin nicht gefunden")
     if user.get("role") == "sucher":
-        appt = await db.appointments.find_one(
-            {"id": appt_id, "dealer_id": user["dealer_id"]},
-            {"_id": 0, "created_by": 1, "status": 1, "contract_id": 1})
-        if not appt:
-            raise HTTPException(404, "Termin nicht gefunden")
         if not await _sucher_darf(user, appt):
             raise HTTPException(403, "Sucher dürfen nur ihre eigenen Termine "
                                      "löschen — andere löscht der Händler-"
@@ -468,6 +556,16 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     res = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]})
     if not res.deleted_count:
         raise HTTPException(404, "Termin nicht gefunden")
+    # Runde 15 (Nr. 7): ein Hard-Delete war die einzige Terminaktion ohne
+    # Audit-Spur — Chef darf sogar abgeschlossene Termine loeschen.
+    await log_activity(user["dealer_id"], user["id"], "termin.geloescht", ref=appt_id,
+                       meta={"status": appt.get("status") or "offen",
+                             "vehicle_id": appt.get("vehicle_id"),
+                             "contract_id": appt.get("contract_id"),
+                             "driver_id": appt.get("driver_id"),
+                             "pickup_date": appt.get("pickup_date"),
+                             "pickup_time": appt.get("pickup_time"),
+                             "created_by": appt.get("created_by")})
     return {"ok": True}
 
 

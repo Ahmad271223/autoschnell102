@@ -499,6 +499,37 @@ async def _unique_index_sicher(coll, feld: str) -> None:
     await coll.create_index(feld, unique=True)
 
 
+async def _termin_unique_index() -> None:
+    """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug und
+    Firma. Zwei parallele Vertragsanlagen (oder Doppelklicks) erzeugten
+    zwei Termine fuer dasselbe Auto; die Vorabpruefung der Routen ist nicht
+    atomar, der Teil-Unique-Index ist der Backstop. Abgeschlossene Termine
+    (abgeholt, storniert, ...) sind ausgenommen — ein Fahrzeug darf spaeter
+    erneut einen Termin bekommen. Bestehende Dubletten blockieren nur den
+    Index (Warnung), nicht den Start: die Regel ist neu, Altdaten werden
+    ueber den Terminplaner bereinigt."""
+    from deps import TERMIN_OFFEN
+    filter_ = {"vehicle_id": {"$type": "string"},
+               "status": {"$in": list(TERMIN_OFFEN)}}
+    dubletten = await db.appointments.aggregate([
+        {"$match": filter_},
+        {"$group": {"_id": {"d": "$dealer_id", "v": "$vehicle_id"}, "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+    if dubletten:
+        beispiele = ", ".join(str(d["_id"].get("v")) for d in dubletten)
+        log.error("ensure_indexes: appointments: mehrere OFFENE Termine je "
+                  "Fahrzeug vorhanden (%s) — Unique-Index NICHT angelegt. "
+                  "Bitte doppelte offene Termine im Terminplaner schliessen "
+                  "oder loeschen, dann Backend neu starten.", beispiele)
+        return
+    try:
+        await db.appointments.create_index(
+            [("dealer_id", 1), ("vehicle_id", 1)], unique=True,
+            name="termin_offen_je_fahrzeug", partialFilterExpression=filter_)
+    except Exception as exc:
+        log.error("ensure_indexes: termin_offen_je_fahrzeug: %s", exc)
+
+
 async def _kunden_nr_unique_index() -> None:
     """Eindeutigkeit der Kundennummer auch auf DB-Ebene (Backstop gegen
     Zaehler-Fehler). sparse: Firmen ohne Nummer (Migrationsmoment) stoeren
@@ -702,6 +733,7 @@ async def ensure_indexes():
     await db.listing_interest.create_index([("buyer_user_id", 1), ("created_at", -1)])
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
+    await _termin_unique_index()
     # Neue Fahrer-Accounts + Dealer-Driver-Links
     await _unique_index_sicher(db.driver_accounts, "email")
     await _unique_index_sicher(db.driver_accounts, "driver_code")
