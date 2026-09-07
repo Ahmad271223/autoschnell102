@@ -1,0 +1,76 @@
+#!/bin/sh
+# Rollout OHNE 502 hinter dem Hetzner Load Balancer — EIN Server je Aufruf.
+#
+# Warum: "docker compose up -d --build" baut auch den Oberflaechen-Container
+# neu. Der Load Balancer prueft nur /api/health (Backend) — das antwortete
+# waehrend des Neubaus weiter mit 200, also schickte der LB Besucher auf
+# diesen Server, und die bekamen fuer rund 45 Sekunden 502 fuer alle
+# statischen Dateien (Vorfall 07.09.2026, 15:04 UTC).
+#
+# Ablauf:
+#   1. Drain-Marker setzen: /api/health antwortet 503, der LB nimmt den
+#      Server nach seinen Wiederholungen (3 x 15 s) aus der Rotation.
+#   2. Code holen, bauen, starten.
+#   3. Warten, bis Backend (/api/ready) und Oberflaeche (/) antworten.
+#   4. Marker entfernen, dem LB Zeit geben, den Server wieder aufzunehmen.
+#   Danach dasselbe auf dem anderen Server. Der zweite Server traegt die
+#   Last waehrenddessen allein — deshalb IMMER nacheinander.
+#
+# Aufruf (auf prod2, dann auf prod1):
+#   cd /opt/autoschnell && sh deploy/rollout.sh
+# Umgebung: WARTE_LB (Sekunden je LB-Umschaltung, Standard 60),
+#           VERZ (Checkout, Standard /opt/autoschnell).
+set -e
+VERZ=${VERZ:-/opt/autoschnell}
+WARTE_LB=${WARTE_LB:-60}
+cd "$VERZ" || { echo "FEHLER: $VERZ fehlt"; exit 2; }
+
+# Replikat-Ergaenzung IMMER mitnehmen (Vorfall 07.09.2026 vormittags), es sei
+# denn, die .env setzt COMPOSE_FILE bereits.
+if ! grep -q '^COMPOSE_FILE=' .env 2>/dev/null; then
+    export COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml
+fi
+PUBLIC_HOST=$(grep '^PUBLIC_HOST=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' )
+[ -n "$PUBLIC_HOST" ] || { echo "FEHLER: PUBLIC_HOST fehlt in .env"; exit 2; }
+
+drain() {
+    docker compose exec -T proxy sh -c 'touch /tmp/drain' \
+        && echo "   Drain gesetzt — der Load Balancer nimmt diesen Server in ca. 45 s aus der Rotation"
+}
+undrain() {
+    docker compose exec -T proxy sh -c 'rm -f /tmp/drain' >/dev/null 2>&1 || true
+}
+trap undrain EXIT INT TERM
+
+echo "== 1/5 Drain (Health -> 503), warte ${WARTE_LB}s"
+drain
+sleep "$WARTE_LB"
+
+echo "== 2/5 Code holen"
+git pull --ff-only
+
+echo "== 3/5 Bauen und starten"
+docker compose up -d --build
+
+echo "== 4/5 Warten, bis Backend und Oberflaeche antworten"
+i=0
+until docker compose exec -T backend curl -fsS http://localhost:8001/api/ready >/dev/null 2>&1; do
+    i=$((i+1))
+    [ $i -gt 60 ] && { echo "FEHLER: Backend nicht bereit"; docker compose exec -T backend curl -s http://localhost:8001/api/ready; docker compose logs --tail 40 backend; exit 1; }
+    sleep 3
+done
+i=0
+# Von innen (127.0.0.1 darf laut LB-Vorlage direkt zugreifen): Startseite ueber
+# den Proxy holen — das prueft auch den neu gebauten Oberflaechen-Container.
+until docker compose exec -T proxy sh -c "wget -q -O /dev/null --header='Host: $PUBLIC_HOST' http://127.0.0.1/" >/dev/null 2>&1; do
+    i=$((i+1))
+    [ $i -gt 40 ] && { echo "FEHLER: Oberflaeche antwortet nicht"; docker compose logs --tail 20 web proxy; exit 1; }
+    sleep 3
+done
+echo "   Backend bereit, Oberflaeche antwortet."
+
+echo "== 5/5 Drain aufheben, warte ${WARTE_LB}s bis der Load Balancer den Server wieder fuehrt"
+undrain
+trap - EXIT INT TERM
+sleep "$WARTE_LB"
+echo "FERTIG auf $(hostname) — jetzt denselben Befehl auf dem anderen Server."

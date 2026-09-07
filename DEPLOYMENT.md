@@ -47,9 +47,42 @@ docker compose logs -f backend              # Live-Log
 ```
 
 ## Updates einspielen
+
+**Hinter dem Load Balancer (prod1 + prod2, seit 09/2026): immer EIN Server
+nach dem anderen mit dem Rollout-Skript.** Es setzt zuerst einen Drain-Marker
+(`/api/health` antwortet 503, der Load Balancer nimmt den Server aus der
+Rotation), baut dann neu und meldet den Server erst zurueck, wenn Backend
+UND Oberflaeche antworten. Ohne dieses Vorgehen bekamen Besucher waehrend
+des Neubaus des Oberflaechen-Containers rund 45 Sekunden lang 502 (Vorfall
+07.09.2026, 15:04 UTC): der Load Balancer prueft nur das Backend, das die
+ganze Zeit gesund war.
+
+```bash
+cd /opt/autoschnell && sh deploy/rollout.sh     # zuerst prod2, nach "FERTIG" prod1
+```
+
+Dauer je Server rund drei Minuten (zweimal 60 s Wartezeit fuer den Load
+Balancer). Waehrenddessen traegt der andere Server die Last allein.
+Bei Fehler bricht das Skript ab und hebt den Drain wieder auf; Rueckweg:
+`git checkout <alter Stand>` und erneut `sh deploy/rollout.sh`.
+
+**Einzelserver ohne Load Balancer** (Entwicklung, Staging):
 ```bash
 git pull && docker compose up -d --build    # bei Fehler: git checkout <alt> && ...
 ```
+
+**Replikat-Betrieb (seit 09/2026, beide Server):** `docker compose` ohne die
+Ergaenzungsdatei baut den Mongo-Container ohne Mitgliedsnamen und das
+Backend ohne die Namen mongo-prod1/mongo-prod2 — Folge: "Temporary failure
+in name resolution", Mitglied faellt aus dem Replikat. Deshalb in der `.env`
+einmalig setzen, dann gilt es fuer jeden Aufruf automatisch:
+
+```
+COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml
+```
+
+Ohne diese Zeile immer ausdruecklich
+`docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --build`.
 
 ## Backups
 Das Backend sichert **täglich um 03:00** MongoDB + alle Dateien nach

@@ -83,6 +83,10 @@ credentials.json
 *credentials.json*
 *.pem
 *.key
+# Server-Geheimnisse, die auf prod1/prod2 im Checkout liegen (07.09.2026):
+# Replikat-Schluessel und Zertifikatsordner duerfen nie ins Repo.
+deploy/mongo-keyfile
+deploy/certs/
 .credentials
 
 # Runtime data — Snapshot-PDF/JPG-Archive der App

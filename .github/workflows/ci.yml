@@ -251,6 +251,13 @@ jobs:
           docker compose exec -T backend curl -fsS --max-time 5 \
             -H "Host: localhost" -H "X-Forwarded-For: 198.51.100.7" http://proxy/api/health
           curl -fsS --max-time 5 -H "Host: localhost" -H "X-Forwarded-For: 198.51.100.7" http://localhost/api/health
+          # Drain-Marker (deploy/rollout.sh): Health -> 503, damit der LB den
+          # Server VOR dem Neubau aus der Rotation nimmt; ohne Marker wieder 200.
+          docker compose exec -T proxy sh -c 'touch /tmp/drain'
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost" http://localhost/api/health)
+          [ "$CODE" = 503 ] || { echo "Drain wirkt nicht (HTTP $CODE)"; exit 1; }
+          docker compose exec -T proxy sh -c 'rm -f /tmp/drain'
+          curl -fsS --max-time 5 -H "Host: localhost" http://localhost/api/health
       - name: Playwright-Report des Stack-Rauchtests bei Fehler
         if: failure()
         uses: actions/upload-artifact@v7
