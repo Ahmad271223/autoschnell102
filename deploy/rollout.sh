@@ -91,7 +91,9 @@ echo "== 6/6 Probe von aussen (ueber Cloudflare und Load Balancer, wie ein Besuc
 # Oberflaechen-Skript (Vorfall 07.09.2026: schwarzer Bildschirm trotz
 # gesunder Server). Ein Fehler hier bricht das Rollout nicht ab — der
 # andere Server laeuft ja — wird aber laut gemeldet.
-if ! docker compose exec -T backend python scripts/betriebsprobe.py "$PUBLIC_HOST"; then
+# DKIM mitpruefen, wenn der Selector in der .env steht (z.B. DKIM_SELECTOR=resend)
+DKIM=$(grep '^DKIM_SELECTOR=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
+if ! docker compose exec -T backend python scripts/betriebsprobe.py "$PUBLIC_HOST" ${DKIM:+--dkim-selector "$DKIM"}; then
     echo "ACHTUNG: Probe von aussen meldet Fehler — siehe oben (Cloudflare-Cache leeren? anderer Server?)"
 fi
 echo "FERTIG auf $(hostname) — jetzt denselben Befehl auf dem anderen Server."
