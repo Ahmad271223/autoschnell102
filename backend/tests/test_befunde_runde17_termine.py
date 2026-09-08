@@ -106,7 +106,7 @@ class _Welt:
     async def aufraeumen(self, db):
         for c in ("appointments", "vehicles", "activity_logs", "generated_pdfs",
                   "generated_pdf_versions", "users", "pickup_reports", "pickup_protocols",
-                  "dealer_drivers", "storage_delete_retry"):
+                  "dealer_drivers", "storage_delete_retry", "kaufvorgaenge"):
             await db[c].delete_many({"dealer_id": self.dealer_id})
         await db.dealers.delete_many({"id": self.dealer_id})
         await db.driver_accounts.delete_many({"id": self.driver_id})
@@ -126,11 +126,20 @@ def _module(name):
 async def _indizes(db):
     """Dieselben Unique-Indizes wie server.py — die CI-Datenbank ist frisch."""
     from deps import TERMIN_OFFEN
+    # Umbau Kaufvorgaenge 09.09.2026 (indizes.py): EIN offener Termin je
+    # VERTRAG statt je Fahrzeug, ein Kaufvorgang je Vertrag. Der alte Index
+    # termin_offen_je_fahrzeug widerspricht der neuen Regel und wird wie im
+    # Backend entfernt.
+    async def _alten_termin_index_entfernen():
+        if "termin_offen_je_fahrzeug" in await db.appointments.index_information():
+            await db.appointments.drop_index("termin_offen_je_fahrzeug")
     versuche = [
+        _alten_termin_index_entfernen,
         lambda: db.appointments.create_index(
-            [("dealer_id", 1), ("vehicle_id", 1)], unique=True, name="termin_offen_je_fahrzeug",
-            partialFilterExpression={"vehicle_id": {"$type": "string", "$gt": ""},
+            [("dealer_id", 1), ("contract_id", 1)], unique=True, name="termin_offen_je_vertrag",
+            partialFilterExpression={"contract_id": {"$type": "string", "$gt": ""},
                                      "status": {"$in": list(TERMIN_OFFEN)}}),
+        lambda: db.kaufvorgaenge.create_index("contract_id", unique=True),
         lambda: db.pickup_protocols.create_index(
             "appointment_id", unique=True, partialFilterExpression={"superseded": False},
             name="ein_aktuelles_protokoll_je_termin"),
@@ -151,8 +160,10 @@ async def _indizes(db):
 def welt():
     from motor.motor_asyncio import AsyncIOMotorClient
     w = _Welt()
+    # Umbau Kaufvorgaenge 09.09.2026: `kaufvorgang` haelt ein eigenes `db`
+    # (from deps import db) - ohne Umbiegen haengt es am Loop des ersten Tests.
     names = ["deps", "routes.appointments", "routes.contracts", "routes.protocols",
-             "routes.drivers", "routes.bestand", "lifecycle"]
+             "routes.drivers", "routes.bestand", "lifecycle", "kaufvorgang"]
     mods = [_module(n) for n in names]
     alt = [(m, getattr(m, "db", None)) for m in mods]
 
@@ -173,8 +184,10 @@ def welt():
     ctx = _Ctx()
     ctx.run(_indizes(ctx.db))
     ctx.run(ctx.db.users.insert_many(w.konten()))
-    ctx.run(ctx.db.dealers.insert_one({"id": w.dealer_id, "company_name": "R17 GmbH",
-                                       "created_at": _jetzt()}))
+    # user_id gesetzt: dealers.user_id ist unique (nicht sparse) - zwei parallel
+    # laufende Testdateien ohne user_id kollidierten auf {user_id: null}.
+    ctx.run(ctx.db.dealers.insert_one({"id": w.dealer_id, "user_id": w.chef["id"],
+                                       "company_name": "R17 GmbH", "created_at": _jetzt()}))
     yield ctx
     try:
         ctx.run(w.aufraeumen(ctx.db))
@@ -729,33 +742,50 @@ def test_11_termin_schliessen_verwirft_korrektur_entwurf(welt):
 
 # ================================================= Nr. 12: Verkaeuferdaten aus dem Vertrag
 def test_12_post_fuellt_leere_verkaeuferfelder_aus_dem_vertrag(welt):
+    """Umbau Kaufvorgaenge 09.09.2026: der Termin traegt zusaetzlich den
+    Kaufvorgang seines Vertrags (kaufvorgang_id); der Vorgang zeigt auf den
+    Termin und steht auf 'abholung_geplant', der Fahrzeug-Lebenszyklus ist
+    nur die Zusammenfassung. Altvertraege ohne Vorgang bekommen weiterhin
+    ihren Termin (ohne kaufvorgang_id)."""
     A = _module("routes.appointments")
     w, db = welt.w, welt.db
-    ca, cb = f"ca_{w.s}", f"cb_{w.s}"
+    ca, cb, vid, kv_id = f"ca_{w.s}", f"cb_{w.s}", f"v_{w.s}", f"kv_{w.s}"
 
     async def lauf():
+        await db.vehicles.insert_one(w.fahrzeug(vid, lifecycle="gekauft"))
         await db.generated_pdfs.insert_many([
-            w.vertrag(ca),
-            # Altvertrag: nur contract_data traegt die Verkaeuferdaten
+            w.vertrag(ca, vehicle_id=vid, kaufvorgang_id=kv_id),
+            # Altvertrag: nur contract_data traegt die Verkaeuferdaten, kein Vorgang
             w.vertrag(cb, seller_name=None, seller_phone=None, seller_email=None,
                       contract_data={"seller_name": "Alt Anbieter", "seller_email": "alt@e2etest-mail.de"}),
         ])
+        await db.kaufvorgaenge.insert_one({
+            "id": kv_id, "dealer_id": w.dealer_id, "user_id": w.chef["id"], "vehicle_id": vid,
+            "contract_id": ca, "purchase_price": 4500, "status": "vertrag_erstellt",
+            "appointment_id": None, "created_at": _jetzt(), "updated_at": _jetzt()})
         r1 = await A.create_appointment(A.AppointmentIn(contract_id=ca, pickup_date="2099-01-01",
                                                         seller_phone="0151 anders"), w.chef)
         a1 = await db.appointments.find_one({"id": r1["id"]}, {"_id": 0})
         c1 = await db.generated_pdfs.find_one({"id": ca}, {"_id": 0})
+        kv = await db.kaufvorgaenge.find_one({"id": kv_id}, {"_id": 0})
+        v = await db.vehicles.find_one({"id": vid}, {"_id": 0})
         r2 = await A.create_appointment(A.AppointmentIn(contract_id=cb, pickup_date="2099-01-02"), w.chef)
         a2 = await db.appointments.find_one({"id": r2["id"]}, {"_id": 0})
         r3 = await A.create_appointment(A.AppointmentIn(pickup_date="2099-01-03"), w.chef)
-        return r1, a1, c1, a2, r3
+        return r1, a1, c1, kv, v, a2, r3
 
-    r1, a1, c1, a2, r3 = welt.run(lauf())
+    r1, a1, c1, kv, v, a2, r3 = welt.run(lauf())
     assert a1["seller_name"] == "Vera Verkauf" and a1["seller_email"] == "vera@e2etest-mail.de"
     assert a1["seller_phone"] == "0151 anders", "abweichender Wert bleibt (kein 4xx)"
     assert r1["seller_name"] == "Vera Verkauf"
     assert c1["appointment_id"] == r1["id"] and c1["status"] == "Termin erstellt"
+    # Umbau Kaufvorgaenge: Termin <-> Vorgang verknuepft, Fahrzeugstatus zusammengefasst
+    assert a1["kaufvorgang_id"] == kv_id and r1["kaufvorgang_id"] == kv_id
+    assert kv["appointment_id"] == r1["id"] and kv["status"] == "abholung_geplant"
+    assert kv["purchase_price"] == 4500 and v.get("purchase_price") is None, "Kaufpreis bleibt am Vorgang"
+    assert v["lifecycle"] == "abholung_geplant"
     assert a2["seller_name"] == "Alt Anbieter" and a2["seller_email"] == "alt@e2etest-mail.de"
-    assert a2.get("seller_phone", "") == ""
+    assert a2.get("seller_phone", "") == "" and "kaufvorgang_id" not in a2, "Altvertrag ohne Vorgang"
     assert r3.get("seller_name", "") == "", "ohne Vertrag bleibt alles leer"
 
 

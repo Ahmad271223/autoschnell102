@@ -521,7 +521,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         if not await _termin_abgeholt_setzen(appt_id, driver["id"], setzen):
             heil_out["hinweis"] = TERMIN_GESCHLOSSEN_HINWEIS
             return heil_out
-        if appt.get("vehicle_id"):
+        import kaufvorgang as _kv
+        if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"],
                                     appt.get("dealer_id", ""), "abgeholt")
         return heil_out
@@ -710,8 +711,12 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         appt_id, driver["id"],
         {"status": "abgeholt", "status_changed_at": now_iso(),
          "protocol_id": doc["id"]})
-    if termin_gesetzt and appt.get("vehicle_id"):
-        await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
+    if termin_gesetzt:
+        # Umbau Kaufvorgaenge: abgeholt gilt fuer den VORGANG dieses Termins,
+        # das Fahrzeug bekommt die Zusammenfassung (und den realisierten Preis).
+        import kaufvorgang as _kv
+        if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
+            await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
     await log_activity(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",
                        ref=appt.get("vehicle_id"),
                        meta={"version": doc.get("version", 1),
@@ -742,11 +747,13 @@ async def driver_protocol_pdf(appt_id: str, driver=Depends(current_driver)):
 
 
 async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
-    if await fahrzeug_im_bereich(user, doc.get("vehicle_id")):
-        return True
+    """Umbau Kaufvorgaenge 09.09.2026: das Protokoll gehoert zum TERMIN und
+    damit zum Kaufvorgang eines Suchers — das gemeinsame Fahrzeug gibt
+    keinen Zugriff mehr (Mitbearbeiter sehen sonst Verkaeufer/Unterschrift
+    des Kollegen)."""
     appt = await db.appointments.find_one(
         {"id": doc.get("appointment_id"), "dealer_id": user["dealer_id"]},
-        {"_id": 0, "created_by": 1, "contract_id": 1, "vehicle_id": 1})
+        {"_id": 0, "created_by": 1, "contract_id": 1, "kaufvorgang_id": 1})
     return bool(appt) and await termin_im_bereich(user, appt)
 
 
@@ -754,15 +761,26 @@ async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
 @router.get("/vehicles/{vehicle_id}/protocols")
 async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep)):
     """Alle Protokoll-Versionen eines Fahrzeugs (Händler/Chef)."""
-    # Runde 16: Sucher nur zu eigenen Fahrzeugen.
+    # Runde 16: Sucher nur zu Fahrzeugen im eigenen Bereich (verglichen
+    # oder eigener Vertrag); Umbau Kaufvorgaenge: darin nur die Protokolle
+    # der EIGENEN Termine.
     if ist_sucher(user) and not await fahrzeug_im_bereich(user, vehicle_id):
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     docs = await db.pickup_protocols.find(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
          "status": "final"},
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
-         "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1},
+         "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1,
+         "appointment_id": 1},
     ).sort("version", -1).to_list(20)
+    if ist_sucher(user):
+        eigene = []
+        for d in docs:
+            if await _protokoll_im_bereich(user, d):
+                eigene.append(d)
+        docs = eigene
+    for d in docs:
+        d.pop("appointment_id", None)
     return docs
 
 

@@ -61,7 +61,8 @@ class _Welt:
     async def aufraeumen(self, db):
         for c in ("appointments", "vehicles", "dealer_drivers", "driver_accounts",
                   "activity_logs", "resale_listings", "subscriptions", "plan_requests",
-                  "dealer_invites", "network_members", "generated_pdfs", "users"):
+                  "dealer_invites", "network_members", "generated_pdfs", "users",
+                  "kaufvorgaenge"):
             await db[c].delete_many({"dealer_id": self.dealer_id})
         await db.driver_accounts.delete_many({"id": self.driver_id})
         await db.plan_requests.delete_many({"subject_user_id": {"$in": [self.chef["id"], self.sucher["id"]]}})
@@ -98,9 +99,11 @@ def welt():
     """Modul-db auf einen frischen Motor-Client des laufenden Loops legen."""
     from motor.motor_asyncio import AsyncIOMotorClient
     w = _Welt()
+    # Umbau Kaufvorgaenge 09.09.2026: auch `kaufvorgang` umbiegen — Termine und
+    # Vertraege schreiben den Vorgang (sonst haengt Motor am geschlossenen Loop).
     module_names = ["deps", "routes.appointments", "routes.drivers", "routes.bestand",
                     "routes.resale", "routes.dealer", "routes.marketplace", "routes.team",
-                    "routes.contracts", "lifecycle"]
+                    "routes.contracts", "lifecycle", "kaufvorgang"]
     mods = [_module(n) for n in module_names]
     alt = [(m, getattr(m, "db", None)) for m in mods]
 
@@ -507,10 +510,26 @@ def test_c5_vertragserstellung_ueberlebt_terminfehler():
     assert 'contract_id": pdf_id}, {"_id": 0}' not in q, "wirkungslose contract_id-Dublettenpruefung ist weg"
 
 
-def test_c6_zweiter_vertrag_haengt_offenen_termin_um_statt_zweiten_anzulegen(welt):
+def _kaufvorgang(w, kv_id, contract_id, vehicle_id, user_id, **extra):
+    """Kaufvorgang-Dokument wie kaufvorgang.anlegen (Umbau 09.09.2026)."""
+    doc = {"id": kv_id, "dealer_id": w.dealer_id, "user_id": user_id, "vehicle_id": vehicle_id,
+           "contract_id": contract_id, "purchase_price": 1000, "status": "vertrag_erstellt",
+           "appointment_id": None, "created_at": _jetzt(), "updated_at": _jetzt()}
+    doc.update(extra)
+    return doc
+
+
+def test_c6_zweiter_vertrag_bekommt_eigenen_termin_statt_umzuhaengen(welt):
+    """Umbau Kaufvorgaenge 09.09.2026: EIN offener Abholtermin je VERTRAG.
+    Ein zweiter Vertrag zum selben Fahrzeug bekommt seinen eigenen Termin —
+    der Termin des ersten Vertrags wird NICHT mehr umgehaengt. Die
+    Wiederholung fuer denselben Vertrag nutzt denselben Termin (idempotent).
+    Jeder Vorgang traegt seinen Termin; das Fahrzeug bekommt nur die
+    Zusammenfassung, sein Kaufpreis bleibt bis zum Abholen unberuehrt."""
     C = _module("routes.contracts")
     w, db = welt.w, welt.db
     vid = f"v_{w.s}"
+    c1, c2, k1, k2 = f"c1_{w.s}", f"c2_{w.s}", f"k1_{w.s}", f"k2_{w.s}"
 
     class Body:
         vehicle_id = vid
@@ -521,29 +540,49 @@ def test_c6_zweiter_vertrag_haengt_offenen_termin_um_statt_zweiten_anzulegen(wel
     async def lauf():
         await db.vehicles.insert_one(w.fahrzeug(vid))
         await db.generated_pdfs.insert_many([
-            {"id": f"c1_{w.s}", "dealer_id": w.dealer_id, "user_id": w.chef["id"], "vehicle_id": vid,
-             "appointment_id": None, "created_at": _jetzt()},
-            {"id": f"c2_{w.s}", "dealer_id": w.dealer_id, "user_id": w.chef["id"], "vehicle_id": vid,
-             "appointment_id": None, "created_at": _jetzt()}])
-        a1, h1 = await C._abholtermin_fuer_vertrag(w.chef, Body(), {"make_label": "BMW"}, f"c1_{w.s}")
-        a2, h2 = await C._abholtermin_fuer_vertrag(w.chef, Body(), {"make_label": "BMW"}, f"c2_{w.s}")
+            {"id": c1, "dealer_id": w.dealer_id, "user_id": w.chef["id"], "vehicle_id": vid,
+             "appointment_id": None, "kaufvorgang_id": k1, "created_at": _jetzt()},
+            {"id": c2, "dealer_id": w.dealer_id, "user_id": w.chef["id"], "vehicle_id": vid,
+             "appointment_id": None, "kaufvorgang_id": k2, "created_at": _jetzt()}])
+        await db.kaufvorgaenge.insert_many([_kaufvorgang(w, k1, c1, vid, w.chef["id"]),
+                                            _kaufvorgang(w, k2, c2, vid, w.chef["id"])])
+        a1, h1 = await C._abholtermin_fuer_vertrag(w.chef, Body(), {"make_label": "BMW"}, c1)
+        a2, h2 = await C._abholtermin_fuer_vertrag(w.chef, Body(), {"make_label": "BMW"}, c2)
+        a1b, h1b = await C._abholtermin_fuer_vertrag(w.chef, Body(), {"make_label": "BMW"}, c1)  # Wiederholung
         termine = await db.appointments.find({"dealer_id": w.dealer_id}, {"_id": 0}).to_list(10)
-        c1 = await db.generated_pdfs.find_one({"id": f"c1_{w.s}"}, {"_id": 0})
-        c2 = await db.generated_pdfs.find_one({"id": f"c2_{w.s}"}, {"_id": 0})
+        c1d = await db.generated_pdfs.find_one({"id": c1}, {"_id": 0})
+        c2d = await db.generated_pdfs.find_one({"id": c2}, {"_id": 0})
+        kv1 = await db.kaufvorgaenge.find_one({"id": k1}, {"_id": 0})
+        kv2 = await db.kaufvorgaenge.find_one({"id": k2}, {"_id": 0})
+        v = await db.vehicles.find_one({"id": vid}, {"_id": 0, "lifecycle": 1, "purchase_price": 1})
         logs = [l["action"] async for l in db.activity_logs.find({"dealer_id": w.dealer_id})]
-        return a1, a2, h1, h2, termine, c1, c2, logs
+        return a1, a2, a1b, h1, h2, h1b, termine, c1d, c2d, kv1, kv2, v, logs
 
-    a1, a2, h1, h2, termine, c1, c2, logs = welt.run(lauf())
-    assert a1 == a2 and h1 is None and h2 is None
-    assert len(termine) == 1 and termine[0]["contract_id"] == f"c2_{w.s}"
-    assert c1["appointment_id"] is None and c2["appointment_id"] == a1
-    assert "termin.auto-erstellt" in logs and "termin.auto-umgehaengt" in logs
+    a1, a2, a1b, h1, h2, h1b, termine, c1d, c2d, kv1, kv2, v, logs = welt.run(lauf())
+    assert a1 and a2 and a1 != a2 and h1 is None and h2 is None, "zweiter Vertrag bekommt eigenen Termin"
+    assert a1b == a1 and h1b is None, "Wiederholung fuer denselben Vertrag nutzt denselben Termin"
+    assert len(termine) == 2
+    assert {t["contract_id"]: t["id"] for t in termine} == {c1: a1, c2: a2}
+    assert {t["contract_id"]: t["kaufvorgang_id"] for t in termine} == {c1: k1, c2: k2}
+    assert c1d["appointment_id"] == a1 and c2d["appointment_id"] == a2, "kein Vertrag verliert seinen Termin"
+    assert c1d["status"] == c2d["status"] == "Termin erstellt"
+    assert kv1["status"] == "abholung_geplant" and kv1["appointment_id"] == a1
+    assert kv2["status"] == "abholung_geplant" and kv2["appointment_id"] == a2
+    assert v["lifecycle"] == "abholung_geplant", "Fahrzeug = Zusammenfassung der Vorgaenge"
+    assert v["purchase_price"] == 12345, "Fahrzeugpreis wird erst beim Abholen aus dem Vorgang gesetzt"
+    assert logs.count("termin.auto-erstellt") == 2 and "termin.auto-wiederverwendet" in logs
+    assert "termin.auto-umgehaengt" not in logs
 
 
-def test_c6b_sucher_haengt_kollegen_termin_nicht_um(welt):
+def test_c6b_sucher_bekommt_eigenen_termin_neben_dem_kollegen_termin(welt):
+    """Umbau Kaufvorgaenge 09.09.2026: zwei Sucher duerfen je einen eigenen
+    Termin zum selben Fahrzeug haben. Der Termin des Kollegen wird weder
+    umgehaengt noch fuer den zweiten Sucher sichtbar (termin_bereich)."""
     C = _module("routes.contracts")
+    A = _module("routes.appointments")
+    from fastapi import Response
     w, db = welt.w, welt.db
-    vid = f"v_{w.s}"
+    vid, ak, ck, cb = f"v_{w.s}", f"a_{w.s}", f"ck_{w.s}", f"cb_{w.s}"
 
     class Body:
         vehicle_id = vid
@@ -553,50 +592,95 @@ def test_c6b_sucher_haengt_kollegen_termin_nicht_um(welt):
 
     async def lauf():
         await db.vehicles.insert_one(w.fahrzeug(vid))
-        await db.appointments.insert_one(w.appt(f"a_{w.s}", vehicle_id=vid, contract_id=f"ck_{w.s}",
+        await db.appointments.insert_one(w.appt(ak, vehicle_id=vid, contract_id=ck,
                                                 created_by=w.sucher["id"]))
-        await db.generated_pdfs.insert_one({"id": f"ck_{w.s}", "dealer_id": w.dealer_id,
-                                            "user_id": w.sucher["id"], "vehicle_id": vid,
-                                            "appointment_id": f"a_{w.s}", "created_at": _jetzt()})
-        a, hinweis = await C._abholtermin_fuer_vertrag(w.sucher_b, Body(), {}, f"cb_{w.s}")
+        await db.generated_pdfs.insert_many([
+            {"id": ck, "dealer_id": w.dealer_id, "user_id": w.sucher["id"], "vehicle_id": vid,
+             "appointment_id": ak, "created_at": _jetzt()},
+            {"id": cb, "dealer_id": w.dealer_id, "user_id": w.sucher_b["id"], "vehicle_id": vid,
+             "appointment_id": None, "created_at": _jetzt()}])
+        a, hinweis = await C._abholtermin_fuer_vertrag(w.sucher_b, Body(), {}, cb)
         termine = await db.appointments.find({"dealer_id": w.dealer_id}, {"_id": 0}).to_list(10)
-        return a, hinweis, termine
+        kollege = next(t for t in termine if t["id"] == ak)
+        neu = next((t for t in termine if t["id"] == a), None)
+        ck_doc = await db.generated_pdfs.find_one({"id": ck}, {"_id": 0})
+        cb_doc = await db.generated_pdfs.find_one({"id": cb}, {"_id": 0})
+        sicht_a = [t["id"] for t in await A.list_appointments(Response(), w.sucher)]
+        sicht_b = [t["id"] for t in await A.list_appointments(Response(), w.sucher_b)]
+        darf_b = await C._termin_gehoert_mir(w.sucher_b, kollege)
+        return a, hinweis, termine, kollege, neu, ck_doc, cb_doc, sicht_a, sicht_b, darf_b
 
-    a, hinweis, termine = welt.run(lauf())
-    assert a is None and "Kollegen" in hinweis
-    assert len(termine) == 1 and termine[0]["contract_id"] == f"ck_{w.s}"
+    a, hinweis, termine, kollege, neu, ck_doc, cb_doc, sicht_a, sicht_b, darf_b = welt.run(lauf())
+    assert a and a != ak and hinweis is None, "Sucher B bekommt einen eigenen Termin"
+    assert len(termine) == 2
+    assert kollege["contract_id"] == ck and kollege["created_by"] == w.sucher["id"], "Kollegen-Termin unangetastet"
+    assert neu["contract_id"] == cb and neu["created_by"] == w.sucher_b["id"] and neu["vehicle_id"] == vid
+    assert ck_doc["appointment_id"] == ak and cb_doc["appointment_id"] == a
+    assert sicht_a == [ak] and sicht_b == [a], "jeder Sucher sieht nur seinen eigenen Termin"
+    assert darf_b is False
 
 
-def test_c6c_manueller_zweiter_offener_termin_je_fahrzeug_409(welt):
+def test_c6c_zweiter_offener_termin_je_vertrag_409_je_fahrzeug_erlaubt(welt):
+    """Umbau Kaufvorgaenge 09.09.2026: die Eindeutigkeit gilt je VERTRAG,
+    nicht mehr je Fahrzeug. Manuelle Termine ohne Vertrag haben keine Regel
+    mehr; ein zweiter offener Termin zum selben Vertrag ist 409 (auch beim
+    Wieder-Oeffnen). Termin loeschen setzt den Vorgang auf
+    'vertrag_erstellt' zurueck (kaufvorgang.termin_loesen)."""
     A = _module("routes.appointments")
     w, db = welt.w, welt.db
-    vid = f"v_{w.s}"
+    vid, c1, k1, a1 = f"v_{w.s}", f"c1_{w.s}", f"k1_{w.s}", f"a1_{w.s}"
 
     async def lauf():
         await db.vehicles.insert_one(w.fahrzeug(vid))
-        await db.appointments.insert_one(w.appt(f"a1_{w.s}", vehicle_id=vid))
+        await db.generated_pdfs.insert_one({"id": c1, "dealer_id": w.dealer_id, "user_id": w.chef["id"],
+                                            "vehicle_id": vid, "appointment_id": a1, "kaufvorgang_id": k1,
+                                            "created_at": _jetzt()})
+        await db.kaufvorgaenge.insert_one(_kaufvorgang(w, k1, c1, vid, w.chef["id"],
+                                                       status="abholung_geplant", appointment_id=a1))
+        await db.appointments.insert_one(w.appt(a1, vehicle_id=vid, contract_id=c1, kaufvorgang_id=k1))
+        # manuelle Termine ohne Vertrag zum selben Fahrzeug: keine Eindeutigkeitsregel
+        r_m1 = await A.create_appointment(A.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-02"), w.chef)
+        r_m2 = await A.create_appointment(A.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-03"), w.chef)
+        # zweiter offener Termin zum selben VERTRAG: 409
         with pytest.raises(HTTPException) as e:
-            await A.create_appointment(A.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-02"), w.chef)
+            await A.create_appointment(A.AppointmentIn(vehicle_id=vid, contract_id=c1,
+                                                       pickup_date="2099-01-02"), w.chef)
         # abgeschlossener Termin blockiert nicht
-        await db.appointments.update_one({"id": f"a1_{w.s}"}, {"$set": {"status": "abgeholt"}})
-        r = await A.create_appointment(A.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-02"), w.chef)
-        # Wieder-Oeffnen des alten waere ein zweiter offener -> 409
+        await db.appointments.update_one({"id": a1}, {"$set": {"status": "abgeholt"}})
+        r = await A.create_appointment(A.AppointmentIn(vehicle_id=vid, contract_id=c1,
+                                                       pickup_date="2099-01-02"), w.chef)
+        kv_geplant = await db.kaufvorgaenge.find_one({"id": k1}, {"_id": 0})
+        # Wieder-Oeffnen des alten waere ein zweiter offener zum Vertrag -> 409
         with pytest.raises(HTTPException) as e2:
-            await A.update_appointment(f"a1_{w.s}", A.AppointmentIn(status="offen"), w.chef)
-        return e.value.status_code, r, e2.value.status_code
+            await A.update_appointment(a1, A.AppointmentIn(status="offen"), w.chef)
+        # Termin loeschen: Vorgang faellt auf "vertrag_erstellt" zurueck, Vertrag verliert den Verweis
+        await A.delete_appointment(r["id"], w.chef)
+        kv_danach = await db.kaufvorgaenge.find_one({"id": k1}, {"_id": 0})
+        c1_danach = await db.generated_pdfs.find_one({"id": c1}, {"_id": 0})
+        offen = await db.appointments.count_documents({"dealer_id": w.dealer_id, "status": "offen"})
+        return (e.value, r_m1, r_m2, r, kv_geplant, e2.value, kv_danach, c1_danach, offen)
 
-    status, r, status2 = welt.run(lauf())
-    assert status == 409 and r["vehicle_id"] == vid and status2 == 409
+    e, r_m1, r_m2, r, kv_geplant, e2, kv_danach, c1_danach, offen = welt.run(lauf())
+    assert r_m1["vehicle_id"] == vid and r_m2["vehicle_id"] == vid, "zwei offene manuelle Termine je Fahrzeug erlaubt"
+    assert e.status_code == 409 and e.detail == A.TERMIN_DOPPELT_HINWEIS and "Vertrag" in e.detail
+    assert r["contract_id"] == c1 and r["kaufvorgang_id"] == k1
+    assert kv_geplant["status"] == "abholung_geplant" and kv_geplant["appointment_id"] == r["id"]
+    assert e2.status_code == 409
+    assert kv_danach["status"] == "vertrag_erstellt" and kv_danach["appointment_id"] is None
+    assert c1_danach["appointment_id"] is None
+    assert offen == 2, "nur die beiden manuellen Termine bleiben offen"
 
 
 def test_c6d_teil_unique_index_ist_definiert():
     # Runde 17: Helfer liegt in indizes.py (ohne server-Import testbar);
     # server.py ruft ihn beim Start auf.
     q = (WURZEL / "backend" / "indizes.py").read_text(encoding="utf-8")
-    assert "termin_offen_je_fahrzeug" in q and "partialFilterExpression" in q
+    # Umbau Kaufvorgaenge: Eindeutigkeit je VERTRAG, alter Fahrzeug-Index wird entfernt
+    assert "termin_offen_je_vertrag" in q and "partialFilterExpression" in q
+    assert 'drop_index("termin_offen_je_fahrzeug")' in q
     assert "await _termin_unique_index()" in (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
     from pymongo import MongoClient
     info = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME].appointments.index_information()
-    if "termin_offen_je_fahrzeug" in info:
-        assert info["termin_offen_je_fahrzeug"]["unique"] is True
-        assert info["termin_offen_je_fahrzeug"]["partialFilterExpression"]["status"]["$in"]
+    if "termin_offen_je_vertrag" in info:
+        assert info["termin_offen_je_vertrag"]["unique"] is True
+        assert info["termin_offen_je_vertrag"]["partialFilterExpression"]["status"]["$in"]

@@ -58,17 +58,25 @@ async def _termin_unique_index() -> bool:
     from deps import TERMIN_OFFEN
     # Runde 17: "" ist ein String — ein Termin mit vehicle_id "" darf nicht
     # mit anderen leeren kollidieren ($gt "" = nicht leer).
-    filter_ = {"vehicle_id": {"$type": "string", "$gt": ""},
+    # Umbau Kaufvorgaenge 09.09.2026: EIN offener Termin je VERTRAG (nicht
+    # mehr je Fahrzeug — mehrere Sucher duerfen dasselbe Inserat kaufen).
+    filter_ = {"contract_id": {"$type": "string", "$gt": ""},
                "status": {"$in": list(TERMIN_OFFEN)}}
-    name = "termin_offen_je_fahrzeug"
+    name = "termin_offen_je_vertrag"
+    try:
+        alt_index = await db.appointments.index_information()
+        if "termin_offen_je_fahrzeug" in alt_index:
+            await db.appointments.drop_index("termin_offen_je_fahrzeug")
+    except Exception as exc:
+        log.warning("alter Termin-Index nicht entfernt: %s", exc)
     dubletten = await db.appointments.aggregate([
         {"$match": filter_},
-        {"$group": {"_id": {"d": "$dealer_id", "v": "$vehicle_id"}, "n": {"$sum": 1}}},
+        {"$group": {"_id": {"d": "$dealer_id", "c": "$contract_id"}, "n": {"$sum": 1}}},
         {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
     if dubletten:
-        beispiele = ", ".join(str(d["_id"].get("v")) for d in dubletten)
+        beispiele = ", ".join(str(d["_id"].get("c")) for d in dubletten)
         log.error("ensure_indexes: appointments: mehrere OFFENE Termine je "
-                  "Fahrzeug vorhanden (%s) — Unique-Index NICHT angelegt. "
+                  "Vertrag vorhanden (%s) — Unique-Index NICHT angelegt. "
                   "Bitte doppelte offene Termine im Terminplaner schliessen "
                   "oder loeschen, dann Backend neu starten.", beispiele)
         # Runde 17: sichtbar im Admin-Bereich (/admin/betrieb), nicht nur im Log
@@ -81,11 +89,11 @@ async def _termin_unique_index() -> bool:
             # Filter hat sich geaendert (Runde 17: $gt "") -> neu anlegen
             await db.appointments.drop_index(name)
         await db.appointments.create_index(
-            [("dealer_id", 1), ("vehicle_id", 1)], unique=True,
+            [("dealer_id", 1), ("contract_id", 1)], unique=True,
             name=name, partialFilterExpression=filter_)
         await alarm_schliessen(db, "termin_index_fehlt", ref="appointments")
         return True
     except Exception as exc:
-        log.error("ensure_indexes: termin_offen_je_fahrzeug: %s", exc)
+        log.error("ensure_indexes: termin_offen_je_vertrag: %s", exc)
         await alarm(db, "termin_index_fehlt", ref="appointments", fehler=str(exc)[:300])
         return False

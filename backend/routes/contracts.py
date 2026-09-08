@@ -290,9 +290,11 @@ def _vehicle_bild_urls(vehicle: dict) -> list:
 async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     """Generate a draft Kaufvertrag PDF without persisting anything.
     Returns the PDF inline so the dealer can review it before final save."""
-    # Runde 16: Sucher nur eigene Fahrzeuge (owner_user_id).
+    # Umbau Kaufvorgaenge 09.09.2026: das Inserat ist firmenweit gemeinsam —
+    # JEDER Sucher der Firma darf dafuer einen eigenen Vertrag anlegen.
     v = await db.vehicles.find_one(
-        {"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0},
+        {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
+         "lifecycle": {"$ne": "geloescht"}}, {"_id": 0},
     )
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
@@ -336,8 +338,11 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
 
 @router.post("/contracts")
 async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
-    # Runde 16: Sucher nur eigene Fahrzeuge (owner_user_id).
-    v = await db.vehicles.find_one({"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
+    # Umbau Kaufvorgaenge 09.09.2026: Inserat firmenweit gemeinsam — jeder
+    # Sucher darf einen eigenen Vertrag (= eigenen Kaufvorgang) anlegen.
+    v = await db.vehicles.find_one(
+        {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
+         "lifecycle": {"$ne": "geloescht"}}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     # Runde 17 (Nr. 270): Kein neuer Kaufvertrag fuer ein Fahrzeug, das
@@ -405,6 +410,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "send_status": [],
         "status": "erstellt",
         "appointment_id": None,
+        "kaufvorgang_id": str(uuid.uuid4()),   # Umbau 09.09.2026: ein Vorgang je Vertrag
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
@@ -426,13 +432,27 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Antwort traegt einen Nacharbeit-Hinweis, der Vertrag bleibt gueltig.
     nacharbeit_hinweis = None
     try:
+        # Umbau Kaufvorgaenge 09.09.2026: der Kaufpreis gehoert zum VORGANG,
+        # nicht zum gemeinsamen Fahrzeug (zwei Sucher ueberschrieben sich
+        # sonst gegenseitig). vehicles.purchase_price wird erst beim Abholen
+        # aus dem erfolgreichen Vorgang uebernommen (kaufvorgang.py).
         await db.vehicles.update_one(
             {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
-            {"$set": {"status": "Vertrag erstellt", "purchase_price": body.purchase_price}},
+            {"$set": {"status": "Vertrag erstellt"}},
         )
-        # Lebenszyklus: Vertrag erstellt → gekauft (Kaufpreis liegt vor).
-        await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "vertrag_erstellt", user=user)
-        await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "gekauft", user=user)
+        if user.get("role") == "sucher":
+            # Wer einen Vertrag anlegt, arbeitet am Fahrzeug mit (Sichtbarkeit).
+            await db.vehicles.update_one(
+                {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
+                 "owner_user_id": {"$ne": user["id"]}},
+                {"$addToSet": {"mitbearbeiter_ids": user["id"]}})
+        import kaufvorgang as _kv
+        await _kv.anlegen(dealer_id=user["dealer_id"], user_id=user["id"],
+                          vehicle_id=body.vehicle_id, contract_id=pdf_id,
+                          purchase_price=body.purchase_price,
+                          kaufvorgang_id=doc["kaufvorgang_id"])
+        # Fahrzeugstatus = Zusammenfassung aller Vorgaenge (vertrag_erstellt -> gekauft)
+        await _kv.fahrzeug_status_aggregieren(body.vehicle_id, user["dealer_id"], user=user)
     except Exception:
         log.exception("Fahrzeugstatus nach Vertrag %s konnte nicht aktualisiert werden", pdf_id)
         nacharbeit_hinweis = ("Vertrag gespeichert; Fahrzeugstatus/Protokoll konnten "
@@ -452,7 +472,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     if body.pickup_date:
         try:
             appt_id, termin_hinweis = await _abholtermin_fuer_vertrag(
-                user, body, vehicle, pdf_id)
+                user, body, vehicle, pdf_id, kaufvorgang_id=doc["kaufvorgang_id"])
         except Exception:
             log.exception("Auto-Termin fuer Vertrag %s fehlgeschlagen", pdf_id)
             appt_id = None
@@ -502,27 +522,17 @@ async def _termin_gehoert_mir(user: dict, appt: dict) -> bool:
         {"id": cid, "user_id": user["id"]}, limit=1) > 0
 
 
-async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str):
-    """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug.
+async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str,
+                                    kaufvorgang_id: Optional[str] = None):
+    """Umbau Kaufvorgaenge 09.09.2026: EIN offener Abholtermin je VERTRAG
+    (Teil-Unique-Index termin_offen_je_vertrag), nicht mehr je Fahrzeug.
 
-    Die alte Dubletten-Pruefung suchte nach der soeben erzeugten contract_id
-    und fand deshalb nie etwas — zwei Vertraege fuer dasselbe Auto (Doppel-
-    klick, Korrektur, zwei Sucher) ergaben zwei Termine. Jetzt: existiert
-    ein offener Termin zum Fahrzeug, wird er auf den neuen Vertrag
-    umgehaengt (Datum/Uhrzeit/Verkaeufer aus dem neuen Vertrag, Fahrer
-    bleibt); der alte Vertrag verliert den Verweis. Gehoert der Termin einem
-    Kollegen (Sucher-Bereich), bleibt er unangetastet und der Vertrag
-    bekommt nur einen Hinweis. Das Rennen zweier gleichzeitiger Anlagen
-    faengt der Teil-Unique-Index termin_offen_je_fahrzeug (server.py).
-    Liefert (appointment_id | None, hinweis | None)."""
-    from routes.appointments import _sucher_darf
-    # Runde 17 (Nr. 355): Zusage-Regel aus dem Terminplaner — lazy, weil
-    # routes.appointments seinerseits routes.contracts importiert; fehlt der
-    # Helfer (aelterer Stand), greift die gleichlautende Regel hier.
-    try:
-        from routes.appointments import zusage_zuruecksetzen_wenn_geaendert as _zusage_reset
-    except (ImportError, AttributeError):
-        _zusage_reset = _zusage_zuruecksetzen_fallback
+    Mehrere Sucher duerfen dasselbe Inserat unabhaengig kaufen — jeder
+    Vertrag bekommt seinen eigenen Termin. Ein bestehender Termin eines
+    ANDEREN Vertrags wird nie umgehaengt (vorher verlor der alte Vertrag
+    seinen Termin, Verkaeuferdaten wurden ueberschrieben). Idempotent: gibt
+    es fuer diesen Vertrag schon einen offenen Termin (Wiederholung), wird
+    er weiterverwendet. Liefert (appointment_id | None, hinweis | None)."""
     dealer_id = user["dealer_id"]
     # Runde 17 (Nr. 347): Abholadresse wie ein Terminfeld deckeln (500).
     pickup_address = " ".join([
@@ -531,49 +541,18 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
     felder = {"seller_name": body.seller_name, "seller_phone": body.seller_phone,
               "seller_email": body.seller_email, "pickup_address": pickup_address,
               "pickup_date": body.pickup_date, "pickup_time": body.pickup_time or ""}
+    if not kaufvorgang_id:
+        vertrag = await db.generated_pdfs.find_one({"id": pdf_id}, {"_id": 0, "kaufvorgang_id": 1})
+        kaufvorgang_id = (vertrag or {}).get("kaufvorgang_id")
+    aktion = "termin.auto-erstellt"
     for versuch in (1, 2):
         offen = await db.appointments.find_one(
-            {"dealer_id": dealer_id, "vehicle_id": body.vehicle_id,
+            {"dealer_id": dealer_id, "contract_id": pdf_id,
              "status": {"$in": TERMIN_OFFEN_WERTE}},
-            # Runde 17 (Nr. 355): Fahrer/Zusage und den bisherigen Termin
-            # mitlesen — beim Umhaengen mit neuem Datum/Uhrzeit/Adresse muss
-            # eine angenommene Zusage zurueck auf "offen" (vorher fuhr der
-            # Fahrer mit alter Zusage zum neuen Termin). vehicle_id braucht
-            # _sucher_darf (Fahrzeug-Besitzer, Runde 16).
-            {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1, "vehicle_id": 1,
-             "driver_id": 1, "zuteilung": 1, "pickup_date": 1, "pickup_time": 1,
-             "pickup_address": 1})
+            {"_id": 0, "id": 1})
         if offen:
-            # Wunsch Ahmad 09.09.2026: Mitbearbeiter sehen den Termin des
-            # Kollegen (Fahrzeug-Anker), duerfen ihn aber NICHT auf ihren
-            # Vertrag umhaengen — nur der eigene Termin (selbst angelegt oder
-            # eigener Vertrag) oder der Chef.
-            if not await _termin_gehoert_mir(user, offen):
-                return None, ("Für dieses Fahrzeug besteht bereits ein offener "
-                              "Abholtermin eines Kollegen — der Vertrag wurde ohne "
-                              "eigenen Termin gespeichert.")
-            zusage_set, zusage_unset = _zusage_reset(offen, felder)
-            umhaengen: Dict[str, Any] = {"$set": {
-                **felder, "contract_id": pdf_id, "updated_at": now_iso(), **zusage_set}}
-            if zusage_unset:
-                umhaengen["$unset"] = dict(zusage_unset)
-            await db.appointments.update_one(
-                {"id": offen["id"], "dealer_id": dealer_id}, umhaengen)
-            alt = offen.get("contract_id")
-            if alt and alt != pdf_id:
-                # Runde 17 (Nr. 356): Der alte Vertrag verliert den Termin UND
-                # den Status "Termin erstellt" — er zeigte sonst dauerhaft
-                # einen Termin an, der laengst am neuen Vertrag haengt.
-                res = await db.generated_pdfs.update_one(
-                    {"id": alt, "appointment_id": offen["id"], "status": "Termin erstellt"},
-                    {"$set": {"appointment_id": None, "status": "erstellt",
-                              "updated_at": now_iso()}})
-                if res.matched_count == 0:
-                    await db.generated_pdfs.update_one(
-                        {"id": alt, "appointment_id": offen["id"]},
-                        {"$set": {"appointment_id": None, "updated_at": now_iso()}})
             appt_id = offen["id"]
-            aktion = "termin.auto-umgehaengt"
+            aktion = "termin.auto-wiederverwendet"
             break
         appt_id = str(uuid.uuid4())
         title = (f"{vehicle.get('make_label','')} {vehicle.get('model_label','')} abholen".strip()
@@ -583,20 +562,25 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
                 "id": appt_id, "dealer_id": dealer_id,
                 "created_by": user["id"],     # Runde 10: sonst kann der Sucher ihn nie loeschen
                 "title": title, "vehicle_id": body.vehicle_id, "contract_id": pdf_id,
+                "kaufvorgang_id": kaufvorgang_id,
                 **felder, "status": "offen",
                 "created_at": now_iso(), "updated_at": now_iso(),
             })
-            aktion = "termin.auto-erstellt"
             break
         except DuplicateKeyError:
             if versuch == 2:
                 raise
-            continue                        # paralleler Termin gewann -> umhaengen
+            continue                        # paralleler Termin desselben Vertrags gewann
     await db.generated_pdfs.update_one(
         {"id": pdf_id},
         {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
     )
-    await try_set_lifecycle(body.vehicle_id, dealer_id, "abholung_geplant", user=user)
+    import kaufvorgang as _kv
+    if kaufvorgang_id:
+        await _kv.status_setzen(kaufvorgang_id, "abholung_geplant", user=user,
+                                appointment_id=appt_id)
+    else:
+        await try_set_lifecycle(body.vehicle_id, dealer_id, "abholung_geplant", user=user)
     await log_activity(dealer_id, user["id"], aktion, ref=appt_id,
                        meta={"contract_id": pdf_id, "vehicle_id": body.vehicle_id})
     return appt_id, None
@@ -1017,6 +1001,14 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                                          "als versendet markiert.")
             out["zustellung"] = "versendet"
             neuer_status = "versendet"
+            # Umbau Kaufvorgaenge: der Vorgang ist jetzt "gesendet" (best effort)
+            try:
+                import kaufvorgang as _kv
+                _vorgang = await _kv.fuer_vertrag(c)
+                if _vorgang and _vorgang.get("status") == "vertrag_erstellt":
+                    await _kv.status_setzen(_vorgang["id"], "gesendet", user=user)
+            except Exception:
+                log.exception("Kaufvorgang nach Versand von %s nicht aktualisiert", contract_id)
             # Kopie an den Sucher — als Beleg, mit demselben PDF. Schlaegt
             # sie fehl, bleibt der Hauptversand gueltig; das Ergebnis steht
             # in der Antwort ("kopie").

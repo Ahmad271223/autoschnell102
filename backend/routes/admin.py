@@ -1949,7 +1949,7 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
             {"_id": 0, "email": 1, "username": 1})],
         # Runde 17: die Parallelitaets-Backstops muessen sichtbar sein —
         # bei Altdubletten werden sie beim Start nur uebersprungen.
-        "termin_index_aktiv": "termin_offen_je_fahrzeug" in await db.appointments.index_information(),
+        "termin_index_aktiv": "termin_offen_je_vertrag" in await db.appointments.index_information(),
         "fahrzeug_index_aktiv": any(
             i.get("unique") and i.get("key") == [("dealer_id", 1), ("id", 1)]
             for i in (await db.vehicles.index_information()).values()),

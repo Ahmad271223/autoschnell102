@@ -975,8 +975,11 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         await db.appointments.update_one(
             {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
             {"$set": {"abgeschlossen_seit": update["status_changed_at"]}})
-    # Fahrzeug-Lebenszyklus nachziehen.
-    if appt.get("vehicle_id"):
+    # Fahrzeug-Lebenszyklus nachziehen — Umbau Kaufvorgaenge: ueber den
+    # Vorgang dieses Termins (Zusammenfassung), sonst wie frueher direkt.
+    import kaufvorgang as _kv
+    if not await _kv.termin_status_uebernehmen(appt, body.status, user={"id": driver["id"]}) \
+            and appt.get("vehicle_id"):
         from lifecycle import try_set_lifecycle
         await try_set_lifecycle(
             appt["vehicle_id"], appt.get("dealer_id"),
@@ -1020,14 +1023,13 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
         raise HTTPException(404, "Datei nicht gefunden")
     # Runde 16: Sucher nur Berichte im eigenen Bereich (Fahrzeug/Termin).
     if user.get("role") == "sucher":
-        from deps import fahrzeug_im_bereich, termin_im_bereich
-        erlaubt = await fahrzeug_im_bereich(user, bericht.get("vehicle_id"))
-        if not erlaubt:
-            appt = await db.appointments.find_one(
-                {"id": bericht.get("appointment_id"), "dealer_id": user["dealer_id"]},
-                {"_id": 0, "created_by": 1, "contract_id": 1, "vehicle_id": 1})
-            erlaubt = bool(appt) and await termin_im_bereich(user, appt)
-        if not erlaubt:
+        # Umbau Kaufvorgaenge: nur ueber den eigenen Termin/Vorgang, nicht
+        # ueber das gemeinsame Fahrzeug.
+        from deps import termin_im_bereich
+        appt = await db.appointments.find_one(
+            {"id": bericht.get("appointment_id"), "dealer_id": user["dealer_id"]},
+            {"_id": 0, "created_by": 1, "contract_id": 1, "kaufvorgang_id": 1})
+        if not (appt and await termin_im_bereich(user, appt)):
             raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, load_async, StorageError
     try:

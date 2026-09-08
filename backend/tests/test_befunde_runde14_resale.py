@@ -181,8 +181,9 @@ class _Coll:
 
 class _Db:
     def __init__(self, **colls):
+        # Umbau Kaufvorgaenge 09.09.2026: create_draft liest den abgeholten Vorgang
         for name in ("resale_listings", "vehicles", "listing_interest",
-                     "dealers", "pickup_reports"):
+                     "dealers", "pickup_reports", "kaufvorgaenge"):
             setattr(self, name, _Coll(colls.get(name)))
 
 

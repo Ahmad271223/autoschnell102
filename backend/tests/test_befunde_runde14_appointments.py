@@ -90,7 +90,7 @@ class _Welt:
 
     async def aufraeumen(self, db):
         for c in ("appointments", "vehicles", "generated_pdfs", "generated_pdf_versions",
-                  "activity_logs", "pickup_protocols", "dealer_drivers"):
+                  "activity_logs", "pickup_protocols", "dealer_drivers", "kaufvorgaenge"):
             await db[c].delete_many({"dealer_id": self.dealer_id})
         await db.driver_accounts.delete_many({"id": self.driver_id})
 
@@ -102,6 +102,7 @@ def _run(fn):
     async def _inner():
         from motor.motor_asyncio import AsyncIOMotorClient
         import deps
+        import kaufvorgang   # Umbau Kaufvorgaenge 09.09.2026: Termine schreiben den Vorgang
         import lifecycle
         import routes.appointments as A
         import routes.contracts as C
@@ -111,13 +112,13 @@ def _run(fn):
             await db.command("ping")
         except Exception as exc:  # pragma: no cover
             pytest.skip(f"Mongo nicht erreichbar: {exc}")
-        alt = (A.db, C.db, deps.db, lifecycle.db)
+        alt = (A.db, C.db, deps.db, lifecycle.db, kaufvorgang.db)
         w = _Welt()
-        A.db = C.db = deps.db = lifecycle.db = db
+        A.db = C.db = deps.db = lifecycle.db = kaufvorgang.db = db
         try:
             return await fn(db, A, C, w)
         finally:
-            A.db, C.db, deps.db, lifecycle.db = alt
+            A.db, C.db, deps.db, lifecycle.db, kaufvorgang.db = alt
             await w.aufraeumen(db)
             cl.close()
     return asyncio.run(_inner())
@@ -411,9 +412,13 @@ def test_77_abholauftrag_pdf_fremder_sucher_404():
         await db.generated_pdfs.insert_one(w.vertrag(ca, user_id=w.sucher_a["id"], appointment_id=aid))
         await db.appointments.insert_one(w.appt(aid, contract_id=ca, created_by=w.sucher_a["id"]))
         await _erwarte(404, A.get_pickup_order_pdf(aid, 0, w.sucher_b))
-        # Termin ohne created_by, aber eigener Vertrag: Sucher A darf (kein 404)
-        aid2 = f"a77b_{w.s}"
-        await db.appointments.insert_one(w.appt(aid2, contract_id=ca, created_by=None))
+        # Termin ohne created_by, aber eigener Vertrag: Sucher A darf (kein 404).
+        # Umbau Kaufvorgaenge 09.09.2026: EIN offener Termin je Vertrag
+        # (Unique-Index termin_offen_je_vertrag) — daher ein zweiter Vertrag
+        # von A fuer den zweiten Termin.
+        ca2, aid2 = f"ca2_{w.s}", f"a77b_{w.s}"
+        await db.generated_pdfs.insert_one(w.vertrag(ca2, user_id=w.sucher_a["id"], appointment_id=aid2))
+        await db.appointments.insert_one(w.appt(aid2, contract_id=ca2, created_by=None))
         await _erwarte(404, A.get_pickup_order_pdf(aid2, 0, w.sucher_b))
         assert await A._sucher_darf(w.sucher_a, await db.appointments.find_one({"id": aid2}))
         assert not (await db.activity_logs.find_one(

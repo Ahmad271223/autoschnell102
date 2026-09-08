@@ -279,12 +279,22 @@ Firma zuordnen lassen (`stats.offen`), sieht nur der Chef, bis er sie
 zuweist. Ein Sucher, der ein Inserat vergleicht, das ein Kollege bereits
 führt, wird **Mitbearbeiter** (Wunsch 09.09.2026): das Fahrzeug erscheint
 auch in seinem Bereich und er darf einen eigenen Kaufvertrag anlegen.
-Hauptbearbeiter bleibt, wer zuerst verglichen hat. Einen offenen
-Abholtermin gibt es je Fahrzeug nur einmal; ein Mitbearbeiter übernimmt
-den Termin des Kollegen nicht, sein Vertrag wird dann ohne eigenen Termin
-gespeichert (Hinweis in der Antwort). Bei einer Übergabe durch den
-Hauptaccount verliert der bisherige Hauptbearbeiter den Zugriff,
-Mitbearbeiter bleiben.
+Hauptbearbeiter bleibt, wer zuerst verglichen hat.
+
+**Kaufvorgänge (Umbau 09.09.2026):** Das Fahrzeug ist nur noch das
+gemeinsame Inserat der Firma. Jeder Vertrag hat einen eigenen
+Kaufvorgang (Sammlung `kaufvorgaenge`: Sucher, Fahrzeug, Vertrag,
+Kaufpreis, Status, Termin). Damit können mehrere Sucher dasselbe Auto
+unabhängig kaufen: jeder mit eigenem Vertrag, eigenem Termin (ein offener
+Termin je Vertrag, Index `termin_offen_je_vertrag`) und eigenem Preis.
+Der Fahrzeugstatus ist nur eine Zusammenfassung aller Vorgänge; „nicht
+abgeholt" am Fahrzeug erst, wenn kein Vorgang mehr offen ist. Der
+realisierte Einkaufspreis am Fahrzeug wird beim Abholen aus dem
+erfolgreichen Vorgang übernommen. Sucher sehen Termine, Berichte,
+Protokolle und Abweichungsfotos nur zu eigenen Vorgängen; der Hauptaccount
+sieht alle. Die Migrationen m5 (Kaufvorgänge für Altverträge) und m6
+(Besitzer nur aktive Konten, nächster gültiger Kandidat) laufen beim
+ersten Start automatisch; Protokoll in `schema_migrations`.
 
 Seit Runde 17 (08.09.2026) außerdem:
 - **`VERTRAG_LOESCHUNG_AKTIV` muss in der Produktions-.env stehen** — `true`

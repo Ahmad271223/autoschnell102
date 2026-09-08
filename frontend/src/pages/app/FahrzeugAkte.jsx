@@ -271,8 +271,26 @@ export default function FahrzeugAkte() {
             </div>
           )}
         </Section>
+        {/* Umbau Kaufvorgaenge (09.09.2026): je Vertrag ein Vorgang mit
+            eigenem Sucher, Preis, Status und Termin. Chef sieht alle,
+            Sucher nur eigene. */}
+        {(akte.kaufvorgaenge || []).length > 0 && (
+          <Section title="Kaufvorgänge">
+            {akte.kaufvorgaenge.map((k) => (
+              <div key={k.id} className="flex flex-wrap items-center justify-between gap-2 py-1 border-b text-sm"
+                   style={{ borderColor: "rgba(255,255,255,0.04)" }} data-testid={`kaufvorgang-${k.id}`}>
+                <span className="text-zinc-300">{k.user_name || k.user_id}</span>
+                <span className="text-zinc-400">{fmtEur(k.purchase_price)}</span>
+                <span className="text-xs px-2 py-0.5 rounded-md border" style={{ borderColor: "var(--border-default)" }}>
+                  {k.status}
+                </span>
+                <span className="text-zinc-500 text-xs">{fmtDate(k.created_at)}</span>
+              </div>
+            ))}
+          </Section>
+        )}
         <Section title="Beschaffung & Kauf">
-          <KV k="Einkaufspreis" val={fmtEur(v.purchase_price)} />
+          <KV k="Einkaufspreis (realisiert)" val={fmtEur(v.purchase_price)} />
           <KV k="Quelle" val={v.source === "manuell" ? "Manuell angelegt" : (d.detail_url ? "Inserat (Plattform)" : "Plattform")} />
           {(akte.appointments || []).slice(0, 1).map((a) => (
             <KV key={a.id} k="Geplante Abholung"

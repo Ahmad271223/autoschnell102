@@ -348,10 +348,14 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0, "pdf_b64": 0},
     ).sort("created_at", -1).to_list(10)
 
+    # Umbau Kaufvorgaenge 09.09.2026: Termine (Verkaeuferdaten) nur im Bereich
+    # des Kontos — Sucher: eigene Vorgaenge; Chef: alle.
+    from deps import termin_bereich
     appointments = await db.appointments.find(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"vehicle_id": vehicle_id, **await termin_bereich(user)},
         {"_id": 0},
     ).sort("created_at", -1).to_list(10)
+    eigene_termin_ids = [a["id"] for a in appointments]
 
     # Nachpruefung Runde 14 (Nr. 47): Versionierung/superseded gilt je
     # Termin — bei mehreren Terminen je Fahrzeug lieferte find_one den
@@ -361,10 +365,14 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # parallel entsteht und keinen Import-Zyklus mit den Routen bilden soll.
     from abholbericht import massgeblicher_bericht
     report = await massgeblicher_bericht(db, vehicle_id, user["dealer_id"])
+    ist_sucher = user.get("role") == "sucher"
+    if ist_sucher and report and report.get("appointment_id") not in eigene_termin_ids:
+        report = None
+    nur_eigene = {"appointment_id": {"$in": eigene_termin_ids}} if ist_sucher else {}
     # Zusaetzlich alle Berichte je Termin (auch ersetzte), damit die Akte
     # jedem Termin seinen Bericht zuordnen kann.
     pickup_reports = await db.pickup_reports.find(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"], **nur_eigene},
         {"_id": 0, "id": 1, "appointment_id": 1, "version": 1, "status": 1,
          "created_at": 1, "superseded": 1, "mileage_at_pickup": 1,
          "driver_name": 1},
@@ -395,7 +403,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # superseded bereits).
     protocols = await db.pickup_protocols.find(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "status": "final", "superseded": {"$ne": True}},
+         "status": "final", "superseded": {"$ne": True}, **nur_eigene},
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
          "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1},
     ).sort("version", -1).to_list(20)
@@ -439,8 +447,18 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
                         else (u.get("email") or u["id"]))
             zuweisbar_an.append({"id": u["id"], "name": name, "role": u.get("role")})
     mit_namen = await besitzer_namen(user["dealer_id"], v.get("mitbearbeiter_ids") or [])
+    # Umbau Kaufvorgaenge: je Vertrag ein Vorgang (Sucher, Preis, Status,
+    # Termin) — Chef sieht alle, Sucher nur eigene.
+    import kaufvorgang as _kv
+    kaufvorgaenge = await db.kaufvorgaenge.find(
+        {"vehicle_id": vehicle_id, **_kv.bereich(user)}, {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+    kv_namen = await besitzer_namen(user["dealer_id"], [k.get("user_id") for k in kaufvorgaenge])
+    for k in kaufvorgaenge:
+        k["user_name"] = kv_namen.get(k.get("user_id"), k.get("user_id"))
     return {
         "vehicle": v,
+        "kaufvorgaenge": kaufvorgaenge,
         "owner": owner,
         "mitbearbeiter": [{"id": m, "name": mit_namen.get(m, m)}
                           for m in (v.get("mitbearbeiter_ids") or [])],

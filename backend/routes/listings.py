@@ -706,9 +706,16 @@ async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> di
             # Runde 17 (Uebergabe-Regel): das Fahrzeug ist der Anker — nach
             # einer Uebergabe verliert der bisherige Bearbeiter auch seine
             # selbst erzeugten Snapshots; ohne Fahrzeug zaehlt der Ersteller.
+            # Umbau Kaufvorgaenge: der Kleinanzeigen-Snapshot gehoert zum
+            # INSERAT — wer es verglichen hat (Bereich) oder einen eigenen
+            # Vertrag dazu besitzt, darf ihn sehen.
             vid = snap.get("vehicle_id")
-            erlaubt = (await fahrzeug_im_bereich(user, vid) if vid
-                       else snap.get("user_id") == user["id"])
+            erlaubt = snap.get("user_id") == user["id"] or (
+                bool(vid) and (
+                    await fahrzeug_im_bereich(user, vid)
+                    or await db.generated_pdfs.count_documents(
+                        {"vehicle_id": vid, "dealer_id": dealer_id,
+                         "user_id": user["id"]}, limit=1) > 0))
         else:
             erlaubt = bool(dealer_id) and (
                 snap.get("dealer_id") == dealer_id
@@ -787,9 +794,10 @@ async def list_snapshots(vehicle_id: Optional[str] = None,
         # samt user_id der Kollegen.
         # Runde 17 (Uebergabe-Regel): nur Fahrzeuge im eigenen Bereich; ohne
         # Fahrzeug zaehlt der Ersteller.
-        vids = list(await eigene_fahrzeug_ids(user) or [])
-        q["$or"] = [{"vehicle_id": {"$in": vids}},
-                    {"vehicle_id": {"$in": [None, ""]}, "user_id": user["id"]}]
+        vids = set(await eigene_fahrzeug_ids(user) or [])
+        vids |= set(await db.generated_pdfs.distinct(
+            "vehicle_id", {"dealer_id": user["dealer_id"], "user_id": user["id"]}))
+        q["$or"] = [{"vehicle_id": {"$in": list(vids)}}, {"user_id": user["id"]}]
     if vehicle_id:
         q["vehicle_id"] = vehicle_id
     if before:

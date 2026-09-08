@@ -659,6 +659,12 @@ async def ensure_indexes():
     # gleichzeitige erste Vergleiche upserteten vorher zwei Dokumente.
     # Altdubletten: kein Startabbruch, sondern Betriebsalarm.
     await _unique_index_sicher(db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)
+    # Umbau Kaufvorgaenge 09.09.2026: ein Vorgang je Vertrag
+    await _unique_index_sicher(db.kaufvorgaenge, "contract_id", abbruch_in_produktion=False)
+    await db.kaufvorgaenge.create_index([("dealer_id", 1), ("vehicle_id", 1)])
+    await db.kaufvorgaenge.create_index([("dealer_id", 1), ("user_id", 1)])
+    await db.kaufvorgaenge.create_index("appointment_id")
+    await db.appointments.create_index([("dealer_id", 1), ("contract_id", 1)])
     # Runde 17: Vertragszeiger je Termin (idempotente Nachfuehrung beim PUT)
     await db.generated_pdfs.create_index([("dealer_id", 1), ("appointment_id", 1)])
     # Fahrzeugpool-Begrenzung sortiert je Firma nach updated_at (09/2026)

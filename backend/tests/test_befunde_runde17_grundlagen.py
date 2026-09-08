@@ -297,19 +297,28 @@ def test_13_alarm_schliessen(welt):
     assert n == 1 and offen == 0
 
 
-# ================================================= Uebergabe-Regel (Fahrzeug ist der Anker)
-def test_14_uebergabe_entzieht_altem_bearbeiter_termin_bericht_snapshot(welt):
-    """Sucher A legt Termin und Snapshot zu seinem Fahrzeug an und hat einen
-    Vertrag darauf. Der Chef weist das Fahrzeug B zu. Danach sieht A weder
-    Termin noch Bericht noch Snapshot; B sieht alles. A behaelt nur seinen
-    Vertrag (Produktregel) und Termine OHNE Fahrzeug, die er selbst anlegte."""
-    D = _module("deps")
+# ================================================= Uebergabe-Regel (Umbau Kaufvorgaenge: Vertrag/Vorgang ist der Anker)
+def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapshots(welt):
+    """Umbau Kaufvorgaenge 09.09.2026 (Beschluss Ahmad): Sucher A hat zu
+    seinem Fahrzeug einen Vertrag, einen eigenen Termin (mit Bericht und
+    Protokoll) und einen Snapshot. Der Chef weist das Fahrzeug B zu.
+
+    Danach behaelt A seine eigenen Termine, Berichte, Protokolle und
+    Snapshots — sie gehoeren zu SEINEM Vertrag/Termin (gewollt, kein Leck).
+    A verliert nur die Fahrzeug-Sichtbarkeit (weder Besitzer noch
+    Mitbearbeiter; der Vertrag wurde hier direkt eingefuegt, nicht ueber
+    create_contract, das den Sucher zum Mitbearbeiter macht). B sieht das
+    Fahrzeug und dessen Snapshot, aber NICHT A's Termin, Bericht oder
+    Protokoll (Verkaeuferdaten des Kollegen)."""
     B = _module("routes.bestand")
     L = _module("routes.listings")
     A_ = _module("routes.appointments")
     P = _module("routes.protocols")
+    K = _module("kaufvorgang")
     from fastapi import HTTPException, Response
-    for m in (B, L, A_, P):
+    mods = (B, L, A_, P, K)
+    alt = [(m, m.db) for m in mods]
+    for m in mods:
         m.db = welt.db
     a = welt.sucher
     b = {"id": f"sb_r17g_{welt.s}", "dealer_id": welt.dealer_id, "role": "sucher"}
@@ -339,35 +348,45 @@ def test_14_uebergabe_entzieht_altem_bearbeiter_termin_bericht_snapshot(welt):
                                                    "vehicle_id": vid, "status": "final", "version": 1,
                                                    "pdf_path": "p.pdf", "created_at": _jetzt()})
         vorher = {t["id"] for t in await A_.list_appointments(Response(), a)}
+        fzg_a_vorher = (await L.get_vehicle_detail(vid, a))["id"]
         # Chef uebergibt das Fahrzeug an B
         await B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id=b["id"]), welt.chef)
         nachher_a = {t["id"] for t in await A_.list_appointments(Response(), a)}
         nachher_b = {t["id"] for t in await A_.list_appointments(Response(), b)}
         darf_a = await A_._sucher_darf(a, {"created_by": a["id"], "contract_id": cid, "vehicle_id": vid})
         darf_b = await A_._sucher_darf(b, {"created_by": a["id"], "contract_id": cid, "vehicle_id": vid})
+        rep_a = await A_.get_pickup_report(aid, 0, a)
         with pytest.raises(HTTPException) as e_rep:
-            await A_.get_pickup_report(aid, 0, a)
-        rep_b = await A_.get_pickup_report(aid, 0, b)
+            await A_.get_pickup_report(aid, 0, b)
         snaps_a = {s["id"] for s in await L.list_snapshots(None, a)}
         snaps_b = {s["id"] for s in await L.list_snapshots(None, b)}
-        with pytest.raises(HTTPException) as e_snap:
-            await L._load_snapshot_or_404(sid, a)
+        snap_a = (await L._load_snapshot_or_404(sid, a))["id"]
+        snap_b = (await L._load_snapshot_or_404(sid, b))["id"]
         proto_a = await P._protokoll_im_bereich(a, {"vehicle_id": vid, "appointment_id": aid})
         proto_b = await P._protokoll_im_bereich(b, {"vehicle_id": vid, "appointment_id": aid})
         vertrag_a = await welt.db.generated_pdfs.count_documents({"id": cid, "user_id": a["id"]})
+        with pytest.raises(HTTPException) as e_fzg:
+            await L.get_vehicle_detail(vid, a)
+        fzg_b = (await L.get_vehicle_detail(vid, b))["id"]
         await welt.db.users.delete_many({"id": {"$in": [a["id"], b["id"]]}})
         for c in ("appointments", "generated_pdfs", "listing_snapshots", "pickup_reports", "pickup_protocols"):
             await welt.db[c].delete_many({"dealer_id": welt.dealer_id})
-        return (vorher, nachher_a, nachher_b, darf_a, darf_b, e_rep.value.status_code, rep_b,
-                snaps_a, snaps_b, e_snap.value.status_code, proto_a, proto_b, vertrag_a)
+        return (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_a, e_rep.value.status_code,
+                snaps_a, snaps_b, snap_a, snap_b, proto_a, proto_b, vertrag_a, e_fzg.value.status_code, fzg_b)
 
-    (vorher, nachher_a, nachher_b, darf_a, darf_b, s_rep, rep_b, snaps_a, snaps_b, s_snap,
-     proto_a, proto_b, vertrag_a) = welt.run(lauf())
-    assert vorher == {aid, f"{aid}_ohne"}
-    assert nachher_a == {f"{aid}_ohne"}, "Termin am Fahrzeug folgt dem neuen Bearbeiter"
-    assert nachher_b == {aid}
-    assert darf_a is False and darf_b is True
-    assert s_rep == 404 and rep_b["report"]["id"] == f"r_{welt.s}"
-    assert snaps_a == set() and snaps_b == {sid} and s_snap == 404
-    assert proto_a is False and proto_b is True
+    try:
+        (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_a, s_rep, snaps_a, snaps_b,
+         snap_a, snap_b, proto_a, proto_b, vertrag_a, s_fzg, fzg_b) = welt.run(lauf())
+    finally:
+        for m, d in alt:
+            m.db = d
+    assert vorher == {aid, f"{aid}_ohne"} and fzg_a_vorher == vid
+    assert nachher_a == {aid, f"{aid}_ohne"}, "eigene Termine bleiben beim bisherigen Bearbeiter (eigener Vertrag)"
+    assert nachher_b == set(), "der neue Besitzer sieht den Termin des Kollegen nicht"
+    assert darf_a is True and darf_b is False
+    assert rep_a["report"]["id"] == f"r_{welt.s}" and s_rep == 404
+    assert snaps_a == {sid} and snaps_b == {sid}, "Snapshot: A ueber Ersteller/Vertrag, B ueber das Fahrzeug"
+    assert snap_a == sid and snap_b == sid
+    assert proto_a is True and proto_b is False
     assert vertrag_a == 1, "der Vertrag bleibt beim Ersteller (Produktregel)"
+    assert s_fzg == 404 and fzg_b == vid, "A verliert nur die Fahrzeug-Sichtbarkeit"

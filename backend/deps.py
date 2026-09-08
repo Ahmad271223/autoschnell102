@@ -565,31 +565,37 @@ _OHNE_FAHRZEUG = {"$in": [None, ""]}
 
 
 async def termin_bereich(user) -> Dict[str, Any]:
-    """Mongo-Filter fuer appointments: Chef = Firma; Sucher = eigenes
-    Fahrzeug, oder (ohne Fahrzeug) selbst angelegt / eigener Vertrag."""
+    """Mongo-Filter fuer appointments (Umbau Kaufvorgaenge 09.09.2026):
+    Chef = Firma; Sucher = selbst angelegt ODER eigener Vertrag ODER
+    eigener Kaufvorgang. Das FAHRZEUG gibt keinen Zugriff mehr — mehrere
+    Sucher duerfen dasselbe Inserat unabhaengig kaufen, ohne die Termine
+    (Verkaeuferdaten) der Kollegen zu sehen."""
     q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if ist_sucher(user):
-        vids = await eigene_fahrzeug_ids(user) or []
         cids = await db.generated_pdfs.distinct(
             "id", {"dealer_id": user["dealer_id"], "user_id": user["id"]})
-        q["$or"] = [{"vehicle_id": {"$in": vids}},
-                    {"vehicle_id": _OHNE_FAHRZEUG, "created_by": user["id"]},
-                    {"vehicle_id": _OHNE_FAHRZEUG, "contract_id": {"$in": cids}}]
+        kids = await db.kaufvorgaenge.distinct(
+            "id", {"dealer_id": user["dealer_id"], "user_id": user["id"]})
+        q["$or"] = [{"created_by": user["id"]},
+                    {"contract_id": {"$in": cids}},
+                    {"kaufvorgang_id": {"$in": kids}}]
     return q
 
 
 async def termin_im_bereich(user, appt: dict) -> bool:
     """Einzelner, bereits geladener Termin (created_by, contract_id,
-    vehicle_id) — dieselbe Regel wie termin_bereich."""
+    kaufvorgang_id) — dieselbe Regel wie termin_bereich."""
     if not ist_sucher(user):
         return True
-    if appt.get("vehicle_id"):
-        return await fahrzeug_im_bereich(user, appt.get("vehicle_id"))
     if appt.get("created_by") == user["id"]:
         return True
     cid = appt.get("contract_id")
-    return bool(cid) and await db.generated_pdfs.count_documents(
-        {"id": cid, "user_id": user["id"]}, limit=1) > 0
+    if cid and await db.generated_pdfs.count_documents(
+            {"id": cid, "user_id": user["id"]}, limit=1):
+        return True
+    kid = appt.get("kaufvorgang_id")
+    return bool(kid) and await db.kaufvorgaenge.count_documents(
+        {"id": kid, "user_id": user["id"]}, limit=1) > 0
 
 
 async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:

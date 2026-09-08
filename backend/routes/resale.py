@@ -328,6 +328,9 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
                 if txt not in known_defects:
                     known_defects.append(txt)
 
+    abgeholt_vorgang = await db.kaufvorgaenge.find_one(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"], "status": "abgeholt"},
+        {"_id": 0, "id": 1, "purchase_price": 1}, sort=[("updated_at", -1)])
     listing = {
         "id": str(uuid.uuid4()),
         "dealer_id": user["dealer_id"],
@@ -347,7 +350,12 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
             "uploaded_keys": [],
         },
         "prices": {"public": None, "b2b": None, "network": None},
-        "purchase_price": v.get("purchase_price"),
+        # Umbau Kaufvorgaenge: der realisierte Kaufpreis kommt aus dem
+        # abgeholten Vorgang (vehicles.purchase_price wird beim Abholen
+        # gesetzt); der Vorgang wird am Inserat vermerkt.
+        "purchase_price": v.get("purchase_price") if v.get("purchase_price") is not None
+        else (abgeholt_vorgang or {}).get("purchase_price"),
+        "kaufvorgang_id": (abgeholt_vorgang or {}).get("id"),
         "costs": (v.get("bestand") or {}).get("costs") or [],
         "visibility": "public",
         "published_at": None,

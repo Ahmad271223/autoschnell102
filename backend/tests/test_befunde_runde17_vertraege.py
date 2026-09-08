@@ -3,10 +3,13 @@
 
   338      DamageIn.x/y und purchase_price ohne inf/nan, Koordinaten gedeckelt
   346/347  pickup_date/pickup_time geprueft; PLZ/Ort/Abholadresse gedeckelt
-  265      Vertrag bleibt gueltig, wenn Fahrzeugstatus/Audit danach scheitern
+  265      Vertrag bleibt gueltig, wenn Fahrzeugstatus/Kaufvorgang/Audit
+           danach scheitern (Nacharbeit-Hinweis statt 500)
   270      409 fuer verkaufte/archivierte Fahrzeuge (kein zweiter Kaufvertrag)
-  355/356  Umhaengen des offenen Termins: Fahrer-Zusage zurueck auf "offen",
-           alter Vertrag verliert Termin UND Status "Termin erstellt"
+  355/356  Umbau Kaufvorgaenge 09.09.2026: EIN offener Termin je VERTRAG -
+           ein zweiter Vertrag zum selben Fahrzeug bekommt einen EIGENEN
+           Termin; der Termin des anderen Vertrags bleibt samt Fahrer-Zusage
+           und Vertragszeiger unberuehrt (kein Umhaengen mehr)
   348      Grabstein-Vertraege (loeschung.status == laeuft) sind unsichtbar,
            Loeschen bleibt idempotent
   349/374  list_contracts: q hoechstens 200 Zeichen, days 1..3650
@@ -97,17 +100,44 @@ class _Welt:
     async def aufraeumen(self, db):
         for c in ("appointments", "vehicles", "activity_logs", "generated_pdfs",
                   "generated_pdf_versions", "users", "pickup_reports", "pickup_protocols",
-                  "listing_snapshots", "vehicle_comparisons"):
+                  "listing_snapshots", "vehicle_comparisons", "kaufvorgaenge"):
             await db[c].delete_many({"dealer_id": self.dealer_id})
         await db.dealers.delete_many({"id": self.dealer_id})
+
+
+async def _indizes(db):
+    """Dieselben Unique-Indizes wie server.py/indizes.py (CI-Datenbank ist
+    frisch): ein Kaufvorgang je Vertrag, EIN offener Termin je VERTRAG.
+    Der alte Index termin_offen_je_fahrzeug (ein Termin je Fahrzeug)
+    widerspricht dem Umbau Kaufvorgaenge und wird wie im Backend entfernt."""
+    from deps import TERMIN_OFFEN
+
+    async def _alten_termin_index_entfernen():
+        if "termin_offen_je_fahrzeug" in await db.appointments.index_information():
+            await db.appointments.drop_index("termin_offen_je_fahrzeug")
+    versuche = [
+        _alten_termin_index_entfernen,
+        lambda: db.kaufvorgaenge.create_index("contract_id", unique=True),
+        lambda: db.appointments.create_index(
+            [("dealer_id", 1), ("contract_id", 1)], unique=True, name="termin_offen_je_vertrag",
+            partialFilterExpression={"contract_id": {"$type": "string", "$gt": ""},
+                                     "status": {"$in": list(TERMIN_OFFEN)}}),
+    ]
+    for v in versuche:
+        try:
+            await v()
+        except Exception:  # noqa: BLE001  (Index existiert mit anderer Definition / Altdubletten)
+            pass
 
 
 @pytest.fixture
 def welt():
     from motor.motor_asyncio import AsyncIOMotorClient
     w = _Welt()
+    # Umbau Kaufvorgaenge 09.09.2026: `kaufvorgang` haelt ein eigenes `db`
+    # (from deps import db) - ohne Umbiegen haengt es am Loop des ersten Tests.
     names = ["deps", "routes.contracts", "routes.appointments", "routes.bestand",
-             "lifecycle", "auto_daten", "cleanup_service"]
+             "lifecycle", "auto_daten", "cleanup_service", "kaufvorgang"]
     mods = [_module(n) for n in names]
     alt = [(m, getattr(m, "db", None)) for m in mods]
 
@@ -126,9 +156,12 @@ def welt():
             return self.loop.run_until_complete(coro)
 
     ctx = _Ctx()
+    ctx.run(_indizes(ctx.db))
     ctx.run(ctx.db.users.insert_many(w.konten()))
-    ctx.run(ctx.db.dealers.insert_one({"id": w.dealer_id, "company_name": "R17 GmbH",
-                                       "created_at": _jetzt()}))
+    # user_id gesetzt: dealers.user_id ist unique (nicht sparse) - zwei parallel
+    # laufende Testdateien ohne user_id kollidierten auf {user_id: null}.
+    ctx.run(ctx.db.dealers.insert_one({"id": w.dealer_id, "user_id": w.chef["id"],
+                                       "company_name": "R17 GmbH", "created_at": _jetzt()}))
     yield ctx
     try:
         ctx.run(w.aufraeumen(ctx.db))
@@ -268,35 +301,72 @@ def test_270_kein_vertrag_fuer_verkauftes_fahrzeug(welt, monkeypatch):
 
 # ================================================= 265: Nacharbeit-Hinweis statt 500
 def test_265_vertrag_bleibt_wenn_fahrzeugstatus_scheitert(welt, monkeypatch):
+    """Umbau Kaufvorgaenge 09.09.2026: Fahrzeugstatus, Mitbearbeiter,
+    kaufvorgang.anlegen und die Zusammenfassung stehen gemeinsam im
+    try-Block nach dem Vertrags-Insert. Scheitert ein Schritt (a: der
+    Fahrzeug-Write, b: das Anlegen des Vorgangs), bleibt der Vertrag samt
+    kaufvorgang_id gespeichert, die Antwort traegt den Nacharbeit-Hinweis
+    (kein 500, kein zweiter Vertrag durch Wiederholen)."""
     C = _module("routes.contracts")
+    KV = _module("kaufvorgang")
     w, db = welt.w, welt.db
     _pdf_stub(monkeypatch)
     _auto_daten_stub(monkeypatch)
-    vid = f"v_{w.s}"
+    va, vb = f"va_{w.s}", f"vb_{w.s}"
+    kaputt = {"vehicles": True}
 
-    async def _kaputt(orig, self, *a, **k):
-        raise RuntimeError("vehicles.update_one: simulierter DB-Aussetzer")
-    _sammlung_hooken(monkeypatch, "update_one", "vehicles", _kaputt)
+    async def _wackelig(orig, self, *a, **k):
+        if kaputt["vehicles"]:
+            raise RuntimeError("vehicles.update_one: simulierter DB-Aussetzer")
+        return await orig(self, *a, **k)
+    _sammlung_hooken(monkeypatch, "update_one", "vehicles", _wackelig)
+
+    async def _anlegen_kaputt(**k):
+        raise RuntimeError("kaufvorgaenge.insert_one: simulierter DB-Aussetzer")
 
     async def lauf():
-        await db.vehicles.insert_one(w.fahrzeug(vid))
-        out = await C.create_contract(_body(vid), w.chef)
-        c = await db.generated_pdfs.find_one({"id": out["id"]}, {"_id": 0})
-        v = await db.vehicles.find_one({"id": vid}, {"_id": 0})
-        return out, c, v, await _logs(db, w.dealer_id)
+        await db.vehicles.insert_many([w.fahrzeug(va), w.fahrzeug(vb)])
+        # a) Fahrzeug-Write scheitert: kein Status, kein Vorgang - Vertrag + Hinweis
+        out_a = await C.create_contract(_body(va), w.chef)
+        c_a = await db.generated_pdfs.find_one({"id": out_a["id"]}, {"_id": 0})
+        v_a = await db.vehicles.find_one({"id": va}, {"_id": 0})
+        kv_a = await db.kaufvorgaenge.find_one({"contract_id": out_a["id"]}, {"_id": 0})
+        # b) Fahrzeug-Write geht, kaufvorgang.anlegen scheitert: ebenfalls Hinweis
+        kaputt["vehicles"] = False
+        monkeypatch.setattr(KV, "anlegen", _anlegen_kaputt)
+        out_b = await C.create_contract(_body(vb), w.chef)
+        c_b = await db.generated_pdfs.find_one({"id": out_b["id"]}, {"_id": 0})
+        v_b = await db.vehicles.find_one({"id": vb}, {"_id": 0})
+        kv_b = await db.kaufvorgaenge.find_one({"contract_id": out_b["id"]}, {"_id": 0})
+        return out_a, c_a, v_a, kv_a, out_b, c_b, v_b, kv_b, await _logs(db, w.dealer_id)
 
-    out, c, v, logs = welt.run(lauf())
-    assert out["nacharbeit_hinweis"].startswith("Vertrag gespeichert"), out.get("nacharbeit_hinweis")
-    assert out["pdf_b64"] and c and c["status"] == "erstellt", "Vertrag ist gespeichert"
-    assert v.get("status") == "verglichen" and v.get("lifecycle") == "verglichen"
-    assert "pdf.erstellt" in logs, "Audit ueber log_activity_sicher trotz Fehler"
+    out_a, c_a, v_a, kv_a, out_b, c_b, v_b, kv_b, logs = welt.run(lauf())
+    for out, c in ((out_a, c_a), (out_b, c_b)):
+        assert out["nacharbeit_hinweis"].startswith("Vertrag gespeichert"), out.get("nacharbeit_hinweis")
+        assert out["pdf_b64"] and c and c["status"] == "erstellt", "Vertrag ist gespeichert"
+        assert c["kaufvorgang_id"] and c["purchase_price"] == 5000, "Vorgangs-ID steht im Vertrag"
+    assert v_a.get("status") == "verglichen" and v_a.get("lifecycle") == "verglichen"
+    assert kv_a is None and kv_b is None, "Vorgang nicht angelegt (Nacharbeit)"
+    assert (v_b["status"] == "Vertrag erstellt" and v_b["lifecycle"] == "verglichen"), (
+        "Zusammenfassung nach dem Fehler nicht mehr erreicht")
+    assert v_a.get("purchase_price") is None and v_b.get("purchase_price") is None, (
+        "Kaufpreis gehoert zum Vorgang, nicht zum gemeinsamen Fahrzeug")
+    assert logs.count("pdf.erstellt") == 2, "Audit ueber log_activity_sicher trotz Fehler"
     q = inspect.getsource(C.create_contract)
     i = q.index("db.vehicles.update_one")
-    assert "try:" in q[i - 120:i] and "except Exception" in q[i:i + 600]
+    block = q[q.rindex("try:", 0, i):q.index("except Exception", i)]
+    assert ("_kv.anlegen(" in block and "fahrzeug_status_aggregieren(" in block
+            and "mitbearbeiter_ids" in block), "alle Nacharbeit-Schritte stehen im try-Block"
+    assert "nacharbeit_hinweis = " in q[q.index("except Exception", i):][:400]
     assert 'log_activity_sicher(user["dealer_id"], user["id"], "pdf.erstellt"' in q
 
 
 def test_265b_normaler_weg_ohne_hinweis_mit_termin(welt, monkeypatch):
+    """Normaler Weg (Umbau Kaufvorgaenge 09.09.2026): kein Hinweis; der
+    Vertrag traegt kaufvorgang_id, der Vorgang existiert mit Kaufpreis und
+    Termin (abholung_geplant), der Termin zeigt auf den Vorgang. Das
+    gemeinsame Fahrzeug bekommt KEINEN purchase_price (erst beim Abholen aus
+    dem Vorgang), nur den zusammengefassten Lebenszyklus."""
     C = _module("routes.contracts")
     w, db = welt.w, welt.db
     aufrufe = _pdf_stub(monkeypatch)
@@ -310,86 +380,126 @@ def test_265b_normaler_weg_ohne_hinweis_mit_termin(welt, monkeypatch):
         c = await db.generated_pdfs.find_one({"id": out["id"]}, {"_id": 0})
         v = await db.vehicles.find_one({"id": vid}, {"_id": 0})
         a = await db.appointments.find_one({"contract_id": out["id"]}, {"_id": 0})
-        return out, c, v, a, await _logs(db, w.dealer_id)
+        kv = await db.kaufvorgaenge.find_one({"contract_id": out["id"]}, {"_id": 0})
+        n_kv = await db.kaufvorgaenge.count_documents({"dealer_id": w.dealer_id})
+        return out, c, v, a, kv, n_kv, await _logs(db, w.dealer_id)
 
-    out, c, v, a, logs = welt.run(lauf())
+    out, c, v, a, kv, n_kv, logs = welt.run(lauf())
     assert "nacharbeit_hinweis" not in out and "termin_hinweis" not in out
     assert len(aufrufe) == 1 and aufrufe[0]["contract_no"] == out["contract_no"]
     assert c["status"] == "Termin erstellt" and c["appointment_id"] == a["id"]
-    assert v["status"] == "Vertrag erstellt" and v["purchase_price"] == 5000
-    assert v["lifecycle"] == "abholung_geplant"
+    assert c["kaufvorgang_id"] and out["kaufvorgang_id"] == c["kaufvorgang_id"]
+    # ein Vorgang je Vertrag: Sucher, Fahrzeug, Kaufpreis, Status, Termin
+    assert n_kv == 1 and kv["id"] == c["kaufvorgang_id"]
+    assert kv["user_id"] == w.chef["id"] and kv["vehicle_id"] == vid
+    assert kv["purchase_price"] == 5000 and kv["status"] == "abholung_geplant"
+    assert kv["appointment_id"] == a["id"] and a["kaufvorgang_id"] == kv["id"]
+    assert v["status"] == "Vertrag erstellt" and v.get("purchase_price") is None, (
+        "Kaufpreis gehoert zum Vorgang, nicht zum gemeinsamen Fahrzeug")
+    assert v["lifecycle"] == "abholung_geplant", "Lebenszyklus = Zusammenfassung der Vorgaenge"
     assert a["pickup_address"] == "Weg 1 30159 Hannover" and a["pickup_date"] == "2099-10-10"
+    assert a["created_by"] == w.chef["id"] and a["status"] == "offen"
     assert "pdf.erstellt" in logs and "termin.auto-erstellt" in logs
 
 
-# ================================================= 355/356: Umhaengen
-def _umhaengen_pruefen(welt, monkeypatch, fallback_erzwingen: bool):
+# ================================================= 355/356: kein Umhaengen - EIN Termin je Vertrag
+def _eigener_termin_je_vertrag_pruefen(welt, monkeypatch, fallback_erzwingen: bool):
+    """Umbau Kaufvorgaenge 09.09.2026: `_abholtermin_fuer_vertrag` haengt den
+    offenen Termin eines ANDEREN Vertrags nie mehr um. Ein zweiter Vertrag
+    desselben Suchers zum selben Fahrzeug bekommt einen EIGENEN Termin; der
+    alte Termin bleibt exakt wie er war - samt angenommener Fahrer-Zusage
+    (Nr. 355 damit gegenstandslos) und Vertragszeiger (Nr. 356: der alte
+    Vertrag behaelt Termin und Status). Wiederholung fuer denselben Vertrag
+    legt keinen zweiten Termin an (Teil-Unique-Index termin_offen_je_vertrag)."""
     C = _module("routes.contracts")
     A = _module("routes.appointments")
     w, db = welt.w, welt.db
     vid = f"v_{w.s}"
+    a1, c1, c2, c3 = f"a_{w.s}", f"c1_{w.s}", f"c2_{w.s}", f"c3_{w.s}"
+    kv1, kv2, kv3 = f"kv1_{w.s}", f"kv2_{w.s}", f"kv3_{w.s}"
     if fallback_erzwingen:
         monkeypatch.delattr(A, "zusage_zuruecksetzen_wenn_geaendert", raising=False)
     neu = _body(vid, pickup_date="2099-10-10", pickup_time="11:00",
                 seller_address="A" * 500)              # 500 + PLZ + Ort > 500
 
+    def vorgang(kid, cid, preis, status="vertrag_erstellt", appointment_id=None):
+        return {"id": kid, "dealer_id": w.dealer_id, "user_id": w.chef["id"], "vehicle_id": vid,
+                "contract_id": cid, "purchase_price": preis, "status": status,
+                "appointment_id": appointment_id, "created_at": _jetzt(), "updated_at": _jetzt()}
+
     async def lauf():
         await db.vehicles.insert_one(w.fahrzeug(vid))
-        await db.appointments.insert_one(w.appt(
-            f"a_{w.s}", contract_id=f"c1_{w.s}", driver_id=f"f_{w.s}",
-            zuteilung="angenommen", zuteilung_am="2026-09-01T00:00:00+00:00",
-            zuteilung_beantwortet_am="2026-09-02T00:00:00+00:00"))
+        alt = w.appt(a1, contract_id=c1, kaufvorgang_id=kv1, driver_id=f"f_{w.s}",
+                     zuteilung="angenommen", zuteilung_am="2026-09-01T00:00:00+00:00",
+                     zuteilung_beantwortet_am="2026-09-02T00:00:00+00:00")
+        await db.appointments.insert_one(dict(alt))
         await db.generated_pdfs.insert_many([
-            w.vertrag(f"c1_{w.s}", appointment_id=f"a_{w.s}", status="Termin erstellt"),
-            w.vertrag(f"c2_{w.s}"),
+            w.vertrag(c1, appointment_id=a1, status="Termin erstellt", kaufvorgang_id=kv1),
+            w.vertrag(c2, purchase_price=4700, kaufvorgang_id=kv2),
         ])
+        await db.kaufvorgaenge.insert_many([
+            vorgang(kv1, c1, 5000, status="abholung_geplant", appointment_id=a1),
+            vorgang(kv2, c2, 4700)])
+        # zweiter Vertrag desselben Suchers zum selben Fahrzeug
         appt_id, hinweis = await C._abholtermin_fuer_vertrag(
-            w.chef, neu, {"make_label": "BMW"}, f"c2_{w.s}")
-        a = await db.appointments.find_one({"id": f"a_{w.s}"}, {"_id": 0})
-        c1 = await db.generated_pdfs.find_one({"id": f"c1_{w.s}"}, {"_id": 0})
-        c2 = await db.generated_pdfs.find_one({"id": f"c2_{w.s}"}, {"_id": 0})
-        # Zweites Umhaengen OHNE Aenderung von Datum/Uhrzeit/Adresse: die
-        # (inzwischen wieder erteilte) Zusage bleibt stehen.
-        await db.appointments.update_one({"id": f"a_{w.s}"}, {
-            "$set": {"zuteilung": "angenommen", "zuteilung_beantwortet_am": "x"},
-            "$unset": {"zuteilung_neu_wegen_aenderung": ""}})
-        await db.generated_pdfs.insert_one(w.vertrag(f"c3_{w.s}"))
-        appt_id2, _ = await C._abholtermin_fuer_vertrag(
-            w.chef, neu, {"make_label": "BMW"}, f"c3_{w.s}")
-        a2 = await db.appointments.find_one({"id": f"a_{w.s}"}, {"_id": 0})
-        c2b = await db.generated_pdfs.find_one({"id": f"c2_{w.s}"}, {"_id": 0})
-        return appt_id, hinweis, a, c1, c2, appt_id2, a2, c2b
+            w.chef, neu, {"make_label": "BMW"}, c2, kaufvorgang_id=kv2)
+        a_alt = await db.appointments.find_one({"id": a1}, {"_id": 0})
+        a_neu = await db.appointments.find_one({"id": appt_id}, {"_id": 0})
+        c1_doc = await db.generated_pdfs.find_one({"id": c1}, {"_id": 0})
+        c2_doc = await db.generated_pdfs.find_one({"id": c2}, {"_id": 0})
+        kv1_doc = await db.kaufvorgaenge.find_one({"id": kv1}, {"_id": 0})
+        kv2_doc = await db.kaufvorgaenge.find_one({"id": kv2}, {"_id": 0})
+        # Wiederholung fuer denselben Vertrag (Vorgang wird aus dem Vertrag gelesen)
+        appt_id2, _ = await C._abholtermin_fuer_vertrag(w.chef, neu, {"make_label": "BMW"}, c2)
+        # dritter Vertrag -> dritter Termin
+        await db.generated_pdfs.insert_one(w.vertrag(c3, kaufvorgang_id=kv3))
+        await db.kaufvorgaenge.insert_one(vorgang(kv3, c3, 5100))
+        appt_id3, _ = await C._abholtermin_fuer_vertrag(w.chef, neu, {"make_label": "BMW"}, c3)
+        a_alt2 = await db.appointments.find_one({"id": a1}, {"_id": 0})
+        offen = await db.appointments.find(
+            {"dealer_id": w.dealer_id, "vehicle_id": vid, "status": "offen"},
+            {"_id": 0, "id": 1, "contract_id": 1}).to_list(10)
+        v = await db.vehicles.find_one({"id": vid}, {"_id": 0})
+        return (alt, appt_id, hinweis, a_alt, a_neu, c1_doc, c2_doc, kv1_doc, kv2_doc,
+                appt_id2, appt_id3, a_alt2, offen, v, await _logs(db, w.dealer_id))
 
-    appt_id, hinweis, a, c1, c2, appt_id2, a2, c2b = welt.run(lauf())
-    assert appt_id == f"a_{w.s}" and hinweis is None
-    # Nr. 355: Zusage zurueck, Fahrer bleibt
-    assert a["zuteilung"] == "offen" and a["zuteilung_neu_wegen_aenderung"] is True
-    assert "zuteilung_beantwortet_am" not in a and a["driver_id"] == f"f_{w.s}"
-    assert a["zuteilung_am"] > "2026-09-01T00:00:01"
-    assert a["contract_id"] == f"c2_{w.s}" and a["pickup_date"] == "2099-10-10"
-    # Nr. 347: Abholadresse gedeckelt
-    assert len(a["pickup_address"]) == 500 and a["pickup_address"].startswith("A" * 500)
-    # Nr. 356: alter Vertrag verliert Termin UND Status
-    assert c1["appointment_id"] is None and c1["status"] == "erstellt"
-    assert c2["appointment_id"] == f"a_{w.s}" and c2["status"] == "Termin erstellt"
-    # unveraenderter Termin: Zusage bleibt
-    assert appt_id2 == f"a_{w.s}"
-    assert a2["zuteilung"] == "angenommen" and a2["zuteilung_beantwortet_am"] == "x"
-    assert "zuteilung_neu_wegen_aenderung" not in a2 and a2["contract_id"] == f"c3_{w.s}"
-    assert c2b["appointment_id"] is None and c2b["status"] == "erstellt"
+    (alt, appt_id, hinweis, a_alt, a_neu, c1_doc, c2_doc, kv1_doc, kv2_doc,
+     appt_id2, appt_id3, a_alt2, offen, v, logs) = welt.run(lauf())
+    assert appt_id and appt_id != a1 and hinweis is None, "eigener Termin statt Umhaengen"
+    # Nr. 355: der Termin des anderen Vertrags bleibt samt Zusage exakt wie er war
+    assert a_alt == alt and a_alt2 == alt
+    # Nr. 356: alter Vertrag behaelt Termin und Status; der neue zeigt auf SEINEN Termin
+    assert c1_doc["appointment_id"] == a1 and c1_doc["status"] == "Termin erstellt"
+    assert c2_doc["appointment_id"] == appt_id and c2_doc["status"] == "Termin erstellt"
+    # neuer Termin: Felder aus dem Vertragsformular; Nr. 347: Abholadresse gedeckelt
+    assert a_neu["contract_id"] == c2 and a_neu["kaufvorgang_id"] == kv2
+    assert a_neu["vehicle_id"] == vid and a_neu["created_by"] == w.chef["id"]
+    assert a_neu["status"] == "offen" and "driver_id" not in a_neu and "zuteilung" not in a_neu
+    assert a_neu["pickup_date"] == "2099-10-10" and a_neu["pickup_time"] == "11:00"
+    assert len(a_neu["pickup_address"]) == 500 and a_neu["pickup_address"].startswith("A" * 500)
+    # Kaufvorgaenge: nur der eigene Vorgang bewegt sich, Kaufpreise bleiben getrennt
+    assert kv1_doc["status"] == "abholung_geplant" and kv1_doc["appointment_id"] == a1
+    assert kv1_doc["purchase_price"] == 5000
+    assert kv2_doc["status"] == "abholung_geplant" and kv2_doc["appointment_id"] == appt_id
+    assert kv2_doc["purchase_price"] == 4700
+    assert v.get("purchase_price") is None and v["lifecycle"] == "abholung_geplant"
+    # Wiederholung: derselbe Termin, kein zweiter; dritter Vertrag: dritter Termin
+    assert appt_id2 == appt_id and appt_id3 not in (a1, appt_id)
+    assert sorted(o["contract_id"] for o in offen) == sorted([c1, c2, c3])
+    assert logs.count("termin.auto-erstellt") == 2 and logs.count("termin.auto-wiederverwendet") == 1
 
 
-def test_355_356_umhaengen_mit_lokalem_fallback(welt, monkeypatch):
-    """Der Helfer aus routes.appointments fehlt (aelterer Stand) -> die
-    gleichlautende Regel in routes.contracts greift."""
-    _umhaengen_pruefen(welt, monkeypatch, fallback_erzwingen=True)
+def test_355_356_eigener_termin_je_vertrag_mit_lokalem_fallback(welt, monkeypatch):
+    """Der Helfer aus routes.appointments fehlt (aelterer Stand): der fremde
+    Termin wird trotzdem nie angefasst - die Zusage-Regel spielt beim
+    Vertragsweg keine Rolle mehr (sie gilt weiter fuer PUT /appointments)."""
+    _eigener_termin_je_vertrag_pruefen(welt, monkeypatch, fallback_erzwingen=True)
 
 
-def test_355_356_umhaengen_mit_vorhandenem_helfer(welt, monkeypatch):
-    """Mit dem Helfer aus routes.appointments (sobald er dort liegt) muss
-    dasselbe herauskommen — sonst laufen Terminplaner und Vertragsweg
-    auseinander."""
-    _umhaengen_pruefen(welt, monkeypatch, fallback_erzwingen=False)
+def test_355_356_eigener_termin_je_vertrag_mit_vorhandenem_helfer(welt, monkeypatch):
+    """Mit dem Helfer aus routes.appointments muss dasselbe herauskommen -
+    Terminplaner und Vertragsweg duerfen nicht auseinanderlaufen."""
+    _eigener_termin_je_vertrag_pruefen(welt, monkeypatch, fallback_erzwingen=False)
 
 
 def test_355_zusage_regel_lokal():

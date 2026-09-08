@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 4
+ZIEL_VERSION = 6
 _SPERRE = "migration"
 
 
@@ -87,70 +87,162 @@ async def m3_kundennummern(db) -> dict:
     return {"nummern": await kunden_nummern_nachziehen()}
 
 
-async def m4_fahrzeug_besitzer(db) -> dict:
-    """Runde 16 (Beschluss 08.09.2026): owner_user_id fuer den Altbestand.
-    Sucher sehen Fahrzeuge nur noch mit eigenem owner_user_id; ohne diese
-    Zuordnung verschwaende jedes alte Fahrzeug aus ihrem Bereich.
-    Reihenfolge je Fahrzeug: aeltester Vertrag -> aeltester Vergleich ->
-    Aktivitaet 'vergleich.gestartet' -> aeltester Termin (created_by) ->
-    Chef der Firma. Nur Konten, die noch zur Firma gehoeren, zaehlen.
-    Idempotent: nur Dokumente ohne owner_user_id."""
-    stats = {"vertrag": 0, "vergleich": 0, "aktivitaet": 0, "termin": 0,
-             "chef": 0, "offen": 0}
-    konten: dict = {}
+def _konto_pruefer(db):
+    """Runde 17 (Migrations-Befunde 2-4): ein Kandidat zaehlt nur, wenn das
+    Konto noch zur Firma gehoert, aktiv ist und Chef oder Sucher ist —
+    vorher reichte irgendein users-Dokument, auch ein deaktiviertes."""
+    cache: dict = {}
 
     async def gueltig(uid, did) -> bool:
-        if not isinstance(uid, str) or not uid:
+        if not isinstance(uid, str) or not uid or not did:
             return False
         k = (uid, did)
-        if k not in konten:
-            konten[k] = await db.users.count_documents(
-                {"id": uid, "dealer_id": did}, limit=1) > 0
-        return konten[k]
+        if k not in cache:
+            cache[k] = await db.users.count_documents(
+                {"id": uid, "dealer_id": did, "role": {"$in": ["sucher", "dealer"]},
+                 "active": {"$ne": False}}, limit=1) > 0
+        return cache[k]
+    return gueltig
 
+
+async def _besitzer_ermitteln(db, v: dict, gueltig, chefs: dict):
+    """Besitzer eines Fahrzeugs aus der Historie: aeltester GUELTIGER Vertrag
+    -> aeltester gueltiger Vergleich -> Aktivitaet -> aeltester gueltiger
+    Termin -> Chef. Runde 17 (Befunde 2/3): je Quelle werden die Kandidaten
+    der Reihe nach durchgegangen — vorher entschied nur der ALLERaelteste
+    Datensatz, und war dessen Konto ausgeschieden, fiel die ganze Quelle weg."""
+    vid, did, ad = v["id"], v.get("dealer_id"), v.get("mobile_ad_id")
+    quellen = [
+        ("vertrag", db.generated_pdfs, {"vehicle_id": vid, "dealer_id": did}, "user_id"),
+        ("vergleich", db.vehicle_comparisons,
+         {"mobile_ad_id": ad, "dealer_id": did} if ad else None, "user_id"),
+        ("aktivitaet", db.activity_logs,
+         {"action": "vergleich.gestartet", "ref": ad, "dealer_id": did} if ad else None, "user_id"),
+        ("termin", db.appointments, {"vehicle_id": vid, "dealer_id": did}, "created_by"),
+    ]
+    for quelle, coll, filt, feld in quellen:
+        if not filt:
+            continue
+        kandidaten = await coll.find(filt, {"_id": 0, feld: 1}).sort("created_at", 1).to_list(50)
+        for d in kandidaten:
+            if await gueltig(d.get(feld), did):
+                return d[feld], quelle
+    if did not in chefs:
+        chef = await db.users.find_one({"dealer_id": did, "role": "dealer", "active": {"$ne": False}},
+                                       {"_id": 0, "id": 1})
+        chefs[did] = (chef or {}).get("id")
+    if chefs[did]:
+        return chefs[did], "chef"
+    return None, None
+
+
+async def m4_fahrzeug_besitzer(db) -> dict:
+    """Runde 16 (Beschluss 08.09.2026): owner_user_id fuer den Altbestand
+    (organisatorischer Bearbeiter im Pool). Idempotent: nur Dokumente ohne
+    owner_user_id. Fahrzeuge ohne zuordenbares Konto ("offen") bleiben fuer
+    den Chef sichtbar, der sie zuweisen kann — seit dem Umbau Kaufvorgaenge
+    (09.09.2026) entscheidet der Besitzer nicht mehr ueber Vertraege."""
+    stats = {"vertrag": 0, "vergleich": 0, "aktivitaet": 0, "termin": 0,
+             "chef": 0, "offen": 0}
+    gueltig = _konto_pruefer(db)
     chefs: dict = {}
     async for v in db.vehicles.find(
             {"$or": [{"owner_user_id": {"$exists": False}}, {"owner_user_id": None}]},
             {"_id": 0, "id": 1, "dealer_id": 1, "mobile_ad_id": 1}):
-        vid, did, ad = v["id"], v.get("dealer_id"), v.get("mobile_ad_id")
-        uid = quelle = None
-        c = await db.generated_pdfs.find_one(
-            {"vehicle_id": vid, "dealer_id": did}, {"_id": 0, "user_id": 1},
-            sort=[("created_at", 1)])
-        if c and await gueltig(c.get("user_id"), did):
-            uid, quelle = c["user_id"], "vertrag"
-        if not uid and ad:
-            k = await db.vehicle_comparisons.find_one(
-                {"mobile_ad_id": ad, "dealer_id": did}, {"_id": 0, "user_id": 1},
-                sort=[("created_at", 1)])
-            if k and await gueltig(k.get("user_id"), did):
-                uid, quelle = k["user_id"], "vergleich"
-        if not uid and ad:
-            a = await db.activity_logs.find_one(
-                {"action": "vergleich.gestartet", "ref": ad, "dealer_id": did},
-                {"_id": 0, "user_id": 1}, sort=[("created_at", 1)])
-            if a and await gueltig(a.get("user_id"), did):
-                uid, quelle = a["user_id"], "aktivitaet"
-        if not uid:
-            t = await db.appointments.find_one(
-                {"vehicle_id": vid, "dealer_id": did}, {"_id": 0, "created_by": 1},
-                sort=[("created_at", 1)])
-            if t and await gueltig(t.get("created_by"), did):
-                uid, quelle = t["created_by"], "termin"
-        if not uid:
-            if did not in chefs:
-                chef = await db.users.find_one({"dealer_id": did, "role": "dealer"},
-                                               {"_id": 0, "id": 1})
-                chefs[did] = (chef or {}).get("id")
-            if chefs[did]:
-                uid, quelle = chefs[did], "chef"
+        uid, quelle = await _besitzer_ermitteln(db, v, gueltig, chefs)
         if not uid:
             stats["offen"] += 1
             continue
         await db.vehicles.update_one(
-            {"id": vid, "dealer_id": did},
+            {"id": v["id"], "dealer_id": v.get("dealer_id")},
             {"$set": {"owner_user_id": uid, "besitzer_migriert_von": quelle}})
         stats[quelle] += 1
+    return stats
+
+
+_TERMIN_ZU_VORGANG = {"abgeholt": "abgeholt", "erledigt": "abgeholt",
+                      "nicht abgeholt": "nicht_abgeholt", "storniert": "storniert"}
+
+
+async def m5_kaufvorgaenge(db) -> dict:
+    """Umbau Kaufvorgaenge (09.09.2026): fuer jeden bestehenden Vertrag ohne
+    kaufvorgang_id EINEN Vorgang anlegen (Sucher, Fahrzeug, Kaufpreis,
+    Status aus Vertrag/Termin, Termin verknuepfen). Der Vertragsersteller
+    wird Mitbearbeiter des Fahrzeugs, wenn er nicht der Besitzer ist —
+    das Fahrzeug bleibt so in seinem Bereich. Idempotent."""
+    import uuid as _uuid
+    stats = {"vorgaenge": 0, "termine_verknuepft": 0, "uebersprungen": 0}
+    async for c in db.generated_pdfs.find(
+            {"$or": [{"kaufvorgang_id": {"$exists": False}}, {"kaufvorgang_id": None}]},
+            {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "vehicle_id": 1,
+             "purchase_price": 1, "status": 1, "appointment_id": 1, "created_at": 1}):
+        if not c.get("vehicle_id") or not c.get("dealer_id"):
+            stats["uebersprungen"] += 1
+            continue
+        appt = None
+        if c.get("appointment_id"):
+            appt = await db.appointments.find_one({"id": c["appointment_id"]},
+                                                  {"_id": 0, "id": 1, "status": 1})
+        if not appt:
+            appt = await db.appointments.find_one(
+                {"contract_id": c["id"], "dealer_id": c["dealer_id"]},
+                {"_id": 0, "id": 1, "status": 1}, sort=[("created_at", -1)])
+        if appt:
+            status = _TERMIN_ZU_VORGANG.get(appt.get("status") or "offen", "abholung_geplant")
+        elif (c.get("status") or "") in ("versendet", "versand_vorbereitet"):
+            status = "gesendet"
+        else:
+            status = "vertrag_erstellt"
+        kv_id = str(_uuid.uuid4())
+        doc = {"id": kv_id, "dealer_id": c["dealer_id"], "user_id": c.get("user_id"),
+               "vehicle_id": c["vehicle_id"], "contract_id": c["id"],
+               "purchase_price": c.get("purchase_price"), "status": status,
+               "appointment_id": (appt or {}).get("id"),
+               "created_at": c.get("created_at") or _now(), "updated_at": _now(),
+               "migriert": True}
+        try:
+            await db.kaufvorgaenge.insert_one(doc)
+        except Exception:
+            alt = await db.kaufvorgaenge.find_one({"contract_id": c["id"]}, {"_id": 0, "id": 1})
+            if not alt:
+                raise
+            kv_id = alt["id"]
+        await db.generated_pdfs.update_one({"id": c["id"]}, {"$set": {"kaufvorgang_id": kv_id}})
+        if appt:
+            await db.appointments.update_one({"id": appt["id"]}, {"$set": {"kaufvorgang_id": kv_id}})
+            stats["termine_verknuepft"] += 1
+        if c.get("user_id"):
+            await db.vehicles.update_one(
+                {"id": c["vehicle_id"], "dealer_id": c["dealer_id"],
+                 "owner_user_id": {"$ne": c["user_id"]}},
+                {"$addToSet": {"mitbearbeiter_ids": c["user_id"]}})
+        stats["vorgaenge"] += 1
+    return stats
+
+
+async def m6_besitzer_nachbessern(db) -> dict:
+    """Runde 17 (Migrations-Befund 4): Fahrzeuge, deren Besitzer inzwischen
+    kein aktives Chef-/Sucher-Konto der Firma mehr ist, bekommen ueber die
+    verbesserte Heuristik einen gueltigen Besitzer (sonst sah kein aktiver
+    Sucher das Fahrzeug, bis der Chef es zuwies). Idempotent."""
+    stats = {"nachgebessert": 0, "offen": 0, "in_ordnung": 0}
+    gueltig = _konto_pruefer(db)
+    chefs: dict = {}
+    async for v in db.vehicles.find({"owner_user_id": {"$type": "string"}},
+                                    {"_id": 0, "id": 1, "dealer_id": 1, "mobile_ad_id": 1,
+                                     "owner_user_id": 1}):
+        if await gueltig(v.get("owner_user_id"), v.get("dealer_id")):
+            stats["in_ordnung"] += 1
+            continue
+        uid, quelle = await _besitzer_ermitteln(db, v, gueltig, chefs)
+        if not uid:
+            stats["offen"] += 1
+            continue
+        await db.vehicles.update_one(
+            {"id": v["id"], "dealer_id": v.get("dealer_id")},
+            {"$set": {"owner_user_id": uid, "besitzer_migriert_von": f"nachgebessert:{quelle}",
+                      "besitzer_vorher": v.get("owner_user_id")}})
+        stats["nachgebessert"] += 1
     return stats
 
 
@@ -159,6 +251,8 @@ MIGRATIONEN = [
     (2, "lifecycle_nachziehen", m2_lifecycle),
     (3, "kundennummern", m3_kundennummern),
     (4, "fahrzeug_besitzer", m4_fahrzeug_besitzer),
+    (5, "kaufvorgaenge", m5_kaufvorgaenge),
+    (6, "besitzer_nachbessern", m6_besitzer_nachbessern),
 ]
 
 

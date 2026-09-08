@@ -42,16 +42,16 @@ def kreuz_dubletten(db) -> int:
 
 
 def doppelte_offene_termine(db) -> int:
-    """Runde 15: mehrere OFFENE Abholtermine je Fahrzeug und Firma. Sie
-    verhindern den Teil-Unique-Index termin_offen_je_fahrzeug (server.py
+    """Runde 15/Umbau Kaufvorgaenge: mehrere OFFENE Abholtermine je VERTRAG
+    und Firma. Sie verhindern den Teil-Unique-Index termin_offen_je_vertrag (server.py
     legt ihn dann nicht an und warnt beim Start). Bereinigen im
     Terminplaner: einen der Termine abschliessen (storniert/erledigt)
     oder loeschen, danach Backend neu starten. Loescht NICHTS."""
     offen = ["offen", "verschoben", "bestätigt", "in Bearbeitung"]
     n = 0
     for d in db.appointments.aggregate([
-            {"$match": {"vehicle_id": {"$type": "string"}, "status": {"$in": offen}}},
-            {"$group": {"_id": {"dealer_id": "$dealer_id", "vehicle_id": "$vehicle_id"},
+            {"$match": {"contract_id": {"$type": "string", "$gt": ""}, "status": {"$in": offen}}},
+            {"$group": {"_id": {"dealer_id": "$dealer_id", "contract_id": "$contract_id"},
                         "n": {"$sum": 1},
                         "termine": {"$push": {"id": "$id", "status": "$status",
                                               "pickup_date": "$pickup_date",
@@ -59,7 +59,7 @@ def doppelte_offene_termine(db) -> int:
                                               "created_at": "$created_at"}}}},
             {"$match": {"n": {"$gt": 1}}}]):
         n += 1
-        print(f"appointments offen: Firma {d['_id']['dealer_id']}  Fahrzeug {d['_id']['vehicle_id']}: {d['n']}x")
+        print(f"appointments offen: Firma {d['_id']['dealer_id']}  Vertrag {d['_id']['contract_id']}: {d['n']}x")
         for e in d["termine"]:
             print(f"    id={e.get('id')}  status={e.get('status')}  pickup_date={e.get('pickup_date')}"
                   f"  contract_id={e.get('contract_id')}  created_at={e.get('created_at')}")
