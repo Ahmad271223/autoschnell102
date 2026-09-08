@@ -138,6 +138,9 @@ export default function FahrzeugAkte() {
                   <option key={k.id} value={k.id}>{k.name}{k.role === "dealer" ? " (Hauptaccount)" : ""}</option>
                 ))}
               </select>
+              {akte.mitbearbeiter?.length > 0 && (
+                <span data-testid="akte-mitbearbeiter">· mit {akte.mitbearbeiter.map((m) => m.name).join(", ")}</span>
+              )}
             </div>
           )}
           <div className="mt-1 text-xs text-zinc-500">

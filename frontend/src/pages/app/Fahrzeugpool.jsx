@@ -81,6 +81,9 @@ export default function Fahrzeugpool() {
                 {mitBearbeiter && (
                   <td className="px-4 py-3 text-xs text-zinc-300" data-testid={`pool-owner-${v.id}`}>
                     {v.owner_name || <span className="text-zinc-600">—</span>}
+                    {v.mitbearbeiter_namen?.length > 0 && (
+                      <span className="text-zinc-500"> · mit {v.mitbearbeiter_namen.join(", ")}</span>
+                    )}
                   </td>
                 )}
                 <td className="px-4 py-3">

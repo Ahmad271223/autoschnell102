@@ -654,6 +654,7 @@ async def ensure_indexes():
     await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1)])
     # Runde 16: Sucher-Bereich (owner_user_id) je Firma
     await db.vehicles.create_index([("dealer_id", 1), ("owner_user_id", 1)])
+    await db.vehicles.create_index([("dealer_id", 1), ("mitbearbeiter_ids", 1)])
     # Runde 17: EIN Fahrzeugdokument je (Firma, Fahrzeug-ID) — zwei
     # gleichzeitige erste Vergleiche upserteten vorher zwei Dokumente.
     # Altdubletten: kein Startabbruch, sondern Betriebsalarm.

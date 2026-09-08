@@ -489,6 +489,19 @@ def _zusage_zuruecksetzen_fallback(existing: dict, neu: dict) -> tuple[dict, dic
             {"zuteilung_beantwortet_am": ""})
 
 
+async def _termin_gehoert_mir(user: dict, appt: dict) -> bool:
+    """Chef immer; Sucher nur, wenn er den Termin angelegt hat oder der
+    verknuepfte Vertrag ihm gehoert (NICHT schon, weil ihm das Fahrzeug
+    gehoert — sonst uebernaehme ein Mitbearbeiter den Termin des Kollegen)."""
+    if user.get("role") != "sucher":
+        return True
+    if appt.get("created_by") == user["id"]:
+        return True
+    cid = appt.get("contract_id")
+    return bool(cid) and await db.generated_pdfs.count_documents(
+        {"id": cid, "user_id": user["id"]}, limit=1) > 0
+
+
 async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str):
     """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug.
 
@@ -531,7 +544,11 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
              "driver_id": 1, "zuteilung": 1, "pickup_date": 1, "pickup_time": 1,
              "pickup_address": 1})
         if offen:
-            if not await _sucher_darf(user, offen):
+            # Wunsch Ahmad 09.09.2026: Mitbearbeiter sehen den Termin des
+            # Kollegen (Fahrzeug-Anker), duerfen ihn aber NICHT auf ihren
+            # Vertrag umhaengen — nur der eigene Termin (selbst angelegt oder
+            # eigener Vertrag) oder der Chef.
+            if not await _termin_gehoert_mir(user, offen):
                 return None, ("Für dieses Fahrzeug besteht bereits ein offener "
                               "Abholtermin eines Kollegen — der Vertrag wurde ohne "
                               "eigenen Termin gespeichert.")

@@ -277,8 +277,14 @@ ordnet den Altbestand zu: ältester Vertrag → ältester Vergleich →
 Aktivität → ältester Termin → Chef. Fahrzeuge, die sich keinem Konto der
 Firma zuordnen lassen (`stats.offen`), sieht nur der Chef, bis er sie
 zuweist. Ein Sucher, der ein Inserat vergleicht, das ein Kollege bereits
-führt, bekommt das Vergleichsergebnis mit Hinweis; das Fahrzeug bleibt
-beim Kollegen.
+führt, wird **Mitbearbeiter** (Wunsch 09.09.2026): das Fahrzeug erscheint
+auch in seinem Bereich und er darf einen eigenen Kaufvertrag anlegen.
+Hauptbearbeiter bleibt, wer zuerst verglichen hat. Einen offenen
+Abholtermin gibt es je Fahrzeug nur einmal; ein Mitbearbeiter übernimmt
+den Termin des Kollegen nicht, sein Vertrag wird dann ohne eigenen Termin
+gespeichert (Hinweis in der Antwort). Bei einer Übergabe durch den
+Hauptaccount verliert der bisherige Hauptbearbeiter den Zugriff,
+Mitbearbeiter bleiben.
 
 Seit Runde 17 (08.09.2026) außerdem:
 - **`VERTRAG_LOESCHUNG_AKTIV` muss in der Produktions-.env stehen** — `true`

@@ -438,9 +438,12 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
                 name = ("Händler-Hauptaccount" if u.get("role") == "dealer"
                         else (u.get("email") or u["id"]))
             zuweisbar_an.append({"id": u["id"], "name": name, "role": u.get("role")})
+    mit_namen = await besitzer_namen(user["dealer_id"], v.get("mitbearbeiter_ids") or [])
     return {
         "vehicle": v,
         "owner": owner,
+        "mitbearbeiter": [{"id": m, "name": mit_namen.get(m, m)}
+                          for m in (v.get("mitbearbeiter_ids") or [])],
         "zuweisbar": not ist_sucher,
         "zuweisbar_an": zuweisbar_an,
         "retention_days_left": retention_days_left,
@@ -582,9 +585,12 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     if alt == ziel["id"]:
         return {"ok": True, "owner_user_id": ziel["id"],
                 "owner_name": namen.get(ziel["id"]), "unveraendert": True}
+    # Der neue Hauptbearbeiter ist nicht zugleich Mitbearbeiter; andere
+    # Mitbearbeiter (haben das Inserat selbst verglichen) bleiben.
     await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()}})
+        {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()},
+         "$pull": {"mitbearbeiter_ids": ziel["id"]}})
     await log_activity(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
                        ref=vehicle_id, meta={"von": alt, "nach": ziel["id"]})
     return {"ok": True, "owner_user_id": ziel["id"], "owner_name": namen.get(ziel["id"])}

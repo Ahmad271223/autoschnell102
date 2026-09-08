@@ -170,11 +170,21 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
         {"id": vid, "dealer_id": dealer_id},
         {"_id": 0, "lifecycle": 1, "owner_user_id": 1, "updated_at": 1})
     besitzer = (vorhanden or {}).get("owner_user_id")
+    kollege = None
     if vorhanden and ist_sucher(user) and besitzer and besitzer != user["id"]:
+        # Wunsch Ahmad 09.09.2026: beide duerfen einen Vertrag anlegen. Der
+        # zweite Sucher wird MITBEARBEITER (Fahrzeug erscheint in seinem
+        # Bereich), Hauptbearbeiter bleibt, wer zuerst verglichen hat. Die
+        # Inseratsdaten werden wie bei jedem Vergleich aktualisiert (nur
+        # solange das Fahrzeug noch "verglichen" ist, siehe unten).
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": dealer_id},
+            {"$addToSet": {"mitbearbeiter_ids": user["id"]}})
         namen = await besitzer_namen(dealer_id, [besitzer])
-        return {"user_id": besitzer,
-                "name": namen.get(besitzer) or "ein Kollege",
-                "seit": vorhanden.get("updated_at")}
+        kollege = {"user_id": besitzer,
+                   "name": namen.get(besitzer) or "ein Kollege",
+                   "seit": vorhanden.get("updated_at"),
+                   "mitbearbeiter": True}
     # Runde 17 (Nr. 383): Quelle am Fahrzeug festhalten (auch am Altbestand
     # beim naechsten Vergleich) — Grundlage fuer den Legacy-Rueckfall.
     quelle_set = {"quelle": quelle} if quelle else {}
@@ -211,7 +221,7 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                      dealer_id, user["id"], entfernt)
     except Exception:
         log.exception("Fahrzeugpool-Begrenzung fehlgeschlagen")
-    return None
+    return kollege
 
 
 @router.post("/mobile/compare")
@@ -456,9 +466,9 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     hinweise = regeln_nicht_abgebildet(vehicle, rules)
     if kollege:
-        hinweise = [f"Dieses Fahrzeug führt bereits {kollege['name']} im Pool — "
-                    "Vertrag und Termin dazu laufen über diese Person; der "
-                    "Händler-Hauptaccount kann es dir zuweisen."] + list(hinweise)
+        hinweise = [f"Dieses Fahrzeug vergleicht auch {kollege['name']} — ihr könnt "
+                    "beide einen Kaufvertrag anlegen; einen Abholtermin gibt es je "
+                    "Fahrzeug nur einmal."] + list(hinweise)
     return {
         "vehicle_id": vid,
         "ad_id": ad_id,

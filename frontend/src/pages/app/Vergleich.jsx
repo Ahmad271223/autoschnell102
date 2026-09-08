@@ -509,19 +509,18 @@ export default function Vergleich() {
 
             <div className="apple-surface p-5">
               <div className="overline mb-3">Aktionen</div>
-              {result.kollege ? (
-                <div className="text-sm rounded-xl p-3" data-testid="kollege-hinweis"
+              {result.kollege && (
+                <div className="text-sm rounded-xl p-3 mb-3" data-testid="kollege-hinweis"
                      style={{ background: "#f59e0b1c", color: "#fbbf24" }}>
-                  Dieses Fahrzeug führt bereits <b>{result.kollege.name}</b> im Pool.
-                  Kaufvertrag und Termin laufen über diese Person — der
-                  Händler-Hauptaccount kann es dir in der Fahrzeugakte zuweisen.
+                  Dieses Fahrzeug vergleicht auch <b>{result.kollege.name}</b>.
+                  Ihr könnt beide einen Kaufvertrag anlegen; einen Abholtermin
+                  gibt es je Fahrzeug nur einmal.
                 </div>
-              ) : (
+              )}
               <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"
                       className="apple-btn apple-btn-primary w-full !py-3">
                 <FileText size={15} /> Kaufvertrag erstellen
               </button>
-              )}
               {contract && (
                 <div className="mt-3 space-y-2">
                   <button
@@ -539,7 +538,7 @@ export default function Vergleich() {
               )}
             </div>
 
-            {result.snapshot_id && !result.kollege && (
+            {result.snapshot_id && (
               <SnapshotCard snapshotId={result.snapshot_id} />
             )}
 

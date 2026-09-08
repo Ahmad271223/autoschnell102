@@ -192,7 +192,7 @@ export default function Bestand() {
                     <span className="text-zinc-300">EK {Number(v.purchase_price).toLocaleString("de-DE")} €</span>
                   )}
                   <span className="text-zinc-600">{v.source === "manuell" ? "manuell" : "über System"}</span>
-                  {v.owner_name && <span className="text-zinc-500" data-testid={`bestand-owner-${v.id}`}>Bearbeiter: {v.owner_name}</span>}
+                  {v.owner_name && <span className="text-zinc-500" data-testid={`bestand-owner-${v.id}`}>Bearbeiter: {v.owner_name}{v.mitbearbeiter_namen?.length > 0 ? ` · mit ${v.mitbearbeiter_namen.join(", ")}` : ""}</span>}
                 </div>
 
                 {lc === "bestand" && v.retention_days_left != null && (

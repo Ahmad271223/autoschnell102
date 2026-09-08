@@ -123,10 +123,12 @@ def test_01_bereichsfilter_chef_firma_sucher_eigene():
     # Runde 17 (Nr. 285): geloeschte Fahrzeuge sind im Standardbereich unsichtbar,
     # nur mit_geloeschten=True (Chef-Akte) bleibt der reine Firmen-/Besitzerfilter.
     weg = {"lifecycle": {"$ne": "geloescht"}}
+    # 09.09.2026: Haupt- ODER Mitbearbeiter
+    mein = {"$or": [{"owner_user_id": "s"}, {"mitbearbeiter_ids": "s"}]}
     assert D.fahrzeug_bereich(chef) == {"dealer_id": "d", **weg}
-    assert D.fahrzeug_bereich(su) == {"dealer_id": "d", "owner_user_id": "s", **weg}
+    assert D.fahrzeug_bereich(su) == {"dealer_id": "d", **mein, **weg}
     assert D.fahrzeug_bereich(chef, mit_geloeschten=True) == {"dealer_id": "d"}
-    assert D.fahrzeug_bereich(su, mit_geloeschten=True) == {"dealer_id": "d", "owner_user_id": "s"}
+    assert D.fahrzeug_bereich(su, mit_geloeschten=True) == {"dealer_id": "d", **mein}
 
 
 def test_02_fahrzeuge_liste_und_detail_je_rolle(welt):
@@ -361,8 +363,11 @@ def test_09_vergleich_kollegenfahrzeug_bleibt_unangetastet(welt):
 
     k1, v1, k2, v2, k3, v3, k4, v4 = welt.run(lauf())
     assert k1 is None and v1["owner_user_id"] == w.a["id"] and v1["data"]["mileage"] == 1
-    assert k2 == {"user_id": w.a["id"], "name": "Anna A", "seit": v1["updated_at"]}
-    assert v2["data"]["mileage"] == 1 and v2["owner_user_id"] == w.a["id"], "Kollegen-Fahrzeug unveraendert"
+    # Wunsch Ahmad 09.09.2026: der zweite Sucher wird Mitbearbeiter (beide
+    # duerfen einen Vertrag anlegen); Hauptbearbeiter bleibt A.
+    assert k2 == {"user_id": w.a["id"], "name": "Anna A", "seit": v1["updated_at"], "mitbearbeiter": True}
+    assert v2["owner_user_id"] == w.a["id"] and v2["mitbearbeiter_ids"] == [w.b["id"]]
+    assert v2["data"]["mileage"] == 999, "Inseratsdaten werden wie bei jedem Vergleich aktualisiert"
     assert k3 is None and v3["data"]["mileage"] == 500 and v3["owner_user_id"] == w.a["id"], \
         "Chef aktualisiert, Besitzer bleibt"
     assert k4 is None and v4["owner_user_id"] == w.b["id"]

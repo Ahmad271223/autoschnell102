@@ -149,7 +149,8 @@ def test_04_fahrzeug_bereich_blendet_geloeschte_aus():
     chef = {"id": "c", "dealer_id": "d", "role": "dealer"}
     su = {"id": "s", "dealer_id": "d", "role": "sucher"}
     assert D.fahrzeug_bereich(chef) == {"dealer_id": "d", "lifecycle": {"$ne": "geloescht"}}
-    assert D.fahrzeug_bereich(su, mit_geloeschten=True) == {"dealer_id": "d", "owner_user_id": "s"}
+    assert D.fahrzeug_bereich(su, mit_geloeschten=True) == {
+        "dealer_id": "d", "$or": [{"owner_user_id": "s"}, {"mitbearbeiter_ids": "s"}]}
     sig = inspect.signature(D.fahrzeug_im_bereich)
     assert sig.parameters["mit_geloeschten"].default is True, \
         "Termine/Beweise zu geloeschten Fahrzeugen bleiben im Bereich"

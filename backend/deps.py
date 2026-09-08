@@ -487,7 +487,11 @@ def fahrzeug_bereich(user, mit_geloeschten: bool = False) -> Dict[str, Any]:
     darf sie mit mit_geloeschten=True bewusst noch zeigen (Historie)."""
     bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if ist_sucher(user):
-        bereich["owner_user_id"] = user["id"]
+        # Wunsch Ahmad 09.09.2026: Hauptbearbeiter (owner_user_id) ODER
+        # Mitbearbeiter (mitbearbeiter_ids) — wer dasselbe Inserat
+        # vergleicht, arbeitet mit und darf einen eigenen Vertrag anlegen.
+        bereich["$or"] = [{"owner_user_id": user["id"]},
+                          {"mitbearbeiter_ids": user["id"]}]
     if not mit_geloeschten:
         bereich["lifecycle"] = {"$ne": "geloescht"}
     return bereich
@@ -499,7 +503,9 @@ async def eigene_fahrzeug_ids(user) -> Optional[List[str]]:
     if not ist_sucher(user):
         return None
     return await db.vehicles.distinct(
-        "id", {"dealer_id": user["dealer_id"], "owner_user_id": user["id"]})
+        "id", {"dealer_id": user["dealer_id"],
+               "$or": [{"owner_user_id": user["id"]},
+                       {"mitbearbeiter_ids": user["id"]}]})
 
 
 async def fahrzeug_im_bereich(user, vehicle_id: Optional[str],
@@ -607,12 +613,21 @@ async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:
 async def besitzer_anreichern(user, items: list) -> list:
     """Chef-Ansicht: owner_name je Fahrzeug ergaenzen (Sucher sehen ohnehin
     nur eigene Fahrzeuge — kein Feld noetig)."""
-    if ist_sucher(user) or not items:
+    if not items:
         return items
-    namen = await besitzer_namen(user["dealer_id"], [i.get("owner_user_id") for i in items])
+    ids = [i.get("owner_user_id") for i in items]
     for i in items:
+        ids.extend(i.get("mitbearbeiter_ids") or [])
+    namen = await besitzer_namen(user["dealer_id"], ids)
+    for i in items:
+        mit = [namen[m] for m in (i.get("mitbearbeiter_ids") or []) if m in namen]
+        if ist_sucher(user):
+            # Sucher: nur, wer am selben Fahrzeug mitarbeitet (kein Firmenblick)
+            i["mitbearbeiter_namen"] = mit
+            continue
         oid = i.get("owner_user_id")
         i["owner_name"] = namen.get(oid) if oid else None
+        i["mitbearbeiter_namen"] = mit
     return items
 
 
