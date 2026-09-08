@@ -31,7 +31,8 @@ from autoscout_service import build_search_url as build_autoscout_url
 from autoscout_service import regeln_nicht_abgebildet
 from autoscout_service import autoscout_quelle_verfuegbar
 from deps import (
-    current_firma,
+    besitzer_anreichern, besitzer_namen, current_firma, eigene_fahrzeug_ids,
+    fahrzeug_bereich, fahrzeug_im_bereich, ist_sucher,
     current_user, db, log_activity, now_iso, require_active_sub,
 )
 from kleinanzeigen_service import (
@@ -121,6 +122,66 @@ async def _rueckfall_erlaubt(gewuenscht: bool, user: dict) -> bool:
         log.warning("Rueckfall-Limit erreicht fuer %s", schluessel)
         return False
     return True
+
+
+async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
+                                frisch: dict) -> Optional[dict]:
+    """Fahrzeug in den Pool des Kontos uebernehmen (Runde 16).
+
+    Liefert {"user_id", "name", "seit"}, wenn das Fahrzeug bereits einem
+    KOLLEGEN derselben Firma gehoert — dann bleibt es unangetastet, der
+    Sucher bekommt nur das Vergleichsergebnis. Sonst None. Der Chef darf
+    jedes Fahrzeug der Firma aktualisieren (Besitzer bleibt).
+    Runde 10: Ist das Fahrzeug schon ueber "verglichen" hinaus (Bestand,
+    Verkauf, abgeholt ...), tragen seine Daten Korrekturen des Haendlers —
+    die frischen Inseratsdaten landen dann getrennt unter inserat_aktuell.
+    Nach einem Seitenausgang (storniert, nicht abgeholt) ist ein erneuter
+    Vergleich ein Neuanfang. Altbestand ohne Besitzer uebernimmt, wer ihn
+    (wieder) vergleicht."""
+    dealer_id = user["dealer_id"]
+    vorhanden = await db.vehicles.find_one(
+        {"id": vid, "dealer_id": dealer_id},
+        {"_id": 0, "lifecycle": 1, "owner_user_id": 1, "updated_at": 1})
+    besitzer = (vorhanden or {}).get("owner_user_id")
+    if vorhanden and ist_sucher(user) and besitzer and besitzer != user["id"]:
+        namen = await besitzer_namen(dealer_id, [besitzer])
+        return {"user_id": besitzer,
+                "name": namen.get(besitzer) or "ein Kollege",
+                "seit": vorhanden.get("updated_at")}
+    if vorhanden and (vorhanden.get("lifecycle") or "verglichen") not in (
+            "verglichen", "gefunden", "storniert", "nicht_abgeholt"):
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": dealer_id},
+            {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
+                      "updated_at": now_iso()}})
+    else:
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": dealer_id},
+            {"$set": {
+                "id": vid, "dealer_id": dealer_id,
+                "mobile_ad_id": ad_id, "data": frisch,
+                "updated_at": now_iso(),
+            },
+             "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
+                              "lifecycle": "verglichen", "source": "plattform",
+                              "lifecycle_changed_at": now_iso(),
+                              "owner_user_id": user["id"]}},
+            upsert=True,
+        )
+    if vorhanden and not besitzer:
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": dealer_id, "owner_user_id": None},
+            {"$set": {"owner_user_id": user["id"]}})
+    # Fahrzeugpool je Konto auf die neuesten 30 Vergleiche begrenzen
+    try:
+        from fahrzeugpool import fahrzeugpool_trimmen
+        entfernt = await fahrzeugpool_trimmen(db, dealer_id, owner_user_id=user["id"])
+        if entfernt:
+            log.info("Fahrzeugpool %s/%s: %d alte Vergleiche entfernt",
+                     dealer_id, user["id"], entfernt)
+    except Exception:
+        log.exception("Fahrzeugpool-Begrenzung fehlgeschlagen")
+    return None
 
 
 @router.post("/mobile/compare")
@@ -247,45 +308,9 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # Persist vehicle for re-use (PDF, Termine)
     vid = f"v_{ad_id}"
     frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
-    # Runde 10: Ist das Fahrzeug schon ueber "verglichen" hinaus (Bestand,
-    # Verkauf, abgeholt …), tragen seine Daten Korrekturen des Haendlers
-    # (z.B. echter Kilometerstand nach der Abholung). Ein erneuter Vergleich
-    # desselben Inserats darf die nicht mit den Inseratsdaten ueberschreiben.
-    # Die frischen Inseratsdaten landen dann getrennt unter inserat_aktuell.
-    vorhanden = await db.vehicles.find_one(
-        {"id": vid, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
-    # Nachpruefung Runde 10: Nach einem Seitenausgang (storniert, nicht
-    # abgeholt) ist ein erneuter Vergleich ein Neuanfang — die Daten duerfen
-    # wieder frisch sein, sonst nutzte der naechste Vertrag veraltete Werte.
-    if vorhanden and (vorhanden.get("lifecycle") or "verglichen") not in (
-            "verglichen", "gefunden", "storniert", "nicht_abgeholt"):
-        await db.vehicles.update_one(
-            {"id": vid, "dealer_id": user["dealer_id"]},
-            {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
-                      "updated_at": now_iso()}})
-    else:
-        await db.vehicles.update_one(
-            {"id": vid, "dealer_id": user["dealer_id"]},
-            {"$set": {
-                "id": vid, "dealer_id": user["dealer_id"],
-                "mobile_ad_id": ad_id, "data": frisch,
-                "updated_at": now_iso(),
-            },
-             "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
-                              "lifecycle": "verglichen", "source": "plattform",
-                              "lifecycle_changed_at": now_iso()}},
-            upsert=True,
-        )
-    await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id)
-    # Fahrzeugpool auf die neuesten 30 Vergleiche begrenzen (Wunsch 09/2026)
-    try:
-        from fahrzeugpool import fahrzeugpool_trimmen
-        entfernt = await fahrzeugpool_trimmen(db, user["dealer_id"])
-        if entfernt:
-            log.info("Fahrzeugpool %s: %d alte Vergleiche entfernt",
-                     user["dealer_id"], entfernt)
-    except Exception:
-        log.exception("Fahrzeugpool-Begrenzung fehlgeschlagen")
+    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch)
+    await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
+                       meta={"kollege": kollege["user_id"]} if kollege else None)
 
     # Proof-of-listing Snapshot.
     snap_id = None
@@ -397,6 +422,11 @@ async def compare(body: CompareIn, background: BackgroundTasks,
                     except Exception:
                         pass
 
+    hinweise = regeln_nicht_abgebildet(vehicle, rules)
+    if kollege:
+        hinweise = [f"Dieses Fahrzeug führt bereits {kollege['name']} im Pool — "
+                    "Vertrag und Termin dazu laufen über diese Person; der "
+                    "Händler-Hauptaccount kann es dir zuweisen."] + list(hinweise)
     return {
         "vehicle_id": vid,
         "ad_id": ad_id,
@@ -404,7 +434,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "search_url": search_url,
         "autoscout_url": autoscout_url,
         # Runde 11: welche Firmenregeln der AutoScout-Link nicht umsetzt
-        "hinweise": regeln_nicht_abgebildet(vehicle, rules),
+        "hinweise": hinweise,
+        # Runde 16: gehoert das Fahrzeug einem Kollegen, bleibt es dort —
+        # das Frontend blendet Vertrag/Snapshot aus und zeigt den Hinweis.
+        "kollege": kollege,
         "rules_applied": rules,
         "active_profile": active,
         "source": source,
@@ -616,12 +649,23 @@ async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> di
         raise HTTPException(404, "Snapshot nicht gefunden")
     if user is not None and user.get("role") != "admin":
         dealer_id = user.get("dealer_id")
-        erlaubt = bool(dealer_id) and (
-            snap.get("dealer_id") == dealer_id
-            or await db.vehicles.count_documents(
-                {"id": snap.get("vehicle_id"), "dealer_id": dealer_id}) > 0
-            or await db.generated_pdfs.count_documents(
-                {"vehicle_id": snap.get("vehicle_id"), "dealer_id": dealer_id}) > 0)
+        if ist_sucher(user):
+            # Runde 16: Sucher nur im eigenen Bereich — selbst erzeugt,
+            # eigenes Fahrzeug oder eigener Vertrag zum Fahrzeug.
+            vid = snap.get("vehicle_id")
+            erlaubt = snap.get("user_id") == user["id"] or (
+                bool(vid) and (
+                    await fahrzeug_im_bereich(user, vid)
+                    or await db.generated_pdfs.count_documents(
+                        {"vehicle_id": vid, "dealer_id": dealer_id,
+                         "user_id": user["id"]}, limit=1) > 0))
+        else:
+            erlaubt = bool(dealer_id) and (
+                snap.get("dealer_id") == dealer_id
+                or await db.vehicles.count_documents(
+                    {"id": snap.get("vehicle_id"), "dealer_id": dealer_id}) > 0
+                or await db.generated_pdfs.count_documents(
+                    {"vehicle_id": snap.get("vehicle_id"), "dealer_id": dealer_id}) > 0)
         if not erlaubt:
             raise HTTPException(404, "Snapshot nicht gefunden")
     return snap
@@ -679,6 +723,14 @@ async def snapshot_download(snap_id: str, kind: str,
 async def list_snapshots(vehicle_id: Optional[str] = None,
                          user=Depends(current_firma)):
     q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if ist_sucher(user):
+        # Runde 16: nur eigene Snapshots bzw. die zu eigenen Fahrzeugen und
+        # eigenen Vertraegen — vorher sah ein Sucher alle Beweise der Firma
+        # samt user_id der Kollegen.
+        vids = set(await eigene_fahrzeug_ids(user) or [])
+        vids |= set(await db.generated_pdfs.distinct(
+            "vehicle_id", {"dealer_id": user["dealer_id"], "user_id": user["id"]}))
+        q["$or"] = [{"user_id": user["id"]}, {"vehicle_id": {"$in": list(vids)}}]
     if vehicle_id:
         q["vehicle_id"] = vehicle_id
     items = await db.listing_snapshots.find(q, {"_id": 0, "png_path": 0, "pdf_path": 0}) \
@@ -691,18 +743,20 @@ async def list_snapshots(vehicle_id: Optional[str] = None,
 # =========================================================
 @router.get("/vehicles/{vehicle_id}")
 async def get_vehicle_detail(vehicle_id: str, user=Depends(current_firma)):
-    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    # Runde 16: Sucher nur eigene Fahrzeuge (owner_user_id), Chef die Firma.
+    v = await db.vehicles.find_one({"id": vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    (await besitzer_anreichern(user, [v]))
     return v
 
 
 @router.get("/vehicles")
 async def list_vehicles(user=Depends(current_firma)):
     items = await db.vehicles.find(
-        {"dealer_id": user["dealer_id"]}, {"_id": 0},
+        fahrzeug_bereich(user), {"_id": 0},
     ).sort("updated_at", -1).to_list(500)
-    return items
+    return await besitzer_anreichern(user, items)
 
 
 # =========================================================

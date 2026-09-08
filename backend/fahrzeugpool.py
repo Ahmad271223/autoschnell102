@@ -11,13 +11,19 @@ import os
 POOL_MAX = int(os.environ.get("FAHRZEUGPOOL_MAX_VERGLEICHE", "30") or 30)
 
 
-async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None) -> int:
+async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
+                               owner_user_id=None) -> int:
+    """Runde 16: mit owner_user_id gilt das Limit JE KONTO — die Vergleiche
+    eines Suchers verdraengen nicht mehr die eines Kollegen (vorher 30 je
+    Firma). Ohne owner_user_id wie bisher firmenweit (Altaufrufer)."""
     limit = POOL_MAX if limit is None else int(limit)
     if limit <= 0 or not dealer_id:
         return 0
+    filter_ = {"dealer_id": dealer_id, "lifecycle": "verglichen"}
+    if owner_user_id:
+        filter_["owner_user_id"] = owner_user_id
     cur = db.vehicles.find(
-        {"dealer_id": dealer_id, "lifecycle": "verglichen"},
-        {"_id": 0, "id": 1},
+        filter_, {"_id": 0, "id": 1},
     ).sort([("updated_at", -1), ("created_at", -1)]).skip(limit)
     kandidaten = [v["id"] async for v in cur]
     if not kandidaten:

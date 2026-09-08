@@ -136,6 +136,7 @@ export default function Vergleich() {
       setResult({ ...data, ms: t1 - t0 });
       // Runde 11: Firmenregeln, die der AutoScout-Link nicht umsetzt (z.B.
       // Land CH, Hubraum, Navi) — vorher sahen beide Links "gleich" aus.
+      // Runde 16: Fahrzeug gehoert einem Kollegen -> Ergebnis ja, Vertrag nein
       for (const h of data.hinweise || []) toast.warning(h, { duration: 8000 });
       try {
         const { data: cnt } = await api.get(`/mobile/live-counter/${data.ad_id}`);
@@ -508,10 +509,19 @@ export default function Vergleich() {
 
             <div className="apple-surface p-5">
               <div className="overline mb-3">Aktionen</div>
+              {result.kollege ? (
+                <div className="text-sm rounded-xl p-3" data-testid="kollege-hinweis"
+                     style={{ background: "#f59e0b1c", color: "#fbbf24" }}>
+                  Dieses Fahrzeug führt bereits <b>{result.kollege.name}</b> im Pool.
+                  Kaufvertrag und Termin laufen über diese Person — der
+                  Händler-Hauptaccount kann es dir in der Fahrzeugakte zuweisen.
+                </div>
+              ) : (
               <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"
                       className="apple-btn apple-btn-primary w-full !py-3">
                 <FileText size={15} /> Kaufvertrag erstellen
               </button>
+              )}
               {contract && (
                 <div className="mt-3 space-y-2">
                   <button
@@ -529,7 +539,7 @@ export default function Vergleich() {
               )}
             </div>
 
-            {result.snapshot_id && (
+            {result.snapshot_id && !result.kollege && (
               <SnapshotCard snapshotId={result.snapshot_id} />
             )}
 

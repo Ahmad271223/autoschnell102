@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 3
+ZIEL_VERSION = 4
 _SPERRE = "migration"
 
 
@@ -87,10 +87,78 @@ async def m3_kundennummern(db) -> dict:
     return {"nummern": await kunden_nummern_nachziehen()}
 
 
+async def m4_fahrzeug_besitzer(db) -> dict:
+    """Runde 16 (Beschluss 08.09.2026): owner_user_id fuer den Altbestand.
+    Sucher sehen Fahrzeuge nur noch mit eigenem owner_user_id; ohne diese
+    Zuordnung verschwaende jedes alte Fahrzeug aus ihrem Bereich.
+    Reihenfolge je Fahrzeug: aeltester Vertrag -> aeltester Vergleich ->
+    Aktivitaet 'vergleich.gestartet' -> aeltester Termin (created_by) ->
+    Chef der Firma. Nur Konten, die noch zur Firma gehoeren, zaehlen.
+    Idempotent: nur Dokumente ohne owner_user_id."""
+    stats = {"vertrag": 0, "vergleich": 0, "aktivitaet": 0, "termin": 0,
+             "chef": 0, "offen": 0}
+    konten: dict = {}
+
+    async def gueltig(uid, did) -> bool:
+        if not isinstance(uid, str) or not uid:
+            return False
+        k = (uid, did)
+        if k not in konten:
+            konten[k] = await db.users.count_documents(
+                {"id": uid, "dealer_id": did}, limit=1) > 0
+        return konten[k]
+
+    chefs: dict = {}
+    async for v in db.vehicles.find(
+            {"$or": [{"owner_user_id": {"$exists": False}}, {"owner_user_id": None}]},
+            {"_id": 0, "id": 1, "dealer_id": 1, "mobile_ad_id": 1}):
+        vid, did, ad = v["id"], v.get("dealer_id"), v.get("mobile_ad_id")
+        uid = quelle = None
+        c = await db.generated_pdfs.find_one(
+            {"vehicle_id": vid, "dealer_id": did}, {"_id": 0, "user_id": 1},
+            sort=[("created_at", 1)])
+        if c and await gueltig(c.get("user_id"), did):
+            uid, quelle = c["user_id"], "vertrag"
+        if not uid and ad:
+            k = await db.vehicle_comparisons.find_one(
+                {"mobile_ad_id": ad, "dealer_id": did}, {"_id": 0, "user_id": 1},
+                sort=[("created_at", 1)])
+            if k and await gueltig(k.get("user_id"), did):
+                uid, quelle = k["user_id"], "vergleich"
+        if not uid and ad:
+            a = await db.activity_logs.find_one(
+                {"action": "vergleich.gestartet", "ref": ad, "dealer_id": did},
+                {"_id": 0, "user_id": 1}, sort=[("created_at", 1)])
+            if a and await gueltig(a.get("user_id"), did):
+                uid, quelle = a["user_id"], "aktivitaet"
+        if not uid:
+            t = await db.appointments.find_one(
+                {"vehicle_id": vid, "dealer_id": did}, {"_id": 0, "created_by": 1},
+                sort=[("created_at", 1)])
+            if t and await gueltig(t.get("created_by"), did):
+                uid, quelle = t["created_by"], "termin"
+        if not uid:
+            if did not in chefs:
+                chef = await db.users.find_one({"dealer_id": did, "role": "dealer"},
+                                               {"_id": 0, "id": 1})
+                chefs[did] = (chef or {}).get("id")
+            if chefs[did]:
+                uid, quelle = chefs[did], "chef"
+        if not uid:
+            stats["offen"] += 1
+            continue
+        await db.vehicles.update_one(
+            {"id": vid, "dealer_id": did},
+            {"$set": {"owner_user_id": uid, "besitzer_migriert_von": quelle}})
+        stats[quelle] += 1
+    return stats
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
     (3, "kundennummern", m3_kundennummern),
+    (4, "fahrzeug_besitzer", m4_fahrzeug_besitzer),
 ]
 
 

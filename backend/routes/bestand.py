@@ -14,7 +14,8 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
-from deps import (clean_doc, current_chef, current_firma, db,
+from deps import (besitzer_anreichern, besitzer_namen, clean_doc, current_chef,
+                  current_firma, db, fahrzeug_bereich,
                   log_activity, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
 
@@ -234,7 +235,8 @@ async def list_bestand(user=Depends(current_firma),
                        source: Optional[str] = None):
     """Fahrzeugbestand des Händlers mit Lifecycle-/Quellen-Filter.
     Liefert zusätzlich Zählergruppen für die Dashboard-Kacheln."""
-    query: Dict[str, Any] = {"dealer_id": user["dealer_id"],
+    # Runde 16: Sucher sehen nur eigene Fahrzeuge (owner_user_id).
+    query: Dict[str, Any] = {**fahrzeug_bereich(user),
                              "lifecycle": {"$nin": ["geloescht"]}}
     if lifecycle:
         query["lifecycle"] = lifecycle
@@ -242,6 +244,7 @@ async def list_bestand(user=Depends(current_firma),
         query["source"] = source
     items = await db.vehicles.find(query, {"_id": 0}).sort(
         "lifecycle_changed_at", -1).to_list(500)
+    await besitzer_anreichern(user, items)
 
     # Restlaufzeit für Bestandsfahrzeuge berechnen (Warnstufen im Frontend).
     now = datetime.now(timezone.utc)
@@ -256,7 +259,7 @@ async def list_bestand(user=Depends(current_firma),
 
     counts: Dict[str, int] = {}
     async for row in db.vehicles.aggregate([
-        {"$match": {"dealer_id": user["dealer_id"],
+        {"$match": {**fahrzeug_bereich(user),
                     "lifecycle": {"$nin": ["geloescht"]}}},
         {"$group": {"_id": "$lifecycle", "n": {"$sum": 1}}},
     ]):
@@ -274,8 +277,9 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     from routes.contracts import _vertrag_bereich
     """Durchgehende Fahrzeugakte: aggregiert alle vorhandenen Informationen
     zu einem Fahrzeug — ohne Datendopplung, direkt aus den Quell-Collections."""
+    # Runde 16: die Akte eines Kollegen-Fahrzeugs gibt es fuer Sucher nicht.
     v = await db.vehicles.find_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+        {"id": vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
 
@@ -354,8 +358,31 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         except (ValueError, TypeError):
             pass
 
+    # Runde 16: Besitzer sichtbar; der Chef bekommt die Konten der Firma
+    # zum Umhaengen (PUT /vehicles/{id}/besitzer) gleich mit.
+    owner = None
+    zuweisbar_an = []
+    if not ist_sucher:
+        namen = await besitzer_namen(user["dealer_id"], [v.get("owner_user_id")])
+        if v.get("owner_user_id"):
+            owner = {"id": v["owner_user_id"],
+                     "name": namen.get(v["owner_user_id"]) or "unbekanntes Konto"}
+        konten = await db.users.find(
+            {"dealer_id": user["dealer_id"], "role": {"$in": ["dealer", "sucher"]},
+             "active": {"$ne": False}},
+            {"_id": 0, "id": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1}
+        ).sort("created_at", 1).to_list(1000)
+        for u in konten:
+            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip()
+            if not name:
+                name = ("Händler-Hauptaccount" if u.get("role") == "dealer"
+                        else (u.get("email") or u["id"]))
+            zuweisbar_an.append({"id": u["id"], "name": name, "role": u.get("role")})
     return {
         "vehicle": v,
+        "owner": owner,
+        "zuweisbar": not ist_sucher,
+        "zuweisbar_an": zuweisbar_an,
         "retention_days_left": retention_days_left,
         "contracts": contracts,
         "appointments": appointments,
@@ -450,6 +477,7 @@ async def create_manual_vehicle(body: ManualVehicleIn,
                + timedelta(days=BESTAND_RETENTION_DAYS)).isoformat()
     doc = {
         "id": vid, "dealer_id": user["dealer_id"],
+        "owner_user_id": user["id"],      # Runde 16: manuell = Chef
         "mobile_ad_id": None,
         "source": "manuell",
         "data": data,
@@ -465,6 +493,41 @@ async def create_manual_vehicle(body: ManualVehicleIn,
                        "fahrzeug.manuell.angelegt", ref=vid,
                        meta={"fahrzeug": f"{body.make_label} {body.model_label}"})
     return clean_doc(doc)
+
+
+class BesitzerIn(BaseModel):
+    owner_user_id: str = Field(min_length=1, max_length=100)
+
+
+@router.put("/vehicles/{vehicle_id}/besitzer")
+async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
+                            user=Depends(current_haendler)):
+    """Runde 16: der Chef haengt ein Fahrzeug einem anderen Konto der Firma
+    um (Sucher-Wechsel, Krankheit, Kollege hat es zuerst verglichen).
+    Termine, Snapshots, Berichte und Protokolle folgen dem Fahrzeug
+    automatisch; Vertraege bleiben bei dem Konto, das sie erstellt hat."""
+    v = await db.vehicles.find_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "owner_user_id": 1})
+    if not v:
+        raise HTTPException(404, "Fahrzeug nicht gefunden")
+    ziel = await db.users.find_one(
+        {"id": body.owner_user_id, "dealer_id": user["dealer_id"],
+         "role": {"$in": ["dealer", "sucher"]}},
+        {"_id": 0, "id": 1, "active": 1})
+    if not ziel or ziel.get("active") is False:
+        raise HTTPException(404, "Konto nicht gefunden oder nicht in deiner Firma")
+    alt = v.get("owner_user_id")
+    namen = await besitzer_namen(user["dealer_id"], [ziel["id"]])
+    if alt == ziel["id"]:
+        return {"ok": True, "owner_user_id": ziel["id"],
+                "owner_name": namen.get(ziel["id"]), "unveraendert": True}
+    await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
+        {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()}})
+    await log_activity(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
+                       ref=vehicle_id, meta={"von": alt, "nach": ziel["id"]})
+    return {"ok": True, "owner_user_id": ziel["id"], "owner_name": namen.get(ziel["id"])}
 
 
 @router.put("/vehicles/manual/{vehicle_id}")

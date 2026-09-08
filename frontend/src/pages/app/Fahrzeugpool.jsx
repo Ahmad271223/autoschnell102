@@ -32,6 +32,10 @@ export default function Fahrzeugpool() {
     }
   };
 
+  // Runde 16: der Chef sieht, welcher Sucher das Fahrzeug fuehrt; Sucher
+  // bekommen nur eigene Fahrzeuge (kein owner_name im Datensatz).
+  const mitBearbeiter = items.some((v) => "owner_name" in v);
+
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-7xl mx-auto" data-testid="vehicles-page">
       <div className="overline">Fahrzeugpool</div>
@@ -47,13 +51,14 @@ export default function Fahrzeugpool() {
               <th className="px-4 py-3">KM</th>
               <th className="px-4 py-3">Leistung</th>
               <th className="px-4 py-3">Status</th>
+              {mitBearbeiter && <th className="px-4 py-3">Bearbeiter</th>}
               <th className="px-4 py-3">Inserat-Link</th>
               <th className="px-4 py-3">Aktualisiert</th>
             </tr>
           </thead>
           <tbody>
             {items.length === 0 && (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-zinc-500">Noch keine Fahrzeuge im Pool. Starte einen Vergleich.</td></tr>
+              <tr><td colSpan={mitBearbeiter ? 9 : 8} className="px-4 py-10 text-center text-zinc-500">Noch keine Fahrzeuge im Pool. Starte einen Vergleich.</td></tr>
             )}
             {items.map((v) => {
               const url = inseratUrl(v);
@@ -73,6 +78,11 @@ export default function Fahrzeugpool() {
                     {v.status || "verglichen"}
                   </span>
                 </td>
+                {mitBearbeiter && (
+                  <td className="px-4 py-3 text-xs text-zinc-300" data-testid={`pool-owner-${v.id}`}>
+                    {v.owner_name || <span className="text-zinc-600">—</span>}
+                  </td>
+                )}
                 <td className="px-4 py-3">
                   {url ? (
                     <div className="inline-flex items-center gap-1">

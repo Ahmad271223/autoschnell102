@@ -704,6 +704,8 @@ async def ensure_indexes():
     # B2B-Modul
     await db.pickup_reports.create_index([("appointment_id", 1), ("version", -1)])
     await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1)])
+    # Runde 16: Sucher-Bereich (owner_user_id) je Firma
+    await db.vehicles.create_index([("dealer_id", 1), ("owner_user_id", 1)])
     # Fahrzeugpool-Begrenzung sortiert je Firma nach updated_at (09/2026)
     await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1),
                                     ("updated_at", -1)])

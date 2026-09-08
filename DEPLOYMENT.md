@@ -259,6 +259,18 @@ ausführen, die genannten Termine im Terminplaner abschließen oder löschen
 und das Backend einmal neu starten. Bis dahin greift nur die Vorabprüfung
 der Routen (409 „bereits ein offener Abholtermin"), nicht der Index.
 
+Seit Runde 16 (Beschluss 08.09.2026) sehen **Sucher nur noch ihren eigenen
+Arbeitsbereich**: Fahrzeuge (`vehicles.owner_user_id`), Termine, Beweis-
+Snapshots, Abholberichte und Protokolle; der Händler-Hauptaccount sieht die
+ganze Firma und hängt Fahrzeuge in der Fahrzeugakte um. Die Migration m4
+(läuft beim ersten Start automatisch, Protokoll in `schema_migrations`)
+ordnet den Altbestand zu: ältester Vertrag → ältester Vergleich →
+Aktivität → ältester Termin → Chef. Fahrzeuge, die sich keinem Konto der
+Firma zuordnen lassen (`stats.offen`), sieht nur der Chef, bis er sie
+zuweist. Ein Sucher, der ein Inserat vergleicht, das ein Kollege bereits
+führt, bekommt das Vergleichsergebnis mit Hinweis; das Fahrzeug bleibt
+beim Kollegen.
+
 ## Auto-Daten & 90-Tage-Löschung
 - Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)
   werden nach `VERTRAG_AUFBEWAHRUNG_TAGE` (Standard 90) vom stündlichen

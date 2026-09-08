@@ -983,9 +983,20 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
     # Foto-Route ist damit mit ihrer Elternressource konsistent.
     bericht = await db.pickup_reports.find_one(
         {"deviations.photo_key": key, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "id": 1})
+        {"_id": 0, "id": 1, "appointment_id": 1, "vehicle_id": 1})
     if not bericht:
         raise HTTPException(404, "Datei nicht gefunden")
+    # Runde 16: Sucher nur Berichte im eigenen Bereich (Fahrzeug/Termin).
+    if user.get("role") == "sucher":
+        from deps import fahrzeug_im_bereich, termin_im_bereich
+        erlaubt = await fahrzeug_im_bereich(user, bericht.get("vehicle_id"))
+        if not erlaubt:
+            appt = await db.appointments.find_one(
+                {"id": bericht.get("appointment_id"), "dealer_id": user["dealer_id"]},
+                {"_id": 0, "created_by": 1, "contract_id": 1, "vehicle_id": 1})
+            erlaubt = bool(appt) and await termin_im_bereich(user, appt)
+        if not erlaubt:
+            raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, load_async, StorageError
     try:
         data = await load_async(key)

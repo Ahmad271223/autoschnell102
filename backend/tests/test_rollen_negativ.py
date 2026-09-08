@@ -226,7 +226,17 @@ def test_03_sucher_loescht_keine_fremden_vertraege(welt):
                         headers=welt["HS"], timeout=30)
     assert r.status_code == 403, r.text[:200]
     assert _db().generated_pdfs.find_one({"id": welt["contract_chef"]}) is not None
+    # Runde 16: das Fahrzeug des Chefs sieht der Sucher nicht mehr (404) —
+    # fuer den eigenen Vertrag bekommt er eine Kopie, die ihm gehoert.
     r = requests.post(f"{API}/contracts", headers=welt["HS"], json=basis, timeout=90)
+    assert r.status_code == 404, r.text[:200]
+    dbx = _db()
+    hs_id = requests.get(f"{API}/auth/me", headers=welt["HS"], timeout=30).json()["user"]["id"]
+    kopie = dbx.vehicles.find_one({"id": welt["vehicle_id"]}, {"_id": 0})
+    kopie.update({"id": f"{welt['vehicle_id']}_hs", "owner_user_id": hs_id})
+    dbx.vehicles.replace_one({"id": kopie["id"]}, kopie, upsert=True)
+    r = requests.post(f"{API}/contracts", headers=welt["HS"],
+                      json={**basis, "vehicle_id": kopie["id"]}, timeout=90)
     assert r.status_code == 200, r.text[:200]
     eigener = r.json()["id"]
     r = requests.delete(f"{API}/contracts/{eigener}", headers=welt["HS"], timeout=30)

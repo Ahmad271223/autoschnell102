@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException
@@ -448,6 +448,105 @@ async def kunden_nummern_nachziehen() -> int:
 TERMIN_OFFEN = ("offen", "verschoben", "bestätigt", "in Bearbeitung")
 # Fuer Abfragen: fehlender oder leerer Status zaehlt ebenfalls als offen.
 TERMIN_OFFEN_WERTE = list(TERMIN_OFFEN) + ["", None]
+
+
+# ---------------------------------------------------------------------
+# Fahrzeug-Besitzer (Runde 16, Beschluss Ahmad 08.09.2026): Sucher sehen
+# Fahrzeuge, Termine, Beweis-Snapshots, Abholberichte und Protokolle nur
+# noch im EIGENEN Arbeitsbereich; der Chef sieht die ganze Firma.
+#   vehicles.owner_user_id = Konto, das das Fahrzeug angelegt hat (erster
+#   Vergleich bzw. manuelle Anlage). Der Chef haengt per
+#   PUT /vehicles/{id}/besitzer um. Ein Sucher, der ein Inserat vergleicht,
+#   das ein Kollege bereits fuehrt, bekommt das Ergebnis mit Hinweis, das
+#   Fahrzeug bleibt beim Kollegen.
+# Regel wie bei Vertraegen (_vertrag_bereich in routes/contracts.py): fehlt
+# der Besitzer am Altdokument, sieht der Sucher es nicht (fail-closed); die
+# Migration m4 (migrationen.py) ordnet den Altbestand nach Vertrag,
+# Vergleich, Aktivitaet, Termin oder Chef zu.
+# ---------------------------------------------------------------------
+def ist_sucher(user) -> bool:
+    return (user or {}).get("role") == "sucher"
+
+
+def fahrzeug_bereich(user) -> Dict[str, Any]:
+    """Mongo-Filter fuer vehicles: Chef = Firma, Sucher = eigene Fahrzeuge."""
+    bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if ist_sucher(user):
+        bereich["owner_user_id"] = user["id"]
+    return bereich
+
+
+async def eigene_fahrzeug_ids(user) -> Optional[List[str]]:
+    """IDs der Fahrzeuge im Bereich des Kontos; None = alle (Chef)."""
+    if not ist_sucher(user):
+        return None
+    return await db.vehicles.distinct(
+        "id", {"dealer_id": user["dealer_id"], "owner_user_id": user["id"]})
+
+
+async def fahrzeug_im_bereich(user, vehicle_id: Optional[str]) -> bool:
+    if not vehicle_id:
+        return False
+    return await db.vehicles.count_documents(
+        {"id": vehicle_id, **fahrzeug_bereich(user)}, limit=1) > 0
+
+
+async def termin_bereich(user) -> Dict[str, Any]:
+    """Mongo-Filter fuer appointments: Chef = Firma; Sucher = selbst angelegt
+    ODER eigenes Fahrzeug ODER eigener Vertrag."""
+    q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if ist_sucher(user):
+        vids = await eigene_fahrzeug_ids(user) or []
+        cids = await db.generated_pdfs.distinct(
+            "id", {"dealer_id": user["dealer_id"], "user_id": user["id"]})
+        q["$or"] = [{"created_by": user["id"]},
+                    {"vehicle_id": {"$in": vids}},
+                    {"contract_id": {"$in": cids}}]
+    return q
+
+
+async def termin_im_bereich(user, appt: dict) -> bool:
+    """Einzelner, bereits geladener Termin (created_by, contract_id,
+    vehicle_id) — dieselbe Regel wie termin_bereich."""
+    if not ist_sucher(user):
+        return True
+    if appt.get("created_by") == user["id"]:
+        return True
+    cid = appt.get("contract_id")
+    if cid and await db.generated_pdfs.count_documents(
+            {"id": cid, "user_id": user["id"]}, limit=1):
+        return True
+    return await fahrzeug_im_bereich(user, appt.get("vehicle_id"))
+
+
+async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:
+    """Konto-ID -> Anzeigename (Chef-Ansicht 'Bearbeiter')."""
+    ids = [i for i in set(ids or []) if i]
+    if not ids:
+        return {}
+    out: Dict[str, str] = {}
+    konten = await db.users.find(
+        {"id": {"$in": ids}, "dealer_id": dealer_id},
+        {"_id": 0, "id": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1}).to_list(1000)
+    for u in konten:
+        name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip()
+        if not name:
+            name = ("Händler-Hauptaccount" if u.get("role") == "dealer"
+                    else (u.get("email") or u["id"]))
+        out[u["id"]] = name
+    return out
+
+
+async def besitzer_anreichern(user, items: list) -> list:
+    """Chef-Ansicht: owner_name je Fahrzeug ergaenzen (Sucher sehen ohnehin
+    nur eigene Fahrzeuge — kein Feld noetig)."""
+    if ist_sucher(user) or not items:
+        return items
+    namen = await besitzer_namen(user["dealer_id"], [i.get("owner_user_id") for i in items])
+    for i in items:
+        oid = i.get("owner_user_id")
+        i["owner_name"] = namen.get(oid) if oid else None
+    return items
 
 
 async def log_activity(dealer_id: str, user_id: str, action: str,

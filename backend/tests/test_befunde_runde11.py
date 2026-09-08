@@ -461,13 +461,16 @@ def test_m3_m4_normaler_admin(welt, sucher2):
     assert mail in b.get("admin_konten_ohne_super_admin", []), b.get("admin_konten_ohne_super_admin")
 
 
-def _fahrzeug_mit_chef_vertrag(welt):
-    """Fahrzeug der Firma + Vertrag des CHEFS (einmal je Modul)."""
+def _fahrzeug_mit_chef_vertrag(welt, owner_user_id=None):
+    """Fahrzeug der Firma + Vertrag des CHEFS (einmal je Modul). Runde 16:
+    das Fahrzeug gehoert dem uebergebenen Konto (owner_user_id), damit der
+    Sucher es ueberhaupt sieht — der Vertrag bleibt der des Chefs."""
     if "vid" in welt:
         return welt["vid"], welt["cid"]
     dbx = _db()
     vid, cid = f"v_r12_{SUF}", f"c_r12_{SUF}"
     dbx.vehicles.insert_one({"id": vid, "dealer_id": welt["dealer_id"], "mobile_ad_id": f"r12{SUF}",
+                             "owner_user_id": owner_user_id,
                              "data": {"make_label": "BMW", "model_label": "M3"},
                              "lifecycle": "verglichen", "status": "verglichen",
                              "created_at": datetime.now(timezone.utc).isoformat()})
@@ -479,7 +482,7 @@ def _fahrzeug_mit_chef_vertrag(welt):
 
 
 def test_m5_termin_nur_mit_vertrag_im_eigenen_bereich(welt, sucher2):
-    vid, cid = _fahrzeug_mit_chef_vertrag(welt)
+    vid, cid = _fahrzeug_mit_chef_vertrag(welt, owner_user_id=sucher2["id"])
     body = {"title": "Abholung", "vehicle_id": vid, "contract_id": cid,
             "pickup_date": "2026-10-01", "pickup_time": "10:00", "pickup_address": "Hannover"}
     r = requests.post(f"{API}/appointments", headers=sucher2["S"], json=body, timeout=30)
@@ -503,7 +506,7 @@ def test_m5_termin_nur_mit_vertrag_im_eigenen_bereich(welt, sucher2):
 
 def test_m6_akte_ohne_verkaufsdaten_und_fremde_historie(welt, sucher2):
     dbx = _db()
-    vid, _cid = _fahrzeug_mit_chef_vertrag(welt)
+    vid, _cid = _fahrzeug_mit_chef_vertrag(welt, owner_user_id=sucher2["id"])
     # Eigene Aktion des Suchers und eine Chef-Aktion am Fahrzeug
     for uid in (sucher2["id"], welt["chef"]["id"]):
         dbx.activity_logs.insert_one({"id": str(uuid.uuid4()), "dealer_id": welt["dealer_id"],

@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
-from deps import db, log_activity, now_iso
+from deps import db, fahrzeug_im_bereich, ist_sucher, log_activity, now_iso, termin_im_bereich
 from lifecycle import try_set_lifecycle
 from routes.drivers import current_driver, _zugriff_pruefen
 
@@ -653,10 +653,22 @@ async def driver_protocol_pdf(appt_id: str, driver=Depends(current_driver)):
     return Response(content=data, media_type="application/pdf")
 
 
+async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
+    if await fahrzeug_im_bereich(user, doc.get("vehicle_id")):
+        return True
+    appt = await db.appointments.find_one(
+        {"id": doc.get("appointment_id"), "dealer_id": user["dealer_id"]},
+        {"_id": 0, "created_by": 1, "contract_id": 1, "vehicle_id": 1})
+    return bool(appt) and await termin_im_bereich(user, appt)
+
+
 # ---------- Händler-Sicht ----------
 @router.get("/vehicles/{vehicle_id}/protocols")
 async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep)):
     """Alle Protokoll-Versionen eines Fahrzeugs (Händler/Chef)."""
+    # Runde 16: Sucher nur zu eigenen Fahrzeugen.
+    if ist_sucher(user) and not await fahrzeug_im_bereich(user, vehicle_id):
+        raise HTTPException(404, "Fahrzeug nicht gefunden")
     docs = await db.pickup_protocols.find(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
          "status": "final"},
@@ -672,6 +684,9 @@ async def dealer_protocol_pdf(protocol_id: str, user=Depends(_dealer_dep)):
     doc = await db.pickup_protocols.find_one(
         {"id": protocol_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not doc or not doc.get("pdf_path"):
+        raise HTTPException(404, "Protokoll nicht gefunden")
+    # Runde 16: Sucher nur im eigenen Bereich (Fahrzeug oder Termin).
+    if ist_sucher(user) and not await _protokoll_im_bereich(user, doc):
         raise HTTPException(404, "Protokoll nicht gefunden")
     from storage_service import load_async, StorageError
     try:

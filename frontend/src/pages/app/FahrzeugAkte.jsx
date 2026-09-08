@@ -78,6 +78,17 @@ export default function FahrzeugAkte() {
     } catch (e) { toast.error(errMsg(e)); }
   };
 
+  // Runde 16: der Chef haengt das Fahrzeug einem anderen Konto der Firma um;
+  // Termine, Snapshots, Berichte und Protokolle folgen dem Fahrzeug.
+  const zuweisen = async (ownerId) => {
+    if (!ownerId || ownerId === akte.owner?.id) return;
+    try {
+      const r = await api.put(`/vehicles/${v.id}/besitzer`, { owner_user_id: ownerId });
+      toast.success(`Fahrzeug jetzt bei ${r.data.owner_name || "neuem Konto"}`);
+      load();
+    } catch (e) { toast.error(errMsg(e, "Zuweisen fehlgeschlagen")); }
+  };
+
   const saveBestand = async () => {
     try {
       await api.put(`/vehicles/${v.id}/bestand`, bestandForm);
@@ -115,6 +126,20 @@ export default function FahrzeugAkte() {
           <h1 className="font-display font-black text-2xl lg:text-3xl tracking-tighter mt-1">
             {d.make_label} {d.model_label} <span className="text-zinc-500 font-normal text-xl">{d.model_description}</span>
           </h1>
+          {akte.zuweisbar && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-zinc-500" data-testid="akte-besitzer">
+              <span>Bearbeiter:</span>
+              <select value={akte.owner?.id || ""} onChange={(e) => zuweisen(e.target.value)}
+                      className="rounded-md px-2 py-1 text-xs bg-transparent border"
+                      style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}
+                      data-testid="akte-besitzer-select">
+                {!akte.owner && <option value="">— nicht zugeordnet —</option>}
+                {(akte.zuweisbar_an || []).map((k) => (
+                  <option key={k.id} value={k.id}>{k.name}{k.role === "dealer" ? " (Hauptaccount)" : ""}</option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="mt-1 text-xs text-zinc-500">
             Status: <b className="text-zinc-300">{v.lifecycle}</b>
             {akte.retention_days_left != null && (

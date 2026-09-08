@@ -11,8 +11,8 @@ from pydantic import BaseModel, field_validator
 
 from pymongo.errors import DuplicateKeyError
 
-from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, db, log_activity,
-                  now_iso, current_firma)
+from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, db, fahrzeug_bereich,
+                  log_activity, now_iso, current_firma, termin_bereich, termin_im_bereich)
 from lifecycle import try_set_lifecycle
 
 log = logging.getLogger("autohandel")
@@ -155,8 +155,9 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     # bzw. Protokoll sehen.
     vehicle_doc = None
     if body.vehicle_id:
+        # Runde 16: Sucher nur eigene Fahrzeuge (owner_user_id).
         vehicle_doc = await db.vehicles.find_one(
-            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+            {"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
         if not vehicle_doc:
             raise HTTPException(404, "Fahrzeug nicht gefunden")
     if body.contract_id:
@@ -215,7 +216,9 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
 @router.get("/appointments")
 async def list_appointments(response: Response, user=Depends(current_firma),
                             status: Optional[str] = None):
-    query: dict = {"dealer_id": user["dealer_id"]}
+    # Runde 16: Sucher sehen nur Termine im eigenen Bereich (selbst angelegt,
+    # eigenes Fahrzeug, eigener Vertrag); der Chef die ganze Firma.
+    query: dict = await termin_bereich(user)
     if status:
         query["status"] = status
     # Nachpruefung Runde 14 (Nr. 74): Termine werden nie automatisch
@@ -276,7 +279,7 @@ async def list_appointments(response: Response, user=Depends(current_firma),
 
 @router.get("/appointments/{appt_id}")
 async def get_appointment(appt_id: str, user=Depends(current_firma)):
-    a = await db.appointments.find_one({"id": appt_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    a = await db.appointments.find_one({"id": appt_id, **await termin_bereich(user)}, {"_id": 0})
     if not a:
         raise HTTPException(404, "Termin nicht gefunden")
     if a.get("vehicle_id"):
@@ -299,20 +302,11 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
 
 
 async def _sucher_darf(user: dict, appt: dict) -> bool:
-    """Ein Sucher darf nur Termine anfassen, die er angelegt hat oder deren
-    Vertrag ihm gehoert (Runde 10: vorher genuegte die Firma — damit
-    liess sich ueber die Terminaenderung das Vertrags-PDF eines Kollegen
-    neu erzeugen und die Sucher-Trennung umgehen)."""
-    if user.get("role") != "sucher":
-        return True
-    if appt.get("created_by") == user["id"]:
-        return True
-    cid = appt.get("contract_id")
-    if cid:
-        c = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0, "user_id": 1})
-        if c and c.get("user_id") == user["id"]:
-            return True
-    return False
+    """Ein Sucher darf nur Termine anfassen, die er angelegt hat, deren
+    Vertrag ihm gehoert oder deren Fahrzeug ihm gehoert (Runde 10: vorher
+    genuegte die Firma; Runde 16: Fahrzeug-Besitzer, Regel zentral in
+    deps.termin_im_bereich — dieselbe wie beim Lesen)."""
+    return await termin_im_bereich(user, appt)
 
 
 @router.put("/appointments/{appt_id}")
@@ -339,9 +333,10 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                  "status", "vehicle_id", "contract_id"):
         if feld in update and update[feld] is None:
             update.pop(feld)
-    # Auch beim Aendern: verknuepfte IDs muessen dem Haendler gehoeren.
+    # Auch beim Aendern: verknuepfte IDs muessen dem Konto gehoeren
+    # (Runde 16: Sucher nur eigene Fahrzeuge).
     if update.get("vehicle_id") and not await db.vehicles.find_one(
-            {"id": update["vehicle_id"], "dealer_id": user["dealer_id"]}, {"_id": 1}):
+            {"id": update["vehicle_id"], **fahrzeug_bereich(user)}, {"_id": 1}):
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     if update.get("contract_id"):
         # Runde 12: auch nachtraeglich nur Vertraege im eigenen Bereich —
@@ -515,9 +510,11 @@ async def get_pickup_report(appt_id: str, versions: int = 0,
     """Händler liest den Abholbericht des Fahrers (aktuelle Version).
     Mit ?versions=1 werden auch alte (ersetzte) Versionen mitgeliefert."""
     appt = await db.appointments.find_one(
-        {"id": appt_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1},
+        {"id": appt_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "id": 1, "created_by": 1, "contract_id": 1, "vehicle_id": 1},
     )
-    if not appt:
+    # Runde 16: Abholberichte nur im eigenen Bereich (wie der Termin selbst).
+    if not appt or not await _sucher_darf(user, appt):
         raise HTTPException(404, "Termin nicht gefunden")
     # Nachpruefung Runde 14 (Befund 38): gibt es nach einem Abbruch kurz zwei
     # nicht-abgeloeste Berichte, gilt der juengste — nicht ein beliebiger.

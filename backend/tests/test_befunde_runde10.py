@@ -198,10 +198,10 @@ def test_f2b_pdf_neuerzeugung_nutzt_den_vertragsbereich():
 
 # ---------------------------------------------------------------- G1
 def test_g1_fahrzeugakte_zeigt_sucher_b_keinen_vertrag_von_a(welt):
+    # Runde 16: das Fahrzeug gehoert A (owner_user_id) — B bekommt gar keine
+    # Akte mehr (vorher: Akte 200, nur der Vertrag von A ausgeblendet).
     r = requests.get(f"{API}/vehicles/{welt['vid']}/akte", headers=welt["b"]["h"], timeout=30)
-    assert r.status_code == 200, r.text[:200]
-    ids_b = [c.get("id") for c in (r.json().get("contracts") or [])]
-    assert welt["cid"] not in ids_b, "B sieht den Vertrag von A in der Akte"
+    assert r.status_code == 404, r.text[:200]
     r = requests.get(f"{API}/vehicles/{welt['vid']}/akte", headers=welt["a"]["h"], timeout=30)
     ids_a = [c.get("id") for c in (r.json().get("contracts") or [])]
     assert welt["cid"] in ids_a

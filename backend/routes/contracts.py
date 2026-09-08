@@ -27,7 +27,7 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
 from pymongo.errors import DuplicateKeyError
 
 from deps import (
-    TERMIN_OFFEN_WERTE, current_firma,
+    TERMIN_OFFEN_WERTE, current_firma, fahrzeug_bereich,
     clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
 )
 import auto_daten
@@ -267,8 +267,9 @@ def _vehicle_bild_urls(vehicle: dict) -> list:
 async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     """Generate a draft Kaufvertrag PDF without persisting anything.
     Returns the PDF inline so the dealer can review it before final save."""
+    # Runde 16: Sucher nur eigene Fahrzeuge (owner_user_id).
     v = await db.vehicles.find_one(
-        {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0},
+        {"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0},
     )
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
@@ -312,7 +313,8 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
 
 @router.post("/contracts")
 async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
-    v = await db.vehicles.find_one({"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    # Runde 16: Sucher nur eigene Fahrzeuge (owner_user_id).
+    v = await db.vehicles.find_one({"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     from deps import effective_dealer
