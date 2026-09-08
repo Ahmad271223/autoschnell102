@@ -633,13 +633,16 @@ async def create_snapshot(
     mobile_ad_id: Optional[str],
     source_url: str,
     snapshot_id: Optional[str] = None,
+    quelle: Optional[str] = None,
 ) -> str:
     """Create a `listing_snapshots` row in 'pending' state and return its id.
     Capture/upload runs as a background task via `run_snapshot_job`.
 
     `snapshot_id` erlaubt es, eine VORHER reservierte ID zu verwenden — so
     kann der Aufrufer sich den Snapshot atomar sichern, bevor er ihn
-    anlegt (verhindert Doppel-Snapshots bei gleichzeitigen Vergleichen)."""
+    anlegt (verhindert Doppel-Snapshots bei gleichzeitigen Vergleichen).
+    `quelle` (Runde 17, Nr. 383): Inserats-Quelle, weil vehicle_id seit
+    Runde 17 je Quelle verschieden gebildet wird."""
     snap_id = snapshot_id or str(uuid.uuid4())
     await db.listing_snapshots.insert_one({
         "id": snap_id,
@@ -647,6 +650,7 @@ async def create_snapshot(
         "user_id": user_id,
         "vehicle_id": vehicle_id,
         "mobile_ad_id": mobile_ad_id,
+        "quelle": quelle,
         "source_url": source_url,
         "status": "pending",
         "pdf_path": None,
@@ -726,9 +730,12 @@ async def _capture_with_retry(db, snap_id: str, url: str, attempts: int = 3):
     for i in range(1, attempts + 1):
         try:
             async def _jetzt_running():
+                # Runde 17 (Nr. 316): heartbeat_at ab Start — der Reaper
+                # (cleanup_service) misst daran, nicht mehr an started_at.
                 await db.listing_snapshots.update_one(
                     {"id": snap_id},
-                    {"$set": {"status": "running", "started_at": _now_iso()}})
+                    {"$set": {"status": "running", "started_at": _now_iso(),
+                              "heartbeat_at": _now_iso()}})
             return await _capture_with_playwright(url, on_start=_jetzt_running)
         except Exception as exc:
             last_exc = exc
@@ -934,12 +941,30 @@ async def run_snapshot_job(db, snap_id: str) -> None:
             try:
                 await asyncio.sleep(30)
                 await extend_slot(db, slot_id)
+                # Runde 17 (Nr. 316): Lebenszeichen am Snapshot selbst — der
+                # Reaper bricht sonst lange (aber lebende) Aufnahmen nach
+                # 15 min ab, obwohl der Job noch laeuft.
+                await db.listing_snapshots.update_one(
+                    {"id": snap_id}, {"$set": {"heartbeat_at": _now_iso()}})
             except asyncio.CancelledError:
                 raise
             except Exception:
                 continue
 
     _puls = asyncio.create_task(_slot_frisch_halten())
+    # Runde 17 (Nr. 310/313): bereits hochgeladene Dateien merken — bricht
+    # der Job nach dem ersten Upload ab, blieb die Datei vorher fuer immer im
+    # Speicher (keine Zeile verweist darauf).
+    hochgeladen: list = []
+
+    async def _dateien_wegraeumen(grund: str) -> None:
+        from storage_service import loeschen_oder_vormerken
+        for key in hochgeladen:
+            await loeschen_oder_vormerken(
+                db, key=key, art="snapshot", grund=grund,
+                dealer_id=doc.get("dealer_id") or "",
+                ref={"collection": "listing_snapshots", "id": snap_id})
+
     try:
         png, pdf = await _capture_with_retry(db, snap_id, url)
         # Compress PNG → JPEG and rebuild a 1-page image-PDF (much smaller).
@@ -950,9 +975,14 @@ async def run_snapshot_job(db, snap_id: str) -> None:
         png_path = f"{base}.jpg"
         pdf_path = f"{base}.pdf"
         await loop.run_in_executor(None, _put_object, png_path, png, "image/jpeg")
+        hochgeladen.append(png_path)
         await loop.run_in_executor(None, _put_object, pdf_path, pdf, "application/pdf")
-        await db.listing_snapshots.update_one(
-            {"id": snap_id},
+        hochgeladen.append(pdf_path)
+        # Runde 17 (Nr. 316): CAS auf den laufenden Zustand — hat der Reaper
+        # (oder ein Neustart-Resume) die Zeile inzwischen auf failed gesetzt,
+        # wird sie nicht mehr "ready" ueberschrieben; die Dateien gehen weg.
+        r = await db.listing_snapshots.update_one(
+            {"id": snap_id, "status": {"$in": ["running", "retrying", "queued"]}},
             {"$set": {
                 "status": "ready",
                 "png_path": png_path,
@@ -962,6 +992,11 @@ async def run_snapshot_job(db, snap_id: str) -> None:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }},
         )
+        if r.matched_count == 0:
+            log.warning("snapshot %s: Zeile ist nicht mehr in Arbeit (Reaper/"
+                        "Neustart) — fertige Dateien werden wieder entfernt", snap_id)
+            await _dateien_wegraeumen("snapshot_ready_verworfen")
+            return
         log.info("snapshot %s ready (%d KB png, %d KB pdf)", snap_id,
                  len(png) // 1024, len(pdf) // 1024)
     except Exception as exc:
@@ -974,6 +1009,7 @@ async def run_snapshot_job(db, snap_id: str) -> None:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }},
         )
+        await _dateien_wegraeumen("snapshot_upload_abbruch")
     finally:
         _puls.cancel()
         # Quelle mitgeben: hat die Frist das Slot-Dokument bereits entfernt,

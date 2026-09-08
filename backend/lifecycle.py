@@ -14,6 +14,7 @@ Der Status wird ausschließlich über `set_lifecycle()` geändert — dort werde
 erlaubte Übergänge validiert und jede Änderung im Audit-Log protokolliert.
 Alte Freitext-Status (vehicles.status) bleiben als `legacy_status` erhalten.
 """
+import logging
 from typing import Optional
 
 from deps import db, log_activity, now_iso
@@ -77,6 +78,9 @@ _LEGACY_MAP = {
 }
 
 
+log = logging.getLogger("autohandel")
+
+
 class LifecycleError(ValueError):
     """Unerlaubter Statusübergang."""
 
@@ -84,6 +88,7 @@ class LifecycleError(ValueError):
 async def set_lifecycle(
     vehicle_id: str, dealer_id: str, new_state: str, *,
     user: Optional[dict] = None, force: bool = False,
+    extra_set: Optional[dict] = None, extra_unset: Optional[dict] = None,
 ) -> dict:
     """Setzt den Lebenszyklus-Status eines Fahrzeugs.
 
@@ -96,19 +101,42 @@ async def set_lifecycle(
     if not v:
         raise LifecycleError("Fahrzeug nicht gefunden")
     current = v.get("lifecycle") or _LEGACY_MAP.get(v.get("status") or "", "verglichen")
+    # Runde 17: Der Write prueft den GELESENEN Zustand mit (CAS) — ein
+    # paralleler Statuswechsel zwischen Lesen und Schreiben wird nicht mehr
+    # ueberschrieben. Altdokumente ohne lifecycle-Feld: Feld darf nicht
+    # inzwischen entstanden sein.
+    cas: dict = {"id": vehicle_id, "dealer_id": dealer_id,
+                 "lifecycle": v["lifecycle"] if "lifecycle" in v else {"$exists": False}}
     if current == new_state:
+        # Zustand steht schon — nur die mitgegebenen Zusatzfelder schreiben
+        # (z.B. Bestandsfrist), ohne zweiten Statuswechsel/Audit.
+        if extra_set or extra_unset:
+            upd: dict = {}
+            if extra_set:
+                upd["$set"] = {**extra_set, "updated_at": now_iso()}
+            if extra_unset:
+                upd["$unset"] = dict(extra_unset)
+            r = await db.vehicles.update_one(cas, upd)
+            if r.matched_count == 0:
+                raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert — bitte neu laden")
         return v
     if not force and new_state not in ALLOWED_TRANSITIONS.get(current, set()):
         raise LifecycleError(
             f"Übergang '{current}' → '{new_state}' ist nicht erlaubt")
-    await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": dealer_id},
-        {"$set": {
-            "lifecycle": new_state,
-            "lifecycle_changed_at": now_iso(),
-            "updated_at": now_iso(),
-        }},
-    )
+    # Runde 17: Zusatzfelder (Fotos leeren, Bestandsfrist, deleted_at ...)
+    # im SELBEN Write wie der Statuswechsel — kein Zwischenzustand mehr
+    # ("geloescht" ohne Fotoloeschung, "bestand" ohne Frist).
+    upd = {"$set": {
+        "lifecycle": new_state,
+        "lifecycle_changed_at": now_iso(),
+        "updated_at": now_iso(),
+        **(extra_set or {}),
+    }}
+    if extra_unset:
+        upd["$unset"] = dict(extra_unset)
+    r = await db.vehicles.update_one(cas, upd)
+    if r.matched_count == 0:
+        raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert — bitte neu laden")
     await log_activity(
         dealer_id, (user or {}).get("id", ""), f"fahrzeug.status.{new_state}",
         ref=vehicle_id, meta={"von": current, "nach": new_state},
@@ -124,8 +152,10 @@ async def try_set_lifecycle(vehicle_id: str, dealer_id: str, new_state: str, *,
     Hauptvorgang niemals abbrechen."""
     try:
         await set_lifecycle(vehicle_id, dealer_id, new_state, user=user)
-    except LifecycleError:
-        pass
+    except LifecycleError as exc:
+        # Runde 17: nicht mehr stumm — im Log nachvollziehbar, warum ein
+        # Fahrzeug nach Vertrag/Termin nicht mitgezogen wurde.
+        log.info("Lifecycle uebersprungen %s -> %s: %s", vehicle_id, new_state, exc)
 
 
 async def migrate_missing_lifecycles() -> int:

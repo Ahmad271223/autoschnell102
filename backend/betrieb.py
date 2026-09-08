@@ -42,6 +42,20 @@ async def alarm(db, typ: str, ref: str = "", **details) -> None:
         log.exception("Betriebsalarm konnte nicht gespeichert werden: %s %s", typ, ref)
 
 
+async def alarm_schliessen(db, typ: str, ref: str = "") -> int:
+    """Offenen Alarm (typ, ref) schliessen, wenn die Ursache behoben ist
+    (z.B. Index inzwischen angelegt). Wirft nie."""
+    try:
+        r = await db.betriebsalarme.update_many(
+            {"typ": typ, "ref": ref or "", "offen": True},
+            {"$set": {"offen": False, "quittiert_am": _now(),
+                      "quittiert_von": "system:behoben"}})
+        return r.modified_count
+    except Exception:
+        log.exception("Betriebsalarm konnte nicht geschlossen werden: %s %s", typ, ref)
+        return 0
+
+
 async def offene_alarme(db, limit: int = 200) -> list:
     return await db.betriebsalarme.find({"offen": True}, {"_id": 0}) \
         .sort("created_at", -1).to_list(limit)

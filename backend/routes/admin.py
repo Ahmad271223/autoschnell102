@@ -1947,6 +1947,12 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "admin_konten_ohne_super_admin": [u.get("email") or u.get("username") async for u in db.users.find(
             {"role": "admin", "is_super_admin": {"$ne": True}},
             {"_id": 0, "email": 1, "username": 1})],
+        # Runde 17: die Parallelitaets-Backstops muessen sichtbar sein —
+        # bei Altdubletten werden sie beim Start nur uebersprungen.
+        "termin_index_aktiv": "termin_offen_je_fahrzeug" in await db.appointments.index_information(),
+        "fahrzeug_index_aktiv": any(
+            i.get("unique") and i.get("key") == [("dealer_id", 1), ("id", 1)]
+            for i in (await db.vehicles.index_information()).values()),
     }
 
 
@@ -1962,8 +1968,14 @@ async def admin_alarm_quittieren(alarm_id: str, admin=Depends(current_super_admi
 async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
     """Reparaturlaeufe sofort anstossen (sonst alle 10 Minuten automatisch)."""
     from routes.payments import zahlungen_abgleichen
+    # Runde 17: fehlende Unique-Indizes (Altdubletten beim Start) ohne
+    # Neustart nachholen, sobald die Daten bereinigt sind.
+    from indizes import _termin_unique_index, _unique_index_sicher
     return {"abo_vorgaenge": await abo_vorgaenge_nachholen(),
-            "zahlungen": await zahlungen_abgleichen(db)}
+            "zahlungen": await zahlungen_abgleichen(db),
+            "termin_index": await _termin_unique_index(),
+            "fahrzeug_index": await _unique_index_sicher(
+                db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)}
 
 
 # ---------- Zwei-Faktor-Anmeldung (Admin / Super-Admin) ----------

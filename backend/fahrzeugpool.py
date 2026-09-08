@@ -29,8 +29,13 @@ async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
     if not kandidaten:
         return 0
     geschuetzt = set()
+    # Runde 17 (Nr. 288): Schutz nur durch EIGENE Vertraege/Termine/Inserate.
+    # Fahrzeug-IDs (v_<Anzeige>) sind firmenuebergreifend gleich — ohne
+    # dealer_id schuetzte der Vertrag einer fremden Firma das eigene
+    # Vergleichsfahrzeug (Pool lief voll und trimmte nie).
     for coll in ("generated_pdfs", "appointments", "resale_listings"):
-        async for d in db[coll].find({"vehicle_id": {"$in": kandidaten}},
+        async for d in db[coll].find({"dealer_id": dealer_id,
+                                      "vehicle_id": {"$in": kandidaten}},
                                      {"_id": 0, "vehicle_id": 1}):
             geschuetzt.add(d.get("vehicle_id"))
     loeschen = [v for v in kandidaten if v not in geschuetzt]

@@ -16,8 +16,9 @@ from auth import (
     JWT_ALG, JWT_SECRET, _DUMMY_HASH, decode_token,
     hash_password_async, verify_password_async,
 )
-from deps import (bearer, current_user, db, log_activity, now_iso, current_firma,
-                  firma_gesperrt, gesperrte_firmen_ids)
+import betrieb
+from deps import (bearer, current_user, db, log_activity, log_activity_sicher, now_iso,
+                  current_firma, firma_gesperrt, gesperrte_firmen_ids)
 # Zentrale Passwortregeln (Pruefbericht 09/2026, Punkt 32): dieselbe
 # Pruefung wie fuer Firma/Sucher/Admin — vorher hatte drivers.py eine
 # eigene, schwaechere Kopie (8 Zeichen, keine Blockliste, keine 72-Byte-
@@ -287,6 +288,10 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
         })
     except DuplicateKeyError:
         raise HTTPException(409, "Fahrer ist bereits in deiner Liste")
+    # Runde 17 (Nr. 6): Audit-Spur (nur die Konto-ID, kein Name/Code).
+    # Nach dem dauerhaften Insert — darf den Vorgang nicht mehr abbrechen.
+    await log_activity_sicher(user["dealer_id"], user["id"], "fahrer.hinzugefuegt",
+                              ref=da["id"])
     return await _load_dealer_driver(user["dealer_id"], da["id"]) or {}
 
 
@@ -333,23 +338,50 @@ async def delete_driver(driver_id: str, user=Depends(current_firma)):
     #    Fahrer kam weiter an Abholauftrag, Vertrag und Protokoll.
     # Die Sitzung des Fahrers wird NICHT beendet: er arbeitet ggf. fuer
     # andere Firmen weiter; die Verknuepfungspruefung reicht.
+    # Runde 17 (Nr. 6): Die Verknuepfung ist bereits weg (Reihenfolge
+    # bewusst: appointments._fahrer_nachpruefen verlaesst sich darauf).
+    # Scheitert die Terminbereinigung danach, darf der Aufruf nicht mit 500
+    # enden (der Fahrer IST entfernt, ein Wiederholen faende ihn nicht
+    # mehr) — stattdessen Betriebsalarm und 200 mit Hinweis.
     jetzt = now_iso()
-    offen = await db.appointments.update_many(
-        {"dealer_id": user["dealer_id"], "driver_id": driver_id,
-         "status": {"$in": _OFFEN_WERTE}},
-        {"$unset": {"driver_id": ""},
-         "$set": {"zuteilung": None, "updated_at": jetzt}},
-    )
-    # Update-Pipeline: driver_id atomar nach driver_id_hist verschieben.
-    geschlossen = await db.appointments.update_many(
-        {"dealer_id": user["dealer_id"], "driver_id": driver_id},
-        [{"$set": {"driver_id_hist": "$driver_id",
-                   "updated_at": {"$literal": jetzt}}},
-         {"$unset": "driver_id"}],
-    )
-    return {"ok": True,
-            "offene_termine_getrennt": offen.modified_count,
-            "abgeschlossene_termine_archiviert": geschlossen.modified_count}
+    offen_n = geschlossen_n = 0
+    bereinigung_fehler = None
+    try:
+        offen = await db.appointments.update_many(
+            {"dealer_id": user["dealer_id"], "driver_id": driver_id,
+             "status": {"$in": _OFFEN_WERTE}},
+            {"$unset": {"driver_id": ""},
+             "$set": {"zuteilung": None, "updated_at": jetzt}},
+        )
+        offen_n = offen.modified_count
+        # Update-Pipeline: driver_id atomar nach driver_id_hist verschieben.
+        geschlossen = await db.appointments.update_many(
+            {"dealer_id": user["dealer_id"], "driver_id": driver_id},
+            [{"$set": {"driver_id_hist": "$driver_id",
+                       "updated_at": {"$literal": jetzt}}},
+             {"$unset": "driver_id"}],
+        )
+        geschlossen_n = geschlossen.modified_count
+    except Exception as exc:  # noqa: BLE001
+        bereinigung_fehler = str(exc)[:300]
+        log.exception("Fahrer %s entfernt, Terminbereinigung fehlgeschlagen",
+                      driver_id)
+        await betrieb.alarm(db, "fahrer_bereinigung_fehlgeschlagen", ref=driver_id,
+                            dealer_id=user["dealer_id"], fehler=bereinigung_fehler)
+    # Audit-Spur (nur Zahlen und die Konto-ID, keine Namen/Codes).
+    await log_activity_sicher(user["dealer_id"], user["id"], "fahrer.entfernt",
+                              ref=driver_id,
+                              meta={"offene_termine_getrennt": offen_n,
+                                    "abgeschlossene_termine_archiviert": geschlossen_n,
+                                    **({"bereinigung_fehler": bereinigung_fehler}
+                                       if bereinigung_fehler else {})})
+    out: Dict[str, Any] = {"ok": True,
+                           "offene_termine_getrennt": offen_n,
+                           "abgeschlossene_termine_archiviert": geschlossen_n}
+    if bereinigung_fehler:
+        out["hinweis"] = ("Fahrer entfernt — die Termine konnten nicht vollständig "
+                          "bereinigt werden; der Betrieb wurde benachrichtigt.")
+    return out
 
 
 @router.get("/drivers/{driver_id}/conflicts")

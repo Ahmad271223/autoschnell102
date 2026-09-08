@@ -139,13 +139,16 @@ export default function Protokoll() {
     setBusy(true);
     try {
       await driverApi.put(`/driver/appointments/${id}/protocol`, f);
-      await driverApi.post(`/driver/appointments/${id}/protocol/finalize`, {
+      const fin = await driverApi.post(`/driver/appointments/${id}/protocol/finalize`, {
         signature_driver_b64: sigDriver,
         signature_seller_b64: sigSeller,
         seller_name: sellerName,
         place: f.place,
       });
-      toast.success("Protokoll abgeschlossen — Fahrzeug ist abgeholt");
+      // Runde 17: der Termin kann inzwischen vom Haendler geschlossen sein —
+      // das Protokoll bleibt als Beweis final, der Server sagt es.
+      if (fin?.data?.hinweis) toast.warning(fin.data.hinweis, { duration: 9000 });
+      else toast.success("Protokoll abgeschlossen — Fahrzeug ist abgeholt");
       load();
     } catch (e) { toast.error(errMsg(e, "Abschließen fehlgeschlagen")); }
     finally { setBusy(false); }

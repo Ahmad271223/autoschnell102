@@ -66,6 +66,31 @@ def doppelte_offene_termine(db) -> int:
     return n
 
 
+def doppelte_fahrzeuge(db) -> int:
+    """Runde 17 (Nr. 396): mehrere vehicles-Dokumente je (dealer_id, id).
+    Sie verhindern den Unique-Index vehicles (dealer_id, id) — server.py
+    legt ihn dann nicht an und loest einen Betriebsalarm aus. Bereinigen:
+    das juengere Dokument (updated_at) pruefen und von Hand entfernen bzw.
+    Vertraege/Termine darauf umhaengen. Loescht NICHTS."""
+    n = 0
+    for d in db.vehicles.aggregate([
+            {"$match": {"id": {"$type": "string"}, "dealer_id": {"$type": "string"}}},
+            {"$group": {"_id": {"dealer_id": "$dealer_id", "id": "$id"},
+                        "n": {"$sum": 1},
+                        "docs": {"$push": {"lifecycle": "$lifecycle", "quelle": "$quelle",
+                                           "mobile_ad_id": "$mobile_ad_id",
+                                           "created_at": "$created_at",
+                                           "updated_at": "$updated_at"}}}},
+            {"$match": {"n": {"$gt": 1}}}]):
+        n += 1
+        print(f"vehicles (dealer_id, id): Firma {d['_id']['dealer_id']}  Fahrzeug {d['_id']['id']}: {d['n']}x")
+        for e in d["docs"]:
+            print(f"    lifecycle={e.get('lifecycle')}  quelle={e.get('quelle')}"
+                  f"  mobile_ad_id={e.get('mobile_ad_id')}  created_at={e.get('created_at')}"
+                  f"  updated_at={e.get('updated_at')}")
+    return n
+
+
 def main() -> int:
     db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
     gefunden = 0
@@ -81,6 +106,7 @@ def main() -> int:
                 print(f"    id={e.get('id')}  created_at={e.get('created_at')}")
     gefunden += kreuz_dubletten(db)
     gefunden += doppelte_offene_termine(db)
+    gefunden += doppelte_fahrzeuge(db)
     print("Keine Dubletten." if not gefunden else f"{gefunden} doppelte Werte — bitte bereinigen.")
     return 0 if not gefunden else 1
 

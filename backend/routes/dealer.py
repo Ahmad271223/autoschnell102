@@ -363,6 +363,13 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
         await loeschen_oder_vormerken(db, key=key, grund="logo_upload_abbruch",
                                       dealer_id=user["dealer_id"])
         raise HTTPException(500, f"Logo konnte nicht gespeichert werden: {exc}")
+    # Runde 17 (Nr. 377): der Logowechsel war die einzige Einstellungs-
+    # aenderung ohne Audit-Spur (Profil/Firma loggen) — das Logo landet auf
+    # Vertraegen und der Verkaufsseite.
+    from deps import log_activity_sicher
+    await log_activity_sicher(user["dealer_id"], user["id"], "einstellungen.logo.geaendert",
+                              meta={"vorher": vorher, "nachher": logo_url,
+                                    "persoenlich": ist_sucher})
     await _altes_logo_wegraeumen(vorher, user["dealer_id"])
     return {"ok": True, "logo_url": logo_url}
 

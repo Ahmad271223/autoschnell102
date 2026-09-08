@@ -646,22 +646,35 @@ async def marktplatz_rotieren(db, now: datetime) -> dict:
     # verkauft oder geloescht sind (Altbestand vor dem Fix in resale.py),
     # werden geschlossen — sonst zeigten Kaeufer und Haendler ewig eine
     # "laufende" Verhandlung zu einem Auto, das es nicht mehr gibt.
-    offene = await db.listing_interest.find(
-        {"status": {"$in": ["offen", "gegenangebot", "gegenangebot_kaeufer"]}},
-        {"_id": 0, "id": 1, "listing_id": 1}).to_list(5000)
-    if offene:
-        ids = list({o.get("listing_id") for o in offene if o.get("listing_id")})
+    # Runde 17 (Nr. 400): Cursor in 1000er-Paketen statt eines festen
+    # 5000er-Deckels — darueber blieben Anfragen fuer immer unbehandelt, und
+    # 5000 Dokumente auf einmal im Speicher sind unnoetig (Muster: Favoriten
+    # unten).
+    async def _paket_schliessen(paket: list) -> int:
+        ids = list({o.get("listing_id") for o in paket if o.get("listing_id")})
         vorhanden = {l["id"] async for l in db.resale_listings.find(
             {"id": {"$in": ids}, "status": {"$nin": ["verkauft", "geloescht"]}}, {"_id": 0, "id": 1})}
-        verwaist = [o["id"] for o in offene if o.get("listing_id") not in vorhanden]
-        if verwaist:
-            r = await db.listing_interest.update_many(
-                {"id": {"$in": verwaist}},
-                {"$set": {"status": "abgelehnt", "beendet_grund": "inserat_weg",
-                          "updated_at": now.isoformat()},
-                 "$push": {"history": {"von": "system", "aktion": "inserat_weg",
-                                       "zeit": now.isoformat()}}})
-            stats["interessen_verwaist_geschlossen"] = r.modified_count
+        verwaist = [o["id"] for o in paket if o.get("listing_id") not in vorhanden]
+        if not verwaist:
+            return 0
+        r = await db.listing_interest.update_many(
+            {"id": {"$in": verwaist}},
+            {"$set": {"status": "abgelehnt", "beendet_grund": "inserat_weg",
+                      "updated_at": now.isoformat()},
+             "$push": {"history": {"von": "system", "aktion": "inserat_weg",
+                                   "zeit": now.isoformat()}}})
+        return r.modified_count
+
+    paket: list = []
+    async for o in db.listing_interest.find(
+            {"status": {"$in": ["offen", "gegenangebot", "gegenangebot_kaeufer"]}},
+            {"_id": 0, "id": 1, "listing_id": 1}):
+        paket.append(o)
+        if len(paket) >= 1000:
+            stats["interessen_verwaist_geschlossen"] += await _paket_schliessen(paket)
+            paket = []
+    if paket:
+        stats["interessen_verwaist_geschlossen"] += await _paket_schliessen(paket)
     cutoff = (now - timedelta(days=INTERESSEN_AUFBEWAHRUNG_TAGE)).isoformat()
     r = await db.listing_interest.delete_many(
         {"status": {"$in": ["akzeptiert", "abgelehnt"]}, **_aelter_als(cutoff)})
@@ -1015,6 +1028,33 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
     Abholbericht, Einkaufspreis und Historie bleiben — Fahrzeug wird
     `archiviert` (geschäftliche Nachvollziehbarkeit)."""
     archived = 0
+    # Runde 17 (Nr. 287): Selbstheilung — Bestandsfahrzeuge OHNE Frist
+    # (Altbestand, abgebrochener Zwei-Schritt-Write vor Runde 17) bekommen
+    # sie aus lifecycle_changed_at + 50 Tage nachgetragen; sonst blieben sie
+    # fuer immer im Bestand, obwohl die Regel "50 Tage" heisst.
+    try:
+        from routes.bestand import BESTAND_RETENTION_DAYS as _tage
+    except Exception:  # noqa: BLE001
+        _tage = 50
+    async for v in db.vehicles.find(
+            {"lifecycle": "bestand", "bestand.expires_at": {"$in": [None]}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "lifecycle_changed_at": 1,
+             "updated_at": 1, "created_at": 1}):
+        basis = v.get("lifecycle_changed_at") or v.get("updated_at") or v.get("created_at")
+        try:
+            start = datetime.fromisoformat(str(basis)) if basis else now
+        except ValueError:
+            start = now
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        frist = (start + timedelta(days=_tage)).isoformat()
+        await db.vehicles.update_one(
+            {"id": v["id"], "dealer_id": v.get("dealer_id"), "lifecycle": "bestand",
+             "bestand.expires_at": {"$in": [None]}},
+            {"$set": {"bestand.expires_at": frist,
+                      "bestand.frist_nachgetragen_at": now.isoformat()}})
+        log.info("bestand: Frist fuer %s/%s nachgetragen (%s)",
+                 v.get("dealer_id"), v["id"], frist)
     cursor = db.vehicles.find(
         {"lifecycle": "bestand",
          "bestand.expires_at": {"$lte": now.isoformat(), "$ne": None}},
@@ -1101,11 +1141,17 @@ async def _reap_stuck_snapshots(db) -> None:
     jetzt = datetime.now(timezone.utc)
     cutoff = (jetzt - timedelta(minutes=15)).isoformat()
     cutoff_wartend = (jetzt - timedelta(minutes=60)).isoformat()
+    # Runde 17 (Nr. 316): Massstab ist das Lebenszeichen heartbeat_at (alle
+    # 30 s vom laufenden Job), ersatzweise started_at, zuletzt created_at —
+    # vorher galt eine lange, aber lebende Aufnahme nach 15 min als haengend
+    # und wurde auf failed gesetzt, waehrend der Job weiterlief.
     r = await db.listing_snapshots.update_many(
         {"$or": [
             {"status": "running",
-             "$or": [{"started_at": {"$lt": cutoff}},
-                     {"started_at": {"$exists": False}, "created_at": {"$lt": cutoff}}]},
+             "$or": [{"heartbeat_at": {"$lt": cutoff}},
+                     {"heartbeat_at": None, "started_at": {"$lt": cutoff}},
+                     {"heartbeat_at": None, "started_at": None,
+                      "created_at": {"$lt": cutoff}}]},
             {"status": {"$in": ["pending", "queued", "retrying"]},
              "created_at": {"$lt": cutoff_wartend}}]},
         {"$set": {"status": "failed",
@@ -1172,4 +1218,58 @@ async def _expire_old_snapshots(db) -> int:
     if n:
         log.info("[cleanup] %s Snapshots nach %s Tagen verfallen",
                  n, SNAPSHOT_RETENTION_DAYS)
+    geraeumt = await _snapshot_reste_entfernen(db)
+    if geraeumt:
+        log.info("[cleanup] %s failed/expired-Snapshotzeilen entfernt", geraeumt)
     return n
+
+
+# Runde 17 (Nr. 307): failed-/expired-Zeilen ohne Dateien sind nach dieser
+# Frist nur noch Ballast (der Vergleich legt bei Bedarf einen neuen an).
+SNAPSHOT_RESTE_TAGE = 7
+
+
+async def _snapshot_reste_entfernen(db) -> int:
+    """Zweiter Sweep: listing_snapshots mit status failed/expired, aelter als
+    SNAPSHOT_RESTE_TAGE (completed_at, sonst created_at). Vorher blieben
+    diese Zeilen fuer immer (die Tabelle wuchs mit jedem Fehlversuch).
+    failed-Zeilen, die noch Dateipfade tragen (Abbruch nach Upload):
+    zuerst die Dateien loeschen bzw. vormerken, dann die Pfade leeren —
+    geloescht wird die Zeile erst, wenn keine Datei mehr an ihr haengt."""
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=SNAPSHOT_RESTE_TAGE)).isoformat()
+    alt = {"$or": [{"completed_at": {"$lt": cutoff}},
+                   {"completed_at": {"$in": [None, ""]},
+                    "created_at": {"$lt": cutoff}}]}
+    async for snap in db.listing_snapshots.find(
+            {"status": "failed", "loeschung_offen": {"$ne": True},
+             "$and": [alt, {"$or": [{"png_path": {"$nin": [None, ""]}},
+                                    {"pdf_path": {"$nin": [None, ""]}}]}]},
+            {"_id": 0, "id": 1, "dealer_id": 1, "png_path": 1, "pdf_path": 1}):
+        unset, offen = {}, False
+        for feld in ("png_path", "pdf_path"):
+            key = snap.get(feld)
+            if not key:
+                continue
+            ok = await loeschen_oder_vormerken(
+                db, key=key, art="snapshot", grund="snapshot_failed_reste",
+                dealer_id=snap.get("dealer_id") or "",
+                ref={"collection": "listing_snapshots", "id": snap["id"],
+                     "unset_fields": [feld]})
+            if ok:
+                unset[feld] = ""
+            else:
+                offen = True
+        upd: dict = {}
+        if unset:
+            upd["$unset"] = unset
+        if offen:
+            upd["$set"] = {"loeschung_offen": True}
+        if upd:
+            await db.listing_snapshots.update_one({"id": snap["id"]}, upd)
+    r = await db.listing_snapshots.delete_many(
+        {"status": {"$in": ["failed", "expired"]},
+         "loeschung_offen": {"$ne": True},
+         "png_path": {"$in": [None, ""]}, "pdf_path": {"$in": [None, ""]},
+         **alt})
+    return r.deleted_count

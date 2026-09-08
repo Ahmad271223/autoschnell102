@@ -246,6 +246,12 @@ def pruefe_produktion(log) -> None:
                          "Personendaten enthalten (Standard: false).")
     if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() in ("1", "true", "yes", "ja"):
         warnungen.append("VERTRAG_LOESCHUNG_AKTIV=true: automatische Vertragsloeschung ist scharf.")
+    elif ist_prod and not os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip():
+        # Runde 17: FEHLT die Variable ganz, ist das kein bewusster
+        # Trockenlauf, sondern vergessen — dann startet Produktion nicht.
+        # Ein ausdrueckliches false bleibt erlaubt (Warnung unten).
+        fehler.append("VERTRAG_LOESCHUNG_AKTIV fehlt in der .env: bewusst 'true' "
+                      "(90-Tage-Loeschung scharf) oder 'false' (Trockenlauf) setzen.")
     elif ist_prod:
         # Nachpruefung Runde 14 (Nr. 97): der Trockenlauf ist die dokumentierte
         # Go-Live-Voreinstellung — wird das Scharfschalten aber vergessen,

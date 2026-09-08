@@ -6,6 +6,7 @@
 - Abweichungs-Übernahme (Diff Einkauf vs. Abholung)
 - Manuell hinzugefügte Fahrzeuge (source: "manuell")
 """
+import logging
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from deps import (besitzer_anreichern, besitzer_namen, clean_doc, current_chef,
                   current_firma, db, fahrzeug_bereich,
-                  log_activity, now_iso)
+                  log_activity, log_activity_sicher, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
 
 router = APIRouter()
@@ -76,7 +77,9 @@ class DecisionIn(BaseModel):
 class BestandUpdateIn(BaseModel):
     location: Optional[str] = Field(default=None, max_length=300)
     notes: Optional[str] = Field(default=None, max_length=10000)
-    costs: Optional[List[Dict[str, Any]]] = None  # [{label, amount}]
+    # Runde 17 (Nr. 337): Liste gedeckelt — _clean_costs schnitt zwar auf 30,
+    # verarbeitete davor aber beliebig lange Eingaben.
+    costs: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=30)  # [{label, amount}]
 
 
 class ApplyDeviationsIn(BaseModel):
@@ -143,53 +146,94 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
 
+    # Runde 17 (Nr. 261/263/287): Statuswechsel UND Zusatzfelder (Fotos
+    # leeren, deleted_at, Bestandsfrist) in EINEM Write mit CAS auf den
+    # gelesenen Lifecycle (set_lifecycle extra_set). Vorher gab es einen
+    # Zwischenzustand ("geloescht" mit Fotos, "bestand" ohne Frist), und
+    # ein paralleler Wechsel wurde ueberschrieben. LifecycleError -> 409.
     if body.decision == "loeschen":
-        try:
-            await set_lifecycle(vehicle_id, user["dealer_id"], "geloescht", user=user)
-        except LifecycleError as exc:
-            raise HTTPException(400, str(exc))
         # Fotos sofort räumen — Vertrag, Abholbericht, Historie bleiben.
-        data = v.get("data") or {}
-        for key in ("image_urls", "images", "photos", "pictures"):
-            if data.get(key):
-                data[key] = []
-        await db.vehicles.update_one(
-            {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-            {"$set": {"data": data, "deleted_at": now_iso()}},
-        )
+        # Dotted-Paths statt Ganzobjekt: nichts anderes in data wird angefasst.
+        leeren = {f"data.{key}": [] for key in ("image_urls", "images", "photos", "pictures")}
+        try:
+            await set_lifecycle(vehicle_id, user["dealer_id"], "geloescht", user=user,
+                                extra_set={**leeren, "deleted_at": now_iso()})
+        except LifecycleError as exc:
+            raise HTTPException(409, str(exc))
+        # Runde 17 (Nr. 283): aktive Inserate zum Fahrzeug (Entwurf,
+        # verkaufsbereit, zurueckgezogen ...) enden mit dem Fahrzeug —
+        # vorher blieben sie stehen und liessen sich weiter bearbeiten und
+        # veroeffentlichen, obwohl das Fahrzeug geloescht war.
+        geloeschte_inserate = await _inserate_zum_fahrzeug_schliessen(
+            vehicle_id, user)
         await log_activity(user["dealer_id"], user["id"],
-                           "fahrzeug.entscheidung.geloescht", ref=vehicle_id)
-        return {"ok": True, "lifecycle": "geloescht"}
+                           "fahrzeug.entscheidung.geloescht", ref=vehicle_id,
+                           meta={"inserate_geloescht": geloeschte_inserate})
+        return {"ok": True, "lifecycle": "geloescht",
+                "inserate_geloescht": geloeschte_inserate}
 
     target = "bestand" if body.decision == "bestand" else "verkaufsentwurf"
-    try:
-        await set_lifecycle(vehicle_id, user["dealer_id"], target, user=user)
-    except LifecycleError as exc:
-        raise HTTPException(400, str(exc))
-
-    update: Dict[str, Any] = {}
+    extra: Dict[str, Any] = {}
     if body.decision == "bestand":
         expires = (datetime.now(timezone.utc)
                    + timedelta(days=BESTAND_RETENTION_DAYS)).isoformat()
-        existing_bestand = v.get("bestand") or {}
-        update["bestand"] = {
-            **existing_bestand,
-            "saved_at": now_iso(),
-            "expires_at": expires,
-        }
+        extra["bestand.saved_at"] = now_iso()
+        extra["bestand.expires_at"] = expires
     else:
-        # Weiterverkauf: keine automatische Löschfrist.
-        b = v.get("bestand") or {}
-        b["expires_at"] = None
-        b.setdefault("saved_at", now_iso())
-        update["bestand"] = b
-    if update:
-        await db.vehicles.update_one(
-            {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"$set": update})
+        # Weiterverkauf: keine automatische Löschfrist; saved_at bleibt,
+        # wenn es schon eines gibt.
+        expires = None
+        extra["bestand.expires_at"] = None
+        if not (v.get("bestand") or {}).get("saved_at"):
+            extra["bestand.saved_at"] = now_iso()
+    try:
+        await set_lifecycle(vehicle_id, user["dealer_id"], target, user=user,
+                            extra_set=extra)
+    except LifecycleError as exc:
+        raise HTTPException(409, str(exc))
     await log_activity(user["dealer_id"], user["id"],
                        f"fahrzeug.entscheidung.{body.decision}", ref=vehicle_id)
-    return {"ok": True, "lifecycle": target,
-            "expires_at": update.get("bestand", {}).get("expires_at")}
+    return {"ok": True, "lifecycle": target, "expires_at": expires}
+
+
+async def _inserate_zum_fahrzeug_schliessen(vehicle_id: str, user: Dict[str, Any]) -> List[str]:
+    """Runde 17 (Nr. 283): alle noch aktiven resale_listings des Fahrzeugs
+    (Status nicht verkauft/geloescht) auf "geloescht" setzen, offene
+    Kaufanfragen dazu beenden und je Inserat einen Audit-Eintrag schreiben.
+    Liefert die Inserats-IDs. Wirft nicht — das Fahrzeug ist bereits
+    geloescht, der Aufraeumer (marktplatz_rotieren) raeumt Reste spaeter."""
+    jetzt = now_iso()
+    ids: List[str] = []
+    try:
+        async for l in db.resale_listings.find(
+                {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+                 "status": {"$nin": ["verkauft", "geloescht"]}},
+                {"_id": 0, "id": 1, "status": 1}):
+            res = await db.resale_listings.update_one(
+                {"id": l["id"], "dealer_id": user["dealer_id"],
+                 "status": {"$nin": ["verkauft", "geloescht"]}},
+                {"$set": {"status": "geloescht", "deleted_at": jetzt,
+                          "updated_at": jetzt,
+                          "geloescht_grund": "fahrzeug_geloescht"}})
+            if res.matched_count == 0:
+                continue
+            ids.append(l["id"])
+            try:
+                # Import in der Funktion: resale.py importiert dieses Modul.
+                from routes.resale import _anfragen_schliessen
+                await _anfragen_schliessen(l["id"], "fahrzeug_geloescht",
+                                           auch_akzeptierte=True)
+            except Exception:  # noqa: BLE001
+                logging.getLogger("autohandel").exception(
+                    "Kaufanfragen zu Inserat %s nicht geschlossen", l["id"])
+            await log_activity_sicher(
+                user["dealer_id"], user["id"], "inserat.geloescht", ref=l["id"],
+                meta={"war_status": l.get("status"), "grund": "fahrzeug_geloescht",
+                      "vehicle_id": vehicle_id})
+    except Exception:  # noqa: BLE001
+        logging.getLogger("autohandel").exception(
+            "Inserate zu geloeschtem Fahrzeug %s nicht geschlossen", vehicle_id)
+    return ids
 
 
 @router.put("/vehicles/{vehicle_id}/bestand")
@@ -205,17 +249,27 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
     _abgeschlossen_sperren(
         v, "Fahrzeug ist abgeschlossen — Bestandsdaten sind eingefroren")
     b = v.get("bestand") or {}
+    # Runde 17 (Nr. 275): nur die GESENDETEN Felder per Dotted-Path schreiben
+    # (statt das ganze bestand-Objekt aus dem gelesenen Stand zurueck) — zwei
+    # parallele PUTs (Standort / Kosten) loeschten sich sonst gegenseitig.
+    # Der Write prueft den Lifecycle mit: ein Verkauf zwischen Lesen und
+    # Schreiben wird nicht mehr ueberschrieben (matched 0 -> 409).
+    update: Dict[str, Any] = {"updated_at": now_iso()}
     if body.location is not None:
-        b["location"] = body.location.strip()
+        b["location"] = update["bestand.location"] = body.location.strip()
     if body.notes is not None:
-        b["notes"] = body.notes.strip()
+        b["notes"] = update["bestand.notes"] = body.notes.strip()
     kosten_alt = sum(float(c.get("amount") or 0) for c in (b.get("costs") or [])
                      if isinstance(c, dict) and math.isfinite(float(c.get("amount") or 0)))
     if body.costs is not None:
-        b["costs"] = _clean_costs(body.costs)
-    await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"bestand": b, "updated_at": now_iso()}})
+        b["costs"] = update["bestand.costs"] = _clean_costs(body.costs)
+    res = await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"],
+         "lifecycle": {"$nin": list(_ABGESCHLOSSEN)}},
+        {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich abgeschlossen — "
+                                 "Bestandsdaten sind eingefroren, bitte neu laden")
     # Runde 15 (Nr. 5): Kosten beeinflussen die Marge — wer wann aus 500 EUR
     # Aufbereitung 5.000 gemacht hat, muss nachvollziehbar bleiben.
     felder = [f for f in ("location", "notes", "costs") if getattr(body, f) is not None]
@@ -238,7 +292,9 @@ async def list_bestand(user=Depends(current_firma),
     # Runde 16: Sucher sehen nur eigene Fahrzeuge (owner_user_id).
     query: Dict[str, Any] = {**fahrzeug_bereich(user),
                              "lifecycle": {"$nin": ["geloescht"]}}
-    if lifecycle:
+    # Runde 17 (Nr. 285): ?lifecycle=geloescht hob den Ausschluss auf —
+    # geloeschte Fahrzeuge (Fotos weg, Akte eingefroren) sind hier nie Thema.
+    if lifecycle and lifecycle != "geloescht":
         query["lifecycle"] = lifecycle
     if source in ("plattform", "manuell"):
         query["source"] = source
@@ -278,8 +334,12 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     """Durchgehende Fahrzeugakte: aggregiert alle vorhandenen Informationen
     zu einem Fahrzeug — ohne Datendopplung, direkt aus den Quell-Collections."""
     # Runde 16: die Akte eines Kollegen-Fahrzeugs gibt es fuer Sucher nicht.
+    # Runde 17 (Nr. 285): der Chef sieht die Akte auch nach dem Loeschen
+    # (Historie: Vertrag, Bericht, Audit) — Sucher bleiben beim Standard.
     v = await db.vehicles.find_one(
-        {"id": vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
+        {"id": vehicle_id,
+         **fahrzeug_bereich(user, mit_geloeschten=user.get("role") != "sucher")},
+        {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
 

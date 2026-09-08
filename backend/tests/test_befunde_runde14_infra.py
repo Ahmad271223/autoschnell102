@@ -574,15 +574,27 @@ def prod_umgebung(monkeypatch, tmp_path):
     return monkeypatch
 
 
-@pytest.mark.parametrize("wert", [None, "false", "0"])
+@pytest.mark.parametrize("wert", ["false", "0"])
 def test_97_produktion_warnt_bei_inaktiver_vertragsloeschung(prod_umgebung, wert):
     import production_check
-    if wert is not None:
-        prod_umgebung.setenv("VERTRAG_LOESCHUNG_AKTIV", wert)
+    prod_umgebung.setenv("VERTRAG_LOESCHUNG_AKTIV", wert)
     log = _Protokoll()
     production_check.pruefe_produktion(log)           # kein SystemExit
     hinweise = [t for t in log.texte("warning") if "VERTRAG_LOESCHUNG_AKTIV" in t]
     assert hinweise and "Vorschau" in hinweise[0], log.eintraege
+
+
+def test_97_produktion_bricht_ab_wenn_die_variable_fehlt(prod_umgebung):
+    """Runde 17: FEHLT die Variable ganz, ist das kein bewusster Trockenlauf,
+    sondern vergessen — Produktion startet dann nicht (ausdruecklich false
+    bleibt eine Warnung, siehe oben)."""
+    import production_check
+    prod_umgebung.delenv("VERTRAG_LOESCHUNG_AKTIV", raising=False)
+    log = _Protokoll()
+    with pytest.raises(SystemExit) as e:
+        production_check.pruefe_produktion(log)
+    assert e.value.code == 78
+    assert any("VERTRAG_LOESCHUNG_AKTIV" in t for t in log.texte("error")), log.eintraege
 
 
 def test_97_aktiv_warnt_scharf_und_dev_schweigt(prod_umgebung):

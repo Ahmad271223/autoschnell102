@@ -468,40 +468,96 @@ def ist_sucher(user) -> bool:
     return (user or {}).get("role") == "sucher"
 
 
-def fahrzeug_bereich(user) -> Dict[str, Any]:
-    """Mongo-Filter fuer vehicles: Chef = Firma, Sucher = eigene Fahrzeuge."""
+def fahrzeug_bereich(user, mit_geloeschten: bool = False) -> Dict[str, Any]:
+    """Mongo-Filter fuer vehicles: Chef = Firma, Sucher = eigene Fahrzeuge.
+    Runde 17: geloeschte Fahrzeuge (lifecycle "geloescht") sind fuer die
+    normalen Lese-/Schreibpfade unsichtbar — vorher lieferten /vehicles und
+    /vehicles/{id} "geloeschte" Fahrzeuge weiter aus. Die Akte des Chefs
+    darf sie mit mit_geloeschten=True bewusst noch zeigen (Historie)."""
     bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if ist_sucher(user):
         bereich["owner_user_id"] = user["id"]
+    if not mit_geloeschten:
+        bereich["lifecycle"] = {"$ne": "geloescht"}
     return bereich
 
 
 async def eigene_fahrzeug_ids(user) -> Optional[List[str]]:
-    """IDs der Fahrzeuge im Bereich des Kontos; None = alle (Chef)."""
+    """IDs der Fahrzeuge im Bereich des Kontos (auch geloeschte — Termine
+    und Beweise dazu bleiben im Bereich); None = alle (Chef)."""
     if not ist_sucher(user):
         return None
     return await db.vehicles.distinct(
         "id", {"dealer_id": user["dealer_id"], "owner_user_id": user["id"]})
 
 
-async def fahrzeug_im_bereich(user, vehicle_id: Optional[str]) -> bool:
+async def fahrzeug_im_bereich(user, vehicle_id: Optional[str],
+                              mit_geloeschten: bool = True) -> bool:
     if not vehicle_id:
         return False
     return await db.vehicles.count_documents(
-        {"id": vehicle_id, **fahrzeug_bereich(user)}, limit=1) > 0
+        {"id": vehicle_id, **fahrzeug_bereich(user, mit_geloeschten=mit_geloeschten)},
+        limit=1) > 0
+
+
+# ---------------------------------------------------------------------
+# Runde 17: Datum/Uhrzeit-Pruefung an EINER Stelle (Terminplaner UND
+# Vertragsformular — der Vertragsweg legte den Termin vorher ungeprueft an).
+# ---------------------------------------------------------------------
+_ISO_DATUM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_UHRZEIT_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def datum_iso_pruefen(v):
+    """Leer bleibt leer; sonst JJJJ-MM-TT und ein echtes Kalenderdatum."""
+    if v is None:
+        return v
+    s = str(v).strip()
+    if not s:
+        return ""
+    if not _ISO_DATUM_RE.match(s):
+        raise ValueError("Datum bitte als JJJJ-MM-TT angeben")
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Kein gueltiges Kalenderdatum")
+    return s
+
+
+def uhrzeit_hhmm_pruefen(v):
+    """Leer bleibt leer; sonst HH:MM (00:00 bis 23:59)."""
+    if v is None:
+        return v
+    s = str(v).strip()
+    if not s:
+        return ""
+    if not _UHRZEIT_RE.match(s):
+        raise ValueError("Uhrzeit bitte als HH:MM angeben")
+    return s
+
+
+# Runde 17 (Uebergabe-Regel): Das FAHRZEUG ist der Anker. Haengt ein Termin
+# (ebenso Bericht, Protokoll, Snapshot) an einem Fahrzeug, sieht ihn der
+# Sucher genau dann, wenn ihm das Fahrzeug gehoert — nach einer Uebergabe
+# durch den Chef (PUT /vehicles/{id}/besitzer) verliert der bisherige
+# Bearbeiter den Zugriff vollstaendig, auch auf Termine, die er selbst
+# angelegt hat oder deren Vertrag ihm gehoert. Nur Termine OHNE Fahrzeug
+# haengen weiter am Ersteller bzw. am eigenen Vertrag. Vertraege selbst
+# bleiben beim Ersteller (_vertrag_bereich, Produktregel).
+_OHNE_FAHRZEUG = {"$in": [None, ""]}
 
 
 async def termin_bereich(user) -> Dict[str, Any]:
-    """Mongo-Filter fuer appointments: Chef = Firma; Sucher = selbst angelegt
-    ODER eigenes Fahrzeug ODER eigener Vertrag."""
+    """Mongo-Filter fuer appointments: Chef = Firma; Sucher = eigenes
+    Fahrzeug, oder (ohne Fahrzeug) selbst angelegt / eigener Vertrag."""
     q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if ist_sucher(user):
         vids = await eigene_fahrzeug_ids(user) or []
         cids = await db.generated_pdfs.distinct(
             "id", {"dealer_id": user["dealer_id"], "user_id": user["id"]})
-        q["$or"] = [{"created_by": user["id"]},
-                    {"vehicle_id": {"$in": vids}},
-                    {"contract_id": {"$in": cids}}]
+        q["$or"] = [{"vehicle_id": {"$in": vids}},
+                    {"vehicle_id": _OHNE_FAHRZEUG, "created_by": user["id"]},
+                    {"vehicle_id": _OHNE_FAHRZEUG, "contract_id": {"$in": cids}}]
     return q
 
 
@@ -510,13 +566,13 @@ async def termin_im_bereich(user, appt: dict) -> bool:
     vehicle_id) — dieselbe Regel wie termin_bereich."""
     if not ist_sucher(user):
         return True
+    if appt.get("vehicle_id"):
+        return await fahrzeug_im_bereich(user, appt.get("vehicle_id"))
     if appt.get("created_by") == user["id"]:
         return True
     cid = appt.get("contract_id")
-    if cid and await db.generated_pdfs.count_documents(
-            {"id": cid, "user_id": user["id"]}, limit=1):
-        return True
-    return await fahrzeug_im_bereich(user, appt.get("vehicle_id"))
+    return bool(cid) and await db.generated_pdfs.count_documents(
+        {"id": cid, "user_id": user["id"]}, limit=1) > 0
 
 
 async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:
@@ -556,3 +612,21 @@ async def log_activity(dealer_id: str, user_id: str, action: str,
         "action": action, "ref": ref, "meta": meta or {},
         "created_at": now_iso(),
     })
+
+
+async def log_activity_sicher(dealer_id: str, user_id: str, action: str,
+                              ref: Optional[str] = None,
+                              meta: Optional[dict] = None) -> bool:
+    """Runde 17: Audit NACH einem bereits dauerhaften Schritt (Inserat
+    veroeffentlicht, Fahrzeug verkauft, Vertrag gespeichert) darf den
+    Vorgang nicht mehr mit 500 abbrechen lassen — der Client wuerde
+    wiederholen, der Zustand ist aber schon geschrieben. Wirft nie; liefert
+    False, wenn der Eintrag nicht gespeichert werden konnte (dann steht es
+    im Fehlerlog)."""
+    try:
+        await log_activity(dealer_id, user_id, action, ref=ref, meta=meta)
+        return True
+    except Exception:
+        logging.getLogger("autohandel").exception(
+            "Audit-Eintrag %s (%s) konnte nicht gespeichert werden", action, ref)
+        return False

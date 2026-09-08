@@ -304,17 +304,30 @@ async def get_sale_plan_status(dealer_id: str) -> dict:
     if valid_until:
         try:
             vu = datetime.fromisoformat(valid_until)
-            if vu.tzinfo is None:
-                vu = vu.replace(tzinfo=timezone.utc)
-            if vu < datetime.now(timezone.utc):
-                return {"active": False, "expired": True, "tier": tier,
-                        "label": meta.get("label", tier),
-                        "valid_until": valid_until,
-                        "quota": 0, "used": 0, "remaining": 0,
-                        "period_start": None, "period_end": None,
-                        "plans": SALE_PLANS}
         except (TypeError, ValueError):
-            pass
+            # Runde 17 (Nr. 387): ein unlesbares Ablaufdatum galt bisher
+            # still als "unbefristet" (except: pass) — das Paket lief
+            # unbegrenzt weiter. Jetzt fail-closed wie bei period_start:
+            # Paket ungueltig, kein Publish, Betreiber repariert. Der
+            # Admin-Verlaengerungspfad (routes/admin.py) rechnet mit
+            # seinem eigenen Parser und bleibt unberuehrt.
+            log.error("Verkaufspaket %s: valid_until %r unlesbar -> ungueltig",
+                      dealer_id, valid_until)
+            return {"active": False, "tier": tier, "label": meta.get("label", tier),
+                    "fehler": "Paketlaufzeit ungueltig — bitte den Betreiber "
+                              "kontaktieren",
+                    "quota": 0, "used": 0, "remaining": 0,
+                    "period_start": None, "period_end": None,
+                    "valid_until": valid_until, "plans": SALE_PLANS}
+        if vu.tzinfo is None:
+            vu = vu.replace(tzinfo=timezone.utc)
+        if vu < datetime.now(timezone.utc):
+            return {"active": False, "expired": True, "tier": tier,
+                    "label": meta.get("label", tier),
+                    "valid_until": valid_until,
+                    "quota": 0, "used": 0, "remaining": 0,
+                    "period_start": None, "period_end": None,
+                    "plans": SALE_PLANS}
     quota = plan.get("custom_quota") or meta.get("quota") or 0
     try:
         period_key, p_start, p_end = _current_period(plan.get("period_start"))
@@ -404,6 +417,11 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
         {"wanted_tier": body.wanted_tier, "message": body.message,
          "updated_at": now_iso()})
     if not neu:
+        # Runde 17 (Nr. 376): der Upsert aendert den Wunsch der offenen
+        # Anfrage — vorher ohne Audit-Spur (nur das Anlegen war geloggt).
+        await log_activity(user["dealer_id"], user["id"],
+                           "verkaufsplan.anfrage.geaendert", ref=doc["id"],
+                           meta={"wunsch": body.wanted_tier})
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Eine Anfrage liegt bereits beim Administrator."}
     await log_activity(user["dealer_id"], user["id"], "verkaufsplan.anfrage",
@@ -457,6 +475,11 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
                                  "aus einer früheren Firmenzuordnung vor — bitte "
                                  "den Betreiber kontaktieren.")
     if not neu:
+        # Runde 17 (Nr. 376): geaenderter Wunsch an der offenen Anfrage
+        # bekommt eine Audit-Spur.
+        await log_activity(user["dealer_id"], user["id"],
+                           "abo.anfrage.selbst.geaendert", ref=doc["id"],
+                           meta={"plan": plan})
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Deine Anfrage liegt bereits beim Betreiber."}
     await log_activity(user["dealer_id"], user["id"], "abo.anfrage.selbst",
@@ -494,21 +517,37 @@ async def sucher_abo_request(sucher_id: str, body: dict = Body(default={}),
                                  "aktivieren, dann Abo anfragen")
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     req_id = str(uuid.uuid4())
-    doc, neu = await _offene_anfrage_upsert(
-        {"type": "sucher_abo", "subject_user_id": sucher_id, "status": "offen"},
-        {"id": req_id,
-         "dealer_id": user["dealer_id"],
-         "sucher_name": f"{sucher.get('first_name','')} {sucher.get('last_name','')}".strip(),
-         "sucher_email": sucher.get("email", ""),
-         "company_name": (dealer or {}).get("company_name", ""),
-         "contact_email": user.get("email", ""),
-         "contact_phone": (dealer or {}).get("phone", ""),
-         "created_at": now_iso()},
-        {"wanted": SUCHER_PLANS[plan]["label"],
-         "wanted_plan": plan,
-         "price": SUCHER_PLANS[plan]["price"],
-         "updated_at": now_iso()})
+    # Runde 17 (Nr. 375): dealer_id gehoert in den Schluessel (wie bei der
+    # eigenen Anfrage, Runde 15 Nr. 3) — vorher traf der Upsert eine offene
+    # Altanfrage des Suchers unter einer FRUEHEREN Firma und schrieb den
+    # Wunsch des neuen Chefs hinein (Anfrage blieb der alten Firma
+    # zugeordnet). Jetzt: 409, der Teil-Unique-Index laesst nur EINE offene
+    # Anfrage je Sucher zu, der Betreiber raeumt die alte weg.
+    try:
+        doc, neu = await _offene_anfrage_upsert(
+            {"type": "sucher_abo", "subject_user_id": sucher_id,
+             "dealer_id": user["dealer_id"], "status": "offen"},
+            {"id": req_id,
+             "sucher_name": f"{sucher.get('first_name','')} {sucher.get('last_name','')}".strip(),
+             "sucher_email": sucher.get("email", ""),
+             "company_name": (dealer or {}).get("company_name", ""),
+             "contact_email": user.get("email", ""),
+             "contact_phone": (dealer or {}).get("phone", ""),
+             "created_at": now_iso()},
+            {"wanted": SUCHER_PLANS[plan]["label"],
+             "wanted_plan": plan,
+             "price": SUCHER_PLANS[plan]["price"],
+             "updated_at": now_iso()})
+    except DuplicateKeyError:
+        raise HTTPException(409, "Für diesen Sucher liegt noch eine offene Anfrage "
+                                 "aus einer früheren Firmenzuordnung vor — bitte "
+                                 "den Betreiber kontaktieren.")
     if not neu:
+        # Runde 17 (Nr. 376): geaenderter Wunsch an der offenen Anfrage
+        # bekommt eine Audit-Spur.
+        await log_activity(user["dealer_id"], user["id"],
+                           "sucher.abo.anfrage.geaendert", ref=doc["id"],
+                           meta={"sucher": sucher_id, "plan": plan})
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Eine Anfrage fuer diesen Sucher liegt bereits beim "
                            "Administrator."}

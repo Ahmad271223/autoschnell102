@@ -120,8 +120,13 @@ def test_01_bereichsfilter_chef_firma_sucher_eigene():
     D = _module("deps")
     chef = {"id": "c", "dealer_id": "d", "role": "dealer"}
     su = {"id": "s", "dealer_id": "d", "role": "sucher"}
-    assert D.fahrzeug_bereich(chef) == {"dealer_id": "d"}
-    assert D.fahrzeug_bereich(su) == {"dealer_id": "d", "owner_user_id": "s"}
+    # Runde 17 (Nr. 285): geloeschte Fahrzeuge sind im Standardbereich unsichtbar,
+    # nur mit_geloeschten=True (Chef-Akte) bleibt der reine Firmen-/Besitzerfilter.
+    weg = {"lifecycle": {"$ne": "geloescht"}}
+    assert D.fahrzeug_bereich(chef) == {"dealer_id": "d", **weg}
+    assert D.fahrzeug_bereich(su) == {"dealer_id": "d", "owner_user_id": "s", **weg}
+    assert D.fahrzeug_bereich(chef, mit_geloeschten=True) == {"dealer_id": "d"}
+    assert D.fahrzeug_bereich(su, mit_geloeschten=True) == {"dealer_id": "d", "owner_user_id": "s"}
 
 
 def test_02_fahrzeuge_liste_und_detail_je_rolle(welt):
@@ -302,7 +307,10 @@ def test_07_snapshots_nur_eigene_eigenes_fahrzeug_oder_eigener_vertrag(welt):
         return a, chef, ok, e.value.status_code, chef_ok
 
     a, chef, ok, status, chef_ok = welt.run(lauf())
-    assert {s["id"] for s in a} == {f"s_eigen{w.s}", f"s_fzg{w.s}", f"s_vertrag{w.s}"}
+    # Runde 17 (Uebergabe-Regel): das Fahrzeug ist der Anker — s_eigen (selbst
+    # erzeugt, fremdes Fahrzeug) und s_vertrag (eigener Vertrag, Fahrzeug
+    # nicht im Bereich) sind fuer den Sucher NICHT mehr sichtbar.
+    assert {s["id"] for s in a} == {f"s_fzg{w.s}"}
     assert len(chef) == 4
     assert ok["id"] == f"s_fzg{w.s}" and status == 404 and chef_ok["id"] == f"s_chef{w.s}"
 

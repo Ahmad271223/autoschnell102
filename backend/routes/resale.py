@@ -8,6 +8,7 @@ pro Inserat nur einmal je Abrechnungszeitraum — `counted_periods`).
 Fahrzeugakte dürfen ein bestehendes Inserat nicht unbemerkt verändern.
 """
 import base64
+import logging
 import uuid
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
@@ -16,12 +17,17 @@ from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
-from deps import clean_doc, current_user, db, log_activity, now_iso
+from deps import (clean_doc, current_user, db, log_activity, log_activity_sicher,
+                  now_iso)
 from lifecycle import (ALLOWED_TRANSITIONS, LifecycleError, set_lifecycle,
                        try_set_lifecycle)
 from routes.bestand import current_haendler, _clean_costs
 
+log = logging.getLogger("autohandel")
 router = APIRouter()
+# Runde 17 (Nr. 289): create_draft nutzt set_lifecycle; die Best-effort-
+# Variante bleibt am Modul verfuegbar (Aufrufer/Tests patchen den Namen).
+_LIFECYCLE_BEST_EFFORT = try_set_lifecycle
 
 # Nachpruefung Runde 14 (Nr. 28/29/67/89/90): verkaufte und geloeschte
 # Inserate sind abgeschlossen — keine Bearbeitung, keine Fotos rein/raus.
@@ -46,12 +52,17 @@ _B64_MAX_LEN = 12_000_000
 class ListingUpdateIn(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=30000)
-    known_defects: Optional[List[str]] = Field(default=None, max_length=50)
+    # Runde 17 (Nr. 336/337): Einzelmangel und Kostenliste schon in der
+    # Validierung gedeckelt — vorher lief ein Megabyte-String je Mangel bis
+    # zum Kuerzen auf 300 Zeichen durch, die Kosten wurden erst in
+    # _clean_costs auf 30 geschnitten.
+    known_defects: Optional[List[Annotated[str, StringConstraints(max_length=300)]]] = \
+        Field(default=None, max_length=50)
     photo_mode: Optional[Literal["einkauf", "neu", "beide"]] = None
     price_public: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     price_b2b: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     price_network: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
-    costs: Optional[List[Dict[str, Any]]] = None
+    costs: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=30)
     data: Optional[Dict[str, Any]] = None  # korrigierte Fahrzeugdaten
 
 
@@ -276,6 +287,11 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
                                   "verkaufsentwurf", "verkaufsbereit"):
         raise HTTPException(400, "Fahrzeug ist nicht im verkaufsfähigen Zustand "
                                  f"(Status: {v.get('lifecycle')})")
+    # Runde 17 (Nr. 289): den Weg zum Fahrzeugstatus "verkaufsentwurf" VOR
+    # dem Insert pruefen (409 statt Entwurf ohne passendes Fahrzeug) — wie
+    # in publish_listing. Vorher schluckte try_set_lifecycle den Fehler.
+    pfad = await _lifecycle_pfad_oder_409(vehicle_id, user["dealer_id"],
+                                          "verkaufsentwurf")
 
     data = dict(v.get("data") or {})
 
@@ -340,8 +356,15 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         "created_at": now_iso(), "updated_at": now_iso(),
     }
     await db.resale_listings.insert_one(listing)
-    await try_set_lifecycle(vehicle_id, user["dealer_id"], "verkaufsentwurf",
-                            user=user)
+    # Runde 17 (Nr. 289): set_lifecycle statt try_ — ein Rennen am Fahrzeug
+    # (zwischenzeitlich verkauft/geloescht) nimmt den Entwurf zurueck und
+    # wird als 409 sichtbar, statt einen Entwurf ohne Fahrzeugbezug zu lassen.
+    try:
+        await _lifecycle_anwenden(vehicle_id, user["dealer_id"], pfad, user)
+    except LifecycleError as exc:
+        await db.resale_listings.delete_one({"id": listing["id"], "status": "entwurf"})
+        raise HTTPException(409, "Fahrzeugstatus passt nicht zum Inserat: "
+                                 f"{exc}")
     await log_activity(user["dealer_id"], user["id"], "inserat.entwurf",
                        ref=listing["id"], meta={"vehicle_id": vehicle_id})
     return _with_margin(clean_doc(listing))
@@ -899,10 +922,13 @@ async def publish_listing(listing_id: str, body: PublishIn,
                 await _kontingent_zurueckgeben()
                 raise HTTPException(409, "Fahrzeugstatus passt nicht zum "
                                          f"Inserat: {exc}")
-        await log_activity(user["dealer_id"], user["id"], "inserat.veroeffentlicht",
-                           ref=listing_id,
-                           meta={"sichtbarkeit": body.visibility,
-                                 "kontingent": f"{plan.get('used', 0) + (0 if already else 1)}/{plan.get('quota')}"})
+        # Runde 17 (Nr. 398): Inserat ist live und gezaehlt — ein Fehler
+        # beim Audit darf daraus keinen 500 (und keinen Client-Retry) machen.
+        await log_activity_sicher(
+            user["dealer_id"], user["id"], "inserat.veroeffentlicht",
+            ref=listing_id,
+            meta={"sichtbarkeit": body.visibility,
+                  "kontingent": f"{plan.get('used', 0) + (0 if already else 1)}/{plan.get('quota')}"})
         return {"ok": True, "status": "veroeffentlicht",
                 "visibility": body.visibility}
     finally:
@@ -932,6 +958,15 @@ async def set_listing_status(listing_id: str, body: ListingStatusIn,
         raise HTTPException(404, "Inserat nicht gefunden")
     current = l.get("status")
     new = body.status
+    if current == new:
+        # Runde 17 (Nr. 399): Doppelklick / Client-Retry nach erfolgreichem
+        # Wechsel ist kein Fehler (vorher 400 "nicht erlaubt", obwohl der
+        # Zustand laengst geschrieben war). Anfragen idempotent nachziehen.
+        try:
+            await _anfragen_nach_wechsel(listing_id, new=new, war_reserviert=False)
+        except Exception:  # noqa: BLE001
+            log.exception("Kaufanfragen zu Inserat %s nicht geschlossen", listing_id)
+        return {"ok": True, "status": new, "bereits": True}
     allowed = {
         "entwurf": {"verkaufsbereit"},
         "verkaufsbereit": {"entwurf", "reserviert", "verkauft", "zurueckgezogen"},
@@ -988,27 +1023,47 @@ async def set_listing_status(listing_id: str, body: ListingStatusIn,
         try:
             await _lifecycle_anwenden(vehicle_id, user["dealer_id"], pfad, user)
         except LifecycleError as exc:
-            # Rennen am Fahrzeug: Inserat auf den alten Status zuruecksetzen
-            # (reserved_for laesst sich nicht wiederherstellen — Hinweis im 409).
+            # Rennen am Fahrzeug: Inserat auf den alten Status zuruecksetzen.
+            # Runde 17 (Nr. 290): auch reserved_for aus dem gelesenen Stand
+            # wiederherstellen — vorher verlor der Kaeufer seine Reservierung.
+            zurueck: Dict[str, Any] = {"status": current, "updated_at": now_iso()}
+            if current == "reserviert" and l.get("reserved_for"):
+                zurueck["reserved_for"] = l["reserved_for"]
             await db.resale_listings.update_one(
                 {"id": listing_id, "dealer_id": user["dealer_id"], "status": new},
-                {"$set": {"status": current, "updated_at": now_iso()},
+                {"$set": zurueck,
                  "$unset": {"sold_at": "", "sold_price": "",
                             "sold_to_user_id": ""}})
             raise HTTPException(409, "Fahrzeugstatus passt nicht zum Inserat: "
                                      f"{exc}")
 
     # Nachpruefung Runde 14 (Nr. 54/26): Kaufanfragen mit dem Inserat
-    # abschliessen. Beim Verkauf bleibt eine akzeptierte Anfrage (der
-    # Kaeufer) stehen, alle offenen Verhandlungen enden; beim Aufheben einer
-    # Reservierung endet auch die akzeptierte.
+    # abschliessen. Runde 17 (Nr. 399): Inserat und Fahrzeug sind bereits
+    # geschrieben — Folgeschritte (Anfragen, Audit) duerfen den Vorgang nicht
+    # mehr mit 500 abbrechen lassen; Fehler landen im Log.
+    try:
+        await _anfragen_nach_wechsel(listing_id, new=new,
+                                     war_reserviert=(current == "reserviert"))
+    except Exception:  # noqa: BLE001
+        log.exception("Kaufanfragen zu Inserat %s nach '%s' nicht geschlossen",
+                      listing_id, new)
+    try:
+        await log_activity(user["dealer_id"], user["id"], f"inserat.{new}",
+                           ref=listing_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Audit-Eintrag inserat.%s (%s) nicht gespeichert", new, listing_id)
+    return {"ok": True, "status": new}
+
+
+async def _anfragen_nach_wechsel(listing_id: str, *, new: str,
+                                 war_reserviert: bool) -> None:
+    """Beim Verkauf bleibt eine akzeptierte Anfrage (der Kaeufer) stehen,
+    alle offenen Verhandlungen enden; beim Aufheben einer Reservierung endet
+    auch die akzeptierte. Idempotent (update_many auf offene Stati)."""
     if new == "verkauft":
         await _anfragen_schliessen(listing_id, "inserat_verkauft")
-    elif current == "reserviert":
+    elif war_reserviert:
         await _anfragen_schliessen(listing_id, "reservierung_aufgehoben",
                                    auch_akzeptierte=True)
     elif new in ("zurueckgezogen", "entwurf"):
         await _anfragen_schliessen(listing_id, f"inserat_{new}")
-    await log_activity(user["dealer_id"], user["id"], f"inserat.{new}",
-                       ref=listing_id)
-    return {"ok": True, "status": new}

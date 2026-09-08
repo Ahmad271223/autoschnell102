@@ -42,6 +42,13 @@ def test_lb_vorlage_hat_drain_marker_in_beiden_health_locations():
         for zeile in text.splitlines():
             if "add_header Cache-Control" in zeile and "max-age=31536000" in zeile:
                 assert "always" not in zeile, zeile
+        # 08.09.2026: waehrend eines Rollouts Server fuer Server kennt der alte
+        # Server das neue Bundle nicht -> 404; Cloudflare cacht 404 drei
+        # Minuten. Die 404 muss deshalb "no-store" tragen, die 200 nicht.
+        assert "proxy_intercept_errors on;" in text and "error_page 404 = @static_fehlt;" in text
+        i = text.index("location @static_fehlt {")
+        assert "add_header Cache-Control \"no-store\" always;" in text[i:i + 200]
+        assert "return 404;" in text[i:i + 200]
     compose = (WURZEL / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./deploy/drain:/etc/nginx/drain:ro" in compose, "Host-Marker muss eingehaengt sein"
     assert (WURZEL / "deploy" / "drain" / ".gitkeep").exists()

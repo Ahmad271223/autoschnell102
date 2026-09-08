@@ -441,7 +441,8 @@ def test_u_66_verwaistes_mitglied_ehrlich_gemeldet(welt_unit):
         {"dealer_id": w["did"], "buyer_user_id": weg, "created_at": _jetzt(-2)},
         {"dealer_id": w["did"], "buyer_user_id": w["k_id"], "created_at": _jetzt(-1)},
     ])
-    out = asyncio.run(m.list_network_members(user=w["chef"]))
+    from fastapi import Response   # Runde 17 (Nr. 386): Response-Parameter
+    out = asyncio.run(m.list_network_members(Response(), user=w["chef"]))
     je = {e["buyer_user_id"]: e for e in out}
     assert je[weg]["active"] is False and je[weg]["fehlt"] is True
     assert je[weg]["email"] == "" and je[weg]["company_name"] == ""

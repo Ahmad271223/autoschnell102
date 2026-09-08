@@ -1,18 +1,18 @@
 """Appointment endpoints: CRUD + pickup-order.pdf."""
 import asyncio
 import logging
-import re
 import uuid
-from datetime import date, datetime
-from typing import Any, Dict, Literal, Optional
+from datetime import datetime
+from typing import Any, Dict, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from pymongo.errors import DuplicateKeyError
 
-from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, db, fahrzeug_bereich,
-                  log_activity, now_iso, current_firma, termin_bereich, termin_im_bereich)
+from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, datum_iso_pruefen, db,
+                  fahrzeug_bereich, log_activity, now_iso, current_firma, termin_bereich,
+                  termin_im_bereich, uhrzeit_hhmm_pruefen)
 from lifecycle import try_set_lifecycle
 
 log = logging.getLogger("autohandel")
@@ -23,11 +23,32 @@ router = APIRouter()
 # Termine.jsx). Nachpruefung Runde 14: Grundlage fuer die Chef-Sperre bei
 # nachtraeglichen Aenderungen (Nr. 99/98) und die Aufraeumfrist (Nr. 114).
 ABGESCHLOSSEN = frozenset({"abgeholt", "nicht abgeholt", "storniert", "erledigt"})
-_ISO_DATUM = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_UHRZEIT = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+# Runde 17 (Nr. 4): Hinweis, wenn der Kaufvertrag nach einer Terminaenderung
+# NICHT neu erzeugt werden konnte (z.B. Vertrag ausserhalb des Bereichs des
+# Sucher-Kontos, PDF-Fehler). Termine.jsx zeigt data.hinweis als Warnung.
+VERTRAG_VERALTET_HINWEIS = ("Termin gespeichert — der Kaufvertrag zeigt noch den "
+                            "alten Abholtermin, bitte erneut speichern")
+# Runde 17 (Nr. 2): Steuerflags im Eingabemodell, die NICHT in der Datenbank
+# landen (siehe AppointmentIn.contract_loesen / fahrzeug_loesen).
+_STEUERFELDER = frozenset({"contract_loesen", "fahrzeug_loesen"})
 
 
 class AppointmentIn(BaseModel):
+    """Eingabe fuer POST/PUT /appointments.
+
+    Runde 17 (Nr. 2): Leere ID-Strings ("" oder nur Leerzeichen) fuer
+    vehicle_id, contract_id und driver_id werden VOR der Validierung zu None
+    — ein leeres Auswahlfeld der Oberflaeche ist kein Verweis auf "nichts".
+    Weil None beim Aendern (PUT) als "nicht gesendet" verworfen wird, gibt
+    es fuer das BEWUSSTE Loesen zwei Schalter:
+      * contract_loesen=True  -> der Vertrag wird vom Termin getrennt; der
+        alte Vertrag verliert seinen Terminverweis (Status "Termin erstellt"
+        faellt auf "erstellt" zurueck).
+      * fahrzeug_loesen=True  -> das Fahrzeug wird vom Termin getrennt (ohne
+        Nebenwirkung auf dessen Lebenszyklus).
+    Beide Schalter sind reine Steuerfelder und werden nie gespeichert.
+    """
     title: Optional[str] = None
     vehicle_id: Optional[str] = None
     contract_id: Optional[str] = None
@@ -44,8 +65,21 @@ class AppointmentIn(BaseModel):
         "verschoben", "erledigt",       # Oberflaeche bietet beide an (09/2026)
     ]] = "offen"
     notes: Optional[str] = ""
-    final_price: Optional[float] = None
-    extra_costs: Optional[float] = None
+    # Runde 17 (Nr. 1): keine negativen Betraege, kein inf/nan (Mongo
+    # speichert NaN, die Oberflaeche rechnet damit weiter).
+    final_price: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    extra_costs: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    # Runde 17 (Nr. 2): Steuerfelder, nur beim PUT ausgewertet (s. Docstring).
+    contract_loesen: bool = False
+    fahrzeug_loesen: bool = False
+
+    # Runde 17 (Nr. 2): leerer/whitespace-String bei ID-Feldern -> None.
+    @field_validator("vehicle_id", "contract_id", "driver_id", mode="before")
+    @classmethod
+    def _leere_id_ist_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     # DoS-Schutz: Termin-Felder fliessen ins Abhol-PDF (ReportLab). Cap:
     # notes als Freitext 20.000, alle uebrigen Felder (enge Zellen) 500.
@@ -63,29 +97,81 @@ class AppointmentIn(BaseModel):
     # durch — der Aufraeumer vergleicht pickup_date als Text, ein deutsches
     # Datum ("01.09.2026") galt dort als uralt (verfruehte Loeschung),
     # "zzzz" als ewig jung (nie geloescht). Leer bleibt erlaubt.
+    # Runde 17 (Nr. 13): Pruefung zentral in deps (dieselbe Regel wie beim
+    # Vertragsformular), Verhalten unveraendert.
     @field_validator("pickup_date")
     @classmethod
     def _datum_iso(cls, v):
-        if v is None or not v.strip():
-            return v
-        v = v.strip()
-        if not _ISO_DATUM.match(v):
-            raise ValueError("Abholdatum bitte als JJJJ-MM-TT angeben")
-        try:
-            date.fromisoformat(v)
-        except ValueError:
-            raise ValueError("Abholdatum ist kein gueltiges Datum")
-        return v
+        return datum_iso_pruefen(v)
 
     @field_validator("pickup_time")
     @classmethod
     def _uhrzeit_hhmm(cls, v):
-        if v is None or not v.strip():
-            return v
-        v = v.strip()
-        if not _UHRZEIT.match(v):
-            raise ValueError("Abholzeit bitte als HH:MM angeben")
-        return v
+        return uhrzeit_hhmm_pruefen(v)
+
+
+def zusage_zuruecksetzen_wenn_geaendert(existing: dict, neu: dict) -> Tuple[dict, dict]:
+    """Runde 17 (Nr. 5): Hat der Fahrer die Fahrt bereits ANGENOMMEN und
+    aendert sich etwas Wesentliches (Datum, Uhrzeit, Abholadresse), gilt die
+    alte Zusage nicht mehr — er muss die geaenderte Fahrt neu bestaetigen.
+
+    Liefert ($set-Felder, $unset-Felder). Verglichen werden nur Felder, die
+    in `neu` vorhanden sind (Teilaenderungen); leer und fehlend gelten als
+    gleich. Wird auch aus routes/contracts.py benutzt (Vertrag verschiebt
+    den Abholtermin), damit die Regel an genau EINER Stelle steht."""
+    if existing.get("zuteilung") != "angenommen":
+        return {}, {}
+    geaendert = any(
+        f in neu and (neu.get(f) or "") != (existing.get(f) or "")
+        for f in ("pickup_date", "pickup_time", "pickup_address"))
+    if not geaendert:
+        return {}, {}
+    return ({"zuteilung": "offen", "zuteilung_am": now_iso(),
+             "zuteilung_neu_wegen_aenderung": True},
+            {"zuteilung_beantwortet_am": ""})
+
+
+async def _vertragszeiger_abgleichen(dealer_id: str, appt_id: str,
+                                     contract_id: Optional[str]) -> None:
+    """Runde 17 (Nr. 3): Vertragsverweise IDEMPOTENT aus dem Termin ableiten
+    — bei jedem PUT, nicht nur beim erkannten Wechsel. Vorher blieb ein
+    Verweis haengen, wenn der Wechsel-Write durchging, das Nachziehen aber
+    abbrach (Neustart, Fehler) — der alte Vertrag zeigte weiter auf den
+    Termin, SendDialog legte einen zweiten an.
+
+      * Vertraege, die auf den Termin zeigen, aber nicht (mehr) SEIN Vertrag
+        sind, verlieren den Verweis; nur ein "Termin erstellt" faellt dabei
+        auf "erstellt" zurueck (andere Stati, z.B. gesendet, bleiben).
+      * Der Vertrag des Termins zeigt auf den Termin (Status "Termin
+        erstellt") — nur geschrieben, wenn er es noch nicht tut.
+    Index (dealer_id, appointment_id) existiert (server.py)."""
+    fremd: Dict[str, Any] = {"dealer_id": dealer_id, "appointment_id": appt_id}
+    if contract_id:
+        fremd["id"] = {"$ne": contract_id}
+    await db.generated_pdfs.update_many(
+        {**fremd, "status": "Termin erstellt"},
+        {"$set": {"appointment_id": None, "status": "erstellt"}})
+    await db.generated_pdfs.update_many(
+        fremd, {"$set": {"appointment_id": None}})
+    if contract_id:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, "dealer_id": dealer_id,
+             "appointment_id": {"$ne": appt_id}},
+            {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}})
+
+
+async def _vertrag_zeigt_termin(dealer_id: str, contract_id: str,
+                                pickup_date, pickup_time) -> bool:
+    """Runde 17 (Nr. 4): Steht im Vertrag bereits der wirksame Abholtermin?
+    (Dann war ein 'False' von regenerate_contract_for_pickup kein Fehler,
+    sondern 'nichts zu tun'.)"""
+    c = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": dealer_id},
+        {"_id": 0, "pickup_date": 1, "pickup_time": 1})
+    if not c:
+        return False
+    return ((c.get("pickup_date") or "") == (pickup_date or "")
+            and (c.get("pickup_time") or "") == (pickup_time or ""))
 
 
 async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
@@ -160,13 +246,19 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
             {"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
         if not vehicle_doc:
             raise HTTPException(404, "Fahrzeug nicht gefunden")
+    vertrag_doc = None
     if body.contract_id:
         # Runde 12: der Vertrag muss im BEREICH des Kontos liegen (Sucher:
         # nur eigene). Vorher genuegte die Firma — ein Sucher konnte seinen
         # Termin an den Vertrag eines Kollegen haengen.
         from routes.contracts import _vertrag_bereich
-        if not await db.generated_pdfs.find_one(
-                {"id": body.contract_id, **_vertrag_bereich(user)}, {"_id": 1}):
+        # Projektion MIT id: ein Vertrag ohne Verkaeuferfelder kaeme sonst als
+        # leeres Dict zurueck und gaelte faelschlich als "nicht gefunden".
+        vertrag_doc = await db.generated_pdfs.find_one(
+            {"id": body.contract_id, **_vertrag_bereich(user)},
+            {"_id": 0, "id": 1, "seller_name": 1, "seller_phone": 1, "seller_email": 1,
+             "contract_data": 1})
+        if vertrag_doc is None:
             raise HTTPException(404, "Vertrag nicht gefunden")
     await _fahrer_pruefen(user["dealer_id"], body.driver_id)
     # Runde 15 (Nr. 6): ein offener Abholtermin je Fahrzeug. Vorabpruefung
@@ -178,11 +270,21 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         d = vehicle_doc["data"]
         title = f"{d.get('make_label','')} {d.get('model_label','')} abholen".strip()
     doc = {"id": appt_id, "dealer_id": user["dealer_id"], "title": title,
-           **body.model_dump(exclude_none=True),
+           **body.model_dump(exclude_none=True, exclude=set(_STEUERFELDER)),
            "created_by": user["id"],
            "created_at": now_iso(), "updated_at": now_iso()}
     if "status" not in doc:
         doc["status"] = "offen"
+    if vertrag_doc:
+        # Runde 17 (Nr. 12): leere Verkaeuferfelder aus dem Vertrag fuellen
+        # (Abholauftrag und Protokoll lesen sie vom Termin). Abweichende,
+        # bewusst gesendete Werte bleiben erhalten — kein Fehler.
+        cd = vertrag_doc.get("contract_data") or {}
+        for feld in ("seller_name", "seller_phone", "seller_email"):
+            if not (doc.get(feld) or "").strip():
+                wert = vertrag_doc.get(feld) or cd.get(feld) or ""
+                if wert:
+                    doc[feld] = str(wert)[:500]
     if doc.get("driver_id"):
         # Wunsch 09/2026: der Fahrer bekommt die Fahrt ZUGETEILT und nimmt
         # sie in seiner App an oder lehnt sie ab.
@@ -325,6 +427,9 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # eine Teilaenderung (z.B. nur driver_id) Verkaeuferdaten, Adresse,
     # Datum, Uhrzeit und Notizen geleert und den Status zurueckgesetzt hat.
     update = body.model_dump(exclude_unset=True)
+    # Runde 17 (Nr. 2): Steuerfelder herausloesen — sie werden nie gespeichert.
+    contract_loesen = bool(update.pop("contract_loesen", False))
+    fahrzeug_loesen = bool(update.pop("fahrzeug_loesen", False))
     # Ein ausdruecklich gesendetes null bleibt nur dort erhalten, wo es
     # etwas bedeutet (driver_id = Fahrer entfernen); sonst wuerde null
     # Pflichtfelder auf None setzen.
@@ -333,6 +438,14 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                  "status", "vehicle_id", "contract_id"):
         if feld in update and update[feld] is None:
             update.pop(feld)
+    if contract_loesen and update.get("contract_id"):
+        raise HTTPException(400, "contract_loesen und eine neue contract_id "
+                                 "schließen sich aus")
+    if fahrzeug_loesen and update.get("vehicle_id"):
+        raise HTTPException(400, "fahrzeug_loesen und eine neue vehicle_id "
+                                 "schließen sich aus")
+    # Felder, die am Termin ENTFERNT werden ($unset).
+    unset: Dict[str, Any] = {}
     # Auch beim Aendern: verknuepfte IDs muessen dem Konto gehoeren
     # (Runde 16: Sucher nur eigene Fahrzeuge).
     if update.get("vehicle_id") and not await db.vehicles.find_one(
@@ -356,8 +469,13 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     if existing.get("status") in ABGESCHLOSSEN and user.get("role") != "dealer":
         geschuetzt = ("driver_id", "vehicle_id", "contract_id", "seller_name",
                       "seller_phone", "seller_email", "pickup_address")
-        if any(f in update and (update.get(f) or "") != (existing.get(f) or "")
-               for f in geschuetzt):
+        # Runde 17 (Nr. 2): das Loesen von Vertrag/Fahrzeug ist ebenfalls
+        # eine Aenderung an Beweisdaten.
+        loesen_aendert = ((contract_loesen and existing.get("contract_id"))
+                          or (fahrzeug_loesen and existing.get("vehicle_id")))
+        if loesen_aendert or any(
+                f in update and (update.get(f) or "") != (existing.get(f) or "")
+                for f in geschuetzt):
             raise HTTPException(403, "Der Termin ist abgeschlossen — Fahrer, "
                                      "Verkäufer, Fahrzeug und Vertrag ändert "
                                      "danach nur der Händler-Hauptaccount")
@@ -374,14 +492,24 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # Audit 09/2026: Aendert sich nach der Zusage des Fahrers etwas
     # Wesentliches (Datum, Uhrzeit, Abholadresse), gilt die alte Zusage
     # nicht mehr — der Fahrer muss die geaenderte Fahrt neu bestaetigen.
-    if (existing.get("zuteilung") == "angenommen"
-            and "driver_id" not in update
-            and any(f in update and (update[f] or "") != (existing.get(f) or "")
-                    for f in ("pickup_date", "pickup_time", "pickup_address"))):
-        update["zuteilung"] = "offen"
-        update["zuteilung_am"] = now_iso()
-        update["zuteilung_neu_wegen_aenderung"] = True
-        update.pop("zuteilung_beantwortet_am", None)
+    # Runde 17 (Nr. 5): Regel im Helfer zusage_zuruecksetzen_wenn_geaendert
+    # (auch contracts.py nutzt ihn). Gilt, solange der Fahrer derselbe
+    # bleibt — die Oberflaeche sendet driver_id immer mit; ein Wechsel oder
+    # das Entfernen des Fahrers ist oben bereits behandelt.
+    if "driver_id" not in update or update.get("driver_id") == existing.get("driver_id"):
+        zusage_set, zusage_unset = zusage_zuruecksetzen_wenn_geaendert(existing, update)
+        update.update(zusage_set)
+        unset.update(zusage_unset)
+    if contract_loesen and existing.get("contract_id"):
+        # Runde 17 (Nr. 2): Vertrag bewusst vom Termin loesen; die Verweise
+        # am alten Vertrag zieht _vertragszeiger_abgleichen nach dem Write
+        # nach. Ein Veraltet-Merker (Nr. 4) ist damit gegenstandslos.
+        unset["contract_id"] = ""
+        unset["vertrag_veraltet"] = ""
+    if fahrzeug_loesen and existing.get("vehicle_id"):
+        # Runde 17 (Nr. 2): Fahrzeug loesen — ohne Lifecycle-Nebenwirkung
+        # auf dem abgehaengten Fahrzeug (es bleibt, wie es ist).
+        unset["vehicle_id"] = ""
     update["updated_at"] = now_iso()
     # Nachpruefung Runde 14 (Nr. 83/84): auch das ERSTMALIGE Setzen und das
     # bewusste Leeren des Datums gelten als Aenderung (vorher nur, wenn
@@ -427,35 +555,36 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             update["abgeschlossen_seit"] = update["status_changed_at"]
     # Runde 15 (Nr. 6): Fahrzeugwechsel oder Wieder-Oeffnen darf keinen
     # zweiten offenen Termin zum selben Fahrzeug ergeben.
-    vehicle_neu = update.get("vehicle_id") or existing.get("vehicle_id")
-    if vehicle_neu and status_neu in TERMIN_OFFEN_WERTE \
+    # Runde 17 (Nr. 2): das Fahrzeug, das NACH dem Update am Termin haengt
+    # (bei fahrzeug_loesen keines).
+    vehicle_id = update.get("vehicle_id") or (
+        None if fahrzeug_loesen else existing.get("vehicle_id"))
+    if vehicle_id and status_neu in TERMIN_OFFEN_WERTE \
             and ("vehicle_id" in update or "status" in update) \
-            and await _offener_termin_zum_fahrzeug(user["dealer_id"], vehicle_neu, ausser=appt_id):
+            and await _offener_termin_zum_fahrzeug(user["dealer_id"], vehicle_id, ausser=appt_id):
         raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
+    aenderung: Dict[str, Any] = {"$set": update}
+    if unset:
+        aenderung["$unset"] = unset
     try:
-        await db.appointments.update_one({"id": appt_id}, {"$set": update})
+        await db.appointments.update_one({"id": appt_id}, aenderung)
     except DuplicateKeyError:
         raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
     fahrer_entfernt = bool(update.get("driver_id")) and not await _fahrer_nachpruefen(
         appt_id, user["dealer_id"], update.get("driver_id"))
-    # Nachpruefung Runde 14 (Nr. 113): Vertragsverweise beim Wechsel der
-    # contract_id nachziehen — sonst zeigte der alte Vertrag weiter auf den
-    # Termin und der neue auf keinen (SendDialog legte einen zweiten an).
+    # Nachpruefung Runde 14 (Nr. 113) / Runde 17 (Nr. 3): Vertragsverweise
+    # bei JEDEM PUT idempotent aus dem Termin ableiten — sonst zeigte der
+    # alte Vertrag weiter auf den Termin und der neue auf keinen (SendDialog
+    # legte einen zweiten an).
     contract_gewechselt = bool(update.get("contract_id")
                                and update["contract_id"] != existing.get("contract_id"))
-    if contract_gewechselt:
-        if existing.get("contract_id"):
-            await db.generated_pdfs.update_one(
-                {"id": existing["contract_id"], "appointment_id": appt_id},
-                {"$set": {"appointment_id": None}})
-        await db.generated_pdfs.update_one(
-            {"id": update["contract_id"], "dealer_id": user["dealer_id"]},
-            {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}})
+    contract_id = update.get("contract_id") or (
+        None if contract_loesen else existing.get("contract_id"))
+    await _vertragszeiger_abgleichen(user["dealer_id"], appt_id, contract_id)
     # Lebenszyklus des Fahrzeugs nachziehen (abgeholt / nicht abgeholt).
     # Nachpruefung Runde 14 (Nr. 19): das Fahrzeug, das NACH dem Update am
     # Termin haengt; ein neu verknuepftes bekommt wie beim Anlegen zuerst
     # "abholung_geplant" (vorher bekam das abgehaengte Auto den Status).
-    vehicle_id = update.get("vehicle_id") or existing.get("vehicle_id")
     if update.get("vehicle_id") and update["vehicle_id"] != existing.get("vehicle_id"):
         await try_set_lifecycle(update["vehicle_id"], user["dealer_id"],
                                 "abholung_geplant", user=user)
@@ -465,31 +594,68 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
         elif update["status"] == "nicht abgeholt":
             await try_set_lifecycle(vehicle_id, user["dealer_id"], "nicht_abgeholt", user=user)
+    if status_neu in ABGESCHLOSSEN and status_neu != "abgeholt":
+        # Runde 17 (Nr. 11): Termin storniert/nicht abgeholt/erledigt — ein
+        # angefangener Korrektur-Entwurf des Protokolls wird verworfen und
+        # die korrigierte Version ist wieder die massgebliche (sonst blieb
+        # der Termin ohne aktuelles Protokoll). Best effort, wirft nie.
+        from routes.protocols import korrektur_verwerfen
+        await korrektur_verwerfen(appt_id)
     # Verschobener Abholtermin -> Kaufvertrag mit dem NEUEN Datum neu
     # erzeugen. Das PDF ist eine gespeicherte Datei und wuerde sonst
     # dauerhaft den alten Termin zeigen (Wunsch 08/2026).
     # Nachpruefung Runde 14 (Nr. 20): gegen den Vertrag, der NACH dem Update
     # am Termin haengt; beim Vertragswechsel bekommt der neue Vertrag den
     # wirksamen Termin (vorher wurde der abgehaengte Vertrag neu erzeugt).
+    # Runde 17 (Nr. 4): scheiterte die Neuerzeugung beim letzten Mal
+    # (vertrag_veraltet), wird sie jetzt auch OHNE Datumsaenderung mit dem
+    # wirksamen Termin nachgeholt.
     vertrag_aktualisiert = False
-    contract_id = update.get("contract_id") or existing.get("contract_id")
-    if (pickup_changed or zeit_geaendert or contract_gewechselt) and contract_id:
+    vertrag_veraltet = False
+    veraltet_nachholen = bool(existing.get("vertrag_veraltet")) and bool(contract_id)
+    wirksames_datum = update.get("pickup_date", existing.get("pickup_date"))
+    wirksame_zeit = update.get("pickup_time", existing.get("pickup_time"))
+    if (pickup_changed or zeit_geaendert or contract_gewechselt
+            or veraltet_nachholen) and contract_id:
+        nachziehen = contract_gewechselt or veraltet_nachholen
         from routes.contracts import regenerate_contract_for_pickup
         vertrag_aktualisiert = await regenerate_contract_for_pickup(
             contract_id=contract_id,
             dealer_id=user["dealer_id"],
             user=user,
             pickup_date=update.get("pickup_date", existing.get("pickup_date")
-                                   if contract_gewechselt else None),
+                                   if nachziehen else None),
             pickup_time=update.get("pickup_time", existing.get("pickup_time")
-                                   if contract_gewechselt else None),
+                                   if nachziehen else None),
             # Nachpruefung Runde 14 (Befund 84): ein bewusst geleertes Datum
             # oder eine geleerte Uhrzeit verschwindet auch aus dem Vertrag.
             leeren_erlaubt=True,
         )
+        if vertrag_aktualisiert:
+            if existing.get("vertrag_veraltet"):
+                await db.appointments.update_one(
+                    {"id": appt_id}, {"$unset": {"vertrag_veraltet": ""}})
+        elif not await _vertrag_zeigt_termin(user["dealer_id"], contract_id,
+                                             wirksames_datum, wirksame_zeit):
+            # False trotz Aenderung UND der Vertrag zeigt einen anderen
+            # Termin: als veraltet merken, beim naechsten PUT nachholen.
+            vertrag_veraltet = True
+            await db.appointments.update_one(
+                {"id": appt_id}, {"$set": {"vertrag_veraltet": True}})
+        elif existing.get("vertrag_veraltet"):
+            # Vertrag zeigt inzwischen den wirksamen Termin (z.B. vom Chef
+            # direkt neu erzeugt) — Merker aufheben.
+            await db.appointments.update_one(
+                {"id": appt_id}, {"$unset": {"vertrag_veraltet": ""}})
 
     meta = {"pickup_changed": pickup_changed,
             "vertrag_aktualisiert": vertrag_aktualisiert}
+    if vertrag_veraltet:
+        meta["vertrag_veraltet"] = True
+    if contract_loesen and existing.get("contract_id"):
+        meta["contract_geloest"] = existing["contract_id"]
+    if fahrzeug_loesen and existing.get("vehicle_id"):
+        meta["fahrzeug_geloest"] = existing["vehicle_id"]
     if status_gewechselt:
         # Nachpruefung Runde 14 (Nr. 98): von/nach im Log, damit ein
         # Wieder-Oeffnen nachvollziehbar bleibt.
@@ -501,6 +667,8 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
            "contract_updated": vertrag_aktualisiert}
     if fahrer_entfernt:
         out["hinweis"] = FAHRER_ENTFERNT_HINWEIS
+    elif vertrag_veraltet:
+        out["hinweis"] = VERTRAG_VERALTET_HINWEIS
     return out
 
 

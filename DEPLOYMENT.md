@@ -97,6 +97,15 @@ Migration oder R2) darf nicht zurueck in die Rotation. Vorgehen:
 Nach einem Rollback per `git reset --hard` holt das naechste
 `sh deploy/rollout.sh` mit `git pull --ff-only` wieder den neuesten Stand.
 
+**Zwischen den beiden Servern** (nach prod2, vor prod1) kennt der alte
+Server das neue Oberflaechen-Bundle noch nicht: Besucher, deren Startseite
+vom neuen und deren Skript-Anfrage vom alten Server kommt, bekommen kurz
+404. Die Probe am Ende des Rollouts meldet das als „404 aus dem
+Cloudflare-Cache". Seit 08.09.2026 liefert nginx solche 404 mit
+`no-store`, Cloudflare speichert sie also nicht mehr; der Zustand endet,
+sobald der zweite Server ausgerollt ist. Bleibt der Bildschirm danach
+laenger als fuenf Minuten schwarz: Cloudflare → Caching → Purge Everything.
+
 **Einzelserver ohne Load Balancer** (Entwicklung, Staging):
 ```bash
 git pull && docker compose up -d --build    # bei Fehler: git checkout <alt> && ...
@@ -270,6 +279,22 @@ Firma zuordnen lassen (`stats.offen`), sieht nur der Chef, bis er sie
 zuweist. Ein Sucher, der ein Inserat vergleicht, das ein Kollege bereits
 führt, bekommt das Vergleichsergebnis mit Hinweis; das Fahrzeug bleibt
 beim Kollegen.
+
+Seit Runde 17 (08.09.2026) außerdem:
+- **`VERTRAG_LOESCHUNG_AKTIV` muss in der Produktions-.env stehen** — `true`
+  (90-Tage-Löschung scharf) oder `false` (Trockenlauf). Fehlt die Variable
+  ganz, bricht der Start ab (bewusste Entscheidung statt Vergessen).
+- Die Betrieb-Seite im Admin zeigt `termin_index_aktiv` und
+  `fahrzeug_index_aktiv`. Fehlt einer der beiden Unique-Indizes wegen
+  Altdubletten (Alarm `termin_index_fehlt` bzw. `unique_index_fehlt`),
+  zuerst `python -X utf8 scripts/dubletten_pruefen.py` im Backend-Container,
+  Daten bereinigen, dann im Admin „Nachholen“ drücken (legt die Indizes
+  ohne Neustart an und schließt den Alarm).
+- Fahrzeug-IDs neuer mobile.de-/AutoScout-Vergleiche heißen
+  `v_mobile_<ID>` bzw. `v_autoscout24_<ID>`; bestehende `v_<ID>` bleiben
+  gültig (Rückfall beim Vergleich). Kleinanzeigen bleibt `v_<ID>`.
+- Bricht ein Rollout ab, bleibt der Server im Drain (siehe oben,
+  `deploy/freigeben.sh`).
 
 ## Auto-Daten & 90-Tage-Löschung
 - Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)

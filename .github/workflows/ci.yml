@@ -264,6 +264,11 @@ jobs:
           [ "$CODE" = 503 ] || { echo "Host-Drain wirkt nicht (HTTP $CODE)"; exit 1; }
           rm -f deploy/drain/aktiv
           curl -fsS --max-time 5 -H "Host: localhost" http://localhost/api/health
+          # Fehlende Bundle-Datei (Rollout Server fuer Server): 404 muss
+          # "no-store" tragen, sonst haelt Cloudflare den Fehler 3 Minuten fest.
+          curl -s -o /dev/null -D /tmp/static404.h -H "Host: localhost" http://localhost/static/js/gibtsnicht.js
+          grep -q "^HTTP/.* 404" /tmp/static404.h || { echo "fehlende Bundle-Datei muss 404 liefern"; cat /tmp/static404.h; exit 1; }
+          grep -qi "^cache-control: no-store" /tmp/static404.h || { echo "404 fuer /static/ muss no-store tragen"; cat /tmp/static404.h; exit 1; }
           # Oberflaeche weg -> Health darf NICHT 200 liefern (Vorfall 07.09.2026:
           # der LB schickte Besucher auf einen Server, dessen web-Container
           # gerade neu gebaut wurde — 502 fuer alle Seitendateien).

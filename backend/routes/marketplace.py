@@ -16,7 +16,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
+                     Response)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo.errors import DuplicateKeyError
@@ -404,16 +405,30 @@ async def delete_invite(invite_id: str, user=Depends(current_haendler)):
 
 
 @router.get("/dealer/network/members")
-async def list_network_members(user=Depends(current_haendler)):
+async def list_network_members(response: Response, user=Depends(current_haendler),
+                               before: Optional[str] = None):
     """Mitglieder des privaten Netzwerks (PR-Review 09/2026: vorher gab es
     weder Liste noch Widerruf — ein beigetretener Kaeufer behielt den
-    Zugang dauerhaft, das Loeschen der Einladung entfernte nur den Link)."""
+    Zugang dauerhaft, das Loeschen der Einladung entfernte nur den Link).
+
+    before: optionaler Cursor (created_at des letzten gelisteten Mitglieds)
+    fuer den naechsten Abschnitt, wenn X-Truncated=1 kam."""
     out = []
     # Runde 15 (Nr. 4): begrenzt und Konten in EINER Abfrage — vorher ohne
     # Limit und ein users.find_one je Mitglied (5.000 Mitglieder = 5.001
     # Abfragen je Seitenaufruf).
+    # Runde 17 (Nr. 386): ab dem 2.001. Mitglied fielen aeltere still aus
+    # der Liste — nicht sichtbar, aber weiter mit Zugang und ohne Widerruf-
+    # Knopf. Jetzt eins mehr lesen als gezeigt wird, den Abschnitt per
+    # X-Truncated melden (wie /appointments) und per before-Cursor
+    # weiterblaettern lassen. Antwort bleibt eine Liste (Frontend).
+    filt: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    if before:
+        filt["created_at"] = {"$lt": before}
     mitglieder = await db.network_members.find(
-        {"dealer_id": user["dealer_id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+        filt, {"_id": 0}).sort("created_at", -1).to_list(2001)
+    response.headers["X-Truncated"] = "1" if len(mitglieder) > 2000 else "0"
+    mitglieder = mitglieder[:2000]
     konten: Dict[str, dict] = {}
     ids = [m["buyer_user_id"] for m in mitglieder if m.get("buyer_user_id")]
     if ids:
@@ -715,7 +730,10 @@ async def redeem_invite(token: str, user=Depends(buyer_nicht_gesperrt)):
 #                    MARKTPLATZ (Browse)
 # =========================================================
 @router.get("/marktplatz/haendler")
-async def browse_dealers(q: Optional[str] = None,
+async def browse_dealers(response: Response,
+                         # Runde 17 (Nr. 384): Suchtext begrenzt — er wird
+                         # zu einem Regex ueber alle Firmennamen.
+                         q: Optional[str] = Query(default=None, max_length=100),
                          user=Depends(marktplatz_besucher)):
     """Öffentliche Händlersuche + private Händler, in deren Netzwerk der
     Betrachter eingeladen wurde. Ohne Anmeldung: nur öffentliche Händler."""
@@ -735,9 +753,13 @@ async def browse_dealers(q: Optional[str] = None,
     gesperrt = await gesperrte_firmen_ids()
     if gesperrt:
         query.setdefault("id", {})["$nin"] = list(gesperrt)
+    # Runde 17 (Nr. 401): ab dem 1.001. Haendler fehlten welche still —
+    # eins mehr lesen, Abschnitt per X-Truncated melden, Liste kuerzen.
     dealers = await db.dealers.find(
         query, {"_id": 0, "id": 1, "company_name": 1, "city": 1, "phone": 1,
-                "logo_url": 1, "marketplace": 1}).to_list(1000)
+                "logo_url": 1, "marketplace": 1}).to_list(1001)
+    response.headers["X-Truncated"] = "1" if len(dealers) > 1000 else "0"
+    dealers = dealers[:1000]
     # Inseratszahlen ALLER Haendler in EINER Aggregation statt
     # count_documents je Haendler (kein N+1 mehr).
     # Runde 13: A7 — vorher zaehlte die Uebersicht auch private Inserate
@@ -776,14 +798,19 @@ async def browse_dealers(q: Optional[str] = None,
 @router.get("/marktplatz/listings")
 async def browse_listings(
     user=Depends(marktplatz_besucher),
-    q: Optional[str] = None, make: Optional[str] = None,
-    model: Optional[str] = None, fuel: Optional[str] = None,
+    # Runde 17 (Nr. 384/385): Freitext-Filter begrenzt (sie werden zu
+    # Regexen ueber den ganzen Bestand), Seitennummer gedeckelt (vorher
+    # rechnete Mongo fuer page=10^9 einen sinnlos grossen $skip).
+    q: Optional[str] = Query(default=None, max_length=100),
+    make: Optional[str] = Query(default=None, max_length=100),
+    model: Optional[str] = Query(default=None, max_length=100),
+    fuel: Optional[str] = Query(default=None, max_length=100),
     price_min: Optional[float] = None, price_max: Optional[float] = None,
     km_min: Optional[int] = None, km_max: Optional[int] = None,
     ps_min: Optional[int] = None, ps_max: Optional[int] = None,
     sort: Optional[str] = None, dealer: Optional[str] = None,
     nur_favoriten: Optional[int] = 0,
-    page: int = 1, limit: int = 300,
+    page: int = Query(1, ge=1, le=1000), limit: int = 300,
 ):
     """Alle für den Betrachter sichtbaren veröffentlichten Fahrzeuge.
 
@@ -791,12 +818,14 @@ async def browse_listings(
     (Aggregation) — keine harte 300er-Grenze und kein Nachfiltern in
     Python mehr. sort: preis_auf | preis_ab | km_auf | km_ab
     (Default: neueste zuerst). nur_favoriten=1: nur gemerkte Fahrzeuge.
-    page/limit: Seitennummer (ab 1) und Treffer pro Seite (max. 200)."""
+    page/limit: Seitennummer (1..1000) und Treffer pro Seite (max. 300)."""
     # Standard 300 = das bisherige Maximum, damit das Frontend OHNE
     # Pagination-Umbau weiterhin denselben Bestand sieht; page/limit stehen
     # fuer kuenftige Pagination bereit.
     limit = max(1, min(int(limit or 300), 300))
-    page = max(1, int(page or 1))
+    # Runde 17 (Nr. 385): Deckel auch hier, falls die Funktion nicht ueber
+    # FastAPI (Query-Validierung) aufgerufen wird.
+    page = max(1, min(int(page or 1), 1000))
 
     # Oeffentlicher Besucher (nicht angemeldet): kein Merkzettel, kein
     # Netzwerk — er sieht ausschliesslich oeffentliche Haendler und dort
@@ -855,12 +884,19 @@ async def browse_listings(
         # (sonst muesste Mongo ihn fuer JEDES Dokument berechnen).
         # $gt 0 statt $gt None: ein als 0 hinterlegter Platzhalter-Preis
         # zaehlt nicht — exakt wie _price_for es beim Anzeigen haelt.
-        eff_price = {"$switch": {"branches": [
+        zweige: List[Dict[str, Any]] = [
             {"case": {"$and": [{"$in": ["$dealer_id", my_networks]},
                                {"$gt": ["$prices.network", 0]}]},
              "then": "$prices.network"},
-            {"case": {"$gt": ["$prices.b2b", 0]}, "then": "$prices.b2b"},
-        ], "default": "$prices.public"}}
+        ]
+        # Runde 17 (Nr. 381): den B2B-Zweig nur fuer angemeldete
+        # Zwischenhaendler — vorher filterte und sortierte ein anonymer
+        # Besucher nach dem B2B-Preis (per price_max ablesbar), obwohl die
+        # Anzeige ihm den oeffentlichen Preis zeigte.
+        if user is not None:
+            zweige.append({"case": {"$gt": ["$prices.b2b", 0]},
+                           "then": "$prices.b2b"})
+        eff_price = {"$switch": {"branches": zweige, "default": "$prices.public"}}
         pipeline.append({"$addFields": {"_eff_price": eff_price}})
         price_match: Dict[str, Any] = {}
         if price_min:
@@ -908,7 +944,11 @@ async def browse_listings(
          "phone": 1, "whatsapp_number": 1, "contact_person": 1,
          "logo_url": 1, "opening_hours": 1})}
 
-    is_trade = True  # jeder hier ist registrierter Händler/Zwischenhändler
+    # Runde 17 (Nr. 381): der Marktplatz ist seit 09/2026 oeffentlich —
+    # "jeder hier ist registriert" stimmte nicht mehr, der B2B-Preis lag
+    # fuer jeden anonymen Besucher offen. B2B nur fuer angemeldete
+    # Zwischenhaendler; Netzwerkpreis-Logik unveraendert.
+    is_trade = user is not None
     out = []
     for l in items:
         member = l["dealer_id"] in my_networks
@@ -1068,7 +1108,10 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
             "network_member": member,
             "vehicle_count": len(listings),
         },
-        "listings": [_public_listing_view(l, is_member=member, is_trade=True)
+        # Runde 17 (Nr. 381): B2B-Preis nur fuer angemeldete Zwischenhaendler
+        # (siehe browse_listings).
+        "listings": [_public_listing_view(l, is_member=member,
+                                          is_trade=user is not None)
                      for l in listings],
     }
 
@@ -1077,13 +1120,15 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
 #              INTERESSENTEN / ANGEBOTE
 # =========================================================
 class InterestIn(BaseModel):
-    offer: Optional[float] = Field(default=None, ge=0)
+    # Runde 17 (Nr. 397): ge=0 liess inf/nan durch — "Infinity" landete als
+    # Angebot in der Historie und beim Haendler; jetzt 422.
+    offer: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
 
 
 class InterestAnswerIn(BaseModel):
     action: Literal["akzeptieren", "ablehnen", "gegenangebot"]
-    counter_offer: Optional[float] = Field(default=None, ge=0)
+    counter_offer: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
 
 
@@ -1147,7 +1192,8 @@ async def buyer_interests(user=Depends(buyer_nicht_gesperrt)):
 class BuyerInterestAnswerIn(BaseModel):
     # 09/2026: der Kaeufer kann jetzt auch selbst ein Gegenangebot machen
     action: Literal["annehmen", "ablehnen", "gegenangebot"]
-    counter_offer: Optional[float] = Field(default=None, ge=0)
+    # Runde 17 (Nr. 397): kein inf/nan als Gegenangebot.
+    counter_offer: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
 
 

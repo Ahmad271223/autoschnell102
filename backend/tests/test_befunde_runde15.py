@@ -458,7 +458,9 @@ def test_b4_netzwerkliste_eine_users_abfrage_und_limit(welt, monkeypatch):
                                              + [{"dealer_id": w.dealer_id, "buyer_user_id": "fehlt_" + w.s,
                                                  "created_at": _jetzt()}])
         zaehler["users"] = 0
-        out = await M.list_network_members(w.chef)
+        # Runde 17 (Nr. 386): Response-Parameter fuer X-Truncated
+        from fastapi import Response
+        out = await M.list_network_members(Response(), w.chef)
         return out, dict(zaehler)
 
     out, n = welt.run(lauf())
@@ -466,7 +468,8 @@ def test_b4_netzwerkliste_eine_users_abfrage_und_limit(welt, monkeypatch):
     assert len(out) == 4
     fehlend = [o for o in out if o["fehlt"]]
     assert len(fehlend) == 1 and fehlend[0]["active"] is False
-    assert "to_list(2000)" in inspect.getsource(M.list_network_members)
+    # Runde 17 (Nr. 386): eins mehr lesen als gezeigt (Abschnitt wird gemeldet)
+    assert "to_list(2001)" in inspect.getsource(M.list_network_members)
 
 
 # ================================================= Runde B Nr. 6: URL-Laenge

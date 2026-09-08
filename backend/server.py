@@ -46,6 +46,7 @@ from listing_identity import ensure_cache_indexes
 from snapshot_service import init_storage
 
 # Shared deps (DB connection, helpers) — required for index/seed setup.
+from indizes import _termin_unique_index, _unique_index_sicher  # noqa: F401
 from deps import (client, db, kunden_nummern_nachziehen, log,
                   naechste_kunden_nr, now_iso)
 
@@ -477,59 +478,6 @@ async def report_client_error(body: ClientErrorIn, request: Request):
 # =========================================================
 #                  INDEX & SEED SETUP
 # =========================================================
-async def _unique_index_sicher(coll, feld: str) -> None:
-    """Unique-Index nur anlegen, wenn keine Dubletten existieren (Runde 5).
-    Vorher scheiterte die Anlage still, und die Eindeutigkeit (z.B. eine
-    E-Mail = ein Konto) galt dann einfach nicht. In Produktion bricht der
-    Start ab, sonst wird gewarnt — bereinigen mit scripts/dubletten_pruefen.py."""
-    dubletten = await coll.aggregate([
-        {"$match": {feld: {"$exists": True, "$ne": None}}},
-        {"$group": {"_id": f"${feld}", "n": {"$sum": 1}}},
-        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
-    if dubletten:
-        beispiele = ", ".join(str(d["_id"]) for d in dubletten)
-        msg = (f"{coll.name}.{feld}: doppelte Werte vorhanden ({beispiele}) — "
-               "Unique-Index NICHT angelegt. Bereinigen: "
-               "python scripts/dubletten_pruefen.py")
-        if os.environ.get("APP_ENV", "").strip().lower() == "production":
-            log.error("Start ABGEBROCHEN: %s", msg)
-            raise SystemExit(78)
-        log.error("ensure_indexes: %s", msg)
-        return
-    await coll.create_index(feld, unique=True)
-
-
-async def _termin_unique_index() -> None:
-    """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug und
-    Firma. Zwei parallele Vertragsanlagen (oder Doppelklicks) erzeugten
-    zwei Termine fuer dasselbe Auto; die Vorabpruefung der Routen ist nicht
-    atomar, der Teil-Unique-Index ist der Backstop. Abgeschlossene Termine
-    (abgeholt, storniert, ...) sind ausgenommen — ein Fahrzeug darf spaeter
-    erneut einen Termin bekommen. Bestehende Dubletten blockieren nur den
-    Index (Warnung), nicht den Start: die Regel ist neu, Altdaten werden
-    ueber den Terminplaner bereinigt."""
-    from deps import TERMIN_OFFEN
-    filter_ = {"vehicle_id": {"$type": "string"},
-               "status": {"$in": list(TERMIN_OFFEN)}}
-    dubletten = await db.appointments.aggregate([
-        {"$match": filter_},
-        {"$group": {"_id": {"d": "$dealer_id", "v": "$vehicle_id"}, "n": {"$sum": 1}}},
-        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
-    if dubletten:
-        beispiele = ", ".join(str(d["_id"].get("v")) for d in dubletten)
-        log.error("ensure_indexes: appointments: mehrere OFFENE Termine je "
-                  "Fahrzeug vorhanden (%s) — Unique-Index NICHT angelegt. "
-                  "Bitte doppelte offene Termine im Terminplaner schliessen "
-                  "oder loeschen, dann Backend neu starten.", beispiele)
-        return
-    try:
-        await db.appointments.create_index(
-            [("dealer_id", 1), ("vehicle_id", 1)], unique=True,
-            name="termin_offen_je_fahrzeug", partialFilterExpression=filter_)
-    except Exception as exc:
-        log.error("ensure_indexes: termin_offen_je_fahrzeug: %s", exc)
-
-
 async def _kunden_nr_unique_index() -> None:
     """Eindeutigkeit der Kundennummer auch auf DB-Ebene (Backstop gegen
     Zaehler-Fehler). sparse: Firmen ohne Nummer (Migrationsmoment) stoeren
@@ -706,6 +654,12 @@ async def ensure_indexes():
     await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1)])
     # Runde 16: Sucher-Bereich (owner_user_id) je Firma
     await db.vehicles.create_index([("dealer_id", 1), ("owner_user_id", 1)])
+    # Runde 17: EIN Fahrzeugdokument je (Firma, Fahrzeug-ID) — zwei
+    # gleichzeitige erste Vergleiche upserteten vorher zwei Dokumente.
+    # Altdubletten: kein Startabbruch, sondern Betriebsalarm.
+    await _unique_index_sicher(db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)
+    # Runde 17: Vertragszeiger je Termin (idempotente Nachfuehrung beim PUT)
+    await db.generated_pdfs.create_index([("dealer_id", 1), ("appointment_id", 1)])
     # Fahrzeugpool-Begrenzung sortiert je Firma nach updated_at (09/2026)
     await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1),
                                     ("updated_at", -1)])

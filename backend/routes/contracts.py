@@ -6,9 +6,9 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 log = logging.getLogger("autohandel")
@@ -28,7 +28,8 @@ from pymongo.errors import DuplicateKeyError
 
 from deps import (
     TERMIN_OFFEN_WERTE, current_firma, fahrzeug_bereich,
-    clean_doc, current_user, db, log_activity, now_iso, require_active_sub,
+    clean_doc, db, log_activity, log_activity_sicher, now_iso,
+    require_active_sub, datum_iso_pruefen, uhrzeit_hhmm_pruefen,
 )
 import auto_daten
 from cleanup_service import vertrag_endgueltig_loeschen
@@ -68,8 +69,11 @@ class DamageIn(BaseModel):
     abbr: Optional[str] = Field(default=None, max_length=500)
     color: Optional[str] = Field(default=None, max_length=500)
     zone: Optional[str] = Field(default="", max_length=500)
-    x: Optional[float] = None
-    y: Optional[float] = None
+    # Runde 17 (Nr. 338): Skizzen-Koordinaten sind Prozent-/Pixelwerte —
+    # inf/nan und Riesenzahlen (JSON-Serialisierung, ReportLab-Layout)
+    # werden abgelehnt statt bis ins PDF durchgereicht.
+    x: Optional[float] = Field(default=None, allow_inf_nan=False, ge=-10000, le=10000)
+    y: Optional[float] = Field(default=None, allow_inf_nan=False, ge=-10000, le=10000)
 
 
 class ContractIn(BaseModel):
@@ -81,15 +85,34 @@ class ContractIn(BaseModel):
     vehicle_id: str
     seller_name: str
     seller_address: Optional[str] = ""
-    seller_zip: Optional[str] = ""
-    seller_city: Optional[str] = ""
+    # Runde 17 (Nr. 347): PLZ/Ort landen in der Abholadresse des Termins —
+    # realistische Deckel statt der allgemeinen 500 Zeichen.
+    seller_zip: Optional[str] = Field(default="", max_length=20)
+    seller_city: Optional[str] = Field(default="", max_length=100)
     seller_phone: Optional[str] = ""
     seller_email: Optional[str] = ""
     id_document: Optional[str] = ""
-    purchase_price: float = Field(ge=0, description="Kaufpreis darf nicht negativ sein")
+    # Runde 17 (Nr. 338): inf/nan sind kein Kaufpreis (auto_daten rechnet
+    # Cent daraus, das PDF druckt ihn).
+    purchase_price: float = Field(ge=0, allow_inf_nan=False,
+                                  description="Kaufpreis darf nicht negativ sein")
     payment_method: Optional[str] = "Bar / Überweisung"
     pickup_date: Optional[str] = ""
     pickup_time: Optional[str] = ""
+
+    # Runde 17 (Nr. 346): Der Vertragsweg legte den Abholtermin bisher
+    # UNGEPRUEFT an (der Terminplaner prueft laengst) — Datum als
+    # JJJJ-MM-TT, Uhrzeit als HH:MM, leer bleibt leer. Regel zentral in deps.
+    @field_validator("pickup_date")
+    @classmethod
+    def _pickup_date_pruefen(cls, v):
+        return datum_iso_pruefen(v)
+
+    @field_validator("pickup_time")
+    @classmethod
+    def _pickup_time_pruefen(cls, v):
+        return uhrzeit_hhmm_pruefen(v)
+
     additional_terms: Optional[str] = ""
     notes: Optional[str] = ""
     # Zusicherungen & Zustand (manuell durch Händler ergänzbar)
@@ -317,6 +340,14 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     v = await db.vehicles.find_one({"id": body.vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    # Runde 17 (Nr. 270): Kein neuer Kaufvertrag fuer ein Fahrzeug, das
+    # bereits verkauft, geloescht oder archiviert ist — vorher entstand ein
+    # Vertrag samt Auto-Datensatz, der Lebenszyklus blieb stumm stehen.
+    # ("geloescht" faengt fahrzeug_bereich schon als 404 ab; die Pruefung
+    # bleibt als zweite Sicherung, falls sich der Bereich einmal aendert.)
+    if (v.get("lifecycle") or "") in {"verkauft", "geloescht", "archiviert"}:
+        raise HTTPException(409, "Fahrzeug ist bereits verkauft/gelöscht/archiviert "
+                                 "— kein neuer Kaufvertrag möglich")
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
@@ -388,14 +419,28 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     except Exception:
         await auto_daten.zurueckrollen(db, auto_daten_id)
         raise
-    await db.vehicles.update_one(
-        {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"status": "Vertrag erstellt", "purchase_price": body.purchase_price}},
-    )
-    # Lebenszyklus: Vertrag erstellt → gekauft (Kaufpreis liegt vor).
-    await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "vertrag_erstellt", user=user)
-    await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "gekauft", user=user)
-    await log_activity(user["dealer_id"], user["id"], "pdf.erstellt", ref=pdf_id)
+    # Runde 17 (Nr. 265): Ab hier ist der Vertrag dauerhaft. Scheitert das
+    # Nachziehen von Fahrzeugstatus/Lebenszyklus (DB-Aussetzer), endete der
+    # Request bisher mit 500 — der Client wiederholte und legte einen
+    # ZWEITEN Vertrag an. Jetzt wie beim Termin-Block: Fehler ins Log, die
+    # Antwort traegt einen Nacharbeit-Hinweis, der Vertrag bleibt gueltig.
+    nacharbeit_hinweis = None
+    try:
+        await db.vehicles.update_one(
+            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
+            {"$set": {"status": "Vertrag erstellt", "purchase_price": body.purchase_price}},
+        )
+        # Lebenszyklus: Vertrag erstellt → gekauft (Kaufpreis liegt vor).
+        await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "vertrag_erstellt", user=user)
+        await try_set_lifecycle(body.vehicle_id, user["dealer_id"], "gekauft", user=user)
+    except Exception:
+        log.exception("Fahrzeugstatus nach Vertrag %s konnte nicht aktualisiert werden", pdf_id)
+        nacharbeit_hinweis = ("Vertrag gespeichert; Fahrzeugstatus/Protokoll konnten "
+                              "nicht aktualisiert werden.")
+    # Audit wirft nie (log_activity_sicher) — der Vertrag steht bereits.
+    if not await log_activity_sicher(user["dealer_id"], user["id"], "pdf.erstellt", ref=pdf_id):
+        nacharbeit_hinweis = nacharbeit_hinweis or (
+            "Vertrag gespeichert; Fahrzeugstatus/Protokoll konnten nicht aktualisiert werden.")
 
     # Abholtermin automatisch anlegen, wenn ein Abholdatum angegeben wurde,
     # damit der Vertrag im Terminplaner erscheint.
@@ -421,7 +466,27 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     out = {**clean_doc(doc), "pdf_b64": pdf_b64}
     if termin_hinweis:
         out["termin_hinweis"] = termin_hinweis
+    if nacharbeit_hinweis:
+        out["nacharbeit_hinweis"] = nacharbeit_hinweis
     return out
+
+
+def _zusage_zuruecksetzen_fallback(existing: dict, neu: dict) -> tuple[dict, dict]:
+    """Runde 17 (Nr. 355): Ersatz, falls routes.appointments den Helfer
+    `zusage_zuruecksetzen_wenn_geaendert` (noch) nicht anbietet — dieselbe
+    Regel wie in update_appointment: hat der Fahrer die Fahrt angenommen und
+    aendern sich Datum, Uhrzeit oder Abholadresse, gilt die Zusage nicht
+    mehr. Liefert ($set-Felder, $unset-Felder)."""
+    if existing.get("zuteilung") != "angenommen":
+        return {}, {}
+    geaendert = any(
+        f in neu and (neu.get(f) or "") != (existing.get(f) or "")
+        for f in ("pickup_date", "pickup_time", "pickup_address"))
+    if not geaendert:
+        return {}, {}
+    return ({"zuteilung": "offen", "zuteilung_am": now_iso(),
+             "zuteilung_neu_wegen_aenderung": True},
+            {"zuteilung_beantwortet_am": ""})
 
 
 async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str):
@@ -438,10 +503,18 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
     faengt der Teil-Unique-Index termin_offen_je_fahrzeug (server.py).
     Liefert (appointment_id | None, hinweis | None)."""
     from routes.appointments import _sucher_darf
+    # Runde 17 (Nr. 355): Zusage-Regel aus dem Terminplaner — lazy, weil
+    # routes.appointments seinerseits routes.contracts importiert; fehlt der
+    # Helfer (aelterer Stand), greift die gleichlautende Regel hier.
+    try:
+        from routes.appointments import zusage_zuruecksetzen_wenn_geaendert as _zusage_reset
+    except (ImportError, AttributeError):
+        _zusage_reset = _zusage_zuruecksetzen_fallback
     dealer_id = user["dealer_id"]
+    # Runde 17 (Nr. 347): Abholadresse wie ein Terminfeld deckeln (500).
     pickup_address = " ".join([
         body.seller_address or "", body.seller_zip or "", body.seller_city or "",
-    ]).strip()
+    ]).strip()[:500]
     felder = {"seller_name": body.seller_name, "seller_phone": body.seller_phone,
               "seller_email": body.seller_email, "pickup_address": pickup_address,
               "pickup_date": body.pickup_date, "pickup_time": body.pickup_time or ""}
@@ -449,20 +522,39 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
         offen = await db.appointments.find_one(
             {"dealer_id": dealer_id, "vehicle_id": body.vehicle_id,
              "status": {"$in": TERMIN_OFFEN_WERTE}},
-            {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1})
+            # Runde 17 (Nr. 355): Fahrer/Zusage und den bisherigen Termin
+            # mitlesen — beim Umhaengen mit neuem Datum/Uhrzeit/Adresse muss
+            # eine angenommene Zusage zurueck auf "offen" (vorher fuhr der
+            # Fahrer mit alter Zusage zum neuen Termin). vehicle_id braucht
+            # _sucher_darf (Fahrzeug-Besitzer, Runde 16).
+            {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1, "vehicle_id": 1,
+             "driver_id": 1, "zuteilung": 1, "pickup_date": 1, "pickup_time": 1,
+             "pickup_address": 1})
         if offen:
             if not await _sucher_darf(user, offen):
                 return None, ("Für dieses Fahrzeug besteht bereits ein offener "
                               "Abholtermin eines Kollegen — der Vertrag wurde ohne "
                               "eigenen Termin gespeichert.")
+            zusage_set, zusage_unset = _zusage_reset(offen, felder)
+            umhaengen: Dict[str, Any] = {"$set": {
+                **felder, "contract_id": pdf_id, "updated_at": now_iso(), **zusage_set}}
+            if zusage_unset:
+                umhaengen["$unset"] = dict(zusage_unset)
             await db.appointments.update_one(
-                {"id": offen["id"], "dealer_id": dealer_id},
-                {"$set": {**felder, "contract_id": pdf_id, "updated_at": now_iso()}})
+                {"id": offen["id"], "dealer_id": dealer_id}, umhaengen)
             alt = offen.get("contract_id")
             if alt and alt != pdf_id:
-                await db.generated_pdfs.update_one(
-                    {"id": alt, "appointment_id": offen["id"]},
-                    {"$set": {"appointment_id": None}})
+                # Runde 17 (Nr. 356): Der alte Vertrag verliert den Termin UND
+                # den Status "Termin erstellt" — er zeigte sonst dauerhaft
+                # einen Termin an, der laengst am neuen Vertrag haengt.
+                res = await db.generated_pdfs.update_one(
+                    {"id": alt, "appointment_id": offen["id"], "status": "Termin erstellt"},
+                    {"$set": {"appointment_id": None, "status": "erstellt",
+                              "updated_at": now_iso()}})
+                if res.matched_count == 0:
+                    await db.generated_pdfs.update_one(
+                        {"id": alt, "appointment_id": offen["id"]},
+                        {"$set": {"appointment_id": None, "updated_at": now_iso()}})
             appt_id = offen["id"]
             aktion = "termin.auto-umgehaengt"
             break
@@ -507,6 +599,10 @@ ZUSTELLUNG_HAENGT_NACH_SEK = int(os.environ.get("ZUSTELLUNG_HAENGT_NACH_SEK", "1
 # die Idempotenz-/Wiederaufnahme-Suche finden ihn weiter. Die vollstaendige
 # Historie steht ohnehin in activity_logs (pdf.gesendet.<channel>).
 SEND_STATUS_MAX = 200
+# Runde 17 (Nr. 321): pickup_history (Terminverschiebungen je Vertrag)
+# ebenso gedeckelt — juengste 100 Eintraege; die Vorversionen liegen
+# ohnehin in generated_pdf_versions, das Audit in activity_logs.
+PICKUP_HISTORY_MAX = 100
 
 
 def _zustellung_haengt(eintrag: dict, jetzt=None) -> bool:
@@ -538,8 +634,19 @@ def _vertrag_bereich(user) -> Dict[str, Any]:
 
     Bewusst streng: fehlt einem alten Vertrag die Angabe, wer ihn angelegt
     hat, sieht ihn der Sucher NICHT (der Chef weiterhin schon). Lieber
-    einmal zu wenig zeigen als fremde Verkaeuferdaten preisgeben."""
-    bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
+    einmal zu wenig zeigen als fremde Verkaeuferdaten preisgeben.
+
+    Runde 17 (Nr. 348): Vertraege mit Grabstein (`loeschung.status ==
+    "laeuft"`, cleanup_service.vertrag_endgueltig_loeschen) sind NICHT mehr
+    im Bereich — die Loeschung laeuft oder ist abgebrochen und wird vom
+    Aufraeumjob zu Ende gefuehrt. Vorher waren solche Vertraege in Liste,
+    Detail, PDF, Versionen und Versand weiter sichtbar/versendbar, und ein
+    Termin liess sich noch daran haengen. Gilt fuer JEDEN Aufrufer
+    (auch routes/appointments.py und routes/bestand.py importieren diesen
+    Filter). delete_contract nutzt bewusst NUR dealer_id: das Loeschen
+    bleibt idempotent und nimmt einen abgebrochenen Vorgang wieder auf."""
+    bereich: Dict[str, Any] = {"dealer_id": user["dealer_id"],
+                               "loeschung.status": {"$ne": "laeuft"}}
     if user.get("role") == "sucher":
         bereich["user_id"] = user["id"]
     return bereich
@@ -555,8 +662,13 @@ CONTRACTS_LIST_MAX = 2000
 async def list_contracts(
     response: Response,
     user=Depends(current_firma),
-    q: Optional[str] = None,
-    days: Optional[int] = None,
+    # Runde 17 (Nr. 349/374): Suchtext und Zeitraum gedeckelt — vorher
+    # liefen ein 1-MB-Regex (re.escape haelt ihn zwar harmlos, aber Mongo
+    # musste ihn ueber jeden Vertrag ziehen) und days=10**9 (timedelta-
+    # Ueberlauf -> 500) ungebremst durch. Annotated-Form, damit die Python-
+    # Standardwerte None bleiben (In-Prozess-Aufrufer/Tests).
+    q: Annotated[Optional[str], Query(max_length=200)] = None,
+    days: Annotated[Optional[int], Query(ge=1, le=3650)] = None,
     channel: Optional[str] = None,
 ):
     query: Dict[str, Any] = _vertrag_bereich(user)
@@ -819,6 +931,14 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 {"id": contract_id, **bereich},
                 {"$pull": {"send_status": {"idempotency_key": body.idempotency_key,
                                            "zustellung": "laeuft"}}})
+    # Runde 17 (Nr. 370): Zwischen dem Lesen oben und dem Versand kann die
+    # Loeschung (Frist oder manuell) begonnen haben — der Grabstein nimmt
+    # den Vertrag aus dem Bereich. Unmittelbar vor dem Versand noch einmal
+    # nachsehen, sonst ginge ein PDF raus, dessen Vertrag gerade
+    # verschwindet (und der Status-Vermerk liefe ins Leere).
+    if not await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 1}):
+        await _reservierung_zurueck()
+        raise HTTPException(409, "Vertrag wird gerade gelöscht")
     # Ehrlicher Versand-Status (PR-Review 09/2026): "versendet" gibt es
     # NUR nach tatsaechlicher Zustellung an den Anbieter. WhatsApp oeffnet
     # lediglich den Chat (PDF haengt der Nutzer selbst an) -> der Vertrag
@@ -916,7 +1036,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         if wiederaufnahme:
             send_entry["wiederaufgenommen"] = True
             send_entry["wiederaufnahme_am"] = claim_am
-        await db.generated_pdfs.update_one(
+        res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
              "send_status": {"$elemMatch": {
                  "idempotency_key": body.idempotency_key,
@@ -925,12 +1045,25 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                       "status": neuer_status, "updated_at": now_iso()}},
         )
     else:
-        await db.generated_pdfs.update_one(
+        res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich},
             {"$push": {"send_status": {"$each": [send_entry],
                                        "$slice": -SEND_STATUS_MAX}},
              "$set": {"status": neuer_status, "updated_at": now_iso()}},
         )
+    if res.matched_count == 0:
+        # Runde 17 (Nr. 372): Der Versand IST erfolgt, aber der Vertrag war
+        # beim Vermerk nicht mehr im Bereich (Loeschung begonnen, Eintrag
+        # durch $slice verdraengt). Vorher blieb das stumm — die Antwort
+        # sagte "versendet", das Archiv wusste nichts davon. Jetzt im Log,
+        # in der Antwort und als eigener Audit-Eintrag (wirft nie).
+        log.warning("Vertrag %s per %s versendet, Status-Vermerk aber nicht "
+                    "gespeichert (Vertrag nicht mehr im Bereich?)",
+                    contract_id, body.channel)
+        out["status_vermerk"] = "nicht_gespeichert"
+        await log_activity_sicher(user["dealer_id"], user["id"],
+                                  "pdf.gesendet.ohne_vermerk", ref=contract_id,
+                                  meta={"channel": body.channel})
     await log_activity(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
     return out
 
@@ -987,7 +1120,9 @@ async def regenerate_contract_for_pickup(
         return False
     # Runde 10: derselbe Bereich wie beim Lesen — ein Sucher erzeugt kein
     # PDF fuer den Vertrag eines Kollegen, auch nicht ueber den Termin.
-    bereich = _vertrag_bereich(user) if user else {"dealer_id": dealer_id}
+    # Runde 17 (Nr. 373): auch ohne user den Grabstein-Filter (Nr. 348).
+    bereich = (_vertrag_bereich(user) if user
+               else {"dealer_id": dealer_id, "loeschung.status": {"$ne": "laeuft"}})
     doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not doc:
         return False
@@ -1035,8 +1170,9 @@ async def regenerate_contract_for_pickup(
     # sondern als eigene Version archiviert. So bleibt belegbar, welcher
     # Vertragstext (mit welchem Abholtermin) zu jedem Zeitpunkt galt.
     alte_version = int(doc.get("version") or 1)
+    archiv_id = str(uuid.uuid4())
     await db.generated_pdf_versions.insert_one({
-        "id": str(uuid.uuid4()),
+        "id": archiv_id,
         "contract_id": contract_id,
         "dealer_id": dealer_id,
         "version": alte_version,
@@ -1050,8 +1186,18 @@ async def regenerate_contract_for_pickup(
         "grund": "abholtermin_geaendert",
     })
 
-    await db.generated_pdfs.update_one(
-        {"id": contract_id, "dealer_id": dealer_id},
+    # Runde 17 (Nr. 373): Compare-and-Swap auf die GELESENE Version — zwei
+    # gleichzeitige Verschiebungen (oder eine parallele Loeschung) schrieben
+    # vorher beide "Version N+1" ueber dieselbe Fassung, und eine der beiden
+    # archivierten Vorversionen wiederholte die andere. Altvertraege ohne
+    # Feld: `None` trifft fehlend UND null (so wurde oben auch gelesen: 1).
+    # Verliert dieser Aufruf, wird die eben archivierte Fassung wieder
+    # entfernt und False geliefert (der Termin bleibt korrekt gespeichert,
+    # der Gewinner hat das PDF bereits neu erzeugt).
+    res = await db.generated_pdfs.update_one(
+        {"id": contract_id, "dealer_id": dealer_id,
+         "version": doc.get("version"),
+         "loeschung.status": {"$ne": "laeuft"}},
         {"$set": {
             "pdf_b64": base64.b64encode(pdf_bytes).decode(),
             "contract_data": contract_dict,
@@ -1060,13 +1206,21 @@ async def regenerate_contract_for_pickup(
             "version": alte_version + 1,
             "updated_at": now_iso(),
         },
-         "$push": {"pickup_history": {
+         # Runde 17 (Nr. 321): Historie gedeckelt — die juengsten 100
+         # Verschiebungen bleiben, das Dokument waechst nicht unbegrenzt.
+         "$push": {"pickup_history": {"$each": [{
              "von_datum": alt_datum, "von_zeit": alt_zeit,
              "auf_datum": neu_datum, "auf_zeit": neu_zeit,
              "geaendert_von": user.get("id"), "geaendert_am": now_iso(),
              "version_vorher": alte_version,
-         }}},
+         }], "$slice": -PICKUP_HISTORY_MAX}}},
     )
+    if res.modified_count == 0:
+        await db.generated_pdf_versions.delete_one({"id": archiv_id})
+        log.warning("Kaufvertrag %s: Neuerzeugung verworfen — Version %s wurde "
+                    "zwischenzeitlich geaendert oder der Vertrag wird geloescht",
+                    contract_id, doc.get("version"))
+        return False
     # Vertragskorrektur innerhalb der Frist: den BESTEHENDEN Auto-Datensatz
     # aktualisieren (nie ein zweiter); Altvertraege ohne id bekommen ihn
     # hier nachgetragen.

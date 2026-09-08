@@ -133,6 +133,9 @@ class _Coll:
 
     async def update_one(self, query, update, **k):
         self.updates.append((query, update))
+        # Runde 17 (Nr. 275): update_bestand prueft matched_count (CAS) —
+        # die Attrappe liefert wie Motor ein Ergebnisobjekt.
+        return types.SimpleNamespace(matched_count=1, modified_count=1)
 
     def aggregate(self, *a, **k):
         async def _leer():

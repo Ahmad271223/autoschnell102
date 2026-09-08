@@ -207,9 +207,12 @@ def test_10_sucher_sieht_nur_eigene_vertraege():
     import routes.contracts as c
     chef = {"role": "dealer", "id": "chef-1", "dealer_id": "firma-1"}
     sucher = {"role": "sucher", "id": "sucher-7", "dealer_id": "firma-1"}
-    assert c._vertrag_bereich(chef) == {"dealer_id": "firma-1"}
+    # Runde 17 (Nr. 348): Grabstein-Vertraege (Loeschung laeuft) sind nicht
+    # mehr im Bereich — der Filter traegt das in jedem Fall mit.
+    grab = {"loeschung.status": {"$ne": "laeuft"}}
+    assert c._vertrag_bereich(chef) == {"dealer_id": "firma-1", **grab}
     assert c._vertrag_bereich(sucher) == {"dealer_id": "firma-1",
-                                          "user_id": "sucher-7"}
+                                          "user_id": "sucher-7", **grab}
 
 
 def test_10b_alle_lesewege_nutzen_denselben_bereich():

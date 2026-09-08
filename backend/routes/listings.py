@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from pymongo import ReturnDocument
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
 # Cache-Lebensdauer fuer abgerufene Inserate. Hoehere TTL = weniger echte
 # Scrape-/Proxy-Requests (dasselbe Inserat wird nur 1x je TTL geladen).
@@ -23,7 +23,8 @@ LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
 CLIENT_INGEST_TTL_HOURS = int(os.environ.get("CLIENT_INGEST_TTL_HOURS", "24"))
 CLIENT_CONFIRMED_TTL_HOURS = int(os.environ.get("CLIENT_CONFIRMED_TTL_HOURS", "168"))
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import (APIRouter, BackgroundTasks, Depends, HTTPException, Query,
+                     Request, Response)
 from pydantic import BaseModel, Field
 
 from auth import decode_token
@@ -124,8 +125,34 @@ async def _rueckfall_erlaubt(gewuenscht: bool, user: dict) -> bool:
     return True
 
 
+async def _fahrzeug_id(source: str, ad_id: str, dealer_id: str) -> str:
+    """Runde 17 (Nr. 382/383): Fahrzeug-ID quellen-eindeutig. Vorher war sie
+    fuer alle Quellen "v_<Anzeigen-ID>" — ein mobile.de-Inserat und eine
+    Kleinanzeige mit derselben Nummer landeten im selben Dokument (Daten
+    ueberschrieben, Termine/Vertraege am falschen Auto). Kleinanzeigen
+    behaelt das alte Muster (Bestand, Snapshots, Vertraege haengen daran);
+    andere Quellen bekommen "v_<quelle>_<id>".
+
+    Legacy-Rueckfall: gibt es fuer eine Nicht-Kleinanzeigen-Quelle noch kein
+    Dokument unter der neuen ID, aber eines unter "v_<id>" mit derselben
+    mobile_ad_id, dessen quelle fehlt oder passt, wird das alte Dokument
+    weiterverwendet (Vertraege/Termine daran bleiben erreichbar)."""
+    if source == "kleinanzeigen":
+        return f"v_{ad_id}"
+    neu = f"v_{source}_{ad_id}"
+    if await db.vehicles.count_documents({"id": neu, "dealer_id": dealer_id}, limit=1):
+        return neu
+    alt = await db.vehicles.find_one(
+        {"id": f"v_{ad_id}", "dealer_id": dealer_id, "mobile_ad_id": ad_id},
+        {"_id": 0, "quelle": 1})
+    if alt is not None and (not alt.get("quelle") or alt.get("quelle") == source):
+        return f"v_{ad_id}"
+    return neu
+
+
 async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
-                                frisch: dict) -> Optional[dict]:
+                                frisch: dict,
+                                quelle: Optional[str] = None) -> Optional[dict]:
     """Fahrzeug in den Pool des Kontos uebernehmen (Runde 16).
 
     Liefert {"user_id", "name", "seit"}, wenn das Fahrzeug bereits einem
@@ -148,19 +175,22 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
         return {"user_id": besitzer,
                 "name": namen.get(besitzer) or "ein Kollege",
                 "seit": vorhanden.get("updated_at")}
+    # Runde 17 (Nr. 383): Quelle am Fahrzeug festhalten (auch am Altbestand
+    # beim naechsten Vergleich) — Grundlage fuer den Legacy-Rueckfall.
+    quelle_set = {"quelle": quelle} if quelle else {}
     if vorhanden and (vorhanden.get("lifecycle") or "verglichen") not in (
             "verglichen", "gefunden", "storniert", "nicht_abgeholt"):
         await db.vehicles.update_one(
             {"id": vid, "dealer_id": dealer_id},
             {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
-                      "updated_at": now_iso()}})
+                      "updated_at": now_iso(), **quelle_set}})
     else:
         await db.vehicles.update_one(
             {"id": vid, "dealer_id": dealer_id},
             {"$set": {
                 "id": vid, "dealer_id": dealer_id,
                 "mobile_ad_id": ad_id, "data": frisch,
-                "updated_at": now_iso(),
+                "updated_at": now_iso(), **quelle_set,
             },
              "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
                               "lifecycle": "verglichen", "source": "plattform",
@@ -305,10 +335,12 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "expires_at_dt": expires_at,
     })
 
-    # Persist vehicle for re-use (PDF, Termine)
-    vid = f"v_{ad_id}"
+    # Persist vehicle for re-use (PDF, Termine). Runde 17 (Nr. 382): ID je
+    # Quelle eindeutig (Legacy-Rueckfall in _fahrzeug_id); die tatsaechlich
+    # verwendete ID geht in Antwort und Snapshot.
+    vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
     frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
-    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch)
+    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source)
     await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
                        meta={"kollege": kollege["user_id"]} if kollege else None)
 
@@ -372,7 +404,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
                     db,
                     dealer_id=user["dealer_id"], user_id=user["id"],
                     vehicle_id=vid, mobile_ad_id=ad_id, source_url=raw_url,
-                    snapshot_id=sid,
+                    snapshot_id=sid, quelle=source,
                 )
                 background.add_task(run_snapshot_job, db, new_id)
                 return new_id
@@ -453,6 +485,13 @@ class IngestIn(BaseModel):
     html: str = Field(min_length=500, max_length=6_000_000)
 
 
+# Runde 17 (Nr. 292): je Konto hoechstens 20 HTML-Einreichungen pro Minute —
+# vorher liess sich der CPU-teure Parser (bis 6 MB je Aufruf) unbegrenzt
+# anstossen. Fester Name = ein Zaehler ueber alle Worker (rate_limiter).
+_ingest_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60,
+                                           name="ingest")
+
+
 @router.post("/listings/ingest")
 async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
     """Nimmt vom BROWSER DES NUTZERS geladenes Kleinanzeigen-HTML entgegen,
@@ -470,6 +509,8 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
         raise HTTPException(400, str(exc) or "Ungültige URL.")
     if identity["source"] != "kleinanzeigen":
         raise HTTPException(400, "Client-Abruf ist nur für Kleinanzeigen vorgesehen.")
+    if not await _ingest_limiter.check(str(user.get("id") or "")):
+        raise HTTPException(429, "Zu viele Einreichungen — bitte eine Minute warten")
 
     # Schon global freigegeben ODER eigene frische Einreichung vorhanden?
     # Dann nichts tun.
@@ -652,13 +693,12 @@ async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> di
         if ist_sucher(user):
             # Runde 16: Sucher nur im eigenen Bereich — selbst erzeugt,
             # eigenes Fahrzeug oder eigener Vertrag zum Fahrzeug.
+            # Runde 17 (Uebergabe-Regel): das Fahrzeug ist der Anker — nach
+            # einer Uebergabe verliert der bisherige Bearbeiter auch seine
+            # selbst erzeugten Snapshots; ohne Fahrzeug zaehlt der Ersteller.
             vid = snap.get("vehicle_id")
-            erlaubt = snap.get("user_id") == user["id"] or (
-                bool(vid) and (
-                    await fahrzeug_im_bereich(user, vid)
-                    or await db.generated_pdfs.count_documents(
-                        {"vehicle_id": vid, "dealer_id": dealer_id,
-                         "user_id": user["id"]}, limit=1) > 0))
+            erlaubt = (await fahrzeug_im_bereich(user, vid) if vid
+                       else snap.get("user_id") == user["id"])
         else:
             erlaubt = bool(dealer_id) and (
                 snap.get("dealer_id") == dealer_id
@@ -721,20 +761,36 @@ async def snapshot_download(snap_id: str, kind: str,
 
 @router.get("/snapshots")
 async def list_snapshots(vehicle_id: Optional[str] = None,
-                         user=Depends(current_firma)):
+                         user=Depends(current_firma),
+                         limit: Annotated[int, Query(ge=1, le=500)] = 200,
+                         before: Optional[str] = None,
+                         response: Response = None):
+    """Runde 17 (Nr. 324): statt stiller Kappung bei 200 jetzt ein Cursor
+    ueber created_at (`before` = created_at des letzten Eintrags der vorigen
+    Seite). Gibt es mehr als `limit`, meldet der Header X-Truncated: 1 und
+    X-Next-Before den Cursor fuer die naechste Seite; die Antwort bleibt
+    eine Liste (Frontend-kompatibel)."""
     q: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
     if ist_sucher(user):
         # Runde 16: nur eigene Snapshots bzw. die zu eigenen Fahrzeugen und
         # eigenen Vertraegen — vorher sah ein Sucher alle Beweise der Firma
         # samt user_id der Kollegen.
-        vids = set(await eigene_fahrzeug_ids(user) or [])
-        vids |= set(await db.generated_pdfs.distinct(
-            "vehicle_id", {"dealer_id": user["dealer_id"], "user_id": user["id"]}))
-        q["$or"] = [{"user_id": user["id"]}, {"vehicle_id": {"$in": list(vids)}}]
+        # Runde 17 (Uebergabe-Regel): nur Fahrzeuge im eigenen Bereich; ohne
+        # Fahrzeug zaehlt der Ersteller.
+        vids = list(await eigene_fahrzeug_ids(user) or [])
+        q["$or"] = [{"vehicle_id": {"$in": vids}},
+                    {"vehicle_id": {"$in": [None, ""]}, "user_id": user["id"]}]
     if vehicle_id:
         q["vehicle_id"] = vehicle_id
+    if before:
+        q["created_at"] = {"$lt": before}
     items = await db.listing_snapshots.find(q, {"_id": 0, "png_path": 0, "pdf_path": 0}) \
-        .sort("created_at", -1).to_list(200)
+        .sort("created_at", -1).to_list(limit + 1)
+    if len(items) > limit:
+        items = items[:limit]
+        if response is not None:
+            response.headers["X-Truncated"] = "1"
+            response.headers["X-Next-Before"] = str(items[-1].get("created_at") or "")
     return items
 
 

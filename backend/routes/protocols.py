@@ -21,8 +21,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
+import betrieb
 from deps import db, fahrzeug_im_bereich, ist_sucher, log_activity, now_iso, termin_im_bereich
 from lifecycle import try_set_lifecycle
+# Runde 17 (Nr. 10): dieselbe Schadensform wie im Kaufvertrag (contracts.py
+# importiert appointments/protocols nur lazy — kein Zyklus).
+from routes.contracts import DamageIn
 from routes.drivers import current_driver, _zugriff_pruefen
 
 # Haendler-/Sucher-Zugriff auf die fertigen Protokolle (Fahrzeugakte).
@@ -81,7 +85,8 @@ class ProtocolIn(BaseModel):
     """Alle Felder optional — der Fahrer speichert laufend Zwischenstände."""
     vehicle_check: Optional[Dict[str, Any]] = None      # Abschnitt 1 (Korrekturen)
 
-    @field_validator("vehicle_check", "condition", mode="before")
+    # Runde 17 (Nr. 9): auch documents/features deckeln (vorher unbegrenzt).
+    @field_validator("vehicle_check", "condition", "documents", "features", mode="before")
     @classmethod
     def _dict_deckeln(cls, v):
         """Review 09/2026: freie Dicts hatten keine Groessengrenze — max. 60
@@ -115,14 +120,18 @@ class ProtocolIn(BaseModel):
     damages_confirmed: Optional[bool] = None            # Abschnitt 5
     # Abschnitt 6: neu entdeckte Schaeden, per Tipp auf die Fahrzeug-Skizze
     # markiert (gleiches Format wie die Kaufvertrag-Schaeden: view/zone/x/y/...)
-    new_damages: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=40)
+    # Runde 17 (Nr. 10): typisiert wie die Vertrags-Schaeden (vorher freie
+    # Dicts — ein String-Element liess pickup_pdf_service abstuerzen).
+    new_damages: Optional[List[DamageIn]] = Field(default=None, max_length=40)
     notes: Optional[str] = Field(default=None, max_length=5000)   # Abschnitt 7
     place: Optional[str] = Field(default=None, max_length=200)    # Ort (Abschnitt 8)
 
 
 class FinalizeIn(BaseModel):
-    signature_driver_b64: str = Field(min_length=20)
-    signature_seller_b64: str = Field(min_length=20)
+    # Runde 17 (Nr. 8): Obergrenze fuer die Base64-Unterschriften (die
+    # dekodierte PNG ist auf 2 MB begrenzt; 3 Mio. Zeichen decken das ab).
+    signature_driver_b64: str = Field(min_length=20, max_length=3_000_000)
+    signature_seller_b64: str = Field(min_length=20, max_length=3_000_000)
     seller_name: Optional[str] = Field(default=None, max_length=200)
     place: Optional[str] = Field(default=None, max_length=200)
 
@@ -201,6 +210,71 @@ async def _current(appt_id: str) -> Optional[dict]:
     return await db.pickup_protocols.find_one(
         {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
         sort=[("version", -1)])
+
+
+# Runde 17 (Nr. 7): Termin-Zustaende, in denen der Protokoll-Abschluss den
+# Termin NICHT mehr auf "abgeholt" setzen darf (Haendler hat ihn inzwischen
+# geschlossen). Dieselbe Menge wie die Vorabpruefung im Finalize.
+_TERMIN_GESCHLOSSEN = ["storniert", "nicht abgeholt", "erledigt"]
+TERMIN_GESCHLOSSEN_HINWEIS = ("Protokoll gespeichert — der Termin wurde inzwischen "
+                              "vom Händler geschlossen oder der Fahrer entfernt.")
+
+
+async def _termin_abgeholt_setzen(appt_id: str, driver_id: str,
+                                  setzen: Dict[str, Any]) -> bool:
+    """Runde 17 (Nr. 7): Termin-Write als Compare-and-Set — nur, wenn der
+    Termin noch diesem Fahrer gehoert und nicht inzwischen geschlossen
+    wurde. Vorher machte der Abschluss auch einen zwischenzeitlich
+    stornierten Termin (oder den eines entfernten Fahrers) zu "abgeholt".
+    Liefert False (mit Betriebsalarm), wenn der Termin nicht mehr passt."""
+    res = await db.appointments.update_one(
+        {"id": appt_id, "driver_id": driver_id,
+         "status": {"$nin": _TERMIN_GESCHLOSSEN}},
+        {"$set": setzen})
+    if res.matched_count == 0:
+        await betrieb.alarm(db, "protokoll_final_termin_geschlossen", ref=appt_id,
+                            driver_id=driver_id,
+                            protocol_id=setzen.get("protocol_id"))
+        return False
+    # Nachpruefung Runde 14 (Befund 114): Aufraeum-Frist ab dem ERSTEN
+    # Abschluss — nur setzen, wenn noch leer.
+    await db.appointments.update_one(
+        {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
+        {"$set": {"abgeschlossen_seit": now_iso()}})
+    return True
+
+
+async def korrektur_verwerfen(appt_id: str) -> bool:
+    """Runde 17 (Nr. 11): Schliesst der Haendler den Termin (storniert /
+    nicht abgeholt / erledigt), waehrend eine Korrektur-Version des
+    Protokolls als Entwurf offen ist, bleibt der Termin sonst OHNE
+    massgebliches Protokoll: die korrigierte Version ist bereits abgeloest
+    (superseded), der Entwurf wird nie fertig. Deshalb: Entwurf verwerfen,
+    DANACH die korrigierte Version wieder als aktuell schalten (Reihenfolge
+    wegen des Unique-Index 'ein aktuelles Protokoll je Termin').
+    Best effort — wirft nie; True, wenn ein Entwurf verworfen wurde."""
+    try:
+        entwurf = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "status": "entwurf",
+             "corrects_version": {"$exists": True}, "superseded": {"$ne": True}},
+            {"_id": 0, "id": 1, "corrects_version": 1})
+        if not entwurf:
+            return False
+        jetzt = now_iso()
+        res = await db.pickup_protocols.update_one(
+            {"id": entwurf["id"], "status": "entwurf"},
+            {"$set": {"superseded": True, "verworfen_am": jetzt, "updated_at": jetzt}})
+        if res.matched_count == 0:
+            return False
+        await db.pickup_protocols.update_one(
+            {"appointment_id": appt_id, "version": entwurf["corrects_version"]},
+            {"$set": {"superseded": False, "updated_at": jetzt},
+             "$unset": {"superseded_at": ""}})
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("Protokoll-Korrektur zu Termin %s konnte nicht verworfen "
+                      "werden", appt_id)
+        return False
 
 
 @router.get("/driver/appointments/{appt_id}/protocol")
@@ -439,19 +513,18 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         if (appt.get("status") or "") != "abgeholt":
             setzen.update({"status": "abgeholt",
                            "status_changed_at": now_iso()})
-        await db.appointments.update_one({"id": appt_id}, {"$set": setzen})
-        # Nachpruefung Runde 14 (Befund 114): Aufraeum-Frist ab dem ERSTEN
-        # Abschluss — nur setzen, wenn noch leer.
-        await db.appointments.update_one(
-            {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
-            {"$set": {"abgeschlossen_seit": now_iso()}})
+        # Runde 17 (Nr. 7): auch die Selbstheilung nur per Compare-and-Set.
+        heil_out = {"ok": True, "protocol_id": doc["id"],
+                    "version": doc.get("version", 1),
+                    "nachgezogen": True,
+                    "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
+        if not await _termin_abgeholt_setzen(appt_id, driver["id"], setzen):
+            heil_out["hinweis"] = TERMIN_GESCHLOSSEN_HINWEIS
+            return heil_out
         if appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"],
                                     appt.get("dealer_id", ""), "abgeholt")
-        return {"ok": True, "protocol_id": doc["id"],
-                "version": doc.get("version", 1),
-                "nachgezogen": True,
-                "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
+        return heil_out
 
     # ---- Pflichtfelder: das Backend verlaesst sich NICHT auf die App ----
     # Abschnitt 1: alle 12 Fahrzeugdaten-Zeilen muessen beantwortet sein.
@@ -521,7 +594,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         await _dateien_verwerfen(geschrieben, dealer_id)
         geschrieben.clear()
 
-    def _save_sig(b64: str, who: str) -> str:
+    def _save_sig(b64: str, who: str) -> tuple:
+        """Runde 17 (Nr. 8): liefert (Storage-Key, Rohbytes) — die Bytes
+        werden fuer das PDF weiterverwendet statt ein zweites Mal dekodiert."""
         try:
             raw = base64.b64decode(b64.split(",")[-1], validate=False)
             from storage_service import validate_image_bytes
@@ -536,12 +611,14 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             storage.save(key, raw)
         except StorageError as exc:
             raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
-        return key
+        return key, raw
 
     import asyncio as _asyncio
     try:
-        sig_driver = await _asyncio.to_thread(_save_sig, body.signature_driver_b64, "fahrer")
-        sig_seller = await _asyncio.to_thread(_save_sig, body.signature_seller_b64, "verkaeufer")
+        sig_driver, sig_driver_raw = await _asyncio.to_thread(
+            _save_sig, body.signature_driver_b64, "fahrer")
+        sig_seller, sig_seller_raw = await _asyncio.to_thread(
+            _save_sig, body.signature_seller_b64, "verkaeufer")
     except Exception:
         await _rollback()
         raise
@@ -571,10 +648,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     filled["place"] = body.place or doc.get("place") or ""
     filled["seller_name"] = body.seller_name or appt.get("seller_name") or ""
     filled["driver_name"] = driver.get("display_name", "")
-    filled["signature_driver"] = base64.b64decode(
-        body.signature_driver_b64.split(",")[-1], validate=False)
-    filled["signature_seller"] = base64.b64decode(
-        body.signature_seller_b64.split(",")[-1], validate=False)
+    filled["signature_driver"] = sig_driver_raw
+    filled["signature_seller"] = sig_seller_raw
     filled["version"] = doc.get("version", 1)
 
     from pickup_pdf_service import build_pickup_pdf
@@ -601,6 +676,16 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         await _rollback()
         raise
 
+    # Runde 17 (Nr. 7): Zwischen Vorabpruefung und diesem Punkt liegen
+    # Dateischreiben und PDF-Erzeugung — wurde der Fahrer inzwischen aus
+    # der Firma entfernt (oder die Firma gesperrt), darf das Protokoll
+    # nicht mehr final werden: Verknuepfung erneut pruefen, sonst Rollback.
+    try:
+        await _zugriff_pruefen(appt, driver)
+    except HTTPException:
+        await _rollback()
+        raise
+
     # Ab hier sind die Dateien im Protokoll referenziert — erst wenn DIESER
     # Schritt fehlschlaegt, waeren sie verwaist, deshalb auch hier Rollback.
     try:
@@ -618,23 +703,26 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         raise
 
     # Termin + Fahrzeug-Lebenszyklus nachziehen: abgeschlossen = abgeholt.
-    await db.appointments.update_one(
-        {"id": appt_id},
-        {"$set": {"status": "abgeholt", "status_changed_at": now_iso(),
-                  "protocol_id": doc["id"]}})
-    # Nachpruefung Runde 14 (Befund 114): Aufraeum-Frist ab dem ERSTEN
-    # Abschluss — nur setzen, wenn noch leer.
-    await db.appointments.update_one(
-        {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
-        {"$set": {"abgeschlossen_seit": now_iso()}})
-    if appt.get("vehicle_id"):
+    # Runde 17 (Nr. 7): Compare-and-Set — ein inzwischen geschlossener
+    # Termin (oder ein entfernter Fahrer) bleibt unangetastet; das Protokoll
+    # ist trotzdem gespeichert (Beweis), der Fahrer bekommt einen Hinweis.
+    termin_gesetzt = await _termin_abgeholt_setzen(
+        appt_id, driver["id"],
+        {"status": "abgeholt", "status_changed_at": now_iso(),
+         "protocol_id": doc["id"]})
+    if termin_gesetzt and appt.get("vehicle_id"):
         await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
     await log_activity(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",
                        ref=appt.get("vehicle_id"),
                        meta={"version": doc.get("version", 1),
-                             "appointment_id": appt_id})
-    return {"ok": True, "protocol_id": doc["id"], "version": doc.get("version", 1),
-            "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
+                             "appointment_id": appt_id,
+                             "termin_gesetzt": termin_gesetzt})
+    out: Dict[str, Any] = {
+        "ok": True, "protocol_id": doc["id"], "version": doc.get("version", 1),
+        "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
+    if not termin_gesetzt:
+        out["hinweis"] = TERMIN_GESCHLOSSEN_HINWEIS
+    return out
 
 
 @router.get("/driver/appointments/{appt_id}/protocol.pdf")
