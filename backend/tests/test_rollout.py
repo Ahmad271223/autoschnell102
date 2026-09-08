@@ -8,8 +8,14 @@ antworteten rund 45 s mit 502. Abhilfe: Drain-Marker in der LB-Vorlage und
 deploy/rollout.sh, das einen Server je Aufruf aus der Rotation nimmt.
 Der funktionale Teil (503 mit Marker, 200 ohne) laeuft in der CI-Stack-Probe.
 """
+import os
 import re
+import shutil
+import stat
+import subprocess
 from pathlib import Path
+
+import pytest
 
 WURZEL = Path(__file__).resolve().parents[2]
 
@@ -53,7 +59,12 @@ def test_rollout_skript_setzt_drain_baut_und_hebt_auf():
     assert s.index("touch /tmp/drain") < s.index("git pull --ff-only") < s.index("up -d --build")
     assert "/api/ready" in s, "Backend-Bereitschaft wird abgewartet"
     assert "http://127.0.0.1/" in s, "Oberflaeche wird ueber den Proxy geprueft"
-    assert "trap undrain EXIT" in s, "Drain muss bei Abbruch aufgehoben werden"
+    # Befund 08.09.2026: der EXIT-Trap hob den Drain bei JEDEM Abbruch auf und
+    # gab damit einen halb fertigen Server wieder an den Load Balancer.
+    assert "trap abbruch EXIT INT TERM" in s and "trap undrain" not in s
+    assert s.index("FERTIG=1") < s.index("undrain\ntrap - EXIT INT TERM"), \
+        "Drain wird nur auf dem Erfolgspfad aufgehoben"
+    assert "freigeben.sh" in s, "Abbruchmeldung nennt den Weg zur Freigabe"
     assert "COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml" in s
     assert "PUBLIC_HOST" in s
 
@@ -80,3 +91,114 @@ def test_doku_und_ci_kennen_den_rollout():
     assert "sh deploy/rollout.sh" in d and "Drain" in d
     ci = (WURZEL / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "touch /tmp/drain" in ci and '[ "$CODE" = 503 ]' in ci
+
+
+# ============================================================ Fehlerpfad wirklich ausfuehren
+_SH = shutil.which("sh")
+
+_FAKE_DOCKER = """#!/bin/sh
+# Nachbau von "docker compose ..." fuer den Rollout-Test. Verhalten per Umgebung:
+#   FAKE_BUILD_FAIL=1  -> "up -d --build" scheitert
+#   FAKE_READY_FAIL=1  -> /api/ready antwortet nie
+#   FAKE_WEB_FAIL=1    -> Oberflaeche antwortet nie
+echo "docker $*" >> "$FAKE_LOG"
+case "$*" in
+  *"up -d --build"*) [ "$FAKE_BUILD_FAIL" = 1 ] && exit 1; exit 0 ;;
+  *"/api/ready"*)    [ "$FAKE_READY_FAIL" = 1 ] && exit 1; exit 0 ;;
+  *"wget"*)          [ "$FAKE_WEB_FAIL" = 1 ] && exit 1; exit 0 ;;
+esac
+exit 0
+"""
+_FAKE_GIT = """#!/bin/sh
+echo "git $*" >> "$FAKE_LOG"
+exit 0
+"""
+
+
+def _skript_lauf(tmp_path, skript, fehler=None, args=()):
+    """rollout.sh / freigeben.sh in einem Wegwerf-Checkout mit Docker-/Git-
+    Attrappen ausfuehren. Liefert (Rueckgabecode, Ausgabe, Marker-vorhanden,
+    Liste der Attrappen-Aufrufe)."""
+    verz = tmp_path / "checkout"
+    (verz / "deploy" / "drain").mkdir(parents=True, exist_ok=True)
+    (verz / ".env").write_text("PUBLIC_HOST=app.example.test\n", encoding="utf-8")
+    for name in ("rollout.sh", "freigeben.sh"):
+        shutil.copy(WURZEL / "deploy" / name, verz / "deploy" / name)
+    fake = tmp_path / "bin"
+    fake.mkdir(exist_ok=True)
+    for name, inhalt in (("docker", _FAKE_DOCKER), ("git", _FAKE_GIT)):
+        f = fake / name
+        f.write_text(inhalt, encoding="utf-8", newline="\n")
+        f.chmod(f.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    log = tmp_path / "aufrufe.log"
+    env = dict(os.environ)
+    env.update({"PATH": str(fake) + os.pathsep + env.get("PATH", ""),
+                "VERZ": str(verz).replace("\\", "/"), "WARTE_LB": "0", "SCHLAF": "0",
+                "FAKE_LOG": str(log).replace("\\", "/"),
+                "FAKE_BUILD_FAIL": "0", "FAKE_READY_FAIL": "0", "FAKE_WEB_FAIL": "0"})
+    if fehler:
+        env[fehler] = "1"
+    r = subprocess.run([_SH, str(verz / "deploy" / skript), *args], env=env,
+                       capture_output=True, text=True, timeout=120)
+    aufrufe = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return r.returncode, r.stdout + r.stderr, (verz / "deploy" / "drain" / "aktiv").exists(), aufrufe
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+@pytest.mark.parametrize("fehler", ["FAKE_BUILD_FAIL", "FAKE_READY_FAIL", "FAKE_WEB_FAIL"])
+def test_rollout_abbruch_laesst_server_im_drain(tmp_path, fehler):
+    """Scheitert Build, Bereitschaft oder Oberflaeche, darf der Drain-Marker
+    NICHT entfernt werden — sonst fuehrt der Load Balancer einen defekten
+    Server wieder (Befund 08.09.2026)."""
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path, "rollout.sh", fehler)
+    assert rc != 0, out
+    assert marker, "Drain-Marker muss nach Abbruch bestehen bleiben:\n" + out
+    assert "BLEIBT im Drain" in out and "freigeben.sh" in out, out
+    assert not any("betriebsprobe" in a for a in aufrufe), "keine Probe von aussen nach Abbruch"
+    if fehler != "FAKE_BUILD_FAIL":
+        assert any("up -d --build" in a for a in aufrufe)
+    # Marker im Proxy-Container wurde ebenfalls nicht entfernt
+    assert not any("rm -f /tmp/drain" in a for a in aufrufe), aufrufe
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+def test_rollout_erfolg_hebt_drain_auf_und_prueft_von_aussen(tmp_path):
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path, "rollout.sh")
+    assert rc == 0, out
+    assert not marker
+    reihenfolge = [a for a in aufrufe if any(k in a for k in
+                   ("touch /tmp/drain", "pull --ff-only", "up -d --build", "/api/ready",
+                    "wget", "rm -f /tmp/drain", "betriebsprobe"))]
+    assert "docker compose exec -T proxy sh -c touch /tmp/drain" in reihenfolge[0]
+    assert reihenfolge.index(next(a for a in reihenfolge if "pull --ff-only" in a)) \
+        < reihenfolge.index(next(a for a in reihenfolge if "up -d --build" in a)) \
+        < reihenfolge.index(next(a for a in reihenfolge if "rm -f /tmp/drain" in a)) \
+        < reihenfolge.index(next(a for a in reihenfolge if "betriebsprobe" in a))
+    assert "FERTIG" in out
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+def test_freigeben_verweigert_bei_kaputtem_backend_oder_oberflaeche(tmp_path):
+    for fehler in ("FAKE_READY_FAIL", "FAKE_WEB_FAIL"):
+        verz = tmp_path / fehler
+        verz.mkdir()
+        (verz / "checkout" / "deploy" / "drain").mkdir(parents=True)
+        (verz / "checkout" / "deploy" / "drain" / "aktiv").touch()
+        rc, out, marker, aufrufe = _skript_lauf(verz, "freigeben.sh", fehler)
+        assert rc != 0 and marker, (fehler, out)
+        assert "Freigabe verweigert" in out
+        assert not any("rm -f /tmp/drain" in a for a in aufrufe)
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+def test_freigeben_entfernt_marker_bei_gesundem_server(tmp_path):
+    (tmp_path / "checkout" / "deploy" / "drain").mkdir(parents=True)
+    (tmp_path / "checkout" / "deploy" / "drain" / "aktiv").touch()
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path, "freigeben.sh")
+    assert rc == 0 and not marker, out
+    assert any("rm -f /tmp/drain" in a for a in aufrufe)
+    assert any("/api/ready" in a for a in aufrufe) and any("wget" in a for a in aufrufe)
+    # --erzwingen: ohne Pruefung, aber laut
+    (tmp_path / "checkout" / "deploy" / "drain" / "aktiv").touch()
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path, "freigeben.sh", args=("--erzwingen",))
+    assert rc == 0 and not marker and "OHNE Pruefung" in out

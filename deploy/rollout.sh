@@ -16,13 +16,21 @@
 #   Danach dasselbe auf dem anderen Server. Der zweite Server traegt die
 #   Last waehrenddessen allein — deshalb IMMER nacheinander.
 #
+# Bricht ein Schritt ab (Build, Bereitschaft, Oberflaeche), BLEIBT der
+# Server im Drain: der Marker wird nicht automatisch entfernt, weil ein halb
+# fertiger Server sonst wieder in die Rotation kaeme (/api/health kann 200
+# liefern, waehrend /api/ready an Datenbank, Migration oder R2 scheitert).
+# Freigabe erst nach Behebung/Rollback mit `sh deploy/freigeben.sh`.
+#
 # Aufruf (auf prod2, dann auf prod1):
 #   cd /opt/autoschnell && sh deploy/rollout.sh
 # Umgebung: WARTE_LB (Sekunden je LB-Umschaltung, Standard 60),
+#           SCHLAF (Wartetakt der Bereitschaftsschleifen, Standard 3),
 #           VERZ (Checkout, Standard /opt/autoschnell).
 set -e
 VERZ=${VERZ:-/opt/autoschnell}
 WARTE_LB=${WARTE_LB:-60}
+SCHLAF=${SCHLAF:-3}
 cd "$VERZ" || { echo "FEHLER: $VERZ fehlt"; exit 2; }
 
 # Replikat-Ergaenzung IMMER mitnehmen (Vorfall 07.09.2026 vormittags), es sei
@@ -45,7 +53,25 @@ undrain() {
     rm -f deploy/drain/aktiv
     docker compose exec -T proxy sh -c 'rm -f /tmp/drain' >/dev/null 2>&1 || true
 }
-trap undrain EXIT INT TERM
+FERTIG=0
+abbruch() {
+    rc=$?
+    [ "$FERTIG" = 1 ] && return 0
+    echo ""
+    echo "ABBRUCH (Code $rc): dieser Server BLEIBT im Drain — /api/health antwortet 503,"
+    echo "   der Load Balancer schickt keine Besucher hierher, der andere Server traegt"
+    echo "   die Last allein. Der Marker wird absichtlich NICHT entfernt: ein halb"
+    echo "   fertiger Server darf nicht zurueck in die Rotation."
+    echo "   Naechste Schritte:"
+    echo "     1. Ursache pruefen:  docker compose ps"
+    echo "                          docker compose logs --tail 80 backend web proxy"
+    echo "     2. Entweder beheben und 'sh deploy/rollout.sh' erneut ausfuehren,"
+    echo "        oder zurueck auf den vorherigen Stand (DEPLOYMENT.md, 'Rollback')."
+    echo "     3. Erst danach freigeben: 'sh deploy/freigeben.sh' (prueft Backend und"
+    echo "        Oberflaeche und entfernt dann den Drain-Marker)."
+    exit "$rc"
+}
+trap abbruch EXIT INT TERM
 
 echo "== 1/5 Drain (Health -> 503), warte ${WARTE_LB}s"
 drain
@@ -62,7 +88,7 @@ i=0
 until docker compose exec -T backend curl -fsS http://localhost:8001/api/ready >/dev/null 2>&1; do
     i=$((i+1))
     [ $i -gt 60 ] && { echo "FEHLER: Backend nicht bereit"; docker compose exec -T backend curl -s http://localhost:8001/api/ready; docker compose logs --tail 40 backend; exit 1; }
-    sleep 3
+    sleep "$SCHLAF"
 done
 i=0
 # Von innen (127.0.0.1 darf laut LB-Vorlage direkt zugreifen): Startseite ueber
@@ -77,11 +103,12 @@ until docker compose exec -T proxy sh -c "wget -q -O /dev/null --header='Host: $
         docker compose restart proxy >/dev/null 2>&1 || true
     fi
     [ $i -gt 40 ] && { echo "FEHLER: Oberflaeche antwortet nicht"; docker compose logs --tail 20 web proxy; exit 1; }
-    sleep 3
+    sleep "$SCHLAF"
 done
 echo "   Backend bereit, Oberflaeche antwortet."
 
 echo "== 5/6 Drain aufheben, warte ${WARTE_LB}s bis der Load Balancer den Server wieder fuehrt"
+FERTIG=1
 undrain
 trap - EXIT INT TERM
 sleep "$WARTE_LB"

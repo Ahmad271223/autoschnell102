@@ -73,8 +73,29 @@ mit gerade neu gebauter Oberflaeche faellt so auch ohne Drain aus der
 Rotation. Beides gilt nur fuer die LB-Vorlage; nach dem ersten `git pull`
 mit dieser Aenderung einmal `docker compose up -d --force-recreate --no-deps proxy`,
 damit Volume und Vorlage geladen sind (ein bis zwei Sekunden Unterbrechung).
-Bei Fehler bricht das Skript ab und hebt den Drain wieder auf; Rueckweg:
-`git checkout <alter Stand>` und erneut `sh deploy/rollout.sh`.
+**Wenn das Rollout abbricht** (Build, Bereitschaft oder Oberflaeche
+scheitern), bleibt der Server absichtlich im Drain: `/api/health` antwortet
+weiter 503, der Load Balancer schickt keine Besucher hin, der andere Server
+traegt die Last allein. Der Marker wird NICHT automatisch entfernt — ein halb
+fertiger Server (Backend antwortet, aber `/api/ready` scheitert an Datenbank,
+Migration oder R2) darf nicht zurueck in die Rotation. Vorgehen:
+
+1. Ursache ansehen: `docker compose ps` und
+   `docker compose logs --tail 80 backend web proxy`.
+2. Entweder beheben und `sh deploy/rollout.sh` erneut ausfuehren, oder
+   **Rollback** auf den vorherigen Stand:
+   ```bash
+   cd /opt/autoschnell && git log --oneline -3      # vorherigen Commit ablesen
+   git reset --hard <vorheriger Commit>              # nur versionierte Dateien; .env, Keyfile, Zertifikate bleiben
+   docker compose up -d --build
+   ```
+3. Erst danach freigeben: `sh deploy/freigeben.sh`. Das Skript prueft
+   `/api/ready` und die Startseite ueber den Proxy und entfernt nur bei
+   Erfolg den Drain-Marker (`--erzwingen` ueberspringt die Pruefung —
+   nur bewusst einsetzen).
+
+Nach einem Rollback per `git reset --hard` holt das naechste
+`sh deploy/rollout.sh` mit `git pull --ff-only` wieder den neuesten Stand.
 
 **Einzelserver ohne Load Balancer** (Entwicklung, Staging):
 ```bash
