@@ -58,8 +58,19 @@ class _MotorProxy:
             loop = __import__("asyncio").get_running_loop()
         except RuntimeError:
             loop = None
-        if self._client is None or (self._loop is not None and self._loop.is_closed()
-                                    and loop is not None and loop is not self._loop):
+        # Runde 17: nicht nur bei GESCHLOSSENER alter Schleife neu binden,
+        # sondern immer, wenn eine ANDERE Schleife laeuft. Vorher blieb der
+        # Client an einer noch offenen Test-Schleife haengen, und der naechste
+        # Test (eigene Schleife) bekam "attached to a different loop" — die
+        # Job-Sperre (job_lock.acquire faengt alles) meldete dann 100x False.
+        # Im Serverbetrieb (eine Schleife je Worker) passiert das nie.
+        if self._client is None or (loop is not None and self._loop is not None
+                                    and loop is not self._loop):
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
             self._client = _neuer_client()
             self._loop = loop
         elif self._loop is None and loop is not None:

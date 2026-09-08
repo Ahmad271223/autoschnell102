@@ -590,9 +590,11 @@ def test_c6c_manueller_zweiter_offener_termin_je_fahrzeug_409(welt):
 
 
 def test_c6d_teil_unique_index_ist_definiert():
-    q = (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
+    # Runde 17: Helfer liegt in indizes.py (ohne server-Import testbar);
+    # server.py ruft ihn beim Start auf.
+    q = (WURZEL / "backend" / "indizes.py").read_text(encoding="utf-8")
     assert "termin_offen_je_fahrzeug" in q and "partialFilterExpression" in q
-    assert "await _termin_unique_index()" in q
+    assert "await _termin_unique_index()" in (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
     from pymongo import MongoClient
     info = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME].appointments.index_information()
     if "termin_offen_je_fahrzeug" in info:
