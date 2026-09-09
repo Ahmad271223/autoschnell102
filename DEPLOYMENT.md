@@ -779,14 +779,25 @@ und ohne Kosten:
   Download-Link `https://<FRONTEND_URL>/api/public/vertrag/<Token>` auf die
   digitale Fassung. Der Link braucht keine Anmeldung, ist standardmäßig
   14 Tage gültig (`VERTRAG_LINK_TAGE`), je IP gedrosselt (60/min) und mit
-  der Löschung des Vertrags automatisch tot. Jeder Abruf wird am Vertrag
-  gezählt (`freigabe.abrufe`) und im Audit-Log als
-  `vertrag.link.abgerufen` vermerkt — Beleg, dass der Verkäufer den
-  Vertrag geöffnet hat.
+  der Löschung des Vertrags automatisch tot. Er ist an die Vertragsfassung
+  gebunden, die verschickt wurde (`freigabe.version`): wird der Vertrag
+  danach neu erzeugt (verschobener Abholtermin), liefert derselbe Link
+  weiter die archivierte Fassung, und der nächste Versand erzeugt einen
+  neuen Link. Jeder Abruf wird gezählt (`freigabe.abrufe`) und als
+  `vertrag.link.abgerufen` protokolliert — das ist ein **anonymer
+  Linkabruf**, kein Nachweis, dass der Verkäufer das Dokument geöffnet hat:
+  wer den Link hat, kann ihn öffnen.
 
 Voraussetzung: `FRONTEND_URL` in der `.env` muss die öffentliche
 https-Adresse sein (steht dort ohnehin für den Passwort-Reset). Der Index
 `vertrag_freigabe_token` auf `generated_pdfs` wird beim Start angelegt.
+
+Was das System belegen kann und was nicht: belegt sind Erstellung, Inhalt
+und Versand des Vertrags (PDF-Fassungen mit Versionsarchiv, Versandprotokoll,
+Mail-Beleg). NICHT belegt ist die Zustimmung des Verkäufers — es gibt keinen
+Verkäufer-Login, keinen Bestätigungslink und keine Signatur. Der Text der
+digitalen Ausfertigung ist eine Vertragsbedingung des Händlers, keine vom
+System nachgewiesene Tatsache.
 
 ## Fahrzeuge verkaufen ist kostenlos
 

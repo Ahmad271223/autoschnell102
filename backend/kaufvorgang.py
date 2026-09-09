@@ -41,6 +41,9 @@ OFFEN = ("vertrag_erstellt", "gesendet", "abholung_geplant")
 _TERMIN_ZU_STATUS = {"abgeholt": "abgeholt", "nicht abgeholt": "nicht_abgeholt",
                      "storniert": "storniert", "erledigt": "abgeholt"}
 _KETTE = ["verglichen", "vertrag_erstellt", "gekauft", "abholung_geplant", "abgeholt"]
+# Fahrzeug-Lebenszyklen, in denen die Zusammenfassung nichts mehr veraendert
+# (Einkaufspreis/realisierter Vorgang sind dann Geschichte).
+ABGESCHLOSSEN_FAHRZEUG = frozenset({"verkauft", "archiviert", "geloescht"})
 
 
 def bereich(user) -> Dict[str, Any]:
@@ -104,7 +107,27 @@ async def fuer_termin(appt: dict) -> Optional[dict]:
         if kv:
             return kv
     if appt.get("contract_id"):
-        return await db.kaufvorgaenge.find_one({"contract_id": appt["contract_id"]}, {"_id": 0})
+        kv = await db.kaufvorgaenge.find_one({"contract_id": appt["contract_id"]}, {"_id": 0})
+        if kv:
+            return kv
+        # Runde 18: Der Termin zeigt auf einen Vertrag, dessen Vorgang fehlt
+        # (Anlage nach dem Vertrags-Insert gescheitert; der Auto-Termin trug
+        # trotzdem die kaufvorgang_id). Ueber den Vertrag nachlegen und den
+        # Termin auf den echten Vorgang zeigen lassen — vorher fiel der
+        # Aufrufer dauerhaft auf die direkte Fahrzeugstatus-Aenderung zurueck.
+        contract = await db.generated_pdfs.find_one(
+            {"id": appt["contract_id"]},
+            {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "vehicle_id": 1,
+             "purchase_price": 1, "kaufvorgang_id": 1, "appointment_id": 1})
+        kv = await fuer_vertrag(contract) if contract else None
+        if kv and appt.get("id"):
+            await db.appointments.update_one({"id": appt["id"]},
+                                             {"$set": {"kaufvorgang_id": kv["id"]}})
+            if not kv.get("appointment_id"):
+                await db.kaufvorgaenge.update_one(
+                    {"id": kv["id"]}, {"$set": {"appointment_id": appt["id"]}})
+                kv["appointment_id"] = appt["id"]
+        return kv
     return None
 
 
@@ -138,6 +161,12 @@ async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
     neu = _TERMIN_ZU_STATUS.get(termin_status, "abholung_geplant")
     if kv.get("status") != neu:
         await status_setzen(kv["id"], neu, user=user)
+    else:
+        # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
+        # Zusammenfassung kann beim letzten Mal gescheitert sein (wird dort
+        # abgefangen). Beim Wiederholen trotzdem abgleichen — sonst blieb das
+        # Fahrzeug dauerhaft falsch.
+        await fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
     return True
 
 
@@ -173,17 +202,33 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
     try:
         faelle = await db.kaufvorgaenge.find(
             {"vehicle_id": vehicle_id, "dealer_id": dealer_id},
-            {"_id": 0, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(500)
+            {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(500)
         if not faelle:
             return None
+        v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                       {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1})
+        aktuell = (v or {}).get("lifecycle") or "verglichen"
         stati = {f.get("status") for f in faelle}
         if "abgeholt" in stati:
-            abg = max((f for f in faelle if f.get("status") == "abgeholt"),
-                      key=lambda f: f.get("updated_at") or "")
-            if abg.get("purchase_price") is not None:
+            # Runde 18: Der REALISIERTE Vorgang wird am Fahrzeug festgehalten
+            # (abgeholt_kaufvorgang_id) und bleibt massgeblich, solange er
+            # abgeholt ist. Ein spaeter abgeschlossener zweiter Vorgang
+            # ueberschreibt weder ihn noch den Einkaufspreis — und ein bereits
+            # verkauftes/archiviertes Fahrzeug wird gar nicht mehr angefasst
+            # (vorher: Preis geschrieben, bevor der Lebenszyklus geprueft wurde
+            # -> historische Marge verfaelscht).
+            abgeholte = [f for f in faelle if f.get("status") == "abgeholt"]
+            fest = (v or {}).get("abgeholt_kaufvorgang_id")
+            abg = next((f for f in abgeholte if f.get("id") == fest), None) \
+                or max(abgeholte, key=lambda f: f.get("updated_at") or "")
+            if aktuell not in ABGESCHLOSSEN_FAHRZEUG:
+                setzen: Dict[str, Any] = {"abgeholt_kaufvorgang_id": abg.get("id")}
+                if abg.get("purchase_price") is not None:
+                    setzen["purchase_price"] = abg["purchase_price"]
                 await db.vehicles.update_one(
-                    {"id": vehicle_id, "dealer_id": dealer_id},
-                    {"$set": {"purchase_price": abg["purchase_price"]}})
+                    {"id": vehicle_id, "dealer_id": dealer_id,
+                     "lifecycle": {"$nin": list(ABGESCHLOSSEN_FAHRZEUG)}},
+                    {"$set": setzen})
             ziel = "abgeholt"
         elif "abholung_geplant" in stati:
             ziel = "abholung_geplant"
@@ -191,9 +236,6 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             ziel = "gekauft"
         else:
             ziel = "nicht_abgeholt" if "nicht_abgeholt" in stati else "storniert"
-        v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
-                                       {"_id": 0, "lifecycle": 1})
-        aktuell = (v or {}).get("lifecycle") or "verglichen"
         for schritt in _schritte(aktuell, ziel):
             await try_set_lifecycle(vehicle_id, dealer_id, schritt, user=user)
         return ziel

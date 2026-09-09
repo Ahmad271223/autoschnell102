@@ -460,6 +460,9 @@ _COMPANY_COLLECTIONS = (
     # Admin ueber DELETE /admin/drivers/{id}.
     "dealer_drivers", "dealer_invites",
     "plan_requests", "vehicle_comparisons",
+    # Runde 18: Kaufvorgaenge (Umbau 09.09.2026) tragen dealer_id, Sucher,
+    # Vertrag, Fahrzeug und Kaufpreis — blieben bei der Firmenloeschung liegen.
+    "kaufvorgaenge",
     # Nachpruefung Runde 14 (Befund 58): users ZULETZT — bricht die
     # Firmenloeschung mittendrin ab, findet der erneute Aufruf ueber den
     # Chef-Account den Vorgang noch (vorher: 404, Rest blieb verwaist).

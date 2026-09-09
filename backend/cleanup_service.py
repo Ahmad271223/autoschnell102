@@ -166,6 +166,22 @@ async def _delete_report_photos(db, appt_id: str, now: datetime, stats: dict,
                 stats.get("report_photos_deleted", 0) + 1)
 
 
+_VORGANG_OFFEN = ("vertrag_erstellt", "gesendet", "abholung_geplant")
+
+
+async def _anderer_vorgang_offen(db, dealer_id: str, vehicle_id: str, appt_id: str) -> bool:
+    """Runde 18: Gibt es zum gemeinsamen Fahrzeug noch einen anderen offenen
+    Termin oder einen offenen Kaufvorgang (anderer Sucher)?"""
+    from deps import TERMIN_OFFEN_WERTE
+    if await db.appointments.count_documents(
+            {"dealer_id": dealer_id, "vehicle_id": vehicle_id, "id": {"$ne": appt_id},
+             "status": {"$in": TERMIN_OFFEN_WERTE}}, limit=1):
+        return True
+    return bool(await db.kaufvorgaenge.count_documents(
+        {"dealer_id": dealer_id, "vehicle_id": vehicle_id,
+         "status": {"$in": list(_VORGANG_OFFEN)}}, limit=1))
+
+
 async def _cleanup_once(db) -> dict:
     """Ein Durchlauf. Liefert Metriken."""
     now = datetime.now(timezone.utc)
@@ -219,27 +235,40 @@ async def _cleanup_once(db) -> dict:
                     )
                     continue
 
+            # Runde 18: Das Inserat ist firmenweit gemeinsam (Kaufvorgaenge).
+            # Hat ein ANDERER Sucher zum selben Fahrzeug noch einen offenen
+            # Termin oder Vorgang, bleiben Inserats-Fotos und Snapshots —
+            # sein eigener Termin raeumt nach seinem Abschluss auf. Die
+            # Berichtsfotos dieses Termins sind oben bereits weg.
+            if vehicle_id and await _anderer_vorgang_offen(db, firma, vehicle_id, appt["id"]):
+                await db.appointments.update_one(
+                    {"id": appt["id"]},
+                    {"$set": {"assets_cleaned_at": now.isoformat(),
+                              "cleanup_skipped": "anderer_vorgang_offen"}},
+                )
+                stats["cleaned"] += 1
+                continue
+
             # 1) Snapshots + Storage-Objekte wegwerfen
             if vehicle_id:
                 deleted = await _delete_snapshots_for_vehicle(
                     db, vehicle_id, dealer_id=appt.get("dealer_id", ""))
                 stats["snapshots_deleted"] += deleted
 
-                # 2) Fotos aus dem Vehicle-Cache räumen
+                # 2) Fotos aus dem Vehicle-Cache räumen — Runde 18: NUR die
+                #    Fotofelder ($set data.<feld>), nicht das ganze data-Objekt
+                #    zurueckschreiben. Vorher gingen zwischenzeitliche
+                #    Korrekturen (Kilometerstand, Fahrzeugdaten) verloren.
                 v = await db.vehicles.find_one(
                     {"id": vehicle_id, "dealer_id": firma},
                     {"_id": 0, "data": 1, "mobile_ad_id": 1})
                 if v and isinstance(v.get("data"), dict):
                     data = v["data"]
-                    changed = False
-                    for key in _iter_photo_keys():
-                        if data.get(key):
-                            data[key] = []
-                            changed = True
-                    if changed:
+                    leeren = {f"data.{key}": [] for key in _iter_photo_keys() if data.get(key)}
+                    if leeren:
                         await db.vehicles.update_one(
                             {"id": vehicle_id, "dealer_id": firma},
-                            {"$set": {"data": data, "assets_cleaned_at": now.isoformat()}},
+                            {"$set": {**leeren, "assets_cleaned_at": now.isoformat()}},
                         )
                         stats["photos_cleared"] += 1
 
@@ -944,7 +973,11 @@ async def firmenreste_bereinigen(db) -> int:
                        ("link_jobs", "requested_by_dealer"),
                        ("listings_cache_client", "dealer_id"),
                        ("listings_cache", "confirmed_by"),
-                       ("listings_cache", "data.ingested_by_dealer")):
+                       ("listings_cache", "data.ingested_by_dealer"),
+                       # Runde 18: Kaufvorgaenge fehlten in der Loeschkaskade
+                       # (jetzt ergaenzt) — Altbestand aus frueher geloeschten
+                       # Firmen wird hier nachtraeglich entfernt.
+                       ("kaufvorgaenge", "dealer_id")):
         try:
             werte = await db[coll].distinct(feld)
         except Exception as exc:                        # noqa: BLE001
@@ -967,6 +1000,8 @@ async def firmenreste_bereinigen(db) -> int:
         {"requested_by_dealer": {"$in": weg}}, {"$set": {"requested_by_dealer": ""}})
     n += r.modified_count
     r = await db.listings_cache_client.delete_many({"dealer_id": {"$in": weg}})
+    n += r.deleted_count
+    r = await db.kaufvorgaenge.delete_many({"dealer_id": {"$in": weg}})
     n += r.deleted_count
     r = await db.listings_cache.update_many(
         {"confirmed_by": {"$in": weg}}, {"$pull": {"confirmed_by": {"$in": weg}}})

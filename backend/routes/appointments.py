@@ -131,6 +131,25 @@ def zusage_zuruecksetzen_wenn_geaendert(existing: dict, neu: dict) -> Tuple[dict
             {"zuteilung_beantwortet_am": ""})
 
 
+async def _fahrzeug_passt_zum_vertrag(dealer_id: str, vehicle_id, contract_id) -> None:
+    """Runde 18: Termin, Fahrzeug und Vertrag muessen ZUSAMMENGEHOEREN.
+    Beide wurden bisher nur einzeln auf Zugriff geprueft — ein Termin konnte
+    Fahrzeug A mit dem Vertrag fuer Fahrzeug B verbinden: der Abholauftrag
+    zeigte Fahrzeug A, die Statusaenderung traf ueber den Kaufvorgang aber
+    Fahrzeug B."""
+    if not vehicle_id or not contract_id:
+        return
+    c = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": dealer_id}, {"_id": 0, "vehicle_id": 1})
+    if c is None:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    # Altvertraege ohne Fahrzeugverweis lassen sich nicht pruefen — kein Fehler.
+    if c.get("vehicle_id") and c["vehicle_id"] != vehicle_id:
+        raise HTTPException(409, "Der Vertrag gehört zu einem anderen Fahrzeug — "
+                                 "bitte den passenden Vertrag wählen oder den "
+                                 "Termin ohne Vertrag anlegen.")
+
+
 async def _vertragszeiger_abgleichen(dealer_id: str, appt_id: str,
                                      contract_id: Optional[str]) -> None:
     """Runde 17 (Nr. 3): Vertragsverweise IDEMPOTENT aus dem Termin ableiten
@@ -295,6 +314,16 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
              "contract_data": 1, "kaufvorgang_id": 1})
         if vertrag_doc is None:
             raise HTTPException(404, "Vertrag nicht gefunden")
+    await _fahrzeug_passt_zum_vertrag(user["dealer_id"], body.vehicle_id, body.contract_id)
+    # Runde 18: "abgeholt" entsteht auch beim ANLEGEN nur mit unterschriebenem
+    # Abholprotokoll, sobald ein Fahrer eingeteilt ist — dieselbe Regel wie
+    # beim Aendern. Ein neuer Termin kann noch kein Protokoll haben, der Weg
+    # ist damit geschlossen (ohne Fahrer bleibt der Buero-Abschluss erlaubt).
+    if (body.status or "") == "abgeholt" and body.driver_id:
+        raise HTTPException(409, "Für diesen Termin ist ein Fahrer eingeteilt. "
+                                 "'Abgeholt' entsteht automatisch, sobald der "
+                                 "Fahrer das Abholprotokoll unterschrieben "
+                                 "abschließt.")
     await _fahrer_pruefen(user["dealer_id"], body.driver_id)
     # Umbau Kaufvorgaenge 09.09.2026: ein offener Abholtermin je VERTRAG
     # (vorher je Fahrzeug — zwei Sucher konnten dasselbe Inserat nicht
@@ -506,6 +535,15 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         if not await db.generated_pdfs.find_one(
                 {"id": update["contract_id"], **_vertrag_bereich(user)}, {"_id": 1}):
             raise HTTPException(404, "Vertrag nicht gefunden")
+    # Runde 18: auch nach dem Aendern muessen Fahrzeug und Vertrag, die dann
+    # am Termin haengen, zusammengehoeren — geprueft, sobald eines von beiden
+    # neu gesetzt wird (ein Loesen macht das Paar unvollstaendig, nichts zu
+    # pruefen; unbeteiligte Aenderungen bleiben von Altdaten unbehelligt).
+    if update.get("vehicle_id") or update.get("contract_id"):
+        await _fahrzeug_passt_zum_vertrag(
+            user["dealer_id"],
+            update.get("vehicle_id") or (None if fahrzeug_loesen else existing.get("vehicle_id")),
+            update.get("contract_id") or (None if contract_loesen else existing.get("contract_id")))
     # Nachpruefung Runde 14 (Nr. 99/98): Bei abgeschlossenen Terminen sind
     # Fahrer, Verkaeufer, Fahrzeug und Vertrag Beweisdaten (Protokoll,
     # driver_id_hist). Nachtraeglich aendert sie nur der Chef; ebenso den
@@ -641,16 +679,24 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         await try_set_lifecycle(update["vehicle_id"], user["dealer_id"],
                                 "abholung_geplant", user=user)
     status_gewechselt = "status" in update and update["status"] != existing.get("status")
-    if status_gewechselt:
+    if status_gewechselt or contract_gewechselt:
         # Umbau Kaufvorgaenge: der Status wirkt auf den VORGANG dieses Termins;
         # das Fahrzeug bekommt nur die Zusammenfassung (nicht_abgeholt erst,
         # wenn kein anderer Vorgang mehr offen ist). Ohne Vorgang (manueller
         # Termin ohne Vertrag) wie frueher direkt am Fahrzeug.
+        # Runde 18: den TATSAECHLICH gespeicherten Termin lesen — nach
+        # _vertragszeiger_abgleichen traegt er den Vorgang des NEUEN Vertrags.
+        # Vorher gewann die alte kaufvorgang_id aus `existing`, und ein
+        # Vertragswechsel mit Statusaenderung markierte den alten Kauf als
+        # abgeholt. Ein Wechsel OHNE Statusaenderung zieht den neuen Vorgang
+        # jetzt ebenfalls nach.
         import kaufvorgang as _kv
-        termin_nachher = {"id": appt_id, "contract_id": contract_id,
-                          "kaufvorgang_id": existing.get("kaufvorgang_id")}
-        if not await _kv.termin_status_uebernehmen(termin_nachher, update["status"], user=user) \
-                and vehicle_id:
+        termin_nachher = await db.appointments.find_one(
+            {"id": appt_id}, {"_id": 0, "id": 1, "contract_id": 1, "kaufvorgang_id": 1}) \
+            or {"id": appt_id, "contract_id": contract_id}
+        wirksamer_status = update.get("status", existing.get("status")) or "offen"
+        if not await _kv.termin_status_uebernehmen(termin_nachher, wirksamer_status, user=user) \
+                and vehicle_id and status_gewechselt:
             if update["status"] == "abgeholt":
                 await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
             elif update["status"] == "nicht abgeholt":

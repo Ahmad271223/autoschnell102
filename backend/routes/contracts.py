@@ -239,11 +239,28 @@ def _pdfs_erzeugen(*, dealer: dict, vehicle: dict, contract: dict) -> tuple[byte
     return druck, digital
 
 
+# Runde 18 (Pruefbefund Blocker): Fehlt einem Altvertrag der digitale Text,
+# darf NICHT der heute eingestellte Text irgendeines Kontos eingesetzt werden
+# — das wuerde den historischen Vertragsinhalt nachtraeglich veraendern.
+# Stattdessen ein klarer Hinweis, dass die Fassung nachtraeglich entstanden
+# ist und ihr Text nicht Teil des damals geschlossenen Vertrags war.
+DIGITAL_NACHTRAEGLICH = (
+    "Diese digitale Ausfertigung wurde nachträglich erzeugt.\n\n"
+    "Der Vertrag wurde vor Einführung der digitalen Ausfertigung geschlossen. "
+    "Für ihn sind keine digitalen Vertragsbedingungen gespeichert; es gelten "
+    "ausschließlich die oben aufgeführten Vertragsangaben und die unterschriebene "
+    "Ausfertigung."
+)
+
+
 async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
     """Digitale Ausfertigung eines gespeicherten Vertrags (fuer Versand und
-    Download). Altvertraege ohne pdf_digital_b64 werden einmalig aus ihren
-    Vertragsdaten nacherzeugt und ergaenzt; schlaegt das fehl, kommt die
-    Druckfassung, damit ein Versand nie an der Fassung scheitert."""
+    Download). Fehlt sie (Altvertrag), wird sie aus den GESPEICHERTEN
+    Vertragsdaten nacherzeugt: der bei der Erstellung festgehaltene digitale
+    Text, sonst der Nachtraeglich-Hinweis. Weder der Text noch die Identitaet
+    des Abrufenden fliessen ein — zwei Abrufe liefern dasselbe Dokument.
+    Schlaegt die Erzeugung fehl, kommt die Druckfassung, damit ein Versand
+    nie an der Fassung scheitert."""
     if c.get("pdf_digital_b64"):
         return base64.b64decode(c["pdf_digital_b64"])
     try:
@@ -251,25 +268,26 @@ async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
         v = await db.vehicles.find_one(
             {"id": c.get("vehicle_id"), "dealer_id": c.get("dealer_id")}, {"_id": 0}) or {}
         vehicle = dict(v.get("data") or {})
-        from deps import effective_dealer
-        # Firmenidentitaet des ERSTELLERS (Sucher-Overrides), nicht des
-        # Abrufenden — so wie die Druckfassung erzeugt wurde.
-        ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
-            if c.get("user_id") and c.get("user_id") != user.get("id") else None
-        dealer = await effective_dealer(ersteller or user) or {}
-        if not (contract_dict.get("digital_vertragstext") or "").strip():
-            contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
+        # Firmenidentitaet aus dem Haendler-Dokument; die im Vertrag
+        # festgehaltenen Firmenangaben (Name, Anschrift, Telefon) gewinnen
+        # ohnehin ueber _apply_contract_overrides. Kein effective_dealer:
+        # dessen Sucher-Overrides haengen am ABRUFENDEN bzw. am heutigen
+        # Stand des Erstellers und machten das Dokument abrufabhaengig.
+        dealer = await db.dealers.find_one({"id": c.get("dealer_id")}, {"_id": 0}) or {}
+        gespeichert = (contract_dict.get("digital_vertragstext") or "").strip()
+        contract_dict["digital_vertragstext"] = gespeichert or DIGITAL_NACHTRAEGLICH
         vehicle, dealer = _apply_contract_overrides(
             contract=contract_dict, vehicle=vehicle, dealer=dealer)
         pdf_bytes = await asyncio.to_thread(
             generate_contract_pdf, dealer=dealer, vehicle=vehicle,
             contract=contract_dict, digital=True)
+        # Nur das PDF zwischenspeichern — contract_data bleibt unangetastet,
+        # der historische Vertragsinhalt aendert sich nicht.
         await db.generated_pdfs.update_one(
             {"id": c["id"], "version": c.get("version"),
              "pdf_digital_b64": {"$exists": False}},
             {"$set": {"pdf_digital_b64": base64.b64encode(pdf_bytes).decode(),
-                      "contract_data.digital_vertragstext":
-                          contract_dict["digital_vertragstext"]}})
+                      "pdf_digital_nachtraeglich": not gespeichert}})
         return pdf_bytes
     except Exception:
         log.exception("Digitale Ausfertigung von Vertrag %s konnte nicht erzeugt "
@@ -294,33 +312,55 @@ def _oeffentliche_basis() -> str:
     return (os.environ.get("FRONTEND_URL") or "http://localhost:3000").split("?")[0].rstrip("/")
 
 
+def _freigabe_gueltig(f: dict, version: int) -> bool:
+    """Ein bestehender Link wird nur wiederverwendet, wenn er noch mindestens
+    einen Tag laeuft UND auf die AKTUELLE Vertragsfassung zeigt (Runde 18:
+    nach einer Terminverschiebung ist die alte Freigabe an die alte Fassung
+    gebunden — der neue Versand braucht einen neuen Link)."""
+    if not (f or {}).get("token") or int(f.get("version") or 0) != int(version or 1):
+        return False
+    try:
+        return datetime.fromisoformat(f.get("laeuft_ab") or "") \
+            - datetime.now(timezone.utc) > timedelta(days=1)
+    except ValueError:
+        return False
+
+
 async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[str, str]:
-    """Liefert (Link, gueltig_bis). Ein noch mindestens einen Tag gueltiger
-    Link wird wiederverwendet (dieselbe Nachricht zweimal = derselbe Link);
-    sonst neues Token. Wirft bei Datenbankfehlern."""
+    """Liefert (Link, gueltig_bis) fuer die AKTUELLE Vertragsfassung.
+
+    Runde 18: Die Freigabe wird ATOMAR gesetzt — zwei gleichzeitige Versande
+    erzeugten vorher zwei Tokens, von denen eines sofort wieder ungueltig war
+    (beide Antworten meldeten Erfolg). Jetzt gewinnt genau einer, der andere
+    bekommt dessen Link. Ein noch gueltiger Link derselben Fassung wird
+    wiederverwendet; eine bestehende Gueltigkeitszusage wird nie verkuerzt."""
     c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
-                                         {"_id": 0, "freigabe": 1})
+                                         {"_id": 0, "freigabe": 1, "version": 1})
     if c is None:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    version = int(c.get("version") or 1)
     f = c.get("freigabe") or {}
-    jetzt = datetime.now(timezone.utc)
-    try:
-        bisher_bis = datetime.fromisoformat(f.get("laeuft_ab") or "")
-    except ValueError:
-        bisher_bis = None
-    if f.get("token") and bisher_bis and bisher_bis - jetzt > timedelta(days=1):
-        token, laeuft_ab = f["token"], f["laeuft_ab"]
-    else:
-        token = secrets.token_urlsafe(32)
-        laeuft_ab = (jetzt + timedelta(days=VERTRAG_LINK_TAGE)).isoformat()
-        res = await db.generated_pdfs.update_one(
-            {"id": contract_id, **bereich},
-            {"$set": {"freigabe": {"token": token, "erstellt_am": now_iso(),
-                                   "laeuft_ab": laeuft_ab, "erstellt_von": user.get("id"),
-                                   "abrufe": 0}}})
-        if res.matched_count == 0:
-            raise HTTPException(404, "Vertrag nicht gefunden")
-    return f"{_oeffentliche_basis()}/api/public/vertrag/{token}", laeuft_ab
+    if _freigabe_gueltig(f, version):
+        return f"{_oeffentliche_basis()}/api/public/vertrag/{f['token']}", f["laeuft_ab"]
+    neu = {"token": secrets.token_urlsafe(32), "erstellt_am": now_iso(),
+           "laeuft_ab": (datetime.now(timezone.utc)
+                         + timedelta(days=VERTRAG_LINK_TAGE)).isoformat(),
+           "erstellt_von": user.get("id"), "version": version, "abrufe": 0}
+    # Nur schreiben, wenn die Freigabe noch genau so aussieht wie gelesen —
+    # sonst hat ein paralleler Aufruf bereits eine gesetzt.
+    res = await db.generated_pdfs.update_one(
+        {"id": contract_id, **bereich,
+         **({"freigabe.token": f["token"]} if f.get("token")
+            else {"freigabe": {"$exists": False}})},
+        {"$set": {"freigabe": neu}})
+    if res.modified_count:
+        return f"{_oeffentliche_basis()}/api/public/vertrag/{neu['token']}", neu["laeuft_ab"]
+    aktuell = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                               {"_id": 0, "freigabe": 1})
+    f2 = (aktuell or {}).get("freigabe") or {}
+    if not f2.get("token"):
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    return f"{_oeffentliche_basis()}/api/public/vertrag/{f2['token']}", f2.get("laeuft_ab") or ""
 
 
 def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) -> tuple[dict, dict]:
@@ -902,8 +942,15 @@ async def public_vertrag_pdf(token: str, request: Request):
     """Digitale Vertragsfassung ueber den Download-Link aus der WhatsApp-
     Nachricht — OHNE Anmeldung, nur mit gueltigem Token (siehe
     _freigabe_link). Je IP gedrosselt; abgelaufen = 410; geloescht oder
-    in Loeschung = 404. Jeder Abruf wird am Vertrag gezaehlt (Beleg, dass
-    der Verkaeufer den Vertrag geoeffnet hat)."""
+    in Loeschung = 404.
+
+    Runde 18: Der Link ist an die FASSUNG gebunden, die verschickt wurde
+    (freigabe.version). Wird der Vertrag danach neu erzeugt (verschobener
+    Abholtermin), liefert derselbe Link weiterhin die archivierte Fassung —
+    vorher zeigte er stillschweigend einen anderen Vertragsinhalt.
+
+    Gezaehlt wird ein ANONYMER Linkabruf. Wer den Link hat, kann ihn oeffnen;
+    das ist kein Nachweis, dass der Verkaeufer das Dokument gesehen hat."""
     from rate_limiter import client_ip
     if not await _link_limiter.check(client_ip(request)):
         raise HTTPException(429, "Zu viele Anfragen — bitte kurz warten.")
@@ -916,26 +963,47 @@ async def public_vertrag_pdf(token: str, request: Request):
          "version": 1, "freigabe": 1})
     if not c:
         raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
+    freigabe = c.get("freigabe") or {}
     try:
-        laeuft_ab = datetime.fromisoformat((c.get("freigabe") or {}).get("laeuft_ab") or "")
+        laeuft_ab = datetime.fromisoformat(freigabe.get("laeuft_ab") or "")
     except ValueError:
         laeuft_ab = None
     if not laeuft_ab or laeuft_ab <= datetime.now(timezone.utc):
         raise HTTPException(410, "Dieser Link ist abgelaufen — bitte den Händler um "
                                  "einen neuen Link bitten.")
-    ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
-        or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
-    pdf_bytes = await _digitales_pdf_bytes(c, ersteller)
-    if not pdf_bytes:
-        raise HTTPException(404, "Vertrag nicht mehr vorhanden")
+    geteilte_version = int(freigabe.get("version") or c.get("version") or 1)
+    if geteilte_version != int(c.get("version") or 1):
+        # Der Vertrag wurde nach dem Versand neu erzeugt: die damals
+        # verschickte Fassung liegt im Versionsarchiv.
+        alt = await db.generated_pdf_versions.find_one(
+            {"contract_id": c["id"], "dealer_id": c.get("dealer_id"),
+             "version": geteilte_version},
+            {"_id": 0, "pdf_digital_b64": 1, "pdf_b64": 1, "filename": 1})
+        pdf_bytes = base64.b64decode(alt["pdf_digital_b64"]) if (alt or {}).get("pdf_digital_b64") \
+            else (base64.b64decode(alt["pdf_b64"]) if (alt or {}).get("pdf_b64") else None)
+        if not pdf_bytes:
+            raise HTTPException(410, "Der Vertrag wurde inzwischen geändert und die "
+                                     "verschickte Fassung ist nicht mehr abrufbar — "
+                                     "bitte den Händler um einen neuen Link bitten.")
+        fname_quelle = (alt or {}).get("filename") or c.get("filename") or ""
+    else:
+        ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
+            or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
+        pdf_bytes = await _digitales_pdf_bytes(c, ersteller)
+        if not pdf_bytes:
+            raise HTTPException(404, "Vertrag nicht mehr vorhanden")
+        fname_quelle = c.get("filename") or ""
     await db.generated_pdfs.update_one(
         {"id": c["id"], "freigabe.token": token},
         {"$inc": {"freigabe.abrufe": 1},
          "$set": {"freigabe.zuletzt_abgerufen": now_iso()}})
+    # Anonymer Abruf: KEINEM Konto zurechenbar (weder Ersteller noch
+    # Empfaenger) — der Audit-Eintrag sagt genau das.
     from deps import log_activity_sicher
-    await log_activity_sicher(c.get("dealer_id"), c.get("user_id"), "vertrag.link.abgerufen",
-                              ref=c["id"])
-    fname = _safe_filename(c.get("filename") or "", fallback="kaufvertrag.pdf")
+    await log_activity_sicher(c.get("dealer_id"), None, "vertrag.link.abgerufen",
+                              ref=c["id"], meta={"anonym": True,
+                                                 "version": geteilte_version})
+    fname = _safe_filename(fname_quelle, fallback="kaufvertrag.pdf")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

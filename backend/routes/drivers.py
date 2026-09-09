@@ -970,7 +970,17 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         update["notes"] = (appt.get("notes") or "") + (
             "\n" if appt.get("notes") else ""
         ) + f"[Fahrer] {body.notes}"
-    await db.appointments.update_one({"id": appt_id}, {"$set": update})
+    # Runde 18: Fahrer und Ausgangsstatus im SCHREIBFILTER erneut pruefen —
+    # zwischen Lesen und Schreiben kann der Termin storniert oder einem
+    # anderen Fahrer zugeteilt worden sein; vorher setzte der alte Aufruf
+    # den Status trotzdem.
+    res = await db.appointments.update_one(
+        {"id": appt_id, "driver_id": driver["id"], "status": appt.get("status")},
+        {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Der Termin wurde zwischenzeitlich geändert "
+                                 "(storniert oder anderem Fahrer zugeteilt) — "
+                                 "bitte die Termine neu laden.")
     if body.status in ("abgeholt", "nicht abgeholt", "erledigt", "storniert"):
         await db.appointments.update_one(
             {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},

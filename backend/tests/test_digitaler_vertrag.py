@@ -285,28 +285,86 @@ def test_22_vertrag_sucher_nutzt_eigenen_text(welt):
     assert "Ort, Datum" not in f
 
 
-def test_23_altvertrag_wird_nachgeholt(welt):
-    """Vertraege von vor dem Umbau haben keine digitale Fassung: beim ersten
-    Abruf (und damit beim Versand) wird sie aus den Vertragsdaten erzeugt
-    und gespeichert — mit dem Text des ERSTELLERS, auch wenn der Chef abruft."""
+def test_23_altvertrag_behaelt_seinen_gespeicherten_text(welt):
+    """Fehlt nur die digitale PDF-Fassung, wird sie aus dem im Vertrag
+    GESPEICHERTEN Text erzeugt — unabhaengig davon, wer abruft und was
+    heute in den Einstellungen steht."""
+    dbx = _db()
+    dbx.generated_pdfs.update_one({"id": welt["contract_sucher"]},
+                                  {"$unset": {"pdf_digital_b64": ""}})
+    # Der Sucher aendert HEUTE seinen Text — der Altvertrag darf ihn nicht bekommen.
+    r = requests.put(f"{API}/dealer/settings", headers=welt["S"],
+                     json={"digital_vertragstext": f"NEUERTEXT-{SUF}: heute geaendert."},
+                     timeout=30)
+    assert r.status_code == 200
+    try:
+        r = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
+                         params={"variante": "digital"}, headers=welt["H"], timeout=60)
+        assert r.status_code == 200 and r.content[:4] == b"%PDF"
+        f = _flach(_text(r.content))
+        assert "Ort, Datum" not in f
+        assert f"SUCHERTEXT-{SUF}" in f            # Stand der Vertragserstellung
+        assert f"NEUERTEXT-{SUF}" not in f         # NICHT der heutige Text
+        doc = dbx.generated_pdfs.find_one({"id": welt["contract_sucher"]})
+        assert doc.get("pdf_digital_b64")
+        assert doc["contract_data"]["digital_vertragstext"] == SUCHER_TEXT
+        assert not doc.get("pdf_digital_nachtraeglich")
+    finally:
+        requests.put(f"{API}/dealer/settings", headers=welt["S"],
+                     json={"digital_vertragstext": SUCHER_TEXT}, timeout=30)
+    r = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
+                     headers=welt["H"], timeout=60)
+    assert "Ort, Datum" in _text(r.content)        # Druckfassung unveraendert
+
+
+def test_23b_echter_altvertrag_wird_als_nachtraeglich_gekennzeichnet(welt):
+    """Blocker-Befund 09.09.2026: Ein Vertrag von VOR der digitalen
+    Ausfertigung hat keinen gespeicherten Text. Dann darf KEIN heute
+    eingestellter Text eingesetzt werden — die Fassung nennt sich
+    ausdruecklich nachtraeglich erzeugt, und der Vertragsinhalt
+    (contract_data) bleibt unveraendert."""
     dbx = _db()
     dbx.generated_pdfs.update_one(
         {"id": welt["contract_sucher"]},
         {"$unset": {"pdf_digital_b64": "", "contract_data.digital_vertragstext": ""}})
-    assert "pdf_digital_b64" not in dbx.generated_pdfs.find_one({"id": welt["contract_sucher"]})
     r = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
                      params={"variante": "digital"}, headers=welt["H"], timeout=60)
-    assert r.status_code == 200 and r.content[:4] == b"%PDF"
+    assert r.status_code == 200
     f = _flach(_text(r.content))
-    assert "Ort, Datum" not in f
-    assert f"SUCHERTEXT-{SUF}" in f          # Text des Erstellers (Sucher)
+    assert "nachträglich erzeugt" in f
+    assert f"SUCHERTEXT-{SUF}" not in f and f"FIRMENTEXT-{SUF}" not in f
+    assert "Absagen sind nach Vertragsbestätigung" not in f   # auch nicht der Standard
     doc = dbx.generated_pdfs.find_one({"id": welt["contract_sucher"]})
-    assert doc.get("pdf_digital_b64")       # einmalig nachgetragen
-    assert doc["contract_data"]["digital_vertragstext"] == SUCHER_TEXT
-    # Druckfassung unveraendert
-    r = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
-                     headers=welt["H"], timeout=60)
-    assert "Ort, Datum" in _text(r.content)
+    assert "digital_vertragstext" not in (doc.get("contract_data") or {}),         "historischer Vertragsinhalt darf nicht nachtraeglich ergaenzt werden"
+    assert doc.get("pdf_digital_nachtraeglich") is True
+
+
+def test_23c_abruf_ist_unabhaengig_vom_abrufenden_und_stabil(welt):
+    """Auch wenn das Ersteller-Konto fehlt, haengt die nacherzeugte Fassung
+    nicht am Abrufenden: Chef und Sucher bekommen dasselbe Dokument, und
+    zwei Abrufe liefern denselben Inhalt (frueher konnten parallele Abrufe
+    verschiedene PDFs zurueckgeben)."""
+    dbx = _db()
+    dbx.generated_pdfs.update_one({"id": welt["contract_sucher"]},
+                                  {"$unset": {"pdf_digital_b64": ""}})
+    dbx.generated_pdfs.update_one({"id": welt["contract_sucher"]},
+                                  {"$set": {"user_id": f"geloescht_{SUF}"}})
+    try:
+        chef = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
+                            params={"variante": "digital"}, headers=welt["H"], timeout=60)
+        sucher = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
+                              params={"variante": "digital"}, headers=welt["H"], timeout=60)
+        assert chef.status_code == sucher.status_code == 200
+        assert _flach(_text(chef.content)) == _flach(_text(sucher.content))
+        f = _flach(_text(chef.content))
+        assert "nachträglich erzeugt" in f or f"SUCHERTEXT-{SUF}" in f
+        assert f"FIRMENTEXT-{SUF}" not in f, "Text des Abrufenden darf nie einfliessen"
+    finally:
+        dbx.generated_pdfs.update_one(
+            {"id": welt["contract_sucher"]},
+            {"$set": {"user_id": welt["sucher_id"],
+                      "contract_data.digital_vertragstext": SUCHER_TEXT},
+             "$unset": {"pdf_digital_b64": "", "pdf_digital_nachtraeglich": ""}})
 
 
 def test_24_vorschau_kennt_beide_fassungen(welt):

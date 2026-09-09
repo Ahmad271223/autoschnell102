@@ -40,6 +40,11 @@ def _text(pdf_bytes: bytes) -> str:
                      for p in PdfReader(io.BytesIO(pdf_bytes)).pages)
 
 
+def _flach(s: str) -> str:
+    """pypdf bricht Zeilen — fuer Textvergleiche Whitespace normalisieren."""
+    return " ".join((s or "").split())
+
+
 def _db():
     from pymongo import MongoClient
     return MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME]
@@ -257,3 +262,98 @@ def test_09_link_ist_je_ip_gedrosselt():
         return [await C._link_limiter.check(ip) for _ in range(61)]
     erg = asyncio.run(lauf())
     assert all(erg[:60]) and erg[60] is False, "61. Abruf derselben IP muss gedrosselt sein"
+
+
+def test_10_link_ist_an_die_verschickte_fassung_gebunden(welt):
+    """Runde 18 (Hoch): Der verschickte Link muss die Fassung liefern, die
+    verschickt wurde. Wird der Vertrag danach neu erzeugt (verschobener
+    Abholtermin), zeigte derselbe Link vorher stillschweigend einen anderen
+    Vertragsinhalt."""
+    dbx = _db()
+    # Frischer Vertrag mit Abholtermin (der erzeugt den Termin automatisch)
+    r = requests.post(f"{API}/contracts", headers=welt["H"], json={
+        "vehicle_id": welt["vehicle_id"], "seller_name": "WA Verkaeufer",
+        "seller_phone": "+49 170 1234567", "purchase_price": 7100,
+        "pickup_date": "2099-05-01", "pickup_time": "09:00"}, timeout=90)
+    assert r.status_code == 200, r.text[:300]
+    cid = r.json()["id"]
+    body = {"channel": "whatsapp", "recipient": "+49 170 1234567",
+            "message": "Vertrag v1.", "idempotency_key": str(uuid.uuid4())}
+    r = requests.post(f"{API}/contracts/{cid}/send", headers=welt["H"], json=body, timeout=60)
+    assert r.status_code == 200, r.text[:300]
+    link_v1 = r.json()["download_link"]
+    assert "01.05.2099" in _flach(_text(requests.get(_lokal(link_v1), timeout=60).content))
+    doc = dbx.generated_pdfs.find_one({"id": cid})
+    assert doc["freigabe"]["version"] == int(doc.get("version") or 1)
+
+    # Abholtermin verschieben -> Vertrag wird neu erzeugt (Version 2)
+    appts = requests.get(f"{API}/appointments", headers=welt["H"], timeout=30).json()
+    appt = next(a for a in appts if a.get("contract_id") == cid)
+    r = requests.put(f"{API}/appointments/{appt['id']}", headers=welt["H"],
+                     json={"pickup_date": "2099-05-09", "pickup_time": "15:00"}, timeout=90)
+    assert r.status_code == 200, r.text[:300]
+    assert int(dbx.generated_pdfs.find_one({"id": cid}).get("version") or 1) == 2
+
+    # Der bereits verschickte Link liefert weiterhin die alte Fassung
+    alt = requests.get(_lokal(link_v1), timeout=60)
+    assert alt.status_code == 200 and alt.content[:4] == b"%PDF"
+    f_alt = _flach(_text(alt.content))
+    assert "01.05.2099" in f_alt and "09.05.2099" not in f_alt, \
+        "der verschickte Link darf keinen anderen Vertragsinhalt zeigen"
+
+    # Der naechste Versand erzeugt einen NEUEN Link auf die neue Fassung
+    r = requests.post(f"{API}/contracts/{cid}/send", headers=welt["H"],
+                      json={"channel": "whatsapp", "recipient": "+49 170 1234567",
+                            "message": "Vertrag v2.",
+                            "idempotency_key": str(uuid.uuid4())}, timeout=60)
+    assert r.status_code == 200, r.text[:300]
+    link_v2 = r.json()["download_link"]
+    assert link_v2 != link_v1
+    f_neu = _flach(_text(requests.get(_lokal(link_v2), timeout=60).content))
+    assert "09.05.2099" in f_neu
+    welt["cid_v2"] = cid
+
+
+def test_11_gleichzeitige_versande_ergeben_einen_gueltigen_link(welt):
+    """Runde 18 (Mittel): Zwei gleichzeitige Freigaben erzeugten zwei Tokens,
+    von denen eines sofort ungueltig war — beide Antworten meldeten Erfolg."""
+    from concurrent.futures import ThreadPoolExecutor
+    r = requests.post(f"{API}/contracts", headers=welt["H"], json={
+        "vehicle_id": welt["vehicle_id"], "seller_name": "WA Verkaeufer",
+        "seller_phone": "+49 170 1234567", "purchase_price": 7200}, timeout=90)
+    assert r.status_code == 200, r.text[:300]
+    cid = r.json()["id"]
+
+    def senden(i):
+        return requests.post(f"{API}/contracts/{cid}/send", headers=welt["H"],
+                             json={"channel": "whatsapp", "recipient": "+49 170 1234567",
+                                   "message": f"Gleichzeitig {i}.",
+                                   "idempotency_key": str(uuid.uuid4())}, timeout=60)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        antworten = list(pool.map(senden, range(4)))
+    assert all(a.status_code == 200 for a in antworten), [a.status_code for a in antworten]
+    links = {a.json()["download_link"] for a in antworten}
+    assert len(links) == 1, "es darf nur EINE Freigabe entstehen"
+    for link in links:
+        assert requests.get(_lokal(link), timeout=60).status_code == 200
+    doc = _db().generated_pdfs.find_one({"id": cid})
+    assert doc["freigabe"]["token"] == links.pop().rsplit("/", 1)[1]
+
+
+def test_12_abruf_wird_als_anonym_protokolliert(welt):
+    """Runde 18 (Mittel): Der Zaehler ist KEIN Nachweis, dass der Verkaeufer
+    geoeffnet hat — der Audit-Eintrag darf ihn deshalb auch keinem Konto
+    zurechnen."""
+    dbx = _db()
+    vorher = dbx.activity_logs.count_documents(
+        {"action": "vertrag.link.abgerufen", "ref": welt["contract_id"]})
+    assert requests.get(_lokal(welt["link"]), timeout=60).status_code == 200
+    eintrag = dbx.activity_logs.find_one(
+        {"action": "vertrag.link.abgerufen", "ref": welt["contract_id"]},
+        sort=[("created_at", -1)])
+    assert eintrag is not None
+    assert dbx.activity_logs.count_documents(
+        {"action": "vertrag.link.abgerufen", "ref": welt["contract_id"]}) == vorher + 1
+    assert not eintrag.get("user_id"), "anonymer Abruf gehoert keinem Konto"
+    assert (eintrag.get("meta") or {}).get("anonym") is True

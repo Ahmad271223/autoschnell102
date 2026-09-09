@@ -444,12 +444,15 @@ def test_11_migration_meldet_fahrzeuge_ohne_besitzer_als_alarm(welt):
         s = await M.m4_fahrzeug_besitzer(w.db)
         alarm = await w.db.betriebsalarme.find_one({"typ": "fahrzeuge_ohne_besitzer", "offen": True}, {"_id": 0})
         await w.db.vehicles.delete_many({"dealer_id": fremd})
-        # alles zugeordnet (0 offen) -> der Alarm wird geschlossen. Direkt ueber
-        # den Melder, weil die geteilte Entwicklungs-DB fremde Altlasten haelt.
+        # Runde 18: Der Melder zaehlt die besitzerlosen Fahrzeuge SELBST aus der
+        # Datenbank (vorher schloss m6 den Alarm von m4 wieder). Er schliesst
+        # also nur, wenn wirklich keines mehr da ist — die geteilte
+        # Entwicklungs-DB haelt fremde Altlasten, deshalb der Abgleich.
         await M._offene_besitzer_melden(w.db, 0)
+        rest = await w.db.vehicles.count_documents(M.OHNE_BESITZER)
         alarm2 = await w.db.betriebsalarme.find_one({"typ": "fahrzeuge_ohne_besitzer", "offen": True}, {"_id": 0})
-        return s, alarm, alarm2
+        return s, alarm, alarm2, rest
 
-    s, alarm, alarm2 = w.run(lauf())
+    s, alarm, alarm2, rest = w.run(lauf())
     assert s["offen"] >= 1 and alarm and alarm["details"]["anzahl"] >= 1
-    assert alarm2 is None
+    assert (alarm2 is None) == (rest == 0),         "der Alarm folgt genau der Zahl besitzerloser Fahrzeuge"

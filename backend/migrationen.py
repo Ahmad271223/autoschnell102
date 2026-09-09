@@ -157,7 +157,9 @@ async def m4_fahrzeug_besitzer(db) -> dict:
             {"id": v["id"], "dealer_id": v.get("dealer_id")},
             {"$set": {"owner_user_id": uid, "besitzer_migriert_von": quelle}})
         stats[quelle] += 1
-    await _offene_besitzer_melden(db, stats["offen"])
+    # Die offen gebliebenen Fahrzeuge haben weiterhin keinen Besitzer und
+    # werden im Helfer direkt aus der Datenbank gezaehlt.
+    await _offene_besitzer_melden(db, 0)
     return stats
 
 
@@ -208,7 +210,10 @@ async def m5_kaufvorgaenge(db) -> dict:
             if not alt:
                 raise
             kv_id = alt["id"]
-        await db.generated_pdfs.update_one({"id": c["id"]}, {"$set": {"kaufvorgang_id": kv_id}})
+        # Runde 18: Termin- und Mitbearbeiter-Verknuepfung VOR dem Merker am
+        # Vertrag — die kaufvorgang_id ist das Fertig-Kennzeichen. Brach die
+        # Migration frueher dazwischen ab, uebersprang die Wiederholung den
+        # Vertrag und die Verknuepfungen fehlten dauerhaft.
         if appt:
             await db.appointments.update_one({"id": appt["id"]}, {"$set": {"kaufvorgang_id": kv_id}})
             stats["termine_verknuepft"] += 1
@@ -217,6 +222,7 @@ async def m5_kaufvorgaenge(db) -> dict:
                 {"id": c["vehicle_id"], "dealer_id": c["dealer_id"],
                  "owner_user_id": {"$ne": c["user_id"]}},
                 {"$addToSet": {"mitbearbeiter_ids": c["user_id"]}})
+        await db.generated_pdfs.update_one({"id": c["id"]}, {"$set": {"kaufvorgang_id": kv_id}})
         stats["vorgaenge"] += 1
     return stats
 
@@ -244,18 +250,33 @@ async def m6_besitzer_nachbessern(db) -> dict:
             {"$set": {"owner_user_id": uid, "besitzer_migriert_von": f"nachgebessert:{quelle}",
                       "besitzer_vorher": v.get("owner_user_id")}})
         stats["nachgebessert"] += 1
+    # Runde 18: m6 sieht nur Fahrzeuge MIT (ungueltigem) Besitzer. Die von m4
+    # offen gelassenen Fahrzeuge OHNE Besitzer zaehlt der Helfer selbst aus
+    # der Datenbank — vorher schloss m6 den Alarm von m4 wieder, obwohl
+    # weiterhin besitzerlose Fahrzeuge existierten.
     await _offene_besitzer_melden(db, stats["offen"])
     return stats
 
 
-async def _offene_besitzer_melden(db, anzahl: int) -> None:
+OHNE_BESITZER = {"$or": [{"owner_user_id": {"$exists": False}},
+                         {"owner_user_id": None}, {"owner_user_id": ""}]}
+
+
+async def _offene_besitzer_melden(db, ungueltige: int = 0) -> None:
     """Runde 17 (Migrations-Befund 5): Fahrzeuge ohne zuordenbaren Besitzer
     duerfen nicht still bleiben — als Betriebsalarm sichtbar (/admin/betrieb),
     der Chef weist sie in der Akte zu. Kein Startabbruch: seit dem Umbau
-    Kaufvorgaenge ist der Besitzer nur organisatorisch."""
+    Kaufvorgaenge ist der Besitzer nur organisatorisch.
+
+    Runde 18: Gesamtzahl = Fahrzeuge OHNE Besitzer (immer frisch aus der
+    Datenbank gezaehlt) + `ungueltige` (Besitzer-ID zeigt auf kein aktives
+    Konto und liess sich nicht ersetzen — nur m6 kennt diese Zahl)."""
     from betrieb import alarm, alarm_schliessen
+    ohne = await db.vehicles.count_documents(OHNE_BESITZER)
+    anzahl = ohne + max(0, int(ungueltige or 0))
     if anzahl > 0:
-        await alarm(db, "fahrzeuge_ohne_besitzer", ref="vehicles", anzahl=anzahl)
+        await alarm(db, "fahrzeuge_ohne_besitzer", ref="vehicles", anzahl=anzahl,
+                    ohne_besitzer=ohne, ungueltiger_besitzer=int(ungueltige or 0))
     else:
         await alarm_schliessen(db, "fahrzeuge_ohne_besitzer", ref="vehicles")
 
