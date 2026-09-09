@@ -371,6 +371,9 @@ async def me(user=Depends(current_user)):
         # Runde 12: Sucher sehen vom Haendler-Dokument nur ihre Einstellungsfelder.
         from routes.dealer import _sucher_sicht
         dealer = _sucher_sicht(dealer)
+    # Standardtext der digitalen Vertragsausfertigung fuer die Einstellungen
+    from routes.dealer import _mit_digital_standard
+    dealer = _mit_digital_standard(dealer)
     return {"user": user, "subscription": sub, "dealer": dealer}
 
 

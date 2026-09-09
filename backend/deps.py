@@ -378,8 +378,8 @@ SUCHER_SETTINGS_FIELDS = {
     "comparison_rules", "export_rules", "active_profile",
     # Versand
     "email_subject", "email_template", "whatsapp_template",
-    # AGB & Vereinbarungen
-    "default_terms", "default_special_agreements",
+    # AGB & Vereinbarungen (+ Text der digitalen Ausfertigung, 09.09.2026)
+    "default_terms", "default_special_agreements", "digital_vertragstext",
 }
 
 

@@ -38,7 +38,7 @@ def _pdf_stub(monkeypatch):
     """ReportLab durch einen Stub ersetzen (create_contract in-Prozess)."""
     C = _module("routes.contracts")
     monkeypatch.setattr(C, "generate_contract_pdf",
-                        lambda *, dealer, vehicle, contract: b"%PDF-1.4 test")
+                        lambda *, dealer, vehicle, contract, digital=False: b"%PDF-1.4 test")
 
 
 def _auto_daten_stub(monkeypatch):

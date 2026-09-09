@@ -45,13 +45,16 @@ class DealerSettingsIn(BaseModel):
     whatsapp_template: Optional[str] = None
     default_terms: Optional[str] = None             # AGB (always appended to PDF)
     default_special_agreements: Optional[str] = None  # Standard-Besondere-Vereinbarungen
+    # Text unter "Unterschriften" in der DIGITALEN Ausfertigung (Versand per
+    # E-Mail/WhatsApp, ohne Unterschriftslinien). Leer = Standardtext.
+    digital_vertragstext: Optional[str] = None
 
     # DoS-Schutz: default_terms/default_special_agreements werden in JEDES
     # Vertrags-PDF injiziert — ohne Cap koennte ein 2-MB-Wert jeden Vertrag
     # lahmlegen. Freitext-Bloecke 20.000, Kurzfelder 500 Zeichen.
     @field_validator("email_subject", "email_template", "whatsapp_template",
                      "default_terms", "default_special_agreements",
-                     "active_profile")
+                     "digital_vertragstext", "active_profile")
     @classmethod
     def _cap_text(cls, v, info):
         if isinstance(v, str):
@@ -109,7 +112,17 @@ async def get_settings(user=Depends(current_firma)):
         for feld, standard in _SETTINGS_STANDARDS:
             if not merged.get(feld):
                 merged[feld] = standard
-        return _sucher_sicht(merged)
+        return _mit_digital_standard(_sucher_sicht(merged))
+    return _mit_digital_standard(dealer)
+
+
+def _mit_digital_standard(dealer):
+    """Der Standardtext der digitalen Ausfertigung wird NICHT gespeichert
+    (leer = Standard), aber der Oberflaeche mitgeliefert, damit Chef und
+    Sucher ihn sehen und als Vorlage uebernehmen koennen."""
+    if isinstance(dealer, dict):
+        from pdf_service import DIGITAL_VERTRAGSTEXT_STANDARD
+        dealer["digital_vertragstext_standard"] = DIGITAL_VERTRAGSTEXT_STANDARD
     return dealer
 
 
@@ -117,7 +130,8 @@ async def get_settings(user=Depends(current_firma)):
 # die er selbst einstellen darf, plus Kennung. Vorher kam das ganze
 # Dokument (samt allem, was kuenftig dazukommt: Kontingente, Marktplatz,
 # interne Vermerke) mit den Overrides obendrauf zurueck.
-_SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "created_at", "updated_at"}
+_SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "created_at", "updated_at",
+                        "digital_vertragstext_standard"}
 
 
 def _sucher_sicht(dealer: dict) -> dict:
@@ -240,6 +254,8 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
         update["default_terms"] = body.default_terms
     if body.default_special_agreements is not None:
         update["default_special_agreements"] = body.default_special_agreements
+    if body.digital_vertragstext is not None:
+        update["digital_vertragstext"] = body.digital_vertragstext
     return update
 
 

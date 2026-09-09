@@ -39,6 +39,31 @@ MARGIN = 1.8 * cm
 CONTENT_W = PAGE_W - 2 * MARGIN
 COL_W = (CONTENT_W - 0.5 * cm) / 2  # two columns with a small gutter
 
+# Digitale Ausfertigung (Wunsch Ahmad 09.09.2026): Wird der Vertrag per
+# E-Mail oder WhatsApp verschickt, gibt es keine Unterschriftslinien —
+# unter "Unterschriften" steht stattdessen dieser Text. Firma (Chef) und
+# Sucher koennen ihn in den Einstellungen dauerhaft durch einen eigenen
+# ersetzen (dealers.digital_vertragstext bzw. Sucher-Override); leer =
+# dieser Standard. Absaetze durch Leerzeile trennen.
+DIGITAL_VERTRAGSTEXT_STANDARD = (
+    "Folgende Vertragsbedingungen werden beidseitig eingewilligt.\n\n"
+    "1. Der/Die Verkäufer*in übernimmt nach der Fahrzeugübergabe keine "
+    "Garantie oder Gewährleistung für das Fahrzeug.\n\n"
+    "2. Mündliche und schriftliche Absagen sind nach Vertragsbestätigung "
+    "aufgrund anfallender Kosten nicht wirksam.\n\n"
+    "3. Der/Die Verkäufer*in bestätigt, dass die oben festgehaltenen Daten "
+    "überprüft wurden und ihrer Richtigkeit entsprechen.\n\n"
+    "4. Dieser Vertrag ist rechtskräftig, verbindlich und auch ohne "
+    "Unterschrift gültig."
+)
+
+
+def digitaler_vertragstext(dealer: dict) -> str:
+    """Wirksamer Text fuer die digitale Ausfertigung: eigener Text der Firma
+    bzw. des Suchers (effective_dealer), sonst der Standard."""
+    eigen = ((dealer or {}).get("digital_vertragstext") or "").strip()
+    return eigen or DIGITAL_VERTRAGSTEXT_STANDARD
+
 
 def _styles():
     s = getSampleStyleSheet()
@@ -225,8 +250,13 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
     return _NumberedCanvas
 
 
-def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> bytes:
-    """Build a Kaufvertrag PDF and return raw bytes."""
+def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
+                          digital: bool = False) -> bytes:
+    """Build a Kaufvertrag PDF and return raw bytes.
+
+    digital=True: Ausfertigung fuer den Versand per E-Mail/WhatsApp — ohne
+    Unterschriftslinien; unter "Unterschriften" steht der digitale
+    Vertragstext (contract["digital_vertragstext"], sonst Standard)."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -555,6 +585,44 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
             if txt:
                 story.append(Paragraph(txt, st["small"]))
                 story.append(Spacer(1, 4))
+
+    # ---------- Digitale Ausfertigung: Text statt Unterschriftslinien ----------
+    if digital:
+        dtext = (contract.get("digital_vertragstext") or "").strip() \
+            or DIGITAL_VERTRAGSTEXT_STANDARD
+        seller_name = (contract.get("seller_name") or "").strip() or "Verkäufer / Halter"
+        block = [_section("Unterschriften", st), Spacer(1, 6),
+                 Paragraph("Digitale Ausfertigung — per E-Mail / WhatsApp übermittelt.",
+                           st["sig_label"]),
+                 Spacer(1, 6)]
+        for para in dtext.split("\n\n"):
+            txt = _xml_escape(para).replace("\n", "<br/>").strip()
+            if txt:
+                block.append(Paragraph(txt, st["body"]))
+                block.append(Spacer(1, 4))
+        parteien = Table([[
+            Paragraph(f"<b>Verkäufer / Halter</b><br/>{_xml_escape(seller_name)}", st["small"]),
+            "",
+            Paragraph(f"<b>Käufer / Händler</b><br/>{_xml_escape(company)}", st["small"]),
+        ]], colWidths=[COL_W, 0.5 * cm, COL_W])
+        parteien.setStyle(TableStyle([
+            ("BOX", (0, 0), (0, 0), 0.5, DIVIDER),
+            ("BOX", (2, 0), (2, 0), 0.5, DIVIDER),
+            ("BACKGROUND", (0, 0), (0, 0), LIGHT),
+            ("BACKGROUND", (2, 0), (2, 0), LIGHT),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        block += [Spacer(1, 6), parteien]
+        story.append(Spacer(1, 20))
+        story.append(KeepTogether(block))
+        footer_left = company
+        footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
+        doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
+        return buf.getvalue()
 
     # ---------- Signatures — boxed, kept on one page ----------
     def _sig_box(role):

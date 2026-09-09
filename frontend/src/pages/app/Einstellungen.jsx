@@ -45,6 +45,7 @@ export default function Einstellungen() {
       whatsapp_template: dealer.whatsapp_template || "",
       default_terms: dealer.default_terms || "",
       default_special_agreements: dealer.default_special_agreements || "",
+      digital_vertragstext: dealer.digital_vertragstext || "",
     });
   }, [dealer]);
 
@@ -423,6 +424,33 @@ export default function Einstellungen() {
                 testid="set-default-agreements"
                 hint='Wird in das Feld „Besondere Vereinbarungen" jedes neuen Vertrags vorbelegt — kann beim Erstellen überschrieben werden.'
               />
+              <AppleTextarea
+                label="Digitaler Vertragstext (Versand per E-Mail / WhatsApp)"
+                rows={10}
+                value={form.digital_vertragstext}
+                onChange={(v) => setForm({ ...form, digital_vertragstext: v })}
+                icon={Mail}
+                testid="set-digital-text"
+                hint='Wird der Vertrag per E-Mail oder WhatsApp verschickt, hat das PDF keine Unterschriftsfelder — unter „Unterschriften" steht stattdessen dieser Text. Leer = Standardtext (unten). Absätze mit einer Leerzeile trennen.'
+              />
+              {!(form.digital_vertragstext || "").trim() && dealer?.digital_vertragstext_standard && (
+                <div className="rounded-xl border p-3 text-[12px] leading-relaxed whitespace-pre-line"
+                     style={{ borderColor: "var(--border-default)", color: "var(--text-secondary)" }}
+                     data-testid="digital-text-standard">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider mb-1 text-zinc-400">
+                    Aktuell gilt der Standardtext:
+                  </div>
+                  {dealer.digital_vertragstext_standard}
+                </div>
+              )}
+              {dealer?.digital_vertragstext_standard && (
+                <button type="button" data-testid="digital-text-standard-btn"
+                        onClick={() => setForm({ ...form, digital_vertragstext: dealer.digital_vertragstext_standard })}
+                        className="text-xs font-semibold underline underline-offset-2"
+                        style={{ color: "var(--text-secondary)" }}>
+                  Standardtext ins Feld übernehmen und anpassen
+                </button>
+              )}
             </Section>
           )}
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import SnapshotCard from "@/components/SnapshotCard";
@@ -36,6 +36,9 @@ export default function PDFArchiv() {
   useEffect(() => { load(); }, [days]);
 
   const openPdf = (id) => openContractPdf(id);
+  // Digitale Fassung: ohne Unterschriftsfelder, mit dem digitalen Vertragstext
+  // (das ist die Fassung, die per E-Mail/WhatsApp verschickt wird).
+  const openDigital = (id) => openContractPdf(id, { variante: "digital" });
 
   const remove = async (id) => {
     if (!window.confirm("Vertrag wirklich löschen?")) return;
@@ -157,8 +160,15 @@ export default function PDFArchiv() {
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
                               style={{ background: "var(--apple-btn-secondary-bg)",
                                        color: "var(--text-primary)" }}
-                              title="Vertrag öffnen">
+                              title="Vertrag öffnen (Druckfassung mit Unterschriftsfeldern)">
                         <Eye size={16} />
+                      </button>
+                      <button onClick={() => openDigital(it.id)} data-testid={`open-pdf-digital-${it.id}`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              style={{ background: "var(--apple-btn-secondary-bg)",
+                                       color: "var(--text-primary)" }}
+                              title="Digitale Fassung (für E-Mail/WhatsApp, ohne Unterschriftsfelder)">
+                        <FileText size={16} />
                       </button>
                       <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-red-500/20"

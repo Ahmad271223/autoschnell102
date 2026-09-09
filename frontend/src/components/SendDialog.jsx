@@ -3,7 +3,8 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
-import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon } from "lucide-react";
+import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon, FileText } from "lucide-react";
+import { openContractPdf } from "@/lib/pdf";
 
 export default function SendDialog({ open, contract, onClose }) {
   const { dealer } = useAuth();
@@ -135,8 +136,18 @@ export default function SendDialog({ open, contract, onClose }) {
                           value={waMsg} onChange={(e) => setWaMsg(e.target.value)} />
               </div>
               <div className="text-[11px] text-zinc-500">
-                Hinweis: WhatsApp-Anhang via wa.me ist eingeschränkt – PDF separat über "PDF öffnen".
+                Hinweis: WhatsApp kann das PDF nicht automatisch anhängen. Lade die digitale Fassung
+                (ohne Unterschriftsfelder, mit dem digitalen Vertragstext) herunter und hänge sie im Chat an.
               </div>
+              <button type="button" data-testid="wa-digital-pdf-btn"
+                      onClick={async () => {
+                        try { await openContractPdf(contract.id, { variante: "digital" }); }
+                        catch (err) { toast.error(errMsg(err, "PDF konnte nicht geöffnet werden")); }
+                      }}
+                      className="w-full py-2.5 rounded-sm flex items-center justify-center gap-2 text-sm font-semibold border"
+                      style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
+                <FileText size={15} /> Digitale Fassung öffnen (für WhatsApp)
+              </button>
               <button data-testid="send-wa-btn" onClick={() => send("whatsapp")} disabled={busy || !phone}
                       className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">
                 <Send size={15} /> WhatsApp-Chat öffnen
@@ -153,7 +164,8 @@ export default function SendDialog({ open, contract, onClose }) {
                           value={emailMsg} onChange={(e) => setEmailMsg(e.target.value)} />
               </div>
               <div className="text-[11px] text-zinc-500">
-                Die E-Mail wird mit dem Vertrags-PDF im Anhang über den Server versendet und im Archiv protokolliert.
+                Die E-Mail wird mit der digitalen Vertragsfassung im Anhang versendet (ohne Unterschriftsfelder —
+                unter „Unterschriften" steht dein digitaler Vertragstext aus den Einstellungen) und im Archiv protokolliert.
               </div>
               <button data-testid="send-email-btn" onClick={() => send("email")} disabled={busy || !email}
                       className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">

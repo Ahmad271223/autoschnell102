@@ -179,8 +179,11 @@ def _pdf_stub(monkeypatch, nebenwirkung=None):
     C = _module("routes.contracts")
     aufrufe = []
 
-    def _gen(*, dealer, vehicle, contract):
-        aufrufe.append(contract)
+    def _gen(*, dealer, vehicle, contract, digital=False):
+        # Seit 09.09.2026 entstehen je Vertrag ZWEI Fassungen (Druck +
+        # digital); gezaehlt wird weiter ein Aufruf je Vertrag (Druckfassung).
+        if not digital:
+            aufrufe.append(contract)
         if nebenwirkung:
             nebenwirkung()
         return PDF_STUB

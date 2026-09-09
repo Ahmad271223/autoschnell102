@@ -906,7 +906,7 @@ async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)
 @router.get("/admin/contracts")
 async def admin_all_contracts(_=Depends(current_admin)):
     items = await db.generated_pdfs.find(
-        {}, {"_id": 0, "pdf_b64": 0},
+        {}, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     ).sort("created_at", -1).to_list(2000)
     return items
 
@@ -932,7 +932,7 @@ async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
             user["kunden_nr"] = firma.get("kunden_nr")
     items = await db.generated_pdfs.find(
         {"$or": [{"user_id": user_id}, {"dealer_id": user.get("dealer_id")}]},
-        {"_id": 0, "pdf_b64": 0},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     ).sort("created_at", -1).to_list(2000)
     return {"user": user, "contracts": items}
 

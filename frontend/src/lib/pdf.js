@@ -5,8 +5,13 @@
  */
 import { api } from "@/lib/api";
 
-export async function openContractPdf(contractId) {
-  const r = await api.get(`/contracts/${contractId}/pdf`, { responseType: "blob" });
+/**
+ * variante: "druck" (Standard, mit Unterschriftslinien) oder "digital"
+ * (Ausfertigung für E-Mail/WhatsApp — Vertragstext statt Unterschriftslinien).
+ */
+export async function openContractPdf(contractId, { variante = "druck" } = {}) {
+  const params = variante === "digital" ? { variante: "digital" } : undefined;
+  const r = await api.get(`/contracts/${contractId}/pdf`, { responseType: "blob", params });
   const blobUrl = URL.createObjectURL(r.data);
   // Use a real <a target="_blank"> click – this is the most popup-blocker-
   // resistant way and never falls back to navigating the current tab.

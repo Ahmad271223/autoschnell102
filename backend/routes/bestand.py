@@ -345,7 +345,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
 
     contracts = await db.generated_pdfs.find(
         {"vehicle_id": vehicle_id, **_vertrag_bereich(user)},
-        {"_id": 0, "pdf_b64": 0},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     ).sort("created_at", -1).to_list(10)
 
     # Umbau Kaufvorgaenge 09.09.2026: Termine (Verkaeuferdaten) nur im Bereich

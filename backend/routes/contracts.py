@@ -34,7 +34,7 @@ from deps import (
 import auto_daten
 from cleanup_service import vertrag_endgueltig_loeschen
 from lifecycle import try_set_lifecycle
-from pdf_service import generate_contract_pdf
+from pdf_service import generate_contract_pdf, digitaler_vertragstext
 
 router = APIRouter()
 
@@ -214,6 +214,54 @@ class SendIn(BaseModel):
 
 
 # ---------- Helpers ----------
+def _pdfs_erzeugen(*, dealer: dict, vehicle: dict, contract: dict) -> tuple[bytes, bytes]:
+    """Beide Fassungen eines Vertrags in EINEM Thread-Aufruf: Druckfassung
+    (mit Unterschriftslinien) und digitale Ausfertigung (Text statt Linien —
+    das ist die Fassung, die per E-Mail/WhatsApp verschickt wird)."""
+    druck = generate_contract_pdf(dealer=dealer, vehicle=vehicle, contract=contract)
+    digital = generate_contract_pdf(dealer=dealer, vehicle=vehicle, contract=contract,
+                                    digital=True)
+    return druck, digital
+
+
+async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
+    """Digitale Ausfertigung eines gespeicherten Vertrags (fuer Versand und
+    Download). Altvertraege ohne pdf_digital_b64 werden einmalig aus ihren
+    Vertragsdaten nacherzeugt und ergaenzt; schlaegt das fehl, kommt die
+    Druckfassung, damit ein Versand nie an der Fassung scheitert."""
+    if c.get("pdf_digital_b64"):
+        return base64.b64decode(c["pdf_digital_b64"])
+    try:
+        contract_dict = dict(c.get("contract_data") or {})
+        v = await db.vehicles.find_one(
+            {"id": c.get("vehicle_id"), "dealer_id": c.get("dealer_id")}, {"_id": 0}) or {}
+        vehicle = dict(v.get("data") or {})
+        from deps import effective_dealer
+        # Firmenidentitaet des ERSTELLERS (Sucher-Overrides), nicht des
+        # Abrufenden — so wie die Druckfassung erzeugt wurde.
+        ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
+            if c.get("user_id") and c.get("user_id") != user.get("id") else None
+        dealer = await effective_dealer(ersteller or user) or {}
+        if not (contract_dict.get("digital_vertragstext") or "").strip():
+            contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
+        vehicle, dealer = _apply_contract_overrides(
+            contract=contract_dict, vehicle=vehicle, dealer=dealer)
+        pdf_bytes = await asyncio.to_thread(
+            generate_contract_pdf, dealer=dealer, vehicle=vehicle,
+            contract=contract_dict, digital=True)
+        await db.generated_pdfs.update_one(
+            {"id": c["id"], "version": c.get("version"),
+             "pdf_digital_b64": {"$exists": False}},
+            {"$set": {"pdf_digital_b64": base64.b64encode(pdf_bytes).decode(),
+                      "contract_data.digital_vertragstext":
+                          contract_dict["digital_vertragstext"]}})
+        return pdf_bytes
+    except Exception:
+        log.exception("Digitale Ausfertigung von Vertrag %s konnte nicht erzeugt "
+                      "werden — Druckfassung wird verwendet", c.get("id"))
+    return base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+
+
 def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) -> tuple[dict, dict]:
     """Mergt die im Vertrags-Dialog editierten Fahrzeug- & Händler-Werte
     in die `vehicle`/`dealer`-Dicts hinein, die der PDF-Builder dann nutzt.
@@ -287,9 +335,11 @@ def _vehicle_bild_urls(vehicle: dict) -> list:
 
 # ---------- Endpoints ----------
 @router.post("/contracts/preview")
-async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
+async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
+                           variante: str = "druck"):
     """Generate a draft Kaufvertrag PDF without persisting anything.
-    Returns the PDF inline so the dealer can review it before final save."""
+    Returns the PDF inline so the dealer can review it before final save.
+    ?variante=digital liefert die Ausfertigung ohne Unterschriftslinien."""
     # Umbau Kaufvorgaenge 09.09.2026: das Inserat ist firmenweit gemeinsam —
     # JEDER Sucher der Firma darf dafuer einen eigenen Vertrag anlegen.
     v = await db.vehicles.find_one(
@@ -307,6 +357,7 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
     # AGB: only fall back to dealer default if no override was provided.
     if not (contract_dict.get("agb_text") or "").strip():
         contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
+    contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
     # Vehicle description: pre-fill from the scraped listing if the user
     # didn't paste/override anything. Lets the description appear in the
     # PDF without an extra step.
@@ -323,6 +374,7 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub)):
         pdf_bytes = await asyncio.to_thread(
             generate_contract_pdf,
             dealer=dealer, vehicle=vehicle, contract=contract_dict,
+            digital=(variante == "digital"),
         )
     except Exception:
         raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
@@ -366,6 +418,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
     if not (contract_dict.get("vehicle_description") or "").strip():
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
+    # Text der digitalen Ausfertigung zum Zeitpunkt der Erstellung
+    # festhalten (Beweis: so wurde der Vertrag verschickt).
+    contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
@@ -379,13 +434,14 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
     # einem sauberen 400 statt einem unhandled 500.
     try:
-        pdf_bytes = await asyncio.to_thread(
-            generate_contract_pdf,
+        pdf_bytes, pdf_digital = await asyncio.to_thread(
+            _pdfs_erzeugen,
             dealer=dealer, vehicle=vehicle, contract=contract_dict,
         )
     except Exception:
         raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
     pdf_b64 = base64.b64encode(pdf_bytes).decode()
+    pdf_digital_b64 = base64.b64encode(pdf_digital).decode()
     # Snapshot vehicle photo URLs at the moment the contract was created.
     # This way the dealer can still see the listing photos retrospectively
     # next to the contract PDF + Beweis-Archiv even if the original ad
@@ -405,6 +461,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "purchase_price": body.purchase_price,
         "contract_data": contract_dict,
         "pdf_b64": pdf_b64,
+        # Digitale Ausfertigung (ohne Unterschriftslinien) — wird per
+        # E-Mail angehaengt bzw. fuer WhatsApp heruntergeladen.
+        "pdf_digital_b64": pdf_digital_b64,
         "vehicle_image_urls": vehicle_image_urls,
         "filename": f"Kaufvertrag_{vehicle.get('make_label','')}_{vehicle.get('model_label','')}_{datetime.now().strftime('%Y%m%d')}.pdf",
         "send_status": [],
@@ -484,6 +543,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             doc["status"] = "Termin erstellt"
 
     out = {**clean_doc(doc), "pdf_b64": pdf_b64}
+    out.pop("pdf_digital_b64", None)  # nicht doppelt uebertragen; per GET ?variante=digital
     if termin_hinweis:
         out["termin_hinweis"] = termin_hinweis
     if nacharbeit_hinweis:
@@ -685,7 +745,7 @@ async def list_contracts(
             {"seller_name": {"$regex": q_safe, "$options": "i"}},
         ]
     items = await db.generated_pdfs.find(
-        query, {"_id": 0, "pdf_b64": 0},
+        query, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     ).sort("created_at", -1).to_list(CONTRACTS_LIST_MAX + 1)
     abgeschnitten = len(items) > CONTRACTS_LIST_MAX
     items = items[:CONTRACTS_LIST_MAX]
@@ -749,14 +809,25 @@ async def get_contract(contract_id: str, user=Depends(current_firma)):
 
 
 @router.get("/contracts/{contract_id}/pdf")
-async def get_contract_pdf(contract_id: str, user=Depends(current_firma)):
+async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
+                           variante: str = "druck"):
+    """?variante=druck (Standard): Fassung mit Unterschriftslinien.
+    ?variante=digital: Ausfertigung fuer E-Mail/WhatsApp — Text statt
+    Unterschriftslinien (Altvertraege werden einmalig nacherzeugt)."""
     c = await db.generated_pdfs.find_one(
         {"id": contract_id, **_vertrag_bereich(user)},
-        {"_id": 0, "pdf_b64": 1, "filename": 1},
+        {"_id": 0, "id": 1, "pdf_b64": 1, "pdf_digital_b64": 1, "filename": 1,
+         "contract_data": 1, "vehicle_id": 1, "dealer_id": 1, "user_id": 1,
+         "version": 1},
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    pdf_bytes = base64.b64decode(c["pdf_b64"])
+    if variante == "digital":
+        pdf_bytes = await _digitales_pdf_bytes(c, user)
+        if not pdf_bytes:
+            raise HTTPException(404, "Vertrag nicht gefunden")
+    else:
+        pdf_bytes = base64.b64decode(c["pdf_b64"])
     fname = _safe_filename(c.get("filename") or "", fallback="kaufvertrag.pdf")
     return Response(
         content=pdf_bytes,
@@ -774,14 +845,17 @@ async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
         raise HTTPException(404, "Vertrag nicht gefunden")
     return await db.generated_pdf_versions.find(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "pdf_b64": 0, "contract_data": 0},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "contract_data": 0},
     ).sort("version", 1).to_list(100)
 
 
 @router.get("/contracts/{contract_id}/versions/{version}/pdf")
 async def get_contract_version_pdf(contract_id: str, version: int,
-                                   user=Depends(current_firma)):
-    """Archivierte PDF-Fassung herunterladen (Beweissicherung)."""
+                                   user=Depends(current_firma),
+                                   variante: str = "druck"):
+    """Archivierte PDF-Fassung herunterladen (Beweissicherung).
+    ?variante=digital liefert die damals archivierte digitale Ausfertigung;
+    fehlt sie (Altfassung), kommt ehrlich die Druckfassung."""
     # Auch die alten Fassungen nur, wenn der Vertrag selbst sichtbar ist.
     haupt = await db.generated_pdfs.find_one(
         {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0, "id": 1})
@@ -790,10 +864,13 @@ async def get_contract_version_pdf(contract_id: str, version: int,
     v = await db.generated_pdf_versions.find_one(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"],
          "version": version},
-        {"_id": 0, "pdf_b64": 1, "filename": 1})
+        {"_id": 0, "pdf_b64": 1, "pdf_digital_b64": 1, "filename": 1})
     if not v or not v.get("pdf_b64"):
         raise HTTPException(404, "Vertragsfassung nicht gefunden")
-    pdf_bytes = base64.b64decode(v["pdf_b64"])
+    if variante == "digital" and v.get("pdf_digital_b64"):
+        pdf_bytes = base64.b64decode(v["pdf_digital_b64"])
+    else:
+        pdf_bytes = base64.b64decode(v["pdf_b64"])
     fname = _safe_filename(v.get("filename") or "",
                            fallback=f"kaufvertrag-v{version}.pdf")
     return Response(
@@ -971,7 +1048,9 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # und die Antwortadresse ist der Sucher: antwortet der Verkaeufer,
             # landet die Antwort direkt bei ihm (Wunsch 09/2026).
             from vertrag_mail import kopie_mail, vertrag_mail
-            pdf_bytes = base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+            # Verschickt wird die DIGITALE Ausfertigung (ohne Unterschrifts-
+            # linien, mit dem digitalen Vertragstext) — Wunsch 09.09.2026.
+            pdf_bytes = await _digitales_pdf_bytes(c, user)
             dateiname = c.get("filename") or "Kaufvertrag.pdf"
             # Nachpruefung Runde 14: dieselbe Firmenidentitaet wie im PDF —
             # effective_dealer legt die gewollten Sucher-Overrides (Firmen-
@@ -1165,9 +1244,13 @@ async def regenerate_contract_for_pickup(
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer)
 
+    # Altvertraege ohne digitalen Text: den aktuell wirksamen Text
+    # uebernehmen; sonst bleibt der bei Erstellung festgehaltene erhalten.
+    if not (contract_dict.get("digital_vertragstext") or "").strip():
+        contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
     try:
-        pdf_bytes = await asyncio.to_thread(
-            generate_contract_pdf,
+        pdf_bytes, pdf_digital = await asyncio.to_thread(
+            _pdfs_erzeugen,
             dealer=dealer, vehicle=vehicle, contract=contract_dict,
         )
     except Exception:
@@ -1186,6 +1269,7 @@ async def regenerate_contract_for_pickup(
         "dealer_id": dealer_id,
         "version": alte_version,
         "pdf_b64": doc.get("pdf_b64"),
+        "pdf_digital_b64": doc.get("pdf_digital_b64"),
         "contract_data": doc.get("contract_data"),
         "pickup_date": alt_datum,
         "pickup_time": alt_zeit,
@@ -1209,6 +1293,7 @@ async def regenerate_contract_for_pickup(
          "loeschung.status": {"$ne": "laeuft"}},
         {"$set": {
             "pdf_b64": base64.b64encode(pdf_bytes).decode(),
+            "pdf_digital_b64": base64.b64encode(pdf_digital).decode(),
             "contract_data": contract_dict,
             "pickup_date": neu_datum,
             "pickup_time": neu_zeit,
