@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon, FileText } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
+import { dateiTeilen, kannDateiTeilen, pdfDatei } from "@/lib/teilen";
 
 export default function SendDialog({ open, contract, onClose }) {
   const { dealer } = useAuth();
@@ -26,6 +27,31 @@ export default function SendDialog({ open, contract, onClose }) {
   const keyRef = useRef(neuerSchluessel());
   useEffect(() => { if (open) keyRef.current = neuerSchluessel(); }, [open]);
 
+  // WhatsApp am Handy (09/2026): Die digitale Fassung wird vorab geladen,
+  // damit das Teilen direkt beim Tipp passiert — Browser verlangen dafuer
+  // eine frische Nutzeraktion. Kann das Geraet Dateien teilen, haengt das
+  // PDF von der eigenen Nummer des Suchers an; sonst (PC) kommt ein
+  // Download-Link in die Nachricht.
+  const [pdf, setPdf] = useState(null);
+  const probe = useMemo(() => {
+    try { return new File(["%PDF-1.4"], "probe.pdf", { type: "application/pdf" }); }
+    catch { return null; }
+  }, []);
+  const geraetKannTeilen = kannDateiTeilen(pdf || probe);
+  useEffect(() => {
+    if (!open || !contract?.id) return undefined;
+    let aktiv = true;
+    setPdf(null);
+    api.get(`/contracts/${contract.id}/pdf`, { responseType: "blob", params: { variante: "digital" } })
+      .then((r) => {
+        if (!aktiv) return;
+        const name = contract.filename || `Kaufvertrag ${contract.make || ""} ${contract.model || ""}`.trim();
+        setPdf(pdfDatei(r.data, name));
+      })
+      .catch(() => { if (aktiv) setPdf(null); });
+    return () => { aktiv = false; };
+  }, [open, contract?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!open) return null;
 
   const send = async (channel) => {
@@ -33,14 +59,18 @@ export default function SendDialog({ open, contract, onClose }) {
     try {
       const idempotency_key = keyRef.current;
       const body = channel === "whatsapp"
-        ? { channel, recipient: phone, message: waMsg, idempotency_key }
+        ? { channel, recipient: phone, message: waMsg, idempotency_key, methode: "link" }
         : { channel, recipient: email, subject, message: emailMsg,
             idempotency_key };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       keyRef.current = neuerSchluessel();
       if (channel === "whatsapp" && data.wa_url) {
         window.open(data.wa_url, "_blank", "noopener");
-        toast.success("WhatsApp Chat geöffnet · PDF separat anhängen");
+        const bis = data.link_gueltig_bis
+          ? new Date(data.link_gueltig_bis).toLocaleDateString("de-DE") : null;
+        toast.success(bis
+          ? `WhatsApp-Chat geöffnet · Download-Link zum Vertrag steht in der Nachricht (gültig bis ${bis})`
+          : "WhatsApp-Chat geöffnet · Download-Link zum Vertrag steht in der Nachricht");
       } else {
         const z = data?.zustellung;
         // Runde 8: "bereits registriert" hiess frueher auch dann, wenn der
@@ -67,6 +97,36 @@ export default function SendDialog({ open, contract, onClose }) {
       }
     } catch (err) {
       toast.error(errMsg(err, "Versand fehlgeschlagen"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Handy: PDF ueber das Teilen-Menue an WhatsApp uebergeben (eigene Nummer).
+  // Erst teilen (Nutzeraktion!), dann den Versand am Vertrag vermerken.
+  const teilen = async () => {
+    if (!pdf) return;
+    setBusy(true);
+    try {
+      const titel = `Kaufvertrag ${contract.make || ""} ${contract.model || ""}`.trim();
+      const ergebnis = await dateiTeilen({ datei: pdf, text: waMsg, titel });
+      if (ergebnis === "geteilt") {
+        try {
+          await api.post(`/contracts/${contract.id}/send`, {
+            channel: "whatsapp", recipient: phone, message: waMsg,
+            idempotency_key: keyRef.current, methode: "teilen",
+          });
+          keyRef.current = neuerSchluessel();
+        } catch (err) {
+          toast.warning(errMsg(err, "Der Versand konnte nicht im Archiv vermerkt werden"));
+        }
+        toast.success("An WhatsApp übergeben · Chat des Verkäufers wählen und senden");
+      } else if (ergebnis === "abgebrochen") {
+        toast.info("Teilen abgebrochen");
+      } else {
+        toast.info("Teilen ist auf diesem Gerät nicht möglich — der Chat wird mit Download-Link geöffnet");
+        await send("whatsapp");
+      }
     } finally {
       setBusy(false);
     }
@@ -135,22 +195,43 @@ export default function SendDialog({ open, contract, onClose }) {
                 <textarea data-testid="wa-message" rows={5} className="input-base w-full mt-1"
                           value={waMsg} onChange={(e) => setWaMsg(e.target.value)} />
               </div>
-              <div className="text-[11px] text-zinc-500">
-                Hinweis: WhatsApp kann das PDF nicht automatisch anhängen. Lade die digitale Fassung
-                (ohne Unterschriftsfelder, mit dem digitalen Vertragstext) herunter und hänge sie im Chat an.
-              </div>
+              {geraetKannTeilen ? (
+                <>
+                  <div className="text-[11px] text-zinc-500" data-testid="wa-hinweis-teilen">
+                    Dein Handy hängt das PDF direkt an: Tippe auf „Per WhatsApp teilen", wähle WhatsApp und
+                    dann den Chat des Verkäufers. Der Vertrag geht von deiner eigenen Nummer raus.
+                  </div>
+                  <button type="button" data-testid="wa-share-btn" onClick={teilen} disabled={busy || !pdf}
+                          className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">
+                    <Send size={15} /> {pdf ? "Per WhatsApp teilen (PDF anhängen)" : "PDF wird vorbereitet…"}
+                  </button>
+                  <button type="button" data-testid="send-wa-btn" onClick={() => send("whatsapp")} disabled={busy || !phone}
+                          className="w-full py-2.5 rounded-sm flex items-center justify-center gap-2 text-sm font-semibold border disabled:opacity-50"
+                          style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
+                    <MessageCircle size={15} /> Stattdessen Chat mit Download-Link öffnen
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="text-[11px] text-zinc-500" data-testid="wa-hinweis-link">
+                    WhatsApp am PC kann kein PDF anhängen. Die Nachricht bekommt deshalb automatisch einen
+                    zeitlich begrenzten Download-Link zur digitalen Vertragsfassung. Am Handy hängt AutoSchnell
+                    das PDF direkt an.
+                  </div>
+                  <button data-testid="send-wa-btn" onClick={() => send("whatsapp")} disabled={busy || !phone}
+                          className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">
+                    <Send size={15} /> WhatsApp-Chat öffnen (mit Download-Link)
+                  </button>
+                </>
+              )}
               <button type="button" data-testid="wa-digital-pdf-btn"
                       onClick={async () => {
                         try { await openContractPdf(contract.id, { variante: "digital" }); }
                         catch (err) { toast.error(errMsg(err, "PDF konnte nicht geöffnet werden")); }
                       }}
-                      className="w-full py-2.5 rounded-sm flex items-center justify-center gap-2 text-sm font-semibold border"
-                      style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
-                <FileText size={15} /> Digitale Fassung öffnen (für WhatsApp)
-              </button>
-              <button data-testid="send-wa-btn" onClick={() => send("whatsapp")} disabled={busy || !phone}
-                      className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">
-                <Send size={15} /> WhatsApp-Chat öffnen
+                      className="w-full py-2 rounded-sm flex items-center justify-center gap-2 text-xs border"
+                      style={{ borderColor: "var(--border-default)", color: "var(--text-secondary)" }}>
+                <FileText size={13} /> Digitale Fassung ansehen
               </button>
             </>
           ) : (

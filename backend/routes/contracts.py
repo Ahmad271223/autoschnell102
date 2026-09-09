@@ -8,7 +8,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 log = logging.getLogger("autohandel")
@@ -35,6 +37,7 @@ import auto_daten
 from cleanup_service import vertrag_endgueltig_loeschen
 from lifecycle import try_set_lifecycle
 from pdf_service import generate_contract_pdf, digitaler_vertragstext
+from rate_limiter import SlidingWindowRateLimiter
 
 router = APIRouter()
 
@@ -211,6 +214,18 @@ class SendIn(BaseModel):
     # Eintrag, auch bei Doppelklick, Netz-Wiederholung oder verlorener
     # Antwort. Das Frontend erzeugt je Klick eine UUID.
     idempotency_key: Optional[str] = Field(default=None, max_length=100)
+    # WhatsApp (09.09.2026): "link" (Standard) = Chat oeffnet sich mit einem
+    # zeitlich begrenzten Download-Link zur digitalen Fassung im Text;
+    # "teilen" = das Handy hat das PDF ueber das Teilen-Menue an WhatsApp
+    # uebergeben (von der eigenen Nummer des Suchers) — nur Vermerk.
+    methode: Optional[str] = Field(default=None, max_length=20)
+
+    @field_validator("methode")
+    @classmethod
+    def _methode_bekannt(cls, v):
+        if v is not None and v not in ("link", "teilen"):
+            raise ValueError("methode muss 'link' oder 'teilen' sein")
+        return v
 
 
 # ---------- Helpers ----------
@@ -260,6 +275,52 @@ async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
         log.exception("Digitale Ausfertigung von Vertrag %s konnte nicht erzeugt "
                       "werden — Druckfassung wird verwendet", c.get("id"))
     return base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+
+
+# ---------- Oeffentlicher Download-Link (WhatsApp am PC) ----------
+# Der wa.me-Weg kann kein PDF anhaengen. Damit der Verkaeufer den Vertrag
+# trotzdem ohne Umweg bekommt, steht in der WhatsApp-Nachricht ein Link auf
+# die digitale Fassung: zufaelliges Token (32 Byte), ohne Anmeldung
+# abrufbar, zeitlich begrenzt (VERTRAG_LINK_TAGE, Standard 14 Tage), je IP
+# gedrosselt, und mit der Loeschung des Vertrags automatisch tot.
+VERTRAG_LINK_TAGE = max(1, min(int(os.environ.get("VERTRAG_LINK_TAGE") or 14), 365))
+_link_limiter = SlidingWindowRateLimiter(max_attempts=60, window_seconds=60,
+                                         name="vertrag_link")
+
+
+def _oeffentliche_basis() -> str:
+    """Basis-Adresse NUR aus der Server-Konfiguration (wie beim Passwort-
+    Reset) — nie aus Origin/Referer des Aufrufers."""
+    return (os.environ.get("FRONTEND_URL") or "http://localhost:3000").split("?")[0].rstrip("/")
+
+
+async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[str, str]:
+    """Liefert (Link, gueltig_bis). Ein noch mindestens einen Tag gueltiger
+    Link wird wiederverwendet (dieselbe Nachricht zweimal = derselbe Link);
+    sonst neues Token. Wirft bei Datenbankfehlern."""
+    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                         {"_id": 0, "freigabe": 1})
+    if c is None:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    f = c.get("freigabe") or {}
+    jetzt = datetime.now(timezone.utc)
+    try:
+        bisher_bis = datetime.fromisoformat(f.get("laeuft_ab") or "")
+    except ValueError:
+        bisher_bis = None
+    if f.get("token") and bisher_bis and bisher_bis - jetzt > timedelta(days=1):
+        token, laeuft_ab = f["token"], f["laeuft_ab"]
+    else:
+        token = secrets.token_urlsafe(32)
+        laeuft_ab = (jetzt + timedelta(days=VERTRAG_LINK_TAGE)).isoformat()
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich},
+            {"$set": {"freigabe": {"token": token, "erstellt_am": now_iso(),
+                                   "laeuft_ab": laeuft_ab, "erstellt_von": user.get("id"),
+                                   "abrufe": 0}}})
+        if res.matched_count == 0:
+            raise HTTPException(404, "Vertrag nicht gefunden")
+    return f"{_oeffentliche_basis()}/api/public/vertrag/{token}", laeuft_ab
 
 
 def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) -> tuple[dict, dict]:
@@ -836,6 +897,54 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
     )
 
 
+@router.get("/public/vertrag/{token}")
+async def public_vertrag_pdf(token: str, request: Request):
+    """Digitale Vertragsfassung ueber den Download-Link aus der WhatsApp-
+    Nachricht — OHNE Anmeldung, nur mit gueltigem Token (siehe
+    _freigabe_link). Je IP gedrosselt; abgelaufen = 410; geloescht oder
+    in Loeschung = 404. Jeder Abruf wird am Vertrag gezaehlt (Beleg, dass
+    der Verkaeufer den Vertrag geoeffnet hat)."""
+    from rate_limiter import client_ip
+    if not await _link_limiter.check(client_ip(request)):
+        raise HTTPException(429, "Zu viele Anfragen — bitte kurz warten.")
+    if not token or len(token) > 80 or not re.fullmatch(r"[A-Za-z0-9_\-]+", token):
+        raise HTTPException(404, "Link ungültig")
+    c = await db.generated_pdfs.find_one(
+        {"freigabe.token": token, "loeschung.status": {"$ne": "laeuft"}},
+        {"_id": 0, "id": 1, "pdf_b64": 1, "pdf_digital_b64": 1, "filename": 1,
+         "contract_data": 1, "vehicle_id": 1, "dealer_id": 1, "user_id": 1,
+         "version": 1, "freigabe": 1})
+    if not c:
+        raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
+    try:
+        laeuft_ab = datetime.fromisoformat((c.get("freigabe") or {}).get("laeuft_ab") or "")
+    except ValueError:
+        laeuft_ab = None
+    if not laeuft_ab or laeuft_ab <= datetime.now(timezone.utc):
+        raise HTTPException(410, "Dieser Link ist abgelaufen — bitte den Händler um "
+                                 "einen neuen Link bitten.")
+    ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
+        or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
+    pdf_bytes = await _digitales_pdf_bytes(c, ersteller)
+    if not pdf_bytes:
+        raise HTTPException(404, "Vertrag nicht mehr vorhanden")
+    await db.generated_pdfs.update_one(
+        {"id": c["id"], "freigabe.token": token},
+        {"$inc": {"freigabe.abrufe": 1},
+         "$set": {"freigabe.zuletzt_abgerufen": now_iso()}})
+    from deps import log_activity_sicher
+    await log_activity_sicher(c.get("dealer_id"), c.get("user_id"), "vertrag.link.abgerufen",
+                              ref=c["id"])
+    fname = _safe_filename(c.get("filename") or "", fallback="kaufvertrag.pdf")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"',
+                 "Cache-Control": "private, no-store",
+                 "X-Robots-Tag": "noindex"},
+    )
+
+
 @router.get("/contracts/{contract_id}/versions")
 async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
     """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten)."""
@@ -1025,8 +1134,33 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     if body.channel == "whatsapp":
         digits = "".join(ch for ch in (body.recipient or "") if ch.isdigit())
         from urllib.parse import quote_plus
-        out["wa_url"] = f"https://wa.me/{digits}?text={quote_plus(body.message)}"
-        out["zustellung"] = "chat_geoeffnet"
+        if body.methode == "teilen":
+            # Handy: das PDF wurde ueber das Teilen-Menue an WhatsApp
+            # uebergeben (eigene Nummer des Suchers). Ob er im Chat wirklich
+            # auf Senden getippt hat, wissen wir nicht -> "vorbereitet".
+            out["zustellung"] = "geteilt"
+        else:
+            try:
+                link, gueltig_bis = await _freigabe_link(contract_id, bereich, user)
+            except HTTPException:
+                await _reservierung_zurueck()
+                raise
+            except Exception:
+                log.exception("Download-Link fuer Vertrag %s konnte nicht erzeugt werden",
+                              contract_id)
+                await _reservierung_zurueck()
+                raise HTTPException(502, "Download-Link konnte nicht erzeugt werden — "
+                                         "bitte erneut versuchen.")
+            try:
+                bis_text = datetime.fromisoformat(gueltig_bis).strftime("%d.%m.%Y")
+            except ValueError:
+                bis_text = gueltig_bis[:10]
+            text = (body.message or "").rstrip() + \
+                f"\n\nKaufvertrag als PDF (Link gültig bis {bis_text}):\n{link}"
+            out["wa_url"] = f"https://wa.me/{digits}?text={quote_plus(text)}"
+            out["download_link"] = link
+            out["link_gueltig_bis"] = gueltig_bis
+            out["zustellung"] = "chat_geoeffnet"
         neuer_status = "versand_vorbereitet"
     elif body.channel == "email":
         from provider_fetch import MOCK_PROVIDER_FETCH
@@ -1114,6 +1248,11 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         "subject": body.subject, "sent_at": out["sent_at"],
         "zustellung": out.get("zustellung", ""),
     }
+    if body.methode:
+        send_entry["methode"] = body.methode
+    if out.get("download_link"):
+        send_entry["download_link"] = out["download_link"]
+        send_entry["link_gueltig_bis"] = out.get("link_gueltig_bis")
     if reserviert:
         # Reservierten Eintrag mit dem Ergebnis fuellen (positional update).
         send_entry["idempotency_key"] = body.idempotency_key

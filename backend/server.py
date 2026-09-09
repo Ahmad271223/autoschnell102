@@ -645,6 +645,11 @@ async def ensure_indexes():
     await _storage_retry_unique_index()
     await _plan_requests_unique_indizes()
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
+    # WhatsApp-Download-Link (09.09.2026): Token -> Vertrag, nur fuer
+    # Vertraege mit Freigabe (partial), eindeutig.
+    await db.generated_pdfs.create_index(
+        "freigabe.token", unique=True, name="vertrag_freigabe_token",
+        partialFilterExpression={"freigabe.token": {"$exists": True}})
     # Audit-Log + Fehler-Meldungen (Admin-Bereich)
     await db.activity_logs.create_index([("created_at", -1)])
     await db.activity_logs.create_index([("action", 1), ("created_at", -1)])

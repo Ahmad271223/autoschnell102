@@ -764,6 +764,30 @@ So sieht der Kunde die Mail: Absender **„Autohaus Muster über AutoSchnell"**,
 
 Ist `RESEND_API_KEY` nicht gesetzt, wird auf SMTP zurückgefallen (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`); Resend lässt sich auch als SMTP-Anbieter eintragen. Ohne beides meldet der Vertragsversand einen klaren Fehler statt still zu scheitern.
 
+## WhatsApp-Versand: Teilen am Handy, Download-Link am PC
+
+WhatsApp erlaubt keinem Programm, von der privaten Nummer eines Suchers
+automatisch zu senden. Deshalb gibt es zwei Wege, beide ohne Meta-Konto
+und ohne Kosten:
+
+- **Handy:** „Per WhatsApp teilen" übergibt die digitale Vertragsfassung
+  (ohne Unterschriftsfelder) über das Teilen-Menü an WhatsApp — von der
+  eigenen Nummer des Suchers, PDF hängt an. Nur den Chat wählt er selbst.
+  Im Archiv steht der Versand als `versand_vorbereitet` mit
+  `methode: teilen`.
+- **PC:** Der Chat öffnet sich wie bisher; die Nachricht enthält einen
+  Download-Link `https://<FRONTEND_URL>/api/public/vertrag/<Token>` auf die
+  digitale Fassung. Der Link braucht keine Anmeldung, ist standardmäßig
+  14 Tage gültig (`VERTRAG_LINK_TAGE`), je IP gedrosselt (60/min) und mit
+  der Löschung des Vertrags automatisch tot. Jeder Abruf wird am Vertrag
+  gezählt (`freigabe.abrufe`) und im Audit-Log als
+  `vertrag.link.abgerufen` vermerkt — Beleg, dass der Verkäufer den
+  Vertrag geöffnet hat.
+
+Voraussetzung: `FRONTEND_URL` in der `.env` muss die öffentliche
+https-Adresse sein (steht dort ohnehin für den Passwort-Reset). Der Index
+`vertrag_freigabe_token` auf `generated_pdfs` wird beim Start angelegt.
+
 ## Fahrzeuge verkaufen ist kostenlos
 
 `VERKAUF_KOSTENLOS=true` (Standard) bedeutet: Jede Firma kann unbegrenzt viele Fahrzeuge veröffentlichen, ohne Paket und ohne Monatskontingent. Die Paketverwaltung bleibt im Code erhalten; mit `VERKAUF_KOSTENLOS=false` gelten wieder Pakete und Kontingente wie zuvor.
