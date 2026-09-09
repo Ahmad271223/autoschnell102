@@ -22,6 +22,15 @@ api.interceptors.response.use(
       if (!url.includes("/auth/login") && !url.includes("/auth/register")) {
         tokenLoeschen(TOKEN_APP);
         if (window.location.pathname.startsWith("/app") || window.location.pathname.startsWith("/admin")) {
+          // Runde 19: den ECHTEN Grund mitnehmen (neue Anmeldung wann/wo,
+          // Abmeldung, Sperre, abgelaufen) — vorher stand fuer jede 401
+          // "auf einem anderen Geraet verwendet". Nicht in die URL (Verlauf,
+          // Logs), sondern nur fuer diesen Tab.
+          const detail = err?.response?.data?.detail;
+          try {
+            window.sessionStorage.setItem("ah_abmeldegrund",
+              typeof detail === "string" && detail ? detail : "");
+          } catch { /* Storage gesperrt — dann nur die allgemeine Meldung */ }
           window.location.href = "/login?reason=session";
         }
       }

@@ -18,6 +18,15 @@ export default function Login() {
 
   const reason = params.get("reason");
   const next = params.get("next") || "/app";
+  // Runde 19: genauer Grund der Abmeldung aus diesem Tab (api.js legt ihn
+  // bei einer 401 ab). Nur einmal anzeigen, dann wieder vergessen.
+  const [abmeldegrund] = useState(() => {
+    try {
+      const g = window.sessionStorage.getItem("ah_abmeldegrund") || "";
+      window.sessionStorage.removeItem("ah_abmeldegrund");
+      return g;
+    } catch { return ""; }
+  });
 
   const submit = async (e) => {
     e.preventDefault();
@@ -75,8 +84,11 @@ export default function Login() {
           <p className="text-zinc-400 text-sm mt-1">Willkommen zurück.</p>
 
           {reason === "session" && (
-            <div className="mt-5 text-xs px-3 py-2 rounded-sm border" style={{ borderColor: "var(--accent-red)", background: "rgba(255,59,48,0.08)", color: "var(--accent-red)" }}>
-              Du wurdest abgemeldet, weil dein Account auf einem anderen Gerät verwendet wurde.
+            <div className="mt-5 text-xs px-3 py-2 rounded-sm border" data-testid="login-abmeldegrund"
+                 style={{ borderColor: "var(--accent-red)", background: "rgba(255,59,48,0.08)", color: "var(--accent-red)" }}>
+              {abmeldegrund
+                ? abmeldegrund
+                : "Du wurdest abgemeldet (Sitzung abgelaufen, neu angemeldet auf einem anderen Gerät oder in einem anderen Tab, Abmeldung oder Sperre). Bitte neu anmelden."}
             </div>
           )}
 

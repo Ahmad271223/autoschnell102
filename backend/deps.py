@@ -154,8 +154,35 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     # ungültig — sonst wären nach einem Logout alle alten Tokens wieder
     # brauchbar und mehrere Geräte gleichzeitig möglich.
     if payload.get("sid") != user.get("current_session_id"):
-        raise HTTPException(401, "Session beendet (anderes Gerät aktiv oder abgemeldet)")
+        # Runde 19 (09.09.2026): SAGEN, was passiert ist — vorher hiess jede
+        # beendete Sitzung "anderes Geraet", auch nach Abmeldung, Sperre oder
+        # Passwortwechsel. Der Aufrufer besass bis eben ein gueltiges Token
+        # dieses Kontos; Zeitpunkt und Geraet der neueren Anmeldung darf er
+        # erfahren (so macht es jeder Mail-Anbieter).
+        raise HTTPException(401, sitzung_beendet_grund(user))
     return user
+
+
+def sitzung_beendet_grund(user: dict) -> str:
+    """Meldung fuer ein Token, dessen Sitzung nicht mehr die aktuelle ist."""
+    if not user.get("current_session_id"):
+        return ("Sitzung beendet: Abmeldung, Sperre oder Passwortwechsel — "
+                "bitte neu anmelden.")
+    seit = user.get("current_session_seit") or ""
+    geraet = user.get("current_session_geraet") or ""
+    wann = ""
+    if seit:
+        try:
+            from datetime import datetime as _dt
+            wann = _dt.fromisoformat(seit).astimezone().strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            wann = seit[:16].replace("T", " ")
+    teile = ["Sitzung beendet: dein Konto wurde erneut angemeldet"]
+    if wann:
+        teile.append(f"am {wann} Uhr")
+    if geraet:
+        teile.append(f"von {geraet}")
+    return " ".join(teile) + ". Es ist immer nur eine Anmeldung je Konto aktiv."
 
 
 async def firma_gesperrt(dealer_id: Optional[str]) -> bool:

@@ -214,13 +214,60 @@ async def register(body: RegisterIn, request: Request):
     return TokenOut(token=token, user=user)
 
 
-async def _sitzung_ausstellen(user: dict, ip: str) -> dict:
+def geraet_kurz(request) -> str:
+    """Runde 19: kurze, lesbare Geraetebeschreibung aus dem User-Agent
+    ("Chrome auf Android", "Safari auf iPhone", "Firefox auf Windows") —
+    fuer die Abmelde-Meldung ("dein Konto wurde erneut angemeldet von ...")
+    und das Login-Protokoll. Kein Fingerprinting, nur Browser + System."""
+    try:
+        ua = (request.headers.get("user-agent") or "") if request is not None else ""
+    except Exception:
+        ua = ""
+    if not ua:
+        return ""
+    u = ua.lower()
+    if "iphone" in u:
+        system = "iPhone"
+    elif "ipad" in u:
+        system = "iPad"
+    elif "android" in u:
+        system = "Android"
+    elif "windows" in u:
+        system = "Windows"
+    elif "mac os" in u or "macintosh" in u:
+        system = "Mac"
+    elif "linux" in u:
+        system = "Linux"
+    else:
+        system = "unbekanntem System"
+    if "edg/" in u:
+        browser = "Edge"
+    elif "opr/" in u or "opera" in u:
+        browser = "Opera"
+    elif "samsungbrowser" in u:
+        browser = "Samsung-Browser"
+    elif "firefox/" in u:
+        browser = "Firefox"
+    elif "chrome/" in u or "crios/" in u:
+        browser = "Chrome"
+    elif "safari/" in u:
+        browser = "Safari"
+    else:
+        browser = "Browser"
+    return f"{browser} auf {system}"
+
+
+async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
     """Passwort (und ggf. 2. Faktor) sind geprueft: neue Einzel-Sitzung,
-    Token, Audit."""
+    Token, Audit. Runde 19: Zeitpunkt und Geraet der Sitzung werden am Konto
+    festgehalten, damit ein verdraengtes Geraet erfaehrt, WER es verdraengt
+    hat (deps.sitzung_beendet_grund)."""
     sid = new_session_id()
-    await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": sid}})
+    await db.users.update_one({"id": user["id"]}, {"$set": {
+        "current_session_id": sid, "current_session_seit": now_iso(),
+        "current_session_geraet": geraet[:60], "current_session_ip": ip}})
     await log_activity(user.get("dealer_id", ""), user["id"], "auth.login",
-                       meta={"email": user.get("email", ""), "ip": ip})
+                       meta={"email": user.get("email", ""), "ip": ip, "geraet": geraet[:60]})
     token = create_token(user["id"], sid)
     user_clean = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "mfa")}
     user_clean["current_session_id"] = sid
@@ -314,7 +361,7 @@ async def login_mfa(body: MfaLoginIn, request: Request):
                               "mfa.fehlversuche": 0}})
             await log_activity("", user["id"], "auth.login.mfa.fehlgeschlagen", meta={"ip": ip})
             raise HTTPException(401, "Code ungültig")
-    return await _sitzung_ausstellen(user, ip)
+    return await _sitzung_ausstellen(user, ip, geraet_kurz(request))
 
 
 @router.post("/auth/login")
@@ -351,7 +398,7 @@ async def login(body: LoginIn, request: Request):
         await log_activity("", user["id"], "auth.login.mfa.angefordert", meta={"ip": ip})
         return {"mfa_erforderlich": True, "mfa_token": create_mfa_token(user),
                 "hinweis": "Bitte den 6-stelligen Code aus der Authenticator-App eingeben."}
-    return await _sitzung_ausstellen(user, ip)
+    return await _sitzung_ausstellen(user, ip, geraet_kurz(request))
 
 
 @router.post("/auth/logout")
