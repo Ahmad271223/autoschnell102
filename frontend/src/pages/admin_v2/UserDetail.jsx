@@ -377,20 +377,26 @@ function AddSucherDialog({ dealerId, onClose, onDone }) {
     finally { setBusy(false); }
   };
 
-  const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none";
+  // Fest dunkel wie die uebrigen Admin-Dialoge — "dark:"-Varianten greifen
+  // in dieser App nicht (keine "dark"-Klasse am Dokument), der Dialog war
+  // weiss mit unsichtbarer weisser Schrift.
+  const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
+  const inputStyle = { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
-      <div className="w-full max-w-md rounded-2xl p-5 bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10">
+      <div className="w-full max-w-md rounded-2xl p-5"
+           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
+           data-testid="sucher-anlegen-dialog">
         <div className="flex items-center justify-between mb-3">
-          <div className="text-lg font-bold">Sucher anlegen</div>
+          <div className="text-lg font-bold text-white">Sucher anlegen</div>
           <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200"><X size={20} /></button>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <input value={f.first_name} onChange={set("first_name")} placeholder="Vorname" className={inputCls} />
-          <input value={f.last_name} onChange={set("last_name")} placeholder="Nachname" className={inputCls} />
-          <div className="col-span-2"><input value={f.email} onChange={set("email")} placeholder="Anmelde-E-Mail *" className={inputCls} /></div>
-          <div className="col-span-2"><input value={f.password} onChange={set("password")} placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *" className={inputCls} /></div>
-          <input value={f.phone} onChange={set("phone")} placeholder="Telefon" className={inputCls} />
+          <input value={f.first_name} onChange={set("first_name")} placeholder="Vorname" className={inputCls} style={inputStyle} autoFocus />
+          <input value={f.last_name} onChange={set("last_name")} placeholder="Nachname" className={inputCls} style={inputStyle} />
+          <div className="col-span-2"><input value={f.email} onChange={set("email")} placeholder="Anmelde-E-Mail *" type="email" className={inputCls} style={inputStyle} /></div>
+          <div className="col-span-2"><input value={f.password} onChange={set("password")} placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *" type="password" autoComplete="new-password" className={inputCls} style={inputStyle} /></div>
+          <input value={f.phone} onChange={set("phone")} placeholder="Telefon" className={inputCls} style={inputStyle} />
         </div>
         <div className="mt-3 text-[11px] text-zinc-500">
           Zugangsdaten danach an die Firma weitergeben. Suchen &amp; Vergleichen

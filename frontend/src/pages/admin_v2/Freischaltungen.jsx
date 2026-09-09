@@ -278,12 +278,19 @@ function FirmaAnlegenDialog({ request, onClose, onDone }) {
     finally { setBusy(false); }
   };
 
-  const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none";
+  // Admin-Dialoge sind fest dunkel (wie Fahrer.jsx). Das fruehere
+  // "bg-white dark:bg-zinc-900" griff nie: Tailwind erwartet dafuer eine
+  // "dark"-Klasse am Dokument, die die App nicht setzt — der Dialog war
+  // weiss, Titel und vorbefuellte Felder (weisse Schrift) unsichtbar.
+  const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
+  const inputStyle = { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
-      <div className="w-full max-w-md rounded-2xl p-5 bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10">
+      <div className="w-full max-w-md rounded-2xl p-5"
+           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
+           data-testid="firma-anlegen-dialog">
         <div className="flex items-center justify-between mb-1">
-          <div className="text-lg font-bold">Firma anlegen</div>
+          <div className="text-lg font-bold text-white">Firma anlegen</div>
           <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200"><X size={20} /></button>
         </div>
         <div className="text-[12px] text-zinc-500 mb-4">
@@ -292,9 +299,12 @@ function FirmaAnlegenDialog({ request, onClose, onDone }) {
           {" — Sucher danach über die Nutzer-Detailseite anlegen."}
         </div>
         <div className="space-y-3">
-          <input value={f.company_name} onChange={set("company_name")} placeholder="Firmenname *" className={inputCls} />
-          <input value={f.email} onChange={set("email")} placeholder="Login-E-Mail des Chefs *" className={inputCls} />
-          <input value={f.password} onChange={set("password")} placeholder="Start-Passwort (min. 8 Zeichen) *" className={inputCls} />
+          <input value={f.company_name} onChange={set("company_name")} placeholder="Firmenname *"
+                 className={inputCls} style={inputStyle} autoFocus />
+          <input value={f.email} onChange={set("email")} placeholder="Login-E-Mail des Chefs *"
+                 type="email" className={inputCls} style={inputStyle} />
+          <input value={f.password} onChange={set("password")} placeholder="Start-Passwort (min. 8 Zeichen) *"
+                 type="password" autoComplete="new-password" className={inputCls} style={inputStyle} />
         </div>
         <Button className="mt-4 w-full" onClick={submit} disabled={busy}>
           {busy ? "Wird angelegt…" : "Firmen-Konto anlegen"}
