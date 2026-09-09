@@ -417,3 +417,65 @@ def test_26_leerer_text_bedeutet_standard(welt):
     f = _flach(_text(r.content))
     assert "Absagen sind nach Vertragsbestätigung" in f
     assert f"FIRMENTEXT-{SUF}" not in f
+
+
+def test_27_terminverschiebung_gibt_altvertrag_keine_heutigen_bedingungen(welt):
+    """Beschluss Ahmad 09.09.2026: Einstellungs-Texte gelten NUR fuer neue
+    Vertraege. Auch die Neuerzeugung bei Terminverschiebung darf einem
+    Altvertrag ohne gespeicherten Text keinen heutigen Text unterschieben."""
+    dbx = _db()
+    r = requests.post(f"{API}/contracts", headers=welt["H"], json={
+        "vehicle_id": welt["vehicle_id"], "seller_name": "Alt V",
+        "purchase_price": 100, "pickup_date": "2099-06-01", "pickup_time": "10:00"},
+        timeout=90)
+    assert r.status_code == 200, r.text[:300]
+    cid = r.json()["id"]
+    # Altvertrag simulieren: kein gespeicherter Text, keine digitale Fassung
+    dbx.generated_pdfs.update_one(
+        {"id": cid}, {"$unset": {"pdf_digital_b64": "", "contract_data.digital_vertragstext": ""}})
+    # Chef hat HEUTE einen Firmentext gesetzt
+    r = requests.put(f"{API}/dealer/settings", headers=welt["H"],
+                     json={"digital_vertragstext": f"HEUTE-{SUF}: neuer Firmentext."}, timeout=30)
+    assert r.status_code == 200
+    try:
+        appts = requests.get(f"{API}/appointments", headers=welt["H"], timeout=30).json()
+        appt = next(a for a in appts if a.get("contract_id") == cid)
+        r = requests.put(f"{API}/appointments/{appt['id']}", headers=welt["H"],
+                         json={"pickup_date": "2099-06-03", "pickup_time": "11:00"}, timeout=90)
+        assert r.status_code == 200, r.text[:300]
+        doc = dbx.generated_pdfs.find_one({"id": cid})
+        assert int(doc.get("version") or 1) == 2
+        assert "digital_vertragstext" not in (doc.get("contract_data") or {}), \
+            "der Vertragsinhalt bekommt keinen nachtraeglichen Text"
+        assert doc.get("pdf_digital_nachtraeglich") is True
+        f = _flach(_text(base64.b64decode(doc["pdf_digital_b64"])))
+        assert "nachträglich erzeugt" in f and "03.06.2099" in f
+        assert f"HEUTE-{SUF}" not in f and "Absagen sind nach Vertragsbestätigung" not in f
+    finally:
+        requests.put(f"{API}/dealer/settings", headers=welt["H"],
+                     json={"digital_vertragstext": ""}, timeout=30)
+
+
+def test_28_scheitert_die_digitale_fassung_kommt_keine_druckfassung(welt):
+    """Pruefbefund: Scheiterte die Nacherzeugung, lieferte der Code still die
+    Druckfassung MIT Unterschriftslinien — obwohl 'digital' zugesagt war.
+    Jetzt: klarer Fehler (503), kein stiller Ersatz."""
+    dbx = _db()
+    cid = welt["contract_chef"]
+    sicherung = dbx.generated_pdfs.find_one({"id": cid}, {"contract_data": 1, "pdf_digital_b64": 1})
+    # Erzeugung zum Scheitern bringen: contract_data kaputt, keine Fassung gespeichert
+    dbx.generated_pdfs.update_one({"id": cid}, {"$set": {"contract_data": "kaputt"},
+                                                "$unset": {"pdf_digital_b64": ""}})
+    try:
+        r = requests.get(f"{API}/contracts/{cid}/pdf", params={"variante": "digital"},
+                         headers=welt["H"], timeout=60)
+        assert r.status_code == 503, r.status_code
+        assert "digitale Vertragsfassung" in r.json()["detail"]
+        # Druckfassung selbst bleibt abrufbar
+        r = requests.get(f"{API}/contracts/{cid}/pdf", headers=welt["H"], timeout=60)
+        assert r.status_code == 200 and "Ort, Datum" in _text(r.content)
+    finally:
+        setzen = {"contract_data": sicherung.get("contract_data")}
+        if sicherung.get("pdf_digital_b64"):
+            setzen["pdf_digital_b64"] = sicherung["pdf_digital_b64"]
+        dbx.generated_pdfs.update_one({"id": cid}, {"$set": setzen})

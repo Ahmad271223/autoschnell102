@@ -795,9 +795,18 @@ https-Adresse sein (steht dort ohnehin für den Passwort-Reset). Der Index
 Was das System belegen kann und was nicht: belegt sind Erstellung, Inhalt
 und Versand des Vertrags (PDF-Fassungen mit Versionsarchiv, Versandprotokoll,
 Mail-Beleg). NICHT belegt ist die Zustimmung des Verkäufers — es gibt keinen
-Verkäufer-Login, keinen Bestätigungslink und keine Signatur. Der Text der
+Verkäufer-Login, keinen Bestätigungslink und keine Signatur. Das ist so
+gewollt (Entscheidung Ahmad 09.09.2026): Der Verkäufer stimmt außerhalb des
+Systems zu, per Antwort auf die E-Mail direkt an den Sucher. Der Text der
 digitalen Ausfertigung ist eine Vertragsbedingung des Händlers, keine vom
 System nachgewiesene Tatsache.
+
+Texte aus den Einstellungen gelten nur für NEUE Verträge. Ein bereits
+erstellter Vertrag behält den Text vom Zeitpunkt seiner Erstellung — auch
+bei Terminverschiebung (Neuerzeugung) und beim späteren Nacherzeugen der
+digitalen Fassung. Verträge von vor der Funktion bekommen nie nachträglich
+Vertragsbedingungen, ihre digitale Fassung ist als „nachträglich erzeugt"
+gekennzeichnet.
 
 ## Fahrzeuge verkaufen ist kostenlos
 

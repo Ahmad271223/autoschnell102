@@ -259,8 +259,9 @@ async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
     Vertragsdaten nacherzeugt: der bei der Erstellung festgehaltene digitale
     Text, sonst der Nachtraeglich-Hinweis. Weder der Text noch die Identitaet
     des Abrufenden fliessen ein — zwei Abrufe liefern dasselbe Dokument.
-    Schlaegt die Erzeugung fehl, kommt die Druckfassung, damit ein Versand
-    nie an der Fassung scheitert."""
+    Schlaegt die Erzeugung fehl, liefert die Funktion None — die Aufrufer
+    melden das als Fehler. Frueher kam still die Druckfassung MIT
+    Unterschriftslinien, obwohl "digital" zugesagt war (Pruefbefund)."""
     if c.get("pdf_digital_b64"):
         return base64.b64decode(c["pdf_digital_b64"])
     try:
@@ -291,8 +292,13 @@ async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
         return pdf_bytes
     except Exception:
         log.exception("Digitale Ausfertigung von Vertrag %s konnte nicht erzeugt "
-                      "werden — Druckfassung wird verwendet", c.get("id"))
-    return base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+                      "werden", c.get("id"))
+    return None
+
+
+DIGITAL_FEHLER_HINWEIS = ("Die digitale Vertragsfassung konnte nicht erzeugt werden. "
+                          "Bitte in ein paar Minuten erneut versuchen — ersatzweise "
+                          "die Druckfassung herunterladen und von Hand anhängen.")
 
 
 # ---------- Oeffentlicher Download-Link (WhatsApp am PC) ----------
@@ -926,7 +932,8 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
     if variante == "digital":
         pdf_bytes = await _digitales_pdf_bytes(c, user)
         if not pdf_bytes:
-            raise HTTPException(404, "Vertrag nicht gefunden")
+            # Kein stiller Ersatz durch die Druckfassung (Pruefbefund).
+            raise HTTPException(503, DIGITAL_FEHLER_HINWEIS)
     else:
         pdf_bytes = base64.b64decode(c["pdf_b64"])
     fname = _safe_filename(c.get("filename") or "", fallback="kaufvertrag.pdf")
@@ -991,7 +998,8 @@ async def public_vertrag_pdf(token: str, request: Request):
             or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
         pdf_bytes = await _digitales_pdf_bytes(c, ersteller)
         if not pdf_bytes:
-            raise HTTPException(404, "Vertrag nicht mehr vorhanden")
+            raise HTTPException(503, "Der Vertrag kann gerade nicht bereitgestellt "
+                                     "werden — bitte in ein paar Minuten erneut versuchen.")
         fname_quelle = c.get("filename") or ""
     await db.generated_pdfs.update_one(
         {"id": c["id"], "freigabe.token": token},
@@ -1253,6 +1261,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # Verschickt wird die DIGITALE Ausfertigung (ohne Unterschrifts-
             # linien, mit dem digitalen Vertragstext) — Wunsch 09.09.2026.
             pdf_bytes = await _digitales_pdf_bytes(c, user)
+            if not pdf_bytes:
+                # Kein stiller Versand der Druckfassung (Pruefbefund): der
+                # Vertrag wird NICHT als versendet markiert.
+                await _reservierung_zurueck()
+                raise HTTPException(503, DIGITAL_FEHLER_HINWEIS
+                                    + " Der Vertrag wurde NICHT versendet.")
             dateiname = c.get("filename") or "Kaufvertrag.pdf"
             # Nachpruefung Runde 14: dieselbe Firmenidentitaet wie im PDF —
             # effective_dealer legt die gewollten Sucher-Overrides (Firmen-
@@ -1451,14 +1465,19 @@ async def regenerate_contract_for_pickup(
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer)
 
-    # Altvertraege ohne digitalen Text: den aktuell wirksamen Text
-    # uebernehmen; sonst bleibt der bei Erstellung festgehaltene erhalten.
-    if not (contract_dict.get("digital_vertragstext") or "").strip():
-        contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
+    # Beschluss Ahmad 09.09.2026: Texte aus den Einstellungen gelten NUR fuer
+    # neue Vertraege. Der bei der Erstellung festgehaltene Text bleibt; ein
+    # Altvertrag ohne Text bekommt auch bei der Neuerzeugung KEINE heutigen
+    # Bedingungen — nur den Nachtraeglich-Hinweis im PDF, contract_data
+    # bleibt ohne Text.
+    gespeichert = (contract_dict.get("digital_vertragstext") or "").strip()
+    pdf_contract = dict(contract_dict)
+    if not gespeichert:
+        pdf_contract["digital_vertragstext"] = DIGITAL_NACHTRAEGLICH
     try:
         pdf_bytes, pdf_digital = await asyncio.to_thread(
             _pdfs_erzeugen,
-            dealer=dealer, vehicle=vehicle, contract=contract_dict,
+            dealer=dealer, vehicle=vehicle, contract=pdf_contract,
         )
     except Exception:
         log.exception("Kaufvertrag konnte mit neuem Abholtermin nicht neu "
@@ -1501,6 +1520,7 @@ async def regenerate_contract_for_pickup(
         {"$set": {
             "pdf_b64": base64.b64encode(pdf_bytes).decode(),
             "pdf_digital_b64": base64.b64encode(pdf_digital).decode(),
+            "pdf_digital_nachtraeglich": not gespeichert,
             "contract_data": contract_dict,
             "pickup_date": neu_datum,
             "pickup_time": neu_zeit,
