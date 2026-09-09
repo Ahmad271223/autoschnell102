@@ -244,6 +244,41 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
         return None
 
 
+async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
+                                  vehicle: Optional[dict] = None) -> Dict[str, Any]:
+    """Befund Ahmad 10.09.2026: Im Inserat stand "Einkaufspreis 0 €", obwohl
+    der Vertrag 23.000 € trug — vehicles.purchase_price wird seit dem Umbau
+    erst beim Abholen gesetzt. Gewuenscht: der Vertragspreis des Suchers
+    gilt, solange kein Fahrer vor Ort bzw. niemand von Hand einen anderen
+    Preis eingetragen hat.
+
+    Liefert {"preis", "quelle", "kaufvorgang_id"}:
+      fahrzeug   — am Fahrzeug eingetragen (Abholung oder von Hand)
+      abgeholt   — aus dem abgeholten Vorgang
+      vertrag    — aus dem (juengsten offenen) Vertrag
+      keiner     — nichts bekannt"""
+    if vehicle is None:
+        vehicle = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                             {"_id": 0, "purchase_price": 1,
+                                              "abgeholt_kaufvorgang_id": 1}) or {}
+    if vehicle.get("purchase_price") is not None:
+        return {"preis": vehicle["purchase_price"], "quelle": "fahrzeug",
+                "kaufvorgang_id": vehicle.get("abgeholt_kaufvorgang_id")}
+    faelle = await db.kaufvorgaenge.find(
+        {"vehicle_id": vehicle_id, "dealer_id": dealer_id},
+        {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(200)
+    mit_preis = [f for f in faelle if f.get("purchase_price") is not None]
+    if not mit_preis:
+        return {"preis": None, "quelle": "keiner", "kaufvorgang_id": None}
+    abgeholt = [f for f in mit_preis if f.get("status") == "abgeholt"]
+    if abgeholt:
+        f = max(abgeholt, key=lambda x: x.get("updated_at") or "")
+        return {"preis": f["purchase_price"], "quelle": "abgeholt", "kaufvorgang_id": f["id"]}
+    offen = [f for f in mit_preis if f.get("status") in OFFEN] or mit_preis
+    f = max(offen, key=lambda x: x.get("updated_at") or "")
+    return {"preis": f["purchase_price"], "quelle": "vertrag", "kaufvorgang_id": f["id"]}
+
+
 async def termin_loesen(appointment_id: str) -> None:
     """Termin geloescht/abgehaengt: Vorgaenge, die auf ihn zeigen, verlieren
     den Verweis; ein geplanter Vorgang faellt auf 'vertrag_erstellt' zurueck."""

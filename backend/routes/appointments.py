@@ -679,6 +679,20 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         await try_set_lifecycle(update["vehicle_id"], user["dealer_id"],
                                 "abholung_geplant", user=user)
     status_gewechselt = "status" in update and update["status"] != existing.get("status")
+    # Befund Ahmad 10.09.2026: der vor Ort vereinbarte Preis (final_price)
+    # ist der Einkaufspreis dieses Kaufvorgangs — er ueberschreibt den
+    # Vertragspreis des Suchers und wird beim Abholen ans Fahrzeug
+    # uebernommen (kaufvorgang.fahrzeug_status_aggregieren).
+    if update.get("final_price") is not None \
+            and update.get("final_price") != existing.get("final_price"):
+        import kaufvorgang as _kv
+        _t = await db.appointments.find_one(
+            {"id": appt_id}, {"_id": 0, "id": 1, "contract_id": 1, "kaufvorgang_id": 1})
+        _vorgang = await _kv.fuer_termin(_t or {})
+        if _vorgang and _vorgang.get("status") in _kv.STATUS:
+            await _kv.status_setzen(_vorgang["id"], _vorgang["status"], user=user,
+                                    extra={"purchase_price": float(update["final_price"]),
+                                           "preis_quelle": "vor_ort"})
     if status_gewechselt or contract_gewechselt:
         # Umbau Kaufvorgaenge: der Status wirkt auf den VORGANG dieses Termins;
         # das Fahrzeug bekommt nur die Zusammenfassung (nicht_abgeholt erst,

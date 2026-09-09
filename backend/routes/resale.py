@@ -145,6 +145,7 @@ def _margin(listing: dict) -> dict:
     total_cost = round(purchase + costs, 2)
     return {
         "purchase_price": purchase,
+        "purchase_price_quelle": listing.get("purchase_price_quelle"),
         "costs_total": round(costs, 2),
         "total_cost": total_cost,
         "expected_margin": round(price - total_cost, 2) if price else None,
@@ -331,6 +332,10 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
     abgeholt_vorgang = await db.kaufvorgaenge.find_one(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"], "status": "abgeholt"},
         {"_id": 0, "id": 1, "purchase_price": 1}, sort=[("updated_at", -1)])
+    # Befund Ahmad 10.09.2026: vor der Abholung gilt der Vertragspreis des
+    # Suchers als Einkaufspreis (statt 0 €).
+    import kaufvorgang as _kv
+    _vorschlag = await _kv.einkaufspreis_vorschlag(vehicle_id, user["dealer_id"], v)
     listing = {
         "id": str(uuid.uuid4()),
         "dealer_id": user["dealer_id"],
@@ -353,9 +358,9 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         # Umbau Kaufvorgaenge: der realisierte Kaufpreis kommt aus dem
         # abgeholten Vorgang (vehicles.purchase_price wird beim Abholen
         # gesetzt); der Vorgang wird am Inserat vermerkt.
-        "purchase_price": v.get("purchase_price") if v.get("purchase_price") is not None
-        else (abgeholt_vorgang or {}).get("purchase_price"),
-        "kaufvorgang_id": (abgeholt_vorgang or {}).get("id"),
+        "purchase_price": _vorschlag.get("preis"),
+        "purchase_price_quelle": _vorschlag.get("quelle"),
+        "kaufvorgang_id": (abgeholt_vorgang or {}).get("id") or _vorschlag.get("kaufvorgang_id"),
         "costs": (v.get("bestand") or {}).get("costs") or [],
         "visibility": "public",
         "published_at": None,
@@ -389,7 +394,7 @@ async def list_listings(user=Depends(current_haendler), status: Optional[str] = 
         query["status"] = status
     items = await db.resale_listings.find(query, {"_id": 0}) \
         .sort("updated_at", -1).to_list(300)
-    return [_mit_foto_urls(_with_margin(i)) for i in items]
+    return [_mit_foto_urls(_with_margin(await _preis_ergaenzen(i))) for i in items]
 
 
 @router.get("/resale/{listing_id}")
@@ -401,7 +406,7 @@ async def get_listing(listing_id: str, user=Depends(current_haendler)):
          "status": {"$ne": "geloescht"}}, {"_id": 0})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
-    return _mit_foto_urls(_with_margin(l))
+    return _mit_foto_urls(_with_margin(await _preis_ergaenzen(l)))
 
 
 def _mit_foto_urls(doc: dict) -> dict:
@@ -409,7 +414,25 @@ def _mit_foto_urls(doc: dict) -> dict:
     Punkt 45) — die Oberflaeche baut keine /api/files-Pfade mehr selbst."""
     keys = ((doc.get("photos") or {}).get("uploaded_keys") or [])
     doc["photo_urls"] = [{"key": k, "url": signierte_datei_url(k)} for k in keys]
+    # 10.09.2026: Einkaufsfotos als Vorschaubilder ueber den Bild-Proxy.
+    from bild_proxy import thumbs as _thumbs
+    doc["einkauf_thumbs"] = _thumbs((doc.get("photos") or {}).get("einkauf_urls") or [])
     return doc
+
+
+async def _preis_ergaenzen(l: dict) -> dict:
+    """Befund Ahmad 10.09.2026: Solange kein realisierter Einkaufspreis am
+    Inserat steht, gilt der Vertragspreis des Suchers (kaufvorgang.
+    einkaufspreis_vorschlag) — nur in der Antwort, nicht gespeichert."""
+    if l.get("purchase_price") is None and l.get("vehicle_id"):
+        import kaufvorgang as _kv
+        v = await _kv.einkaufspreis_vorschlag(l["vehicle_id"], l["dealer_id"])
+        if v.get("preis") is not None:
+            l["purchase_price"] = v["preis"]
+            l["purchase_price_quelle"] = v["quelle"]
+    elif l.get("purchase_price") is not None and not l.get("purchase_price_quelle"):
+        l["purchase_price_quelle"] = "inserat"
+    return l
 
 
 @router.put("/resale/{listing_id}")

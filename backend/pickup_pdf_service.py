@@ -49,7 +49,19 @@ CONTENT_W = PAGE_W - 2 * MARGIN
 # Pfad relativ zu dieser Datei aufloesen (funktioniert lokal auf Windows UND
 # im Container); /app/... bleibt als Fallback fuer das alte Deployment.
 _LOCAL_SKETCH_DIR = Path(__file__).resolve().parent.parent / "frontend" / "public" / "damage"
-SKETCH_DIR = _LOCAL_SKETCH_DIR if _LOCAL_SKETCH_DIR.exists() else Path("/app/frontend/public/damage")
+# Befund Ahmad 10.09.2026 ("Fahrer-Protokoll ohne Bilder, wo genau"): Das
+# Backend-Image enthaelt NUR backend/ (Dockerfile: COPY . .) — der Ordner
+# frontend/public/damage existiert im Container nicht, die Skizzen fehlten
+# in JEDEM Abholauftrag und Protokoll in Produktion. Die Skizzen liegen
+# deshalb jetzt zusaetzlich unter backend/assets/damage und werden zuerst
+# dort gesucht.
+_EIGENER_SKETCH_DIR = Path(__file__).resolve().parent / "assets" / "damage"
+if (_EIGENER_SKETCH_DIR / "front.png").exists():
+    SKETCH_DIR = _EIGENER_SKETCH_DIR
+elif _LOCAL_SKETCH_DIR.exists():
+    SKETCH_DIR = _LOCAL_SKETCH_DIR
+else:
+    SKETCH_DIR = Path("/app/frontend/public/damage")
 
 # Fuer das PDF reichen 900px-Skizzen (Druckbreite ~8cm) — die 1536px-
 # Originale wuerden jedes Protokoll ~2MB gross und ~1s langsam machen.

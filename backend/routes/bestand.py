@@ -456,8 +456,12 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     kv_namen = await besitzer_namen(user["dealer_id"], [k.get("user_id") for k in kaufvorgaenge])
     for k in kaufvorgaenge:
         k["user_name"] = kv_namen.get(k.get("user_id"), k.get("user_id"))
+    # Befund Ahmad 10.09.2026: welcher Einkaufspreis gilt gerade und woher
+    # (Fahrzeug/Abholung, Vertrag des Suchers, keiner).
+    einkaufspreis = await _kv.einkaufspreis_vorschlag(vehicle_id, user["dealer_id"], v)
     return {
         "vehicle": v,
+        "einkaufspreis": einkaufspreis,
         "kaufvorgaenge": kaufvorgaenge,
         "owner": owner,
         "mitbearbeiter": [{"id": m, "name": mit_namen.get(m, m)}

@@ -260,7 +260,10 @@ def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
     urls = []
     mode = photos.get("mode", "einkauf")
     if mode in ("einkauf", "beide"):
-        urls += photos.get("einkauf_urls", [])
+        # 10.09.2026: Portal-Fotos ueber den eigenen Bild-Proxy (klein,
+        # zuverlaessig, kein Fremdhost beim Kaeufer); 3 Tage gueltig.
+        from bild_proxy import thumbs as _thumbs
+        urls += _thumbs(photos.get("einkauf_urls", []), ttl=3 * 24 * 3600)
     if mode in ("neu", "beide"):
         urls += [signierte_datei_url(k) for k in photos.get("uploaded_keys", [])]
     return {

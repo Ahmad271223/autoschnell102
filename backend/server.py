@@ -416,6 +416,32 @@ async def serve_file(key: str, exp: Optional[str] = None, sig: Optional[str] = N
                     headers={"Cache-Control": cache})
 
 
+# ---------- Bild-Proxy fuer Inseratsfotos (10.09.2026) ----------
+# 300 Bilder / 60 s je IP: eine Vergleichsseite laedt hoechstens 10-40.
+_bild_limiter = SlidingWindowRateLimiter(max_attempts=300, window_seconds=60, name="bild_proxy")
+
+
+@app.get("/api/bild")
+async def bild_proxy_route(request: Request, u: str = "", exp: Optional[str] = None,
+                           sig: Optional[str] = None):
+    """Verkleinertes Vorschaubild eines Portal-Fotos (bild_proxy.py). Nur mit
+    gueltiger Signatur und nur fuer die bekannten Portal-Hosts — kein
+    offener Proxy."""
+    import bild_proxy
+    from rate_limiter import client_ip
+    if not u or not bild_proxy.erlaubt(u):
+        return JSONResponse(status_code=404, content={"detail": "Bild nicht verfügbar"})
+    if not bild_proxy.gueltig(u, exp, sig):
+        return JSONResponse(status_code=403, content={"detail": "Link abgelaufen oder ungültig"})
+    if not await _bild_limiter.check(client_ip(request)):
+        return JSONResponse(status_code=429, content={"detail": "Zu viele Bildanfragen"})
+    data = await bild_proxy.laden(u)
+    if not data:
+        return JSONResponse(status_code=404, content={"detail": "Bild nicht verfügbar"})
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
 # ---------- Frontend-Fehler-Meldung (landet im Admin-Bereich) ----------
 # 20 Meldungen / 60 s pro IP — verhindert, dass ein kaputter Client (oder
 # ein Angreifer) die error_logs-Collection flutet.

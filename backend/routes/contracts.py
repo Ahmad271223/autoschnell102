@@ -301,6 +301,23 @@ DIGITAL_FEHLER_HINWEIS = ("Die digitale Vertragsfassung konnte nicht erzeugt wer
                           "die Druckfassung herunterladen und von Hand anhängen.")
 
 
+def wa_nummer(recipient: Optional[str]) -> str:
+    """Telefonnummer fuer wa.me: nur Ziffern MIT Laendervorwahl, ohne '+'.
+    Befund Ahmad 10.09.2026: Verkaeufer-Nummern stehen meist deutsch
+    ("0170 1234567" oder "+49 170 …"); wa.me/01701234567 meldet "ungueltig"
+    und oeffnet keinen Chat. Regeln: '00' am Anfang weg, eine fuehrende '0'
+    wird zu '49' (deutsche Nummer), '+49…' bleibt 49…"""
+    digits = "".join(ch for ch in (recipient or "") if ch.isdigit())
+    roh = (recipient or "").strip()
+    if roh.startswith("+"):
+        return digits
+    if digits.startswith("00"):
+        return digits[2:]
+    if digits.startswith("0") and len(digits) >= 6:
+        return "49" + digits[1:]
+    return digits
+
+
 # ---------- Oeffentlicher Download-Link (WhatsApp am PC) ----------
 # Der wa.me-Weg kann kein PDF anhaengen. Damit der Verkaeufer den Vertrag
 # trotzdem ohne Umweg bekommt, steht in der WhatsApp-Nachricht ein Link auf
@@ -856,6 +873,12 @@ async def list_contracts(
     ).sort("created_at", -1).to_list(CONTRACTS_LIST_MAX + 1)
     abgeschnitten = len(items) > CONTRACTS_LIST_MAX
     items = items[:CONTRACTS_LIST_MAX]
+    # 10.09.2026: Inseratsfotos neben dem Vertrag als Vorschaubilder ueber
+    # den eigenen Bild-Proxy (klein, zuverlaessig).
+    from bild_proxy import thumbs as _thumbs
+    for i in items:
+        if i.get("vehicle_image_urls"):
+            i["vehicle_image_urls_thumbs"] = _thumbs(i["vehicle_image_urls"][:12])
     response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
     if channel:
         items = [
@@ -1208,7 +1231,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # wird als "versand_vorbereitet" gefuehrt, nicht als versendet.
     out: dict = {"channel": body.channel, "status": "ok", "sent_at": now_iso()}
     if body.channel == "whatsapp":
-        digits = "".join(ch for ch in (body.recipient or "") if ch.isdigit())
+        digits = wa_nummer(body.recipient)
         from urllib.parse import quote_plus
         if body.methode == "teilen":
             # Handy: das PDF wurde ueber das Teilen-Menue an WhatsApp

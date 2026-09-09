@@ -290,7 +290,12 @@ export default function FahrzeugAkte() {
           </Section>
         )}
         <Section title="Beschaffung & Kauf">
-          <KV k="Einkaufspreis (realisiert)" val={fmtEur(v.purchase_price)} />
+          {v.purchase_price != null
+            ? <KV k="Einkaufspreis (realisiert)" val={fmtEur(v.purchase_price)} />
+            : akte.einkaufspreis?.preis != null
+              ? <KV k={akte.einkaufspreis.quelle === "vertrag" ? "Einkaufspreis (aus dem Kaufvertrag)" : "Einkaufspreis"}
+                    val={fmtEur(akte.einkaufspreis.preis)} />
+              : <KV k="Einkaufspreis" val="—" />}
           <KV k="Quelle" val={v.source === "manuell" ? "Manuell angelegt" : (d.detail_url ? "Inserat (Plattform)" : "Plattform")} />
           {(akte.appointments || []).slice(0, 1).map((a) => (
             <KV key={a.id} k="Geplante Abholung"

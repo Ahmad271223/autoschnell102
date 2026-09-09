@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
 import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X } from "lucide-react";
 
@@ -301,7 +302,9 @@ export default function Inserat() {
               {(mode !== "neu") && einkaufFotos.slice(0, 12).map((u, i) => (
                 <div key={`e${i}`} className="relative group">
                   <a href={u} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                    <img src={u} alt="" className="aspect-square w-full object-cover rounded-lg opacity-90 hover:opacity-100 cursor-zoom-in" />
+                    <img src={thumbSrc(l.einkauf_thumbs?.[i], u)} alt="" loading="lazy" referrerPolicy="no-referrer"
+                         onError={(e) => thumbFehler(e, u)}
+                         className="aspect-square w-full object-cover rounded-lg opacity-90 hover:opacity-100 cursor-zoom-in" />
                   </a>
                   <button onClick={() => removePhoto({ url: u })}
                           data-testid={`foto-del-e${i}`}
@@ -351,7 +354,15 @@ export default function Inserat() {
           <div className="tactical-card p-4">
             <div className="text-sm font-bold uppercase tracking-wide mb-2">Kalkulation</div>
             <div className="space-y-1 text-sm">
-              <div className="flex justify-between"><span className="text-zinc-500">Einkaufspreis</span><span>{fmtEur(margin.purchase_price)}</span></div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">
+                  Einkaufspreis
+                  {margin.purchase_price_quelle === "vertrag" && <span className="ml-1 text-[11px] text-zinc-500">(aus dem Kaufvertrag)</span>}
+                  {margin.purchase_price_quelle === "abgeholt" && <span className="ml-1 text-[11px] text-zinc-500">(bei Abholung)</span>}
+                  {margin.purchase_price_quelle === "fahrzeug" && <span className="ml-1 text-[11px] text-zinc-500">(Fahrzeugakte)</span>}
+                </span>
+                <span data-testid="kalkulation-einkaufspreis">{fmtEur(margin.purchase_price)}</span>
+              </div>
               <div className="flex justify-between"><span className="text-zinc-500">Kosten gesamt</span><span>{fmtEur(margin.costs_total)}</span></div>
               <div className="flex justify-between border-t pt-1" style={st}><span className="text-zinc-500">Gesamtkosten</span><span>{fmtEur(margin.total_cost)}</span></div>
               <div className="flex justify-between text-base font-bold pt-1">

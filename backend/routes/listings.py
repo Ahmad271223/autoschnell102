@@ -469,10 +469,15 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         hinweise = [f"Dieses Fahrzeug vergleicht auch {kollege['name']} — ihr könnt "
                     "beide einen Kaufvertrag anlegen; einen Abholtermin gibt es je "
                     "Fahrzeug nur einmal."] + list(hinweise)
+    # Befund 10.09.2026: Vorschaubilder ueber den eigenen Bild-Proxy (klein,
+    # zwischengespeichert, kein Fremdhost im Browser). Nur in der Antwort,
+    # nie im gespeicherten Fahrzeug (die Links laufen ab).
+    from bild_proxy import thumbs as _thumbs
+    _bilder = (vehicle or {}).get("images") or (vehicle or {}).get("image_urls") or []
     return {
         "vehicle_id": vid,
         "ad_id": ad_id,
-        "vehicle": vehicle,
+        "vehicle": {**(vehicle or {}), "images_thumbs": _thumbs(_bilder[:40])},
         "search_url": search_url,
         "autoscout_url": autoscout_url,
         # Runde 11: welche Firmenregeln der AutoScout-Link nicht umsetzt

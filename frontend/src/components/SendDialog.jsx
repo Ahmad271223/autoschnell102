@@ -52,10 +52,22 @@ export default function SendDialog({ open, contract, onClose }) {
     return () => { aktiv = false; };
   }, [open, contract?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Befund Ahmad 10.09.2026: "die Nummer des Verkaeufers wird nie geoeffnet".
+  // window.open NACH dem Server-Aufruf gilt fuer den Browser nicht mehr als
+  // Nutzerklick und wird als Popup geblockt. Deshalb: das Fenster SOFORT im
+  // Klick oeffnen und erst danach auf die WhatsApp-Adresse leiten. Klappt
+  // auch das nicht (strenger Blocker), bleibt ein Knopf zum Nachoeffnen.
+  const [waUrl, setWaUrl] = useState("");
+
   if (!open) return null;
 
   const send = async (channel) => {
     setBusy(true);
+    let fenster = null;
+    if (channel === "whatsapp") {
+      try { fenster = window.open("", "_blank"); } catch { fenster = null; }
+      if (fenster) { try { fenster.opener = null; } catch { /* egal */ } }
+    }
     try {
       const idempotency_key = keyRef.current;
       const body = channel === "whatsapp"
@@ -65,13 +77,26 @@ export default function SendDialog({ open, contract, onClose }) {
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       keyRef.current = neuerSchluessel();
       if (channel === "whatsapp" && data.wa_url) {
-        window.open(data.wa_url, "_blank", "noopener");
+        setWaUrl(data.wa_url);
+        let geoeffnet = false;
+        if (fenster && !fenster.closed) {
+          try { fenster.location.href = data.wa_url; fenster.focus(); geoeffnet = true; } catch { geoeffnet = false; }
+        }
+        if (!geoeffnet) {
+          const w2 = window.open(data.wa_url, "_blank", "noopener");
+          geoeffnet = !!w2;
+        }
         const bis = data.link_gueltig_bis
           ? new Date(data.link_gueltig_bis).toLocaleDateString("de-DE") : null;
-        toast.success(bis
-          ? `WhatsApp-Chat geöffnet · Download-Link zum Vertrag steht in der Nachricht (gültig bis ${bis})`
-          : "WhatsApp-Chat geöffnet · Download-Link zum Vertrag steht in der Nachricht");
+        if (geoeffnet) {
+          toast.success(bis
+            ? `WhatsApp-Chat geöffnet · Download-Link zum Vertrag steht in der Nachricht (gültig bis ${bis})`
+            : "WhatsApp-Chat geöffnet · Download-Link zum Vertrag steht in der Nachricht");
+        } else {
+          toast.warning("Dein Browser hat das WhatsApp-Fenster blockiert — bitte unten auf „WhatsApp jetzt öffnen“ tippen.");
+        }
       } else {
+        if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
         const z = data?.zustellung;
         // Runde 8: "bereits registriert" hiess frueher auch dann, wenn der
         // Versand noch lief oder abgebrochen war. Jetzt sagt der Server,
@@ -96,6 +121,7 @@ export default function SendDialog({ open, contract, onClose }) {
         else toast.success("Versand registriert");
       }
     } catch (err) {
+      if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
       toast.error(errMsg(err, "Versand fehlgeschlagen"));
     } finally {
       setBusy(false);
@@ -223,6 +249,13 @@ export default function SendDialog({ open, contract, onClose }) {
                     <Send size={15} /> WhatsApp-Chat öffnen (mit Download-Link)
                   </button>
                 </>
+              )}
+              {waUrl && (
+                <a href={waUrl} target="_blank" rel="noopener noreferrer" data-testid="wa-open-again"
+                   className="w-full py-2.5 rounded-sm flex items-center justify-center gap-2 text-sm font-semibold border"
+                   style={{ borderColor: "var(--accent-green, #22c55e)", color: "var(--text-primary)" }}>
+                  <MessageCircle size={15} /> WhatsApp jetzt öffnen (Chat mit Verkäufer)
+                </a>
               )}
               <button type="button" data-testid="wa-digital-pdf-btn"
                       onClick={async () => {

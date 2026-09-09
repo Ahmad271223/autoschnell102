@@ -808,6 +808,24 @@ digitalen Fassung. Verträge von vor der Funktion bekommen nie nachträglich
 Vertragsbedingungen, ihre digitale Fassung ist als „nachträglich erzeugt"
 gekennzeichnet.
 
+## Inseratsfotos über den eigenen Bild-Proxy
+
+Seit 10.09.2026 lädt der Browser Portal-Fotos (Kleinanzeigen, mobile.de,
+AutoScout24) nicht mehr direkt vom fremden CDN, sondern als kleines JPEG
+(max. 640 px) über `GET /api/bild?u=…&exp=…&sig=…`. Der Server holt das
+Bild einmal, verkleinert es und hält es im Speicher (`BILD_PROXY_CACHE`,
+Standard 400 Bilder). Kein offener Proxy: nur https-Adressen der bekannten
+Portal-Hosts (Allowliste, erweiterbar über `BILD_PROXY_HOSTS`, kommagetrennt),
+jede Adresse trägt eine Signatur mit Ablauf, je IP 300 Bilder/Minute.
+Vorschaubilder stehen in den Antworten als `images_thumbs`
+(Vergleich), `einkauf_thumbs` (Inserat), `vehicle_image_urls_thumbs`
+(Vertragsliste) und in den öffentlichen Marktplatz-Fotos. Große Ansichten
+und Links zeigen weiter das Originalfoto.
+
+Schadensskizzen für Abholauftrag und Protokoll liegen jetzt unter
+`backend/assets/damage/` (vorher nur im Frontend-Ordner, den das
+Backend-Image nicht enthält — in Produktion fehlten die Skizzen deshalb).
+
 ## Fahrzeuge verkaufen ist kostenlos
 
 `VERKAUF_KOSTENLOS=true` (Standard) bedeutet: Jede Firma kann unbegrenzt viele Fahrzeuge veröffentlichen, ohne Paket und ohne Monatskontingent. Die Paketverwaltung bleibt im Code erhalten; mit `VERKAUF_KOSTENLOS=false` gelten wieder Pakete und Kontingente wie zuvor.

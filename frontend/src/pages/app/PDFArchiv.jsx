@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
 import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
@@ -265,6 +266,9 @@ function VehicleThumb({ item, onOpen }) {
   // (vehicle_image_urls). Fehlen sie (z.B. sehr alte Verträge, deren
   // Fahrzeug inzwischen gelöscht ist), einmal still beim Fahrzeug nachsehen.
   const [urls, setUrls] = useState(item.vehicle_image_urls || []);
+  // 10.09.2026: fuer das kleine Vorschaubild den Bild-Proxy nutzen (klein,
+  // zuverlaessig); die grosse Ansicht zeigt weiter das Originalfoto.
+  const thumbs = item.vehicle_image_urls_thumbs || [];
 
   useEffect(() => {
     let aktiv = true;
@@ -305,8 +309,11 @@ function VehicleThumb({ item, onOpen }) {
       title={`${urls.length} Fotos ansehen`}
     >
       <img
-        src={urls[0]}
+        src={thumbSrc(thumbs[0], urls[0])}
         alt=""
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        onError={(e) => thumbFehler(e, urls[0])}
         className="h-40 sm:h-24 w-full object-cover rounded-xl transition-transform duration-200 group-hover:scale-[1.03]"
         style={{ border: "1px solid var(--border-default)" }}
         loading="lazy"

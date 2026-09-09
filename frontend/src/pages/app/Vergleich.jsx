@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { thumbSrc } from "@/lib/bilder";
 import { checkLink, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
 import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
@@ -396,7 +397,11 @@ export default function Vergleich() {
                          className="block aspect-[4/3] rounded-lg overflow-hidden border hover:opacity-80 transition"
                          style={{ borderColor: "var(--hairline)" }}
                          data-testid={`gallery-thumb-${idx}`}>
-                        <img src={src} alt="" loading="lazy" className="w-full h-full object-cover" />
+                        {/* 10.09.2026: Vorschaubild ueber den eigenen Bild-Proxy (klein,
+                            zwischengespeichert); schlaegt es fehl, das Portalbild direkt. */}
+                        <img src={thumbSrc(result.vehicle.images_thumbs?.[idx], src)} alt="" loading="lazy"
+                             referrerPolicy="no-referrer" className="w-full h-full object-cover"
+                             onError={(e) => { if (e.currentTarget.src !== src) e.currentTarget.src = src; }} />
                       </a>
                     ))}
                     {result.vehicle.images.length > 10 && (
