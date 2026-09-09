@@ -426,3 +426,30 @@ def test_10_index_und_betrieb_kennen_den_vertragsindex():
     assert '"termin_offen_je_vertrag" in await db.appointments.index_information()' in a
     s = (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
     assert '_unique_index_sicher(db.kaufvorgaenge, "contract_id"' in s
+
+
+def test_11_migration_meldet_fahrzeuge_ohne_besitzer_als_alarm(welt):
+    """Runde 17 (Migrations-Befund 5): laesst sich kein Besitzer ermitteln,
+    bleibt das nicht still — offener Betriebsalarm fahrzeuge_ohne_besitzer;
+    sobald alles zugeordnet ist, wird er geschlossen."""
+    M = _module("migrationen")
+    B = _module("betrieb")
+    B.db = welt.db
+    w = welt
+    fremd = f"d_kv_leer_{w.s}"      # Firma ohne Konten -> kein Kandidat
+
+    async def lauf():
+        await w.db.vehicles.insert_one({"id": f"v_ohne_{w.s}", "dealer_id": fremd, "lifecycle": "verglichen",
+                                        "data": {}, "created_at": _jetzt()})
+        s = await M.m4_fahrzeug_besitzer(w.db)
+        alarm = await w.db.betriebsalarme.find_one({"typ": "fahrzeuge_ohne_besitzer", "offen": True}, {"_id": 0})
+        await w.db.vehicles.delete_many({"dealer_id": fremd})
+        # alles zugeordnet (0 offen) -> der Alarm wird geschlossen. Direkt ueber
+        # den Melder, weil die geteilte Entwicklungs-DB fremde Altlasten haelt.
+        await M._offene_besitzer_melden(w.db, 0)
+        alarm2 = await w.db.betriebsalarme.find_one({"typ": "fahrzeuge_ohne_besitzer", "offen": True}, {"_id": 0})
+        return s, alarm, alarm2
+
+    s, alarm, alarm2 = w.run(lauf())
+    assert s["offen"] >= 1 and alarm and alarm["details"]["anzahl"] >= 1
+    assert alarm2 is None

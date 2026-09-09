@@ -157,6 +157,7 @@ async def m4_fahrzeug_besitzer(db) -> dict:
             {"id": v["id"], "dealer_id": v.get("dealer_id")},
             {"$set": {"owner_user_id": uid, "besitzer_migriert_von": quelle}})
         stats[quelle] += 1
+    await _offene_besitzer_melden(db, stats["offen"])
     return stats
 
 
@@ -243,7 +244,20 @@ async def m6_besitzer_nachbessern(db) -> dict:
             {"$set": {"owner_user_id": uid, "besitzer_migriert_von": f"nachgebessert:{quelle}",
                       "besitzer_vorher": v.get("owner_user_id")}})
         stats["nachgebessert"] += 1
+    await _offene_besitzer_melden(db, stats["offen"])
     return stats
+
+
+async def _offene_besitzer_melden(db, anzahl: int) -> None:
+    """Runde 17 (Migrations-Befund 5): Fahrzeuge ohne zuordenbaren Besitzer
+    duerfen nicht still bleiben — als Betriebsalarm sichtbar (/admin/betrieb),
+    der Chef weist sie in der Akte zu. Kein Startabbruch: seit dem Umbau
+    Kaufvorgaenge ist der Besitzer nur organisatorisch."""
+    from betrieb import alarm, alarm_schliessen
+    if anzahl > 0:
+        await alarm(db, "fahrzeuge_ohne_besitzer", ref="vehicles", anzahl=anzahl)
+    else:
+        await alarm_schliessen(db, "fahrzeuge_ohne_besitzer", ref="vehicles")
 
 
 MIGRATIONEN = [
