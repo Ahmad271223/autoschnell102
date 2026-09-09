@@ -142,7 +142,11 @@ def test_69_send_contract_nutzt_effective_dealer_fuer_die_mail(monkeypatch):
     vertrag = {"id": "c1", "dealer_id": "d1", "user_id": "u1",
                "contract_no": "KV-1", "seller_name": "Max Kunde",
                "make": "BMW", "model": "320d", "purchase_price": 5000,
-               "pdf_b64": "", "filename": "Kaufvertrag.pdf", "send_status": []}
+               "pdf_b64": "", "filename": "Kaufvertrag.pdf", "send_status": [],
+               # Seit 09.09.2026 haengt der Versand die DIGITALE Fassung an;
+               # liegt sie vor, braucht der Weg keine Nacherzeugung (kein
+               # Zugriff auf vehicles/dealers — genau das prueft dieser Test).
+               "pdf_digital_b64": "JVBERi0xLjQgdGVzdA=="}
     sucher = {"id": "u1", "dealer_id": "d1", "role": "sucher",
               "email": "sucher@e2etest-mail.de", "first_name": "Sina", "last_name": "S",
               "settings_override": {"company_name": "Filiale Sued",
