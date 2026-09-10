@@ -66,6 +66,17 @@ def welt():
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.driver_accounts.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.listings_cache.delete_many({"cache_key": {"$regex": f"97{NUM:06d}"}})
+    # Beweisdokumente dieses Laufs (Kleinanzeigen- und mobile.de-Inserat) samt Datei
+    muster = {"$regex": f"^(kleinanzeigen:97{NUM:06d}|mobile:3{NUM:06d}1$)"}
+    for d in dbx.inserat_beweise.find({"cache_key": muster}, {"pdf_key": 1, "alle_keys": 1}):
+        for k in set((d.get("alle_keys") or []) + ([d["pdf_key"]] if d.get("pdf_key") else [])):
+            try:
+                from storage_service import storage
+                storage.delete(k)
+            except Exception:
+                pass
+    dbx.inserat_beweise.delete_many({"cache_key": muster})
+    dbx.listings_cache.delete_many({"cache_key": {"$regex": f"^mobile:3{NUM:06d}1$"}})
 
 
 def test_00_aufbau(welt):
@@ -96,19 +107,21 @@ def test_00_aufbau(welt):
                              json={"plan": "monthly"}, timeout=30).status_code == 200
 
 
-# ---------- Snapshots nur fuer Kleinanzeigen ----------
-def test_01_snapshots_nur_kleinanzeigen(welt):
+# ---------- Beweisdokument fuer jedes Portal (ersetzt die Snapshots, 10.09.2026) ----------
+def test_01_beweisdokument_fuer_jedes_portal_statt_snapshot(welt):
     r = _compare(welt["S"], _ka_url(1))
     assert r.status_code == 200, r.text[:300]
-    assert r.json().get("snapshot_id"), "Kleinanzeigen: Snapshot erwartet"
+    j = r.json()
+    assert "snapshot_id" not in j, "Snapshots gibt es nicht mehr"
+    assert (j.get("beweis") or {}).get("id"), "Kleinanzeigen: Beweisdokument erwartet"
+    zweit = _compare(welt["S"], _ka_url(1))
+    assert zweit.json()["beweis"]["id"] == j["beweis"]["id"], "je Inserat genau EIN Dokument"
     r = _compare(welt["S"], f"https://suchen.mobile.de/fahrzeuge/details.html?id=3{NUM:06d}1")
     if r.status_code == 400 and "freigeschaltet" in r.text:
         pytest.skip("mobile.de in dieser Umgebung nicht verfuegbar")
     assert r.status_code == 200, r.text[:300]
-    assert r.json().get("snapshot_id") is None, "mobile.de: KEIN Snapshot mehr"
-    vid = f"v_{r.json().get('ad_id')}"
-    assert _db().listing_snapshots.count_documents(
-        {"vehicle_id": vid, "dealer_id": welt["dealer_id"]}) == 0
+    assert (r.json().get("beweis") or {}).get("id"), "mobile.de: Beweisdokument erwartet"
+    assert _db().listing_snapshots.count_documents({"dealer_id": welt["dealer_id"]}) == 0
 
 
 # ---------- Fahrzeugpool: max. 30 Vergleiche ----------

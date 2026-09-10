@@ -558,7 +558,6 @@ _PROD_UMGEBUNG = {
     "RESEND_API_KEY": "re_r14_test",
     "MAIL_FROM": "AutoSchnell <vertrag@example.de>",
     "WEB_CONCURRENCY": "1",
-    "SNAPSHOT_CONCURRENCY": "1",
     "SELF_SIGNUP": "false",
     "AUTO_DATEN_SCHAEDEN_FREITEXT": "false",
 }
@@ -642,13 +641,6 @@ def test_97_trockenlauf_mit_kandidaten_alarmiert(monkeypatch):
             await db.betriebsalarme.delete_many({"typ": "vertrag_loeschung_trockenlauf"})
 
     _run(lauf)
-
-
-def test_4_mobile_datenblatt_fallback_mandantengebunden():
-    import snapshot_service
-    src = inspect.getsource(snapshot_service._mobile_datenblatt_job)
-    assert 'filt["dealer_id"] = doc["dealer_id"]' in src
-    assert 'find_one(\n                {"id": doc["vehicle_id"]}' not in src
 
 
 def test_25_dateien_rechnet_mit_auth_geheimnis(monkeypatch):

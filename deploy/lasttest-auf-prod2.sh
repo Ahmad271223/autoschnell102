@@ -72,7 +72,7 @@ docker run -d --name last-backend --network "$NETZ" --memory 4g --shm-size 512m 
     -e JWT_SECRET=lasttest-nur-wegwerf-nicht-produktiv \
     -e ADMIN_EMAIL=last-admin@ci.invalid -e ADMIN_PASSWORD=last-only-admin-pw-1 \
     -e SUPER_ADMIN_USERNAME=last-superadmin -e SUPER_ADMIN_PASSWORD=last-only-superadmin-pw-1 \
-    -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" -e SNAPSHOT_CONCURRENCY=1 \
+    -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" \
     -e TZ=Europe/Berlin \
     "$IMAGE" >/dev/null
 

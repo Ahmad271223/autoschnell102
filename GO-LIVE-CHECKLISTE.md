@@ -29,7 +29,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 16 | Long-Polling DB-Last | ✅ | Backoff (max. 6 Lesungen), Limit je Konto. |
 | 17 | Unbegrenzte Hintergrundaufgaben | ✅ | Sofort-Anstöße begrenzt/dedupliziert (`LINK_JOB_SOFORT_MAX`). |
 | 18 | Startmigrationen in 8 Workern | ✅ | `migrationen.py` mit Sperre + Versionierung, vor den Workern; Fehler bricht in Produktion ab. |
-| 19 | Ressourcenbedarf | ✅ | 4 Worker × 1 Snapshot, Limits in Compose, `maxPoolSize`; Lasttest-Skript `backend/scripts/lasttest.py` (gegen Staging mit `MOCK_PROVIDER_FETCH=true`) — **Lauf auf Staging 🔧 Betreiber**. |
+| 19 | Ressourcenbedarf | ✅ | 4 Worker, kein Browser mehr (Beweisdokument statt Snapshot, 10.09.2026), Limits in Compose, `maxPoolSize`; Lasttest-Skript `backend/scripts/lasttest.py` (gegen Staging mit `MOCK_PROVIDER_FETCH=true`) — **Lauf auf Staging 🔧 Betreiber**. |
 | 20 | Datenschutz/AGB widersprechen Code | 🔧 | Texte angeglichen (90 Tage, Empfänger, Fristen, USt), Fonts lokal, B2B-Bestätigung. **Platzhalter `[…]` ausfüllen + juristische Prüfung.** |
 | 21 | Backups nur lokal | 🔧 | Verschlüsselte Offsite-Kopie mit Object-Lock-Option (`BACKUP_S3_*`), Alter/Vollständigkeit in `/api/ready` und Betrieb; Prüfskript `python scripts/offsite_pruefen.py [--laden]` (Bucket erreichbar, Verschlüsselung, Object Lock, jüngstes Backup, Prüfsumme, Manifest). **Bucket anlegen + Skript monatlich.** |
 

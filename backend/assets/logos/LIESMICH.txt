@@ -1,0 +1,27 @@
+Portal-Logos fuer das Beweisdokument
+====================================
+
+Links oben im Beweisdokument steht das Logo des Portals. Liegt fuer ein
+Portal keine Datei hier, zeichnet das Backend einen Schriftzug in der
+Farbe des Portals.
+
+Stand 10.09.2026:
+  mobile.png          vorhanden (aus frontend/public/logos/mobile-de.png,
+                      dieselbe Datei wie auf den Vergleichs-Buttons)
+  autoscout24.png     vorhanden (aus frontend/public/logos/autoscout24.png,
+                      dunkler Rand beschnitten)
+  kleinanzeigen.png   fehlt noch — bis dahin dunkelgruener Schriftzug
+                      "kleinanzeigen". Offizielle Datei: Mediathek von
+                      Kleinanzeigen (themen.kleinanzeigen.de, Logo-Guideline,
+                      horizontale Variante). Richtlinie: nicht verzerren oder
+                      veraendern, Schutzzone 10 % der Logobreite, mindestens
+                      27 mm breit.
+
+Regeln fuer eigene Dateien:
+  * Logos NUR mit Nutzungsrecht des jeweiligen Portals verwenden
+  * Name: mobile.png, autoscout24.png, kleinanzeigen.png (oder .jpg)
+  * hoechstens 1 MB je Datei, PNG mit transparentem Hintergrund am besten
+  * das Logo wird in ein Feld von ca. 44 x 11 mm eingepasst (Seitenverhaeltnis bleibt)
+  * nach dem Ablegen neu bauen und ausrollen (sh deploy/rollout.sh),
+    die Datei ist Teil des Backend-Images
+  * gilt nur fuer NEU erstellte Beweisdokumente, bestehende bleiben unveraendert

@@ -694,6 +694,27 @@ async def driver_appointments(driver=Depends(current_driver)):
         ).sort("completed_at", -1):
             snap_map.setdefault((s.get("dealer_id"), s["vehicle_id"]), s["id"])
 
+    # Beweisdokument je Inserat (ersetzt die Snapshots): ueber das Inserat
+    # des Fahrzeugs, firmenunabhaengig geteilt. Altbestand ohne
+    # inserat_schluessel wird dabei einmal zugeordnet (Download-Route
+    # sucht ueber dieses Feld).
+    beweis_map = {}
+    if vehicles:
+        import beweis_service as _BS
+        je_fz = {k: _BS.inserat_schluessel(v) for k, v in vehicles.items()}
+        for (did, fz_id), ck in je_fz.items():
+            if ck and not vehicles[(did, fz_id)].get("inserat_schluessel"):
+                await db.vehicles.update_one({"id": fz_id, "dealer_id": did},
+                                             {"$set": {"inserat_schluessel": ck}})
+        cks = sorted({ck for ck in je_fz.values() if ck})
+        if cks:
+            fertig = {}
+            async for b in db.inserat_beweise.find(
+                    {"cache_key": {"$in": cks}, "status": "fertig"},
+                    {"_id": 0, "id": 1, "cache_key": 1}):
+                fertig[b["cache_key"]] = b["id"]
+            beweis_map = {k: fertig.get(ck) for k, ck in je_fz.items() if ck}
+
     dealer_ids = list({a.get("dealer_id") for a in appts if a.get("dealer_id")})
     dealers = {}
     if dealer_ids:
@@ -748,6 +769,7 @@ async def driver_appointments(driver=Depends(current_driver)):
                 "photos": photos,
             } if v else None,
             "snapshot_id": snap_map.get(schluessel),
+            "beweis_id": beweis_map.get(schluessel),
         })
     return out
 

@@ -106,7 +106,7 @@ def main() -> int:
         "APP_ENV=production",
         "SELF_SIGNUP=false",
         "WEB_CONCURRENCY=4",
-        "SNAPSHOT_CONCURRENCY=1",
+        "BEWEIS_AUFBEWAHRUNG_TAGE=90",
         "ENABLE_DOCS=false",
         "MOCK_PROVIDER_FETCH=false",
         "MOBILE_SANDBOX_MODE=false",

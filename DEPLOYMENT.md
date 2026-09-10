@@ -255,7 +255,7 @@ Testumgebung nachgestellt — bitte zuerst auf Staging durchspielen.
 ## Beim Start geprüft (production_check.py)
 Mit `APP_ENV=production` bricht der Start ab bei: Dev-Secret/Demo-Passwort,
 `localhost` in FRONTEND_URL/CORS, Mongo ohne Auth, aktivem Mock, nicht
-beschreibbaren Backup-/Upload-/Snapshot-Verzeichnissen, fehlendem SMTP,
+beschreibbaren Backup-/Upload-Verzeichnissen, fehlendem SMTP,
 Aufbewahrungsfristen ≤ 0, halb konfiguriertem S3 sowie bei doppelten Werten
 in Feldern mit Eindeutigkeits-Index (`scripts/dubletten_pruefen.py`). Die
 Prüfung läuft **vor** Indexanlage und Admin-Seeding.
@@ -271,8 +271,8 @@ und das Backend einmal neu starten. Bis dahin greift nur die Vorabprüfung
 der Routen (409 „bereits ein offener Abholtermin"), nicht der Index.
 
 Seit Runde 16 (Beschluss 08.09.2026) sehen **Sucher nur noch ihren eigenen
-Arbeitsbereich**: Fahrzeuge (`vehicles.owner_user_id`), Termine, Beweis-
-Snapshots, Abholberichte und Protokolle; der Händler-Hauptaccount sieht die
+Arbeitsbereich**: Fahrzeuge (`vehicles.owner_user_id`), Termine,
+Beweisdokumente, Abholberichte und Protokolle; der Händler-Hauptaccount sieht die
 ganze Firma und hängt Fahrzeuge in der Fahrzeugakte um. Die Migration m4
 (läuft beim ersten Start automatisch, Protokoll in `schema_migrations`)
 ordnet den Altbestand zu: ältester Vertrag → ältester Vergleich →
@@ -351,7 +351,11 @@ Was danach gilt: Jede Aenderung in der Datenbank liegt sofort auf beiden
 Servern. Faellt prod1 aus, gehen keine Daten verloren. Ob das Umschalten
 automatisch passiert, haengt vom Schiedsrichter ab (siehe 2c).
 
-### 1. Beweis-Snapshots in den Objektspeicher (R2)
+### 1. Alte Beweis-Snapshots in den Objektspeicher (R2)
+
+Seit 10.09.2026 entstehen keine Snapshots mehr (siehe „Beweisdokument je
+Inserat“ unten). Der folgende Schritt betrifft nur noch Aufnahmen von
+davor, bis sie verfallen sind.
 
 Fotos liegen laengst in R2. Die Snapshot-Dateien (JPG + PDF je Inserat)
 lagen bis jetzt nur auf der Platte von prod1 — ein zweiter Server saehe
@@ -634,7 +638,7 @@ Historien-Bereinigung. Reihenfolge:
 openssl rand -base64 48        # JWT_SECRET
 # 2. In .env eintragen: JWT_SECRET, ADMIN_PASSWORD, SUPER_ADMIN_PASSWORD,
 #    MONGO_PASSWORD (+ Mongo-Benutzer ändern: mongosh db.changeUserPassword),
-#    SMTP_PASS, STRIPE_*, APIFY_TOKEN, S3_SECRET_KEY, BROWSERLESS_TOKEN
+#    SMTP_PASS, STRIPE_*, APIFY_TOKEN, S3_SECRET_KEY
 # 3. Stack neu starten (neue Werte greifen; alte JWTs sind durch den neuen
 #    JWT_SECRET ungültig)
 docker compose up -d --build
@@ -679,11 +683,43 @@ für ALLE Antworten (auch die React-Oberfläche). Prüfen nach dem Start:
 `curl -sI https://PUBLIC_HOST/ | grep -i -E "strict|frame|content-type-options"`.
 
 ### Ressourcen
-Standard jetzt 4 Worker × 1 Chromium-Snapshot (vorher 8 × 3 = bis zu 24
-Browser ≈ 9,6 GB). `docker-compose.yml` setzt Speicher-/CPU-Limits
-(`BACKEND_MEM_LIMIT`, `MONGO_MEM_LIMIT`, …) und begrenzt den Mongo-Pool
-(`maxPoolSize=20` in MONGO_URL). Faustregel: Backend-RAM ≈ 400 MB × Worker
-+ 400 MB × (Worker × SNAPSHOT_CONCURRENCY) + 500 MB.
+Standard 4 Worker, seit 10.09.2026 ohne Browser (Beweisdokumente
+entstehen mit ReportLab; je Dokument mit 20 Fotos etwa 1–2 s Rechenzeit und
+1–2,5 MB in R2 — bei 100.000 neuen Inseraten im Monat und 90 Tagen
+Aufbewahrung grob 0,3–0,75 TB). `docker-compose.yml`
+setzt Speicher-/CPU-Limits (`BACKEND_MEM_LIMIT`, `MONGO_MEM_LIMIT`, …) und
+begrenzt den Mongo-Pool (`maxPoolSize=20` in MONGO_URL). Faustregel:
+Backend-RAM ≈ 400 MB × Worker + 500 MB.
+
+### Beweisdokument je Inserat (ersetzt die Snapshots, 10.09.2026)
+Wird ein Inserats-Link zum ersten Mal verwendet — egal von welcher Firma —,
+entsteht genau EIN PDF, das alle Firmen teilen, die das Inserat verwenden:
+Portal-Kennzeichnung links oben, Anzeigen-ID, Inserats-Adresse, alle
+ausgelesenen Daten geordnet, die Inseratsfotos (höchstens
+`BEWEIS_FOTOS_MAX`, alle Adressen im Anhang). Erzeugt wird es im
+Hintergrund (`beweis_service.py`, Collection `inserat_beweise`, Dateien
+unter `beweise/<portal>/` in R2) — der Vergleich wartet nie darauf.
+
+- Portal-Logos: ohne Datei ein Schriftzug in Markenfarbe. Echte Logos nur
+  mit Nutzungsrecht als `backend/assets/logos/<mobile|autoscout24|kleinanzeigen>.png`
+  ablegen und neu ausrollen (`backend/assets/logos/LIESMICH.txt`).
+- Private Anbieter: nur PLZ/Ort, kein Name/Telefon (`BEWEIS_PRIVATDATEN=1`
+  ändert das — vorher Datenschutzerklärung anpassen).
+- Aufbewahrung: `BEWEIS_AUFBEWAHRUNG_TAGE` (90) ab Erstellung, länger,
+  solange bei einer Firma zu dem Inserat ein Kaufvertrag, Abholtermin,
+  Verkaufsinserat oder Bestandsfahrzeug besteht (bloß verglichene
+  Fahrzeuge halten es nicht). Danach wird die
+  Datei gelöscht; die Zeile bleibt als Grabstein, damit derselbe Link
+  kein zweites „erstes“ Dokument bekommt.
+- Alte Snapshots (vor dem 10.09.2026) bleiben lesbar, bis sie nach der
+  bisherigen Regel verfallen (60 Tage, mit Kaufvertrag länger).
+- Kontrolle (auf dem Server in `/opt/autoschnell`):
+  ```bash
+  docker compose exec -T mongo mongosh --quiet -u "$(grep ^MONGO_USER .env | cut -d= -f2)" -p "$(grep ^MONGO_PASSWORD .env | cut -d= -f2)" --authenticationDatabase admin autoschnell --eval 'db.inserat_beweise.aggregate([{$group:{_id:"$status",n:{$sum:1}}}]).toArray()'
+  ```
+  `offen` sollte nach wenigen Sekunden zu `fertig` werden. Endgültig
+  `fehlgeschlagen` löst den Betriebsalarm `beweis_fehlgeschlagen` aus; beim
+  nächsten Vergleich des Links wird es erneut versucht.
 
 ### Vertragslöschung (90 Tage) ist standardmäßig NUR Vorschau
 `VERTRAG_LOESCHUNG_AKTIV=false`: der stündliche Lauf schreibt eine
@@ -720,7 +756,7 @@ Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`).
    (Wartungsmodus sichtbar, Rollback-Test mit absichtlichem Fehler).
 5. Stripe im Testmodus: Checkout, Webhook (Dashboard: `/api/webhook/stripe`),
    Wiederholungs-Webhook, Betrieb-Seite ohne "Zahlung ohne Zugang".
-6. Rollen-/Mandantentests und Lasttest (Vergleiche + Snapshots + PDFs gleichzeitig).
+6. Rollen-/Mandantentests und Lasttest (Vergleiche + Beweisdokumente + PDFs gleichzeitig).
 
 ## Zwei-Faktor-Anmeldung für Admins (TOTP)
 

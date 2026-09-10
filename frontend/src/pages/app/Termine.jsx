@@ -10,7 +10,7 @@ import {
   openContractPdf, printContractPdf,
   openPickupOrderPdf, printPickupOrderPdf, downloadPickupOrderPdf,
 } from "@/lib/pdf";
-import SnapshotCard from "@/components/SnapshotCard";
+import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
 import {
@@ -364,7 +364,7 @@ function DayApptItem({ a, onEdit, compact }) {
         </div>
         {a.vehicle_id && !compact && (
           <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-            <SnapshotCard vehicleId={a.vehicle_id} compact />
+            <BeweisCard vehicleId={a.vehicle_id} compact />
           </div>
         )}
       </div>
@@ -692,7 +692,7 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
 
           {a.vehicle_id && (
             <div className="mt-4">
-              <SnapshotCard vehicleId={a.vehicle_id} />
+              <BeweisCard vehicleId={a.vehicle_id} />
             </div>
           )}
 

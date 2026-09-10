@@ -116,8 +116,11 @@ def _module(name):
 def welt():
     from motor.motor_asyncio import AsyncIOMotorClient
     w = _Welt()
-    names = ["deps", "lifecycle", "routes.bestand", "routes.resale", "routes.listings",
-             "routes.marketplace", "routes.team", "routes.contracts"]
+    # kaufvorgang: create_draft fragt seit Runde 19 den Einkaufspreis-Vorschlag
+    # ab — ohne Tausch nutzte der Test den globalen Client eines fremden,
+    # schon geschlossenen Test-Loops ("Event loop is closed", reihenfolgeabhaengig).
+    names = ["deps", "lifecycle", "kaufvorgang", "routes.bestand", "routes.resale",
+             "routes.listings", "routes.marketplace", "routes.team", "routes.contracts"]
     mods = [_module(n) for n in names]
     alt = [(m, getattr(m, "db", None)) for m in mods]
 
@@ -550,101 +553,11 @@ def test_14_snapshots_liste_cursor_und_truncated(welt):
     assert len(alle) == 5 and all("png_path" not in s for s in alle)
 
 
-# ================================================= Nr. 310/313/316: Snapshot-Job
-def _snapshot_job_vorbereiten(monkeypatch, db, *, put_object):
-    SN = _module("snapshot_service")
-    PF = _module("provider_fetch")
-    PL = _module("provider_limiter")
-    monkeypatch.setattr(PF, "MOCK_PROVIDER_FETCH", False)
-
-    async def _slot(db_, quelle):
-        return "slot"
-
-    async def _nichts(*a, **k):
-        return None
-    monkeypatch.setattr(PL, "acquire_slot", _slot)
-    monkeypatch.setattr(PL, "extend_slot", _nichts)
-    monkeypatch.setattr(PL, "release_slot", _nichts)
-    monkeypatch.setattr(SN, "_compress_artifacts", lambda png, pdf: (png, pdf))
-    monkeypatch.setattr(SN, "_put_object", put_object)
-    geloescht = []
-
-    def _delete_object(path):            # Storage-Loeschung scheitert -> vormerken
-        geloescht.append(path)
-        return False
-    monkeypatch.setattr(SN, "delete_object", _delete_object)
-    return SN, geloescht
-
-
-def test_15_snapshot_upload_abbruch_merkt_dateien_vor(welt, monkeypatch):
-    w, db = welt.w, welt.db
-    sid = f"snap_{w.s}"
-    hochgeladen = []
-
-    def _put(path, data, ct):
-        if hochgeladen:
-            raise RuntimeError("Objektspeicher weg")
-        hochgeladen.append(path)
-        return {"path": path}
-    SN, geloescht = _snapshot_job_vorbereiten(monkeypatch, db, put_object=_put)
-
-    async def _capture(db_, snap_id, url):
-        await db_.listing_snapshots.update_one({"id": snap_id},
-                                               {"$set": {"status": "running", "started_at": _jetzt()}})
-        return b"png", b"pdf"
-    monkeypatch.setattr(SN, "_capture_with_retry", _capture)
-
-    async def lauf():
-        await db.listing_snapshots.insert_one(w.snap(sid, status="pending", completed_at=None))
-        await SN.run_snapshot_job(db, sid)
-        s = await db.listing_snapshots.find_one({"id": sid}, {"_id": 0})
-        retry = await db.storage_delete_retry.find({"dealer_id": w.dealer_id}, {"_id": 0}).to_list(10)
-        return s, retry
-
-    s, retry = welt.run(lauf())
-    assert s["status"] == "failed" and "Objektspeicher" in s["error"]
-    assert len(hochgeladen) == 1 and hochgeladen[0].endswith(".jpg")
-    assert geloescht == hochgeladen, "die halb hochgeladene Datei wird geloescht bzw. vorgemerkt"
-    assert len(retry) == 1 and retry[0]["key"] == hochgeladen[0]
-    assert retry[0]["art"] == "snapshot" and retry[0]["grund"] == "snapshot_upload_abbruch"
-    assert retry[0]["ref"] == {"collection": "listing_snapshots", "id": sid}
-
-
-def test_16_snapshot_ready_write_cas_gegen_reaper(welt, monkeypatch):
-    w, db = welt.w, welt.db
-    sid = f"snap_{w.s}"
-    hochgeladen = []
-
-    def _put(path, data, ct):
-        hochgeladen.append(path)
-        return {"path": path}
-    SN, geloescht = _snapshot_job_vorbereiten(monkeypatch, db, put_object=_put)
-
-    async def _capture(db_, snap_id, url):
-        # Der Reaper hat die Zeile waehrend der Aufnahme auf failed gesetzt.
-        await db_.listing_snapshots.update_one(
-            {"id": snap_id}, {"$set": {"status": "failed", "error": "Zeitueberschreitung"}})
-        return b"png", b"pdf"
-    monkeypatch.setattr(SN, "_capture_with_retry", _capture)
-
-    async def lauf():
-        await db.listing_snapshots.insert_one(w.snap(sid, status="pending", completed_at=None))
-        await SN.run_snapshot_job(db, sid)
-        s = await db.listing_snapshots.find_one({"id": sid}, {"_id": 0})
-        retry = await db.storage_delete_retry.find({"dealer_id": w.dealer_id}, {"_id": 0}).to_list(10)
-        return s, retry
-
-    s, retry = welt.run(lauf())
-    assert s["status"] == "failed" and not s.get("png_path") and not s.get("pdf_path"), \
-        "failed wird nicht mehr zu ready ueberschrieben"
-    assert len(hochgeladen) == 2 and sorted(geloescht) == sorted(hochgeladen)
-    assert {r["key"] for r in retry} == set(hochgeladen)
-    assert {r["grund"] for r in retry} == {"snapshot_ready_verworfen"}
-
-
+# ================================================= Nr. 313: Reaper fuer Alt-Snapshots
+# (Snapshot-Erzeugung seit 10.09.2026 entfernt — Nr. 310/316 entfallen mit ihr;
+# der Reaper bleibt, bis keine Altzeilen mehr haengen koennen.)
 def test_17_reaper_misst_am_heartbeat(welt):
     CS = _module("cleanup_service")
-    SN = _module("snapshot_service")
     w, db = welt.w, welt.db
 
     async def lauf():
@@ -668,8 +581,6 @@ def test_17_reaper_misst_am_heartbeat(welt):
     assert stati[f"tot_{w.s}"] == "failed"
     assert stati[f"alt_{w.s}"] == "failed", "ohne heartbeat gilt started_at"
     assert stati[f"frisch_{w.s}"] == "running" and stati[f"wartet_{w.s}"] == "queued"
-    q = inspect.getsource(SN.run_snapshot_job)
-    assert '"heartbeat_at"' in q and '"status": {"$in": ["running", "retrying", "queued"]}' in q
 
 
 # ================================================= Nr. 307: Snapshot-Reste

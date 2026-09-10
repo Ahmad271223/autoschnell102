@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
-import SnapshotCard from "@/components/SnapshotCard";
+import BeweisCard from "@/components/BeweisCard";
 
 const DAY_FILTERS = [
   { v: 0, l: "Alle" },
@@ -142,7 +142,7 @@ export default function PDFArchiv() {
                     <AbholZeile item={it} />
                     <div className="mt-3">
                       {it.vehicle_id ? (
-                        <SnapshotCard vehicleId={it.vehicle_id} compact />
+                        <BeweisCard vehicleId={it.vehicle_id} compact />
                       ) : (
                         <span className="text-xs" style={{ color: "var(--text-muted)" }}>—</span>
                       )}

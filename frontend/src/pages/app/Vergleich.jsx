@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import ContractDialog from "@/components/ContractDialog";
 import SendDialog from "@/components/SendDialog";
-import SnapshotCard from "@/components/SnapshotCard";
+import BeweisCard from "@/components/BeweisCard";
 import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
@@ -543,8 +543,8 @@ export default function Vergleich() {
               )}
             </div>
 
-            {result.snapshot_id && (
-              <SnapshotCard snapshotId={result.snapshot_id} />
+            {result.beweis?.id && (
+              <BeweisCard key={result.beweis.id} beweis={result.beweis} />
             )}
 
             <div className="text-[11px] leading-relaxed px-1" style={{ color: "var(--text-muted)" }}>

@@ -233,6 +233,9 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         "seller_name": _attr(seller_node.get("seller:contact-person") or {}, "value")
                        or _attr(seller_node.get("seller:company-name") or {}, "value")
                        or ("Händler" if _attr(seller_node.get("seller:type") or {}, "commercial") == "true" else "Privatverkäufer"),
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": {"true": "haendler", "false": "privat"}.get(
+            _attr(seller_node.get("seller:type") or {}, "commercial") or ""),
         "seller_address": _attr(seller_addr.get("seller:street") or {}, "value") if isinstance(seller_addr, dict) else None,
         "seller_zip": _attr(seller_addr.get("seller:zipcode") or {}, "value") if isinstance(seller_addr, dict) else None,
         "seller_city": _attr(seller_addr.get("seller:city") or {}, "value") if isinstance(seller_addr, dict) else None,
@@ -508,6 +511,10 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
                        or ((kontakt.get("person") or {}).get("name") if isinstance(kontakt.get("person"), dict) else None)
                        or ("Händler" if str(kontakt.get("enumType") or "").upper() == "DEALER"
                            else "Privatverkäufer"),
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": {"DEALER": "haendler", "PRIVATE": "privat",
+                        "PRIVATE_SELLER": "privat"}.get(
+            str(kontakt.get("enumType") or "").upper()),
         "seller_address": kontakt.get("address1"),
         "seller_zip": plz,
         "seller_city": stadt,

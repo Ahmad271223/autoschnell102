@@ -103,7 +103,6 @@ _PROD_UMGEBUNG = {
     "RESEND_API_KEY": "re_r13_test",
     "MAIL_FROM": "AutoSchnell <vertrag@example.de>",
     "WEB_CONCURRENCY": "1",
-    "SNAPSHOT_CONCURRENCY": "1",
     "SELF_SIGNUP": "false",
     "AUTO_DATEN_SCHAEDEN_FREITEXT": "false",
     "VERTRAG_LOESCHUNG_AKTIV": "false",

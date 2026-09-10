@@ -64,9 +64,6 @@ from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
     MOBILE_USER, build_search_url, get_vehicle, mobile_quelle_verfuegbar,
 )
-from snapshot_service import (
-    create_snapshot, get_object as snapshot_get_object, run_snapshot_job,
-)
 
 log = logging.getLogger("autohandel")
 
@@ -338,6 +335,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "id": str(uuid.uuid4()),
         "mobile_ad_id": ad_id,
         "source": source,
+        # Beweisdokument: Zugriff fuer Firmen, die das Inserat verglichen haben
+        "cache_key": identity["cache_key"],
         "cached": was_cached,
         "dealer_id": user["dealer_id"],
         "user_id": user["id"],
@@ -351,118 +350,25 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
     frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
     kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source)
+    # Beweisdokument: das Fahrzeug kennt sein Inserat (bei AutoScout24 weicht
+    # die Anzeigen-ID von der ID in der Adresse ab — deshalb der cache_key).
+    await db.vehicles.update_one(
+        {"id": vid, "dealer_id": user["dealer_id"]},
+        {"$set": {"inserat_schluessel": identity["cache_key"]}})
     await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
                        meta={"kollege": kollege["user_id"]} if kollege else None)
 
-    # Proof-of-listing Snapshot.
-    snap_id = None
-    # Wunsch 09/2026: Beweis-Snapshots NUR fuer Kleinanzeigen — mobile.de
-    # und AutoScout24 (Datenblatt-Nachbau) werden vorerst nicht erzeugt.
-    is_web_url = source == "kleinanzeigen" and raw_url.startswith("http")
-
-    async def _reuse_cached_snapshot(sid: str) -> Optional[str]:
-        # Bewusst OHNE dealer-Filter: der ERSTE Snapshot einer Anzeige wird
-        # von ALLEN uebernommen — nie doppelt fotografieren (Wunsch 08/2026).
-        doc = await db.listing_snapshots.find_one(
-            {"id": sid},
-            {"_id": 0, "status": 1, "id": 1},
-        )
-        if not doc:
-            return None
-        if doc.get("status") in ("failed", "expired"):
-            return None
-        return doc["id"]
-
-    if is_web_url and was_cached and cached_snapshot_id:
-        snap_id = await _reuse_cached_snapshot(cached_snapshot_id)
-
-    # Zweite Reuse-Stufe: existiert fuer diese Anzeige-URL BEREITS irgendein
-    # brauchbarer Snapshot (egal von wem), wird er uebernommen — es wird nie
-    # doppelt fotografiert, auch nicht in Rennsituationen.
-    if is_web_url and not snap_id:
-        existing = await db.listing_snapshots.find_one(
-            {"source_url": raw_url, "status": {"$nin": ["failed", "expired"]}},
-            {"_id": 0, "id": 1}, sort=[("created_at", -1)])
-        if existing:
-            snap_id = existing["id"]
-            try:
-                await set_cache_snapshot(db, raw_url, snap_id)
-            except Exception:
-                pass
-
-    if is_web_url and not snap_id:
-        # ATOMARE RESERVIERUNG (Beschluss 08/2026): Vergleichen mehrere
-        # Nutzer im SELBEN Moment denselben NEUEN Link, darf nur EINER den
-        # Snapshot anlegen. Vorher war das ein "pruefen, dann anlegen" —
-        # gleichzeitige Vergleiche erzeugten mehrere Snapshots (mehrfacher
-        # Abruf derselben Anzeige = Block-Risiko, mehrfacher Speicher).
-        # Wer die ID im Cache setzt, gewinnt; alle anderen erben sie.
-        _ck = identity["cache_key"]
-        _reserved = str(uuid.uuid4())
-        _now = datetime.now(timezone.utc)
-        won = await db.listings_cache.find_one_and_update(
-            {"cache_key": _ck,
-             "$or": [{"snapshot_id": {"$exists": False}}, {"snapshot_id": None}]},
-            {"$set": {"snapshot_id": _reserved, "snapshot_reserved_at": _now}},
-            projection={"_id": 0, "snapshot_id": 1},
-            return_document=ReturnDocument.AFTER,
-        )
-
-        async def _anlegen(sid: str) -> Optional[str]:
-            try:
-                new_id = await create_snapshot(
-                    db,
-                    dealer_id=user["dealer_id"], user_id=user["id"],
-                    vehicle_id=vid, mobile_ad_id=ad_id, source_url=raw_url,
-                    snapshot_id=sid, quelle=source,
-                )
-                background.add_task(run_snapshot_job, db, new_id)
-                return new_id
-            except Exception as exc:
-                log.warning("could not schedule snapshot for %s: %s", raw_url, exc)
-                # Reservierung freigeben, sonst blockiert sie alle anderen.
-                await db.listings_cache.update_one(
-                    {"cache_key": _ck, "snapshot_id": sid},
-                    {"$unset": {"snapshot_id": "", "snapshot_reserved_at": ""}})
-                return None
-
-        if won and won.get("snapshot_id") == _reserved:
-            snap_id = await _anlegen(_reserved)
-        else:
-            # Jemand war schneller -> dessen Snapshot uebernehmen.
-            doc = await db.listings_cache.find_one(
-                {"cache_key": _ck},
-                {"_id": 0, "snapshot_id": 1, "snapshot_reserved_at": 1})
-            snap_id = (doc or {}).get("snapshot_id")
-            if snap_id and not await db.listing_snapshots.find_one(
-                    {"id": snap_id}, {"_id": 1}):
-                # Reservierung zeigt ins Leere (Gewinner abgebrochen). Erst
-                # nach einer Schonfrist uebernehmen — sonst wuerde man dem
-                # Gewinner die ID wegschnappen, der gerade anlegt.
-                res_at = (doc or {}).get("snapshot_reserved_at")
-                if isinstance(res_at, datetime):
-                    if res_at.tzinfo is None:
-                        res_at = res_at.replace(tzinfo=timezone.utc)
-                    veraltet = (_now - res_at).total_seconds() > 120
-                else:
-                    veraltet = True
-                if veraltet:
-                    taken = await db.listings_cache.find_one_and_update(
-                        {"cache_key": _ck, "snapshot_id": snap_id},
-                        {"$set": {"snapshot_id": _reserved,
-                                  "snapshot_reserved_at": _now}},
-                        projection={"_id": 0, "snapshot_id": 1},
-                        return_document=ReturnDocument.AFTER)
-                    if taken and taken.get("snapshot_id") == _reserved:
-                        snap_id = await _anlegen(_reserved)
-            if not snap_id:
-                # Kein Cache-Eintrag vorhanden (Sonderfall): normal anlegen.
-                snap_id = await _anlegen(str(uuid.uuid4()))
-                if snap_id:
-                    try:
-                        await set_cache_snapshot(db, raw_url, snap_id)
-                    except Exception:
-                        pass
+    # Beweisdokument (ersetzt die Snapshots, 10.09.2026): EIN PDF je Inserat,
+    # beim ersten Gebrauch (egal welche Firma), fuer alle geteilt. Meist hat
+    # der Abruf-Zweig es schon vorgemerkt; hier idempotent nachziehen (auch
+    # fuer Cache-Eintraege von vor der Umstellung). Nicht aus ungepruefter
+    # Browser-Lieferung (Kleinanzeigen-Erweiterung, Quarantaene).
+    beweis = None
+    if client_hit is None:
+        from beweis_service import beweis_vormerken
+        beweis = await beweis_vormerken(
+            db, cache_key=identity["cache_key"], quelle=source,
+            item_id=identity["item_id"], url=raw_url, anlass="vergleich")
 
     hinweise = regeln_nicht_abgebildet(vehicle, rules)
     if kollege:
@@ -490,8 +396,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "source": source,
         "cached": was_cached,
         "cache_key": identity["cache_key"],
-        "snapshot_id": snap_id,
-        "snapshot_reused": bool(was_cached and cached_snapshot_id and snap_id == cached_snapshot_id),
+        "beweis": beweis,
     }
 
 
@@ -692,7 +597,8 @@ async def live_counter(ad_id: str, user=Depends(current_firma)):
 
 
 # =========================================================
-#                  LISTING SNAPSHOTS
+#   LISTING SNAPSHOTS — Altbestand, nur noch lesen (seit 10.09.2026
+#   entstehen Beweisdokumente: routes/beweise.py)
 # =========================================================
 async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> dict:
     """Snapshot laden — NUR fuer die Firma, die das Inserat selbst fuehrt
@@ -742,7 +648,7 @@ async def snapshot_status(snap_id: str, user=Depends(current_user)):
     # (v_<Anzeigen-ID> bei mehreren Firmen identisch). Eine FREMDE Firma,
     # die dasselbe Fahrzeug fuehrt, darf den Stand sehen — aber nicht, WER
     # (dealer_id/user_id) den Snapshot erzeugt hat. Deshalb fuer fremde
-    # Firmen nur die Sachfelder (SnapshotCard braucht status/error/
+    # Firmen nur die Sachfelder (BeweisCard, Alt-Anzeige, braucht status/error/
     # completed_at); die eigene Firma und Admins sehen wie bisher alles.
     if user.get("role") != "admin" and snap.get("dealer_id") != user.get("dealer_id"):
         felder = ("id", "vehicle_id", "mobile_ad_id", "source_url", "status",

@@ -153,15 +153,4 @@ export async function downloadPickupOrderPdf(appointmentId, filename = "Abholauf
   }, 1000);
 }
 
-/**
- * Druckt einen Listing-Snapshot (PDF-Variante des Beweises) direkt.
- * Nutzt denselben Auth-Flow wie das &lt;a&gt;-Download: Token im Query.
- */
-export async function printSnapshot(snapshotId, kind = "pdf") {
-  // Snapshot-Bytes holen (respektiert Auth via axios-Interceptor).
-  const r = await api.get(`/snapshots/${snapshotId}/${kind}`, { responseType: "blob" });
-  const blobUrl = URL.createObjectURL(r.data);
-  printBlobUrl(blobUrl, { label: "Snapshot" });
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-}
 

@@ -66,6 +66,7 @@ from routes import protocols as protocols_routes
 from routes import resale as resale_routes
 from routes import team as team_routes
 from routes import marketplace as marketplace_routes
+from routes import beweise as beweise_routes
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -934,13 +935,6 @@ async def on_start():
         init_storage()
     except Exception as exc:
         log.warning("snapshot storage init failed at startup: %s", exc)
-    # Playwright Symlink self-heal — Kubernetes-Restarts verlieren
-    # gelegentlich den Versions-Symlink. Wir legen ihn beim Boot neu an.
-    try:
-        from snapshot_service import _ensure_browser_executable
-        _ensure_browser_executable()
-    except Exception as exc:
-        log.warning("playwright self-heal at startup failed: %s", exc)
     # Job-Sperren-Index SYNCHRON anlegen, BEVOR irgendein Hintergrundjob
     # startet — sonst koennten beim allerersten Start (frische Datenbank)
     # mehrere Worker denselben Job uebernehmen, weil der Unique-Index
@@ -964,6 +958,15 @@ async def on_start():
         asyncio.create_task(run_job_worker_forever(db))
     except Exception as exc:
         log.warning("link job worker start failed: %s", exc)
+    # Beweisdokumente je Inserat (ersetzt die Snapshots): Indizes synchron,
+    # dann die Erzeugungs-Schleife dieses Workers (beweis_service.py).
+    try:
+        from beweis_service import ensure_beweis_indexes, run_beweis_worker_forever
+        await ensure_beweis_indexes(db)
+        import asyncio
+        asyncio.create_task(run_beweis_worker_forever(db))
+    except Exception as exc:
+        log.warning("beweis worker start failed: %s", exc)
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         import asyncio
@@ -982,15 +985,6 @@ async def on_start():
         asyncio.create_task(run_backup_forever(db))
     except Exception as exc:
         log.warning("backup task start failed: %s", exc)
-    # Snapshot Self-Heal: Beim Boot alle Snapshots, die in pending/running
-    # hängen geblieben sind (z.B. weil das Backend während eines Jobs
-    # neu gestartet wurde), erneut anstoßen. Sonst würde das Frontend
-    # ewig „lade…" anzeigen.
-    try:
-        import asyncio
-        asyncio.create_task(_resume_stuck_snapshots())
-    except Exception as exc:
-        log.warning("snapshot resume task failed: %s", exc)
 
 
 async def _alle_indexe():
@@ -1001,6 +995,13 @@ async def _alle_indexe():
         await ensure_cache_indexes(db)
     except Exception as exc:
         log.warning("listings_cache index setup failed: %s", exc)
+    # Beweisdokumente: Unique-Index auf cache_key VOR allen Workern (ein
+    # Dokument je Inserat haengt an ihm).
+    try:
+        from beweis_service import ensure_beweis_indexes
+        await ensure_beweis_indexes(db)
+    except Exception as exc:
+        log.error("Index beweis_je_inserat: %s", exc)
     try:
         await db.pickup_protocols.create_index(
             [("appointment_id", 1), ("version", 1)], unique=True,
@@ -1065,56 +1066,6 @@ async def run_abgleich_forever():
         await asyncio.sleep(600)
 
 
-async def _resume_stuck_snapshots():
-    """Findet Snapshots in pending/running und startet sie sequentiell neu.
-
-    Wir machen das sequentiell (eins nach dem anderen), damit der frisch
-    gestartete Backend nicht direkt unter Last steht. Snapshots, die schon
-    älter als 1 Stunde sind, markieren wir als failed (vermutlich wirklich
-    kaputt — wir wollen die nicht endlos wiederholen).
-    """
-    import asyncio
-    from datetime import datetime, timedelta, timezone
-    from snapshot_service import run_snapshot_job
-
-    # 5 Sekunden warten, bis der Webserver wirklich oben ist
-    await asyncio.sleep(5)
-
-    # Bei mehreren Worker-Prozessen stoesst nur EINER die haengenden
-    # Snapshots neu an — sonst laeuft jeder Job achtfach.
-    try:
-        from job_lock import acquire
-        if not await acquire(db, "snapshot-resume-boot", ttl_seconds=600):
-            return
-    except Exception:
-        pass
-
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    too_old = await db.listing_snapshots.update_many(
-        {"status": {"$in": ["pending", "running"]},
-         "created_at": {"$lt": cutoff}},
-        {"$set": {"status": "failed",
-                  "error": "Backend-Neustart — Job verloren",
-                  "completed_at": now_iso()}},
-    )
-    if too_old.modified_count:
-        log.info("snapshot resume: marked %d stale jobs as failed",
-                 too_old.modified_count)
-
-    stuck = await db.listing_snapshots.find(
-        {"status": {"$in": ["pending", "running"]}},
-        {"_id": 0, "id": 1},
-    ).to_list(50)
-    if not stuck:
-        return
-    log.info("snapshot resume: re-running %d stuck job(s)", len(stuck))
-    for s in stuck:
-        try:
-            await run_snapshot_job(db, s["id"])
-        except Exception as exc:
-            log.warning("snapshot resume %s failed: %s", s["id"], exc)
-
-
 async def on_stop():
     client.close()
 
@@ -1136,6 +1087,7 @@ api.include_router(bestand_routes.router)
 api.include_router(resale_routes.router)
 api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router)
+api.include_router(beweise_routes.router)
 api.include_router(protocols_routes.router)
 
 app.include_router(api)

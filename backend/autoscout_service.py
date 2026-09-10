@@ -579,6 +579,11 @@ def parse_autoscout_item(item: dict, item_id: str,
         "list_price": float(preis) if preis is not None else None,
         "currency": item.get("currency") or "EUR",
         "seller_name": verkaeufer,
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": ("privat" if str(item.get("seller") or "").strip().lower().startswith("privat")
+                        else "haendler" if str(item.get("seller") or "").strip().lower().startswith(
+                            ("händler", "haendler", "dealer", "gewerb"))
+                        else None),
         "seller_address": (adresse.get("street") or "") or None,
         "seller_zip": adresse.get("zip") or None,
         "seller_city": adresse.get("city") or None,

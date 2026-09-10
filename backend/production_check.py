@@ -185,7 +185,8 @@ def pruefe_produktion(log) -> None:
                 "Rechte fuer Benutzer 'app' pruefen).")
 
     for var, default in (("VERTRAG_AUFBEWAHRUNG_TAGE", "90"),
-                         ("SNAPSHOT_RETENTION_DAYS", "60")):
+                         ("SNAPSHOT_RETENTION_DAYS", "60"),
+                         ("BEWEIS_AUFBEWAHRUNG_TAGE", "90")):
         if _int_env(var, default) <= 0:
             fehler.append(f"{var} muss eine positive Zahl (Tage) sein — "
                           "0 oder negativ wuerde SOFORT loeschen.")
@@ -260,14 +261,22 @@ def pruefe_produktion(log) -> None:
         warnungen.append("VERTRAG_LOESCHUNG_AKTIV fehlt/false: 90-Tage-Loeschung von "
                          "Vertraegen laeuft nur als Vorschau (Trockenlauf) — nach "
                          "Bestandspruefung und Backup auf true setzen (DEPLOYMENT.md).")
+    # Seit 10.09.2026 kein Browser mehr (Beweisdokument statt Snapshot).
     try:
-        wc = int(os.environ.get("WEB_CONCURRENCY", "4") or 4)
-        sc = int(os.environ.get("SNAPSHOT_CONCURRENCY", "1") or 1)
-        if wc * sc > 8:
-            warnungen.append(f"WEB_CONCURRENCY x SNAPSHOT_CONCURRENCY = {wc * sc} Chromium-"
-                             "Prozesse (~400 MB je) — Serverspeicher pruefen.")
+        int(os.environ.get("WEB_CONCURRENCY", "4") or 4)
+        bp = int(os.environ.get("BEWEIS_PARALLEL", "1") or 1)
+        if bp > 4:
+            warnungen.append(f"BEWEIS_PARALLEL={bp}: so viele Beweisdokumente je Worker "
+                             "gleichzeitig (je 1-2 s Rechenzeit, bis zu 20 Fotos laden) — "
+                             "Standard 1 genuegt in der Regel.")
     except ValueError:
-        (fehler if ist_prod else warnungen).append("WEB_CONCURRENCY/SNAPSHOT_CONCURRENCY muessen Zahlen sein")
+        (fehler if ist_prod else warnungen).append("WEB_CONCURRENCY/BEWEIS_PARALLEL muessen Zahlen sein")
+    veraltet = [v for v in ("SNAPSHOT_CONCURRENCY", "SNAPSHOT_WORKER_TIMEOUT",
+                            "BROWSERLESS_URL", "BROWSERLESS_TOKEN")
+                if os.environ.get(v, "").strip()]
+    if veraltet:
+        warnungen.append(", ".join(veraltet) + " sind seit 10.09.2026 wirkungslos (keine "
+                         "Snapshots mehr) — koennen aus der .env entfernt werden.")
     if ist_prod and "maxPoolSize" not in os.environ.get("MONGO_URL", ""):
         warnungen.append("MONGO_URL ohne maxPoolSize — je Worker bis zu 100 Verbindungen (Empfehlung: maxPoolSize=20).")
     for w in warnungen:

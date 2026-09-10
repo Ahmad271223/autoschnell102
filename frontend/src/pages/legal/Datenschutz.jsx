@@ -43,12 +43,12 @@ export default function Datenschutz() {
       {/* BETREIBER-HINWEIS (im Browser unsichtbar): Stand 04.09.2026 —
           die Liste bildet den TATSAECHLICHEN Produktionsbetrieb ab:
           Hetzner (Hosting), Resend (E-Mail), Cloudflare R2 (Dateien),
-          Apify (Inserats-Abruf). Stripe und browserless sind aktuell NICHT
+          Apify (Inserats-Abruf). Stripe ist aktuell NICHT
           im Einsatz und deshalb als solche gekennzeichnet — werden sie
           eingeschaltet, muss der jeweilige Absatz wieder aktiv formuliert
           werden. Herkunft: backend/email_service.py, storage_service.py,
           mobile_service.py + autoscout_service.py, routes/payments.py,
-          snapshot_service.py (BROWSERLESS_URL). Der EINZIGE offene Punkt
+          beweis_service.py (Beweisdokumente ohne externen Dienst). Der EINZIGE offene Punkt
           ist der Rechenzentrums-Standort in eckigen Klammern. */}
       <p>
         Für den Betrieb der Plattform setzen wir die folgenden Dienstleister
@@ -95,10 +95,16 @@ export default function Datenschutz() {
             Übermittlung in die USA sind EU-Standardvertragsklauseln
             (Art.&nbsp;46 DSGVO). Datenschutzhinweise:
             cloudflare.com/de-de/privacypolicy.</li>
-        <li><b>Browser-Rendering für Beweis-Snapshots:</b> derzeit kein
-            externer Dienst im Einsatz. Screenshots und PDF-Sicherungen von
-            Inseraten erzeugt unser eigener Server; es wird dafür nichts an
-            Dritte übermittelt.</li>
+        <li><b>Beweisdokumente zu Inseraten:</b> kein externer Dienst im
+            Einsatz. Wird ein Inserats-Link zum ersten Mal über die Plattform
+            verwendet, erstellt unser eigener Server ein PDF mit den im
+            Inserat öffentlich angegebenen Fahrzeugdaten, Fotos, der
+            Anzeigen-ID und der Inserats-Adresse. Es wird dafür nichts an
+            Dritte übermittelt. Anbieterangaben: bei gewerblichen Anbietern
+            Name, Anschrift, Telefon und E-Mail laut Inserat; bei privaten
+            Anbietern nur Postleitzahl und Ort. Telefonnummern und
+            E-Mail-Adressen, die private Anbieter in Titel oder Beschreibung
+            nennen, machen wir unkenntlich.</li>
       </ul>
       <p>
         Schriftarten liefern wir lokal von unserem eigenen Server aus — es
@@ -112,7 +118,8 @@ export default function Datenschutz() {
           sind technisch konfigurierte Werte, keine rechtlich geprueften
           Zusagen — eine abschliessende rechtliche Pruefung steht noch aus.
           Quellen: backend/cleanup_service.py (VERTRAG_AUFBEWAHRUNG_TAGE=90,
-          LOG_AUFBEWAHRUNG_TAGE=180, SNAPSHOT_RETENTION_DAYS=60,
+          LOG_AUFBEWAHRUNG_TAGE=180, SNAPSHOT_RETENTION_DAYS=60 (nur Alt-Snapshots),
+          beweis_service.py BEWEIS_AUFBEWAHRUNG_TAGE=90,
           CLEANUP_RULES 7/14 Tage fuer Inseratsfotos, FAHRERFOTO_TAGE=90
           fuer Fahrerfotos ab dem Hochladen), routes/bestand.py
           (BESTAND_RETENTION_DAYS=50), routes/listings.py
@@ -148,9 +155,13 @@ export default function Datenschutz() {
         Inserat übernommene Fahrzeugfotos werden 7 Tage nach der Abholung
         (bei nicht abgeholten Fahrzeugen nach 14 Tagen) gelöscht, sofern das
         Fahrzeug nicht in den Bestand oder Verkauf übernommen wurde.
-        Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert. Beweis-Snapshots
-        von Inseraten bewahren wir zur Dokumentation des Vertragsschlusses
-        auf.
+        Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert.
+        Beweisdokumente zu Inseraten löschen wir 90 Tage nach ihrer
+        Erstellung, außer zu dem Inserat besteht bei einem Händler noch ein
+        Kaufvertrag, ein Abholtermin, ein Verkaufsinserat oder ein
+        Bestandsfahrzeug — dann so lange wie dieser Vorgang. Beweis-Aufnahmen aus der Zeit vor dem
+        10.09.2026 werden nach 60 Tagen gelöscht, bei einem Kaufvertrag
+        mit diesem.
       </p>
       <p>Weitere Fristen:</p>
       <ul className="list-disc pl-6 space-y-1">

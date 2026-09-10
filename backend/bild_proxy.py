@@ -100,20 +100,35 @@ def _verkleinern(raw: bytes) -> bytes:
     return out.getvalue()
 
 
-async def laden(url: str) -> Optional[bytes]:
-    """Vorschaubild (JPEG) fuer die Adresse — aus dem Zwischenspeicher oder
-    frisch geholt. None, wenn das Portal nicht liefert."""
-    async with _cache_lock:
-        hit = _cache.get(url)
-        if hit is not None:
-            _cache.move_to_end(url)
-            return hit
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=ZEITLIMIT, follow_redirects=True,
-                                     headers={"User-Agent": _UA,
-                                              "Accept": "image/jpeg,image/png,image/webp;q=0.9,*/*;q=0.5"}) as client:
-            async with client.stream("GET", url) as r:
+_WEITERLEITUNGEN = (301, 302, 303, 307, 308)
+# Dekompressionsbomben: ein 8-MB-JPEG kann 100+ Megapixel ausgeben.
+_MAX_PIXEL = 40_000_000
+
+
+async def _holen(url: str) -> Optional[bytes]:
+    """Rohdaten eines erlaubten Portal-Fotos (hoechstens MAX_BYTES).
+
+    Weiterleitungen werden von Hand verfolgt (hoechstens 3) und JEDES Ziel
+    erneut gegen die Allowliste geprueft. Vorher folgte httpx jeder
+    Weiterleitung selbst (follow_redirects=True) — ein Portal-Host haette so
+    auf beliebige Adressen zeigen koennen, auch auf interne."""
+    if not erlaubt(url):
+        return None
+    import httpx
+    ziel = url
+    async with httpx.AsyncClient(
+            timeout=ZEITLIMIT, follow_redirects=False,
+            headers={"User-Agent": _UA,
+                     "Accept": "image/jpeg,image/png,image/webp;q=0.9,*/*;q=0.5"}) as client:
+        for _ in range(4):
+            async with client.stream("GET", ziel) as r:
+                if r.status_code in _WEITERLEITUNGEN:
+                    ziel = str(httpx.URL(ziel).join(r.headers.get("location") or ""))
+                    if not erlaubt(ziel):
+                        log.info("Bild-Proxy: Weiterleitung auf fremden Host verworfen (%s)",
+                                 ziel[:120])
+                        return None
+                    continue
                 if r.status_code != 200:
                     return None
                 ctype = (r.headers.get("content-type") or "").lower()
@@ -125,7 +140,55 @@ async def laden(url: str) -> Optional[bytes]:
                     if gesamt > MAX_BYTES:
                         return None
                     teile.append(chunk)
-        raw = b"".join(teile)
+                return b"".join(teile)
+    return None
+
+
+def _fuer_pdf(raw: bytes, kante: int) -> bytes:
+    from PIL import Image, ImageOps
+    im = Image.open(io.BytesIO(raw))
+    w, h = im.size
+    if w * h > _MAX_PIXEL:
+        raise ValueError(f"Bild zu gross ({w}x{h})")
+    im.draft("RGB", (kante, kante))       # JPEG: beim Dekodieren schon verkleinern
+    im.load()
+    im = ImageOps.exif_transpose(im)
+    if im.mode != "RGB":
+        im = im.convert("RGB")
+    im.thumbnail((kante, kante))
+    out = io.BytesIO()
+    # Ohne exif=...: Metadaten (Standort, Geraet) landen nicht im Dokument.
+    im.save(out, "JPEG", quality=75 if kante >= 1200 else 70, optimize=True)
+    return out.getvalue()
+
+
+async def laden_fuer_pdf(url: str, kante: int = 800) -> Optional[bytes]:
+    """Inseratsfoto fuer das Beweisdokument: JPEG mit hoechstens `kante` px,
+    ohne Metadaten. None, wenn das Portal nicht liefert oder die Adresse
+    nicht erlaubt ist. Bewusst OHNE den Vorschau-Zwischenspeicher (andere
+    Groesse; jedes Foto wird fuer genau ein Dokument einmal geladen)."""
+    try:
+        raw = await _holen(url)
+        if not raw:
+            return None
+        return await asyncio.to_thread(_fuer_pdf, raw, max(200, min(int(kante), 2000)))
+    except Exception as exc:  # noqa: BLE001
+        log.info("Bild-Proxy (PDF): %s nicht ladbar (%s)", url[:120], exc.__class__.__name__)
+        return None
+
+
+async def laden(url: str) -> Optional[bytes]:
+    """Vorschaubild (JPEG) fuer die Adresse — aus dem Zwischenspeicher oder
+    frisch geholt. None, wenn das Portal nicht liefert."""
+    async with _cache_lock:
+        hit = _cache.get(url)
+        if hit is not None:
+            _cache.move_to_end(url)
+            return hit
+    try:
+        raw = await _holen(url)
+        if not raw:
+            return None
         klein = await asyncio.to_thread(_verkleinern, raw)
     except Exception as exc:  # noqa: BLE001
         log.info("Bild-Proxy: %s nicht ladbar (%s)", url[:120], exc.__class__.__name__)

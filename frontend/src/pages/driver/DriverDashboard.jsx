@@ -65,7 +65,7 @@ export default function DriverDashboard() {
       return;
     }
     const confirmMsg =
-      "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Fotos & Beweis-Archiv werden nach 14 Tagen automatisch gelöscht.";
+      "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Inseratsfotos werden nach 14 Tagen automatisch gelöscht.";
     if (!window.confirm(confirmMsg)) return;
     setBusy(id);
     try {
@@ -229,11 +229,18 @@ export default function DriverDashboard() {
                           )}
                         </div>
 
+                        {a.beweis_id && (
+                          <button onClick={() => oeffnePdf(`/driver/beweise/${a.beweis_id}/pdf`)}
+                                  data-testid={`beweis-pdf-${a.id}`}
+                                  className="flex items-center justify-center gap-2 px-4 py-2 rounded-sm text-xs font-semibold bg-white/5 hover:bg-white/10">
+                            <CheckCircle2 size={13} /> Beweisdokument (Inserat-PDF)
+                          </button>
+                        )}
                         {a.snapshot_id && (
                           <button onClick={() => oeffnePdf(`/driver/snapshots/${a.snapshot_id}/pdf`)}
-                                  data-testid={`snapshot-pdf-${a.id}`}
+                                  data-testid={`snapshot-alt-pdf-${a.id}`}
                                   className="flex items-center justify-center gap-2 px-4 py-2 rounded-sm text-xs font-semibold bg-white/5 hover:bg-white/10">
-                            <CheckCircle2 size={13} /> Beweis-Archiv (Inserat-PDF)
+                            <CheckCircle2 size={13} /> Beweis-Aufnahme (vor 10.09.2026)
                           </button>
                         )}
 

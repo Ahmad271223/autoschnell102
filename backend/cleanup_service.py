@@ -1209,6 +1209,11 @@ async def run_cleanup_forever(db):
             await _expire_old_snapshots(db)
         except Exception as exc:  # noqa: BLE001
             log.exception("snapshot expiry error: %s", exc)
+        try:
+            from beweis_service import beweise_verfallen
+            await beweise_verfallen(db)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("beweis expiry error: %s", exc)
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
 

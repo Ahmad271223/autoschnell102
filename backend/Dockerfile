@@ -1,14 +1,13 @@
-# AutoSchnell Backend — FastAPI + Playwright (Snapshots)
+# AutoSchnell Backend — FastAPI (ohne Browser: Beweisdokumente entstehen mit ReportLab)
 FROM python:3.12-slim
 
-# Playwright legt seine Browser hier ab (siehe snapshot_service.py).
-ENV PLAYWRIGHT_BROWSERS_PATH=/pw-browsers \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# System-Abhaengigkeiten fuer Chromium (Snapshots) + curl fuer Health-Check.
+# curl fuer den Health-Check; fonts-liberation fuer die PDFs (Beweisdokument:
+# Umlaute, Euro-Zeichen, fremde Buchstaben in Inseratstexten).
 # Audit 09/2026: Betriebssystem-Pakete auf den letzten Stand (Image-Scan
 # in CI blockiert bei bekannten, behebbaren Schwachstellen).
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
@@ -18,17 +17,15 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Chromium (headless-shell) fuer Playwright installieren — inkl. OS-Libs.
-RUN playwright install --with-deps chromium
-
 COPY . .
 
-# Nicht als root laufen (Sicherheit). /app + Browser-Ordner beschreibbar.
-# Runde 5: Backup-, Upload- und Snapshot-Verzeichnisse existieren im Image und
+# Nicht als root laufen (Sicherheit). /app beschreibbar.
+# Runde 5: Backup- und Upload-Verzeichnisse (local_storage: lokale Kopien alter
+# Snapshots bis zu deren Verfall) existieren im Image und
 # gehoeren 'app' — benannte Docker-Volumes uebernehmen diese Rechte beim
 # ersten Start (sonst waren /backups und /app/local_storage nicht beschreibbar).
-RUN useradd -m app && mkdir -p /pw-browsers /app/uploads /app/local_storage /backups \
-    && chown -R app:app /app /pw-browsers /backups
+RUN useradd -m app && mkdir -p /app/uploads /app/local_storage /backups \
+    && chown -R app:app /app /backups
 USER app
 
 EXPOSE 8001
@@ -39,9 +36,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 
 # Produktion: mehrere Worker-Prozesse (Anzahl via WEB_CONCURRENCY, Default 8).
 # ProactorEventLoop-Wahl passiert in server.py nur auf Windows; unter Linux
-# ist der Default korrekt fuer Playwright-Subprozesse.
+# ist der Default-Event-Loop korrekt.
 # Audit 09/2026 (Punkt 18/19): ZUERST genau eine Migration (Indizes, Seeds,
 # versionierte Datenmigrationen — mit Sperre), DANN die Worker. Default 4
-# Worker (statt 8): Chromium-Snapshots brauchen ~400 MB je Prozess —
-# WEB_CONCURRENCY/SNAPSHOT_CONCURRENCY an die Servergroesse anpassen.
+# Worker (statt 8) — WEB_CONCURRENCY an die Servergroesse anpassen.
 CMD ["sh", "-c", "python migrationen.py && uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-4} --proxy-headers --forwarded-allow-ips='*'"]

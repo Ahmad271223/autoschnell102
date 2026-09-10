@@ -10,15 +10,16 @@ ab (Standard: **aus**):
 
 | Konstellation | Wer ruft die Kleinanzeigen-Seite ab | Welche IP sieht Kleinanzeigen |
 | --- | --- | --- |
-| Schalter AUS (Standard, heutiger Betrieb) | **Backend-Server** (Datenabruf + Beweis-Snapshot) | Server-IP |
+| Schalter AUS (Standard, heutiger Betrieb) | **Backend-Server** (Datenabruf) | Server-IP |
 | Schalter AN, Inseratsdaten | **Browser des Nutzers** über die Erweiterung | Nutzer-IP |
-| Schalter AN, **Beweis-Snapshot** | **Backend-Server** (Playwright) | Server-IP |
 | Schalter AN, `/listings/resolve` bei unbekanntem Link | **Backend-Server** | Server-IP |
 | Bekanntes Inserat (Cache-Treffer), egal welcher Schalter | **niemand** — nur Datenbank | keine |
 
 Ein reiner „immer Nutzer-PC"-Betrieb existiert derzeit **nicht**, selbst mit
-aktivem Schalter, wegen der zwei server-seitigen Restpfade (Snapshot,
-resolve).
+aktivem Schalter, wegen des server-seitigen Restpfads (resolve). Seit
+10.09.2026 ruft das Beweisdokument die Inseratsseite NICHT mehr ab: es
+entsteht aus den bereits ausgelesenen Daten, nur die Fotos kommen vom
+Bilder-CDN.
 
 ## Der vollständige Ablauf (mit Codestellen)
 
@@ -73,16 +74,11 @@ Meldung „Abruf-Helfer benötigt" und bricht ab
 ([Vergleich.jsx, Zweig `needs_client_fetch`](../frontend/src/pages/app/Vergleich.jsx));
 der Server holt die Seite dann **nicht** ersatzweise selbst.
 
-**ABER es gibt zwei server-seitige Restpfade, die auch bei aktivem
-Schalter greifen:**
+**ABER es gibt einen server-seitigen Restpfad, der auch bei aktivem
+Schalter greift** (der frühere Beweis-Snapshot per Playwright ist seit
+10.09.2026 entfallen; das Beweisdokument entsteht ohne Seitenabruf):
 
-1. **Beweis-Snapshot**: Nach erfolgreichem Vergleich erzeugt der Server
-   für die Beweissicherung einen Playwright-Screenshot der ECHTEN
-   Inseratsseite ([routes/listings.py:203/226 ff.](../backend/routes/listings.py)
-   → [snapshot_service.py](../backend/snapshot_service.py)) — ein
-   **Server-Seitenaufruf** mit Server-IP (gedrosselt über dieselben
-   Anbieter-Slots, aber eben server-seitig).
-2. **`POST /listings/resolve`**: prüft zwar Quarantäne und Cache, ruft bei
+1. **`POST /listings/resolve`**: prüft zwar Quarantäne und Cache, ruft bei
    Miss aber direkt `get_or_fetch_listing` auf — **ohne**
    `needs_client_fetch`-Weiche ([routes/listings.py:559 ff.](../backend/routes/listings.py)).
    Das Haupt-Frontend nutzt diesen Endpunkt nicht, er ist aber per API
@@ -93,7 +89,7 @@ Schalter greifen:**
 | Variable | Wirkung |
 | --- | --- |
 | `CLIENT_FETCH_KLEINANZEIGEN` (Standard aus) | AN = neue Kleinanzeigen-Links holt der Nutzer-Browser via Erweiterung; Server-Datenabruf für diese Links abgeschaltet (außer Restpfade oben) |
-| `MAX_CONCURRENT_KLEINANZEIGEN` (3) | globale Obergrenze gleichzeitiger Server-Abrufe (Daten **und** Snapshots), über alle Worker/Server |
+| `MAX_CONCURRENT_KLEINANZEIGEN` (3) | globale Obergrenze gleichzeitiger Server-Abrufe, über alle Worker/Server |
 | `LISTING_CACHE_TTL_HOURS` (8760) | wie lange ein Server-Abruf im globalen Cache gilt |
 | `CLIENT_INGEST_TTL_HOURS` (24) / `CLIENT_CONFIRMED_TTL_HOURS` (168) | Gültigkeit von Client-Einreichungen in Quarantäne / nach Freigabe |
 | `MOCK_PROVIDER_FETCH` (aus; nur Staging) | ersetzt JEDEN externen Abruf durch synthetische Daten; Produktions-Check verweigert damit den Start |
@@ -128,14 +124,14 @@ selbst gefälschte Daten vorsetzen (Schaden: nur der eigene Händler,
 nachvollziehbar über `ingested_by_user/_dealer`, 24 h TTL).
 **Global: nur mit Kollusion zweier Händler-Konten**, die identische
 Kerndaten einreichen — Einzeltäter erreichen andere Händler nicht.
-Restrisiko dokumentiert; die Beweis-Snapshots entstehen unabhängig davon
-server-seitig von der echten Seite.
+Restrisiko dokumentiert; ein gemeinsames Beweisdokument entsteht nur aus
+Server-Abrufen, nicht aus Browser-Einreichungen.
 
 ### 10. Welche IP sieht Kleinanzeigen?
 
 Siehe Tabelle oben. Zusammengefasst: Standardbetrieb = **Server-IP** für
 alles; Client-Modus = **Nutzer-IP** für Inseratsdaten, **Server-IP** für
-Beweis-Snapshots und den resolve-Restpfad; Cache-Treffer = keine.
+den resolve-Restpfad; Cache-Treffer = keine.
 
 ## Zulässigkeit / Anbieterbedingungen — Einschätzung, kein Rechtsrat
 

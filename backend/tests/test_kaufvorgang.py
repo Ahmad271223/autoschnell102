@@ -259,9 +259,10 @@ def test_04_snapshot_gemeinsam_beide_duerfen_laden_und_kein_snapshot_fuer_mobile
 
     a, b, c, status_d, liste_b = w.run(lauf())
     assert a == b == c == sid and status_d == 404 and liste_b == {sid}
-    # Snapshots nur fuer Kleinanzeigen (mobile.de/AutoScout weiterhin nicht)
+    # Seit 10.09.2026: keine neuen Snapshots mehr, stattdessen EIN
+    # Beweisdokument je Inserat fuer alle Portale (alte Snapshots bleiben lesbar).
     q = inspect.getsource(L.compare)
-    assert 'is_web_url = source == "kleinanzeigen"' in q
+    assert "beweis_vormerken(" in q and "create_snapshot" not in q
 
 
 def test_05_termin_nur_mit_eigenem_vertrag_je_vertrag_ein_offener(welt):

@@ -61,28 +61,36 @@ def _zuruecksetzen():
 def test_ohne_s3_bleibt_es_lokal(monkeypatch, tmp_path):
     sn = _modul(monkeypatch, s3=False, tmp_path=tmp_path)
     assert sn.speicherort() == "lokal"
-    sn._put_object("autohandel/snapshots/a/b.jpg", b"jpg", "image/jpeg")
-    assert (tmp_path / "autohandel" / "snapshots" / "a" / "b.jpg").read_bytes() == b"jpg"
+    ziel = tmp_path / "autohandel" / "snapshots" / "a" / "b.jpg"
+    ziel.parent.mkdir(parents=True)
+    ziel.write_bytes(b"jpg")
+    assert sn.get_object("autohandel/snapshots/a/b.jpg") == (b"jpg", "image/jpeg")
+    assert sn.delete_object("autohandel/snapshots/a/b.jpg") is True and not ziel.exists()
 
 
-def test_mit_s3_geht_alles_in_den_objektspeicher(monkeypatch, tmp_path):
+def test_mit_s3_wird_aus_dem_objektspeicher_gelesen_und_geloescht(monkeypatch, tmp_path):
     sn = _modul(monkeypatch, s3=True, tmp_path=tmp_path)
     assert sn.speicherort() == "s3"
     fake = _FakeSpeicher()
+    fake.daten = {"autohandel/snapshots/a/b.jpg": b"jpg",
+                  "autohandel/snapshots/a/b.pdf": b"%PDF"}
     monkeypatch.setattr(sn, "_s3_speicher", lambda: fake)
-
-    sn._put_object("autohandel/snapshots/a/b.jpg", b"jpg", "image/jpeg")
-    sn._put_object("autohandel/snapshots/a/b.pdf", b"%PDF", "application/pdf")
-    assert set(fake.daten) == {"autohandel/snapshots/a/b.jpg", "autohandel/snapshots/a/b.pdf"}
-    assert not list(tmp_path.rglob("*")), "es wurde trotzdem lokal geschrieben"
-
-    daten, ct = sn.get_object("autohandel/snapshots/a/b.pdf")
-    assert daten == b"%PDF" and ct == "application/pdf"
-    daten, ct = sn.get_object("autohandel/snapshots/a/b.jpg")
-    assert daten == b"jpg" and ct == "image/jpeg"
-
+    assert sn.get_object("autohandel/snapshots/a/b.pdf") == (b"%PDF", "application/pdf")
+    assert sn.get_object("autohandel/snapshots/a/b.jpg") == (b"jpg", "image/jpeg")
     assert sn.delete_object("autohandel/snapshots/a/b.jpg") is True
     assert "autohandel/snapshots/a/b.jpg" not in fake.daten
+
+
+def test_snapshots_werden_nicht_mehr_erzeugt():
+    """Seit 10.09.2026 (Beweisdokument statt Snapshot): kein Browser, keine
+    Erzeugung — das Modul liest und loescht nur noch Altbestand."""
+    import importlib.util
+    import snapshot_service as sn
+    for name in ("create_snapshot", "run_snapshot_job", "_put_object",
+                 "_capture_with_playwright", "_ensure_browser_executable"):
+        assert not hasattr(sn, name), name
+    assert importlib.util.find_spec("_playwright_worker") is None
+    assert importlib.util.find_spec("datenblatt_service") is None
 
 
 def test_alte_lokale_datei_wird_weiterhin_gefunden(monkeypatch, tmp_path):

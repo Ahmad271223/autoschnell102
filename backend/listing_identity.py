@@ -637,6 +637,18 @@ async def get_or_fetch_listing(
         },
         upsert=True,
     )
+    # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
+    # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
+    # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).
+    # Eigener Schutzblock: ein Fehler darf den Datenabruf nie brechen.
+    try:
+        from beweis_service import beweis_vormerken
+        await beweis_vormerken(db, cache_key=cache_key, quelle=source,
+                               item_id=item_id, url=url, anlass="abruf")
+    except Exception as exc:  # noqa: BLE001
+        import logging as _logging
+        _logging.getLogger("autohandel").warning(
+            "Beweis-Vormerkung %s: %s", cache_key, exc)
     return data, False, None
 
 

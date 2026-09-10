@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
+import BeweisCard from "@/components/BeweisCard";
 import { fotosBis } from "@/components/AbholberichtDialog";
 import {
   ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
@@ -194,6 +195,13 @@ export default function FahrzeugAkte() {
           )}
         </div>
       </div>
+
+      {/* Beweisdokument zum Inserat (ersetzt die Snapshots, 10.09.2026) */}
+      {v.id && v.source !== "manuell" && (
+        <div className="mb-4" data-testid="akte-beweis">
+          <BeweisCard vehicleId={v.id} />
+        </div>
+      )}
 
       {/* Abholung + Diff */}
       {report && (
