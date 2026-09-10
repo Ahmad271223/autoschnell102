@@ -96,6 +96,25 @@ BILD_QUALITAET = int(os.environ.get("IMAGE_QUALITY", "82"))
 MAX_BILD_PIXEL = int(os.environ.get("MAX_IMAGE_PIXELS", str(80 * 1000 * 1000)))
 
 
+def _hat_metadaten(im) -> bool:
+    """Runde 21 (Pruefbefund Fahrerfotos): traegt das Bild EXIF/XMP-Daten
+    (Aufnahmezeit, Geraet, oft die GPS-Position des Handys)?"""
+    info = getattr(im, "info", None) or {}
+    if info.get("exif") or info.get("xmp") or info.get("XML:com.adobe.xmp"):
+        return True
+    try:
+        return len(im.getexif()) > 0
+    except Exception:                       # noqa: BLE001
+        return False
+
+
+def _roh_hat_metadaten(raw: bytes) -> bool:
+    """EXIF-/XMP-Kennung in den Rohbytes — auch dann erkennbar, wenn Pillow
+    das (beschaedigte) Bild gar nicht oeffnen kann."""
+    kopf = raw[:256 * 1024]
+    return b"Exif\x00\x00" in kopf or b"http://ns.adobe.com/xap/1.0/" in kopf
+
+
 def bild_verkleinern(raw: bytes, wo: str = "Foto",
                      ziel_format: str = "JPEG") -> bytes:
     """Verkleinert ein Foto auf MAX_BILD_KANTE und liefert die neuen Bytes.
@@ -114,6 +133,7 @@ def bild_verkleinern(raw: bytes, wo: str = "Foto",
         from PIL import Image, ImageOps
     except ImportError:                     # Pillow fehlt -> unveraendert
         return raw
+    hat_metadaten = False
     try:
         with Image.open(io.BytesIO(raw)) as im:
             breite, hoehe = im.size
@@ -122,7 +142,13 @@ def bild_verkleinern(raw: bytes, wo: str = "Foto",
                     f"{wo}: Bild hat zu viele Bildpunkte "
                     f"({breite}x{hoehe}). Bitte ein normales Foto verwenden.")
             passt_schon = (im.format or "").upper() == ziel_format
-            if passt_schon and max(breite, hoehe) <= MAX_BILD_KANTE:
+            # Runde 21: Kleine Handyfotos gingen bisher UNVERAENDERT durch —
+            # samt EXIF mit Aufnahmezeit, Geraet und oft der GPS-Position.
+            # Traegt ein Bild Metadaten, wird es immer neu gespeichert (ohne
+            # sie); nur metadatenfreie, schon passende Bilder bleiben 1:1.
+            hat_metadaten = _hat_metadaten(im)
+            if passt_schon and max(breite, hoehe) <= MAX_BILD_KANTE \
+                    and not hat_metadaten:
                 return raw                  # schon klein genug und richtig
             # Drehung aus den Aufnahme-Daten anwenden, sonst liegen Fotos
             # vom Handy nach dem Umwandeln auf der Seite.
@@ -132,21 +158,35 @@ def bild_verkleinern(raw: bytes, wo: str = "Foto",
             if ziel_format == "PNG":
                 bild.convert("RGBA").save(ziel, format="PNG", optimize=True)
             else:
+                # Farbprofil behalten (nur bei RGB-Quelle; es enthaelt keine
+                # GPS-/Geraetedaten) — sonst verschieben sich die Farben.
+                icc = im.info.get("icc_profile") if im.mode == "RGB" else None
                 bild.convert("RGB").save(ziel, format="JPEG",
                                          quality=BILD_QUALITAET, optimize=True,
-                                         progressive=True)
+                                         progressive=True,
+                                         **({"icc_profile": icc} if icc else {}))
             klein = ziel.getvalue()
     except StorageError:
         raise
     except Exception:                       # noqa: BLE001
+        # Runde 21 (Gegenpruefung): Ein beschaedigtes Foto MIT Metadaten
+        # (z.B. abgeschnittenes Handy-JPEG mit GPS) ging hier als Original
+        # durch — samt Aufnahmeort, bis ins oeffentliche Inserat. Solche
+        # Bilder werden abgelehnt; geprueft wird auch in den Rohbytes, falls
+        # schon das Oeffnen scheiterte.
+        if hat_metadaten or _roh_hat_metadaten(raw):
+            raise StorageError(f"{wo}: Foto ist beschaedigt und kann nicht sicher "
+                               "verarbeitet werden — bitte neu aufnehmen.")
         log.warning("%s: Verkleinern nicht moeglich, Original wird gespeichert", wo)
         return raw
     if not klein:
+        if hat_metadaten or _roh_hat_metadaten(raw):
+            raise StorageError(f"{wo}: Foto konnte nicht bereinigt werden — bitte neu aufnehmen.")
         return raw
     # Musste das Format ohnehin gewechselt werden, wird das Ergebnis auch
     # dann genommen, wenn es zufaellig ein paar Bytes groesser ist — sonst
     # laege eine PNG-Datei unter einem .jpg-Namen.
-    if not passt_schon:
+    if not passt_schon or hat_metadaten:
         return klein
     return klein if len(klein) < len(raw) else raw
 

@@ -14,6 +14,11 @@ Prueft von aussen — ohne Zugangsdaten — was vor dem Live-Gang stimmen muss:
   7. Kein offener Mongo-Port (27017) von aussen
 
 Aufruf:  python scripts/betriebsprobe.py app.autoschnell.de [--mail-domain autoschnell.de] [--dkim-selector resend]
+                                         [--zwischenstand]
+--zwischenstand: nach dem ERSTEN von zwei Servern (deploy/rollout.sh mit
+ERSTER_SERVER=1) zaehlt ein 404 fuer das Oberflaechen-Skript nur als Warnung,
+weil der andere Server das neue Bundle noch nicht kennt. Alles andere bleibt
+Fehler.
 Exit 0 = alles gruen, 1 = mindestens ein Fehler (Warnungen zaehlen nicht).
 Braucht nur die Standardbibliothek + requests (bereits Abhaengigkeit); DNS-
 TXT-Abfragen ueber dnspython (bereits Abhaengigkeit).
@@ -178,11 +183,19 @@ def api_pruefen(host):
         warn(f"/docs nicht pruefbar: {exc}")
 
 
-def oberflaeche_pruefen(host):
+def oberflaeche_pruefen(host, zwischenstand=False):
     """Vorfall 07.09.2026: Beide Server gesund, /api/health 200 — aber Cloudflare
     lieferte fuer /static/js/main.*.js einen gecachten 502 (schwarzer Bildschirm).
-    Diese Probe macht, was der Browser macht: Startseite laden, Skript laden."""
-    print("5b. Oberflaeche komplett (Startseite + Skript, wie der Browser)")
+    Diese Probe macht, was der Browser macht: Startseite laden, Skript laden.
+
+    Runde 21 (Pruefbefund D, Zwischenstand): Zwischen den beiden Servern eines
+    Rollouts kennt der alte Server das neue Bundle nicht. Startseite und Skript
+    koennen ueber den Load Balancer von verschiedenen Servern kommen -> 404
+    (DEPLOYMENT.md, "Zwischen den beiden Servern"). Mit zwischenstand=True ist
+    GENAU dieser Fall (404, auch frisch 200 oder 404) nur eine Warnung; 5xx,
+    fehlende Startseite oder fehlender Skript-Verweis bleiben Fehler."""
+    print("5b. Oberflaeche komplett (Startseite + Skript, wie der Browser)"
+          + (" — Zwischenstand: 404 fuer das Skript zaehlt nur als Warnung" if zwischenstand else ""))
     try:
         r = requests.get(f"https://{host}/", timeout=15)
         if r.status_code != 200:
@@ -200,7 +213,11 @@ def oberflaeche_pruefen(host):
             return
         # Am Cache vorbei: liefert der Server 200, haelt Cloudflare einen Fehler fest.
         f = requests.get(f"https://{host}{pfad}?probe={int(time.time())}", timeout=15)
-        if f.status_code == 200:
+        if zwischenstand and s.status_code == 404 and f.status_code in (200, 404):
+            warn(f"Skript {pfad}: 404 (frisch: {f.status_code}) — Bundle-Wechsel zwischen den Servern "
+                 "(Startseite und Skript von verschiedenen Servern); erwartet, bis der andere Server "
+                 "ausgerollt ist. Streng geprueft wird nach dem zweiten Server.")
+        elif f.status_code == 200:
             fehler(f"Skript {pfad}: {s.status_code} aus dem Cloudflare-Cache, der Server liefert 200 "
                    "— Cloudflare: Caching -> Configuration -> Purge Everything")
         else:
@@ -253,6 +270,8 @@ def main():
     ap.add_argument("host", help="z.B. app.autoschnell.de")
     ap.add_argument("--mail-domain", default=None, help="Absender-Domain (Default: host ohne erstes Label)")
     ap.add_argument("--dkim-selector", default=None)
+    ap.add_argument("--zwischenstand", action="store_true",
+                    help="nach dem ERSTEN von zwei Servern: 404 fuer das Oberflaechen-Skript nur als Warnung")
     args = ap.parse_args()
     host = args.host.strip().lower()
     mail_domain = args.mail_domain or ".".join(host.split(".")[-2:])
@@ -261,7 +280,7 @@ def main():
     http_pruefen(host)
     header_pruefen(host)
     api_pruefen(host)
-    oberflaeche_pruefen(host)
+    oberflaeche_pruefen(host, zwischenstand=args.zwischenstand)
     mail_pruefen(mail_domain, args.dkim_selector)
     ports_pruefen(ips)
     print(f"\nERGEBNIS: {len(OK)} ok, {len(WARNUNGEN)} Warnungen, {len(FEHLER)} Fehler")

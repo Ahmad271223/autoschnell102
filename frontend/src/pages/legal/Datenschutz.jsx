@@ -113,7 +113,8 @@ export default function Datenschutz() {
           Zusagen — eine abschliessende rechtliche Pruefung steht noch aus.
           Quellen: backend/cleanup_service.py (VERTRAG_AUFBEWAHRUNG_TAGE=90,
           LOG_AUFBEWAHRUNG_TAGE=180, SNAPSHOT_RETENTION_DAYS=60,
-          CLEANUP_RULES 7/14 Tage), routes/bestand.py
+          CLEANUP_RULES 7/14 Tage fuer Inseratsfotos, FAHRERFOTO_TAGE=90
+          fuer Fahrerfotos ab dem Hochladen), routes/bestand.py
           (BESTAND_RETENTION_DAYS=50), routes/listings.py
           (LISTING_CACHE_TTL_HOURS). Wird eine Umgebungsvariable geaendert,
           muss dieser Text nachgezogen werden. Abweichung Stand 09/2026:
@@ -140,9 +141,14 @@ export default function Datenschutz() {
         gespeichert.
       </p>
       <p>
-        Fahrzeug-Fotos aus Abholungen werden nach 7 Tagen (bei nicht
-        abgeholten Fahrzeugen nach 14 Tagen) automatisch gelöscht;
-        Bestandsfahrzeug-Daten nach 50 Tagen archiviert. Beweis-Snapshots
+        Fotos, die der Fahrer bei der Abholung zu Abweichungen aufnimmt,
+        werden 90 Tage nach dem Hochladen automatisch gelöscht, also etwa so
+        lange, wie der zugehörige Kaufvertrag aufbewahrt wird; der Text des
+        Abholberichts bleibt als Geschäftsunterlage erhalten. Aus dem
+        Inserat übernommene Fahrzeugfotos werden 7 Tage nach der Abholung
+        (bei nicht abgeholten Fahrzeugen nach 14 Tagen) gelöscht, sofern das
+        Fahrzeug nicht in den Bestand oder Verkauf übernommen wurde.
+        Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert. Beweis-Snapshots
         von Inseraten bewahren wir zur Dokumentation des Vertragsschlusses
         auf.
       </p>
@@ -152,7 +158,8 @@ export default function Datenschutz() {
         <li>Fehlerprotokolle: max. 365 Tage</li>
         <li>Marktplatz-Anfragen: 180 Tage nach Abschluss</li>
         <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 90 Tage</li>
-        <li>Backups: verschlüsselt, max. 30 Tage</li>
+        <li>Backups: täglich; auf unseren Servern 14 Tage, zusätzlich
+            verschlüsselt außer Haus bis zu 30 Tage</li>
       </ul>
 
       <H2>6. Deine Rechte</H2>

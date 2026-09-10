@@ -406,7 +406,11 @@ async def get_listing(listing_id: str, user=Depends(current_haendler)):
          "status": {"$ne": "geloescht"}}, {"_id": 0})
     if not l:
         raise HTTPException(404, "Inserat nicht gefunden")
-    return _mit_foto_urls(_with_margin(await _preis_ergaenzen(l)))
+    l = _mit_foto_urls(_with_margin(await _preis_ergaenzen(l)))
+    # Runde 21: Fahrerfotos, die noch uebernommen werden koennen.
+    l["abholfotos"] = await _abholfotos(l)
+    l["fahrerfoto_tage"] = __import__("cleanup_service").FAHRERFOTO_TAGE
+    return l
 
 
 def _mit_foto_urls(doc: dict) -> dict:
@@ -526,7 +530,13 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
                        ref=listing_id, meta=meta)
     fresh = await db.resale_listings.find_one(
         {"id": listing_id}, {"_id": 0})
-    return _with_margin(fresh)
+    # Runde 21 (Gegenpruefung): dieselbe Form wie GET — sonst verschwanden
+    # nach "Speichern" Foto-Links, Einkaufspreis-Quelle und der Hinweis
+    # "Fotos vom Fahrer uebernehmen".
+    fresh = _mit_foto_urls(_with_margin(await _preis_ergaenzen(fresh)))
+    fresh["abholfotos"] = await _abholfotos(fresh)
+    fresh["fahrerfoto_tage"] = __import__("cleanup_service").FAHRERFOTO_TAGE
+    return fresh
 
 
 @router.delete("/resale/{listing_id}")
@@ -681,6 +691,115 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
                                              "status": l.get("status")})
     return {"ok": True, "uploaded": [signierte_datei_url(k) for k in added],
             "total": total}
+
+
+# =========================================================
+#     Runde 21: Fotos aus dem Abholbericht ins Inserat
+# =========================================================
+async def _abholfotos(l: dict) -> list:
+    """Fahrerfotos (Abweichungsfotos aus aktuellen Abholberichten) dieses
+    Fahrzeugs, die noch nicht ins Inserat uebernommen wurden."""
+    if not l.get("vehicle_id") or not l.get("dealer_id"):
+        return []
+    schon = set((l.get("photos") or {}).get("aus_abholbericht") or [])
+    out: list = []
+    gesehen: set = set()
+    async for rep in db.pickup_reports.find(
+            {"vehicle_id": l["vehicle_id"], "dealer_id": l["dealer_id"],
+             "superseded": {"$ne": True}, "deviations.photo_key": {"$type": "string"}},
+            {"_id": 0, "deviations": 1}).sort("created_at", -1):
+        for d in rep.get("deviations") or []:
+            k = d.get("photo_key")
+            if k and k not in schon and k not in gesehen:
+                gesehen.add(k)
+                out.append({"key": k, "label": d.get("label") or ""})
+    return out[:40]
+
+
+class AbholfotosIn(BaseModel):
+    # Ohne Angabe: alle noch nicht uebernommenen Fahrerfotos.
+    photo_keys: Optional[List[Annotated[str, StringConstraints(max_length=300)]]] = \
+        Field(default=None, max_length=40)
+
+
+@router.post("/resale/{listing_id}/photos/aus-abholbericht")
+async def fotos_aus_abholbericht(listing_id: str, body: Optional[AbholfotosIn] = None,
+                                 user=Depends(current_haendler)):
+    """Fahrerfotos (z.B. Schaeden) mit einem Klick ins Inserat uebernehmen.
+    Es entsteht eine eigene Kopie unter resale/: sie bleibt im Inserat,
+    auch wenn der Abholbericht seine Fotos nach FAHRERFOTO_TAGE loescht,
+    und verschwindet mit dem Inserat. Nur Fotos aus Berichten DIESES
+    Fahrzeugs der eigenen Firma (sonst liessen sich fremde Schluessel
+    einschleusen)."""
+    l = await db.resale_listings.find_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "id": 1, "photos": 1, "status": 1, "vehicle_id": 1, "dealer_id": 1})
+    if not l:
+        raise HTTPException(404, "Inserat nicht gefunden")
+    if l.get("status") in _ABGESCHLOSSEN:
+        raise HTTPException(400, "Fuer verkaufte oder geloeschte Inserate koennen "
+                                 "keine Fotos mehr uebernommen werden")
+    verfuegbar = [f["key"] for f in await _abholfotos(l)]
+    wahl = verfuegbar
+    if body is not None and body.photo_keys is not None:
+        erlaubt = set(verfuegbar)
+        wahl = [k for k in dict.fromkeys(body.photo_keys) if k in erlaubt]
+    if not wahl:
+        raise HTTPException(400, "Keine neuen Fotos vom Fahrer vorhanden")
+    keys = list((l.get("photos") or {}).get("uploaded_keys") or [])
+    if len(keys) + len(wahl) > 40:
+        raise HTTPException(400, "Maximal 40 Fotos pro Inserat — bitte vorher "
+                                 "Fotos entfernen oder weniger auswaehlen")
+    import asyncio as _asyncio
+    from storage_service import (StorageError, bild_verkleinern, load_async,
+                                 loeschen_oder_vormerken, make_key, save_async)
+    added: list = []
+    try:
+        for k in wahl:
+            raw = await load_async(k)
+            # Alte Fahrerfotos koennen noch EXIF (Aufnahmeort) tragen —
+            # die Kopie fuer das oeffentliche Inserat ist immer bereinigt.
+            raw = await _asyncio.to_thread(bild_verkleinern, raw, "Fahrerfoto")
+            neu_key = make_key("resale", user["dealer_id"], "foto.jpg")
+            # VOR dem Speichern vormerken: auch eine halb geschriebene Datei
+            # wird bei einem Abbruch wieder aufgeraeumt.
+            added.append(neu_key)
+            await save_async(neu_key, raw)
+    except Exception as exc:               # auch S3-/Netzfehler, nicht nur StorageError
+        for nk in added:
+            await loeschen_oder_vormerken(db, key=nk, grund="abholfoto_uebernahme_abbruch",
+                                          dealer_id=user["dealer_id"])
+        if isinstance(exc, StorageError):
+            raise HTTPException(400, f"Foto konnte nicht uebernommen werden: {exc}")
+        log.exception("Fahrerfotos konnten nicht ins Inserat %s uebernommen werden", listing_id)
+        raise HTTPException(503, "Fotos konnten gerade nicht uebernommen werden — "
+                                 "bitte in einem Moment erneut versuchen.")
+    # Runde 21 (Gegenpruefung): "$nin" verhindert Doppel-Uebernahmen bei
+    # Doppelklick oder parallelen Anfragen — der zweite Aufruf findet die
+    # Originale schon vermerkt und raeumt seine Kopien wieder weg.
+    res = await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"],
+         "status": {"$nin": list(_ABGESCHLOSSEN)},
+         "photos.aus_abholbericht": {"$nin": wahl},
+         f"photos.uploaded_keys.{40 - len(added)}": {"$exists": False}},
+        {"$push": {"photos.uploaded_keys": {"$each": added}},
+         "$addToSet": {"photos.aus_abholbericht": {"$each": wahl}},
+         "$set": {"updated_at": now_iso()}})
+    if res.modified_count == 0:
+        for nk in added:
+            await loeschen_oder_vormerken(db, key=nk, grund="abholfoto_uebernahme_limit",
+                                          dealer_id=user["dealer_id"])
+        raise HTTPException(409, "Die Fotos wurden gerade schon uebernommen, das Inserat "
+                                 "ist voll (max. 40 Fotos) oder inzwischen verkauft/geloescht.")
+    # Zeigt das Inserat bisher nur Einkaufsfotos, waeren die uebernommenen
+    # unsichtbar — dann Einkaufs- UND neue Fotos zeigen.
+    await db.resale_listings.update_one(
+        {"id": listing_id, "dealer_id": user["dealer_id"], "photos.mode": "einkauf"},
+        {"$set": {"photos.mode": "beide"}})
+    await log_activity(user["dealer_id"], user["id"], "inserat.foto.aus_abholbericht",
+                       ref=listing_id, meta={"anzahl": len(added)})
+    return {"ok": True, "uebernommen": len(added),
+            "uploaded": [signierte_datei_url(k) for k in added]}
 
 
 # =========================================================

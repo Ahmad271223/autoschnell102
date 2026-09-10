@@ -27,6 +27,10 @@ BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -135,9 +139,40 @@ def _anwenden(doc, op):
         _set(doc, pfad, (_get(doc, pfad) or 0) + wert)
 
 
+class _Cursor:
+    """Runde 21: find()-Attrappe (sort/limit/to_list/async for) — das Inserat
+    liest seit der Fahrerfoto-Uebernahme und dem Einkaufspreis aus dem
+    Vertrag auch Listen (pickup_reports, kaufvorgaenge)."""
+    def __init__(self, docs):
+        self.docs = docs
+
+    def sort(self, *a, **k):
+        return self
+
+    def limit(self, n):
+        self.docs = self.docs[:n] if n else self.docs
+        return self
+
+    async def to_list(self, n=None):
+        return self.docs[:n] if n else list(self.docs)
+
+    def __aiter__(self):
+        self._it = iter(self.docs)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
 class _Coll:
     def __init__(self, docs=None):
         self.docs = [copy.deepcopy(d) for d in (docs or [])]
+
+    def find(self, q=None, proj=None, **kw):
+        return _Cursor([copy.deepcopy(d) for d in self._treffer(q or {})])
 
     def _treffer(self, q):
         return [d for d in self.docs if _passt(d, q)]
@@ -231,6 +266,8 @@ def welt(monkeypatch):
     def bauen(**colls):
         z.db = _Db(**colls)
         monkeypatch.setattr(resale, "db", z.db)
+        import kaufvorgang as _kv          # Runde 21: Einkaufspreis aus dem Vertrag
+        monkeypatch.setattr(_kv, "db", z.db)
         return z
 
     async def _try_set_lifecycle(vehicle_id, dealer_id, ziel, *, user=None):
@@ -646,7 +683,7 @@ def _kopf(token):
 @pytest.fixture(scope="module")
 def firma():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = requests.post(f"{API}/auth/register", json={
         "email": f"r14_resale_{SUF}@{MAIL}", "password": PW,
         "company_name": f"R14 Resale {SUF}", "contact_person": "Chef R", "phone": "0511 4"}, timeout=30)
@@ -709,7 +746,7 @@ def _jpeg_b64():
 
 def test_http_28_29_geloescht_sperrt_alles(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma, "entwurf")
     assert requests.delete(f"{API}/resale/{lid}", headers=firma["kopf"], timeout=30).status_code == 200
     assert _lifecycle(vid) == "bestand"
@@ -730,7 +767,7 @@ def test_http_28_29_geloescht_sperrt_alles(firma):
 
 def test_http_67_79_verkauf_fotos_bleiben(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma)
     r = requests.post(f"{API}/resale/{lid}/photos", headers=firma["kopf"],
                       json={"photos_b64": [_jpeg_b64()]}, timeout=60)
@@ -760,7 +797,7 @@ def test_http_67_79_verkauf_fotos_bleiben(firma):
 
 def test_http_80_unendliche_preise_422_liste_bleibt(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma, "entwurf")
     for body in ('{"price_public": 1e400}', '{"price_b2b": Infinity}', '{"price_network": NaN}'):
         r = requests.put(f"{API}/resale/{lid}", headers={**firma["kopf"], "Content-Type": "application/json"},
@@ -772,7 +809,7 @@ def test_http_80_unendliche_preise_422_liste_bleibt(firma):
 
 def test_http_26_52_106_reservierung_aufheben(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma)
     assert _status(firma, lid, "reserviert").status_code == 200
     assert _lifecycle(vid) == "reserviert"
@@ -804,7 +841,7 @@ def test_http_26_52_106_reservierung_aufheben(firma):
 
 def test_http_27_reserviert_verkauft_kaeufer_festgehalten(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma)
     assert _status(firma, lid, "reserviert").status_code == 200
     _db().resale_listings.update_one({"id": lid}, {"$set": {"reserved_for": "kaeufer-y"}})
@@ -816,7 +853,7 @@ def test_http_27_reserviert_verkauft_kaeufer_festgehalten(firma):
 
 def test_http_53_54_reserviertes_inserat_loeschen(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma, "veroeffentlicht")
     dbx = _db()
     dbx.listing_interest.insert_one({"id": f"i_{SUF}_b", "listing_id": lid, "dealer_id": firma["dealer_id"],
@@ -836,7 +873,7 @@ def test_http_53_54_reserviertes_inserat_loeschen(firma):
 
 def test_http_81_desync_publish_und_status_409(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma)
     _db().vehicles.update_one({"id": vid}, {"$set": {"lifecycle": "bestand"}})
     r = requests.post(f"{API}/resale/{lid}/publish", headers=firma["kopf"], json={"visibility": "public"}, timeout=30)
@@ -850,7 +887,7 @@ def test_http_81_desync_publish_und_status_409(firma):
 
 def test_http_106_zurueckgezogen_kein_zweites_inserat(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma, "veroeffentlicht")
     assert requests.post(f"{API}/resale/draft/{vid}", headers=firma["kopf"], timeout=30).status_code == 409
     assert _status(firma, lid, "zurueckgezogen").status_code == 200
@@ -861,7 +898,7 @@ def test_http_106_zurueckgezogen_kein_zweites_inserat(firma):
 
 def test_http_107_preis_null_und_publish_ohne_preis(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma, "veroeffentlicht")
     assert requests.put(f"{API}/resale/{lid}", headers=firma["kopf"], json={"price_public": 0}, timeout=30).status_code == 400
     assert _db().resale_listings.find_one({"id": lid})["prices"]["public"] == 9900.0
@@ -874,7 +911,7 @@ def test_http_107_preis_null_und_publish_ohne_preis(firma):
 
 def test_http_117_foto_riesenstring_422(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma, "entwurf")
     r = requests.post(f"{API}/resale/{lid}/photos", headers=firma["kopf"],
                       json={"photos_b64": ["A" * 12_000_001]}, timeout=120)

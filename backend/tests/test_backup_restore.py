@@ -18,6 +18,8 @@ Zieldatenbank nie teilweise zerstoeren.
   Skripts loesen Betriebsalarme aus.
 - Offsite-Kopie (BACKUP_S3_BUCKET) landet im Manifest; Upload-Fehler ->
   UNVOLLSTAENDIG (Exit 2); Offsite-Rotation loescht nur die aeltesten.
+- Runde 21: Rueckfall nach gescheitertem Snapshot -> INKONSISTENT (Exit 3);
+  Details in test_befunde_runde21_backup.py.
 
 Braucht nur Mongo (kein Backend).
 """
@@ -537,19 +539,31 @@ def test_11_snapshot_session_oder_fallback(welt, tmp_path, monkeypatch):
     monkeypatch.setenv("EMERGENT_LLM_KEY", "")
     monkeypatch.setenv("S3_BUCKET", "")
     monkeypatch.setenv("BACKUP_S3_BUCKET", "")
+    monkeypatch.setenv("BACKUP_SNAPSHOT_PAUSE_S", "0")
+    monkeypatch.delenv("BACKUP_SNAPSHOT_PFLICHT", raising=False)
+    echtes_rs = bool(backup_mongo.ist_replica_set(_client()))
     # Snapshot-Pfad erzwingen: auf einem echten Replica Set -> "snapshot",
-    # auf Standalone lehnt der Server readConcern snapshot ab -> Fallback.
+    # auf Standalone lehnt der Server readConcern snapshot ab -> Rueckfall.
+    # Runde 21 (Pruefbefund Backup A): der Rueckfall ist INKONSISTENT
+    # (Exit 3, kein "BACKUP OK") — bisher schrieb dieser Test das
+    # Fehlverhalten (rc 0, BACKUP OK) fest.
     monkeypatch.setattr(backup_mongo, "ist_replica_set", lambda client: True)
     base = tmp_path / "snap"
     rc = backup_mongo.backup_erstellen(base, db_name=QUELLE, mongo_url=MONGO_URL)
-    assert rc == 0
     ordner = [p for p in base.iterdir() if p.is_dir() and p.name.startswith("autoschnell-")]
     m = json.loads((ordner[0] / "manifest.json").read_text(encoding="utf-8"))
-    assert m["konsistenz"] == "snapshot" or m["konsistenz"].startswith("best-effort (snapshot fehlgeschlagen")
-    assert m["collections"] == {"leer": 0, "users": 50, "vehicles": 30}
     log = (base / "backup.log").read_text(encoding="utf-8")
-    assert "BACKUP OK" in log and m["konsistenz"] in log
-    # Der Fallback muss vollstaendige, lesbare Dateien hinterlassen
+    if echtes_rs:
+        assert rc == 0, log[-800:]
+        assert m["konsistenz"] == "snapshot" and m["inkonsistent"] == ""
+        assert "BACKUP OK" in log and m["konsistenz"] in log
+    else:
+        assert rc == 3, log[-800:]
+        assert m["konsistenz"].startswith("best-effort (snapshot fehlgeschlagen")
+        assert m["inkonsistent"] and "Snapshot nach 3 Versuch" in m["inkonsistent"]
+        assert "BACKUP INKONSISTENT" in log and "BACKUP OK" not in log
+    assert m["collections"] == {"leer": 0, "users": 50, "vehicles": 30}
+    # Der Rueckfall muss vollstaendige, lesbare Dateien hinterlassen
     import restore_mongo
     dumps, manifest, _ = restore_mongo.pruefe_backup(ordner[0], allow_no_manifest=False)
     assert {k: len(v[0]) for k, v in dumps.items()} == m["collections"]

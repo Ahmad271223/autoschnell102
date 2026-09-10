@@ -127,43 +127,90 @@ async def _delete_snapshots_for_vehicle(db, vehicle_id: str,
 
 async def _delete_report_photos(db, appt_id: str, now: datetime, stats: dict,
                                 dealer_id: str = "") -> None:
-    """Abweichungsfotos aus Abholberichten loeschen. Die Datenschutz-
-    erklaerung verspricht das PAUSCHAL nach 7 Tagen (nicht abgeholt: 14) —
-    unabhaengig davon, was der Haendler mit dem Fahrzeug weiter vorhat.
-    Der Berichtstext (Kilometerstand, Maengel) bleibt als
-    Geschaeftsunterlage erhalten, nur die Bilddateien gehen."""
+    """Alle Abweichungsfotos der Berichte EINES Termins sofort loeschen.
+    Runde 21: Der stuendliche Aufraeumer nutzt diese Funktion nicht mehr —
+    Fahrerfotos haben eine eigene Frist ab dem Hochladen
+    (berichtsfotos_nach_frist_loeschen). Sie bleibt fuer Aufrufer, die die
+    Fotos eines Termins gezielt entfernen. Der Berichtstext (Kilometerstand,
+    Maengel) bleibt als Geschaeftsunterlage erhalten, nur die Bilddateien
+    gehen."""
     async for rep in db.pickup_reports.find(
             {"appointment_id": appt_id},
             {"_id": 0, "id": 1, "deviations": 1}):
-        devs = rep.get("deviations") or []
-        rep_changed = False
-        for entry in devs:
-            key = entry.get("photo_key")
-            if not key:
-                continue
-            # Berichtsfotos liegen im UPLOAD-Storage (storage_service, Prefix
-            # "pickup/") — nicht im Snapshot-Storage. Vorher loeschte dieser
-            # Job im falschen Backend, die Fotos blieben liegen (Runde 4).
-            # Fehlschlaege gelten nicht mehr als Erfolg: Key bleibt stehen,
-            # die Nachholung raeumt das Array-Element ueber `ref` auf.
-            ok = await loeschen_oder_vormerken(
-                db, key=key, grund="berichtsfoto_frist", dealer_id=dealer_id,
-                ref={"collection": "pickup_reports", "id": rep["id"],
-                     "array": {"pfad": "deviations", "schluessel": "photo_key"},
-                     "unset_fields": ["photo_key", "photo_loeschung_offen"],
-                     "set_fields": {"photo_deleted_at": "$now"}})
-            if ok:
-                entry["photo_key"] = None
-                entry["photo_deleted_at"] = now.isoformat()
-                entry.pop("photo_loeschung_offen", None)
-            else:
-                entry["photo_loeschung_offen"] = True
-            rep_changed = True
-        if rep_changed:
-            await db.pickup_reports.update_one(
-                {"id": rep["id"]}, {"$set": {"deviations": devs}})
-            stats["report_photos_deleted"] = (
-                stats.get("report_photos_deleted", 0) + 1)
+        await _fotos_eines_berichts_loeschen(db, rep, now, stats, dealer_id)
+
+
+async def _fotos_eines_berichts_loeschen(db, rep: dict, now: datetime, stats: dict,
+                                         dealer_id: str = "") -> bool:
+    """Alle noch vorhandenen Fotos EINES Berichts loeschen bzw. zur
+    Nachholung vormerken. Eintraege mit bereits vorgemerkter Loeschung
+    (photo_loeschung_offen) uebernimmt storage_loeschungen_nachholen — sie
+    werden hier nicht erneut angestossen (sonst entstuende jede Stunde ein
+    weiterer Vormerk-Eintrag)."""
+    devs = rep.get("deviations") or []
+    rep_changed = False
+    for entry in devs:
+        key = entry.get("photo_key")
+        if not key or entry.get("photo_loeschung_offen"):
+            continue
+        # Berichtsfotos liegen im UPLOAD-Storage (storage_service, Prefix
+        # "pickup/") — nicht im Snapshot-Storage (Runde 4). Fehlschlaege
+        # gelten nicht als Erfolg: Key bleibt stehen, die Nachholung raeumt
+        # das Array-Element ueber `ref` auf.
+        ok = await loeschen_oder_vormerken(
+            db, key=key, grund="berichtsfoto_frist", dealer_id=dealer_id,
+            ref={"collection": "pickup_reports", "id": rep["id"],
+                 "array": {"pfad": "deviations", "schluessel": "photo_key"},
+                 "unset_fields": ["photo_key", "photo_loeschung_offen"],
+                 "set_fields": {"photo_deleted_at": "$now"}})
+        if ok:
+            entry["photo_key"] = None
+            entry["photo_deleted_at"] = now.isoformat()
+            entry.pop("photo_loeschung_offen", None)
+        else:
+            entry["photo_loeschung_offen"] = True
+        rep_changed = True
+    if rep_changed:
+        await db.pickup_reports.update_one(
+            {"id": rep["id"]}, {"$set": {"deviations": devs}})
+        stats["report_photos_deleted"] = (
+            stats.get("report_photos_deleted", 0) + 1)
+    return rep_changed
+
+
+def _fahrerfoto_tage() -> int:
+    try:
+        wert = int(os.environ.get("FAHRERFOTO_TAGE") or 90)
+    except ValueError:
+        wert = 90
+    return max(1, min(wert, 3650))
+
+
+# Runde 21 (Befund Ahmad 10.09.2026): Fahrerfotos bleiben so lange wie der
+# Kaufvertrag (90 Tage, vgl. VERTRAG_AUFBEWAHRUNG_TAGE) — gezaehlt ab dem
+# Hochladen des Berichts, unabhaengig vom Terminstatus. Vorher 7/14 Tage ab
+# dem ERSTEN Terminabschluss: zu kurz als Beweis, Fotos geloeschter oder
+# stornierter Termine blieben fuer immer liegen, und wiedergeoeffnete
+# Termine verloren frische Fotos schon beim naechsten stuendlichen Lauf.
+FAHRERFOTO_TAGE = _fahrerfoto_tage()
+
+
+async def berichtsfotos_nach_frist_loeschen(db, now: datetime, stats: dict) -> int:
+    """Fotos aller Berichte loeschen, die vor mehr als FAHRERFOTO_TAGE
+    hochgeladen wurden (created_at des Berichts). Liefert die Zahl der
+    bearbeiteten Berichte; hoechstens 500 je Lauf, der Rest folgt stuendlich."""
+    cutoff = (now - timedelta(days=FAHRERFOTO_TAGE)).isoformat()
+    n = 0
+    cursor = db.pickup_reports.find(
+        {"created_at": {"$lte": cutoff},
+         "deviations": {"$elemMatch": {"photo_key": {"$type": "string"},
+                                       "photo_loeschung_offen": {"$ne": True}}}},
+        {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).limit(500)
+    async for rep in cursor:
+        if await _fotos_eines_berichts_loeschen(db, rep, now, stats,
+                                                rep.get("dealer_id") or ""):
+            n += 1
+    return n
 
 
 _VORGANG_OFFEN = ("vertrag_erstellt", "gesendet", "abholung_geplant")
@@ -211,11 +258,10 @@ async def _cleanup_once(db) -> dict:
             stats["checked"] += 1
             vehicle_id = appt.get("vehicle_id")
 
-            # Berichts-Fotos werden IMMER nach Frist geloescht — das
-            # Datenschutz-Versprechen kennt keine Ausnahme fuer Fahrzeuge,
-            # ueber die der Haendler schon entschieden hat.
-            await _delete_report_photos(db, appt["id"], now, stats,
-                                        dealer_id=appt.get("dealer_id", ""))
+            # Runde 21 (Befund Ahmad 10.09.2026): Fahrerfotos haben eine
+            # EIGENE Frist ab dem Hochladen (berichtsfotos_nach_frist_loeschen
+            # unten) und haengen nicht mehr am Terminabschluss. Hier geht es
+            # nur noch um Inseratsfotos und Snapshots des Fahrzeugs.
 
             # Händler hat bereits über das Fahrzeug entschieden? Dann regelt
             # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt
@@ -289,6 +335,8 @@ async def _cleanup_once(db) -> dict:
             )
             stats["cleaned"] += 1
 
+    # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
+    stats["berichtsfotos_frist"] = await berichtsfotos_nach_frist_loeschen(db, now, stats)
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
     stats["archived"] = await _archive_expired_bestand(db, now)
     # ---- Versand, der nie ein Ergebnis bekam (Runde 8, Befund 3) ----

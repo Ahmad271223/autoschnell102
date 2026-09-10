@@ -162,9 +162,11 @@ Ohne S3-Offsite das Volume regelmäßig auf einen ANDEREN Ort kopieren
 (z. B. Hetzner Storage Box), damit ein Server-Ausfall nicht auch die Backups
 mitnimmt:
 ```bash
-# Beispiel: naechtlich per cron auf eine Storage Box spiegeln
+# Beispiel: naechtlich per cron auf eine Storage Box spiegeln. Runde 21:
+# Kopien aelter als 30 Tage werden entfernt — die Datenschutzerklaerung
+# sagt "ausser Haus bis zu 30 Tage" (vorher loeschte "cp -ru" nie).
 docker run --rm -v autoschnell_backups_data:/b -v /mnt/storagebox:/dest \
-  alpine sh -c "cp -ru /b/. /dest/"
+  alpine sh -c "cp -ru /b/. /dest/ && find /dest -mindepth 1 -maxdepth 1 -name 'autoschnell-*' -mtime +30 -exec rm -rf {} +"
 ```
 
 **RPO/RTO:** RPO ≤ 24 h (ein Lauf pro Nacht; wer weniger Verlust
@@ -831,6 +833,25 @@ und Links zeigen weiter das Originalfoto.
 Schadensskizzen für Abholauftrag und Protokoll liegen jetzt unter
 `backend/assets/damage/` (vorher nur im Frontend-Ordner, den das
 Backend-Image nicht enthält — in Produktion fehlten die Skizzen deshalb).
+
+## Fahrerfotos (Abweichungsfotos aus dem Abhol-Check)
+
+Seit 10.09.2026 (Runde 21):
+
+- **Frist:** 90 Tage nach dem Hochladen des Berichts (`FAHRERFOTO_TAGE`,
+  Standard 90, also so lange wie der Kaufvertrag). Unabhängig vom
+  Terminstatus: gelöschte, stornierte und wiedergeöffnete Termine sind
+  damit abgedeckt. Gelöscht wird nur das Bild; der Berichtstext bleibt.
+- **Wer sieht sie:** der Chef alle, ein Sucher nur zu Terminen in seinem
+  Bereich, der Fahrer nur seine eigenen und nur, solange der Termin ihm
+  zugeteilt ist. Keine öffentliche Adresse (Präfix `pickup/` ist privat).
+- **Wo:** Terminplaner → Knopf „Abholbericht“ am Termin, Fahrzeugakte →
+  Abschnitt „Abholung“ (Vorschaubilder), Bestand → „Fahrzeugakte ·
+  Abholbericht“. Im Verkaufsinserat: „Fotos vom Fahrer übernehmen“ legt
+  eine eigene Kopie unter `resale/` an, die im Inserat bleibt.
+- **Metadaten:** Die Fahrer-App verkleinert Fotos vor dem Hochladen
+  (max. 2000 px); der Server speichert Bilder mit EXIF/GPS immer neu,
+  ohne diese Daten.
 
 ## Fahrzeuge verkaufen ist kostenlos
 

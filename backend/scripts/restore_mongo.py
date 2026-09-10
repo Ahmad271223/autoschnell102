@@ -38,6 +38,20 @@ nie aus dem Backup zurückgespielt. Alte Backups ohne Manifest (Version < 2)
 werden nur mit --allow-no-manifest akzeptiert (dann ohne Prüfsummen, aber
 weiterhin mit vollständigem Einlesen vor dem Umschalten). --nur-datenbank
 lässt die Datei-Speicher unangetastet (Restore-Probe in eine Testdatenbank).
+
+Runde 21 (Pruefbefund Backup):
+  A  Ein als INKONSISTENT markiertes Backup (Snapshot gescheitert,
+     Collections nacheinander gelesen; Manifest "inkonsistent" bzw. bei
+     Alt-Manifesten konsistenz "best-effort (snapshot fehlgeschlagen)")
+     wird abgelehnt — auch im --dry-run. Nur --notfall-inkonsistent-
+     akzeptieren spielt es ein, mit lauter Warnung.
+  B  Zu JEDER .bson.gz muss eine lesbare <name>.metadata.json mit den
+     Indexen vorliegen (und zum Manifest-Feld "indexe" passen). Fehlt sie
+     oder ist sie unlesbar: Abbruch, nichts veraendert. Nur fuer Alt-Backups
+     ohne Indexdaten gibt es --alt-backup-ohne-indexdaten (dann werden fuer
+     diese Collections keine Indexe angelegt oder geprueft). Die Pruefung
+     vergleicht je Index Schluessel, unique, sparse, expireAfterSeconds und
+     partialFilterExpression — nicht nur den Namen.
 """
 import argparse
 import gzip
@@ -49,7 +63,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Als Skript gestartet kennt Python nur den scripts-Ordner; die gemeinsame
+# Bewertung (backup_bewertung) liegt im Backend-Ordner darueber.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import bson
+from bson import json_util
+from backup_bewertung import inkonsistenz, ist_stichtagsgenau, metadaten_mangel
 from pymongo import MongoClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -80,9 +100,36 @@ def sha256_datei(p: Path) -> str:
     return h.hexdigest()
 
 
-def pruefe_backup(root: Path, allow_no_manifest: bool):
+def index_metadaten_mangel(meta_path: Path, soll_namen=None) -> str:
+    """Runde 21 (Befund B): Mangel der metadata.json einer Collection
+    ("" = in Ordnung). soll_namen: Indexnamen laut Manifest-Feld "indexe"
+    (None = Manifest ohne diese Angabe)."""
+    if not meta_path.is_file():
+        return "fehlen (metadata.json nicht vorhanden)"
+    try:
+        meta = json_util.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return f"unlesbar ({exc})"
+    grund = metadaten_mangel(meta)
+    if grund:
+        return f"ungueltig ({grund})"
+    if soll_namen is not None:
+        ist = sorted(str(i.get("name")) for i in meta["indexes"])
+        if sorted(str(n) for n in soll_namen) != ist:
+            return (f"passen nicht zum Manifest (Manifest: {sorted(soll_namen)}, "
+                    f"Datei: {ist})")
+    return ""
+
+
+def pruefe_backup(root: Path, allow_no_manifest: bool,
+                  alt_ohne_indexdaten: bool = False):
     """Liefert (dumps: {name: (docs, metadata-Pfad)}, manifest|None, db_dir).
-    Wirft bei jedem Fehler."""
+    Wirft bei jedem Fehler.
+
+    Runde 21 (Befund B): metadata.json ist fuer jede Collection Pflicht.
+    Nur mit alt_ohne_indexdaten (--alt-backup-ohne-indexdaten) wird eine
+    fehlende/unlesbare Datei hingenommen; der metadata-Pfad ist dann None
+    (= fuer diese Collection keine Indexe anlegen oder pruefen)."""
     manifest = None
     mp = root / "manifest.json"
     if mp.is_file():
@@ -114,7 +161,10 @@ def pruefe_backup(root: Path, allow_no_manifest: bool):
     if db_dir is None:
         raise ValueError(f"keine .bson.gz-Dateien unter {root}")
 
-    dumps = {}
+    manifest_indexe = (manifest or {}).get("indexe")
+    if not isinstance(manifest_indexe, dict):
+        manifest_indexe = None
+    dumps, index_maengel = {}, []
     for f in sorted(db_dir.glob("*.bson.gz")):
         name = f.name[:-len(".bson.gz")]
         with gzip.open(f, "rb") as fh:
@@ -123,8 +173,29 @@ def pruefe_backup(root: Path, allow_no_manifest: bool):
         if erwartet is not None and erwartet != len(docs):
             raise ValueError(f"{name}: {len(docs)} Dokumente gelesen, Manifest "
                              f"erwartet {erwartet}")
-        dumps[name] = (docs, db_dir / f"{name}.metadata.json")
+        meta_path = db_dir / f"{name}.metadata.json"
+        if manifest_indexe is not None and name not in manifest_indexe:
+            grund = "im Manifest (Feld 'indexe') nicht verzeichnet"
+        else:
+            grund = index_metadaten_mangel(
+                meta_path, manifest_indexe.get(name) if manifest_indexe else None)
+        if grund:
+            if not alt_ohne_indexdaten:
+                index_maengel.append(f"{name}: Index-Metadaten {grund}")
+            else:
+                print(f"  !!! WARNUNG: {name}: Index-Metadaten {grund} — wegen "
+                      f"--alt-backup-ohne-indexdaten werden fuer {name} KEINE Indexe "
+                      f"angelegt oder geprueft (Unique-/TTL-Indexe fehlen, bis das "
+                      f"Backend sie beim Start neu anlegt)")
+                meta_path = None
+        dumps[name] = (docs, meta_path)
         print(f"  {name}: {len(docs)} Dokumente gelesen")
+    if index_maengel:
+        raise ValueError(
+            "Index-Metadaten fehlen oder sind unlesbar — ohne sie wuerden Unique- "
+            "und TTL-Indexe nach dem Restore unbemerkt fehlen: "
+            + "; ".join(index_maengel[:10])
+            + ". Nur fuer Alt-Backups ohne Indexdaten: --alt-backup-ohne-indexdaten")
     return dumps, manifest, db_dir
 
 
@@ -149,14 +220,23 @@ def live_verzeichnisse() -> dict:
 
 
 # ------------------------------------------------------------------ Indexe
-def erwartete_indexe(meta_path: Path) -> dict:
-    """{indexname: (keys, optionen)} aus einer metadata.json (ohne _id_)."""
-    if not meta_path.is_file():
+_INDEX_OPTIONEN = ("unique", "sparse", "expireAfterSeconds", "partialFilterExpression")
+
+
+def erwartete_indexe(meta_path) -> dict:
+    """{indexname: (keys, optionen)} aus einer metadata.json (ohne _id_).
+
+    Runde 21 (Befund B): Eine fehlende oder unlesbare Datei wirft. Bisher
+    hiess das still "keine Indexe erwartet", und Unique-/TTL-Indexe fehlten
+    unbemerkt. meta_path None = ausdruecklich ohne Indexdaten
+    (--alt-backup-ohne-indexdaten). Gelesen wird mit json_util (Datumswerte
+    u. ae. in partialFilterExpression bleiben erhalten)."""
+    if meta_path is None:
         return {}
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {}
+    meta = json_util.loads(Path(meta_path).read_text(encoding="utf-8"))
+    grund = metadaten_mangel(meta)
+    if grund:
+        raise ValueError(f"{Path(meta_path).name} ungueltig ({grund})")
     out = {}
     for idx in meta.get("indexes") or []:
         name = idx.get("name")
@@ -165,17 +245,19 @@ def erwartete_indexe(meta_path: Path) -> dict:
         keys = [(k, v) for k, v in (idx.get("key") or {}).items()]
         if not keys:
             continue
-        opts = {k: v for k, v in idx.items()
-                if k in ("unique", "sparse", "expireAfterSeconds",
-                         "partialFilterExpression")}
+        opts = {k: v for k, v in idx.items() if k in _INDEX_OPTIONEN}
         out[name] = (keys, opts)
     return out
 
 
-def indexe_anlegen(coll, meta_path: Path) -> list:
+def indexe_anlegen(coll, meta_path) -> list:
     """Indexe laut metadata.json anlegen; liefert die Liste der Fehler."""
     fehler = []
-    for name, (keys, opts) in erwartete_indexe(meta_path).items():
+    try:
+        soll = erwartete_indexe(meta_path)
+    except Exception as exc:  # noqa: BLE001
+        return [f"{coll.name}: Index-Metadaten nicht lesbar ({exc})"]
+    for name, (keys, opts) in soll.items():
         try:
             coll.create_index(keys, name=name, **opts)
         except Exception as exc:  # noqa: BLE001
@@ -188,24 +270,90 @@ def erwartete_anzahl(manifest, name: str, gelesen: int) -> int:
     return gelesen if e is None else int(e)
 
 
+def _norm(wert):
+    """Zahlen gleich behandeln (1 == 1.0, Int64 == int), Dicts/Listen
+    rekursiv; bool bleibt bool."""
+    if isinstance(wert, bool) or wert is None:
+        return wert
+    if isinstance(wert, (int, float)):
+        return float(wert)
+    if isinstance(wert, dict):
+        return {str(k): _norm(v) for k, v in wert.items()}
+    if isinstance(wert, (list, tuple)):
+        return [_norm(v) for v in wert]
+    return wert
+
+
+def _anzeige(wert) -> str:
+    if wert is None or wert is False:
+        return "fehlt"
+    if isinstance(wert, float) and wert.is_integer():
+        return str(int(wert))
+    if isinstance(wert, dict):
+        return "{" + ", ".join(f"{k}: {_anzeige(v)}" for k, v in wert.items()) + "}"
+    if isinstance(wert, list):
+        return "[" + ", ".join(_anzeige(v) for v in wert) + "]"
+    return str(wert)
+
+
+def _index_eigenschaften(keys, opts: dict) -> dict:
+    """Vergleichbare Form eines Index (Soll aus metadata.json, Ist aus
+    index_information()). unique/sparse False gleich fehlt."""
+    ttl = opts.get("expireAfterSeconds")
+    pfe = opts.get("partialFilterExpression")
+    return {
+        "key": [[str(k), _norm(v)] for k, v in (keys or [])],
+        "unique": bool(opts.get("unique")),
+        "sparse": bool(opts.get("sparse")),
+        "expireAfterSeconds": None if ttl is None else _norm(ttl),
+        "partialFilterExpression": None if pfe is None else _norm(pfe),
+    }
+
+
+def index_abweichungen(coll_name: str, soll: dict, ist_info: dict) -> list:
+    """Runde 21 (Befund B): je gleichnamigem Index Schluessel (mit
+    Reihenfolge), unique, sparse, expireAfterSeconds und
+    partialFilterExpression vergleichen. Ein Index gleichen Namens, der
+    nicht mehr eindeutig ist oder keine Ablaufzeit mehr hat, faellt so auf."""
+    out = []
+    for idx_name, (keys, opts) in soll.items():
+        info = ist_info.get(idx_name)
+        if info is None:
+            continue  # fehlende Indexe meldet pruefe_datenbank gesondert
+        s = _index_eigenschaften(keys, opts)
+        i = _index_eigenschaften(info.get("key") or [], info)
+        for feld in ("key", "unique", "sparse", "expireAfterSeconds",
+                     "partialFilterExpression"):
+            if s[feld] != i[feld]:
+                out.append(f"{coll_name}.{idx_name}: {feld} soll {_anzeige(s[feld])}, "
+                           f"ist {_anzeige(i[feld])}")
+    return out
+
+
 def pruefe_datenbank(db, dumps: dict, manifest) -> list:
-    """Dokumentzahlen (gegen Manifest bzw. gelesene Dokumente) und Indexnamen
-    jeder Collection in db pruefen. Liefert die Liste der Abweichungen."""
+    """Dokumentzahlen (gegen Manifest bzw. gelesene Dokumente) und Indexe
+    jeder Collection in db pruefen. Liefert die Liste der Abweichungen.
+    Runde 21: Indexe nach Name UND Eigenschaften (index_abweichungen)."""
     probleme = []
     for name, (docs, meta_path) in dumps.items():
         soll = erwartete_anzahl(manifest, name, len(docs))
         ist = db[name].count_documents({})
         if ist != soll:
             probleme.append(f"{name}: {ist} Dokumente, erwartet {soll}")
-        soll_idx = set(erwartete_indexe(meta_path))
         try:
-            ist_idx = set(db[name].index_information())
+            soll_idx = erwartete_indexe(meta_path)
+        except Exception as exc:  # noqa: BLE001
+            probleme.append(f"{name}: Index-Metadaten nicht lesbar ({exc})")
+            continue
+        try:
+            ist_info = db[name].index_information()
         except Exception as exc:  # noqa: BLE001
             probleme.append(f"{name}: Indexe nicht lesbar ({exc})")
             continue
-        fehlend = sorted(soll_idx - ist_idx)
+        fehlend = sorted(set(soll_idx) - set(ist_info))
         if fehlend:
             probleme.append(f"{name}: Index(e) fehlen: {', '.join(fehlend)}")
+        probleme += index_abweichungen(name, soll_idx, ist_info)
     return probleme
 
 
@@ -431,7 +579,9 @@ def wiederherstellen(args) -> int:
         return 1
     print(f"1/6 Vorabpruefung von {root} ...")
     try:
-        dumps, manifest, db_dir = pruefe_backup(root, args.allow_no_manifest)
+        dumps, manifest, db_dir = pruefe_backup(
+            root, args.allow_no_manifest,
+            alt_ohne_indexdaten=getattr(args, "alt_backup_ohne_indexdaten", False))
     except Exception as exc:  # noqa: BLE001
         print(f"FEHLER: {exc}")
         print("Es wurde NICHTS veraendert.")
@@ -451,6 +601,23 @@ def wiederherstellen(args) -> int:
               "NICHT vorhanden:")
         for f in fehlend:
             print(f"!!!   - {f}")
+    # Runde 21 (Pruefbefund Backup A): ein Rueckfall nach gescheitertem
+    # Snapshot ist kein stimmiger Stand (z. B. Termine ohne Vertrag).
+    grund_inkonsistent = inkonsistenz(manifest)
+    if grund_inkonsistent:
+        if not getattr(args, "notfall_inkonsistent_akzeptieren", False):
+            print("FEHLER: Dieses Backup ist als INKONSISTENT markiert — die "
+                  "Collections zeigen unterschiedliche Zeitstaende:")
+            print(f"  - {grund_inkonsistent}")
+            print("Besser ein gutes (stimmiges) Backup waehlen. Einspielen nur im "
+                  "Notfall mit --notfall-inkonsistent-akzeptieren (danach koennen "
+                  "z. B. Termine ohne Vertrag vorliegen; Datenbestand pruefen).")
+            print("Es wurde NICHTS veraendert.")
+            return 1
+        print("!!! WARNUNG: INKONSISTENTES Backup wird auf ausdruecklichen Wunsch "
+              "(Notfall) eingespielt. Die Collections zeigen unterschiedliche "
+              "Zeitstaende; nach dem Restore Datenbestand pruefen:")
+        print(f"!!!   - {grund_inkonsistent}")
     if manifest:
         print(f"  Konsistenz laut Manifest: {manifest.get('konsistenz', 'unbekannt')}")
     s3_objekte = [] if args.nur_datenbank else s3_objekte_im_backup(root)
@@ -474,7 +641,16 @@ def wiederherstellen(args) -> int:
         dumps.pop(FLAG_COLLECTION)
         print(f"  Hinweis: {FLAG_COLLECTION} (Betriebs-Flags) wird nicht zurueckgespielt")
     if args.dry_run:
-        print("DRY-RUN OK: Backup ist konsistent; nichts veraendert.")
+        # Runde 21: "konsistent" nur sagen, wenn es stimmt.
+        if grund_inkonsistent:
+            print("DRY-RUN OK (NOTFALL): Pruefsummen und Inhalte in Ordnung, aber "
+                  "das Backup ist INKONSISTENT; nichts veraendert.")
+        elif ist_stichtagsgenau(manifest):
+            print("DRY-RUN OK: Backup ist konsistent (stichtagsgenau); nichts veraendert.")
+        else:
+            print(f"DRY-RUN OK: Pruefsummen und Inhalte in Ordnung (Konsistenz: "
+                  f"{(manifest or {}).get('konsistenz', 'unbekannt')}, nicht "
+                  f"stichtagsgenau); nichts veraendert.")
         return 0
 
     if not args.yes:
@@ -576,6 +752,9 @@ def wiederherstellen(args) -> int:
     n_files = sum(1 for e in geschaltet for f in e["live"].rglob("*") if f.is_file())
     print(f"RESTORE OK: {len(dumps)} Collections, {total} Dokumente, "
           f"{n_files} Dateien, {n_s3} S3-Objekte -> {args.db}; Wartungsmodus beendet.")
+    if grund_inkonsistent:
+        print(f"!!! WARNUNG: eingespielt wurde ein INKONSISTENTES Backup "
+              f"({grund_inkonsistent}) — Datenbestand pruefen.")
     print(f"Der vorherige Datenbestand liegt in '{alt_name}'"
           + ("".join(f", Ordner {e['vorher']}" for e in geschaltet if e["vorher"]))
           + ". Wenn alles passt, entfernen mit:  mongosh --eval "
@@ -671,6 +850,14 @@ def main(argv=None) -> int:
     ap.add_argument("--notfall-unvollstaendig-akzeptieren", action="store_true",
                     help="ein als UNVOLLSTAENDIG markiertes Backup trotzdem "
                          "einspielen (nur im Notfall)")
+    ap.add_argument("--notfall-inkonsistent-akzeptieren", action="store_true",
+                    help="ein als INKONSISTENT markiertes Backup (Snapshot "
+                         "gescheitert, Collections nacheinander gelesen) trotzdem "
+                         "einspielen (nur im Notfall)")
+    ap.add_argument("--alt-backup-ohne-indexdaten", action="store_true",
+                    help="Alt-Backup ohne (lesbare) metadata.json einspielen; fuer "
+                         "diese Collections werden dann KEINE Indexe angelegt oder "
+                         "geprueft (Standard: Abbruch)")
     ap.add_argument("--ohne-s3", action="store_true",
                     help="S3-Objekte im Backup bewusst NICHT zurueckspielen")
     ap.add_argument("--nur-datenbank", action="store_true",

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { toast } from "sonner";
+import AbholFoto from "@/components/AbholFoto";
+import { fotosBis } from "@/components/AbholberichtDialog";
 import {
   ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
 } from "lucide-react";
@@ -18,6 +20,13 @@ const fmtDate = (s) => {
   catch { return s; }
 };
 const fmtEur = (n) => (n == null ? "—" : `${Number(n).toLocaleString("de-DE")} €`);
+
+// Runde 21: lesbare Texte fuer Historie-Eintraege, die sonst als Kennung erscheinen.
+const HISTORIE_TEXT = {
+  "abholung.bericht": "Abholbericht vom Fahrer eingereicht",
+  "abholung.bericht.korrektur": "Abholbericht vom Fahrer korrigiert",
+  "inserat.foto.aus_abholbericht": "Fahrerfotos ins Inserat übernommen",
+};
 
 export default function FahrzeugAkte() {
   const { id } = useParams();
@@ -207,6 +216,12 @@ export default function FahrzeugAkte() {
               <div className="text-xs text-zinc-400 mb-2">
                 Ursprüngliche Daten vs. bei Abholung festgestellt — auswählen und übernehmen:
               </div>
+              {deviations.some((d) => d.photo_key) && fotosBis(report.created_at, akte.fahrerfoto_tage) && (
+                <div className="text-[11px] text-zinc-500 mb-2" data-testid="akte-fotos-bis">
+                  Fahrerfotos werden am {fotosBis(report.created_at, akte.fahrerfoto_tage).toLocaleDateString("de-DE")} automatisch
+                  gelöscht. Wichtige Fotos vorher im Verkaufsinserat übernehmen.
+                </div>
+              )}
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left overline">
@@ -228,10 +243,12 @@ export default function FahrzeugAkte() {
                       <td className="py-2 pr-2">
                         {dev.label}
                         {dev.photo_key && (
-                          <button type="button"
-                             onClick={() => openAuthedFile(`/pickup-fotos/${dev.photo_key}`, "image/jpeg")
-                               .catch(() => toast.error("Foto konnte nicht geladen werden"))}
-                             className="ml-2 text-xs text-sky-400 hover:underline">Foto</button>
+                          <span className="ml-2 inline-block align-middle">
+                            <AbholFoto photoKey={dev.photo_key} label={dev.label} size={44} />
+                          </span>
+                        )}
+                        {!dev.photo_key && dev.photo_deleted_at && (
+                          <span className="ml-2 text-[11px] text-zinc-500">Foto nach Frist gelöscht</span>
                         )}
                       </td>
                       <td className="py-2 pr-2 text-right text-zinc-400">{dev.expected || "—"}</td>
@@ -387,7 +404,7 @@ export default function FahrzeugAkte() {
         <div className="space-y-1 max-h-64 overflow-y-auto">
           {akte.history.map((h) => (
             <div key={h.id} className="flex justify-between gap-4 text-xs py-1 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-              <span className="text-zinc-300">{h.action}</span>
+              <span className="text-zinc-300">{HISTORIE_TEXT[h.action] || h.action}</span>
               <span className="text-zinc-600 whitespace-nowrap">{fmtDate(h.created_at)}</span>
             </div>
           ))}

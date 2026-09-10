@@ -36,6 +36,10 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "autoschnell")
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ["MONGO_URL"]
@@ -576,7 +580,7 @@ def _kaeufer_direkt(nr):
 @pytest.fixture(scope="module")
 def welt():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     import bcrypt
     dbx = _db()
     z = {}
@@ -627,7 +631,7 @@ def _inserat_freigeben(lid):
 
 def test_h_1_gesperrter_und_geloeschter_kaeufer(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     k1, k3, lid = welt["k1"], welt["k3"], welt["oeffentlich"]
     iid = _interesse(welt, k1, lid)
     # Admin deaktiviert das Konto
@@ -663,7 +667,7 @@ def test_h_1_gesperrter_und_geloeschter_kaeufer(welt):
 
 def test_h_2_netzwerk_widerruf_beendet_haendlerseite(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     h, k2, lid = welt["h"], welt["k2"], welt["privat"]
     r = requests.post(f"{API}/dealer/invites", headers=h["kopf"], json={"max_uses": 5}, timeout=30)
     assert r.status_code == 200, r.text[:300]
@@ -687,7 +691,7 @@ def test_h_2_netzwerk_widerruf_beendet_haendlerseite(welt):
 
 def test_h_48_eigenes_gegenangebot_nicht_annehmbar(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     k1, lid = welt["k1"], welt["oeffentlich"]
     # k1 wieder freischalten (Test 1 hat gesperrt)
     r = requests.post(f"{API}/admin/buyers/{k1['id']}/access", headers=welt["A"],
@@ -713,7 +717,7 @@ def test_h_48_eigenes_gegenangebot_nicht_annehmbar(welt):
 
 def test_h_62_parallele_registrierung_gleiche_mail(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     mail = f"r14mp_dup_{SUF}@{MAIL}"
     start = _jetzt()
     body = {"gewerblich_bestaetigt": True, "company_name": f"R14 Dup {SUF}",
@@ -731,7 +735,7 @@ def test_h_62_parallele_registrierung_gleiche_mail(welt):
 
 def test_h_66_verwaistes_mitglied(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     h = welt["h"]
     weg = f"r14mp_weg_{SUF}"
     _db().network_members.insert_one({"dealer_id": h["dealer_id"], "buyer_user_id": weg,
@@ -746,7 +750,7 @@ def test_h_66_verwaistes_mitglied(welt):
 
 def test_h_87_alle_gueltigen_einladungen_loeschbar(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     h = welt["h"]
     dbx = _db()
     docs = []
@@ -774,7 +778,7 @@ def test_h_87_alle_gueltigen_einladungen_loeschbar(welt):
 
 def test_h_119_parallele_profil_updates(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     h = welt["h"]
     dbx = _db()
     seit = dbx.dealers.find_one({"id": h["dealer_id"]})["marketplace"].get("member_since")

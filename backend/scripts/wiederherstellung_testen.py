@@ -13,7 +13,8 @@ Ablauf:
 
 Exit 0 = Wiederherstellung bewiesen und Backup vollstaendig
 Exit 2 = Datenbank-Wiederherstellung bewiesen, aber Backup UNVOLLSTAENDIG
-         (Datei-Speicher oder Offsite-Kopie fehlt) — Ursache beheben
+         (Datei-Speicher oder Offsite-Kopie fehlt) oder INKONSISTENT
+         (Snapshot gescheitert, Runde 21) — Ursache beheben
 Exit 1 = Abweichung gefunden bzw. Backup/Restore fehlgeschlagen
 
 Monatlich laufen lassen (DEPLOYMENT.md, "Restore-Probe") — ein Backup, das
@@ -26,7 +27,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from pymongo import MongoClient
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from backup_bewertung import inkonsistenz  # noqa: E402
+from pymongo import MongoClient  # noqa: E402
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 DB_NAME = os.environ.get("DB_NAME", "autoschnell")
@@ -46,18 +50,23 @@ def main() -> int:
         r = subprocess.run([sys.executable, "-X", "utf8",
                             str(HIER / "backup_mongo.py"), "--dir", tmp],
                            capture_output=True, text=True, timeout=1800)
-        if r.returncode not in (0, 2):
+        # Runde 21: Exit 3 = BACKUP INKONSISTENT (Daten gesichert, aber nicht
+        # stichtagsgleich) — die Wiederherstellung wird trotzdem geprobt.
+        if r.returncode not in (0, 2, 3):
             print("BACKUP FEHLGESCHLAGEN:\n", r.stdout[-800:], r.stderr[-800:])
             return 1
         dump = next(p for p in Path(tmp).iterdir()
                     if p.is_dir() and p.name.startswith("autoschnell-"))
         manifest = json.loads((dump / "manifest.json").read_text(encoding="utf-8"))
         fehlend = [str(x) for x in manifest.get("unvollstaendig") or []]
+        grund = inkonsistenz(manifest)
         print(f"      Backup: {dump.name} (Konsistenz: "
               f"{manifest.get('konsistenz', 'unbekannt')}, Offsite: "
               f"{'ja' if manifest.get('offsite') else 'nein'})")
         if fehlend:
             print("      WARNUNG: Backup UNVOLLSTAENDIG — " + "; ".join(fehlend))
+        if grund:
+            print("      WARNUNG: Backup INKONSISTENT — " + grund)
 
         print(f"[2/4] Wiederherstellung in Testdatenbank '{TEST_DB}' (nur Datenbank) …")
         client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
@@ -66,6 +75,8 @@ def main() -> int:
                str(dump), "--db", TEST_DB, "--yes", "--nur-datenbank"]
         if fehlend:
             cmd.append("--notfall-unvollstaendig-akzeptieren")
+        if grund:
+            cmd.append("--notfall-inkonsistent-akzeptieren")
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         if r.returncode != 0 or "RESTORE OK" not in (r.stdout or ""):
             print("RESTORE FEHLGESCHLAGEN:\n", r.stdout[-1200:], r.stderr[-800:])
@@ -99,6 +110,11 @@ def main() -> int:
         if fehler:
             print(f"\nERGEBNIS: {fehler} Abweichung(en) — Backup NICHT ok!")
             return 1
+        if grund:
+            print(f"\nERGEBNIS: Datenbank-Wiederherstellung bewiesen ({len(erwartet)} "
+                  f"Collections), ABER das Backup ist INKONSISTENT: {grund}"
+                  + (f"; zudem UNVOLLSTAENDIG: {'; '.join(fehlend)}" if fehlend else ""))
+            return 2
         if fehlend:
             print(f"\nERGEBNIS: Datenbank-Wiederherstellung bewiesen ({len(erwartet)} "
                   f"Collections), ABER das Backup ist UNVOLLSTAENDIG: "

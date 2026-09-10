@@ -34,6 +34,10 @@ BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -466,7 +470,7 @@ def _kopf(token):
 @pytest.fixture(scope="module")
 def welt():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     import routes.drivers as D
     dbx = _db()
     z = {}
@@ -525,7 +529,7 @@ def _termin(welt, h, status, **extra):
 
 def test_9_http_gesperrte_firma_fuer_fahrer_zu(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     f = welt["fahrer"]["kopf"]
     a1 = _termin(welt, "h1", "offen")
@@ -557,7 +561,7 @@ def test_9_http_gesperrte_firma_fuer_fahrer_zu(welt):
 
 def test_43_36_http_kaputtes_foto_loest_reservierung_und_dateien(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     f = welt["fahrer"]["kopf"]
     d = welt["h1"]["dealer_id"]
@@ -579,7 +583,7 @@ def test_43_36_http_kaputtes_foto_loest_reservierung_und_dateien(welt):
 
 def test_37_38_http_nur_ersetzte_version_und_ein_aktueller(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     f = welt["fahrer"]["kopf"]
     d = welt["h1"]["dealer_id"]
@@ -604,7 +608,7 @@ def test_37_38_http_nur_ersetzte_version_und_ein_aktueller(welt):
 
 def test_111_http_konfliktzaehler(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     ids = [_termin(welt, "h1", "offen", pickup_date="2026-10-01", pickup_time=f"{i % 24:02d}:00")
            for i in range(51)]
     try:

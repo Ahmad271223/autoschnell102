@@ -813,6 +813,9 @@ async def get_pickup_report(appt_id: str, versions: int = 0,
     ).sort("version", -1).to_list(1)
     current = aktuelle[0] if aktuelle else None
     out: Dict[str, Any] = {"report": current}
+    # Runde 21: Frist der Fahrerfotos (Tage ab dem Hochladen) fuer die Anzeige.
+    from cleanup_service import FAHRERFOTO_TAGE
+    out["fahrerfoto_tage"] = FAHRERFOTO_TAGE
     if versions:
         out["versions"] = await db.pickup_reports.find(
             {"appointment_id": appt_id}, {"_id": 0},

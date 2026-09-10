@@ -34,6 +34,10 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -473,7 +477,7 @@ def test_96_sucher_upload_setzt_nur_override(monkeypatch, storage_attrappe):
 @pytest.fixture(scope="module")
 def welt():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = requests.post(f"{API}/auth/register", json={
         "email": f"r14td_{SUF}@{MAIL}", "password": PW,
         "company_name": "R14 Team GmbH", "contact_person": "R T", "phone": "0511 14"},
@@ -509,7 +513,7 @@ def _offen(**filt):
 
 def test_http_33_doppelte_sucher_anfrage_bereits_offen(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     url = f"{API}/dealer/sucher/{welt['sucher_id']}/abo-anfrage"
     r1 = requests.post(url, headers=welt["C"], json={"plan": "monthly"}, timeout=30)
     r2 = requests.post(url, headers=welt["C"], json={"plan": "yearly"}, timeout=30)
@@ -525,7 +529,7 @@ def test_http_33_doppelte_sucher_anfrage_bereits_offen(welt):
 
 def test_http_56_sechzehn_parallele_eigene_anfragen(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     _db().plan_requests.delete_many({"subject_user_id": welt["chef"]["id"]})
     n = 16
     schranke = Barrier(n)
@@ -550,7 +554,7 @@ def test_http_56_sechzehn_parallele_eigene_anfragen(welt):
 
 def test_http_56_index_vorhanden():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     info = _db().plan_requests.index_information()
     partial = [v for v in info.values() if v.get("partialFilterExpression")]
     schluessel = {tuple(sorted(k for k, _ in v["key"])) for v in partial if v.get("unique")}
@@ -560,7 +564,7 @@ def test_http_56_index_vorhanden():
 
 def test_http_57_verkaufspaket_anfrage_idempotent(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     url = f"{API}/dealer/sale-plan/upgrade-request"
     r1 = requests.post(url, headers=welt["C"], json={"wanted_tier": "s10"}, timeout=30)
     if r1.status_code == 400 and "kostenlos" in r1.text:
@@ -576,7 +580,7 @@ def test_http_57_verkaufspaket_anfrage_idempotent(welt):
 
 def test_http_104_deaktivierter_sucher_400(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     sid = welt["sucher_id"]
     _db().plan_requests.delete_many({"subject_user_id": sid})
     _db().users.update_one({"id": sid}, {"$set": {"active": False}})
@@ -595,7 +599,7 @@ def test_http_104_deaktivierter_sucher_400(welt):
 
 def test_http_72_92_liste_ueber_100_und_fremde_dealer_id(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     extra = [{"id": f"r14x-{SUF}-{i}", "email": f"r14x_{SUF}_{i}@{MAIL}",
               "password_hash": "x", "role": "sucher", "active": True,
@@ -629,7 +633,7 @@ def test_http_72_92_liste_ueber_100_und_fremde_dealer_id(welt):
 
 def test_http_70_kuendigung_trifft_das_angezeigte_abo(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     chef = welt["chef"]
     dbx.subscriptions.delete_many({"dealer_id": welt["dealer_id"]})
@@ -664,7 +668,7 @@ def test_http_70_kuendigung_trifft_das_angezeigte_abo(welt):
 
 def test_http_71_anzeige_ohne_gemischte_felder(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     chef = welt["chef"]
     dbx.subscriptions.delete_many({"dealer_id": welt["dealer_id"]})
@@ -689,7 +693,7 @@ def test_http_71_anzeige_ohne_gemischte_felder(welt):
 
 def test_http_103_fremder_logo_host_abgelehnt(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     for H in (welt["C"], welt["S"]):
         r = requests.put(f"{API}/dealer/settings", headers=H,
                          json={"profile": {"logo_url": "https://tracker.example/x.png"}},
@@ -703,7 +707,7 @@ def test_http_103_fremder_logo_host_abgelehnt(welt):
 
 def test_http_116_zu_grosser_base64_string_422(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = requests.post(f"{API}/dealer/logo", headers=welt["C"],
                       json={"logo_b64": "A" * 3_000_000}, timeout=60)
     assert r.status_code == 422, r.text[:200]
@@ -711,7 +715,7 @@ def test_http_116_zu_grosser_base64_string_422(welt):
 
 def test_http_96_logo_wechsel_raeumt_altes_auf(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     import base64
     import io
     try:

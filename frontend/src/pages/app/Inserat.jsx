@@ -24,6 +24,7 @@ export default function Inserat() {
   const nav = useNavigate();
   const [l, setL] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [abholBusy, setAbholBusy] = useState(false);
   const fileRef = useRef(null);
   const backend = process.env.REACT_APP_BACKEND_URL;
 
@@ -107,6 +108,18 @@ export default function Inserat() {
       toast.success(`${photos.length} Foto(s) hochgeladen`);
       load();
     } catch (e) { toast.error(errMsg(e)); }
+  };
+
+  // Runde 21: Fotos aus dem Abholbericht (z.B. Schaeden) mit einem Klick uebernehmen.
+  const fahrerfotosUebernehmen = async () => {
+    if (abholBusy) return;                 // Doppelklick-Sperre
+    setAbholBusy(true);
+    try {
+      const r = await api.post(`/resale/${l.id}/photos/aus-abholbericht`, {});
+      toast.success(`${r.data?.uebernommen || 0} Foto(s) vom Fahrer übernommen`);
+      await load();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setAbholBusy(false); }
   };
 
   const margin = l.margin || {};
@@ -298,6 +311,19 @@ export default function Inserat() {
                 </button>
               ))}
             </div>
+            {(l.abholfotos || []).length > 0 && !["verkauft", "geloescht"].includes(l.status) && (
+              <div className="mt-3 rounded-lg p-2.5 flex flex-wrap items-center gap-2" data-testid="abholfotos-hinweis"
+                   style={{ background: "rgba(56,189,248,0.06)", border: "1px solid rgba(56,189,248,0.25)" }}>
+                <button onClick={fahrerfotosUebernehmen} data-testid="abholfotos-uebernehmen" disabled={abholBusy}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-sky-300 hover:text-sky-200">
+                  <Camera size={14} /> {abholBusy ? "Wird übernommen…" : `${l.abholfotos.length} Foto${l.abholfotos.length === 1 ? "" : "s"} vom Fahrer übernehmen`}
+                </button>
+                <span className="text-[11px] text-zinc-500">
+                  Aus dem Abholbericht, z.B. Schäden. Übernommene Fotos bleiben im Inserat, auch wenn der
+                  Abholbericht seine Fotos nach {l.fahrerfoto_tage || 90} Tagen löscht.
+                </span>
+              </div>
+            )}
             <div className="mt-3 grid grid-cols-4 sm:grid-cols-6 gap-2">
               {(mode !== "neu") && einkaufFotos.slice(0, 12).map((u, i) => (
                 <div key={`e${i}`} className="relative group">

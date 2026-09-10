@@ -626,6 +626,9 @@ async def ensure_indexes():
     await db.pickup_reports.create_index(
         [("appointment_id", 1), ("version", 1)], unique=True,
         name="berichtsversion_eindeutig")
+    # Runde 21: Fahrerfotos laufen FAHRERFOTO_TAGE nach dem Hochladen ab
+    # (cleanup_service.berichtsfotos_nach_frist_loeschen sucht nach created_at).
+    await db.pickup_reports.create_index([("created_at", 1)], name="bericht_erstellt")
     # Tagesbudget-Zaehler (provider_fetch) raeumen sich selbst weg.
     await db.provider_budget.create_index("ablauf", expireAfterSeconds=0)
     # TTL on cache (30 minutes)

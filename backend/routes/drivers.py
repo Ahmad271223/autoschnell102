@@ -1023,9 +1023,9 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
         raise HTTPException(404, "Datei nicht gefunden")
     # Runde 13: B1 — Berechtigung ueber die DB-Ressource, nicht nur ueber den
     # Firmen-Praefix im Pfad: das Foto muss zu einem Abholbericht der eigenen
-    # Firma gehoeren (wie die Fahrer-Variante unten). Termine und Berichte
-    # sind lesend firmenweit (Beschluss offen, ob je Sucher getrennt) — die
-    # Foto-Route ist damit mit ihrer Elternressource konsistent.
+    # Firma gehoeren (wie die Fahrer-Variante unten). Seit Runde 16 und dem
+    # Umbau Kaufvorgaenge gilt: der Chef sieht alle Berichte der Firma, ein
+    # Sucher nur Berichte zu Terminen im eigenen Bereich (direkt darunter).
     bericht = await db.pickup_reports.find_one(
         {"deviations.photo_key": key, "dealer_id": user["dealer_id"]},
         {"_id": 0, "id": 1, "appointment_id": 1, "vehicle_id": 1})
@@ -1061,13 +1061,19 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
     # Key beliebige Abholfotos dieser Firma zu laden.
     eigener_bericht = await db.pickup_reports.find_one(
         {"deviations.photo_key": key, "driver_account_id": driver["id"]},
-        {"_id": 0, "dealer_id": 1})
+        {"_id": 0, "dealer_id": 1, "appointment_id": 1})
     if not eigener_bericht:
         raise HTTPException(404, "Datei nicht gefunden")
     # ... und nur solange der Fahrer bei dieser Firma noch in der Liste steht.
     try:
         await _zugriff_pruefen(eigener_bericht, driver)
     except HTTPException:
+        raise HTTPException(404, "Datei nicht gefunden")
+    # Runde 21: ... und nur solange der Termin noch IHM zugeteilt ist. Nach
+    # einer Neuzuteilung an einen anderen Fahrer endet der Zugriff.
+    if not await db.appointments.find_one(
+            {"id": eigener_bericht.get("appointment_id"), "driver_id": driver["id"]},
+            {"_id": 1}):
         raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, load_async, StorageError
     try:
@@ -1271,8 +1277,11 @@ async def driver_get_report(appt_id: str, driver=Depends(current_driver)):
     await _zugriff_pruefen(appt, driver)
     # Nachpruefung Runde 14, Nr. 38: hoechste Version explizit — die
     # Reihenfolge ohne sort hing vom Index ab, den der Planer waehlte.
+    # Runde 21: nur der EIGENE Bericht. Nach einer Neuzuteilung sah der neue
+    # Fahrer vorher den Bericht des Vorgaengers (Name, Notizen, Fotoschluessel).
     report = await db.pickup_reports.find_one(
-        {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
+        {"appointment_id": appt_id, "superseded": {"$ne": True},
+         "driver_account_id": driver["id"]}, {"_id": 0},
         sort=[("version", -1)],
     )
     return report or {}

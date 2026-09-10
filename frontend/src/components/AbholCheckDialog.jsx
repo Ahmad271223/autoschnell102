@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
+import { verkleinereBildDatei } from "@/lib/bilder";
 import { toast } from "sonner";
 import { X, Plus, Trash2, Camera, CheckCircle2 } from "lucide-react";
 
@@ -33,25 +34,44 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
   const [notes, setNotes] = useState("");
   const [deviations, setDeviations] = useState([]);
   const [busy, setBusy] = useState(false);
+  // Runde 21 (Gegenpruefung): Fotos, die gerade noch verkleinert werden —
+  // solange darf nicht abgesendet werden (sonst fehlt das Foto im
+  // unveraenderbaren Bericht).
+  const [fotoLaeuft, setFotoLaeuft] = useState(0);
 
   const addDeviation = () =>
-    setDeviations((d) => [...d, { field: "damage", label: "", expected: "", actual: "", note: "", photo_b64: null }]);
+    setDeviations((d) => [...d, {
+      // feste Kennung je Zeile: ein spaet fertiges Foto landet sicher in der
+      // richtigen Abweichung, auch wenn inzwischen eine Zeile geloescht wurde
+      id: (window.crypto && window.crypto.randomUUID && window.crypto.randomUUID()) || `${Date.now()}-${Math.random()}`,
+      field: "damage", label: "", expected: "", actual: "", note: "", photo_b64: null,
+    }]);
 
-  const updateDev = (i, patch) =>
-    setDeviations((d) => d.map((x, idx) => (idx === i ? { ...x, ...patch } : x)));
+  const updateDev = (id, patch) =>
+    setDeviations((d) => d.map((x) => (x.id === id ? { ...x, ...patch } : x)));
 
-  const removeDev = (i) => setDeviations((d) => d.filter((_, idx) => idx !== i));
+  const removeDev = (id) => setDeviations((d) => d.filter((x) => x.id !== id));
 
-  const attachPhoto = (i, file) => {
+  // Runde 21: Foto im Handy auf max. 2000 px verkleinern — schneller Upload
+  // auch mit schwachem Netz, und Aufnahmeort/Geraetedaten fallen weg. Klappt
+  // das nicht, geht das Original wie bisher (max. 6 MB).
+  const attachPhoto = async (id, file) => {
     if (!file) return;
-    if (file.size > 6 * 1024 * 1024) { toast.error("Foto zu groß (max. 6 MB)"); return; }
-    const reader = new FileReader();
-    reader.onload = () => updateDev(i, { photo_b64: reader.result });
-    reader.readAsDataURL(file);
+    setFotoLaeuft((n) => n + 1);
+    try {
+      let dataUrl = null;
+      try { dataUrl = await verkleinereBildDatei(file); } catch { dataUrl = null; }
+      if (!dataUrl) { toast.error("Foto konnte nicht gelesen werden"); return; }
+      if (dataUrl.length > 8000000) { toast.error("Foto zu groß (max. 6 MB)"); return; }
+      updateDev(id, { photo_b64: dataUrl });
+    } finally {
+      setFotoLaeuft((n) => n - 1);
+    }
   };
 
   const submit = async () => {
     if (busy) return;
+    if (fotoLaeuft > 0) { toast.info("Foto wird noch vorbereitet – bitte kurz warten."); return; }
     for (const d of deviations) {
       if (!d.label.trim()) { toast.error("Bitte jede Abweichung kurz benennen."); return; }
     }
@@ -154,26 +174,26 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
           </button>
         </div>
 
-        {deviations.map((d, i) => (
-          <div key={i} className="mt-2 rounded-xl border p-3 space-y-2" style={inputStyle}>
+        {deviations.map((d) => (
+          <div key={d.id} className="mt-2 rounded-xl border p-3 space-y-2" style={inputStyle}>
             <div className="flex items-center gap-2">
               <select value={d.field}
-                      onChange={(e) => updateDev(i, { field: e.target.value })}
+                      onChange={(e) => updateDev(d.id, { field: e.target.value })}
                       className="flex-1 rounded-lg border bg-[#141416] px-2 py-1.5 text-xs"
                       style={inputStyle}>
                 {DEVIATION_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
               </select>
-              <button type="button" onClick={() => removeDev(i)} className="text-zinc-500 hover:text-red-400">
+              <button type="button" onClick={() => removeDev(d.id)} className="text-zinc-500 hover:text-red-400">
                 <Trash2 size={15} />
               </button>
             </div>
-            <input value={d.label} onChange={(e) => updateDev(i, { label: e.target.value })}
+            <input value={d.label} onChange={(e) => updateDev(d.id, { label: e.target.value })}
                    placeholder="Kurzbeschreibung, z.B. Kratzer hinten rechts *"
                    className={inputCls} style={inputStyle} />
             <div className="grid grid-cols-2 gap-2">
-              <input value={d.expected} onChange={(e) => updateDev(i, { expected: e.target.value })}
+              <input value={d.expected} onChange={(e) => updateDev(d.id, { expected: e.target.value })}
                      placeholder="Laut Vertrag (z.B. 84.000 km)" className={inputCls} style={inputStyle} />
-              <input value={d.actual} onChange={(e) => updateDev(i, { actual: e.target.value })}
+              <input value={d.actual} onChange={(e) => updateDev(d.id, { actual: e.target.value })}
                      placeholder="Vor Ort (z.B. 85.120 km)" className={inputCls} style={inputStyle} />
             </div>
             <div className="flex items-center gap-2">
@@ -181,7 +201,7 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
                 <Camera size={14} />
                 {d.photo_b64 ? "Foto ersetzen" : "Foto anhängen"}
                 <input type="file" accept="image/*" capture="environment" className="hidden"
-                       onChange={(e) => attachPhoto(i, e.target.files?.[0])} />
+                       onChange={(e) => attachPhoto(d.id, e.target.files?.[0])} />
               </label>
               {d.photo_b64 && <img src={d.photo_b64} alt="" className="h-10 w-10 rounded object-cover" />}
             </div>
@@ -194,11 +214,11 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
                     className={inputCls} style={inputStyle} />
         </div>
 
-        <button onClick={submit} disabled={busy}
+        <button onClick={submit} disabled={busy || fotoLaeuft > 0}
                 className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold text-white disabled:opacity-50"
                 style={{ background: "var(--accent-red, #FF3B30)" }}>
           <CheckCircle2 size={17} />
-          {busy ? "Wird gesendet…" : deviations.length
+          {fotoLaeuft > 0 ? "Foto wird vorbereitet…" : busy ? "Wird gesendet…" : deviations.length
             ? `Abholung mit ${deviations.length} Abweichung(en) bestätigen`
             : "Abholung ohne Abweichungen bestätigen"}
         </button>

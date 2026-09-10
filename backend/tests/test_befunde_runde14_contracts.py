@@ -28,6 +28,10 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "autoschnell")
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ["MONGO_URL"]
@@ -272,7 +276,7 @@ def test_73_list_contracts_limit_2000_mit_kopfzeile():
 @pytest.fixture(scope="module")
 def welt():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = requests.post(f"{API}/auth/register", json={
         "email": f"r14c_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "R14 Contracts GmbH", "contact_person": "R T",
@@ -305,7 +309,7 @@ def welt():
 
 def test_http_88_preview_lehnt_kaputte_schaeden_ab(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     basis = {"vehicle_id": welt["vid"], "seller_name": "R V", "purchase_price": 100}
     for kaputt in ([None], [{"zone": "a"}] * 201, [{"zone": "x" * 200000}], ["x" * 5001]):
         r = requests.post(f"{API}/contracts/preview", headers=welt["h"],
@@ -325,7 +329,7 @@ def test_http_88_preview_lehnt_kaputte_schaeden_ab(welt):
 
 def test_http_68_get_contracts_verewigt_keine_heutigen_bilder(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     alt_id = f"alt-{SUF}"
     urls = ["https://img.e2etest/1.jpg", "https://img.e2etest/2.jpg"]
@@ -351,7 +355,7 @@ def test_http_68_get_contracts_verewigt_keine_heutigen_bilder(welt):
 
 def test_http_73_liste_bis_2000_und_kopfzeile(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     marker = f"masse-{SUF}"
     docs = [{"id": f"{marker}-{i}", "contract_no": f"KV-M{i}",
@@ -376,7 +380,7 @@ def test_http_73_liste_bis_2000_und_kopfzeile(welt):
 
 def test_http_118_send_status_bleibt_bei_200_eintraegen(welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     from routes.contracts import SEND_STATUS_MAX
     n = SEND_STATUS_MAX + 10
     keys = []
@@ -405,7 +409,7 @@ def test_http_118_wiederaufnahme_nach_slice_funktioniert(welt):
     """Haengender Eintrag am Ende der (vollen) Liste: der naechste Klick
     nimmt ihn wieder auf, statt einen zweiten anzulegen."""
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     from routes.contracts import SEND_STATUS_MAX
     alt = f"haengt-{uuid.uuid4().hex[:8]}"
     _db().generated_pdfs.update_one({"id": welt["cid"]}, {"$push": {"send_status": {

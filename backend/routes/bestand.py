@@ -356,6 +356,10 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0},
     ).sort("created_at", -1).to_list(10)
     eigene_termin_ids = [a["id"] for a in appointments]
+    # Runde 21: ALLE Termine im Bereich (nicht nur die 10 neuesten) fuer
+    # Bericht, Protokolle und Historie.
+    alle_termin_ids = await db.appointments.distinct(
+        "id", {"vehicle_id": vehicle_id, **await termin_bereich(user)})
 
     # Nachpruefung Runde 14 (Nr. 47): Versionierung/superseded gilt je
     # Termin — bei mehreren Terminen je Fahrzeug lieferte find_one den
@@ -364,11 +368,14 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # Verkaufsentwurf, Nr. 45/46); Import in der Funktion, weil das Modul
     # parallel entsteht und keinen Import-Zyklus mit den Routen bilden soll.
     from abholbericht import massgeblicher_bericht
-    report = await massgeblicher_bericht(db, vehicle_id, user["dealer_id"])
     ist_sucher = user.get("role") == "sucher"
-    if ist_sucher and report and report.get("appointment_id") not in eigene_termin_ids:
-        report = None
-    nur_eigene = {"appointment_id": {"$in": eigene_termin_ids}} if ist_sucher else {}
+    # Runde 21: fuer Sucher der massgebliche Bericht UNTER DEN EIGENEN
+    # Terminen — vorher wurde der firmenweit massgebliche Bericht (evtl. der
+    # eines Kollegen) ausgeblendet und der eigene samt Fotos nie gezeigt.
+    report = await massgeblicher_bericht(
+        db, vehicle_id, user["dealer_id"],
+        nur_termine=alle_termin_ids if ist_sucher else None)
+    nur_eigene = {"appointment_id": {"$in": alle_termin_ids}} if ist_sucher else {}
     # Zusaetzlich alle Berichte je Termin (auch ersetzte), damit die Akte
     # jedem Termin seinen Bericht zuordnen kann.
     pickup_reports = await db.pickup_reports.find(
@@ -410,9 +417,14 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
 
     # Runde 12: Sucher sehen nur ihre eigenen Aktionen zum Fahrzeug —
     # nicht, was Chef oder Kollegen damit gemacht haben.
-    history_filter = {"ref": vehicle_id, "dealer_id": user["dealer_id"]}
+    # Runde 21: auch Eintraege zu den Terminen des Fahrzeugs (z.B. "Abholbericht
+    # eingereicht", ref=Termin) — vorher fehlten sie in jeder Akte.
+    history_filter = {"ref": {"$in": [vehicle_id, *alle_termin_ids]},
+                      "dealer_id": user["dealer_id"]}
     if ist_sucher:
-        history_filter["user_id"] = user["id"]
+        history_filter = {"dealer_id": user["dealer_id"], "$or": [
+            {"ref": vehicle_id, "user_id": user["id"]},
+            {"ref": {"$in": alle_termin_ids}}]}
     history = await db.activity_logs.find(history_filter, {"_id": 0}) \
         .sort("created_at", -1).to_list(100)
 
@@ -462,6 +474,9 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     return {
         "vehicle": v,
         "einkaufspreis": einkaufspreis,
+        # Runde 21: Frist der Fahrerfotos in Tagen ab dem Hochladen (Anzeige
+        # "Fotos werden am ... geloescht").
+        "fahrerfoto_tage": __import__("cleanup_service").FAHRERFOTO_TAGE,
         "kaufvorgaenge": kaufvorgaenge,
         "owner": owner,
         "mitbearbeiter": [{"id": m, "name": mit_namen.get(m, m)}

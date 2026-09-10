@@ -17,12 +17,23 @@ _id, oder None, wenn es keinen aktuellen Bericht gibt.
 from typing import Optional
 
 
-async def massgeblicher_bericht(db, vehicle_id: str, dealer_id: str) -> Optional[dict]:
+async def massgeblicher_bericht(db, vehicle_id: str, dealer_id: str,
+                                nur_termine: Optional[list] = None) -> Optional[dict]:
+    """nur_termine (Runde 21): Auswahl nur unter den Berichten dieser Termine
+    — fuer Sucher. Vorher waehlte die Akte den massgeblichen Bericht der
+    GANZEN Firma und blendete ihn fuer den Sucher aus, wenn er zum Termin
+    eines Kollegen gehoerte; den eigenen Bericht samt Fotos sah er dann nie."""
     if not vehicle_id or not dealer_id:
         return None
+    filter_: dict = {"vehicle_id": vehicle_id, "dealer_id": dealer_id,
+                     "superseded": {"$ne": True}}
+    if nur_termine is not None:
+        termine = [t for t in nur_termine if t]
+        if not termine:
+            return None
+        filter_["appointment_id"] = {"$in": termine}
     berichte = await db.pickup_reports.find(
-        {"vehicle_id": vehicle_id, "dealer_id": dealer_id,
-         "superseded": {"$ne": True}},
+        filter_,
         {"_id": 0},
     ).sort([("created_at", -1), ("version", -1)]).to_list(100)
     if not berichte:

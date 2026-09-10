@@ -37,6 +37,10 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -705,7 +709,7 @@ def firmen():
 
 def test_10_http_fremde_firma_sieht_keine_ersteller_metadaten(firmen):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     a, b = firmen
     d = _db()
     vid = f"v_r14_{SUF}"
@@ -741,7 +745,7 @@ def test_10_http_fremde_firma_sieht_keine_ersteller_metadaten(firmen):
 
 def test_11_http_vor_dir_zaehlt_nur_eigene_jobs(firmen):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     a, b = firmen
     d = _db()
     frueher = JETZT - timedelta(minutes=5)
@@ -777,7 +781,7 @@ def test_11_http_vor_dir_zaehlt_nur_eigene_jobs(firmen):
 
 def test_85_http_ohne_haendlerprofil_403(firmen):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     a, _b = firmen
     d = _db()
     dealer = d.dealers.find_one({"id": a["dealer_id"]})
@@ -797,7 +801,7 @@ def test_85_http_ohne_haendlerprofil_403(firmen):
 
 def test_60_61_http_indizes_nach_start_vorhanden():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     assert requests.get(f"{API}/health", timeout=30).status_code == 200
     d = _db()
     assert "grant_je_session" in _index_namen(d.zugang_grants)
@@ -805,3 +809,59 @@ def test_60_61_http_indizes_nach_start_vorhanden():
     assert "uniq_offene_sucher_abo_anfrage" in _index_namen(d.plan_requests)
     assert "uniq_offene_verkaufspaket_anfrage" in _index_namen(d.plan_requests)
     assert d.storage_delete_retry.count_documents({"art": {"$exists": False}}) == 0
+
+
+# =============================================================== CI (Runde 21)
+# Runde 21 (Pruefbefund C): die HTTP-Teile aller Runde-14-Dateien liefen in
+# der CI nie — RUNDE14_HTTP fehlte im Workflow, rund 60 Tests wurden still
+# uebersprungen (Grund "HTTP nach Neustart"). Diese Tests halten fest, dass
+# der Schalter im Schritt mit dem laufenden Backend gesetzt bleibt und jeder
+# Skip einen verstaendlichen Grund traegt.
+WURZEL = Path(__file__).resolve().parents[2]
+CI_YML = WURZEL / ".github" / "workflows" / "ci.yml"
+
+
+def _ci_schritt(ci, name):
+    start = ci.index(f"- name: {name}")
+    ende = ci.find("\n      - ", start + 1)
+    return ci[start:] if ende == -1 else ci[start:ende]
+
+
+def test_r21_ci_schaltet_runde14_http_tests_ein():
+    import re
+    ci = CI_YML.read_text(encoding="utf-8")
+    job = ci[ci.index("\n  backend:"):ci.index("\n  frontend:")]
+    schritt = _ci_schritt(job, "Selbsttest-Suite")
+    # Schalter als echte YAML-Zeile (kein Kommentar), im Schritt oder im
+    # Job-env — beides wirkt fuer pytest; 1 mit oder ohne Anfuehrungszeichen.
+    schalter = r'^\s+RUNDE14_HTTP:\s*["\']?1["\']?\s*$'
+    job_env = job[:job.index("\n    steps:")]
+    assert (re.search(schalter, schritt, re.M)
+            or re.search(schalter, job_env, re.M)), schritt
+    # Runde 21 (Gegenpruefung): "-rs" steht auch im Kommentar ueber dem
+    # Schritt — geprueft wird deshalb der pytest-Aufruf selbst (-rs, -ra, -rfs).
+    assert re.search(r'^\s*python -m pytest\b[^\n#]*\s-r[a-zA-Z]*[sa]\b',
+                     schritt, re.M), "Skip-Gruende muessen im CI-Log stehen (pytest -rs)"
+    # Das Backend fuer die HTTP-Tests laeuft im selben Job VOR der Suite auf
+    # dem Port aus TEST_BASE_URL (sonst liefen die Tests ins Leere).
+    assert "TEST_BASE_URL: http://127.0.0.1:8001" in job
+    assert "- name: Backend starten" in job, "Schritt 'Backend starten' fehlt im Job backend"
+    start = job.index("- name: Backend starten")
+    assert "--port 8001" in _ci_schritt(job, "Backend starten")
+    assert start < job.index("- name: Selbsttest-Suite")
+    # Uebersicht der verbleibenden Skips liegt im Repo
+    doku = WURZEL / "docs" / "tests" / "UEBERSPRUNGENE_TESTS.md"
+    assert doku.is_file(), doku
+    assert "RUNDE14_HTTP" in doku.read_text(encoding="utf-8")
+
+
+def test_r21_runde14_skips_haben_klaren_grund():
+    alt = 'pytest.skip("HTTP nach ' + 'Neustart")'
+    dateien = sorted(Path(__file__).resolve().parent.glob("test_befunde_runde14_*.py"))
+    assert len(dateien) >= 9, dateien
+    for datei in dateien:
+        text = datei.read_text(encoding="utf-8")
+        assert alt not in text, f"{datei.name}: Skip ohne klaren Grund"
+        if 'os.environ.get("RUNDE14_HTTP")' in text:
+            assert "HTTP_GRUND = (" in text and "RUNDE14_HTTP=1" in text, datei.name
+            assert "pytest.skip(HTTP_GRUND)" in text, datei.name

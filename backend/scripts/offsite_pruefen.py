@@ -118,7 +118,11 @@ def main():
                         manifest = [n for n in namen if n.endswith("manifest.json")]
                         if manifest:
                             m = json.load(io.TextIOWrapper(t.extractfile(manifest[0]), encoding="utf-8"))
-                            print(f"OK   Manifest: {sum(m.get('collections', {}).values())} Dokumente, unvollstaendig={m.get('unvollstaendig') or 'nein'}")
+                            print(f"OK   Manifest: {sum(m.get('collections', {}).values())} Dokumente, unvollstaendig={m.get('unvollstaendig') or 'nein'}, konsistenz={m.get('konsistenz', 'unbekannt')}")
+                            # Runde 21: ein inkonsistentes Backup deutlich nennen
+                            from backup_bewertung import inkonsistenz
+                            if inkonsistenz(m):
+                                print(f"WARN  Juengstes Offsite-Backup ist INKONSISTENT (kein guter Stand): {inkonsistenz(m)}")
                         else:
                             print("FEHLER Kein manifest.json im Archiv"); fehler += 1
                 except Exception as exc:  # noqa: BLE001

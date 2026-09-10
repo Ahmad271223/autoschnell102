@@ -113,6 +113,44 @@ def _liste(wert) -> List[str]:
 
 
 # --------------------------------------------------------------- Resend
+# Runde 21 (Kapazitaetsfrage 50 gleichzeitige Nutzer): Resend erlaubt
+# standardmaessig 10 Anfragen je Sekunde fuer das ganze Konto; jeder
+# Vertragsversand braucht zwei (Mail + Kopie an den Sucher). Schickten viele
+# Sucher gleichzeitig, antwortete Resend mit 429 und der Versand scheiterte
+# sofort ("E-Mail-Versand fehlgeschlagen"). Jetzt: hoechstens
+# RESEND_PARALLEL gleichzeitige Anfragen je Worker, und bei 429 bzw.
+# voruebergehenden Serverfehlern ein erneuter Versuch mit kurzer Wartezeit
+# (Retry-After des Anbieters, sonst 0,5-4 s plus Zufall, zusammen hoechstens
+# RESEND_WARTEN_MAX Sekunden). Wiederholungen sind sicher, weil jede Mail
+# einen Idempotency-Key traegt (Resend stellt dann nicht doppelt zu).
+RESEND_PARALLEL = max(1, int(os.environ.get("RESEND_PARALLEL", "3") or 3))
+RESEND_VERSUCHE = max(1, int(os.environ.get("RESEND_VERSUCHE", "6") or 6))
+RESEND_WARTEN_MAX = float(os.environ.get("RESEND_WARTEN_MAX", "20") or 20)
+_RESEND_VORUEBERGEHEND = {429, 500, 502, 503, 504}
+_resend_sperre: Optional[asyncio.Semaphore] = None
+_resend_sperre_loop = None
+
+
+def _resend_semaphore() -> asyncio.Semaphore:
+    """Semaphore je Event-Loop (Tests erzeugen eigene Loops)."""
+    global _resend_sperre, _resend_sperre_loop
+    loop = asyncio.get_running_loop()
+    if _resend_sperre is None or _resend_sperre_loop is not loop:
+        _resend_sperre = asyncio.Semaphore(RESEND_PARALLEL)
+        _resend_sperre_loop = loop
+    return _resend_sperre
+
+
+def _wartezeit(versuch: int, retry_after: Optional[str]) -> float:
+    import random
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 10.0))
+        except ValueError:
+            pass
+    return min(4.0, 0.5 * (2 ** versuch)) + random.uniform(0, 0.5)
+
+
 async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
                        anhang: Optional[bytes], anhang_name: str,
                        reply_to: Sequence[str], kopie: Sequence[str],
@@ -143,16 +181,43 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
         # Resend haelt den Schluessel 24 h: gleicher Schluessel = keine
         # zweite Zustellung, sondern die Antwort der ersten.
         kopf["Idempotency-Key"] = str(idempotency_key)[:256]
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(RESEND_URL, json=daten, headers=kopf)
-    if r.status_code in (200, 201, 202):
+    gewartet = 0.0
+    r = None
+    for versuch in range(RESEND_VERSUCHE):
         try:
-            return str(r.json().get("id") or "angenommen")
-        except ValueError:
-            return "angenommen"
+            async with _resend_semaphore():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    r = await client.post(RESEND_URL, json=daten, headers=kopf)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # Ohne Idempotency-Key koennte ein Wiederholen doppelt zustellen
+            # (die erste Anfrage kam evtl. an) — dann nicht wiederholen.
+            if not idempotency_key or versuch == RESEND_VERSUCHE - 1:
+                raise
+            warte = _wartezeit(versuch, None)
+            if gewartet + warte > RESEND_WARTEN_MAX:
+                raise
+            log.warning("email_service: Resend nicht erreichbar (%s) — neuer Versuch in %.1f s",
+                        exc.__class__.__name__, warte)
+            await asyncio.sleep(warte)
+            gewartet += warte
+            continue
+        if r.status_code in (200, 201, 202):
+            try:
+                return str(r.json().get("id") or "angenommen")
+            except ValueError:
+                return "angenommen"
+        if r.status_code in _RESEND_VORUEBERGEHEND and versuch < RESEND_VERSUCHE - 1:
+            warte = _wartezeit(versuch, r.headers.get("retry-after"))
+            if gewartet + warte <= RESEND_WARTEN_MAX:
+                log.warning("email_service: Resend HTTP %s (Tempo-Limit/voruebergehend) — "
+                            "neuer Versuch in %.1f s", r.status_code, warte)
+                await asyncio.sleep(warte)
+                gewartet += warte
+                continue
+        break
     # Resend meldet Fehler klar (unverifizierte Domain, falscher Schlüssel …)
     log.error("email_service: Resend lehnt ab (HTTP %s): %s",
-              r.status_code, r.text[:300])
+              r.status_code if r is not None else "-", (r.text[:300] if r is not None else ""))
     return ""
 
 

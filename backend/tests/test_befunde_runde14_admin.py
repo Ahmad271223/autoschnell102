@@ -30,6 +30,10 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "autoschnell")
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ["MONGO_URL"]
@@ -368,7 +372,7 @@ def _kopf(token):
 @pytest.fixture(scope="module")
 def http_welt(aufraeumen):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     import bcrypt
     dbx = _db()
     sa_mail = f"r14_httpsa_{SUF}@{MAIL}"
@@ -402,7 +406,7 @@ def _firma_http(http_welt, kennung, **extra):
 
 def test_http_18_put_sperre_und_entsperren(http_welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = _firma_http(http_welt, "h18")
     assert r.status_code == 200, r.text[:300]
     chef_id, dealer_id = r.json()["user_id"], r.json()["dealer_id"]
@@ -425,7 +429,7 @@ def test_http_18_put_sperre_und_entsperren(http_welt):
 
 def test_http_50_firmenanlage_expires_at(http_welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = _firma_http(http_welt, "h50a", plan_type="yearly", expires_at="31.12.2027")
     assert r.status_code == 400, r.text[:300]
     assert _db().users.count_documents({"email": f"r14_h50a_{SUF}@{MAIL}"}) == 0
@@ -441,7 +445,7 @@ def test_http_50_firmenanlage_expires_at(http_welt):
 
 def test_http_32_sale_plan_custom_quota(http_welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = _firma_http(http_welt, "h32")
     assert r.status_code == 200, r.text[:300]
     dealer_id = r.json()["dealer_id"]
@@ -459,7 +463,7 @@ def test_http_32_sale_plan_custom_quota(http_welt):
 
 def test_http_17_fahrer_sperre(http_welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     dealer_id = f"r14_h17_dealer_{SUF}"
     driver_id = f"r14_h17_driver_{SUF}"
@@ -478,7 +482,7 @@ def test_http_17_fahrer_sperre(http_welt):
 
 def test_http_24_58_kaeufer_loeschen(http_welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     import hashlib
     dbx = _db()
     buyer_id = f"r14_hbuyer_{SUF}"
@@ -499,7 +503,7 @@ def test_http_24_58_kaeufer_loeschen(http_welt):
 
 def test_http_12_firmenloeschung_password_resets(http_welt):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     r = _firma_http(http_welt, "h12")
     assert r.status_code == 200, r.text[:300]

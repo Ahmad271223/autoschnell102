@@ -13,6 +13,20 @@ Collections in EINER Snapshot-Session gelesen — ein gemeinsamer Zeitpunkt
 für die ganze Datenbank (Manifest "konsistenz": "snapshot"). Ein
 Standalone-Server kann das nicht; dort wird Collection für Collection
 gelesen ("konsistenz": "best-effort (standalone)").
+Runde 21 (Pruefbefund Backup A): Scheitert das Snapshot-Lesen, wird es bis
+zu BACKUP_SNAPSHOT_VERSUCHE mal wiederholt. Bleibt es beim Rueckfall auf
+Collection fuer Collection, ist das Backup INKONSISTENT (Manifest-Feld
+"inkonsistent", Exit 3): es zaehlt nie als letzter guter Stand, schuetzt
+sich nicht in der Rotation und wird beim Restore abgelehnt. Nennt
+MONGO_URL ein Replica Set (replicaSet=...) oder ist BACKUP_SNAPSHOT_PFLICHT
+gesetzt, wird immer der Snapshot versucht; ein Einzelserver-Lauf ist dann
+ebenfalls INKONSISTENT.
+
+Index-Metadaten (Runde 21, Befund B): <name>.metadata.json ist fuer JEDE
+Collection Pflicht. Lassen sich die Indexe nicht lesen oder die Datei
+nicht vollstaendig schreiben (atomar geschrieben und zurueckgelesen),
+scheitert das Backup (Exit 1) — ohne Index-Metadaten fehlen nach einem
+Restore Unique- und TTL-Indexe unbemerkt.
 
 Offsite-Kopie: Ist BACKUP_S3_BUCKET gesetzt, wird das fertige Backup als
 tar.gz (serverseitig verschlüsselt, optional mit Object Lock)
@@ -20,18 +34,27 @@ hochgeladen und im Manifest unter "offsite" vermerkt. Schlägt der Upload
 fehl, gilt das Backup als UNVOLLSTAENDIG.
 
 Ergebnis-Status ("BACKUP OK" nur, wenn wirklich alles gesichert wurde):
-  BACKUP OK               Exit 0  — Datenbank, alle Datei-Speicher und
-                                    (falls konfiguriert) die Offsite-Kopie
+  BACKUP OK               Exit 0  — Datenbank (stimmig bzw. zugelassener
+                                    Einzelserver-Lauf), alle Datei-Speicher
+                                    und (falls konfiguriert) die Offsite-Kopie
   BACKUP UNVOLLSTAENDIG   Exit 2  — Datenbank gesichert, aber mindestens
                                     ein Datei-Speicher oder die Offsite-
                                     Kopie fehlt (siehe manifest.unvollstaendig)
-  FEHLER                  Exit 1  — Datenbank nicht gesichert
+  BACKUP INKONSISTENT     Exit 3  — Daten gesichert, aber NICHT auf einen
+                                    gemeinsamen Zeitpunkt (siehe
+                                    manifest.inkonsistent); Vorrang vor Exit 2
+  FEHLER                  Exit 1  — Datenbank oder Index-Metadaten nicht
+                                    gesichert
 
-Aufbewahrung: lokal die letzten 14 Backups; offsite die letzten
-BACKUP_S3_KEEP (Standard 30) Archive, best effort.
+Aufbewahrung: lokal die letzten 14 Backups, dazu immer das juengste GUTE
+(auch wenn es aelter ist); offsite die letzten BACKUP_S3_KEEP (Standard
+30) Archive, best effort — rotiert wird offsite nur nach einem guten Lauf.
 
 Umgebung:
   MONGO_URL, DB_NAME, BACKUP_DIR
+  BACKUP_SNAPSHOT_VERSUCHE    Snapshot-Versuche vor dem Rueckfall (3)
+  BACKUP_SNAPSHOT_PAUSE_S     Pause vor Versuch n: n-1 mal so viele Sekunden (5)
+  BACKUP_SNAPSHOT_PFLICHT     true: Snapshot ist Pflicht (siehe oben)
   S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION
       Datei-Speicher der App — wird IN das Backup gespiegelt.
   BACKUP_S3_BUCKET            Offsite-Ziel (EIGENER Bucket, nicht S3_BUCKET);
@@ -53,6 +76,7 @@ import re
 import shutil
 import sys
 import tarfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -64,17 +88,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bson
 from bson import json_util
 from s3_kompatibel import s3_client, sse_optionen
+from backup_bewertung import (KONSISTENZ_RUECKFALL, KONSISTENZ_SCHREIBPAUSE,
+                              KONSISTENZ_SNAPSHOT, KONSISTENZ_STANDALONE,
+                              ist_gut, metadaten_mangel, snapshot_pflicht)
 from pymongo import MongoClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 DB_NAME = os.environ.get("DB_NAME", "autoschnell")
 KEEP = 14
+# Runde 21 (Nebenbefund Schreibpause): die WartungsmodusMiddleware im
+# Backend liest das Flag nur alle 5 s neu. Erst nach dieser Frist sind
+# Schreibzugriffe sicher pausiert.
+WARTUNG_WARTEN_S = 6
 DEFAULT_DIR = Path(os.environ.get("BACKUP_DIR") or r"C:\AutoSchnell-Backups")
 BACKEND = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = Path(os.environ.get("BACKUP_UPLOADS_DIR") or BACKEND / "uploads")
 LOCAL_STORAGE_DIR = Path(os.environ.get("BACKUP_LOCAL_STORAGE_DIR")
                          or BACKEND / "local_storage")
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4          # Runde 21: Feld "inkonsistent", Pflicht-Indexdaten
 OFFSITE_PREFIX_DEFAULT = "autoschnell-backups/"
 OFFSITE_KEEP_DEFAULT = 30
 _OFFSITE_ARCHIV = re.compile(r"autoschnell-\d{4}-\d{2}-\d{2}_\d{4}\.tar\.gz$")
@@ -99,15 +130,79 @@ def sha256_datei(p: Path) -> str:
 
 
 # ---------------------------------------------------------------- Datenbank
-def ist_replica_set(client) -> bool:
+def ist_replica_set(client):
     """True, wenn der Server Mitglied eines Replica Sets ist — nur dann sind
-    Snapshot-Reads (readConcern snapshot) moeglich."""
+    Snapshot-Reads (readConcern snapshot) moeglich. False: Einzelserver.
+
+    Runde 21 (Nebenbefund): None, wenn weder hello noch isMaster antworten.
+    Bisher hiess das still "Standalone", und ein Replica Set wurde ohne
+    Snapshot als gutes Backup gesichert. Unbekannt fuehrt jetzt zum
+    Snapshot-Versuch; scheitert er, ist das Backup INKONSISTENT."""
     for cmd in ("hello", "isMaster"):
         try:
             return bool(client.admin.command(cmd).get("setName"))
         except Exception:  # noqa: BLE001
             continue
-    return False
+    return None
+
+
+class IndexMetadatenFehler(RuntimeError):
+    """Runde 21 (Pruefbefund Backup B): Index-Metadaten einer Collection
+    nicht lesbar oder nicht vollstaendig geschrieben. Fuehrt immer zu
+    FEHLER (Exit 1) — auch im Snapshot-Zweig, nie zum Rueckfall auf
+    Collection fuer Collection."""
+
+
+def _metadaten_lesen(pfad: Path) -> dict:
+    """metadata.json laden und pruefen; wirft IndexMetadatenFehler."""
+    try:
+        meta = json_util.loads(pfad.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise IndexMetadatenFehler(f"{pfad.name} fehlt oder ist unlesbar ({exc})") from exc
+    grund = metadaten_mangel(meta)
+    if grund:
+        raise IndexMetadatenFehler(f"{pfad.name} ungueltig ({grund})")
+    return meta
+
+
+def indexe_sichern(coll, out_dir: Path) -> list:
+    """<name>.metadata.json atomar schreiben und zuruecklesen.
+
+    Runde 21 (Befund B): Fehler wurden hier bisher verschluckt — dann fehlte
+    die Datei (Restore erwartete "keine Indexe") oder sie war halb
+    geschrieben und wanderte mit Pruefsumme ins Manifest. Jetzt: eine
+    Wiederholung bei einem Lesefehler, danach IndexMetadatenFehler.
+    Liefert die Indexnamen."""
+    letzter = None
+    for _ in range(2):
+        try:
+            indexes = list(coll.list_indexes())
+            break
+        except Exception as exc:  # noqa: BLE001
+            letzter = exc
+    else:
+        raise IndexMetadatenFehler(f"{coll.name}: Indexe nicht lesbar ({letzter})")
+    meta = {"options": {}, "collectionName": coll.name,
+            "indexes": [json.loads(json_util.dumps(i)) for i in indexes]}
+    ziel = out_dir / f"{coll.name}.metadata.json"
+    tmp = out_dir / f"{coll.name}.metadata.json.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False)
+        os.replace(tmp, ziel)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise IndexMetadatenFehler(
+            f"{coll.name}: metadata.json nicht vollstaendig geschrieben ({exc})") from exc
+    zurueck = _metadaten_lesen(ziel)
+    namen = [i.get("name") for i in zurueck["indexes"]]
+    if namen != [i.get("name") for i in meta["indexes"]]:
+        raise IndexMetadatenFehler(f"{coll.name}: zurueckgelesene Indexe weichen ab "
+                                   f"({namen})")
+    return namen
 
 
 def dump_collection(coll, out_dir: Path, session=None) -> int:
@@ -116,15 +211,19 @@ def dump_collection(coll, out_dir: Path, session=None) -> int:
         for doc in coll.find({}, session=session):
             fh.write(bson.encode(doc))
             n += 1
-    try:
-        indexes = list(coll.list_indexes())
-        meta = {"options": {}, "collectionName": coll.name,
-                "indexes": [json.loads(json_util.dumps(i)) for i in indexes]}
-        with open(out_dir / f"{coll.name}.metadata.json", "w", encoding="utf-8") as fh:
-            json.dump(meta, fh, ensure_ascii=False)
-    except Exception:
-        pass
+    indexe_sichern(coll, out_dir)
     return n
+
+
+def indexe_gegenpruefen(target: Path, namen) -> dict:
+    """Nach dem Dump: zu JEDER Collection eine gueltige metadata.json.
+    Liefert {collection: [indexnamen]} fuers Manifest; wirft
+    IndexMetadatenFehler."""
+    out = {}
+    for name in namen:
+        meta = _metadaten_lesen(target / f"{name}.metadata.json")
+        out[name] = [i.get("name") for i in meta["indexes"]]
+    return out
 
 
 def wartung_setzen(db, an: bool, logfile: Path) -> bool:
@@ -147,39 +246,93 @@ def wartung_setzen(db, an: bool, logfile: Path) -> bool:
         return False
 
 
-def dump_datenbank(client, db, names, target: Path, logfile: Path):
-    """Alle Collections nach target schreiben. Liefert (counts, konsistenz).
+def _snapshot_versuche() -> int:
+    try:
+        return max(1, int(os.environ.get("BACKUP_SNAPSHOT_VERSUCHE", "").strip() or 3))
+    except ValueError:
+        return 3
+
+
+def _snapshot_pause_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("BACKUP_SNAPSHOT_PAUSE_S", "").strip() or 5))
+    except ValueError:
+        return 5.0
+
+
+def _teildateien_entfernen(target: Path) -> None:
+    """Reste eines abgebrochenen Versuchs entfernen, damit kein Teil eines
+    frueheren Zeitstands im Backup landet."""
+    for muster in ("*.bson.gz", "*.metadata.json", "*.tmp"):
+        for f in target.glob(muster):
+            f.unlink(missing_ok=True)
+
+
+def dump_datenbank(client, db, names, target: Path, logfile: Path,
+                   pflicht: bool = False):
+    """Alle Collections nach target schreiben.
+    Liefert (counts, konsistenz, inkonsistent); inkonsistent ist der Grund
+    als Text ("" = stimmig bzw. zugelassener Einzelserver-Lauf).
 
     Replica Set: EINE Snapshot-Session fuer alle Collections, d. h. alle
     Dateien zeigen denselben Zeitpunkt. Standalone: Collection fuer
     Collection (Aenderungen waehrend des Laufs koennen dazwischen liegen).
-    Schlaegt das Snapshot-Lesen fehl (z. B. SnapshotTooOld bei sehr grossen
-    Datenbanken), wird auf das Collection-fuer-Collection-Verfahren
-    zurueckgefallen statt gar kein Backup zu haben."""
-    if ist_replica_set(client):
-        counts = {}
-        try:
-            with client.start_session(snapshot=True) as s:
-                for name in names:
-                    counts[name] = dump_collection(db[name], target, session=s)
-                    log(f"  {name}: {counts[name]} Dokumente (Snapshot)", logfile)
-            return counts, "snapshot"
-        except Exception as exc:  # noqa: BLE001
-            log(f"  WARNUNG: Snapshot-Lesen fehlgeschlagen ({exc}) — Fallback: "
-                f"Collection fuer Collection", logfile)
-            konsistenz = "best-effort (snapshot fehlgeschlagen)"
+
+    Runde 21 (Pruefbefund Backup A): Schlaegt das Snapshot-Lesen fehl (z. B.
+    SnapshotTooOld bei sehr grossen Datenbanken), wird es bis zu
+    BACKUP_SNAPSHOT_VERSUCHE mal wiederholt. Erst danach wird Collection
+    fuer Collection gelesen — lieber ein Backup als keins —, aber das
+    Ergebnis ist ausdruecklich INKONSISTENT und zaehlt nicht als gutes
+    Backup. pflicht=True (MONGO_URL mit replicaSet= oder
+    BACKUP_SNAPSHOT_PFLICHT) erzwingt den Snapshot-Versuch auch dann, wenn
+    die Erkennung "kein Replica Set" meldet. Fehler bei den Index-Metadaten
+    fallen NICHT in den Rueckfall, sondern brechen das Backup ab."""
+    rs = ist_replica_set(client)
+    if rs is None:
+        log("  WARNUNG: Replica-Set-Erkennung (hello/isMaster) ohne Antwort — "
+            "Snapshot wird versucht", logfile)
+    if rs or rs is None or pflicht:
+        versuche = _snapshot_versuche()
+        letzter = None
+        for versuch in range(1, versuche + 1):
+            if versuch > 1:
+                pause = _snapshot_pause_s() * (versuch - 1)
+                log(f"  Snapshot-Versuch {versuch}/{versuche} in {pause:.0f} s ...", logfile)
+                time.sleep(pause)
+            _teildateien_entfernen(target)
+            counts = {}
+            try:
+                with client.start_session(snapshot=True) as s:
+                    for name in names:
+                        counts[name] = dump_collection(db[name], target, session=s)
+                        log(f"  {name}: {counts[name]} Dokumente (Snapshot)", logfile)
+                return counts, KONSISTENZ_SNAPSHOT, ""
+            except IndexMetadatenFehler:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                letzter = exc
+                log(f"  WARNUNG: Snapshot-Lesen fehlgeschlagen (Versuch {versuch}/"
+                    f"{versuche}): {exc}", logfile)
+        konsistenz = KONSISTENZ_RUECKFALL
+        inkonsistent = (f"Snapshot nach {versuche} Versuch(en) fehlgeschlagen "
+                        f"({str(letzter)[:300]}); Collections nacheinander gelesen, "
+                        f"Zeitstaende koennen abweichen")
+        log(f"  WARNUNG: {inkonsistent} — Backup wird als INKONSISTENT markiert "
+            f"und zaehlt NICHT als gutes Backup", logfile)
     else:
-        konsistenz = "best-effort (standalone)"
+        konsistenz = KONSISTENZ_STANDALONE
+        inkonsistent = ""
         log("  WARNUNG: MongoDB laeuft OHNE Replica Set — die Sicherung wird "
             "Collection fuer Collection gelesen und ist damit nicht auf eine "
             "Sekunde genau in sich stimmig. Abhilfe: Replica Set einrichten "
             "(mongod --replSet rs0) ODER die Sicherung mit --wartung starten "
             "(pausiert Schreibzugriffe fuer die Dauer des Laufs).", logfile)
+    _teildateien_entfernen(target)
     counts = {}
     for name in names:
         counts[name] = dump_collection(db[name], target)
         log(f"  {name}: {counts[name]} Dokumente", logfile)
-    return counts, konsistenz
+    return counts, konsistenz, inkonsistent
 
 
 # ------------------------------------------------------------ Datei-Speicher
@@ -346,10 +499,29 @@ def schreibe_manifest(ordner: Path, manifest: dict) -> None:
     os.replace(tmp, ordner / "manifest.json")
 
 
+def _manifest_lesen(ordner: Path):
+    try:
+        m = json.loads((ordner / "manifest.json").read_text(encoding="utf-8"))
+        return m if isinstance(m, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def rotate(base: Path, logfile: Path) -> None:
+    """Lokal die letzten KEEP Backups behalten.
+
+    Runde 21 (Nebenbefund Rotation): das juengste GUTE Backup (vollstaendig
+    und stimmig) bleibt immer erhalten, auch ausserhalb der letzten KEEP —
+    sonst verdraengen 14 schlechte Laeufe in Folge den letzten brauchbaren
+    Stand."""
     dumps = sorted([p for p in base.iterdir()
                     if p.is_dir() and p.name.startswith("autoschnell-")])
+    gute = [p for p in dumps if ist_gut(_manifest_lesen(p))]
+    schutz = gute[-1] if gute else None
     for old in dumps[:-KEEP]:
+        if old == schutz:
+            log(f"Backup {old.name} bleibt erhalten: juengstes gutes Backup", logfile)
+            continue
         shutil.rmtree(old, ignore_errors=True)
         log(f"Altes Backup entfernt: {old.name}", logfile)
 
@@ -388,7 +560,20 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
     # zusammenpassen (Audit 09/2026).
     pause = wartung and wartung_setzen(db, True, logfile)
     try:
-        counts, konsistenz = dump_datenbank(client, db, names, target, logfile)
+        if pause:
+            # Runde 21: die Middleware cacht das Flag 5 s je Prozess — erst
+            # danach sind Schreibzugriffe ueber die API sicher pausiert.
+            log(f"  warte {WARTUNG_WARTEN_S} s, bis alle Backend-Prozesse die "
+                f"Schreibpause sehen ...", logfile)
+            time.sleep(WARTUNG_WARTEN_S)
+        counts, konsistenz, inkonsistent = dump_datenbank(
+            client, db, names, target, logfile, pflicht=snapshot_pflicht(mongo_url))
+        indexe = indexe_gegenpruefen(target, counts)
+    except IndexMetadatenFehler as exc:
+        log(f"FEHLER: Index-Metadaten nicht gesichert — {exc}. Ohne sie fehlen "
+            f"nach einem Restore Unique- und TTL-Indexe; kein Backup angelegt.", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return 1
     except Exception as exc:  # noqa: BLE001
         log(f"FEHLER beim Sichern der Datenbank: {exc}", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -397,8 +582,11 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         if pause:
             wartung_setzen(db, False, logfile)
     if pause:
-        konsistenz = "stimmig (Schreibpause)"
-    log(f"  Konsistenz: {konsistenz}", logfile)
+        # Bei pausierten Schreibzugriffen passen auch nacheinander gelesene
+        # Collections zusammen (auch nach einem gescheiterten Snapshot).
+        konsistenz, inkonsistent = KONSISTENZ_SCHREIBPAUSE, ""
+    log(f"  Konsistenz: {konsistenz}" + (f" — INKONSISTENT: {inkonsistent}"
+                                         if inkonsistent else ""), logfile)
 
     # ---- Datei-Speicher ----
     unvollstaendig = []
@@ -441,6 +629,10 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         "version": MANIFEST_VERSION, "db": db_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "konsistenz": konsistenz,
+        # Runde 21: Grund einer Inkonsistenz ("" = kein Mangel) und die
+        # Indexnamen je Collection als Gegenprobe fuer den Restore.
+        "inkonsistent": inkonsistent,
+        "indexe": indexe,
         "collections": counts, "files": dateien,
         "unvollstaendig": unvollstaendig,
     }
@@ -458,11 +650,23 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
             log(f"  WARNUNG: Offsite-Kopie NICHT hochgeladen — {exc}", logfile)
         manifest["unvollstaendig"] = unvollstaendig
         schreibe_manifest(final_dir, manifest)
-        if manifest.get("offsite"):
+        if manifest.get("offsite") and ist_gut(manifest):
             offsite_rotieren(logfile)
+        elif manifest.get("offsite"):
+            # Runde 21: nach einem schlechten Lauf nichts offsite loeschen —
+            # sonst verdraengen schlechte Archive die guten.
+            log("  Offsite-Rotation ausgesetzt: dieser Lauf ist kein gutes Backup",
+                logfile)
 
     total_docs = sum(counts.values())
     rotate(base, logfile)
+    if inkonsistent:
+        log(f"BACKUP INKONSISTENT: {len(names)} Collections, {total_docs} "
+            f"Dokumente, {n_files} Dateien, {size_mb:.1f} MB -> {final_dir.name}; "
+            f"Grund: {inkonsistent}; zaehlt NICHT als gutes Backup"
+            + (f"; zudem UNVOLLSTAENDIG, NICHT gesichert: {'; '.join(unvollstaendig)}"
+               if unvollstaendig else ""), logfile)
+        return 3
     if unvollstaendig:
         log(f"BACKUP UNVOLLSTAENDIG: {len(names)} Collections, {total_docs} "
             f"Dokumente, {n_files} Dateien, {size_mb:.1f} MB -> {final_dir.name}; "

@@ -223,6 +223,13 @@ export default function Bestand() {
                               className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400">
                         <Trash2 size={13} /> Löschen
                       </button>
+                      {/* Runde 21: gerade frisch abgeholte Fahrzeuge brauchen den Weg
+                          zum Abholbericht mit den Fahrerfotos — vorher fehlte er hier. */}
+                      <Link to={`/app/akte/${v.id}`} data-testid={`akte-link-${v.id}`}
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border text-zinc-300 hover:text-white"
+                            style={{ borderColor: "var(--border-default)" }}>
+                        Fahrzeugakte · Abholbericht
+                      </Link>
                     </>
                   ) : (
                     <>

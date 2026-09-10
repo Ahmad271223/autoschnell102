@@ -28,6 +28,10 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -431,7 +435,7 @@ def test_77_abholauftrag_pdf_fremder_sucher_404():
 @pytest.fixture(scope="module")
 def firma():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     from auth import create_token
     r = requests.post(f"{API}/auth/register", json={
         "email": f"r14appt_{SUF}@e2etest-mail.de", "password": PW,
@@ -460,7 +464,7 @@ def firma():
 
 def test_http_77_abholauftrag_pdf_nur_im_eigenen_bereich(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     sa, sb = firma["sucher"]["a"], firma["sucher"]["b"]
     aid, cid = f"h77_{SUF}", f"h77c_{SUF}"
@@ -480,10 +484,19 @@ def test_http_77_abholauftrag_pdf_nur_im_eigenen_bereich(firma):
         assert r.status_code == 200, r.text[:200]
         assert r.headers.get("content-type", "").startswith("application/pdf")
     # Termin ohne created_by, aber eigener Vertrag -> Sucher A 200
-    aid2 = f"h77b_{SUF}"
+    # Runde 21 (Pruefbefund C): seit dem Teil-Unique-Index
+    # termin_offen_je_vertrag (Kaufvorgaenge 09.09.2026) hat ein Vertrag
+    # hoechstens EINEN offenen Termin — der zweite Termin bekommt daher einen
+    # eigenen Vertrag von Sucher A (vorher DuplicateKeyError E11000).
+    aid2, cid2 = f"h77b_{SUF}", f"h77c2_{SUF}"
+    dbx.generated_pdfs.insert_one({
+        "id": cid2, "dealer_id": firma["dealer_id"], "user_id": sa["id"], "appointment_id": aid2,
+        "pickup_date": "2099-09-11", "pickup_time": "10:00", "version": 1,
+        "contract_data": {"seller_name": "GEHEIM", "seller_phone": "0170 1234567"},
+        "seller_phone": "0170 1234567", "created_at": JETZT.isoformat()})
     dbx.appointments.insert_one({
         "id": aid2, "dealer_id": firma["dealer_id"], "title": "H77b", "status": "offen",
-        "contract_id": cid, "created_at": JETZT.isoformat()})
+        "contract_id": cid2, "created_at": JETZT.isoformat()})
     assert requests.get(f"{API}/appointments/{aid2}/pickup-order.pdf",
                         headers=sa["h"], timeout=60).status_code == 200
     assert requests.get(f"{API}/appointments/{aid2}/pickup-order.pdf",
@@ -492,7 +505,7 @@ def test_http_77_abholauftrag_pdf_nur_im_eigenen_bereich(firma):
 
 def test_http_101_datum_und_zeit_format(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     for body in ({"pickup_date": "zzz"}, {"pickup_date": "01.09.2026"}, {"pickup_time": "9 Uhr"}):
         r = requests.post(f"{API}/appointments", headers=firma["h"],
                           json={"title": "T", **body}, timeout=30)
@@ -512,7 +525,7 @@ def test_http_101_datum_und_zeit_format(firma):
 
 def test_http_99_sucher_403_chef_200_auf_abgeschlossenem_termin(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     sa = firma["sucher"]["a"]
     aid = f"h99_{SUF}"
     _db().appointments.insert_one({
@@ -532,7 +545,7 @@ def test_http_99_sucher_403_chef_200_auf_abgeschlossenem_termin(firma):
 
 def test_http_74_kommende_termine_fallen_nicht_weg(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     dbx = _db()
     start = datetime(2030, 1, 1)
     docs = [{"id": f"h74_{i}_{SUF}", "dealer_id": firma["dealer_id"], "title": f"T{i}",

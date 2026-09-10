@@ -13,6 +13,13 @@ und keine "unvollstaendig"-Einträge hat — nur solche zählen für die
 Nachhol-Logik und die Readiness-Auskunft (letztes_backup_info). Exit-Code 2
 des Skripts (UNVOLLSTAENDIG) und 1 (FEHLER) lösen einen Betriebsalarm aus
 (betrieb.alarm: backup_unvollstaendig / backup_fehlgeschlagen).
+
+Runde 21 (Pruefbefund Backup A): Zusaetzlich muss das Backup in sich stimmig
+sein (backup_bewertung.ist_gut). Ein Rueckfall nach gescheitertem Snapshot
+(Manifest "inkonsistent", Exit 3) zaehlt weder als letzter guter Stand
+(Nachholung, system_flags.letztes_vollstaendiges_backup) noch als
+"vollstaendig" fuer /ready und Admin/Betrieb, und loest den Alarm
+backup_inkonsistent aus.
 """
 import asyncio
 import json
@@ -22,6 +29,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from backup_bewertung import inkonsistenz, ist_gut, ist_stichtagsgenau, mangel
 from deps import log
 
 BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "3"))
@@ -50,8 +58,11 @@ def _manifest(p: Path):
         return None
 
 
-def _ist_vollstaendig(manifest) -> bool:
-    return bool(manifest) and not manifest.get("unvollstaendig")
+def _ist_gut(manifest) -> bool:
+    """Runde 21: vollstaendig UND stimmig (gemeinsame Bewertung mit den
+    Skripten). Bisher genuegte "unvollstaendig leer" — ein Rueckfall nach
+    gescheitertem Snapshot galt damit als gutes Backup."""
+    return ist_gut(manifest)
 
 
 def _erstellt(p: Path, manifest) -> datetime:
@@ -72,20 +83,32 @@ def _alter_stunden(zeit: datetime) -> float:
 
 
 def _last_backup_age_hours() -> float:
-    """Alter des juengsten VOLLSTAENDIGEN Backups in Stunden (inf = keins).
-    Ordner ohne Manifest oder mit unvollstaendig-Eintraegen zaehlen nicht —
-    sonst wuerde ein kaputtes Backup die Nachhol-Logik beruhigen."""
+    """Alter des juengsten GUTEN Backups in Stunden (inf = keins).
+    Ordner ohne Manifest, mit unvollstaendig-Eintraegen oder (Runde 21)
+    inkonsistente zaehlen nicht — sonst wuerde ein kaputtes Backup die
+    Nachhol-Logik beruhigen."""
     for p in _backup_ordner():
         m = _manifest(p)
-        if _ist_vollstaendig(m):
+        if _ist_gut(m):
             return _alter_stunden(_erstellt(p, m))
     return float("inf")
 
 
 def letztes_backup_info() -> dict:
     """Auskunft fuer die Readiness-Pruefung: Zustand des JUENGSTEN Backups
-    (vollstaendig? offsite?) plus Hinweis auf das letzte vollstaendige."""
+    (vollstaendig? stimmig? offsite?) plus Hinweis auf das letzte gute.
+
+    "vollstaendig" heisst seit Runde 21 "zaehlt als gutes Backup": False
+    auch dann, wenn nur die Konsistenz fehlt (Rueckfall nach gescheitertem
+    Snapshot). Dafuer gibt es die Felder "konsistent" (kein
+    Konsistenzmangel), "konsistenz" (Text aus dem Manifest),
+    "inkonsistent" (Grund) und "stichtagsgenau" (Snapshot/Schreibpause).
+    Runde 21 (Gegenpruefung): ohne Manifest ist "konsistent" None
+    (unbekannt), nicht False — sonst meldete der ANDERE Server ueber den
+    Datenbank-Eintrag "INKONSISTENT", obwohl nur das Manifest fehlt."""
     info = {"alter_stunden": None, "pfad": None, "vollstaendig": False,
+            "konsistent": None, "konsistenz": None, "inkonsistent": "",
+            "stichtagsgenau": False,
             "offsite": False, "erstellt": None, "hinweis": ""}
     ordner = _backup_ordner()
     if not ordner:
@@ -95,13 +118,22 @@ def letztes_backup_info() -> dict:
     m = _manifest(p)
     zeit = _erstellt(p, m)
     alter = _alter_stunden(zeit)
+    fehlend, grund = mangel(m)
     info.update(alter_stunden=round(alter, 2), pfad=str(p), erstellt=zeit.isoformat(),
-                vollstaendig=_ist_vollstaendig(m), offsite=bool((m or {}).get("offsite")))
+                vollstaendig=_ist_gut(m),
+                konsistent=(not grund) if m is not None else None,
+                konsistenz=(m or {}).get("konsistenz"), inkonsistent=grund,
+                stichtagsgenau=ist_stichtagsgenau(m),
+                offsite=bool((m or {}).get("offsite")))
     if m is None:
         info["hinweis"] = "manifest.json fehlt oder unlesbar"
     elif not info["vollstaendig"]:
-        info["hinweis"] = "UNVOLLSTAENDIG: " + "; ".join(
-            str(x) for x in m.get("unvollstaendig") or [])
+        teile = []
+        if grund:
+            teile.append("INKONSISTENT: " + grund)
+        if fehlend:
+            teile.append("UNVOLLSTAENDIG: " + "; ".join(fehlend))
+        info["hinweis"] = "; ".join(teile)
     elif alter > 26:
         info["hinweis"] = f"letztes vollstaendiges Backup ist {alter:.0f} h alt"
     else:
@@ -109,7 +141,7 @@ def letztes_backup_info() -> dict:
     if not info["vollstaendig"]:
         for q in ordner[1:]:
             mq = _manifest(q)
-            if _ist_vollstaendig(mq):
+            if _ist_gut(mq):
                 info["hinweis"] += (f"; letztes vollstaendiges Backup: {q.name} "
                                     f"({_alter_stunden(_erstellt(q, mq)):.0f} h alt)")
                 break
@@ -148,15 +180,38 @@ async def _run_backup(db=None) -> None:
     ausgabe = "\n".join(zeilen[-8:])
     namen = _BACKUP_NAME.findall(ausgabe)
     ref = namen[-1] if namen else ""
-    if proc.returncode == 0:
-        log.info("[backup] %s", tail)
-    elif proc.returncode == 2:
-        log.error("[backup] UNVOLLSTAENDIG: %s", tail)
-        await _alarm(db, "backup_unvollstaendig", ref, ausgabe=ausgabe)
+    # Runde 21: nicht nur dem Exit-Code glauben — das Manifest des gerade
+    # geschriebenen Ordners ist die Wahrheit (so bleibt auch ein Skript,
+    # das trotz Mangel 0 liefert, nicht unbemerkt).
+    ordner = (BACKUP_DIR / ref) if ref else None
+    ordner_da = bool(ordner) and ordner.is_dir()
+    m = _manifest(ordner) if ordner_da else None
+    fehlend, grund = mangel(m)
+    rc = proc.returncode
+    if rc in (0, 2, 3):
+        inkonsistent = rc == 3 or bool(grund)
+        unvoll = rc == 2 or bool(fehlend) or (rc == 3 and "UNVOLLSTAENDIG" in ausgabe)
+        if inkonsistent:
+            log.error("[backup] INKONSISTENT (zaehlt nicht als gutes Backup): %s", tail)
+            await _alarm(db, "backup_inkonsistent", ref, ausgabe=ausgabe,
+                         grund=grund or "siehe Ausgabe",
+                         hinweis="Snapshot gescheitert, Collections nacheinander "
+                                 "gelesen. Replica Set pruefen (rs.status()), "
+                                 "Sicherung erneut starten; zum Einspielen ein "
+                                 "gutes Backup waehlen.")
+        if unvoll:
+            log.error("[backup] UNVOLLSTAENDIG: %s", tail)
+            await _alarm(db, "backup_unvollstaendig", ref, ausgabe=ausgabe)
+        if rc == 0 and ordner_da and m is None:
+            log.error("[backup] Manifest fehlt trotz Exit 0: %s", ordner)
+            await _alarm(db, "backup_fehlgeschlagen", ref, ausgabe=ausgabe,
+                         code=rc, grund="manifest.json fehlt oder unlesbar")
+        elif not inkonsistent and not unvoll:
+            log.info("[backup] %s", tail)
     else:
-        log.error("[backup] FEHLGESCHLAGEN (Code %s): %s", proc.returncode, tail)
-        await _alarm(db, "backup_fehlgeschlagen", ref or f"code-{proc.returncode}",
-                     ausgabe=ausgabe, code=proc.returncode)
+        log.error("[backup] FEHLGESCHLAGEN (Code %s): %s", rc, tail)
+        await _alarm(db, "backup_fehlgeschlagen", ref or f"code-{rc}",
+                     ausgabe=ausgabe, code=rc)
     await stand_speichern(db)
 
 
@@ -187,20 +242,42 @@ async def stand_speichern(db) -> None:
         info["server"] = socket.gethostname()
         info["gespeichert"] = datetime.now(timezone.utc).isoformat()
         await db.system_flags.update_one({"_id": _STAND_ID}, {"$set": info}, upsert=True)
-        if info.get("vollstaendig"):
+        # Runde 21: nur ein GUTES Backup (vollstaendig UND stimmig) wird zum
+        # letzten guten Stand, den beide Server fuer die Nachholung sehen.
+        if info.get("vollstaendig") and info.get("konsistent") and not info.get("inkonsistent"):
             await db.system_flags.update_one({"_id": _STAND_VOLL_ID}, {"$set": info}, upsert=True)
     except Exception as exc:                        # noqa: BLE001
         log.warning("[backup] Stand konnte nicht gespeichert werden: %s", exc)
 
 
+def _db_eintrag_inkonsistent(doc) -> str:
+    """Runde 21: Konsistenzmangel eines system_flags-Eintrags (Felder
+    konsistent/konsistenz/inkonsistent, wie stand_speichern sie schreibt).
+    Eintraege von vor Runde 21 tragen keine Konsistenzangabe; sie werden
+    nach ihren Feldern bewertet, soweit vorhanden."""
+    if not isinstance(doc, dict):
+        return ""
+    grund = inkonsistenz(doc)
+    if not grund and doc.get("konsistent") is False:
+        grund = "laut Datenbank-Eintrag nicht stimmig"
+    return grund
+
+
 async def letztes_vollstaendiges_alter_global(db) -> float:
-    """Alter (Stunden) der letzten VOLLSTAENDIGEN Sicherung, egal auf
-    welchem Server — fuer die Nachhol-Entscheidung. Unbekannt = sehr alt."""
+    """Alter (Stunden) der letzten GUTEN Sicherung, egal auf welchem
+    Server — fuer die Nachhol-Entscheidung. Unbekannt = sehr alt.
+    Runde 21: ein Eintrag, der als inkonsistent oder nicht vollstaendig
+    gekennzeichnet ist, zaehlt nicht."""
     lokal = _last_backup_age_hours()
     if db is None:
         return lokal
     try:
-        doc = await db.system_flags.find_one({"_id": _STAND_VOLL_ID}, {"_id": 0, "erstellt": 1})
+        doc = await db.system_flags.find_one(
+            {"_id": _STAND_VOLL_ID},
+            {"_id": 0, "erstellt": 1, "vollstaendig": 1, "konsistent": 1,
+             "konsistenz": 1, "inkonsistent": 1})
+        if doc and (doc.get("vollstaendig") is False or _db_eintrag_inkonsistent(doc)):
+            return lokal
         if doc and doc.get("erstellt"):
             zeit = datetime.fromisoformat(doc["erstellt"])
             if zeit.tzinfo is None:
@@ -233,6 +310,16 @@ async def letztes_backup_info_global(db) -> dict:
         return lokal
     if lokal.get("alter_stunden") is not None and lokal["alter_stunden"] <= doc["alter_stunden"]:
         return lokal
+    # Runde 21: ein als inkonsistent gekennzeichneter Eintrag gilt nie als
+    # vollstaendig — /ready und Admin/Betrieb warnen dann.
+    grund = _db_eintrag_inkonsistent(doc)
+    if grund:
+        doc["vollstaendig"] = False
+        doc["konsistent"] = False
+        doc["inkonsistent"] = grund
+        if "INKONSISTENT" not in str(doc.get("hinweis") or ""):
+            doc["hinweis"] = ("INKONSISTENT: " + grund
+                              + (f"; {doc['hinweis']}" if doc.get("hinweis") else ""))
     doc["quelle"] = f"Datenbank (Sicherung lief auf {doc.get('server', '?')})"
     return doc
 

@@ -104,8 +104,17 @@ jobs:
         working-directory: backend
         # Audit 09/2026: automatische Discovery — neue Testdateien koennen
         # nicht mehr vergessen werden (vorher: handgepflegte Dateiliste).
+        env:
+          # Runde 21 (Pruefbefund C): die HTTP-Teile der Runde-14-Tests
+          # (tests/test_befunde_runde14_*.py) laufen gegen das oben
+          # gestartete Backend (TEST_BASE_URL, Port 8001) — vorher wurden
+          # rund 60 davon still uebersprungen. Nur hier gesetzt, weil nur in
+          # diesem Job ein Backend fuer pytest laeuft.
+          RUNDE14_HTTP: "1"
+        # -rs: jeder verbleibende Skip steht mit Grund im Log
+        # (Uebersicht: docs/tests/UEBERSPRUNGENE_TESTS.md).
         run: |
-          python -m pytest -v tests/ --ignore=tests/backend_test.py
+          python -m pytest -v -rs tests/ --ignore=tests/backend_test.py
       - name: Backend-Log bei Fehler zeigen
         if: failure()
         run: tail -100 /tmp/backend.log || true

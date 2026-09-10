@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   Calendar as CalIcon, FileText, Edit3, X, ChevronLeft, ChevronRight,
   Plus, MapPin, Phone, User as UserIcon, Trash2, Clock, Printer,
-  ClipboardCheck, Download,
+  ClipboardCheck, Download, Camera,
 } from "lucide-react";
 import {
   openContractPdf, printContractPdf,
@@ -12,6 +12,7 @@ import {
 } from "@/lib/pdf";
 import SnapshotCard from "@/components/SnapshotCard";
 import PhotoGallery from "@/components/PhotoGallery";
+import AbholberichtDialog from "@/components/AbholberichtDialog";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
   format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
@@ -305,6 +306,8 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
 
 function DayApptItem({ a, onEdit, compact }) {
   const meta = STATUS_META[a.status] || STATUS_META.offen;
+  // Runde 21: Abholbericht samt Fahrerfotos direkt am Termin (auch fuer Sucher).
+  const [bericht, setBericht] = useState(false);
   const v = a.vehicle?.data;
   const date = safeParse(a.pickup_date);
   return (
@@ -344,6 +347,15 @@ function DayApptItem({ a, onEdit, compact }) {
               <UserIcon size={10} /> vom Fahrer abgelehnt{a.zuteilung_abgelehnt_von ? ` (${a.zuteilung_abgelehnt_von})` : ""} — bitte neu zuteilen
             </span>
           )}
+          {a.has_pickup_report && (
+            <span role="button" tabIndex={0} data-testid={`bericht-${a.id}`}
+                  onClick={(e) => { e.stopPropagation(); setBericht(true); }}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setBericht(true); } }}
+                  className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline cursor-pointer">
+              <Camera size={10} /> Abholbericht
+              {a.deviations_count ? ` · ${a.deviations_count} Abweichung${a.deviations_count === 1 ? "" : "en"}` : ""}
+            </span>
+          )}
           {a.contract_id && (
             <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "#34c759" }}>
               <FileText size={10} /> PDF
@@ -356,6 +368,7 @@ function DayApptItem({ a, onEdit, compact }) {
           </div>
         )}
       </div>
+      {bericht && <AbholberichtDialog appt={a} onClose={() => setBericht(false)} />}
     </button>
   );
 }

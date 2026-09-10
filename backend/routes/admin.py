@@ -1924,8 +1924,12 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
     Freischaltungs-Vorgaenge, Zahlungen ohne Zugang, letztes Backup."""
     from betrieb import offene_alarme
     try:
-        from backup_service import letztes_backup_info
-        backup = letztes_backup_info()
+        # Runde 21 (Nebenbefund): serveruebergreifend wie /ready — sonst
+        # zeigte der Server ohne eigene Sicherung "kein Backup". Die
+        # Auskunft traegt konsistent/konsistenz/inkonsistent; ein
+        # inkonsistentes Backup gilt nicht als vollstaendig.
+        from backup_service import letztes_backup_info_global
+        backup = await letztes_backup_info_global(db)
     except Exception as exc:                      # pragma: no cover
         backup = {"hinweis": f"nicht ermittelbar: {exc}"}
     frist = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()

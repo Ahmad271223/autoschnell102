@@ -32,6 +32,10 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "autoschnell")
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
+# Runde 21 (Pruefbefund C): klarer Skip-Grund statt "HTTP nach Neustart" —
+# die CI setzt RUNDE14_HTTP=1 im Schritt "Selbsttest-Suite".
+HTTP_GRUND = ("RUNDE14_HTTP=1 nicht gesetzt — HTTP-Test braucht ein laufendes "
+              "Backend auf TEST_BASE_URL (CI: Schritt Selbsttest-Suite)")
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ["MONGO_URL"]
@@ -131,6 +135,19 @@ class _Coll:
     def find(self, query=None, projection=None):
         return _Cursor([dict(d) for d in self.docs])
 
+    async def distinct(self, feld, query=None, **k):
+        # Runde 21 (Pruefbefund C): vehicle_akte liest ALLE Termin-IDs per
+        # distinct (routes/bestand.py) — wie Motor die eindeutigen Werte,
+        # Filter wie find_one (nur einfache Gleichheit).
+        werte = []
+        for d in self.docs:
+            if query and not all(d.get(key) == val for key, val in query.items()
+                                 if not isinstance(val, dict)):
+                continue
+            if feld in d and d[feld] not in werte:
+                werte.append(d[feld])
+        return werte
+
     async def update_one(self, query, update, **k):
         self.updates.append((query, update))
         # Runde 17 (Nr. 275): update_bestand prueft matched_count (CAS) —
@@ -156,7 +173,10 @@ def _mit_bericht_helfer(monkeypatch, bericht, aufrufe):
     """Stub fuer abholbericht.massgeblicher_bericht (Modul entsteht parallel)."""
     mod = types.ModuleType("abholbericht")
 
-    async def massgeblicher_bericht(db, vehicle_id, dealer_id):
+    # Runde 21 (Pruefbefund C): wie abholbericht.massgeblicher_bericht mit
+    # optionalem nur_termine (Auswahl nur unter den eigenen Terminen des
+    # Suchers) — vehicle_akte uebergibt es seit Runde 21 immer.
+    async def massgeblicher_bericht(db, vehicle_id, dealer_id, nur_termine=None):
         aufrufe.append((vehicle_id, dealer_id))
         return bericht
     mod.massgeblicher_bericht = massgeblicher_bericht
@@ -301,7 +321,7 @@ def test_35_akte_filtert_abgeloeste_protokolle():
 @pytest.fixture(scope="module")
 def firma():
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = requests.post(f"{API}/auth/register", json={
         "email": f"r14bestand_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "R14 Bestand GmbH", "contact_person": "B T",
@@ -363,7 +383,7 @@ def _bericht(firma, vid, tid, km, created_at, devs=None):
 
 def test_http_39_bestand_put_nach_abschluss_409(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     for lc in ("verkauft", "archiviert", "geloescht"):
         vid = _neues_auto(firma)
         r = requests.put(f"{API}/vehicles/{vid}/bestand", headers=firma["h"],
@@ -380,7 +400,7 @@ def test_http_39_bestand_put_nach_abschluss_409(firma):
 
 def test_http_40_apply_deviations_nach_verkauf_409(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid = _neues_auto(firma)
     tid = _termin(firma, vid, "abgeholt", JETZT.isoformat(), JETZT.isoformat())
     _bericht(firma, vid, tid, 155000, JETZT.isoformat(),
@@ -394,7 +414,7 @@ def test_http_40_apply_deviations_nach_verkauf_409(firma):
 
 def test_http_41_manual_put_nach_verkauf_409_sonst_audit(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid = _neues_auto(firma)
     r = requests.put(f"{API}/vehicles/manual/{vid}", headers=firma["h"],
                      json={**AUTO, "purchase_price": 18000}, timeout=30)
@@ -430,7 +450,7 @@ def _zwei_termine(firma):
 
 def test_http_46_apply_deviations_vom_abgeholten_termin(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, _, _, _, _ = _zwei_termine(firma)
     r = requests.post(f"{API}/vehicles/{vid}/apply-deviations", headers=firma["h"],
                       json={"deviation_ids": ["neu-1", "neu-2"]}, timeout=30)
@@ -447,7 +467,7 @@ def test_http_46_apply_deviations_vom_abgeholten_termin(firma):
 
 def test_http_47_akte_bericht_des_abgeholten_termins(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid, t_alt, t_neu, r_alt, r_neu = _zwei_termine(firma)
     r = requests.get(f"{API}/vehicles/{vid}/akte", headers=firma["h"], timeout=30)
     assert r.status_code == 200, r.text[:300]
@@ -464,7 +484,7 @@ def test_http_47_akte_bericht_des_abgeholten_termins(firma):
 
 def test_http_35_akte_protokolle_nur_aktuelle_mit_superseded(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid = _neues_auto(firma)
     basis = {"vehicle_id": vid, "dealer_id": firma["dealer_id"], "status": "final",
              "driver_name": "F", "seller_name": "V", "place": "Hannover",
@@ -484,7 +504,7 @@ def test_http_35_akte_protokolle_nur_aktuelle_mit_superseded(firma):
 
 def test_http_93_94_naives_expires_at_kein_500(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vid = _neues_auto(firma)
     naiv = (JETZT + timedelta(days=20)).replace(tzinfo=None).isoformat()
     assert "+" not in naiv
@@ -500,7 +520,7 @@ def test_http_93_94_naives_expires_at_kein_500(firma):
 
 def test_http_95_purchase_price_infinity_422(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     vorher = _db().vehicles.count_documents({"dealer_id": firma["dealer_id"]})
     for roh in ('{"make_label":"VW","model_label":"Golf","purchase_price":Infinity}',
                 '{"make_label":"VW","model_label":"Golf","purchase_price":NaN}',
@@ -520,7 +540,7 @@ def test_http_95_purchase_price_infinity_422(firma):
 
 def test_http_110_features_einzelstring(firma):
     if not HTTP:
-        pytest.skip("HTTP nach Neustart")
+        pytest.skip(HTTP_GRUND)
     r = requests.post(f"{API}/vehicles/manual", headers=firma["h"],
                       json={**AUTO, "features": ["x" * 121]}, timeout=30)
     assert r.status_code == 422, r.text[:200]
