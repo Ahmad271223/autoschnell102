@@ -463,6 +463,26 @@ def test_betriebsprobe_zwischenstand_nur_404_als_warnung(monkeypatch, skript_cod
         assert not modul.FEHLER and not modul.WARNUNGEN and modul.OK
 
 
+@pytest.mark.parametrize("startseite", [
+    '<script defer="defer" src="/static/js/main.abc123.js"></script>',
+    '<script type="module" crossorigin src="/static/js/main.Bq7_x-9Z.js"></script>',
+])
+def test_betriebsprobe_findet_skript_von_cra_und_vite(monkeypatch, startseite):
+    """Vite (09/2026) benennt das Hauptskript main.<Base64-Hash>.js statt
+    main.<hex>.js — die Probe muss beide erkennen (Rollout-Zwischenstand)."""
+    import types
+    modul = _probe_modul()
+    geholt = []
+
+    def get(url, **_kw):
+        geholt.append(url)
+        return _Antwort(200, startseite) if url.endswith("/") else _Antwort(200)
+    monkeypatch.setattr(modul, "requests", types.SimpleNamespace(get=get))
+    modul.oberflaeche_pruefen("app.example.test")
+    assert not modul.FEHLER and modul.OK, (modul.FEHLER, modul.OK)
+    assert any("/static/js/main." in u for u in geholt[1:])
+
+
 def test_betriebsprobe_kennt_option_zwischenstand(monkeypatch):
     modul = _probe_modul()
     gesehen = {}

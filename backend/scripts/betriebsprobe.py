@@ -201,7 +201,9 @@ def oberflaeche_pruefen(host, zwischenstand=False):
         if r.status_code != 200:
             fehler(f"Startseite antwortet {r.status_code}")
             return
-        m = re.search(r'src="(/static/js/main\.[a-f0-9]+\.js)"', r.text)
+        # CRA: main.<hex>.js — Vite (09/2026): main.<Buchstaben/Ziffern/_->.js.
+        # Beides erkennen: waehrend eines Rollouts laeuft kurz beides.
+        m = re.search(r'src="(/static/js/main\.[A-Za-z0-9_-]+\.js)"', r.text)
         if not m:
             fehler("Startseite enthaelt keinen Skript-Verweis (kein Build ausgeliefert?)")
             return

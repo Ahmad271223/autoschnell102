@@ -1,4 +1,62 @@
 import "@/App.css";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { tokenLesen } from "@/lib/sitzung";
+
+// Vite (09/2026): Seiten laden erst bei Bedarf nach — die erste Seite ist
+// dadurch deutlich schneller da. Scheitert das Nachladen (z. B. kurz nach
+// einem Update, wenn der Browser noch die alte Seitenliste kennt), laedt die
+// Oberflaeche EINMAL neu statt einen leeren Bildschirm zu zeigen.
+const NEU_GELADEN = "ah_seite_neu_geladen";
+function seite(laden) {
+  return lazy(() => laden().then((modul) => {
+    try { sessionStorage.removeItem(NEU_GELADEN); } catch { /* egal */ }
+    return modul;
+  }, (fehler) => {
+    let schonVersucht = false;
+    try { schonVersucht = sessionStorage.getItem(NEU_GELADEN) === "1"; } catch { /* egal */ }
+    if (!schonVersucht) {
+      try { sessionStorage.setItem(NEU_GELADEN, "1"); } catch { /* egal */ }
+      window.location.reload();
+      return new Promise(() => {});
+    }
+    throw fehler;
+  }));
+}
+
+// Angemeldete Nutzer: die Arbeitsseiten im Leerlauf vorladen — der Klick im
+// Menue oeffnet sie dann ohne Wartezeit.
+const VORLADEN = [
+  () => import("@/pages/app/ManuelleSuche"),
+  () => import("@/pages/app/PDFArchiv"),
+  () => import("@/pages/app/Termine"),
+  () => import("@/pages/app/Fahrzeugpool"),
+  () => import("@/pages/app/Bestand"),
+  () => import("@/pages/app/FahrzeugAkte"),
+  () => import("@/pages/app/Inserat"),
+  () => import("@/pages/app/Fahrer"),
+  () => import("@/pages/app/Team"),
+  () => import("@/pages/app/Einstellungen"),
+  () => import("@/pages/app/Anfragen"),
+];
+function vorladen() {
+  for (const laden of VORLADEN) laden().catch(() => {});
+}
+
+// Kurze Ladezeiten zeigen nichts an (kein Flackern); erst nach 250 ms ein Hinweis.
+function Laedt() {
+  const [zeigen, setZeigen] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setZeigen(true), 250);
+    return () => clearTimeout(t);
+  }, []);
+  if (!zeigen) return null;
+  return (
+    <div className="min-h-[40vh] flex items-center justify-center text-sm"
+         style={{ color: "var(--text-muted)" }} data-testid="seite-laedt">
+      Lädt …
+    </div>
+  );
+}
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 
@@ -11,52 +69,52 @@ import AppLayout from "@/components/AppLayout";
 
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
-import Anfrage from "@/pages/Anfrage";
-import MarktZahlungErfolg from "@/pages/markt/ZahlungErfolg";
-import PasswortVergessen from "@/pages/PasswortVergessen";
-import PasswortReset from "@/pages/PasswortReset";
-import Impressum from "@/pages/legal/Impressum";
-import Datenschutz from "@/pages/legal/Datenschutz";
-import AGB from "@/pages/legal/AGB";
-import Subscription from "@/pages/Subscription";
-import PaymentSuccess from "@/pages/PaymentSuccess";
-import AdminLayout from "@/pages/admin_v2/AdminLayout";
-import AdminOverview from "@/pages/admin_v2/Overview";
-import AdminUsers from "@/pages/admin_v2/Users";
-import AdminUserDetail from "@/pages/admin_v2/UserDetail";
-import AdminComparisons from "@/pages/admin_v2/Comparisons";
-import AdminUrlStats from "@/pages/admin_v2/UrlStats";
-import AdminAuditLog from "@/pages/admin_v2/AuditLog";
-import AdminErrors from "@/pages/admin_v2/Errors";
-import AdminFreischaltungen from "@/pages/admin_v2/Freischaltungen";
-import AdminSettings from "@/pages/admin_v2/Settings";
-import AdminAutoDaten from "@/pages/admin_v2/AutoDaten";
-import AdminFahrer from "@/pages/admin_v2/Fahrer";
-import AdminBetrieb from "@/pages/admin_v2/Betrieb";
+const Anfrage = seite(() => import("@/pages/Anfrage"));
+const MarktZahlungErfolg = seite(() => import("@/pages/markt/ZahlungErfolg"));
+const PasswortVergessen = seite(() => import("@/pages/PasswortVergessen"));
+const PasswortReset = seite(() => import("@/pages/PasswortReset"));
+const Impressum = seite(() => import("@/pages/legal/Impressum"));
+const Datenschutz = seite(() => import("@/pages/legal/Datenschutz"));
+const AGB = seite(() => import("@/pages/legal/AGB"));
+const Subscription = seite(() => import("@/pages/Subscription"));
+const PaymentSuccess = seite(() => import("@/pages/PaymentSuccess"));
+const AdminLayout = seite(() => import("@/pages/admin_v2/AdminLayout"));
+const AdminOverview = seite(() => import("@/pages/admin_v2/Overview"));
+const AdminUsers = seite(() => import("@/pages/admin_v2/Users"));
+const AdminUserDetail = seite(() => import("@/pages/admin_v2/UserDetail"));
+const AdminComparisons = seite(() => import("@/pages/admin_v2/Comparisons"));
+const AdminUrlStats = seite(() => import("@/pages/admin_v2/UrlStats"));
+const AdminAuditLog = seite(() => import("@/pages/admin_v2/AuditLog"));
+const AdminErrors = seite(() => import("@/pages/admin_v2/Errors"));
+const AdminFreischaltungen = seite(() => import("@/pages/admin_v2/Freischaltungen"));
+const AdminSettings = seite(() => import("@/pages/admin_v2/Settings"));
+const AdminAutoDaten = seite(() => import("@/pages/admin_v2/AutoDaten"));
+const AdminFahrer = seite(() => import("@/pages/admin_v2/Fahrer"));
+const AdminBetrieb = seite(() => import("@/pages/admin_v2/Betrieb"));
 
 import Vergleich from "@/pages/app/Vergleich";
-import ManuelleSuche from "@/pages/app/ManuelleSuche";
-import PDFArchiv from "@/pages/app/PDFArchiv";
-import Termine from "@/pages/app/Termine";
-import Fahrzeugpool from "@/pages/app/Fahrzeugpool";
-import Bestand from "@/pages/app/Bestand";
-import FahrzeugAkte from "@/pages/app/FahrzeugAkte";
-import Inserat from "@/pages/app/Inserat";
-import Fahrer from "@/pages/app/Fahrer";
-import Team from "@/pages/app/Team";
-import Einstellungen from "@/pages/app/Einstellungen";
-import Anfragen from "@/pages/app/Anfragen";
+const ManuelleSuche = seite(() => import("@/pages/app/ManuelleSuche"));
+const PDFArchiv = seite(() => import("@/pages/app/PDFArchiv"));
+const Termine = seite(() => import("@/pages/app/Termine"));
+const Fahrzeugpool = seite(() => import("@/pages/app/Fahrzeugpool"));
+const Bestand = seite(() => import("@/pages/app/Bestand"));
+const FahrzeugAkte = seite(() => import("@/pages/app/FahrzeugAkte"));
+const Inserat = seite(() => import("@/pages/app/Inserat"));
+const Fahrer = seite(() => import("@/pages/app/Fahrer"));
+const Team = seite(() => import("@/pages/app/Team"));
+const Einstellungen = seite(() => import("@/pages/app/Einstellungen"));
+const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 
-import DriverLogin from "@/pages/driver/DriverLogin";
-import DriverRegister from "@/pages/driver/DriverRegister";
-import DriverLayout from "@/pages/driver/DriverLayout";
-import DriverDashboard from "@/pages/driver/DriverDashboard";
-import DriverSettings from "@/pages/driver/DriverSettings";
-import DriverProtokoll from "@/pages/driver/Protokoll";
+const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
+const DriverRegister = seite(() => import("@/pages/driver/DriverRegister"));
+const DriverLayout = seite(() => import("@/pages/driver/DriverLayout"));
+const DriverDashboard = seite(() => import("@/pages/driver/DriverDashboard"));
+const DriverSettings = seite(() => import("@/pages/driver/DriverSettings"));
+const DriverProtokoll = seite(() => import("@/pages/driver/Protokoll"));
 
-import BuyerLogin from "@/pages/markt/BuyerLogin";
-import BuyerRegister from "@/pages/markt/BuyerRegister";
-import Marktplatz from "@/pages/markt/Marktplatz";
+const BuyerLogin = seite(() => import("@/pages/markt/BuyerLogin"));
+const BuyerRegister = seite(() => import("@/pages/markt/BuyerRegister"));
+const Marktplatz = seite(() => import("@/pages/markt/Marktplatz"));
 
 const Wrap = ({ children }) => (
   <ProtectedRoute>
@@ -81,12 +139,20 @@ function AppHome() {
 }
 
 export default function App() {
+  useEffect(() => {
+    if (!tokenLesen()) return undefined;
+    const leerlauf = window.requestIdleCallback || ((f) => setTimeout(f, 1500));
+    const abbrechen = window.cancelIdleCallback || clearTimeout;
+    const id = leerlauf(vorladen);
+    return () => abbrechen(id);
+  }, []);
   return (
     <AuthProvider>
       <DriverAuthProvider>
        <BuyerAuthProvider>
         <BrowserRouter>
           <Toaster theme="dark" position="top-right" richColors closeButton />
+          <Suspense fallback={<Laedt />}>
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
@@ -155,6 +221,7 @@ export default function App() {
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </Suspense>
         </BrowserRouter>
        </BuyerAuthProvider>
       </DriverAuthProvider>

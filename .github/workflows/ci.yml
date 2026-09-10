@@ -140,7 +140,7 @@ jobs:
         run: node audit-pruefen.js
       - name: Frontend-Tests
         working-directory: frontend
-        run: CI=true yarn test --watchAll=false
+        run: CI=true yarn test
       - name: Produktions-Build
         working-directory: frontend
         # Audit 09/2026 (Punkt 50): Warnungen sind Fehler.

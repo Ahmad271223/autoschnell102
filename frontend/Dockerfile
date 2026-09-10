@@ -1,4 +1,4 @@
-# AutoSchnell Frontend — React (craco) Build, ausgeliefert von nginx
+# AutoSchnell Frontend — React (Vite) Build, ausgeliefert von nginx
 FROM node:20-slim AS build
 WORKDIR /app
 COPY package.json yarn.lock* ./
@@ -6,7 +6,7 @@ COPY package.json yarn.lock* ./
 # Schutz genau dann, wenn er gebraucht wurde (abweichende Abhaengigkeiten).
 RUN yarn install --frozen-lockfile
 COPY . .
-# Backend-URL wird zur Build-Zeit eingebacken (CRA/craco liest REACT_APP_*).
+# Backend-URL wird zur Build-Zeit eingebacken (vite.config.mjs liest REACT_APP_*).
 # LEER ist der richtige Standard: lib/api.js baut daraus `${BACKEND}/api`.
 # Stand hier "/api", rief ein ohne Build-Argument gebautes Image
 # "/api/api/..." auf und die ganze Oberflaeche waere tot. docker-compose
@@ -14,7 +14,7 @@ COPY . .
 # von Hand baut, darf nicht kaputt sein (Pruefbericht 09/2026).
 ARG REACT_APP_BACKEND_URL=
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
-# CI=true: Warnungen sind Fehler (Audit 09/2026, Punkt 50).
+# Vite bricht bei Fehlern ab; CI=true bleibt fuer Werkzeuge, die es auswerten.
 RUN CI=true yarn build
 
 # --- Auslieferung ---
