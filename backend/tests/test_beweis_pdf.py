@@ -181,7 +181,7 @@ def test_13_echte_portal_logos_sind_gueltig_und_klein_genug():
     (frontend/public/logos); jede Datei muss lesbar und unter der Grenze sein."""
     from pathlib import Path
     ordner = Path(B.__file__).resolve().parent / "assets" / "logos"
-    for quelle in ("mobile", "autoscout24"):
+    for quelle in ("mobile", "autoscout24", "kleinanzeigen"):
         datei = ordner / f"{quelle}.png"
         assert datei.is_file(), datei
         assert 0 < datei.stat().st_size <= B.LOGO_MAX_BYTES

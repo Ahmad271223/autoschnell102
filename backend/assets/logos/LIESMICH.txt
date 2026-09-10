@@ -10,12 +10,13 @@ Stand 10.09.2026:
                       dieselbe Datei wie auf den Vergleichs-Buttons)
   autoscout24.png     vorhanden (aus frontend/public/logos/autoscout24.png,
                       dunkler Rand beschnitten)
-  kleinanzeigen.png   fehlt noch — bis dahin dunkelgruener Schriftzug
-                      "kleinanzeigen". Offizielle Datei: Mediathek von
-                      Kleinanzeigen (themen.kleinanzeigen.de, Logo-Guideline,
-                      horizontale Variante). Richtlinie: nicht verzerren oder
-                      veraendern, Schutzzone 10 % der Logobreite, mindestens
-                      27 mm breit.
+  kleinanzeigen.png   vorhanden (offizielle horizontale Variante "lightgreen" aus
+                      der Mediathek von Kleinanzeigen, themen.kleinanzeigen.de,
+                      Logo-Guideline; am 11.09.2026 auf Wunsch des Betreibers
+                      geladen und auf 600 px / 16 Farben verkleinert: 79 KB ->
+                      4 KB, Seitenverhaeltnis unveraendert).
+                      Richtlinie: nicht verzerren oder veraendern, Schutzzone
+                      10 % der Logobreite, mindestens 27 mm breit.
 
 Regeln fuer eigene Dateien:
   * Logos NUR mit Nutzungsrecht des jeweiligen Portals verwenden
