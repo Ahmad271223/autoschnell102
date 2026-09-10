@@ -425,13 +425,13 @@ export default function Einstellungen() {
                 hint='Wird in das Feld „Besondere Vereinbarungen" jedes neuen Vertrags vorbelegt — kann beim Erstellen überschrieben werden.'
               />
               <AppleTextarea
-                label="Digitaler Vertragstext (Versand per E-Mail / WhatsApp)"
+                label="Allgemeine Vertragsbedingungen (in jedem Kaufvertrag)"
                 rows={10}
                 value={form.digital_vertragstext}
                 onChange={(v) => setForm({ ...form, digital_vertragstext: v })}
                 icon={Mail}
                 testid="set-digital-text"
-                hint='Wird der Vertrag per E-Mail oder WhatsApp verschickt, hat das PDF keine Unterschriftsfelder — unter „Unterschriften" steht stattdessen dieser Text. Leer = Standardtext (unten). Absätze mit einer Leerzeile trennen.'
+                hint='Steht in jedem neuen Kaufvertrag als eigener Abschnitt „Allgemeine Vertragsbedingungen" (Druck und digital). Beim Versand per E-Mail/WhatsApp entfallen die Unterschriftsfelder, dort steht nur: „Dieser Vertrag ist ohne Unterschrift gültig." Leer = Standardtext (unten). Bestehende Verträge bleiben unverändert. Absätze mit einer Leerzeile trennen.'
               />
               {!(form.digital_vertragstext || "").trim() && dealer?.digital_vertragstext_standard && (
                 <div className="rounded-xl border p-3 text-[12px] leading-relaxed whitespace-pre-line"

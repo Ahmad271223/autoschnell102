@@ -63,27 +63,44 @@ _CONTRACT = {"seller_name": "Max Muster", "purchase_price": 1000,
 
 
 def test_01_druckfassung_hat_unterschriftslinien():
-    t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=_CONTRACT))
+    c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
+    t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=c))
     assert "Ort, Datum" in t
     assert "Mit ihrer Unterschrift" in _flach(t)
     assert "digitale Ausfertigung" not in t
+    # Beschluss 10.09.2026: die Vertragsbedingungen stehen auch im Druck —
+    # als eigener Abschnitt, nicht unter "Unterschriften".
+    f = _flach(t)
+    assert "Allgemeine Vertragsbedingungen" in f and "Absagen sind nach Vertragsbestätigung" in f
 
 
 def test_02_digitale_fassung_text_statt_linien():
+    c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
     t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
-                                    contract=_CONTRACT, digital=True))
+                                    contract=c, digital=True))
     assert "Ort, Datum" not in t
     assert "Mit ihrer Unterschrift" not in _flach(t)
     assert "UNTERSCHRIFTEN" in t.upper()          # Kopf bleibt, Linien nicht
     assert "digitale Ausfertigung" in t
     f = _flach(t)
-    # die vier Standard-Klauseln
+    # Beschluss 10.09.2026: die vier Klauseln unter "Allgemeine
+    # Vertragsbedingungen"; unter "Unterschriften" nur der eine Satz.
+    assert "Allgemeine Vertragsbedingungen" in f
     assert "keine Garantie oder Gewährleistung" in f
     assert "Absagen sind nach Vertragsbestätigung" in f
     assert "ihrer Richtigkeit entsprechen" in f
-    assert "auch ohne Unterschrift gültig" in f
-    # Parteien werden benannt
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." in f
     assert "Max Muster" in f and "Digi Autohaus GmbH" in f
+
+
+def test_02b_ohne_gespeicherten_text_keine_bedingungen():
+    """Kein Text im Vertrag -> kein Abschnitt (nie ein heutiger Standard aus
+    der Luft); digital steht trotzdem der eine Satz."""
+    f = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
+                                           contract=_CONTRACT, digital=True)))
+    assert "Allgemeine Vertragsbedingungen" not in f
+    assert "Absagen sind nach Vertragsbestätigung" not in f
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." in f
 
 
 def test_03_eigener_text_ersetzt_standard():

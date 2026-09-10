@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
 import { toast } from "sonner";
 
@@ -41,17 +41,53 @@ const VIEW_LABELS = {
   top:   "Draufsicht",
 };
 
-// Alle neuen Skizzen liegen einheitlich bei 1536 × 1024 px in
-// /app/frontend/public/damage/.
+// Koordinatenraum der Skizzen: 1536 × 1024 (alle Punkte/Markierungen
+// rechnen darin). Angezeigt wird seit 10.09.2026 eine kleine JPEG-Fassung
+// (1024 px, ~55 KB statt ~400 KB PNG) — Befund Ahmad: die Skizzen luden
+// am Handy beim Vertrag erstellen oft nicht. Neue Dateinamen (-v2), weil
+// der Server /damage/* ein Jahr lang cachen darf.
 const IMG_W = 1536;
 const IMG_H = 1024;
 const VIEW_IMAGES = {
-  front: { src: "/damage/front.png", w: IMG_W, h: IMG_H },
-  rear:  { src: "/damage/rear.png",  w: IMG_W, h: IMG_H },
-  left:  { src: "/damage/left.png",  w: IMG_W, h: IMG_H },
-  right: { src: "/damage/right.png", w: IMG_W, h: IMG_H },
-  top:   { src: "/damage/top.png",   w: IMG_W, h: IMG_H },
+  front: { src: "/damage/front-v2.jpg", w: IMG_W, h: IMG_H },
+  rear:  { src: "/damage/rear-v2.jpg",  w: IMG_W, h: IMG_H },
+  left:  { src: "/damage/left-v2.jpg",  w: IMG_W, h: IMG_H },
+  right: { src: "/damage/right-v2.jpg", w: IMG_W, h: IMG_H },
+  top:   { src: "/damage/top-v2.jpg",   w: IMG_W, h: IMG_H },
 };
+
+/** Skizze mit Lade- und Fehlerbehandlung: bis zu drei Versuche, danach ein
+ *  Knopf zum Neuladen — eine leere Fläche ohne Erklärung gibt es nicht mehr. */
+function SkizzenBild({ src, alt }) {
+  const [versuch, setVersuch] = useState(0);
+  const [zustand, setZustand] = useState("laedt"); // laedt | ok | fehler
+  const url = versuch ? `${src}?r=${versuch}` : src;
+  return (
+    <>
+      <img src={url} alt={alt} decoding="async" draggable={false}
+           onLoad={() => setZustand("ok")}
+           onError={() => {
+             if (versuch < 3) { setVersuch((v) => v + 1); setZustand("laedt"); }
+             else setZustand("fehler");
+           }}
+           className="absolute inset-0 w-full h-full select-none"
+           style={{ objectFit: "fill", pointerEvents: "none",
+                    opacity: zustand === "ok" ? 1 : 0, transition: "opacity .15s" }} />
+      {zustand !== "ok" && (
+        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-500 bg-white"
+             data-testid="skizze-status">
+          {zustand === "laedt" ? "Skizze wird geladen…" : (
+            <button type="button" className="underline text-zinc-700"
+                    style={{ pointerEvents: "auto" }}
+                    onClick={(e) => { e.stopPropagation(); setVersuch((v) => v + 1); setZustand("laedt"); }}>
+              Skizze konnte nicht geladen werden – erneut versuchen
+            </button>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
 
 // Hilfsfunktion: Punkt mit Mittelpunkt (Bild-Pixel) + Name.
 const P = (name, cx, cy) => ({ name, cx, cy });
@@ -269,6 +305,12 @@ export default function DamageSelector({ damages = [], onChange }) {
     return map;
   }, [damages]);
 
+  // Alle fuenf Skizzen sofort vorladen, sobald der Dialog offen ist — dann
+  // liegen sie beim Wechsel der Ansicht schon im Browser-Cache.
+  useEffect(() => {
+    Object.values(VIEW_IMAGES).forEach((v) => { const i = new Image(); i.src = v.src; });
+  }, []);
+
   return (
     <div className="space-y-4">
       {/* Schadensart-Chips */}
@@ -423,9 +465,10 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
         )}
       </div>
       <div
-        className="relative w-full overflow-hidden rounded-md"
+        className="relative w-full overflow-hidden rounded-md bg-white"
         style={{ aspectRatio: `${dim.w} / ${dim.h}` }}
       >
+        <SkizzenBild src={dim.src} alt={VIEW_LABELS[view]} />
         <svg
           id={`dmg-${view}`}
           viewBox={`0 0 ${dim.w} ${dim.h}`}
@@ -447,17 +490,9 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
               opacity: 0.95;
             }
           `}</style>
-          <rect x="0" y="0" width={dim.w} height={dim.h} fill="white" />
-          <image
-            href={dim.src}
-            xlinkHref={dim.src}
-            x="0"
-            y="0"
-            width={dim.w}
-            height={dim.h}
-            preserveAspectRatio="xMidYMid meet"
-            style={{ pointerEvents: "none" }}
-          />
+          {/* Skizze liegt als <img> unter dem SVG (Lade-/Fehlerbehandlung);
+              das SVG ist durchsichtig und traegt nur Punkte und Markierungen. */}
+          <rect x="0" y="0" width={dim.w} height={dim.h} fill="transparent" />
 
           {/* Klickbare Dots — unauffällig, Label im title (Hover-Tooltip) */}
           {dots.map((d) => (

@@ -36,7 +36,7 @@ from deps import (
 import auto_daten
 from cleanup_service import vertrag_endgueltig_loeschen
 from lifecycle import try_set_lifecycle
-from pdf_service import generate_contract_pdf, digitaler_vertragstext
+from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf, digitaler_vertragstext
 from rate_limiter import SlidingWindowRateLimiter
 
 router = APIRouter()
@@ -244,13 +244,7 @@ def _pdfs_erzeugen(*, dealer: dict, vehicle: dict, contract: dict) -> tuple[byte
 # — das wuerde den historischen Vertragsinhalt nachtraeglich veraendern.
 # Stattdessen ein klarer Hinweis, dass die Fassung nachtraeglich entstanden
 # ist und ihr Text nicht Teil des damals geschlossenen Vertrags war.
-DIGITAL_NACHTRAEGLICH = (
-    "Diese digitale Ausfertigung wurde nachträglich erzeugt.\n\n"
-    "Der Vertrag wurde vor Einführung der digitalen Ausfertigung geschlossen. "
-    "Für ihn sind keine digitalen Vertragsbedingungen gespeichert; es gelten "
-    "ausschließlich die oben aufgeführten Vertragsangaben und die unterschriebene "
-    "Ausfertigung."
-)
+# DIGITAL_NACHTRAEGLICH liegt seit 10.09.2026 in pdf_service (dort wird er erkannt).
 
 
 async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:

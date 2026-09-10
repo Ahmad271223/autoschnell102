@@ -58,6 +58,17 @@ DIGITAL_VERTRAGSTEXT_STANDARD = (
 )
 
 
+# Hinweis fuer Altvertraege (vor Einfuehrung der Vertragsbedingungen): steht
+# in der digitalen Fassung unter "Unterschriften" — nie als Vertragstext.
+DIGITAL_NACHTRAEGLICH = (
+    "Diese digitale Ausfertigung wurde nachträglich erzeugt.\n\n"
+    "Der Vertrag wurde vor Einführung der digitalen Ausfertigung geschlossen. "
+    "Für ihn sind keine Vertragsbedingungen gespeichert; es gelten "
+    "ausschließlich die oben aufgeführten Vertragsangaben und die unterschriebene "
+    "Ausfertigung."
+)
+
+
 def digitaler_vertragstext(dealer: dict) -> str:
     """Wirksamer Text fuer die digitale Ausfertigung: eigener Text der Firma
     bzw. des Suchers (effective_dealer), sonst der Standard."""
@@ -586,37 +597,36 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
                 story.append(Paragraph(txt, st["small"]))
                 story.append(Spacer(1, 4))
 
-    # ---------- Digitale Ausfertigung: Text statt Unterschriftslinien ----------
-    if digital:
-        dtext = (contract.get("digital_vertragstext") or "").strip() \
-            or DIGITAL_VERTRAGSTEXT_STANDARD
-        seller_name = (contract.get("seller_name") or "").strip() or "Verkäufer / Halter"
-        block = [_section("Unterschriften", st), Spacer(1, 6),
-                 Paragraph("Digitale Ausfertigung — per E-Mail / WhatsApp übermittelt.",
-                           st["sig_label"]),
-                 Spacer(1, 6)]
-        for para in dtext.split("\n\n"):
+    # ---------- Allgemeine Vertragsbedingungen (Beschluss Ahmad 10.09.2026) ----------
+    # Der Standardtext (vier Klauseln) bzw. der in den Einstellungen
+    # gespeicherte Text steht in JEDER Fassung unter einer eigenen
+    # Ueberschrift — nicht mehr unter "Unterschriften". Immer nur der bei
+    # der Erstellung festgehaltene Text (contract_data); Altvertraege ohne
+    # Text haben den Abschnitt nicht (DIGITAL_NACHTRAEGLICH ist ein Hinweis
+    # fuer die Unterschriften-Zeile, kein Vertragstext).
+    avb = (contract.get("digital_vertragstext") or "").strip()
+    nachtraeglich = bool(avb) and avb == DIGITAL_NACHTRAEGLICH.strip()
+    if avb and not nachtraeglich:
+        story.append(Spacer(1, 12))
+        story.append(_section("Allgemeine Vertragsbedingungen", st))
+        story.append(Spacer(1, 6))
+        for para in avb.split("\n\n"):
             txt = _xml_escape(para).replace("\n", "<br/>").strip()
             if txt:
-                block.append(Paragraph(txt, st["body"]))
-                block.append(Spacer(1, 4))
-        parteien = Table([[
-            Paragraph(f"<b>Verkäufer / Halter</b><br/>{_xml_escape(seller_name)}", st["small"]),
-            "",
-            Paragraph(f"<b>Käufer / Händler</b><br/>{_xml_escape(company)}", st["small"]),
-        ]], colWidths=[COL_W, 0.5 * cm, COL_W])
-        parteien.setStyle(TableStyle([
-            ("BOX", (0, 0), (0, 0), 0.5, DIVIDER),
-            ("BOX", (2, 0), (2, 0), 0.5, DIVIDER),
-            ("BACKGROUND", (0, 0), (0, 0), LIGHT),
-            ("BACKGROUND", (2, 0), (2, 0), LIGHT),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ]))
-        block += [Spacer(1, 6), parteien]
+                story.append(Paragraph(txt, st["body"]))
+                story.append(Spacer(1, 4))
+
+    # ---------- Digitale Ausfertigung: ein Satz statt Unterschriftslinien ----------
+    if digital:
+        block = [_section("Unterschriften", st), Spacer(1, 8),
+                 Paragraph("Dieser Vertrag ist ohne Unterschrift gültig.", st["body"])]
+        if nachtraeglich:
+            block.append(Spacer(1, 8))
+            for para in avb.split("\n\n"):
+                txt = _xml_escape(para).replace("\n", "<br/>").strip()
+                if txt:
+                    block.append(Paragraph(txt, st["small"]))
+                    block.append(Spacer(1, 3))
         story.append(Spacer(1, 20))
         story.append(KeepTogether(block))
         footer_left = company

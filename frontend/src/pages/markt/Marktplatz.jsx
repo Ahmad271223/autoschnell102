@@ -4,7 +4,7 @@ import { buyerApi, useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
 import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
-import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera, Heart, Handshake, Inbox, Check } from "lucide-react";
+import { Store, LogOut, Lock, Gauge, Calendar, Fuel, ShieldCheck, Phone, MapPin, X, Clock, ChevronLeft, ChevronRight, Camera, Heart, Handshake, Inbox, Check, SlidersHorizontal } from "lucide-react";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
 const fmtEur = (n) => (n == null ? "Preis auf Anfrage" : `${Number(n).toLocaleString("de-DE")} €`);
@@ -18,7 +18,7 @@ const fInput = "h-9 px-2.5 rounded-lg border bg-transparent text-sm outline-none
 const fStyle = { borderColor: "var(--border-default)" };
 function FField({ label, children }) {
   return (
-    <div>
+    <div className="w-[calc(50%-4px)] sm:w-auto">
       <label className="block text-[10px] text-zinc-500 mb-1 uppercase tracking-wide">{label}</label>
       {children}
     </div>
@@ -41,6 +41,11 @@ export default function Marktplatz() {
   const [makes, setMakes] = useState([]);
   const [favs, setFavs] = useState(() => new Set());
   const [nurFavs, setNurFavs] = useState(false);
+  // Handy (Befund Ahmad 10.09.2026): die Filterleiste nahm den ganzen
+  // Bildschirm ein, bevor das erste Auto kam. Wie bei mobile.de: kompakte
+  // Leiste, Filter erst auf Tipp. Auf grossen Bildschirmen wie bisher.
+  const [filterOffen, setFilterOffen] = useState(false);
+  const aktiveFilter = Object.values(filters || {}).filter((v) => v !== "" && v != null).length;
   // Haendler-Ansicht: alle Fahrzeuge EINES Haendlers + Profil (Logo,
   // Oeffnungszeiten, Telefon). Filter/Sortierung gelten dort weiter.
   const [dealerView, setDealerView] = useState(null);
@@ -320,15 +325,24 @@ export default function Marktplatz() {
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
                 <div className="overline">{dealerView ? "Händler-Angebot" : "Marktplatz"}</div>
-                <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">
+                <h1 className="font-display font-black text-2xl sm:text-3xl lg:text-4xl tracking-tighter mt-1">
                   {dealerView ? `Fahrzeuge von ${dealerView.company_name}` : "Angebotene Fahrzeuge"}
                 </h1>
+                {items && <div className="text-xs text-zinc-500 mt-1 sm:hidden">{items.length} Fahrzeuge</div>}
               </div>
-              <div className="flex items-center gap-2">
-                {items && <span className="text-xs text-zinc-500">{items.length} Fahrzeuge</span>}
+              <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto pb-1 -mx-1 px-1"
+                   data-testid="markt-toolbar">
+                {items && <span className="text-xs text-zinc-500 hidden sm:inline">{items.length} Fahrzeuge</span>}
+                <button onClick={() => setFilterOffen((x) => !x)}
+                        data-testid="filter-toggle"
+                        className={`sm:hidden h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 shrink-0 transition ${
+                          filterOffen || aktiveFilter ? "text-white border-white/40 bg-white/5" : "text-zinc-400"}`}
+                        style={filterOffen || aktiveFilter ? {} : { borderColor: "var(--border-default)" }}>
+                  <SlidersHorizontal size={14} /> Filter{aktiveFilter ? ` (${aktiveFilter})` : ""}
+                </button>
                 <select value={sort}
                         onChange={(e) => { setSort(e.target.value); apply(); }}
-                        className="h-10 px-3 rounded-xl border bg-[#141416] text-sm outline-none focus:border-white/40"
+                        className="h-10 px-3 rounded-xl border bg-[#141416] text-sm outline-none focus:border-white/40 shrink-0"
                         style={{ borderColor: "var(--border-default)" }}>
                   <option value="">Neueste zuerst</option>
                   <option value="preis_auf">Günstigste zuerst</option>
@@ -338,13 +352,13 @@ export default function Marktplatz() {
                 </select>
                 <button onClick={() => setShowAnfragen(true)}
                         data-testid="meine-anfragen-btn"
-                        className="h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 text-zinc-400 hover:text-white transition"
+                        className="h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 text-zinc-400 hover:text-white transition shrink-0 whitespace-nowrap"
                         style={{ borderColor: "var(--border-default)" }}>
                   <Inbox size={14} /> Meine Anfragen
                 </button>
                 <button onClick={() => setNurFavs((x) => !x)}
                         data-testid="filter-favoriten"
-                        className={`h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 transition ${
+                        className={`h-10 px-3.5 rounded-xl border text-sm inline-flex items-center gap-1.5 transition shrink-0 whitespace-nowrap ${
                           nurFavs ? "text-red-400 border-red-500/50 bg-red-500/10" : "text-zinc-400"}`}
                         style={nurFavs ? {} : { borderColor: "var(--border-default)" }}>
                   <Heart size={14} fill={nurFavs ? "currentColor" : "none"} />
@@ -354,12 +368,13 @@ export default function Marktplatz() {
             </div>
 
             {/* Filterleiste */}
-            <div className="mt-5 rounded-2xl p-3 flex flex-wrap items-end gap-2"
+            <div className={`${filterOffen ? "flex" : "hidden"} sm:flex mt-4 sm:mt-5 rounded-2xl p-3 flex-wrap items-end gap-2`}
+                 data-testid="markt-filter"
                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
               <FField label="Marke">
                 <select value={filters.make}
                         onChange={(e) => { setFilters((s) => ({ ...s, make: e.target.value, model: "" })); apply(); }}
-                        className={fInput + " bg-[#141416] w-40"} style={fStyle}>
+                        className={fInput + " bg-[#141416] w-full sm:w-40"} style={fStyle}>
                   <option value="">Alle Marken</option>
                   {makes.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}
                 </select>
@@ -367,7 +382,7 @@ export default function Marktplatz() {
               <FField label="Modell">
                 <select value={filters.model} disabled={!filters.make}
                         onChange={(e) => { setFilters((s) => ({ ...s, model: e.target.value })); apply(); }}
-                        className={fInput + " bg-[#141416] w-40 disabled:opacity-40"} style={fStyle}>
+                        className={fInput + " bg-[#141416] w-full sm:w-40 disabled:opacity-40"} style={fStyle}>
                   <option value="">{filters.make ? "Alle Modelle" : "erst Marke wählen"}</option>
                   {models.map((mm) => <option key={mm.id} value={mm.name}>{mm.name}</option>)}
                 </select>
@@ -375,7 +390,7 @@ export default function Marktplatz() {
               <FField label="Kraftstoff">
                 <select value={filters.fuel}
                         onChange={(e) => { setFilters((s) => ({ ...s, fuel: e.target.value })); apply(); }}
-                        className={fInput + " bg-[#141416]"} style={fStyle}>
+                        className={fInput + " bg-[#141416] w-full sm:w-auto"} style={fStyle}>
                   <option value="">Alle</option>
                   <option value="Benzin">Benzin</option>
                   <option value="Diesel">Diesel</option>
@@ -387,32 +402,33 @@ export default function Marktplatz() {
               <FField label="km von–bis">
                 <div className="flex gap-1">
                   <input type="number" value={filters.km_min} onChange={(e) => setFilters((s) => ({ ...s, km_min: e.target.value }))}
-                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="von" className={fInput + " w-20"} style={fStyle} />
+                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="von" className={fInput + " w-full sm:w-20 min-w-0"} style={fStyle} />
                   <input type="number" value={filters.km_max} onChange={(e) => setFilters((s) => ({ ...s, km_max: e.target.value }))}
-                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="bis" className={fInput + " w-20"} style={fStyle} />
+                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="bis" className={fInput + " w-full sm:w-20 min-w-0"} style={fStyle} />
                 </div>
               </FField>
               <FField label="PS von–bis">
                 <div className="flex gap-1">
                   <input type="number" value={filters.ps_min} onChange={(e) => setFilters((s) => ({ ...s, ps_min: e.target.value }))}
-                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="von" className={fInput + " w-16"} style={fStyle} />
+                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="von" className={fInput + " w-full sm:w-16 min-w-0"} style={fStyle} />
                   <input type="number" value={filters.ps_max} onChange={(e) => setFilters((s) => ({ ...s, ps_max: e.target.value }))}
-                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="bis" className={fInput + " w-16"} style={fStyle} />
+                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="bis" className={fInput + " w-full sm:w-16 min-w-0"} style={fStyle} />
                 </div>
               </FField>
               <FField label="Preis € von–bis">
                 <div className="flex gap-1">
                   <input type="number" value={filters.price_min} onChange={(e) => setFilters((s) => ({ ...s, price_min: e.target.value }))}
-                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="von" className={fInput + " w-24"} style={fStyle} />
+                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="von" className={fInput + " w-full sm:w-24 min-w-0"} style={fStyle} />
                   <input type="number" value={filters.price_max} onChange={(e) => setFilters((s) => ({ ...s, price_max: e.target.value }))}
-                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="bis" className={fInput + " w-24"} style={fStyle} />
+                         onKeyDown={(e) => e.key === "Enter" && apply()} placeholder="bis" className={fInput + " w-full sm:w-24 min-w-0"} style={fStyle} />
                 </div>
               </FField>
-              <button onClick={apply}
-                      className="h-9 px-4 rounded-lg text-sm font-semibold text-white"
+              <button onClick={() => { apply(); setFilterOffen(false); }}
+                      data-testid="filter-anwenden"
+                      className="h-10 sm:h-9 px-4 rounded-lg text-sm font-semibold text-white w-full sm:w-auto"
                       style={{ background: "var(--accent-red)" }}>Anwenden</button>
               <button onClick={() => { setFilters(EMPTY); setSort(""); setQ(""); apply(); }}
-                      className="h-9 px-3 rounded-lg text-sm text-zinc-400 hover:text-white">Zurücksetzen</button>
+                      className="h-9 px-3 rounded-lg text-sm text-zinc-400 hover:text-white w-full sm:w-auto">Zurücksetzen</button>
             </div>
 
             <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -430,8 +446,10 @@ export default function Marktplatz() {
                   <div key={v.id} onClick={() => setSel(v)}
                        className="tactical-card overflow-hidden flex flex-col cursor-pointer hover:border-white/25 transition"
                        data-testid={`markt-${v.id}`}>
-                    <div className="h-44 overflow-hidden bg-zinc-900 relative">
-                      {img ? <img src={img} alt="" className="w-full h-full object-cover" />
+                    <div className="h-52 sm:h-44 overflow-hidden bg-zinc-900 relative">
+                      {img ? <img src={img} alt="" loading="lazy" referrerPolicy="no-referrer"
+                                  className="w-full h-full object-cover"
+                                  onError={(e) => { e.currentTarget.style.display = "none"; }} />
                            : <div className="w-full h-full flex items-center justify-center text-zinc-700 text-xs">kein Foto</div>}
                       <button onClick={(e) => toggleFav(e, v.id)}
                               data-testid={`fav-${v.id}`}
@@ -444,7 +462,7 @@ export default function Marktplatz() {
                       </button>
                     </div>
                     <div className="p-4 flex-1 flex flex-col">
-                      <div className="font-semibold">{d.make_label} {d.model_label}</div>
+                      <div className="font-semibold text-lg sm:text-base leading-tight">{d.make_label} {d.model_label}</div>
                       <div className="text-xs text-zinc-500 line-clamp-1">{d.model_description}</div>
                       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
                         {d.first_registration && <span className="inline-flex items-center gap-1"><Calendar size={12} /> {d.first_registration}</span>}
@@ -454,7 +472,7 @@ export default function Marktplatz() {
                       </div>
                       <div className="mt-3 pt-3 border-t flex items-end justify-between" style={{ borderColor: "var(--border-default)" }}>
                         <div>
-                          <div className="text-lg font-black">{fmtEur(v.price)}</div>
+                          <div className="text-xl sm:text-lg font-black">{fmtEur(v.price)}</div>
                           <div className="text-[10px] text-zinc-500 inline-flex items-center gap-1">
                             <ShieldCheck size={11} /> {LEVEL_LABEL[v.price_level] || v.price_level}
                           </div>

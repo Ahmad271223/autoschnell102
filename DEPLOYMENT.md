@@ -801,6 +801,12 @@ Systems zu, per Antwort auf die E-Mail direkt an den Sucher. Der Text der
 digitalen Ausfertigung ist eine Vertragsbedingung des Händlers, keine vom
 System nachgewiesene Tatsache.
 
+Seit 10.09.2026 stehen die Klauseln (Standard: vier Sätze, oder der Text aus
+Einstellungen → „Allgemeine Vertragsbedingungen") in JEDER Fassung als eigener
+Abschnitt „Allgemeine Vertragsbedingungen". Die digitale Fassung (E-Mail/
+WhatsApp) hat keine Unterschriftsfelder; unter „Unterschriften" steht nur:
+„Dieser Vertrag ist ohne Unterschrift gültig."
+
 Texte aus den Einstellungen gelten nur für NEUE Verträge. Ein bereits
 erstellter Vertrag behält den Text vom Zeitpunkt seiner Erstellung — auch
 bei Terminverschiebung (Neuerzeugung) und beim späteren Nacherzeugen der

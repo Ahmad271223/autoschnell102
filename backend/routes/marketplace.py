@@ -712,7 +712,10 @@ async def request_marketplace_access(user=Depends(current_buyer)):
         "company_name": user.get("company_name", ""),
         "contact_email": user.get("email", ""),
         "contact_phone": user.get("phone", ""),
-        "wanted": f"Marktplatz-Zugang ({BUYER_ACCESS_PRICE:.2f} €/Monat)",
+        # Beschluss Ahmad 10.09.2026: Marktplatz vorerst 0 € — keine Kosten
+        # mehr in Anfragen und Freischaltungen nennen.
+        "wanted": ("Marktplatz-Zugang (kostenlos)" if MARKTPLATZ_KOSTENLOS
+                   else f"Marktplatz-Zugang ({BUYER_ACCESS_PRICE:.2f} €/Monat)"),
         "status": "offen", "created_at": now_iso(),
     })
     await log_activity("", user["id"], "marktplatz.zugang.anfrage", ref=req_id)
