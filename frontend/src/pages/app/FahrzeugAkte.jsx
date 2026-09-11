@@ -5,6 +5,10 @@ import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
 import BeweisCard from "@/components/BeweisCard";
 import { fotosBis } from "@/components/AbholberichtDialog";
+import StatusSchild from "@/components/StatusSchild";
+import {
+  aktionText, beschreibungLesbar, datumDE, inseratText, kaufvorgangText, lesbar, lifecycleText,
+} from "@/lib/fahrzeugStatus";
 import {
   ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
 } from "lucide-react";
@@ -20,14 +24,8 @@ const fmtDate = (s) => {
   try { return new Date(s).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
   catch { return s; }
 };
-const fmtEur = (n) => (n == null ? "—" : `${Number(n).toLocaleString("de-DE")} €`);
-
-// Runde 21: lesbare Texte fuer Historie-Eintraege, die sonst als Kennung erscheinen.
-const HISTORIE_TEXT = {
-  "abholung.bericht": "Abholbericht vom Fahrer eingereicht",
-  "abholung.bericht.korrektur": "Abholbericht vom Fahrer korrigiert",
-  "inserat.foto.aus_abholbericht": "Fahrerfotos ins Inserat übernommen",
-};
+// Geschuetztes Leerzeichen: "20.000 €" bricht auf dem Handy nie vor dem €-Zeichen um.
+const fmtEur = (n) => (n == null ? "—" : `${Number(n).toLocaleString("de-DE")}\u00a0€`);
 
 export default function FahrzeugAkte() {
   const { id } = useParams();
@@ -108,7 +106,7 @@ export default function FahrzeugAkte() {
   };
 
   const Section = ({ title, children, warn }) => (
-    <div className="tactical-card p-4 mt-4">
+    <div className="tactical-card p-4 mt-4 min-w-0">
       <div className="flex items-center gap-2 mb-3">
         <div className="w-1 h-4 rounded" style={{ background: "var(--accent-red)" }} />
         <div className="text-sm font-bold uppercase tracking-wide">{title}</div>
@@ -120,8 +118,9 @@ export default function FahrzeugAkte() {
 
   const KV = ({ k, val }) => (
     <div className="flex justify-between gap-4 py-1 border-b text-sm" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-      <span className="text-zinc-500">{k}</span>
-      <span className="text-right">{val ?? "—"}</span>
+      {/* Die Beschriftung bricht um, nicht der Wert ("20.000 €" bleibt ganz). */}
+      <span className="min-w-0 text-zinc-500">{k}</span>
+      <span className="text-right break-words">{val == null || val === "" ? "—" : val}</span>
     </div>
   );
 
@@ -130,39 +129,52 @@ export default function FahrzeugAkte() {
       <Link to="/app/bestand" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
         <ArrowLeft size={14} /> Zurück zum Bestand
       </Link>
-      <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
-        <div>
+      {/* 11.09.2026 (Befund Ahmad "zu eng da oben"): Modellbeschreibung in
+          eigener Zeile, Status/Bearbeiter/Frist als eine Zeile, Knoepfe rechts
+          (auf dem Handy darunter) und Abstand zum Beweisdokument. */}
+      <header className="mt-3 mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"
+              data-testid="akte-kopf">
+        <div className="min-w-0 flex-1">
           <div className="overline">Fahrzeugakte · {v.source === "manuell" ? "manuell angelegt" : "über System beschafft"}</div>
-          <h1 className="font-display font-black text-2xl lg:text-3xl tracking-tighter mt-1">
-            {d.make_label} {d.model_label} <span className="text-zinc-500 font-normal text-xl">{d.model_description}</span>
+          <h1 className="font-display font-black text-2xl lg:text-3xl tracking-tighter mt-2 break-words">
+            {d.make_label} {d.model_label}
           </h1>
-          {akte.zuweisbar && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-zinc-500" data-testid="akte-besitzer">
-              <span>Bearbeiter:</span>
-              <select value={akte.owner?.id || ""} onChange={(e) => zuweisen(e.target.value)}
-                      className="rounded-md px-2 py-1 text-xs bg-transparent border"
-                      style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}
-                      data-testid="akte-besitzer-select">
-                {!akte.owner && <option value="">— nicht zugeordnet —</option>}
-                {(akte.zuweisbar_an || []).map((k) => (
-                  <option key={k.id} value={k.id}>{k.name}{k.role === "dealer" ? " (Hauptaccount)" : ""}</option>
-                ))}
-              </select>
-              {akte.mitbearbeiter?.length > 0 && (
-                <span data-testid="akte-mitbearbeiter">· mit {akte.mitbearbeiter.map((m) => m.name).join(", ")}</span>
-              )}
-            </div>
+          {d.model_description && (
+            <p className="mt-1 text-sm break-words" style={{ color: "var(--text-secondary)" }}
+               data-testid="akte-beschreibung">
+              {beschreibungLesbar(d.model_description)}
+            </p>
           )}
-          <div className="mt-1 text-xs text-zinc-500">
-            Status: <b className="text-zinc-300">{v.lifecycle}</b>
+          <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2.5 text-xs text-zinc-500">
+            <span className="inline-flex items-center gap-2">
+              Status
+              <StatusSchild status={v.lifecycle} text={lifecycleText(v.lifecycle)} data-testid="akte-status" />
+            </span>
+            {akte.zuweisbar && (
+              <span className="inline-flex flex-wrap items-center gap-2" data-testid="akte-besitzer">
+                Bearbeiter
+                <select value={akte.owner?.id || ""} onChange={(e) => zuweisen(e.target.value)}
+                        className="rounded-md px-2 py-1 text-xs bg-transparent border"
+                        style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}
+                        data-testid="akte-besitzer-select">
+                  {!akte.owner && <option value="">— nicht zugeordnet —</option>}
+                  {(akte.zuweisbar_an || []).map((k) => (
+                    <option key={k.id} value={k.id}>{k.name}{k.role === "dealer" ? " (Hauptaccount)" : ""}</option>
+                  ))}
+                </select>
+                {akte.mitbearbeiter?.length > 0 && (
+                  <span data-testid="akte-mitbearbeiter">mit {akte.mitbearbeiter.map((m) => m.name).join(", ")}</span>
+                )}
+              </span>
+            )}
             {akte.retention_days_left != null && (
-              <span className={akte.retention_days_left <= 10 ? "text-amber-400" : ""}>
-                {" "}· <Clock size={11} className="inline" /> noch {akte.retention_days_left} Tage im Bestand
+              <span className={`inline-flex items-center gap-1 ${akte.retention_days_left <= 10 ? "text-amber-400" : ""}`}>
+                <Clock size={12} /> noch {akte.retention_days_left} Tage im Bestand
               </span>
             )}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2 lg:justify-end lg:shrink-0 lg:max-w-[50%]">
           {v.lifecycle === "abgeholt" && (
             <>
               <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
@@ -190,11 +202,11 @@ export default function FahrzeugAkte() {
           {listing && ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"].includes(listing.status) && (
             <Link to={`/app/inserat/${listing.id}`} data-testid="akte-inserat-link"
                   className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
-              {listing.status === "veroeffentlicht" ? "Inserat öffnen (live · vom Marktplatz nehmen / löschen)" : `Inserat öffnen (${listing.status})`}
+              {listing.status === "veroeffentlicht" ? "Inserat öffnen (live · vom Marktplatz nehmen / löschen)" : `Inserat öffnen (${inseratText(listing.status)})`}
             </Link>
           )}
         </div>
-      </div>
+      </header>
 
       {/* Beweisdokument zum Inserat (ersetzt die Snapshots, 10.09.2026) */}
       {v.id && v.source !== "manuell" && (
@@ -280,7 +292,9 @@ export default function FahrzeugAkte() {
       )}
 
       {/* Fahrzeugdaten + Kauf */}
-      <div className="grid md:grid-cols-2 gap-4">
+      {/* grid-cols-1 = minmax(0,1fr): ein langer Name darf die Spalte auf dem
+          Handy nicht breiter als den Bildschirm machen (Pruefbefund 11.09.2026). */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Section title="Fahrzeugdaten">
           <KV k="Erstzulassung" val={d.first_registration} />
           <KV k="Kilometerstand" val={d.mileage ? `${Number(d.mileage).toLocaleString("de-DE")} km` : null} />
@@ -302,14 +316,18 @@ export default function FahrzeugAkte() {
         {(akte.kaufvorgaenge || []).length > 0 && (
           <Section title="Kaufvorgänge">
             {akte.kaufvorgaenge.map((k) => (
-              <div key={k.id} className="flex flex-wrap items-center justify-between gap-2 py-1 border-b text-sm"
+              <div key={k.id} className="py-2 border-b last:border-b-0 text-sm"
                    style={{ borderColor: "rgba(255,255,255,0.04)" }} data-testid={`kaufvorgang-${k.id}`}>
-                <span className="text-zinc-300">{k.user_name || k.user_id}</span>
-                <span className="text-zinc-400">{fmtEur(k.purchase_price)}</span>
-                <span className="text-xs px-2 py-0.5 rounded-md border" style={{ borderColor: "var(--border-default)" }}>
-                  {k.status}
-                </span>
-                <span className="text-zinc-500 text-xs">{fmtDate(k.created_at)}</span>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 truncate font-medium" style={{ color: "var(--text-primary)" }}>
+                    {k.user_name || k.user_id}
+                  </span>
+                  <StatusSchild status={k.status} text={kaufvorgangText(k.status)} />
+                </div>
+                <div className="mt-1 flex items-center justify-between gap-3 text-xs text-zinc-500">
+                  <span style={{ color: "var(--text-secondary)" }}>{fmtEur(k.purchase_price)}</span>
+                  <span>{fmtDate(k.created_at)}</span>
+                </div>
               </div>
             ))}
           </Section>
@@ -324,7 +342,7 @@ export default function FahrzeugAkte() {
           <KV k="Quelle" val={v.source === "manuell" ? "Manuell angelegt" : (d.detail_url ? "Inserat (Plattform)" : "Plattform")} />
           {(akte.appointments || []).slice(0, 1).map((a) => (
             <KV key={a.id} k="Geplante Abholung"
-                val={`${a.pickup_date || "—"}${a.pickup_time ? ` · ${a.pickup_time}` : ""} (${a.status || "offen"})`} />
+                val={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time}\u00a0Uhr` : ""} · ${lesbar(a.status || "offen")}`} />
           ))}
           {akte.contracts.map((c) => (
             <div key={c.id} className="mt-2 flex items-center justify-between text-sm">
@@ -412,7 +430,7 @@ export default function FahrzeugAkte() {
         <div className="space-y-1 max-h-64 overflow-y-auto">
           {akte.history.map((h) => (
             <div key={h.id} className="flex justify-between gap-4 text-xs py-1 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-              <span className="text-zinc-300">{HISTORIE_TEXT[h.action] || h.action}</span>
+              <span style={{ color: "var(--text-primary)" }}>{aktionText(h.action)}</span>
               <span className="text-zinc-600 whitespace-nowrap">{fmtDate(h.created_at)}</span>
             </div>
           ))}

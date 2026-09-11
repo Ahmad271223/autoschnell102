@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import {
   Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X,
 } from "lucide-react";
+import StatusSchild from "@/components/StatusSchild";
+import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
 
 /**
  * Fahrzeugbestand (B2B-Modul Phase 1).
@@ -13,23 +15,6 @@ import {
  * - Bestand mit Lifecycle-Filter, 50-Tage-Countdown und Quellen-Kennzeichnung
  * - Manuelles Hinzufügen vorhandener Fahrzeuge (source: manuell)
  */
-
-const LIFECYCLE_LABELS = {
-  verglichen: "Verglichen", besichtigung: "Besichtigung",
-  verhandlung: "Verhandlung", vertrag_erstellt: "Vertrag erstellt",
-  gekauft: "Gekauft", abholung_geplant: "Abholung geplant",
-  abgeholt: "Abgeholt", bestand: "Im Bestand",
-  verkaufsentwurf: "Verkaufsentwurf", verkaufsbereit: "Verkaufsbereit",
-  veroeffentlicht: "Veröffentlicht", reserviert: "Reserviert",
-  verkauft: "Verkauft", nicht_abgeholt: "Nicht abgeholt",
-  storniert: "Storniert", archiviert: "Archiviert",
-};
-
-const LIFECYCLE_COLORS = {
-  abgeholt: "#f59e0b", bestand: "#0ea5e9", verkaufsentwurf: "#a855f7",
-  verkaufsbereit: "#34c759", veroeffentlicht: "#34c759",
-  reserviert: "#eab308", verkauft: "#71717a", archiviert: "#52525b",
-};
 
 const FILTERS = [
   { key: "",                label: "Alle" },
@@ -165,7 +150,6 @@ export default function Bestand() {
         {data.items.map((v) => {
           const d = v.data || {};
           const lc = v.lifecycle || "verglichen";
-          const color = LIFECYCLE_COLORS[lc] || "#71717a";
           const img = (d.image_urls || d.images || [])[0];
           return (
             <div key={v.id} className="tactical-card overflow-hidden flex flex-col" data-testid={`bestand-${v.id}`}>
@@ -175,17 +159,21 @@ export default function Bestand() {
                 </div>
               )}
               <div className="p-4 flex-1 flex flex-col">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-semibold">{d.make_label} {d.model_label}</div>
-                    <div className="text-xs text-zinc-500 line-clamp-1">{d.model_description}</div>
+                {/* min-w-0: sonst drueckt ein langer Untertitel das
+                    Status-Schild aus der Karte (11.09.2026). */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold line-clamp-2 break-words">{d.make_label} {d.model_label}</div>
+                    {d.model_description && (
+                      <div className="mt-0.5 text-xs text-zinc-500 line-clamp-2 break-words"
+                           title={d.model_description} data-testid={`bestand-beschreibung-${v.id}`}>
+                        {beschreibungLesbar(d.model_description)}
+                      </div>
+                    )}
                   </div>
-                  <span className="shrink-0 text-[11px] px-2 py-0.5 rounded-md border font-medium"
-                        style={{ borderColor: `${color}66`, color, background: `${color}1a` }}>
-                    {LIFECYCLE_LABELS[lc] || lc}
-                  </span>
+                  <StatusSchild status={lc} text={lifecycleText(lc)} data-testid={`bestand-status-${v.id}`} />
                 </div>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: "var(--text-secondary)" }}>
                   {d.first_registration && <span>EZ {d.first_registration}</span>}
                   {d.mileage && <span>{Number(d.mileage).toLocaleString("de-DE")} km</span>}
                   {v.purchase_price != null && (
@@ -226,8 +214,8 @@ export default function Bestand() {
                       {/* Runde 21: gerade frisch abgeholte Fahrzeuge brauchen den Weg
                           zum Abholbericht mit den Fahrerfotos — vorher fehlte er hier. */}
                       <Link to={`/app/akte/${v.id}`} data-testid={`akte-link-${v.id}`}
-                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border text-zinc-300 hover:text-white"
-                            style={{ borderColor: "var(--border-default)" }}>
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border hover:opacity-80"
+                            style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
                         Fahrzeugakte · Abholbericht
                       </Link>
                     </>
@@ -250,8 +238,8 @@ export default function Bestand() {
                         </button>
                       )}
                       <Link to={`/app/akte/${v.id}`}
-                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border text-zinc-300 hover:text-white"
-                            style={{ borderColor: "var(--border-default)" }}>
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border hover:opacity-80"
+                            style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
                         Fahrzeugakte
                       </Link>
                     </>

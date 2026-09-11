@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
+import { INSERAT_LABELS } from "@/lib/fahrzeugStatus";
 import { toast } from "sonner";
 import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X } from "lucide-react";
 
@@ -13,11 +14,7 @@ import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X }
 
 const fmtEur = (n) => (n == null ? "—" : `${Number(n).toLocaleString("de-DE", { minimumFractionDigits: 0 })} €`);
 
-const STATUS_LABELS = {
-  entwurf: "Entwurf", verkaufsbereit: "Verkaufsbereit",
-  veroeffentlicht: "Veröffentlicht", reserviert: "Reserviert",
-  verkauft: "Verkauft", zurueckgezogen: "Zurückgezogen",
-};
+const STATUS_LABELS = INSERAT_LABELS;
 
 export default function Inserat() {
   const { id } = useParams();
