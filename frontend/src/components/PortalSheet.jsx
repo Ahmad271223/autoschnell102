@@ -2,29 +2,35 @@
  * PortalSheet – modales Fenster zur Portal-Auswahl.
  *
  * Erscheint nach Vergleich oder manueller Suche.
- * Jeder Button ist ein direkter User-Klick → kein Popup-Blocker.
+ * Jeder Button ist ein direkter User-Klick — Chrome/Edge lassen damit aber
+ * nur EIN neues Fenster je Klick zu (Runde 22, 11.09.2026). "Beide öffnen"
+ * laeuft deshalb ueber filterOeffnen: das zweite Portal kommt per Hinweis-
+ * Knopf (neue Geste) nach, oder sofort, wenn Pop-ups erlaubt sind.
  */
 import { ExternalLink, X } from "lucide-react";
-import { openInPopup, openMultiple } from "@/lib/popup";
+import { filterOeffnen } from "@/lib/filterOeffnen";
 import PortalBadge from "@/components/PortalBadge";
+
+const MOBILE = { name: "mobileFilterWindow", label: "mobile.de" };
+const AUTOSCOUT = { name: "autoscoutFilterWindow", label: "AutoScout24" };
 
 export default function PortalSheet({ mobileUrl, autoscoutUrl, aufgeloest, onClose }) {
   if (!mobileUrl && !autoscoutUrl) return null;
 
   const openMobile = () => {
-    openInPopup(mobileUrl, "mobileFilterWindow");
+    filterOeffnen([{ ...MOBILE, url: mobileUrl }]);
     onClose();
   };
 
   const openAutoscout = () => {
-    openInPopup(autoscoutUrl, "autoscoutFilterWindow");
+    filterOeffnen([{ ...AUTOSCOUT, url: autoscoutUrl }]);
     onClose();
   };
 
   const openBoth = () => {
-    openMultiple([
-      { url: mobileUrl,     name: "mobileFilterWindow" },
-      { url: autoscoutUrl,  name: "autoscoutFilterWindow" },
+    filterOeffnen([
+      { ...MOBILE,    url: mobileUrl },
+      { ...AUTOSCOUT, url: autoscoutUrl },
     ].filter((u) => u.url));
     onClose();
   };

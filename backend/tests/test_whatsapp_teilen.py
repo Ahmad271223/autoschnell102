@@ -179,7 +179,7 @@ def test_02_link_liefert_digitale_fassung_ohne_anmeldung(welt):
     assert r.content[:4] == b"%PDF"
     assert "no-store" in r.headers.get("cache-control", "")
     t = _text(r.content)
-    assert "Ort, Datum" not in t                  # digitale Fassung
+    assert "Mit ihrer Unterschrift" not in " ".join(t.split())   # digitale Fassung
     assert "digitale Ausfertigung" in t
     doc = _db().generated_pdfs.find_one({"id": welt["contract_id"]})
     assert doc["freigabe"]["abrufe"] == 1 and doc["freigabe"].get("zuletzt_abgerufen")

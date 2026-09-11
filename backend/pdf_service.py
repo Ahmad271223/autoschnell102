@@ -8,7 +8,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether,
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, Flowable,
 )
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 
@@ -192,8 +192,9 @@ def _two_col_kv(rows, st):
     half = (len(rows) + 1) // 2
     left = rows[:half]
     right = rows[half:]
-    while len(right) < len(left):
-        right.append(("", ""))
+    # Runde 22: keine Fuellzeile mehr bei ungerader Zeilenzahl — sie erschien
+    # als leere Zeile mit "—" (seit der Zeile "Zulassung" in Abschnitt 2).
+    # Die Spalten stehen oben buendig (VALIGN TOP), unterschiedliche Hoehe stoert nicht.
     label_w = 3.2 * cm
     val_w = COL_W - label_w - 0.2 * cm
     left_t = _kv_compact(left, st, label_w, val_w)
@@ -217,6 +218,169 @@ def _yn(value):
     if s.lower() in ("nein", "no", "false", "0"):
         return "Nein"
     return s
+
+
+def _zulassung_anzeige(value):
+    """Runde 22 (11.09.2026): Zulassungsstatus fuer die Zusicherungen —
+    nur die beiden bekannten Werte, alles andere (auch leer) als '—'."""
+    return {"angemeldet": "Angemeldet", "abgemeldet": "Abgemeldet"}.get(
+        str(value or "").strip().lower(), "—")
+
+
+# ---------- Empfangsbestaetigung (Runde 22, 11.09.2026, Vorlage Ahmad) ----------
+# Im Abschnitt "Unterschriften" je Partei ein Kasten: Kaeufer bestaetigt den
+# Empfang von Zulassungsbescheinigung Teil I & II und KFZ mit n Schluessel(n),
+# Verkaeufer den Empfang des Kaufpreises; darunter "Datum und Ort". Es steht
+# nur, was im Vertrag erfasst ist — Altvertraege ohne Felder bekommen leere
+# Kaestchen und eine Linie zum Ausfuellen von Hand.
+class _Kaestchen(Flowable):
+    """Ankreuz-Kaestchen, selbst gezeichnet: Quadrat, bei an=True mit Haken.
+    Bewusst kein Unicode-Zeichen (☐/☒) — die Standardschrift Helvetica hat
+    diese Zeichen nicht, sie erschienen als schwarze Kaesten."""
+
+    def __init__(self, an=False, groesse=8):
+        super().__init__()
+        self.an = bool(an)
+        self.groesse = groesse
+        self.width = self.height = groesse
+
+    def wrap(self, avail_w, avail_h):
+        return self.groesse, self.groesse
+
+    def draw(self):
+        s = self.groesse
+        c = self.canv
+        c.saveState()
+        c.setStrokeColor(PRIMARY)
+        c.setLineWidth(0.7)
+        c.rect(0, 0, s, s, stroke=1, fill=0)
+        if self.an:
+            # Haken aus zwei Strichen
+            c.setLineWidth(1.2)
+            p = c.beginPath()
+            p.moveTo(s * 0.18, s * 0.52)
+            p.lineTo(s * 0.42, s * 0.2)
+            p.lineTo(s * 0.86, s * 0.84)
+            c.drawPath(p, stroke=1, fill=0)
+        c.restoreState()
+
+
+def _angekreuzt(value) -> bool:
+    """True/False aus contract_data; Texte alter Clients ("true", "ja")
+    werden verstanden, alles andere gilt als nicht angekreuzt."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "ja", "yes", "x")
+    return bool(value)
+
+
+def _empfang_datum_ort(datum_iso, ort) -> str:
+    """'18.08.2026, Rensenheim' — nur, was im Vertrag steht. Runde 22
+    (11.09.2026, Gegenpruefung): fehlt nur ein Teil, steht an seiner Stelle
+    eine Linie zum Ausfuellen von Hand ('18.08.2026, ______________' bzw.
+    '__________, Rensenheim') — das Formular fuellt das Datum immer vor, der
+    Verkaeufer-Ort fehlt aber, wenn das Inserat keinen Ort hat. Fehlt beides:
+    eine durchgehende Linie."""
+    datum = str(datum_iso or "").strip()
+    if datum:
+        try:
+            from datetime import date as _date
+            datum = _date.fromisoformat(datum).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            pass
+    ort = str(ort or "").strip()
+    if not datum and not ort:
+        return "_" * 26
+    return f"{datum or '_' * 10}, {ort or '_' * 14}"
+
+
+def _empfang_block(seite, contract, st, breite):
+    """Inhalt der Empfangsbestaetigung einer Partei (seite: "kaeufer" |
+    "verkaeufer") als randlose Tabelle der Breite `breite`."""
+    c = contract or {}
+    if seite == "kaeufer":
+        anzahl = str(c.get("schluessel_anzahl") or "").strip()
+        punkte = [
+            (c.get("empfang_zulassungsbescheinigung"), "Zulassungsbescheinigung Teil I & II"),
+            (c.get("empfang_schluessel"), f"KFZ mit {anzahl or '____'} Schlüssel(n)"),
+        ]
+        ort = c.get("empfang_ort_kaeufer")
+    else:
+        punkte = [(c.get("empfang_kaufpreis"), "Kaufpreis")]
+        ort = c.get("empfang_ort_verkaeufer")
+    rows = [[Paragraph("<b>bestätigt Empfang von:</b>", st["sig_label"]), ""]]
+    for an, text in punkte:
+        rows.append([_Kaestchen(_angekreuzt(an)),
+                     Paragraph(_xml_escape(text), st["value"])])
+    # Hoehenausgleich: beide Kaesten stehen nebeneinander gleich hoch.
+    while len(rows) < 3:
+        rows.append(["", Paragraph("&nbsp;", st["value"])])
+    datum_ort = _empfang_datum_ort(c.get("empfang_datum"), ort)
+    rows.append([Paragraph("Datum und Ort: " + _xml_escape(datum_ort),
+                           st["value"]), ""])
+    t = Table(rows, colWidths=[0.5 * cm, breite - 0.5 * cm])
+    t.setStyle(TableStyle([
+        ("SPAN", (0, 0), (1, 0)),
+        ("SPAN", (0, -1), (1, -1)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, -1), (-1, -1), 6),
+    ]))
+    return t
+
+
+def _empfang_kasten(rolle, seite, contract, st, unterschrift):
+    """Kasten einer Partei im Abschnitt "Unterschriften": Titel,
+    "bestätigt Empfang von:" mit Kaestchen, "Datum und Ort". Druckfassung
+    (unterschrift=True) zusaetzlich mit der Unterschriftslinie; die digitale
+    Fassung ohne. Die fruehere Linie "Ort, Datum" entfaellt (Beschluss
+    11.09.2026, wie Ahmads Vorlage): "Datum und Ort" steht schon im Kasten —
+    zwei Datums-/Ortsangaben je Partei verwirrten."""
+    rows = [
+        [Paragraph(f"<b>{_xml_escape(rolle)}</b>", st["sig_label"])],
+        [_empfang_block(seite, contract, st, COL_W - 16)],
+    ]
+    stil = [
+        ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+        ("BACKGROUND", (0, 0), (0, 0), LIGHT),
+        ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (0, 0), 5),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 5),
+        ("TOPPADDING", (0, 1), (0, 1), 5),
+        ("BOTTOMPADDING", (0, -1), (0, -1), 6),
+    ]
+    if unterschrift:
+        rows += [
+            [Spacer(1, 34)],
+            [Paragraph("Unterschrift", st["sig_label"])],
+        ]
+        stil += [
+            ("LINEBELOW", (0, 2), (0, 2), 0.5, GREY),   # Unterschrift line
+        ]
+    t = Table(rows, colWidths=[COL_W])
+    t.setStyle(TableStyle(stil))
+    return t
+
+
+def _empfang_paar(contract, st, unterschrift):
+    """Beide Kaesten nebeneinander — Verkaeufer links, Kaeufer rechts
+    (wie die Parteien oben im Vertrag)."""
+    t = Table(
+        [[_empfang_kasten("Verkäufer / Halter", "verkaeufer", contract, st, unterschrift),
+          "",
+          _empfang_kasten("Käufer / Händler", "kaeufer", contract, st, unterschrift)]],
+        colWidths=[COL_W, 0.5 * cm, COL_W],
+    )
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
 
 
 def _numbered_canvas_factory(footer_left: str, footer_center: str):
@@ -402,6 +566,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("EU-Import", _yn(contract.get("eu_import"))),
         ("Fahrtauglich", _yn(contract.get("drivable"))),
         ("Gewerblich genutzt seit EZ", _yn(contract.get("commercial_since_ez"))),
+        # Runde 22 (11.09.2026, Vorlage Ahmad): angemeldet oder abgemeldet.
+        ("Zulassung", _zulassung_anzeige(contract.get("zulassung"))),
         ("Unfallschaden (Inserat)", "Nein" if not vehicle.get("accident_damaged") else "Ja"),
         ("Fahrbereit (Inserat)", "Ja" if vehicle.get("roadworthy", True) else "Nein"),
     ]
@@ -618,7 +784,10 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
 
     # ---------- Digitale Ausfertigung: ein Satz statt Unterschriftslinien ----------
     if digital:
+        # Runde 22 (11.09.2026): Empfangsbestaetigung beider Parteien (ohne
+        # Unterschriftslinie) vor dem Satz zur Gueltigkeit.
         block = [_section("Unterschriften", st), Spacer(1, 8),
+                 _empfang_paar(contract, st, unterschrift=False), Spacer(1, 8),
                  Paragraph("Dieser Vertrag ist ohne Unterschrift gültig.", st["body"])]
         if nachtraeglich:
             block.append(Spacer(1, 8))
@@ -635,37 +804,11 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         return buf.getvalue()
 
     # ---------- Signatures — boxed, kept on one page ----------
-    def _sig_box(role):
-        t = Table([
-            [Paragraph(f"<b>{role}</b>", st["sig_label"])],
-            [Spacer(1, 34)],
-            [Paragraph("Ort, Datum", st["sig_label"])],
-            [Spacer(1, 22)],
-            [Paragraph("Unterschrift", st["sig_label"])],
-        ], colWidths=[COL_W])
-        t.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
-            ("BACKGROUND", (0, 0), (0, 0), LIGHT),
-            ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
-            ("LINEBELOW", (0, 1), (0, 1), 0.5, GREY),   # Ort/Datum line
-            ("LINEBELOW", (0, 3), (0, 3), 0.5, GREY),   # Unterschrift line
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (0, 0), 5),
-            ("BOTTOMPADDING", (0, 0), (0, 0), 5),
-            ("BOTTOMPADDING", (0, -1), (0, -1), 6),
-        ]))
-        return t
-
-    sig = Table(
-        [[_sig_box("Verkäufer / Halter"), "", _sig_box("Käufer / Händler")]],
-        colWidths=[COL_W, 0.5 * cm, COL_W],
-    )
-    sig.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-    ]))
+    # Runde 22 (11.09.2026, Vorlage Ahmad): Die Unterschriftskaesten
+    # ("Verkäufer / Halter" links, "Käufer / Händler" rechts) tragen unter
+    # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
+    # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
+    sig = _empfang_paar(contract, st, unterschrift=True)
     story.append(Spacer(1, 20))
     story.append(KeepTogether([
         _section("Unterschriften", st),

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc } from "@/lib/bilder";
 import { checkLink, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
@@ -15,7 +15,7 @@ import BeweisCard from "@/components/BeweisCard";
 import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
-import { openInPopup, openMultiple } from "@/lib/popup";
+import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
 
 // Aktuell ist nur Kleinanzeigen als Daten-Quelle freigeschaltet;
 // mobile.de-/AutoScout-Links folgen, sobald der API-Zugang vorliegt.
@@ -24,6 +24,16 @@ const SAMPLE_URLS = [
 ];
 
 const STORAGE_KEY = "ah_vergleich_state";
+
+// Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
+// und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
+// und das automatische Oeffnen nach dem Auslesen.
+function filterEintraege(data, { mobile = true, autoscout = true } = {}) {
+  return [
+    mobile    && data?.search_url    && { url: data.search_url,    name: "mobileFilterWindow",    label: "mobile.de" },
+    autoscout && data?.autoscout_url && { url: data.autoscout_url, name: "autoscoutFilterWindow", label: "AutoScout24" },
+  ].filter(Boolean);
+}
 
 export default function Vergleich() {
   // Restore last comparison so the user can navigate to PDFs / Fahrer
@@ -55,14 +65,42 @@ export default function Vergleich() {
     catch { return true; }
   });
 
+  // Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen —
+  // Standard AN (Wunsch Ahmad: Einfuegen genuegt, alles geht von selbst auf).
+  const [filterAuto, setFilterAuto] = useState(() => {
+    try { const v = localStorage.getItem("ah_filter_automatisch"); return v === null ? true : v === "1"; }
+    catch { return true; }
+  });
+  // Runde 22 (11.09.2026, Gegenpruefung): aktuelle Schalter-Staende fuer das
+  // automatische Oeffnen. Ein Lauf kann Minuten dauern — die Werte aus dem
+  // Moment des Starts waeren veraltet, wenn der Sucher inzwischen umschaltet.
+  const schalterRef = useRef({ mobile: portalMobile, autoscout: portalAutoscout, auto: filterAuto });
+
   const toggleMobile = (v) => {
     setPortalMobile(v);
+    schalterRef.current.mobile = v;
     try { localStorage.setItem("ah_portal_mobile", v ? "1" : "0"); } catch { /* ignore */ }
   };
   const toggleAutoscout = (v) => {
     setPortalAutoscout(v);
+    schalterRef.current.autoscout = v;
     try { localStorage.setItem("ah_portal_autoscout", v ? "1" : "0"); } catch { /* ignore */ }
   };
+  const toggleFilterAuto = (v) => {
+    setFilterAuto(v);
+    schalterRef.current.auto = v;
+    try { localStorage.setItem("ah_filter_automatisch", v ? "1" : "0"); } catch { /* ignore */ }
+  };
+
+  // Runde 22 (11.09.2026, Gegenpruefung): Seite verlassen -> ein noch
+  // laufender Vergleich oeffnet danach keine Filter-Tabs mehr. Im Effekt auf
+  // true setzen (nicht nur im Aufraeumen auf false): React.StrictMode spielt
+  // im Dev-Modus Einhaengen/Aushaengen/Einhaengen durch.
+  const aktivRef = useRef(true);
+  useEffect(() => {
+    aktivRef.current = true;
+    return () => { aktivRef.current = false; };
+  }, []);
 
   // Persist on every meaningful state change.
   useEffect(() => {
@@ -83,6 +121,9 @@ export default function Vergleich() {
     setResult(null);
     setCounter(null);
     setContract(null);
+    // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
+    // traegt die Links des vorherigen Ergebnisses — mit dem alten Ergebnis weg.
+    toast.dismiss(FILTER_TOAST_ID);
     try {
       const t0 = Date.now();
 
@@ -135,6 +176,17 @@ export default function Vergleich() {
 
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0 });
+      // Runde 22 (11.09.2026): Filter der aktiven Portale gleich mit oeffnen.
+      // Nur hier (echter Vergleichslauf), nie beim Wiederherstellen aus der
+      // sessionStorage. Benannte Fenster -> derselbe Tab wird wiederverwendet;
+      // blockt der Browser (Klick-Erlaubnis abgelaufen), erklaert ein Hinweis
+      // mit Knopf den Rest. Schalter erst JETZT lesen (schalterRef) und nur,
+      // solange die Vergleichsseite noch offen ist (aktivRef).
+      const schalter = schalterRef.current;
+      if (aktivRef.current && schalter.auto) {
+        const eintraege = filterEintraege(data, { mobile: schalter.mobile, autoscout: schalter.autoscout });
+        if (eintraege.length > 0) filterOeffnen(eintraege, { automatisch: true });
+      }
       // Runde 11: Firmenregeln, die der AutoScout-Link nicht umsetzt (z.B.
       // Land CH, Hubraum, Navi) — vorher sahen beide Links "gleich" aus.
       // Runde 16: Fahrzeug gehoert einem Kollegen -> Ergebnis ja, Vertrag nein
@@ -285,10 +337,9 @@ export default function Vergleich() {
             data-testid="open-filter-btn"
             disabled={!result || (!portalMobile && !portalAutoscout)}
             onClick={() => {
-              openMultiple([
-                portalMobile    && result?.search_url    && { url: result.search_url,    name: "mobileFilterWindow" },
-                portalAutoscout && result?.autoscout_url && { url: result.autoscout_url, name: "autoscoutFilterWindow" },
-              ].filter(Boolean));
+              // Runde 22: je Klick laesst der Browser nur EIN Fenster zu — den
+              // Rest holt der Hinweis-Knopf nach (oder Pop-ups erlauben).
+              filterOeffnen(filterEintraege(result, { mobile: portalMobile, autoscout: portalAutoscout }));
             }}
             className="shrink-0 apple-btn apple-btn-secondary !px-4 !py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
             title={result ? "Filter der aktiven Portale öffnen" : "Erst Vergleich auslesen"}
@@ -313,6 +364,20 @@ export default function Vergleich() {
               ID: {s.split(/[=/]/).pop()}
             </button>
           ))}
+          {/* Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen */}
+          <label
+            className="inline-flex items-center gap-1.5 sm:ml-3 cursor-pointer select-none"
+            title="Nach dem Auslesen die Filter der aktiven Portale (mobile.de / AutoScout24) automatisch öffnen"
+          >
+            <input
+              type="checkbox"
+              data-testid="toggle-filter-auto"
+              checked={filterAuto}
+              onChange={(e) => toggleFilterAuto(e.target.checked)}
+              style={{ accentColor: "var(--accent-red)" }}
+            />
+            <span style={{ color: "var(--text-secondary)" }}>Filter nach dem Auslesen automatisch öffnen</span>
+          </label>
         </div>
       </form>
 
@@ -455,7 +520,7 @@ export default function Vergleich() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => openInPopup(result.search_url, "mobileFilterWindow")}
+                  onClick={() => filterOeffnen(filterEintraege(result, { autoscout: false }))}
                   data-testid="open-mobile-btn"
                   className="apple-btn apple-btn-primary"
                 >
@@ -478,7 +543,7 @@ export default function Vergleich() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => openInPopup(result.autoscout_url, "autoscoutFilterWindow")}
+                    onClick={() => filterOeffnen(filterEintraege(result, { mobile: false }))}
                     data-testid="open-autoscout-btn"
                     className="apple-btn apple-btn-secondary"
                   >
