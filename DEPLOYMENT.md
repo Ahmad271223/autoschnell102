@@ -753,14 +753,24 @@ Browser es kann und die App dort noch nicht installiert ist.
 - `service-worker.js`, `boot.js` und `manifest.json` liefert nginx mit
   `Cache-Control: no-cache` aus (`frontend/Dockerfile`), damit Cloudflare
   keine alte Fassung festhält; `e2e/stack.spec.js` prüft das.
-- **Einmalig nach dem ersten Rollout dieser Fassung (nach dem ZWEITEN
-  Server):** Die alten Server lieferten diese Dateien ohne `Cache-Control`;
-  Cloudflare hält sie sonst bis zu 2 Stunden. Cloudflare → Caching →
-  Configuration → Custom Purge → URL: `https://<PUBLIC_HOST>/service-worker.js`,
-  `/boot.js`, `/manifest.json`, `/icon-192.png`, `/icon-512.png` (ersatzweise
-  „Purge Everything“). Prüfen: `curl -sI https://<PUBLIC_HOST>/service-worker.js`
-  zeigt `cache-control: no-cache`. Ab dann sieht nach jedem Rollout jeder
-  sofort die neue Version.
+- **Cloudflare „Browser Cache TTL“ auf „Respect Existing Headers“ stellen
+  (einmalig, Cloudflare → Caching → Configuration → Browser Cache TTL).**
+  Mit dem Cloudflare-Standard (4 Stunden) ersetzt Cloudflare bei `.js`- und
+  `.png`-Dateien unser `no-cache` durch `max-age=14400` — gemessen am
+  11.09.2026 auch bei Abrufen, die Cloudflares Zwischenspeicher umgehen
+  (`cf-cache-status: MISS`); `manifest.json` (von Cloudflare nicht
+  zwischengespeichert) kam korrekt mit `no-cache`. Folge ohne Umstellung:
+  Browser nutzen ein altes `boot.js` bis zu 4 Stunden (Installieren-Knopf
+  fehlt dann so lange). Der Service Worker selbst ist nicht betroffen —
+  `boot.js` registriert ihn mit `updateViaCache: "none"`.
+- Danach einmal Cloudflare → Caching → Configuration → Custom Purge → URL:
+  `https://<PUBLIC_HOST>/service-worker.js`, `/boot.js`, `/manifest.json`,
+  `/icon-192.png`, `/icon-512.png` (ersatzweise „Purge Everything“).
+  Prüfen: `curl -sI "https://<PUBLIC_HOST>/boot.js?x=$RANDOM"` zeigt
+  `cache-control: no-cache`. Zeigt es weiter `max-age=14400`, greift die
+  Browser-Cache-TTL-Einstellung noch. Was der Server selbst sendet (ohne
+  Cloudflare), zeigt auf dem Server:
+  `docker compose exec -T proxy wget -S -O /dev/null --header="Host: <PUBLIC_HOST>" http://127.0.0.1/boot.js`
 - Notbremse, falls der Service Worker je Ärger macht: den Inhalt von
   `public/service-worker.js` ersetzen durch
   ```js
