@@ -2,12 +2,16 @@ import { Link, NavLink, Navigate, Outlet, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
 import { Truck, Calendar, Settings, LogOut } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
+import VerbindungsFehler from "@/components/VerbindungsFehler";
 
 export default function DriverLayout() {
-  const { driver, ready, logout } = useDriver();
+  const { driver, ready, fehler, logout } = useDriver();
   const nav = useNavigate();
 
   if (!ready) return null;
+  // Runde 22 (11.09.2026): Server nicht erreichbar -> Anmeldung behalten
+  // und "Keine Verbindung" zeigen, statt zur Login-Seite zu schicken.
+  if (!driver && fehler) return <VerbindungsFehler grund={fehler} />;
   if (!driver) return <Navigate to="/fahrer/login" replace />;
 
   const onLogout = () => { logout(); nav("/fahrer/login"); };

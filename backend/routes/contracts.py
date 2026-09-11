@@ -99,6 +99,11 @@ class ContractIn(BaseModel):
     # Cent daraus, das PDF druckt ihn).
     purchase_price: float = Field(ge=0, allow_inf_nan=False,
                                   description="Kaufpreis darf nicht negativ sein")
+    # Runde 22 (11.09.2026, Vorlage Ahmad): Das Formular bietet jetzt die
+    # Auswahl Bar | Überweisung | Echtzeitüberweisung. Bewusst KEIN hartes
+    # Enum — der Standard und Freitext alter Clients/Vertraege bleiben
+    # gueltig (gemischter Rollout zweier Server); gedeckelt wie alle engen
+    # Felder durch _cap_string_length (500 Zeichen).
     payment_method: Optional[str] = "Bar / Überweisung"
     pickup_date: Optional[str] = ""
     pickup_time: Optional[str] = ""
@@ -128,6 +133,45 @@ class ContractIn(BaseModel):
     drivable: Optional[str] = ""           # "Ja" | "Nein" | ""
     commercial_since_ez: Optional[str] = ""  # "Ja" | "Nein" | ""
     previous_owners: Optional[str] = ""    # vom Händler manuell eingegeben (Anzahl)
+    # Runde 22 (11.09.2026, Vorlage Ahmad): Zulassungsstatus des Fahrzeugs
+    # und die Empfangsbestaetigung im Abschnitt "Unterschriften" —
+    # Kaeufer: Zulassungsbescheinigung Teil I & II, KFZ mit n Schluessel(n);
+    # Verkaeufer: Kaufpreis; je Seite "Datum und Ort". Alles optional:
+    # Altvertraege ohne Felder bekommen leere Kaestchen und eine Linie.
+    zulassung: Optional[str] = ""                      # "" | "angemeldet" | "abgemeldet"
+    empfang_zulassungsbescheinigung: Optional[bool] = False
+    empfang_schluessel: Optional[bool] = False
+    schluessel_anzahl: Optional[str] = ""               # leer oder 1-2 Ziffern
+    empfang_kaufpreis: Optional[bool] = False
+    empfang_datum: Optional[str] = ""                   # leer oder JJJJ-MM-TT
+    empfang_ort_kaeufer: Optional[str] = Field(default="", max_length=100)
+    empfang_ort_verkaeufer: Optional[str] = Field(default="", max_length=100)
+
+    @field_validator("zulassung")
+    @classmethod
+    def _zulassung_pruefen(cls, v):
+        if v is None:
+            return v
+        s = str(v).strip().lower()
+        if s not in ("", "angemeldet", "abgemeldet"):
+            raise ValueError("Zulassung muss 'angemeldet' oder 'abgemeldet' sein")
+        return s
+
+    @field_validator("schluessel_anzahl")
+    @classmethod
+    def _schluessel_anzahl_pruefen(cls, v):
+        # coerce_numbers_to_str macht aus der Zahl 2 bereits "2".
+        if v is None:
+            return v
+        s = str(v).strip()
+        if s and not re.fullmatch(r"[0-9]{1,2}", s):
+            raise ValueError("Schlüsselanzahl bitte als Zahl (1-2 Ziffern) angeben")
+        return s
+
+    @field_validator("empfang_datum")
+    @classmethod
+    def _empfang_datum_pruefen(cls, v):
+        return datum_iso_pruefen(v)
     # Auto-prefilled from listing description but editable per contract.
     vehicle_description: Optional[str] = ""
     # Optional override for the dealer's default AGB block. If empty,
@@ -1473,6 +1517,12 @@ async def regenerate_contract_for_pickup(
     contract_dict = dict(doc.get("contract_data") or {})
     contract_dict["pickup_date"] = neu_datum or ""
     contract_dict["pickup_time"] = neu_zeit or ""
+    # Runde 22 (11.09.2026): Das Empfangsdatum (Uebergabe, "Datum und Ort")
+    # folgt im Formular dem Abholdatum. Stand es noch auf dem alten
+    # Abholtag, wandert es mit dem verschobenen Termin mit — ein von Hand
+    # anders gesetztes Datum bleibt.
+    if alt_datum and (contract_dict.get("empfang_datum") or "") == alt_datum:
+        contract_dict["empfang_datum"] = neu_datum or ""
 
     v = await db.vehicles.find_one(
         {"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
