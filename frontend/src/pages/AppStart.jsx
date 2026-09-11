@@ -4,6 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useDriver } from "@/context/DriverContext";
 import { useBuyer } from "@/context/BuyerContext";
 import SeiteLaedt from "@/components/SeiteLaedt";
+import VerbindungsFehler from "@/components/VerbindungsFehler";
 import { startZiel } from "@/lib/appstart";
 import { letzteAnmeldung } from "@/lib/sitzung";
 
@@ -57,10 +58,15 @@ function Auswahl() {
 
 /** /start — Einstieg der installierten App (Erklaerung in lib/appstart.js). */
 export default function AppStart() {
-  const { user, loading } = useAuth();
-  const { driver, ready: fahrerBereit } = useDriver();
+  const { user, loading, verbindungsfehler } = useAuth();
+  const { driver, ready: fahrerBereit, fehler: fahrerFehler } = useDriver();
   const { buyer, ready: kaeuferBereit } = useBuyer();
   if (loading || !fahrerBereit || !kaeuferBereit) return <SeiteLaedt ganzeSeite />;
+  // Runde 22: Server nicht erreichbar (Funkloch, Rollout) — die Anmeldung
+  // bleibt erhalten; nicht auf Anmeldung/Auswahl raten, sondern das sagen.
+  if (!user && !driver && !buyer && (verbindungsfehler || fahrerFehler)) {
+    return <VerbindungsFehler grund={verbindungsfehler || fahrerFehler} />;
+  }
   const ziel = startZiel({ user, driver, buyer, letzte: letzteAnmeldung() });
   // Sitzung beendet (z. B. neue Anmeldung auf einem anderen Geraet): die
   // Anmeldung mit dem Grund zeigen statt kommentarlos.

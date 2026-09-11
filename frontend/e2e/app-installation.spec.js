@@ -93,6 +93,20 @@ test.describe("Installierbare App", () => {
       await expect(page).toHaveURL(/\/app\/bestand$/);
     });
 
+    test("Server nicht erreichbar: 'Keine Verbindung' statt Abmeldung, danach geht es weiter", async ({ page }) => {
+      // Runde 22: Funkloch/502 beim Laden meldete frueher ab (Token geloescht).
+      await h.authPage(page, "app", sucher.token);
+      await page.route("**/api/auth/me", (r) => r.abort("internetdisconnected"));
+      await page.goto("/start");
+      await expect(page.getByTestId("verbindungsfehler")).toBeVisible();
+      await page.goto("/app/vergleich");
+      await expect(page.getByTestId("verbindungsfehler")).toBeVisible();
+      expect(await page.evaluate(() => window.localStorage.getItem("ah_token"))).toBe(sucher.token);
+      await page.unroute("**/api/auth/me");
+      await page.getByTestId("verbindungsfehler-erneut").click();
+      await expect(page.getByTestId("vergleich-page")).toBeVisible();
+    });
+
     test("Sitzung inzwischen beendet: /start zeigt die Anmeldung MIT Grund", async ({ page }) => {
       const alt = sucher.token;
       // Neue Anmeldung desselben Kontos beendet die alte Sitzung (Single-Session).
