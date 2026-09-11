@@ -61,11 +61,30 @@ export function tokenLesen(key = TOKEN_APP) {
   return null;
 }
 
+/** Welche Anmeldung zuletzt benutzt wurde (TOKEN_APP, TOKEN_FAHRER oder
+ *  TOKEN_KAEUFER) — nur die Art, kein Token. Der Einstieg der installierten
+ *  App (/start, lib/appstart.js) oeffnet danach die passende Anmeldeseite. */
+export const LETZTE_ANMELDUNG = "ah_letzte_anmeldung";
+
+export function letzteAnmeldung() {
+  return sicher(() => window.localStorage.getItem(LETZTE_ANMELDUNG));
+}
+
+/** Anmeldeseite von Fahrer/Marktplatz aufgerufen, aber hier noch nie
+ *  angemeldet: die Art trotzdem vormerken — wer von dort aus die App
+ *  installiert, landet beim ersten Start auf der richtigen Anmeldung.
+ *  Eine echte fruehere Anmeldung wird nie ueberschrieben. */
+export function anmeldeartVormerken(key) {
+  if (letzteAnmeldung()) return;
+  sicher(() => window.localStorage.setItem(LETZTE_ANMELDUNG, key));
+}
+
 /** Nach einer Anmeldung: dieser Tab UND "letzte Anmeldung". */
 export function tokenSetzen(key, wert) {
   sicher(() => window.sessionStorage.removeItem(abgemeldetKey(key)));
   sicher(() => window.sessionStorage.setItem(key, wert));
   sicher(() => window.localStorage.setItem(key, wert));
+  sicher(() => window.localStorage.setItem(LETZTE_ANMELDUNG, key));
 }
 
 /** Nach Abmeldung oder abgelaufener Sitzung: nur dieser Tab — und die

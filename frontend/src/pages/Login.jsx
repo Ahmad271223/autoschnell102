@@ -5,6 +5,7 @@ import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { sicheresZiel } from "@/lib/rollen";
 import { Bolt, ArrowRight } from "lucide-react";
+import InstallPWAButton from "@/components/InstallPWAButton";
 
 export default function Login() {
   const { login, loginMfa } = useAuth();
@@ -129,6 +130,10 @@ export default function Login() {
             <div>
               Noch kein Konto? <Link to="/anfrage" className="text-white hover:underline">Zugang anfragen — wir schalten dich frei</Link>
             </div>
+          </div>
+
+          <div className="mt-8">
+            <InstallPWAButton />
           </div>
         </form>
       </div>

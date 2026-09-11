@@ -67,6 +67,7 @@ import AppLayout from "@/components/AppLayout";
 
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
+import AppStart from "@/pages/AppStart";
 const Anfrage = seite(() => import("@/pages/Anfrage"));
 const MarktZahlungErfolg = seite(() => import("@/pages/markt/ZahlungErfolg"));
 const PasswortVergessen = seite(() => import("@/pages/PasswortVergessen"));
@@ -149,6 +150,12 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
+            {/* Einstieg der installierten App (manifest.json: start_url) */}
+            <Route path="/start" element={<AppStart />} />
+            {/* Einstieg des frueheren "Fahrer-Portals" (alte Installationen,
+                iPhone-Symbole aendern ihn nie) — die Route fehlte, das Symbol
+                landete auf der Werbe-Startseite. */}
+            <Route path="/driver-login" element={<Navigate to="/start" replace />} />
             {/* Firmen registrieren sich nicht mehr selbst (09/2026) —
                 der alte Registrieren-Link landet auf der Zugangs-Anfrage. */}
             <Route path="/register" element={<Navigate to="/anfrage" replace />} />

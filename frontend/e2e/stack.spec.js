@@ -87,4 +87,17 @@ test.describe("Produktions-Stack (nginx + Container + MongoDB mit Auth)", () => 
       expect(r.status()).toBe(200);
       expect((await r.text()).toLowerCase()).toContain("<div id=\"root\"");
     });
+
+  test("App-Dateien ohne Hash kommen ohne Zwischenspeicher", async ({ request }) => {
+    // Installierbare App (09/2026): Service Worker, boot.js und Manifest
+    // tragen keinen Hash im Namen. Ohne "no-cache" hielten Cloudflare oder
+    // der Browser nach einem Update die alte Fassung fest.
+    for (const pfad of ["/service-worker.js", "/boot.js", "/manifest.json"]) {
+      const r = await request.get(pfad);
+      expect(r.status(), pfad).toBe(200);
+      expect(r.headers()["cache-control"] || "", pfad).toContain("no-cache");
+    }
+    const manifest = await (await request.get("/manifest.json")).json();
+    expect(manifest.start_url).toBe("/start");
+  });
 });

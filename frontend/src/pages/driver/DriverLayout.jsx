@@ -38,7 +38,7 @@ export default function DriverLayout() {
             </div>
           </Link>
           <div className="flex items-center gap-2">
-            <InstallPWAButton compact />
+            <InstallPWAButton variante="kompakt" />
             <button onClick={onLogout} data-testid="driver-logout-btn"
               className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white px-3 py-2">
               <LogOut size={14} /> Abmelden

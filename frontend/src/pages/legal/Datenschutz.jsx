@@ -191,6 +191,16 @@ export default function Datenschutz() {
         erforderlich). Darüber hinaus setzen wir keine Cookies ein —
         insbesondere keine Analyse- oder Werbe-Cookies.
       </p>
+      <p>
+        Außerdem merkt sich dein Browser einige technische Einstellungen: helles
+        oder dunkles Design, mit welcher Anmeldung (Firma, Fahrer, Marktplatz) du
+        zuletzt angemeldet warst — damit die installierte App gleich die richtige
+        Anmeldeseite öffnet — und ob AutoSchnell auf diesem Gerät als App
+        installiert ist. Damit sich AutoSchnell als App installieren lässt,
+        richtet die Seite einen sogenannten Service Worker ein. Er speichert keine
+        Inhalte und keine personenbezogenen Daten; er zeigt nur ohne
+        Internetverbindung einen Hinweis an.
+      </p>
 
       <H2>8. Datensicherheit</H2>
       <p>

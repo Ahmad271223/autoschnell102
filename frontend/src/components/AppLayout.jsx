@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
+import InstallPWAButton from "@/components/InstallPWAButton";
 
 const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
@@ -82,6 +83,7 @@ export default function AppLayout({ children }) {
 
         <div className="flex flex-col items-center gap-2 pb-2 border-t pt-2"
              style={{ borderColor: "var(--border-default)" }}>
+          <InstallPWAButton variante="symbol" />
           <ThemeToggle />
           <span
             className="w-2 h-2 rounded-full"

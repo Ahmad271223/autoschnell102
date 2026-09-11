@@ -721,6 +721,54 @@ unter `beweise/<portal>/` in R2) — der Vergleich wartet nie darauf.
   `fehlgeschlagen` löst den Betriebsalarm `beweis_fehlgeschlagen` aus; beim
   nächsten Vergleich des Links wird es erneut versucht.
 
+### Installierbare App (09/2026)
+AutoSchnell lässt sich als App installieren — Symbol auf Taskleiste,
+Startmenü, Dock oder Startbildschirm. Der Knopf „Als App installieren“ steht
+auf den Anmeldeseiten (Firma, Fahrer, Marktplatz), in der Seitenleiste der
+Firmen-App und in der Kopfzeile der Fahrer-App; er erscheint nur, wenn der
+Browser es kann und die App dort noch nicht installiert ist.
+
+- Das Symbol öffnet `/start`: noch angemeldet → direkt zur eigenen
+  Startseite (Sucher: Vergleich, Chef: Bestand, Fahrer, Marktplatz), sonst
+  zur zuletzt benutzten Anmeldung; ist nichts bekannt (neues Gerät), eine
+  Auswahl Firma / Fahrer / Marktplatz (`src/lib/appstart.js`).
+- iPhone/iPad und Safari am Mac: Die installierte App hat einen eigenen
+  Speicher, getrennt vom Browser (von Apple so gewollt). Man meldet sich in
+  der App einmal an; wegen „eine Sitzung je Konto“ endet dabei die Anmeldung
+  im Browser. Der Anleitungs-Dialog sagt das.
+- `public/manifest.json` trägt `"id": "/driver-login"` — das ist die Kennung,
+  unter der Fahrer das frühere „Fahrer-Portal“ installiert haben (ohne `id`
+  gilt die alte `start_url`). Den neuen Einstieg bekommen diese
+  Installationen automatisch, Name und Symbol am PC erst, wenn der Nutzer
+  das App-Update bestätigt; iPhone/iPad-Symbole ändern sich nie. Deshalb
+  leitet `/driver-login` dauerhaft auf `/start` weiter. Die `id` NIE ändern:
+  sonst gilt jede Installation als fremde App und bekommt keine Änderungen mehr.
+- `public/service-worker.js` speichert NICHTS zwischen. Er behandelt nur
+  Seitenaufrufe (Chrome/Edge verlangen einen fetch-Handler für den
+  Installieren-Dialog) und zeigt ohne Netz eine Seite „Keine
+  Internetverbindung“, die von selbst neu lädt, sobald der Server wieder
+  antwortet. Alle übrigen Anfragen (API, Bilder, Skripte) schicken
+  Chrome/Edge ab Version 126 per Static Routing ganz am Worker vorbei;
+  ältere Browser reicht der Handler ohne Umweg durch.
+- `service-worker.js`, `boot.js` und `manifest.json` liefert nginx mit
+  `Cache-Control: no-cache` aus (`frontend/Dockerfile`), damit Cloudflare
+  keine alte Fassung festhält; `e2e/stack.spec.js` prüft das.
+- **Einmalig nach dem ersten Rollout dieser Fassung (nach dem ZWEITEN
+  Server):** Die alten Server lieferten diese Dateien ohne `Cache-Control`;
+  Cloudflare hält sie sonst bis zu 2 Stunden. Cloudflare → Caching →
+  Configuration → Custom Purge → URL: `https://<PUBLIC_HOST>/service-worker.js`,
+  `/boot.js`, `/manifest.json`, `/icon-192.png`, `/icon-512.png` (ersatzweise
+  „Purge Everything“). Prüfen: `curl -sI https://<PUBLIC_HOST>/service-worker.js`
+  zeigt `cache-control: no-cache`. Ab dann sieht nach jedem Rollout jeder
+  sofort die neue Version.
+- Notbremse, falls der Service Worker je Ärger macht: den Inhalt von
+  `public/service-worker.js` ersetzen durch
+  ```js
+  self.addEventListener("install", () => self.skipWaiting());
+  self.addEventListener("activate", (e) => e.waitUntil(self.registration.unregister()));
+  ```
+  und ausrollen — beim nächsten Seitenaufruf meldet er sich überall ab.
+
 ### Vertragslöschung (90 Tage) ist standardmäßig NUR Vorschau
 `VERTRAG_LOESCHUNG_AKTIV=false`: der stündliche Lauf schreibt eine
 Löschvorschau (`system_reports`, typ `vertrag_loeschvorschau`) und löscht

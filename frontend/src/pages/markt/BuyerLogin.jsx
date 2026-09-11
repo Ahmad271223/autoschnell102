@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useBuyer } from "@/context/BuyerContext";
+import { TOKEN_KAEUFER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Store, ArrowRight } from "lucide-react";
+import InstallPWAButton from "@/components/InstallPWAButton";
 
 export default function BuyerLogin() {
   const { login } = useBuyer();
@@ -12,6 +14,8 @@ export default function BuyerLogin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  // Wer von hier aus die App installiert, soll beim Start hier landen.
+  useEffect(() => { anmeldeartVormerken(TOKEN_KAEUFER); }, []);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -33,7 +37,12 @@ export default function BuyerLogin() {
   const st = { borderColor: "var(--border-default)" };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "#0a0a0a" }}>
+    // Die Seite ist immer dunkel: die Design-Variablen hier auf die dunklen
+    // Werte setzen, sonst waere der Installieren-Knopf im hellen Design
+    // dunkel auf dunkel (Gegenpruefung 11.09.2026).
+    <div className="min-h-screen flex items-center justify-center p-4"
+         style={{ background: "#0a0a0a", "--text-primary": "#f4f4f5", "--text-secondary": "#a1a1aa",
+                  "--border-default": "rgba(255,255,255,0.12)" }}>
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2 mb-6">
           <div className="w-9 h-9 rounded-lg flex items-center justify-center text-white"
@@ -64,6 +73,9 @@ export default function BuyerLogin() {
         <div className="mt-5 text-center text-sm text-zinc-500">
           Noch kein Zugang?{" "}
           <Link to={sp.get("invite") ? `/markt/registrieren?invite=${encodeURIComponent(sp.get("invite"))}` : "/markt/registrieren"} className="text-white font-semibold">Jetzt registrieren</Link>
+        </div>
+        <div className="mt-8">
+          <InstallPWAButton />
         </div>
       </div>
     </div>

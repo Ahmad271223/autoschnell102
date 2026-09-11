@@ -14,3 +14,10 @@ React 19 mit Vite 6 (seit 09/2026, vorher Create React App).
 Konfiguration: `vite.config.mjs` (CSP-Platzhalter, Proxy, Ausgabe), `.env.example`.
 Seiten werden bei Bedarf nachgeladen (`src/App.jsx`); angemeldete Nutzer bekommen
 die Arbeitsseiten im Leerlauf vorgeladen.
+
+Installierbare App: `public/manifest.json` (Einstieg `/start`), `public/service-worker.js`
+(ohne Zwischenspeicher, nur Offline-Seite), Knopf `src/components/InstallPWAButton.jsx`,
+Wege je Browser in `src/lib/installation.js`. Die App-Symbole erzeugt
+`scripts/app_symbole.py` (Python mit Pillow: `python scripts/app_symbole.py public`)
+aus dem Lucide-Symbol „bolt“ (Logo der Startseite); Details und Notbremse in
+`DEPLOYMENT.md`, „Installierbare App“.

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
+import { TOKEN_FAHRER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Truck, Mail, Lock } from "lucide-react";
@@ -12,6 +13,8 @@ export default function DriverLogin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  // Wer von hier aus die App installiert, soll beim Start hier landen.
+  useEffect(() => { anmeldeartVormerken(TOKEN_FAHRER); }, []);
 
   if (!ready) return null;
   if (driver) return <Navigate to="/fahrer" replace />;
