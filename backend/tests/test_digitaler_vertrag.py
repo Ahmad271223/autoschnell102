@@ -76,6 +76,22 @@ def test_01_druckfassung_hat_unterschriftslinien():
     assert "Allgemeine Vertragsbedingungen" in f and "Absagen sind nach Vertragsbestätigung" in f
 
 
+def test_01b_druckfassung_nennt_die_elektronische_uebermittlung():
+    """Wunsch Ahmad (12.09.2026): Der Satz unter den Unterschriftslinien
+    deckt auch den elektronischen Versand ab (Kfz-Kaufvertrag ist formfrei).
+    Die digitale Fassung bleibt unveraendert ("ohne Unterschrift gueltig")."""
+    c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
+    druck = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=c)))
+    digital = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
+                                                 contract=c, digital=True)))
+    assert "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit aller Angaben" in druck
+    assert "Wird dieser Vertrag elektronisch übermittelt" in druck
+    assert "Bestätigung der Vertragsinhalte in Textform" in druck
+    assert "eigenhändige Unterschrift ist dann nicht erforderlich" in druck
+    assert "elektronisch übermittelt" not in digital
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." in digital
+
+
 def test_02_digitale_fassung_text_statt_linien():
     c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
     t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,

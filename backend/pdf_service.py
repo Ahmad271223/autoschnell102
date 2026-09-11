@@ -816,8 +816,14 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         sig,
         Spacer(1, 4),
         Paragraph(
+            # Wunsch Ahmad (12.09.2026): Der Satz deckt auch den Fall ab, dass der
+            # Vertrag elektronisch uebermittelt wurde — ein Kfz-Kaufvertrag ist
+            # formfrei, eine eigenhaendige Unterschrift also nicht noetig.
             "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit "
-            "aller Angaben sowie den Erhalt einer Vertragsausfertigung.",
+            "aller Angaben sowie den Erhalt einer Vertragsausfertigung. Wird dieser "
+            "Vertrag elektronisch übermittelt, gilt die Bestätigung der Vertragsinhalte "
+            "in Textform, zum Beispiel per E-Mail, als Zustimmung beider Parteien; eine "
+            "eigenhändige Unterschrift ist dann nicht erforderlich.",
             st["small"],
         ),
     ]))
