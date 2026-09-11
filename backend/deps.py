@@ -446,22 +446,27 @@ async def naechste_kunden_nr() -> int:
 
     Selbstheilung (Haertung 09/2026): haengt der Zaehler hinter dem Bestand
     (Restore ohne counters, alter Zaehler + neue Firmen), wird er auf die
-    hoechste vergebene Nummer gehoben — es entsteht nie eine Dublette."""
+    hoechste vergebene Nummer gehoben — es entsteht nie eine Dublette.
+
+    Runde 22 (11.09.2026): Gehoben wurde nur bei einer Kollision. Stand der
+    Zaehler zurueck und gab es Luecken (geloeschte Firmen), bekam eine neue
+    Firma still die Nummer einer GELOESCHTEN Firma. Jetzt gilt: nie unter
+    oder auf die hoechste vergebene Nummer (Index kunden_nr_unique, also
+    ein billiger Indexzugriff; Firmen werden selten angelegt)."""
     for _ in range(5):
         doc = await db.counters.find_one_and_update(
             {"_id": "kunden_nr"},
             {"$inc": {"seq": 1}, "$setOnInsert": {"start": 1000}},
             upsert=True, return_document=True)
         nr = 1000 + int(doc["seq"])
-        if not await db.dealers.find_one({"kunden_nr": nr}, {"_id": 1}):
-            return nr
         top = await db.dealers.find_one(
             {"kunden_nr": {"$type": "number"}}, {"kunden_nr": 1},
             sort=[("kunden_nr", -1)])
-        if top:
-            await db.counters.update_one(
-                {"_id": "kunden_nr"},
-                {"$max": {"seq": int(top["kunden_nr"]) - 1000}})
+        hoechste = int(top["kunden_nr"]) if top else 0
+        if nr > hoechste:
+            return nr
+        await db.counters.update_one(
+            {"_id": "kunden_nr"}, {"$max": {"seq": hoechste - 1000}})
     raise RuntimeError("Kundennummer: kein freier Wert gefunden")
 
 
