@@ -320,14 +320,14 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     if damage_mode == "no_accident":
         params.append(("damaged_listing", "exclude"))
 
-    # Kategorie (body=) und Tueren (doorfrom/doorto) — Runde 11: vorher
-    # endete die Regelverarbeitung nach Kraftstoff/Getriebe/Schaden, und
-    # beide Links sahen nach "derselben Suche" aus, obwohl AutoScout die
-    # Firmenregeln fuer Kategorie und Tueren nie umsetzte.
-    if (rules.get("category") or {}).get("mode") == "exact":
-        body = _AUTOSCOUT_BODY.get(str(vehicle.get("category") or ""))
-        if body:
-            params.append(("body", body))
+    # Tueren (doorfrom/doorto) — Runde 11: vorher endete die
+    # Regelverarbeitung nach Kraftstoff/Getriebe/Schaden, und beide Links
+    # sahen nach "derselben Suche" aus, obwohl AutoScout die Firmenregeln
+    # fuer Tueren nie umsetzte.
+    # Runde 24 (11.09.2026): Die Kategorie (body=) ist als Filter fuer beide
+    # Portale entfallen — AutoScout24 hatte nicht fuer jede mobile.de-
+    # Kategorie einen body-Code ("keine passende Kategorie fuer 'Kombi'").
+    # Kein body mehr, auch wenn gespeicherte Alt-Regeln "category" enthalten.
     if (rules.get("doors") or {}).get("mode") == "exact":
         tueren = _autoscout_tueren(vehicle.get("doors"))
         if tueren:
@@ -358,11 +358,8 @@ def _autoscout_tueren(wert) -> Optional[Tuple[int, int]]:
     return None
 
 
-# mobile.de-Kategorie -> AutoScout24 body-Code
-_AUTOSCOUT_BODY = {
-    "SmallCar": "1", "Cabrio": "2", "SportsCar": "3", "OffRoad": "4",
-    "EstateCar": "5", "Limousine": "6", "Van": "7",
-}
+# Runde 24 (11.09.2026): Die Zuordnung mobile.de-Kategorie -> AutoScout24
+# body-Code (_AUTOSCOUT_BODY) ist mit dem Kategorie-Filter entfallen.
 _AUTOSCOUT_SORT = {
     "price_asc": [("sort", "price"), ("desc", "0")],
     "price_desc": [("sort", "price"), ("desc", "1")],
@@ -378,7 +375,12 @@ def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
     """Welche Firmenregeln kann der AutoScout-Link NICHT umsetzen?
     Liefert lesbare Hinweise fuer den Nutzer (Runde 11) — vorher bekam er
     zwei Links "nach denselben Regeln", die stillschweigend verschieden
-    filterten."""
+    filterten.
+
+    Runde 24 (11.09.2026): Kategorie, Navigation und Klimatisierung sind
+    als Filter fuer beide Portale entfallen — dazu gibt es deshalb auch
+    keinen Hinweis mehr (auch nicht bei Alt-Regeln mit diesen Schluesseln).
+    Land und Hubraum bleiben."""
     from regeln import laender_ohne_autoscout
     rules = rules or {}
     hinweise = []
@@ -393,20 +395,9 @@ def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
         else:
             hinweise.append(f"AutoScout24 bietet {', '.join(fehlend)} nicht als Land an — "
                             "der AutoScout-Link sucht in ALLEN AutoScout-Laendern.")
-    if (rules.get("category") or {}).get("mode") == "exact" and vehicle.get("category") \
-            and str(vehicle["category"]) not in _AUTOSCOUT_BODY:
-        hinweise.append("AutoScout24 hat keine passende Kategorie fuer "
-                        f"'{vehicle.get('category_label') or vehicle['category']}' — "
-                        "der AutoScout-Link filtert nicht nach Kategorie.")
     cc_mode = (rules.get("displacement") or {}).get("mode")
     if cc_mode in ("exact", "tolerance") and vehicle.get("displacement"):
         hinweise.append("Hubraum filtert nur mobile.de — der AutoScout-Link zeigt alle Hubraeume.")
-    nav_mode = ((rules.get("features") or {}).get("navigation") or {}).get("mode", "ignore")
-    if nav_mode != "ignore":
-        hinweise.append("Navigation filtert nur mobile.de — der AutoScout-Link zeigt auch Fahrzeuge ohne Navi.")
-    klima = (rules.get("climatisation") or {}).get("mode", "ignore")
-    if klima != "ignore":
-        hinweise.append("Klimatisierung filtert nur mobile.de — der AutoScout-Link zeigt auch Fahrzeuge ohne Klima.")
     return hinweise
 
 

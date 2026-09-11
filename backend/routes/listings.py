@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 from typing import Annotated, Any, Dict, Optional
 
 # Cache-Lebensdauer fuer abgerufene Inserate. Hoehere TTL = weniger echte
@@ -147,6 +148,28 @@ async def _fahrzeug_id(source: str, ad_id: str, dealer_id: str) -> str:
     return neu
 
 
+# Lebenszyklen, in denen ein erneuter Vergleich die Inseratsdaten (data)
+# ueberschreiben darf. Alles andere traegt Korrekturen des Haendlers —
+# dort landen frische Daten nur unter inserat_aktuell (Runde 10).
+_NEUVERGLEICH_UEBERSCHREIBT = ("verglichen", "gefunden", "storniert", "nicht_abgeholt")
+
+
+async def _als_mitbearbeiter_eintragen(user: dict, filt: dict, besitzer: str,
+                                       seit: Optional[str]) -> dict:
+    """Wunsch Ahmad 09.09.2026: Vergleicht ein zweiter Sucher ein Fahrzeug,
+    das schon einem Kollegen gehoert, wird er MITBEARBEITER (Fahrzeug
+    erscheint in seinem Bereich), Hauptbearbeiter bleibt, wer zuerst
+    verglichen hat. Liefert den Kollegen-Hinweis fuer die Antwort.
+    Runde 23 (11.09.2026): eigene Funktion, weil auch der verlorene
+    gleichzeitige Erstvergleich (Upsert-Zweig) hier landet."""
+    await db.vehicles.update_one(filt, {"$addToSet": {"mitbearbeiter_ids": user["id"]}})
+    namen = await besitzer_namen(user["dealer_id"], [besitzer])
+    return {"user_id": besitzer,
+            "name": namen.get(besitzer) or "ein Kollege",
+            "seit": seit,
+            "mitbearbeiter": True}
+
+
 async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                                 frisch: dict,
                                 quelle: Optional[str] = None) -> Optional[dict]:
@@ -161,54 +184,103 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
     die frischen Inseratsdaten landen dann getrennt unter inserat_aktuell.
     Nach einem Seitenausgang (storniert, nicht abgeholt) ist ein erneuter
     Vergleich ein Neuanfang. Altbestand ohne Besitzer uebernimmt, wer ihn
-    (wieder) vergleicht."""
+    (wieder) vergleicht.
+
+    Runde 23 (11.09.2026): Lesen und Schreiben sind gegen parallele Zugriffe
+    abgesichert (mehrere Worker, zwei Server):
+    - Befund 1: Zwei Sucher vergleichen denselben NEUEN Link gleichzeitig.
+      Beide lasen "gibt es noch nicht"; nur einer wurde per $setOnInsert
+      Hauptbearbeiter, der andere aber NICHT Mitbearbeiter (das geschah nur
+      im Zweig "vorhanden"). Jetzt meldet der Upsert den Vorzustand
+      (ReturnDocument.BEFORE — "seit" ist wie im Zweig "vorhanden" der Stand
+      VOR dem eigenen Schreiben); gehoert das Fahrzeug einem Kollegen, wird
+      der aktuelle Sucher Mitbearbeiter. "id"/"dealer_id" stehen nicht mehr
+      im $set (kommen beim Einfuegen aus dem Gleichheitsfilter) — sonst kann
+      MongoDB einen DuplicateKey des Upserts nicht selbst wiederholen. Ein
+      trotzdem gemeldeter DuplicateKeyError fuehrt zu EINEM zweiten
+      Durchlauf ab dem Lesen (dann im Zweig "vorhanden", mit CAS).
+    - Befund 2: Neue Inseratsdaten werden nur noch geschrieben, solange der
+      GELESENE Lebenszyklus noch gilt (CAS wie lifecycle.set_lifecycle).
+      Wechselte er dazwischen (Vertrag durch Kollegen, Chef uebernimmt ...),
+      bleibt data unangetastet und die frischen Daten landen wie bei
+      fortgeschrittenen Lebenszyklen unter inserat_aktuell. updated_at ist
+      bewusst NICHT Teil der Bedingung (parallele Vergleiche setzen es
+      staendig).
+    - Ist das Fahrzeug zwischen Lesen und Schreiben ganz verschwunden (z. B.
+      Pool-Begrenzung), wird es wie beim Erstvergleich neu angelegt."""
     dealer_id = user["dealer_id"]
-    vorhanden = await db.vehicles.find_one(
-        {"id": vid, "dealer_id": dealer_id},
-        {"_id": 0, "lifecycle": 1, "owner_user_id": 1, "updated_at": 1})
-    besitzer = (vorhanden or {}).get("owner_user_id")
-    kollege = None
-    if vorhanden and ist_sucher(user) and besitzer and besitzer != user["id"]:
-        # Wunsch Ahmad 09.09.2026: beide duerfen einen Vertrag anlegen. Der
-        # zweite Sucher wird MITBEARBEITER (Fahrzeug erscheint in seinem
-        # Bereich), Hauptbearbeiter bleibt, wer zuerst verglichen hat. Die
-        # Inseratsdaten werden wie bei jedem Vergleich aktualisiert (nur
-        # solange das Fahrzeug noch "verglichen" ist, siehe unten).
-        await db.vehicles.update_one(
-            {"id": vid, "dealer_id": dealer_id},
-            {"$addToSet": {"mitbearbeiter_ids": user["id"]}})
-        namen = await besitzer_namen(dealer_id, [besitzer])
-        kollege = {"user_id": besitzer,
-                   "name": namen.get(besitzer) or "ein Kollege",
-                   "seit": vorhanden.get("updated_at"),
-                   "mitbearbeiter": True}
+    filt = {"id": vid, "dealer_id": dealer_id}
     # Runde 17 (Nr. 383): Quelle am Fahrzeug festhalten (auch am Altbestand
     # beim naechsten Vergleich) — Grundlage fuer den Legacy-Rueckfall.
     quelle_set = {"quelle": quelle} if quelle else {}
-    if vorhanden and (vorhanden.get("lifecycle") or "verglichen") not in (
-            "verglichen", "gefunden", "storniert", "nicht_abgeholt"):
-        await db.vehicles.update_one(
-            {"id": vid, "dealer_id": dealer_id},
-            {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
-                      "updated_at": now_iso(), **quelle_set}})
-    else:
-        await db.vehicles.update_one(
-            {"id": vid, "dealer_id": dealer_id},
-            {"$set": {
-                "id": vid, "dealer_id": dealer_id,
-                "mobile_ad_id": ad_id, "data": frisch,
-                "updated_at": now_iso(), **quelle_set,
-            },
-             "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
-                              "lifecycle": "verglichen", "source": "plattform",
-                              "lifecycle_changed_at": now_iso(),
-                              "owner_user_id": user["id"]}},
-            upsert=True,
-        )
-    if vorhanden and not besitzer:
-        await db.vehicles.update_one(
-            {"id": vid, "dealer_id": dealer_id, "owner_user_id": None},
-            {"$set": {"owner_user_id": user["id"]}})
+    kollege = None
+    for versuch in range(2):
+        kollege = None
+        vorhanden = await db.vehicles.find_one(
+            filt, {"_id": 0, "lifecycle": 1, "owner_user_id": 1, "updated_at": 1})
+        if vorhanden is not None:
+            besitzer = vorhanden.get("owner_user_id")
+            if ist_sucher(user) and besitzer and besitzer != user["id"]:
+                # Die Inseratsdaten werden wie bei jedem Vergleich
+                # aktualisiert (nur solange das Fahrzeug noch "verglichen"
+                # ist, siehe unten).
+                kollege = await _als_mitbearbeiter_eintragen(
+                    user, filt, besitzer, vorhanden.get("updated_at"))
+            daten_geschrieben = False
+            if (vorhanden.get("lifecycle") or "verglichen") in _NEUVERGLEICH_UEBERSCHREIBT:
+                # Runde 23 (Befund 2): CAS auf den gelesenen Lebenszyklus;
+                # Altdokumente ohne Feld: es darf nicht inzwischen entstanden sein.
+                cas = {**filt, "lifecycle": vorhanden["lifecycle"]
+                       if "lifecycle" in vorhanden else {"$exists": False}}
+                r = await db.vehicles.update_one(cas, {"$set": {
+                    "mobile_ad_id": ad_id, "data": frisch,
+                    "updated_at": now_iso(), **quelle_set}})
+                daten_geschrieben = r.matched_count > 0
+            if not daten_geschrieben:
+                r = await db.vehicles.update_one(
+                    filt,
+                    {"$set": {"inserat_aktuell": frisch, "inserat_aktuell_am": now_iso(),
+                              "updated_at": now_iso(), **quelle_set}})
+                if r.matched_count == 0:
+                    # Zwischenzeitlich entfernt — einmal wie ein Erstvergleich.
+                    kollege = None
+                    if versuch == 0:
+                        continue
+                    break
+            if not besitzer:
+                await db.vehicles.update_one(
+                    {**filt, "owner_user_id": None},
+                    {"$set": {"owner_user_id": user["id"]}})
+            break
+        # Erstvergleich: atomar anlegen oder — wenn ein Kollege gleichzeitig
+        # schneller war — dessen Dokument aktualisieren (Befund 1).
+        try:
+            vorher = await db.vehicles.find_one_and_update(
+                filt,
+                {"$set": {"mobile_ad_id": ad_id, "data": frisch,
+                          "updated_at": now_iso(), **quelle_set},
+                 "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
+                                  "lifecycle": "verglichen", "source": "plattform",
+                                  "lifecycle_changed_at": now_iso(),
+                                  "owner_user_id": user["id"]}},
+                projection={"_id": 0, "owner_user_id": 1, "updated_at": 1},
+                upsert=True, return_document=ReturnDocument.BEFORE)
+        except DuplicateKeyError:
+            if versuch == 0:
+                continue
+            raise
+        if vorher is not None:
+            # Das Dokument gab es schon (paralleler Erstvergleich) — der
+            # tatsaechliche Besitzer entscheidet, nicht unser Lesen.
+            besitzer = vorher.get("owner_user_id")
+            if not besitzer:
+                await db.vehicles.update_one(
+                    {**filt, "owner_user_id": None},
+                    {"$set": {"owner_user_id": user["id"]}})
+            elif ist_sucher(user) and besitzer != user["id"]:
+                kollege = await _als_mitbearbeiter_eintragen(
+                    user, filt, besitzer, vorher.get("updated_at"))
+        break
     # Fahrzeugpool je Konto auf die neuesten 30 Vergleiche begrenzen
     try:
         from fahrzeugpool import fahrzeugpool_trimmen
@@ -733,7 +805,8 @@ async def get_vehicle_detail(vehicle_id: str, user=Depends(current_firma)):
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     (await besitzer_anreichern(user, [v]))
-    return v
+    # Runde 23 (11.09.2026, Befund A): Sucher sehen nur den eigenen Einkaufspreis.
+    return await __import__("kaufvorgang").einkauf_fuer_sucher_maskieren(user, v)
 
 
 @router.get("/vehicles")
@@ -741,7 +814,9 @@ async def list_vehicles(user=Depends(current_firma)):
     items = await db.vehicles.find(
         fahrzeug_bereich(user), {"_id": 0},
     ).sort("updated_at", -1).to_list(500)
-    return await besitzer_anreichern(user, items)
+    # Runde 23 (11.09.2026, Befund A): Sucher sehen nur den eigenen Einkaufspreis.
+    return await __import__("kaufvorgang").einkauf_fuer_sucher_maskieren(
+        user, await besitzer_anreichern(user, items))
 
 
 # =========================================================

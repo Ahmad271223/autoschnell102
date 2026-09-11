@@ -16,7 +16,8 @@ Ablauf
      (run_beweis_worker_forever). Eine Zeile wird per atomarem Statuswechsel
      offen -> in_arbeit beansprucht; genau EIN Worker gewinnt. Faellt er aus,
      gibt die Aufraeumung die Zeile nach BEARBEITUNG_SEKUNDEN wieder frei.
-  4. Erzeugen: Inseratsdaten aus listings_cache, Fotos ueber
+  4. Erzeugen: Inseratsdaten aus dem beim Vormerken eingefrorenen Stand
+     (quelle_daten, Runde 23 — Altbestand ohne ihn: listings_cache), Fotos ueber
      bild_proxy.laden_fuer_pdf (Allowliste, Groessenlimit), PDF ueber
      beweis_pdf.beweis_pdf (ohne Browser), Ablage im Datei-Speicher unter
      beweise/<quelle>/<id>.pdf (firmenneutral).
@@ -161,10 +162,75 @@ def oeffentlich(doc: Optional[dict]) -> Optional[dict]:
     return aus
 
 
+# Runde 23 (11.09.2026): Datenstand beim ersten Gebrauch einfrieren. Vorher
+# las der Worker die Fahrzeugdaten erst spaeter aus dem veraenderlichen
+# listings_cache — nach Verzoegerung, Fehlversuch, Wiederbelebung oder einem
+# erneuten Portalabruf zeigte das PDF einen NEUEREN Stand als beim
+# ausloesenden Erstgebrauch (oder scheiterte, wenn der Eintrag per TTL weg war).
+# Nicht eingefroren wird, was das PDF nie liest: interne Parser-Felder
+# (_mock, _resolved_*), die Vorschaubilder der Antwort und die doppelte
+# Fotoliste image_urls (foto_urls nimmt images vor image_urls).
+_ANBIETER_ERSATZNAMEN = ("händler", "privatverkäufer", "privatanbieter")
+_ANBIETER_KONTAKT = ("seller_address", "seller_phone", "seller_email")
+
+
+def quelle_einfrieren(quelle: Any, daten: Any) -> Optional[Dict[str, Any]]:
+    """Inseratsdaten fuer quelle_daten: nur, was das PDF braucht — und bei
+    privaten/unbekannten Anbietern schon maskiert.
+
+    Die Beweiszeile lebt laenger als der Zwischenspeicher (90 Tage und mehr,
+    solange ein Vorgang sie haelt). Sie speichert deshalb nie mehr
+    Personendaten, als das PDF selbst enthaelt: Freitexte wie
+    beweis_pdf.kontaktdaten_maskieren, Name/Anschrift/Telefon/E-Mail als
+    Platzhalter (das PDF druckt sie bei privaten Anbietern ohnehin nicht; der
+    Platzhalter erhaelt dort den Hinweis auf entfernte Angaben). PLZ/Ort und
+    die Ersatznamen ("Privatverkäufer") bleiben — PLZ/Ort stehen im PDF, die
+    Ersatznamen bestimmen die Anbieterart. Haendler (und BEWEIS_PRIVATDATEN)
+    bleiben unveraendert, weil das PDF sie vollstaendig druckt."""
+    if not isinstance(daten, dict) or not daten:
+        return None
+    aus = {k: v for k, v in daten.items()
+           if not str(k).startswith("_") and k != "images_thumbs"}
+    if aus.get("images"):
+        aus.pop("image_urls", None)
+    from beweis_pdf import KONTAKT_ENTFERNT, kontaktdaten_maskieren, verkaeufer_art
+    if BEWEIS_PRIVATDATEN or verkaeufer_art(aus, quelle) == "haendler":
+        return aus
+    gemaskt = kontaktdaten_maskieren(aus)
+    for feld in _ANBIETER_KONTAKT:
+        if gemaskt.get(feld):
+            gemaskt[feld] = KONTAKT_ENTFERNT
+    name = gemaskt.get("seller_name")
+    if name and str(name).strip().lower() not in _ANBIETER_ERSATZNAMEN:
+        gemaskt["seller_name"] = KONTAKT_ENTFERNT
+    if gemaskt != aus:
+        # Merker fuer _fuer_pdf ("_" = nie im PDF): hier wurde maskiert.
+        gemaskt["_kontakt_maskiert"] = True
+    return gemaskt
+
+
+def _fuer_pdf(daten: Dict[str, Any]) -> Dict[str, Any]:
+    """Eingefrorene Daten sind schon maskiert. beweis_pdf erkennt Maskierung
+    aber nur am Unterschied vor/nach seiner eigenen und liesse den Hinweis
+    auf entfernte Kontaktangaben weg, wenn nur Titel/Beschreibung eine
+    enthielten. seller_email wird bei privaten Anbietern nie gedruckt, loest
+    den Hinweis aber aus — nur fuer den Aufbau, nie gespeichert."""
+    if daten.get("_kontakt_maskiert") and not BEWEIS_PRIVATDATEN \
+            and not any(daten.get(f) for f in _ANBIETER_KONTAKT):
+        from beweis_pdf import KONTAKT_ENTFERNT
+        return dict(daten, seller_email=KONTAKT_ENTFERNT)
+    return daten
+
+
 async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
-                           url: str, anlass: str) -> Optional[dict]:
+                           url: str, anlass: str, daten: Optional[dict] = None,
+                           abgerufen_am: Optional[datetime] = None) -> Optional[dict]:
     """Beweisdokument fuer ein Inserat vormerken — idempotent, wirft nie.
-    Liefert die (neue oder bestehende) Zeile als oeffentliche Sachfelder."""
+    Liefert die (neue oder bestehende) Zeile als oeffentliche Sachfelder.
+
+    daten/abgerufen_am (Runde 23): Stand des ausloesenden Abrufs. Er wird nur
+    beim Anlegen gespeichert ($setOnInsert) — spaetere Aufrufe, andere
+    Firmen, Wiederbelebung und neue Portalabrufe aendern ihn nie."""
     if not cache_key:
         return None
     marke = f"{id(db.client) if hasattr(db, 'client') else id(db)}:{getattr(db, 'name', '')}"
@@ -179,15 +245,23 @@ async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
               "erstellt_am": 1, "fertig_am": 1, "pdf_bytes": 1, "fehler": 1,
               "fotos_eingebettet": 1, "fotos_gesamt": 1, "daten_abgerufen_am": 1,
               "pdf_sha256": 1}
+    neu = {"id": str(uuid.uuid4()), "cache_key": cache_key,
+           "quelle": quelle, "item_id": str(item_id or ""),
+           "url": kanonische_url(quelle, item_id, url), "status": "offen", "versuche": 0,
+           "anlass": anlass, "erstellt_am": _jetzt()}
+    try:
+        eingefroren = quelle_einfrieren(quelle, daten)
+    except Exception as exc:  # noqa: BLE001 — dann wie Altbestand aus dem Cache
+        log.warning("Beweisdokument %s: Datenstand nicht eingefroren: %s", cache_key, exc)
+        eingefroren = None
+    if eingefroren:
+        neu["quelle_daten"] = eingefroren
+        neu["quelle_abgerufen_am"] = abgerufen_am or _jetzt()
     try:
         try:
             doc = await db.inserat_beweise.find_one_and_update(
                 {"cache_key": cache_key},
-                {"$setOnInsert": {
-                    "id": str(uuid.uuid4()), "cache_key": cache_key,
-                    "quelle": quelle, "item_id": str(item_id or ""),
-                    "url": kanonische_url(quelle, item_id, url), "status": "offen", "versuche": 0,
-                    "anlass": anlass, "erstellt_am": _jetzt()}},
+                {"$setOnInsert": neu},
                 upsert=True, projection=felder, return_document=ReturnDocument.AFTER)
         except DuplicateKeyError:
             # Zwei gleichzeitige Erstnutzungen: der andere hat angelegt.
@@ -288,23 +362,33 @@ def neuer_speicher_key(doc: dict) -> str:
 
 async def beweis_erzeugen(db, doc: dict) -> bool:
     """Eine beanspruchte Zeile ausfuehren. True = fertig."""
-    cache = await db.listings_cache.find_one(
-        {"cache_key": doc["cache_key"]},
-        {"_id": 0, "data": 1, "fetched_at": 1, "url": 1})
-    daten = (cache or {}).get("data")
-    if not isinstance(daten, dict) or not daten:
-        raise RuntimeError("Inseratsdaten fehlen im Zwischenspeicher")
+    eingefroren = doc.get("quelle_daten")
+    if isinstance(eingefroren, dict) and eingefroren:
+        # Runde 23 (11.09.2026): der beim Erstgebrauch eingefrorene Stand —
+        # nie der (inzwischen evtl. neu abgerufene oder abgelaufene) Cache.
+        daten = eingefroren
+        abgerufen_am, cache_url = doc.get("quelle_abgerufen_am"), None
+    else:
+        # Altbestand (vor Runde 23 vorgemerkt) und Vormerkungen ohne Daten
+        # (routes/listings.compare zu altem Cache-Eintrag): wie bisher.
+        cache = await db.listings_cache.find_one(
+            {"cache_key": doc["cache_key"]},
+            {"_id": 0, "data": 1, "fetched_at": 1, "url": 1})
+        daten = (cache or {}).get("data")
+        if not isinstance(daten, dict) or not daten:
+            raise RuntimeError("Inseratsdaten fehlen im Zwischenspeicher")
+        abgerufen_am, cache_url = (cache or {}).get("fetched_at"), (cache or {}).get("url")
     urls = foto_urls(daten)
     fotos = await _fotos_laden(urls[:BEWEIS_FOTOS_MAX])
     from beweis_pdf import beweis_pdf
     erstellt = _jetzt()
     pdf = await asyncio.to_thread(
-        beweis_pdf, quelle=doc.get("quelle"), daten=daten,
+        beweis_pdf, quelle=doc.get("quelle"), daten=_fuer_pdf(daten),
         url=kanonische_url(doc.get("quelle"), doc.get("item_id"),
-                           doc.get("url") or (cache or {}).get("url")
+                           doc.get("url") or cache_url
                            or daten.get("detail_url") or ""),
         item_id=doc.get("item_id") or "", beweis_id=doc["id"],
-        abgerufen_am=(cache or {}).get("fetched_at"), erstellt_am=erstellt,
+        abgerufen_am=abgerufen_am, erstellt_am=erstellt,
         fotos=fotos, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN)
     key = neuer_speicher_key(doc)
     # Erst vermerken, dann schreiben: jeder je geschriebene Schluessel steht in
@@ -317,7 +401,7 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
         {"$set": {"status": "fertig", "pdf_key": key, "pdf_bytes": len(pdf),
                   "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
                   "fertig_am": erstellt,
-                  "daten_abgerufen_am": (cache or {}).get("fetched_at"),
+                  "daten_abgerufen_am": abgerufen_am,
                   "fotos_eingebettet": sum(1 for f in fotos if f),
                   "fotos_gesamt": len(urls), "fehler": None,
                   "bearbeitung_bis": None, "naechster_versuch_ab": None}})
@@ -518,7 +602,10 @@ async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500
             await db.inserat_beweise.update_one(
                 {"id": d["id"]},
                 {"$set": {"status": "geloescht", "geloescht_am": now, "pdf_key": None},
-                 "$unset": {"url": "", "pdf_sha256": "", "fehler": "", "alle_keys": ""}})
+                 # Runde 23: der eingefrorene Datenstand geht mit — Grabstein
+                 # ohne Inseratsdaten.
+                 "$unset": {"url": "", "pdf_sha256": "", "fehler": "", "alle_keys": "",
+                            "quelle_daten": ""}})
             geloescht += 1
         if len(kandidaten) < seite:
             break

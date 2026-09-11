@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import PortalSheet from "@/components/PortalSheet";
 import { FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
 import {
   Search, Car, Calendar, Gauge, Zap, Fuel, Cog, Eye, ExternalLink,
@@ -84,6 +85,10 @@ export default function ManuelleSuche() {
     } else if (!v) setKw("");
   };
 
+  // Runde 24 (11.09.2026): ids der gezeigten Server-Hinweise — eine weitere
+  // Suche ersetzt denselben Text, statt ihn zu stapeln (siehe lib/hinweise).
+  const hinweisIdsRef = useRef([]);
+
   const submit = async () => {
     if (!selectedMake) {
       toast.error("Bitte zuerst eine Marke auswählen");
@@ -115,7 +120,8 @@ export default function ManuelleSuche() {
       });
       // Runde 10: Der Server sagt, wenn ein Portal Marke oder Modell nicht
       // kennt — vorher lief die Suche dann still ueber die ganze Marke.
-      for (const h of data.hinweise || []) toast.warning(h, { duration: 8000 });
+      // Runde 24 (11.09.2026): feste id je Text — derselbe Hinweis steht nie doppelt.
+      hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
     } catch (e) {
       toast.error(errMsg(e, "Suche fehlgeschlagen"));
     } finally {
@@ -130,6 +136,8 @@ export default function ManuelleSuche() {
     // Runde 11: Links der VORHERIGEN Suche gehoeren nicht zu leeren Feldern.
     setPortalUrls(null);
     toast.dismiss(FILTER_TOAST_ID);   // Runde 22: dito fuer den Blockade-Hinweis
+    // Runde 24 (11.09.2026): dito fuer die Server-Hinweise der vorigen Suche.
+    hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
   };
 
   const years = useMemo(() => {

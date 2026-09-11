@@ -488,6 +488,23 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
     return v, d
 
 
+# Runde 24 (11.09.2026, Befund Ahmad): Der Kaeufer (= Auftraggeber im
+# Abholprotokoll) braucht einen Namen. Steht weder im Formular noch in den
+# Einstellungen (Firma bzw. Sucher-Override) eine Firma, wird der Vertrag
+# nicht angelegt. Nur der Name — Adresse/PLZ/Ort erzwingt das Formular, damit
+# alte Clients ohne Adressfelder nicht brechen. Die Vorschau bleibt Entwurf.
+KAEUFER_FEHLT = ("Käuferdaten fehlen: bitte Firma/Name im Kaufvertrag oder in "
+                 "den Einstellungen eintragen.")
+
+
+def kaeufer_pflicht_pruefen(dealer: Optional[dict]) -> None:
+    """422, wenn das Haendler-Dokument NACH _apply_contract_overrides keinen
+    Kaeufernamen (company_name) hat."""
+    name = (dealer or {}).get("company_name")
+    if not (str(name).strip() if name is not None else ""):
+        raise HTTPException(422, KAEUFER_FEHLT)
+
+
 def _vehicle_bild_urls(vehicle: dict) -> list:
     """Foto-URLs eines Fahrzeugs — ausgelesene Inserate speichern sie je
     nach Quelle unter `images` (Kleinanzeigen-Scraper) oder `image_urls`."""
@@ -586,6 +603,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
+    # Runde 24: ohne Kaeufername kein Vertrag (vor PDF und Speichern).
+    kaeufer_pflicht_pruefen(dealer)
     # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
     # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.
     pdf_id = str(uuid.uuid4())

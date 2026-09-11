@@ -200,16 +200,34 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
     Beim Abholen wird der realisierte Kaufpreis ans Fahrzeug geschrieben
     (juengster abgeholter Vorgang). Nie eine Exception nach aussen."""
     try:
-        faelle = await db.kaufvorgaenge.find(
-            {"vehicle_id": vehicle_id, "dealer_id": dealer_id},
-            {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(500)
-        if not faelle:
-            return None
-        v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
-                                       {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1})
-        aktuell = (v or {}).get("lifecycle") or "verglichen"
-        stati = {f.get("status") for f in faelle}
-        if "abgeholt" in stati:
+        # Runde 23 (11.09.2026, Befund B): zwei parallele Abholabschluesse
+        # verschiedener Vorgaenge lasen beide "kein massgeblicher Vorgang
+        # festgelegt" und schrieben je ihren Vorgang samt Preis — der letzte
+        # gewann und ueberschrieb den bereits festgehaltenen. Jetzt schreibt
+        # der Fahrzeug-Write per Compare-and-Set (nur, wenn noch kein bzw.
+        # derselbe oder ein nicht mehr abgeholter Vorgang festgehalten ist).
+        # Scheitert er, wird EINMAL neu gelesen und neu entschieden.
+        # Runde 23 (Gegenpruefung): der CAS verlangt zusaetzlich den GELESENEN
+        # Fahrzeugpreis — sonst schrieb ein veralteter Lauf fuer DENSELBEN
+        # Vorgang (Fahrer schliesst ab, gleichzeitig traegt der Chef den Vor-
+        # Ort-Preis nach) den alten Preis zurueck (Fahrzeug X/20000, Vorgang X
+        # 18000). Dafuer wird das Fahrzeug VOR den Vorgaengen gelesen: jeder
+        # Lauf, der danach geschrieben hat, aendert Vorgang oder Preis am
+        # Fahrzeug, und unser Write scheitert; wer vor unserem Lesen schrieb,
+        # hat die Vorgaenge davor gelesen, wir sehen also mindestens deren Stand.
+        for versuch in (1, 2):
+            v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                           {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1,
+                                            "purchase_price": 1})
+            faelle = await db.kaufvorgaenge.find(
+                {"vehicle_id": vehicle_id, "dealer_id": dealer_id},
+                {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(500)
+            if not faelle:
+                return None
+            aktuell = (v or {}).get("lifecycle") or "verglichen"
+            stati = {f.get("status") for f in faelle}
+            if v is None or "abgeholt" not in stati or aktuell in ABGESCHLOSSEN_FAHRZEUG:
+                break
             # Runde 18: Der REALISIERTE Vorgang wird am Fahrzeug festgehalten
             # (abgeholt_kaufvorgang_id) und bleibt massgeblich, solange er
             # abgeholt ist. Ein spaeter abgeschlossener zweiter Vorgang
@@ -218,17 +236,31 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             # (vorher: Preis geschrieben, bevor der Lebenszyklus geprueft wurde
             # -> historische Marge verfaelscht).
             abgeholte = [f for f in faelle if f.get("status") == "abgeholt"]
-            fest = (v or {}).get("abgeholt_kaufvorgang_id")
+            fest = v.get("abgeholt_kaufvorgang_id")
             abg = next((f for f in abgeholte if f.get("id") == fest), None) \
                 or max(abgeholte, key=lambda f: f.get("updated_at") or "")
-            if aktuell not in ABGESCHLOSSEN_FAHRZEUG:
-                setzen: Dict[str, Any] = {"abgeholt_kaufvorgang_id": abg.get("id")}
-                if abg.get("purchase_price") is not None:
-                    setzen["purchase_price"] = abg["purchase_price"]
-                await db.vehicles.update_one(
-                    {"id": vehicle_id, "dealer_id": dealer_id,
-                     "lifecycle": {"$nin": list(ABGESCHLOSSEN_FAHRZEUG)}},
-                    {"$set": setzen})
+            setzen: Dict[str, Any] = {"abgeholt_kaufvorgang_id": abg.get("id")}
+            if abg.get("purchase_price") is not None:
+                setzen["purchase_price"] = abg["purchase_price"]
+            # CAS: None trifft auch das fehlende Feld. Der alte Vorgang darf
+            # nur abgeloest werden, wenn er nicht mehr abgeholt ist (sonst
+            # waere abg == fest).
+            erlaubt = [None, abg.get("id")]
+            if fest and fest != abg.get("id"):
+                erlaubt.append(fest)
+            # purchase_price None trifft wie oben auch das fehlende Feld.
+            res = await db.vehicles.update_one(
+                {"id": vehicle_id, "dealer_id": dealer_id,
+                 "lifecycle": {"$nin": list(ABGESCHLOSSEN_FAHRZEUG)},
+                 "abgeholt_kaufvorgang_id": {"$in": erlaubt},
+                 "purchase_price": v.get("purchase_price")},
+                {"$set": setzen})
+            if res.matched_count:
+                break
+            if versuch == 2:
+                log.warning("Massgeblicher Vorgang fuer %s nach Neulesen weiter "
+                            "umkaempft — Fahrzeug bleibt beim festgehaltenen", vehicle_id)
+        if "abgeholt" in stati:
             ziel = "abgeholt"
         elif "abholung_geplant" in stati:
             ziel = "abholung_geplant"
@@ -245,7 +277,8 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
 
 
 async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
-                                  vehicle: Optional[dict] = None) -> Dict[str, Any]:
+                                  vehicle: Optional[dict] = None, *,
+                                  user_id: Optional[str] = None) -> Dict[str, Any]:
     """Befund Ahmad 10.09.2026: Im Inserat stand "Einkaufspreis 0 €", obwohl
     der Vertrag 23.000 € trug — vehicles.purchase_price wird seit dem Umbau
     erst beim Abholen gesetzt. Gewuenscht: der Vertragspreis des Suchers
@@ -256,17 +289,33 @@ async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
       fahrzeug   — am Fahrzeug eingetragen (Abholung oder von Hand)
       abgeholt   — aus dem abgeholten Vorgang
       vertrag    — aus dem (juengsten offenen) Vertrag
-      keiner     — nichts bekannt"""
+      keiner     — nichts bekannt
+
+    Runde 23 (11.09.2026, Befund A): mit `user_id` (Sucher) zaehlen NUR
+    dessen eigene Vorgaenge — vorher sah Sucher B in seiner Akte den
+    Vertragspreis von Sucher A als "Einkaufspreis (aus dem Kaufvertrag)".
+    Der Fahrzeugpreis gilt fuer ihn nur, wenn der abgeholte (massgebliche)
+    Vorgang sein eigener ist, und dann mit dem Preis dieses Vorgangs.
+    Ohne `user_id` (Chef, Weiterverkauf) unveraendert firmenweit."""
     if vehicle is None:
         vehicle = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
                                              {"_id": 0, "purchase_price": 1,
                                               "abgeholt_kaufvorgang_id": 1}) or {}
-    if vehicle.get("purchase_price") is not None:
-        return {"preis": vehicle["purchase_price"], "quelle": "fahrzeug",
-                "kaufvorgang_id": vehicle.get("abgeholt_kaufvorgang_id")}
+    filt: Dict[str, Any] = {"vehicle_id": vehicle_id, "dealer_id": dealer_id}
+    if user_id is None:
+        if vehicle.get("purchase_price") is not None:
+            return {"preis": vehicle["purchase_price"], "quelle": "fahrzeug",
+                    "kaufvorgang_id": vehicle.get("abgeholt_kaufvorgang_id")}
+    else:
+        filt["user_id"] = user_id
     faelle = await db.kaufvorgaenge.find(
-        {"vehicle_id": vehicle_id, "dealer_id": dealer_id},
-        {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(200)
+        filt, {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(200)
+    if user_id is not None:
+        fest = vehicle.get("abgeholt_kaufvorgang_id")
+        eigen = next((f for f in faelle if fest and f.get("id") == fest), None)
+        if eigen and eigen.get("purchase_price") is not None:
+            return {"preis": eigen["purchase_price"], "quelle": "fahrzeug",
+                    "kaufvorgang_id": fest}
     mit_preis = [f for f in faelle if f.get("purchase_price") is not None]
     if not mit_preis:
         return {"preis": None, "quelle": "keiner", "kaufvorgang_id": None}
@@ -277,6 +326,41 @@ async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
     offen = [f for f in mit_preis if f.get("status") in OFFEN] or mit_preis
     f = max(offen, key=lambda x: x.get("updated_at") or "")
     return {"preis": f["purchase_price"], "quelle": "vertrag", "kaufvorgang_id": f["id"]}
+
+
+# Runde 23 (11.09.2026, Befund A): Felder am gemeinsamen Fahrzeug, die den
+# realisierten Einkauf EINES Vorgangs (= eines Suchers) tragen.
+EINKAUF_FELDER = ("purchase_price", "abgeholt_kaufvorgang_id")
+
+
+async def einkauf_fuer_sucher_maskieren(user, fahrzeuge):
+    """Runde 23 (11.09.2026, Befund A): Regel "Sucher sehen nur ihren eigenen
+    Einkaufspreis". vehicles.purchase_price/abgeholt_kaufvorgang_id liegen am
+    firmenweit gemeinsamen Fahrzeug und gingen ueber /bestand, /vehicles,
+    /vehicles/{id} und die Akte an JEDEN Sucher des Fahrzeugs — auch den
+    Preis aus dem Vertrag eines Kollegen bzw. einen vom Chef eingetragenen.
+    Fuer Sucher bleiben die Felder nur, wenn der abgeholte Vorgang sein
+    eigener ist (Preis dann aus diesem Vorgang); sonst werden sie entfernt.
+    Chef: unveraendert. Nimmt ein Dokument oder eine Liste (in place)."""
+    if (user or {}).get("role") != "sucher" or not fahrzeuge:
+        return fahrzeuge
+    items = [fahrzeuge] if isinstance(fahrzeuge, dict) else list(fahrzeuge)
+    ids = list({v.get("abgeholt_kaufvorgang_id") for v in items
+                if v.get("abgeholt_kaufvorgang_id")})
+    eigene: Dict[str, Any] = {}
+    if ids:
+        async for kv in db.kaufvorgaenge.find(
+                {"id": {"$in": ids}, "dealer_id": user["dealer_id"], "user_id": user["id"]},
+                {"_id": 0, "id": 1, "purchase_price": 1}):
+            eigene[kv["id"]] = kv.get("purchase_price")
+    for v in items:
+        kv_id = v.get("abgeholt_kaufvorgang_id")
+        if kv_id in eigene and eigene[kv_id] is not None:
+            v["purchase_price"] = eigene[kv_id]
+            continue
+        for feld in EINKAUF_FELDER:
+            v.pop(feld, None)
+    return fahrzeuge
 
 
 async def termin_loesen(appointment_id: str) -> None:

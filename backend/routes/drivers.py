@@ -800,9 +800,11 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
         )
         if doc:
             contract = dict(doc.get("contract_data") or {})
-    dealer = await db.dealers.find_one(
-        {"id": appt.get("dealer_id")}, {"_id": 0},
-    ) or {}
+    # Runde 24 (11.09.2026, Befund Ahmad "AUFTRAGGEBER —"): derselbe
+    # Auftraggeber wie im Kaufvertrag (Kaeuferfelder bzw. Sucher-Einstellungen
+    # des Erstellers), nicht mehr das nackte Firmen-Dokument.
+    from auftraggeber import auftraggeber_fuer_termin
+    dealer = await auftraggeber_fuer_termin(appt)
     from pickup_pdf_service import build_pickup_pdf
     import asyncio as _aio
     driver_info = {

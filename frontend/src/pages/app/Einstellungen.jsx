@@ -78,11 +78,6 @@ export default function Einstellungen() {
     ...form,
     [rulesKey]: { ...(form[rulesKey] || {}), [key]: val },
   });
-  const setFeature = (key, mode) => {
-    const features = { ...(form[rulesKey]?.features || {}) };
-    features[key] = { mode };
-    setForm({ ...form, [rulesKey]: { ...(form[rulesKey] || {}), features } });
-  };
 
   const save = async () => {
     try {
@@ -109,7 +104,6 @@ export default function Einstellungen() {
   };
 
   const r = form[rulesKey] || {};
-  const features = r.features || {};
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1280px] mx-auto" data-testid="settings-page">
@@ -317,12 +311,6 @@ export default function Einstellungen() {
                              options={[{ v: "ignore", l: "Nicht übernehmen" }, { v: "exact", l: "1:1 übernehmen" }]} />
               </RuleRow>
 
-              <RuleRow label="Kategorie">
-                <AppleSelect testid="rule-cat-mode" value={r.category?.mode || "exact"}
-                             onChange={(v) => setRule("category", { mode: v })}
-                             options={[{ v: "ignore", l: "Nicht übernehmen" }, { v: "exact", l: "1:1 übernehmen" }]} />
-              </RuleRow>
-
               <RuleRow label="Schadensfilter">
                 <AppleSelect testid="rule-damage-mode" value={r.damage?.mode || "no_accident"}
                              onChange={(v) => setRule("damage", { mode: v })}
@@ -339,47 +327,15 @@ export default function Einstellungen() {
                              ]} />
               </RuleRow>
 
-              <RuleRow label="Land">
+              {/* Runde 24 (11.09.2026): Kategorie, Navigation und Klimatisierung
+                  sind als Filter für beide Portale entfallen (AutoScout24 kann
+                  die Kategorie nicht sauber abbilden). Alt-Werte verwirft das
+                  Backend beim Speichern still. */}
+              <RuleRow label="Land" last>
                 <CountryPicker
                   value={r.country || { mode: "exact", codes: ["DE"] }}
                   onChange={(v) => setRule("country", v)}
                 />
-              </RuleRow>
-
-              {/* Ausstattungsfilter — Navigation + Klimatisierung. */}
-              <RuleRow label="Navigation">
-                <AppleSelect testid="rule-navi-mode"
-                             value={features.navigation?.mode || "ignore"}
-                             onChange={(v) => setFeature("navigation", v)}
-                             options={[
-                               { v: "ignore", l: "Egal" },
-                               { v: "exact",  l: "Nur wenn Fahrzeug es hat" },
-                               { v: "always", l: "Immer pflichtig" },
-                             ]} />
-              </RuleRow>
-
-              <RuleRow label="Klimatisierung" last>
-                <AppleSelect testid="rule-climate-mode"
-                             value={r.climatisation?.mode || "ignore"}
-                             onChange={(v) => setRule("climatisation", { ...(r.climatisation || {}), mode: v })}
-                             options={[
-                               { v: "ignore", l: "Egal" },
-                               { v: "exact",  l: "Auto erkennen aus Inserat" },
-                               { v: "always", l: "Immer mit folgendem Typ:" },
-                             ]} />
-                {r.climatisation?.mode === "always" && (
-                  <AppleSelect testid="rule-climate-value"
-                               value={r.climatisation?.value || "AUTOMATIC_CLIMATISATION"}
-                               onChange={(v) => setRule("climatisation", { ...(r.climatisation || {}), value: v })}
-                               options={[
-                                 { v: "AUTOMATIC_CLIMATISATION",         l: "Klimaautomatik" },
-                                 { v: "MANUAL_CLIMATISATION",            l: "Klimaanlage o. -automatik" },
-                                 { v: "AUTOMATIC_CLIMATISATION_2_ZONES", l: "2-Zonen-Klimaautomatik" },
-                                 { v: "AUTOMATIC_CLIMATISATION_3_ZONES", l: "3-Zonen-Klimaautomatik" },
-                                 { v: "AUTOMATIC_CLIMATISATION_4_ZONES", l: "4-Zonen-Klimaautomatik" },
-                                 { v: "NO_CLIMATISATION",                l: "Keine Klimaanlage" },
-                               ]} />
-                )}
               </RuleRow>
             </Section>
           )}

@@ -640,7 +640,11 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             {"id": appt["contract_id"], "dealer_id": appt.get("dealer_id")},
             {"_id": 0, "contract_data": 1}) or {}
         contract = dict(c.get("contract_data") or {})
-    dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0}) or {}
+    # Runde 24 (11.09.2026, Befund Ahmad "AUFTRAGGEBER —"): derselbe
+    # Auftraggeber wie im Kaufvertrag (Kaeuferfelder bzw. Sucher-Einstellungen
+    # des Erstellers), nicht mehr das nackte Firmen-Dokument.
+    from auftraggeber import auftraggeber_fuer_termin
+    dealer = await auftraggeber_fuer_termin(appt)
 
     filled = {k: doc.get(k) for k in
               ("vehicle_check", "documents", "keys_count", "keys_expected",

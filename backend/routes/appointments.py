@@ -463,6 +463,10 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
             {"id": a["vehicle_id"], "dealer_id": user["dealer_id"]}, {"_id": 0},
         )
         if v:
+            # Runde 23 (11.09.2026, Gegenpruefung): Sucher sehen nur ihren
+            # eigenen Einkaufspreis — auch hier nicht den des Kollegen aus dem
+            # gemeinsamen Fahrzeug-Dokument (Chef unveraendert).
+            await __import__("kaufvorgang").einkauf_fuer_sucher_maskieren(user, v)
             a["vehicle"] = v
     if a.get("driver_id"):
         d = await db.driver_accounts.find_one(
@@ -933,9 +937,11 @@ async def get_pickup_order_pdf(appt_id: str, download: int = 0,
             driver = {"id": da["id"], "name": da.get("display_name"),
                       "email": da.get("email"), "driver_code": da.get("driver_code")}
 
-    dealer = await db.dealers.find_one(
-        {"id": user["dealer_id"]}, {"_id": 0},
-    ) or {}
+    # Runde 24 (11.09.2026, Befund Ahmad "AUFTRAGGEBER —"): Auftraggeber ist
+    # der Kaeufer aus dem Vertrag bzw. der Ersteller mit seinen Sucher-
+    # Einstellungen — nicht mehr das nackte Firmen-Dokument.
+    from auftraggeber import auftraggeber_fuer_termin
+    dealer = await auftraggeber_fuer_termin(appt)
 
     try:
         from pickup_pdf_service import build_pickup_pdf

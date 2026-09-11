@@ -42,8 +42,24 @@ MAX_LAENDER = 40
 # Ausstattungen, die mindestens ein Portal-Bauer wirklich filtert. Andere
 # Namen liessen sich vorher speichern ("panorama", "leder") und bewirkten
 # nichts.
-FEATURES_BEKANNT = {"navigation"}
+# Runde 24 (11.09.2026): Der Navigationsfilter ist entfallen (Wunsch Ahmad —
+# nur mobile.de setzte ihn um, AutoScout24 nie). Damit filtert derzeit KEINE
+# Ausstattung mehr. "navigation" aus gespeicherten Alt-Regeln wird still
+# verworfen (ENTFERNTE_FEATURES); jeder andere Name bleibt ein Fehler wie
+# seit Runde 11.
+FEATURES_BEKANNT: set = set()
+ENTFERNTE_FEATURES = {"navigation"}
 _FEATURE_MODI = {"ignore", "always", "exact"}
+
+# Runde 24 (11.09.2026): Kategorie und Klimatisierung sind keine Filter mehr
+# — fuer BEIDE Portale. AutoScout24 kann die Kategorie nicht sauber abbilden
+# ("keine passende Kategorie fuer 'Kombi'"), die Klimatisierung filterte nur
+# mobile.de. Gespeicherte Firmen-Regeln, Sucher-Overrides und Admin-
+# Standards koennen die Schluessel noch enthalten: Beim Speichern werden sie
+# wie jeder unbekannte Schluessel still verworfen (kein RegelFehler), beim
+# Lesen ignoriert. Die Fahrzeug-Kategorie als DATEN (Inserat, Vertrag, PDF,
+# Beweisdokument) bleibt davon unberuehrt.
+ENTFERNTE_REGELN = {"category", "climatisation"}
 
 # Regelschluessel -> (erlaubte Modi, Zahlenfelder)
 _REGELN: Dict[str, Dict[str, Any]] = {
@@ -56,13 +72,11 @@ _REGELN: Dict[str, Dict[str, Any]] = {
               "zahlen": ("value",)},
     "fuel": {"modi": {"ignore", "exact"}, "zahlen": ()},
     "gearbox": {"modi": {"ignore", "exact"}, "zahlen": ()},
-    "category": {"modi": {"ignore", "exact"}, "zahlen": ()},
     "doors": {"modi": {"ignore", "exact"}, "zahlen": ()},
     "displacement": {"modi": {"ignore", "exact", "tolerance"}, "zahlen": ("value",)},
     "damage": {"modi": {"ignore", "any", "no_accident", "include"}, "zahlen": ()},
     "seller": {"modi": {"all", "dealer", "private"}, "zahlen": ()},
     "country": {"modi": {"all", "any", "exact"}, "zahlen": ()},
-    "climatisation": {"modi": {"ignore", "always", "exact"}, "zahlen": ()},
 }
 # Sortierungen, die BEIDE Portal-Bauer umsetzen (Runde 11: vorher wurde
 # die Sortierung gespeichert und von beiden Bauern ignoriert).
@@ -138,9 +152,6 @@ def regeln_validieren(rohe: Any) -> Dict[str, Any]:
             if mode == "exact" and not saubere_codes:
                 raise RegelFehler("country: Modus 'exact' braucht mindestens ein Land")
             neu["codes"] = saubere_codes
-        if regel == "climatisation" and isinstance(eintrag.get("value"), str):
-            if re.fullmatch(r"[A-Z_]{1,40}", eintrag["value"]):
-                neu["value"] = eintrag["value"]
         sauber[regel] = neu
     if "sort" in rohe:
         if rohe["sort"] not in _SORT:
@@ -159,14 +170,22 @@ def regeln_validieren(rohe: Any) -> Dict[str, Any]:
             raise RegelFehler("features: Objekt erwartet")
         saubere_feats = {}
         for name, f in feats.items():
+            if name in ENTFERNTE_FEATURES:
+                # Runde 24: entfallener Filter aus Alt-Regeln -> still weg
+                # (auch mit kaputtem Modus), nie ein Fehler beim Speichern.
+                continue
             if not isinstance(name, str) or name not in FEATURES_BEKANNT:
+                bekannt = ", ".join(sorted(FEATURES_BEKANNT)) or "derzeit keine"
                 raise RegelFehler(f"features: {name!r} filtert kein Portal "
-                                  f"(bekannt: {', '.join(sorted(FEATURES_BEKANNT))})")
+                                  f"(bekannt: {bekannt})")
             mode = (f or {}).get("mode") if isinstance(f, dict) else None
             if mode not in _FEATURE_MODI:
                 raise RegelFehler(f"features.{name}.mode: unbekannter Wert {mode!r}")
             saubere_feats[name] = {"mode": mode}
-        sauber["features"] = saubere_feats
+        # Runde 24: ein leeres "features" (bereinigte Alt-Regeln) wird nicht
+        # mehr gespeichert — es gibt derzeit keinen Ausstattungsfilter.
+        if saubere_feats:
+            sauber["features"] = saubere_feats
     return sauber
 
 

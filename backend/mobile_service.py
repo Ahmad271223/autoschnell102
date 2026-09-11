@@ -952,8 +952,9 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     #   pw=MIN:MAX                  power range (kW)
     #   ft=PETROL                   fuel type
     #   tr=MANUAL_GEAR              transmission
-    #   c=OffRoad                   category
     #   dam=0/1                     damaged filter
+    # Runde 24 (11.09.2026): Kategorie (c=…), Navigation (f=NAVIGATION_SYSTEM)
+    # und Klimatisierung (climatisation=…) setzt der Link nicht mehr.
     # Mixing old long names (maxMileage, fuels, …) with `ms=` confuses
     # mobile.de's parser → some filters get silently dropped. So keep
     # everything in compact form.
@@ -1033,13 +1034,13 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             mx = ps_to_kw(cur_ps + v_ps)
             params.append(("pw", f"{mn}:{mx}"))
 
-    # Kraftstoff / Getriebe / Kategorie (compact)
+    # Kraftstoff / Getriebe / Tueren (compact). Runde 24 (11.09.2026): keine
+    # Kategorie (c=…) mehr — der Filter ist fuer beide Portale entfallen,
+    # auch wenn gespeicherte Alt-Regeln noch "category" enthalten.
     if (rules.get("fuel") or {}).get("mode") == "exact" and vehicle.get("fuel"):
         params.append(("ft", vehicle["fuel"]))
     if (rules.get("gearbox") or {}).get("mode") == "exact" and vehicle.get("gearbox"):
         params.append(("tr", vehicle["gearbox"]))
-    if (rules.get("category") or {}).get("mode") == "exact" and vehicle.get("category"):
-        params.append(("c", vehicle["category"]))
     if (rules.get("doors") or {}).get("mode") == "exact" and vehicle.get("doors"):
         params.append(("doors", str(vehicle["doors"])))
 
@@ -1079,42 +1080,11 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             if code:
                 params.append(("cn", code))
 
-    # Ausstattungs-Filter: Navigation
-    feats = rules.get("features") or {}
-    vehicle_features = set(
-        (f or "").lower() for f in (vehicle.get("features") or [])
-    )
-    nav_rule = feats.get("navigation") or {}
-    nav_mode = nav_rule.get("mode", "ignore")
-    if nav_mode == "always":
-        params.append(("f", "NAVIGATION_SYSTEM"))
-    elif nav_mode == "exact":
-        if any(("navi" in vf or "navigation" in vf) for vf in vehicle_features):
-            params.append(("f", "NAVIGATION_SYSTEM"))
-
-    # Klimatisierung – mobile.de Single-Select-Enum unter `climatisation=`.
-    # Werte: AUTOMATIC_CLIMATISATION, MANUAL_CLIMATISATION,
-    # AUTOMATIC_CLIMATISATION_2_ZONES, _3_ZONES, _4_ZONES, NO_CLIMATISATION.
-    climate_rule = rules.get("climatisation") or {}
-    climate_mode = climate_rule.get("mode", "ignore")
-    valid_climate = {
-        "AUTOMATIC_CLIMATISATION",
-        "MANUAL_CLIMATISATION",
-        "AUTOMATIC_CLIMATISATION_2_ZONES",
-        "AUTOMATIC_CLIMATISATION_3_ZONES",
-        "AUTOMATIC_CLIMATISATION_4_ZONES",
-        "NO_CLIMATISATION",
-    }
-    if climate_mode == "always":
-        val = climate_rule.get("value")
-        if val in valid_climate:
-            params.append(("climatisation", val))
-    elif climate_mode == "exact":
-        # Mappt anhand der Ausstattungs-Strings, was das Fahrzeug konkret hat.
-        if any("klimaautomat" in vf or "automatic climat" in vf for vf in vehicle_features):
-            params.append(("climatisation", "AUTOMATIC_CLIMATISATION"))
-        elif any("klimaanl" in vf or "klima" in vf for vf in vehicle_features):
-            params.append(("climatisation", "MANUAL_CLIMATISATION"))
+    # Runde 24 (11.09.2026): Ausstattung "Navigation" (f=NAVIGATION_SYSTEM)
+    # und Klimatisierung (climatisation=…) filtern nicht mehr — beide gab es
+    # nur bei mobile.de, der AutoScout-Link setzte sie nie um. Gespeicherte
+    # Alt-Regeln mit features.navigation / climatisation werden hier bewusst
+    # NICHT mehr ausgewertet.
 
     # Sortierung aus dem Regelpaket (Runde 11: vorher immer sb=p&od=up,
     # obwohl "Kilometer zuerst" o.ae. gespeichert werden konnte).
@@ -1136,13 +1106,15 @@ _MOBILE_SORT = {
 }
 
 
+# Runde 24 (11.09.2026): Standard-Regeln ohne Kategorie, Navigation
+# (features) und Klimatisierung — diese Filter gibt es fuer beide Portale
+# nicht mehr (regeln.ENTFERNTE_REGELN / ENTFERNTE_FEATURES).
 DEFAULT_RULES = {
     "first_registration": {"mode": "older_exact", "years": 1},
     "mileage": {"mode": "plus", "value": 30000},
     "power": {"mode": "tolerance_ps", "value": 5},
     "fuel": {"mode": "exact"},
     "gearbox": {"mode": "exact"},
-    "category": {"mode": "exact"},
     "doors": {"mode": "ignore"},
     "displacement": {"mode": "ignore"},
     "damage": {"mode": "no_accident"},
@@ -1150,10 +1122,6 @@ DEFAULT_RULES = {
     "country": {"mode": "exact", "codes": ["DE"]},
     "sort": "price_asc",
     "result_count": 4,
-    "features": {
-        "navigation": {"mode": "ignore"},
-    },
-    "climatisation": {"mode": "ignore", "value": "AUTOMATIC_CLIMATISATION"},
 }
 
 
@@ -1165,7 +1133,6 @@ DEFAULT_EXPORT_RULES = {
     "power": {"mode": "tolerance_ps", "value": 10},
     "fuel": {"mode": "exact"},
     "gearbox": {"mode": "exact"},
-    "category": {"mode": "exact"},
     "doors": {"mode": "ignore"},
     "displacement": {"mode": "ignore"},
     "damage": {"mode": "ignore"},
@@ -1173,8 +1140,4 @@ DEFAULT_EXPORT_RULES = {
     "country": {"mode": "all"},
     "sort": "price_asc",
     "result_count": 4,
-    "features": {
-        "navigation": {"mode": "ignore"},
-    },
-    "climatisation": {"mode": "ignore", "value": "AUTOMATIC_CLIMATISATION"},
 }

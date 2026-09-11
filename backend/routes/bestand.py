@@ -301,6 +301,9 @@ async def list_bestand(user=Depends(current_firma),
     items = await db.vehicles.find(query, {"_id": 0}).sort(
         "lifecycle_changed_at", -1).to_list(500)
     await besitzer_anreichern(user, items)
+    # Runde 23 (11.09.2026, Befund A): Sucher sehen nur den eigenen Einkaufspreis.
+    import kaufvorgang as _kv
+    await _kv.einkauf_fuer_sucher_maskieren(user, items)
 
     # Restlaufzeit für Bestandsfahrzeuge berechnen (Warnstufen im Frontend).
     now = datetime.now(timezone.utc)
@@ -470,7 +473,12 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         k["user_name"] = kv_namen.get(k.get("user_id"), k.get("user_id"))
     # Befund Ahmad 10.09.2026: welcher Einkaufspreis gilt gerade und woher
     # (Fahrzeug/Abholung, Vertrag des Suchers, keiner).
-    einkaufspreis = await _kv.einkaufspreis_vorschlag(vehicle_id, user["dealer_id"], v)
+    # Runde 23 (11.09.2026, Befund A): fuer Sucher nur aus den EIGENEN
+    # Vorgaengen (vorher firmenweit -> Vertragspreis des Kollegen sichtbar);
+    # Fahrzeugpreis/abgeholter Vorgang nur, wenn es sein eigener ist.
+    einkaufspreis = await _kv.einkaufspreis_vorschlag(
+        vehicle_id, user["dealer_id"], v, user_id=user["id"] if ist_sucher else None)
+    await _kv.einkauf_fuer_sucher_maskieren(user, v)
     return {
         "vehicle": v,
         "einkaufspreis": einkaufspreis,

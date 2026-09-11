@@ -103,16 +103,20 @@ def test_h2_radius_ist_kein_regelschluessel_mehr():
 
 
 def test_h3_autoscout_kategorie_und_tueren():
+    # Runde 24 (11.09.2026): Kategorie, Navigation und Klimatisierung sind als
+    # Filter fuer beide Portale entfallen — kein body= mehr und auch keine
+    # Hinweise dazu, selbst wenn Alt-Regeln die Schluessel noch enthalten.
+    # Tueren setzt AutoScout weiterhin um, der Hubraum-Hinweis bleibt.
     from autoscout_service import build_search_url, regeln_nicht_abgebildet
     rules = {"category": {"mode": "exact"}, "doors": {"mode": "exact"},
              "country": {"mode": "exact", "codes": ["DE"]}}
     v = {"make": "BMW", "make_label": "BMW", "model": "X5", "category": "OffRoad",
          "doors": "FOUR_OR_FIVE"}
     q = _q(build_search_url(v, rules))
-    assert q.get("body") == ["4"], q
+    assert "body" not in q, q
     assert q.get("doorfrom") == ["4"] and q.get("doorto") == ["5"], q
     assert regeln_nicht_abgebildet(v, rules) == []
-    # Kategorie ohne AutoScout-Entsprechung -> kein Filter, aber Hinweis
+    # Kategorie ohne AutoScout-Entsprechung -> weder Filter noch Hinweis
     v2 = {**v, "category": "OtherCar", "category_label": "Sonstiges", "displacement": 1998}
     q2 = _q(build_search_url(v2, rules))
     assert "body" not in q2
@@ -120,7 +124,8 @@ def test_h3_autoscout_kategorie_und_tueren():
                                             "features": {"navigation": {"mode": "always"}},
                                             "climatisation": {"mode": "always"}})
     text = " ".join(hinweise)
-    assert "Kategorie" in text and "Hubraum" in text and "Navigation" in text and "Klima" in text
+    assert "Hubraum" in text
+    assert "Kategorie" not in text and "Navigation" not in text and "Klima" not in text, hinweise
 
 
 def test_h4_laender_zentral_und_autoscout_luecke_mit_hinweis():
@@ -157,9 +162,11 @@ def test_h6_ausstattung_nur_bekannte_namen_und_exact_erreichbar():
     from regeln import RegelFehler, regeln_validieren
     with pytest.raises(RegelFehler, match="panorama"):
         regeln_validieren({"features": {"panorama": {"mode": "always"}}})
-    assert regeln_validieren({"features": {"navigation": {"mode": "exact"}}}) == \
-        {"features": {"navigation": {"mode": "exact"}}}
-    assert regeln_validieren({"climatisation": {"mode": "exact"}})["climatisation"]["mode"] == "exact"
+    # Runde 24 (11.09.2026): Navigation und Klimatisierung sind als Filter
+    # entfallen — Alt-Werte werden still verworfen (kein Fehler, nichts
+    # gespeichert); unbekannte Namen wie "panorama" bleiben ein Fehler.
+    assert regeln_validieren({"features": {"navigation": {"mode": "exact"}}}) == {}
+    assert "climatisation" not in regeln_validieren({"climatisation": {"mode": "exact"}})
 
 
 def test_k1_selbst_registrierung_fail_closed(monkeypatch):

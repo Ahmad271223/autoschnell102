@@ -16,6 +16,7 @@ import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { hinweiseZeigen } from "@/lib/hinweise";
 
 // Aktuell ist nur Kleinanzeigen als Daten-Quelle freigeschaltet;
 // mobile.de-/AutoScout-Links folgen, sobald der API-Zugang vorliegt.
@@ -102,6 +103,17 @@ export default function Vergleich() {
     return () => { aktivRef.current = false; };
   }, []);
 
+  // Runde 24 (11.09.2026): doppelte Hinweis-Toasts (Befund Ahmad).
+  //  - laeuftRef: Sperre gegen einen zweiten gleichzeitigen Lauf. "loading"
+  //    allein reicht nicht — es stammt aus dem Render, in dem der Aufrufer
+  //    entstand. ProfileBadge ruft onChange erst NACH dem await seines PUT
+  //    auf, mit der Funktion vom Klick-Zeitpunkt; ein inzwischen per
+  //    Einfuegen gestarteter Vergleich sah dort noch loading=false.
+  //  - hinweisIdsRef: ids der gezeigten Hinweise, damit der naechste Lauf
+  //    denselben Text ersetzt statt stapelt und veraltete schliesst.
+  const laeuftRef = useRef(false);
+  const hinweisIdsRef = useRef([]);
+
   // Persist on every meaningful state change.
   useEffect(() => {
     try {
@@ -115,7 +127,8 @@ export default function Vergleich() {
     e?.preventDefault?.();
     const ziel = (direktUrl ?? url).trim();
     if (!ziel) return;
-    if (loading) return;               // Mehrfachklicks abfangen
+    if (loading || laeuftRef.current) return;   // Mehrfachklicks abfangen
+    laeuftRef.current = true;          // Runde 24: sofort, nicht erst nach dem Render
     setLoading(true);
     setWaitMsg(null);
     setResult(null);
@@ -190,18 +203,23 @@ export default function Vergleich() {
       // Runde 11: Firmenregeln, die der AutoScout-Link nicht umsetzt (z.B.
       // Land CH, Hubraum, Navi) — vorher sahen beide Links "gleich" aus.
       // Runde 16: Fahrzeug gehoert einem Kollegen -> Ergebnis ja, Vertrag nein
-      for (const h of data.hinweise || []) toast.warning(h, { duration: 8000 });
+      // Runde 24 (11.09.2026): feste id je Text — ein weiterer Lauf ersetzt
+      // denselben Hinweis, statt ihn ein zweites Mal darunter zu setzen.
+      hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
       try {
         const { data: cnt } = await api.get(`/mobile/live-counter/${data.ad_id}`);
         setCounter(cnt);
       } catch (_) { /* ignore */ }
     } catch (err) {
+      // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
+      hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
       if (err?.code === "timeout") {
         toast.info(TIMEOUT_MESSAGE);
       } else {
         toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
       }
     } finally {
+      laeuftRef.current = false;
       setLoading(false);
       setWaitMsg(null);
     }

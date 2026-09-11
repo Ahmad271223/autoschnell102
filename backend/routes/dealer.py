@@ -279,7 +279,19 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
         for k, v in update.items():
             if k not in SUCHER_SETTINGS_FIELDS:
                 continue
-            if v == dealer.get(k):
+            chef_wert = dealer.get(k)
+            # Runde 24 (11.09.2026): Regelpakete normalisiert vergleichen. Alte
+            # Chef-Pakete enthalten noch Kategorie/Navigation/Klimatisierung,
+            # die regeln_validieren jetzt still verwirft — ohne Normalisierung
+            # waere jedes unveraenderte Speichern eines Suchers eine
+            # "Abweichung" und fror das Chef-Paket als Override ein.
+            if k in ("comparison_rules", "export_rules") and isinstance(chef_wert, dict):
+                from regeln import RegelFehler, regeln_validieren
+                try:
+                    chef_wert = regeln_validieren(chef_wert)
+                except RegelFehler:
+                    pass
+            if v == chef_wert:
                 if k in aktuell:
                     loeschen[f"settings_override.{k}"] = ""
             elif aktuell.get(k) != v:

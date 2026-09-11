@@ -151,6 +151,13 @@ def _fmt(v: Any, empty: str = "—") -> str:
     return s if s else empty
 
 
+def _txt(v: Any) -> str:
+    """Runde 24 (11.09.2026): Freitext aus Firmen-/Vertragsdaten als
+    getrimmter String — None (Feld vorhanden, aber leer) und Zahlen (PLZ aus
+    Altdaten) duerfen den Aufbau des Protokolls nicht abbrechen."""
+    return "" if v is None else str(v).strip()
+
+
 def _fmt_km(v: Any) -> str:
     if v in (None, "", 0):
         return "—"
@@ -521,7 +528,14 @@ def build_pickup_pdf(
         abholung_str = f"{pickup_date} · {pickup_time} Uhr"
 
     # ---- Briefkopf (analog Kaufvertrag): Firma + Titel links, Meta-Box rechts ----
-    company = (dealer.get("company_name") or dealer.get("name") or "Autohändler").strip()
+    # Runde 24 (11.09.2026, Befund Ahmad): Kopf und Auftraggeber-Karte zeigen
+    # DIESELBE Firma (auftraggeber.auftraggeber_fuer_termin: Kaeufer aus dem
+    # Vertrag bzw. Sucher-Einstellungen). Kein "Autohändler"-Platzhalter
+    # mehr — fehlt wirklich alles, steht wie in der Karte "—".
+    dealer_name = _txt(dealer.get("company_name")) or _txt(dealer.get("name"))
+    company = dealer_name or "—"
+    if dealer_name:
+        doc.author = dealer_name
     header_left = [
         Paragraph(f"<b>{_xe(company)}</b>", st["brand"]),
         Spacer(1, 2),
@@ -572,21 +586,28 @@ def build_pickup_pdf(
         seller_lines.append(_xe(seller_email))
     seller_block = "<br/>".join(seller_lines) or "—"
 
+    # Runde 24: Auftraggeber-Karte = Firma (fett), Ansprechpartner, Anschrift,
+    # Tel., E-Mail — dieselben Felder wie die Kaeufer-Box im Kaufvertrag.
+    # Vorher brach ein vorhandenes, aber leeres Feld (None) den Aufbau ab.
     dealer_lines: List[str] = []
-    dealer_name = (dealer.get("company_name") or dealer.get("name") or "")
     if dealer_name:
         dealer_lines.append(f"<b>{_xe(dealer_name)}</b>")
-    deal_addr = " ".join([
-        dealer.get("address", ""),
-        dealer.get("zip_code") or dealer.get("zip", ""),
-        dealer.get("city", ""),
-    ]).strip()
-    if deal_addr:
-        dealer_lines.append(_xe(deal_addr))
-    if dealer.get("phone"):
-        dealer_lines.append(f"Tel.: {_xe(str(dealer['phone']))}")
-    if dealer.get("email"):
-        dealer_lines.append(_xe(str(dealer["email"])))
+    kontakt = _txt(dealer.get("contact_person"))
+    if kontakt and kontakt != dealer_name:
+        dealer_lines.append(f"Ansprechpartner: {_xe(kontakt)}")
+    strasse = _txt(dealer.get("address"))
+    if strasse:
+        dealer_lines.append(_xe(strasse))
+    plz_ort = " ".join(x for x in (_txt(dealer.get("zip_code") or dealer.get("zip")),
+                                   _txt(dealer.get("city"))) if x)
+    if plz_ort:
+        dealer_lines.append(_xe(plz_ort))
+    tel = _txt(dealer.get("phone"))
+    if tel:
+        dealer_lines.append(f"Tel.: {_xe(tel)}")
+    mail = _txt(dealer.get("email"))
+    if mail:
+        dealer_lines.append(f"E-Mail: {_xe(mail)}")
     dealer_block = "<br/>".join(dealer_lines) or "—"
 
     card_w = 8.55 * cm
@@ -979,7 +1000,7 @@ def build_pickup_pdf(
             "Dokumente und Schlüssel.", st["small"]),
     ]))
 
-    footer_left = company
+    footer_left = dealer_name
     footer_center = (f"Abholprotokoll {auftrag_nr} · erstellt am "
                      f"{datetime.now().strftime('%d.%m.%Y · %H:%M')}")
     doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))

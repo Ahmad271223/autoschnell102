@@ -643,8 +643,12 @@ async def get_or_fetch_listing(
     # Eigener Schutzblock: ein Fehler darf den Datenabruf nie brechen.
     try:
         from beweis_service import beweis_vormerken
+        # Runde 23 (11.09.2026): den Stand DIESES Abrufs mitgeben — er wird
+        # beim Anlegen eingefroren; der Worker liest sonst spaeter den
+        # veraenderlichen Cache (neuerer Stand nach Wiederholung/Neuabruf).
         await beweis_vormerken(db, cache_key=cache_key, quelle=source,
-                               item_id=item_id, url=url, anlass="abruf")
+                               item_id=item_id, url=url, anlass="abruf",
+                               daten=data, abgerufen_am=now)
     except Exception as exc:  # noqa: BLE001
         import logging as _logging
         _logging.getLogger("autohandel").warning(

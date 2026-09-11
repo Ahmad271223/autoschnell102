@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
-import { X, Eye, FileText, Loader2 } from "lucide-react";
+import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
 import DamageSelector from "./DamageSelector";
+import { fehlendeKaeuferfelder, kaeuferAusProfil, kaeuferLueckenFuellen } from "@/lib/kaeuferdaten";
 
 const YN_OPTIONS = [
   { value: "", label: "—" },
@@ -62,7 +63,7 @@ const todayLocalIso = () => {
 };
 
 export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
-  const { dealer } = useAuth();
+  const { dealer, refresh } = useAuth();
   const v = vehicle || {};
   // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
   // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
@@ -131,17 +132,35 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
     // Händler-Profil — pre-filled, kann pro Vertrag überschrieben werden
     // (z.B. abweichende Telefonnummer im Vertretungsfall).
-    dealer_company: dealer?.company_name || "",
-    dealer_contact: dealer?.contact_person || "",
-    dealer_phone: dealer?.phone || "",
-    dealer_whatsapp: dealer?.whatsapp_number || dealer?.phone || "",
-    dealer_email: dealer?.email || "",
-    dealer_address: dealer?.address || "",
-    dealer_zip: dealer?.zip_code || "",
-    dealer_city: dealer?.city || "",
+    ...kaeuferAusProfil(dealer),
   });
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  // Runde 24 (11.09.2026): Käuferdaten sind Pflicht (Wunsch Ahmad). Der
+  // Hinweis sagt, was die EINSTELLUNGEN offen lassen — daher aus dem Profil
+  // abgeleitet, nicht aus dem Formular: er bleibt stehen, während der
+  // Sucher tippt.
+  const fehltInEinstellungen = fehlendeKaeuferfelder(kaeuferAusProfil(dealer));
+  const kaeuferRef = useRef(null);
+
+  // Runde 24 (11.09.2026, Gegenprüfung): useAuth().dealer wird nur beim
+  // App-Start/Login geladen. Speichert der Sucher seine Käuferdaten über den
+  // Link im Hinweis in einem ANDEREN Tab (oder ergänzt der Chef die
+  // Firmenadresse), wäre das Profil hier veraltet: der Hinweis stünde
+  // wieder da und die Pflicht blockierte "PDF erstellen", obwohl die Daten
+  // gespeichert sind. Deshalb beim Öffnen frisch laden und nur LEERE
+  // Käuferfelder nachfüllen (Getipptes bleibt). refresh() behält bei
+  // Netzfehlern den geladenen Stand und hängt die Seite nicht aus.
+  useEffect(() => {
+    if (!open || !refresh) return undefined;
+    let aktiv = true;
+    Promise.resolve(refresh())
+      .then((data) => {
+        if (aktiv && data?.dealer) setForm((f) => kaeuferLueckenFuellen(f, data.dealer));
+      })
+      .catch(() => {});
+    return () => { aktiv = false; };
+  }, [open, refresh]);
 
   if (!open) return null;
 
@@ -212,6 +231,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
   const submit = async (e) => {
     e.preventDefault();
+    // Runde 24 (11.09.2026): Käuferdaten Pflicht beim Erstellen (die Vorschau
+    // geht weiterhin ohne). Leere Felder hält schon required auf; hier
+    // zusätzlich nur-Leerzeichen — mit Feldnamen und Sprung zum Abschnitt.
+    const fehlend = fehlendeKaeuferfelder(form);
+    if (fehlend.length > 0) {
+      toast.error(`Bitte Käuferdaten ergänzen: ${fehlend.map((f) => f.label).join(", ")}`);
+      const abschnitt = kaeuferRef.current;
+      abschnitt?.scrollIntoView({ behavior: "smooth", block: "start" });
+      abschnitt
+        ?.querySelector(`[data-testid="contract-${fehlend[0].key.replace("_", "-")}"]`)
+        ?.focus({ preventScroll: true });
+      return;
+    }
     if (!form.purchase_price || Number(form.purchase_price) <= 0) {
       toast.error("Bitte Kaufpreis manuell eingeben");
       return;
@@ -270,8 +302,38 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               </div>
             </Section>
 
+            {/* Runde 24 (11.09.2026): Firma/Adresse/PLZ/Ort sind Pflicht —
+                Käufer im Kaufvertrag, Auftraggeber im Abholprotokoll. */}
+            <div ref={kaeuferRef} style={{ scrollMarginTop: "5rem" }} data-testid="contract-kaeufer">
             <Section title="Käufer (Händler — du)">
-              <Field label="Firma" value={form.dealer_company} onChange={(v) => set("dealer_company", v)} testid="contract-dealer-company" />
+              {fehltInEinstellungen.length > 0 && (
+                <div role="alert" data-testid="contract-kaeufer-fehlt"
+                     className="flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm leading-snug"
+                     style={{
+                       borderColor: "var(--accent-red)",
+                       background: "color-mix(in srgb, var(--accent-red) 12%, transparent)",
+                       color: "var(--text-primary)",
+                     }}>
+                  <AlertTriangle size={16} className="shrink-0 mt-0.5" style={{ color: "var(--accent-red)" }} />
+                  <div>
+                    <div className="font-semibold">Käuferdaten fehlen in deinen Einstellungen</div>
+                    <div className="text-[12px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                      Fehlt: {fehltInEinstellungen.map((f) => f.label).join(", ")}. Bitte hier eintragen —
+                      ohne diese Angaben wird kein Kaufvertrag erstellt.
+                    </div>
+                    <a href="/app/einstellungen" target="_blank" rel="noopener noreferrer"
+                       data-testid="contract-kaeufer-einstellungen"
+                       className="inline-flex items-center gap-1 mt-1.5 text-[12px] font-semibold underline"
+                       style={{ color: "var(--accent-blue)" }}>
+                      Dauerhaft in den Einstellungen speichern <ExternalLink size={12} />
+                    </a>
+                    <span className="text-[11px] ml-1" style={{ color: "var(--text-secondary)" }}>
+                      (neuer Tab — deine Eingaben hier bleiben erhalten)
+                    </span>
+                  </div>
+                </div>
+              )}
+              <Field label="Firma *" required value={form.dealer_company} onChange={(v) => set("dealer_company", v)} testid="contract-dealer-company" />
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Ansprechpartner" value={form.dealer_contact} onChange={(v) => set("dealer_contact", v)} testid="contract-dealer-contact" />
                 <Field label="Telefon" value={form.dealer_phone} onChange={(v) => set("dealer_phone", v)} testid="contract-dealer-phone" />
@@ -280,16 +342,17 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 <Field label="WhatsApp" value={form.dealer_whatsapp} onChange={(v) => set("dealer_whatsapp", v)} testid="contract-dealer-wa" />
                 <Field label="E-Mail" type="email" value={form.dealer_email} onChange={(v) => set("dealer_email", v)} testid="contract-dealer-email" />
               </div>
-              <Field label="Adresse" value={form.dealer_address} onChange={(v) => set("dealer_address", v)} testid="contract-dealer-address" />
+              <Field label="Adresse *" required value={form.dealer_address} onChange={(v) => set("dealer_address", v)} testid="contract-dealer-address" />
               <div className="grid grid-cols-2 gap-3">
-                <Field label="PLZ" value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
-                <Field label="Ort" value={form.dealer_city} onChange={(v) => set("dealer_city", v)} testid="contract-dealer-city" />
+                <Field label="PLZ *" required value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
+                <Field label="Ort *" required value={form.dealer_city} onChange={(v) => set("dealer_city", v)} testid="contract-dealer-city" />
               </div>
               <div className="text-[11px] text-zinc-500 leading-relaxed">
-                Aus deinem Profil vorbefüllt — Änderungen hier gelten nur für diesen Vertrag.
-                Dauerhaft anpassen unter <strong>Einstellungen</strong>.
+                Erscheint als Käufer im Kaufvertrag und als Auftraggeber im Abholprotokoll.
+                Aus deinen Einstellungen vorbefüllt — fehlt etwas, hier eintragen (dauerhaft unter Einstellungen).
               </div>
             </Section>
+            </div>
           </div>
 
           {/* Fahrzeugdaten — direkt aus dem Inserat übernommen, vor
