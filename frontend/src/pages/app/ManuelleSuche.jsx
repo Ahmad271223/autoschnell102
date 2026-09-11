@@ -3,6 +3,7 @@ import { api, errMsg } from "@/lib/api";
 import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import PortalSheet from "@/components/PortalSheet";
+import { FILTER_TOAST_ID } from "@/lib/filterOeffnen";
 import { useAuth } from "@/context/AuthContext";
 import {
   Search, Car, Calendar, Gauge, Zap, Fuel, Cog, Eye, ExternalLink,
@@ -88,6 +89,9 @@ export default function ManuelleSuche() {
       toast.error("Bitte zuerst eine Marke auswählen");
       return;
     }
+    // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
+    // der vorherigen Suche wuerde deren Link in den Filter-Tab laden.
+    toast.dismiss(FILTER_TOAST_ID);
     setBusy(true);
     try {
       const { data } = await api.post("/manual/search", {
@@ -125,6 +129,7 @@ export default function ManuelleSuche() {
     setKw(""); setPs(""); setFuel(""); setGearbox("");
     // Runde 11: Links der VORHERIGEN Suche gehoeren nicht zu leeren Feldern.
     setPortalUrls(null);
+    toast.dismiss(FILTER_TOAST_ID);   // Runde 22: dito fuer den Blockade-Hinweis
   };
 
   const years = useMemo(() => {
@@ -144,7 +149,7 @@ export default function ManuelleSuche() {
         </h1>
         <p className="text-sm mt-2 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
           Wähle Marke, Modell und Filter aus — wir öffnen mobile.de und AutoScout24
-          gleichzeitig in zwei Tabs mit fertigem Filter.
+          mit fertigem Filter (beide auf einmal, sobald Pop-ups für AutoSchnell erlaubt sind).
         </p>
         <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }} data-testid="suche-profil">
           Aktives Regelprofil: <strong>{aktivesProfil}</strong> — Land, Unfallwagen und Anbieter

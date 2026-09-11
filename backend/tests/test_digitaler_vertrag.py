@@ -65,8 +65,10 @@ _CONTRACT = {"seller_name": "Max Muster", "purchase_price": 1000,
 def test_01_druckfassung_hat_unterschriftslinien():
     c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
     t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=c))
-    assert "Ort, Datum" in t
+    # Druckfassung erkennbar an "Mit ihrer Unterschrift" (die Linie
+    # "Ort, Datum" entfiel 11.09.2026 zugunsten von "Datum und Ort").
     assert "Mit ihrer Unterschrift" in _flach(t)
+    assert "Ort, Datum" not in t
     assert "digitale Ausfertigung" not in t
     # Beschluss 10.09.2026: die Vertragsbedingungen stehen auch im Druck —
     # als eigener Abschnitt, nicht unter "Unterschriften".
@@ -78,7 +80,6 @@ def test_02_digitale_fassung_text_statt_linien():
     c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
     t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
                                     contract=c, digital=True))
-    assert "Ort, Datum" not in t
     assert "Mit ihrer Unterschrift" not in _flach(t)
     assert "UNTERSCHRIFTEN" in t.upper()          # Kopf bleibt, Linien nicht
     assert "digitale Ausfertigung" in t
@@ -109,7 +110,7 @@ def test_03_eigener_text_ersetzt_standard():
                                            contract=c, digital=True)))
     assert "Mein eigener Text." in f and "Zweiter Absatz." in f
     assert "Absagen sind nach Vertragsbestätigung" not in f
-    assert "Ort, Datum" not in f
+    assert "Mit ihrer Unterschrift" not in f
 
 
 def test_04_helfer_digitaler_vertragstext():
@@ -255,7 +256,9 @@ def test_20_vertrag_chef_beide_fassungen(welt):
         "vehicle_id": welt["vehicle_id"], "seller_name": "Digi Verkaeufer",
         "seller_address": "Weg 3", "seller_zip": "30159",
         "seller_city": "Hannover", "purchase_price": 9000,
-        "pickup_date": "2099-04-01", "pickup_time": "10:00"}, timeout=90)
+        "pickup_date": "2099-04-01", "pickup_time": "10:00",
+        # Runde 22: Empfangsdatum wie im Formular = Abholdatum (test_25)
+        "empfang_datum": "2099-04-01", "empfang_ort_verkaeufer": "Hannover"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
     body = r.json()
     welt["contract_chef"] = body["id"]
@@ -263,19 +266,19 @@ def test_20_vertrag_chef_beide_fassungen(welt):
     # Druckfassung (Standard) — mit Unterschriftslinien
     r = requests.get(f"{API}/contracts/{body['id']}/pdf", headers=welt["H"], timeout=60)
     assert r.status_code == 200 and r.content[:4] == b"%PDF"
-    assert "Ort, Datum" in _text(r.content)
+    assert "Mit ihrer Unterschrift" in _flach(_text(r.content))
     # Digitale Fassung — Firmentext statt Linien
     r = requests.get(f"{API}/contracts/{body['id']}/pdf",
                      params={"variante": "digital"}, headers=welt["H"], timeout=60)
     assert r.status_code == 200 and r.content[:4] == b"%PDF"
     f = _flach(_text(r.content))
-    assert "Ort, Datum" not in f
+    assert "Mit ihrer Unterschrift" not in f
     assert f"FIRMENTEXT-{SUF}" in f and "Zweiter Absatz der Firma." in f
     assert "Absagen sind nach Vertragsbestätigung" not in f
     doc = _db().generated_pdfs.find_one({"id": body["id"]})
     assert doc.get("pdf_digital_b64") and doc.get("pdf_b64")
     assert doc["contract_data"]["digital_vertragstext"] == FIRMA_TEXT
-    assert _text(base64.b64decode(doc["pdf_digital_b64"])).find("Ort, Datum") < 0
+    assert "Mit ihrer Unterschrift" not in _flach(_text(base64.b64decode(doc["pdf_digital_b64"])))
 
 
 def test_21_vertragsliste_ohne_pdf_inhalte(welt):
@@ -299,7 +302,7 @@ def test_22_vertrag_sucher_nutzt_eigenen_text(welt):
     assert r.status_code == 200
     f = _flach(_text(r.content))
     assert f"SUCHERTEXT-{SUF}" in f and f"FIRMENTEXT-{SUF}" not in f
-    assert "Ort, Datum" not in f
+    assert "Mit ihrer Unterschrift" not in f
 
 
 def test_23_altvertrag_behaelt_seinen_gespeicherten_text(welt):
@@ -319,7 +322,7 @@ def test_23_altvertrag_behaelt_seinen_gespeicherten_text(welt):
                          params={"variante": "digital"}, headers=welt["H"], timeout=60)
         assert r.status_code == 200 and r.content[:4] == b"%PDF"
         f = _flach(_text(r.content))
-        assert "Ort, Datum" not in f
+        assert "Mit ihrer Unterschrift" not in f
         assert f"SUCHERTEXT-{SUF}" in f            # Stand der Vertragserstellung
         assert f"NEUERTEXT-{SUF}" not in f         # NICHT der heutige Text
         doc = dbx.generated_pdfs.find_one({"id": welt["contract_sucher"]})
@@ -331,7 +334,7 @@ def test_23_altvertrag_behaelt_seinen_gespeicherten_text(welt):
                      json={"digital_vertragstext": SUCHER_TEXT}, timeout=30)
     r = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
                      headers=welt["H"], timeout=60)
-    assert "Ort, Datum" in _text(r.content)        # Druckfassung unveraendert
+    assert "Mit ihrer Unterschrift" in _flach(_text(r.content))        # Druckfassung unveraendert
 
 
 def test_23b_echter_altvertrag_wird_als_nachtraeglich_gekennzeichnet(welt):
@@ -388,12 +391,12 @@ def test_24_vorschau_kennt_beide_fassungen(welt):
     payload = {"vehicle_id": welt["vehicle_id"], "seller_name": "Vorschau V",
                "purchase_price": 100}
     r = requests.post(f"{API}/contracts/preview", headers=welt["H"], json=payload, timeout=60)
-    assert r.status_code == 200 and "Ort, Datum" in _text(r.content)
+    assert r.status_code == 200 and "Mit ihrer Unterschrift" in _flach(_text(r.content))
     r = requests.post(f"{API}/contracts/preview", params={"variante": "digital"},
                       headers=welt["H"], json=payload, timeout=60)
     assert r.status_code == 200
     f = _flach(_text(r.content))
-    assert "Ort, Datum" not in f and f"FIRMENTEXT-{SUF}" in f
+    assert "Mit ihrer Unterschrift" not in f and f"FIRMENTEXT-{SUF}" in f
 
 
 def test_25_termin_verschieben_archiviert_beide_fassungen(welt):
@@ -406,7 +409,10 @@ def test_25_termin_verschieben_archiviert_beide_fassungen(welt):
     assert int(doc.get("version") or 1) == 2
     assert doc.get("pdf_digital_b64")
     neu = _flach(_text(base64.b64decode(doc["pdf_digital_b64"])))
-    assert "05.04.2099" in neu and "Ort, Datum" not in neu
+    assert "05.04.2099" in neu and "Mit ihrer Unterschrift" not in neu
+    # Runde 22: das Empfangsdatum stand auf dem alten Abholtag und wandert mit
+    assert doc["contract_data"]["empfang_datum"] == "2099-04-05"
+    assert "Datum und Ort: 05.04.2099, Hannover" in neu
     versionen = requests.get(f"{API}/contracts/{welt['contract_chef']}/versions",
                              headers=welt["H"], timeout=30).json()
     assert versionen and versionen[0]["version"] == 1
@@ -415,10 +421,11 @@ def test_25_termin_verschieben_archiviert_beide_fassungen(welt):
                      params={"variante": "digital"}, headers=welt["H"], timeout=60)
     assert r.status_code == 200
     alt = _flach(_text(r.content))
-    assert "01.04.2099" in alt and "Ort, Datum" not in alt
+    assert "01.04.2099" in alt and "Mit ihrer Unterschrift" not in alt
+    assert "Datum und Ort: 01.04.2099, Hannover" in alt
     r = requests.get(f"{API}/contracts/{welt['contract_chef']}/versions/1/pdf",
                      headers=welt["H"], timeout=60)
-    assert "Ort, Datum" in _text(r.content)
+    assert "Mit ihrer Unterschrift" in _flach(_text(r.content))
 
 
 def test_26_leerer_text_bedeutet_standard(welt):
@@ -443,7 +450,9 @@ def test_27_terminverschiebung_gibt_altvertrag_keine_heutigen_bedingungen(welt):
     dbx = _db()
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "Alt V",
-        "purchase_price": 100, "pickup_date": "2099-06-01", "pickup_time": "10:00"},
+        "purchase_price": 100, "pickup_date": "2099-06-01", "pickup_time": "10:00",
+        # Runde 22: von Hand anders gesetztes Empfangsdatum bleibt stehen
+        "empfang_datum": "2099-05-31"},
         timeout=90)
     assert r.status_code == 200, r.text[:300]
     cid = r.json()["id"]
@@ -465,6 +474,7 @@ def test_27_terminverschiebung_gibt_altvertrag_keine_heutigen_bedingungen(welt):
         assert "digital_vertragstext" not in (doc.get("contract_data") or {}), \
             "der Vertragsinhalt bekommt keinen nachtraeglichen Text"
         assert doc.get("pdf_digital_nachtraeglich") is True
+        assert doc["contract_data"]["empfang_datum"] == "2099-05-31"
         f = _flach(_text(base64.b64decode(doc["pdf_digital_b64"])))
         assert "nachträglich erzeugt" in f and "03.06.2099" in f
         assert f"HEUTE-{SUF}" not in f and "Absagen sind nach Vertragsbestätigung" not in f
@@ -490,7 +500,7 @@ def test_28_scheitert_die_digitale_fassung_kommt_keine_druckfassung(welt):
         assert "digitale Vertragsfassung" in r.json()["detail"]
         # Druckfassung selbst bleibt abrufbar
         r = requests.get(f"{API}/contracts/{cid}/pdf", headers=welt["H"], timeout=60)
-        assert r.status_code == 200 and "Ort, Datum" in _text(r.content)
+        assert r.status_code == 200 and "Mit ihrer Unterschrift" in _flach(_text(r.content))
     finally:
         setzen = {"contract_data": sicherung.get("contract_data")}
         if sicherung.get("pdf_digital_b64"):

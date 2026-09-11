@@ -1,6 +1,7 @@
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { bereichVonPfad, darfBereich, startseite } from "@/lib/rollen";
+import VerbindungsFehler from "@/components/VerbindungsFehler";
 
 /*
  * Zugangssperre fuer die geschuetzten Seiten.
@@ -16,9 +17,12 @@ import { bereichVonPfad, darfBereich, startseite } from "@/lib/rollen";
  * "Nur fuer Haendler-Accounts" (Befund 05.09.2026).
  */
 export const ProtectedRoute = ({ children, requireSub = true, adminOnly = false }) => {
-  const { user, subscription, loading } = useAuth();
+  const { user, subscription, loading, verbindungsfehler } = useAuth();
   const loc = useLocation();
   if (loading) return <div className="min-h-screen flex items-center justify-center text-zinc-500">Lade…</div>;
+  // Runde 22 (11.09.2026): Server nicht erreichbar (Funkloch, Rollout) ->
+  // Anmeldung bleibt, "Keine Verbindung" statt Umleitung auf /login.
+  if (!user && verbindungsfehler) return <VerbindungsFehler grund={verbindungsfehler} />;
   if (!user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname)}`} replace />;
 
   // adminOnly bleibt als ausdrueckliche Kennzeichnung erhalten; die
