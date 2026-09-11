@@ -1,3 +1,6 @@
+import { Suspense } from "react";
+import NachladeFehler from "@/components/NachladeFehler";
+import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
@@ -102,7 +105,11 @@ export default function AppLayout({ children }) {
       </aside>
 
       <main className="flex-1 overflow-x-hidden min-w-0">
-        {children}
+        <NachladeFehler>
+          <Suspense fallback={<SeiteLaedt />}>
+            {children}
+          </Suspense>
+        </NachladeFehler>
       </main>
 
     </div>

@@ -316,7 +316,6 @@ function VehicleThumb({ item, onOpen }) {
         onError={(e) => thumbFehler(e, urls[0])}
         className="h-40 sm:h-24 w-full object-cover rounded-xl transition-transform duration-200 group-hover:scale-[1.03]"
         style={{ border: "1px solid var(--border-default)" }}
-        loading="lazy"
       />
       {urls.length > 1 && (
         <span

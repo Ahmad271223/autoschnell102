@@ -1,3 +1,6 @@
+import { Suspense } from "react";
+import NachladeFehler from "@/components/NachladeFehler";
+import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, NavLink, Navigate, Outlet, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
 import { Truck, Calendar, Settings, LogOut } from "lucide-react";
@@ -45,7 +48,11 @@ export default function DriverLayout() {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 pt-5 pb-24">
-        <Outlet />
+        <NachladeFehler>
+          <Suspense fallback={<SeiteLaedt />}>
+            <Outlet />
+          </Suspense>
+        </NachladeFehler>
       </main>
 
       {/* Bottom Tab Bar */}

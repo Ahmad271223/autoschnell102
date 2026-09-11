@@ -183,6 +183,25 @@ def api_pruefen(host):
         warn(f"/docs nicht pruefbar: {exc}")
 
 
+def _startdatei_pruefen(host, pfad, zwischenstand):
+    s = requests.get(f"https://{host}{pfad}", timeout=15)
+    cache = s.headers.get("cf-cache-status", "")
+    if s.status_code == 200:
+        ok(f"Skript {pfad}: 200" + (f" (Cloudflare-Cache: {cache})" if cache else ""))
+        return
+    # Am Cache vorbei: liefert der Server 200, haelt Cloudflare einen Fehler fest.
+    f = requests.get(f"https://{host}{pfad}?probe={int(time.time())}", timeout=15)
+    if zwischenstand and s.status_code == 404 and f.status_code in (200, 404):
+        warn(f"Skript {pfad}: 404 (frisch: {f.status_code}) — Bundle-Wechsel zwischen den Servern "
+             "(Startseite und Skript von verschiedenen Servern); erwartet, bis der andere Server "
+             "ausgerollt ist. Streng geprueft wird nach dem zweiten Server.")
+    elif f.status_code == 200:
+        fehler(f"Skript {pfad}: {s.status_code} aus dem Cloudflare-Cache, der Server liefert 200 "
+               "— Cloudflare: Caching -> Configuration -> Purge Everything")
+    else:
+        fehler(f"Skript {pfad}: {s.status_code} (auch frisch: {f.status_code}) — Oberflaeche defekt")
+
+
 def oberflaeche_pruefen(host, zwischenstand=False):
     """Vorfall 07.09.2026: Beide Server gesund, /api/health 200 — aber Cloudflare
     lieferte fuer /static/js/main.*.js einen gecachten 502 (schwarzer Bildschirm).
@@ -201,29 +220,16 @@ def oberflaeche_pruefen(host, zwischenstand=False):
         if r.status_code != 200:
             fehler(f"Startseite antwortet {r.status_code}")
             return
-        # CRA: main.<hex>.js — Vite (09/2026): main.<Buchstaben/Ziffern/_->.js.
-        # Beides erkennen: waehrend eines Rollouts laeuft kurz beides.
-        m = re.search(r'src="(/static/js/main\.[A-Za-z0-9_-]+\.js)"', r.text)
-        if not m:
+        # Alle Dateien, die die Startseite sofort braucht (Vite 09/2026:
+        # Hauptskript, React-Teil per modulepreload, CSS). CRA: main.<hex>.js,
+        # Vite: main.<Buchstaben/Ziffern/_->.js — waehrend eines Rollouts laeuft
+        # kurz beides.
+        pfade = list(dict.fromkeys(re.findall(r'(?:src|href)="(/static/[^"]+\.(?:js|css))"', r.text)))
+        if not any(re.match(r"/static/js/main\.[A-Za-z0-9_-]+\.js$", p) for p in pfade):
             fehler("Startseite enthaelt keinen Skript-Verweis (kein Build ausgeliefert?)")
             return
-        pfad = m.group(1)
-        s = requests.get(f"https://{host}{pfad}", timeout=15)
-        cache = s.headers.get("cf-cache-status", "")
-        if s.status_code == 200:
-            ok(f"Skript {pfad}: 200" + (f" (Cloudflare-Cache: {cache})" if cache else ""))
-            return
-        # Am Cache vorbei: liefert der Server 200, haelt Cloudflare einen Fehler fest.
-        f = requests.get(f"https://{host}{pfad}?probe={int(time.time())}", timeout=15)
-        if zwischenstand and s.status_code == 404 and f.status_code in (200, 404):
-            warn(f"Skript {pfad}: 404 (frisch: {f.status_code}) — Bundle-Wechsel zwischen den Servern "
-                 "(Startseite und Skript von verschiedenen Servern); erwartet, bis der andere Server "
-                 "ausgerollt ist. Streng geprueft wird nach dem zweiten Server.")
-        elif f.status_code == 200:
-            fehler(f"Skript {pfad}: {s.status_code} aus dem Cloudflare-Cache, der Server liefert 200 "
-                   "— Cloudflare: Caching -> Configuration -> Purge Everything")
-        else:
-            fehler(f"Skript {pfad}: {s.status_code} (auch frisch: {f.status_code}) — Oberflaeche defekt")
+        for pfad in pfade:
+            _startdatei_pruefen(host, pfad, zwischenstand)
     except Exception as exc:  # noqa: BLE001
         fehler(f"Oberflaeche nicht pruefbar: {exc}")
 

@@ -1,21 +1,21 @@
 import "@/App.css";
-import { Suspense, lazy, useEffect, useState } from "react";
-import { tokenLesen } from "@/lib/sitzung";
+import { Suspense, lazy, useEffect } from "react";
+import NachladeFehler from "@/components/NachladeFehler";
+import SeiteLaedt from "@/components/SeiteLaedt";
 
 // Vite (09/2026): Seiten laden erst bei Bedarf nach — die erste Seite ist
 // dadurch deutlich schneller da. Scheitert das Nachladen (z. B. kurz nach
 // einem Update, wenn der Browser noch die alte Seitenliste kennt), laedt die
-// Oberflaeche EINMAL neu statt einen leeren Bildschirm zu zeigen.
-const NEU_GELADEN = "ah_seite_neu_geladen";
+// Oberflaeche neu — hoechstens einmal je 30 Sekunden (Zeitstempel statt
+// Merker: sonst loeste ein erfolgreiches Layout mit fehlender Unterseite eine
+// Endlosschleife aus). Danach zeigt die Fehlergrenze "Neu laden".
+const NEU_GELADEN = "ah_seite_neu_geladen_um";
 function seite(laden) {
-  return lazy(() => laden().then((modul) => {
-    try { sessionStorage.removeItem(NEU_GELADEN); } catch { /* egal */ }
-    return modul;
-  }, (fehler) => {
-    let schonVersucht = false;
-    try { schonVersucht = sessionStorage.getItem(NEU_GELADEN) === "1"; } catch { /* egal */ }
-    if (!schonVersucht) {
-      try { sessionStorage.setItem(NEU_GELADEN, "1"); } catch { /* egal */ }
+  return lazy(() => laden().catch((fehler) => {
+    let zuletzt = 0;
+    try { zuletzt = Number(sessionStorage.getItem(NEU_GELADEN)) || 0; } catch { /* egal */ }
+    if (Date.now() - zuletzt > 30000) {
+      try { sessionStorage.setItem(NEU_GELADEN, String(Date.now())); } catch { /* egal */ }
       window.location.reload();
       return new Promise(() => {});
     }
@@ -42,20 +42,18 @@ function vorladen() {
   for (const laden of VORLADEN) laden().catch(() => {});
 }
 
-// Kurze Ladezeiten zeigen nichts an (kein Flackern); erst nach 250 ms ein Hinweis.
-function Laedt() {
-  const [zeigen, setZeigen] = useState(false);
+// Vorladen, sobald jemand angemeldet ist (auch direkt nach der Anmeldung) —
+// nicht fuer den Admin, der die Haendlerseiten nie sieht.
+function Vorladen() {
+  const { user } = useAuth();
   useEffect(() => {
-    const t = setTimeout(() => setZeigen(true), 250);
-    return () => clearTimeout(t);
-  }, []);
-  if (!zeigen) return null;
-  return (
-    <div className="min-h-[40vh] flex items-center justify-center text-sm"
-         style={{ color: "var(--text-muted)" }} data-testid="seite-laedt">
-      Lädt …
-    </div>
-  );
+    if (!user || user.role === "admin" || user.is_super_admin) return undefined;
+    const leerlauf = window.requestIdleCallback || ((f) => setTimeout(f, 1500));
+    const abbrechen = window.cancelIdleCallback || clearTimeout;
+    const id = leerlauf(vorladen);
+    return () => abbrechen(id);
+  }, [user]);
+  return null;
 }
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
@@ -139,20 +137,15 @@ function AppHome() {
 }
 
 export default function App() {
-  useEffect(() => {
-    if (!tokenLesen()) return undefined;
-    const leerlauf = window.requestIdleCallback || ((f) => setTimeout(f, 1500));
-    const abbrechen = window.cancelIdleCallback || clearTimeout;
-    const id = leerlauf(vorladen);
-    return () => abbrechen(id);
-  }, []);
   return (
     <AuthProvider>
       <DriverAuthProvider>
        <BuyerAuthProvider>
         <BrowserRouter>
+          <Vorladen />
           <Toaster theme="dark" position="top-right" richColors closeButton />
-          <Suspense fallback={<Laedt />}>
+          <NachladeFehler>
+          <Suspense fallback={<SeiteLaedt ganzeSeite />}>
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
@@ -222,6 +215,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           </Suspense>
+          </NachladeFehler>
         </BrowserRouter>
        </BuyerAuthProvider>
       </DriverAuthProvider>

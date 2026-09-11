@@ -36,7 +36,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "cra-template": "1.2.0",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "input-otp": "^1.4.2",
@@ -52,7 +51,8 @@
     "tailwind-merge": "^3.2.0",
     "tailwindcss-animate": "^1.0.7",
     "vaul": "^1.1.2",
-    "zod": "^3.24.4"
+    "zod": "^3.24.4",
+    "postcss": "^8.5.18"
   },
   "scripts": {
     "start": "vite",
@@ -61,7 +61,8 @@
     "e2e": "playwright test",
     "e2e:ci": "playwright test --retries=1 --workers=1 --reporter=list,html",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint --max-warnings=0 src"
   },
   "browserslist": {
     "production": [
@@ -76,7 +77,6 @@
     ]
   },
   "devDependencies": {
-    "@emergentbase/visual-edits": "https://assets.emergent.sh/npm/emergentbase-visual-edits-1.0.8.tgz",
     "@eslint/js": "9.23.0",
     "@playwright/test": "^1.62.1",
     "@vitejs/plugin-react": "^4",
@@ -107,6 +107,8 @@
     "underscore": "^1.13.8",
     "brace-expansion": "^2.1.4",
     "serialize-javascript": "^7.0.3",
-    "react-router": "^7.18.2"
+    "react-router": "^7.18.2",
+    "vite": "^6",
+    "js-yaml": "^4.3.2"
   }
 }

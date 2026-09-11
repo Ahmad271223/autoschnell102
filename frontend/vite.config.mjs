@@ -46,6 +46,8 @@ export default defineConfig(({ command, mode }) => {
   // loadEnv liest .env-Dateien; bereits gesetzte Umgebungsvariablen
   // (Docker-Build-Argument, CI) haben Vorrang.
   const env = loadEnv(mode, WURZEL, "REACT_APP_");
+  // Auch PORT und BACKEND_PROXY_TARGET aus frontend/.env (wie frueher craco).
+  const alle = loadEnv(mode, WURZEL, "");
   const dev = command === "serve";
   const werte = {
     REACT_APP_CSP_CONNECT: env.REACT_APP_CSP_CONNECT ?? (dev ? "http://localhost:8001" : ""),
@@ -64,21 +66,27 @@ export default defineConfig(({ command, mode }) => {
     },
     server: {
       host: true,
-      port: Number(process.env.PORT) || 3000,
+      port: Number(alle.PORT) || 3000,
       strictPort: true,
       // Zugriff ueber LAN-IP oder Tunnel (ngrok) wie bisher erlaubt.
       allowedHosts: true,
       proxy: {
         "/api": {
-          target: process.env.BACKEND_PROXY_TARGET || "http://127.0.0.1:8001",
+          target: alle.BACKEND_PROXY_TARGET || "http://127.0.0.1:8001",
           changeOrigin: true,
+          xfwd: true,
           // Keep-Alive: sonst schneidet uvicorn (Windows) grosse PDF-Antworten ab.
           agent: new http.Agent({ keepAlive: true }),
         },
       },
     },
+    // Vorschau des fertigen Builds nur lokal und ohne Weiterleitung — sie
+    // erbt sonst Netz-Freigabe und /api-Proxy des Entwicklungsservers.
     preview: {
-      port: Number(process.env.PORT) || 3000,
+      port: Number(alle.PORT) || 3000,
+      host: "localhost",
+      allowedHosts: [],
+      proxy: {},
     },
     build: {
       outDir: "build",
@@ -112,7 +120,6 @@ export default defineConfig(({ command, mode }) => {
     test: {
       environment: "jsdom",
       globals: true,
-      setupFiles: ["./src/setupTests.js"],
       include: ["src/**/*.test.{js,jsx}"],
     },
   };

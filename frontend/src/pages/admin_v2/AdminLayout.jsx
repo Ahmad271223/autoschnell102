@@ -1,3 +1,6 @@
+import { Suspense } from "react";
+import NachladeFehler from "@/components/NachladeFehler";
+import SeiteLaedt from "@/components/SeiteLaedt";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -163,7 +166,11 @@ export default function AdminLayout() {
           </div>
 
           <div className="px-5 md:px-8 lg:px-10 py-6 md:py-8 max-w-[1200px] mx-auto">
-            <Outlet />
+            <NachladeFehler>
+              <Suspense fallback={<SeiteLaedt />}>
+                <Outlet />
+              </Suspense>
+            </NachladeFehler>
           </div>
         </main>
       </div>

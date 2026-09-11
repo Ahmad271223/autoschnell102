@@ -1,16 +1,16 @@
 import { openInPopup, openMultiple } from "./popup";
 
 function fensterAttrappe() {
-  return { closed: false, opener: {}, focus: jest.fn(), location: { href: "" }, close: jest.fn() };
+  return { closed: false, opener: {}, focus: vi.fn(), location: { href: "" }, close: vi.fn() };
 }
 
 describe("openInPopup", () => {
   beforeEach(() => { window.innerWidth = 1400; });
-  afterEach(() => { jest.restoreAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); });
 
   test("kappt opener VOR der Navigation und oeffnet nur EIN Fenster", () => {
     const w = fensterAttrappe();
-    const open = jest.spyOn(window, "open").mockReturnValue(w);
+    const open = vi.spyOn(window, "open").mockReturnValue(w);
     const r = openInPopup("https://suchen.mobile.de/x", "mobileFilterWindow");
     expect(open).toHaveBeenCalledTimes(1);
     expect(open.mock.calls[0][0]).toBe("");                     // erst leer ...
@@ -22,7 +22,7 @@ describe("openInPopup", () => {
   });
 
   test("faellt bei Blocker auf _blank mit noopener,noreferrer zurueck", () => {
-    const open = jest.spyOn(window, "open").mockReturnValue(null);
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
     expect(openInPopup("https://www.autoscout24.de/x", "autoscoutFilterWindow")).toBeNull();
     expect(open).toHaveBeenCalledTimes(2);
     expect(open.mock.calls[1][1]).toBe("_blank");
@@ -32,14 +32,14 @@ describe("openInPopup", () => {
   test("wirft nicht, wenn der opener-Setter cross-origin SecurityError liefert", () => {
     const w = fensterAttrappe();
     Object.defineProperty(w, "opener", { set() { throw new Error("SecurityError"); } });
-    jest.spyOn(window, "open").mockReturnValue(w);
+    vi.spyOn(window, "open").mockReturnValue(w);
     expect(() => openInPopup("https://suchen.mobile.de/x", "mobileFilterWindow")).not.toThrow();
     expect(w.location.href).toBe("https://suchen.mobile.de/x");
   });
 
   test("kleine Bildschirme: direkt _blank mit noopener", () => {
     window.innerWidth = 500;
-    const open = jest.spyOn(window, "open").mockReturnValue(null);
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
     expect(openInPopup("https://suchen.mobile.de/x")).toBeNull();
     expect(open).toHaveBeenCalledTimes(1);
     expect(open.mock.calls[0][2]).toContain("noopener");
@@ -47,10 +47,10 @@ describe("openInPopup", () => {
 });
 
 describe("openMultiple", () => {
-  afterEach(() => { jest.restoreAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); });
 
   test("mehrere URLs: je ein _blank ohne Namen, mit noopener", () => {
-    const open = jest.spyOn(window, "open").mockReturnValue(fensterAttrappe());
+    const open = vi.spyOn(window, "open").mockReturnValue(fensterAttrappe());
     openMultiple([{ url: "https://a/1", name: "a" }, { url: "https://b/2", name: "b" }]);
     expect(open).toHaveBeenCalledTimes(2);
     for (const call of open.mock.calls) {

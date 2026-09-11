@@ -5,10 +5,10 @@
  * Haendler-Seite — mit der Admin-Seitenleiste daneben und der Meldung
  * "Nur fuer Haendler-Accounts". Diese Tests halten fest, wer wohin darf.
  */
-const {
+import {
   bereichVonPfad, bereichVonRolle, startseite, darfBereich, sicheresZiel,
   BEREICH_FIRMA, BEREICH_ADMIN, BEREICH_MARKT, BEREICH_FAHRER,
-} = require("./rollen");
+} from "./rollen";
 
 const CHEF = { role: "dealer" };
 const SUCHER = { role: "sucher" };

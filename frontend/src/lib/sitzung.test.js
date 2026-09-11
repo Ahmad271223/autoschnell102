@@ -4,7 +4,7 @@
  * wird hier durch Leeren von sessionStorage bei erhaltenem localStorage
  * nachgestellt — genau so verhaelt sich ein neuer Browser-Tab.
  */
-const { tokenLesen, tokenSetzen, tokenLoeschen, TOKEN_APP } = require("./sitzung");
+import { tokenLesen, tokenSetzen, tokenLoeschen, TOKEN_APP } from "./sitzung";
 
 beforeEach(() => {
   window.sessionStorage.clear();

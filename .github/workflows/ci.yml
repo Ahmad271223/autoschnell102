@@ -141,9 +141,13 @@ jobs:
       - name: Frontend-Tests
         working-directory: frontend
         run: CI=true yarn test
+      - name: ESLint (React-Hook-Regeln)
+        working-directory: frontend
+        # Audit 09/2026 (Punkt 50): Warnungen sind Fehler (--max-warnings=0).
+        # Unter CRA lief ESLint im Build mit, seit Vite als eigener Schritt.
+        run: yarn lint
       - name: Produktions-Build
         working-directory: frontend
-        # Audit 09/2026 (Punkt 50): Warnungen sind Fehler.
         run: CI=true yarn build
 
   docker:

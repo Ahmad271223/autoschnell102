@@ -9,25 +9,25 @@ describe("kannDateiTeilen", () => {
   });
 
   test("share vorhanden, aber Dateien nicht erlaubt: nein", () => {
-    const nav = { share: jest.fn(), canShare: () => false };
+    const nav = { share: vi.fn(), canShare: () => false };
     expect(kannDateiTeilen(datei, nav)).toBe(false);
   });
 
   test("Handy mit Datei-Teilen: ja — ohne Datei trotzdem nein", () => {
-    const nav = { share: jest.fn(), canShare: ({ files }) => files?.length === 1 };
+    const nav = { share: vi.fn(), canShare: ({ files }) => files?.length === 1 };
     expect(kannDateiTeilen(datei, nav)).toBe(true);
     expect(kannDateiTeilen(null, nav)).toBe(false);
   });
 
   test("canShare wirft: nein statt Absturz", () => {
-    const nav = { share: jest.fn(), canShare: () => { throw new TypeError("x"); } };
+    const nav = { share: vi.fn(), canShare: () => { throw new TypeError("x"); } };
     expect(kannDateiTeilen(datei, nav)).toBe(false);
   });
 });
 
 describe("dateiTeilen", () => {
   test("uebergibt Datei, Text und Titel und meldet 'geteilt'", async () => {
-    const share = jest.fn().mockResolvedValue(undefined);
+    const share = vi.fn().mockResolvedValue(undefined);
     const nav = { share, canShare: () => true };
     const r = await dateiTeilen({ datei, text: "Hallo", titel: "Kaufvertrag" }, nav);
     expect(r).toBe("geteilt");
@@ -36,12 +36,12 @@ describe("dateiTeilen", () => {
 
   test("Nutzer schliesst das Menue: 'abgebrochen', kein Fehler", async () => {
     const err = new Error("cancel"); err.name = "AbortError";
-    const nav = { share: jest.fn().mockRejectedValue(err), canShare: () => true };
+    const nav = { share: vi.fn().mockRejectedValue(err), canShare: () => true };
     expect(await dateiTeilen({ datei, text: "x" }, nav)).toBe("abgebrochen");
   });
 
   test("anderer Fehler oder kein Teilen: 'nicht_moeglich' (-> Link-Weg)", async () => {
-    const nav = { share: jest.fn().mockRejectedValue(new Error("boom")), canShare: () => true };
+    const nav = { share: vi.fn().mockRejectedValue(new Error("boom")), canShare: () => true };
     expect(await dateiTeilen({ datei, text: "x" }, nav)).toBe("nicht_moeglich");
     expect(await dateiTeilen({ datei, text: "x" }, {})).toBe("nicht_moeglich");
   });

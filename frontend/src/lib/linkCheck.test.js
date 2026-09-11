@@ -23,7 +23,7 @@ describe("postWithRetry503", () => {
       return e;
     };
     const client = {
-      post: jest.fn(async () => {
+      post: vi.fn(async () => {
         n += 1;
         calls.push(Date.now());
         if (n < 3) throw noHeader();
@@ -44,7 +44,7 @@ describe("postWithRetry503", () => {
   });
 
   test("nach Ablauf der maximalen Wartezeit kommt die verständliche Abbruchmeldung", async () => {
-    const client = { post: jest.fn(async () => { throw err503(10); }) };
+    const client = { post: vi.fn(async () => { throw err503(10); }) };
     await expect(
       postWithRetry503(client, "/mobile/compare", { url: "x" },
         { maxWaitMs: 50 }),
@@ -54,7 +54,7 @@ describe("postWithRetry503", () => {
   test("andere Fehler (z.B. 400) werden NICHT wiederholt", async () => {
     const e = new Error("bad");
     e.response = { status: 400 };
-    const client = { post: jest.fn(async () => { throw e; }) };
+    const client = { post: vi.fn(async () => { throw e; }) };
     await expect(
       postWithRetry503(client, "/mobile/compare", { url: "x" }, {}),
     ).rejects.toBe(e);
@@ -65,8 +65,8 @@ describe("postWithRetry503", () => {
 describe("checkLink (Hintergrundjob-Ablauf)", () => {
   test("bekanntes Inserat: sofort completed, kein Polling", async () => {
     const client = {
-      post: jest.fn(async () => ({ data: { status: "completed", cached: true } })),
-      get: jest.fn(),
+      post: vi.fn(async () => ({ data: { status: "completed", cached: true } })),
+      get: vi.fn(),
     };
     const res = await checkLink(client, "https://kleinanzeigen.de/s-anzeige/1");
     expect(res.status).toBe("completed");
@@ -76,8 +76,8 @@ describe("checkLink (Hintergrundjob-Ablauf)", () => {
   test("unbekanntes Inserat: Job wird gepollt bis completed", async () => {
     let polls = 0;
     const client = {
-      post: jest.fn(async () => ({ data: { status: "queued", job_id: "j1" } })),
-      get: jest.fn(async () => {
+      post: vi.fn(async () => ({ data: { status: "queued", job_id: "j1" } })),
+      get: vi.fn(async () => {
         polls += 1;
         return { data: { status: polls < 3 ? "processing" : "completed" } };
       }),
@@ -92,8 +92,8 @@ describe("checkLink (Hintergrundjob-Ablauf)", () => {
 
   test("failed-Job wirft die Backend-Meldung", async () => {
     const client = {
-      post: jest.fn(async () => ({ data: { status: "queued", job_id: "j2" } })),
-      get: jest.fn(async () => ({
+      post: vi.fn(async () => ({ data: { status: "queued", job_id: "j2" } })),
+      get: vi.fn(async () => ({
         data: { status: "failed", error: "Das Inserat ist nicht mehr verfügbar." },
       })),
     };
@@ -104,8 +104,8 @@ describe("checkLink (Hintergrundjob-Ablauf)", () => {
 
   test("Zeitüberschreitung beim Polling liefert die Abbruchmeldung", async () => {
     const client = {
-      post: jest.fn(async () => ({ data: { status: "queued", job_id: "j3" } })),
-      get: jest.fn(async () => ({ data: { status: "processing" } })),
+      post: vi.fn(async () => ({ data: { status: "queued", job_id: "j3" } })),
+      get: vi.fn(async () => ({ data: { status: "processing" } })),
     };
     await expect(
       checkLink(client, "u", { pollMs: 5, maxWaitMs: 40 }),
@@ -116,8 +116,8 @@ describe("checkLink (Hintergrundjob-Ablauf)", () => {
     const notFound = new Error("gone");
     notFound.response = { status: 404 };
     const client = {
-      post: jest.fn(async () => ({ data: { status: "queued", job_id: "j4" } })),
-      get: jest.fn(async () => { throw notFound; }),
+      post: vi.fn(async () => ({ data: { status: "queued", job_id: "j4" } })),
+      get: vi.fn(async () => { throw notFound; }),
     };
     const res = await checkLink(client, "u", { pollMs: 5, maxWaitMs: 5000 });
     expect(res.status).toBe("completed");

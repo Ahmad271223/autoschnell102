@@ -483,6 +483,26 @@ def test_betriebsprobe_findet_skript_von_cra_und_vite(monkeypatch, startseite):
     assert any("/static/js/main." in u for u in geholt[1:])
 
 
+def test_betriebsprobe_prueft_alle_startdateien(monkeypatch):
+    """Vite (09/2026): die Startseite braucht Hauptskript, React-Teil
+    (modulepreload) und CSS. Fehlt nur der React-Teil, ist die Oberflaeche
+    trotzdem tot — die Probe muss das melden."""
+    import types
+    modul = _probe_modul()
+    startseite = ('<script type="module" crossorigin src="/static/js/main.Ab_1.js"></script>'
+                  '<link rel="modulepreload" crossorigin href="/static/js/react.Xy-9.chunk.js">'
+                  '<link rel="stylesheet" crossorigin href="/static/css/index.Q1.css">')
+
+    def get(url, **_kw):
+        if url.endswith("/"):
+            return _Antwort(200, startseite)
+        return _Antwort(502 if "react." in url else 200)
+    monkeypatch.setattr(modul, "requests", types.SimpleNamespace(get=get))
+    modul.oberflaeche_pruefen("app.example.test")
+    assert len(modul.FEHLER) == 1 and "react." in modul.FEHLER[0], modul.FEHLER
+    assert len(modul.OK) == 2, modul.OK
+
+
 def test_betriebsprobe_kennt_option_zwischenstand(monkeypatch):
     modul = _probe_modul()
     gesehen = {}

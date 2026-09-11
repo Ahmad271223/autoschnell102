@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /* Release-Gate fuer `yarn audit` (Audit 09/2026, Punkt 49).
  *
- * Laeuft in CI im Ordner frontend/: `yarn audit --json --groups dependencies`
+ * Laeuft in CI im Ordner frontend/: `yarn audit --json` (alle Gruppen — seit
+ * dem Vite-Umstieg stecken Build-Werkzeuge in devDependencies)
  * wird ausgewertet; jede Schwachstelle ab Schweregrad "high" blockiert —
  * ausser sie steht mit Begruendung UND Ablaufdatum in audit-ausnahmen.json.
  * Abgelaufene Ausnahmen blockieren wieder.
@@ -19,7 +20,7 @@ const ausnahmen = fs.existsSync(ausnahmenPfad)
   : [];
 const heute = new Date().toISOString().slice(0, 10);
 
-const res = spawnSync("yarn", ["audit", "--json", "--groups", "dependencies"], {
+const res = spawnSync("yarn", ["audit", "--json"], {
   encoding: "utf8", shell: true, maxBuffer: 64 * 1024 * 1024,
 });
 const zeilen = (res.stdout || "").split("\n").filter(Boolean);
