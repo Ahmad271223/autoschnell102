@@ -96,6 +96,12 @@ export default function Bestand() {
           <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">
             Fahrzeugbestand & Weiterverkauf
           </h1>
+          {/* Runde 32 (Wunsch Ahmad): nur Autos mit gespeichertem oder
+              verschicktem Kaufvertrag, dazu von Hand hinzugefuegte. */}
+          <div className="text-[13px] mt-1" style={{ color: "var(--text-muted)" }}
+               data-testid="bestand-regel">
+            Fahrzeuge mit gespeichertem oder verschicktem Kaufvertrag und von Hand hinzugefügte.
+          </div>
         </div>
         <button onClick={() => setShowManual(true)}
                 className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
@@ -154,7 +160,9 @@ export default function Bestand() {
       <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {data.items.length === 0 && (
           <div className="col-span-full text-center py-16 text-zinc-500 text-sm">
-            Keine Fahrzeuge für diesen Filter.
+            {filter || sourceFilter
+              ? "Keine Fahrzeuge für diesen Filter."
+              : "Noch keine Fahrzeuge im Bestand. Ein Auto erscheint hier, sobald ein Kaufvertrag gespeichert oder verschickt ist — oder wenn du es von Hand hinzufügst."}
           </div>
         )}
         {data.items.map((v) => {

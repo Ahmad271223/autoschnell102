@@ -233,7 +233,9 @@ def test_07_bestandsliste_sagt_wenn_sie_gekuerzt_ist(welt, monkeypatch):
     B = _modul("routes.bestand")
     w = welt
     w.run(w.db.vehicles.insert_many([
-        _fahrzeug(w, f"v_liste_{i}_{w.s}", w.a, lifecycle="bestand") for i in range(6)]))
+        # Runde 32: Der Bestand zeigt Autos mit Vertrag oder von Hand hinzugefuegte.
+        _fahrzeug(w, f"v_liste_{i}_{w.s}", w.a, lifecycle="bestand", source="manuell")
+        for i in range(6)]))
     daten = w.run(B.list_bestand(w.chef))
     assert daten["gesamt"] == 6 and daten["gekuerzt"] is False
     assert len(daten["items"]) == 6

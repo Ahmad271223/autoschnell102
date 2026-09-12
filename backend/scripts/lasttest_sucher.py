@@ -323,14 +323,18 @@ async def pruefe_dubletten(mongo_url: str, db_name: str, dealer_id: str) -> list
 
 async def pruefe_dubletten_http(k: Klient, chef_token: str) -> list:
     """Dieselbe Pruefung ohne Datenbankzugang (Produktion): Der Chef sieht
-    den ganzen Firmenbestand — dort darf jede Fahrzeug-ID genau einmal
-    stehen und je (Konto, Inserat) genau ein Datensatz existieren."""
-    code, bestand = await k.ruf("GET", "/bestand", token=chef_token,
-                                weg="chef /bestand (Dubletten)")
-    if code != 200 or not isinstance(bestand, dict):
-        return [f"(Dublettenpruefung nicht moeglich — /bestand gab {code})"]
+    alle Fahrzeuge der Firma — dort darf jede Fahrzeug-ID genau einmal
+    stehen und je (Konto, Inserat) genau ein Datensatz existieren.
+
+    Runde 32: ueber /vehicles, nicht /bestand. Der Bestand zeigt seitdem nur
+    Autos mit Kaufvertrag — die verglichenen Autos dieses Laufs stehen dort
+    gar nicht, die Pruefung waere blind gewesen."""
+    code, fahrzeuge = await k.ruf("GET", "/vehicles", token=chef_token,
+                                  weg="chef /vehicles (Dubletten)")
+    if code != 200 or not isinstance(fahrzeuge, list):
+        return [f"(Dublettenpruefung nicht moeglich — /vehicles gab {code})"]
     raus, ids, paare = [], {}, {}
-    for f in bestand.get("items", []):
+    for f in fahrzeuge:
         fid = f.get("id")
         if fid:
             ids[fid] = ids.get(fid, 0) + 1
@@ -339,13 +343,12 @@ async def pruefe_dubletten_http(k: Klient, chef_token: str) -> list:
             paare[schluessel] = paare.get(schluessel, 0) + 1
     for fid, n in ids.items():
         if n > 1:
-            raus.append(f"DUBLETTE: Fahrzeug-ID {fid} kommt {n}x im Bestand vor")
+            raus.append(f"DUBLETTE: Fahrzeug-ID {fid} kommt {n}x vor")
     for (konto, inserat), n in paare.items():
         if n > 1:
             raus.append(f"DUBLETTE: Konto {konto} hat Inserat {inserat} {n}x")
-    if bestand.get("gekuerzt"):
-        raus.append("(Hinweis: Bestand gekuerzt — geprueft wurden nur die "
-                    f"neuesten {len(bestand.get('items', []))} Fahrzeuge)")
+    if not fahrzeuge:
+        raus.append("(Hinweis: /vehicles lieferte keine Fahrzeuge — nichts geprueft)")
     return raus
 
 

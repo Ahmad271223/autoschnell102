@@ -278,10 +278,15 @@ def test_05_geloeschte_nur_in_der_chef_akte(welt):
     weg, da = f"v_weg{w.s}", f"v_da{w.s}"
 
     async def lauf():
-        await db.vehicles.insert_many([
-            w.fahrzeug(weg, lifecycle="geloescht", owner=w.a["id"]),
-            w.fahrzeug(da, lifecycle="bestand", owner=w.a["id"]),
-        ])
+        f_weg = w.fahrzeug(weg, lifecycle="geloescht", owner=w.a["id"])
+        f_da = w.fahrzeug(da, lifecycle="bestand", owner=w.a["id"])
+        await db.vehicles.insert_many([f_weg, f_da])
+        # Runde 32: Sucher sehen im Bestand nur eigene Vertraege oder eigene
+        # Abholungen — beide sind abgeholt; das geloeschte bleibt trotzdem draussen.
+        await db.kaufvorgaenge.insert_many([
+            {"id": f"k_{v['id']}", "dealer_id": v["dealer_id"], "user_id": w.a["id"],
+             "vehicle_id": v["id"], "contract_id": f"c_{v['id']}", "status": "abgeholt"}
+            for v in (f_weg, f_da)])
         liste = await B.list_bestand(w.chef, lifecycle="geloescht")
         liste_a = await B.list_bestand(w.a)
         fahrzeuge = await L.list_vehicles(w.chef)

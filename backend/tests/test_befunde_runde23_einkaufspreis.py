@@ -108,6 +108,13 @@ async def _zwei_vorgaenge(w, vid):
     """A und B legen je einen eigenen Vorgang an; B ist der juengere."""
     KV = _module("kaufvorgang")
     await w.db.vehicles.insert_one(w.fahrzeug(vid))
+    # Runde 32: Der Bestand zaehlt gespeicherte Vertraege — zu jedem Vorgang
+    # gehoert (wie in echt) das Vertragsdokument.
+    await w.db.generated_pdfs.insert_many([
+        {"id": f"ca_{vid}", "dealer_id": w.dealer_id, "user_id": w.a["id"],
+         "vehicle_id": vid, "contract_no": "R23-A", "created_at": _jetzt()},
+        {"id": f"cb_{vid}", "dealer_id": w.dealer_id, "user_id": w.b["id"],
+         "vehicle_id": vid, "contract_no": "R23-B", "created_at": _jetzt()}])
     kv_a = await KV.anlegen(dealer_id=w.dealer_id, user_id=w.a["id"], vehicle_id=vid,
                             contract_id=f"ca_{vid}", purchase_price=PREIS_A)
     kv_b = await KV.anlegen(dealer_id=w.dealer_id, user_id=w.b["id"], vehicle_id=vid,

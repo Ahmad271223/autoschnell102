@@ -195,9 +195,16 @@ def test_03_bestand_und_akte_je_rolle(welt):
     w, db = welt.w, welt.db
 
     async def lauf():
-        await db.vehicles.insert_many([
-            w.fahrzeug(f"v_a{w.s}", owner=w.a["id"], lifecycle="bestand"),
-            w.fahrzeug(f"v_b{w.s}", owner=w.b["id"], lifecycle="bestand"),
+        fa = w.fahrzeug(f"v_a{w.s}", owner=w.a["id"], lifecycle="bestand")
+        fb = w.fahrzeug(f"v_b{w.s}", owner=w.b["id"], lifecycle="bestand")
+        await db.vehicles.insert_many([fa, fb])
+        # Runde 32: Sucher sehen im Bestand nur eigene Vertraege oder eigene
+        # Abholungen — beide Autos stehen im Bestand, sind also abgeholt.
+        await db.kaufvorgaenge.insert_many([
+            {"id": f"k_a{w.s}", "dealer_id": fa["dealer_id"], "user_id": w.a["id"],
+             "vehicle_id": fa["id"], "contract_id": f"c_a{w.s}", "status": "abgeholt"},
+            {"id": f"k_b{w.s}", "dealer_id": fb["dealer_id"], "user_id": w.b["id"],
+             "vehicle_id": fb["id"], "contract_id": f"c_b{w.s}", "status": "abgeholt"},
         ])
         chef = await B.list_bestand(w.chef)
         a = await B.list_bestand(w.a)

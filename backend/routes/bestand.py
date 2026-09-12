@@ -289,6 +289,69 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
 BESTAND_MAX = 500
 
 
+# Runde 32 (12.09.2026, Wunsch Ahmad): "Im Bestand nur Autos, zu denen ein
+# Vertrag gespeichert oder verschickt wurde — mehr nicht", dazu die von Hand
+# hinzugefuegten (Entscheidung Ahmad). Nur verglichene Autos gehoeren nicht
+# hierher; Sucher finden sie weiter unter "Fahrzeuge".
+#
+# SUCHER sehen ein Auto, wenn
+#   * ER einen Vertrag dazu gespeichert hat (Vertragsdokument vorhanden, nicht
+#     im Grabstein; Verschicken setzt Speichern voraus), oder
+#   * SEIN Kauf abgeholt wurde (Kaufvorgang "abgeholt" — haelt das Auto auch,
+#     wenn der Vertrag danach geloescht wird), oder
+#   * es von Hand angelegt ist UND ihm gehoert (vom Chef zugewiesen).
+# Besitz allein reicht nicht: Besitzer wird schon, wer ein Inserat als Erster
+# VERGLEICHT — sonst stuende das Auto, das ein Kollege gekauft hat, auch bei
+# ihm im Bestand.
+#
+# Der CHEF sieht alles davon fuer die ganze Firma und zusaetzlich jedes Auto,
+# das per Termin abgeholt wurde oder auf dem Hof bzw. im Weiterverkauf steht
+# (NACH_ABHOLUNG) — auch nach einer Vertragsloeschung und fuer Altbestand ohne
+# Vorgang. Er entscheidet dort, was mit dem Auto passiert.
+#
+# Ein vor der Abholung von Hand geloeschter Vertrag zaehlt nicht: der Kauf wurde
+# zurueckgezogen. Die Fristloeschung storniert offene Vorgaenge ebenfalls; ein
+# bereits abgeholtes Auto bleibt ueber seinen Vorgang bzw. beim Chef stehen.
+#
+# Gegenpruefung 12.09.2026 (zweimal, bestaetigte Befunde): Die erste Fassung
+# zaehlte nur Kaufvorgaenge (abgeholtes Auto verschwand nach Vertragsloeschung,
+# alte Loeschungen ohne Markierung hielten Autos faelschlich fest, Vertrag ohne
+# Vorgang fehlte). Die zweite liess Sucher ueber Besitz oder einen stornierten
+# eigenen Vorgang fremde Kaeufe sehen, und ein per Terminplaner abgeholtes Auto
+# nach Vertragsloeschung fehlte beim Chef.
+NACH_ABHOLUNG = ("abgeholt", "bestand", "verkaufsentwurf", "verkaufsbereit",
+                 "veroeffentlicht", "reserviert", "verkauft")
+TERMIN_ABGEHOLT = ("abgeholt", "erledigt")
+
+
+async def bestand_filter(user) -> Dict[str, Any]:
+    """Mongo-Filter fuer den Bestand. fahrzeug_bereich enthaelt fuer Sucher
+    selbst ein $or — deshalb ueber $and verknuepft, nie per dict-Merge."""
+    from deps import ist_sucher
+    from routes.contracts import _vertrag_bereich
+    sucher = ist_sucher(user)
+    leer = {"$nin": [None, ""]}
+    ids = set(await db.generated_pdfs.distinct(
+        "vehicle_id", {**_vertrag_bereich(user), "vehicle_id": leer}))
+    abholungen: Dict[str, Any] = {"dealer_id": user["dealer_id"], "vehicle_id": leer,
+                                  "status": "abgeholt"}
+    if sucher:
+        abholungen["user_id"] = user["id"]
+    ids |= set(await db.kaufvorgaenge.distinct("vehicle_id", abholungen))
+    if sucher:
+        wege = [{"source": "manuell", "owner_user_id": user["id"]},
+                {"id": {"$in": sorted(ids)}}]
+    else:
+        ids |= set(await db.appointments.distinct(
+            "vehicle_id", {"dealer_id": user["dealer_id"], "vehicle_id": leer,
+                           "status": {"$in": list(TERMIN_ABGEHOLT)}}))
+        wege = [{"source": "manuell"},
+                {"id": {"$in": sorted(ids)}},
+                {"lifecycle": {"$in": list(NACH_ABHOLUNG)}}]
+    return {"$and": [fahrzeug_bereich(user), {"$or": wege}],
+            "lifecycle": {"$nin": ["geloescht"]}}
+
+
 @router.get("/bestand")
 async def list_bestand(user=Depends(current_firma),
                        lifecycle: Optional[str] = None,
@@ -296,8 +359,9 @@ async def list_bestand(user=Depends(current_firma),
     """Fahrzeugbestand des Händlers mit Lifecycle-/Quellen-Filter.
     Liefert zusätzlich Zählergruppen für die Dashboard-Kacheln."""
     # Runde 16: Sucher sehen nur eigene Fahrzeuge (owner_user_id).
-    query: Dict[str, Any] = {**fahrzeug_bereich(user),
-                             "lifecycle": {"$nin": ["geloescht"]}}
+    # Runde 32: und davon nur die mit Kaufvertrag oder von Hand hinzugefuegte.
+    grundfilter = await bestand_filter(user)
+    query: Dict[str, Any] = dict(grundfilter)
     # Runde 17 (Nr. 285): ?lifecycle=geloescht hob den Ausschluss auf —
     # geloeschte Fahrzeuge (Fotos weg, Akte eingefroren) sind hier nie Thema.
     if lifecycle and lifecycle != "geloescht":
@@ -332,8 +396,7 @@ async def list_bestand(user=Depends(current_firma),
 
     counts: Dict[str, int] = {}
     async for row in db.vehicles.aggregate([
-        {"$match": {**fahrzeug_bereich(user),
-                    "lifecycle": {"$nin": ["geloescht"]}}},
+        {"$match": grundfilter},
         {"$group": {"_id": "$lifecycle", "n": {"$sum": 1}}},
     ]):
         counts[row["_id"] or "unbekannt"] = row["n"]

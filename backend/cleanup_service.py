@@ -602,9 +602,20 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
              "status": {"$in": list(_KV_OFFEN)}},
             {"$set": {"status": "storniert",
                       "storno_grund": "vertrag_geloescht", "updated_at": jetzt}})
+        # Runde 32: Den Grund mitschreiben (manuell / 90tage) — damit laesst
+        # sich spaeter unterscheiden, ob ein Kauf zurueckgezogen wurde oder nur
+        # die Aufbewahrungsfrist ablief.
         await db.kaufvorgaenge.update_many(
             {"contract_id": contract_id, "vertrag_geloescht_am": None},
-            {"$set": {"vertrag_geloescht_am": jetzt, "updated_at": jetzt}})
+            {"$set": {"vertrag_geloescht_am": jetzt, "vertrag_geloescht_grund": grund,
+                      "updated_at": jetzt}})
+        # Gegenpruefung 12.09.2026: Wird eine mit aelterem Code begonnene
+        # Loeschung wieder aufgenommen, steht vertrag_geloescht_am schon — der
+        # Grund fehlte dann fuer immer. Nachtragen, ohne einen vorhandenen zu
+        # ueberschreiben.
+        await db.kaufvorgaenge.update_many(
+            {"contract_id": contract_id, "vertrag_geloescht_grund": None},
+            {"$set": {"vertrag_geloescht_grund": grund, "updated_at": jetzt}})
         # Fahrzeugstatus neu ableiten, damit kein Auto auf einem Stand
         # haengen bleibt, den es nicht mehr gibt. Scheitert das, wird die
         # Loeschung trotzdem zu Ende gefuehrt — aber NICHT still: ein
