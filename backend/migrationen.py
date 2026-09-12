@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 6
+ZIEL_VERSION = 7
 _SPERRE = "migration"
 
 
@@ -281,6 +281,94 @@ async def _offene_besitzer_melden(db, ungueltige: int = 0) -> None:
         await alarm_schliessen(db, "fahrzeuge_ohne_besitzer", ref="vehicles")
 
 
+async def m7_kaeuferdaten_einfrieren(db) -> dict:
+    """Runde 25 (12.09.2026, Pruefbefund "Kaeuferdaten nicht unveraenderlich"):
+
+    Vertraege, deren contract_data keine Kaeuferfelder tragen (Altvertraege,
+    Anlage ueber die API), holten Firma/Anschrift des Kaeufers spaeter erneut
+    aus den HEUTIGEN Einstellungen — Abholprotokoll und neue Vertragsfassung
+    konnten dadurch von der urspruenglichen Ausfertigung abweichen.
+
+    Diese Migration friert den heute gueltigen Stand EINMALIG ein (bestmoeglich:
+    der urspruengliche Stand steht nur im bereits erzeugten PDF, das unveraendert
+    bleibt). Gesetzt werden nur fehlende Felder; der Vertrag bekommt die Marke
+    kaeufer_nachtraeglich_eingefroren. Idempotent.
+    """
+    from routes.contracts import KAEUFER_FELDER
+
+    stats = {"eingefroren": 0, "schon_gesetzt": 0, "ohne_quelle": 0}
+    dealers: dict = {}
+
+    async def firma_doc(dealer_id):
+        f = dealers.get(dealer_id)
+        if f is None:
+            f = await db.dealers.find_one({"id": dealer_id}, {"_id": 0}) or {}
+            dealers[dealer_id] = f
+        return f
+
+    async def konto_basis(user_id, dealer_id):
+        """Wie deps.effective_dealer (ohne an deps.db zu haengen) — None,
+        wenn es das Konto in dieser Firma nicht (mehr) gibt."""
+        if not user_id:
+            return None
+        u = await db.users.find_one(
+            {"id": user_id, "dealer_id": dealer_id},
+            {"_id": 0, "role": 1, "settings_override": 1})
+        if not u:
+            return None
+        firma = await firma_doc(dealer_id)
+        if u.get("role") != "sucher":
+            return dict(firma)
+        from deps import SUCHER_SETTINGS_FIELDS
+        merged = dict(firma)
+        for k, v in (u.get("settings_override") or {}).items():
+            if k in SUCHER_SETTINGS_FIELDS and v is not None:
+                merged[k] = v
+        return merged
+
+    async for doc in db.generated_pdfs.find(
+            {}, {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "contract_data": 1}):
+        daten = doc.get("contract_data")
+        if not isinstance(daten, dict):
+            continue
+        fehlend = [f for f in KAEUFER_FELDER
+                   if not str(daten.get(f) or "").strip()]
+        if not fehlend:
+            stats["schon_gesetzt"] += 1
+            continue
+        # Gegenpruefung Runde 25: dieselbe Kette wie auftraggeber.py —
+        # Vertrags-Ersteller, sonst Termin-Ersteller, sonst Firma. Ohne den
+        # mittleren Schritt schrieb die Migration bei Altvertraegen ohne
+        # Ersteller die Firmendaten fest, obwohl das Abholprotokoll bis
+        # dahin die Sucher-Daten zeigte.
+        dealer_id = doc.get("dealer_id")
+        quelle = await konto_basis(doc.get("user_id"), dealer_id)
+        if quelle is None:
+            termin = await db.appointments.find_one(
+                {"contract_id": doc["id"], "dealer_id": dealer_id},
+                {"_id": 0, "created_by": 1}) or {}
+            quelle = await konto_basis(termin.get("created_by"), dealer_id)
+        if quelle is None:
+            quelle = await firma_doc(dealer_id)
+        neu = {}
+        for feld in fehlend:
+            wert = quelle.get(KAEUFER_FELDER[feld])
+            wert = str(wert).strip() if wert is not None else ""
+            if wert:
+                neu[f"contract_data.{feld}"] = wert
+        if not neu:
+            # Nichts nachzutragen: entweder stehen die Kaeuferdaten schon im
+            # Vertrag (es fehlen nur Felder, die auch in den Einstellungen
+            # leer sind, z. B. WhatsApp) oder es gibt gar keine Quelle.
+            leer = len(fehlend) == len(KAEUFER_FELDER)
+            stats["ohne_quelle" if leer else "schon_gesetzt"] += 1
+            continue
+        neu["contract_data.kaeufer_nachtraeglich_eingefroren"] = True
+        await db.generated_pdfs.update_one({"id": doc["id"]}, {"$set": neu})
+        stats["eingefroren"] += 1
+    return stats
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -288,6 +376,7 @@ MIGRATIONEN = [
     (4, "fahrzeug_besitzer", m4_fahrzeug_besitzer),
     (5, "kaufvorgaenge", m5_kaufvorgaenge),
     (6, "besitzer_nachbessern", m6_besitzer_nachbessern),
+    (7, "kaeuferdaten_einfrieren", m7_kaeuferdaten_einfrieren),
 ]
 
 

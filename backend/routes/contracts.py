@@ -424,6 +424,21 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
     return f"{_oeffentliche_basis()}/api/public/vertrag/{f2['token']}", f2.get("laeuft_ab") or ""
 
 
+# Kaeuferfelder des Vertrags -> Feld im Haendler-Dokument. Dieselbe
+# Zuordnung fuer das Einsetzen (_apply_contract_overrides) UND das
+# Einfrieren beim Anlegen (kaeufer_einfrieren).
+KAEUFER_FELDER = {
+    "dealer_company": "company_name",
+    "dealer_contact": "contact_person",
+    "dealer_phone": "phone",
+    "dealer_whatsapp": "whatsapp_number",
+    "dealer_email": "email",
+    "dealer_address": "address",
+    "dealer_zip": "zip_code",
+    "dealer_city": "city",
+}
+
+
 def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) -> tuple[dict, dict]:
     """Mergt die im Vertrags-Dialog editierten Fahrzeug- & Händler-Werte
     in die `vehicle`/`dealer`-Dicts hinein, die der PDF-Builder dann nutzt.
@@ -467,23 +482,12 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
         for t in targets:
             v[t] = val
 
-    # --- Dealer-Mappings (Override → Dealer-Dict) ---
-    deal_map = {
-        "dealer_company": ("company_name",),
-        "dealer_contact": ("contact_person",),
-        "dealer_phone": ("phone",),
-        "dealer_whatsapp": ("whatsapp_number",),
-        "dealer_email": ("email",),
-        "dealer_address": ("address",),
-        "dealer_zip": ("zip_code",),
-        "dealer_city": ("city",),
-    }
-    for src, targets in deal_map.items():
+    # --- Kaeufer-Mappings (Override → Dealer-Dict) ---
+    for src, ziel in KAEUFER_FELDER.items():
         val = take(src)
         if val is None:
             continue
-        for t in targets:
-            d[t] = val
+        d[ziel] = val
 
     return v, d
 
@@ -503,6 +507,23 @@ def kaeufer_pflicht_pruefen(dealer: Optional[dict]) -> None:
     name = (dealer or {}).get("company_name")
     if not (str(name).strip() if name is not None else ""):
         raise HTTPException(422, KAEUFER_FEHLT)
+
+def kaeufer_einfrieren(contract: dict, dealer: dict) -> dict:
+    """Runde 25 (12.09.2026, Pruefbefund): Die TATSAECHLICH verwendeten
+    Kaeuferdaten in den Vertrag schreiben — auch die, die nur aus den
+    Einstellungen (Firma bzw. Sucher-Override) stammen.
+
+    Ohne das griffen spaetere Fassungen (verschobener Termin) und das
+    Abholprotokoll erneut auf die HEUTIGEN Einstellungen zu: Aendert der
+    Sucher seine Firmendaten, stand im Protokoll ein anderer Auftraggeber
+    als im Kaufvertrag. Idempotent; leere Werte werden nicht gesetzt.
+    """
+    for feld, ziel in KAEUFER_FELDER.items():
+        wert = (dealer or {}).get(ziel)
+        wert = str(wert).strip() if wert is not None else ""
+        if wert:
+            contract[feld] = wert
+    return contract
 
 
 def _vehicle_bild_urls(vehicle: dict) -> list:
@@ -605,6 +626,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     )
     # Runde 24: ohne Kaeufername kein Vertrag (vor PDF und Speichern).
     kaeufer_pflicht_pruefen(dealer)
+    # Runde 25: Kaeuferdaten einfrieren, damit spaetere Fassungen und das
+    # Abholprotokoll genau diesen Stand zeigen (Pruefbefund 12.09.2026).
+    kaeufer_einfrieren(contract_dict, dealer)
     # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
     # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.
     pdf_id = str(uuid.uuid4())
@@ -1546,10 +1570,23 @@ async def regenerate_contract_for_pickup(
     v = await db.vehicles.find_one(
         {"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
     vehicle = dict(v.get("data") or {})
-    from deps import effective_dealer
-    dealer = await effective_dealer(user) or {}
+    # Gegenpruefung Runde 25 (12.09.2026): Kaeufer ist der ERSTELLER des
+    # Vertrags (sonst der Termin-Ersteller, sonst die Firma) — NICHT, wer
+    # gerade den Termin verschiebt. Vorher fror der Chef beim Verschieben
+    # seine eigenen Firmendaten im Vertrag eines Suchers ein; ueber
+    # _apply_contract_overrides galt das dann auch im Abholprotokoll.
+    from auftraggeber import kaeufer_basis
+    termin = await db.appointments.find_one(
+        {"contract_id": contract_id, "dealer_id": dealer_id},
+        {"_id": 0, "created_by": 1}) or {}
+    dealer = await kaeufer_basis(
+        dealer_id=dealer_id,
+        user_ids=(doc.get("user_id"), termin.get("created_by"))) or {}
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer)
+    # Altvertrag ohne gespeicherte Kaeuferdaten: den jetzt verwendeten Stand
+    # festhalten, damit alle weiteren Fassungen identisch bleiben (Runde 25).
+    kaeufer_einfrieren(contract_dict, dealer)
 
     # Beschluss Ahmad 09.09.2026: Texte aus den Einstellungen gelten NUR fuer
     # neue Vertraege. Der bei der Erstellung festgehaltene Text bleibt; ein

@@ -425,6 +425,35 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
     return _NumberedCanvas
 
 
+def _abholzeile(contract: dict) -> str:
+    """Abholung als EINE Zeile: "Wird abgeholt am 19.11.2026 um 10:00 Uhr,
+    <Anschrift des Verkaeufers>". Leer, wenn kein Abholdatum im Vertrag steht.
+
+    Wunsch Ahmad (12.09.2026): Die Zeile steht jetzt unter den Halter- und
+    Kaeuferangaben statt im Kaufpreis-Kasten.
+    """
+    if not contract.get("pickup_date"):
+        return ""
+    datum = str(contract.get("pickup_date", ""))
+    try:
+        from datetime import date as _date
+        datum = _date.fromisoformat(datum).strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        pass
+    abhol = f"Wird abgeholt am {datum}"
+    if str(contract.get("pickup_time") or "").strip():
+        abhol += f" um {contract['pickup_time']} Uhr"
+    adresse = ", ".join(x for x in [
+        (contract.get("seller_address") or "").strip(),
+        " ".join(y for y in [
+            (contract.get("seller_zip") or "").strip(),
+            (contract.get("seller_city") or "").strip()] if y),
+    ] if x)
+    if adresse:
+        abhol += f", {adresse}"
+    return abhol
+
+
 def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
                           digital: bool = False) -> bytes:
     """Build a Kaufvertrag PDF and return raw bytes.
@@ -500,6 +529,12 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         st,
     ))
     story.append(Spacer(1, 12))
+
+    # Abholung direkt unter den Halter-/Kaeuferangaben (Wunsch Ahmad 12.09.2026).
+    _abhol = _abholzeile(contract)
+    if _abhol:
+        story.append(Paragraph(f"<b>Abholung:</b> {_xml_escape(_abhol)}", st["body"]))
+        story.append(Spacer(1, 12))
 
     # ---------- Vehicle data — 2 columns ----------
     def _as_int(val):
@@ -662,27 +697,6 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         preis_label = "inkl. aller Bestandteile lt. Vertrag"
 
     pay_bits = [("Zahlungsart", contract.get("payment_method", "Bar / Überweisung"))]
-    # Abholung als EINE klare Zeile: "Wird abgeholt am 19.11.2026 um 10:00
-    # Uhr, <Adresse aus dem Vertrag>" — Adresse = Anschrift des Verkäufers.
-    if contract.get("pickup_date"):
-        datum = str(contract.get("pickup_date", ""))
-        try:
-            from datetime import date as _date
-            datum = _date.fromisoformat(datum).strftime("%d.%m.%Y")
-        except (ValueError, TypeError):
-            pass
-        abhol = f"Wird abgeholt am {datum}"
-        if str(contract.get("pickup_time") or "").strip():
-            abhol += f" um {contract['pickup_time']} Uhr"
-        adresse = ", ".join(x for x in [
-            (contract.get("seller_address") or "").strip(),
-            " ".join(y for y in [
-                (contract.get("seller_zip") or "").strip(),
-                (contract.get("seller_city") or "").strip()] if y),
-        ] if x)
-        if adresse:
-            abhol += f", {adresse}"
-        pay_bits.append(("", abhol))
     pay_sub = "   ·   ".join(
         (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
         for k, v in pay_bits if str(v).strip()

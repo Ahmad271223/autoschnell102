@@ -42,6 +42,23 @@ async def _ersteller_basis(user_id: Optional[str],
     return await deps.effective_dealer(u)
 
 
+async def kaeufer_basis(*, dealer_id: str, user_ids) -> Dict[str, Any]:
+    """Basis des Kaeufers: effective_dealer des ERSTEN Kontos DIESER Firma aus
+    user_ids (Vertrags-Ersteller, dann Termin-Ersteller), sonst das
+    Firmen-Dokument.
+
+    Gegenpruefung Runde 25 (12.09.2026): Kaufvertrag, Neuerzeugung nach
+    verschobenem Termin und Abholprotokoll muessen DIESELBE Kette nutzen —
+    sonst friert z. B. der Chef beim Verschieben seine Firmendaten im
+    Vertrag eines Suchers ein.
+    """
+    for uid in user_ids or ():
+        basis = await _ersteller_basis(uid, dealer_id)
+        if basis is not None:
+            return basis
+    return await deps.db.dealers.find_one({"id": dealer_id}, {"_id": 0}) or {}
+
+
 async def auftraggeber_fuer_termin(appt: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Haendler-Dokument des Auftraggebers eines Abholtermins (company_name,
     contact_person, address, zip_code, city, phone, email, …) — mit oder
@@ -59,13 +76,9 @@ async def auftraggeber_fuer_termin(appt: Optional[Dict[str, Any]]) -> Dict[str, 
         vertrag = await deps.db.generated_pdfs.find_one(
             {"id": appt["contract_id"], "dealer_id": dealer_id},
             {"_id": 0, "user_id": 1, "contract_data": 1}) or {}
-    basis: Optional[Dict[str, Any]] = None
-    for uid in (vertrag.get("user_id"), appt.get("created_by")):
-        basis = await _ersteller_basis(uid, dealer_id)
-        if basis is not None:
-            break
-    if basis is None:
-        basis = await deps.db.dealers.find_one({"id": dealer_id}, {"_id": 0}) or {}
+    basis = await kaeufer_basis(
+        dealer_id=dealer_id,
+        user_ids=(vertrag.get("user_id"), appt.get("created_by")))
     daten = vertrag.get("contract_data")
     _, auftraggeber = _apply_contract_overrides(
         contract=daten if isinstance(daten, dict) else {},
