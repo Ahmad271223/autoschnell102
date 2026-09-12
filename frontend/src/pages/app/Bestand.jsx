@@ -1,3 +1,5 @@
+import MonatJahrEingabe from "@/components/MonatJahrEingabe";
+import { monatJahrFehler } from "@/lib/monatJahr";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
@@ -288,6 +290,8 @@ function ManualVehicleDialog({ onClose, onDone }) {
     if (!f.make_label.trim() || !f.model_label.trim()) {
       toast.error("Marke und Modell sind Pflichtfelder"); return;
     }
+    const ezFehler = monatJahrFehler(f.first_registration);
+    if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return; }
     setBusy(true);
     try {
       await api.post("/vehicles/manual", {
@@ -335,7 +339,7 @@ function ManualVehicleDialog({ onClose, onDone }) {
           <div className="col-span-2">
             <Field label="Modellbezeichnung"><input value={f.model_description} onChange={set("model_description")} className={inputCls} style={st} placeholder="320d Touring M Sport" /></Field>
           </div>
-          <Field label="Erstzulassung"><input value={f.first_registration} onChange={set("first_registration")} className={inputCls} style={st} placeholder="03/2019" /></Field>
+          <Field label="Erstzulassung"><MonatJahrEingabe value={f.first_registration} onChange={(v) => set("first_registration")({ target: { value: v } })} art="ez" testid="manuell-ez" className={inputCls} style={st} /></Field>
           <Field label="Kilometerstand"><input type="number" value={f.mileage} onChange={set("mileage")} className={inputCls} style={st} /></Field>
           <Field label="Kraftstoff"><input value={f.fuel_label} onChange={set("fuel_label")} className={inputCls} style={st} placeholder="Diesel" /></Field>
           <Field label="Getriebe"><input value={f.gearbox_label} onChange={set("gearbox_label")} className={inputCls} style={st} placeholder="Automatik" /></Field>

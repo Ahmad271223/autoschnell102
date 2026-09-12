@@ -101,19 +101,25 @@ test.describe("Abholprotokoll: Freigabe und Knopfleiste", () => {
     // Solange es beim Chef liegt, gibt es keine Unterschriftsfelder.
     await expect(page.getByText("Mit dem Finger unterschreiben")).toHaveCount(0);
 
-    // --- Chef: Freigabe-Kasten im Terminplaner ---
+    // --- Chef: eigene Seite "Freigaben" (Runde 33, Wunsch Ahmad) ---
     const chef = await h.newAuthedPage(browser, "app", firma.token);
     try {
+      // Der Zaehler im Menue zeigt auf JEDER Seite, dass ein Fahrer wartet.
       await chef.page.goto("/app/termine");
-      const kasten = chef.page.getByTestId("freigabe-kasten");
-      await expect(kasten).toBeVisible();
-      await expect(kasten).toContainText("Chevrolet Camaro");
+      await expect(chef.page.getByTestId("nav-freigaben-zaehler")).toHaveText("1");
+      await chef.page.getByTestId("termine-freigaben-hinweis").click();
+      await expect(chef.page).toHaveURL(/\/app\/freigaben$/);
       const proto = await h.get("/protocols/zur-freigabe", { token: firma.token });
       const pid = proto[0].protocol_id;
+      const karte = chef.page.getByTestId(`freigabe-${pid}`);
+      await expect(karte).toBeVisible();
+      await expect(karte).toContainText("Chevrolet Camaro");
+      // Vorher/Nachher: Kilometerstand bei Abholung einheitlich formatiert.
+      await expect(karte).toContainText("75.200 km");
       // Deutscher Tausenderpunkt: "17.250" muss 17250 EUR ergeben, nicht 17.
       await chef.page.getByTestId(`freigabe-preis-${pid}`).fill("17.250");
       await chef.page.getByTestId(`freigabe-ok-${pid}`).click();
-      await expect(kasten).toContainText("17.250,00");
+      await expect(chef.page.getByTestId(`freigabe-aktueller-preis-${pid}`)).toContainText("17.250,00");
     } finally {
       await chef.context.close();
     }

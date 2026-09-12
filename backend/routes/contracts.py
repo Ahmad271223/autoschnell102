@@ -424,72 +424,10 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
     return f"{_oeffentliche_basis()}/api/public/vertrag/{f2['token']}", f2.get("laeuft_ab") or ""
 
 
-# Kaeuferfelder des Vertrags -> Feld im Haendler-Dokument. Dieselbe
-# Zuordnung fuer das Einsetzen (_apply_contract_overrides) UND das
-# Einfrieren beim Anlegen (kaeufer_einfrieren).
-KAEUFER_FELDER = {
-    "dealer_company": "company_name",
-    "dealer_contact": "contact_person",
-    "dealer_phone": "phone",
-    "dealer_whatsapp": "whatsapp_number",
-    "dealer_email": "email",
-    "dealer_address": "address",
-    "dealer_zip": "zip_code",
-    "dealer_city": "city",
-}
-
-
-def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) -> tuple[dict, dict]:
-    """Mergt die im Vertrags-Dialog editierten Fahrzeug- & Händler-Werte
-    in die `vehicle`/`dealer`-Dicts hinein, die der PDF-Builder dann nutzt.
-    So bleibt der bestehende PDF-Code unverändert.
-
-    Werte werden NUR überschrieben, wenn der Händler im Dialog tatsächlich
-    etwas eingetragen hat (nicht None und nicht leer-string)."""
-    v = dict(vehicle or {})
-    d = dict(dealer or {})
-
-    def take(src_key: str) -> Optional[str]:
-        val = contract.get(src_key)
-        if val is None:
-            return None
-        s = str(val).strip()
-        return s or None
-
-    # --- Fahrzeug-Mappings (Override → Vehicle-Dict) ---
-    veh_map = {
-        "vehicle_make": ("make_label", "make"),
-        "vehicle_model": ("model_description", "model_label", "model"),
-        "vehicle_category": ("category_label", "category"),
-        "vehicle_first_registration": ("first_registration", "ezl"),
-        "vehicle_mileage": ("mileage", "km"),
-        "vehicle_fuel": ("fuel_label", "fuel_type", "fuel"),
-        "vehicle_gearbox": ("gearbox_label", "transmission", "gearbox"),
-        "vehicle_power_kw": ("power_kw",),
-        "vehicle_power_ps": ("power_ps",),
-        "vehicle_displacement": ("displacement", "cubic_capacity"),
-        "vehicle_color": ("exterior_color", "color"),
-        "vehicle_doors": ("door_count", "doors"),
-        "vehicle_seats": ("seat_count", "seats"),
-        "vehicle_vin": ("vin", "fin"),
-        "vehicle_license_plate": ("license_plate", "kennzeichen"),
-        "vehicle_damage_note": ("damage_note",),
-    }
-    for src, targets in veh_map.items():
-        val = take(src)
-        if val is None:
-            continue
-        for t in targets:
-            v[t] = val
-
-    # --- Kaeufer-Mappings (Override → Dealer-Dict) ---
-    for src, ziel in KAEUFER_FELDER.items():
-        val = take(src)
-        if val is None:
-            continue
-        d[ziel] = val
-
-    return v, d
+# Gegenpruefung 12.09.2026: Zuordnung und Einsetzen liegen in vertrag_felder
+# (ohne Datenbank), damit das Abholprotokoll-PDF nicht den ganzen Routen-Stack
+# braucht. Die Namen hier bleiben gueltig.
+from vertrag_felder import KAEUFER_FELDER, _apply_contract_overrides  # noqa: E402,F401
 
 
 # Runde 24 (11.09.2026, Befund Ahmad): Der Kaeufer (= Auftraggeber im

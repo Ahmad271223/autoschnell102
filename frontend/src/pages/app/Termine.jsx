@@ -13,7 +13,8 @@ import {
 import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
-import FreigabeKasten from "@/components/FreigabeKasten";
+import { Link } from "react-router-dom";
+import { useFreigabeZaehler } from "@/lib/freigaben";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
   format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
@@ -127,9 +128,9 @@ export default function Termine() {
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="termine-page">
-      {/* Runde 30 (12.09.2026): Abholprotokolle, die auf die Freigabe des
-          Chefs warten. Ganz oben — der Fahrer steht solange beim Verkaeufer. */}
-      <FreigabeKasten onAenderung={load} />
+      {/* Runde 30: Abholprotokolle, die auf die Freigabe des Chefs warten.
+          Runde 33: Sie haben eine eigene Seite — hier nur der Hinweis. */}
+      <FreigabeHinweis />
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
         <div>
@@ -736,5 +737,22 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Runde 33 (Wunsch Ahmad): Mehrere Fahrer koennen gleichzeitig warten — die
+// Freigaben liegen deshalb auf einer eigenen Seite (/app/freigaben).
+function FreigabeHinweis() {
+  const { wartet, freigegeben } = useFreigabeZaehler(true);
+  if (!wartet && !freigegeben) return null;
+  const text = wartet > 0
+    ? `${wartet} Abholprotokoll${wartet === 1 ? " wartet" : "e warten"} auf deine Freigabe`
+    : `${freigegeben} freigegeben — vor Ort wird unterschrieben`;
+  return (
+    <Link to="/app/freigaben" data-testid="termine-freigaben-hinweis"
+          className="mb-5 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-white/5 transition"
+          style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "#ffb340" }}>
+      {text} — zu den Freigaben ›
+    </Link>
   );
 }

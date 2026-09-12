@@ -1,3 +1,5 @@
+import MonatJahrEingabe from "@/components/MonatJahrEingabe";
+import { monatJahrFehler } from "@/lib/monatJahr";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
@@ -36,17 +38,10 @@ const PAYMENT_OPTIONS = [
   { value: "Echtzeitüberweisung", label: "Echtzeitüberweisung" },
 ];
 
-// HU-Datum Auto-Formatter: nur Ziffern, automatisch "/" nach 2 Ziffern.
-// Akzeptiert MM/JJ (5 Zeichen) oder MM/JJJJ (7 Zeichen).
-//   "0626"   -> "06/26"
-//   "062026" -> "06/2026"
-//   "06"     -> "06"   (Slash kommt erst beim 3. Zeichen)
-const formatHuDate = (raw) => {
-  if (raw === undefined || raw === null) return "";
-  const digits = String(raw).replace(/\D/g, "").slice(0, 6);
-  if (digits.length <= 2) return digits;
-  return digits.slice(0, 2) + "/" + digits.slice(2);
-};
+// Runde 33 (Wunsch Ahmad): HU und Erstzulassung ueber MonatJahrEingabe —
+// MM/JJJJ, nur Ziffern, "/" automatisch. Der fruehere formatHuDate liess den
+// Monat ungeprueft, machte aus eingefuegtem "2026-06" "20/2606" und liess sich
+// am "/" nicht loeschen (Analyse 12.09.2026).
 
 // Numerische Helper für Vorhalter (nur ganze Zahlen, max 2 Stellen).
 const cleanIntStr = (raw, max = 2) => {
@@ -258,6 +253,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       toast.error("Bitte Zahlungsart wählen");
       return;
     }
+    // Gegenpruefung 12.09.2026: ein halb getipptes "05/2" landete sonst im Vertrag.
+    for (const [feld, label] of [["vehicle_first_registration", "Erstzulassung"], ["hu_until", "HU gültig bis"]]) {
+      const fehler = monatJahrFehler(form[feld]);
+      if (fehler) {
+        toast.error(`${label}: ${fehler}`);
+        return;
+      }
+    }
     setLoading(true);
     try {
       const { data } = await api.post("/contracts", buildPayload());
@@ -368,7 +371,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="Kategorie" value={form.vehicle_category} onChange={(v) => set("vehicle_category", v)} testid="contract-veh-cat" />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Erstzulassung (MM/JJJJ)" value={form.vehicle_first_registration} onChange={(v) => set("vehicle_first_registration", v)} testid="contract-veh-ez" />
+              <div>
+                <label className="text-xs text-zinc-400">Erstzulassung (MM/JJJJ)</label>
+                <MonatJahrEingabe value={form.vehicle_first_registration}
+                                  onChange={(v) => set("vehicle_first_registration", v)}
+                                  art="ez" testid="contract-veh-ez" className="input-base w-full mt-1" />
+              </div>
               <Field label="Kilometerstand" value={form.vehicle_mileage} onChange={(v) => set("vehicle_mileage", v)} testid="contract-veh-km" />
               <Field label="Hubraum (ccm)" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
             </div>
@@ -417,16 +425,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 options={YN_OPTIONS}
                 testid="contract-hu-valid"
               />
-              <Field
-                label="HU gültig bis (z.B. 06/26)"
-                value={form.hu_until}
-                onChange={(v) => set("hu_until", formatHuDate(v))}
-                testid="contract-hu-until"
-                placeholder="MM/JJ"
-                disabled={form.hu_valid !== "Ja"}
-                inputMode="numeric"
-                maxLength={7}
-              />
+              <div>
+                <label className="text-xs text-zinc-400">HU gültig bis (MM/JJJJ)</label>
+                <MonatJahrEingabe value={form.hu_until} onChange={(v) => set("hu_until", v)}
+                                  art="hu" testid="contract-hu-until" disabled={form.hu_valid !== "Ja"}
+                                  className="input-base w-full mt-1 disabled:opacity-50" />
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <SelectField

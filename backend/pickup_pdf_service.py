@@ -667,43 +667,48 @@ def build_pickup_pdf(
         st["small"]))
     story.append(Spacer(1, 0.25 * cm))
 
-    # Gather values from vehicle + contract
-    make = vehicle.get("make") or vehicle.get("brand") or "—"
-    model = vehicle.get("model") or "—"
-    ez = (vehicle.get("ezl") or vehicle.get("first_registration")
-          or vehicle.get("ez") or "—")
-    fin = (vehicle.get("vin") or vehicle.get("fin") or "—")
-    power_kw = vehicle.get("power_kw") or vehicle.get("kw")
-    power_ps = vehicle.get("power_ps") or vehicle.get("ps")
-    if power_ps in (None, "", 0) and power_kw not in (None, "", 0):
-        try:
-            power_ps = round(float(power_kw) * 1.35962)
-        except (TypeError, ValueError):
-            power_ps = None
-    power = f"{_fmt(power_kw)} kW / {_fmt(power_ps)} PS"
-    halter = contract.get("previous_owners") or vehicle.get("previous_owners") or "—"
-    color = vehicle.get("exterior_color") or vehicle.get("color") or "—"
-    fuel = vehicle.get("fuel") or vehicle.get("fuel_type") or "—"
-    hu_val = contract.get("hu_valid") or ""
-    hu_until = contract.get("hu_until") or vehicle.get("hu") or ""
-    hu_disp = f"{hu_val} · gültig bis {hu_until}".strip(" ·") if (hu_val or hu_until) else "—"
-    km = _fmt_km(vehicle.get("km") or vehicle.get("mileage"))
-    commercial = contract.get("commercial_since_ez") or ""
-    accident = contract.get("accident_free") or ""
+    # Runde 33 (Analyse 12.09.2026): Soll-Werte aus dem VERTRAG (die
+    # Ueberschreibungen im Vertrags-Dialog), nicht mehr aus dem Inserat —
+    # dieselben Werte wie in der Fahrer-App und im Freigabe-Kasten.
+    import protokoll_vergleich as PV
+    # Gegenpruefung 12.09.2026: aus dem reinen Modul — das PDF braucht
+    # keine Routen und keine Datenbank.
+    VEHICLE_CHECK_FIELDS = PV.FELDER
+    _werte = PV.vertragswerte(vehicle, contract)
+    _texte = PV.werte_als_text(_werte)
+    make = _texte["make"] or "—"
+    model = _texte["model"] or "—"
+    ez = _texte["first_registration"] or "—"
+    fin = _texte["vin"] or "—"
+    power = _texte["power"] or "— kW / — PS"
+    halter = _texte["previous_owners"] or "—"
+    color = _texte["color"] or "—"
+    fuel = _texte["fuel"] or "—"
+    hu_disp = _texte["hu"] or "—"
+    km = _texte["mileage_contract"] or "—"
+    commercial = _texte["commercial"]
+    accident = _texte["accident_free"]
 
     # Fahrer-Eingaben zu Abschnitt 1 (App): pro Zeile "stimmt"/"weicht ab"
     # plus optionaler Korrekturwert. _vc[key] = {"status": .., "value": ..}
     _vc = filled.get("vehicle_check") or {}
+    _zeilen = ({z["schluessel"]: z for z in PV.vergleich(
+        VEHICLE_CHECK_FIELDS, _vc, _fill_cond, _werte)} if filled else {})
 
     def _vrow(key: str, label: str, value, options=None, bold=False):
-        """Zeile mit Fahrer-Auswahl; weicht der Wert ab, wird die Korrektur
-        des Fahrers zusaetzlich fett angezeigt."""
+        """Zeile mit Fahrer-Auswahl. Nur bei echter Abweichung steht
+        "Vertrag  →  vor Ort" im PDF — ein alter Korrekturwert bei "stimmt"
+        gehoert nicht ins unterschriebene Dokument (Befund 12.09.2026)."""
         entry = _vc.get(key) or {}
         sel = entry.get("status")
-        corrected = str(entry.get("value") or "").strip()
+        zeile = _zeilen.get(key)
         shown = value
-        if corrected:
-            shown = f"{_fmt(value)}  →  {corrected}"
+        # Gegenpruefung 12.09.2026: nur wenn "weicht ab" angekreuzt ist. Bei
+        # "stimmt" stand sonst ein Kilometer-Pfeil (Stand bei Abholung) direkt
+        # neben dem bestaetigten Vertragswert — das Dokument widersprach sich.
+        if (sel == "weicht ab" and zeile and zeile["abweichend"]
+                and zeile["art"] != "ja_nein" and zeile["vor_ort_text"]):
+            shown = f"{_fmt(value)}  →  {zeile['vor_ort_text']}"
         return _check_row(label, shown, options or ["stimmt", "weicht ab"],
                           st, bold_value=bold, selected=sel)
 

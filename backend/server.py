@@ -1109,6 +1109,14 @@ async def _alle_indexe():
         log.error("Index protokollversion_eindeutig: %s", exc)
         if os.environ.get("APP_ENV", "").strip().lower() == "production":
             raise
+    try:
+        # Gegenpruefung 12.09.2026: Der Zaehler "Freigaben" im Menue fragt alle
+        # 20 s je offenem Tab — ohne Index durchsuchte das die ganze Sammlung.
+        await db.pickup_protocols.create_index(
+            [("dealer_id", 1), ("status", 1), ("abgeschickt_am", -1)],
+            name="protokolle_je_firma_status")
+    except Exception as exc:
+        log.error("Index protokolle_je_firma_status: %s", exc)
     await db.subscriptions.create_index([("subject_user_id", 1), ("status", 1), ("created_at", -1)])
     # Audit 09/2026: "genau ein aktives Abo je Konto" gilt jetzt auch in
     # der Datenbank. Findet sich Altbestand mit mehreren aktiven Abos,

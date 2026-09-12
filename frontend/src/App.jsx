@@ -74,6 +74,7 @@ const VORLADEN = [
   () => import("@/pages/app/Team"),
   () => import("@/pages/app/Einstellungen"),
   () => import("@/pages/app/Anfragen"),
+  () => import("@/pages/app/Freigaben"),
 ];
 function vorladen() {
   for (const laden of VORLADEN) laden().catch(() => {});
@@ -140,6 +141,7 @@ const Fahrer = seite(() => import("@/pages/app/Fahrer"));
 const Team = seite(() => import("@/pages/app/Team"));
 const Einstellungen = seite(() => import("@/pages/app/Einstellungen"));
 const Anfragen = seite(() => import("@/pages/app/Anfragen"));
+const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 
 const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
 const DriverRegister = seite(() => import("@/pages/driver/DriverRegister"));
@@ -215,6 +217,8 @@ export default function App() {
             {/* Verkaufen & Verwalten: kostenlos für den Händler-Hauptaccount */}
             <Route path="/app/vertraege" element={<WrapFree><PDFArchiv /></WrapFree>} />
             <Route path="/app/termine" element={<WrapFree><Termine /></WrapFree>} />
+            {/* Runde 33 (Wunsch Ahmad): alle wartenden Abholprotokolle auf einer Seite */}
+            <Route path="/app/freigaben" element={<WrapFree><Freigaben /></WrapFree>} />
             <Route path="/app/bestand" element={<WrapFree><Bestand /></WrapFree>} />
             <Route path="/app/anfragen" element={<WrapFree><Anfragen /></WrapFree>} />
             <Route path="/app/akte/:id" element={<WrapFree><FahrzeugAkte /></WrapFree>} />

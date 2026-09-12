@@ -1,3 +1,5 @@
+import MonatJahrEingabe from "@/components/MonatJahrEingabe";
+import { monatJahrFehler } from "@/lib/monatJahr";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
@@ -41,6 +43,8 @@ export default function Inserat() {
     setL((s) => ({ ...s, prices: { ...s.prices, [k]: e.target.value === "" ? null : parseFloat(e.target.value) } }));
 
   const save = async (extra = {}) => {
+    const ezFehler = monatJahrFehler(l.data?.first_registration);
+    if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return false; }
     setBusy(true);
     try {
       const r = await api.put(`/resale/${l.id}`, {
@@ -266,9 +270,15 @@ export default function Inserat() {
               ].map(([k, label]) => (
                 <div key={k}>
                   <label className="text-[11px] text-zinc-500">{label}</label>
-                  <input value={l.data?.[k] ?? ""} disabled={l.status === "verkauft"}
-                         onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, [k]: e.target.value } }))}
-                         className={inputCls} style={st} />
+                  {k === "first_registration" ? (
+                    <MonatJahrEingabe value={String(l.data?.[k] ?? "")} disabled={l.status === "verkauft"}
+                                      onChange={(v) => setL((s) => ({ ...s, data: { ...s.data, [k]: v } }))}
+                                      art="ez" className={inputCls} style={st} />
+                  ) : (
+                    <input value={l.data?.[k] ?? ""} disabled={l.status === "verkauft"}
+                           onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, [k]: e.target.value } }))}
+                           className={inputCls} style={st} />
+                  )}
                 </div>
               ))}
               <div>
