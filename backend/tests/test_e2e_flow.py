@@ -236,13 +236,26 @@ def test_07_abholprotokoll_und_pdfs(welt):
                       timeout=30)
     assert r.status_code == 200 and r.json()["status"] == "freigegeben", r.text[:200]
 
-    # 3. Jetzt darf unterschrieben werden
+    # 3a. Mit einem VERALTETEN Preis wird nicht unterschrieben (Gegenpruefung
+    #     12.09.2026: sonst stuende ein anderer Betrag ueber den Unterschriften,
+    #     als der Verkaeufer gesehen hat).
     r = requests.post(
         f"{API}/driver/appointments/{welt['appt_id']}/protocol/finalize",
         headers=welt["D"], json={"signature_driver_b64": SIG,
                                  "signature_seller_b64": SIG,
                                  "seller_name": "E2E Verkaeufer",
-                                 "place": "Hannover"}, timeout=120)
+                                 "place": "Hannover",
+                                 "neuer_preis_gesehen": 9999}, timeout=120)
+    assert r.status_code == 409 and "Preis" in r.text, r.text[:200]
+
+    # 3b. Mit dem angezeigten Preis geht es durch
+    r = requests.post(
+        f"{API}/driver/appointments/{welt['appt_id']}/protocol/finalize",
+        headers=welt["D"], json={"signature_driver_b64": SIG,
+                                 "signature_seller_b64": SIG,
+                                 "seller_name": "E2E Verkaeufer",
+                                 "place": "Hannover",
+                                 "neuer_preis_gesehen": 8500}, timeout=120)
     assert r.status_code == 200, f"Abschluss: {r.status_code} {r.text[:300]}"
 
     # PDFs: Abholauftrag + ausgefuelltes Protokoll
