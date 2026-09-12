@@ -24,7 +24,8 @@ from deps import (bearer, current_user, db, log_activity, log_activity_sicher, n
 # eigene, schwaechere Kopie (8 Zeichen, keine Blockliste, keine 72-Byte-
 # bcrypt-Grenze).
 from passwoerter import pruefe_passwort as _check_password_strength
-from rate_limiter import client_ip, driver_login_limiter, driver_register_limiter
+from rate_limiter import (client_ip, driver_login_limiter, driver_register_limiter,
+                          login_ip_limiter, login_schluessel)
 from snapshot_service import get_object as snapshot_get_object
 
 import logging
@@ -541,10 +542,15 @@ async def driver_register(body: DriverAccountRegister, request: Request):
 @router.post("/driver/login")
 async def driver_login(body: DriverAccountLogin, request: Request):
     # Rate-limit by client IP (15 attempts / 60 s).
+    # Runde 26 (12.09.2026): wie beim Haendler-Login — Zaehler je KONTO,
+    # damit mehrere Fahrer im selben WLAN sich nicht gegenseitig aussperren.
     ip = client_ip(request)
-    if not await driver_login_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()
+    schluessel = login_schluessel(ip, email)
+    if not await driver_login_limiter.check(schluessel):
+        raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
+    if not await login_ip_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
     da = await db.driver_accounts.find_one({"email": email})
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = da["password_hash"] if da else _DUMMY_HASH
@@ -552,6 +558,7 @@ async def driver_login(body: DriverAccountLogin, request: Request):
         raise HTTPException(401, "E-Mail oder Passwort falsch")
     if not da.get("active", True):
         raise HTTPException(403, "Account deaktiviert")
+    await driver_login_limiter.reset(schluessel)
     # Rotate session ID on every login to invalidate previous tokens.
     sid = str(uuid.uuid4())
     await db.driver_accounts.update_one(

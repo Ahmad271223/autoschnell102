@@ -144,7 +144,7 @@ async def _holen(url: str) -> Optional[bytes]:
     return None
 
 
-def _fuer_pdf(raw: bytes, kante: int) -> bytes:
+def _fuer_pdf(raw: bytes, kante: int, qualitaet: int = 0) -> bytes:
     from PIL import Image, ImageOps
     im = Image.open(io.BytesIO(raw))
     w, h = im.size
@@ -158,11 +158,15 @@ def _fuer_pdf(raw: bytes, kante: int) -> bytes:
     im.thumbnail((kante, kante))
     out = io.BytesIO()
     # Ohne exif=...: Metadaten (Standort, Geraet) landen nicht im Dokument.
-    im.save(out, "JPEG", quality=75 if kante >= 1200 else 70, optimize=True)
+    # qualitaet=0 -> wie bisher nach Kantenlaenge. Das Beweisdokument gibt
+    # seit Runde 26 eigene Werte vor (kleinere Datei, Wunsch Ahmad).
+    q = qualitaet if qualitaet else (75 if kante >= 1200 else 70)
+    im.save(out, "JPEG", quality=max(40, min(int(q), 95)), optimize=True)
     return out.getvalue()
 
 
-async def laden_fuer_pdf(url: str, kante: int = 800) -> Optional[bytes]:
+async def laden_fuer_pdf(url: str, kante: int = 800,
+                         qualitaet: int = 0) -> Optional[bytes]:
     """Inseratsfoto fuer das Beweisdokument: JPEG mit hoechstens `kante` px,
     ohne Metadaten. None, wenn das Portal nicht liefert oder die Adresse
     nicht erlaubt ist. Bewusst OHNE den Vorschau-Zwischenspeicher (andere
@@ -171,7 +175,8 @@ async def laden_fuer_pdf(url: str, kante: int = 800) -> Optional[bytes]:
         raw = await _holen(url)
         if not raw:
             return None
-        return await asyncio.to_thread(_fuer_pdf, raw, max(200, min(int(kante), 2000)))
+        return await asyncio.to_thread(_fuer_pdf, raw,
+                                       max(200, min(int(kante), 2000)), qualitaet)
     except Exception as exc:  # noqa: BLE001
         log.info("Bild-Proxy (PDF): %s nicht ladbar (%s)", url[:120], exc.__class__.__name__)
         return None

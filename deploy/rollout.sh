@@ -137,11 +137,37 @@ echo "== 1/6 Drain (Health -> 503), warte ${WARTE_LB}s"
 drain
 sleep "$WARTE_LB"
 
+# Runde 26 (12.09.2026): Die nginx-Vorlage wird NUR beim Start des
+# Proxy-Containers ausgewertet (envsubst im nginx-Einstiegsskript) und liegt
+# als Bind-Mount im Container. Aendert sie sich durch den Pull, muss der
+# Proxy neu erzeugt werden — 'up -d --build' allein taete das nicht, und die
+# Aenderung (z.B. Besucher-IP an das Backend) waere still wirkungslos.
+VORLAGE=$(grep '^PROXY_TEMPLATE=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
+VORLAGE=deploy/${VORLAGE:-default.conf.template}
+# Immer erfolgreich: fehlt die Datei (oder md5sum), ist der Stand leer —
+# ein Fehlercode wuerde hier wegen 'set -e' das ganze Rollout abbrechen.
+vorlagen_stand() {
+    if [ -f "$VORLAGE" ]; then
+        md5sum "$VORLAGE" 2>/dev/null | cut -d' ' -f1 || true
+    fi
+    return 0
+}
+VORLAGE_VORHER=$(vorlagen_stand)
+
 echo "== 2/6 Code holen"
 git pull --ff-only
+if [ "$(vorlagen_stand)" != "$VORLAGE_VORHER" ]; then
+    PROXY_NEU=1
+    echo "   nginx-Vorlage geaendert ($VORLAGE) — der Proxy wird neu erzeugt"
+fi
 
 echo "== 3/6 Bauen und starten"
 docker compose up -d --build
+if [ "$PROXY_NEU" = 1 ]; then
+    # Der Drain-Marker auf dem Host (deploy/drain/aktiv) ueberlebt das,
+    # der Server bleibt also waehrenddessen aus der Rotation.
+    docker compose up -d --force-recreate --no-deps proxy
+fi
 
 echo "== 4/6 Warten, bis Backend und Oberflaeche antworten"
 i=0

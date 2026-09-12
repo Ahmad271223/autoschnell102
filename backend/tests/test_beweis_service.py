@@ -82,7 +82,7 @@ def welt(monkeypatch):
     # Fotos ohne Netz: "a" liefert ein Bild, alles andere nichts.
     import bild_proxy
 
-    async def _foto(url, kante=800):
+    async def _foto(url, kante=800, qualitaet=0):
         return _jpeg() if url.endswith("/a") else None
 
     monkeypatch.setattr(bild_proxy, "laden_fuer_pdf", _foto)

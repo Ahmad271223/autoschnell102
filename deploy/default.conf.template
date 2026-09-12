@@ -70,6 +70,15 @@ server {
   location /api/ {
     proxy_pass $backend_up;
     proxy_read_timeout 300s;   # Snapshots/PDF + synchrone Apify-Abrufe (bis 180 s)
+    # Runde 26 (12.09.2026, Pruefbefund): Besucher-Adresse ausdruecklich an das
+    # Backend weitergeben. nginx reicht fremde Kopfzeilen sonst durch — ein
+    # Besucher koennte X-Forwarded-For selbst setzen und damit die
+    # IP-Sperren beeinflussen. $proxy_add_x_forwarded_for haengt die ECHTE
+    # Adresse des direkten Nachbarn hinten an; rate_limiter.client_ip nimmt
+    # genau den letzten fremden Eintrag.
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
   }
 
   # Statische Build-Dateien mit Hash im Namen: lange cachen.

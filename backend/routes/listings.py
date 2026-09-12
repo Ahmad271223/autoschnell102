@@ -110,7 +110,11 @@ async def _rueckfall_erlaubt(gewuenscht: bool, user: dict) -> bool:
     if RUECKFALL_TAGESLIMIT <= 0:
         return False
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    schluessel = f"{tag}:rueckfall:{user.get('dealer_id') or user.get('id') or 'ohne'}"
+    # Runde 26 (12.09.2026, Vorgabe Ahmad): Das Tageslimit gilt je KONTO, nicht
+    # je Firma — sonst verbrauchen 30 Sucher gemeinsam 25 Rueckfaelle und der
+    # 26. Link des Tages scheitert fuer alle. Jeder Sucher hat sein eigenes
+    # Budget; Limits werden nie von einem Konto auf ein anderes uebertragen.
+    schluessel = f"{tag}:rueckfall:{user.get('id') or user.get('dealer_id') or 'ohne'}"
     doc = await db.provider_budget.find_one_and_update(
         {"_id": schluessel},
         {"$inc": {"n": 1},
@@ -214,7 +218,10 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
     # beim naechsten Vergleich) — Grundlage fuer den Legacy-Rueckfall.
     quelle_set = {"quelle": quelle} if quelle else {}
     kollege = None
-    for versuch in range(2):
+    # Runde 27 (Gegenpruefung): DREI Versuche — der Fall 'Upsert traf ein
+    # vorhandenes Dokument' schickt uns noch einmal durch den Zweig
+    # 'vorhanden' und verbraucht dabei einen Durchlauf.
+    for versuch in range(3):
         kollege = None
         vorhanden = await db.vehicles.find_one(
             filt, {"_id": 0, "lifecycle": 1, "owner_user_id": 1, "updated_at": 1})
@@ -244,7 +251,7 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                 if r.matched_count == 0:
                     # Zwischenzeitlich entfernt — einmal wie ein Erstvergleich.
                     kollege = None
-                    if versuch == 0:
+                    if versuch < 2:
                         continue
                     break
             if not besitzer:
@@ -255,23 +262,42 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
         # Erstvergleich: atomar anlegen oder — wenn ein Kollege gleichzeitig
         # schneller war — dessen Dokument aktualisieren (Befund 1).
         try:
+            # Runde 27 (12.09.2026, Pruefbefund): NICHTS mehr im $set. Gab es
+            # das Fahrzeug schon (Kollege war im selben Moment schneller und
+            # ist womoeglich schon weiter — Vertrag, Termin), wuerde ein $set
+            # dessen gemeinsame Inseratsdaten ueberschreiben. Beim Einfuegen
+            # liefert $setOnInsert alles; existiert es bereits, schreibt der
+            # Aufruf nichts und der zweite Durchlauf geht durch den Zweig
+            # "vorhanden" (CAS auf den Lebenszyklus + Mitbearbeiter).
             vorher = await db.vehicles.find_one_and_update(
                 filt,
-                {"$set": {"mobile_ad_id": ad_id, "data": frisch,
-                          "updated_at": now_iso(), **quelle_set},
-                 "$setOnInsert": {"created_at": now_iso(), "status": "verglichen",
+                {"$setOnInsert": {"mobile_ad_id": ad_id, "data": frisch,
+                                  "updated_at": now_iso(), **quelle_set,
+                                  "created_at": now_iso(), "status": "verglichen",
                                   "lifecycle": "verglichen", "source": "plattform",
                                   "lifecycle_changed_at": now_iso(),
                                   "owner_user_id": user["id"]}},
                 projection={"_id": 0, "owner_user_id": 1, "updated_at": 1},
                 upsert=True, return_document=ReturnDocument.BEFORE)
         except DuplicateKeyError:
-            if versuch == 0:
+            if versuch < 2:
                 continue
             raise
         if vorher is not None:
-            # Das Dokument gab es schon (paralleler Erstvergleich) — der
-            # tatsaechliche Besitzer entscheidet, nicht unser Lesen.
+            # Das Dokument gab es schon (paralleler Erstvergleich): noch einmal
+            # von vorn — diesmal ueber den Zweig "vorhanden", der die frischen
+            # Daten nur mit CAS schreibt und sonst unter inserat_aktuell ablegt.
+            if versuch < 2:
+                continue
+            # Letzter Versuch (drei Rennen hintereinander): wenigstens
+            # Herkunft, Zeitstempel und die frischen Daten als
+            # inserat_aktuell festhalten — sonst bliebe das Fahrzeug
+            # voellig unberuehrt (Gegenpruefung 12.09.2026).
+            await db.vehicles.update_one(
+                filt,
+                {"$set": {"inserat_aktuell": frisch,
+                          "inserat_aktuell_am": now_iso(),
+                          "updated_at": now_iso(), **quelle_set}})
             besitzer = vorher.get("owner_user_id")
             if not besitzer:
                 await db.vehicles.update_one(
@@ -403,10 +429,21 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     # Track comparison (anonym)
     expires_at = datetime.now(timezone.utc) + timedelta(days=14)
+    # Runde 27 (Pruefbefund 12.09.2026): Ein technischer Neulauf ist keine
+    # neue Nachfrage — Profilwechsel Inland/Export, Doppelklick oder eine
+    # Wiederholung nach Zeitueberschreitung starteten denselben Vergleich
+    # erneut und blaehten den LIVE-Zaehler auf. Solche Eintraege bleiben
+    # erhalten (Beweiszugriff, Chef-Statistik), zaehlen aber nicht mit.
+    _seit = (datetime.now(timezone.utc)
+             - timedelta(minutes=LIVE_FENSTER_MIN)).isoformat()
+    _wiederholung = await db.vehicle_comparisons.count_documents(
+        {"cache_key": identity["cache_key"], "user_id": user["id"],
+         "created_at": {"$gte": _seit}}, limit=1) > 0
     await db.vehicle_comparisons.insert_one({
         "id": str(uuid.uuid4()),
         "mobile_ad_id": ad_id,
         "source": source,
+        "wiederholung": _wiederholung,
         # Beweisdokument: Zugriff fuer Firmen, die das Inserat verglichen haben
         "cache_key": identity["cache_key"],
         "cached": was_cached,
@@ -444,9 +481,12 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
     hinweise = regeln_nicht_abgebildet(vehicle, rules)
     if kollege:
-        hinweise = [f"Dieses Fahrzeug vergleicht auch {kollege['name']} — ihr könnt "
-                    "beide einen Kaufvertrag anlegen; einen Abholtermin gibt es je "
-                    "Fahrzeug nur einmal."] + list(hinweise)
+        # Runde 26 (12.09.2026): Seit dem Umbau auf Kaufvorgaenge hat JEDER
+        # Vertrag seinen eigenen Abholtermin — der alte Hinweis sagte das
+        # Gegenteil und haette die Sucher in der Schulung verwirrt.
+        hinweise = [f"Dieses Fahrzeug vergleicht auch {kollege['name']} — ihr "
+                    "arbeitet unabhängig voneinander: Jeder kann einen eigenen "
+                    "Kaufvertrag mit eigenem Abholtermin anlegen."] + list(hinweise)
     # Befund 10.09.2026: Vorschaubilder ueber den eigenen Bild-Proxy (klein,
     # zwischengespeichert, kein Fremdhost im Browser). Nur in der Antwort,
     # nie im gespeicherten Fahrzeug (die Links laufen ab).
@@ -654,18 +694,41 @@ async def listings_check_status(job_id: str, user=Depends(require_active_sub)):
     return out
 
 
+# Runde 27 (12.09.2026, Beschluss Ahmad): Der LIVE-Zaehler ist ein rein
+# ANONYMES Nachfrage-Signal zum Inserat. Er gehoert weder zu einem Konto
+# noch zu einer Firma — jeder Sucher jeder Firma sieht dieselbe Zahl.
+LIVE_FENSTER_MIN = 10
+
+
 @router.get("/mobile/live-counter/{ad_id}")
-async def live_counter(ad_id: str, user=Depends(current_firma)):
-    five_min = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    active = await db.vehicle_comparisons.count_documents({
-        "mobile_ad_id": ad_id, "created_at": {"$gte": five_min},
-        "dealer_id": {"$ne": user["dealer_id"]},
-    })
-    today_total = await db.vehicle_comparisons.count_documents({
-        "mobile_ad_id": ad_id, "created_at": {"$gte": today},
-    })
-    return {"active_now": active, "today": today_total}
+async def live_counter(ad_id: str, quelle: Optional[str] = None,
+                       user=Depends(current_firma)):
+    """Wie oft wurde dieses INSERAT zuletzt verglichen (anonym)?
+
+    Zwei Befunde vom 12.09.2026 sind hier behoben:
+      * Die eigene Firma wurde aus 'active_now' herausgerechnet, aus
+        'today' aber nicht — zwei Sucher derselben Firma sahen oben 0 und
+        unten 8. Jetzt zaehlen beide Werte ALLE Firmen.
+      * Gezaehlt wurde nur nach "mobile_ad_id": ein mobile.de-Inserat und
+        eine Kleinanzeige mit derselben Nummer fielen zusammen. Mit
+        ?quelle=... zaehlt der Schluessel 'quelle:id' (cache_key).
+
+    Geliefert werden Vergleichsvorgaenge, nicht Personen — die Oberflaeche
+    schreibt deshalb "Vergleiche", nicht "Haendler"."""
+    seit = (datetime.now(timezone.utc)
+            - timedelta(minutes=LIVE_FENSTER_MIN)).isoformat()
+    heute = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0).isoformat()
+    basis = ({"cache_key": f"{quelle}:{ad_id}"} if quelle
+             else {"mobile_ad_id": ad_id})
+    # Wiederholungen desselben Kontos zaehlen nicht als neue Nachfrage.
+    basis["wiederholung"] = {"$ne": True}
+    aktuell = await db.vehicle_comparisons.count_documents({
+        **basis, "created_at": {"$gte": seit}})
+    heute_gesamt = await db.vehicle_comparisons.count_documents({
+        **basis, "created_at": {"$gte": heute}})
+    return {"active_now": aktuell, "today": heute_gesamt,
+            "fenster_minuten": LIVE_FENSTER_MIN}
 
 
 # =========================================================

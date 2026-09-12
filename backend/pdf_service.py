@@ -58,6 +58,25 @@ DIGITAL_VERTRAGSTEXT_STANDARD = (
 )
 
 
+# Runde 26 (12.09.2026, Wunsch Ahmad: die zwei aehnlich klingenden Felder
+# zusammenlegen): Startertext fuer NEUE Firmen — die vier Klauseln plus die
+# AGB-Punkte, die frueher getrennt unter default_terms standen. Alles steht
+# ab Anlage im EINEN Feld "Vertragsbedingungen" und ist dort editierbar.
+AGB_PUNKTE_START = (
+    "5. Das Fahrzeug wird unter Ausschluss jeglicher Sachmängelhaftung verkauft, "
+    "soweit gesetzlich zulässig (§ 444 BGB bleibt unberührt).\n\n"
+    "6. Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb erfolgt zum "
+    "Zwecke des gewerblichen Wiederverkaufs.\n\n"
+    "7. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n\n"
+    "8. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen "
+    "bedürfen der Schriftform.\n\n"
+    "9. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit "
+    "gesetzlich zulässig."
+)
+
+VERTRAGSTEXT_START = DIGITAL_VERTRAGSTEXT_STANDARD + "\n\n" + AGB_PUNKTE_START
+
+
 # Hinweis fuer Altvertraege (vor Einfuehrung der Vertragsbedingungen): steht
 # in der digitalen Fassung unter "Unterschriften" — nie als Vertragstext.
 DIGITAL_NACHTRAEGLICH = (

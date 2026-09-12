@@ -78,6 +78,11 @@ async def admin_trigger_cleanup(user=Depends(current_super_admin)):
     return stats
 
 
+def _vertragstext_start_admin() -> str:
+    from pdf_service import VERTRAGSTEXT_START
+    return VERTRAGSTEXT_START
+
+
 async def _dealer_anlegen_mit_kunden_nr(doc: dict, naechste_kunden_nr) -> None:
     """Firmenprofil mit frischer Kundennummer einfuegen; bei DuplicateKey
     (Unique-Index kunden_nr, nur im Rennen mit einem korrigierten Zaehler)
@@ -160,6 +165,8 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
         "email_template": "Guten Tag,\n\nanbei sende ich Ihnen den Kaufvertrag.\n\nMfG\n{händler_name}",
         "whatsapp_template": "Hallo, hier ist der Kaufvertrag. Bitte prüfen.",
         "default_terms": "",
+        # Runde 26: ein Feld fuer Vertragsbedingungen (vier Klauseln + AGB).
+        "digital_vertragstext": _vertragstext_start_admin(),
         "default_special_agreements": "",
         "created_at": now_iso(),
         }, naechste_kunden_nr)

@@ -148,7 +148,10 @@ export default function ManuelleSuche() {
   }, []);
 
   return (
-    <div className="space-y-6">
+    // Befund Ahmad (12.09.2026): Die Seite hatte weder Rand noch Breiten-
+    // begrenzung — alles klebte am Bildschirmrand. Jetzt derselbe Rahmen wie
+    // im Vergleich, mehr Abstand und zweispaltige Filter ab Tablet-Breite.
+    <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto space-y-8" data-testid="suche-page">
       <div>
         <div className="overline">MANUELLE SUCHE · MOBILE.DE & AUTOSCOUT24</div>
         <h1 className="font-display font-black text-4xl tracking-tighter leading-none mt-2">
@@ -166,7 +169,7 @@ export default function ManuelleSuche() {
       </div>
 
       {/* Marke + Modell */}
-      <div className="grid md:grid-cols-2 gap-4">
+      <div className="grid md:grid-cols-2 gap-5">
         <PickerCard
           icon={<Car size={14} />}
           label="MARKE"
@@ -202,14 +205,16 @@ export default function ManuelleSuche() {
       </div>
 
       {/* Filter-Block */}
-      <div className="apple-card p-6">
-        <div className="overline mb-4 flex items-center gap-2">
+      <div className="apple-card p-5 sm:p-7">
+        <div className="overline mb-5 flex items-center gap-2">
           <Search size={11} /> FILTER
         </div>
 
+        <div className="grid gap-x-10 gap-y-1 sm:grid-cols-2">
+
         {/* Erstzulassung */}
         <FieldGroup icon={<Calendar size={14} />} label="Erstzulassung">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <YearSelect testid="manual-ez-from" value={ezFrom} onChange={setEzFrom} years={years} placeholder="von" />
             <YearSelect testid="manual-ez-to"   value={ezTo}   onChange={setEzTo}   years={years} placeholder="bis" />
           </div>
@@ -217,7 +222,7 @@ export default function ManuelleSuche() {
 
         {/* KM */}
         <FieldGroup icon={<Gauge size={14} />} label="Kilometerstand">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <NumInput testid="manual-km-min" value={kmMin} onChange={setKmMin} placeholder="von km" suffix="km" />
             <NumInput testid="manual-km-max" value={kmMax} onChange={setKmMax} placeholder="bis km" suffix="km" />
           </div>
@@ -225,7 +230,7 @@ export default function ManuelleSuche() {
 
         {/* Leistung */}
         <FieldGroup icon={<Zap size={14} />} label="Leistung">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <NumInput testid="manual-kw" value={kw} onChange={onKwChange} placeholder="kW" suffix="kW" />
             <NumInput testid="manual-ps" value={ps} onChange={onPsChange} placeholder="PS" suffix="PS" />
           </div>
@@ -234,15 +239,18 @@ export default function ManuelleSuche() {
           </p>
         </FieldGroup>
 
-        {/* Kraftstoff */}
-        <FieldGroup icon={<Fuel size={14} />} label="Kraftstoff">
-          <ChipRow value={fuel} onChange={setFuel} options={FUELS} testidPrefix="manual-fuel" />
-        </FieldGroup>
-
-        {/* Getriebe */}
-        <FieldGroup icon={<Cog size={14} />} label="Getriebe">
-          <ChipRow value={gearbox} onChange={setGearbox} options={GEARBOXES} testidPrefix="manual-gear" />
-        </FieldGroup>
+        {/* Kraftstoff und Getriebe brauchen die volle Breite */}
+        <div className="sm:col-span-2">
+          <FieldGroup icon={<Fuel size={14} />} label="Kraftstoff">
+            <ChipRow value={fuel} onChange={setFuel} options={FUELS} testidPrefix="manual-fuel" />
+          </FieldGroup>
+        </div>
+        <div className="sm:col-span-2">
+          <FieldGroup icon={<Cog size={14} />} label="Getriebe">
+            <ChipRow value={gearbox} onChange={setGearbox} options={GEARBOXES} testidPrefix="manual-gear" />
+          </FieldGroup>
+        </div>
+        </div>
 
         {/* CTA */}
         {/* Portal-Auswahl-Dialog */}
@@ -254,7 +262,7 @@ export default function ManuelleSuche() {
             onClose={() => setPortalUrls(null)}
           />
         )}
-        <div className="flex flex-wrap items-center gap-3 pt-4 mt-2"
+        <div className="flex flex-wrap items-center gap-3 pt-5 mt-5"
              style={{ borderTop: "1px solid var(--hairline)" }}>
           <button
             data-testid="manual-submit"

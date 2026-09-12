@@ -20,7 +20,8 @@ from deps import (
     log_activity, log,
 )
 from mobile_service import DEFAULT_RULES
-from rate_limiter import client_ip, SlidingWindowRateLimiter, login_limiter, register_limiter
+from rate_limiter import (client_ip, SlidingWindowRateLimiter, login_ip_limiter,
+                          login_limiter, login_schluessel, register_limiter)
 
 # Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
 reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="passwort-reset")
@@ -126,6 +127,13 @@ def _self_signup_enabled() -> bool:
 
 
 # ---------- Endpoints ----------
+def _vertragstext_start() -> str:
+    """Startertext fuer neue Firmen. Spaeter Import: pdf_service zieht
+    reportlab nach und wird beim Anmelden nicht gebraucht."""
+    from pdf_service import VERTRAGSTEXT_START
+    return VERTRAGSTEXT_START
+
+
 @router.post("/auth/register", response_model=TokenOut)
 async def register(body: RegisterIn, request: Request):
     if not _self_signup_enabled():
@@ -174,18 +182,10 @@ async def register(body: RegisterIn, request: Request):
             "Hallo,\nhier ist der Kaufvertrag für Ihr Fahrzeug.\n"
             "Bitte einmal prüfen und kurz bestätigen. Danke!"
         ),
-        "default_terms": (
-            "Allgemeine Geschäftsbedingungen (AGB):\n"
-            "1. Das Fahrzeug wird unter Ausschluss jeglicher Sachmängelhaftung verkauft, "
-            "soweit gesetzlich zulässig (§ 444 BGB bleibt unberührt).\n"
-            "2. Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb erfolgt zum Zwecke "
-            "des gewerblichen Wiederverkaufs.\n"
-            "3. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n"
-            "4. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen bedürfen "
-            "der Schriftform.\n"
-            "5. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit gesetzlich "
-            "zulässig."
-        ),
+        # Runde 26: EIN Feld fuer Vertragsbedingungen. Der Startertext
+        # enthaelt die vier Klauseln UND die frueheren AGB-Punkte.
+        "default_terms": "",
+        "digital_vertragstext": _vertragstext_start(),
         "default_special_agreements": "",
         "created_at": now_iso(),
     }
@@ -366,10 +366,16 @@ async def login_mfa(body: MfaLoginIn, request: Request):
 
 @router.post("/auth/login")
 async def login(body: LoginIn, request: Request):
-    # Rate-limit by client IP (10 attempts / 60 s).
+    # Runde 26 (12.09.2026, Vorgabe Ahmad): Der Zaehler haengt am KONTO
+    # (IP + Kennung), nicht an der IP allein — sonst sperren sich 30 Sucher
+    # im selben Buero gegenseitig aus. Das weiter gefasste IP-Limit bremst
+    # weiterhin Rateversuche ueber viele Konten.
     ip = client_ip(request)
-    if not await login_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
+    schluessel = login_schluessel(ip, body.email or "")
+    if not await login_limiter.check(schluessel):
+        raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
+    if not await login_ip_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
 
     # Accept email OR username. Email lookup is case-insensitive.
     identifier = (body.email or "").strip()
@@ -392,6 +398,9 @@ async def login(body: LoginIn, request: Request):
         raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
+    # Passwort stimmte: Zaehler dieses Kontos leeren, damit fruehere
+    # Fehlversuche eine richtige Anmeldung spaeter nicht blockieren.
+    await login_limiter.reset(schluessel)
     if (user.get("mfa") or {}).get("aktiv"):
         # Zwei-Faktor (Abo-Audit 09/2026): noch KEINE Sitzung — erst der
         # zweite Faktor in /auth/login/mfa stellt das Sitzungs-Token aus.

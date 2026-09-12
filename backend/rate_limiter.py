@@ -283,6 +283,22 @@ class SlidingWindowRateLimiter:
 # 10 attempts / 60 s per IP for the dealer/admin login.
 login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login")
 
+# Runde 26 (12.09.2026, Vorgabe Ahmad: kein Sucher bremst einen anderen aus):
+# Der Login-Zaehler haengt am KONTO (IP + Kennung), nicht mehr allein an der
+# IP — 30 Sucher im selben Buero teilten sich sonst 10 Versuche je Minute,
+# und schon richtige Anmeldungen zaehlten mit. Zusaetzlich ein weit
+# gefasstes Limit je IP, damit Rateversuche ueber viele Konten weiter
+# gebremst werden (Standard 120/min, per LOGIN_IP_LIMIT einstellbar).
+login_ip_limiter = SlidingWindowRateLimiter(
+    max_attempts=int(os.environ.get("LOGIN_IP_LIMIT", "120") or 120),
+    window_seconds=60, name="login-ip")
+
+
+def login_schluessel(ip: str, kennung: str) -> str:
+    """Zaehler-Schluessel je Konto UND IP ("1.2.3.4|name@firma.de")."""
+    k = (kennung or "").strip().lower()
+    return f"{ip or 'unknown'}|{k}" if k else (ip or "unknown")
+
 # Slightly more lenient for the driver app (mobile clients can have flaky
 # connectivity and may retry quickly), but still bounded.
 driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60, name="fahrer-login")

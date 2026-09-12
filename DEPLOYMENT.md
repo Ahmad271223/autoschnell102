@@ -779,6 +779,28 @@ Browser es kann und die App dort noch nicht installiert ist.
   ```
   und ausrollen — beim nächsten Seitenaufruf meldet er sich überall ab.
 
+### Grenzen gelten je Konto, nicht je Firma oder Büro (Runde 26)
+Alle Sucher einer Firma sind eigenständige Konten und dürfen sich nie
+gegenseitig ausbremsen:
+
+- **Anmeldung:** 10 Versuche je Minute und **Konto** (IP + Kennung). Nach
+  einer erfolgreichen Anmeldung wird der Zähler geleert. Zusätzlich ein
+  weiter gefasstes Limit je IP gegen Rateversuche (`LOGIN_IP_LIMIT`,
+  Standard 120/min) — 30 Sucher hinter einer Büro-IP passen hinein.
+- **Kleinanzeigen-Rückfall:** `ABRUF_RUECKFALL_TAGESLIMIT` (25) gilt je
+  **Sucher** und Tag, nicht mehr je Firma.
+- **Vorschaubilder:** `BILD_PROXY_LIMIT` (1500/min je IP). Der Bild-Link ist
+  signiert und trägt kein Token, deshalb bleibt es ein IP-Limit — der Wert
+  ist aber auf ein Büro mit vielen Suchern ausgelegt (ein Vergleich lädt
+  bis zu 40 Bilder).
+- **Besucher-Adresse:** nginx setzt für `/api/` jetzt ausdrücklich
+  `X-Real-IP` und `X-Forwarded-For`. Vorher reichte es eine vom Besucher
+  selbst gesetzte Kopfzeile durch — die IP-Sperren waren beeinflussbar.
+  **Die Vorlage wird nur beim Start des Proxy-Containers ausgewertet.**
+  `deploy/rollout.sh` erkennt eine geänderte Vorlage seit Runde 26 selbst
+  und erzeugt den Proxy neu; von Hand:
+  `docker compose up -d --force-recreate --no-deps proxy`.
+
 ### Vertragslöschung (90 Tage) ist standardmäßig NUR Vorschau
 `VERTRAG_LOESCHUNG_AKTIV=false`: der stündliche Lauf schreibt eine
 Löschvorschau (`system_reports`, typ `vertrag_loeschvorschau`) und löscht

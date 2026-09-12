@@ -226,12 +226,22 @@ def welt():
 
 
 def test_10_einstellungen_liefern_standardtext(welt):
+    """Runde 26 (Zusammenlegung der zwei Textfelder): Neue Firmen starten
+    mit dem Startertext (vier Klauseln + AGB-Punkte) im EINEN Feld. Wer das
+    Feld leert, bekommt weiterhin den Standardtext."""
     for h in (welt["H"], welt["S"]):
         s = requests.get(f"{API}/dealer/settings", headers=h, timeout=30).json()
         assert s.get("digital_vertragstext_standard") == DIGITAL_VERTRAGSTEXT_STANDARD
-        assert not s.get("digital_vertragstext")
+        assert DIGITAL_VERTRAGSTEXT_STANDARD in (s.get("digital_vertragstext") or "")
+        assert "Gerichtsstand" in (s.get("digital_vertragstext") or ""), "AGB-Punkte dabei"
         me = requests.get(f"{API}/auth/me", headers=h, timeout=30).json()
         assert me["dealer"].get("digital_vertragstext_standard") == DIGITAL_VERTRAGSTEXT_STANDARD
+    # Feld leeren -> wieder der Standardtext
+    r = requests.put(f"{API}/dealer/settings", headers=welt["H"],
+                     json={"digital_vertragstext": ""}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    s = requests.get(f"{API}/dealer/settings", headers=welt["H"], timeout=30).json()
+    assert not s.get("digital_vertragstext")
 
 
 def test_11_chef_speichert_firmentext(welt):

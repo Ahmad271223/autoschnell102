@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
+import { wurdeZusammengefuehrt, zusammenfuehren } from "@/lib/vertragstext";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
   CreditCard, Calendar, X, ArrowRight, Bolt, Store,
@@ -13,7 +14,7 @@ const SECTIONS = [
   { id: "rules",      label: "Vergleich",      icon: Sliders },
   { id: "templates",  label: "Versand",        icon: Mail },
   { id: "markt",      label: "Marktplatz",     icon: Store },
-  { id: "agb",        label: "AGB & Vereinb.", icon: ShieldCheck },
+  { id: "agb",        label: "Vertragstexte", icon: ShieldCheck },
   { id: "abo",        label: "Abo",            icon: CreditCard },
 ];
 
@@ -43,9 +44,12 @@ export default function Einstellungen() {
       email_subject: dealer.email_subject || "",
       email_template: dealer.email_template || "",
       whatsapp_template: dealer.whatsapp_template || "",
-      default_terms: dealer.default_terms || "",
+      // Runde 26: EIN Feld. Ein noch vorhandener AGB-Text wird hier
+      // angehaengt; beim Speichern wird das alte Feld geleert.
+      default_terms: "",
       default_special_agreements: dealer.default_special_agreements || "",
-      digital_vertragstext: dealer.digital_vertragstext || "",
+      digital_vertragstext: zusammenfuehren(dealer.default_terms, dealer.digital_vertragstext),
+      _agb_zusammengefuehrt: wurdeZusammengefuehrt(dealer.default_terms, dealer.digital_vertragstext),
     });
   }, [dealer]);
 
@@ -82,7 +86,7 @@ export default function Einstellungen() {
   const save = async () => {
     try {
       // _edit_profile ist nur UI-State, nicht ans Backend schicken
-      const { _edit_profile, ...payload } = form;
+      const { _edit_profile, _agb_zusammengefuehrt, ...payload } = form;
       await api.put("/dealer/settings", payload);
       await refresh();
       toast.success("Einstellungen gespeichert");
@@ -360,29 +364,19 @@ export default function Einstellungen() {
           )}
 
           {active === "agb" && (
-            <Section title="AGB & Besondere Vereinbarungen"
+            <Section title="Vertragsbedingungen & Vereinbarungen"
                      subtitle="Diese Texte werden bei jedem neuen Kaufvertrag automatisch übernommen.">
+              {form._agb_zusammengefuehrt && (
+                <div className="rounded-xl border p-3 text-[12.5px] leading-relaxed"
+                     data-testid="agb-zusammengefuehrt"
+                     style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+                  Aus zwei Textfeldern ist eins geworden: Deine bisherigen AGB stehen jetzt
+                  unten im Feld „Vertragsbedingungen“. Bitte einmal durchlesen und speichern.
+                </div>
+              )}
               <AppleTextarea
-                label="Allgemeine Geschäftsbedingungen (AGB)"
-                rows={12}
-                value={form.default_terms}
-                onChange={(v) => setForm({ ...form, default_terms: v })}
-                icon={ShieldCheck}
-                testid="set-default-terms"
-                hint="Werden bei jedem PDF als eigener Block am Ende des Vertrags eingefügt."
-              />
-              <AppleTextarea
-                label="Standard-Besondere-Vereinbarungen"
-                rows={6}
-                value={form.default_special_agreements}
-                onChange={(v) => setForm({ ...form, default_special_agreements: v })}
-                icon={FileText}
-                testid="set-default-agreements"
-                hint='Wird in das Feld „Besondere Vereinbarungen" jedes neuen Vertrags vorbelegt — kann beim Erstellen überschrieben werden.'
-              />
-              <AppleTextarea
-                label="Allgemeine Vertragsbedingungen (in jedem Kaufvertrag)"
-                rows={10}
+                label="Vertragsbedingungen & AGB (stehen in jedem Kaufvertrag)"
+                rows={16}
                 value={form.digital_vertragstext}
                 onChange={(v) => setForm({ ...form, digital_vertragstext: v })}
                 icon={Mail}
@@ -407,6 +401,15 @@ export default function Einstellungen() {
                   Standardtext ins Feld übernehmen und anpassen
                 </button>
               )}
+              <AppleTextarea
+                label="Standard-Besondere-Vereinbarungen"
+                rows={6}
+                value={form.default_special_agreements}
+                onChange={(v) => setForm({ ...form, default_special_agreements: v })}
+                icon={FileText}
+                testid="set-default-agreements"
+                hint='Wird in das Feld „Besondere Vereinbarungen" jedes neuen Vertrags vorbelegt — kann beim Erstellen überschrieben werden.'
+              />
             </Section>
           )}
 

@@ -79,7 +79,7 @@ def welt(monkeypatch):
     w.keys = []
     w.run(BS.ensure_beweis_indexes(w.db))
 
-    async def _foto(url, kante=800):   # "a" liefert ein Bild, alles andere nichts
+    async def _foto(url, kante=800, qualitaet=0):   # "a" liefert ein Bild, alles andere nichts
         return _jpeg() if url.endswith("/a") else None
 
     monkeypatch.setattr(bild_proxy, "laden_fuer_pdf", _foto)

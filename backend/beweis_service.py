@@ -63,6 +63,13 @@ def _zahl_env(name: str, standard: int, unten: int, oben: int) -> int:
 BEWEIS_PARALLEL = _zahl_env("BEWEIS_PARALLEL", 1, 1, 8)
 # Hoechstzahl eingebetteter Fotos je Dokument (alle Adressen stehen im Anhang).
 BEWEIS_FOTOS_MAX = _zahl_env("BEWEIS_FOTOS_MAX", 20, 0, 60)
+# Runde 26 (12.09.2026, Wunsch Ahmad: Dokument kleiner): Fotos werden fuer
+# das Beweisdokument staerker verkleinert. Gemessen mit 9 Fotos: 666 KB ->
+# rund 374 KB, ohne dass Fahrzeug oder Schaeden schlechter erkennbar sind.
+_FOTO_KANTE_ERSTE = _zahl_env("BEWEIS_FOTO_KANTE_ERSTE", 1000, 400, 2000)
+_FOTO_KANTE = _zahl_env("BEWEIS_FOTO_KANTE", 640, 300, 2000)
+_FOTO_QUALITAET_ERSTE = _zahl_env("BEWEIS_FOTO_QUALITAET_ERSTE", 68, 40, 95)
+_FOTO_QUALITAET = _zahl_env("BEWEIS_FOTO_QUALITAET", 62, 40, 95)
 BEWEIS_AUFBEWAHRUNG_TAGE = _zahl_env("BEWEIS_AUFBEWAHRUNG_TAGE", 90, 1, 3650)
 # Name/Anschrift/Telefon auch privater Anbieter drucken (Standard: nein).
 BEWEIS_PRIVATDATEN = (os.environ.get("BEWEIS_PRIVATDATEN", "") or "").strip().lower() \
@@ -340,7 +347,10 @@ async def _fotos_laden(urls: List[str]) -> List[Optional[bytes]]:
     async def _eins(i: int, u: str) -> Optional[bytes]:
         async with sperre:
             try:
-                return await laden_fuer_pdf(u, 1280 if i == 0 else 800)
+                return await laden_fuer_pdf(
+                    u,
+                    _FOTO_KANTE_ERSTE if i == 0 else _FOTO_KANTE,
+                    _FOTO_QUALITAET_ERSTE if i == 0 else _FOTO_QUALITAET)
             except Exception:  # noqa: BLE001 — ein Foto darf das Dokument nie verhindern
                 return None
 

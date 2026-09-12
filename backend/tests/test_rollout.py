@@ -515,3 +515,17 @@ def test_betriebsprobe_kennt_option_zwischenstand(monkeypatch):
     assert modul.main() == 0 and gesehen == {"host": "app.example.test", "z": True}
     monkeypatch.setattr(modul.sys, "argv", ["betriebsprobe.py", "app.example.test"])
     assert modul.main() == 0 and gesehen["z"] is False
+
+
+def test_proxy_wird_bei_geaenderter_vorlage_neu_erzeugt():
+    """Runde 26 (12.09.2026): Die nginx-Vorlage wird nur beim Start des
+    Proxy-Containers ausgewertet. Aendert der Pull sie, muss das Rollout den
+    Proxy neu erzeugen — sonst bleibt z.B. die Weitergabe der Besucher-IP
+    still wirkungslos."""
+    s = (WURZEL / "deploy" / "rollout.sh").read_text(encoding="utf-8")
+    assert "PROXY_TEMPLATE=" in s and "vorlagen_stand()" in s
+    assert "--force-recreate --no-deps proxy" in s
+    # Reihenfolge: Stand merken -> pull -> vergleichen -> bauen -> Proxy neu
+    assert s.index("VORLAGE_VORHER=") < s.index("git pull --ff-only")
+    assert s.index("git pull --ff-only") < s.index("PROXY_NEU=1")
+    assert s.index("docker compose up -d --build") < s.index("--force-recreate --no-deps proxy")

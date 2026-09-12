@@ -419,7 +419,14 @@ async def serve_file(key: str, exp: Optional[str] = None, sig: Optional[str] = N
 
 # ---------- Bild-Proxy fuer Inseratsfotos (10.09.2026) ----------
 # 300 Bilder / 60 s je IP: eine Vergleichsseite laedt hoechstens 10-40.
-_bild_limiter = SlidingWindowRateLimiter(max_attempts=300, window_seconds=60, name="bild_proxy")
+# Runde 26 (12.09.2026): 30 Sucher im selben Buero teilen sich EINE oeffentliche
+# IP, und ein Vergleich laedt bis zu 40 Vorschaubilder — mit 300/min bekamen
+# spaetere Nutzer 429 und sahen Fahrzeuge ohne Bild. Die Adresse ist beim
+# signierten Bild-Link die einzige Kennung (kein Token im <img>-Tag), deshalb
+# bleibt es ein IP-Limit, aber mit realistischem Wert (BILD_PROXY_LIMIT).
+_bild_limiter = SlidingWindowRateLimiter(
+    max_attempts=int(os.environ.get("BILD_PROXY_LIMIT", "1500") or 1500),
+    window_seconds=60, name="bild_proxy")
 
 
 @app.get("/api/bild")
@@ -721,6 +728,18 @@ async def ensure_indexes():
     # Monatsstatistik je Sucher.
     await db.vehicle_comparisons.create_index(
         [("user_id", 1), ("created_at", -1)])
+    # Runde 27 (12.09.2026): heisse Abfrage des LIVE-Zaehlers — bei vielen
+    # Suchern fragt die Vergleichsseite alle 30 s nach. Ohne diesen Index
+    # scannt Mongo dafuer die ganze Sammlung.
+    await db.vehicle_comparisons.create_index(
+        [("cache_key", 1), ("created_at", -1)])
+    # Runde 27 (Gegenpruefung): Die Fahrzeugakte zaehlt Vertraege und Termine
+    # je Fahrzeug. Ohne diese Indizes muss Mongo dafuer jedes Vertrags-
+    # dokument der Firma laden — samt eingebettetem PDF (mehrere hundert KB).
+    await db.generated_pdfs.create_index([("dealer_id", 1), ("vehicle_id", 1)])
+    await db.appointments.create_index([("dealer_id", 1), ("vehicle_id", 1)])
+    # Bestandsliste sortiert nach lifecycle_changed_at (mit Limit).
+    await db.vehicles.create_index([("dealer_id", 1), ("lifecycle_changed_at", -1)])
     await db.generated_pdfs.create_index([("user_id", 1), ("created_at", -1)])
     await db.resale_listings.create_index([("vehicle_id", 1)])
     # Phase 3: Marktplatz
