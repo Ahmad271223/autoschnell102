@@ -10,6 +10,8 @@ from anbieter_fehler import AnbieterFehler, melden
 import os
 from typing import Any, Dict
 
+from deps import log
+
 # NUR fuer Staging-Lasttests: externe Abrufe durch synthetische Daten
 # ersetzen (Cache-, Lease- und Begrenzungslogik laeuft trotzdem echt).
 # NIE in Produktion setzen.
@@ -113,10 +115,65 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
         raise
 
 
+async def _mit_scrape_bremse(db, ueber_api: bool, holen, url: str) -> Dict[str, Any]:
+    """Den eigenen HTML-Abruf unter der STRENGEN Kleinanzeigen-Grenze laufen
+    lassen (Gegenpruefung 12.09.2026).
+
+    Der Slot fuer den Abruf wird eine Ebene hoeher belegt (listing_identity),
+    und zwar nach der Frage "ist ein API-Schluessel hinterlegt?" — also mit
+    der lockeren Grenze des bezahlten Dienstes. Genau dann, wenn die API
+    ausfaellt und wirklich gescrapt wird, waere Kleinanzeigen dadurch mit dem
+    Vierfachen belastet worden. Ist der aeussere Slot aus dem API-Topf, holen
+    wir hier zusaetzlich einen Slot aus dem strengen Topf.
+
+    Ohne API-Schluessel liegt der aeussere Slot bereits im strengen Topf —
+    dann NICHT noch einmal belegen (das waere eine Selbstblockade)."""
+    if not ueber_api or db is None:
+        return await holen(url)
+    from provider_limiter import acquire_slot, release_slot
+    from listing_identity import ListingBusy
+    slot = None
+    for _versuch in range(100):           # bis ~30 s auf die Bremse warten
+        slot = await acquire_slot(db, "kleinanzeigen")
+        if slot:
+            break
+        await asyncio.sleep(0.3)
+    if not slot:
+        raise ListingBusy(
+            "Gerade werden viele Inserate gleichzeitig geladen - "
+            "bitte in ein paar Sekunden erneut versuchen.")
+    try:
+        return await holen(url)
+    finally:
+        await release_slot(db, slot)
+
+
 async def _abrufen(db, source: str, item_id: str, url: str) -> Dict[str, Any]:
     if source == "kleinanzeigen":
         from kleinanzeigen_service import fetch_kleinanzeigen_vehicle
-        v = await fetch_kleinanzeigen_vehicle(url)
+        # Wunsch Ahmad 12.09.2026: ZUERST die API von kleinanzeigen-agent.de
+        # (gemessen 0,4 s statt mehrerer Sekunden, strukturierte Daten, kein
+        # Blockieren durch Kleinanzeigen). Der eigene Abruf bleibt die
+        # Notloesung — faellt die API aus, merkt der Nutzer nichts ausser
+        # der laengeren Wartezeit.
+        import kleinanzeigen_api as _api
+        v = None
+        ueber_api = _api.api_verfuegbar()
+        if ueber_api:
+            try:
+                v = await _api.hole_inserat(item_id, url)
+            except _api.ApiNichtNutzbar as exc:
+                log.warning("Kleinanzeigen-API nicht nutzbar (%s) — eigener Abruf fuer %s", exc, item_id)
+        if v is None:
+            # Gegenpruefung 12.09.2026 (schwerer Befund): Der aeussere
+            # Begrenzungs-Slot wurde bereits nach "API vorhanden" gewaehlt
+            # (8 gleichzeitig). Faellt die API aus, lief das Abgreifen der
+            # Webseite unter dieser lockeren Grenze — also ausgerechnet dann
+            # vierfach, wenn NUR noch gescrapt wird. Deshalb hier zusaetzlich
+            # die strenge Bremse des Selbst-Abrufs.
+            v = await _mit_scrape_bremse(db, ueber_api,
+                                         fetch_kleinanzeigen_vehicle, url)
+            v["_abrufweg"] = "eigener-abruf"
         v["mobile_ad_id"] = v.get("kleinanzeigen_id") or item_id
         v.setdefault("kleinanzeigen_id", item_id)
         return v

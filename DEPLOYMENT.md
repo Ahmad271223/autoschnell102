@@ -793,6 +793,20 @@ gegenseitig ausbremsen:
   signiert und trägt kein Token, deshalb bleibt es ein IP-Limit — der Wert
   ist aber auf ein Büro mit vielen Suchern ausgelegt (ein Vergleich lädt
   bis zu 40 Bilder).
+- **Kleinanzeigen über die API:** Ist `KLEINANZEIGEN_API_KEY` gesetzt,
+  werden Inserate zuerst über die API von kleinanzeigen-agent.de geholt
+  (gemessen 12.09.2026: 0,4 s je Inserat, 8 gleichzeitige Anfragen in
+  0,56 s, Limit 600 Anfragen/Minute). Sie liefert zusätzlich den
+  Verkäufernamen und meldet beendete Anzeigen zuverlässig. Der eigene
+  Abruf der Webseite bleibt die **Notlösung** und springt bei jedem
+  API-Problem automatisch ein — ohne Schlüssel läuft alles wie bisher.
+  Deshalb gilt für den API-Weg eine eigene, höhere Obergrenze
+  (`MAX_CONCURRENT_KLEINANZEIGEN_API`, 8) als für den Selbst-Abruf
+  (`MAX_CONCURRENT_KLEINANZEIGEN`, 2). Wird der Schlüssel abgelehnt,
+  steht das als Fehler im Protokoll — sonst liefe still der langsame Weg.
+  **Bekannte Einschränkung:** In Großstädten außerhalb von Berlin/Hamburg
+  nennt die API den Stadtteil statt der Stadt ("30179 Nord" statt
+  "30179 Hannover"). Das Feld ist im Vertragsdialog editierbar.
 - **Link-Warteschlange:** Jeder Sucher darf höchstens
   `LINK_JOB_MAX_OFFEN_JE_KONTO` (20) offene Link-Abrufe haben, die Firma
   `LINK_JOB_MAX_OFFEN_JE_FIRMA` (100). Darüber kommt 429 mit klarer

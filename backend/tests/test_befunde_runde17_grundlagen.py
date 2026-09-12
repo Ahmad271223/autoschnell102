@@ -238,8 +238,12 @@ def test_09_unique_index_sicher_feldliste_alarm_statt_abbruch(welt, monkeypatch)
     assert ok is False and alarm and "v1" in alarm["details"]["beispiele"]
     assert ok2 is True and any(i.get("unique") and i["key"] == [("dealer_id", 1), ("id", 1)] for i in info.values())
     assert alarm2 is None
-    assert "await _unique_index_sicher(db.vehicles, [\"dealer_id\", \"id\"], abbruch_in_produktion=False)" \
-        in (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
+    quelle = (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
+    assert 'db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False' in quelle
+    # Runde 29 (12.09.2026): Der Start bricht weiterhin NICHT ab — aber die
+    # Instanz meldet sich ueber /ready als nicht bereit, damit der Load
+    # Balancer sie nicht in die Rotation nimmt.
+    assert 'BETRIEBSBEREIT["index_vehicles"]' in quelle
 
 
 def test_10_termin_unique_index_alarmiert_bei_dubletten_und_filtert_leere_ids(welt, monkeypatch):

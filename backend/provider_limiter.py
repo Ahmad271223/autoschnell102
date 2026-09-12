@@ -21,6 +21,12 @@ from pymongo import ReturnDocument
 # Gleichzeitige externe Abrufe JE QUELLE, ueber alle Prozesse/Server gesamt.
 PROVIDER_MAX_CONCURRENT = {
     "kleinanzeigen": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN", "3")),
+    # Runde 29 (12.09.2026): Der Weg ueber die API ist ein bezahlter Dienst,
+    # kein Abgreifen der Webseite — er darf deutlich mehr gleichzeitig. Die
+    # API selbst erlaubt 600 Anfragen je Minute (gemessen), 8 gleichzeitige
+    # Anfragen beantwortet sie in 0,56 s. Der eigene Abruf bleibt streng
+    # begrenzt, damit wir Kleinanzeigen nicht belasten.
+    "kleinanzeigen_api": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN_API", "8")),
     "mobile": int(os.environ.get("MAX_CONCURRENT_MOBILE", "10")),
     "autoscout24": int(os.environ.get("MAX_CONCURRENT_AUTOSCOUT", "3")),
 }

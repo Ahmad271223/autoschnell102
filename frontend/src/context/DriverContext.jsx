@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_FAHRER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
-import { API_BASE, openAuthedFile } from "@/lib/api";
+import { API_BASE, istLangeAktion, LANGE_AKTION_MS, openAuthedFile } from "@/lib/api";
 import { verbindungsGrund } from "@/components/VerbindungsFehler";
 
 /**
@@ -14,6 +14,10 @@ export const driverApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 driverApi.interceptors.request.use((c) => {
   const t = tokenLesen(TOKEN_FAHRER);
   if (t) c.headers.Authorization = `Bearer ${t}`;
+  // Gegenpruefung 12.09.2026: Die Fahrer-App hat eine EIGENE Verbindung und
+  // bekam das laengere Zeitlimit nicht — Abholprotokoll und Kaufvertrag sind
+  // aber genau die PDFs, die am laengsten brauchen.
+  if (istLangeAktion(c)) c.timeout = LANGE_AKTION_MS;
   return c;
 });
 

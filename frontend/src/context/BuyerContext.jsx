@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, istLangeAktion, LANGE_AKTION_MS } from "@/lib/api";
 
 /**
  * Zwischenhändler-Auth (Rolle b2b_buyer, eigene Accounts — separat vom
@@ -13,6 +13,8 @@ export const buyerApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
 buyerApi.interceptors.request.use((c) => {
   const t = tokenLesen(TOKEN_KAEUFER);
   if (t) c.headers.Authorization = `Bearer ${t}`;
+  // Wie in der Haendler- und Fahrer-App: Datei-Abrufe duerfen laenger dauern.
+  if (istLangeAktion(c)) c.timeout = LANGE_AKTION_MS;
   return c;
 });
 // Session beendet (anderes Gerät / abgemeldet) -> sauber zum Login statt

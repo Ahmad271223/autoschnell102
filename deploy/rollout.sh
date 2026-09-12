@@ -153,6 +153,20 @@ vorlagen_stand() {
     return 0
 }
 VORLAGE_VORHER=$(vorlagen_stand)
+# Runde 29 (12.09.2026, Vorfall Cloudflare-404): Der Vergleich VOR/NACH dem
+# Pull greift nur, wenn rollout.sh selbst pullt. Wer vorher von Hand pullt
+# (so steht es im Handbuch), bekommt hier nur noch Already up to date — die
+# geaenderte Vorlage blieb dann still wirkungslos, weil der Proxy seine
+# Konfiguration NUR beim Start auswertet. Genau deshalb fehlte am 12.09. die
+# Regel, fehlende Bundle-Dateien nicht zwischenspeichern zu lassen, und
+# Cloudflare hielt ein 404 fest (leere Seite fuer alle Besucher).
+# Jetzt merkt sich der Server, mit welcher Vorlage der Proxy zuletzt erzeugt
+# wurde — unabhaengig davon, wer gepullt hat.
+VORLAGE_MARKE=deploy/.proxy-vorlage
+if [ "$(vorlagen_stand)" != "$(cat "$VORLAGE_MARKE" 2>/dev/null || echo "")" ]; then
+    PROXY_NEU=1
+    echo "   Proxy laeuft nicht mit der aktuellen nginx-Vorlage — er wird neu erzeugt"
+fi
 
 echo "== 2/6 Code holen"
 git pull --ff-only
@@ -161,12 +175,43 @@ if [ "$(vorlagen_stand)" != "$VORLAGE_VORHER" ]; then
     echo "   nginx-Vorlage geaendert ($VORLAGE) — der Proxy wird neu erzeugt"
 fi
 
+# Runde 29 (12.09.2026): Die Bundle-Dateien des VORHERIGEN Standes aufheben.
+# Wer die App offen hat, laedt nach dem Rollout noch Dateien des alten
+# Standes nach (Vite teilt den Code in viele Haeppchen auf) — ohne Kopie
+# gibt es dafuer 404 und einen schwarzen Bildschirm bis zum Neuladen.
+# Der Ordner haengt schreibgeschuetzt im Oberflaechen-Container.
+mkdir -p deploy/assets-alt/static 2>/dev/null || true
+WEB_ALT=$(docker compose ps -q web 2>/dev/null || true)
+if [ -n "$WEB_ALT" ]; then
+    # Gegenpruefung 12.09.2026: "docker cp" uebernimmt die Zeitstempel AUS
+    # DEM IMAGE (Bauzeit). Ein "find -mtime +14" direkt danach haette die
+    # gerade kopierten Dateien sofort wieder geloescht — der Rueckfall waere
+    # genau dann leer gewesen, wenn er gebraucht wird. Deshalb: erst in einen
+    # Zwischenordner kopieren, dort die Zeitstempel auf JETZT setzen, dann
+    # hinueberlegen (cp -a behaelt die aufgefrischte Zeit).
+    rm -rf deploy/assets-alt/.neu 2>/dev/null || true
+    mkdir -p deploy/assets-alt/.neu 2>/dev/null || true
+    if docker cp "$WEB_ALT:/usr/share/nginx/html/static/." deploy/assets-alt/.neu/ 2>/dev/null; then
+        find deploy/assets-alt/.neu -type f -exec touch {} + 2>/dev/null || true
+        cp -a deploy/assets-alt/.neu/. deploy/assets-alt/static/ 2>/dev/null || true
+    fi
+    rm -rf deploy/assets-alt/.neu 2>/dev/null || true
+fi
+# Nach 14 Tagen aufraeumen, damit der Ordner nicht unbegrenzt waechst. Zaehlt
+# ab dem AUFHEBEN (siehe touch oben), nicht ab der Bauzeit des Images.
+find deploy/assets-alt/static -type f -mtime +14 -delete 2>/dev/null || true
+
 echo "== 3/6 Bauen und starten"
 docker compose up -d --build
 if [ "$PROXY_NEU" = 1 ]; then
     # Der Drain-Marker auf dem Host (deploy/drain/aktiv) ueberlebt das,
     # der Server bleibt also waehrenddessen aus der Rotation.
     docker compose up -d --force-recreate --no-deps proxy
+    # Merken, mit welcher Vorlage der Proxy jetzt laeuft (Runde 29).
+    # Nicht abbrechen, wenn sich die Marke nicht schreiben laesst (set -e):
+    # der Proxy laeuft dann schon richtig, nur die Erkennung greift beim
+    # naechsten Mal erneut — das ist harmlos, ein Abbruch im Drain nicht.
+    vorlagen_stand > "$VORLAGE_MARKE" 2>/dev/null || true
 fi
 
 echo "== 4/6 Warten, bis Backend und Oberflaeche antworten"

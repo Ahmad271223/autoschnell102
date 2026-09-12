@@ -241,6 +241,24 @@ async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
         {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"})
     if not s:
         raise HTTPException(404, "Sucher nicht gefunden")
+    # Runde 29 (12.09.2026, Pruefbefund): VOR dem Loeschen die Arbeit des
+    # Kontos uebernehmen. Vorher blieben die Fahrzeuge mit owner_user_id des
+    # geloeschten Suchers stehen (Besitzer, den es nicht mehr gibt) und sein
+    # Name stand weiter in mitbearbeiter_ids. Bricht der Vorgang hier ab,
+    # existiert der Sucher noch und der Chef kann es einfach erneut
+    # versuchen — nichts Halbes bleibt zurueck.
+    jetzt = now_iso()
+    firma = {"dealer_id": user["dealer_id"]}
+    uebernommen = (await db.vehicles.update_many(
+        {**firma, "owner_user_id": sucher_id},
+        {"$set": {"owner_user_id": user["id"], "uebernommen_von": sucher_id,
+                  "updated_at": jetzt}})).modified_count
+    await db.vehicles.update_many(
+        {**firma, "mitbearbeiter_ids": sucher_id},
+        {"$pull": {"mitbearbeiter_ids": sucher_id}})
+    # Vertraege, Kaufvorgaenge und Termine bleiben unveraendert: sie sind
+    # Belege und gehoeren der Firma — der Chef sieht sie ohnehin alle, und
+    # wer sie angelegt hat, gehoert zur Nachvollziehbarkeit.
     await db.users.delete_one({"id": sucher_id})
     # Persoenliche Reste mitloeschen (PR-Review 09/2026): das Sucher-Abo
     # blieb sonst bestehen und konnte Status-/Kuendigungslogik verwirren.
@@ -255,7 +273,8 @@ async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
     from snapshot_service import snapshots_pseudonymisieren
     await snapshots_pseudonymisieren(db, user_id=sucher_id)
     await log_activity(user["dealer_id"], user["id"], "sucher.geloescht",
-                       ref=sucher_id, meta={"email": s.get("email", "")})
+                       ref=sucher_id, meta={"email": s.get("email", ""),
+                                            "fahrzeuge_uebernommen": uebernommen})
     return {"ok": True}
 
 

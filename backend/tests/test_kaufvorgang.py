@@ -426,7 +426,15 @@ def test_10_index_und_betrieb_kennen_den_vertragsindex():
     a = (WURZEL / "backend" / "routes" / "admin.py").read_text(encoding="utf-8")
     assert '"termin_offen_je_vertrag" in await db.appointments.index_information()' in a
     s = (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
-    assert '_unique_index_sicher(db.kaufvorgaenge, "contract_id"' in s
+    assert "_unique_index_sicher(" in s and 'db.kaufvorgaenge, "contract_id"' in s
+    # Runde 29 (12.09.2026): Fehlt der Index, darf die Instanz nicht in die
+    # Rotation — /ready meldet dann einen Fehler (503) statt nur zu warnen.
+    assert 'BETRIEBSBEREIT["index_kaufvorgaenge"]' in s
+    # Gegenpruefung 12.09.2026: geprueft wird LIVE (nicht ueber den Merker
+    # vom Start) — sonst bliebe /ready nach dem Bereinigen der Dubletten
+    # dauerhaft auf 503 und der Server waere nicht mehr freizugeben.
+    assert '"kaufvorgaenge": ("contract_id",)' in s
+    assert "index_information()" in s
 
 
 def test_11_migration_meldet_fahrzeuge_ohne_besitzer_als_alarm(welt):

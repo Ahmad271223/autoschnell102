@@ -134,6 +134,13 @@ async def _validierungsfehler(request: Request, exc: RequestValidationError):
         e["input"] = _json_sicher(e.get("input"))
         fehler.append(e)
     return JSONResponse(status_code=422, content={"detail": fehler})
+# Runde 29 (12.09.2026, Pruefbefund): Zustand der kritischen Startteile.
+# True = steht, False = fehlgeschlagen, gar nicht gesetzt = noch nicht
+# versucht (z.B. Tests, die ensure_indexes nicht aufrufen). /ready macht
+# aus False einen FEHLER — der Load Balancer nimmt die Instanz dann nicht
+# in die Rotation, statt kaputte Antworten an Besucher zu liefern.
+BETRIEBSBEREIT: dict = {}
+
 api = APIRouter(prefix="/api")
 
 
@@ -363,6 +370,48 @@ async def readiness_check(response: Response):
         _ = alt
     except Exception as exc:
         warnungen.append(f"queue: {exc}")
+    # Runde 29 (12.09.2026, Pruefbefund): Fehlt ein kritischer Unique-Index
+    # oder laeuft der Link-Worker nicht, darf diese Instanz NICHT in die
+    # Rotation. Vorher wurde das nur ins Protokoll geschrieben und der
+    # Server bediente trotzdem Besucher.
+    #
+    # Gegenpruefung 12.09.2026 (schwerer Befund): Die Indizes werden LIVE
+    # geprueft, nicht ueber einen Merker vom Start. Sonst meldete /ready nach
+    # dem Bereinigen der Dubletten weiter 503 — und weil deploy/rollout.sh und
+    # deploy/freigeben.sh genau diese Route abfragen, waere der Server nicht
+    # mehr aus dem Drain zu holen gewesen, ohne alle Prozesse neu zu starten.
+    # (Der Load Balancer prueft /api/health, nicht /ready — ein laufender
+    # Server faellt dadurch also nicht aus der Rotation.)
+    kritische_indizes = {
+        "vehicles": ("dealer_id", "id"),
+        "kaufvorgaenge": ("contract_id",),
+    }
+    steht = {}
+    for sammlung, felder in kritische_indizes.items():
+        try:
+            vorhanden = await db[sammlung].index_information()
+            steht[sammlung] = any(
+                i.get("unique") and [f for f, _r in i["key"]] == list(felder)
+                for i in vorhanden.values())
+        except Exception as exc:  # noqa: BLE001
+            warnungen.append(f"Index-Pruefung {sammlung}: {exc}")
+            continue
+        if not steht[sammlung]:
+            fehler.append(
+                f"Unique-Index {sammlung} ({', '.join(felder)}) fehlt — "
+                "Dubletten sind moeglich. Bereinigen mit "
+                "'python scripts/dubletten_pruefen.py', danach greift das "
+                "sofort (kein Neustart noetig).")
+    # Prozesslokale Teile: sie koennen sich nicht selbst heilen, ein Neustart
+    # dieses Prozesses ist der Weg.
+    _TEILE = {"link_worker": "Link-Abruf-Arbeiter",
+              "anbieter_grenze": "Anbieter-Begrenzung (provider_limiter)"}
+    for schluessel, klartext in _TEILE.items():
+        if BETRIEBSBEREIT.get(schluessel) is False:
+            fehler.append(f"{klartext} ist beim Start gescheitert — "
+                          "Protokoll pruefen und diesen Prozess neu starten")
+    info["betriebsbereit"] = {**BETRIEBSBEREIT, **{f"index_{k}": v
+                                                   for k, v in steht.items()}}
     bereit = not fehler
     if not bereit:
         response.status_code = 503
@@ -700,9 +749,18 @@ async def ensure_indexes():
     # Runde 17: EIN Fahrzeugdokument je (Firma, Fahrzeug-ID) — zwei
     # gleichzeitige erste Vergleiche upserteten vorher zwei Dokumente.
     # Altdubletten: kein Startabbruch, sondern Betriebsalarm.
-    await _unique_index_sicher(db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)
+    # Runde 29 (12.09.2026, Pruefbefund): Stehen diese beiden Indizes nicht,
+    # sind Dubletten moeglich (zwei Fahrzeugdokumente, zwei Vorgaenge je
+    # Vertrag). Der Start bricht bewusst NICHT ab — sonst haette eine
+    # Altdublette den ganzen Server unbedienbar gemacht. Stattdessen meldet
+    # /ready einen FEHLER: der Load Balancer nimmt die Instanz gar nicht erst
+    # in die Rotation, und die Ursache laesst sich in Ruhe beheben
+    # (python scripts/dubletten_pruefen.py).
+    BETRIEBSBEREIT["index_vehicles"] = await _unique_index_sicher(
+        db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)
     # Umbau Kaufvorgaenge 09.09.2026: ein Vorgang je Vertrag
-    await _unique_index_sicher(db.kaufvorgaenge, "contract_id", abbruch_in_produktion=False)
+    BETRIEBSBEREIT["index_kaufvorgaenge"] = await _unique_index_sicher(
+        db.kaufvorgaenge, "contract_id", abbruch_in_produktion=False)
     await db.kaufvorgaenge.create_index([("dealer_id", 1), ("vehicle_id", 1)])
     await db.kaufvorgaenge.create_index([("dealer_id", 1), ("user_id", 1)])
     await db.kaufvorgaenge.create_index("appointment_id")
@@ -975,8 +1033,10 @@ async def on_start():
     try:
         from provider_limiter import ensure_slot_indexes
         await ensure_slot_indexes(db)
+        BETRIEBSBEREIT["anbieter_grenze"] = True
     except Exception as exc:
         log.warning("provider slot index setup failed: %s", exc)
+        BETRIEBSBEREIT["anbieter_grenze"] = False
     # Linkpruefungs-Jobs: Indizes synchron, dann die Job-Schleife dieses
     # Workers starten (Details in link_jobs.py).
     try:
@@ -984,8 +1044,10 @@ async def on_start():
         await ensure_job_indexes(db)
         import asyncio
         asyncio.create_task(run_job_worker_forever(db))
+        BETRIEBSBEREIT["link_worker"] = True
     except Exception as exc:
         log.warning("link job worker start failed: %s", exc)
+        BETRIEBSBEREIT["link_worker"] = False
     # Beweisdokumente je Inserat (ersetzt die Snapshots): Indizes synchron,
     # dann die Erzeugungs-Schleife dieses Workers (beweis_service.py).
     try:

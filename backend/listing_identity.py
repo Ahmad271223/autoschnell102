@@ -554,13 +554,26 @@ async def get_or_fetch_listing(
     # sondern hoechstens MAX_CONCURRENT_<QUELLE> — der Rest wartet kurz
     # oder bekommt eine freundliche "bitte gleich nochmal"-Antwort.
     from provider_limiter import acquire_slot, extend_slot, release_slot
+    # Runde 29 (12.09.2026): Kleinanzeigen wird jetzt zuerst ueber die API
+    # geholt (bezahlter Dienst, 600 Anfragen/Minute) statt die Webseite
+    # abzugreifen. Dafuer gilt eine eigene, deutlich hoehere Obergrenze —
+    # sonst wuerde die strenge Bremse des Selbst-Abrufs (2-3 gleichzeitig)
+    # 30 Sucher ausbremsen, obwohl die API muehelos mithaelt.
+    begrenzung = source
+    if source == "kleinanzeigen":
+        try:
+            from kleinanzeigen_api import api_verfuegbar
+            if api_verfuegbar():
+                begrenzung = "kleinanzeigen_api"
+        except Exception:  # noqa: BLE001 — im Zweifel die strenge Bremse
+            pass
     slot_id = None
     try:
         # 0,3-s-Takt statt 1,5 s: bei kurzen Abrufen (Mock 0,4 s; echte
         # Abrufe 1-3 s) verschenkte der grobe Takt bis zu 1,5 s je
         # Slot-Wechsel — das drittelte den Durchsatz der Warteschlange.
         for _try in range(100):                # max. ~30 s auf einen Slot warten
-            slot_id = await acquire_slot(db, source)
+            slot_id = await acquire_slot(db, begrenzung)
             if slot_id:
                 break
             await _aio.sleep(0.3)

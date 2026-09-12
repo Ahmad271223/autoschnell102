@@ -38,8 +38,9 @@ RUN printf 'server {\n\
   add_header Content-Security-Policy "frame-ancestors '"'"'none'"'"'" always;\n\
   gzip on;\n\
   gzip_types text/plain text/css application/json application/javascript text/javascript image/svg+xml;\n\
-  location /static/ { expires 1y; add_header Cache-Control "public, max-age=31536000, immutable" always; try_files $uri =404; }\n\
-  location /fonts/ { expires 30d; add_header Cache-Control "public, max-age=2592000" always; try_files $uri =404; }\n\
+  location /static/ { expires 1y; add_header Cache-Control "public, max-age=31536000, immutable" always; try_files $uri /alt$uri @fehlt; }\n\
+  location @fehlt { add_header Cache-Control "no-store" always; return 404; }\n\
+  location /fonts/ { expires 30d; add_header Cache-Control "public, max-age=2592000" always; try_files $uri @fehlt; }\n\
   location = /index.html { add_header Cache-Control "no-store" always; }\n\
   location = /service-worker.js { add_header Cache-Control "no-cache" always; add_header X-Content-Type-Options "nosniff" always; }\n\
   location = /boot.js { add_header Cache-Control "no-cache" always; add_header X-Content-Type-Options "nosniff" always; }\n\

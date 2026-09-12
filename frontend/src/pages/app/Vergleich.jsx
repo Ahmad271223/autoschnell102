@@ -22,11 +22,6 @@ import {
   einstellungLesen, einstellungSchreiben, vergleichLaden, vergleichSichern,
 } from "@/lib/vergleichSpeicher";
 
-// Aktuell ist nur Kleinanzeigen als Daten-Quelle freigeschaltet;
-// mobile.de-/AutoScout-Links folgen, sobald der API-Zugang vorliegt.
-const SAMPLE_URLS = [
-  "https://www.kleinanzeigen.de/s-anzeige/...",
-];
 
 // Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
 // und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
@@ -370,20 +365,7 @@ export default function Vergleich() {
           </button>
         </div>
 
-        {/* Demo-URLs */}
         <div className="mt-3 text-xs flex flex-wrap gap-2 items-center" style={{ color: "var(--text-muted)" }}>
-          <span style={{ color: "var(--text-secondary)" }}>Demo:</span>
-          {SAMPLE_URLS.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setUrl(s)}
-              data-testid={`sample-url-${s.split("=").pop()}`}
-              className="apple-btn apple-btn-secondary !py-1 !px-2.5 !text-[11px] !rounded-full font-mono"
-            >
-              ID: {s.split(/[=/]/).pop()}
-            </button>
-          ))}
           {/* Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen */}
           <label
             className="inline-flex items-center gap-1.5 sm:ml-3 cursor-pointer select-none"

@@ -9,9 +9,30 @@ export const API_BASE = `${BACKEND}/api`;
 // statt eines endlosen Spinners (Vergleich + PDF sind die langsamsten Wege).
 export const api = axios.create({ baseURL: API_BASE, timeout: 60000 });
 
+// Runde 29 (12.09.2026, Pruefbefund): 60 s passen fuer die schnellen Wege,
+// sind aber zu knapp fuer die langsamen. nginx laesst Anfragen bis 300 s
+// laufen — der Browser brach nach 60 s ab, der Nutzer sah einen Fehler,
+// obwohl der Server weiterarbeitete (und der Vertrag am Ende doch entstand).
+// Betroffen sind das Erzeugen des Kaufvertrags und alle Datei-Abrufe (PDF).
+//
+// Hinweis (Gegenpruefung): In Produktion liegt Cloudflare davor und kappt
+// eine Anfrage nach rund 100 s mit HTTP 524. Dieses Limit wirkt also als
+// Netz fuer den Browser, nicht als Verlaengerung darueber hinaus — es
+// verhindert vor allem, dass der Browser VOR dem Server aufgibt.
+export const LANGE_AKTION_MS = 180000;
+
+/** Braucht diese Anfrage das lange Zeitlimit? (rein, damit testbar) */
+export function istLangeAktion(config = {}) {
+  if (config.responseType === "blob") return true;
+  const pfad = String(config.url || "");
+  const methode = String(config.method || "get").toLowerCase();
+  return methode === "post" && /^\/contracts(\/|$|\?)/.test(pfad);
+}
+
 api.interceptors.request.use((config) => {
   const token = tokenLesen(TOKEN_APP);
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (istLangeAktion(config)) config.timeout = LANGE_AKTION_MS;
   return config;
 });
 

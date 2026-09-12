@@ -877,9 +877,12 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         if (appt.get("status") or "offen") not in ("offen", "verschoben"):
             raise HTTPException(409, "Abgeschlossene oder stornierte Termine "
                                      "löscht nur der Händler-Hauptaccount")
-    res = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]})
-    if not res.deleted_count:
-        raise HTTPException(404, "Termin nicht gefunden")
+    # Runde 29 (12.09.2026, Pruefbefund): ZUERST die Verweise loesen, DANN
+    # den Termin loeschen. Vorher war es umgekehrt — brach der Vorgang
+    # dazwischen ab (Neustart, Netz weg), war der Termin weg, und Kaufvorgang
+    # und Vertrag zeigten fuer immer auf einen Termin, den es nicht mehr gibt.
+    # In dieser Reihenfolge ist der schlimmste Fall harmlos: der Termin steht
+    # noch da und laesst sich einfach erneut loeschen.
     # Umbau Kaufvorgaenge: der Vorgang verliert den Termin (zurueck auf
     # "Vertrag erstellt"), Vertragsverweis wird geloest.
     import kaufvorgang as _kv
@@ -887,6 +890,11 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     await db.generated_pdfs.update_many(
         {"dealer_id": user["dealer_id"], "appointment_id": appt_id},
         {"$set": {"appointment_id": None}})
+    res = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]})
+    if not res.deleted_count:
+        # Jemand anderes war schneller — dessen Lauf hat dieselben Verweise
+        # geloest, es bleibt nichts Halbes zurueck.
+        raise HTTPException(404, "Termin nicht gefunden")
     # Runde 15 (Nr. 7): ein Hard-Delete war die einzige Terminaktion ohne
     # Audit-Spur — Chef darf sogar abgeschlossene Termine loeschen.
     await log_activity(user["dealer_id"], user["id"], "termin.geloescht", ref=appt_id,

@@ -115,6 +115,12 @@ services:
       - LINK_JOB_MAX_OFFEN_JE_KONTO=${LINK_JOB_MAX_OFFEN_JE_KONTO:-20}
       - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-100}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-1500}
+      # Kleinanzeigen zuerst ueber die API (Runde 29) — ohne Schluessel
+      # unveraendert der eigene Abruf.
+      - KLEINANZEIGEN_API_KEY=${KLEINANZEIGEN_API_KEY:-}
+      - KLEINANZEIGEN_API_URL=${KLEINANZEIGEN_API_URL:-https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen}
+      - KLEINANZEIGEN_API_TIMEOUT=${KLEINANZEIGEN_API_TIMEOUT:-12}
+      - MAX_CONCURRENT_KLEINANZEIGEN_API=${MAX_CONCURRENT_KLEINANZEIGEN_API:-8}
       - MAX_CONCURRENT_KLEINANZEIGEN=${MAX_CONCURRENT_KLEINANZEIGEN:-2}
       - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-2}
       - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-2}
@@ -194,6 +200,12 @@ services:
         # der nginx-Proxy leitet /api an das Backend weiter.
         REACT_APP_BACKEND_URL: ""
     restart: unless-stopped
+    # Runde 29 (12.09.2026): Bundle-Dateien des vorherigen Standes. Wer die
+    # App offen hat, laedt nach einem Rollout noch alte Haeppchen nach —
+    # ohne diesen Rueckfall gibt es dafuer 404 (schwarzer Bildschirm bis zum
+    # Neuladen). deploy/rollout.sh fuellt den Ordner vor jedem Bau.
+    volumes:
+      - ./deploy/assets-alt:/usr/share/nginx/html/alt:ro
     mem_limit: 256m
     cpus: 0.5
     logging: *log

@@ -119,3 +119,10 @@ frontend/test-results/
 
 # Drain-Marker des Rollout-Skripts (nur zur Laufzeit auf dem Server)
 deploy/drain/aktiv
+
+# Serverzustand des Rollouts (Runde 29): aufgehobene Bundle-Dateien des
+# vorherigen Standes und die Marke, mit welcher nginx-Vorlage der Proxy
+# zuletzt erzeugt wurde. Beides gehoert auf den Server, nicht ins Repo.
+deploy/assets-alt/*
+!deploy/assets-alt/.gitkeep
+deploy/.proxy-vorlage

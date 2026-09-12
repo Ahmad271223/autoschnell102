@@ -512,6 +512,11 @@ async def protokoll_orte_nachziehen(db) -> int:
     return r.modified_count
 
 
+# Runde 29 (12.09.2026): Stati, die einen Kaufvorgang als OFFEN ausweisen.
+# Bewusst hier gespiegelt (kaufvorgang.OFFEN), damit das Aufraeumen keinen
+# Import-Zyklus braucht; der Test haelt beide Listen zusammen.
+_KV_OFFEN = ("vertrag_erstellt", "gesendet", "abholung_geplant")
+
 async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
                                       grund: str, audit: bool = True) -> bool:
     """Einen Kaufvertrag endgueltig loeschen — idempotent und wiederaufnehmbar.
@@ -573,6 +578,51 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
     await db.appointments.update_many(
         {"contract_id": contract_id},
         {"$set": {"contract_id": None, "updated_at": jetzt}})
+    # 4b) Kaufvorgang (Runde 29, 12.09.2026, Pruefbefund): Der Vorgang blieb
+    #     unberuehrt. Ein noch OFFENER Vorgang liess das Fahrzeug damit
+    #     dauerhaft auf "gekauft" stehen, obwohl es den Vertrag nicht mehr
+    #     gibt. Offene Vorgaenge werden deshalb geschlossen; abgeschlossene
+    #     (abgeholt/storniert) bleiben als Beleg stehen. Beide werden
+    #     markiert, damit niemand einem toten Vertragszeiger folgt.
+    #     Der Zeiger selbst bleibt stehen: kaufvorgaenge.contract_id traegt
+    #     einen Unique-Index ohne Teilfilter — zwei leere Werte waeren eine
+    #     Dublette und der Schreibvorgang wuerde scheitern.
+    #     Gegenpruefung 12.09.2026: Die Auswahl darf NICHT nach der Markierung
+    #     filtern. Sonst waere 4b nach einem Abbruch mitten drin (Markierung
+    #     schon gesetzt, Fahrzeugstatus noch nicht) bei der Wiederaufnahme
+    #     leer — und das Fahrzeug haette fuer immer auf "gekauft" gestanden,
+    #     weil danach kein Statuswechsel mehr kommt. Alle Schritte hier sind
+    #     mehrfach ausfuehrbar.
+    betroffen = [k async for k in db.kaufvorgaenge.find(
+        {"contract_id": contract_id},
+        {"_id": 0, "id": 1, "status": 1, "vehicle_id": 1})]
+    if betroffen:
+        await db.kaufvorgaenge.update_many(
+            {"contract_id": contract_id,
+             "status": {"$in": list(_KV_OFFEN)}},
+            {"$set": {"status": "storniert",
+                      "storno_grund": "vertrag_geloescht", "updated_at": jetzt}})
+        await db.kaufvorgaenge.update_many(
+            {"contract_id": contract_id, "vertrag_geloescht_am": None},
+            {"$set": {"vertrag_geloescht_am": jetzt, "updated_at": jetzt}})
+        # Fahrzeugstatus neu ableiten, damit kein Auto auf einem Stand
+        # haengen bleibt, den es nicht mehr gibt. Scheitert das, wird die
+        # Loeschung trotzdem zu Ende gefuehrt — aber NICHT still: ein
+        # Betriebsalarm nennt das Fahrzeug, damit es jemand nachzieht.
+        try:
+            import kaufvorgang as _kv
+            for vid in {k.get("vehicle_id") for k in betroffen if k.get("vehicle_id")}:
+                await _kv.fahrzeug_status_aggregieren(vid, dealer_id)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Fahrzeugstatus nach Vertragsloeschung %s nicht aktualisiert", contract_id)
+            try:
+                await alarm(db, "fahrzeugstatus_nach_loeschung_offen",
+                            ref=contract_id, dealer_id=dealer_id or "",
+                            fahrzeuge=sorted({k.get("vehicle_id") for k in betroffen
+                                              if k.get("vehicle_id")}),
+                            fehler=str(exc)[:300])
+            except Exception:  # noqa: BLE001
+                pass
     # 5) Vertrag
     res = await db.generated_pdfs.delete_one({"id": contract_id})
     if not res.deleted_count:

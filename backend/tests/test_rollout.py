@@ -527,5 +527,59 @@ def test_proxy_wird_bei_geaenderter_vorlage_neu_erzeugt():
     assert "--force-recreate --no-deps proxy" in s
     # Reihenfolge: Stand merken -> pull -> vergleichen -> bauen -> Proxy neu
     assert s.index("VORLAGE_VORHER=") < s.index("git pull --ff-only")
-    assert s.index("git pull --ff-only") < s.index("PROXY_NEU=1")
+    # Runde 29: Die Erkennung nach dem Pull bleibt (jemand pullt hier), die
+    # zusaetzliche Marke davor faengt den Fall ab, dass von Hand gepullt wurde.
+    vergleich = s.index('"$VORLAGE_VORHER"')
+    assert s.index("git pull --ff-only") < vergleich
     assert s.index("docker compose up -d --build") < s.index("--force-recreate --no-deps proxy")
+
+
+# ============================================================ Runde 29
+# Vorfall 12.09.2026: Cloudflare lieferte fuer das neue Bundle ein 404 aus
+# dem Cache, obwohl beide Server 200 lieferten. Zwei Ursachen:
+#   a) Die Regel "fehlende Bundle-Datei nicht zwischenspeichern" stand zwar in
+#      der nginx-Vorlage, der laufende Proxy kannte sie aber nicht: die
+#      Vorlage wird nur beim START des Containers ausgewertet, und die
+#      Erkennung "Vorlage geaendert" verglich nur VOR/NACH dem Pull DES
+#      ROLLOUTS. Wer vorher von Hand pullte, loeste sie nie aus.
+#   b) Nach einem Rollout sind die Bundle-Dateien des vorherigen Standes weg —
+#      wer die App offen hat, bekommt beim Nachladen 404.
+def test_rollout_erkennt_alte_proxy_vorlage_auch_ohne_eigenen_pull():
+    roh = (WURZEL / "deploy" / "rollout.sh").read_text(encoding="utf-8")
+    s = "\n".join(z for z in roh.splitlines() if not z.lstrip().startswith("#"))
+    assert "VORLAGE_MARKE=deploy/.proxy-vorlage" in s, "Marke fuer die zuletzt benutzte Vorlage fehlt"
+    assert 'cat "$VORLAGE_MARKE"' in s, "Vergleich gegen die Marke fehlt"
+    # Die Marke wird erst NACH dem Neuerzeugen geschrieben.
+    assert s.index("--force-recreate --no-deps proxy") < s.index('vorlagen_stand > "$VORLAGE_MARKE"')
+    # Der Vergleich passiert vor dem Bauen.
+    assert s.index("VORLAGE_MARKE=") < s.index("up -d --build")
+    # Server-Zustand gehoert nicht ins Repo.
+    ignore = (WURZEL / ".gitignore").read_text(encoding="utf-8")
+    assert "deploy/.proxy-vorlage" in ignore
+
+
+def test_rollout_hebt_die_bundles_des_vorherigen_standes_auf():
+    roh = (WURZEL / "deploy" / "rollout.sh").read_text(encoding="utf-8")
+    s = "\n".join(z for z in roh.splitlines() if not z.lstrip().startswith("#"))
+    assert "deploy/assets-alt/static" in s, "Ordner fuer die alten Bundles fehlt"
+    kopie = s.index("docker cp")
+    assert kopie < s.index("up -d --build"), "kopiert werden muss VOR dem Neubau"
+    assert "/usr/share/nginx/html/static/." in s
+    assert "-mtime +14 -delete" in s, "ohne Aufraeumen waechst der Ordner unbegrenzt"
+    # Gegenpruefung 12.09.2026: "docker cp" uebernimmt die Zeitstempel aus dem
+    # Image (Bauzeit). Ohne Auffrischen haette das Aufraeumen die gerade
+    # aufgehobenen Dateien sofort wieder geloescht — der Rueckfall waere genau
+    # dann leer gewesen, wenn er gebraucht wird.
+    assert "-exec touch {} +" in s, "Zeitstempel der Kopie muessen aufgefrischt werden"
+    assert s.index("-exec touch {} +") < s.index("-mtime +14 -delete"), \
+        "erst auffrischen, dann nach Alter aufraeumen"
+    assert "cp -a" in s, "cp -a behaelt die aufgefrischte Zeit"
+    # Der Ordner haengt schreibgeschuetzt im Oberflaechen-Container ...
+    compose = (WURZEL / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "./deploy/assets-alt:/usr/share/nginx/html/alt:ro" in compose
+    # ... und nginx nutzt ihn als Rueckfall; fehlende Dateien bleiben ungecacht.
+    docker = (WURZEL / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+    assert "try_files $uri /alt$uri @fehlt;" in docker
+    assert 'location @fehlt { add_header Cache-Control "no-store" always; return 404; }' in docker
+    ignore = (WURZEL / ".gitignore").read_text(encoding="utf-8")
+    assert "deploy/assets-alt/*" in ignore

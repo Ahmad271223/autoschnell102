@@ -307,33 +307,41 @@ def _parse_description(visible: str) -> Optional[str]:
     return _clean(desc[:end])
 
 
+# Runde 29 (12.09.2026): Aus der Funktion herausgezogen, damit der Weg ueber
+# die Kleinanzeigen-API (kleinanzeigen_api.py) GENAU dieselben Rausch-Regeln
+# benutzt. Vorher lagen sie innen und der API-Weg musste seine Merkmale zum
+# Filtern wieder zu einer Komma-Zeile zusammenfuegen — dabei zerfielen
+# Merkmale mit Komma in der Klammer ("Audiosystem (Touchscreen, MP3)").
+NOISE_PATTERNS = (
+    re.compile(r"^\d{4,5}\b"),                      # postcode prefix
+    re.compile(r"verhandlungs(basis|sache)", re.I),
+    re.compile(r"\bvhb\b", re.I),
+    re.compile(r"privat(anbieter|verkauf|person)", re.I),
+    re.compile(r"^anbieter\b", re.I),
+    re.compile(r"^h[äa]ndler\b", re.I),
+    re.compile(r"^(deutschland|österreich|oesterreich|schweiz|polen|niederlande|belgien|frankreich|italien)\s*$", re.I),
+    re.compile(r"^festpreis", re.I),
+    re.compile(r"^preis", re.I),
+    re.compile(r"^der preis", re.I),
+    re.compile(r"\bzu verkaufen\b", re.I),
+)
+
+
+def _is_equipment_like(item: str) -> bool:
+    if not item or len(item) < 2 or len(item) > 70:
+        return False
+    if item.endswith("."):
+        return False
+    for pat in NOISE_PATTERNS:
+        if pat.search(item):
+            return False
+    return True
+
+
 def _parse_equipment(visible: str) -> List[str]:
     """Pull comma-separated list under 'Ausstattung' if present, else fall
     back to a known-vocabulary scan. Filters out obvious noise items
     (price hints, seller-type lines, postcodes, country names)."""
-    NOISE_PATTERNS = (
-        re.compile(r"^\d{4,5}\b"),                      # postcode prefix
-        re.compile(r"verhandlungs(basis|sache)", re.I),
-        re.compile(r"\bvhb\b", re.I),
-        re.compile(r"privat(anbieter|verkauf|person)", re.I),
-        re.compile(r"^anbieter\b", re.I),
-        re.compile(r"^h[äa]ndler\b", re.I),
-        re.compile(r"^(deutschland|österreich|oesterreich|schweiz|polen|niederlande|belgien|frankreich|italien)\s*$", re.I),
-        re.compile(r"^festpreis", re.I),
-        re.compile(r"^preis", re.I),
-        re.compile(r"^der preis", re.I),
-        re.compile(r"\bzu verkaufen\b", re.I),
-    )
-
-    def _is_equipment_like(item: str) -> bool:
-        if not item or len(item) < 2 or len(item) > 70:
-            return False
-        if item.endswith("."):
-            return False
-        for pat in NOISE_PATTERNS:
-            if pat.search(item):
-                return False
-        return True
 
     items: List[str] = []
     m = re.search(

@@ -81,9 +81,17 @@ def test_many_distinct_new_links_do_not_block_each_other():
             # Abrufe als das Kleinanzeigen-Limit erlaubt (90 Aufrufer
             # duerfen eben NICHT 90 externe Requests ausloesen).
             from provider_limiter import PROVIDER_MAX_CONCURRENT
-            limit = PROVIDER_MAX_CONCURRENT["kleinanzeigen"]
+            # Runde 29 (12.09.2026): Kleinanzeigen wird zuerst ueber die API
+            # geholt. Dieser bezahlte Dienst darf deutlich mehr gleichzeitig
+            # als der eigene Abruf der Webseite — geprueft wird deshalb der
+            # Topf, der tatsaechlich benutzt wird. Die Garantie bleibt: NIE
+            # mehr gleichzeitige Abrufe, als fuer diesen Weg erlaubt sind.
+            from kleinanzeigen_api import api_verfuegbar
+            topf = "kleinanzeigen_api" if api_verfuegbar() else "kleinanzeigen"
+            limit = PROVIDER_MAX_CONCURRENT[topf]
             assert live["max"] <= limit, (
-                f"{live['max']} gleichzeitige Provider-Abrufe — erlaubt: {limit}")
+                f"{live['max']} gleichzeitige Provider-Abrufe — "
+                f"erlaubt: {limit} ({topf})")
         finally:
             await client.drop_database(db.name)
             client.close()

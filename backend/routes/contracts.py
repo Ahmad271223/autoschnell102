@@ -1021,8 +1021,15 @@ async def list_contracts(
 
 @router.get("/contracts/{contract_id}")
 async def get_contract(contract_id: str, user=Depends(current_firma)):
+    """Angaben zum Vertrag OHNE die eingebetteten PDF-Dateien.
+
+    Runde 29 (12.09.2026, Pruefbefund): Die Route lieferte das komplette
+    Dokument samt beider PDFs als Base64 — je nach Fotoanzahl mehrere
+    hundert Kilobyte pro Aufruf, obwohl niemand sie hier braucht. Die
+    Dateien gibt es weiterhin unter /contracts/{id}/pdf."""
     c = await db.generated_pdfs.find_one(
-        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0},
+        {"id": contract_id, **_vertrag_bereich(user)},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
