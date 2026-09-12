@@ -352,6 +352,22 @@ export default function FahrzeugAkte() {
               <span className="text-zinc-500 text-xs">{fmtDate(c.created_at)}</span>
             </div>
           ))}
+          {/* Runde 27: Die Akte zeigt die 10 neuesten — bei mehreren Suchern
+              am selben Auto gibt es mehr. Das darf nicht still verschwinden. */}
+          {akte.contracts_gesamt > akte.contracts.length && (
+            <div className="mt-2 text-xs" style={{ color: "var(--text-secondary)" }}
+                 data-testid="akte-vertraege-gekuerzt">
+              {akte.contracts.length} von {akte.contracts_gesamt} Kaufverträgen angezeigt —
+              alle findest du im Vertragsarchiv.
+            </div>
+          )}
+          {akte.appointments_gesamt > (akte.appointments || []).length && (
+            <div className="mt-1 text-xs" style={{ color: "var(--text-secondary)" }}
+                 data-testid="akte-termine-gekuerzt">
+              {(akte.appointments || []).length} von {akte.appointments_gesamt} Terminen angezeigt —
+              alle stehen im Terminkalender.
+            </div>
+          )}
           {akte.comparisons.length > 0 && (
             <div className="mt-2 text-xs text-zinc-500">{akte.comparisons.length} Vergleich(e) durchgeführt</div>
           )}

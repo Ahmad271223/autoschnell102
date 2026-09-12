@@ -526,6 +526,15 @@ def kaeufer_einfrieren(contract: dict, dealer: dict) -> dict:
     return contract
 
 
+# Gesperrt bleibt NUR, was schon immer gesperrt war (Runde 17, Nr. 270):
+# verkauft, geloescht, archiviert — geprueft EINMAL beim Start der Anlage.
+# Beschluss Ahmad (12.09.2026): Das System sperrt und loescht nichts von
+# sich aus, und das Speichern soll klappen. Ein abgeholtes Fahrzeug bleibt
+# vertragsfaehig; eine zweite Pruefung kurz vor dem Speichern gibt es
+# bewusst NICHT (sie wuerde den Vertrag im letzten Moment verwerfen).
+VERTRAG_GESPERRT = {"verkauft", "geloescht", "archiviert"}
+
+
 def _vehicle_bild_urls(vehicle: dict) -> list:
     """Foto-URLs eines Fahrzeugs — ausgelesene Inserate speichern sie je
     nach Quelle unter `images` (Kleinanzeigen-Scraper) oder `image_urls`."""
@@ -602,7 +611,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Vertrag samt Auto-Datensatz, der Lebenszyklus blieb stumm stehen.
     # ("geloescht" faengt fahrzeug_bereich schon als 404 ab; die Pruefung
     # bleibt als zweite Sicherung, falls sich der Bereich einmal aendert.)
-    if (v.get("lifecycle") or "") in {"verkauft", "geloescht", "archiviert"}:
+    if (v.get("lifecycle") or "") in VERTRAG_GESPERRT:
         raise HTTPException(409, "Fahrzeug ist bereits verkauft/gelöscht/archiviert "
                                  "— kein neuer Kaufvertrag möglich")
     from deps import effective_dealer
@@ -682,6 +691,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Datensatz, dann der Vertrag mit dessen zufaelliger id. Scheitert der
     # Vertrags-Insert, wird der Datensatz sofort wieder entfernt — es gibt
     # nie einen Vertrag ohne Auto-Daten und keinen Datensatz ohne Vertrag.
+
     auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
     doc["admin_vehicle_data_id"] = auto_daten_id
     try:

@@ -17,14 +17,16 @@ import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
 import { hinweiseZeigen } from "@/lib/hinweise";
+import { useAuth } from "@/context/AuthContext";
+import {
+  einstellungLesen, einstellungSchreiben, vergleichLaden, vergleichSichern,
+} from "@/lib/vergleichSpeicher";
 
 // Aktuell ist nur Kleinanzeigen als Daten-Quelle freigeschaltet;
 // mobile.de-/AutoScout-Links folgen, sobald der API-Zugang vorliegt.
 const SAMPLE_URLS = [
   "https://www.kleinanzeigen.de/s-anzeige/...",
 ];
-
-const STORAGE_KEY = "ah_vergleich_state";
 
 // Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
 // und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
@@ -37,16 +39,14 @@ function filterEintraege(data, { mobile = true, autoscout = true } = {}) {
 }
 
 export default function Vergleich() {
-  // Restore last comparison so the user can navigate to PDFs / Fahrer
-  // and come back without losing their result. Cleared on logout.
-  const restored = (() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  })();
+  // Runde 27 (12.09.2026, Pruefbefund P0): Der zuletzt angezeigte Vergleich
+  // haengt am KONTO. Vorher lag er unter einem festen Schluessel — meldete
+  // sich am selben Browser ein anderer Sucher an, sah er Fahrzeug,
+  // Verkaeuferdaten und den letzten Vertrag seines Kollegen.
+  const { user } = useAuth();
+  const kontoId = user?.id || null;
+  const restored = vergleichLaden(
+    typeof window !== "undefined" ? window.sessionStorage : null, kontoId);
 
   const [url, setUrl] = useState(restored?.url || "");
   const [loading, setLoading] = useState(false);
@@ -58,19 +58,19 @@ export default function Vergleich() {
   const [showSend, setShowSend] = useState(false);
   // Portal-Toggles — Zustand wird in localStorage gespeichert
   const [portalMobile, setPortalMobile] = useState(() => {
-    try { const v = localStorage.getItem("ah_portal_mobile"); return v === null ? true : v === "1"; }
-    catch { return true; }
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_portal_mobile", user?.id, true);
   });
   const [portalAutoscout, setPortalAutoscout] = useState(() => {
-    try { const v = localStorage.getItem("ah_portal_autoscout"); return v === null ? true : v === "1"; }
-    catch { return true; }
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_portal_autoscout", user?.id, true);
   });
 
   // Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen —
   // Standard AN (Wunsch Ahmad: Einfuegen genuegt, alles geht von selbst auf).
   const [filterAuto, setFilterAuto] = useState(() => {
-    try { const v = localStorage.getItem("ah_filter_automatisch"); return v === null ? true : v === "1"; }
-    catch { return true; }
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_filter_automatisch", user?.id, true);
   });
   // Runde 22 (11.09.2026, Gegenpruefung): aktuelle Schalter-Staende fuer das
   // automatische Oeffnen. Ein Lauf kann Minuten dauern — die Werte aus dem
@@ -80,17 +80,17 @@ export default function Vergleich() {
   const toggleMobile = (v) => {
     setPortalMobile(v);
     schalterRef.current.mobile = v;
-    try { localStorage.setItem("ah_portal_mobile", v ? "1" : "0"); } catch { /* ignore */ }
+    einstellungSchreiben(window.localStorage, "ah_portal_mobile", kontoId, v);
   };
   const toggleAutoscout = (v) => {
     setPortalAutoscout(v);
     schalterRef.current.autoscout = v;
-    try { localStorage.setItem("ah_portal_autoscout", v ? "1" : "0"); } catch { /* ignore */ }
+    einstellungSchreiben(window.localStorage, "ah_portal_autoscout", kontoId, v);
   };
   const toggleFilterAuto = (v) => {
     setFilterAuto(v);
     schalterRef.current.auto = v;
-    try { localStorage.setItem("ah_filter_automatisch", v ? "1" : "0"); } catch { /* ignore */ }
+    einstellungSchreiben(window.localStorage, "ah_filter_automatisch", kontoId, v);
   };
 
   // Runde 22 (11.09.2026, Gegenpruefung): Seite verlassen -> ein noch
@@ -118,10 +118,10 @@ export default function Vergleich() {
   useEffect(() => {
     try {
       if (result) {
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ url, result, counter, contract }));
+        vergleichSichern(window.sessionStorage, kontoId, { url, result, counter, contract });
       }
     } catch { /* quota/private mode — silent */ }
-  }, [url, result, counter, contract]);
+  }, [url, result, counter, contract, kontoId]);
 
   const startCompare = async (e, direktUrl) => {
     e?.preventDefault?.();
@@ -207,7 +207,8 @@ export default function Vergleich() {
       // denselben Hinweis, statt ihn ein zweites Mal darunter zu setzen.
       hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
       try {
-        const { data: cnt } = await api.get(`/mobile/live-counter/${data.ad_id}`);
+        const { data: cnt } = await api.get(
+          `/mobile/live-counter/${data.ad_id}?quelle=${encodeURIComponent(data.source || "")}`);
         setCounter(cnt);
       } catch (_) { /* ignore */ }
     } catch (err) {
@@ -229,12 +230,13 @@ export default function Vergleich() {
     if (!result?.ad_id) return;
     const t = setInterval(async () => {
       try {
-        const { data } = await api.get(`/mobile/live-counter/${result.ad_id}`);
+        const { data } = await api.get(
+          `/mobile/live-counter/${result.ad_id}?quelle=${encodeURIComponent(result.source || "")}`);
         setCounter(data);
       } catch (_) { /* ignore */ }
     }, 30000);
     return () => clearInterval(t);
-  }, [result?.ad_id]);
+  }, [result?.ad_id, result?.source]);
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="vergleich-page">
@@ -585,10 +587,12 @@ export default function Vergleich() {
               <div className="font-display font-black text-4xl mt-3 tracking-tight">
                 {counter?.active_now ?? 0}
               </div>
+              {/* Runde 27: Gezaehlt werden VERGLEICHE, nicht Haendler — ein
+                  Sucher kann mehrfach vergleichen. Und das Fenster steht dabei. */}
               <div className="text-sm mt-0.5 font-medium" style={{ color: "var(--text-primary)" }}>
-                {counter?.active_now === 1 ? "Händler prüft dieses Fahrzeug" :
-                 counter?.active_now > 1 ? `Händler prüfen dieses Fahrzeug` :
-                 "Du bist allein hier"}
+                {counter?.active_now
+                  ? `${counter.active_now === 1 ? "Vergleich" : "Vergleiche"} in den letzten ${counter?.fenster_minuten ?? 10} Minuten`
+                  : `Keine Vergleiche in den letzten ${counter?.fenster_minuten ?? 10} Minuten`}
               </div>
               <div className="text-[11px] mt-3 pt-3 border-t" style={{ color: "var(--text-muted)", borderColor: "var(--hairline)" }}>
                 Heute insg.: <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{counter?.today ?? 1}</span> Vergleiche
@@ -601,8 +605,8 @@ export default function Vergleich() {
                 <div className="text-sm rounded-xl p-3 mb-3" data-testid="kollege-hinweis"
                      style={{ background: "#f59e0b1c", color: "#fbbf24" }}>
                   Dieses Fahrzeug vergleicht auch <b>{result.kollege.name}</b>.
-                  Ihr könnt beide einen Kaufvertrag anlegen; einen Abholtermin
-                  gibt es je Fahrzeug nur einmal.
+                  Ihr arbeitet unabhängig voneinander: Jeder kann einen eigenen
+                  Kaufvertrag mit eigenem Abholtermin anlegen.
                 </div>
               )}
               <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"

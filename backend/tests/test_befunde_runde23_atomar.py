@@ -167,7 +167,10 @@ def test_01_erstvergleich_setzt_id_und_firma_nur_ueber_filter(welt):
     k, v = w.run(lauf())
     assert k is None
     assert len(fz.upserts) == 1
-    gesetzt = fz.upserts[0]["$set"]
+    # Runde 27: Beim Erstvergleich steht nichts mehr im $set (nur noch
+    # $setOnInsert) — die Zusage 'id/dealer_id kommen aus dem Filter' gilt
+    # damit erst recht.
+    gesetzt = {**fz.upserts[0].get("$set", {}), **fz.upserts[0].get("$setOnInsert", {})}
     assert "id" not in gesetzt and "dealer_id" not in gesetzt
     assert fz.upserts[0]["$setOnInsert"]["owner_user_id"] == w.a["id"]
     assert v["id"] == vid and v["dealer_id"] == w.dealer_id

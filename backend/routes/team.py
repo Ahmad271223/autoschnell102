@@ -187,16 +187,25 @@ async def list_sucher(user=Depends(current_haendler)):
                     "created_at": {"$gte": month_start}}},
         {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
     ])}
+    # Runde 27 (Pruefbefund 12.09.2026): vehicle_comparisons wird nach 14
+    # Tagen automatisch geloescht. Ab Monatsmitte waere 'seit dem Ersten'
+    # also schlicht falsch — der Chef saehe weniger, als seine Sucher
+    # wirklich gearbeitet haben. Deshalb wird der Zeitraum ehrlich
+    # begrenzt und mitgeliefert; die Oberflaeche schreibt ihn dazu.
+    vergleiche_seit = max(
+        month_start,
+        (datetime.now(timezone.utc) - timedelta(days=14)).isoformat())
     comparisons = {row["_id"]: row["n"] async for row in db.vehicle_comparisons.aggregate([
         {"$match": {"dealer_id": user["dealer_id"],
                     "user_id": {"$in": ids},
-                    "created_at": {"$gte": month_start}}},
+                    "created_at": {"$gte": vergleiche_seit}}},
         {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
     ])}
     return [{**s,
              "subscription": sub_status_from_doc(subs.get(s["id"])),
              "stats_month": {"kaeufe": purchases.get(s["id"], 0),
-                             "vergleiche": comparisons.get(s["id"], 0)}}
+                             "vergleiche": comparisons.get(s["id"], 0),
+                             "vergleiche_seit": vergleiche_seit}}
             for s in items]
 
 

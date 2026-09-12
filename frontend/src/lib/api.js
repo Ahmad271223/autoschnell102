@@ -1,3 +1,4 @@
+import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import axios from "axios";
 import { TOKEN_APP, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
 
@@ -34,6 +35,11 @@ api.interceptors.response.use(
           try {
             window.sessionStorage.setItem("ah_abmeldegrund",
               typeof detail === "string" && detail ? detail : "");
+            // Runde 27 (Pruefbefund P0): Auch der zuletzt angezeigte
+            // Vergleich muss weg — sonst sieht der naechste Nutzer an
+            // diesem Browser Fahrzeug, Verkaeuferdaten und Vertrag des
+            // vorherigen Kontos.
+            vergleichLeeren(window.sessionStorage);
           } catch { /* Storage gesperrt — dann nur die allgemeine Meldung */ }
         }
         if (imBereich) window.location.href = "/login?reason=session";

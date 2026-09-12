@@ -283,6 +283,11 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
 # =========================================================
 #                     BESTANDSLISTE
 # =========================================================
+# Hoechstzahl der in einer Antwort gelieferten Fahrzeuge. Die Oberflaeche
+# meldet, wenn mehr vorhanden sind (Runde 27).
+BESTAND_MAX = 500
+
+
 @router.get("/bestand")
 async def list_bestand(user=Depends(current_firma),
                        lifecycle: Optional[str] = None,
@@ -298,8 +303,16 @@ async def list_bestand(user=Depends(current_firma),
         query["lifecycle"] = lifecycle
     if source in ("plattform", "manuell"):
         query["source"] = source
+    # Runde 27 (12.09.2026, Pruefbefund): Die Liste endete still bei 500
+    # Fahrzeugen — bei 30 Suchern ist das erreichbar, und aeltere Autos
+    # schienen einfach zu fehlen. Jetzt wird die Gesamtzahl mitgeliefert,
+    # die Oberflaeche sagt es und bietet die Filter an.
+    # .limit() gehoert an den Cursor: sonst sortiert Mongo ALLE Treffer im
+    # Speicher (Gegenpruefung 12.09.2026: bei vielen Fahrzeugen 500er-Fehler
+    # "Sort exceeded memory limit") statt nur die neuesten zu halten.
     items = await db.vehicles.find(query, {"_id": 0}).sort(
-        "lifecycle_changed_at", -1).to_list(500)
+        "lifecycle_changed_at", -1).limit(BESTAND_MAX).to_list(BESTAND_MAX)
+    gesamt = await db.vehicles.count_documents(query)
     await besitzer_anreichern(user, items)
     # Runde 23 (11.09.2026, Befund A): Sucher sehen nur den eigenen Einkaufspreis.
     import kaufvorgang as _kv
@@ -323,7 +336,8 @@ async def list_bestand(user=Depends(current_firma),
         {"$group": {"_id": "$lifecycle", "n": {"$sum": 1}}},
     ]):
         counts[row["_id"] or "unbekannt"] = row["n"]
-    return {"items": items, "counts": counts}
+    return {"items": items, "counts": counts, "gesamt": gesamt,
+            "gekuerzt": gesamt > len(items)}
 
 
 # =========================================================
@@ -346,18 +360,26 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
 
+    # Runde 27: Die Akte zeigt die 10 neuesten Vertraege/Termine. Bei
+    # mehreren Suchern am selben Auto gibt es mehr — die Gesamtzahl steht
+    # jetzt dabei, damit nichts unbemerkt fehlt.
+    AKTE_MAX = 10
     contracts = await db.generated_pdfs.find(
         {"vehicle_id": vehicle_id, **_vertrag_bereich(user)},
         {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
-    ).sort("created_at", -1).to_list(10)
+    ).sort("created_at", -1).to_list(AKTE_MAX)
+    contracts_gesamt = await db.generated_pdfs.count_documents(
+        {"vehicle_id": vehicle_id, **_vertrag_bereich(user)})
 
     # Umbau Kaufvorgaenge 09.09.2026: Termine (Verkaeuferdaten) nur im Bereich
     # des Kontos — Sucher: eigene Vorgaenge; Chef: alle.
     from deps import termin_bereich
+    termin_filter = {"vehicle_id": vehicle_id, **await termin_bereich(user)}
     appointments = await db.appointments.find(
-        {"vehicle_id": vehicle_id, **await termin_bereich(user)},
+        termin_filter,
         {"_id": 0},
-    ).sort("created_at", -1).to_list(10)
+    ).sort("created_at", -1).to_list(AKTE_MAX)
+    appointments_gesamt = await db.appointments.count_documents(termin_filter)
     eigene_termin_ids = [a["id"] for a in appointments]
     # Runde 21: ALLE Termine im Bereich (nicht nur die 10 neuesten) fuer
     # Bericht, Protokolle und Historie.
@@ -493,7 +515,9 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "zuweisbar_an": zuweisbar_an,
         "retention_days_left": retention_days_left,
         "contracts": contracts,
+        "contracts_gesamt": contracts_gesamt,
         "appointments": appointments,
+        "appointments_gesamt": appointments_gesamt,
         "pickup_report": report,
         "pickup_reports": pickup_reports,
         "comparisons": comparisons,

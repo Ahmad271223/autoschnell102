@@ -287,12 +287,18 @@ async def _cleanup_once(db) -> dict:
             # sein eigener Termin raeumt nach seinem Abschluss auf. Die
             # Berichtsfotos dieses Termins sind oben bereits weg.
             if vehicle_id and await _anderer_vorgang_offen(db, firma, vehicle_id, appt["id"]):
+                # Runde 27 (Gegenpruefung 12.09.2026): NICHT assets_cleaned_at
+                # setzen. Sonst gilt der Termin als erledigt und wird nie
+                # wieder geprueft — bleibt der Vorgang des Kollegen fuer immer
+                # offen (das System storniert bewusst nichts von selbst),
+                # lagen Inseratsfotos und Snapshots dauerhaft weiter herum.
+                # Nur vermerken und beim naechsten Lauf erneut versuchen.
                 await db.appointments.update_one(
                     {"id": appt["id"]},
-                    {"$set": {"assets_cleaned_at": now.isoformat(),
+                    {"$set": {"cleanup_zurueckgestellt_am": now.isoformat(),
                               "cleanup_skipped": "anderer_vorgang_offen"}},
                 )
-                stats["cleaned"] += 1
+                stats["zurueckgestellt"] = stats.get("zurueckgestellt", 0) + 1
                 continue
 
             # 1) Snapshots + Storage-Objekte wegwerfen

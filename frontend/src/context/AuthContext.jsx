@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import { TOKEN_APP, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import { verbindungsGrund } from "@/components/VerbindungsFehler";
 
@@ -114,7 +115,7 @@ export const AuthProvider = ({ children }) => {
       await api.post("/auth/logout");
     } catch (_) {}
     tokenLoeschen(TOKEN_APP);
-    sessionStorage.removeItem("ah_vergleich_state");
+    vergleichLeeren(window.sessionStorage);   // Runde 27: auch fremde Staende
     geladenFuerToken.current = null;
     setUser(null);
     setDealer(null);

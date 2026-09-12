@@ -141,6 +141,16 @@ export default function Bestand() {
         </div>
       </div>
 
+      {/* Runde 27: Die Liste endet bei 500 Fahrzeugen — das sagen wir jetzt,
+          statt aeltere Autos stillschweigend wegzulassen. */}
+      {data.gekuerzt && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm"
+             data-testid="bestand-gekuerzt"
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+          Es werden {data.items.length} von {data.gesamt} Fahrzeugen angezeigt.
+          Nutze die Filter oben, um ältere Fahrzeuge zu finden.
+        </div>
+      )}
       <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {data.items.length === 0 && (
           <div className="col-span-full text-center py-16 text-zinc-500 text-sm">

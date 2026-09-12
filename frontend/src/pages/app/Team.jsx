@@ -158,7 +158,11 @@ export default function Team() {
               <th className="px-4 py-3">Sucher-Abo</th>
               <th className="px-4 py-3">Nächste Zahlung</th>
               <th className="px-4 py-3">Käufe (Monat)</th>
-              <th className="px-4 py-3">Vergleiche</th>
+              {/* Runde 27: Vergleiche werden nach 14 Tagen geloescht — die
+                  Spalte sagt jetzt, welcher Zeitraum wirklich gemeint ist. */}
+              <th className="px-4 py-3" title="Vergleichsdaten werden nach 14 Tagen automatisch gelöscht">
+                Vergleiche (14 Tage)
+              </th>
               <th className="px-4 py-3">Status</th>
             </tr>
           </thead>

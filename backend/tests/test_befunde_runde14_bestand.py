@@ -135,6 +135,15 @@ class _Coll:
     def find(self, query=None, projection=None):
         return _Cursor([dict(d) for d in self.docs])
 
+    async def count_documents(self, query=None, **k):
+        """Runde 27: Die Akte meldet, wie viele Vertraege/Termine es WIRKLICH
+        gibt (nicht nur die 10 gezeigten) — dafuer zaehlt sie hier mit
+        denselben einfachen Gleichheitsfiltern wie find_one."""
+        return sum(
+            1 for d in self.docs
+            if not query or all(d.get(key) == val for key, val in query.items()
+                                if not isinstance(val, dict)))
+
     async def distinct(self, feld, query=None, **k):
         # Runde 21 (Pruefbefund C): vehicle_akte liest ALLE Termin-IDs per
         # distinct (routes/bestand.py) — wie Motor die eindeutigen Werte,
