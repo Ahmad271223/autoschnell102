@@ -14,6 +14,11 @@ COPY . .
 # von Hand baut, darf nicht kaputt sein (Pruefbericht 09/2026).
 ARG REACT_APP_BACKEND_URL=
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
+# Runde 31: Fassungs-Stempel "<Commit-Zeit>-<Kurz-SHA>" (deploy/rollout.sh).
+# Der Bau-Kontext ist ./frontend — dort gibt es kein .git, deshalb kommt der
+# Wert als Build-Argument. Leer = die Oberflaeche prueft nicht auf neue Fassungen.
+ARG APP_FASSUNG=
+ENV APP_FASSUNG=$APP_FASSUNG
 # Vite bricht bei Fehlern ab; CI=true bleibt fuer Werkzeuge, die es auswerten.
 RUN CI=true yarn build
 
@@ -40,6 +45,7 @@ RUN printf 'server {\n\
   gzip_types text/plain text/css application/json application/javascript text/javascript image/svg+xml;\n\
   location /static/ { expires 1y; add_header Cache-Control "public, max-age=31536000, immutable" always; try_files $uri /alt$uri @fehlt; }\n\
   location @fehlt { add_header Cache-Control "no-store" always; return 404; }\n\
+  location /alt/ { internal; }\n\
   location /fonts/ { expires 30d; add_header Cache-Control "public, max-age=2592000" always; try_files $uri @fehlt; }\n\
   location = /index.html { add_header Cache-Control "no-store" always; }\n\
   location = /service-worker.js { add_header Cache-Control "no-cache" always; add_header X-Content-Type-Options "nosniff" always; }\n\

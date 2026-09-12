@@ -1,3 +1,4 @@
+import { fassungMithoeren } from "@/lib/fassung";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import axios from "axios";
 import { TOKEN_APP, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
@@ -8,6 +9,9 @@ export const API_BASE = `${BACKEND}/api`;
 // 60 s Timeout: haengt der Server, bekommt der Nutzer eine Fehlermeldung
 // statt eines endlosen Spinners (Vergleich + PDF sind die langsamsten Wege).
 export const api = axios.create({ baseURL: API_BASE, timeout: 60000 });
+// Runde 31: jede Antwort traegt X-AH-Fassung — so erfaehrt die Oberflaeche
+// von einer neuen Fassung, bevor sie gegen eine fehlende Datei laeuft.
+fassungMithoeren(api);
 
 // Runde 29 (12.09.2026, Pruefbefund): 60 s passen fuer die schnellen Wege,
 // sind aber zu knapp fuer die langsamen. nginx laesst Anfragen bis 300 s

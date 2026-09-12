@@ -144,6 +144,13 @@ BETRIEBSBEREIT: dict = {}
 api = APIRouter(prefix="/api")
 
 
+# Runde 31 (12.09.2026): Fassungs-Stempel "<Commit-Zeit>-<Kurz-SHA>" aus
+# deploy/rollout.sh. Die Oberflaeche liest ihn aus jeder API-Antwort und
+# erfaehrt so von einer neuen Fassung — ohne eigene Abfrage und bevor sie
+# gegen eine fehlende Datei laeuft (Vorfall Fahrer-App/Super-Admin).
+APP_FASSUNG = os.environ.get("APP_FASSUNG", "").strip()
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Inject standard security headers on every response."""
 
@@ -170,6 +177,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Content-Security-Policy",
             "default-src 'none'; frame-ancestors 'none'",
         )
+        if APP_FASSUNG:
+            response.headers.setdefault("X-AH-Fassung", APP_FASSUNG)
         return response
 
 

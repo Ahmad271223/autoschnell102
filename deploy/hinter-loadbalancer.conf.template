@@ -221,7 +221,52 @@ server {
     # (schwarzer Bildschirm). Fehlende Bundle-Dateien deshalb ausdruecklich
     # als "no-store" ausliefern (nur die 404, die 200 bleibt ein Jahr cachebar).
     proxy_intercept_errors on;
-    error_page 404 = @static_fehlt;
+    # Runde 31 (12.09.2026, Vorfall Fahrer-App/Super-Admin): Die 404 oben kam
+    # nicht nur kurz vor — prod2 lief 12:20:35 UTC mit dem neuen Stand,
+    # prod1 erst 12:33:58 UTC. 13 Minuten lang konnte JEDER Besucher auf
+    # eine tote Seite laufen (DriverLayout.*.chunk.js -> 404). no-store
+    # verhinderte nur, dass Cloudflare den Fehler festhielt. Jetzt fragt
+    # der Server, dem die Datei fehlt, erst beide Server im privaten Netz
+    # (Port 8081, Block ganz unten) — der neue kennt das neue Bundle, der
+    # alte (ueber assets-alt) das alte. Erst wenn keiner sie hat: 404.
+    recursive_error_pages on;
+    error_page 404 = @static_nachbar1;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+
+  # Beide Server nacheinander fragen (einer davon ist dieser Server selbst —
+  # das kostet nur bei fehlenden Dateien eine kurze Anfrage und erspart eine
+  # eigene Einstellung je Server: PROD1_IP/PROD2_IP stehen ohnehin in der
+  # .env, docker-compose setzt ohne sie 127.0.0.1). Kurze Zeitlimits: ist
+  # der Nachbar weg (Neubau, Drain), wartet der Besucher hoechstens ~1 s.
+  location @static_nachbar1 {
+    set $nachbar1 http://${PROD1_IP}:8081;
+    proxy_pass $nachbar1;
+    proxy_connect_timeout 1s;
+    proxy_read_timeout 5s;
+    proxy_intercept_errors on;
+    recursive_error_pages on;
+    error_page 403 404 500 502 503 504 = @static_nachbar2;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+  location @static_nachbar2 {
+    set $nachbar2 http://${PROD2_IP}:8081;
+    proxy_pass $nachbar2;
+    proxy_connect_timeout 1s;
+    proxy_read_timeout 5s;
+    proxy_intercept_errors on;
+    recursive_error_pages on;
+    error_page 403 404 500 502 503 504 = @static_fehlt;
+    add_header Cache-Control "public, max-age=31536000, immutable";
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
@@ -245,4 +290,33 @@ server {
     }
     proxy_pass $web_up;
   }
+}
+
+# ---- Bundle-Dateien fuer den anderen Server (Runde 31) ----
+# Nur /static/, nur fuer die beiden eigenen Server. Veroeffentlicht wird der
+# Port ausschliesslich auf der PRIVATEN Adresse (deploy/docker-compose.
+# replica.yml) — aus dem Internet ist er nicht erreichbar. allow/deny wirkt
+# hier auf die echte Adresse: dieser Block kennt kein real_ip.
+# Dieser Block fragt NIE weiter — damit koennen sich die beiden Server nicht
+# gegenseitig im Kreis schicken.
+server {
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $web_up http://web:80;
+  listen 8081;
+  server_name _;
+  allow 127.0.0.1;
+  allow ${PROD1_IP};
+  allow ${PROD2_IP};
+  deny all;
+  access_log off;
+
+  location /static/ {
+    proxy_pass $web_up;
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 5s;
+    proxy_intercept_errors on;
+    error_page 404 500 502 503 504 = @nicht_hier;
+  }
+  location @nicht_hier { return 404; }
+  location / { return 404; }
 }

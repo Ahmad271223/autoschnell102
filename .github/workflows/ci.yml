@@ -282,6 +282,11 @@ jobs:
           curl -s -o /dev/null -D /tmp/static404.h -H "Host: localhost" http://localhost/static/js/gibtsnicht.js
           grep -q "^HTTP/.* 404" /tmp/static404.h || { echo "fehlende Bundle-Datei muss 404 liefern"; cat /tmp/static404.h; exit 1; }
           grep -qi "^cache-control: no-store" /tmp/static404.h || { echo "404 fuer /static/ muss no-store tragen"; cat /tmp/static404.h; exit 1; }
+          # Runde 31: Die Nachbar-Kette (@static_nachbar1/2 -> Port 8081) darf
+          # vorhandene Dateien nicht stoeren und fehlende nicht aufhalten.
+          MAIN=$(curl -s -H "Host: localhost" http://localhost/ | grep -oE "/static/js/main[.][A-Za-z0-9_-]+[.]js" | head -1)
+          [ -n "$MAIN" ] || { echo "Startseite ohne Hauptskript"; exit 1; }
+          curl -fsS -o /dev/null -w "Hauptskript ueber die LB-Vorlage: %{http_code}\n" -H "Host: localhost" "http://localhost$MAIN"
           # Oberflaeche weg -> Health darf NICHT 200 liefern (Vorfall 07.09.2026:
           # der LB schickte Besucher auf einen Server, dessen web-Container
           # gerade neu gebaut wurde — 502 fuer alle Seitendateien).
@@ -383,7 +388,8 @@ jobs:
         # Test-Server e2e/serve.js reicht /api an :8002 weiter; so braucht
         # das Backend keine CORS-Freigabe und die CSP (connect-src 'self')
         # bleibt unveraendert.
-        run: REACT_APP_BACKEND_URL= CI=true yarn build
+        # Runde 31: alter Fassungs-Stempel — e2e/fassung.spec.js spielt einen neueren ein.
+        run: APP_FASSUNG=1700000000-aaaaaaa REACT_APP_BACKEND_URL= CI=true yarn build
       - name: Chromium installieren
         working-directory: frontend
         run: npx playwright install --with-deps chromium

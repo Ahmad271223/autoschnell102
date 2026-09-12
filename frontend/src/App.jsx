@@ -2,25 +2,62 @@ import "@/App.css";
 import { Suspense, lazy, useEffect } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
 import SeiteLaedt from "@/components/SeiteLaedt";
+import FassungsHinweis from "@/components/FassungsHinweis";
+import { nachladenGescheitert } from "@/lib/fassung";
+import { hatUngespeichert } from "@/lib/ungespeichert";
 
 // Vite (09/2026): Seiten laden erst bei Bedarf nach — die erste Seite ist
-// dadurch deutlich schneller da. Scheitert das Nachladen (z. B. kurz nach
-// einem Update, wenn der Browser noch die alte Seitenliste kennt), laedt die
-// Oberflaeche neu — hoechstens einmal je 30 Sekunden (Zeitstempel statt
-// Merker: sonst loeste ein erfolgreiches Layout mit fehlender Unterseite eine
-// Endlosschleife aus). Danach zeigt die Fehlergrenze "Neu laden".
+// dadurch deutlich schneller da.
+//
+// Runde 31 (12.09.2026, Vorfall Fahrer-App/Super-Admin): Die Oberflaeche
+// lieferte fehlende Dateien mit "ein Jahr, immutable" aus. Wer im Rollout-
+// Fenster einen 404 bekam, dessen Browser hielt ihn fest und fragte den
+// Server nie wieder — bei JEDER Anmeldung dieselbe tote Seite, obwohl beide
+// Server laengst sauber waren (in Chromium nachgestellt). Deshalb:
+//   1. Scheitert das Nachladen, holt fetch(..., {cache: "reload"}) genau
+//      diese Datei am Browser-Zwischenspeicher vorbei und ersetzt dort den
+//      festgehaltenen Fehler. Dann ein zweiter Versuch.
+//   2. Klappt der nicht (Chromium merkt sich den Fehlschlag im laufenden
+//      Tab), wird EINMAL neu geladen — jetzt mit erneuertem Speicher.
+//      Hoechstens alle 30 Sekunden (Zeitstempel statt Merker: sonst loeste
+//      ein erfolgreiches Layout mit fehlender Unterseite eine Endlosschleife
+//      aus) und NIE, solange ungespeicherte Eingaben offen sind.
+//   3. Sonst zeigt die Fehlergrenze "Neu laden".
 const NEU_GELADEN = "ah_seite_neu_geladen_um";
+const DATEI_IN_FEHLER = /(https?:[/][/][^ "')]+[.](?:js|css))/i;
+
+async function zwischenspeicherErneuern(fehler) {
+  const treffer = DATEI_IN_FEHLER.exec(String(fehler?.message || ""));
+  if (!treffer) return;
+  try {
+    const url = new URL(treffer[1]);
+    if (url.origin !== window.location.origin) return;
+    await fetch(url.href, { cache: "reload", credentials: "same-origin" });
+  } catch { /* offline — dann hilft nur spaeter ein Neuladen */ }
+}
+
 function seite(laden) {
-  return lazy(() => laden().catch((fehler) => {
+  return lazy(async () => {
+    let letzter;
+    for (const warten of [0, 700]) {
+      if (warten) await new Promise((weiter) => { setTimeout(weiter, warten); });
+      try {
+        return await laden();
+      } catch (fehler) {
+        letzter = fehler;
+        await zwischenspeicherErneuern(fehler);
+      }
+    }
+    nachladenGescheitert();
     let zuletzt = 0;
     try { zuletzt = Number(sessionStorage.getItem(NEU_GELADEN)) || 0; } catch { /* egal */ }
-    if (Date.now() - zuletzt > 30000) {
+    if (!hatUngespeichert() && Date.now() - zuletzt > 30000) {
       try { sessionStorage.setItem(NEU_GELADEN, String(Date.now())); } catch { /* egal */ }
       window.location.reload();
       return new Promise(() => {});
     }
-    throw fehler;
-  }));
+    throw letzter;
+  });
 }
 
 // Angemeldete Nutzer: die Arbeitsseiten im Leerlauf vorladen — der Klick im
@@ -145,6 +182,7 @@ export default function App() {
         <BrowserRouter>
           <Vorladen />
           <Toaster theme="dark" position="top-right" richColors closeButton />
+          <FassungsHinweis />
           <NachladeFehler>
           <Suspense fallback={<SeiteLaedt ganzeSeite />}>
           <Routes>

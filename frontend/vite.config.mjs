@@ -63,6 +63,9 @@ export default defineConfig(({ command, mode }) => {
       // Der Code liest die Backend-Adresse wie unter CRA; leer = gleiche
       // Herkunft (nginx reicht /api an das Backend weiter).
       "process.env.REACT_APP_BACKEND_URL": JSON.stringify(env.REACT_APP_BACKEND_URL ?? ""),
+      // Runde 31: Fassungs-Stempel "<Commit-Zeit>-<Kurz-SHA>" (deploy/rollout.sh,
+      // Docker-Build-Argument). Leer = kein Versionshinweis (lokal, Tests).
+      "import.meta.env.APP_FASSUNG": JSON.stringify(alle.APP_FASSUNG ?? ""),
     },
     server: {
       host: true,
@@ -99,6 +102,13 @@ export default defineConfig(({ command, mode }) => {
         output: {
           entryFileNames: "static/js/main.[hash].js",
           chunkFileNames: "static/js/[name].[hash].chunk.js",
+          // Runde 31 (12.09.2026): EINMALIG alle Dateinamen aendern. Die
+          // Oberflaeche lieferte fehlende Dateien mit "ein Jahr, immutable" aus;
+          // Browser, die im Rollout-Fenster einen 404 bekamen, halten ihn fest
+          // und fragen nie wieder (Chromium nachgestellt). Mit neuen Namen
+          // greift keiner dieser Eintraege mehr. Nur aendern, wenn genau so ein
+          // Fall erneut eintritt.
+          banner: "/*! AutoSchnell R31 */",
           assetFileNames: dateiname,
           // Kleinstteile (einzelne Symbole) wieder zusammenfuehren: weniger
           // Anfragen, ohne den ersten Aufruf groesser zu machen.

@@ -1,3 +1,4 @@
+import { neueFassungLaden } from "@/lib/fassung";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useBuyer } from "@/context/BuyerContext";
@@ -25,7 +26,10 @@ export default function BuyerLogin() {
       // Einladung aus dem Registrierungs-Link ueberlebt den Umweg ueber
       // den Login und wird im Marktplatz eingeloest (Review 09/2026).
       const invite = sp.get("invite");
-      nav(invite ? `/markt?invite=${encodeURIComponent(invite)}` : (sp.get("next") || "/markt"));
+      const ziel = invite ? `/markt?invite=${encodeURIComponent(invite)}` : (sp.get("next") || "/markt");
+      // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
+      // laden — direkt nach der Anmeldung geht dabei nichts verloren.
+      if (!neueFassungLaden(ziel)) nav(ziel);
     } catch (err) {
       toast.error(errMsg(err, "Anmeldung fehlgeschlagen"));
     } finally {

@@ -1,3 +1,4 @@
+import { neueFassungLaden } from "@/lib/fassung";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
@@ -45,7 +46,10 @@ export default function Login() {
       // /login?next=/app/bestand anmeldet, auf einer Haendler-Seite —
       // mit Admin-Seitenleiste und der Meldung "Nur fuer Haendler-
       // Accounts" (Befund 05.09.2026).
-      nav(sicheresZiel(u, params.get("next")));
+      const ziel = sicheresZiel(u, params.get("next"));
+      // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
+      // laden — direkt nach der Anmeldung geht dabei nichts verloren.
+      if (!neueFassungLaden(ziel)) nav(ziel);
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {

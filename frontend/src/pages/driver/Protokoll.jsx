@@ -1,3 +1,4 @@
+import { useUngespeichert } from "@/lib/ungespeichert";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
@@ -97,6 +98,10 @@ export default function Protokoll() {
   const gesperrt = isFinal || wartetAufFreigabe || freigegeben;
   const neuerPreis = data?.protocol?.neuer_preis ?? null;
   const rueckfrage = data?.protocol?.rueckfrage || "";
+  // Runde 31: Die Unterschriften liegen bis zum Abschluss NUR im Speicher —
+  // der Auto-Save schickt sie nicht mit. Ein Neuladen haette sie ersatzlos
+  // geloescht, und der Verkaeufer steht oft schon am Auto.
+  useUngespeichert(Boolean((sigDriver || sigSeller) && !isFinal));
 
   // Immer den AKTUELLEN Stand speichern (nie einen veralteten Klick-Zustand):
   // fRef spiegelt f nach jedem Render, der Auto-Save liest daraus.

@@ -174,6 +174,14 @@ if [ "$(vorlagen_stand)" != "$VORLAGE_VORHER" ]; then
     PROXY_NEU=1
     echo "   nginx-Vorlage geaendert ($VORLAGE) — der Proxy wird neu erzeugt"
 fi
+# Runde 31 (12.09.2026): Fassungs-Stempel fuer Oberflaeche und Backend —
+# Commit-Zeit + Kurz-SHA. Aus dem COMMIT, nicht aus der Bauzeit: beide Server
+# bauen nacheinander und muessen trotzdem denselben Wert haben, sonst meldete
+# die Oberflaeche beim Wechsel zwischen ihnen staendig "neue Version".
+# Groesser = neuer; die Oberflaeche meldet nur ECHT neuere Staende.
+APP_FASSUNG=$(git log -1 --format=%ct-%h 2>/dev/null || true)
+export APP_FASSUNG
+echo "   Fassung: ${APP_FASSUNG:-unbekannt (Oberflaeche zeigt keinen Versionshinweis)}"
 
 # Runde 29 (12.09.2026): Die Bundle-Dateien des VORHERIGEN Standes aufheben.
 # Wer die App offen hat, laedt nach dem Rollout noch Dateien des alten
@@ -193,13 +201,27 @@ if [ -n "$WEB_ALT" ]; then
     mkdir -p deploy/assets-alt/.neu 2>/dev/null || true
     if docker cp "$WEB_ALT:/usr/share/nginx/html/static/." deploy/assets-alt/.neu/ 2>/dev/null; then
         find deploy/assets-alt/.neu -type f -exec touch {} + 2>/dev/null || true
-        cp -a deploy/assets-alt/.neu/. deploy/assets-alt/static/ 2>/dev/null || true
+        # Runde 31: Das Sicherheitsnetz der Besucher darf nicht still leer
+        # bleiben (vorher: jede Stufe mit "|| true" stumm geschaltet).
+        if cp -a deploy/assets-alt/.neu/. deploy/assets-alt/static/ 2>/dev/null; then
+            echo "   Bundle-Dateien des bisherigen Standes aufgehoben ($(find deploy/assets-alt/static -type f 2>/dev/null | wc -l | tr -d ' ') Dateien im Rueckfall)"
+        else
+            echo "   WARNUNG: Bundle-Dateien liessen sich nicht nach deploy/assets-alt/static kopieren (Rechte? Platte voll?)."
+            echo "            Offene Fenster koennen nach dem Rollout ins Leere laufen. Das Rollout laeuft weiter."
+        fi
+    else
+        echo "   WARNUNG: Bundle-Dateien des laufenden Oberflaechen-Containers nicht lesbar (docker cp) — kein Rueckfall fuer offene Fenster."
     fi
     rm -rf deploy/assets-alt/.neu 2>/dev/null || true
+else
+    echo "   WARNUNG: kein laufender Oberflaechen-Container — die Bundle-Dateien des bisherigen Standes fehlen im Rueckfall."
 fi
-# Nach 14 Tagen aufraeumen, damit der Ordner nicht unbegrenzt waechst. Zaehlt
+# Nach 90 Tagen aufraeumen, damit der Ordner nicht unbegrenzt waechst. Zaehlt
 # ab dem AUFHEBEN (siehe touch oben), nicht ab der Bauzeit des Images.
-find deploy/assets-alt/static -type f -mtime +14 -delete 2>/dev/null || true
+# Runde 31: 14 -> 90 Tage. Die installierte App bleibt wochenlang offen; ein
+# ganzer Stand hat rund 1,2 MB, unveraenderte Dateien behalten ihren Namen.
+find deploy/assets-alt/static -type f -mtime +90 -delete 2>/dev/null || true
+find deploy/assets-alt/static -mindepth 1 -type d -empty -delete 2>/dev/null || true
 
 echo "== 3/6 Bauen und starten"
 docker compose up -d --build

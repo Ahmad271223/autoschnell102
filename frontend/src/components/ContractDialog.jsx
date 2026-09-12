@@ -1,3 +1,4 @@
+import { useUngespeichert } from "@/lib/ungespeichert";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
@@ -136,6 +137,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   });
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  // Runde 31: rund 60 Felder ohne Zwischenspeicher — solange der Dialog offen
+  // ist, fragt der Browser vor dem Neuladen oder Schliessen nach.
+  useUngespeichert(Boolean(open));
   // Runde 24 (11.09.2026): Käuferdaten sind Pflicht (Wunsch Ahmad). Der
   // Hinweis sagt, was die EINSTELLUNGEN offen lassen — daher aus dem Profil
   // abgeleitet, nicht aus dem Formular: er bleibt stehen, während der

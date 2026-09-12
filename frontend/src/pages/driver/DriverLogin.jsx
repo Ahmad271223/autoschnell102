@@ -1,3 +1,4 @@
+import { neueFassungLaden } from "@/lib/fassung";
 import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
@@ -25,7 +26,9 @@ export default function DriverLogin() {
     try {
       await login(email, password);
       toast.success("Willkommen zurück!");
-      nav("/fahrer");
+      // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
+      // laden — direkt nach der Anmeldung geht dabei nichts verloren.
+      if (!neueFassungLaden("/fahrer")) nav("/fahrer");
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {

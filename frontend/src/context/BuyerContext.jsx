@@ -1,3 +1,4 @@
+import { fassungMithoeren } from "@/lib/fassung";
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
@@ -10,6 +11,8 @@ import { API_BASE, istLangeAktion, LANGE_AKTION_MS } from "@/lib/api";
 const BuyerCtx = createContext(null);
 
 export const buyerApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
+// Runde 31: eigene Verbindung — sonst bliebe dieser Bereich blind fuer neue Fassungen.
+fassungMithoeren(buyerApi);
 buyerApi.interceptors.request.use((c) => {
   const t = tokenLesen(TOKEN_KAEUFER);
   if (t) c.headers.Authorization = `Bearer ${t}`;

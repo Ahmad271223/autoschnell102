@@ -202,6 +202,64 @@ def _startdatei_pruefen(host, pfad, zwischenstand):
         fehler(f"Skript {pfad}: {s.status_code} (auch frisch: {f.status_code}) — Oberflaeche defekt")
 
 
+def _nachladbare_teile_pruefen(host, hauptskript, zwischenstand, versuche=3):
+    """Runde 31 (Vorfall 12.09.2026): Die Probe pruefte nur die Dateien, die
+    die Startseite SOFORT laedt. Die Seitenteile, die erst beim Klick
+    nachgeladen werden (Fahrer-App, Admin-Bereich), fehlten 13 Minuten lang
+    auf einem der beiden Server — Fahrer und Super-Admin liefen auf eine tote
+    Seite, und die Probe meldete "0 Fehler".
+
+    Jetzt liest die Probe alle im Hauptskript genannten Seitenteile und fragt
+    jedes mehrfach am Cloudflare-Cache vorbei ab, damit beide Server hinter
+    dem Load Balancer drankommen. Danach einmal ueber den Cache: haelt
+    Cloudflare trotz frischer 200 einen Fehler fest?"""
+    try:
+        r = requests.get(f"https://{host}{hauptskript}", timeout=20)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Seitenteile nicht pruefbar: {exc}")
+        return
+    if r.status_code != 200:
+        return  # bei den Startdateien schon gemeldet
+    namen = sorted(set(re.findall(
+        r"(?:\./|static/js/)([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.chunk\.js)", r.text or "")))
+    if not namen:
+        print("  (keine nachladbaren Seitenteile im Hauptskript gefunden)")
+        return
+    stempel = int(time.time())
+    fehlend, aus_cache = {}, []
+    for name in namen:
+        pfad = f"/static/js/{name}"
+        codes = []
+        for i in range(versuche):
+            try:
+                codes.append(requests.get(f"https://{host}{pfad}?probe={stempel}-{i}", timeout=15).status_code)
+            except Exception:  # noqa: BLE001
+                codes.append(None)
+        if any(c != 200 for c in codes):
+            fehlend[name] = codes
+            continue
+        try:
+            gecacht = requests.get(f"https://{host}{pfad}", timeout=15)
+            if gecacht.status_code != 200:
+                aus_cache.append(f"{name} ({gecacht.status_code})")
+        except Exception:  # noqa: BLE001
+            pass
+    for eintrag in aus_cache:
+        fehler(f"Seitenteil {eintrag} aus dem Cloudflare-Cache, der Server liefert 200 "
+               "— Cloudflare: Caching -> Configuration -> Purge Everything")
+    if fehlend:
+        liste = ", ".join(f"{n} {c}" for n, c in list(fehlend.items())[:5])
+        nur_404 = all(c in (200, 404) for cs in fehlend.values() for c in cs)
+        text = (f"{len(fehlend)} von {len(namen)} nachladbaren Seitenteilen fehlen auf mindestens "
+                f"einem Server: {liste}")
+        if zwischenstand and nur_404:
+            warn(text + " — Bundle-Wechsel zwischen den Servern; streng geprueft wird nach dem zweiten Server")
+        else:
+            fehler(text + " — Fahrer-App und Admin-Bereich laufen dort auf eine tote Seite")
+    elif not aus_cache:
+        ok(f"{len(namen)} nachladbare Seitenteile: je {versuche}x am Cache vorbei 200")
+
+
 def oberflaeche_pruefen(host, zwischenstand=False):
     """Vorfall 07.09.2026: Beide Server gesund, /api/health 200 — aber Cloudflare
     lieferte fuer /static/js/main.*.js einen gecachten 502 (schwarzer Bildschirm).
@@ -230,6 +288,8 @@ def oberflaeche_pruefen(host, zwischenstand=False):
             return
         for pfad in pfade:
             _startdatei_pruefen(host, pfad, zwischenstand)
+        haupt = next(p for p in pfade if re.match(r"/static/js/main\.[A-Za-z0-9_-]+\.js$", p))
+        _nachladbare_teile_pruefen(host, haupt, zwischenstand)
     except Exception as exc:  # noqa: BLE001
         fehler(f"Oberflaeche nicht pruefbar: {exc}")
 

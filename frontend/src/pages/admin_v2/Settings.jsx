@@ -1,3 +1,4 @@
+import { useUngespeichert } from "@/lib/ungespeichert";
 import { useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
@@ -12,6 +13,9 @@ function MfaKarte() {
   const [code, setCode] = useState("");
   const [codes, setCodes] = useState(null);      // Wiederherstellungscodes (einmalig)
   const [busy, setBusy] = useState(false);
+  // Runde 31: Die Codes werden genau einmal gezeigt — ein Neuladen haette den
+  // Notzugang des einzigen Super-Admins vernichtet.
+  useUngespeichert(Boolean(codes?.length));
   const load = () => api.get("/admin/me/mfa").then((r) => setSt(r.data)).catch(() => setSt({ aktiv: false }));
   useEffect(() => { load(); }, []);
   const einrichten = async () => {

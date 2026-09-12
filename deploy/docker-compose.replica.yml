@@ -43,3 +43,12 @@ services:
     extra_hosts:
       - "mongo-prod1:${PROD1_IP}"
       - "mongo-prod2:${PROD2_IP}"
+
+  # Runde 31 (12.09.2026): Bundle-Dateien fuer den anderen Server. Fehlt dem
+  # Proxy eine Datei unter /static/ (Rollout Server fuer Server), fragt er
+  # hier beim Nachbarn nach. NUR auf der privaten Adresse veroeffentlicht —
+  # aus dem Internet lauscht auf 8081 nichts; nginx laesst zusaetzlich nur
+  # PROD1_IP und PROD2_IP herein.
+  proxy:
+    ports:
+      - "${PRIVATE_IP}:8081:8081"

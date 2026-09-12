@@ -1,3 +1,4 @@
+import { useUngespeichert } from "@/lib/ungespeichert";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { driverApi } from "@/context/DriverContext";
@@ -38,6 +39,9 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
   // solange darf nicht abgesendet werden (sonst fehlt das Foto im
   // unveraenderbaren Bericht).
   const [fotoLaeuft, setFotoLaeuft] = useState(0);
+  // Runde 31: Kilometerstand, Abweichungen und Kamera-Fotos gehen erst beim
+  // Absenden an den Server — bis dahin nicht still verlieren.
+  useUngespeichert(Boolean(mileage || notes.trim() || deviations.length));
 
   const addDeviation = () =>
     setDeviations((d) => [...d, {

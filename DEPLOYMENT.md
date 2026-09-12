@@ -86,7 +86,11 @@ Migration oder R2) darf nicht zurueck in die Rotation. Vorgehen:
    **Rollback** auf den vorherigen Stand:
    ```bash
    cd /opt/autoschnell && git log --oneline -3      # vorherigen Commit ablesen
+   # Runde 31: erst die Bundle-Dateien des laufenden Standes aufheben — wer ihn
+   # schon geladen hat, braucht sie weiter:
+   docker cp "$(docker compose ps -q web):/usr/share/nginx/html/static/." deploy/assets-alt/static/
    git reset --hard <vorheriger Commit>              # nur versionierte Dateien; .env, Keyfile, Zertifikate bleiben
+   export APP_FASSUNG=$(git log -1 --format=%ct-%h) # Fassungs-Stempel, sonst kein Versionshinweis
    docker compose up -d --build
    ```
 3. Erst danach freigeben: `sh deploy/freigeben.sh`. Das Skript prueft
@@ -97,14 +101,55 @@ Migration oder R2) darf nicht zurueck in die Rotation. Vorgehen:
 Nach einem Rollback per `git reset --hard` holt das naechste
 `sh deploy/rollout.sh` mit `git pull --ff-only` wieder den neuesten Stand.
 
-**Zwischen den beiden Servern** (nach prod2, vor prod1) kennt der alte
-Server das neue Oberflaechen-Bundle noch nicht: Besucher, deren Startseite
-vom neuen und deren Skript-Anfrage vom alten Server kommt, bekommen kurz
-404. Die Probe am Ende des Rollouts meldet das als „404 aus dem
-Cloudflare-Cache". Seit 08.09.2026 liefert nginx solche 404 mit
-`no-store`, Cloudflare speichert sie also nicht mehr; der Zustand endet,
-sobald der zweite Server ausgerollt ist. Bleibt der Bildschirm danach
-laenger als fuenf Minuten schwarz: Cloudflare → Caching → Purge Everything.
+**Zwischen den beiden Servern** (nach prod2, vor prod1) laufen zwei Staende
+gleichzeitig. Startseite und nachgeladene Seitenteile koennen ueber den Load
+Balancer von verschiedenen Servern kommen. Vorfall 12.09.2026: prod2 lief ab
+12:20:35 UTC neu, prod1 erst ab 12:33:58 UTC — 13 Minuten lang bekam jeder,
+der einen Teil vom falschen Server holte, 404. Die Oberflaeche lieferte diese
+404 mit `public, max-age=31536000, immutable` aus; Chromium hielt sie fest und
+fragte den Server nie wieder. Fahrer-App und Super-Admin kamen danach bei
+JEDER Anmeldung nicht weiter, obwohl beide Server laengst sauber waren
+(Abhilfe auf den betroffenen Geraeten: Websitedaten von
+`app.auto-schnellkauf.de` loeschen; einmal Cloudflare → Purge Everything).
+
+Seit Runde 31:
+- Fehlt dem Proxy eine Datei unter `/static/`, fragt er erst beide Server im
+  privaten Netz (`hinter-loadbalancer.conf.template`, Port 8081 — nur auf
+  `PRIVATE_IP` veroeffentlicht, nur fuer `PROD1_IP`/`PROD2_IP` freigegeben,
+  liefert nur `/static/`, fragt selbst nie weiter). Der neue Server kennt das
+  neue Bundle, beide ueber `deploy/assets-alt` die vorherigen. Erst wenn keiner
+  sie hat: 404 mit `no-store`.
+- Auch die Oberflaeche selbst liefert fehlende Dateien nur noch mit
+  `no-store` (`frontend/Dockerfile`, `@fehlt`).
+- Scheitert trotzdem ein Seitenteil, erneuert die Oberflaeche den
+  Browser-Zwischenspeicher fuer genau diese Datei (`fetch(..., {cache: "reload"})`)
+  und laedt einmal neu — nie, solange ungespeicherte Eingaben offen sind.
+- Die Abschlusspruefung des Rollouts (`scripts/betriebsprobe.py`) holt auch
+  ALLE nachladbaren Seitenteile, je dreimal am Cloudflare-Cache vorbei —
+  vorher prueften sie nur die Startdateien und meldeten am 12.09. "0 Fehler".
+
+**Beim ERSTEN Rollout mit dieser Aenderung** kennt der noch alte Server Port
+8081 nicht. Wer auch dieses eine Fenster schliessen will, erzeugt auf dem
+zweiten Server VOR dem Rollout des ersten nur den Proxy neu (eine Sekunde
+Unterbrechung):
+```bash
+cd /opt/autoschnell && git pull --ff-only
+COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml docker compose up -d --force-recreate --no-deps proxy
+```
+Pruefen, von einem Server zum anderen (Antwort `200`; jede andere Adresse bekommt `403`):
+`docker compose exec -T proxy wget -S -O /dev/null http://<PRIVATE_IP des anderen>:8081/static/js/<Datei aus der index.html>`
+
+**Versionshinweis in der Oberflaeche (Runde 31):** `deploy/rollout.sh` setzt
+`APP_FASSUNG=<Commit-Zeit>-<Kurz-SHA>` — aus dem Commit, damit beide Server
+denselben Wert haben. Das Backend schickt ihn in jeder API-Antwort als
+`X-AH-Fassung`, die Oberflaeche kennt ihren eigenen aus dem Bau. Ist der
+Server-Stempel neuer, erscheint „Neue Version verfügbar“; beim naechsten
+Seitenwechsel und direkt nach der Anmeldung laedt die Oberflaeche still die
+neue Fassung — nie, solange Unterschriften, ein offener Kaufvertrag, ein
+Abhol-Check oder Wiederherstellungscodes ungespeichert sind (dann fragt der
+Browser vor dem Verlassen nach). Wer von Hand baut, setzt den Wert selbst
+(`export APP_FASSUNG=$(git log -1 --format=%ct-%h)`); ohne ihn gibt es keinen
+Hinweis, sonst aendert sich nichts.
 
 **Einzelserver ohne Load Balancer** (Entwicklung, Staging):
 ```bash

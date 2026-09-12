@@ -1,3 +1,4 @@
+import { fassungMithoeren } from "@/lib/fassung";
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_FAHRER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
@@ -11,6 +12,8 @@ import { verbindungsGrund } from "@/components/VerbindungsFehler";
 const DriverCtx = createContext(null);
 
 export const driverApi = axios.create({ baseURL: API_BASE, timeout: 60000 });
+// Runde 31: eigene Verbindung — sonst bliebe dieser Bereich blind fuer neue Fassungen.
+fassungMithoeren(driverApi);
 driverApi.interceptors.request.use((c) => {
   const t = tokenLesen(TOKEN_FAHRER);
   if (t) c.headers.Authorization = `Bearer ${t}`;

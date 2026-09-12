@@ -32,7 +32,9 @@ def test_lb_vorlage_hat_drain_marker_in_beiden_health_locations():
     assert t.count("location = /_oberflaeche_ok {") == 2
     assert "proxy_pass $web_up/;" in t and "proxy_method HEAD;" in t
     # Docker-DNS: nginx darf die Container-Adressen nicht nur beim Start aufloesen
-    assert t.count("resolver 127.0.0.11 valid=10s ipv6=off;") == 2
+    # Runde 31: auch der Block fuer den Nachbarserver (Port 8081) spricht den
+    # web-Container an — JEDER solche Block braucht den Docker-DNS-Resolver.
+    assert t.count("resolver 127.0.0.11 valid=10s ipv6=off;") == t.count("set $web_up http://web:80;") >= 2
     assert "proxy_pass http://" not in t, "feste Upstream-Adressen veralten nach einem Container-Neustart"
     d = (WURZEL / "deploy" / "default.conf.template").read_text(encoding="utf-8")
     assert "resolver 127.0.0.11" in d and "proxy_pass http://" not in d
@@ -45,7 +47,11 @@ def test_lb_vorlage_hat_drain_marker_in_beiden_health_locations():
         # 08.09.2026: waehrend eines Rollouts Server fuer Server kennt der alte
         # Server das neue Bundle nicht -> 404; Cloudflare cacht 404 drei
         # Minuten. Die 404 muss deshalb "no-store" tragen, die 200 nicht.
-        assert "proxy_intercept_errors on;" in text and "error_page 404 = @static_fehlt;" in text
+        assert "proxy_intercept_errors on;" in text
+        # Runde 31: hinter dem Load Balancer erst beide Server fragen, dann 404.
+        erster_halt = "@static_nachbar1" if text is t else "@static_fehlt"
+        assert f"error_page 404 = {erster_halt};" in text
+        assert "= @static_fehlt;" in text
         i = text.index("location @static_fehlt {")
         assert "add_header Cache-Control \"no-store\" always;" in text[i:i + 200]
         assert "return 404;" in text[i:i + 200]
@@ -565,13 +571,13 @@ def test_rollout_hebt_die_bundles_des_vorherigen_standes_auf():
     kopie = s.index("docker cp")
     assert kopie < s.index("up -d --build"), "kopiert werden muss VOR dem Neubau"
     assert "/usr/share/nginx/html/static/." in s
-    assert "-mtime +14 -delete" in s, "ohne Aufraeumen waechst der Ordner unbegrenzt"
+    assert "-mtime +90 -delete" in s, "ohne Aufraeumen waechst der Ordner unbegrenzt"
     # Gegenpruefung 12.09.2026: "docker cp" uebernimmt die Zeitstempel aus dem
     # Image (Bauzeit). Ohne Auffrischen haette das Aufraeumen die gerade
     # aufgehobenen Dateien sofort wieder geloescht — der Rueckfall waere genau
     # dann leer gewesen, wenn er gebraucht wird.
     assert "-exec touch {} +" in s, "Zeitstempel der Kopie muessen aufgefrischt werden"
-    assert s.index("-exec touch {} +") < s.index("-mtime +14 -delete"), \
+    assert s.index("-exec touch {} +") < s.index("-mtime +90 -delete"), \
         "erst auffrischen, dann nach Alter aufraeumen"
     assert "cp -a" in s, "cp -a behaelt die aufgefrischte Zeit"
     # Der Ordner haengt schreibgeschuetzt im Oberflaechen-Container ...
