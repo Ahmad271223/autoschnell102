@@ -793,6 +793,14 @@ gegenseitig ausbremsen:
   signiert und trägt kein Token, deshalb bleibt es ein IP-Limit — der Wert
   ist aber auf ein Büro mit vielen Suchern ausgelegt (ein Vergleich lädt
   bis zu 40 Bilder).
+- **Link-Warteschlange:** Jeder Sucher darf höchstens
+  `LINK_JOB_MAX_OFFEN_JE_KONTO` (20) offene Link-Abrufe haben, die Firma
+  `LINK_JOB_MAX_OFFEN_JE_FIRMA` (100). Darüber kommt 429 mit klarer
+  Meldung. Der Worker arbeitet die Konten **reihum** ab statt streng nach
+  Alter — ein Sucher mit 500 Links blockiert die anderen nicht mehr.
+- **Termine:** Ein Sucher kann einen Abholtermin nur an ein Fahrzeug
+  hängen, das ihm gehört oder zu dem er einen eigenen Kaufvertrag hat.
+  Der Chef darf weiterhin alles.
 - **Besucher-Adresse:** nginx setzt für `/api/` jetzt ausdrücklich
   `X-Real-IP` und `X-Forwarded-For`. Vorher reichte es eine vom Besucher
   selbst gesetzte Kopfzeile durch — die IP-Sperren waren beeinflussbar.

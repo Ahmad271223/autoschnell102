@@ -637,8 +637,16 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
                 "source": source,
                 "hint": "Bitte über die Browser-Erweiterung laden."}
 
-    from link_jobs import enqueue_job, process_one_now
-    job = await enqueue_job(db, raw_url, dealer_id=user.get("dealer_id") or "")
+    from link_jobs import enqueue_job, process_one_now, WarteschlangeVoll
+    try:
+        # Runde 28: Der Job gehoert auch dem KONTO — dadurch bedient der
+        # Worker die Sucher reihum, und ein einzelnes Konto kann die
+        # Warteschlange nicht mehr fuer alle fuellen.
+        job = await enqueue_job(db, raw_url,
+                                dealer_id=user.get("dealer_id") or "",
+                                user_id=user.get("id") or "")
+    except WarteschlangeVoll as voll:
+        raise HTTPException(429, voll.text)
     if job.get("status") == "queued":
         # Sofort-Anstoss (begrenzt/dedupliziert, Audit 09/2026 Punkt 17)
         from link_jobs import anstossen
@@ -677,6 +685,14 @@ async def listings_check_status(job_id: str, user=Depends(require_active_sub)):
         if eigene not in (job.get("dealer_ids") or []) \
                 and job.get("requested_by_dealer") != eigene:
             raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+        # Runde 28: Ein Sucher sieht nur Jobs, die er selbst eingereicht hat
+        # — Status und Fehler eines Kollegen gehen ihn nichts an. Altjobs
+        # ohne Konto-Angabe bleiben fuer die Firma sichtbar.
+        konten = job.get("user_ids") or []
+        if (ist_sucher(user) and konten
+                and user.get("id") not in konten
+                and job.get("requested_by_user") != user.get("id")):
+            raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
         if job["status"] in ("completed", "failed") or schritt >= len(pausen):
             break
         await _aio.sleep(pausen[schritt])
@@ -688,9 +704,14 @@ async def listings_check_status(job_id: str, user=Depends(require_active_sub)):
         # Nachpruefung Runde 14 (Nr. 11): nur die EIGENEN wartenden Jobs
         # zaehlen. Die globale Position verriet die Plattformauslastung
         # (fremde Firmen), das Frontend wertet den Wert ohnehin nicht aus.
-        out["vor_dir"] = await db.link_jobs.count_documents(
-            {"status": "queued", "dealer_ids": eigene,
-             "created_at": {"$lt": job["created_at"]}})
+        # Runde 28: die eigenen wartenden Jobs — fuer Sucher je Konto.
+        vor_filter = {"status": "queued",
+                      "created_at": {"$lt": job["created_at"]}}
+        if ist_sucher(user):
+            vor_filter["user_ids"] = user.get("id")
+        else:
+            vor_filter["dealer_ids"] = eigene
+        out["vor_dir"] = await db.link_jobs.count_documents(vor_filter)
     return out
 
 

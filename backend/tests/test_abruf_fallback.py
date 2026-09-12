@@ -44,7 +44,7 @@ def test_check_und_compare_fallen_ohne_erweiterung_auf_server_zurueck():
                link_jobs.process_one_now, L.get_or_fetch_listing)
         aufrufe = []
 
-        async def enqueue_stub(db_, url, dealer_id=""):
+        async def enqueue_stub(db_, url, dealer_id="", user_id=""):
             aufrufe.append(url)
             return {"status": "completed", "id": "job_abruf_test"}
 

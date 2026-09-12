@@ -283,6 +283,27 @@ async def _offener_termin_zum_fahrzeug(dealer_id: str, vehicle_id: Optional[str]
         q, {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1, "status": 1})
 
 
+async def _fahrzeug_fuer_termin_erlaubt(user: dict, vehicle_id: str) -> bool:
+    """Runde 28 (12.09.2026, Pruefbefund): Darf DIESES Konto einen Termin an
+    dieses Fahrzeug haengen?
+
+    Vorher genuegte die Firma. Fahrzeug-IDs sind aber ratbar (v_<Anzeigen-
+    nummer>) — ein Sucher konnte damit einen Termin auf das Auto eines
+    Kollegen setzen, dessen Fahrzeugdaten im Fahrer-PDF sehen und (ohne
+    eigenen Vertrag) ueber try_set_lifecycle sogar dessen Fahrzeugstatus
+    auf 'Abholung geplant' schieben.
+
+    Erlaubt ist jetzt: das Fahrzeug liegt im eigenen Bereich (Chef: Firma;
+    Sucher: selbst verglichen bzw. Mitbearbeiter) ODER es gibt einen
+    EIGENEN Kaufvertrag dazu."""
+    if await db.vehicles.count_documents(
+            {"id": vehicle_id, **fahrzeug_bereich(user)}, limit=1):
+        return True
+    from routes.contracts import _vertrag_bereich
+    return bool(await db.generated_pdfs.count_documents(
+        {"vehicle_id": vehicle_id, **_vertrag_bereich(user)}, limit=1))
+
+
 @router.post("/appointments")
 async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     appt_id = str(uuid.uuid4())
@@ -299,6 +320,9 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
             {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
              "lifecycle": {"$ne": "geloescht"}}, {"_id": 0})
         if not vehicle_doc:
+            raise HTTPException(404, "Fahrzeug nicht gefunden")
+        # Runde 28: nur eigene Fahrzeuge (oder mit eigenem Vertrag).
+        if not await _fahrzeug_fuer_termin_erlaubt(user, body.vehicle_id):
             raise HTTPException(404, "Fahrzeug nicht gefunden")
     vertrag_doc = None
     if body.contract_id:
@@ -527,10 +551,16 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     unset: Dict[str, Any] = {}
     # Auch beim Aendern: das Fahrzeug muss der Firma gehoeren (Umbau
     # Kaufvorgaenge: firmenweit gemeinsam, nicht mehr je Sucher).
-    if update.get("vehicle_id") and not await db.vehicles.find_one(
-            {"id": update["vehicle_id"], "dealer_id": user["dealer_id"],
-             "lifecycle": {"$ne": "geloescht"}}, {"_id": 1}):
-        raise HTTPException(404, "Fahrzeug nicht gefunden")
+    if update.get("vehicle_id"):
+        # Runde 28: dieselbe Pruefung wie beim Anlegen — ein sauberer
+        # eigener Termin darf nicht nachtraeglich auf das Auto eines
+        # Kollegen umgebogen werden.
+        if not await db.vehicles.find_one(
+                {"id": update["vehicle_id"], "dealer_id": user["dealer_id"],
+                 "lifecycle": {"$ne": "geloescht"}}, {"_id": 1}):
+            raise HTTPException(404, "Fahrzeug nicht gefunden")
+        if not await _fahrzeug_fuer_termin_erlaubt(user, update["vehicle_id"]):
+            raise HTTPException(404, "Fahrzeug nicht gefunden")
     if update.get("contract_id"):
         # Runde 12: auch nachtraeglich nur Vertraege im eigenen Bereich —
         # vorher liess sich ein sauberer eigener Termin spaeter auf den

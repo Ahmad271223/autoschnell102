@@ -294,9 +294,11 @@ def test_05_termine_liste_und_detail_im_eigenen_bereich(welt):
 def test_06_sucher_darf_folgt_vertrag_und_vorgang_nicht_dem_fahrzeug(welt):
     """Umbau Kaufvorgaenge 09.09.2026: _sucher_darf (= deps.termin_im_bereich)
     prueft Ersteller, eigenen Vertrag und eigenen Kaufvorgang — nicht mehr
-    das Fahrzeug. Abholberichte nur zu Terminen im Bereich. Das Fahrzeug ist
-    firmenweit gemeinsam: ein Kollege darf einen eigenen Termin darauf
-    anlegen, den der Besitzer nicht sieht."""
+    das Fahrzeug. Abholberichte nur zu Terminen im Bereich.
+
+    Runde 28 (12.09.2026): Ein Kollege darf an ein FREMDES Fahrzeug gar
+    keinen Termin mehr haengen (404). Eigene Termine ohne Fahrzeug bleiben
+    fuer den Besitzer unsichtbar."""
     A = _module("routes.appointments")
     from fastapi import Response
     w, db = welt.w, welt.db
@@ -326,19 +328,28 @@ def test_06_sucher_darf_folgt_vertrag_und_vorgang_nicht_dem_fahrzeug(welt):
         rep = await A.get_pickup_report(f"t_a{w.s}", 0, w.a)
         with pytest.raises(HTTPException) as e:
             await A.get_pickup_report(f"t_chef{w.s}", 0, w.a)   # Chef-Termin auf A's Fahrzeug: nicht A's
-        # Kollege B legt einen eigenen Termin auf das (firmenweit gemeinsame) Fahrzeug von A
-        r_b = await A.create_appointment(A.AppointmentIn(vehicle_id=f"v_a{w.s}", pickup_date="2099-01-01"), w.b)
+        # Runde 28 (12.09.2026, Vorgabe Ahmad): Kollege B darf KEINEN Termin
+        # auf das Fahrzeug von A legen — weder sieht er dessen Daten, noch
+        # veraendert er ueber den Termin dessen Fahrzeugstatus.
+        with pytest.raises(HTTPException) as e_b:
+            await A.create_appointment(
+                A.AppointmentIn(vehicle_id=f"v_a{w.s}", pickup_date="2099-01-01"), w.b)
+        # Einen eigenen Termin OHNE fremdes Fahrzeug darf er selbstverstaendlich
+        r_b = await A.create_appointment(
+            A.AppointmentIn(pickup_date="2099-01-01"), w.b)
         sicht_a = {t["id"] for t in await A.list_appointments(Response(), w.a)}
         sicht_b = {t["id"] for t in await A.list_appointments(Response(), w.b)}
         with pytest.raises(HTTPException) as e2:
             await A.get_appointment(r_b["id"], w.a)
-        return darf, rep, e.value.status_code, r_b, sicht_a, sicht_b, e2.value.status_code
+        return (darf, rep, e.value.status_code, r_b, sicht_a, sicht_b,
+                e2.value.status_code, e_b.value.status_code)
 
-    darf, rep, s1, r_b, sicht_a, sicht_b, s2 = welt.run(lauf())
+    darf, rep, s1, r_b, sicht_a, sicht_b, s2, s_b = welt.run(lauf())
     assert darf == {"fahrzeug": False, "selbst": True, "vertrag": True, "vorgang": True,
                     "kollege_vertrag": False, "kollege_vorgang": False, "chef": True}
     assert rep["report"]["id"] == f"r_{w.s}" and s1 == 404
-    assert r_b["vehicle_id"] == f"v_a{w.s}" and r_b["created_by"] == w.b["id"], "Fahrzeug ist firmenweit"
+    assert s_b == 404, "Termin auf das Fahrzeug des Kollegen: nicht erlaubt"
+    assert not r_b.get("vehicle_id") and r_b["created_by"] == w.b["id"]
     assert sicht_a == {f"t_a{w.s}"} and sicht_b == {r_b["id"]}
     assert s2 == 404, "der Besitzer sieht den Termin des Kollegen nicht"
 

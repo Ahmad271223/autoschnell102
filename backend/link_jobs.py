@@ -44,6 +44,24 @@ MAX_ATTEMPTS = int(os.environ.get("LINK_JOB_MAX_ATTEMPTS", "3"))
 # Fertige/gescheiterte Jobs verschwinden nach dieser Zeit automatisch.
 FINISHED_TTL_SECONDS = int(os.environ.get("LINK_JOB_FINISHED_TTL", "3600"))
 
+# Runde 28 (12.09.2026, Pruefbefund Fairness): Ohne Obergrenze konnte EIN
+# Sucher hunderte Links einreihen; die Warteschlange war reines FIFO und
+# alle anderen warteten dahinter. Jetzt: begrenzte offene Jobs je Konto
+# und je Firma, und der Worker bedient die Konten reihum.
+MAX_OFFEN_JE_KONTO = int(os.environ.get("LINK_JOB_MAX_OFFEN_JE_KONTO", "20") or 20)
+MAX_OFFEN_JE_FIRMA = int(os.environ.get("LINK_JOB_MAX_OFFEN_JE_FIRMA", "100") or 100)
+
+
+class WarteschlangeVoll(Exception):
+    """Zu viele offene Link-Jobs dieses Kontos bzw. dieser Firma."""
+
+    def __init__(self, text: str, offen: int, grenze: int):
+        super().__init__(text)
+        self.text = text
+        self.offen = offen
+        self.grenze = grenze
+
+
 _WORKER = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 
@@ -58,6 +76,11 @@ async def ensure_job_indexes(db) -> None:
         partialFilterExpression={"active": True})
     await db.link_jobs.create_index("id", unique=True, name="uniq_job_id")
     await db.link_jobs.create_index("status", name="by_status")
+    # Runde 28: offene Jobs je Konto/Firma zaehlen und reihum auswaehlen.
+    await db.link_jobs.create_index([("status", 1), ("user_ids", 1)],
+                                    name="by_status_user")
+    await db.link_jobs.create_index([("status", 1), ("dealer_ids", 1)],
+                                    name="by_status_dealer")
     # TTL: fertige Jobs raeumen sich selbst weg. Aendert sich die TTL per
     # Umgebung, lehnt Mongo create_index mit "IndexOptionsConflict" ab —
     # vorher fiel damit der Job-Worker in ALLEN Prozessen aus (Review
@@ -82,11 +105,40 @@ async def _ttl_index_sicher(db, feld: str, sekunden: int, name: str) -> None:
         await db.link_jobs.create_index(feld, expireAfterSeconds=sekunden, name=name)
 
 
-async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:
+OFFEN = ("queued", "processing")
+
+
+async def _grenzen_pruefen(db, dealer_id: str, user_id: str) -> None:
+    """Zu viele offene Jobs? Dann NICHT einreihen (Runde 28).
+
+    Ohne diese Grenze konnte ein einzelnes Konto die Warteschlange fuellen
+    und alle anderen Sucher warten lassen. Die Grenzen zaehlen nur OFFENE
+    Jobs — fertige verschwinden ohnehin von selbst."""
+    if user_id and MAX_OFFEN_JE_KONTO > 0:
+        offen = await db.link_jobs.count_documents(
+            {"status": {"$in": list(OFFEN)}, "user_ids": user_id})
+        if offen >= MAX_OFFEN_JE_KONTO:
+            raise WarteschlangeVoll(
+                f"Du hast {offen} Links in der Warteschlange (Grenze {MAX_OFFEN_JE_KONTO}). "
+                "Bitte warte, bis die ersten fertig sind.",
+                offen, MAX_OFFEN_JE_KONTO)
+    if dealer_id and MAX_OFFEN_JE_FIRMA > 0:
+        offen = await db.link_jobs.count_documents(
+            {"status": {"$in": list(OFFEN)}, "dealer_ids": dealer_id})
+        if offen >= MAX_OFFEN_JE_FIRMA:
+            raise WarteschlangeVoll(
+                f"Deine Firma hat {offen} Links in der Warteschlange (Grenze {MAX_OFFEN_JE_FIRMA}). "
+                "Bitte kurz warten.",
+                offen, MAX_OFFEN_JE_FIRMA)
+
+
+async def enqueue_job(db, url: str, dealer_id: str = "",
+                      user_id: str = "") -> dict:
     """Job fuer diesen Link anlegen — oder den bereits AKTIVEN Job dieses
     Inserats zurueckgeben (idempotent, race-fest ueber den Unique-Index)."""
     from listing_identity import get_listing_identity
     identity = get_listing_identity(url)
+    await _grenzen_pruefen(db, dealer_id, user_id)
     job = {
         "id": str(uuid.uuid4()),
         "cache_key": identity["cache_key"],
@@ -98,6 +150,9 @@ async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:
         "attempts": 0,
         "error": None,
         "requested_by_dealer": dealer_id,
+        "requested_by_user": user_id,
+        # Runde 28: das KONTO, das wartet — fuer Fairness und Statusabfrage.
+        "user_ids": [user_id] if user_id else [],
         # Audit 09/2026 (Punkt 33): alle Firmen, die auf diesen Job warten —
         # nur sie duerfen den Status abfragen.
         "dealer_ids": [dealer_id] if dealer_id else [],
@@ -109,10 +164,15 @@ async def enqueue_job(db, url: str, dealer_id: str = "") -> dict:
         job.pop("_id", None)
         return job
     except DuplicateKeyError:
-        if dealer_id:
+        if dealer_id or user_id:
+            dazu = {}
+            if dealer_id:
+                dazu["dealer_ids"] = dealer_id
+            if user_id:
+                dazu["user_ids"] = user_id
             await db.link_jobs.update_one(
                 {"cache_key": identity["cache_key"], "active": True},
-                {"$addToSet": {"dealer_ids": dealer_id}})
+                {"$addToSet": dazu})
         existing = await db.link_jobs.find_one(
             {"cache_key": identity["cache_key"], "active": True}, {"_id": 0})
         if existing:
@@ -183,9 +243,10 @@ async def _requeue_stale(db) -> None:
                 {"$set": {"status": "queued", "updated_at": _now()}})
 
 
-async def _claim_one(db) -> Optional[dict]:
+async def _beanspruchen(db, filter_zusatz: dict) -> Optional[dict]:
+    """Einen wartenden Job in Bearbeitung nehmen (aeltester zuerst)."""
     return await db.link_jobs.find_one_and_update(
-        {"status": "queued", "active": True},
+        {"status": "queued", "active": True, **filter_zusatz},
         {"$set": {"status": "processing", "worker": _WORKER,
                   "processing_until": _now() + timedelta(
                       seconds=PROCESSING_TTL_SECONDS),
@@ -193,6 +254,43 @@ async def _claim_one(db) -> Optional[dict]:
          "$inc": {"attempts": 1}},
         sort=[("created_at", 1)],
         return_document=ReturnDocument.AFTER)
+
+
+async def _claim_one(db) -> Optional[dict]:
+    """Naechsten Job holen — reihum je Konto (Runde 28).
+
+    Vorher galt reines FIFO: Wer 500 Links einwarf, schob alle anderen
+    dahinter. Jetzt wird je Konto der aelteste wartende Job betrachtet;
+    zuerst kommt das Konto, das gerade am wenigsten in Arbeit hat, dann
+    das mit dem laengsten Warten."""
+    laufend: dict = {}
+    async for reihe in db.link_jobs.aggregate([
+        {"$match": {"status": "processing"}},
+        {"$group": {"_id": "$requested_by_user", "n": {"$sum": 1}}},
+    ]):
+        laufend[reihe["_id"] or ""] = reihe["n"]
+    kandidaten = [reihe async for reihe in db.link_jobs.aggregate([
+        {"$match": {"status": "queued", "active": True}},
+        {"$sort": {"created_at": 1}},
+        {"$group": {"_id": "$requested_by_user",
+                    "job_id": {"$first": "$id"},
+                    "created_at": {"$first": "$created_at"}}},
+        # Aeltestes Warten zuerst betrachten: so rutscht kein Konto
+        # dauerhaft aus der Auswahl, auch wenn sehr viele warten.
+        {"$sort": {"created_at": 1}},
+        {"$limit": 50},
+    ])]
+    if not kandidaten:
+        return None
+    kandidaten.sort(key=lambda k: (laufend.get(k["_id"] or "", 0),
+                                   k["created_at"]))
+    for k in kandidaten:
+        job = await _beanspruchen(db, {"id": k["job_id"]})
+        if job:
+            return job
+    # Alle Kandidaten waren inzwischen weg (anderer Worker) — einmal
+    # regulaer nachfassen, damit kein Job liegen bleibt.
+    return await _beanspruchen(db, {})
 
 
 async def _process(db, job: dict) -> None:

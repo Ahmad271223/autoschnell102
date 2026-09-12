@@ -622,7 +622,12 @@ def test_http_72_92_liste_ueber_100_und_fremde_dealer_id(welt):
         assert len(rows) >= 102, len(rows)
         assert all("stats_month" in x and "subscription" in x for x in rows)
         mein = next(x for x in rows if x["id"] == sid)
-        assert mein["stats_month"] == {"kaeufe": 0, "vergleiche": 0}, mein["stats_month"]
+        # Runde 27: stats_month traegt zusaetzlich den Zeitraum
+        # (vergleiche_seit) — die Zahlen bleiben, der Vergleich prueft
+        # deshalb die Werte statt das ganze Dict.
+        assert mein["stats_month"]["kaeufe"] == 0, mein["stats_month"]
+        assert mein["stats_month"]["vergleiche"] == 0, mein["stats_month"]
+        assert mein["stats_month"]["vergleiche_seit"], "Zeitraum fehlt"
         assert mein["subscription"]["active"] is False, mein["subscription"]
     finally:
         dbx.users.delete_many({"id": {"$in": [e["id"] for e in extra]}})
