@@ -486,7 +486,10 @@ def test_korrektur_duplicate_key_nimmt_abloesung_zurueck():
 def _vollstaendiger_entwurf(P, t, appt_id, proto_id):
     return {"id": proto_id, "appointment_id": appt_id, "dealer_id": t.dealer_id,
             "driver_account_id": t.driver_id, "driver_name": t.driver["display_name"],
-            "version": 1, "status": "entwurf", "superseded": False,
+            # Runde 30 (12.09.2026): Unterschrieben wird erst NACH der Freigabe
+            # des Chefs. Diese Tests pruefen den Abschluss selbst, deshalb
+            # startet das Protokoll direkt als freigegeben.
+            "version": 1, "status": P.FREIGEGEBEN, "superseded": False,
             "vehicle_check": {k: {"status": "stimmt"}
                               for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
             "condition": {"mileage": "123456"}, "keys_count": "2",
@@ -527,7 +530,9 @@ def test_finalize_abbruch_raeumt_dateien_auf_und_meldet_retry():
             assert len(keys) == 2, keys
             assert all(not storage_service.storage.exists(k) for k in keys), keys
             p = await db.pickup_protocols.find_one({"id": proto_id}, {"_id": 0})
-            assert p["status"] == "entwurf" and "claim_bis" not in p
+            # Runde 30: zurueck auf FREIGEGEBEN (die Freigabe des Chefs
+            # bleibt erhalten), nicht auf Entwurf.
+            assert p["status"] == P.FREIGEGEBEN and "claim_bis" not in p
             assert await db.storage_delete_retry.count_documents(
                 {"dealer_id": t.dealer_id}) == 0
 

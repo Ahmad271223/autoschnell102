@@ -13,6 +13,7 @@ import {
 import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
+import FreigabeKasten from "@/components/FreigabeKasten";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
   format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
@@ -126,6 +127,9 @@ export default function Termine() {
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="termine-page">
+      {/* Runde 30 (12.09.2026): Abholprotokolle, die auf die Freigabe des
+          Chefs warten. Ganz oben — der Fahrer steht solange beim Verkaeufer. */}
+      <FreigabeKasten onAenderung={load} />
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
         <div>

@@ -402,7 +402,10 @@ def test_15_protokoll_abschluss_archiviert_den_auftraggeber(welt, monkeypatch):
         w.run(w.db.pickup_protocols.insert_one({
             "id": pid, "appointment_id": aid, "dealer_id": w.dealer_id,
             "driver_account_id": w.driver["id"], "driver_name": w.driver["display_name"],
-            "version": 1, "status": "entwurf", "superseded": False,
+            # Runde 30 (12.09.2026): Unterschrieben wird erst NACH der
+            # Freigabe des Chefs — dieser Test prueft den Abschluss selbst,
+            # deshalb startet das Protokoll direkt als freigegeben.
+            "version": 1, "status": P.FREIGEGEBEN, "superseded": False,
             "vehicle_check": {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
             "condition": {"mileage": "123456"}, "keys_count": "2",
             "damages_confirmed": True, "place": "Hannover", "created_at": _jetzt()}))

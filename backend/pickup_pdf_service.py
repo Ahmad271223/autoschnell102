@@ -988,16 +988,71 @@ def build_pickup_pdf(
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.append(Spacer(1, 0.4 * cm))
-    story.append(KeepTogether([
-        _section("8 · Übergabe-Bestätigung", st),
+    # ---- Runde 30 (12.09.2026, Wunsch Ahmad): Kaufpreis vor den
+    # Unterschriften. Findet der Fahrer vor Ort Abweichungen, verhandelt der
+    # Haendler nach — unterschrieben wird dann der NEUE Preis. Im leeren
+    # Formular stehen Linien zum Eintragen, im ausgefuellten die Werte.
+    _preis_vertrag = contract.get("purchase_price")
+    _preis_neu = filled.get("neuer_preis")
+    # Gegenpruefung 12.09.2026: Der Vermerk ist Freitext des Chefs und geht
+    # in einen ReportLab-Absatz — der wird als Mini-XML gelesen. Ein
+    # "<" im Text (z.B. "Bremsen <b> vorn") liess den PDF-Bau abstuerzen,
+    # und der Fahrer konnte vor Ort ueberhaupt nicht mehr abschliessen.
+    _preis_notiz = _xe(_txt(filled.get("preis_notiz")))
+
+    def _eur_oder_linie(wert) -> str:
+        if wert in (None, ""):
+            return "_______________ €"
+        try:
+            return f"{float(wert):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+        except (TypeError, ValueError):
+            return _txt(wert)
+
+    preis_zeilen = [[
+        Paragraph("<b>Kaufpreis laut Vertrag</b>", st["label"]),
+        Paragraph(_eur_oder_linie(_preis_vertrag), st["value"]),
+        Paragraph("<b>Neuer Preis (nach Verhandlung vor Ort)</b>", st["label"]),
+        Paragraph(_eur_oder_linie(_preis_neu), st["value"]),
+    ]]
+    preis_t = Table(preis_zeilen, colWidths=[CONTENT_W * 0.22, CONTENT_W * 0.26,
+                                             CONTENT_W * 0.28, CONTENT_W * 0.24])
+    preis_t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#d0d0d0")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e6e6e6")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f7f7f7")),
+        ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f7f7f7")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    preis_block = [
+        _section("8 · Kaufpreis & Übergabe-Bestätigung", st),
         Spacer(1, 8),
+        preis_t,
+    ]
+    if _preis_notiz:
+        preis_block += [Spacer(1, 4),
+                        Paragraph(f"Vermerk zur Verhandlung: {_preis_notiz}",
+                                  st["small"])]
+    elif _preis_neu in (None, ""):
+        preis_block += [
+            Spacer(1, 3),
+            Paragraph("Wurde vor Ort nachverhandelt, wird der neue Preis hier "
+                      "eingetragen und von beiden Seiten unterschrieben.",
+                      st["small"])]
+
+    story.append(Spacer(1, 0.4 * cm))
+    story.append(KeepTogether(preis_block + [
+        Spacer(1, 10),
         sig_t,
         Spacer(1, 4),
         Paragraph(
             "Mit ihrer Unterschrift bestätigen beide Parteien die Übergabe des "
             "Fahrzeugs im dokumentierten Zustand inklusive der aufgeführten "
-            "Dokumente und Schlüssel.", st["small"]),
+            "Dokumente und Schlüssel sowie den oben genannten Kaufpreis.",
+            st["small"]),
     ]))
 
     footer_left = dealer_name

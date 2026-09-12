@@ -134,6 +134,45 @@ class FinalizeIn(BaseModel):
     signature_seller_b64: str = Field(min_length=20, max_length=3_000_000)
     seller_name: Optional[str] = Field(default=None, max_length=200)
     place: Optional[str] = Field(default=None, max_length=200)
+    # Gegenpruefung 12.09.2026 (schwerer Befund): Der Chef kann den Preis
+    # aendern, waehrend vor Ort unterschrieben wird. Die App schickt
+    # deshalb den Preis mit, den sie ANGEZEIGT hat — weicht er ab, wird
+    # nicht abgeschlossen. Sonst haette der Verkaeufer einen anderen
+    # Betrag gesehen als den, der im PDF ueber seiner Unterschrift steht.
+    # None = die App kannte noch keinen Preis (Altfassung / keine Freigabe
+    # mit Preis).
+    neuer_preis_gesehen: Optional[float] = Field(default=None, ge=0,
+                                                 le=10_000_000)
+
+
+# --------------------------------------------------------------------------
+# Runde 30 (12.09.2026, Wunsch Ahmad): Freigabe durch den Chef VOR den
+# Unterschriften.
+#
+# Ablauf vor Ort:
+#   1. Der Fahrer fuellt das Protokoll vollstaendig aus und schickt es ab
+#      (Status "zur_freigabe") — noch OHNE Unterschriften.
+#   2. Der Chef sieht das ausgefuellte Protokoll: was weicht ab, welche
+#      neuen Schaeden hat der Fahrer gefunden. Er kann den Verkaeufer
+#      anrufen und nachverhandeln.
+#   3. Der Chef gibt frei — mit dem NEUEN Preis, falls verhandelt wurde
+#      (Status "freigegeben"). Oder er schickt das Protokoll zurueck, wenn
+#      der Fahrer etwas nachtragen soll (zurueck auf "entwurf").
+#   4. Erst dann unterschreiben Verkaeufer und Fahrer vor Ort, und das
+#      Protokoll wird endgueltig (Status "final") — mit dem neuen Preis.
+ZUR_FREIGABE = "zur_freigabe"
+FREIGEGEBEN = "freigegeben"
+# In diesen Staenden darf der Fahrer nichts mehr aendern (sonst saehe der
+# Chef etwas anderes, als am Ende unterschrieben wird).
+GESPERRT_FUER_FAHRER = (ZUR_FREIGABE, FREIGEGEBEN)
+
+
+class FreigabeIn(BaseModel):
+    """Freigabe des Chefs. `neuer_preis` nur, wenn nachverhandelt wurde."""
+    neuer_preis: Optional[float] = Field(default=None, ge=0, le=10_000_000)
+    notiz: Optional[str] = Field(default=None, max_length=2000)
+    # True = zurueck an den Fahrer (er soll etwas nachtragen/korrigieren).
+    zurueck: bool = False
 
 
 def _vehicle_check_values(vehicle: dict, contract: dict) -> Dict[str, str]:
@@ -252,17 +291,24 @@ async def korrektur_verwerfen(appt_id: str) -> bool:
     (superseded), der Entwurf wird nie fertig. Deshalb: Entwurf verwerfen,
     DANACH die korrigierte Version wieder als aktuell schalten (Reihenfolge
     wegen des Unique-Index 'ein aktuelles Protokoll je Termin').
-    Best effort — wirft nie; True, wenn ein Entwurf verworfen wurde."""
+    Best effort — wirft nie; True, wenn ein Entwurf verworfen wurde.
+
+    Gegenpruefung 12.09.2026 (schwerer Befund): Seit Runde 30 kann eine
+    Korrektur auch beim Chef liegen (zur_freigabe) oder freigegeben sein.
+    Wurde nur nach 'entwurf' gesucht, blieb der Termin nach dem Schliessen
+    OHNE massgebliches Protokoll zurueck — das unterschriebene PDF der
+    Vorversion war nicht mehr erreichbar."""
+    OFFENE_KORREKTUR = ["entwurf", ZUR_FREIGABE, FREIGEGEBEN]
     try:
         entwurf = await db.pickup_protocols.find_one(
-            {"appointment_id": appt_id, "status": "entwurf",
+            {"appointment_id": appt_id, "status": {"$in": OFFENE_KORREKTUR},
              "corrects_version": {"$exists": True}, "superseded": {"$ne": True}},
             {"_id": 0, "id": 1, "corrects_version": 1})
         if not entwurf:
             return False
         jetzt = now_iso()
         res = await db.pickup_protocols.update_one(
-            {"id": entwurf["id"], "status": "entwurf"},
+            {"id": entwurf["id"], "status": {"$in": OFFENE_KORREKTUR}},
             {"$set": {"superseded": True, "verworfen_am": jetzt, "updated_at": jetzt}})
         if res.matched_count == 0:
             return False
@@ -314,6 +360,9 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
         },
         "vehicle": vehicle,
         "damages": contract.get("damages") or vehicle.get("damages") or [],
+        # Runde 30: Der Fahrer sieht den Vertragspreis — und nach der
+        # Freigabe den nachverhandelten Preis, den er unterschreibt.
+        "preis_vertrag": contract.get("purchase_price"),
         "appointment": {k: appt.get(k) for k in
                         ("id", "title", "pickup_date", "pickup_time",
                          "pickup_address", "seller_name", "status")},
@@ -354,6 +403,16 @@ async def _speichern_abgelehnt(proto_id: str):
     if akt and akt.get("status") == "wird_abgeschlossen":
         raise HTTPException(409, "Das Protokoll wird gerade abgeschlossen "
                                  "— bitte einen Moment warten.")
+    # Runde 30: abgeschickt oder freigegeben -> nicht mehr aenderbar, damit
+    # der Chef genau das sieht, was am Ende unterschrieben wird.
+    if akt and akt.get("status") == ZUR_FREIGABE:
+        raise HTTPException(409, "Das Protokoll liegt beim Händler zur "
+                                 "Freigabe und kann gerade nicht geändert "
+                                 "werden.")
+    if akt and akt.get("status") == FREIGEGEBEN:
+        raise HTTPException(409, "Der Händler hat das Protokoll freigegeben — "
+                                 "bitte jetzt unterschreiben. Für Änderungen "
+                                 "muss er es zurückschicken.")
     raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
                              "Korrektur-Version starten.")
 
@@ -415,6 +474,88 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         return await db.pickup_protocols.find_one(
             {"id": vorhandenes["id"]}, {"_id": 0})
     return {k: v for k, v in new_doc.items() if k != "_id"}
+
+
+def _pflichtfelder_pruefen(doc: dict, appt: dict, *,
+                           seller_name: Optional[str] = None,
+                           place: Optional[str] = None,
+                           mit_uebergabe: bool = True) -> None:
+    """Alles beisammen? Das Backend verlaesst sich NICHT auf die App.
+
+    Runde 30: dieselbe Pruefung fuer das Abschicken zur Freigabe UND fuer
+    den endgueltigen Abschluss — sonst koennte ein halb ausgefuelltes
+    Protokoll beim Chef landen. `mit_uebergabe=False` laesst Ort und
+    Verkaeufername aus (die traegt der Fahrer erst beim Unterschreiben ein).
+    """
+    # Abschnitt 1: alle 12 Fahrzeugdaten-Zeilen muessen beantwortet sein.
+    vc = doc.get("vehicle_check") or {}
+    fehlend = [label for key, label, _opts in VEHICLE_CHECK_FIELDS
+               if not str((vc.get(key) or {}).get("status")
+                          if isinstance(vc.get(key), dict)
+                          else vc.get(key) or "").strip()]
+    if fehlend:
+        raise HTTPException(422, "Abschnitt 1 unvollständig — bitte noch "
+                                 "ankreuzen: " + ", ".join(fehlend))
+    cond = doc.get("condition") or {}
+    if not str(cond.get("mileage") or "").strip():
+        raise HTTPException(422, "Bitte den Kilometerstand bei Abholung "
+                                 "eintragen (Abschnitt 4).")
+    if not str(doc.get("keys_count") or "").strip():
+        raise HTTPException(422, "Bitte die Anzahl der übergebenen "
+                                 "Schlüssel eintragen (Abschnitt 2).")
+    if doc.get("damages_confirmed") is None:
+        raise HTTPException(422, "Bitte Abschnitt 5 (bekannte Schäden "
+                                 "bestätigt) beantworten.")
+    if not mit_uebergabe:
+        return
+    if not (seller_name or doc.get("seller_name")
+            or appt.get("seller_name") or "").strip():
+        raise HTTPException(422, "Bitte den Namen des Verkäufers angeben.")
+    if not (place or doc.get("place") or "").strip():
+        raise HTTPException(422, "Bitte den Ort der Übergabe angeben.")
+
+
+@router.post("/driver/appointments/{appt_id}/protocol/submit")
+async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
+    """Runde 30 (Wunsch Ahmad): Der Fahrer schickt das ausgefuellte
+    Protokoll zur FREIGABE an den Chef — noch ohne Unterschriften.
+
+    Danach sieht der Chef, was vor Ort abweicht und welche Schaeden neu
+    sind, und kann mit dem Verkaeufer nachverhandeln. Erst nach seiner
+    Freigabe wird unterschrieben."""
+    appt = await _appt_or_404(appt_id, driver)
+    _termin_offen_oder_409(appt)
+    doc = await _current(appt_id)
+    if not doc:
+        raise HTTPException(400, "Bitte zuerst das Protokoll ausfüllen")
+    if doc.get("status") == "final":
+        raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte "
+                                 "eine Korrektur-Version starten.")
+    if doc.get("status") in GESPERRT_FUER_FAHRER:
+        # Schon abgeschickt — idempotent, damit ein Doppeltipp oder ein
+        # Netzabbruch keine Fehlermeldung erzeugt.
+        return {"ok": True, "status": doc["status"],
+                "protocol_id": doc["id"], "bereits": True}
+    # Vollstaendig ausgefuellt? Ort und Verkaeufername kommen erst beim
+    # Unterschreiben dazu.
+    _pflichtfelder_pruefen(doc, appt, mit_uebergabe=False)
+    jetzt = now_iso()
+    res = await db.pickup_protocols.update_one(
+        {"id": doc["id"], "status": "entwurf"},
+        {"$set": {"status": ZUR_FREIGABE, "abgeschickt_am": jetzt,
+                  "abgeschickt_von": driver["id"], "updated_at": jetzt},
+         "$unset": {"rueckfrage": "", "rueckfrage_am": ""}})
+    if not res.matched_count:
+        # Zwischen Lesen und Schreiben hat sich der Stand geaendert.
+        akt = await db.pickup_protocols.find_one({"id": doc["id"]},
+                                                 {"_id": 0, "status": 1})
+        return {"ok": True, "status": (akt or {}).get("status", "unbekannt"),
+                "protocol_id": doc["id"], "bereits": True}
+    await log_activity(appt.get("dealer_id", ""), driver["id"],
+                       "protokoll.zur_freigabe", ref=doc["id"],
+                       meta={"appointment_id": appt_id,
+                             "vehicle_id": appt.get("vehicle_id")})
+    return {"ok": True, "status": ZUR_FREIGABE, "protocol_id": doc["id"]}
 
 
 @router.post("/driver/appointments/{appt_id}/protocol/correction")
@@ -527,30 +668,28 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
                                     appt.get("dealer_id", ""), "abgeholt")
         return heil_out
 
+    # ---- Runde 30 (Wunsch Ahmad): Erst die Freigabe des Chefs ----
+    # Unterschrieben wird NACH der Nachverhandlung. Ohne Freigabe gibt es
+    # keine Unterschriften — sonst stuende am Ende der alte Preis im
+    # Protokoll, obwohl vor Ort ein anderer vereinbart wurde.
+    if doc.get("status") != FREIGEGEBEN:
+        if doc.get("status") == ZUR_FREIGABE:
+            raise HTTPException(409, "Das Protokoll liegt beim Händler zur "
+                                     "Freigabe. Sobald er freigegeben hat, "
+                                     "könnt ihr unterschreiben.")
+        raise HTTPException(409, "Bitte das Protokoll zuerst zur Freigabe an "
+                                 "den Händler schicken.")
+    # Hat der Chef den Preis nach der Anzeige noch geaendert?
+    _preis_jetzt = doc.get("neuer_preis")
+    if (body.neuer_preis_gesehen is not None or _preis_jetzt is not None) and (
+            body.neuer_preis_gesehen is None or _preis_jetzt is None
+            or abs(float(body.neuer_preis_gesehen) - float(_preis_jetzt)) > 0.004):
+        raise HTTPException(409,
+                            "Der Händler hat den Preis inzwischen geändert. Bitte die Seite neu laden und den neuen Preis zeigen, bevor unterschrieben wird.")
+
     # ---- Pflichtfelder: das Backend verlaesst sich NICHT auf die App ----
-    # Abschnitt 1: alle 12 Fahrzeugdaten-Zeilen muessen beantwortet sein.
-    vc = doc.get("vehicle_check") or {}
-    fehlend = [label for key, label, _opts in VEHICLE_CHECK_FIELDS
-               if not str((vc.get(key) or {}).get("status")
-                          if isinstance(vc.get(key), dict)
-                          else vc.get(key) or "").strip()]
-    if fehlend:
-        raise HTTPException(422, "Abschnitt 1 unvollständig — bitte noch "
-                                 "ankreuzen: " + ", ".join(fehlend))
-    cond = doc.get("condition") or {}
-    if not str(cond.get("mileage") or "").strip():
-        raise HTTPException(422, "Bitte den Kilometerstand bei Abholung "
-                                 "eintragen (Abschnitt 4).")
-    if not str(doc.get("keys_count") or "").strip():
-        raise HTTPException(422, "Bitte die Anzahl der übergebenen "
-                                 "Schlüssel eintragen (Abschnitt 2).")
-    if doc.get("damages_confirmed") is None:
-        raise HTTPException(422, "Bitte Abschnitt 5 (bekannte Schäden "
-                                 "bestätigt) beantworten.")
-    if not (body.seller_name or appt.get("seller_name") or "").strip():
-        raise HTTPException(422, "Bitte den Namen des Verkäufers angeben.")
-    if not (body.place or doc.get("place") or "").strip():
-        raise HTTPException(422, "Bitte den Ort der Übergabe angeben.")
+    _pflichtfelder_pruefen(doc, appt, seller_name=body.seller_name,
+                           place=body.place)
 
     # ---- Abschluss ATOMAR beanspruchen: von beliebig vielen gleichzeitigen
     # Aufrufen gewinnt genau EINER (kein doppeltes PDF, keine doppelten
@@ -560,15 +699,24 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     # immer in 'wird_abgeschlossen' gefangen (nur per Datenbank loesbar).
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     _jetzt = _dt.now(_tz.utc)
+    # Gegenpruefung 12.09.2026: Der Claim verlangt ausdruecklich FREIGEGEBEN.
+    # Vorher genuegte 'nicht final/nicht in Arbeit' — zog der Chef die
+    # Freigabe im selben Moment zurueck (zurueck=true -> entwurf), lief der
+    # Abschluss trotzdem durch und das Protokoll wurde mit dem alten Preis
+    # unterschrieben.
     claim = await db.pickup_protocols.find_one_and_update(
         {"id": doc["id"],
-         "$or": [{"status": {"$nin": ["final", "wird_abgeschlossen"]}},
+         "$or": [{"status": FREIGEGEBEN},
                  {"status": "wird_abgeschlossen",
                   "claim_bis": {"$lt": _jetzt.isoformat()}}]},
         {"$set": {"status": "wird_abgeschlossen",
                   "claim_bis": (_jetzt + _td(minutes=3)).isoformat(),
                   "updated_at": now_iso()}})
     if not claim:
+        akt = await db.pickup_protocols.find_one({"id": doc["id"]},
+                                                 {"_id": 0, "status": 1})
+        if (akt or {}).get("status") in ("entwurf", ZUR_FREIGABE):
+            raise HTTPException(409, "Der Händler hat die Freigabe gerade zurückgezogen — bitte die Seite neu laden.")
         raise HTTPException(409, "Das Protokoll wird gerade abgeschlossen "
                                  "— bitte einen Moment warten.")
 
@@ -581,13 +729,16 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     geschrieben: List[str] = []
 
     async def _rollback():
-        """Claim freigeben — zurueck auf 'entwurf' (den einzigen Status,
-        aus dem ein Claim moeglich ist), damit der Fahrer neu abschliessen
-        kann — und bereits geschriebene Dateien verwerfen."""
+        """Claim freigeben, damit der Fahrer neu abschliessen kann — und
+        bereits geschriebene Dateien verwerfen.
+
+        Runde 30: zurueck auf FREIGEGEBEN (nicht auf 'entwurf'). Sonst
+        haette ein gescheiterter Abschluss die Freigabe des Chefs geloescht
+        und der Fahrer haette vor Ort erneut auf ihn warten muessen."""
         try:
             await db.pickup_protocols.update_one(
                 {"id": doc["id"], "status": "wird_abgeschlossen"},
-                {"$set": {"status": "entwurf"},
+                {"$set": {"status": FREIGEGEBEN},
                  "$unset": {"claim_bis": ""}})
         except Exception:  # noqa: BLE001
             log.exception("Protokoll-Rollback: Claim von %s konnte nicht "
@@ -653,6 +804,13 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     filled["place"] = body.place or doc.get("place") or ""
     filled["seller_name"] = body.seller_name or appt.get("seller_name") or ""
     filled["driver_name"] = driver.get("display_name", "")
+    # Runde 30: der nachverhandelte Preis steht im unterschriebenen PDF.
+    # Gegenpruefung: aus dem FRISCH beanspruchten Dokument lesen (claim),
+    # nicht aus dem vor dem Claim gelesenen Stand — sonst koennten PDF und
+    # Kaufvorgang auseinanderlaufen.
+    _preis_final = (claim or doc).get("neuer_preis")
+    filled["neuer_preis"] = _preis_final
+    filled["preis_notiz"] = (claim or doc).get("preis_notiz") or ""
     filled["signature_driver"] = sig_driver_raw
     filled["signature_seller"] = sig_seller_raw
     filled["version"] = doc.get("version", 1)
@@ -716,6 +874,18 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         {"status": "abgeholt", "status_changed_at": now_iso(),
          "protocol_id": doc["id"]})
     if termin_gesetzt:
+        # Runde 30 (Wunsch Ahmad): Wurde vor Ort nachverhandelt, ist DAS der
+        # Preis, den die Firma wirklich zahlt. Er gehoert deshalb in den
+        # Kaufvorgang — sonst stuende in Akte und Auswertung weiter der alte
+        # Vertragspreis. VOR der Statusuebernahme, damit die Zusammenfassung
+        # gleich den richtigen Preis ans Fahrzeug schreibt.
+        if _preis_final is not None and appt.get("kaufvorgang_id"):
+            await db.kaufvorgaenge.update_one(
+                {"id": appt["kaufvorgang_id"], "dealer_id": appt.get("dealer_id")},
+                {"$set": {"purchase_price": float(_preis_final),
+                          "preis_nachverhandelt": True,
+                          "preis_vorher": (contract or {}).get("purchase_price"),
+                          "updated_at": now_iso()}})
         # Umbau Kaufvorgaenge: abgeholt gilt fuer den VORGANG dieses Termins,
         # das Fahrzeug bekommt die Zusammenfassung (und den realisierten Preis).
         import kaufvorgang as _kv
@@ -786,6 +956,134 @@ async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep)):
     for d in docs:
         d.pop("appointment_id", None)
     return docs
+
+
+def _abweichungen(doc: dict) -> List[dict]:
+    """Was hat der Fahrer als 'weicht ab' angekreuzt? (Runde 30 — der Chef
+    soll auf einen Blick sehen, worueber sich verhandeln laesst.)"""
+    vc = doc.get("vehicle_check") or {}
+    raus = []
+    for key, label, _opts in VEHICLE_CHECK_FIELDS:
+        eintrag = vc.get(key)
+        wert = (eintrag or {}).get("value") if isinstance(eintrag, dict) else None
+        stand = ((eintrag or {}).get("status") if isinstance(eintrag, dict)
+                 else eintrag) or ""
+        if str(stand).strip() and str(stand).strip() not in ("stimmt", "Ja"):
+            raus.append({"feld": label, "status": str(stand).strip(),
+                         "wert": str(wert or "").strip()})
+    return raus
+
+
+@router.get("/protocols/zur-freigabe")
+async def protokolle_zur_freigabe(user=Depends(_dealer_dep)):
+    """Runde 30 (Wunsch Ahmad): Was wartet gerade auf die Freigabe des Chefs?
+
+    Liefert das ausgefuellte Protokoll in Kurzform — Abweichungen, neue
+    Schaeden, Kilometerstand — damit der Chef entscheiden (und notfalls
+    beim Verkaeufer anrufen) kann, ohne das ganze PDF zu oeffnen."""
+    docs = await db.pickup_protocols.find(
+        {"dealer_id": user["dealer_id"], "status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]},
+         "superseded": {"$ne": True}},
+        {"_id": 0, "pdf_path": 0},
+    ).sort("abgeschickt_am", -1).to_list(50)
+    raus = []
+    for d in docs:
+        # Runde 16/29: Sucher sehen nur ihre eigenen Vorgaenge.
+        if ist_sucher(user) and not await _protokoll_im_bereich(user, d):
+            continue
+        appt = await db.appointments.find_one(
+            {"id": d.get("appointment_id")},
+            {"_id": 0, "pickup_date": 1, "pickup_time": 1, "pickup_address": 1,
+             "seller_name": 1, "vehicle_id": 1, "contract_id": 1}) or {}
+        # Gegenpruefung 12.09.2026: Marke/Modell stehen im Unterdokument
+        # "data" (wie ueberall sonst) — die flache Projektion lieferte immer
+        # einen leeren Namen. Zusaetzlich ueber dealer_id, weil Fahrzeug-IDs
+        # firmenuebergreifend gleich sein koennen.
+        v_doc = await db.vehicles.find_one(
+            {"id": d.get("vehicle_id"), "dealer_id": user["dealer_id"]},
+            {"_id": 0, "data": 1}) or {}
+        fahrzeug = v_doc.get("data") or {}
+        vertrag = await db.generated_pdfs.find_one(
+            {"id": appt.get("contract_id")},
+            {"_id": 0, "contract_data": 1}) if appt.get("contract_id") else None
+        preis_vertrag = ((vertrag or {}).get("contract_data") or {}).get("purchase_price")
+        raus.append({
+            "protocol_id": d["id"],
+            "appointment_id": d.get("appointment_id"),
+            "vehicle_id": d.get("vehicle_id"),
+            "status": d.get("status"),
+            "fahrzeug": " ".join(x for x in (fahrzeug.get("make_label") or fahrzeug.get("make"),
+                                             fahrzeug.get("model_label") or fahrzeug.get("model")) if x),
+            "abholung": " ".join(x for x in (appt.get("pickup_date"), appt.get("pickup_time")) if x),
+            "abholort": appt.get("pickup_address") or "",
+            "verkaeufer": d.get("seller_name") or appt.get("seller_name") or "",
+            "fahrer": d.get("driver_name") or "",
+            "abgeschickt_am": d.get("abgeschickt_am"),
+            "kilometerstand": (d.get("condition") or {}).get("mileage") or "",
+            "abweichungen": _abweichungen(d),
+            "neue_schaeden": d.get("new_damages") or [],
+            "schaeden_bestaetigt": d.get("damages_confirmed"),
+            "bemerkungen": d.get("notes") or "",
+            "preis_vertrag": preis_vertrag,
+            "neuer_preis": d.get("neuer_preis"),
+            "preis_notiz": d.get("preis_notiz") or "",
+        })
+    return raus
+
+
+@router.post("/protocols/{protocol_id}/freigabe")
+async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
+                              user=Depends(_dealer_dep)):
+    """Runde 30: Der Chef gibt das abgeschickte Protokoll frei — mit dem
+    neuen Preis, falls er nachverhandelt hat. Oder er schickt es zurueck,
+    wenn der Fahrer etwas nachtragen soll.
+
+    Erst nach der Freigabe kann vor Ort unterschrieben werden."""
+    doc = await db.pickup_protocols.find_one(
+        {"id": protocol_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Protokoll nicht gefunden")
+    if ist_sucher(user) and not await _protokoll_im_bereich(user, doc):
+        raise HTTPException(404, "Protokoll nicht gefunden")
+    if doc.get("status") == "final":
+        raise HTTPException(409, "Das Protokoll ist bereits abgeschlossen.")
+    if doc.get("status") not in (ZUR_FREIGABE, FREIGEGEBEN):
+        raise HTTPException(409, "Der Fahrer hat das Protokoll noch nicht "
+                                 "abgeschickt.")
+    jetzt = now_iso()
+    if body.zurueck:
+        res = await db.pickup_protocols.update_one(
+            {"id": protocol_id, "status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}},
+            {"$set": {"status": "entwurf", "rueckfrage": (body.notiz or "").strip(),
+                      "rueckfrage_am": jetzt, "rueckfrage_von": user["id"],
+                      "updated_at": jetzt},
+             "$unset": {"freigegeben_am": "", "freigegeben_von": ""}})
+        if not res.matched_count:
+            raise HTTPException(409, "Der Stand hat sich gerade geändert — "
+                                     "bitte neu laden.")
+        await log_activity(user["dealer_id"], user["id"],
+                           "protokoll.zurueck_an_fahrer", ref=protocol_id,
+                           meta={"notiz": (body.notiz or "")[:200]})
+        return {"ok": True, "status": "entwurf"}
+
+    setzen: Dict[str, Any] = {"status": FREIGEGEBEN, "freigegeben_am": jetzt,
+                              "freigegeben_von": user["id"], "updated_at": jetzt}
+    if body.neuer_preis is not None:
+        setzen["neuer_preis"] = float(body.neuer_preis)
+    if body.notiz is not None:
+        setzen["preis_notiz"] = body.notiz.strip()
+    res = await db.pickup_protocols.update_one(
+        {"id": protocol_id, "status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}},
+        {"$set": setzen, "$unset": {"rueckfrage": "", "rueckfrage_am": ""}})
+    if not res.matched_count:
+        raise HTTPException(409, "Der Stand hat sich gerade geändert — "
+                                 "bitte neu laden.")
+    await log_activity(user["dealer_id"], user["id"], "protokoll.freigegeben",
+                       ref=protocol_id,
+                       meta={"neuer_preis": body.neuer_preis,
+                             "notiz": (body.notiz or "")[:200]})
+    return {"ok": True, "status": FREIGEGEBEN,
+            "neuer_preis": setzen.get("neuer_preis")}
 
 
 @router.get("/protocols/{protocol_id}.pdf")

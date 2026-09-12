@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
+import { preisText } from "@/lib/preis";
 import { toast } from "sonner";
 import {
   ArrowLeft, Save, CheckCircle2, FileText, AlertTriangle, Pencil,
@@ -24,6 +25,7 @@ const Section = ({ n, title, children, hint }) => (
     <div className="mt-3">{children}</div>
   </div>
 );
+
 
 const Check = ({ on, onClick, disabled, children }) => (
   <button type="button" onClick={onClick} disabled={disabled}
@@ -83,7 +85,18 @@ export default function Protokoll() {
 
   useEffect(() => { load(); }, [load]);
 
-  const isFinal = data?.protocol?.status === "final";
+  // Runde 30 (12.09.2026, Wunsch Ahmad): Der Fahrer schickt das ausgefuellte
+  // Protokoll erst zur Freigabe an den Chef. Der prueft die Abweichungen,
+  // verhandelt ggf. nach und gibt mit dem neuen Preis frei — DANN wird
+  // unterschrieben. Solange etwas beim Chef liegt, sind alle Eingaben
+  // gesperrt: er soll genau das sehen, was am Ende unterschrieben wird.
+  const status = data?.protocol?.status || "entwurf";
+  const isFinal = status === "final";
+  const wartetAufFreigabe = status === "zur_freigabe";
+  const freigegeben = status === "freigegeben";
+  const gesperrt = isFinal || wartetAufFreigabe || freigegeben;
+  const neuerPreis = data?.protocol?.neuer_preis ?? null;
+  const rueckfrage = data?.protocol?.rueckfrage || "";
 
   // Immer den AKTUELLEN Stand speichern (nie einen veralteten Klick-Zustand):
   // fRef spiegelt f nach jedem Render, der Auto-Save liest daraus.
@@ -92,7 +105,7 @@ export default function Protokoll() {
 
   // Automatisch speichern (1,2 s nach der letzten Änderung)
   const queueSave = useCallback(() => {
-    if (isFinal) return;
+    if (gesperrt) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
@@ -100,7 +113,7 @@ export default function Protokoll() {
         setSavedAt(new Date());
       } catch (e) { /* stiller Retry beim nächsten Tippen */ }
     }, 1200);
-  }, [id, isFinal]);
+  }, [id, gesperrt]);
 
   // patch darf ein Objekt ODER eine Funktion (voriger Stand -> Teilupdate)
   // sein — die Funktionsform verhindert, dass schnelle Klicks hintereinander
@@ -130,6 +143,23 @@ export default function Protokoll() {
     finally { setBusy(false); }
   };
 
+  // Runde 30: Schritt 1 — ausgefülltes Protokoll an den Händler schicken.
+  // Er prüft die Abweichungen, ruft ggf. den Verkäufer an und gibt frei.
+  const zurFreigabe = async () => {
+    if (!window.confirm("Protokoll an den Händler schicken?\n\nEr prüft die "
+                        + "Abweichungen und gibt frei — danach unterschreibt "
+                        + "ihr vor Ort. Bis dahin sind keine Änderungen mehr "
+                        + "möglich.")) return;
+    setBusy(true);
+    try {
+      await driverApi.put(`/driver/appointments/${id}/protocol`, f);
+      await driverApi.post(`/driver/appointments/${id}/protocol/submit`);
+      toast.success("Abgeschickt — der Händler prüft jetzt");
+      load();
+    } catch (e) { toast.error(errMsg(e, "Abschicken fehlgeschlagen")); }
+    finally { setBusy(false); }
+  };
+
   const finalize = async () => {
     if (!sigDriver || !sigSeller) {
       toast.error("Bitte beide Unterschriften erfassen"); return;
@@ -138,12 +168,16 @@ export default function Protokoll() {
                         + "abgeholt und das PDF wird erstellt.")) return;
     setBusy(true);
     try {
-      await driverApi.put(`/driver/appointments/${id}/protocol`, f);
       const fin = await driverApi.post(`/driver/appointments/${id}/protocol/finalize`, {
         signature_driver_b64: sigDriver,
         signature_seller_b64: sigSeller,
         seller_name: sellerName,
         place: f.place,
+        // Gegenprüfung 12.09.2026: Der Händler kann den Preis ändern,
+        // während vor Ort unterschrieben wird. Wir schicken den Preis mit,
+        // den DIESE Ansicht gezeigt hat — weicht er ab, lehnt der Server ab,
+        // statt einen anderen Betrag über die Unterschriften zu drucken.
+        neuer_preis_gesehen: neuerPreis,
       });
       // Runde 17: der Termin kann inzwischen vom Haendler geschlossen sein —
       // das Protokoll bleibt als Beweis final, der Server sagt es.
@@ -178,7 +212,8 @@ export default function Protokoll() {
   const st = { borderColor: "var(--border-default)" };
 
   return (
-    <div className="p-4 pb-28 max-w-2xl mx-auto" data-testid="protokoll-page">
+    <div className="p-4 max-w-2xl mx-auto" data-testid="protokoll-page"
+         style={{ paddingBottom: "calc(7rem + env(safe-area-inset-bottom, 0px))" }}>
       <button onClick={() => nav("/fahrer")} className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
         <ArrowLeft size={14} /> Zurück zu den Fahrten
       </button>
@@ -200,6 +235,46 @@ export default function Protokoll() {
         </button>
       </div>
 
+      {/* Runde 30: Wo steht das Protokoll gerade? */}
+      {wartetAufFreigabe && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-wartet"
+             style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "#ff9f0a" }}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Beim Händler zur Freigabe — er prüft die Abweichungen und meldet sich.
+            <div className="mt-2">
+              <button onClick={load}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border"
+                      style={{ borderColor: "#ff9f0a55" }}>
+                Aktualisieren
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {freigegeben && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-freigegeben"
+             style={{ borderColor: "#34c75955", background: "#34c75914", color: "#34c759" }}>
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Freigegeben{neuerPreis != null ? ` — neuer Preis ${preisText(neuerPreis)}` : ""}.
+            Jetzt unterschreiben lassen (Abschnitt 8).
+            {data?.protocol?.preis_notiz && (
+              <div className="mt-1 text-[11px] opacity-80">{data.protocol.preis_notiz}</div>
+            )}
+          </div>
+        </div>
+      )}
+      {!!rueckfrage && !gesperrt && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-rueckfrage"
+             style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "#ff3b30" }}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">Der Händler bittet um eine Ergänzung: {rueckfrage}</div>
+        </div>
+      )}
       {isFinal && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
              style={{ borderColor: "#34c75955", background: "#34c75914", color: "#34c759" }}>
@@ -238,7 +313,7 @@ export default function Protokoll() {
                 </div>
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
                   {fld.options.map((o) => (
-                    <button key={o} type="button" disabled={isFinal}
+                    <button key={o} type="button" disabled={gesperrt}
                             data-testid={`vc-${fld.key}-${o}`}
                             onClick={() => setVCheck(fld.key, "status", o)}
                             className={`px-3 py-1.5 rounded-lg text-xs border disabled:opacity-60 ${
@@ -249,7 +324,7 @@ export default function Protokoll() {
                   ))}
                 </div>
                 {abweichend && (
-                  <input value={entry.value || ""} disabled={isFinal}
+                  <input value={entry.value || ""} disabled={gesperrt}
                          onChange={(e) => setVCheck(fld.key, "value", e.target.value)}
                          className={`${inputCls} mt-1.5`} style={st}
                          placeholder="Richtiger Wert vor Ort …" />
@@ -272,18 +347,18 @@ export default function Protokoll() {
       {/* 2 Dokumente */}
       <Section n="2" title="Dokumente & Zubehör" hint="Vor Ort einsammeln und abhaken.">
         {(tpl.documents || []).map((doc) => (
-          <Check key={doc} disabled={isFinal} on={!!f.documents[doc]} onClick={() => toggleDoc(doc)}>{doc}</Check>
+          <Check key={doc} disabled={gesperrt} on={!!f.documents[doc]} onClick={() => toggleDoc(doc)}>{doc}</Check>
         ))}
         <div className="mt-3 grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] text-zinc-500">Schlüssel erhalten</label>
-            <input type="number" inputMode="numeric" value={f.keys_count} disabled={isFinal}
+            <input type="number" inputMode="numeric" value={f.keys_count} disabled={gesperrt}
                    onChange={(e) => upd({ keys_count: e.target.value })}
                    className={inputCls} style={st} placeholder="z.B. 2" />
           </div>
           <div>
             <label className="text-[11px] text-zinc-500">davon vereinbart</label>
-            <input type="number" inputMode="numeric" value={f.keys_expected} disabled={isFinal}
+            <input type="number" inputMode="numeric" value={f.keys_expected} disabled={gesperrt}
                    onChange={(e) => upd({ keys_expected: e.target.value })}
                    className={inputCls} style={st} placeholder="z.B. 2" />
           </div>
@@ -294,7 +369,7 @@ export default function Protokoll() {
       {(tpl.features || []).length > 0 && (
         <Section n="3" title="Ausstattung laut Inserat" hint="Vorhanden? Abhaken.">
           {tpl.features.map((ft) => (
-            <Check key={ft} disabled={isFinal} on={!!f.features[ft]} onClick={() => toggleFeat(ft)}>{ft}</Check>
+            <Check key={ft} disabled={gesperrt} on={!!f.features[ft]} onClick={() => toggleFeat(ft)}>{ft}</Check>
           ))}
         </Section>
       )}
@@ -308,7 +383,7 @@ export default function Protokoll() {
               {fld.options ? (
                 <div className="flex flex-wrap gap-1.5 mt-1">
                   {fld.options.map((o) => (
-                    <button key={o} type="button" disabled={isFinal}
+                    <button key={o} type="button" disabled={gesperrt}
                             onClick={() => setCond(fld.key, o)}
                             className={`px-3 py-1.5 rounded-lg text-xs border disabled:opacity-60 ${
                               f.condition[fld.key] === o ? "bg-white/15 font-semibold text-white" : "text-zinc-400"}`}
@@ -318,7 +393,7 @@ export default function Protokoll() {
                   ))}
                 </div>
               ) : (
-                <input value={f.condition[fld.key] || ""} disabled={isFinal}
+                <input value={f.condition[fld.key] || ""} disabled={gesperrt}
                        onChange={(e) => setCond(fld.key, e.target.value)}
                        className={inputCls} style={st}
                        placeholder={fld.key === "mileage" ? "z.B. 85120" : ""} />
@@ -341,7 +416,7 @@ export default function Protokoll() {
             ))}
           </div>
         )}
-        <Check disabled={isFinal} on={!!f.damages_confirmed} onClick={() => upd((s) => ({ damages_confirmed: !s.damages_confirmed }))}>
+        <Check disabled={gesperrt} on={!!f.damages_confirmed} onClick={() => upd((s) => ({ damages_confirmed: !s.damages_confirmed }))}>
           Zustand entspricht der Dokumentation
         </Check>
       </Section>
@@ -350,7 +425,10 @@ export default function Protokoll() {
           dieselbe Skizze wie im Kaufvertrag. Landet im PDF (Abschnitt 6). */}
       <Section n="6" title="Vor-Ort-Aufnahme"
                hint="Neue Schäden? Art wählen und auf die Fahrzeug-Skizze tippen — genau wie im Kaufvertrag.">
-        {isFinal ? (
+        {/* Gegenprüfung 12.09.2026: Abschnitt 6 war in den gesperrten
+            Zuständen weiter bedienbar — Tipps auf die Skizze wurden nie
+            gespeichert und gingen still verloren. Jetzt nur noch Anzeige. */}
+        {gesperrt ? (
           (f.new_damages || []).length === 0 ? (
             <div className="text-sm text-zinc-500">Keine neuen Schäden erfasst.</div>
           ) : (
@@ -376,14 +454,34 @@ export default function Protokoll() {
 
       {/* 7 Bemerkungen */}
       <Section n="7" title="Bemerkungen">
-        <textarea value={f.notes} disabled={isFinal} rows={4}
+        <textarea value={f.notes} disabled={gesperrt} rows={4}
                   onChange={(e) => upd({ notes: e.target.value })}
                   className={inputCls} style={st}
                   placeholder="Auffälligkeiten, Absprachen, Zustand …" />
       </Section>
 
-      {/* 8 Übergabe */}
-      <Section n="8" title="Übergabe-Bestätigung" hint="Beide Parteien unterschreiben auf dem Handy.">
+      {/* 8 Kaufpreis & Übergabe */}
+      <Section n="8" title="Kaufpreis & Übergabe-Bestätigung"
+               hint="Erst nach der Freigabe des Händlers unterschreiben — dann gilt der freigegebene Preis.">
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="rounded-lg border px-3 py-2" style={st}>
+            <div className="text-[11px] text-zinc-500">Preis laut Vertrag</div>
+            <div className="text-sm">{preisText(data?.preis_vertrag)}</div>
+          </div>
+          <div className="rounded-lg border px-3 py-2"
+               style={{ borderColor: neuerPreis != null ? "#34c75988" : "var(--border-default)" }}>
+            <div className="text-[11px] text-zinc-500">Neuer Preis (nach Verhandlung)</div>
+            <div className="text-sm" data-testid="protokoll-neuer-preis"
+                 style={{ color: neuerPreis != null ? "#34c759" : undefined }}>
+              {neuerPreis != null ? preisText(neuerPreis) : "unverändert"}
+            </div>
+          </div>
+        </div>
+        {data?.protocol?.preis_notiz && (
+          <div className="text-[11px] text-zinc-400 mb-3">
+            Vermerk des Händlers: {data.protocol.preis_notiz}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] text-zinc-500">Ort</label>
@@ -398,36 +496,79 @@ export default function Protokoll() {
                    className={inputCls} style={st} />
           </div>
         </div>
-        {!isFinal && (
+        {freigegeben && (
           <div className="mt-4 space-y-4">
             <SignaturePad label="Unterschrift Verkäufer" onChange={setSigSeller} />
             <SignaturePad label="Unterschrift Fahrer" onChange={setSigDriver} />
           </div>
         )}
+        {!isFinal && !freigegeben && (
+          <div className="mt-4 text-[11px] text-zinc-500">
+            Die Unterschriftsfelder erscheinen, sobald der Händler freigegeben hat.
+          </div>
+        )}
       </Section>
 
-      {/* Fixe Aktionsleiste */}
-      {!isFinal && (
-        <div className="fixed bottom-0 left-0 right-0 p-3 flex gap-2"
-             style={{ background: "rgba(10,10,10,0.95)", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-          <button onClick={saveNow} disabled={busy}
+      {/* Fixe Aktionsleiste — Runde 30: in JEDEM Zustand sichtbar.
+          Vorher verschwand sie beim fertigen Protokoll ganz, und auf dem
+          Handy lag sie unter der Systemleiste (fehlendes safe-area).
+          Die Knoepfe richten sich nach dem Stand des Protokolls. */}
+      <div className="fixed bottom-0 left-0 right-0 px-3 pt-3 flex gap-2"
+           data-testid="protokoll-aktionen"
+           style={{ background: "rgba(10,10,10,0.95)",
+                    borderTop: "1px solid rgba(255,255,255,0.08)",
+                    paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}>
+        {isFinal ? (
+          <>
+            <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
+                    data-testid="protokoll-pdf-unten"
+                    className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2"
+                    style={{ background: "var(--accent-red)" }}>
+              <FileText size={15} /> PDF öffnen
+            </button>
+            <button onClick={startCorrection}
+                    className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2"
+                    style={st}>
+              <Pencil size={15} /> Korrektur
+            </button>
+          </>
+        ) : wartetAufFreigabe ? (
+          <button onClick={load} disabled={busy}
+                  data-testid="protokoll-warten-aktualisieren"
                   className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
-                  style={st}>
-            <Save size={15} /> Speichern
+                  style={{ ...st, color: "#ff9f0a" }}>
+            <AlertTriangle size={15} /> Wartet auf Freigabe · aktualisieren
           </button>
+        ) : freigegeben ? (
           <button onClick={finalize} disabled={busy}
+                  data-testid="protokoll-abschliessen"
                   className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 disabled:opacity-50"
                   style={{ background: "var(--accent-red)" }}>
-            <CheckCircle2 size={16} /> Abschließen
+            <CheckCircle2 size={16} /> Unterschrieben — abschließen
           </button>
-        </div>
-      )}
-      {savedAt && !isFinal && (
-        <div className="fixed bottom-16 right-4 text-[10px] text-zinc-600">
+        ) : (
+          <>
+            <button onClick={saveNow} disabled={busy}
+                    className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                    style={st}>
+              <Save size={15} /> Speichern
+            </button>
+            <button onClick={zurFreigabe} disabled={busy}
+                    data-testid="protokoll-zur-freigabe"
+                    className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                    style={{ background: "var(--accent-red)" }}>
+              <CheckCircle2 size={16} /> Zur Freigabe senden
+            </button>
+          </>
+        )}
+      </div>
+      {savedAt && !gesperrt && (
+        <div className="fixed right-4 text-[10px] text-zinc-600"
+             style={{ bottom: "calc(4.5rem + env(safe-area-inset-bottom, 0px))" }}>
           gespeichert {savedAt.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
         </div>
       )}
-      {!isFinal && (!sigDriver || !sigSeller) && (
+      {freigegeben && (!sigDriver || !sigSeller) && (
         <div className="mt-3 text-[11px] text-amber-400/80 inline-flex items-center gap-1.5">
           <AlertTriangle size={12} /> Zum Abschließen werden beide Unterschriften benötigt.
         </div>

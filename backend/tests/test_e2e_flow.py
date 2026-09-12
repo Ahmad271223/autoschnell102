@@ -208,6 +208,35 @@ def test_07_abholprotokoll_und_pdfs(welt):
         "notes": "E2E-Testlauf"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
 
+    # Runde 30 (12.09.2026): Ohne Freigabe des Chefs wird NICHT unterschrieben.
+    r = requests.post(
+        f"{API}/driver/appointments/{welt['appt_id']}/protocol/finalize",
+        headers=welt["D"], json={"signature_driver_b64": SIG,
+                                 "signature_seller_b64": SIG,
+                                 "seller_name": "E2E Verkaeufer",
+                                 "place": "Hannover"}, timeout=60)
+    assert r.status_code == 409 and "Freigabe" in r.text, r.text[:200]
+
+    # 1. Fahrer schickt das ausgefuellte Protokoll ab
+    r = requests.post(
+        f"{API}/driver/appointments/{welt['appt_id']}/protocol/submit",
+        headers=welt["D"], timeout=30)
+    assert r.status_code == 200 and r.json()["status"] == "zur_freigabe", r.text[:200]
+
+    # 2. Der Chef sieht es in seiner Liste und gibt mit neuem Preis frei
+    offen = requests.get(f"{API}/protocols/zur-freigabe",
+                         headers=welt["H"], timeout=30)
+    assert offen.status_code == 200, offen.text[:200]
+    eintrag = next((x for x in offen.json()
+                    if x["appointment_id"] == welt["appt_id"]), None)
+    assert eintrag, offen.text[:300]
+    pid = eintrag["protocol_id"]
+    r = requests.post(f"{API}/protocols/{pid}/freigabe", headers=welt["H"],
+                      json={"neuer_preis": 8500, "notiz": "Rost am Schweller"},
+                      timeout=30)
+    assert r.status_code == 200 and r.json()["status"] == "freigegeben", r.text[:200]
+
+    # 3. Jetzt darf unterschrieben werden
     r = requests.post(
         f"{API}/driver/appointments/{welt['appt_id']}/protocol/finalize",
         headers=welt["D"], json={"signature_driver_b64": SIG,

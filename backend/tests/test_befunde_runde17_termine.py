@@ -96,7 +96,10 @@ class _Welt:
     def entwurf(self, P, appt_id, proto_id, **extra):
         doc = {"id": proto_id, "appointment_id": appt_id, "dealer_id": self.dealer_id,
                "driver_account_id": self.driver_id, "driver_name": self.driver["display_name"],
-               "version": 1, "status": "entwurf", "superseded": False,
+               # Runde 30 (12.09.2026): Unterschrieben wird erst NACH der Freigabe
+               # des Chefs. Diese Tests pruefen den Abschluss selbst, deshalb
+               # startet das Protokoll direkt als freigegeben.
+               "version": 1, "status": P.FREIGEGEBEN, "superseded": False,
                "vehicle_check": {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
                "condition": {"mileage": "123456"}, "keys_count": "2",
                "damages_confirmed": True, "place": "Hannover", "created_at": _jetzt()}
@@ -619,7 +622,10 @@ def test_07b_finalize_prueft_verknuepfung_vor_dem_finalen_write(welt, monkeypatc
                 await db.appointments.find_one({"id": aid}, {"_id": 0}))
 
     proto, appt = welt.run(lauf())
-    assert proto["status"] == "entwurf" and "claim_bis" not in proto and "pdf_path" not in proto
+    # Runde 30: Ein gescheiterter Abschluss faellt auf FREIGEGEBEN zurueck —
+    # sonst waere die Freigabe des Chefs weg und der Fahrer muesste vor Ort
+    # erneut auf ihn warten.
+    assert proto["status"] == P.FREIGEGEBEN and "claim_bis" not in proto and "pdf_path" not in proto
     assert appt["status"] == "offen" and "protocol_id" not in appt
     assert len(keys) == 3, keys
     assert all(not storage_service.storage.exists(k) for k in keys), "Rollback raeumt Dateien auf"
@@ -721,7 +727,8 @@ def test_11_termin_schliessen_verwirft_korrektur_entwurf(welt):
         await db.pickup_protocols.insert_many([
             w.entwurf(P, aid, p1, status="final", superseded=True, superseded_at=_jetzt(),
                       pdf_path=f"protocol/{w.dealer_id}/v1.pdf"),
-            w.entwurf(P, aid, p2, version=2, corrects_version=1),
+            # Runde 30: bewusst ein ENTWURF — genau den verwirft das Schliessen.
+            w.entwurf(P, aid, p2, version=2, corrects_version=1, status="entwurf"),
         ])
         assert await P.korrektur_verwerfen(f"ohne_{w.s}") is False
         r = await _put(A, aid, w.chef, status="storniert")
