@@ -877,6 +877,21 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         if (appt.get("status") or "offen") not in ("offen", "verschoben"):
             raise HTTPException(409, "Abgeschlossene oder stornierte Termine "
                                      "löscht nur der Händler-Hauptaccount")
+    # Abnahme 12.09.2026: Der Audit-Eintrag stand NACH dem Hard-Delete und
+    # konnte selbst werfen — dann war der Termin weg und die Spur fehlte.
+    # Jetzt vorher, und ein Fehler dabei stoppt das Loeschen nicht.
+    try:
+        await log_activity(user["dealer_id"], user["id"], "termin.geloescht",
+                           ref=appt_id,
+                           meta={"status": appt.get("status") or "offen",
+                                 "vehicle_id": appt.get("vehicle_id"),
+                                 "contract_id": appt.get("contract_id"),
+                                 "driver_id": appt.get("driver_id"),
+                                 "pickup_date": appt.get("pickup_date"),
+                                 "pickup_time": appt.get("pickup_time"),
+                                 "created_by": appt.get("created_by")})
+    except Exception:  # noqa: BLE001
+        log.exception("Audit-Eintrag zur Terminloeschung %s fehlgeschlagen", appt_id)
     # Runde 29 (12.09.2026, Pruefbefund): ZUERST die Verweise loesen, DANN
     # den Termin loeschen. Vorher war es umgekehrt — brach der Vorgang
     # dazwischen ab (Neustart, Netz weg), war der Termin weg, und Kaufvorgang
@@ -895,16 +910,8 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         # Jemand anderes war schneller — dessen Lauf hat dieselben Verweise
         # geloest, es bleibt nichts Halbes zurueck.
         raise HTTPException(404, "Termin nicht gefunden")
-    # Runde 15 (Nr. 7): ein Hard-Delete war die einzige Terminaktion ohne
-    # Audit-Spur — Chef darf sogar abgeschlossene Termine loeschen.
-    await log_activity(user["dealer_id"], user["id"], "termin.geloescht", ref=appt_id,
-                       meta={"status": appt.get("status") or "offen",
-                             "vehicle_id": appt.get("vehicle_id"),
-                             "contract_id": appt.get("contract_id"),
-                             "driver_id": appt.get("driver_id"),
-                             "pickup_date": appt.get("pickup_date"),
-                             "pickup_time": appt.get("pickup_time"),
-                             "created_by": appt.get("created_by")})
+    # Die Audit-Spur (Runde 15, Nr. 7) steht oben — VOR dem Loeschen
+    # (Abnahme 12.09.2026), damit sie auch bei einem Abbruch existiert.
     return {"ok": True}
 
 

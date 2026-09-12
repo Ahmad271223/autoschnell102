@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
 from deps import (besitzer_anreichern, besitzer_namen, clean_doc, current_chef,
+                  konten_maskieren,
                   current_firma, db, fahrzeug_bereich,
                   log_activity, log_activity_sicher, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
@@ -513,6 +514,9 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     einkaufspreis = await _kv.einkaufspreis_vorschlag(
         vehicle_id, user["dealer_id"], v, user_id=user["id"] if ist_sucher else None)
     await _kv.einkauf_fuer_sucher_maskieren(user, v)
+    # Runde 30 (Abnahme): auch die Konto-Kennungen der Kollegen raus —
+    # die Akte liefert das rohe Fahrzeugdokument.
+    konten_maskieren(user, v)
     return {
         "vehicle": v,
         "einkaufspreis": einkaufspreis,

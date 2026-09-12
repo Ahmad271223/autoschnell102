@@ -1024,6 +1024,16 @@ async def protokolle_zur_freigabe(user=Depends(_dealer_dep)):
             "neue_schaeden": d.get("new_damages") or [],
             "schaeden_bestaetigt": d.get("damages_confirmed"),
             "bemerkungen": d.get("notes") or "",
+            # Abnahme 12.09.2026: Der Chef bekam nur einen Auszug. Er soll
+            # das GANZE ausgefuellte Protokoll sehen koennen, bevor er
+            # freigibt — Haken bei Dokumenten und Ausstattung inklusive.
+            "dokumente": d.get("documents") or {},
+            "ausstattung": d.get("features") or {},
+            "zustand": d.get("condition") or {},
+            "schluessel": d.get("keys_count") or "",
+            "schluessel_vereinbart": d.get("keys_expected") or "",
+            "fahrzeugdaten": d.get("vehicle_check") or {},
+            "ort": d.get("place") or "",
             "preis_vertrag": preis_vertrag,
             "neuer_preis": d.get("neuer_preis"),
             "preis_notiz": d.get("preis_notiz") or "",

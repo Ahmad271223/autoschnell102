@@ -26,7 +26,14 @@ export function istLangeAktion(config = {}) {
   if (config.responseType === "blob") return true;
   const pfad = String(config.url || "");
   const methode = String(config.method || "get").toLowerCase();
-  return methode === "post" && /^\/contracts(\/|$|\?)/.test(pfad);
+  if (methode !== "post") return false;
+  // Lange Wege auf der Serverseite: Vertrag erzeugen (PDF + Fotos) und der
+  // Protokoll-Abschluss (Abholprotokoll-PDF + zwei Unterschrift-Bilder).
+  // Abnahme 12.09.2026: Der Abschluss fehlte hier — ausgerechnet der
+  // langsamste Weg der Fahrer-App lief weiter ins 60-Sekunden-Limit.
+  return /^\/contracts(\/|$|\?)/.test(pfad)
+    || /\/protocol\/(finalize|submit|correction)(\?|$)/.test(pfad)
+    || /\/report(\?|$)/.test(pfad);
 }
 
 api.interceptors.request.use((config) => {

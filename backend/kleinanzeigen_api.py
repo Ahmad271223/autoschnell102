@@ -243,14 +243,14 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     titel = (ad.get("title") or "").strip() or None
     beschreibung = (ad.get("description") or "").strip() or None
 
-    preis = ad.get("price") or {}
+    preis = ad.get("price") if isinstance(ad.get("price"), dict) else {}
     betrag = preis.get("amount")
     try:
         betrag = float(betrag) if betrag is not None else None
     except (TypeError, ValueError):
         betrag = None
 
-    ort = ad.get("location") or {}
+    ort = ad.get("location") if isinstance(ad.get("location"), dict) else {}
     plz = str(ort.get("zip") or "").strip() or None
     stadt = str(ort.get("city") or "").strip() or None
     bundesland = str(ort.get("state") or "").strip()
@@ -267,7 +267,7 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     if ortszeile and stadtteil:
         ortszeile = f"{ortszeile} - {stadtteil}"
 
-    verkaeufer = ad.get("seller") or {}
+    verkaeufer = ad.get("seller") if isinstance(ad.get("seller"), dict) else {}
     verkaeufer_name = str(verkaeufer.get("name") or "").strip() or None
 
     marke_roh = tabelle.get("Marke")
@@ -410,4 +410,11 @@ async def hole_inserat(item_id: str, url: str) -> Dict[str, Any]:
             "ACTIVE", "ONLINE", ""):
         raise ListingGone("Das Inserat ist bei Kleinanzeigen nicht mehr "
                           "verfügbar (gelöscht, beendet oder verkauft).")
-    return fahrzeug_aus_api(ad, url, item_id)
+    # Abnahme 12.09.2026: Weicht die Antwort von der erwarteten Form ab
+    # (der Anbieter aendert etwas, ein Feld ist ploetzlich eine Liste),
+    # war das bisher ein harter Fehler FUER DEN SUCHER. Der Auftrag lautet
+    # aber "eigener Abruf als Notloesung" — also auch hier still zurueck.
+    try:
+        return fahrzeug_aus_api(ad, url, item_id)
+    except Exception as exc:  # noqa: BLE001
+        raise ApiNichtNutzbar(f"Antwort nicht verwertbar: {exc}") from exc

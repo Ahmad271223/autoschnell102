@@ -24,7 +24,12 @@ export default function DriverLayout() {
     `${tabBase} ${isActive ? "text-white" : "text-zinc-500"}`;
 
   return (
-    <div className="min-h-screen pb-20" style={{ background: "var(--bg-app)" }}>
+    // --fahrer-tabs ist die verbindliche Hoehe der unteren Tableiste.
+    // Seiten, die eine eigene Leiste darueber legen (Abholprotokoll),
+    // rechnen damit — geschaetzte Werte fuehrten zu 1-2 Pixel Ueberlappung
+    // und damit zu nicht klickbaren Knoepfen (Befund Ahmad 12.09.2026).
+    <div className="min-h-screen pb-20"
+         style={{ background: "var(--bg-app)", "--fahrer-tabs": "3.75rem" }}>
       <header className="glass-nav sticky top-0 z-40 border-b"
               style={{ borderColor: "var(--border-default)" }}>
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
@@ -61,8 +66,13 @@ export default function DriverLayout() {
 
       {/* Bottom Tab Bar */}
       <nav className="fixed bottom-0 inset-x-0 border-t z-40"
+           data-testid="fahrer-tableiste"
            style={{ borderColor: "var(--border-default)", background: "rgba(10,10,10,0.92)",
-                    backdropFilter: "blur(12px)" }}>
+                    backdropFilter: "blur(12px)",
+                    // Gegenpruefung 12.09.2026: ohne safe-area lag die Leiste
+                    // auf dem iPhone unter dem Home-Balken.
+                    minHeight: "var(--fahrer-tabs)",
+                    paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
         <div className="max-w-3xl mx-auto flex">
           <NavLink to="/fahrer" end className={tabCss} data-testid="tab-termine">
             <Calendar size={18} />

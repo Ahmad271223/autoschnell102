@@ -1106,9 +1106,22 @@ async def public_vertrag_pdf(token: str, request: Request):
         alt = await db.generated_pdf_versions.find_one(
             {"contract_id": c["id"], "dealer_id": c.get("dealer_id"),
              "version": geteilte_version},
-            {"_id": 0, "pdf_digital_b64": 1, "pdf_b64": 1, "filename": 1})
-        pdf_bytes = base64.b64decode(alt["pdf_digital_b64"]) if (alt or {}).get("pdf_digital_b64") \
-            else (base64.b64decode(alt["pdf_b64"]) if (alt or {}).get("pdf_b64") else None)
+            {"_id": 0, "pdf_digital_b64": 1, "pdf_b64": 1, "filename": 1,
+             "contract_data": 1})
+        # Abnahme 12.09.2026: Fehlte die digitale Fassung im Archiv, kam
+        # still die DRUCKfassung mit Unterschriftslinien — obwohl der Link
+        # eine digitale Ausfertigung zusagt. Sie wird jetzt aus den
+        # archivierten Vertragsdaten nacherzeugt (dieselbe Funktion wie
+        # fuer Altvertraege); nur wenn auch das nicht geht, gibt es 410.
+        if (alt or {}).get("pdf_digital_b64"):
+            pdf_bytes = base64.b64decode(alt["pdf_digital_b64"])
+        elif alt:
+            ersteller_alt = await db.users.find_one(
+                {"id": c.get("user_id")}, {"_id": 0}) \
+                or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
+            pdf_bytes = await _digitales_pdf_bytes({**c, **alt}, ersteller_alt)
+        else:
+            pdf_bytes = None
         if not pdf_bytes:
             raise HTTPException(410, "Der Vertrag wurde inzwischen geändert und die "
                                      "verschickte Fassung ist nicht mehr abrufbar — "

@@ -67,8 +67,11 @@ def test_03_terminloeschung_loest_erst_die_verweise():
     loeschen = block.index("db.appointments.delete_one(")
     assert loesen < loeschen, "Kaufvorgang zuerst loesen, dann den Termin loeschen"
     assert zeiger < loeschen, "Vertragszeiger zuerst loesen, dann den Termin loeschen"
-    # Der Audit-Eintrag bleibt am Ende (er braucht das Ergebnis).
-    assert loeschen < block.index('"termin.geloescht"')
+    # Abnahme 12.09.2026: Der Audit-Eintrag steht jetzt VOR dem Loeschen —
+    # vorher konnte er selbst werfen, dann war der Termin weg und die Spur
+    # fehlte. Ein Fehler dabei stoppt das Loeschen nicht mehr.
+    assert block.index('"termin.geloescht"') < loeschen
+    assert "except Exception" in block
 
 
 def test_04_vertragsdetails_liefern_die_pdfs_nicht_mit():

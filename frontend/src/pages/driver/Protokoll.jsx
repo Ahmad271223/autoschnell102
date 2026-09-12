@@ -213,7 +213,7 @@ export default function Protokoll() {
 
   return (
     <div className="p-4 max-w-2xl mx-auto" data-testid="protokoll-page"
-         style={{ paddingBottom: "calc(7rem + env(safe-area-inset-bottom, 0px))" }}>
+         style={{ paddingBottom: "calc(var(--fahrer-tabs, 3.75rem) + 7.5rem + env(safe-area-inset-bottom, 0px))" }}>
       <button onClick={() => nav("/fahrer")} className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
         <ArrowLeft size={14} /> Zurück zu den Fahrten
       </button>
@@ -513,11 +513,15 @@ export default function Protokoll() {
           Vorher verschwand sie beim fertigen Protokoll ganz, und auf dem
           Handy lag sie unter der Systemleiste (fehlendes safe-area).
           Die Knoepfe richten sich nach dem Stand des Protokolls. */}
-      <div className="fixed bottom-0 left-0 right-0 px-3 pt-3 flex gap-2"
+      {/* Gegenpruefung 12.09.2026: Die Leiste hatte KEINEN z-index und lag
+          damit unter der Fahrer-Tableiste (z-40) — genau der gemeldete
+          Fehler 'die Knoepfe unten sind nicht sichtbar'. Jetzt z-50 UND
+          oberhalb der Tabs, damit beide bedienbar bleiben. */}
+      <div className="fixed left-0 right-0 px-3 py-3 flex gap-2 z-50"
            data-testid="protokoll-aktionen"
            style={{ background: "rgba(10,10,10,0.95)",
                     borderTop: "1px solid rgba(255,255,255,0.08)",
-                    paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}>
+                    bottom: "calc(var(--fahrer-tabs, 3.75rem) + env(safe-area-inset-bottom, 0px))" }}>
         {isFinal ? (
           <>
             <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
@@ -563,8 +567,8 @@ export default function Protokoll() {
         )}
       </div>
       {savedAt && !gesperrt && (
-        <div className="fixed right-4 text-[10px] text-zinc-600"
-             style={{ bottom: "calc(4.5rem + env(safe-area-inset-bottom, 0px))" }}>
+        <div className="fixed right-4 text-[10px] text-zinc-600 z-50"
+             style={{ bottom: "calc(var(--fahrer-tabs, 3.75rem) + 4.6rem + env(safe-area-inset-bottom, 0px))" }}>
           gespeichert {savedAt.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
         </div>
       )}

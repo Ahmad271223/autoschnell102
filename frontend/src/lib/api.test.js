@@ -18,6 +18,13 @@ describe("istLangeAktion", () => {
     expect(istLangeAktion({ url: "/contracts/c1/send", method: "POST" })).toBe(true);
   });
 
+  it("gilt fuer den Protokoll-Abschluss (Abnahme 12.09.2026)", () => {
+    // Der langsamste Weg der Fahrer-App: PDF bauen + zwei Unterschriften.
+    expect(istLangeAktion({ url: "/driver/appointments/a1/protocol/finalize", method: "post" })).toBe(true);
+    expect(istLangeAktion({ url: "/driver/appointments/a1/protocol/submit", method: "post" })).toBe(true);
+    expect(istLangeAktion({ url: "/driver/appointments/a1/report", method: "post" })).toBe(true);
+  });
+
   it("gilt NICHT fuer die schnellen Wege", () => {
     expect(istLangeAktion({ url: "/contracts", method: "get" })).toBe(false);
     expect(istLangeAktion({ url: "/mobile/compare", method: "post" })).toBe(false);

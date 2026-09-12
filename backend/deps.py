@@ -648,6 +648,30 @@ async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:
     return out
 
 
+# Runde 30 (12.09.2026, Abnahme der Befunde): Felder am gemeinsam genutzten
+# Fahrzeug, die KONTEN der Firma benennen. Ein Sucher darf sie nicht sehen —
+# auch nicht in der rohen Antwort. Bis hierher waren nur die NAMEN
+# ausgeblendet; die Konto-Kennungen der Kollegen standen weiterhin in
+# /bestand, /vehicles, /vehicles/{id} und in der Fahrzeugakte.
+KONTO_FELDER = ("owner_user_id", "mitbearbeiter_ids", "uebernommen_von",
+                "besitzer_migriert_von", "besitzer_vorher")
+
+
+def konten_maskieren(user, fahrzeuge):
+    """Kollegen-Kennungen aus Fahrzeugdaten entfernen (nur fuer Sucher).
+
+    Nimmt ein einzelnes Fahrzeug ODER eine Liste und aendert es an Ort und
+    Stelle. Fuer den Chef bleibt alles stehen — er verwaltet die Zuordnung."""
+    if not ist_sucher(user) or not fahrzeuge:
+        return fahrzeuge
+    liste = fahrzeuge if isinstance(fahrzeuge, list) else [fahrzeuge]
+    for f in liste:
+        if isinstance(f, dict):
+            for feld in KONTO_FELDER:
+                f.pop(feld, None)
+    return fahrzeuge
+
+
 async def besitzer_anreichern(user, items: list) -> list:
     """Chef-Ansicht: owner_name je Fahrzeug ergaenzen (Sucher sehen ohnehin
     nur eigene Fahrzeuge — kein Feld noetig)."""
@@ -668,6 +692,8 @@ async def besitzer_anreichern(user, items: list) -> list:
         oid = i.get("owner_user_id")
         i["owner_name"] = namen.get(oid) if oid else None
         i["mitbearbeiter_namen"] = mit
+    # Runde 30: ... und auch die Kennungen selbst raus.
+    konten_maskieren(user, items)
     return items
 
 

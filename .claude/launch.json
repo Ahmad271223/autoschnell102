@@ -10,6 +10,16 @@
       "name": "Frontend (React)",
       "url": "http://localhost:3000",
       "autoPort": false
+    },
+    {
+      "name": "Suite-Backend 8002",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd backend && set DB_NAME=autoschnell_r29&& set MOCK_PROVIDER_FETCH=true&& set AUTO_DATEN_SCHAEDEN_FREITEXT=true&& set RUNDE14_HTTP=1&& python -m uvicorn server:app --host 127.0.0.1 --port 8002 --loop asyncio"
+      ],
+      "port": 8002,
+      "autoPort": false
     }
   ]
 }
