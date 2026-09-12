@@ -706,6 +706,15 @@ async def ensure_indexes():
     await db.kaufvorgaenge.create_index([("dealer_id", 1), ("vehicle_id", 1)])
     await db.kaufvorgaenge.create_index([("dealer_id", 1), ("user_id", 1)])
     await db.kaufvorgaenge.create_index("appointment_id")
+    # Runde 29 (12.09.2026): Fahrzeugstatus und Einkaufspreis fragen jetzt
+    # gezielt nach Status + juengster Aenderung (statt 200/500 Vorgaenge zu
+    # laden). Ohne diesen Index muesste Mongo dafuer sortieren.
+    await db.kaufvorgaenge.create_index([("dealer_id", 1), ("vehicle_id", 1),
+                                         ("status", 1), ("updated_at", -1)])
+    # Nachschlagen per id ist der haeufigste Zugriff ueberhaupt (jede
+    # Anmeldung, jede Berechtigungspruefung) — bisher ohne eigenen Index.
+    await db.users.create_index("id", name="by_user_id")
+    await db.dealers.create_index("id", name="by_dealer_id")
     await db.appointments.create_index([("dealer_id", 1), ("contract_id", 1)])
     # Runde 17: Vertragszeiger je Termin (idempotente Nachfuehrung beim PUT)
     await db.generated_pdfs.create_index([("dealer_id", 1), ("appointment_id", 1)])

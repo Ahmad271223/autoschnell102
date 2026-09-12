@@ -660,8 +660,10 @@ async def besitzer_anreichern(user, items: list) -> list:
     for i in items:
         mit = [namen[m] for m in (i.get("mitbearbeiter_ids") or []) if m in namen]
         if ist_sucher(user):
-            # Sucher: nur, wer am selben Fahrzeug mitarbeitet (kein Firmenblick)
-            i["mitbearbeiter_namen"] = mit
+            # Runde 29 (12.09.2026, Regel Ahmad): Ein Sucher sieht NICHT, wer
+            # sonst an seinem Auto arbeitet — vorher standen die Namen der
+            # Kollegen in Bestandsliste und Fahrzeugpool.
+            i["mitbearbeiter_namen"] = []
             continue
         oid = i.get("owner_user_id")
         i["owner_name"] = namen.get(oid) if oid else None

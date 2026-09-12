@@ -134,7 +134,9 @@ def test_01_zweiter_sucher_wird_mitbearbeiter_und_sieht_das_fahrzeug(welt):
     assert v["owner_user_id"] == w.a["id"] and v["mitbearbeiter_ids"] == [w.b["id"]], "kein Doppeleintrag"
     assert liste_a == [vid] and [x["id"] for x in liste_b] == [vid] and liste_c == []
     assert det_b["id"] == vid and ids_b == [vid]
-    assert liste_b[0]["mitbearbeiter_namen"] == ["Ben B"]
+    # Runde 29 (12.09.2026, Regel Ahmad): Der Sucher sieht NICHT, wer sonst
+    # an dem Auto arbeitet — nur der Chef bekommt die Namen.
+    assert liste_b[0]["mitbearbeiter_namen"] == []
     assert chef[0]["owner_name"] == "Anna A" and chef[0]["mitbearbeiter_namen"] == ["Ben B"]
 
 
@@ -283,4 +285,6 @@ def test_05_akte_zeigt_mitbearbeiter(welt):
     akte_chef, akte_b = w.run(lauf())
     assert akte_chef["owner"]["name"] == "Anna A"
     assert akte_chef["mitbearbeiter"] == [{"id": w.b["id"], "name": "Ben B"}]
-    assert akte_b["vehicle"]["id"] == vid and akte_b["mitbearbeiter"][0]["name"] == "Ben B"
+    # Runde 29 (12.09.2026, Regel Ahmad): Der Sucher sieht seine Akte, aber
+    # NICHT, wer sonst an dem Auto arbeitet — nur der Chef bekommt die Namen.
+    assert akte_b["vehicle"]["id"] == vid and akte_b["mitbearbeiter"] == []

@@ -277,6 +277,16 @@ def _is_fresh(doc: Optional[dict]) -> bool:
     return exp > datetime.now(timezone.utc)
 
 
+def _ohne_herkunft(daten):
+    """Runde 29 (12.09.2026): Wer ein Inserat eingereicht hat, steht als
+    ingested_by_user/-dealer im Datensatz. Das ist Buchhaltung fuer das
+    Aufraeumen, keine Information fuer andere Konten — beim Lesen raus.
+    (Die Felder bleiben in der Datenbank, das Aufraeumen braucht sie.)"""
+    if not isinstance(daten, dict):
+        return daten
+    return {k: v for k, v in daten.items()
+            if not str(k).startswith("ingested_by_")}
+
 async def peek_cached_listing(db, url: str,
                               dealer_id: Optional[str] = None
                               ) -> Optional[Tuple[dict, Optional[str]]]:
@@ -296,12 +306,19 @@ async def peek_cached_listing(db, url: str,
             {"cache_key": cache_key},
             {"$inc": {"use_count": 1},
              "$set": {"last_used_at": datetime.now(timezone.utc), "url": url}})
-        return cached["data"], cached.get("snapshot_id")
+        # Altbestand im geteilten Cache kann die Herkunft noch tragen.
+        return _ohne_herkunft(cached["data"]), cached.get("snapshot_id")
     if dealer_id:
         own = await db.listings_cache_client.find_one(
             {"cache_key": cache_key, "dealer_id": dealer_id}, {"_id": 0})
         if _is_fresh(own):
-            return own["data"], None
+            # Runde 29 (12.09.2026, Pruefbefund): Die Quarantaene liegt je
+            # FIRMA. Der Datensatz traegt aber, wer ihn eingereicht hat
+            # (ingested_by_user/-dealer) — damit haette ein Sucher gesehen,
+            # dass ein Kollege dasselbe Inserat schon geholt hat. Die
+            # Inseratsdaten selbst duerfen firmenweit geteilt werden, die
+            # Herkunft nicht. Zum Aufraeumen bleibt sie in der Datenbank.
+            return _ohne_herkunft(own["data"]), None
     return None
 
 

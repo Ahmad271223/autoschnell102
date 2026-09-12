@@ -412,8 +412,16 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     for r in pickup_reports:
         r["massgeblich"] = bool(report) and r.get("id") == report.get("id")
 
+    # Runde 29 (12.09.2026, Pruefbefund): Die Vergleichsliste der Akte lief
+    # nur ueber mobile_ad_id + dealer_id — ein Sucher sah damit, WANN seine
+    # Kollegen dasselbe Auto verglichen haben. Fuer Sucher zaehlt jetzt nur
+    # das eigene Konto; der Chef sieht weiterhin die ganze Firma.
+    vergleich_filter = {"mobile_ad_id": v.get("mobile_ad_id"),
+                        "dealer_id": user["dealer_id"]}
+    if ist_sucher:
+        vergleich_filter["user_id"] = user["id"]
     comparisons = await db.vehicle_comparisons.find(
-        {"mobile_ad_id": v.get("mobile_ad_id"), "dealer_id": user["dealer_id"]},
+        vergleich_filter,
         {"_id": 0, "created_at": 1, "source": 1},
     ).sort("created_at", -1).to_list(20) if v.get("mobile_ad_id") else []
 
@@ -483,7 +491,11 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
                 name = ("Händler-Hauptaccount" if u.get("role") == "dealer"
                         else (u.get("email") or u["id"]))
             zuweisbar_an.append({"id": u["id"], "name": name, "role": u.get("role")})
-    mit_namen = await besitzer_namen(user["dealer_id"], v.get("mitbearbeiter_ids") or [])
+    # Runde 29: Wer sonst noch an diesem Auto arbeitet, geht einen Sucher
+    # nichts an (Regel Ahmad: Konten nicht vermischen). Nur der Chef sieht
+    # die Mitbearbeiter — fuer Sucher gar keine Namensabfrage.
+    mit_namen = {} if ist_sucher else await besitzer_namen(
+        user["dealer_id"], v.get("mitbearbeiter_ids") or [])
     # Umbau Kaufvorgaenge: je Vertrag ein Vorgang (Sucher, Preis, Status,
     # Termin) — Chef sieht alle, Sucher nur eigene.
     import kaufvorgang as _kv
@@ -509,8 +521,9 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "fahrerfoto_tage": __import__("cleanup_service").FAHRERFOTO_TAGE,
         "kaufvorgaenge": kaufvorgaenge,
         "owner": owner,
-        "mitbearbeiter": [{"id": m, "name": mit_namen.get(m, m)}
-                          for m in (v.get("mitbearbeiter_ids") or [])],
+        "mitbearbeiter": [] if ist_sucher else [
+            {"id": m, "name": mit_namen.get(m, m)}
+            for m in (v.get("mitbearbeiter_ids") or [])],
         "zuweisbar": not ist_sucher,
         "zuweisbar_an": zuweisbar_an,
         "retention_days_left": retention_days_left,

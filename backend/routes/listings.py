@@ -480,6 +480,12 @@ async def compare(body: CompareIn, background: BackgroundTasks,
             item_id=identity["item_id"], url=raw_url, anlass="vergleich")
 
     hinweise = regeln_nicht_abgebildet(vehicle, rules)
+    # Runde 29 (12.09.2026, Regel Ahmad): Ein Sucher erfaehrt NICHT, welcher
+    # Kollege dasselbe Auto bearbeitet — weder den Namen noch die Konto-ID.
+    # Wie gefragt das Auto ist, sagt ihm der anonyme LIVE-Zaehler. Der Chef
+    # sieht die Namen weiterhin (er soll wissen, wer woran arbeitet).
+    if ist_sucher(user):
+        kollege = None
     if kollege:
         # Runde 26 (12.09.2026): Seit dem Umbau auf Kaufvorgaenge hat JEDER
         # Vertrag seinen eigenen Abholtermin — der alte Hinweis sagte das

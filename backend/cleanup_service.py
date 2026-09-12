@@ -802,16 +802,20 @@ def _feld_wert(doc: dict, pfad: str):
     return cur
 
 
-async def _retry_ref_anwenden(db, e: dict) -> None:
+async def _retry_ref_anwenden(db, e: dict) -> str:
     """Nach erfolgreicher Nachholung das referenzierende Dokument bereinigen
     (Feld/Key entfernen, Markierung aufheben, leeres Dokument loeschen —
     Schema von `ref` siehe storage_service.loeschen_oder_vormerken).
-    Fehler hier lassen die Nachholung nicht scheitern: die Datei ist weg,
-    das ist das Wichtigste."""
+
+    Rueckgabe: leerer Text bei Erfolg, sonst der Fehler. Runde 29
+    (12.09.2026, Pruefbefund): Frueher wurde ein Fehler hier nur geloggt und
+    die Vormerkung trotzdem geloescht — die Datei war weg, der Verweis in der
+    Datenbank blieb fuer immer stehen. Jetzt bleibt die Vormerkung liegen und
+    wird beim naechsten Lauf erneut versucht."""
     ref = e.get("ref") or {}
     coll, doc_id = ref.get("collection"), ref.get("id")
     if not coll or not doc_id:
-        return
+        return ""
     jetzt = now_iso()
     key = e.get("key")
     try:
@@ -857,6 +861,8 @@ async def _retry_ref_anwenden(db, e: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Nachholung: Dokument %s/%s konnte nicht bereinigt werden: %s",
                     coll, doc_id, exc)
+        return str(exc)[:300]
+    return ""
 
 
 async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
@@ -873,32 +879,44 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
     erledigt = 0
     eintraege = await db.storage_delete_retry.find(
         {"aufgegeben": {"$ne": True}}, {"_id": 0}).limit(limit).to_list(limit)
+    async def _fehlschlag(e: dict, art: str, fehler: str, zusatz=None) -> None:
+        """Versuch zaehlen, ggf. aufgeben und Alarm schlagen — die Vormerkung
+        bleibt in jedem Fall liegen (Runde 29)."""
+        versuche = int(e.get("versuche", 0)) + 1
+        upd = {"letzter_fehler": fehler[:300], "versuche": versuche,
+               "updated_at": now_iso(), **(zusatz or {})}
+        if versuche >= STORAGE_RETRY_MAX_VERSUCHE:
+            upd["aufgegeben"] = True
+            upd["aufgegeben_am"] = now_iso()
+            await alarm(db, "datei_loeschung_aufgegeben",
+                        ref=e.get("key") or e.get("prefix") or e["id"],
+                        dealer_id=e.get("dealer_id") or "", art=art,
+                        grund=e.get("grund") or "", versuche=versuche,
+                        fehler=fehler[:300])
+        await db.storage_delete_retry.update_one({"id": e["id"]}, {"$set": upd})
+
     for e in eintraege:
         art = e.get("art") or "prefix"
-        try:
-            if art == "prefix":
-                await asyncio.to_thread(storage.delete_prefix, e["prefix"])
-            elif art == "snapshot":
-                if not await asyncio.to_thread(delete_object, e["key"]):
-                    raise RuntimeError("Snapshot-Storage meldet Fehlschlag")
-            else:
-                await asyncio.to_thread(storage.delete, e["key"])
-        except Exception as exc:  # noqa: BLE001
-            versuche = int(e.get("versuche", 0)) + 1
-            upd = {"letzter_fehler": str(exc)[:300], "versuche": versuche,
-                   "updated_at": now_iso()}
-            if versuche >= STORAGE_RETRY_MAX_VERSUCHE:
-                upd["aufgegeben"] = True
-                upd["aufgegeben_am"] = now_iso()
-                await alarm(db, "datei_loeschung_aufgegeben",
-                            ref=e.get("key") or e.get("prefix") or e["id"],
-                            dealer_id=e.get("dealer_id") or "", art=art,
-                            grund=e.get("grund") or "", versuche=versuche,
-                            fehler=str(exc)[:300])
-            await db.storage_delete_retry.update_one({"id": e["id"]},
-                                                     {"$set": upd})
+        # Runde 29: Ist die Datei bereits weg (frueherer Lauf), nur noch die
+        # Referenz bereinigen — ein zweites Loeschen koennte fehlschlagen.
+        if not e.get("storage_deleted"):
+            try:
+                if art == "prefix":
+                    await asyncio.to_thread(storage.delete_prefix, e["prefix"])
+                elif art == "snapshot":
+                    if not await asyncio.to_thread(delete_object, e["key"]):
+                        raise RuntimeError("Snapshot-Storage meldet Fehlschlag")
+                else:
+                    await asyncio.to_thread(storage.delete, e["key"])
+            except Exception as exc:  # noqa: BLE001
+                await _fehlschlag(e, art, str(exc))
+                continue
+        fehler = await _retry_ref_anwenden(db, e)
+        if fehler:
+            # Datei weg, Verweis steht noch: vormerken lassen und beim
+            # naechsten Lauf nur noch die Referenz versuchen.
+            await _fehlschlag(e, art, fehler, {"storage_deleted": True})
             continue
-        await _retry_ref_anwenden(db, e)
         await db.storage_delete_retry.delete_one({"id": e["id"]})
         erledigt += 1
     return erledigt

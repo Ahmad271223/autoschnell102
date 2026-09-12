@@ -302,6 +302,16 @@ class _Cursor:
     def __init__(self, echt, st, filt):
         self._echt, self._st, self._filt = echt, st, filt
 
+    # Runde 29: die Zusammenfassung fragt jetzt gezielt (sortiert, begrenzt)
+    # statt 500 Vorgaenge zu laden — die Attrappe reicht beides durch.
+    def sort(self, *a, **k):
+        self._echt = self._echt.sort(*a, **k)
+        return self
+
+    def limit(self, *a, **k):
+        self._echt = self._echt.limit(*a, **k)
+        return self
+
     async def to_list(self, *a, **k):
         docs = await self._echt.to_list(*a, **k)
         if (_rolle.get() == "A" and not self._st.a_pausiert

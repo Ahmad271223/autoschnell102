@@ -306,5 +306,10 @@ driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=
 # Registration: 5 new accounts per IP per hour prevents spam account creation.
 register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung")
 
-# Driver registration: same limit.
-driver_register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung")
+# Driver registration: same limit, EIGENER Zaehler (Runde 29, 12.09.2026).
+# Vorher trugen beide Limiter den Namen 'registrierung' und teilten sich
+# damit dieselben 5 Versuche je Stunde und IP: Fahrer, die sich in einem
+# Autohaus anmelden, verbrauchten das Kontingent der Firmenregistrierung
+# (und umgekehrt).
+driver_register_limiter = SlidingWindowRateLimiter(
+    max_attempts=5, window_seconds=3600, name="fahrer-registrierung")

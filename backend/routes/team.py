@@ -384,14 +384,23 @@ async def sale_plan_status(user=Depends(current_haendler)):
 # zweiten Versuch aufgeloest, der dann die bestehende Zeile trifft.
 async def _offene_anfrage_upsert(schluessel: dict, neu: dict,
                                  wunsch: dict) -> tuple:
-    """Liefert (Anfrage-Dokument, neu_angelegt). `neu` wird nur beim Anlegen
-    geschrieben, `wunsch` (Wunschplan/-paket) immer — eine bereits offene
-    Anfrage uebernimmt so den zuletzt geaeusserten Wunsch."""
+    """Liefert (Anfrage-Dokument, neu_angelegt). `wunsch` (Wunschplan/-paket)
+    wird immer geschrieben — eine bereits offene Anfrage uebernimmt so den
+    zuletzt geaeusserten Wunsch.
+
+    Runde 29 (12.09.2026, Pruefbefund): Aus `neu` gingen frueher AUCH
+    Firmenname, Kontaktdaten und aktueller Verbrauch nur beim Anlegen in die
+    Anfrage. Aenderte die Firma danach Telefon oder E-Mail, sah der Betreiber
+    weiter die alten Angaben. Jetzt bleibt nur die Identitaet der Anfrage
+    (id, created_at) beim Anlegen; alles andere wird jedes Mal aufgefrischt.
+    """
+    beim_anlegen = {k: v for k, v in neu.items() if k in ("id", "created_at")}
+    aktuell = {k: v for k, v in neu.items() if k not in beim_anlegen}
     for versuch in (1, 2):
         try:
             doc = await db.plan_requests.find_one_and_update(
                 schluessel,
-                {"$setOnInsert": neu, "$set": wunsch},
+                {"$setOnInsert": beim_anlegen, "$set": {**aktuell, **wunsch}},
                 upsert=True, projection={"_id": 0},
                 return_document=ReturnDocument.AFTER)
             break

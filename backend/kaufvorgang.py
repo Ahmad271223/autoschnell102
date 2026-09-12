@@ -219,13 +219,16 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
                                            {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1,
                                             "purchase_price": 1})
-            faelle = await db.kaufvorgaenge.find(
-                {"vehicle_id": vehicle_id, "dealer_id": dealer_id},
-                {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(500)
-            if not faelle:
+            # Runde 29 (12.09.2026, Pruefbefund): Vorher wurden bis zu 500
+            # Vorgaenge geladen und in Python gefiltert — bei mehr Vorgaengen
+            # (viele Sucher am selben Auto) haette der entscheidende gefehlt.
+            # Jetzt gezielte Abfragen: welche Stati gibt es, und welcher
+            # abgeholte Vorgang ist massgeblich. Kein Deckel mehr.
+            grund = {"vehicle_id": vehicle_id, "dealer_id": dealer_id}
+            stati = set(await db.kaufvorgaenge.distinct("status", grund))
+            if not stati:
                 return None
             aktuell = (v or {}).get("lifecycle") or "verglichen"
-            stati = {f.get("status") for f in faelle}
             if v is None or "abgeholt" not in stati or aktuell in ABGESCHLOSSEN_FAHRZEUG:
                 break
             # Runde 18: Der REALISIERTE Vorgang wird am Fahrzeug festgehalten
@@ -235,10 +238,22 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             # verkauftes/archiviertes Fahrzeug wird gar nicht mehr angefasst
             # (vorher: Preis geschrieben, bevor der Lebenszyklus geprueft wurde
             # -> historische Marge verfaelscht).
-            abgeholte = [f for f in faelle if f.get("status") == "abgeholt"]
             fest = v.get("abgeholt_kaufvorgang_id")
-            abg = next((f for f in abgeholte if f.get("id") == fest), None) \
-                or max(abgeholte, key=lambda f: f.get("updated_at") or "")
+            felder = {"_id": 0, "id": 1, "status": 1, "purchase_price": 1,
+                      "updated_at": 1}
+            neueste = await db.kaufvorgaenge.find(
+                {**grund, "status": "abgeholt"}, felder
+            ).sort("updated_at", -1).limit(1).to_list(1)
+            if not neueste:
+                break
+            abg = neueste[0]
+            if fest and abg.get("id") != fest:
+                # Der am Fahrzeug festgehaltene Vorgang bleibt massgeblich,
+                # solange er abgeholt ist (Runde 18).
+                gehalten = await db.kaufvorgaenge.find_one(
+                    {**grund, "status": "abgeholt", "id": fest}, felder)
+                if gehalten:
+                    abg = gehalten
             setzen: Dict[str, Any] = {"abgeholt_kaufvorgang_id": abg.get("id")}
             if abg.get("purchase_price") is not None:
                 setzen["purchase_price"] = abg["purchase_price"]
@@ -308,24 +323,37 @@ async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
                     "kaufvorgang_id": vehicle.get("abgeholt_kaufvorgang_id")}
     else:
         filt["user_id"] = user_id
-    faelle = await db.kaufvorgaenge.find(
-        filt, {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}).to_list(200)
+    # Runde 29 (12.09.2026, Pruefbefund): Vorher wurden bis zu 200 Vorgaenge
+    # geladen und in Python sortiert. Jetzt gezielte Abfragen (jeweils der
+    # juengste passende Vorgang), damit kein Deckel etwas verschluckt.
+    felder = {"_id": 0, "id": 1, "status": 1, "purchase_price": 1, "updated_at": 1}
+
+    async def _juengster(zusatz: Dict[str, Any]) -> Optional[dict]:
+        treffer = await db.kaufvorgaenge.find(
+            {**filt, "purchase_price": {"$ne": None}, **zusatz}, felder
+        ).sort("updated_at", -1).limit(1).to_list(1)
+        return treffer[0] if treffer else None
+
     if user_id is not None:
         fest = vehicle.get("abgeholt_kaufvorgang_id")
-        eigen = next((f for f in faelle if fest and f.get("id") == fest), None)
+        eigen = await db.kaufvorgaenge.find_one(
+            {**filt, "id": fest}, felder) if fest else None
         if eigen and eigen.get("purchase_price") is not None:
             return {"preis": eigen["purchase_price"], "quelle": "fahrzeug",
                     "kaufvorgang_id": fest}
-    mit_preis = [f for f in faelle if f.get("purchase_price") is not None]
-    if not mit_preis:
-        return {"preis": None, "quelle": "keiner", "kaufvorgang_id": None}
-    abgeholt = [f for f in mit_preis if f.get("status") == "abgeholt"]
-    if abgeholt:
-        f = max(abgeholt, key=lambda x: x.get("updated_at") or "")
-        return {"preis": f["purchase_price"], "quelle": "abgeholt", "kaufvorgang_id": f["id"]}
-    offen = [f for f in mit_preis if f.get("status") in OFFEN] or mit_preis
-    f = max(offen, key=lambda x: x.get("updated_at") or "")
-    return {"preis": f["purchase_price"], "quelle": "vertrag", "kaufvorgang_id": f["id"]}
+    f = await _juengster({"status": "abgeholt"})
+    if f:
+        return {"preis": f["purchase_price"], "quelle": "abgeholt",
+                "kaufvorgang_id": f["id"]}
+    # Runde 29: NUR offene Vorgaenge duerfen den Vertragspreis stellen.
+    # Vorher fiel der Code ohne offenen Vorgang auf ALLE zurueck — ein
+    # stornierter oder nicht abgeholter Kauf erschien dann als aktueller
+    # "Vertragspreis".
+    f = await _juengster({"status": {"$in": list(OFFEN)}})
+    if f:
+        return {"preis": f["purchase_price"], "quelle": "vertrag",
+                "kaufvorgang_id": f["id"]}
+    return {"preis": None, "quelle": "keiner", "kaufvorgang_id": None}
 
 
 # Runde 23 (11.09.2026, Befund A): Felder am gemeinsamen Fahrzeug, die den
