@@ -61,6 +61,25 @@ from listing_identity import (
 CLIENT_FETCH_KLEINANZEIGEN = os.environ.get(
     "CLIENT_FETCH_KLEINANZEIGEN", "").strip().lower() in ("1", "true", "yes")     and os.environ.get("MOCK_PROVIDER_FETCH", "").strip().lower() not in (
         "1", "true", "yes")
+def _erweiterung_noetig() -> bool:
+    """Muss der Browser des Nutzers das Inserat holen?
+
+    Runde 30 (12.09.2026, Fund aus dem Live-Lauf): Der Umweg ueber die
+    Browser-Erweiterung gab es nur, weil der Server Kleinanzeigen selbst
+    abgreifen musste und dabei gesperrt werden konnte. Mit dem bezahlten
+    API-Zugang faellt dieser Grund weg — dann holt der Server selbst, egal
+    ob die Erweiterung installiert ist. Ohne Schluessel bleibt alles beim
+    Alten (Erweiterung zuerst, eigener Abruf nur als Notloesung).
+    """
+    if not CLIENT_FETCH_KLEINANZEIGEN:
+        return False
+    try:
+        from kleinanzeigen_api import api_verfuegbar
+        return not api_verfuegbar()
+    except Exception:  # noqa: BLE001 — im Zweifel den alten Weg gehen
+        return True
+
+
 from mobile_service import (
     DEFAULT_EXPORT_RULES, DEFAULT_RULES, MOBILE_PASS, MOBILE_SANDBOX_MODE,
     MOBILE_USER, build_search_url, get_vehicle, mobile_quelle_verfuegbar,
@@ -362,7 +381,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # holen und per /listings/ingest zu schicken. Danach ruft das Frontend
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
     client_hit = None
-    if source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN:
+    if source == "kleinanzeigen" and _erweiterung_noetig():
         # Nachpruefung Runde 14 (Nr. 86): ERST den Cache pruefen, DANN den
         # Rueckfall zaehlen. Vorher zaehlte _rueckfall_erlaubt sofort ($inc),
         # auch wenn das Inserat laengst im Cache lag und gar kein Abruf
@@ -637,7 +656,7 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         return {"status": "completed", "cached": True,
                 "source": source, "item_id": identity["item_id"]}
 
-    if (source == "kleinanzeigen" and CLIENT_FETCH_KLEINANZEIGEN
+    if (source == "kleinanzeigen" and _erweiterung_noetig()
             and not await _rueckfall_erlaubt(body.ohne_erweiterung, user)):
         return {"status": "needs_client_fetch", "url": raw_url,
                 "source": source,

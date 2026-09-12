@@ -59,12 +59,15 @@ def welt(monkeypatch):
     import provider_limiter
 
     # Runde 23 (11.09.2026, Gegenpruefung): test_08 ruft das echte
-    # get_or_fetch_listing; acquire_slot setzt dabei den prozessweiten Merker
-    # _indexes_ready. Bliebe er stehen, legte ein spaeterer Test mit frischer
-    # Datenbank (test_listing_cache) weder den Unique-Index auf
+    # get_or_fetch_listing; acquire_slot setzte dabei einen PROZESSWEITEN
+    # Merker _indexes_ready. Blieb er stehen, legte ein spaeterer Test mit
+    # frischer Datenbank (test_listing_cache) weder den Unique-Index auf
     # provider_limits.provider noch die Zaehler an -> Limit vervielfacht.
-    # monkeypatch setzt ihn hier zurueck und stellt den Ausgangswert danach her.
-    monkeypatch.setattr(provider_limiter, "_indexes_ready", False)
+    # Runde 31 (12.09.2026): Der Merker haengt jetzt am Datenbanknamen, das
+    # Zuruecksetzen ist damit nicht mehr noetig. Es bleibt als Guertel zum
+    # Hosentraeger stehen — und haelt fest, dass der Merker eine MENGE ist.
+    assert isinstance(provider_limiter._indexes_ready, set)
+    monkeypatch.setattr(provider_limiter, "_indexes_ready", set())
 
     class _W:
         pass

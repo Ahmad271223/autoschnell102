@@ -494,7 +494,14 @@ def test_86_cache_treffer_verbraucht_keinen_rueckfall():
             "url": url, "fetched_at": JETZT, "expires_at": JETZT + timedelta(hours=1),
             "data": {"title": "R14 Cache", "list_price": 1000, "mobile_ad_id": ck.split(":")[1],
                      "make_label": "VW", "model_label": "Golf"}})
+        import kleinanzeigen_api as _KA
+        ka_alt = _KA.API_KEY
         try:
+            # Runde 31: Der Umweg ueber die Erweiterung gilt nur noch OHNE
+            # Kleinanzeigen-API-Schluessel. Dieser Test prueft genau diesen
+            # Weg — auf Entwicklungsrechnern liegt ein Schluessel in der
+            # .env, der hier weg muss.
+            _KA.API_KEY = ""
             L.CLIENT_FETCH_KLEINANZEIGEN = True
             L.db = db
             for _ in range(3):
@@ -512,6 +519,7 @@ def test_86_cache_treffer_verbraucht_keinen_rueckfall():
                                 BackgroundTasks(), user)
             assert isinstance(r, dict) and r.get("needs_client_fetch") is True, r
         finally:
+            _KA.API_KEY = ka_alt
             (L.CLIENT_FETCH_KLEINANZEIGEN, L.db, L.RUECKFALL_TAGESLIMIT) = alt
             await db.listings_cache.delete_many({"cache_key": ck})
             await db.provider_budget.delete_many({"_id": budget_id})

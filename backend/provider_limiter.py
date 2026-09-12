@@ -39,13 +39,26 @@ HEAL_INTERVAL_SECONDS = int(os.environ.get("PROVIDER_HEAL_INTERVAL", "30"))
 # Der eindeutige Index auf provider_limits.provider ist die einzige
 # Absicherung dagegen, dass zwei gleichzeitige Erst-Anfragen ZWEI
 # Zaehler-Dokumente derselben Quelle anlegen — dann wuerde das Limit
-# doppelt gelten. Deshalb legt der Limiter ihn selbst an (einmal je
-# Prozess), statt sich auf die Startroutine zu verlassen.
-_indexes_ready = False
+# doppelt gelten. Deshalb legt der Limiter ihn selbst an, statt sich auf
+# die Startroutine zu verlassen.
+#
+# Runde 31 (12.09.2026): Der Merker galt frueher je PROZESS (ein bool).
+# Sobald irgendwer ihn gesetzt hatte, uebersprang jede spaetere Datenbank
+# das Anlegen — und ohne den eindeutigen Index entstanden bei
+# gleichzeitigen Erst-Anfragen mehrere Zaehler je Quelle, das Limit galt
+# dann doppelt. Sichtbar wurde das in der Suite: 14 gleichzeitige Abrufe
+# bei erlaubten 8. Der Merker haengt jetzt am Datenbanknamen.
+_indexes_ready: set = set()
+
+
+def _db_marke(db) -> str:
+    try:
+        return f"{id(getattr(db, 'client', None))}:{db.name}"
+    except Exception:  # noqa: BLE001 — im Zweifel immer neu anlegen
+        return ""
 
 
 async def ensure_slot_indexes(db) -> None:
-    global _indexes_ready
     await db.provider_slots.create_index("expires_at", expireAfterSeconds=0,
                                          name="ttl_expires")
     await db.provider_slots.create_index("provider", name="by_provider")
@@ -56,7 +69,9 @@ async def ensure_slot_indexes(db) -> None:
             {"provider": provider},
             {"$setOnInsert": {"provider": provider, "active": 0}},
             upsert=True)
-    _indexes_ready = True
+    marke = _db_marke(db)
+    if marke:
+        _indexes_ready.add(marke)
 
 
 async def _heal_stale(db, provider: str) -> None:
@@ -91,7 +106,7 @@ async def acquire_slot(db, provider: str) -> Optional[str]:
     """Versucht, einen Abruf-Slot zu belegen. Liefert die Slot-ID oder None
     (Limit erreicht). Kein Warten — das macht der Aufrufer."""
     limit = PROVIDER_MAX_CONCURRENT.get(provider, 3)
-    if not _indexes_ready:
+    if _db_marke(db) not in _indexes_ready:
         # Selbstversorgung: ohne den eindeutigen Index koennten gleichzeitige
         # Erst-Anfragen mehrere Zaehler je Quelle anlegen und das Limit
         # vervielfachen.

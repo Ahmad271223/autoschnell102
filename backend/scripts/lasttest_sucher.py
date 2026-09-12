@@ -202,6 +202,18 @@ async def alle_anmelden(k: Klient, konten: dict):
     return gescheitert
 
 
+# Wird von lauf() gesetzt: Bei echten Abrufen bittet der Server sonst die
+# Browser-Erweiterung (CLIENT_FETCH_KLEINANZEIGEN) und legt nichts an.
+OHNE_ERWEITERUNG = False
+
+
+def _vergleich_rumpf(url: str) -> dict:
+    rumpf = {"url": url}
+    if OHNE_ERWEITERUNG:
+        rumpf["ohne_erweiterung"] = True
+    return rumpf
+
+
 # ------------------------------------------------------------ Szenarien
 async def szenario_gleiches_auto(k: Klient, sucher: list, url: str):
     """ALLE vergleichen im selben Moment DASSELBE Auto."""
@@ -210,7 +222,8 @@ async def szenario_gleiches_auto(k: Klient, sucher: list, url: str):
     async def einer(su):
         await tor.wait()
         code, daten = await k.ruf("POST", "/mobile/compare", token=su["token"],
-                                  daten={"url": url}, weg="vergleich (gleiches Auto)")
+                                  daten=_vergleich_rumpf(url),
+                                  weg="vergleich (gleiches Auto)")
         return su, code, daten
 
     aufgaben = [asyncio.create_task(einer(su)) for su in sucher]
@@ -225,7 +238,8 @@ async def szenario_eigene_autos(k: Klient, sucher: list, urls: list):
     async def einer(i, su):
         url = urls[i % len(urls)]
         code, daten = await k.ruf("POST", "/mobile/compare", token=su["token"],
-                                  daten={"url": url}, weg="vergleich (eigenes Auto)")
+                                  daten=_vergleich_rumpf(url),
+                                  weg="vergleich (eigenes Auto)")
         return su, url, code, daten
 
     return await asyncio.gather(*[einer(i, su) for i, su in enumerate(sucher)])
@@ -307,8 +321,38 @@ async def pruefe_dubletten(mongo_url: str, db_name: str, dealer_id: str) -> list
     return raus
 
 
+async def pruefe_dubletten_http(k: Klient, chef_token: str) -> list:
+    """Dieselbe Pruefung ohne Datenbankzugang (Produktion): Der Chef sieht
+    den ganzen Firmenbestand — dort darf jede Fahrzeug-ID genau einmal
+    stehen und je (Konto, Inserat) genau ein Datensatz existieren."""
+    code, bestand = await k.ruf("GET", "/bestand", token=chef_token,
+                                weg="chef /bestand (Dubletten)")
+    if code != 200 or not isinstance(bestand, dict):
+        return [f"(Dublettenpruefung nicht moeglich — /bestand gab {code})"]
+    raus, ids, paare = [], {}, {}
+    for f in bestand.get("items", []):
+        fid = f.get("id")
+        if fid:
+            ids[fid] = ids.get(fid, 0) + 1
+        schluessel = (f.get("owner_user_id"), f.get("mobile_ad_id"))
+        if schluessel[0] and schluessel[1]:
+            paare[schluessel] = paare.get(schluessel, 0) + 1
+    for fid, n in ids.items():
+        if n > 1:
+            raus.append(f"DUBLETTE: Fahrzeug-ID {fid} kommt {n}x im Bestand vor")
+    for (konto, inserat), n in paare.items():
+        if n > 1:
+            raus.append(f"DUBLETTE: Konto {konto} hat Inserat {inserat} {n}x")
+    if bestand.get("gekuerzt"):
+        raus.append("(Hinweis: Bestand gekuerzt — geprueft wurden nur die "
+                    f"neuesten {len(bestand.get('items', []))} Fahrzeuge)")
+    return raus
+
+
 # ---------------------------------------------------------------- Lauf
 async def lauf(args):
+    global OHNE_ERWEITERUNG
+    OHNE_ERWEITERUNG = bool(args.echte_abrufe) and not args.mit_erweiterung
     grenze = aiohttp.TCPConnector(limit=max(50, args.sucher * 2))
     zeit = aiohttp.ClientTimeout(total=args.timeout)
     messung = Messung()
@@ -369,6 +413,16 @@ async def lauf(args):
             szenario_chef_liest(k, konten["chef"]["token"]))
         print(f"     {time.perf_counter() - t0:.1f}s")
 
+        # Bat der Server um die Browser-Erweiterung? Dann wurde NICHTS
+        # abgerufen und der Lauf hat die Vergleichswege gar nicht belastet.
+        gebeten = sum(1 for _s, c, d in gleiche
+                      if c == 200 and isinstance(d, dict) and d.get("needs_client_fetch"))
+        gebeten += sum(1 for _s, _u, c, d in eigene_roh
+                       if c == 200 and isinstance(d, dict) and d.get("needs_client_fetch"))
+        if gebeten:
+            print(f"!! {gebeten} Vergleiche wurden an die Browser-Erweiterung "
+                  "verwiesen (needs_client_fetch) — es wurde NICHTS abgerufen.")
+
         # Wem gehoert was?
         eigene: dict = {}
         for su, url, code, daten in eigene_roh:
@@ -396,7 +450,7 @@ async def lauf(args):
             if dealer_id:
                 dubletten = await pruefe_dubletten(args.mongo, args.db_name, dealer_id)
         else:
-            dubletten = ["(ohne --db-name uebersprungen — nur lokal moeglich)"]
+            dubletten = await pruefe_dubletten_http(k, konten["chef"]["token"])
 
     return {
         "basis": args.basis,
@@ -408,6 +462,8 @@ async def lauf(args):
         "verstoesse_trennung": verstoesse,
         "dubletten": dubletten,
         "fahrzeuge_je_sucher": {e: len(ids) for e, ids in sorted(eigene.items())},
+        "gebeten_um_erweiterung": gebeten,
+        "mit_erweiterung": bool(args.mit_erweiterung),
         "zeitpunkt": jetzt(),
     }
 
@@ -434,6 +490,15 @@ def bewerten(b: dict) -> int:
                 print("     ", z)
         else:
             print(f"OK {titel}: 0")
+    gebeten = b.get("gebeten_um_erweiterung") or 0
+    if gebeten and not b.get("mit_erweiterung"):
+        fehler += 1
+        print(f"!! {gebeten} Vergleiche an die Browser-Erweiterung verwiesen — "
+              "der Lauf hat die Abrufwege NICHT belastet")
+    elif b["echte_abrufe"]:
+        print("OK An die Erweiterung verwiesen: 0")
+    for hinweis in [d for d in b["dubletten"] if not d.startswith("DUBLETTE")]:
+        print(f"   {hinweis}")
     if b["fehler_4xx"]:
         print(f"   (Hinweis: {len(b['fehler_4xx'])} Antworten mit 4xx — "
               "erwartet z.B. bei Limits/Abos)")
@@ -457,6 +522,10 @@ def main():
     p.add_argument("--mongo", default=os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017")
     p.add_argument("--db-name", default=os.environ.get("DB_NAME"),
                    help="fuer die Dublettenpruefung (nur lokal)")
+    p.add_argument("--mit-erweiterung", action="store_true",
+                   help="NICHT ohne_erweiterung senden — dann verweist ein "
+                        "Server im Client-Abruf-Modus auf die Erweiterung "
+                        "und es wird nichts abgerufen")
     p.add_argument("--echte-abrufe", action="store_true",
                    help="ECHTE Inserate abrufen und ECHTE Daten anlegen")
     p.add_argument("--bericht", help="Ergebnis zusaetzlich als JSON hier ablegen")
