@@ -293,3 +293,26 @@ def pruefe_produktion(log) -> None:
         log.error("Start ABGEBROCHEN: %d Konfigurationsfehler (siehe oben). "
                   ".env pruefen — Vorlage: .env.example", len(fehler))
         sys.exit(78)  # EX_CONFIG
+
+
+def produktionspruefung_beim_start(log) -> None:
+    """Aufruf aus server.on_start — fail-closed in Produktion.
+
+    Go-Live 13.09.2026 (B4): vorher fing on_start jede andere Exception als
+    SystemExit ab, loggte nur eine Warnung und startete WEITER. Geschuetzt
+    war Produktion dann nur, weil der Dockerfile-CMD vorher
+    `python migrationen.py` (ohne try/except) ausfuehrt. Jetzt bricht der
+    Start in Produktion auch ohne diesen Vorlauf ab, wenn die Pruefung selbst
+    nicht durchlaeuft; ausserhalb von Produktion bleibt es beim Log.
+    (Name bewusst nicht "pruefe_*": test_befunde_runde10 sucht per dir().)
+    """
+    try:
+        pruefe_produktion(log)
+    except SystemExit:
+        raise
+    except Exception as exc:                        # noqa: BLE001
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            log.error("Produktions-Check konnte nicht laufen: %s — Start "
+                      "ABGEBROCHEN (Go-Live 13.09.2026, B4)", exc)
+            raise SystemExit(78)  # EX_CONFIG
+        log.warning("production check failed to run: %s", exc)

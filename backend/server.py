@@ -985,13 +985,17 @@ async def on_start():
     # und Admin-Seeding bereits, bevor eine fehlerhafte Produktions-
     # konfiguration den Start abbrach — die Datenbank war dann schon
     # veraendert.
+    # Go-Live 13.09.2026 (B4): eine unerwartete Exception der Pruefung (oder
+    # ihres Imports) bricht in Produktion mit SystemExit(78) ab, statt nur zu
+    # warnen und weiterzustarten; ausserhalb von Produktion nur ein Log.
     try:
-        from production_check import pruefe_produktion
-        pruefe_produktion(log)
-    except SystemExit:
-        raise
+        from production_check import produktionspruefung_beim_start
     except Exception as exc:
-        log.warning("production check failed to run: %s", exc)
+        log.error("production check not importable: %s", exc)
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            raise SystemExit(78)
+    else:
+        produktionspruefung_beim_start(log)
     # Audit 09/2026 (Punkt 18): GENAU EIN Prozess legt Indizes/Seeds an und
     # fuehrt die versionierten Migrationen aus; die anderen warten auf den
     # Zielstand. In Produktion bricht ein Fehler den Start ab.
