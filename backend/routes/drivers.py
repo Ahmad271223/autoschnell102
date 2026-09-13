@@ -692,15 +692,26 @@ async def driver_appointments(driver=Depends(current_driver),
     # JUENGSTEN abgeschlossenen; Antwort weiter aufsteigend nach Datum.
     basis = {"driver_id": driver["id"], "dealer_id": {"$in": dealer_ids_aktiv}}
     grenze = 500
+    # Nachbesserung: auch die offenen selbst koennen die Grenze sprengen (nie
+    # auf "nicht abgeholt" gesetzte Alttermine). Aufsteigend gekappt fielen
+    # dann wieder die neuen Zuteilungen weg. Jetzt: datumslose zuerst, dann
+    # die JUENGSTEN mit Datum — es fallen die aeltesten offenen weg.
+    # grenze + 1 erkennt den Abschnitt genau; max(1, ...) — nie to_list(0).
+    offen_q = {**basis, "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}}
     offen = await db.appointments.find(
-        {**basis, "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}}, {"_id": 0},
-    ).sort("pickup_date", 1).to_list(grenze)
-    rest = max(0, grenze - len(offen))
+        {**offen_q, "pickup_date": {"$in": ["", None]}}, {"_id": 0},
+    ).to_list(grenze + 1)
+    offen += await db.appointments.find(
+        {**offen_q, "pickup_date": {"$nin": ["", None]}}, {"_id": 0},
+    ).sort("pickup_date", -1).to_list(max(1, grenze + 1 - len(offen)))
+    offen_gekappt = len(offen) > grenze
+    offen = offen[:grenze]
+    rest = grenze - len(offen)
     # rest + 1 (nie to_list(0) — das liefert in Motor ALLE) erkennt den Abschnitt.
     alt = await db.appointments.find(
         {**basis, "status": {"$in": sorted(_TERMIN_ABGESCHLOSSEN)}}, {"_id": 0},
     ).sort("pickup_date", -1).to_list(rest + 1)
-    if len(offen) >= grenze or len(alt) > rest:
+    if offen_gekappt or len(alt) > rest:
         log.warning("Fahrer %s: Terminliste auf %d gekappt (offen %d)",
                     driver["id"], grenze, len(offen))
         if response is not None:

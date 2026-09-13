@@ -224,6 +224,9 @@ def test_05b_nacharbeit_scheitert_merker_und_naechstes_speichern_holt_nach(welt,
     monkeypatch.setattr(KV, "termin_status_uebernehmen", echt)
 
     async def speichern():
+        # Nachbesserung: der Vertragsverweis wurde beim Anlegen schon gesetzt
+        # (vor der gepatchten Stelle) — entfernen, damit das PUT ihn wirklich heilt.
+        await w.db.generated_pdfs.update_one({"id": cid}, {"$unset": {"appointment_id": ""}})
         out = await A.update_appointment(r["id"], A.AppointmentIn(notes="x"), w.chef)
         t = await w.db.appointments.find_one({"id": r["id"]}, {"_id": 0})
         kv = await w.db.kaufvorgaenge.find_one({"id": kid}, {"_id": 0})
@@ -387,3 +390,153 @@ def test_13_60_fahrer_firmenliste_ohne_500er_grenze(welt):
     assert len(me["dealers"]) == 501
     assert len(verknuepft) == 501
     assert len(neu["dealers"]) == 501 and neu["display_name"] == "Neu Name"
+
+
+# ================================================= Nachbesserung (Gegenpruefung)
+def test_05e_merker_ohne_vorgang_und_statuswechsel_auf_offenen_wert(welt, monkeypatch):
+    """Nachhol-Rueckfall stand als elif hinter dem Statuswechsel-Zweig: ein PUT
+    auf 'bestätigt' loeschte den Merker, ohne den Fahrzeugstatus nachzuziehen."""
+    A = _modul("routes.appointments")
+    w = welt
+    vid = f"v_{w.s}"
+    w.run(w.db.vehicles.insert_one({"id": vid, "dealer_id": w.dealer_id, "lifecycle": "vertrag_erstellt",
+                                    "owner_user_id": w.chef["id"], "data": {}, "created_at": _jetzt()}))
+    echt = A.try_set_lifecycle
+    monkeypatch.setattr(A, "try_set_lifecycle", _kaputt)
+    r = w.run(A.create_appointment(A.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-01"), w.chef))
+    assert r["hinweis"] == A.NACHARBEIT_HINWEIS
+    monkeypatch.setattr(A, "try_set_lifecycle", echt)
+    out = w.run(A.update_appointment(r["id"], A.AppointmentIn(status="bestätigt"), w.chef))
+    fahrzeug = w.run(w.db.vehicles.find_one({"id": vid}, {"_id": 0}))
+    termin = w.run(w.db.appointments.find_one({"id": r["id"]}, {"_id": 0}))
+    assert out["ok"] is True and termin["status"] == "bestätigt"
+    assert fahrzeug["lifecycle"] == "abholung_geplant"
+    assert "nacharbeit_offen" not in termin
+
+
+class _DbMerkerKaputt:
+    """db-Stellvertreter fuer routes.appointments: das Setzen des Merkers
+    nacharbeit_offen scheitert, alles andere geht an die echte DB."""
+
+    def __init__(self, echt):
+        self._echt = echt
+
+    def __getattr__(self, name):
+        wert = getattr(self._echt, name)
+        if name != "appointments":
+            return wert
+
+        class _Termine:
+            def __getattr__(self, n):
+                return getattr(wert, n)
+
+            async def update_one(self, filt, upd, *a, **k):
+                if "nacharbeit_offen" in (upd.get("$set") or {}):
+                    raise RuntimeError("DB-Aussetzer beim Merker (Test)")
+                return await wert.update_one(filt, upd, *a, **k)
+
+        return _Termine()
+
+    def __getitem__(self, name):
+        return self.__getattr__(name)
+
+
+def test_05f_ohne_merker_kein_versprechen_des_nachholens(welt, monkeypatch):
+    A = _modul("routes.appointments")
+    w = welt
+    vid = f"v_{w.s}"
+    w.run(w.db.vehicles.insert_one({"id": vid, "dealer_id": w.dealer_id, "lifecycle": "vertrag_erstellt",
+                                    "owner_user_id": w.chef["id"], "data": {}, "created_at": _jetzt()}))
+    monkeypatch.setattr(A, "try_set_lifecycle", _kaputt)
+    monkeypatch.setattr(A, "db", _DbMerkerKaputt(w.db))
+    r = w.run(A.create_appointment(A.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-01"), w.chef))
+    termin = w.run(w.db.appointments.find_one({"id": r["id"]}, {"_id": 0}))
+    assert termin and "nacharbeit_offen" not in termin
+    assert r["hinweis"] == A.NACHARBEIT_FEHLGESCHLAGEN_HINWEIS
+    assert "nacharbeit_offen" not in r
+
+
+def test_05g_audit_fehler_nach_dem_update_gibt_kein_500(welt, monkeypatch):
+    """#0 (= zustaende #44): termin.aktualisiert nach dem dauerhaften Write."""
+    A = _modul("routes.appointments")
+    deps = _modul("deps")
+    w = welt
+    r = w.run(A.create_appointment(A.AppointmentIn(title="x", pickup_date="2099-01-01"), w.chef))
+    monkeypatch.setattr(A, "log_activity", _kaputt)
+    monkeypatch.setattr(deps, "log_activity", _kaputt)
+    out = w.run(A.update_appointment(r["id"], A.AppointmentIn(notes="neu"), w.chef))
+    termin = w.run(w.db.appointments.find_one({"id": r["id"]}, {"_id": 0}))
+    assert out["ok"] is True and termin["notes"] == "neu"
+
+
+def test_02b_protokolle_genau_an_der_grenze_ohne_kopf(welt, monkeypatch):
+    P = _modul("routes.protocols")
+    w = welt
+    vid = f"v_{w.s}"
+
+    async def lauf():
+        await w.db.appointments.insert_one(_termin(w, f"t1_{w.s}", "abgeholt"))
+        await w.db.pickup_protocols.insert_many(
+            [_protokoll(w, f"p{i}_{w.s}", f"t1_{w.s}", vid, i, i, superseded=i < 3)
+             for i in range(1, 4)])
+        monkeypatch.setattr(P, "_PROTOKOLLE_JE_FAHRZEUG", 3)
+        antwort = Response()
+        return await P.dealer_list_protocols(vid, w.chef, antwort), antwort
+
+    docs, antwort = w.run(lauf())
+    assert len(docs) == 3 and antwort.headers.get("X-Truncated") is None
+
+
+def test_06c_mehr_offene_als_grenze_aelteste_offene_fallen_weg(welt):
+    A = _modul("routes.appointments")
+    w = welt
+
+    async def lauf():
+        await w.db.appointments.insert_many(
+            [_termin(w, f"liegen{i}_{w.s}", "verschoben", _tag(i)) for i in range(2000)])
+        a1 = Response()
+        genau = await A.list_appointments(a1, w.chef)
+        await w.db.appointments.insert_many([
+            _termin(w, f"kommend_{w.s}", "offen", "2099-01-01"),
+            _termin(w, f"ohne_datum_{w.s}", "offen", ""),
+            _termin(w, f"zu_{w.s}", "abgeholt", "2098-01-01")])
+        a2 = Response()
+        return genau, a1, await A.list_appointments(a2, w.chef), a2
+
+    genau, a1, items, a2 = w.run(lauf())
+    assert len(genau) == 2000 and a1.headers.get("X-Truncated") is None, \
+        "genau 2000 offene, nichts abgeschlossen: kein Abschnitt"
+    ids = {a["id"] for a in items}
+    assert {f"kommend_{w.s}", f"ohne_datum_{w.s}"} <= ids, "kommende und datumslose bleiben"
+    assert f"liegen0_{w.s}" not in ids and f"liegen1_{w.s}" not in ids and f"liegen2_{w.s}" in ids
+    assert f"zu_{w.s}" not in ids
+    assert len(items) == 2000 and a2.headers.get("X-Truncated") == "1"
+    daten = [a.get("pickup_date") or "" for a in items]
+    assert daten == sorted(daten)
+
+
+def test_12c_mehr_offene_fahrten_als_grenze_neue_bleiben(welt):
+    D = _modul("routes.drivers")
+    w = welt
+    _fahrer_welt(w)
+    f = w.driver["id"]
+
+    async def lauf():
+        await w.db.appointments.insert_many(
+            [_termin(w, f"liegen{i}_{w.s}", "verschoben", _tag(i), driver_id=f) for i in range(500)])
+        a1 = Response()
+        genau = await D.driver_appointments(w.driver, a1)
+        await w.db.appointments.insert_many([
+            _termin(w, f"neu_{w.s}", "offen", "2099-01-01", driver_id=f, zuteilung="offen"),
+            _termin(w, f"ohne_datum_{w.s}", "offen", "", driver_id=f),
+            _termin(w, f"zu_{w.s}", "abgeholt", "2098-01-01", driver_id=f)])
+        a2 = Response()
+        return genau, a1, await D.driver_appointments(w.driver, a2), a2
+
+    genau, a1, appts, a2 = w.run(lauf())
+    assert len(genau) == 500 and a1.headers.get("X-Truncated") is None
+    ids = {a["id"] for a in appts}
+    assert {f"neu_{w.s}", f"ohne_datum_{w.s}"} <= ids, "neue und datumslose Fahrten bleiben"
+    assert f"liegen0_{w.s}" not in ids and f"liegen1_{w.s}" not in ids and f"liegen2_{w.s}" in ids
+    assert f"zu_{w.s}" not in ids
+    assert len(appts) == 500 and a2.headers.get("X-Truncated") == "1"

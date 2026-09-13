@@ -999,8 +999,10 @@ async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep),
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
          "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1,
          "appointment_id": 1},
-    ).sort([("finalized_at", -1), ("version", -1)]).to_list(_PROTOKOLLE_JE_FAHRZEUG)
-    if len(docs) >= _PROTOKOLLE_JE_FAHRZEUG:
+    ).sort([("finalized_at", -1), ("version", -1)]).to_list(_PROTOKOLLE_JE_FAHRZEUG + 1)
+    # Nachbesserung: eins mehr holen — genau an der Grenze ist nichts abgeschnitten.
+    if len(docs) > _PROTOKOLLE_JE_FAHRZEUG:
+        docs = docs[:_PROTOKOLLE_JE_FAHRZEUG]
         log.warning("Protokollliste Fahrzeug %s: Obergrenze %d erreicht, aeltere "
                     "Versionen abgeschnitten", vehicle_id, _PROTOKOLLE_JE_FAHRZEUG)
         if response is not None:

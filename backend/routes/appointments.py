@@ -255,6 +255,11 @@ TERMIN_DOPPELT_HINWEIS = ("Für diesen Vertrag gibt es bereits einen offenen "
                           "oder zuerst abschließen.")
 # Audit 13.09.2026 (#5): Nacharbeit nach dem Anlegen gescheitert (Merker
 # nacharbeit_offen am Termin, update_appointment holt sie nach).
+# Nachbesserung 13.09.2026: konnte auch der Merker nicht geschrieben werden,
+# holt das naechste Speichern nichts nach — dann nichts versprechen.
+NACHARBEIT_FEHLGESCHLAGEN_HINWEIS = ("Termin gespeichert — Vertrag und "
+                                     "Fahrzeugstatus konnten nicht aktualisiert "
+                                     "werden, bitte beides prüfen.")
 NACHARBEIT_HINWEIS = ("Termin gespeichert — Vertrag und Fahrzeugstatus werden "
                       "beim nächsten Speichern des Termins nachgezogen.")
 
@@ -403,6 +408,7 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     # normales Speichern zog sie nicht nach). Jetzt: Merker nacharbeit_offen,
     # update_appointment holt alles beim naechsten Speichern nach.
     nacharbeit_offen = False
+    merker_gesetzt = False
     try:
         if body.contract_id:
             await db.generated_pdfs.update_one(
@@ -425,6 +431,7 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         try:
             await db.appointments.update_one({"id": appt_id},
                                              {"$set": {"nacharbeit_offen": True}})
+            merker_gesetzt = True
         except Exception:  # noqa: BLE001
             log.exception("Merker nacharbeit_offen fuer Termin %s nicht gesetzt", appt_id)
     # Audit 13.09.2026 (#5): Audit nach dem dauerhaften Insert darf nicht mehr
@@ -432,8 +439,10 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     await log_activity_sicher(user["dealer_id"], user["id"], "termin.erstellt", ref=appt_id)
     out = clean_doc(doc)
     if nacharbeit_offen:
-        out["nacharbeit_offen"] = True
-        hinweis = f"{hinweis} {NACHARBEIT_HINWEIS}" if hinweis else NACHARBEIT_HINWEIS
+        if merker_gesetzt:
+            out["nacharbeit_offen"] = True
+        text = NACHARBEIT_HINWEIS if merker_gesetzt else NACHARBEIT_FEHLGESCHLAGEN_HINWEIS
+        hinweis = f"{hinweis} {text}" if hinweis else text
     if hinweis:
         out["hinweis"] = hinweis
     return out
@@ -460,15 +469,26 @@ async def list_appointments(response: Response, user=Depends(current_firma),
             {**query, "status": status}, {"_id": 0}).sort("pickup_date", -1).to_list(2000)
         abgeschnitten = len(items) >= grenze
     else:
+        # Nachbesserung: auch die offenen selbst koennen die Grenze sprengen
+        # (nie abgeschlossene Alttermine). Aufsteigend gekappt fielen dann
+        # wieder die kommenden weg. Jetzt: datumslose (Termine.jsx zeigt sie
+        # unter "Kommend") zuerst, dann die JUENGSTEN mit Datum; es fallen die
+        # aeltesten offenen weg. grenze + 1 erkennt den Abschnitt genau.
+        offen_q = {**query, "status": {"$nin": sorted(ABGESCHLOSSEN)}}
         items = await db.appointments.find(
-            {**query, "status": {"$nin": sorted(ABGESCHLOSSEN)}}, {"_id": 0},
-        ).sort("pickup_date", 1).to_list(2000)
-        rest = max(0, grenze - len(items))
+            {**offen_q, "pickup_date": {"$in": ["", None]}}, {"_id": 0},
+        ).to_list(grenze + 1)
+        items += await db.appointments.find(
+            {**offen_q, "pickup_date": {"$nin": ["", None]}}, {"_id": 0},
+        ).sort("pickup_date", -1).to_list(max(1, grenze + 1 - len(items)))
+        offen_gekappt = len(items) > grenze
+        items = items[:grenze]
+        rest = grenze - len(items)
         # rest + 1 (nie to_list(0) — das liefert in Motor ALLE) erkennt den Abschnitt.
         alt = await db.appointments.find(
             {**query, "status": {"$in": sorted(ABGESCHLOSSEN)}}, {"_id": 0},
         ).sort("pickup_date", -1).to_list(rest + 1)
-        abgeschnitten = len(items) >= grenze or len(alt) > rest
+        abgeschnitten = offen_gekappt or len(alt) > rest
         items = items + alt[:rest]
     items.sort(key=lambda a: str(a.get("pickup_date") or ""))
     if abgeschnitten:
@@ -800,9 +820,13 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                 await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
             elif update["status"] == "nicht abgeholt":
                 await try_set_lifecycle(vehicle_id, user["dealer_id"], "nicht_abgeholt", user=user)
-        elif not hat_vorgang and vehicle_id and nacharbeit_nachholen \
+        if not hat_vorgang and vehicle_id and nacharbeit_nachholen \
                 and wirksamer_status in TERMIN_OFFEN_WERTE:
             # Audit 13.09.2026 (#5): wie beim Anlegen (manueller Termin ohne Vorgang).
+            # Nachbesserung: eigenes if statt elif — ein Statuswechsel auf einen
+            # OFFENEN Wert (bestätigt, verschoben ...) nahm sonst den ersten Zweig,
+            # zog nichts nach und loeschte trotzdem den Merker. Abgeschlossene
+            # Zielstati sind hier ausgeschlossen, der erste Zweig bleibt massgeblich.
             await try_set_lifecycle(vehicle_id, user["dealer_id"], "abholung_geplant", user=user)
         if nacharbeit_nachholen:
             if hat_vorgang and termin_nachher.get("kaufvorgang_id"):
@@ -878,8 +902,10 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         # Wieder-Oeffnen nachvollziehbar bleibt.
         meta["status_von"] = existing.get("status")
         meta["status_nach"] = update["status"]
-    await log_activity(user["dealer_id"], user["id"], "termin.aktualisiert", ref=appt_id,
-                       meta=meta)
+    # Nachbesserung 13.09.2026 (#0): Termin, Vorgang und Merker sind hier
+    # schon geschrieben — ein fehlender Audit-Eintrag darf kein 500 geben.
+    await log_activity_sicher(user["dealer_id"], user["id"], "termin.aktualisiert",
+                              ref=appt_id, meta=meta)
     out = {"ok": True, "pickup_date_changed": pickup_changed,
            "contract_updated": vertrag_aktualisiert}
     if fahrer_entfernt:
