@@ -443,6 +443,15 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
     pseudonym = "geloescht:" + hashlib.sha256(
         driver_id.encode("utf-8")).hexdigest()[:12]
     jetzt = now_iso()
+    # 0) Haendler-Verknuepfungen ZUERST (Audit 13.09.2026, #59): Eine
+    #    parallele Chef-Zuweisung landet damit entweder VOR der Termin-
+    #    Pseudonymisierung (und wird mit erfasst), oder ihre Nachpruefung
+    #    (appointments._fahrer_nachpruefen) sieht die fehlende Verknuepfung
+    #    und nimmt sie zurueck. Vorher fiel die Verknuepfung als letzter
+    #    Schritt — eine Zuweisung dazwischen bestand die Nachpruefung und
+    #    behielt die echte driver_id dauerhaft. Zaehler unveraendert.
+    r_links = await db.dealer_drivers.delete_many(
+        {"driver_account_id": driver_id})
     # 1) Termine: offene verlieren die Zuweisung (zuteilung=None); alle mit
     #    dieser driver_id bekommen das Pseudonym in driver_id_hist, das
     #    Zugriffsfeld driver_id verschwindet. Bereits archivierte Zuordnungen
@@ -473,10 +482,8 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
         {"$set": {"user_id": pseudonym},
          "$unset": {"meta.email": "", "meta.driver_code": "",
                     "meta.display_name": ""}})
-    # 4) Reset-Tokens und Haendler-Verknuepfungen weg
+    # 4) Reset-Tokens weg (Haendler-Verknuepfungen: Schritt 0)
     r_reset = await db.password_resets.delete_many({"user_id": driver_id})
-    r_links = await db.dealer_drivers.delete_many(
-        {"driver_account_id": driver_id})
     return {
         "pseudonym": pseudonym,
         "appointments": (r_offen.modified_count + r_rest.modified_count

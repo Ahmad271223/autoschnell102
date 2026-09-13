@@ -639,15 +639,29 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
     if not res.deleted_count:
         return False   # parallel bereits geloescht — nichts doppelt protokollieren
     if audit:
-        await db.activity_logs.insert_one({
-            "id": uuid.uuid4().hex,
-            "dealer_id": dealer_id, "user_id": "",
-            "action": f"vertrag.geloescht.{grund}",
-            "ref": contract_id,
-            "meta": {"contract_no": c.get("contract_no"),
-                     "scrub_pii": scrub_pii, "wiederaufnahme": wiederaufnahme},
-            "created_at": jetzt,
-        })
+        # Audit 13.09.2026 (#45): Der Vertrag ist bereits geloescht. Ein
+        # Fehler beim Audit-Eintrag brach vorher den ganzen Aufraeumzyklus ab
+        # (weitere Frist-Kandidaten und Folgeschritte warteten bis zum
+        # naechsten Lauf) und der Eintrag ging still verloren. Jetzt: Spur im
+        # Fehlerlog und als Betriebsalarm, Rueckgabe bleibt True.
+        try:
+            await db.activity_logs.insert_one({
+                "id": uuid.uuid4().hex,
+                "dealer_id": dealer_id, "user_id": "",
+                "action": f"vertrag.geloescht.{grund}",
+                "ref": contract_id,
+                "meta": {"contract_no": c.get("contract_no"),
+                         "scrub_pii": scrub_pii, "wiederaufnahme": wiederaufnahme},
+                "created_at": jetzt,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Audit vertrag.geloescht.%s fuer %s fehlt (Vertrag "
+                          "bereits geloescht)", grund, contract_id)
+            await alarm(db, "audit_fehlt", ref=contract_id,
+                        aktion=f"vertrag.geloescht.{grund}",
+                        dealer_id=dealer_id or "",
+                        contract_no=c.get("contract_no") or "",
+                        fehler=str(exc)[:300])
     return True
 
 

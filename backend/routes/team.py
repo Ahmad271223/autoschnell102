@@ -14,7 +14,7 @@ from typing import Optional
 
 import os
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -149,7 +149,7 @@ async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
 
 
 @router.get("/dealer/sucher")
-async def list_sucher(user=Depends(current_haendler)):
+async def list_sucher(response: Response, user=Depends(current_haendler)):
     """Alle Sucher des Händlers inkl. Abo-Status und Monats-Statistik."""
     # Runde 11: feste Feldliste statt "alles ausser Passwort" — sonst
     # landen Sitzungs-ID, persoenliche Overrides und jedes kuenftige
@@ -163,6 +163,16 @@ async def list_sucher(user=Depends(current_haendler)):
          "first_name": 1, "last_name": 1, "phone": 1, "employee_id": 1,
          "created_by": 1, "created_at": 1, "updated_at": 1},
     ).sort("created_at", 1).to_list(1000)
+    # Audit 13.09.2026 (#55): Die Obergrenze bleibt, wird aber nicht mehr
+    # still gezogen — ab dem 1001. Sucher meldet die Kopfzeile X-Truncated
+    # (Antwort bleibt eine Liste) und das Log eine Warnung. Zaehlen nur,
+    # wenn die Grenze ueberhaupt erreicht ist.
+    abgeschnitten = len(items) >= 1000 and await db.users.count_documents(
+        {"dealer_id": user["dealer_id"], "role": "sucher"}) > len(items)
+    response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
+    if abgeschnitten:
+        log.warning("Sucherliste der Firma %s auf %s Eintraege gekuerzt",
+                    user["dealer_id"], len(items))
     month_start = datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
     # ALLE Zusatzdaten in 3 Sammelabfragen statt 3 Abfragen JE SUCHER

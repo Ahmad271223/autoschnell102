@@ -18,7 +18,7 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     return safe[:200] or fallback
 
 from pymongo.errors import DuplicateKeyError
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -26,7 +26,8 @@ from auth import (hash_password, hash_password_async,
                   verify_password, verify_password_async)
 from cleanup_service import _cleanup_once
 from deps import (
-    current_admin, current_super_admin, db, get_subscription_status, log, log_activity, now_iso, sub_status_from_doc, subscription_for,
+    current_admin, current_super_admin, db, get_subscription_status, log, log_activity,
+    log_activity_sicher, now_iso, sub_status_from_doc, subscription_for,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
 from passwoerter import pruefe_passwort
@@ -822,6 +823,12 @@ async def _fahrer_or_404(driver_id: str) -> dict:
 async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
                                   admin=Depends(current_super_admin)):
     d = await _fahrer_or_404(driver_id)
+    # Audit 13.09.2026 (#59): Ein halb geloeschtes Konto (Grabstein aus
+    # admin_delete_driver) nicht wieder entsperren — sonst hebt ein Klick die
+    # Sperre auf, waehrend Termine/Berichte schon pseudonymisiert sind.
+    if body.active and (d.get("loeschung") or {}).get("status") == "laeuft":
+        raise HTTPException(409, "Löschung läuft — bitte 'Löschen' erneut "
+                                 "ausführen, um sie abzuschließen")
     jetzt = now_iso()
     fields = {"active": body.active, "updated_at": jetzt}
     if not body.active:
@@ -895,35 +902,91 @@ async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)
     ist die driver_id keiner Person mehr zuzuordnen), Reset-Tokens weg,
     dann das Konto selbst."""
     d = await _fahrer_or_404(driver_id)
+    # Audit 13.09.2026 (#59): Grabstein und Sperre ZUERST, im Muster von
+    # admin_delete_user. Vorher lief die Pseudonymisierung (sieben getrennte
+    # Schreibschritte, update_many/delete_many sind keine retryable writes)
+    # ohne Sperre und ohne Marker: brach sie ab, blieb der Fahrer aktiv und
+    # eingeloggt, und nichts meldete den Mischzustand. Jetzt weisen
+    # current_driver (401), driver_login (403) und add_driver_by_code (409)
+    # sofort ab, und ein erneuter DELETE fuehrt die Loeschung zu Ende.
+    jetzt = now_iso()
+    grab = d.get("loeschung") or {}
+    wiederaufnahme = grab.get("status") == "laeuft"
+    if wiederaufnahme:
+        await db.driver_accounts.update_one(
+            {"id": driver_id},
+            {"$set": {"loeschung.gestartet": jetzt, "active": False,
+                      "current_session_id": None, "updated_at": jetzt},
+             "$inc": {"loeschung.wiederaufnahmen": 1}})
+    else:
+        await db.driver_accounts.update_one(
+            {"id": driver_id},
+            {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
+                                    "grund": "admin", "durch": admin["id"]},
+                      "active": False, "current_session_id": None,
+                      "updated_at": jetzt}})
+    # Start-Audit VOR dem ersten destruktiven Schritt mit der WERFENDEN
+    # Variante (wie admin.firma.loeschung.gestartet): scheitert es, wird
+    # nichts pseudonymisiert. Ohne E-Mail in meta.
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
+                       "admin.fahrer.loeschung.gestartet", ref=driver_id,
+                       meta={"wiederaufnahme": wiederaufnahme})
     # Audit 09/2026: nicht nur trennen, sondern pseudonymisieren (Termine,
     # Berichte, Protokolle, Audit-Log) — Funktion in routes/drivers.py.
+    # Bewusst akzeptiertes Restrisiko: Ein Fahrer-Bericht, der VOR der Sperre
+    # begann und erst nach delete_one gespeichert wird, traegt noch Kennung
+    # und Klarnamen (selten, braeuchte eine Nachpruefung in submit_report).
     from routes.drivers import fahrer_konto_anonymisieren
     anonym = await fahrer_konto_anonymisieren(db, driver_id)
     links = type("R", (), {"deleted_count": anonym.get("dealer_drivers", 0)})()
     getrennt = type("R", (), {"modified_count": anonym.get("appointments", 0)})()
     await db.driver_accounts.delete_one({"id": driver_id})
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
-                       "admin.fahrer.geloescht", ref=driver_id,
-                       meta={"email": d.get("email", ""),
-                             "driver_code": d.get("driver_code", ""),
-                             "verknuepfungen": links.deleted_count,
-                             "offene_termine_getrennt": getrennt.modified_count})
+    # Konto ist geloescht — ein Audit-Fehler darf keinen 500 mit 404-Retry
+    # ("Fahrer nicht gefunden") mehr ausloesen.
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+                              "admin.fahrer.geloescht", ref=driver_id,
+                              meta={"email": d.get("email", ""),
+                                    "driver_code": d.get("driver_code", ""),
+                                    "verknuepfungen": links.deleted_count,
+                                    "offene_termine_getrennt": getrennt.modified_count,
+                                    "wiederaufnahme": wiederaufnahme})
     return {"ok": True, "verknuepfungen_entfernt": links.deleted_count,
             "offene_termine_getrennt": getrennt.modified_count}
 
 
 # ---------- Contracts (read-only admin views) ----------
+# Audit 13.09.2026 (#51/#52): Obergrenze der Admin-Vertragslisten. Sie wird
+# signalisiert (X-Truncated bzw. "abgeschnitten") statt still gezogen.
+ADMIN_VERTRAEGE_MAX = 2000
+
+
 @router.get("/admin/contracts")
-async def admin_all_contracts(_=Depends(current_admin)):
+async def admin_all_contracts(response: Response, _=Depends(current_admin),
+                              page: int = 1, limit: int = ADMIN_VERTRAEGE_MAX):
+    """Alle Vertraege plattformweit, neueste zuerst (ohne PDF-Bytes).
+
+    Audit 13.09.2026 (#52): Vorher kappte to_list(2000) ohne jedes Signal.
+    Jetzt blaettern per ?page=&limit= (Standard wie bisher: erste 2000) und
+    Kopfzeile X-Truncated: "1", wenn es weitere Vertraege gibt. Die Antwort
+    bleibt eine Liste."""
+    limit = max(1, min(int(limit or ADMIN_VERTRAEGE_MAX), ADMIN_VERTRAEGE_MAX))
+    page = max(1, int(page or 1))
     items = await db.generated_pdfs.find(
         {}, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
-    ).sort("created_at", -1).to_list(2000)
-    return items
+    ).sort("created_at", -1).skip((page - 1) * limit).to_list(limit + 1)
+    abgeschnitten = len(items) > limit
+    response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
+    if abgeschnitten:
+        log.warning("Admin-Vertragsliste Seite %s auf %s Eintraege gekuerzt "
+                    "(weitere per ?page=)", page, limit)
+    return items[:limit]
 
 
 @router.get("/admin/users/{user_id}/contracts")
 async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
-    """Listet alle Verträge eines Nutzers auf (read-only).
+    """Listet die Verträge eines Nutzers auf (read-only).
+    Chef (role dealer): alle Verträge seiner Firma (umfang "firma"); jedes
+    andere Konto: nur die selbst erzeugten (umfang "nutzer").
     Enthält keine PDF-Bytes — nur Metadaten + extrahierte Vertragsdaten,
     damit die Liste schnell lädt. PDF kann separat über
     /api/admin/contracts/{id}/pdf abgerufen werden (falls benötigt).
@@ -940,11 +1003,23 @@ async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
         if firma:
             user.setdefault("company_name", firma.get("company_name"))
             user["kunden_nr"] = firma.get("kunden_nr")
+    # Audit 13.09.2026 (#51): nach Rolle getrennt (Definition wie
+    # contracts._vertrag_bereich). Vorher griff beim Sucher der Zweig
+    # {dealer_id: <Firma>} und zeigte ALLE Firmenvertraege als "seine";
+    # Konten ohne Firma filterten auf {dealer_id: None}.
+    if user.get("role") == "dealer" and user.get("dealer_id"):
+        filt, umfang = {"dealer_id": user["dealer_id"]}, "firma"
+    else:
+        filt, umfang = {"user_id": user_id}, "nutzer"
     items = await db.generated_pdfs.find(
-        {"$or": [{"user_id": user_id}, {"dealer_id": user.get("dealer_id")}]},
-        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
-    ).sort("created_at", -1).to_list(2000)
-    return {"user": user, "contracts": items}
+        filt, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
+    ).sort("created_at", -1).to_list(ADMIN_VERTRAEGE_MAX + 1)
+    abgeschnitten = len(items) > ADMIN_VERTRAEGE_MAX
+    if abgeschnitten:
+        log.warning("Admin-Vertragsansicht %s (%s) auf %s Eintraege gekuerzt",
+                    user_id, umfang, ADMIN_VERTRAEGE_MAX)
+    return {"user": user, "contracts": items[:ADMIN_VERTRAEGE_MAX],
+            "umfang": umfang, "abgeschnitten": abgeschnitten}
 
 
 @router.get("/admin/contracts/{contract_id}/pdf")
@@ -1560,26 +1635,34 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
     if not dealer:
         raise HTTPException(404, "Firma nicht gefunden")
     email = body.email.strip().lower()
-    existing = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
-    if existing:
+    # Audit 13.09.2026 (#11): Plattformregel B5 wie in allen anderen
+    # Anlagepfaden — users UND driver_accounts. Vorher pruefte dieser Pfad
+    # nur users und legte neben einem Fahrerkonto immer ein Doppelkonto an.
+    from deps import email_vergeben
+    if await email_vergeben(email):
         raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
-    await db.users.insert_one({
-        "id": sucher_id, "email": email,
-        "password_hash": await hash_password_async(body.password),
-        "role": "sucher", "active": True,
-        "dealer_id": dealer_id,
-        "first_name": body.first_name.strip(),
-        "last_name": body.last_name.strip(),
-        "phone": body.phone.strip(),
-        "created_by": admin["id"],
-        "current_session_id": None,
-        "created_at": now_iso(),
-    })
-    await log_activity(dealer_id, admin["id"], "admin.sucher.angelegt",
-                       ref=sucher_id, meta={"email": email,
-                                            "firma": dealer.get("company_name", "")})
+    try:
+        await db.users.insert_one({
+            "id": sucher_id, "email": email,
+            "password_hash": await hash_password_async(body.password),
+            "role": "sucher", "active": True,
+            "dealer_id": dealer_id,
+            "first_name": body.first_name.strip(),
+            "last_name": body.last_name.strip(),
+            "phone": body.phone.strip(),
+            "created_by": admin["id"],
+            "current_session_id": None,
+            "created_at": now_iso(),
+        })
+    except DuplicateKeyError:
+        # Doppelklick/Rennen: der Unique-Index auf users.email entscheidet
+        # (409 statt 500), wie in admin_create_user.
+        raise HTTPException(409, "E-Mail ist bereits registriert")
+    # Konto ist angelegt — ein Audit-Fehler darf keinen 500 mit Retry ausloesen.
+    await log_activity_sicher(dealer_id, admin["id"], "admin.sucher.angelegt",
+                              ref=sucher_id, meta={"email": email,
+                                                   "firma": dealer.get("company_name", "")})
     return {"ok": True, "sucher_id": sucher_id, "email": email,
             "hinweis": "Konto angelegt — zum Suchen/Vergleichen noch das "
                        "Sucher-Abo freischalten (150 €/Monat bzw. "

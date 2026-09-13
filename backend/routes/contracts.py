@@ -1473,9 +1473,21 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
         db, contract_id, scrub_pii=False, grund="manuell", audit=False)
     if not ok:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    await log_activity(user["dealer_id"], user["id"], "vertrag.geloescht.manuell",
-                       ref=contract_id,
-                       meta={"contract_no": vorhanden.get("contract_no")})
+    # Audit 13.09.2026 (#45): Der Vertrag ist bereits geloescht — ein 500
+    # wuerde nur einen 404-Retry ausloesen, und die Spur, WER geloescht (und
+    # damit Kaufvorgaenge storniert) hat, ginge verloren. Deshalb best
+    # effort; scheitert der Eintrag, stehen Nutzer und Vertrag im Fehlerlog
+    # und als Betriebsalarm (log_activity_sicher allein nennt den Nutzer nicht).
+    if not await log_activity_sicher(user["dealer_id"], user["id"],
+                                     "vertrag.geloescht.manuell", ref=contract_id,
+                                     meta={"contract_no": vorhanden.get("contract_no")}):
+        log.error("Vertrag %s (Nr. %s) wurde von %s geloescht — Audit-Eintrag fehlt",
+                  contract_id, vorhanden.get("contract_no"), user["id"])
+        from betrieb import alarm   # lokal: kein Importzyklus
+        await alarm(db, "audit_fehlt", ref=contract_id,
+                    aktion="vertrag.geloescht.manuell", user_id=user["id"],
+                    dealer_id=user["dealer_id"],
+                    contract_no=vorhanden.get("contract_no") or "")
     return {"ok": True}
 
 
@@ -1636,12 +1648,22 @@ async def regenerate_contract_for_pickup(
     # Vertragskorrektur innerhalb der Frist: den BESTEHENDEN Auto-Datensatz
     # aktualisieren (nie ein zweiter); Altvertraege ohne id bekommen ihn
     # hier nachgetragen.
-    if doc.get("admin_vehicle_data_id"):
-        await auto_daten.aktualisieren(db, doc["admin_vehicle_data_id"],
-                                       contract_dict, vehicle)
-    else:
-        await auto_daten.nachtragen(db, {**doc, "contract_data": contract_dict})
-    await log_activity(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
-                       ref=contract_id,
-                       meta={"von": alt_datum, "auf": neu_datum})
+    # Audit 13.09.2026 (#44): Der Vertrag steht bereits (CAS getroffen,
+    # Version N+1, Archivfassung N) — Nachfuehrung und Audit sind Beiwerk.
+    # Vorher schlug eine Exception hier (z.B. DB-Aussetzer beim Failover)
+    # bis PUT /appointments durch: 500, obwohl Termin und Vertrag korrekt
+    # gespeichert waren. Fehlende Auto-Datensaetze traegt auto_daten_reparieren
+    # nach; das Abholdatum steht nicht in den Auto-Daten.
+    try:
+        if doc.get("admin_vehicle_data_id"):
+            await auto_daten.aktualisieren(db, doc["admin_vehicle_data_id"],
+                                           contract_dict, vehicle)
+        else:
+            await auto_daten.nachtragen(db, {**doc, "contract_data": contract_dict})
+    except Exception:  # noqa: BLE001
+        log.exception("Auto-Daten nach Neuerzeugung von %s nicht nachgefuehrt — "
+                      "Aufraeumjob holt fehlende Datensaetze nach", contract_id)
+    await log_activity_sicher(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
+                              ref=contract_id,
+                              meta={"von": alt_datum, "auf": neu_datum})
     return True

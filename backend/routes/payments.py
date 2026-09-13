@@ -71,6 +71,9 @@ _ABGESCHLOSSEN = ("active", "complete")
 # "activating" dauern, bevor es als haengengeblieben gilt.
 ABGLEICH_WARTEZEIT = timedelta(minutes=2)
 ABGLEICH_HAENGT_AB = timedelta(minutes=10)
+# Audit 13.09.2026 (#43): Transaktionen je Abgleich-Lauf (Rotation nach
+# updated_at, siehe zahlungen_abgleichen).
+ABGLEICH_MAX = 500
 
 
 def _truthy(v: Optional[str]) -> bool:
@@ -334,7 +337,7 @@ async def _marktplatz_zugang_verlaengern(tx: dict, session_id: str,
     # auch auf ein gesperrtes Konto (active=False): Laufzeit lief waehrend der
     # Sperre ab, Transaktion ging still auf "active", der Betreiber erfuhr
     # nichts. Jetzt fail-closed wie beim fehlenden Konto: activation_failed +
-    # Alarm zahlung_ohne_zugang; nach dem Entsperren holt der stuendliche
+    # Alarm zahlung_ohne_zugang; nach dem Entsperren holt der zehnminuetliche
     # Abgleich (bzw. der Poll des Kaeufers) die Freischaltung nach, die 30
     # Tage beginnen erst dann (Grant entsteht erst bei Erfolg).
     if not u.get("active"):
@@ -441,7 +444,7 @@ async def _activate_paid_transaction(tx: dict, session_id: str) -> bool:
     parallele Status-Polls und der Abgleich stossen sich hier ab), dann
     Zugang freischalten, Zahlungsbeleg verbuchen, Status "active". Scheitert
     die Freischaltung: "activation_failed" + Betriebsalarm
-    (zahlung_ohne_zugang) — Poll und stuendlicher Abgleich holen es nach.
+    (zahlung_ohne_zugang) — Poll und der Abgleich (alle 10 Minuten) holen es nach.
 
     Liefert True, wenn DIESER Aufruf freigeschaltet hat."""
     r = await db.payment_transactions.update_one(
@@ -530,7 +533,7 @@ async def payment_status(session_id: str, user=Depends(current_user)):
         raise HTTPException(403, "Diese Zahlung gehört dir nicht")
     if tx.get("user_id") != user["id"]:
         # Runde 13: A4 — der Betreiber liest hier nur. Freischaltung stossen
-        # allein der Kaeufer-Poll, der Stripe-Webhook und der stuendliche
+        # allein der Kaeufer-Poll, der Stripe-Webhook und der zehnminuetliche
         # Abgleich (zahlungen_abgleichen) an; fuer Handarbeit gibt es
         # Admin -> Freischaltungen.
         return tx
@@ -612,7 +615,7 @@ async def stripe_webhook(request: Request):
     return {"ok": True, "type": typ}
 
 
-# ---------- Abgleich (stuendlich aus cleanup_service) ----------
+# ---------- Abgleich (alle 10 Minuten aus server.run_abgleich_forever) ----------
 async def zahlungen_abgleichen(db_, *, jetzt: Optional[datetime] = None) -> dict:
     """Bezahlte, aber nicht freigeschaltete Transaktionen nachholen.
 
@@ -628,10 +631,22 @@ async def zahlungen_abgleichen(db_, *, jetzt: Optional[datetime] = None) -> dict
     now = jetzt or datetime.now(timezone.utc)
     stats = {"geprueft": 0, "aktiviert": 0, "fehlgeschlagen": 0,
              "uebersprungen": 0}
-    cursor = db_.payment_transactions.find(
+    # Audit 13.09.2026 (#43): Aelteste ZULETZT BEARBEITETE zuerst (updated_at
+    # statt created_at). Jeder Fehlschlag setzt updated_at neu — dauerhaft
+    # scheiternde Transaktionen (Konto gesperrt/geloescht) wandern ans Ende,
+    # die Liste rotiert. Vorher belegten sie bei jedem Lauf wieder alle
+    # Plaetze und eine spaetere Zahlung wurde nie nachgeholt. Die Kandidaten
+    # werden vorab eingesammelt, weil ein Index-Cursor einen gerade
+    # umgeschriebenen Eintrag sonst ein zweites Mal liefern koennte.
+    # Altbestand ohne updated_at sortiert als null nach vorne (unkritisch);
+    # der Index (status, updated_at) traegt die Abfrage.
+    kandidaten = await db_.payment_transactions.find(
         {"status": {"$in": list(_BEZAHLT_OHNE_ZUGANG)}}, {"_id": 0}
-    ).sort("created_at", 1).limit(500)
-    async for tx in cursor:
+    ).sort("updated_at", 1).to_list(ABGLEICH_MAX)
+    if len(kandidaten) >= ABGLEICH_MAX:
+        log.warning("Zahlungsabgleich: Obergrenze %s erreicht — weitere "
+                    "Transaktionen folgen in den naechsten Laeufen", ABGLEICH_MAX)
+    for tx in kandidaten:
         stats["geprueft"] += 1
         sid = tx.get("session_id")
         stamp = _parse_ts(tx.get("updated_at") or tx.get("created_at"))

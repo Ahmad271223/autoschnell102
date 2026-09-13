@@ -11,13 +11,14 @@ Jedes Fahrzeug durchläuft einen festen Lebenszyklus:
     Seitenausgänge: nicht_abgeholt, storniert, archiviert
 
 Der Status wird ausschließlich über `set_lifecycle()` geändert — dort werden
-erlaubte Übergänge validiert und jede Änderung im Audit-Log protokolliert.
+erlaubte Übergänge validiert und jede Änderung im Audit-Log protokolliert
+(Audit best effort nach dem Write, Audit 13.09.2026 #46).
 Alte Freitext-Status (vehicles.status) bleiben als `legacy_status` erhalten.
 """
 import logging
 from typing import Optional
 
-from deps import db, log_activity, now_iso
+from deps import db, log_activity_sicher, now_iso
 
 # Reihenfolge dient auch der Anzeige (Fortschrittsbalken im Frontend).
 LIFECYCLE_STATES = [
@@ -137,7 +138,12 @@ async def set_lifecycle(
     r = await db.vehicles.update_one(cas, upd)
     if r.matched_count == 0:
         raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert — bitte neu laden")
-    await log_activity(
+    # Audit 13.09.2026 (#46), Runde-17-Muster: Der Statuswechsel ist bereits
+    # geschrieben (CAS) — das Audit darf ihn nicht mehr als Fehler melden.
+    # Vorher lief eine Exception hier an allen `except LifecycleError`-
+    # Rueckbauten vorbei (Fahrzeug im Zwischenstatus, Inserate zum geloeschten
+    # Fahrzeug blieben offen, Fahrer-App sah 500). Fehler stehen im Log.
+    await log_activity_sicher(
         dealer_id, (user or {}).get("id", ""), f"fahrzeug.status.{new_state}",
         ref=vehicle_id, meta={"von": current, "nach": new_state},
     )

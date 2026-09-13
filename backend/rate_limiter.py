@@ -268,13 +268,25 @@ class SlidingWindowRateLimiter:
             del self._buckets[k]
 
     async def reset(self, key: str) -> None:
-        """Zaehler eines Schluessels leeren (z.B. nach erfolgreichem Login)."""
+        """Zaehler eines Schluessels leeren (z.B. nach erfolgreichem Login).
+
+        Audit 13.09.2026 (#47): exakte Schluessel statt Regex-Praefix. Die
+        Kennung ist frei waehlbar (eine E-Mail wie "a|.|b@x.de" ist gueltig)
+        und stand ungeschuetzt im Muster — "|" hob die Bindung an Limiter und
+        Schluessel auf, "." passte auf alles: ein einziger Login leerte
+        fremde Zaehler bis hin zur ganzen Sammlung rate_limits, ein "+" in
+        der Adresse machte das Muster ungueltig (Reset wirkungslos).
+        check() liest nur das aktuelle Fenster; die Nachbarfenster decken
+        Uhrabweichungen zwischen den App-Servern ab, aeltere raeumt die TTL
+        weg. Schluesselformat unveraendert (Mischbetrieb beim Rollout)."""
         with self._lock:
             self._buckets.pop(key, None)
         try:
             from deps import db
+            fenster = int(time.time() // self.window_seconds)
             await db.rate_limits.delete_many(
-                {"_id": {"$regex": f"^{self.name}:{key}:"}})
+                {"_id": {"$in": [f"{self.name}:{key}:{f}"
+                                 for f in (fenster - 1, fenster, fenster + 1)]}})
         except Exception:
             pass
 
