@@ -191,11 +191,6 @@ def test_03_admin_setzt_fahrer_passwort(welt):
 
 def test_04_admin_loescht_fahrer_mit_entkopplung(welt):
     dbx = _db()
-    dbx.password_resets.insert_one({
-        "id": str(uuid.uuid4()), "user_id": welt["driver_id"],
-        "account_type": "driver", "token_hash": "x", "used": False,
-        "expires_at": datetime.now(timezone.utc).isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat()})
     r = requests.delete(f"{API}/admin/drivers/{welt['driver_id']}",
                         headers=welt["A"], timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -203,7 +198,6 @@ def test_04_admin_loescht_fahrer_mit_entkopplung(welt):
     assert r.json()["offene_termine_getrennt"] >= 1
     assert dbx.driver_accounts.find_one({"id": welt["driver_id"]}) is None
     assert dbx.dealer_drivers.count_documents({"driver_account_id": welt["driver_id"]}) == 0
-    assert dbx.password_resets.count_documents({"user_id": welt["driver_id"]}) == 0
     offen = dbx.appointments.find_one({"id": f"pk_offen_{SUF}"})
     assert "driver_id" not in offen or not offen.get("driver_id")
     fertig = dbx.appointments.find_one({"id": f"pk_fertig_{SUF}"})

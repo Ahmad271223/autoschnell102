@@ -8,7 +8,7 @@
       Schutz ("$exists": nur schreiben, wenn das Feld weiterhin fehlt) bleibt.
 
 Quelltext- und Funktionstests brauchen nur Mongo (MONGO_URL/DB_NAME); die
-HTTP-Teile brauchen das Backend auf TEST_BASE_URL mit SELF_SIGNUP=true.
+HTTP-Teile brauchen das Backend auf TEST_BASE_URL.
 """
 import asyncio
 import inspect
@@ -139,7 +139,7 @@ def welt():
     r = konten.registrieren(json={
         "email": f"r13_chef_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Runde13 {SUF}", "contact_person": "R E", "phone": "0511 13"}, timeout=30)
-    assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+    assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
     C = {"Authorization": f"Bearer {r.json()['token']}"}
     chef = requests.get(f"{API}/auth/me", headers=C, timeout=30).json()["user"]
 
@@ -152,9 +152,8 @@ def welt():
     z = {"A": A, "C": C, "S": _login(sucher_mail), "chef": chef,
          "sucher_id": sucher_id, "dealer_id": chef["dealer_id"]}
     yield z
-    for coll in ("subscriptions", "activity_logs", "plan_requests", "password_resets"):
+    for coll in ("subscriptions", "activity_logs", "plan_requests"):
         dbx[coll].delete_many({"dealer_id": z["dealer_id"]})
-    dbx.password_resets.delete_many({"user_id": {"$in": [chef["id"], sucher_id]}})
     dbx.plan_requests.delete_many({"subject_user_id": {"$in": [chef["id"], sucher_id]}})
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.dealers.delete_many({"id": z["dealer_id"]})

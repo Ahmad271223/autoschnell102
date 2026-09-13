@@ -22,6 +22,7 @@ import pytest
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import routes.admin as ADMIN  # noqa: E402  Kontonummer (13.09.2026): am Modulanfang, nie erstmals in einer Test-Schleife
 
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
@@ -75,8 +76,6 @@ class _Daten:
         await db.activity_logs.delete_many(
             {"$or": [{"dealer_id": {"$in": dealers}}, {"ref": self.tag},
                      {"user_id": {"$in": [self.driver_id, pseudo]}}]})
-        await db.password_resets.delete_many(
-            {"user_id": {"$in": [self.driver_id, pseudo]}})
 
 
 def _pseudonym(driver_id: str) -> str:
@@ -262,13 +261,11 @@ def test_fahrer_konto_anonymisieren_ersetzt_ids_und_namen():
              "action": "termin.zugewiesen", "ref": t.tag,
              "meta": {"email": "chef@x", "kontonummer": "10023"}},
         ])
-        await db.password_resets.insert_one({
-            "id": str(uuid.uuid4()), "user_id": t.driver_id, "token_hash": "abc"})
 
         counts = await D.fahrer_konto_anonymisieren(db, t.driver_id)
         assert counts == {
             "pseudonym": pseudo, "appointments": 3, "pickup_reports": 1,
-            "pickup_protocols": 1, "activity_logs": 3, "password_resets": 1,
+            "pickup_protocols": 1, "activity_logs": 3,
             "dealer_drivers": 1,
         }, counts
 
@@ -304,7 +301,6 @@ def test_fahrer_konto_anonymisieren_ersetzt_ids_und_namen():
         assert chef["meta"]["email"] == "chef@x"      # fremde Eintraege unberuehrt
         assert chef["meta"]["kontonummer"] == "10023"
 
-        assert await db.password_resets.count_documents({"user_id": t.driver_id}) == 0
         assert await db.dealer_drivers.count_documents(
             {"driver_account_id": t.driver_id}) == 0
         # Idempotent: zweiter Lauf aendert nichts mehr
@@ -572,16 +568,15 @@ def test_finalize_abbruch_raeumt_dateien_auf_und_meldet_retry():
 def test_fahrer_passwortregeln_zentral():
     import routes.drivers as D
     from pydantic import ValidationError
+    # Kontonummer (13.09.2026), Schritt 5: Fahrer legt der Betreiber an —
+    # dieselben Regeln gelten fuer AdminFahrerIn (routes.admin am Modulanfang).
     with pytest.raises(ValidationError):
-        D.DriverAccountRegister(email="a@example.com", password="Kurz1234!",
-                                display_name="Max")            # 9 Zeichen
+        ADMIN.AdminFahrerIn(display_name="Max", password="Kurz1234!")      # 9 Zeichen
     with pytest.raises(ValidationError):
-        D.DriverAccountRegister(email="a@example.com", password="Passwort123!",
-                                display_name="Max")            # Blockliste
+        ADMIN.AdminFahrerIn(display_name="Max", password="Passwort123!")   # Blockliste
     with pytest.raises(ValidationError):
         D.DriverPasswordIn(current_password="x", new_password="nurbuchstaben")
-    ok = D.DriverAccountRegister(email="a@example.com",
-                                 password="Sicher-Fahrt-2026", display_name="Max")
+    ok = ADMIN.AdminFahrerIn(display_name="Max", password="Sicher-Fahrt-2026")
     assert ok.password == "Sicher-Fahrt-2026"
     assert D.DriverPasswordIn(current_password="x",
                               new_password="Neues-Passwort-77").new_password

@@ -7,8 +7,11 @@ was zufaellig sein muss, wird zufaellig erzeugt; alles, was du selbst
 entscheiden musst, steht klar markiert mit `BITTE-AUSFUELLEN` darin.
 
 Aufruf (auf dem Server, im Projektverzeichnis):
-  python backend/scripts/env_erzeugen.py --domain app.auto-schnellkauf.de \\
-      --admin-mail chef@auto-schnellkauf.de > .env
+  python backend/scripts/env_erzeugen.py --domain app.auto-schnellkauf.de > .env
+
+Kontonummer (13.09.2026): Es gibt nur den Super-Admin (SUPER_ADMIN_USERNAME/
+SUPER_ADMIN_PASSWORD); Bootstrap-Admin per E-Mail und Selbst-Registrierung
+entfallen.
 
 Vorhandene Werte uebernehmen (nichts neu wuerfeln):
   python backend/scripts/env_erzeugen.py --domain … --vorlage .env > .env.neu
@@ -72,8 +75,6 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Produktions-.env erzeugen")
     ap.add_argument("--domain", required=True,
                     help="oeffentliche Adresse, z.B. app.auto-schnellkauf.de")
-    ap.add_argument("--admin-mail", default="",
-                    help="E-Mail des ersten Admin-Kontos")
     ap.add_argument("--mongo-host", default="mongo",
                     help="Mongo-Adresse: 'mongo' (Docker) oder die private IP, "
                          "z.B. 10.0.0.2")
@@ -104,7 +105,6 @@ def main() -> int:
         "",
         "# ---- Betrieb ----",
         "APP_ENV=production",
-        "SELF_SIGNUP=false",
         "WEB_CONCURRENCY=4",
         "BEWEIS_AUFBEWAHRUNG_TAGE=90",
         "ENABLE_DOCS=false",
@@ -135,8 +135,6 @@ def main() -> int:
         "",
         "# ---- Anmeldung ----",
         f"JWT_SECRET={wert('JWT_SECRET', geheimnis)}",
-        f"ADMIN_EMAIL={alt.get('ADMIN_EMAIL') or args.admin_mail or 'BITTE-AUSFUELLEN@' + domain}",
-        f"ADMIN_PASSWORD={wert('ADMIN_PASSWORD', passwort)}",
         f"SUPER_ADMIN_USERNAME={wert('SUPER_ADMIN_USERNAME', lambda: 'chef-' + secrets.token_hex(3))}",
         f"SUPER_ADMIN_PASSWORD={wert('SUPER_ADMIN_PASSWORD', passwort)}",
         "",

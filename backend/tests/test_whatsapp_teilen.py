@@ -112,7 +112,7 @@ def welt():
         "company_name": f"WA Autohaus {SUF}", "contact_person": "W Chef",
         "phone": "0511 5"}, timeout=30)
     if r.status_code != 200:
-        pytest.skip(f"Registrierung nicht moeglich ({r.status_code}) — SELF_SIGNUP aus?")
+        pytest.skip(f"Registrierung nicht moeglich ({r.status_code})")
     z["H"] = {"Authorization": f"Bearer {r.json()['token']}"}
     me = requests.get(f"{API}/auth/me", headers=z["H"], timeout=30).json()
     z["chef"] = me["user"]

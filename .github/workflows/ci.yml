@@ -23,20 +23,15 @@ jobs:
       MONGO_URL: mongodb://127.0.0.1:27017
       DB_NAME: autoschnell_ci
       JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
-      # Runde 11: Selbst-Registrierung ist fail-closed — Tests legen ihre
-      # Firmenkonten ueber /auth/register an, deshalb hier ausdruecklich an.
-      SELF_SIGNUP: "true"
       TEST_BASE_URL: http://127.0.0.1:8001
-      BETREIBER_PROD_URL: http://127.0.0.1:8003
       # Freitext-Schaeden nur im Test aktiv (Produktions-Default: false)
       AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
       # Anbieter-Mock: E2E-, Job- und Mandantentests vergleichen echte
       # Ablaeufe, ohne Kleinanzeigen/mobile.de zu belasten.
       MOCK_PROVIDER_FETCH: "true"
-      # Admin-/Super-Admin-Seeds fuer tests/test_admin_dashboard.py
-      # (nur CI-Testwerte — Produktion setzt eigene in der .env).
-      ADMIN_EMAIL: ci-admin@ci.invalid
-      ADMIN_PASSWORD: "ci-only-admin-pw-1"
+      # Super-Admin-Seed fuer tests/test_admin_dashboard.py (nur CI-Testwerte —
+      # Produktion setzt eigene in der .env). Kontonummer (13.09.2026): Konten
+      # legt nur der Super-Admin an; es gibt keinen Admin per E-Mail mehr.
       SUPER_ADMIN_USERNAME: ci-superadmin
       SUPER_ADMIN_PASSWORD: "ci-only-superadmin-pw-1"
     steps:
@@ -87,19 +82,6 @@ jobs:
             sleep 2
           done
           curl -fsS http://127.0.0.1:8001/api/health
-      - name: Backend im Betreiber-Modus starten (SELF_SIGNUP=false)
-        # Audit 09/2026 (Punkt 43): der Produktionstest fuer deaktivierte
-        # Selbstregistrierung wird nicht mehr uebersprungen.
-        working-directory: backend
-        env:
-          SELF_SIGNUP: "false"
-        run: |
-          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8003             --loop asyncio > /tmp/backend-prod.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:8003/api/health && break
-            sleep 2
-          done
-          curl -fsS http://127.0.0.1:8003/api/health
       - name: Selbsttest-Suite
         working-directory: backend
         # Audit 09/2026: automatische Discovery — neue Testdateien koennen
@@ -114,7 +96,7 @@ jobs:
         # -rs: jeder verbleibende Skip steht mit Grund im Log
         # (Uebersicht: docs/tests/UEBERSPRUNGENE_TESTS.md).
         run: |
-          python -m pytest -v -rs tests/ --ignore=tests/backend_test.py
+          python -m pytest -v -rs tests/
       - name: Backend-Log bei Fehler zeigen
         if: failure()
         run: tail -100 /tmp/backend.log || true
@@ -181,8 +163,6 @@ jobs:
           MONGO_USER=ci_mongo
           MONGO_PASSWORD=ci-mongo-passwort-nur-fuer-ci-123
           JWT_SECRET=ci-stack-probe-jwt-geheimnis-abcdefghijklmnop
-          ADMIN_EMAIL=stack-admin@ci.invalid
-          ADMIN_PASSWORD=Ci-Stack-Admin-2026!x
           SUPER_ADMIN_USERNAME=ci-stack-superadmin
           SUPER_ADMIN_PASSWORD=Ci-Stack-Super-2026!x
           FRONTEND_URL=https://stackprobe.ci.invalid
@@ -340,15 +320,10 @@ jobs:
       MONGO_URL: mongodb://127.0.0.1:27017
       DB_NAME: autoschnell_e2e
       JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
-      # Runde 11: Selbst-Registrierung ist fail-closed — Tests legen ihre
-      # Firmenkonten ueber /auth/register an, deshalb hier ausdruecklich an.
-      SELF_SIGNUP: "true"
       AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
       MOCK_PROVIDER_FETCH: "true"
-      # Seeds (nur CI-Testwerte, siehe Backend-Job) — die Suite meldet sich
+      # Seed (nur CI-Testwerte, siehe Backend-Job) — die Suite meldet sich
       # als Super-Admin an und legt alle weiteren Testkonten selbst an.
-      ADMIN_EMAIL: ci-admin@ci.invalid
-      ADMIN_PASSWORD: "ci-only-admin-pw-1"
       SUPER_ADMIN_USERNAME: ci-superadmin
       SUPER_ADMIN_PASSWORD: "ci-only-superadmin-pw-1"
       E2E_API_URL: http://127.0.0.1:8002/api

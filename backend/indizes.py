@@ -159,21 +159,39 @@ async def konto_indizes(db) -> dict:
     return ergebnis
 
 
-async def email_uebergang(db) -> dict:
-    """Kontonummer (13.09.2026), Schritt 2: Konten brauchen keine E-Mail mehr.
-    Der volle Unique-Index email_1 in users und driver_accounts liess nur EIN
-    Konto ohne Adresse zu (fehlendes Feld = null kollidiert). Er wird durch
-    'email_alt_eindeutig' ersetzt: unique, aber nur fuer Dokumente mit
-    String-Adresse (Teil-Index). Die 409 bei doppelter Adresse bleiben so bis
-    Schritt 5 (email_eindeutigkeit_entfernen) erhalten.
-    Nebenlaeufigkeitsfest ueber _index_sicher_ersetzen (Leader und wartende
-    Prozesse gleichzeitig); Dubletten brechen wie bisher den Produktionsstart
-    ab, sonst Betriebsalarm."""
+EMAIL_INDEX_NAMEN = ("email_alt_eindeutig", "email_1")
+
+
+async def email_eindeutigkeit_entfernen(db) -> dict:
+    """Kontonummer (13.09.2026), Schritt 5: Angemeldet wird per Kontonummer,
+    die E-Mail ist nur noch Kontaktadresse und darf mehrfach vorkommen. Die
+    Eindeutigkeit auf users.email und driver_accounts.email faellt weg:
+    'email_alt_eindeutig' (Teil-Index aus Schritt 2) und ein etwa noch
+    vorhandenes 'email_1' werden entfernt. Es entsteht KEIN neuer E-Mail-Index.
+
+    Nebenlaeufigkeitsfest: Leader und wartende Prozesse fuehren das
+    gleichzeitig aus — OperationFailure 27 (IndexNotFound, der andere war
+    schneller) gilt als erledigt. Liefert je Sammlung die entfernten Namen."""
+    from pymongo.errors import OperationFailure
     ergebnis = {}
     for coll in (db.users, db.driver_accounts):
-        ergebnis[coll.name] = await _index_sicher_ersetzen(
-            coll, "email", "email_alt_eindeutig", unique=True,
-            partial={"email": {"$type": "string"}})
+        entfernt = []
+        try:
+            vorhanden = await coll.index_information()
+        except OperationFailure as exc:
+            if exc.code != 26:              # NamespaceNotFound: Sammlung fehlt
+                raise
+            vorhanden = {}
+        for name in EMAIL_INDEX_NAMEN:
+            if name not in vorhanden:
+                continue
+            try:
+                await coll.drop_index(name)
+                entfernt.append(name)
+            except OperationFailure as exc:
+                if exc.code != 27:
+                    raise
+        ergebnis[coll.name] = entfernt
     return ergebnis
 
 

@@ -170,5 +170,9 @@ def test_fremde_sucher_unsichtbar(welt):
     liste_b = requests.get(f"{API}/dealer/sucher", headers=hb,
                            timeout=30).json()
     assert sid not in [s["id"] for s in liste_b]
-    r = requests.delete(f"{API}/dealer/sucher/{sid}", headers=hb, timeout=30)
-    assert r.status_code == 404, f"Fremden Sucher geloescht: {r.status_code}"
+    # Kontonummer (13.09.2026), Schritt 5: die Chef-Route loescht gar nicht mehr
+    # (feste 403) — weder fremde noch eigene Sucher
+    for kopf in (hb, ha):
+        r = requests.delete(f"{API}/dealer/sucher/{sid}", headers=kopf, timeout=30)
+        assert r.status_code == 403, f"Chef-Route loescht Sucher: {r.status_code}"
+    assert _db().users.find_one({"id": sid}) is not None

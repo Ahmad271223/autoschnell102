@@ -64,7 +64,6 @@ services:
       # Runde 31: derselbe Stempel wie im Oberflaechen-Bau — geht als
       # X-AH-Fassung an jede API-Antwort (server.py).
       - APP_FASSUNG=${APP_FASSUNG:-}
-      - SELF_SIGNUP=${SELF_SIGNUP:-false}
       # maxPoolSize begrenzt die Verbindungen JE Worker (Audit 09/2026, Punkt 19)
       - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin&maxPoolSize=20}
       - DB_NAME=${DB_NAME:-autoschnell}
@@ -88,8 +87,6 @@ services:
       - TRUSTED_PROXIES_NUR_LISTE=${TRUSTED_PROXIES_NUR_LISTE:-false}
       - RATE_LIMIT_EXEMPT_LOOPBACK=false
       - JWT_SECRET=${JWT_SECRET}
-      - ADMIN_EMAIL=${ADMIN_EMAIL}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
       - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
       - SMTP_HOST=${SMTP_HOST:-}

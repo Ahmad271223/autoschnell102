@@ -212,15 +212,12 @@ async def _anfrage_abschliessen(anfrage: Optional[dict], konto_id: str,
         log.exception("Anfrage %s nach Kontenanlage nicht geschlossen", anfrage.get("id"))
 
 
-async def _email_frei_409(email: Optional[str]) -> None:
-    """Bis Schritt 5 (Kontonummer, 13.09.2026): Kontaktadresse plattformweit
-    eindeutig — nur geprueft, wenn eine angegeben ist. Import zur Aufrufzeit
-    (Tests ersetzen deps.email_vergeben)."""
-    if not email:
-        return
-    from deps import email_vergeben
-    if await email_vergeben(email):
-        raise HTTPException(409, "E-Mail bereits registriert")
+# Kontonummer (13.09.2026), Schritt 5: Die E-Mail ist nur noch Kontaktadresse
+# und darf mehrfach vorkommen (keine 409 "E-Mail bereits registriert" mehr).
+# Eine DuplicateKey bei der Anlage kann nur noch eine echte Dublette sein
+# (Kontonummern-Dubletten wiederholt kontenanlage selbst).
+_KONTO_DUBLETTE = ("Konto konnte wegen einer Dublette nicht angelegt werden — "
+                   "bitte erneut versuchen")
 
 
 async def _konto_sperre_aufheben(konto: dict) -> None:
@@ -247,10 +244,8 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     email = (body.email or "").strip().lower() or None
     # Nachpruefung Runde 14 (Befund 50): Ablauf VOR dem ersten Insert
     # pruefen — ein 400 hier laesst weder Konto noch Firmenprofil zurueck.
-    # Kontonummer (13.09.2026): Reihenfolge Ablauf -> E-Mail -> Anfrage -> Nummer.
+    # Kontonummer (13.09.2026): Reihenfolge Ablauf -> Anfrage -> Nummer.
     ablauf_eingabe = _ablaufdatum_pruefen_400(body.expires_at)
-    # Runde 13: B5 — plattformweit (users UND driver_accounts) statt nur users.
-    await _email_frei_409(email)
     anfrage = await _anfrage_reservieren(body.anfrage_id, "firma")
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
@@ -286,9 +281,8 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
         "created_at": now_iso(),
         }, chef_doc)
     except DuplicateKeyError:
-        # Rennen zweier gleichzeitiger Anlagen: Unique-Index entscheidet.
         await _anfrage_freigeben(anfrage)
-        raise HTTPException(409, "E-Mail bereits registriert")
+        raise HTTPException(409, _KONTO_DUBLETTE)
     except HTTPException:
         await _anfrage_freigeben(anfrage)
         raise
@@ -658,8 +652,8 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
     if u.get("role") != "dealer":
         # Einzelner Mitarbeiter-/Kaeufer-Account: diesen entfernen — samt
         # seiner personenbezogenen Reste (DSGVO): Netzwerk-Mitgliedschaften,
-        # Favoriten, Kaufanfragen und offene Passwort-Resets. Vorher blieb
-        # all das nach der "vollstaendigen" Loeschung zurueck.
+        # Favoriten und Kaufanfragen. Vorher blieb all das nach der
+        # "vollstaendigen" Loeschung zurueck.
         #
         # Nachpruefung Runde 14 (Befund 58): Reihenfolge wie bei
         # cleanup_service.vertrag_endgueltig_loeschen — Grabstein zuerst,
@@ -684,13 +678,38 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
                                         "grund": "admin", "durch": admin["id"]},
                           "active": False, "current_session_id": None,
                           "updated_at": jetzt}})
+        uebernommen = 0
+        if u.get("role") == "sucher" and u.get("dealer_id"):
+            # Kontonummer (13.09.2026), Schritt 5: aus der entfernten Chef-Route
+            # team.delete_sucher uebernommen (Runde 29 / Runde 11 J2) — Sucher
+            # loescht nur noch der Betreiber. Die Fahrzeuge des Suchers gehen an
+            # den Firmen-Hauptaccount, sein Konto verschwindet aus den
+            # Mitbearbeitern (sonst ein Besitzer, den es nicht mehr gibt), offene
+            # Abo-Anfragen bleiben nicht verwaist stehen. Wiederholbar: nach dem
+            # Grabstein, ein zweiter Lauf findet nichts mehr.
+            firma = {"dealer_id": u["dealer_id"]}
+            chef = await db.users.find_one(
+                {"dealer_id": u["dealer_id"], "role": "dealer"}, {"_id": 0, "id": 1},
+                sort=[("created_at", 1)])
+            if chef:
+                uebernommen = (await db.vehicles.update_many(
+                    {**firma, "owner_user_id": user_id},
+                    {"$set": {"owner_user_id": chef["id"], "uebernommen_von": user_id,
+                              "updated_at": jetzt}})).modified_count
+            else:
+                log.warning("Sucher %s geloescht: Firma %s ohne Hauptaccount — "
+                            "Fahrzeuge bleiben beim alten Besitzer", user_id,
+                            u["dealer_id"])
+            await db.vehicles.update_many(
+                {**firma, "mitbearbeiter_ids": user_id},
+                {"$pull": {"mitbearbeiter_ids": user_id}})
+            await db.plan_requests.delete_many(
+                {"subject_user_id": user_id, "status": "offen"})
         await db.subscriptions.delete_many({"subject_user_id": user_id})
         await db.network_members.delete_many({"buyer_user_id": user_id})
         await db.buyer_favorites.delete_many({"buyer_user_id": user_id})
         await db.listing_interest.delete_many({"buyer_user_id": user_id})
         await db.plan_requests.delete_many({"buyer_user_id": user_id})
-        # Reset-Dokumente tragen user_id, keine E-Mail (Runde 5).
-        await db.password_resets.delete_many({"user_id": user_id})
         # Nachpruefung Runde 14 (Befund 24): zugang_grants (Stripe-
         # Freischaltungen, routes/payments.py) blieben mit der user_id
         # stehen — die Collection raeumte sonst niemand auf. Sie werden
@@ -716,6 +735,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
                            # Kontonummer (13.09.2026): keine E-Mail im Audit
                            meta={"kontonummer": u.get("kontonummer", ""),
                                  "rolle": u.get("role", ""),
+                                 "fahrzeuge_uebernommen": uebernommen,
                                  "wiederaufnahme": grab.get("status") == "laeuft"})
         return {"ok": True, "geloescht": "nur_nutzer"}
 
@@ -754,20 +774,12 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
                                     "grund": "admin", "durch": admin["id"]},
                       "updated_at": jetzt}})
-        # Nachpruefung Runde 14 (Befund 12): password_resets tragen user_id,
-        # kein dealer_id — die Konto-IDs der Firma VOR dem Loeschen der
-        # users einsammeln, sonst bleiben die Reset-Dokumente (token_hash,
-        # requested_ip) bis zum TTL-Ablauf (7 Tage) stehen.
-        user_ids = [x["id"] async for x in db.users.find(
-            {"dealer_id": dealer_id}, {"_id": 0, "id": 1})]
         for coll in _COMPANY_COLLECTIONS:
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
                 geloescht[coll] = res.deleted_count
-        if user_ids:
-            res = await db.password_resets.delete_many({"user_id": {"$in": user_ids}})
-            if res.deleted_count:
-                geloescht["password_resets"] = res.deleted_count
+        # (Kontonummer 13.09.2026, Schritt 5: password_resets gibt es nicht
+        # mehr — Runde 14 Befund 12 entfaellt.)
         # Runde 13: B8 — die Snapshot-Zeilen bleiben (Beweiszweck), aber die
         # Zuordnung "welche Firma, welcher Nutzer hat gesichert" wird
         # pseudonymisiert; vorher blieben dealer_id/user_id unbegrenzt stehen.
@@ -1801,15 +1813,9 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
         raise HTTPException(404, "Firma nicht gefunden")
     if (dealer.get("loeschung") or {}).get("status") == "laeuft":
         raise HTTPException(409, "Die Firma wird gerade gelöscht")
+    # Kontonummer (13.09.2026), Schritt 5: E-Mail nur Kontaktadresse — die
+    # Plattformregel B5 (Audit #11) entfaellt, gleiche Adresse ist erlaubt.
     email = (body.email or "").strip().lower() or None
-    # Audit 13.09.2026 (#11): Plattformregel B5 wie in allen anderen
-    # Anlagepfaden — users UND driver_accounts. Vorher pruefte dieser Pfad
-    # nur users und legte neben einem Fahrerkonto immer ein Doppelkonto an.
-    # Kontonummer (13.09.2026): nur mit Angabe (bis Schritt 5).
-    if email:
-        from deps import email_vergeben
-        if await email_vergeben(email):
-            raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
     konto = {
         "id": sucher_id,
@@ -1825,17 +1831,14 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
     }
     if email:                       # ohne Angabe fehlt das Feld (nie "")
         konto["email"] = email
-    # Kontonummer (13.09.2026): Nummer '<kunden_nr>-<zusatz>' erst NACH der
-    # E-Mail-Pruefung ziehen; eine Firma ohne kunden_nr bekommt eine. Neuer
-    # Zusatz nur bei einer Kontonummer-Dublette (kontenanlage), jede andere
-    # Dublette bleibt 409.
+    # Kontonummer (13.09.2026): Nummer '<kunden_nr>-<zusatz>'; eine Firma ohne
+    # kunden_nr bekommt eine. Neuer Zusatz nur bei einer Kontonummer-Dublette
+    # (kontenanlage), jede andere Dublette bleibt 409 (statt 500).
     from kontenanlage import sucher_anlegen
     try:
         erg = await sucher_anlegen(db, dealer_id, konto)
     except DuplicateKeyError:
-        # Doppelklick/Rennen: der Unique-Index auf users.email entscheidet
-        # (409 statt 500), wie in admin_create_user.
-        raise HTTPException(409, "E-Mail ist bereits registriert")
+        raise HTTPException(409, _KONTO_DUBLETTE)
     # Konto ist angelegt — ein Audit-Fehler darf keinen 500 mit Retry ausloesen.
     await log_activity_sicher(dealer_id, admin["id"], "admin.sucher.angelegt",
                               ref=sucher_id, meta={"kontonummer": erg["kontonummer"],
@@ -1888,7 +1891,6 @@ async def admin_create_buyer(body: AdminKaeuferIn, admin=Depends(current_super_a
         raise HTTPException(400, "Bitte bestätigen, dass der Nachweis der "
                                  "gewerblichen Tätigkeit (B2B) vorliegt")
     email = (body.email or "").strip().lower() or None
-    await _email_frei_409(email)
     anfrage = await _anfrage_reservieren(body.anfrage_id, "kaeufer")
     try:
         bestaetigt_am = (anfrage or {}).get("gewerblich_bestaetigt_am")
@@ -1912,7 +1914,7 @@ async def admin_create_buyer(body: AdminKaeuferIn, admin=Depends(current_super_a
         try:
             erg = await kaeufer_anlegen(db, konto)
         except DuplicateKeyError:
-            raise HTTPException(409, "E-Mail bereits registriert")
+            raise HTTPException(409, _KONTO_DUBLETTE)
     except BaseException:
         await _anfrage_freigeben(anfrage)
         raise
@@ -1947,7 +1949,6 @@ class AdminFahrerIn(BaseModel):
 async def admin_create_driver(body: AdminFahrerIn, admin=Depends(current_super_admin)):
     """Fahrer mit Kontonummer (gemeinsame Reihe) und FD-Code, ohne Token."""
     email = (body.email or "").strip().lower() or None
-    await _email_frei_409(email)
     anfrage = await _anfrage_reservieren(body.anfrage_id, "fahrer")
     try:
         konto = {
@@ -1967,7 +1968,7 @@ async def admin_create_driver(body: AdminFahrerIn, admin=Depends(current_super_a
         try:
             erg = await fahrer_anlegen(db, konto)
         except DuplicateKeyError:
-            raise HTTPException(409, "E-Mail bereits registriert")
+            raise HTTPException(409, _KONTO_DUBLETTE)
     except BaseException:
         await _anfrage_freigeben(anfrage)
         raise

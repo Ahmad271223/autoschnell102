@@ -4,7 +4,8 @@
 Abgedeckt:
 - Oeffentliche Zugangs-Anfrage (landet als plan_request type=zugang)
 - Firma anlegen mit plan_type "none" (Hauptaccount ohne Abo)
-- Sucher-Konten legt der Betreiber an (anlegen, Duplikat 409, Login,
+- Sucher-Konten legt der Betreiber an (anlegen, gleiche Kontakt-E-Mail
+  erlaubt — Kontonummer 13.09.2026, Login,
   Liste mit Abo-Status und naechster Zahlung)
 - Freischalten erfasst die Zahlung (manual_payments) und schliesst die
   offene Anfrage; funktioniert auch fuer den Chef (dealer)
@@ -138,10 +139,15 @@ def test_03_betreiber_legt_sucher_an(welt):
     assert r.status_code == 200, r.text[:300]
     welt["sucher_id"] = r.json()["sucher_id"]
     assert "150" in r.json()["hinweis"] and "1.500" in r.json()["hinweis"]
-    # Duplikat -> 409; fremde Firma -> 404; Nicht-Admin -> 403
-    assert requests.post(url, headers=welt["A"], json={
-        "email": f"bt_sucher_{SUF}@e2etest-mail.de", "password": PW},
-        timeout=30).status_code == 409
+    # Kontonummer (13.09.2026), Schritt 5: gleiche Kontakt-E-Mail -> 200 mit
+    # eigener Nummer (gleich wieder entfernt, damit die Anmeldung per Adresse
+    # im Test eindeutig bleibt); fremde Firma -> 404; Nicht-Admin -> 403
+    r2 = requests.post(url, headers=welt["A"], json={
+        "email": f"bt_sucher_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
+    assert r2.status_code == 200, r2.text[:200]
+    assert r2.json()["kontonummer"] != r.json()["kontonummer"]
+    assert requests.delete(f"{API}/admin/users/{r2.json()['sucher_id']}", headers=welt["A"],
+                           timeout=30).status_code == 200
     assert requests.post(f"{API}/admin/dealers/gibtesnicht/sucher", headers=welt["A"],
                          json={"password": PW, "email": f"bt_x_{SUF}@e2etest-mail.de"},
                          timeout=30).status_code == 404
@@ -316,57 +322,43 @@ def test_10_marktplatz_ist_kostenlos(welt):
     assert r.status_code == 200, r.text[:200]
 
 
-# ---------- Produktionsverhalten: SELF_SIGNUP=false ----------
-PROD_BASE = os.environ.get("BETREIBER_PROD_URL", "").rstrip("/")
-
-
-@pytest.mark.skipif(not PROD_BASE, reason="BETREIBER_PROD_URL nicht gesetzt "
-                    "(eigener Backend-Prozess mit SELF_SIGNUP=false)")
-def test_11_self_signup_aus(welt):
-    api = f"{PROD_BASE}/api"
-    r = requests.post(f"{api}/auth/register", json={  # ALTWEG – Schritt 5
-        "email": f"bt_prod_{SUF}@e2etest-mail.de", "password": PW,
-        "company_name": "Prod Test", "contact_person": "P T",
-        "phone": "0511 1"}, timeout=30)
-    assert r.status_code == 403, r.text[:200]
-    assert "Zugangs-Anfrage" in r.text
-    # Kontonummer (13.09.2026), Schritt 0: auch Kaeufer- und Fahrer-
-    # Registrierung sind zu — 403 mit Anfrage-Hinweis, kein Konto angelegt.
-    k_mail = f"bt_prodk_{SUF}@e2etest-mail.de"
-    f_mail = f"bt_prodf_{SUF}@e2etest-mail.de"
+# ---------- Kontonummer (13.09.2026), Schritt 5: alte Anlagewege ----------
+def test_11_alte_anlagewege_geschlossen(welt):
+    """Frueher nur an einem zweiten Backend im Betreiber-Modus geprueft. Jetzt
+    in JEDER Umgebung: Registrierung von Firma, Kaeufer und Fahrer 410 ohne
+    Konto; die Zugangs-Anfrage bleibt offen; die Chef-Sucheranlage antwortet
+    mit fester 403."""
+    mail_f = f"bt_prod_{SUF}@e2etest-mail.de"
+    mail_k = f"bt_prodk_{SUF}@e2etest-mail.de"
+    mail_d = f"bt_prodf_{SUF}@e2etest-mail.de"
     try:
-        r = requests.post(f"{api}/buyer/register", json={  # ALTWEG – Schritt 5
+        r = requests.post(f"{API}/auth/register", json={
+            "email": mail_f, "password": PW, "company_name": "Prod Test",
+            "contact_person": "P T", "phone": "0511 1"}, timeout=30)
+        assert r.status_code == 410 and "Betreiber" in r.text, r.text[:200]
+        r = requests.post(f"{API}/buyer/register", json={
             "gewerblich_bestaetigt": True, "company_name": "Prod Kaeufer",
-            "contact_name": "P K", "email": k_mail, "password": PW}, timeout=30)
-        assert r.status_code == 403 and "Zugangs-Anfrage" in r.text, r.text[:200]
-        r = requests.post(f"{api}/driver/register", json={  # ALTWEG – Schritt 5
-            "email": f_mail, "password": PW, "display_name": "Prod Fahrer"},
-            timeout=30)
-        assert r.status_code == 403 and "Zugangs-Anfrage" in r.text, r.text[:200]
-        assert _db().users.count_documents({"email": k_mail}) == 0
-        assert _db().driver_accounts.count_documents({"email": f_mail}) == 0
+            "contact_name": "P K", "email": mail_k, "password": PW}, timeout=30)
+        assert r.status_code == 410 and "Betreiber" in r.text, r.text[:200]
+        r = requests.post(f"{API}/driver/register", json={
+            "email": mail_d, "password": PW, "display_name": "Prod Fahrer"}, timeout=30)
+        assert r.status_code == 410 and "Betreiber" in r.text, r.text[:200]
+        assert _db().users.count_documents({"email": {"$in": [mail_f, mail_k]}}) == 0
+        assert _db().driver_accounts.count_documents({"email": mail_d}) == 0
     finally:
-        _db().driver_accounts.delete_many({"email": f_mail})
+        _db().driver_accounts.delete_many({"email": mail_d})
     # Zugangs-Anfrage selbst bleibt offen (oeffentlich erlaubt)
-    r = requests.post(f"{api}/zugang-anfrage", json={
+    r = requests.post(f"{API}/zugang-anfrage", json={
         "company_name": f"Prod Firma {SUF}", "contact_person": "P T",
-        "email": f"bt_prod_{SUF}@e2etest-mail.de"}, timeout=30)
+        "email": mail_f}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    _db().plan_requests.delete_many({"contact_email": f"bt_prod_{SUF}@e2etest-mail.de"})
-    # Chef-Sucher-Verwaltung ist zu (403 mit Betreiber-Hinweis).
-    # Kontonummer (13.09.2026): Anmeldung am Betreiber-Backend (gleiche DB)
-    # per Kontonummer des Chefs — konten.anmelden spricht nur TEST_BASE_URL an.
-    chef_nr = (_db().users.find_one({"id": welt["chef_id"]},
-                                    {"_id": 0, "kontonummer": 1}) or {}).get("kontonummer")
-    assert chef_nr, "Chef ohne Kontonummer"
-    r = requests.post(f"{api}/auth/login", json={
-        "kontonummer": chef_nr, "password": PW}, timeout=30)
-    assert r.status_code == 200, r.text[:200]
-    H = {"Authorization": f"Bearer {r.json()['token']}"}
-    r = requests.post(f"{api}/dealer/sucher", headers=H, json={  # ALTWEG – Schritt 5
+    _db().plan_requests.delete_many({"contact_email": mail_f})
+    # Chef-Sucher-Verwaltung ist zu (403 mit Betreiber-Hinweis)
+    r = requests.post(f"{API}/dealer/sucher", headers=welt["H"], json={
         "email": f"bt_neu_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "N", "last_name": "S"}, timeout=30)
     assert r.status_code == 403 and "Betreiber" in r.text, r.text[:200]
+    assert _db().users.count_documents({"email": f"bt_neu_{SUF}@e2etest-mail.de"}) == 0
 
 
 # ---------- Firmen-Verwaltung 09/2026: Kundennummer, Chef-Zeile, Gueltig-bis ----------

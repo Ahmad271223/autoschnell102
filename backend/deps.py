@@ -214,18 +214,10 @@ async def gesperrte_firmen_ids() -> set:
     return {r["_id"] async for r in rows}
 
 
-async def email_vergeben(email: str) -> Optional[str]:
-    """Runde 13: B5 — Login-E-Mail plattformweit eindeutig ueber users UND
-    driver_accounts. Vorher prueften alle Anlagepfade nur ihre eigene
-    Sammlung: dieselbe Adresse konnte Firmen-/Sucher-/Kaeuferkonto UND
-    Fahrerkonto sein, und der gemeinsame Passwort-Reset fand dann immer nur
-    das users-Konto. Liefert "user", "driver" oder None (Adresse frei)."""
-    muster = {"$regex": f"^{re.escape((email or '').strip())}$", "$options": "i"}
-    if await db.users.find_one({"email": muster}, {"_id": 1}):
-        return "user"
-    if await db.driver_accounts.find_one({"email": muster}, {"_id": 1}):
-        return "driver"
-    return None
+# Kontonummer (13.09.2026), Schritt 5: die plattformweite E-Mail-Pruefung
+# (Runde 13, B5) entfaellt —
+# angemeldet wird per Kontonummer, die E-Mail ist nur noch Kontaktadresse und
+# darf mehrfach vorkommen (kein Unique-Index mehr, kein Passwort-Reset per Mail).
 
 
 async def current_firma(user=Depends(current_user)):

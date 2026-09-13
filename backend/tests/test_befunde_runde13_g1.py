@@ -12,15 +12,16 @@
   A10 Netzwerk-Widerruf beendet auch laufende Verhandlungen
   B1  Abholfoto nur ueber einen Abholbericht der eigenen Firma
   B3  Admin-Vergleichsansicht mischt keine Firmenkorrekturen
-  B5  Login-E-Mail plattformweit eindeutig (users + driver_accounts)
-  B6  Passwort-Reset bedient beide Kontotypen
+  B5  Login-E-Mail plattformweit eindeutig (Kontonummer 13.09.2026: abgeloest —
+      E-Mail nur Kontakt, eine Nummernreihe ueber alle Kontoarten)
+  B6  Passwort-Reset bedient beide Kontotypen (abgeloest: Passwort setzt der Betreiber)
   B8  Beweis-Snapshots werden bei Loeschung pseudonymisiert
   C1  Verhandlungsantwort braucht aktiven Marktplatz-Zugang
   C2  Favorit setzen braucht aktiven Marktplatz-Zugang
   C4  Merkliste zeigt nur noch sichtbare Inserate; Widerruf raeumt auf
   C6  Betreiber-Sperre gilt auch im Kostenlos-Modus
 
-HTTP-Teile brauchen das Backend auf TEST_BASE_URL mit SELF_SIGNUP=true.
+HTTP-Teile brauchen das Backend auf TEST_BASE_URL.
 """
 import asyncio
 import inspect
@@ -162,22 +163,19 @@ def test_a5_a6_stripe_freischaltung_prueft_rolle_und_sperre():
         dbx.manual_payments.delete_many({"subject_user_id": {"$in": [uid_s, uid_b, uid_g]}})
 
 
-def test_b5_email_namensraum_und_b6_reset_quelle():
-    from deps import email_vergeben
+def test_b5_b6_abgeloest_durch_kontonummer():
+    """Kontonummer (13.09.2026), Schritt 5: B5 (E-Mail plattformweit eindeutig)
+    und B6 (Reset fuer beide Kontotypen) sind abgeloest — angemeldet wird per
+    Nummer aus EINER Reihe ueber alle Kontoarten, Passwoerter setzt nur der
+    Betreiber."""
+    import deps
+    import kontenanlage
     import routes.auth as a
-    dbx = _db()
-    mail = f"r13ns_{SUF}@{MAIL}"
-    dbx.driver_accounts.insert_one({"id": f"r13drv_{SUF}", "email": mail, "active": True,
-                                    "password_hash": "x", "created_at": _jetzt()})
-    try:
-        assert asyncio.run(email_vergeben(mail)) == "driver"
-        assert asyncio.run(email_vergeben(mail.upper())) == "driver"
-        assert asyncio.run(email_vergeben(f"frei_{SUF}@{MAIL}")) is None
-    finally:
-        dbx.driver_accounts.delete_many({"id": f"r13drv_{SUF}"})
-    src = inspect.getsource(a.password_reset_request)
-    assert "kandidaten" in src and "driver_accounts" in src
-    assert "if not u:" not in src, "Fahrerkonto darf nicht mehr hinter dem users-Treffer verschwinden"
+    assert not hasattr(deps, "email_vergeben")
+    src = inspect.getsource(a.password_reset_request) + inspect.getsource(a.password_reset_confirm)
+    assert "410" in src and "send_email" not in src and "password_resets" not in src
+    for anlage in (kontenanlage.kaeufer_anlegen, kontenanlage.fahrer_anlegen):
+        assert "naechste_nummer(db)" in inspect.getsource(anlage)
 
 
 def test_b8_snapshots_pseudonymisieren():
@@ -211,7 +209,7 @@ def _haendler(nr, oeffentlich):
         "email": f"r13_chef{nr}_{SUF}@{MAIL}", "password": PW,
         "company_name": f"R13 Autohaus {nr} {SUF}", "contact_person": f"Chef {nr}",
         "phone": "0511 1"}, timeout=30)
-    assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+    assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
     kopf = _kopf(r.json()["token"])
     r2 = requests.put(f"{API}/dealer/marketplace-profile", headers=kopf,
                       json={"public": oeffentlich, "description": f"R13 {nr}"}, timeout=30)
@@ -386,28 +384,38 @@ def test_a3_a4_zahlungsstatus_http(welt):
     assert dbx.users.find_one({"id": welt["k2"]["id"]}).get("marketplace_access") == vorher
 
 
-def test_b5_doppelkonto_ueber_kontotypen_abgelehnt(welt):
+def test_b5_gleiche_adresse_ueber_kontotypen_erlaubt(welt):
+    """Kontonummer (13.09.2026), Schritt 5: dieselbe Kontaktadresse als Fahrer
+    und als Firma ist erlaubt — beide Konten haben verschiedene Nummern aus
+    derselben Reihe. Die alten Anlagewege antworten 410 bzw. 403."""
     dbx = _db()
     mail = f"r13_fahrer_{SUF}@{MAIL}"
-    dbx.driver_accounts.insert_one({"id": f"r13drv2_{SUF}", "email": mail, "active": True,
-                                    "password_hash": "x", "created_at": _jetzt()})
-    # ALTWEG – Schritt 5: prueft bewusst die B5-Pruefung JEDES alten
-    # Anlagewegs (Selbstregistrierung Firma/Kaeufer, Chef-Sucheranlage)
-    r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
-        "email": mail, "password": PW, "company_name": f"Dup {SUF}", "contact_person": "D",
-        "phone": "0511 1"}, timeout=30)
-    assert r.status_code == 409, r.text[:200]
-    r = requests.post(f"{API}/buyer/register", json={  # ALTWEG – Schritt 5
-        "gewerblich_bestaetigt": True, "company_name": f"Dup K {SUF}", "contact_name": "D K",
-        "email": mail, "password": PW, "phone": "0511 2"}, timeout=30)
-    assert r.status_code == 409, r.text[:200]
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["h1"]["kopf"], json={  # ALTWEG – Schritt 5
-        "email": mail, "password": PW, "first_name": "D", "last_name": "S"}, timeout=30)
-    assert r.status_code == 409, r.text[:200]
+    r = konten.fahrer_registrieren(json={"email": mail, "password": PW,
+                                         "display_name": "R13 Fahrer"}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    fahrer_nr = r.json()["driver"]["kontonummer"]
     r = requests.post(f"{API}/admin/users", headers=welt["A"], json={
         "email": mail, "password": PW, "company_name": f"Dup A {SUF}", "plan_type": "none"}, timeout=60)
-    assert r.status_code == 409, r.text[:200]
-    assert dbx.users.count_documents({"email": mail}) == 0
+    assert r.status_code == 200, r.text[:200]
+    dealer_id = r.json()["dealer_id"]
+    try:
+        assert r.json()["kontonummer"] != fahrer_nr
+        assert dbx.users.count_documents({"email": mail}) == 1
+        assert dbx.driver_accounts.count_documents({"email": mail}) == 1
+        r = requests.post(f"{API}/auth/register", json={
+            "email": mail, "password": PW, "company_name": f"Dup {SUF}"}, timeout=30)
+        assert r.status_code == 410, r.text[:200]
+        r = requests.post(f"{API}/buyer/register", json={
+            "gewerblich_bestaetigt": True, "company_name": f"Dup K {SUF}", "contact_name": "D K",
+            "email": mail, "password": PW}, timeout=30)
+        assert r.status_code == 410, r.text[:200]
+        r = requests.post(f"{API}/dealer/sucher", headers=welt["h1"]["kopf"], json={
+            "email": mail, "password": PW, "first_name": "D", "last_name": "S"}, timeout=30)
+        assert r.status_code == 403, r.text[:200]
+        assert dbx.users.count_documents({"email": mail}) == 1
+    finally:
+        dbx.users.delete_many({"dealer_id": dealer_id})
+        dbx.dealers.delete_many({"id": dealer_id})
 
 
 def test_b8_sucher_loeschen_pseudonymisiert_snapshots(welt):
@@ -419,7 +427,8 @@ def test_b8_sucher_loeschen_pseudonymisiert_snapshots(welt):
     sid = r.json()["sucher_id"]
     dbx.listing_snapshots.insert_one({"id": f"snapx_{SUF}", "dealer_id": welt["h1"]["dealer_id"],
                                       "user_id": sid, "mobile_ad_id": f"r13_{SUF}", "created_at": _jetzt()})
-    assert requests.delete(f"{API}/dealer/sucher/{sid}", headers=welt["h1"]["kopf"], timeout=30).status_code == 200
+    # Kontonummer (13.09.2026), Schritt 5: Sucher loescht nur noch der Betreiber
+    assert requests.delete(f"{API}/admin/users/{sid}", headers=welt["A"], timeout=30).status_code == 200
     snap = dbx.listing_snapshots.find_one({"id": f"snapx_{SUF}"})
     assert snap["user_id"] == snapshot_pseudonym(sid) and snap["dealer_id"] == welt["h1"]["dealer_id"]
 

@@ -275,13 +275,14 @@ def test_13_startertext_enthaelt_klauseln_und_agb():
 
 
 def test_14_neue_firmen_bekommen_nur_noch_ein_textfeld():
-    """Anlage ueber die Selbstregistrierung UND ueber den Betreiber setzen
-    den Startertext in digital_vertragstext; default_terms bleibt leer."""
-    for modul in ("routes.auth", "routes.admin"):
-        quelle = inspect.getsource(importlib.import_module(modul))
-        assert '"default_terms": ""' in quelle, modul
-        assert "VERTRAGSTEXT_START" in quelle, modul
-        assert '"digital_vertragstext": _vertragstext_start' in quelle, modul
+    """Anlage ueber den Betreiber setzt den Startertext in digital_vertragstext;
+    default_terms bleibt leer. Kontonummer (13.09.2026), Schritt 5: die
+    Selbstregistrierung in routes.auth gibt es nicht mehr."""
+    quelle = inspect.getsource(importlib.import_module("routes.admin"))
+    assert '"default_terms": ""' in quelle
+    assert "VERTRAGSTEXT_START" in quelle
+    assert '"digital_vertragstext": _vertragstext_start' in quelle
+    assert "_vertragstext_start" not in inspect.getsource(importlib.import_module("routes.auth"))
 
 
 def test_15_einstellungen_fuehren_alten_agb_text_zusammen():

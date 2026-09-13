@@ -478,7 +478,8 @@ def _main() -> int:
         from deps import db
         ergebnis = await ausfuehren_oder_warten(
             db, indexe=server.ensure_indexes,
-            seeds=(server.seed_admin, server.seed_super_admin), warte_sekunden=300)
+            # Kontonummer (13.09.2026), Schritt 5: nur noch der Super-Admin
+            seeds=(server.seed_super_admin,), warte_sekunden=300)
         log.info("Migration: %s (Version %d)", ergebnis, await aktuelle_version(db))
         return 0 if ergebnis in ("leader", "gewartet") else 1
 

@@ -3,8 +3,8 @@
 
 HTTP (RUNDE14_HTTP=1, laufendes Backend auf TEST_BASE_URL, dieselbe DB):
   - Firma zweimal OHNE E-Mail (beide 200, kontonummer = str(kunden_nr));
-    users.email_1 ist durch den Teil-Index email_alt_eindeutig ersetzt;
-    zwei Firmen mit derselben Kontakt-E-Mail -> bis Schritt 5 noch 409
+    kein Unique-Index auf users.email (Schritt 5); zwei Firmen mit derselben
+    Kontakt-E-Mail -> beide 200 mit verschiedenen Nummern
   - Sucher ohne E-Mail: -1, -2, nach Loeschen -3; 404/409 fuer Firma
   - Kaeufer ueber POST /admin/buyers (B2B-Nachweis Pflicht, USt-IdNr. geprueft),
     Login /buyer/login; Anfrage art=kaeufer wird beim Anlegen geschlossen
@@ -158,25 +158,25 @@ def test_01_firma_ohne_email_zweimal_und_index(welt):
     welt["firma"], welt["firma2"] = firmen
     for coll in (dbx.users, dbx.driver_accounts):
         info = coll.index_information()
-        assert "email_1" not in info, (coll.name, sorted(info))
-        idx = info["email_alt_eindeutig"]
-        assert idx.get("unique") is True
-        assert idx["partialFilterExpression"] == {"email": {"$type": "string"}}, idx
+        assert "email_1" not in info and "email_alt_eindeutig" not in info, (
+            coll.name, sorted(info))
     # Anmeldung per Nummer (einmal je Konto — Single-Session)
     r = _post("/auth/login", {"kontonummer": firmen[0]["kontonummer"], "password": PW})
     assert r.status_code == 200, r.text[:200]
     welt["C"] = _kopf(r.json()["token"])
-    # Zwei Firmen mit derselben Kontakt-E-Mail: bis Schritt 5 noch 409 ueber
-    # email_alt_eindeutig (ab Schritt 5 beide 200)
+    # Zwei Firmen mit derselben Kontakt-E-Mail: Kontonummer (13.09.2026),
+    # Schritt 5 — beide 200 mit verschiedenen Nummern (E-Mail nur Kontakt)
     mail = f"ka_kontakt_{SUF}@{MAIL}"
-    r = _post("/admin/users", {"email": mail, "password": PW,
-                               "company_name": f"KA Kontakt {SUF}"}, welt["S"])
-    assert r.status_code == 200, r.text[:200]
-    welt["user_ids"].append(r.json()["user_id"])
-    welt["dealer_ids"].append(r.json()["dealer_id"])
-    r = _post("/admin/users", {"email": mail.upper(), "password": PW,
-                               "company_name": f"KA Kontakt 2 {SUF}"}, welt["S"])
-    assert r.status_code == 409, r.text[:200]
+    nummern = []
+    for adresse, name in ((mail, f"KA Kontakt {SUF}"), (mail.upper(), f"KA Kontakt 2 {SUF}")):
+        r = _post("/admin/users", {"email": adresse, "password": PW,
+                                   "company_name": name}, welt["S"])
+        assert r.status_code == 200, r.text[:200]
+        welt["user_ids"].append(r.json()["user_id"])
+        welt["dealer_ids"].append(r.json()["dealer_id"])
+        nummern.append(r.json()["kontonummer"])
+    assert nummern[0] != nummern[1]
+    assert dbx.users.count_documents({"email": mail}) == 2
 
 
 # ============================================================ Sucher
@@ -284,8 +284,7 @@ def test_03_kaeufer_anlage_und_anfrage_geschlossen(welt):
     assert u2["gewerblich_bestaetigt_durch"] == "anfrage"
     assert u2["gewerblich_bestaetigt_am"] == req["gewerblich_bestaetigt_am"]
     assert u2["ust_id"] == "DE123456789" and u2["email"] == mail
-    # dieselbe Anfrage ein zweites Mal -> 409 (erst NACH der E-Mail-Pruefung
-    # waere es 409 wegen der Adresse — deshalb ohne E-Mail)
+    # dieselbe Anfrage ein zweites Mal -> 409 (Anfrage ist schon erledigt)
     r = _post("/admin/buyers", {**neu, "email": ""}, S)
     assert r.status_code == 409, r.text[:200]
     assert dbx.users.count_documents({"company_name": f"KA Anfrage {SUF}"}) == 1

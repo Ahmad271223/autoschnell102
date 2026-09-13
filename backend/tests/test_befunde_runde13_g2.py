@@ -11,8 +11,8 @@
       ausserhalb von Produktion eine Warnung.
 
 Einheitentests laufen ohne Server. HTTP-Teile brauchen das Backend auf
-TEST_BASE_URL (Standardkonfiguration DATEI_SIGNATUR_PFLICHT=true) mit
-SELF_SIGNUP=true; der Ende-zu-Ende-Test laedt ein echtes Foto hoch und
+TEST_BASE_URL (Standardkonfiguration DATEI_SIGNATUR_PFLICHT=true);
+der Ende-zu-Ende-Test laedt ein echtes Foto hoch und
 belegt, dass der Schluessel allein NICHT genuegt.
 """
 import base64
@@ -93,7 +93,6 @@ class _Protokoll:
 _PROD_UMGEBUNG = {
     "APP_ENV": "production",
     "JWT_SECRET": uuid.uuid4().hex + uuid.uuid4().hex,       # 64 Hex-Zeichen
-    "ADMIN_PASSWORD": "Runde13-Betreiber-Kennwort!",
     "SUPER_ADMIN_PASSWORD": "",
     "FRONTEND_URL": "https://app.example.de",
     "CORS_ORIGINS": "https://app.example.de",
@@ -104,7 +103,6 @@ _PROD_UMGEBUNG = {
     "RESEND_API_KEY": "re_r13_test",
     "MAIL_FROM": "AutoSchnell <vertrag@example.de>",
     "WEB_CONCURRENCY": "1",
-    "SELF_SIGNUP": "false",
     "AUTO_DATEN_SCHAEDEN_FREITEXT": "false",
     "VERTRAG_LOESCHUNG_AKTIV": "false",
 }
@@ -273,7 +271,7 @@ def welt():
     r = konten.registrieren(json={
         "email": f"r13g2_chef_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Runde13g2 {SUF}", "contact_person": "R E", "phone": "0511 13"}, timeout=30)
-    assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+    assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
     C = {"Authorization": f"Bearer {r.json()['token']}"}
     chef = requests.get(f"{API}/auth/me", headers=C, timeout=30).json()["user"]
     _abo(chef["dealer_id"], chef["id"])
@@ -286,7 +284,7 @@ def welt():
     z = {"C": C, "chef": chef, "dealer_id": chef["dealer_id"], "vid": vid}
     yield z
     for coll in ("subscriptions", "activity_logs", "vehicles", "resale_listings",
-                 "storage_delete_retry", "plan_requests", "password_resets"):
+                 "storage_delete_retry", "plan_requests"):
         dbx[coll].delete_many({"dealer_id": z["dealer_id"]})
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.dealers.delete_many({"id": z["dealer_id"]})

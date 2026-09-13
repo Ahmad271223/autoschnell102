@@ -14,6 +14,9 @@
     Text fuer vorhandene und unbekannte Nummer, ohne bcrypt), von der
     gemerkten IP weiter 401/200; ein Erfolg leert den Konto-Zaehler nicht
   - Verdrahtung der drei Login-Routen per Quelltext
+  Schritt 5: email_eindeutigkeit_entfernen (zwei parallele Aufrufe, danach
+  gleiche Adresse mehrfach), production_check ohne ADMIN_PASSWORD und mit
+  SUPER_ADMIN_USERNAME im Nummernmuster
 
 Kein Import von server.py. routes.marketplace wird NUR hier am Modulanfang
 importiert (beim Einsammeln, nie erstmals innerhalb einer Test-Schleife —
@@ -312,47 +315,57 @@ def test_konto_indizes_parallel_und_dubletten(wegwerf, monkeypatch):
     assert z["bereinigt"]["users"] is True and z["alarm_danach"] == 0
 
 
-def test_email_uebergang_parallel_konten_ohne_email(wegwerf, monkeypatch):
-    """Schritt 2: email_1 (voller Unique-Index) -> email_alt_eindeutig (Teil-
-    Index auf String-Adressen). Zwei parallele Aufrufe plus konto_indizes
-    ohne Ausnahme (Codes 27/85/86); danach viele Konten ohne E-Mail moeglich,
-    doppelte Adresse weiter DuplicateKey (keine Kontonummer-Dublette)."""
+def test_email_eindeutigkeit_entfernen_parallel(wegwerf, monkeypatch):
+    """Schritt 5: 'email_alt_eindeutig' (Schritt 2) und ein altes 'email_1'
+    verschwinden aus users und driver_accounts — zwei parallele Aufrufe plus
+    konto_indizes ohne Ausnahme (Code 27 = erledigt). Danach dieselbe Adresse
+    mehrfach und beliebig viele Konten ohne Adresse; kein neuer E-Mail-Index."""
     monkeypatch.delenv("APP_ENV", raising=False)
     db = wegwerf.db
-    partial = {"email": {"$type": "string"}}
+    adresse = "a@konto.test"
 
     async def lauf():
         z = {}
-        for coll in (db.users, db.driver_accounts):
-            await coll.create_index("email", unique=True)          # Altbestand email_1
-            await coll.insert_one({"id": f"mit_{coll.name}", "email": "a@konto.test"})
-        z["erg"] = await asyncio.gather(indizes.email_uebergang(db),
-                                        indizes.email_uebergang(db),
+        await db.users.create_index("email", unique=True)                  # altes email_1
+        await db.driver_accounts.create_index(
+            "email", name="email_alt_eindeutig", unique=True,
+            partialFilterExpression={"email": {"$type": "string"}})         # Schritt 2
+        await db.users.insert_one({"id": "mit", "email": adresse})
+        await db.driver_accounts.insert_one({"id": "fmit", "email": adresse})
+        z["erg"] = await asyncio.gather(indizes.email_eindeutigkeit_entfernen(db),
+                                        indizes.email_eindeutigkeit_entfernen(db),
                                         indizes.konto_indizes(db), return_exceptions=True)
         z["info"] = [await db.users.index_information(),
                      await db.driver_accounts.index_information()]
-        await db.users.insert_many([{"id": f"ohne{i}"} for i in range(3)])
-        await db.driver_accounts.insert_many([{"id": f"fohne{i}"} for i in range(3)])
-        try:
-            await db.users.insert_one({"id": "doppelt", "email": "a@konto.test"})
-            z["dublette"] = None
-        except DuplicateKeyError as exc:
-            z["dublette"] = exc
-        z["nochmal"] = await indizes.email_uebergang(db)
+        await db.users.insert_many([{"id": "doppelt", "email": adresse},
+                                    {"id": "ohne1"}, {"id": "ohne2"}])
+        await db.driver_accounts.insert_many([{"id": "fdoppelt", "email": adresse},
+                                              {"id": "fohne1"}, {"id": "fohne2"}])
+        z["n"] = (await db.users.count_documents({"email": adresse}),
+                  await db.driver_accounts.count_documents({"email": adresse}))
+        z["nochmal"] = await indizes.email_eindeutigkeit_entfernen(db)
+        # Sammlungen gibt es noch gar nicht (frische DB): kein Fehler
+        z["leer"] = await indizes.email_eindeutigkeit_entfernen(
+            db.client[f"{db.name}_leer"])
         return z
 
     z = wegwerf.run(lauf())
-    assert z["erg"][0] == {"users": True, "driver_accounts": True}, z["erg"]
-    assert z["erg"][1] == {"users": True, "driver_accounts": True}, z["erg"]
+    for erg in z["erg"]:
+        assert not isinstance(erg, BaseException), z["erg"]
     assert z["erg"][2] == {"users": True, "driver_accounts": True}, z["erg"]
+    assert sorted(z["erg"][0]["users"] + z["erg"][1]["users"]) == ["email_1"], z["erg"]
+    assert sorted(z["erg"][0]["driver_accounts"] + z["erg"][1]["driver_accounts"]) == [
+        "email_alt_eindeutig"], z["erg"]
     for info in z["info"]:
-        assert "email_1" not in info, sorted(info)
-        idx = info["email_alt_eindeutig"]
-        assert idx.get("unique") is True and idx["partialFilterExpression"] == partial, idx
-    assert z["dublette"] is not None and not ist_kontonummer_dublette(z["dublette"])
-    assert z["nochmal"] == {"users": True, "driver_accounts": True}
+        for name, idx in info.items():
+            assert [f for f, _ in idx["key"]] != ["email"], (name, idx)
+        assert "kontonummer_eindeutig" in info
+    assert z["n"] == (2, 2)
+    assert z["nochmal"] == {"users": [], "driver_accounts": []}
+    assert z["leer"] == {"users": [], "driver_accounts": []}
     ensure = _funktion("server.py", "ensure_indexes")
-    assert "email_uebergang(db)" in ensure
+    assert "email_eindeutigkeit_entfernen(db)" in ensure
+    assert "email_uebergang" not in ensure and "password_resets" not in ensure
     assert '_unique_index_sicher(db.users, "email")' not in ensure
     assert '_unique_index_sicher(db.driver_accounts, "email")' not in ensure
 
@@ -488,6 +501,11 @@ def test_login_routen_verdrahtet():
                         ("routes/drivers.py", "driver_login")):
         assert "bekannte_ip_merken(" in _funktion(datei, name), name
     suche = _funktion("routes/auth.py", "_konto_fuer_login")
+    # Schritt 5: kein E-Mail-Zweig mehr in den drei Anmeldungen
+    for q_suche in (suche, _funktion("routes/marketplace.py", "buyer_login"),
+                    _funktion("routes/drivers.py", "driver_login")):
+        assert "$regex" not in q_suche and '{"email": kennung' not in q_suche
+        assert "ALTWEG" not in q_suche
     assert '"is_super_admin": True' in suche
     assert '"kontonummer": nummer_bedingung(nr)' in suche
     assert "nummer_bedingung(" in _funktion("kontenanlage.py", "_hoechster_zusatz")
@@ -624,6 +642,83 @@ def test_buyer_login_konto_sperre_429_bekannte_ip_frei(limiter, monkeypatch):
     assert z["fehl"] == [401] * 60
     assert z["gesperrt"] == [sperre, sperre, sperre], z["gesperrt"]
     assert z["passwort_geprueft"] == 0, "gesperrte Anmeldung darf kein Passwort pruefen"
-    assert z["bekannt"] == [(401, "E-Mail oder Passwort falsch"), (200, nr)]
+    assert z["bekannt"] == [(401, "Kontonummer oder Passwort falsch"), (200, nr)]
     assert z["danach_fremd"] == sperre, "Erfolg von bekannter IP hat die Sperre aufgehoben"
     assert z["stand"] == 31
+
+
+# ================================ production_check (Kontonummer, Schritt 5)
+class _Protokoll:
+    def __init__(self):
+        self.eintraege = []
+
+    def _log(self, stufe):
+        def _f(msg, *args, **kw):
+            self.eintraege.append((stufe, msg % args if args else msg))
+        return _f
+
+    def __getattr__(self, name):
+        if name in ("error", "warning", "info", "debug", "critical", "exception"):
+            return self._log(name)
+        raise AttributeError(name)
+
+    def texte(self, stufe):
+        return [t for s, t in self.eintraege if s == stufe]
+
+
+@pytest.fixture
+def prod_umgebung(monkeypatch, tmp_path):
+    """Sonst gueltige Produktionsumgebung (wie test_befunde_runde13_g2) OHNE
+    ADMIN_EMAIL/ADMIN_PASSWORD/SELF_SIGNUP — backend/.env laedt sie lokal nach,
+    deshalb ausdruecklich entfernt."""
+    werte = {
+        "APP_ENV": "production", "JWT_SECRET": uuid.uuid4().hex + uuid.uuid4().hex,
+        "SUPER_ADMIN_USERNAME": "betreiber-kn", "SUPER_ADMIN_PASSWORD": "",
+        "FRONTEND_URL": "https://app.example.de", "CORS_ORIGINS": "https://app.example.de",
+        "MONGO_URL": "mongodb://u:p@db:27017/autoschnell?authSource=admin&maxPoolSize=20",
+        "MOCK_PROVIDER_FETCH": "false", "VERTRAG_AUFBEWAHRUNG_TAGE": "90",
+        "SNAPSHOT_RETENTION_DAYS": "60", "RESEND_API_KEY": "re_kn_test",
+        "MAIL_FROM": "AutoSchnell <vertrag@example.de>", "WEB_CONCURRENCY": "1",
+        "AUTO_DATEN_SCHAEDEN_FREITEXT": "false", "VERTRAG_LOESCHUNG_AKTIV": "false",
+    }
+    for k, v in werte.items():
+        monkeypatch.setenv(k, v)
+    for k in ("ADMIN_EMAIL", "ADMIN_PASSWORD", "SELF_SIGNUP", "S3_ENDPOINT", "S3_BUCKET",
+              "S3_ACCESS_KEY", "S3_SECRET_KEY", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET",
+              "DATEI_SIGNATUR_PFLICHT", "SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "backups"))
+    return monkeypatch
+
+
+def test_production_check_ohne_admin_passwort_kein_fehler(prod_umgebung):
+    import production_check
+    log = _Protokoll()
+    production_check.pruefe_produktion(log)                  # kein SystemExit
+    assert log.texte("error") == [], log.texte("error")
+    alles = " ".join(t for _, t in log.eintraege)
+    assert "ADMIN_PASSWORD" not in alles.replace("SUPER_ADMIN_PASSWORD", "")
+    assert "SELF_SIGNUP" not in alles
+    # ein alter Schalter in der .env stoert nicht und wird nicht mehr gemeldet
+    prod_umgebung.setenv("SELF_SIGNUP", "true")
+    log = _Protokoll()
+    production_check.pruefe_produktion(log)
+    assert log.texte("error") == [] and not any("SELF_SIGNUP" in t for _, t in log.eintraege)
+    quelle = (BACKEND / "production_check.py").read_text(encoding="utf-8")
+    assert '"ADMIN_PASSWORD"' not in quelle and "SELF_SIGNUP" not in quelle
+
+
+@pytest.mark.parametrize("name", ["10023", "10023-2", " 10023 2 "])
+def test_production_check_super_admin_name_wie_kontonummer_ist_fehler(prod_umgebung, name):
+    import production_check
+    prod_umgebung.setenv("SUPER_ADMIN_USERNAME", name)
+    log = _Protokoll()
+    with pytest.raises(SystemExit) as exc:
+        production_check.pruefe_produktion(log)
+    assert exc.value.code == 78
+    assert any("SUPER_ADMIN_USERNAME" in t for t in log.texte("error")), log.eintraege
+    # ausserhalb der Produktion nur gemeldet, kein Abbruch
+    prod_umgebung.setenv("APP_ENV", "development")
+    log = _Protokoll()
+    production_check.pruefe_produktion(log)
+    assert any("SUPER_ADMIN_USERNAME" in t for t in log.texte("warning")), log.eintraege

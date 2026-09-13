@@ -657,11 +657,11 @@ async def _plan_requests_unique_indizes() -> None:
 
 
 async def ensure_indexes():
-    # Kontonummer (13.09.2026), Schritt 2: users.email / driver_accounts.email
-    # nur noch als Teil-Unique-Index 'email_alt_eindeutig' (Konten ohne
-    # E-Mail moeglich); ersetzt _unique_index_sicher(..., "email").
-    from indizes import email_uebergang
-    await email_uebergang(db)
+    # Kontonummer (13.09.2026), Schritt 5: users.email / driver_accounts.email
+    # sind nur noch Kontaktadressen — die Eindeutigkeit (email_alt_eindeutig
+    # aus Schritt 2 bzw. altes email_1) wird entfernt, kein neuer E-Mail-Index.
+    from indizes import email_eindeutigkeit_entfernen
+    await email_eindeutigkeit_entfernen(db)
     await _unique_index_sicher(db.dealers, "user_id")
     await db.vehicle_cache.create_index("mobile_ad_id", unique=True)
     # Genau EIN aktuelles Abholprotokoll je Termin (Race-Schutz: zwei
@@ -818,7 +818,7 @@ async def ensure_indexes():
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
     await _termin_unique_index()
-    # Neue Fahrer-Accounts + Dealer-Driver-Links (E-Mail-Index: email_uebergang oben)
+    # Fahrer-Accounts + Dealer-Driver-Links (E-Mail ohne Index, Kontonummer: konto_indizes)
     await _unique_index_sicher(db.driver_accounts, "driver_code")
     await db.dealer_drivers.create_index(
         [("dealer_id", 1), ("driver_account_id", 1)], unique=True,
@@ -864,74 +864,14 @@ async def ensure_indexes():
     await db.admin_vehicle_data.create_index([("brand", 1), ("model", 1)])
     await db.admin_vehicle_data.create_index("purchase_price_cents")
     await db.generated_pdfs.create_index("created_at")
-    # Passwort-Reset-Tokens: Lookup + automatisches Wegräumen
-    await db.password_resets.create_index("token_hash")
-    # Runde 5: automatisches Wegraeumen war nur versprochen, nicht angelegt.
-    await db.password_resets.create_index("loeschen_ab", expireAfterSeconds=0,
-                                          name="ttl_loeschen_ab")
+    # (Kontonummer 13.09.2026, Schritt 5: keine password_resets-Indizes mehr —
+    # ein neues Passwort setzt nur der Betreiber. Vorhandene Indizes bleiben
+    # unangetastet; das Live-Reset leert die Sammlung.)
     # (N1, Review 09/2026) Frueher stand hier `db.drivers.drop()` bei JEDEM
     # Start — als "Legacy-Index entfernen" beschriftet, tatsaechlich ein
     # Collection-Drop. Die Migration ist laengst durch; ersatzlos gestrichen.
 
 
-
-
-async def seed_admin():
-    """Runde 12 (Beschluss 06.09.2026): Es gibt nur den Super-Admin
-    (seed_super_admin). Der fruehere Bootstrap-"normale Admin" aus
-    ADMIN_EMAIL wird nicht mehr angelegt; ein vorhandenes Altkonto wird
-    weder geaendert noch reaktiviert und bekommt ueberall 403
-    (deps.current_admin). Es erscheint unter /admin/betrieb zum Loeschen."""
-    email = os.environ.get("ADMIN_EMAIL", "")
-    if email and await db.users.find_one({"email": email, "role": "admin",
-                                          "is_super_admin": {"$ne": True}}, {"_id": 1}):
-        log.warning("seed_admin: Altkonto %s hat Rolle admin ohne Super-Admin — "
-                    "es kann nichts mehr und sollte im Betrieb geloescht werden.", email)
-    return
-    password = os.environ.get("ADMIN_PASSWORD", "")
-    if not password:
-        log.warning(
-            "seed_admin: ADMIN_PASSWORD is not set in the environment — "
-            "admin account will NOT be seeded. Set ADMIN_PASSWORD in .env."
-        )
-        return
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        if existing.get("role") == "admin":
-            # Runde 5: KEINE Reaktivierung — ein vom Super-Admin gesperrter
-            # Admin wurde sonst bei jedem Neustart wieder entsperrt.
-            pass
-        else:
-            # NIEMALS ein Fremdkonto hochstufen (PR-Review 09/2026): wer
-            # die Admin-Mail zuerst registriert hatte, wuerde sonst nach
-            # einer Fehlkonfiguration automatisch Admin.
-            log.error("seed_admin: unter %s existiert bereits ein NORMALES "
-                      "Konto (Rolle %s) — es wird NICHT zum Admin "
-                      "hochgestuft. ADMIN_EMAIL in der .env aendern.",
-                      email, existing.get("role"))
-        return
-    user_id = str(uuid.uuid4())
-    dealer_id = str(uuid.uuid4())
-    await db.users.insert_one({
-        "id": user_id, "email": email,
-        "password_hash": hash_password(password),
-        "role": "admin", "active": True,
-        "dealer_id": dealer_id,
-        "current_session_id": None,
-        "created_at": now_iso(),
-    })
-    await db.dealers.insert_one({
-        "kunden_nr": await naechste_kunden_nr(),
-        "id": dealer_id, "user_id": user_id,
-        "company_name": "Autohandel Admin", "contact_person": "Admin",
-        "phone": "", "email": email, "address": "", "zip_code": "", "city": "",
-        "created_at": now_iso(),
-    })
-    await db.subscriptions.insert_one({
-        "id": str(uuid.uuid4()), "dealer_id": dealer_id,
-        "plan": "lifetime", "status": "active",
-        "expires_at": None, "created_at": now_iso(),
-    })
 
 
 async def seed_super_admin():
@@ -956,7 +896,9 @@ async def seed_super_admin():
                   "Kontonummer aus — Super-Admin wird NICHT angelegt. Bitte einen "
                   "Benutzernamen mit Buchstaben waehlen.", username)
         return
-    placeholder_email = f"{username.lower()}@cashcar.local"
+    # Kontonummer (13.09.2026), Schritt 5: keine Platzhalter-E-Mail mehr fuer
+    # neue Seeds (die E-Mail ist nur Kontaktadresse); ein vorhandenes Konto
+    # bleibt unberuehrt.
     existing = await db.users.find_one({"username": username})
     if existing:
         # Idempotent: Rolle/aktiv-Status sicherstellen, Passwort NICHT überschreiben.
@@ -976,7 +918,6 @@ async def seed_super_admin():
     await db.users.insert_one({
         "id": user_id,
         "username": username,
-        "email": placeholder_email,
         "password_hash": hash_password(password),
         "role": "admin",
         "is_super_admin": True,
@@ -990,7 +931,7 @@ async def seed_super_admin():
         "kunden_nr": await naechste_kunden_nr(),
         "id": dealer_id, "user_id": user_id,
         "company_name": "Cash Car Hannover", "contact_person": "Super Admin",
-        "phone": "", "email": placeholder_email, "address": "", "zip_code": "",
+        "phone": "", "email": "", "address": "", "zip_code": "",
         "city": "Hannover", "created_at": now_iso(),
     })
     await db.subscriptions.insert_one({
@@ -1038,7 +979,7 @@ async def on_start():
                 log.warning("Warte auf MongoDB (%d/30): %s", attempt, exc)
                 await _asyncio.sleep(2)
     ergebnis = await ausfuehren_oder_warten(
-        db, indexe=_alle_indexe, seeds=(seed_admin, seed_super_admin))
+        db, indexe=_alle_indexe, seeds=(seed_super_admin,))
     log.info("Migration/Indizes: %s", ergebnis)
     # Object storage for listing snapshots (PDF + PNG proof archives).
     # Non-fatal if EMERGENT_LLM_KEY missing — snapshot endpoints will 503.

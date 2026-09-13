@@ -10,22 +10,19 @@
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import os
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Response
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 import re
 
-from auth import hash_password_async
-from deps import (current_firma, current_user, db, email_vergeben, get_subscription_status,
+from deps import (current_firma, current_user, db, get_subscription_status,
                   log_activity, now_iso,
 )
-from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 
 router = APIRouter()
@@ -62,34 +59,6 @@ SUCHER_PLANS = {
 
 
 # ---------- Models ----------
-class SucherIn(BaseModel):
-    first_name: str = Field(min_length=1, max_length=80)
-    last_name: str = Field(min_length=1, max_length=80)
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=200)
-    phone: str = Field(default="", max_length=50)
-    employee_id: str = Field(default="", max_length=50)
-
-    @field_validator("password")
-    @classmethod
-    def _pw(cls, v):
-        return _check_password_strength(v)
-
-
-class SucherUpdateIn(BaseModel):
-    first_name: Optional[str] = Field(default=None, max_length=80)
-    last_name: Optional[str] = Field(default=None, max_length=80)
-    phone: Optional[str] = Field(default=None, max_length=50)
-    employee_id: Optional[str] = Field(default=None, max_length=50)
-    active: Optional[bool] = None
-    password: Optional[str] = Field(default=None, min_length=8, max_length=200)
-
-    @field_validator("password")
-    @classmethod
-    def _pw(cls, v):
-        return _check_password_strength(v) if v is not None else v
-
-
 class UpgradeRequestIn(BaseModel):
     wanted_tier: str = Field(max_length=20)
     message: str = Field(default="", max_length=2000)
@@ -99,60 +68,20 @@ class UpgradeRequestIn(BaseModel):
 #                SUCHER-VERWALTUNG
 # =========================================================
 # Beschluss 09/2026: Sucher-Konten legt NUR der Betreiber an (Admin-Bereich,
-# /admin/dealers/{id}/sucher) — inkl. Anmeldename + Passwort. Der Chef sieht
-# sein Team weiterhin (Liste + Statistik) und stellt Abo-Anfragen; Anlegen,
-# Löschen und Passwörter laufen über den Betreiber. In Entwicklung/CI
-# (SELF_SIGNUP nicht auf false) bleiben die Chef-Routen aktiv, damit die
-# bestehenden Tests und lokales Ausprobieren funktionieren.
-def _chef_verwaltung_erlaubt() -> bool:
-    # Runde 11: dieselbe fail-closed Regel wie die Selbst-Registrierung
-    # (vorher hier eine zweite Kopie der alten fail-open Logik).
-    from routes.auth import _self_signup_enabled
-    return _self_signup_enabled()
-
-
+# /admin/dealers/{id}/sucher) — inkl. Kontonummer + Passwort. Der Chef sieht
+# sein Team weiterhin (Liste + Statistik) und stellt Abo-Anfragen.
+# Kontonummer (13.09.2026), Schritt 5: Anlegen, Aendern und Loeschen durch den
+# Chef antworten in JEDER Umgebung mit einer festen 403 (vorher in
+# Entwicklung/CI ueber den Registrierungs-Schalter noch offen). Loeschen samt Uebernahme der
+# Fahrzeuge macht der Betreiber (DELETE /admin/users/{id}).
 _NUR_BETREIBER = ("Sucher-Konten verwaltet der Betreiber. Bitte melde dich "
                   "bei uns — wir legen Zugänge an, setzen Passwörter und "
                   "entfernen Konten.")
 
 
 @router.post("/dealer/sucher")
-async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
-    if not _chef_verwaltung_erlaubt():
-        raise HTTPException(403, _NUR_BETREIBER)
-    # Runde 13: B5 — E-Mail wie in auth.py normalisieren und plattformweit
-    # (users UND driver_accounts) pruefen; vorher nur users, unnormalisiert.
-    email = body.email.strip().lower()
-    if await email_vergeben(email):
-        raise HTTPException(409, "E-Mail ist bereits registriert")
-    sucher_id = str(uuid.uuid4())
-    # Kontonummer (13.09.2026): dieselbe Anlage wie beim Betreiber
-    # (Nummer '<kunden_nr>-<zusatz>'). Neu: Dublette -> 409 statt 500.
-    from kontenanlage import sucher_anlegen
-    try:
-        erg = await sucher_anlegen(db, user["dealer_id"], {
-            "id": sucher_id,
-            "email": email,
-            "password_hash": await hash_password_async(body.password),
-            "role": "sucher",
-            "active": True,
-            "dealer_id": user["dealer_id"],          # gehört zum Händler
-            "first_name": body.first_name,
-            "last_name": body.last_name,
-            "phone": body.phone,
-            "employee_id": body.employee_id,
-            "created_by": user["id"],
-            "current_session_id": None,
-            "created_at": now_iso(),
-        })
-    except DuplicateKeyError:
-        raise HTTPException(409, "E-Mail ist bereits registriert")
-    await log_activity(user["dealer_id"], user["id"], "sucher.angelegt",
-                       ref=sucher_id, meta={"email": body.email,
-                                            "kontonummer": erg["kontonummer"]})
-    return {"ok": True, "sucher_id": sucher_id, "kontonummer": erg["kontonummer"],
-            "hinweis": "Der Sucher benötigt ein aktives Sucher-Abo, um "
-                       "Fahrzeuge suchen und vergleichen zu können."}
+async def create_sucher(user=Depends(current_haendler)):
+    raise HTTPException(403, _NUR_BETREIBER)
 
 
 @router.get("/dealer/sucher")
@@ -228,72 +157,13 @@ async def list_sucher(response: Response, user=Depends(current_haendler)):
 
 
 @router.put("/dealer/sucher/{sucher_id}")
-async def update_sucher(sucher_id: str, body: SucherUpdateIn,
-                        user=Depends(current_haendler)):
-    if not _chef_verwaltung_erlaubt():
-        raise HTTPException(403, _NUR_BETREIBER)
-    s = await db.users.find_one(
-        {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"})
-    if not s:
-        raise HTTPException(404, "Sucher nicht gefunden")
-    fields = {k: v for k, v in body.model_dump(exclude_none=True).items()
-              if k != "password"}
-    if body.password:
-        fields["password_hash"] = await hash_password_async(body.password)
-        fields["current_session_id"] = None
-    if body.active is False:
-        fields["current_session_id"] = None
-    if fields:
-        fields["updated_at"] = now_iso()
-        await db.users.update_one({"id": sucher_id}, {"$set": fields})
-    await log_activity(user["dealer_id"], user["id"], "sucher.aktualisiert",
-                       ref=sucher_id, meta={"felder": sorted(fields.keys())})
-    return {"ok": True}
+async def update_sucher(sucher_id: str, user=Depends(current_haendler)):
+    raise HTTPException(403, _NUR_BETREIBER)
 
 
 @router.delete("/dealer/sucher/{sucher_id}")
 async def delete_sucher(sucher_id: str, user=Depends(current_haendler)):
-    if not _chef_verwaltung_erlaubt():
-        raise HTTPException(403, _NUR_BETREIBER)
-    s = await db.users.find_one(
-        {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"})
-    if not s:
-        raise HTTPException(404, "Sucher nicht gefunden")
-    # Runde 29 (12.09.2026, Pruefbefund): VOR dem Loeschen die Arbeit des
-    # Kontos uebernehmen. Vorher blieben die Fahrzeuge mit owner_user_id des
-    # geloeschten Suchers stehen (Besitzer, den es nicht mehr gibt) und sein
-    # Name stand weiter in mitbearbeiter_ids. Bricht der Vorgang hier ab,
-    # existiert der Sucher noch und der Chef kann es einfach erneut
-    # versuchen — nichts Halbes bleibt zurueck.
-    jetzt = now_iso()
-    firma = {"dealer_id": user["dealer_id"]}
-    uebernommen = (await db.vehicles.update_many(
-        {**firma, "owner_user_id": sucher_id},
-        {"$set": {"owner_user_id": user["id"], "uebernommen_von": sucher_id,
-                  "updated_at": jetzt}})).modified_count
-    await db.vehicles.update_many(
-        {**firma, "mitbearbeiter_ids": sucher_id},
-        {"$pull": {"mitbearbeiter_ids": sucher_id}})
-    # Vertraege, Kaufvorgaenge und Termine bleiben unveraendert: sie sind
-    # Belege und gehoeren der Firma — der Chef sieht sie ohnehin alle, und
-    # wer sie angelegt hat, gehoert zur Nachvollziehbarkeit.
-    await db.users.delete_one({"id": sucher_id})
-    # Persoenliche Reste mitloeschen (PR-Review 09/2026): das Sucher-Abo
-    # blieb sonst bestehen und konnte Status-/Kuendigungslogik verwirren.
-    await db.subscriptions.delete_many({"subject_user_id": sucher_id})
-    # Runde 11: password_resets tragen user_id, keine E-Mail — der alte
-    # Filter nach E-Mail traf nie. Offene Abo-Anfragen des Suchers blieben
-    # beim Betreiber als verwaiste "offene" Anfrage stehen.
-    await db.password_resets.delete_many({"user_id": sucher_id})
-    await db.plan_requests.delete_many({"subject_user_id": sucher_id, "status": "offen"})
-    # Runde 13: B8 — Nutzerkennung in Beweis-Snapshots pseudonymisieren
-    # (die Snapshots selbst bleiben, s. snapshot_service).
-    from snapshot_service import snapshots_pseudonymisieren
-    await snapshots_pseudonymisieren(db, user_id=sucher_id)
-    await log_activity(user["dealer_id"], user["id"], "sucher.geloescht",
-                       ref=sucher_id, meta={"email": s.get("email", ""),
-                                            "fahrzeuge_uebernommen": uebernommen})
-    return {"ok": True}
+    raise HTTPException(403, _NUR_BETREIBER)
 
 
 # =========================================================

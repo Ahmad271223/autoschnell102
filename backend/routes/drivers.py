@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response  # Requ
 from fastapi.security import HTTPAuthorizationCredentials
 from pymongo.errors import DuplicateKeyError
 import jwt                                   # PyJWT
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from auth import (
     JWT_ALG, JWT_SECRET, _DUMMY_HASH, decode_token,
@@ -23,7 +23,7 @@ from deps import (bearer, current_user, db, log_activity, log_activity_sicher, n
 # eigene, schwaechere Kopie (8 Zeichen, keine Blockliste, keine 72-Byte-
 # bcrypt-Grenze).
 from passwoerter import pruefe_passwort as _check_password_strength
-from rate_limiter import (client_ip, driver_login_limiter, driver_register_limiter,
+from rate_limiter import (client_ip, driver_login_limiter,
                           login_ip_limiter, login_schluessel,
                           bekannte_ip_merken, konto_fehlversuch, konto_gesperrt,
                           konto_gesperrt_text)
@@ -40,21 +40,10 @@ router = APIRouter()
 
 
 # ---------- Models ----------
-class DriverAccountRegister(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8)
-    display_name: str = Field(min_length=2, max_length=120)
-
-    @field_validator("password")
-    @classmethod
-    def password_strength(cls, v: str) -> str:
-        return _check_password_strength(v)
-
-
 class DriverAccountLogin(BaseModel):
     """Kontonummer (13.09.2026): `kontonummer`; `email` ist str statt EmailStr
     (sonst 422 fuer eine Nummer aus einer gecachten Oberflaeche) und bleibt
-    als alter Feldname."""
+    als alter Feldname (keine Suche per E-Mail-Adresse mehr, Schritt 5)."""
     kontonummer: Optional[str] = Field(default=None, max_length=80)
     email: Optional[str] = Field(default=None, max_length=254)
     password: str
@@ -476,8 +465,8 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
         {"$set": {"user_id": pseudonym},
          "$unset": {"meta.email": "", "meta.driver_code": "",
                     "meta.display_name": "", "meta.kontonummer": ""}})
-    # 4) Reset-Tokens weg (Haendler-Verknuepfungen: Schritt 0)
-    r_reset = await db.password_resets.delete_many({"user_id": driver_id})
+    # (Kontonummer 13.09.2026, Schritt 5: keine Reset-Tokens mehr —
+    # Passwoerter setzt nur der Betreiber.)
     return {
         "pseudonym": pseudonym,
         "appointments": (r_offen.modified_count + r_rest.modified_count
@@ -485,68 +474,20 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
         "pickup_reports": r_ber.modified_count,
         "pickup_protocols": r_prot.modified_count,
         "activity_logs": r_log.modified_count,
-        "password_resets": r_reset.deleted_count,
         "dealer_drivers": r_links.deleted_count,
     }
 
 
 # =========================================================
-#   FAHRER-APP  (eigenständige Accounts mit E-Mail/Passwort)
+#   FAHRER-APP  (eigenständige Accounts mit Kontonummer/Passwort)
 # =========================================================
 @router.post("/driver/register")
-async def driver_register(body: DriverAccountRegister, request: Request):
-    """Fahrer registriert sich in der Fahrer-App."""
-    # Kontonummer (13.09.2026), Schritt 0: dasselbe fail-closed-Gate wie
-    # /auth/register — vorher war die Fahrer-Registrierung in Produktion
-    # offen, obwohl Konten nur der Betreiber anlegt.
-    from routes.auth import _self_signup_enabled
-    if not _self_signup_enabled():
-        raise HTTPException(403, "Die Selbst-Registrierung ist deaktiviert. "
-                                 "Bitte stelle eine Zugangs-Anfrage – der "
-                                 "Betreiber legt dein Konto an.")
-    # Rate-limit: 5 new accounts per IP per hour.
-    ip = client_ip(request)
-    if not await driver_register_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
-    email = body.email.lower().strip()
-    # Runde 13: B5 — vorher nur driver_accounts geprueft; dieselbe Adresse
-    # konnte zusaetzlich Firmen-/Sucher-/Kaeuferkonto sein (der gemeinsame
-    # Passwort-Reset fand dann nur das users-Konto). Jetzt plattformweit.
-    from deps import email_vergeben
-    vergeben = await email_vergeben(email)
-    if vergeben == "driver":
-        raise HTTPException(409, "E-Mail ist bereits als Fahrer registriert")
-    if vergeben:
-        raise HTTPException(409, "E-Mail ist bereits registriert (Firmen-, "
-                                 "Sucher- oder Käuferkonto). Bitte eine andere "
-                                 "Adresse verwenden.")
-    did = str(uuid.uuid4())
-    sid = str(uuid.uuid4())
-    doc = {
-        "id": did, "email": email,
-        "password_hash": await hash_password_async(body.password),
-        "display_name": body.display_name.strip(),
-        "active": True,
-        "current_session_id": sid,
-        "created_at": now_iso(),
-    }
-    # Kontonummer (13.09.2026): Nummer aus der gemeinsamen Reihe + FD-Code.
-    from kontenanlage import fahrer_anlegen
-    try:
-        erg = await fahrer_anlegen(db, doc)
-    except DuplicateKeyError:
-        # Runde 13: B5 — Rennen zweier Registrierungen: der Unique-Index
-        # driver_accounts.email entscheidet (vorher 500).
-        raise HTTPException(409, "E-Mail ist bereits als Fahrer registriert")
-    token = create_driver_token(did, sid)
-    return {
-        "token": token,
-        "driver": {
-            "id": did, "email": email, "kontonummer": erg["kontonummer"],
-            "display_name": body.display_name.strip(),
-            "driver_code": erg["driver_code"],
-        },
-    }
+async def driver_register():
+    """Kontonummer (13.09.2026), Schritt 5: Fahrer registrieren sich nicht
+    mehr selbst — der Super-Admin legt sie an (POST /admin/drivers). 410 fuer
+    gecachte alte Oberflaechen der Fahrer-App."""
+    from routes.auth import NUR_BETREIBER_KONTEN
+    raise HTTPException(410, NUR_BETREIBER_KONTEN)
 
 
 @router.post("/driver/login")
@@ -561,15 +502,14 @@ async def driver_login(body: DriverAccountLogin, request: Request):
         raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
     if not await login_ip_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
-    # Kontonummer (13.09.2026): Nummer zuerst, bis Schritt 5 der E-Mail-Zweig.
+    # Kontonummer (13.09.2026): nur per Nummer (Schritt 5: kein E-Mail-Zweig).
     # Nummern sind ueber alle Kontoarten eindeutig -> gemeinsamer Konto-Limiter.
     from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+    from routes.auth import LOGIN_FALSCH
     nr = normalisieren(kennung)
     da = None
     if nr:
         da = await db.driver_accounts.find_one({"kontonummer": nummer_bedingung(nr)})
-    elif "@" in kennung:
-        da = await db.driver_accounts.find_one({"email": kennung.lower()})  # ALTWEG – Schritt 5
     konto_k = anmeldekennung(kennung)
     if await konto_gesperrt(konto_k, ip, da):
         raise HTTPException(429, konto_gesperrt_text())
@@ -577,7 +517,7 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     pw_hash = da["password_hash"] if da else _DUMMY_HASH
     if not await verify_password_async(body.password, pw_hash) or not da:
         await konto_fehlversuch(konto_k, ip)
-        raise HTTPException(401, "E-Mail oder Passwort falsch")
+        raise HTTPException(401, LOGIN_FALSCH)
     if not da.get("active", True):
         raise HTTPException(403, "Account deaktiviert")
     await driver_login_limiter.reset(schluessel)

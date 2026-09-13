@@ -30,8 +30,6 @@ BASE_URL = (os.environ.get("TEST_BASE_URL")
 
 SUPER_USERNAME = os.environ.get("SUPER_ADMIN_USERNAME", "ci-superadmin")
 SUPER_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD", "ci-only-superadmin-pw-1")
-LEGACY_ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "ci-admin@ci.invalid")
-LEGACY_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 
 
 # --------------------- helpers / fixtures ---------------------
@@ -48,13 +46,6 @@ def super_admin_token():
     data = r.json()
     assert "token" in data and "user" in data
     return data["token"], data["user"]
-
-
-@pytest.fixture(scope="module")
-def legacy_admin_token():
-    r = _login(LEGACY_ADMIN_EMAIL, LEGACY_ADMIN_PASSWORD)
-    assert r.status_code == 200, f"legacy admin login failed: {r.status_code} {r.text}"
-    return r.json()["token"], r.json()["user"]
 
 
 @pytest.fixture(scope="module")
@@ -97,20 +88,6 @@ class TestLogin:
         assert isinstance(body.get("token"), str) and len(body["token"]) > 10
         assert body["user"]["role"] == "admin"
         assert body["user"].get("is_super_admin") is True
-
-    def test_login_legacy_admin_email(self):
-        # Runde 12 (06.09.2026): Es gibt nur den Super-Admin. Der fruehere
-        # Bootstrap-Admin aus ADMIN_EMAIL wird nicht mehr angelegt; existiert
-        # er noch aus alten Laeufen, kommt er in keine Betreiber-Route.
-        r = _login(LEGACY_ADMIN_EMAIL, LEGACY_ADMIN_PASSWORD)
-        if r.status_code != 200:
-            assert r.status_code in (401, 403), r.text
-            return
-        u = r.json()["user"]
-        if u.get("is_super_admin"):
-            return                      # ADMIN_EMAIL zeigt auf den Super-Admin selbst
-        h = {"Authorization": f"Bearer {r.json()['token']}"}
-        assert requests.get(f"{BASE_URL}/api/admin/users", headers=h, timeout=20).status_code == 403
 
     def test_login_wrong_password(self):
         r = _login(SUPER_USERNAME, "definitely-wrong")

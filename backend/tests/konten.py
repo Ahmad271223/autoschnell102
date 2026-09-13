@@ -10,10 +10,14 @@ hier EINMAL:
   kennung_fuer_mail(mail)    Bruecke fuer Tests, die ihr Konto per Mail kennen
   login_per_mail(mail, pw)   Ersatz fuer requests.post(.../login, {"email": …})
   token_direkt(konto_id)     Sitzung per DB setzen und Token erzeugen
-  registrieren(json)         Ersatz fuer POST /auth/register (Firma + Chef)
-  sucher_als_chef_anlegen()  Ersatz fuer POST /dealer/sucher
-  fahrer_registrieren(json)  Ersatz fuer POST /driver/register
-  kaeufer_registrieren(json) Ersatz fuer POST /buyer/register (+ Einladung)
+  registrieren(json)         Firma + Chef ueber POST /admin/users (+ Login)
+  sucher_als_chef_anlegen()  Sucher ueber POST /admin/dealers/{id}/sucher
+  fahrer_registrieren(json)  Fahrer ueber POST /admin/drivers (+ Login)
+  kaeufer_registrieren(json) Kaeufer ueber POST /admin/buyers (+ Login, Einladung)
+
+Kontonummer (13.09.2026), Schritt 5: die alten Routen (/auth/register,
+/buyer/register, /driver/register) antworten 410, POST /dealer/sucher 403; eine
+Anmeldung per E-Mail ergibt 401.
 
 Bewusst KEIN conftest.py (Import-Nebenwirkungen in allen Testdateien und in
 In-Prozess-Schleifen). Nur requests, pymongo, bcrypt und — erst beim Aufruf —
@@ -92,8 +96,8 @@ class Antwort:
 # ------------------------------------------------------------ Anmeldung
 def anmelden(kennung, pw, weg="auth", headers=None, timeout=30, **kw):
     """POST /auth/login bzw. /buyer/login, /driver/login mit der Kennung
-    (Kontonummer, Benutzername des Super-Admins — oder bis Schritt 4 eine
-    E-Mail-Adresse, die dann unter dem alten Feldnamen geht)."""
+    (Kontonummer oder Benutzername des Super-Admins). Eine E-Mail-Adresse geht
+    unter dem alten Feldnamen `email` und ergibt seit Schritt 5 immer 401."""
     kennung = "" if kennung is None else str(kennung)
     feld = "email" if "@" in kennung else "kontonummer"
     return requests.post(f"{API}{WEGE[weg]}", json={feld: kennung, "password": pw},
@@ -228,8 +232,9 @@ def kennung_fuer_mail(mail, sammlung="users"):
       - Konto mit Kontonummer -> die Nummer
       - Super-Admin (is_super_admin True) -> Benutzername (fehlt er, wird
         't-'+sha1(mail)[:12] gesetzt — passt nie zum Nummernmuster)
-      - normaler Admin -> die Adresse selbst (bis Schritt 4 greift der
-        '@'-Altzweig; admin_konten_ohne_super_admin zeigt weiter die Adresse)
+      - normaler Admin -> die Adresse selbst (Schritt 5: per Login 401 —
+        login_per_mail erzeugt sein Token direkt; admin_konten_ohne_super_admin
+        zeigt weiter die Adresse)
       - direkt eingefuegtes Chef/Sucher/Kaeufer- bzw. Fahrerkonto ohne
         Nummer -> Nummer nach dem Schema der Kontenanlage (_nummer_vergeben)
       - unbekannte Adresse -> die Adresse (Negativtests bleiben 401)
@@ -263,11 +268,46 @@ def kennung_fuer_mail(mail, sammlung="users"):
     return _nummer_vergeben(sammlung, konto)
 
 
+def _normaler_admin(mail):
+    """Konto mit Rolle admin OHNE is_super_admin zu dieser Adresse (oder None)."""
+    treffer = list(_db().users.find(
+        {"email": {"$regex": f"^{re.escape(str(mail).strip())}$", "$options": "i"},
+         "role": "admin", "is_super_admin": {"$ne": True}}).limit(2))
+    assert len(treffer) <= 1, f"konten: mehrere normale Admins mit der Adresse {mail}"
+    return treffer[0] if treffer else None
+
+
+def _normaler_admin_antwort(konto, pw):
+    """Kontonummer (13.09.2026), Schritt 5: Ein normaler Admin kann sich nicht
+    mehr anmelden (401) — fuer die 403-Pruefungen der Tests wird sein Token
+    zentral direkt erzeugt. Das Passwort wird trotzdem geprueft (falsch -> 401),
+    ein gesperrtes Konto bleibt 403 wie beim Login."""
+    import bcrypt
+    try:
+        ok = bcrypt.checkpw(str(pw).encode(), str(konto.get("password_hash", "")).encode())
+    except ValueError:
+        ok = False
+    if not ok:
+        return Antwort(401, {"detail": "Kontonummer oder Passwort falsch"})
+    if not konto.get("active"):
+        return Antwort(403, {"detail": "Account ist deaktiviert"})
+    token = token_direkt(konto["id"])
+    frisch = _db().users.find_one({"id": konto["id"]}) or konto
+    user = {k: v for k, v in frisch.items() if k not in ("password_hash", "_id", "mfa")}
+    return Antwort(200, {"token": token, "user": user})
+
+
 def login_per_mail(mail, pw, weg="auth", headers=None, timeout=30, **kw):
     """Ersatz fuer requests.post(f"{API}/<weg>/login", json={"email": mail, …}):
     Kennung ueber kennung_fuer_mail bestimmen, dann anmelden. Liefert die
-    Response unveraendert (auch 401/403/429)."""
+    Response unveraendert (auch 401/403/429).
+    Normaler Admin (Rolle admin ohne is_super_admin): Token direkt (siehe
+    _normaler_admin_antwort) — per Login gaebe es seit Schritt 5 nur 401."""
     sammlung = "driver_accounts" if weg == "driver" else "users"
+    if weg == "auth" and mail and "@" in str(mail):
+        normal = _normaler_admin(mail)
+        if normal is not None:
+            return _normaler_admin_antwort(normal, pw)
     return anmelden(kennung_fuer_mail(mail, sammlung), pw, weg, headers=headers,
                     timeout=timeout, **kw)
 
@@ -354,7 +394,7 @@ def _ohne_none(d):
 
 
 def registrieren(json=None, timeout=30, **_):
-    """Ersatz fuer POST /auth/register: Firma + Chef ueber POST /admin/users
+    """Anstelle der entfernten Selbstregistrierung: Firma + Chef ueber POST /admin/users
     (plan_type none, wie die Selbstregistrierung ohne Abo), danach EIN Login
     per Kontonummer. Antwort wie frueher {token, user{…, kontonummer}};
     Fehler der Anlage (409/422) werden unveraendert durchgereicht."""
@@ -377,8 +417,7 @@ def sucher_als_chef_anlegen(chef=None, json=None, timeout=30, headers=None, **_)
     E-Mail, Vor- und Nachname sind optional (E-Mail nur Kontakt) und gehen
     unveraendert an die Admin-Route. Es gibt KEINE Weiterleitung an die alte
     Chef-Route: ungueltiges Token -> die 401 von /auth/me; ein Nicht-Chef ist
-    ein Fehler im Test. Wer die Ablehnung der alten Route pruefen will, ruft
-    POST /dealer/sucher direkt auf (mit '# ALTWEG – Schritt 5')."""
+    ein Fehler im Test. POST /dealer/sucher antwortet seit Schritt 5 fest 403."""
     kopf = headers or (chef if isinstance(chef, dict) else _kopf(chef))
     body = dict(json or {})
     me = requests.get(f"{API}/auth/me", headers=kopf, timeout=timeout)
@@ -401,7 +440,7 @@ def sucher_als_chef_anlegen(chef=None, json=None, timeout=30, headers=None, **_)
 
 
 def fahrer_registrieren(json=None, timeout=30, **_):
-    """Ersatz fuer POST /driver/register: POST /admin/drivers, danach EIN
+    """Anstelle der entfernten Fahrer-Registrierung: POST /admin/drivers, danach EIN
     Login per Kontonummer. Antwort wie frueher {token, driver{id, email,
     kontonummer, display_name, driver_code}}."""
     body = dict(json or {})
@@ -415,7 +454,7 @@ def fahrer_registrieren(json=None, timeout=30, **_):
 
 
 def kaeufer_registrieren(json=None, timeout=30, **_):
-    """Ersatz fuer POST /buyer/register: POST /admin/buyers (b2b_nachweis =
+    """Anstelle der entfernten Kaeufer-Registrierung: POST /admin/buyers (b2b_nachweis =
     gewerblich_bestaetigt), EIN Login per Kontonummer, bei invite_token das
     Einloesen ueber POST /invites/{token}/redeem. Antwort wie frueher
     {ok, token, user{id, email, role, kontonummer, company_name}, network_joined}."""

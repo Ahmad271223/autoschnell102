@@ -784,7 +784,8 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     # parallelen Umhaengungen stand sonst ein falsches "von" im Audit. Ist
     # alt None, trifft der Filter auch das fehlende Feld (Altbestand).
     # Abgeschlossene Fahrzeuge bleiben bewusst umhaengbar (Sucher-Wechsel,
-    # team.delete_sucher) — Einfrieren waere eine Produktentscheidung.
+    # Loeschen eines Suchers durch den Betreiber) — Einfrieren waere eine
+    # Produktentscheidung.
     res = await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": alt},
         {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()},

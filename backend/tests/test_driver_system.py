@@ -1,7 +1,7 @@
 """Tests for new standalone driver-account system (Fahrer-App).
 
 Covers:
-  /api/driver/register, /login, /me, /me PUT  (ALTWEG – Schritt 5)
+  /api/admin/drivers (Anlage), /api/driver/login per Kontonummer, /me, /me PUT
   /api/drivers/add, /api/drivers, DELETE /api/drivers/{id}
   /api/drivers/{id}/conflicts
   /api/driver/appointments
@@ -31,8 +31,8 @@ API = f"{BASE_URL}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 _ADMIN_SUFFIX = uuid.uuid4().hex[:8]
-ADMIN_EMAIL = f"test_admin_{_ADMIN_SUFFIX}@e2etest-mail.de"
-ADMIN_PASSWORD = "TestAdmin123!"
+BETREIBER_MAIL = f"test_admin_{_ADMIN_SUFFIX}@e2etest-mail.de"
+BETREIBER_PW = "TestAdmin123!"
 
 
 def _make_admin():
@@ -40,12 +40,12 @@ def _make_admin():
     import bcrypt
     from pymongo import MongoClient
     dbx = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME]
-    if not dbx.users.find_one({"email": ADMIN_EMAIL}):
+    if not dbx.users.find_one({"email": BETREIBER_MAIL}):
         dbx.users.insert_one({
-            "id": f"testadm_{_ADMIN_SUFFIX}", "email": ADMIN_EMAIL,
+            "id": f"testadm_{_ADMIN_SUFFIX}", "email": BETREIBER_MAIL,
             # Runde 12: es gibt nur den Super-Admin als Betreiber
             "role": "admin", "active": True, "dealer_id": None, "is_super_admin": True,
-            "password_hash": bcrypt.hashpw(ADMIN_PASSWORD.encode(),
+            "password_hash": bcrypt.hashpw(BETREIBER_PW.encode(),
                                            bcrypt.gensalt()).decode(),
             "created_at": "2026-01-01T00:00:00+00:00"})
 
@@ -53,12 +53,12 @@ def _make_admin():
 def _drop_admin():
     from pymongo import MongoClient
     MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)[DB_NAME] \
-        .users.delete_many({"email": ADMIN_EMAIL})
+        .users.delete_many({"email": BETREIBER_MAIL})
 
 
 def _admin_login():
     _make_admin()
-    r = konten.login_per_mail(ADMIN_EMAIL, ADMIN_PASSWORD, "auth",
+    r = konten.login_per_mail(BETREIBER_MAIL, BETREIBER_PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Admin-Login: {r.status_code} {r.text[:200]}"
     return r.json()["token"]
@@ -141,15 +141,20 @@ class TestDriverRegisterLogin:
         code = d["driver_code"]
         assert code.startswith("FD-") and len(code) == 11
 
-    def test_duplicate_email_returns_409(self):
-        # ALTWEG – Schritt 5: prueft die Dubletten-Pruefung der Fahrer-
-        # Selbstregistrierung selbst (wird mit der Route neu geschrieben)
+    def test_gleiche_email_zweites_konto_eigene_nummer(self):
+        # Kontonummer (13.09.2026), Schritt 5: Fahrer legt der Betreiber an; die
+        # E-Mail ist nur Kontakt — dieselbe Adresse ergibt ein zweites Konto mit
+        # eigener Nummer und eigenem FD-Code. Die alte Selbstregistrierung: 410.
         email = f"{_unique('dup')}@example.com"
         payload = {"email": email, "password": "Drv12345!x", "display_name": "Dup"}
-        r1 = requests.post(f"{API}/driver/register", json=payload, timeout=30)  # ALTWEG – Schritt 5
-        assert r1.status_code == 200
-        r2 = requests.post(f"{API}/driver/register", json=payload, timeout=30)  # ALTWEG – Schritt 5
-        assert r2.status_code == 409
+        r1 = konten.fahrer_registrieren(json=payload, timeout=30)
+        r2 = konten.fahrer_registrieren(json=payload, timeout=30)
+        assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
+        d1, d2 = r1.json()["driver"], r2.json()["driver"]
+        assert d1["kontonummer"] != d2["kontonummer"]
+        assert d1["driver_code"] != d2["driver_code"]
+        r = requests.post(f"{API}/driver/register", json=payload, timeout=30)
+        assert r.status_code == 410, r.text
 
     def test_login_success(self):
         email = f"{_unique('lg')}@example.com"

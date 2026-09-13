@@ -6,7 +6,7 @@ Rollentrennung:
 - Sucher -> Fahrerverwaltung, fremde Vertraege, fremde Termine
 - Fahrer nach Abschluss: Status/Bericht/Protokoll gesperrt
 - zwei Haendler mit identischer Fahrzeug-ID: Fahrer sieht das richtige
-- Fahrer-Passwortwechsel + Reset-Bestaetigung ueber driver_accounts
+- Fahrer-Passwortwechsel + Passwort-Setzen durch den Betreiber (Kontonummer)
 - Netzwerk-Mitglieder: Liste (Chef-only), Widerruf, ehrliches network_joined
 - Marktplatz nur fuer Zwischenhaendler
 - Abo-Freischaltung erhaelt Restlaufzeit + schliesst den Antrag
@@ -16,7 +16,6 @@ Rollentrennung:
 Braucht ein laufendes Backend MIT MOCK_PROVIDER_FETCH=true und Mongo-Zugriff.
 Reihenfolgeabhaengig — immer die ganze Datei laufen lassen.
 """
-import hashlib
 import json
 import os
 import secrets
@@ -133,7 +132,6 @@ def welt():
         dbx.dealers.delete_one({"id": did})
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.driver_accounts.delete_many({"email": {"$regex": f"_{SUF}@"}})
-    dbx.password_resets.delete_many({"user_id": z.get("driver_id", "___")})
     dbx.plan_requests.delete_many({"subject_user_id": z.get("sucher_id", "___")})
     dbx.subscriptions.delete_many({"subject_user_id": z.get("sucher_id", "___")})
     dbx.listings_cache.delete_many({"item_id": KA_ID})
@@ -316,25 +314,23 @@ def test_07_fahrer_passwort_wechsel(welt):
     welt["D"] = _hdr(r.json()["token"])
 
 
-def test_08_fahrer_passwort_reset_bestaetigung(welt):
-    token = secrets.token_urlsafe(32)
-    _db().password_resets.insert_one({
-        "id": str(uuid.uuid4()), "user_id": welt["driver_id"],
-        "account_type": "driver",
-        "token_hash": hashlib.sha256(token.encode()).hexdigest(),
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
-        "used": False, "created_at": datetime.now(timezone.utc).isoformat()})
+def test_08_fahrer_passwort_setzt_der_betreiber(welt):
+    """Kontonummer (13.09.2026), Schritt 5: kein Reset-Link mehr — der Betreiber
+    setzt das Passwort (die Sitzung endet), danach meldet sich der Fahrer per
+    Kontonummer an. Die alte Reset-Bestaetigung antwortet 410."""
     r = requests.post(f"{API}/auth/password-reset/confirm",
-                      json={"token": token, "new_password": "ResetPw12345!"}, timeout=30)
+                      json={"token": secrets.token_urlsafe(32), "new_password": "ResetPw12345!"},
+                      timeout=30)
+    assert r.status_code == 410, r.text[:200]
+    r = requests.post(f"{API}/admin/drivers/{welt['driver_id']}/password", headers=welt["SA"],
+                      json={"new_password": "ResetPw12345!"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    r = konten.login_per_mail(f"rt_fahrer_{SUF}@e2etest-mail.de", "ResetPw12345!", "driver",
-        timeout=30)
+    assert requests.get(f"{API}/driver/me", headers=welt["D"], timeout=30).status_code == 401
+    nr = _db().driver_accounts.find_one({"id": welt["driver_id"]})["kontonummer"]
+    assert konten.anmelden(nr, "NeuesPw12345!", "driver", timeout=30).status_code == 401
+    r = konten.anmelden(nr, "ResetPw12345!", "driver", timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["D"] = _hdr(r.json()["token"])
-    # Token ist verbraucht
-    r = requests.post(f"{API}/auth/password-reset/confirm",
-                      json={"token": token, "new_password": "NochEinPw12345!"}, timeout=30)
-    assert r.status_code == 400
 
 
 # ------------------------------------------------ Marktplatz

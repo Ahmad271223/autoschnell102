@@ -115,20 +115,29 @@ def pruefe_produktion(log) -> None:
             "JWT_SECRET fehlt, ist ein Platzhalter oder zu kurz (<32 "
             "Zeichen). Erzeugen mit: openssl rand -hex 32")
 
-    admin_pw = os.environ.get("ADMIN_PASSWORD", "").strip()
-    if admin_pw in _VERBOTENE_PASSWOERTER or len(admin_pw) < 12:
-        fehler.append(
-            "ADMIN_PASSWORD fehlt, ist ein bekannter Demo-/CI-Wert oder zu "
-            "kurz (<12 Zeichen).")
+    # Kontonummer (13.09.2026), Schritt 5: den Bootstrap-Admin per E-Mail samt
+    # Passwort-Pflicht gibt es nicht mehr (nur der Super-Admin wird geseedet).
     super_pw = os.environ.get("SUPER_ADMIN_PASSWORD", "").strip()
     if super_pw and (super_pw in _VERBOTENE_PASSWOERTER or len(super_pw) < 12):
         fehler.append("SUPER_ADMIN_PASSWORD ist gesetzt, aber unsicher.")
+    # Ein Benutzername im Kontonummer-Muster (z.B. '10023') wuerde vom
+    # Nummern-Zweig der Anmeldung verdeckt; seed_super_admin legt ihn dann
+    # gar nicht an — der Betreiber waere ausgesperrt.
+    super_name = os.environ.get("SUPER_ADMIN_USERNAME", "").strip()
+    if super_name:
+        from kontonummer import normalisieren
+        if normalisieren(super_name):
+            fehler.append(
+                f"SUPER_ADMIN_USERNAME '{super_name}' sieht wie eine Kontonummer aus "
+                "— bitte einen Benutzernamen mit Buchstaben waehlen (sonst ist "
+                "die Betreiber-Anmeldung nicht moeglich).")
 
     frontend = os.environ.get("FRONTEND_URL", "").strip()
     if not frontend.startswith("https://") or "localhost" in frontend:
         fehler.append(
             "FRONTEND_URL muss in Produktion eine https-Adresse der echten "
-            "Domain sein (Passwort-Reset-Links werden daraus gebaut).")
+            "Domain sein (Links der Plattform, z.B. in Vertragsmails und "
+            "Einladungen, werden daraus gebaut).")
 
     cors = os.environ.get("CORS_ORIGINS", "").strip()
     if not cors or "localhost" in cors or cors == "*":
@@ -240,8 +249,6 @@ def pruefe_produktion(log) -> None:
         (fehler if ist_prod else warnungen).append(
             "Stripe nur halb konfiguriert (STRIPE_API_KEY und STRIPE_WEBHOOK_SECRET "
             "beide setzen oder beide leer lassen — sonst ist Online-Zahlung aus).")
-    if os.environ.get("SELF_SIGNUP", "").strip().lower() in ("1", "true", "yes") and ist_prod:
-        warnungen.append("SELF_SIGNUP=true: offene Selbstregistrierung ist in Produktion aktiv.")
     if os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "").strip().lower() in ("1", "true", "yes"):
         warnungen.append("AUTO_DATEN_SCHAEDEN_FREITEXT=true: Freitext-Schaeden koennen "
                          "Personendaten enthalten (Standard: false).")

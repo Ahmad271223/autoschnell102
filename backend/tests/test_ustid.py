@@ -2,8 +2,9 @@
 """USt-IdNr.-Pruefung (Go-Live-Audit 09/2026, Punkt 40).
 
 Unit-Tests fuer Format/Normalisierung/VIES-Auswertung (ohne Netz) und ein
-Endpunkt-Test: falsche USt-IdNr. bei der Zwischenhaendler-Registrierung
-wird mit 422 und klarem Text abgewiesen (kein Konto entsteht).
+Endpunkt-Test: falsche USt-IdNr. bei der Kaeufer-Anlage durch den Betreiber
+(POST /admin/buyers) und in der Zugangs-Anfrage (art=kaeufer) wird mit 422 und
+klarem Text abgewiesen (kein Konto, keine Anfrage entsteht).
 """
 import asyncio
 import os
@@ -119,7 +120,7 @@ def test_vies_ungueltig_und_nicht_pruefbar(monkeypatch):
     assert asyncio.run(ustid.vies_pruefen("DE12345"))["status"] == "nicht_pruefbar"
 
 
-def test_registrierung_weist_falsche_ustid_ab():
+def test_kaeuferanlage_und_anfrage_weisen_falsche_ustid_ab():
     try:
         requests.get(f"{API}/health", timeout=5)
     except requests.RequestException:
@@ -130,5 +131,12 @@ def test_registrierung_weist_falsche_ustid_ab():
         "password": "UstIdTest123!x", "gewerblich_bestaetigt": True,
         "ust_id": "DE12345678",
     }, timeout=30)
+    assert r.status_code == 422, r.text[:300]
+    assert "Format von DE" in r.text
+    # Kontonummer (13.09.2026): Zwischenhaendler fragen den Zugang an
+    r = requests.post(f"{API}/zugang-anfrage", json={
+        "art": "kaeufer", "company_name": "USt Test GmbH", "contact_person": "Test Person",
+        "email": "ustid-test-nicht-anlegen@e2etest-mail.de", "gewerblich_bestaetigt": True,
+        "ust_id": "DE12345678"}, timeout=30)
     assert r.status_code == 422, r.text[:300]
     assert "Format von DE" in r.text

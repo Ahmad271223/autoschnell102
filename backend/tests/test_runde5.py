@@ -11,7 +11,6 @@
 
 Braucht laufendes Backend (TEST_BASE_URL) + Mongo-Zugriff.
 """
-import asyncio
 import os
 import sys
 import uuid
@@ -144,23 +143,9 @@ def test_04_client_errors_ohne_query(welt):
     assert doc["path"] == "https://app.example/passwort-reset"
 
 
-def test_05_seed_reaktiviert_gesperrten_admin_nicht(welt):
-    """seed_admin()/seed_super_admin() setzen 'active' nicht mehr auf True."""
-    import server  # noqa: F401  (Modul laedt .env; Funktionen direkt aufrufen)
-    dbx = _db()
-    mail = os.environ.get("ADMIN_EMAIL", "")
-    if not mail:
-        pytest.skip("ADMIN_EMAIL nicht gesetzt")
-    u = dbx.users.find_one({"email": mail})
-    if not u:
-        pytest.skip("Bootstrap-Admin nicht vorhanden")
-    vorher = u.get("active", True)
-    dbx.users.update_one({"email": mail}, {"$set": {"active": False}})
-    try:
-        asyncio.run(server.seed_admin())
-        assert dbx.users.find_one({"email": mail})["active"] is False
-    finally:
-        dbx.users.update_one({"email": mail}, {"$set": {"active": vorher}})
+# test_05 (Admin-Seed reaktiviert keinen gesperrten Admin) entfaellt:
+# Kontonummer (13.09.2026), Schritt 5 — der Admin-Seed ist entfernt, es gibt nur
+# den Super-Admin (seed_super_admin fasst 'active' ebenfalls nicht an).
 
 
 def test_06_chef_sperre_kaskadiert_auf_sucher(welt):

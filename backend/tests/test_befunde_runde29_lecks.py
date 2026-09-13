@@ -359,9 +359,11 @@ def test_10_zweite_anfrage_frischt_firmen_und_kontaktdaten_auf(welt):
 
 
 # ------------------------------------------------------ Registrierung
-def test_08_fahrer_registrierung_hat_eigenen_zaehler(welt, monkeypatch):
-    """Befund 6: Beide Limiter hiessen 'registrierung' und teilten sich
-    damit dieselben 5 Versuche je Stunde und IP."""
+def test_08_registrierungszaehler_ohne_fahrer_registrierung(welt, monkeypatch):
+    """Befund 6 (Runde 29): Firmen- und Fahrer-Registrierung teilten sich
+    einen Zaehler. Kontonummer (13.09.2026), Schritt 5: die Fahrer-
+    Registrierung und ihr Zaehler sind entfernt; register_limiter (Zugangs-
+    Anfragen) zaehlt weiter 5 je Stunde und IP."""
     w = welt
     RL = _modul("rate_limiter")
     D = _modul("deps")
@@ -369,18 +371,15 @@ def test_08_fahrer_registrierung_hat_eigenen_zaehler(welt, monkeypatch):
     D.db = w.db
     monkeypatch.setattr(RL, "_RATE_LIMIT_ENABLED", True)
     monkeypatch.setattr(RL, "_EXEMPT_LOOPBACK", False)
-    assert RL.register_limiter.name != RL.driver_register_limiter.name
+    assert not hasattr(RL, "driver_register_limiter")
 
     async def lauf():
         ip = f"9.9.9.{w.s[:1]}"
-        firma = [await RL.register_limiter.check(ip) for _ in range(6)]
-        fahrer = await RL.driver_register_limiter.check(ip)
-        return firma, fahrer
+        return [await RL.register_limiter.check(ip) for _ in range(6)]
 
     try:
-        firma, fahrer = w.run(lauf())
+        firma = w.run(lauf())
     finally:
         if alt_db is not None:
             D.db = alt_db
     assert firma[:5] == [True] * 5 and firma[5] is False, firma
-    assert fahrer is True, "Die Fahrer-Anmeldung darf nicht mitgezaehlt werden"

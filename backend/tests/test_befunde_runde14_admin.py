@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Nachpruefung Runde 14 (07.09.2026), Gruppe "admin" — routes/admin.py.
 
-  12  Firmenloeschung entfernt password_resets aller Konten der Firma
+  12  Firmenloeschung entfernt alle Konten der Firma (password_resets entfallen,
+      Kontonummer 13.09.2026)
   17  Fahrer-Sperre trennt offene Termine vom Fahrer (+ Audit je Firma)
   18  PUT /admin/users/{id} active=false verwirft Sitzung (auch der Sucher);
       active=true laesst keine alte Sitzung wieder gelten
@@ -67,7 +68,7 @@ def aufraeumen():
     dbx.users.delete_many({"$or": [{"id": muster}, {"email": muster}, {"dealer_id": muster}]})
     dbx.dealers.delete_many({"$or": [{"id": muster}, {"email": muster}]})
     dbx.driver_accounts.delete_many({"$or": [{"id": muster}, {"email": muster}]})
-    for coll in ("subscriptions", "appointments", "password_resets", "zugang_grants",
+    for coll in ("subscriptions", "appointments", "zugang_grants",
                  "activity_logs", "network_members", "buyer_favorites",
                  "listing_interest", "plan_requests", "dealer_drivers"):
         dbx[coll].delete_many({"$or": [{"dealer_id": muster}, {"user_id": muster},
@@ -221,22 +222,17 @@ def test_50_put_abo_lehnt_ungueltiges_datum_ab(aufraeumen):
     assert sub["expires_at"].startswith("2027-06-30T23:59:59"), sub
 
 
-def test_12_firmenloeschung_entfernt_password_resets(aufraeumen):
+def test_12_firmenloeschung_entfernt_konten(aufraeumen):
     import routes.admin as a
     dbx = _db()
     dealer_id, chef_id, sucher_id = _firma_anlegen(dbx, "firma")
-    for uid in (chef_id, sucher_id):
-        dbx.password_resets.insert_one({"id": f"r14_reset_{uid}", "user_id": uid,
-                                        "token_hash": "h", "requested_ip": "1.2.3.4",
-                                        "created_at": _iso(0), "loeschen_ab": JETZT + timedelta(days=7)})
     dbx.subscriptions.insert_one({"id": f"r14_sub_{SUF}", "dealer_id": dealer_id,
                                   "subject_user_id": sucher_id, "plan": "monthly",
                                   "status": "active", "expires_at": _iso(3), "created_at": _iso(0)})
     erg = asyncio.run(a.admin_delete_user(chef_id, firma_loeschen=True, admin=SA))
     assert erg["ok"] is True
-    assert erg["geloescht"].get("password_resets") == 2, erg
+    assert "password_resets" not in erg["geloescht"], erg
     assert erg["geloescht"].get("users") == 2
-    assert dbx.password_resets.count_documents({"user_id": {"$in": [chef_id, sucher_id]}}) == 0
     assert dbx.users.count_documents({"dealer_id": dealer_id}) == 0
     assert dbx.dealers.count_documents({"id": dealer_id}) == 0
     assert dbx.subscriptions.count_documents({"dealer_id": dealer_id}) == 0
@@ -263,8 +259,6 @@ def test_24_58_kaeufer_loeschung_grabstein_und_wiederaufnahme(aufraeumen, monkey
     dbx.subscriptions.insert_one({"id": f"r14_bsub_{SUF}", "dealer_id": None, "subject_user_id": buyer_id,
                                   "plan": "monthly", "status": "active", "expires_at": _iso(3),
                                   "created_at": _iso(0)})
-    dbx.password_resets.insert_one({"id": f"r14_breset_{SUF}", "user_id": buyer_id, "token_hash": "h",
-                                    "created_at": _iso(0), "loeschen_ab": JETZT + timedelta(days=7)})
     dbx.buyer_favorites.insert_one({"id": f"r14_fav_{SUF}", "buyer_user_id": buyer_id,
                                     "listing_id": "x", "created_at": _iso(0)})
 
@@ -284,7 +278,6 @@ def test_24_58_kaeufer_loeschung_grabstein_und_wiederaufnahme(aufraeumen, monkey
     g = dbx.zugang_grants.find_one({"session_id": f"cs_r14_{SUF}"})
     assert g and g["user_id"] == pseudonym and g.get("pseudonymisiert_at")
     assert dbx.subscriptions.count_documents({"subject_user_id": buyer_id}) == 0
-    assert dbx.password_resets.count_documents({"user_id": buyer_id}) == 0
     assert dbx.buyer_favorites.count_documents({"buyer_user_id": buyer_id}) == 0
 
     # Wiederaufnahme: zweiter Aufruf fuehrt zu Ende (kein 404), Pseudonym stabil
@@ -502,7 +495,7 @@ def test_http_24_58_kaeufer_loeschen(http_welt):
     assert requests.delete(f"{API}/admin/users/{buyer_id}", headers=http_welt["S"], timeout=30).status_code == 404
 
 
-def test_http_12_firmenloeschung_password_resets(http_welt):
+def test_http_12_firmenloeschung(http_welt):
     if not HTTP:
         pytest.skip(HTTP_GRUND)
     dbx = _db()
@@ -510,10 +503,8 @@ def test_http_12_firmenloeschung_password_resets(http_welt):
     assert r.status_code == 200, r.text[:300]
     chef_id, dealer_id = r.json()["user_id"], r.json()["dealer_id"]
     http_welt.setdefault("dealer_ids", []).append(dealer_id)
-    dbx.password_resets.insert_one({"id": f"r14_hreset_{SUF}", "user_id": chef_id, "token_hash": "h",
-                                    "created_at": _iso(0), "loeschen_ab": JETZT + timedelta(days=7)})
     r = requests.delete(f"{API}/admin/users/{chef_id}?firma_loeschen=true", headers=http_welt["S"], timeout=30)
     assert r.status_code == 200, r.text[:300]
-    assert r.json()["geloescht"].get("password_resets") == 1
-    assert dbx.password_resets.count_documents({"user_id": chef_id}) == 0
+    assert "password_resets" not in r.json()["geloescht"], r.json()
+    assert dbx.users.count_documents({"dealer_id": dealer_id}) == 0
     assert dbx.dealers.count_documents({"id": dealer_id}) == 0

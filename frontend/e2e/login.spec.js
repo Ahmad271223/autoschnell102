@@ -80,7 +80,8 @@ test.describe("Anmeldung per Formular", () => {
 
   test("Falsches Passwort zeigt eine Fehlermeldung", async ({ page }) => {
     await h.formLogin(page, "auth", firma, { passwort: "falsches-Passwort-1!" });
-    await expect(page.getByText("E-Mail/Benutzername oder Passwort falsch")).toBeVisible();
+    // Kontonummer (13.09.2026), Schritt 5: ein neutraler Text fuer alle Masken
+    await expect(page.getByText("Kontonummer oder Passwort falsch")).toBeVisible();
     await expect(page).toHaveURL(/\/login/);
     await expect(page.getByTestId("login-submit")).toBeEnabled();
   });

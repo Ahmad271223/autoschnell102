@@ -16,7 +16,7 @@
 
 Einheitentests laufen in-Prozess gegen Mongo (Muster tests/test_fahrer_
 zugriff.py). HTTP-Tests laufen nur mit RUNDE14_HTTP=1 (Backend auf
-TEST_BASE_URL mit SELF_SIGNUP=true, nach dem Neustart mit neuem Code).
+TEST_BASE_URL, nach dem Neustart mit neuem Code).
 """
 import asyncio
 import base64
@@ -480,7 +480,7 @@ def welt():
         r = konten.registrieren(json={
             "email": mail, "password": PW, "company_name": f"R14 Fahrer-Autohaus {nr} {SUF}",
             "contact_person": f"Chef {nr}", "phone": "0511 1"}, timeout=30)
-        assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+        assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
         z[f"h{nr}"] = {"kopf": _kopf(r.json()["token"]), "dealer_id": r.json()["user"]["dealer_id"],
                        "user_id": r.json()["user"]["id"], "mail": mail}
         dbx.subscriptions.insert_one({

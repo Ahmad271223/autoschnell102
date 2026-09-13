@@ -5,9 +5,11 @@
          gesperrt, nicht geloescht) und Sichtbarkeit des Inserats pruefen
   48     akzeptieren im Status 'gegenangebot' -> 400 (eigenes Angebot
          liegt beim Kaeufer); Frontend zeigt den Knopf dort nicht
-  62     buyer_register: DuplicateKeyError -> 409 statt 500
-  63     buyer_register: Fehler beim Einloesen der Einladung kippt die
-         Registrierung nicht mehr
+  62     Kaeufer-Anlage (Kontonummer 13.09.2026: POST /admin/buyers statt
+         Selbstregistrierung): Kontonummer-Dublette -> neuer Versuch, jede
+         andere DuplicateKeyError -> 409 statt 500
+  63     Anlage ohne Token; die Einladung loest der Kaeufer nach der Anmeldung
+         ein, ein Fehler dabei laesst das Konto unberuehrt
   64/115 _redeem_invite: Mitgliedschaft zuerst, Verbrauch atomar danach,
          Rueckbau bei Misserfolg (DELETE der Einladung im Fenster)
   66     verwaiste Netzwerkmitglieder: active=False, fehlt=True
@@ -260,51 +262,70 @@ class _DbHaken:
 
 def _request():
     from starlette.requests import Request
-    return Request({"type": "http", "method": "POST", "path": "/api/buyer/register",  # ALTWEG – Schritt 5
+    return Request({"type": "http", "method": "POST", "path": "/api/admin/buyers",
                     "headers": [], "client": ("127.0.0.1", 40000), "query_string": b""})
 
 
-def _register_body(mail, invite=None):
-    import routes.marketplace as m
-    return m.BuyerRegisterIn(company_name=f"R14 Kaeufer {SUF}", contact_name="K M",
-                             email=mail, password=PW, phone="0511 2",
-                             invite_token=invite, gewerblich_bestaetigt=True)
+SA = {"id": f"r14mp_sa_{SUF}", "role": "admin", "is_super_admin": True,
+      "active": True, "dealer_id": ""}
 
 
-@pytest.fixture()
-def ohne_limiter(monkeypatch):
-    import routes.marketplace as m
-
-    async def frei(_ip):
-        return True
-    monkeypatch.setattr(m.register_limiter, "check", frei)
+def _kaeufer_body(mail):
+    import routes.admin as a
+    return a.AdminKaeuferIn(company_name=f"R14 Kaeufer {SUF}", contact_name="K M",
+                            email=mail, password=PW, phone="0511 2", b2b_nachweis=True)
 
 
-def test_u_62_dublette_beim_insert_gibt_409(monkeypatch, ohne_limiter):
-    import routes.marketplace as m
+def _aufraeumen_mail(mail):
+    dbx = _db()
+    for u in dbx.users.find({"email": mail}, {"_id": 0, "id": 1}):
+        dbx.activity_logs.delete_many({"$or": [{"user_id": u["id"]}, {"ref": u["id"]}]})
+    dbx.users.delete_many({"email": mail})
+
+
+def test_u_62_kontonummer_dublette_neuer_versuch_sonst_409(monkeypatch):
+    import routes.admin as a
     from fastapi import HTTPException
     from pymongo.errors import DuplicateKeyError
-    # Kontonummer (13.09.2026), Schritt 0: buyer_register hat jetzt das
-    # SELF_SIGNUP-Gate — ausdruecklich an, unabhaengig von der Umgebung.
-    monkeypatch.setenv("SELF_SIGNUP", "true")
+    echt = a.db
+    nummern = []
 
-    def ersatz(_echt):
-        async def insert_one(doc, *a, **kw):
-            raise DuplicateKeyError("E11000 duplicate key error index: email_1")
+    def einmal_dublette(echt_insert):
+        async def insert_one(doc, *args, **kw):
+            nummern.append(doc.get("kontonummer"))
+            if len(nummern) == 1:
+                raise DuplicateKeyError(
+                    "E11000 duplicate key error collection: users index: kontonummer_eindeutig")
+            return await echt_insert(doc, *args, **kw)
         return insert_one
-    monkeypatch.setattr(m, "db", _DbHaken(m.db, "users", "insert_one", ersatz))
+    monkeypatch.setattr(a, "db", _DbHaken(echt, "users", "insert_one", einmal_dublette))
     mail = f"r14dup_{SUF}@{MAIL}"
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(m.buyer_register(_register_body(mail), _request()))
-    assert e.value.status_code == 409
-    assert _db().users.count_documents({"email": mail}) == 0
+    try:
+        r = asyncio.run(a.admin_create_buyer(_kaeufer_body(mail), admin=SA))
+        assert r["ok"] is True and len(nummern) == 2 and nummern[0] != nummern[1], nummern
+        assert r["kontonummer"] == nummern[1]
+        assert _db().users.count_documents({"email": mail}) == 1
+    finally:
+        _aufraeumen_mail(mail)
+
+    def andere_dublette(_echt):
+        async def insert_one(doc, *args, **kw):
+            raise DuplicateKeyError("E11000 duplicate key error index: id_1")
+        return insert_one
+    monkeypatch.setattr(a, "db", _DbHaken(echt, "users", "insert_one", andere_dublette))
+    mail2 = f"r14dup2_{SUF}@{MAIL}"
+    try:
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(a.admin_create_buyer(_kaeufer_body(mail2), admin=SA))
+        assert e.value.status_code == 409
+        assert _db().users.count_documents({"email": mail2}) == 0
+    finally:
+        _aufraeumen_mail(mail2)
 
 
-def test_u_63_einladungsfehler_kippt_registrierung_nicht(monkeypatch, ohne_limiter):
+def test_u_63_anlage_ohne_token_einladung_erst_nach_login(monkeypatch):
+    import routes.admin as a
     import routes.marketplace as m
-    from auth import decode_token
-    # Kontonummer (13.09.2026), Schritt 0: SELF_SIGNUP-Gate ausdruecklich an.
-    monkeypatch.setenv("SELF_SIGNUP", "true")
 
     async def kaputt(token, uid):
         raise RuntimeError("Mongo weg")
@@ -312,16 +333,17 @@ def test_u_63_einladungsfehler_kippt_registrierung_nicht(monkeypatch, ohne_limit
     mail = f"r14inv_{SUF}@{MAIL}"
     dbx = _db()
     try:
-        r = asyncio.run(m.buyer_register(_register_body(mail, invite="egal"), _request()))
-        assert r["ok"] is True and r["network_joined"] is False, r
+        r = asyncio.run(a.admin_create_buyer(_kaeufer_body(mail), admin=SA))
+        assert r["ok"] is True and "token" not in r, r
         u = dbx.users.find_one({"email": mail})
         assert u and u["role"] == "b2b_buyer" and u["active"] is True
-        # Token passt zur gespeicherten Sitzung -> Login sofort moeglich
-        assert decode_token(r["token"])["sid"] == u["current_session_id"]
+        assert u["current_session_id"] is None, "die erste Anmeldung macht der Kaeufer selbst"
+        with pytest.raises(RuntimeError):
+            asyncio.run(m.redeem_invite("egal", user={"id": u["id"], "role": "b2b_buyer"}))
+        u2 = dbx.users.find_one({"id": u["id"]})
+        assert u2 and u2["active"] is True and u2["kontonummer"] == r["kontonummer"]
     finally:
-        u = dbx.users.find_one({"email": mail}) or {}
-        dbx.activity_logs.delete_many({"user_id": u.get("id", "-")})
-        dbx.users.delete_many({"email": mail})
+        _aufraeumen_mail(mail)
 
 
 # --------------------------------------------------------------- Nr. 64/115
@@ -527,7 +549,7 @@ def _haendler():
     r = konten.registrieren(json={
         "email": mail, "password": PW, "company_name": f"R14 Autohaus {SUF}",
         "contact_person": "Chef", "phone": "0511 1"}, timeout=30)
-    assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+    assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
     kopf = _kopf(r.json()["token"])
     r2 = requests.put(f"{API}/dealer/marketplace-profile", headers=kopf,
                       json={"public": True, "description": "R14"}, timeout=30)
@@ -721,21 +743,25 @@ def test_h_48_eigenes_gegenangebot_nicht_annehmbar(welt):
     _inserat_freigeben(lid)
 
 
-def test_h_62_parallele_registrierung_gleiche_mail(welt):
+def test_h_62_parallele_kaeuferanlage_verschiedene_nummern(welt):
+    """Kontonummer (13.09.2026), Schritt 5: statt zweier Selbstregistrierungen
+    legt der Betreiber gleichzeitig vier Kaeufer mit derselben Kontakt-E-Mail
+    an — alle 200, vier verschiedene Nummern, kein DuplicateKeyError im Log."""
     if not HTTP:
         pytest.skip(HTTP_GRUND)
     mail = f"r14mp_dup_{SUF}@{MAIL}"
     start = _jetzt()
-    body = {"gewerblich_bestaetigt": True, "company_name": f"R14 Dup {SUF}",
-            "contact_name": "K M", "email": mail, "password": PW, "phone": "0511 2"}
+    kopf = konten.super_kopf()
 
-    def schuss(_):
-        # ALTWEG – Schritt 5: Rennen zweier Selbstregistrierungen (h_62)
-        return requests.post(f"{API}/buyer/register", json=body, timeout=30).status_code  # ALTWEG – Schritt 5
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        codes = sorted(ex.map(schuss, range(2)))
-    assert codes == [200, 409], codes
-    assert _db().users.count_documents({"email": mail}) == 1
+    def schuss(i):
+        return requests.post(f"{API}/admin/buyers", headers=kopf, timeout=30, json={
+            "company_name": f"R14 Dup {i} {SUF}", "contact_name": "K M", "email": mail,
+            "password": PW, "phone": "0511 2", "b2b_nachweis": True})
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        antworten = list(ex.map(schuss, range(4)))
+    assert [r.status_code for r in antworten] == [200] * 4, [r.text[:120] for r in antworten]
+    assert len({r.json()["kontonummer"] for r in antworten}) == 4
+    assert _db().users.count_documents({"email": mail}) == 4
     assert _db().error_logs.count_documents({"error_type": "DuplicateKeyError",
                                              "created_at": {"$gte": start}}) == 0
 

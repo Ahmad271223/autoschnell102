@@ -37,7 +37,7 @@ def welt():
     from motor.motor_asyncio import AsyncIOMotorClient
     s = uuid.uuid4().hex[:10]
     namen = ["deps", "routes.team", "routes.bestand", "kaufvorgang",
-             "lifecycle", "cleanup_service"]
+             "lifecycle", "cleanup_service", "routes.admin"]
     mods = [_modul(n) for n in namen]
     alt = [(m, getattr(m, "db", None)) for m in mods]
 
@@ -146,10 +146,14 @@ def test_02_abgeschlossener_vorgang_bleibt_als_beleg_stehen(welt):
 
 
 # ------------------------------------------------------- Sucher loeschen
-def test_03_geloeschter_sucher_hinterlaesst_keine_toten_verweise(welt, monkeypatch):
+def test_03_geloeschter_sucher_hinterlaesst_keine_toten_verweise(welt):
+    """Kontonummer (13.09.2026), Schritt 5: Sucher loescht nur noch der
+    Betreiber (DELETE /admin/users/{id}) — die Uebernahme aus der entfernten
+    Chef-Route gilt dort."""
     w = welt
-    T = _modul("routes.team")
-    monkeypatch.setattr(T, "_chef_verwaltung_erlaubt", lambda: True)
+    A = _modul("routes.admin")
+    sa = {"id": f"betreiber_r29l_{w.s}", "role": "admin", "is_super_admin": True,
+          "dealer_id": ""}
     v_eigen, v_fremd = f"ve_{w.s}", f"vf_{w.s}"
 
     async def lauf():
@@ -160,22 +164,27 @@ def test_03_geloeschter_sucher_hinterlaesst_keine_toten_verweise(welt, monkeypat
             {"id": v_fremd, "dealer_id": w.dealer_id, "owner_user_id": w.b["id"],
              "mitbearbeiter_ids": [w.a["id"]], "lifecycle": "verglichen",
              "created_at": _jetzt()}])
-        ok = await T.delete_sucher(w.a["id"], w.chef)
+        await w.db.plan_requests.insert_one({"id": f"pr_{w.s}", "type": "sucher_abo",
+                                             "subject_user_id": w.a["id"],
+                                             "dealer_id": w.dealer_id, "status": "offen"})
+        ok = await A.admin_delete_user(w.a["id"], admin=sa)
         eigen = await w.db.vehicles.find_one({"id": v_eigen}, {"_id": 0})
         fremd = await w.db.vehicles.find_one({"id": v_fremd}, {"_id": 0})
         weg = await w.db.users.find_one({"id": w.a["id"]})
-        log = await w.db.activity_logs.find_one({"action": "sucher.geloescht"},
+        anfragen = await w.db.plan_requests.count_documents({"subject_user_id": w.a["id"]})
+        log = await w.db.activity_logs.find_one({"action": "admin.user.geloescht"},
                                                 {"_id": 0})
-        return ok, eigen, fremd, weg, log
+        return ok, eigen, fremd, weg, anfragen, log
 
-    ok, eigen, fremd, weg, log = w.run(lauf())
-    assert ok == {"ok": True} and weg is None
+    ok, eigen, fremd, weg, anfragen, log = w.run(lauf())
+    assert ok == {"ok": True, "geloescht": "nur_nutzer"} and weg is None
     # Das Fahrzeug des geloeschten Suchers gehoert jetzt dem Firmenaccount.
     assert eigen["owner_user_id"] == w.chef["id"], eigen
     assert eigen["uebernommen_von"] == w.a["id"], eigen
     # Bei fremden Fahrzeugen verschwindet er aus den Mitbearbeitern.
     assert fremd["owner_user_id"] == w.b["id"], fremd
     assert fremd["mitbearbeiter_ids"] == [], fremd
+    assert anfragen == 0
     assert log["meta"]["fahrzeuge_uebernommen"] == 1, log
 
 

@@ -14,15 +14,17 @@
   J1  zweites dealer-Konto je Firma ueber Rollenaenderung moeglich
   J2  Sucher-Loeschung liess offene Abo-Anfragen zurueck; Reset-Loeschung traf nie
   J3  Sucher-Liste lieferte "alles ausser Passwort"
-  K1  Selbst-Registrierung fail-open ohne APP_ENV
+  K1  Selbst-Registrierung fail-open ohne APP_ENV (Kontonummer 13.09.2026:
+      Registrierung entfernt, Test entfaellt)
   K2  JWT_SECRET fehlte -> Zufallswert je Prozess (Load Balancer!)
   K3  MFA-Schritt verbrauchte Passwort-Login-Versuche
   K4  Passwort-Reset: alte Links vor dem Versand entwertet; kein Limit je Konto
+      (entfallen: kein Reset per Mail mehr)
   K5  Freischaltungs-Status frei waehlbar
   L1  Frontend: abgemeldeter Tab uebernahm das zuletzt angemeldete Konto
       (Jest: frontend/src/lib/sitzung.test.js)
 
-HTTP-Teile brauchen das Backend auf TEST_BASE_URL mit SELF_SIGNUP=true.
+HTTP-Teile brauchen das Backend auf TEST_BASE_URL.
 """
 import inspect
 import os
@@ -170,25 +172,6 @@ def test_h6_ausstattung_nur_bekannte_namen_und_exact_erreichbar():
     assert "climatisation" not in regeln_validieren({"climatisation": {"mode": "exact"}})
 
 
-def test_k1_selbst_registrierung_fail_closed(monkeypatch):
-    from routes.auth import _self_signup_enabled
-    for k in ("SELF_SIGNUP", "APP_ENV"):
-        monkeypatch.delenv(k, raising=False)
-    assert _self_signup_enabled() is False, "ohne APP_ENV muss die Registrierung AUS sein"
-    monkeypatch.setenv("APP_ENV", "production")
-    assert _self_signup_enabled() is False
-    monkeypatch.setenv("SELF_SIGNUP", "true")
-    assert _self_signup_enabled() is True
-    monkeypatch.setenv("SELF_SIGNUP", "false")
-    monkeypatch.setenv("APP_ENV", "development")
-    assert _self_signup_enabled() is False
-    monkeypatch.delenv("SELF_SIGNUP")
-    assert _self_signup_enabled() is True
-    # Team-Verwaltung durch den Chef folgt derselben Regel (keine zweite Kopie)
-    import routes.team as t
-    assert "_self_signup_enabled" in inspect.getsource(t._chef_verwaltung_erlaubt)
-
-
 def test_k2_fehlendes_jwt_secret_verhindert_den_start():
     env = {**os.environ, "JWT_SECRET": "", "APP_ENV": ""}
     lauf = dict(cwd=str(BACKEND), env=env, capture_output=True, text=True,
@@ -210,10 +193,8 @@ def test_k3_k4_k5_quelle():
     assert '"$inc": {"mfa.fehlversuche": 1}' in src_mfa
     assert 'int(m.get("fehlversuche", 0)) + 1' not in src_mfa
     assert a.login_mfa_limiter.name != a.login_limiter.name
-    src_reset = inspect.getsource(a.password_reset_request)
-    assert src_reset.index("send_email(") < src_reset.index("delete_many("), \
-        "alte Reset-Links duerfen erst NACH erfolgreichem Versand entwertet werden"
-    assert "reset_konto_limiter.check" in src_reset
+    # Kontonummer (13.09.2026), Schritt 5: K4 entfaellt — kein Reset per Mail
+    assert "send_email" not in inspect.getsource(a.password_reset_request)
     assert adm.PLAN_REQUEST_STATUS == {"offen", "erledigt", "abgelehnt"}
     assert "PLAN_REQUEST_STATUS" in inspect.getsource(adm.admin_close_plan_request)
 
@@ -248,7 +229,7 @@ def welt():
     r = konten.registrieren(json={
         "email": f"r11_chef_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Runde11 {SUF}", "contact_person": "R E", "phone": "0511 11"}, timeout=30)
-    assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+    assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
     C = {"Authorization": f"Bearer {r.json()['token']}"}
     chef = requests.get(f"{API}/auth/me", headers=C, timeout=30).json()["user"]
     _abo(chef["dealer_id"], chef["id"])
@@ -260,11 +241,10 @@ def welt():
     sucher_id = r.json()["sucher_id"]
     z = {"A": A, "C": C, "chef": chef, "sucher_id": sucher_id, "dealer_id": chef["dealer_id"]}
     yield z
-    for coll in ("subscriptions", "activity_logs", "plan_requests", "password_resets",
+    for coll in ("subscriptions", "activity_logs", "plan_requests",
                  "vehicles", "generated_pdfs", "appointments", "resale_listings"):
         dbx[coll].delete_many({"dealer_id": z["dealer_id"]})
     dbx.dealers.update_one({"id": z["dealer_id"]}, {"$unset": {"interner_vermerk_r12": ""}})
-    dbx.password_resets.delete_many({"user_id": {"$in": [chef["id"], sucher_id]}})
     dbx.plan_requests.delete_many({"subject_user_id": {"$in": [chef["id"], sucher_id]}})
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.dealers.delete_many({"id": z["dealer_id"]})
@@ -360,21 +340,22 @@ def test_j1_zweiter_chef_je_firma_nur_als_chefwechsel(welt):
     welt["C"] = {"Authorization": f"Bearer {r.json()['token']}"}
 
 
-def test_j2_sucher_loeschen_raeumt_anfragen_und_resets_auf(welt):
+def test_j2_sucher_loeschen_raeumt_anfragen_auf(welt):
+    """Kontonummer (13.09.2026), Schritt 5: Sucher loescht nur noch der
+    Betreiber (die Chef-Route antwortet fest 403); password_resets gibt es
+    nicht mehr. Offene Abo-Anfragen verschwinden weiterhin mit dem Konto."""
     sid = welt["sucher_id"]
     dbx = _db()
     dbx.plan_requests.insert_one({
         "id": f"r11req_{SUF}", "type": "sucher_abo", "subject_user_id": sid,
         "dealer_id": welt["dealer_id"], "status": "offen",
         "created_at": datetime.now(timezone.utc).isoformat()})
-    dbx.password_resets.insert_one({
-        "id": f"r11rst_{SUF}", "user_id": sid, "token_hash": "x", "used": False,
-        "expires_at": "2099-01-01T00:00:00+00:00",
-        "created_at": datetime.now(timezone.utc).isoformat()})
     r = requests.delete(f"{API}/dealer/sucher/{sid}", headers=welt["C"], timeout=30)
+    assert r.status_code == 403, r.text[:200]
+    r = requests.delete(f"{API}/admin/users/{sid}", headers=welt["A"], timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert dbx.plan_requests.count_documents({"subject_user_id": sid, "status": "offen"}) == 0
-    assert dbx.password_resets.count_documents({"user_id": sid}) == 0
+    assert dbx.users.find_one({"id": sid}) is None
 
 
 def test_k5_freischaltung_status_fest(welt):

@@ -3,11 +3,13 @@
 krachen?") fuer Kundennummer, Firmen-/Sucher-Anlage und Freischaltung.
 
 Abgedeckt:
-- Parallele Firmen-Anlage (Admin + Selbstregistrierung gleichzeitig):
-  jede Firma bekommt eine eigene 4-stellige Kundennummer, nie doppelt
-- Doppelte E-Mail (auch nur anders geschrieben) -> 409, kein Konto ohne
-  Firmenprofil, keine zweite Firma
-- Sucher mit bereits vergebener E-Mail (Chef / andere Firma) -> 409
+- Parallele Firmen-Anlage durch den Betreiber: jede Firma bekommt eine
+  eigene 4-stellige Kundennummer, nie doppelt (Chef-Kontonummer = Kundennummer)
+- Kontonummer (13.09.2026), Schritt 5: gleiche Kontakt-E-Mail (auch anders
+  geschrieben) ist erlaubt — jede Firma eigene Nummer, kein Konto ohne
+  Firmenprofil, Anmeldung nur per Nummer
+- Sucher mit bereits vergebener Kontakt-E-Mail -> erlaubt, der Zusatz laeuft
+  fort und wird nie doppelt vergeben
 - Zaehler weg oder veraltet (z.B. Restore ohne 'counters') -> Selbst-
   heilung, naechste Nummer liegt immer ueber dem Bestand
 - Backfill fuer Bestandsfirmen parallel (zwei Worker) -> jede Firma genau
@@ -123,12 +125,6 @@ def test_00_admin(welt):
         "created_at": "2026-01-01T00:00:00+00:00"})
     welt["A"] = _login(mail)
     welt["max_vor_probe"] = _max_nr()      # hoechste Nummer VOR allen Testfirmen
-    # ALTWEG – Schritt 5: prueft bewusst die Selbstregistrierung (vergibt bis
-    # dahin ebenfalls Nummern aus derselben Reihe)
-    welt["self_signup"] = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
-        "email": f"fv_probe_{SUF}@{MAIL}", "password": PW,
-        "company_name": f"Probe {SUF}", "contact_person": "P",
-        "phone": "0511 1"}, timeout=60).status_code == 200
 
 
 # ---------- parallele Anlage ----------
@@ -138,61 +134,50 @@ def test_01_parallel_anlegen_eindeutige_nummern(welt):
     def admin_anlegen(i):
         return _firma(welt, f"par{i}")
 
-    def selbst_registrieren(i):
-        # ALTWEG – Schritt 5: parallele Selbstregistrierung neben der Admin-Anlage
-        return requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
-            "email": f"fv_reg{i}_{SUF}@{MAIL}", "password": PW,
-            "company_name": f"Firma reg{i} {SUF}", "contact_person": "R",
-            "phone": "0511 2"}, timeout=60)
-
     with ThreadPoolExecutor(max_workers=16) as ex:
-        a = list(ex.map(admin_anlegen, range(12)))
-        b = list(ex.map(selbst_registrieren, range(4))) if welt["self_signup"] else []
+        a = list(ex.map(admin_anlegen, range(16)))
     assert all(r.status_code == 200 for r in a), [r.text[:100] for r in a if r.status_code != 200]
-    assert all(r.status_code == 200 for r in b), [r.text[:100] for r in b if r.status_code != 200]
     firmen = list(_db().dealers.find({"company_name": {"$regex": SUF}},
                                      {"kunden_nr": 1, "company_name": 1}))
     nummern = [f.get("kunden_nr") for f in firmen]
-    assert len(firmen) == 12 + len(b) + (1 if welt["self_signup"] else 0)
+    assert len(firmen) == 16
     assert all(isinstance(n, int) and 1001 <= n <= 9999 for n in nummern), nummern
     assert len(set(nummern)) == len(nummern), f"Dublette: {nummern}"
     assert min(nummern) > vorher_max
     assert _dubletten() == []
+    # Kontonummer (13.09.2026): Chef-Nummer = Kundennummer, alle verschieden
+    konten_nr = [r.json()["kontonummer"] for r in a]
+    assert konten_nr == [str(r.json()["kunden_nr"]) for r in a]
+    assert len(set(konten_nr)) == 16
 
 
-# ---------- doppelte E-Mail ----------
-def test_02_doppelte_email_auch_anders_geschrieben(welt):
+# ---------- gleiche Kontakt-E-Mail ----------
+def test_02_gleiche_kontakt_email_eigene_nummer(welt):
     dbx = _db()
     r = _firma(welt, "dup")
     assert r.status_code == 200, r.text[:200]
     dealer_id = r.json()["dealer_id"]
+    nummern = [r.json()["kontonummer"]]
     users_vorher = _n_users()
     dealers_vorher = _n_dealers()
-    # exakt gleich
-    r = requests.post(f"{API}/admin/users", headers=welt["A"], json={
-        "email": f"fv_dup_{SUF}@{MAIL}", "password": PW,
-        "company_name": "Nochmal", "plan_type": "none"}, timeout=60)
-    assert r.status_code == 409, r.text[:200]
-    # nur Gross-/Kleinschreibung anders
-    r = requests.post(f"{API}/admin/users", headers=welt["A"], json={
-        "email": f"FV_DUP_{SUF}@{MAIL.upper()}", "password": PW,
-        "company_name": "Nochmal gross", "plan_type": "none"}, timeout=60)
-    assert r.status_code == 409, r.text[:200]
-    # Selbstregistrierung mit derselben Adresse
-    if welt["self_signup"]:
-        # ALTWEG – Schritt 5: Dublette ueber die Selbstregistrierung
-        r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
-            "email": f"Fv_Dup_{SUF}@{MAIL}", "password": PW,
-            "company_name": "Reg dup", "contact_person": "D", "phone": "1"},
-            timeout=60)
-        assert r.status_code == 409, r.text[:200]
-    assert _n_users() == users_vorher
-    assert _n_dealers() == dealers_vorher
-    # gespeichert klein geschrieben, genau ein Konto, Login mit anderer Schreibweise
-    assert dbx.users.count_documents({"email": {"$regex": f"^fv_dup_{SUF}@", "$options": "i"}}) == 1
-    assert dbx.users.find_one({"dealer_id": dealer_id})["email"] == f"fv_dup_{SUF}@{MAIL}"
-    r = konten.login_per_mail(f"FV_DUP_{SUF}@{MAIL}", PW, "auth", timeout=30)
-    assert r.status_code == 200, r.text[:200]
+    # Kontonummer (13.09.2026), Schritt 5: exakt gleich und nur anders
+    # geschrieben -> je eine neue Firma mit eigener Nummer (E-Mail nur Kontakt)
+    for mail, name in ((f"fv_dup_{SUF}@{MAIL}", "Nochmal"),
+                       (f"FV_DUP_{SUF}@{MAIL.upper()}", "Nochmal gross")):
+        r = requests.post(f"{API}/admin/users", headers=welt["A"], json={
+            "email": mail, "password": PW, "company_name": f"{name} {SUF}",
+            "plan_type": "none"}, timeout=60)
+        assert r.status_code == 200, r.text[:200]
+        welt["dealer_ids"].append(r.json()["dealer_id"])
+        nummern.append(r.json()["kontonummer"])
+    assert len(set(nummern)) == 3, nummern
+    assert _n_users() == users_vorher + 2
+    assert _n_dealers() == dealers_vorher + 2
+    # gespeichert klein geschrieben; Anmeldung nur per Nummer, nie per Adresse
+    gleich = list(dbx.users.find({"email": {"$regex": f"^fv_dup_{SUF}@", "$options": "i"}}))
+    assert len(gleich) == 3 and all(u["email"] == f"fv_dup_{SUF}@{MAIL}" for u in gleich)
+    assert konten.anmelden(nummern[0], PW).status_code == 200
+    assert konten.anmelden(f"FV_DUP_{SUF}@{MAIL}", PW).status_code == 401
     welt["dup_dealer"] = dealer_id
     welt["dup_chef"] = dbx.users.find_one({"dealer_id": dealer_id})["id"]
     # kein Konto ohne Firmenprofil zurueckgeblieben
@@ -200,7 +185,7 @@ def test_02_doppelte_email_auch_anders_geschrieben(welt):
         assert dbx.dealers.count_documents({"id": u["dealer_id"]}) == 1, u["email"]
 
 
-# ---------- Sucher mit vergebener E-Mail ----------
+# ---------- Sucher mit vergebener Kontakt-E-Mail ----------
 def test_03_sucher_mit_vergebener_email(welt):
     dbx = _db()
     url = f"{API}/admin/dealers/{welt['dup_dealer']}/sucher"
@@ -209,20 +194,25 @@ def test_03_sucher_mit_vergebener_email(welt):
         "first_name": "S", "last_name": "Eins"}, timeout=60)
     assert r.status_code == 200, r.text[:200]
     welt["sucher_id"] = r.json()["sucher_id"]
+    nummern = [r.json()["kontonummer"]]
     n = _n_users()
-    # E-Mail des Chefs, E-Mail des Suchers (anders geschrieben), fremde Firma
+    kunden_nr = dbx.dealers.find_one({"id": welt["dup_dealer"]})["kunden_nr"]
+    # Kontonummer (13.09.2026), Schritt 5: E-Mail des Chefs, des Suchers (anders
+    # geschrieben) oder einer fremden Firma ist erlaubt — der Zusatz laeuft fort
     for mail in (f"fv_dup_{SUF}@{MAIL}", f"FV_SUCH_{SUF}@{MAIL}", f"fv_par0_{SUF}@{MAIL}"):
         r = requests.post(url, headers=welt["A"], json={
             "email": mail, "password": PW, "first_name": "X", "last_name": "Y"},
             timeout=60)
-        assert r.status_code == 409, (mail, r.text[:200])
-    assert _n_users() == n
+        assert r.status_code == 200, (mail, r.text[:200])
+        nummern.append(r.json()["kontonummer"])
+    assert nummern == [f"{kunden_nr}-{i}" for i in range(1, 5)], nummern
+    assert _n_users() == n + 3
     # unbekannte Firma -> 404, kein Konto
     r = requests.post(f"{API}/admin/dealers/gibtesnicht/sucher", headers=welt["A"],
                       json={"password": PW, "email": f"fv_nix_{SUF}@{MAIL}",
                             "first_name": "X", "last_name": "Y"}, timeout=60)
     assert r.status_code == 404
-    assert _n_users() == n
+    assert _n_users() == n + 3
 
 
 # ---------- Zaehler weg / veraltet ----------

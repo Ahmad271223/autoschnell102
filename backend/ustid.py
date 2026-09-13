@@ -103,7 +103,7 @@ def format_pruefen(wert: str) -> Tuple[Optional[str], str]:
 
 def feld_pruefen(wert) -> str:
     """Gemeinsamer Pydantic-Feldvalidator (Kontonummer, 13.09.2026) fuer
-    BuyerRegisterIn, AdminKaeuferIn und ZugangsAnfrageIn: liefert den
+    AdminKaeuferIn und ZugangsAnfrageIn: liefert den
     normalisierten Wert oder wirft ValueError mit der deutschen Meldung."""
     fehler, s = format_pruefen(wert or "")
     if fehler:

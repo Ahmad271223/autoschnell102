@@ -6,7 +6,7 @@ Befunde 26, 27, 28, 29, 45, 52, 53, 54, 67, 79, 80, 81, 89, 90, 91, 106,
 
 Einheitentests laufen ohne Server gegen eine kleine Mongo-Attrappe (nur die
 Operatoren, die resale.py benutzt). HTTP-Tests laufen nur mit
-RUNDE14_HTTP=1 (Backend auf TEST_BASE_URL mit neuem Code, SELF_SIGNUP=true).
+RUNDE14_HTTP=1 (Backend auf TEST_BASE_URL mit neuem Code).
 """
 import asyncio
 import base64
@@ -688,7 +688,7 @@ def firma():
     r = konten.registrieren(json={
         "email": f"r14_resale_{SUF}@{MAIL}", "password": PW,
         "company_name": f"R14 Resale {SUF}", "contact_person": "Chef R", "phone": "0511 4"}, timeout=30)
-    assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
+    assert r.status_code == 200, f"Firmenanlage fehlgeschlagen: {r.text[:200]}"
     u = r.json()["user"]
     z = {"kopf": _kopf(r.json()["token"]), "dealer_id": u["dealer_id"], "user_id": u["id"]}
     yield z

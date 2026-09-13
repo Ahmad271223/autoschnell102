@@ -16,7 +16,7 @@
 
 Einheitentests laufen ohne Server (teils gegen ein eigenes Mongo-Schema).
 HTTP-Teile laufen nur mit RUNDE14_HTTP=1 gegen das Backend auf TEST_BASE_URL
-(SELF_SIGNUP=true, Mock-Anbieter wie in CI).
+(Mock-Anbieter wie in CI).
 """
 import asyncio
 import inspect
@@ -490,8 +490,6 @@ def welt():
     r = konten.sucher_als_chef_anlegen(headers=C, json={
         "first_name": "Sina", "last_name": "Sucht", "email": f"r14td_s_{SUF}@{MAIL}",
         "password": PW}, timeout=30)
-    if r.status_code == 403:
-        pytest.skip("SELF_SIGNUP=false — Chef darf keine Sucher anlegen")
     assert r.status_code == 200, r.text[:200]
     sucher_id = r.json()["sucher_id"]
     from auth import create_token

@@ -1,37 +1,29 @@
-"""Auth endpoints: register, login, logout, me, password-reset."""
-import os
-import hashlib
-import re
-import secrets
+"""Auth endpoints: login (Kontonummer), logout, me, Zugangs-Anfrage.
+
+Kontonummer (13.09.2026), Schritt 5: Selbst-Registrierung und Passwort-Reset
+per E-Mail gibt es nicht mehr — die Routen antworten 410 mit Hinweis, damit
+gecachte alte Oberflaechen keine 404/422 zeigen."""
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from pymongo.errors import DuplicateKeyError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Literal, Optional
 
 from auth import (
-    create_mfa_token, create_token, decode_mfa_token, hash_password_async,
+    create_mfa_token, create_token, decode_mfa_token,
     new_session_id, verify_password_async, _DUMMY_HASH,
 )
 from deps import (
-    current_user, db, email_vergeben, get_subscription_status, now_iso, clean_doc,
-    log_activity, log,
+    current_user, db, get_subscription_status, now_iso,
+    log_activity,
 )
-from mobile_service import DEFAULT_RULES
 from rate_limiter import (client_ip, SlidingWindowRateLimiter, bekannte_ip_merken,
                           konto_fehlversuch, konto_gesperrt, konto_gesperrt_text,
                           login_ip_limiter,
                           login_limiter, login_schluessel, register_limiter)
 from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
 
-# Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
-reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="passwort-reset")
-# Runde 11: zusaetzlich je KONTO (nicht nur je IP) — sonst konnte jeder,
-# der die E-Mail kennt, mit immer neuen Anfragen den gueltigen Reset-Link
-# des echten Nutzers laufend entwerten (Reset-DoS).
-reset_konto_limiter = SlidingWindowRateLimiter(max_attempts=3, window_seconds=3600, name="passwort-reset-konto")
 # Zweiter Anmeldeschritt (Authenticator-Code) mit eigenem Zaehler.
 login_mfa_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login-mfa")
 
@@ -39,28 +31,14 @@ router = APIRouter()
 
 
 # ---------- Models ----------
-# Zentrale Passwortregel (Audit 09/2026, Punkt 32) — gilt fuer ALLE Rollen.
-from passwoerter import pruefe_passwort as _check_password_strength  # noqa: E402
-
-
-class RegisterIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8)
-    company_name: str
-    contact_person: Optional[str] = None
-    phone: Optional[str] = None
-
-    @field_validator("password")
-    @classmethod
-    def password_strength(cls, v: str) -> str:
-        return _check_password_strength(v)
 
 
 class LoginIn(BaseModel):
     """Kontonummer (13.09.2026): Anmeldung mit `kontonummer` (Chef '10023',
     Sucher '10023-2', Kaeufer '10031'); der Super-Admin nutzt dasselbe Feld
-    fuer seinen Benutzernamen. `email` bleibt als alter FELDNAME fuer
-    gecachte Oberflaechen (Alias) — bis Schritt 5 auch fuer E-Mail-Adressen."""
+    fuer seinen Benutzernamen. `email` bleibt nur als alter FELDNAME fuer
+    gecachte Oberflaechen (Alias) — gesucht wird darueber NICHT mehr per
+    E-Mail-Adresse (Schritt 5)."""
     kontonummer: Optional[str] = Field(default=None, max_length=80)
     email: Optional[str] = Field(default=None, max_length=254)
     password: str
@@ -70,8 +48,10 @@ _NUMMERN_ROLLEN = ["dealer", "sucher", "b2b_buyer"]
 
 
 async def _konto_fuer_login(kennung: str):
-    """Kontosuche fuer /auth/login: Nummer -> Super-Admin-Benutzername ->
-    (bis Schritt 5) alter E-Mail-Zweig fuer jede Rolle."""
+    """Kontosuche fuer /auth/login: Nummer -> Super-Admin-Benutzername.
+    Kontonummer (13.09.2026), Schritt 5: KEIN E-Mail-Zweig mehr — eine
+    Adresse (oder der Benutzername eines normalen Admins) findet kein Konto
+    und bekommt dieselbe 401 wie ein falsches Passwort."""
     nr = normalisieren(kennung)
     if nr:
         return await db.users.find_one({"kontonummer": nummer_bedingung(nr),
@@ -79,9 +59,14 @@ async def _konto_fuer_login(kennung: str):
     if "@" not in kennung:
         return await db.users.find_one({"username": kennung, "role": "admin",
                                         "is_super_admin": True})
-    # ALTWEG – Schritt 5: Anmeldung per E-Mail (auch normale Admins, Tests).
-    return await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape(kennung)}$", "$options": "i"}})
+    return None
+
+
+# Kontonummer (13.09.2026), Schritt 5: ein neutraler Text fuer alle drei
+# Anmeldemasken (auch der Super-Admin sieht ihn).
+LOGIN_FALSCH = "Kontonummer oder Passwort falsch"
+NUR_BETREIBER_KONTEN = ("Konten legt der Betreiber an – bitte Zugang unter "
+                        "/anfrage anfragen")
 
 
 class TokenOut(BaseModel):
@@ -161,112 +146,13 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
                                    "und schalten dein Firmen-Konto frei."}
 
 
-# Selbst-Registrierung von Firmen: seit 09/2026 standardmäßig AUS —
-# der Betreiber legt Firmen-Konten nach einer Zugangs-Anfrage selbst an
-# (docker-compose setzt SELF_SIGNUP=false). In Entwicklung/CI bleibt die
-# Route aktiv, damit Tests und lokales Ausprobieren funktionieren.
-_ENTWICKLUNGS_UMGEBUNGEN = {"development", "dev", "local", "test", "ci"}
-
-
-def _self_signup_enabled() -> bool:
-    """Runde 11: fail-closed. Vorher war die Selbst-Registrierung AN, sobald
-    APP_ENV auf einem neuen Server fehlte — jeder konnte sich per
-    POST /api/auth/register ein aktives Firmen-Konto samt JWT holen.
-    Jetzt: nur mit ausdruecklichem SELF_SIGNUP=true oder in einer
-    ausdruecklich als Entwicklung/Test benannten Umgebung."""
-    wert = os.environ.get("SELF_SIGNUP", "").strip().lower()
-    if wert:
-        return wert in ("true", "1", "yes", "on")
-    return os.environ.get("APP_ENV", "").strip().lower() in _ENTWICKLUNGS_UMGEBUNGEN
-
-
 # ---------- Endpoints ----------
-def _vertragstext_start() -> str:
-    """Startertext fuer neue Firmen. Spaeter Import: pdf_service zieht
-    reportlab nach und wird beim Anmelden nicht gebraucht."""
-    from pdf_service import VERTRAGSTEXT_START
-    return VERTRAGSTEXT_START
-
-
-@router.post("/auth/register", response_model=TokenOut)
-async def register(body: RegisterIn, request: Request):
-    if not _self_signup_enabled():
-        raise HTTPException(403, "Die Selbst-Registrierung ist deaktiviert. "
-                                 "Bitte stelle eine Zugangs-Anfrage — der "
-                                 "Betreiber legt dein Firmen-Konto an und "
-                                 "schaltet dich frei.")
-    # Rate-limit: 5 registrations per IP per hour.
-    ip = client_ip(request)
-    if not await register_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
-    # E-Mail KANONISCH speichern (klein, getrimmt) und case-insensitiv auf
-    # Duplikate pruefen — vorher konnten User@x.de und user@x.de als zwei
-    # Konten entstehen, waehrend der Login case-insensitiv irgendeins fand.
-    email = body.email.strip().lower()
-    # Runde 13: B5 — vorher nur users; jetzt plattformweit (auch
-    # driver_accounts), Meldung bewusst ohne Kontotyp.
-    if await email_vergeben(email):
-        raise HTTPException(409, "E-Mail bereits registriert")
-    user_id = str(uuid.uuid4())
-    dealer_id = str(uuid.uuid4())
-    sid = new_session_id()
-    user_doc = {  # kontonummer setzt kontenanlage (Chef = str(kunden_nr))
-        "id": user_id, "email": email,
-        "password_hash": await hash_password_async(body.password),
-        "role": "dealer", "active": True,
-        "dealer_id": dealer_id, "current_session_id": sid,
-        "created_at": now_iso(),
-    }
-    dealer_doc = {
-        "id": dealer_id, "user_id": user_id,
-        "company_name": body.company_name,
-        "contact_person": body.contact_person or "",
-        "phone": body.phone or "",
-        "email": body.email, "address": "", "zip_code": "", "city": "",
-        "logo_url": "",
-        "whatsapp_number": body.phone or "",
-        "comparison_rules": DEFAULT_RULES,
-        "email_subject": "Kaufvertrag für Ihr Fahrzeug",
-        "email_template": (
-            "Guten Tag,\n\nanbei sende ich Ihnen den Kaufvertrag für Ihr Fahrzeug.\n"
-            "Bitte prüfen Sie die Angaben und geben Sie mir kurz Rückmeldung.\n\n"
-            "Mit freundlichen Grüßen\n{händler_name}"
-        ),
-        "whatsapp_template": (
-            "Hallo,\nhier ist der Kaufvertrag für Ihr Fahrzeug.\n"
-            "Bitte einmal prüfen und kurz bestätigen. Danke!"
-        ),
-        # Runde 26: EIN Feld fuer Vertragsbedingungen. Der Startertext
-        # enthaelt die vier Klauseln UND die frueheren AGB-Punkte.
-        "default_terms": "",
-        "digital_vertragstext": _vertragstext_start(),
-        "default_special_agreements": "",
-        "created_at": now_iso(),
-    }
-    # Zwei Inserts ohne Transaktion (PR-Review 09/2026): erst das Haendler-
-    # profil, dann der Benutzer. Scheitert der Benutzer-Insert, wird das
-    # Profil wieder entfernt — es bleibt nie ein aktives, aber unvollstaendiges
-    # Konto zurueck (vorher: Benutzer ohne Haendlerprofil).
-    # Kontonummer (13.09.2026): beides ueber kontenanlage (Chef bekommt
-    # kontonummer = str(kunden_nr), die Firma wird bei Fehlern entfernt).
-    from kontenanlage import firma_mit_chef_anlegen
-    try:
-        erg = await firma_mit_chef_anlegen(db, dealer_doc, user_doc)
-    except DuplicateKeyError:
-        # Rennen zweier Registrierungen mit derselben E-Mail
-        raise HTTPException(409, "E-Mail bereits registriert")
-    except Exception:
-        log.exception("Registrierung: Benutzer-Insert fehlgeschlagen")
-        raise HTTPException(500, "Registrierung fehlgeschlagen — bitte erneut "
-                                 "versuchen.")
-    user_doc["kontonummer"] = erg["kontonummer"]
-    user_doc["kontonummer_basis"] = erg["kunden_nr"]
-    token = create_token(user_id, sid)
-    await log_activity(dealer_id, user_id, "auth.registriert",
-                       meta={"email": body.email, "ip": ip,
-                             "kontonummer": erg["kontonummer"]})
-    user = clean_doc({k: v for k, v in user_doc.items() if k != "password_hash"})
-    return TokenOut(token=token, user=user)
+@router.post("/auth/register")
+async def register():
+    """Kontonummer (13.09.2026), Schritt 5: Selbst-Registrierung entfernt —
+    Firmen, Sucher, Kaeufer und Fahrer legt nur der Super-Admin an. 410 mit
+    Hinweis auf die Zugangs-Anfrage (gecachte alte Oberflaechen)."""
+    raise HTTPException(410, NUR_BETREIBER_KONTEN)
 
 
 def geraet_kurz(request) -> str:
@@ -442,9 +328,8 @@ async def login(body: LoginIn, request: Request):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
 
     if not identifier:
-        raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
-    # Suchreihenfolge: Nummer, Benutzername NUR fuer den Super-Admin, dann
-    # (bis Schritt 5) der alte E-Mail-Zweig. Email lookup is case-insensitive.
+        raise HTTPException(401, LOGIN_FALSCH)
+    # Suchreihenfolge: Nummer, Benutzername NUR fuer den Super-Admin.
     user = await _konto_fuer_login(identifier)
     # Konto-Limiter VOR bcrypt — gleicher Text und Weg fuer vorhandene und
     # unbekannte Kennungen (keine Aufzaehlung der Nummern).
@@ -459,7 +344,7 @@ async def login(body: LoginIn, request: Request):
         await log_activity("", "", "auth.login.fehlgeschlagen",
                            meta={"identifier": (normalisieren(identifier) or identifier)[:120],
                                  "ip": ip})
-        raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
+        raise HTTPException(401, LOGIN_FALSCH)
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
     # Passwort stimmte: Zaehler dieses Kontos leeren, damit fruehere
@@ -504,193 +389,20 @@ async def me(user=Depends(current_user)):
 
 
 # =========================================================
-#                 PASSWORT VERGESSEN / RESET
+#                 PASSWORT VERGESSEN
 # =========================================================
-# Ablauf: E-Mail eingeben -> Token per Mail (1 h gültig, einmalig) -> neues
-# Passwort setzen. Sucher sind AUSGENOMMEN: deren Passwort setzt nur der
-# Händler-Hauptaccount zurück (Team-Seite) — bewusste Entscheidung 08/2026.
-RESET_TOKEN_TTL_MINUTES = 60
-
-
-class ResetRequestIn(BaseModel):
-    email: EmailStr
-
-
-class ResetConfirmIn(BaseModel):
-    token: str = Field(min_length=20, max_length=200)
-    new_password: str = Field(min_length=8, max_length=200)
-
-    @field_validator("new_password")
-    @classmethod
-    def password_strength(cls, v: str) -> str:
-        return _check_password_strength(v)
-
-
-def _hash_reset_token(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+# Kontonummer (13.09.2026), Schritt 5: kein Reset-Link per E-Mail mehr —
+# ein neues Passwort setzt ausschliesslich der Betreiber (POST
+# /admin/users/{id}/password bzw. /admin/drivers/{id}/password). Beide alten
+# Routen antworten 410, ohne Konten zu suchen oder Mails zu verschicken.
+NUR_BETREIBER_PASSWORT = "Ein neues Passwort vergibt der Betreiber – bitte melden"
 
 
 @router.post("/auth/password-reset/request")
-async def password_reset_request(body: ResetRequestIn, request: Request):
-    """Immer generische Antwort (kein User-Enumeration-Leak). Versand nur,
-    wenn der Account existiert, kein Sucher ist und SMTP konfiguriert ist."""
-    from email_service import email_configured, send_email
-    ip = client_ip(request)
-    if not await reset_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Anfragen – bitte später erneut versuchen.")
-    if not email_configured():
-        # Ehrlich statt Sackgasse: ohne SMTP kann kein Link verschickt werden.
-        raise HTTPException(
-            503, "Der E-Mail-Versand ist noch nicht eingerichtet. Bitte wende "
-                 "dich an den Administrator, um dein Passwort zurückzusetzen.")
-
-    generic = {"ok": True, "hinweis": "Falls die Adresse registriert ist, wurde "
-                                      "eine E-Mail mit dem Reset-Link versendet."}
-    # Runde 13: B6 Passwort-Reset-Konflikt — vorher wurde driver_accounts nur
-    # befragt, wenn users KEINEN Treffer hatte; wer mit derselben Adresse
-    # Sucher/Haendler UND Fahrer war, konnte sein Fahrerkonto nie
-    # zuruecksetzen. Jetzt: beide Sammlungen unabhaengig, jedes berechtigte
-    # Konto bekommt seinen eigenen Link (Altbestand; neue Doppelkonten
-    # verhindert B5). Antwort bleibt in allen Faellen generisch.
-    filt = {"email": {"$regex": f"^{re.escape(body.email)}$", "$options": "i"}}
-    kandidaten = []
-    u = await db.users.find_one(
-        filt, {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1})
-    # Kein Selbst-Reset fuer Sucher — aber die gleiche generische Antwort,
-    # damit Aussenstehende Rollen nicht erraten koennen; das Sucher-Konto
-    # blockiert aber nicht mehr das Fahrerkonto derselben Adresse.
-    if u and u.get("active", True) and u.get("role") != "sucher":
-        kandidaten.append((u, "user"))
-    # Fahrer-Konten leben in driver_accounts (PR-Review 09/2026: vorher
-    # hatten Fahrer keinerlei Wiederherstellungsweg).
-    d = await db.driver_accounts.find_one(
-        filt, {"_id": 0, "id": 1, "email": 1, "active": 1})
-    if d and d.get("active", True):
-        kandidaten.append(({**d, "role": "driver"}, "driver"))
-    if not kandidaten:
-        return generic
-
-    # Basis-Adresse NUR aus der Server-Konfiguration. Frueher kam sie aus
-    # Origin/Referer — beides bestimmt der Aufrufer, wodurch ein Angreifer
-    # den Reset-Link in einer fremden E-Mail auf seine eigene Seite lenken
-    # konnte (Reset-Link-Poisoning).
-    frontend = (os.environ.get("FRONTEND_URL")
-                or "http://localhost:3000").split("?")[0].rstrip("/")
-    versendet = 0
-    versand_fehler = False
-    for u, konto_typ in kandidaten:
-        # Je Konto begrenzt — und ZAEHLT erst hier, damit Anfragen fuer
-        # unbekannte Adressen den Zaehler eines echten Kontos nicht treffen.
-        # (Die IDs beider Sammlungen sind eigene UUIDs — kein Schluessel-
-        # Konflikt.) Scheitert ein Konto am Limit, wird das andere trotzdem
-        # bedient.
-        if not await reset_konto_limiter.check(f"konto:{u['id']}"):
-            continue
-        token = secrets.token_urlsafe(32)
-        neu_id = str(uuid.uuid4())
-        await db.password_resets.insert_one({
-            "id": neu_id,
-            "user_id": u["id"],
-            "account_type": konto_typ,
-            "token_hash": _hash_reset_token(token),
-            "expires_at": (datetime.now(timezone.utc)
-                           + timedelta(minutes=RESET_TOKEN_TTL_MINUTES)).isoformat(),
-            "used": False,
-            "requested_ip": ip,
-            "created_at": now_iso(),
-            # TTL-Index (server.ensure_indexes): Token-Hash + IP verschwinden
-            # 7 Tage nach Anforderung automatisch (Runde 5).
-            "loeschen_ab": datetime.now(timezone.utc) + timedelta(days=7),
-        })
-        link = f"{frontend}/passwort-reset?token={token}"
-        # Mailtext je Kontotyp kennzeichnen, damit der Empfaenger zwei
-        # Links auseinanderhalten kann.
-        if konto_typ == "driver":
-            betreff = "Passwort zurücksetzen – AutoSchnell Fahrer-App"
-            wofuer = " für dein Fahrer-Konto"
-        else:
-            betreff = "Passwort zurücksetzen – AutoSchnell"
-            wofuer = ""
-        # Runde 11: ERST senden, DANN die aelteren Links entwerten. Vorher wurden
-        # die alten Links zuerst geloescht — fiel danach der Mailversand aus,
-        # hatte der Nutzer weder den alten noch einen neuen Link.
-        try:
-            await send_email(
-                u["email"],
-                betreff,
-                f"Hallo,\n\nüber diesen Link kannst du{wofuer} ein neues Passwort "
-                f"setzen (gültig {RESET_TOKEN_TTL_MINUTES} Minuten):\n\n{link}\n\n"
-                "Wenn du das nicht angefordert hast, ignoriere diese E-Mail einfach — "
-                "dein Passwort bleibt unverändert.",
-                absender_name="AutoSchnell",
-            )
-        except Exception:
-            await db.password_resets.delete_one({"id": neu_id})
-            log.exception("Passwort-Reset: E-Mail-Versand fehlgeschlagen (%s)", konto_typ)
-            versand_fehler = True
-            continue
-        versendet += 1
-        await db.password_resets.delete_many(
-            {"user_id": u["id"], "account_type": konto_typ, "id": {"$ne": neu_id}})
-        await log_activity("", u["id"], "auth.passwort.reset.angefordert",
-                           meta={"ip": ip, "konto": konto_typ})
-    if versand_fehler and not versendet:
-        raise HTTPException(503, "Die E-Mail konnte gerade nicht versendet werden — "
-                                 "bitte in ein paar Minuten erneut versuchen.")
-    return generic
+async def password_reset_request():
+    raise HTTPException(410, NUR_BETREIBER_PASSWORT)
 
 
 @router.post("/auth/password-reset/confirm")
-async def password_reset_confirm(body: ResetConfirmIn, request: Request):
-    ip = client_ip(request)
-    if not await reset_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Versuche – bitte später erneut versuchen.")
-    doc = await db.password_resets.find_one(
-        {"token_hash": _hash_reset_token(body.token), "used": False}, {"_id": 0})
-    invalid = HTTPException(400, "Der Link ist ungültig oder abgelaufen. "
-                                 "Bitte fordere einen neuen an.")
-    if not doc:
-        raise invalid
-    try:
-        if datetime.fromisoformat(doc["expires_at"]) < datetime.now(timezone.utc):
-            raise invalid
-    except ValueError:
-        raise invalid
-    konten = db.driver_accounts if doc.get("account_type") == "driver" else db.users
-    u = await konten.find_one({"id": doc["user_id"]},
-                              {"_id": 0, "id": 1, "role": 1, "active": 1})
-    if not u or not u.get("active", True) or u.get("role") == "sucher":
-        raise invalid
-    # ATOMAR entwerten — und zwar VOR der Passwortaenderung (Runde 5):
-    # nur der ERSTE parallele Bestaetiger gewinnt; vorher wurde das
-    # Passwort schon geaendert, bevor der Token endgueltig verbraucht war.
-    # Claim-Zustand (Audit 09/2026, Punkt 31): das Token wird zuerst nur
-    # "beansprucht" (claimed_at); scheitert das Speichern des Passworts,
-    # wird der Claim zurueckgesetzt und der Link bleibt gueltig. Ein Claim
-    # aelter als 60 s gilt als haengengeblieben und darf uebernommen werden.
-    # Parallele Doppelnutzung bleibt ausgeschlossen (atomarer Claim).
-    claim_frist = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
-    beansprucht = await db.password_resets.find_one_and_update(
-        {"id": doc["id"], "used": {"$ne": True},
-         "$or": [{"claimed_at": {"$exists": False}}, {"claimed_at": None},
-                 {"claimed_at": {"$lt": claim_frist}}]},
-        {"$set": {"claimed_at": now_iso()}})
-    if not beansprucht:
-        raise invalid
-    try:
-        await konten.update_one(
-            {"id": u["id"]},
-            {"$set": {"password_hash": await hash_password_async(body.new_password),
-                      # Alle bestehenden Sessions beenden (Single-Session strikt)
-                      "current_session_id": None}})
-    except Exception:
-        await db.password_resets.update_one({"id": doc["id"]},
-                                            {"$set": {"claimed_at": None}})
-        log.exception("Passwort-Reset: Speichern fehlgeschlagen")
-        raise HTTPException(500, "Passwort konnte nicht gespeichert werden — "
-                                 "bitte den Link erneut verwenden")
-    await db.password_resets.update_one(
-        {"id": doc["id"]}, {"$set": {"used": True, "used_at": now_iso()}})
-    await log_activity("", u["id"], "auth.passwort.reset.durchgefuehrt",
-                       meta={"ip": ip})
-    return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}
+async def password_reset_confirm():
+    raise HTTPException(410, NUR_BETREIBER_PASSWORT)

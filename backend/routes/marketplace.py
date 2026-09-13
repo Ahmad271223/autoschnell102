@@ -20,19 +20,18 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
                      Response)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
-from auth import (hash_password_async, new_session_id, create_token,
+from auth import (new_session_id, create_token,
                   verify_password_async, _DUMMY_HASH)
-from deps import (_ablauf_parsen, current_user, db, email_vergeben,
+from deps import (_ablauf_parsen, current_user, db,
                   firma_gesperrt, gesperrte_firmen_ids, log_activity,
                   log_activity_sicher, now_iso)
-from rate_limiter import (client_ip, register_limiter, login_limiter,
+from rate_limiter import (client_ip, login_limiter,
                           login_ip_limiter, login_schluessel,
                           bekannte_ip_merken, konto_fehlversuch, konto_gesperrt,
                           konto_gesperrt_text)
-from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 
@@ -638,110 +637,19 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
 # =========================================================
 #              ZWISCHENHÄNDLER (b2b_buyer)
 # =========================================================
-class BuyerRegisterIn(BaseModel):
-    company_name: str = Field(min_length=2, max_length=200)
-    contact_name: str = Field(min_length=2, max_length=120)
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=200)
-    phone: str = Field(default="", max_length=50)
-    invite_token: Optional[str] = Field(default=None, max_length=100)
-    # B2B-Bestaetigung (AGB §1): Pflicht-Checkbox "Ich handle als Unternehmer
-    # ... und akzeptiere AGB + Datenschutz". Pflichtfeld; False -> 400.
-    gewerblich_bestaetigt: bool
-    # USt-IdNr. oder Handelsregister-Nr. — freiwillig. Sieht der Wert wie
-    # eine USt-IdNr. aus, wird das Landesformat geprueft (Audit 09/2026,
-    # Punkt 40); die Online-Pruefung (VIES) stoesst der Admin an.
-    ust_id: str = Field(default="", max_length=40)
-
-    @field_validator("ust_id")
-    @classmethod
-    def _ustid(cls, v):
-        # Kontonummer (13.09.2026): gemeinsamer Validator (auch AdminKaeuferIn,
-        # ZugangsAnfrageIn)
-        from ustid import feld_pruefen
-        return feld_pruefen(v)
-
-    @field_validator("password")
-    @classmethod
-    def _pw(cls, v):
-        return _check_password_strength(v)
-
-
 @router.post("/buyer/register")
-async def buyer_register(body: BuyerRegisterIn, request: Request):
-    # Kontonummer (13.09.2026), Schritt 0: dasselbe fail-closed-Gate wie
-    # /auth/register — vorher war die Kaeufer-Registrierung in Produktion
-    # offen, obwohl Konten nur der Betreiber anlegt.
-    from routes.auth import _self_signup_enabled
-    if not _self_signup_enabled():
-        raise HTTPException(403, "Die Selbst-Registrierung ist deaktiviert. "
-                                 "Bitte stelle eine Zugangs-Anfrage – der "
-                                 "Betreiber legt dein Konto an.")
-    if not body.gewerblich_bestaetigt:
-        raise HTTPException(400, "Bitte bestätige, dass du als Unternehmer handelst")
-    ip = client_ip(request)
-    if not await register_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Registrierungen von dieser IP – bitte später erneut versuchen.")
-    email = body.email.strip().lower()
-    # Runde 13: B5 — vorher nur users; jetzt plattformweit (auch
-    # driver_accounts), Meldung bewusst ohne Kontotyp.
-    if await email_vergeben(email):
-        raise HTTPException(409, "E-Mail bereits registriert")
-    user_id = str(uuid.uuid4())
-    sid = new_session_id()
-    # Kontonummer (13.09.2026): eigene Nummer aus der gemeinsamen Reihe; neuer
-    # Versuch NUR bei einer Kontonummer-Dublette, sonst 409 wie bisher.
-    from kontenanlage import kaeufer_anlegen
-    try:
-        erg = await kaeufer_anlegen(db, {
-            "id": user_id, "email": email,
-            "password_hash": await hash_password_async(body.password),
-            "role": "b2b_buyer", "active": True,
-            "dealer_id": None,
-            "company_name": body.company_name,
-            "contact_name": body.contact_name,
-            "phone": body.phone,
-            "ust_id": body.ust_id.strip(),
-            "gewerblich_bestaetigt_am": now_iso(),
-            "current_session_id": sid,
-            "created_at": now_iso(),
-        })
-    except DuplicateKeyError:
-        # Nachpruefung Runde 14 (Nr. 62): Rennen zweier Registrierungen mit
-        # derselben E-Mail — der Unique-Index faengt die Dublette, vorher
-        # wurde daraus ein 500 samt Fehlerlog-Eintrag. Jetzt 409 wie in
-        # routes/auth.py.
-        raise HTTPException(409, "E-Mail bereits registriert")
-    joined = None
-    if body.invite_token:
-        # Nachpruefung Runde 14 (Nr. 63): das Konto ist nach dem Insert
-        # vollstaendig — ein Fehler beim Einloesen der Einladung darf die
-        # Registrierung nicht kippen (vorher 500, Konto existierte trotzdem,
-        # erneute Registrierung 409). Kein Rollback des Kontos: der waere
-        # bei bereits verbrauchtem Einmal-Link schlimmer (Link verloren).
-        # Der Beitritt ist ueber POST /invites/{token}/redeem nachholbar;
-        # das Frontend warnt bei network_joined=False.
-        try:
-            joined = await _redeem_invite(body.invite_token, user_id)
-        except Exception:
-            log.exception("Einladung nach Registrierung nicht einloesbar "
-                          "(Kaeufer %s)", user_id)
-            joined = None
-    # Audit 13.09.2026 (#56): das Konto ist schon dauerhaft angelegt — ein
-    # Audit-Fehler darf die Registrierung nicht mehr kippen (vorher 500 ohne
-    # Token, erneute Registrierung 409).
-    await log_activity_sicher(joined or "", user_id, "buyer.registriert",
-                              meta={"email": body.email, "ip": ip,
-                                    "einladung": bool(joined)})
-    return {"ok": True, "token": create_token(user_id, sid),
-            "user": {"id": user_id, "email": body.email, "role": "b2b_buyer",
-                     "kontonummer": erg["kontonummer"],
-                     "company_name": body.company_name},
-            "network_joined": bool(joined)}
+async def buyer_register():
+    """Kontonummer (13.09.2026), Schritt 5: Kaeufer registrieren sich nicht
+    mehr selbst — der Super-Admin legt sie an (POST /admin/buyers), die
+    Einladung loest der Kaeufer nach der Anmeldung ein
+    (POST /invites/{token}/redeem). 410 fuer gecachte alte Oberflaechen."""
+    from routes.auth import NUR_BETREIBER_KONTEN
+    raise HTTPException(410, NUR_BETREIBER_KONTEN)
 
 
 class BuyerLoginIn(BaseModel):
-    """Kontonummer (13.09.2026): `kontonummer`, `email` als alter Feldname."""
+    """Kontonummer (13.09.2026): `kontonummer`, `email` nur als alter
+    Feldname (keine Suche per E-Mail-Adresse mehr, Schritt 5)."""
     kontonummer: Optional[str] = Field(default=None, max_length=80)
     email: Optional[str] = Field(default=None, max_length=254)
     password: str
@@ -763,18 +671,13 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
         raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
     if not await login_ip_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
-    # Kontonummer (13.09.2026): Nummer zuerst, bis Schritt 5 der E-Mail-Zweig.
+    # Kontonummer (13.09.2026): nur per Nummer (Schritt 5: kein E-Mail-Zweig).
     from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+    from routes.auth import LOGIN_FALSCH
     nr = normalisieren(kennung)
     u = None
     if nr:
         u = await db.users.find_one({"kontonummer": nummer_bedingung(nr),
-                                     "role": "b2b_buyer"})
-    elif "@" in kennung:
-        # ALTWEG – Schritt 5
-        email = kennung.lower()
-        u = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$",
-                                               "$options": "i"},
                                      "role": "b2b_buyer"})
     # Konto-Limiter VOR bcrypt (gleicher Weg fuer bekannte und unbekannte).
     konto_k = anmeldekennung(kennung)
@@ -787,7 +690,7 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     if not u or not ok:
         await konto_fehlversuch(konto_k, ip)
     if not u or not ok or not u.get("active", True):
-        raise HTTPException(401, "E-Mail oder Passwort falsch")
+        raise HTTPException(401, LOGIN_FALSCH)
     # Audit 13.09.2026 (#26): Passwort stimmte — Zaehler dieses Kontos leeren,
     # damit fruehere Fehlversuche eine richtige Anmeldung nicht blockieren.
     await login_limiter.reset(schluessel)

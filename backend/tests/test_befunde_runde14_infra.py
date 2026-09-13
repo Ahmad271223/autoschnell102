@@ -556,7 +556,6 @@ class _Protokoll:
 _PROD_UMGEBUNG = {
     "APP_ENV": "production",
     "JWT_SECRET": uuid.uuid4().hex + uuid.uuid4().hex,
-    "ADMIN_PASSWORD": "Runde14-Betreiber-Kennwort!",
     "SUPER_ADMIN_PASSWORD": "",
     "FRONTEND_URL": "https://app.example.de",
     "CORS_ORIGINS": "https://app.example.de",
@@ -567,7 +566,6 @@ _PROD_UMGEBUNG = {
     "RESEND_API_KEY": "re_r14_test",
     "MAIL_FROM": "AutoSchnell <vertrag@example.de>",
     "WEB_CONCURRENCY": "1",
-    "SELF_SIGNUP": "false",
     "AUTO_DATEN_SCHAEDEN_FREITEXT": "false",
 }
 _PROD_LOESCHEN = ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY",

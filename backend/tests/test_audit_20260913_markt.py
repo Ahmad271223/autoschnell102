@@ -17,7 +17,8 @@ Einladungen, Netzwerk).
   27  hoechstens EINE offene Zugangsanfrage je Kaeufer
   18/19/27 Nachbesserung: /admin/betrieb/nachholen holt die drei Indizes ohne
       Neustart nach, /admin/betrieb zeigt je ein *_index_aktiv
-  56  Audit-Fehler kippt die Kaeufer-Registrierung nicht
+  56  Audit-Fehler kippt die Kaeufer-Anlage nicht (Kontonummer 13.09.2026:
+      POST /admin/buyers statt Selbstregistrierung)
   57  Audit-Fehler kippt Einladung erstellen/loeschen nicht
   58  Netzwerk-Widerruf ist nach einem Teilfehler wiederholbar
 
@@ -45,7 +46,9 @@ MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 MAIL = "e2etest-mail.de"
 PW = "AuditMarkt13!xY"
 MODULE = ("deps", "indizes", "routes.bestand", "routes.marketplace",
-          "routes.resale", "routes.team", "kaufvorgang")
+          "routes.resale", "routes.team", "kaufvorgang",
+          # Kontonummer (13.09.2026): Import im Fixture VOR der Test-Schleife
+          "routes.admin")
 
 
 def _jetzt(**delta):
@@ -104,6 +107,7 @@ class _Welt:
         self.user_ids = [self.chef["id"], self.k["id"]]
         self.mails = []
         self.ips = []
+        self.nummern = []
 
     async def anlegen(self):
         await self.db.dealers.insert_one({
@@ -139,18 +143,24 @@ class _Welt:
         return doc
 
     async def login_konten(self, n):
+        """Kaeuferkonten mit Kontonummer (13.09.2026) — Anmeldung nur per Nummer.
+        Zufallsnummern im oberen Bereich der Reihe (keine Kollision mit der
+        gemeinsamen Test-DB)."""
         from auth import hash_password_async
         h = await hash_password_async(PW)
-        mails = []
+        nummern = []
         for i in range(n):
             uid = f"lk{i}_a13_{self.s}"
-            mail = f"{uid}@{MAIL}"
-            await self.db.users.insert_one({"id": uid, "email": mail, "role": "b2b_buyer",
+            nr = 800000000 + uuid.uuid4().int % 100000000
+            await self.db.users.insert_one({"id": uid, "email": f"{uid}@{MAIL}",
+                                            "role": "b2b_buyer", "kontonummer": str(nr),
+                                            "kontonummer_basis": nr,
                                             "active": True, "dealer_id": None,
                                             "password_hash": h, "created_at": _jetzt()})
             self.user_ids.append(uid)
-            mails.append(mail)
-        return mails
+            self.nummern.append(str(nr))
+            nummern.append(str(nr))
+        return nummern
 
     async def aufraeumen(self):
         db = self.db
@@ -169,6 +179,8 @@ class _Welt:
             await db.users.delete_many({"email": mail})
         for ip in self.ips:
             await db.rate_limits.delete_many({"_id": {"$regex": "^login(-ip)?:" + re.escape(ip)}})
+        for nr in self.nummern:
+            await db.rate_limits.delete_many({"_id": {"$regex": "^login-konto:" + re.escape(nr) + ":"}})
 
 
 @pytest.fixture
@@ -589,9 +601,9 @@ def test_25_kaeufer_login_zaehlt_je_konto_nicht_je_ip(welt, monkeypatch):
     a, b = welt.run(welt.login_konten(2))
 
     async def lauf():
-        fehl = [await _code(lambda: M.buyer_login(M.BuyerLoginIn(email=a, password="falsch-falsch"),
+        fehl = [await _code(lambda: M.buyer_login(M.BuyerLoginIn(kontonummer=a, password="falsch-falsch"),
                                                   _request(ip))) for _ in range(10)]
-        kollege = await _code(lambda: M.buyer_login(M.BuyerLoginIn(email=b, password=PW), _request(ip)))
+        kollege = await _code(lambda: M.buyer_login(M.BuyerLoginIn(kontonummer=b, password=PW), _request(ip)))
         return fehl, kollege
 
     fehl, kollege = welt.run(lauf())
@@ -607,7 +619,7 @@ def test_26_erfolgreicher_kaeufer_login_leert_den_zaehler(welt, monkeypatch):
     (a,) = welt.run(welt.login_konten(1))
 
     def anmelden(pw):
-        return _code(lambda: M.buyer_login(M.BuyerLoginIn(email=a, password=pw), _request(ip)))
+        return _code(lambda: M.buyer_login(M.BuyerLoginIn(kontonummer=a, password=pw), _request(ip)))
 
     async def lauf():
         codes = [await anmelden("falsch-falsch") for _ in range(9)]
@@ -743,34 +755,31 @@ def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(w
                        ("interesse_index_aktiv", "interesse_offen_je_kaeufer"),
                        ("zugangsanfrage_index_aktiv", "uniq_offene_buyer_access_anfrage")):
         assert f'"{flag}"' in status and name in status, flag
-def test_56_audit_fehler_kippt_registrierung_nicht(welt, monkeypatch):
-    M, deps = _mod("routes.marketplace"), _mod("deps")
-    from auth import decode_token
-    # Kontonummer (13.09.2026), Schritt 0: buyer_register hat jetzt das
-    # SELF_SIGNUP-Gate — ausdruecklich an, unabhaengig von der Umgebung.
-    monkeypatch.setenv("SELF_SIGNUP", "true")
-
-    async def frei(_ip):
-        return True
+def test_56_audit_fehler_kippt_kaeuferanlage_nicht(welt, monkeypatch):
+    """Kontonummer (13.09.2026), Schritt 5: Kaeufer legt der Betreiber an. Das
+    Konto ist nach dem Insert dauerhaft — ein Audit-Fehler danach darf keinen
+    500 ausloesen (sonst legt ein erneuter Klick ein zweites Konto an)."""
+    A, deps = _mod("routes.admin"), _mod("deps")
 
     async def kaputt(*a, **kw):
         raise RuntimeError("Mongo weg")
-    monkeypatch.setattr(M.register_limiter, "check", frei)
-    monkeypatch.setattr(M, "log_activity", kaputt)
+    monkeypatch.setattr(A, "log_activity", kaputt)
     monkeypatch.setattr(deps, "log_activity", kaputt)
     mail = f"reg_a13_{welt.s}@{MAIL}"
     welt.mails.append(mail)
-    body = M.BuyerRegisterIn(company_name="A13 Kaeufer", contact_name="K M", email=mail,
-                             password=PW, phone="0511", gewerblich_bestaetigt=True)
+    body = A.AdminKaeuferIn(company_name="A13 Kaeufer", contact_name="K M", email=mail,
+                            password=PW, phone="0511", b2b_nachweis=True)
+    sa = {"id": f"sa_a13_{welt.s}", "role": "admin", "is_super_admin": True, "dealer_id": ""}
 
     async def lauf():
-        r = await M.buyer_register(body, _request(path="/api/buyer/register"))  # ALTWEG – Schritt 5
+        r = await A.admin_create_buyer(body, admin=sa)
         u = await welt.db.users.find_one({"email": mail})
         return r, u
 
     r, u = welt.run(lauf())
-    assert r["ok"] is True and u and u["role"] == "b2b_buyer"
-    assert decode_token(r["token"])["sid"] == u["current_session_id"]
+    assert r["ok"] is True and "token" not in r
+    assert u and u["role"] == "b2b_buyer" and u["kontonummer"] == r["kontonummer"]
+    assert u["current_session_id"] is None
 
 
 # ============================================================ Nr. 57

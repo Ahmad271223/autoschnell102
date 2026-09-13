@@ -2,8 +2,8 @@
 """Audit 13.09.2026, Bereich "zustaende": Teilzustaende nach bereits
 geschriebenen Schritten, Obergrenzen ohne Signal, Limiter-Reset.
 
-  #11  admin_create_sucher prueft die E-Mail plattformweit (auch Fahrerkonten),
-       Doppelklick -> 409 statt 500
+  #11  admin_create_sucher (Kontonummer 13.09.2026: E-Mail nur Kontakt — gleiche
+       Adresse erlaubt); Kontonummer-Dublette -> neuer Zusatz, bleibt sie -> 409
   #43  Zahlungsabgleich rotiert nach updated_at — Dauerfehler hungern spaetere
        Zahlungen nicht mehr aus
   #44  Neuerzeugung mit neuem Abholtermin: Auto-Daten/Audit nach dem CAS
@@ -135,35 +135,45 @@ def _fenster_abwarten(sekunden: int = 60, puffer: float = 5.0) -> None:
 
 
 # ============================================================ #11
-def test_11_sucher_anlage_prueft_fahrerkonten_und_duplicate_key(welt, monkeypatch):
+def test_11_sucher_anlage_gleiche_adresse_und_kontonummer_dublette(welt, monkeypatch):
+    """Kontonummer (13.09.2026), Schritt 5: Ein Fahrerkonto mit derselben
+    Adresse verhindert keinen Sucher mehr. Doppelklick/Rennen auf dieselbe
+    Nummer: kontenanlage zieht einen neuen Zusatz; bleibt die Dublette, gibt es
+    409 statt 500 und kein Konto."""
     A = _m("routes.admin")
+    KA = _m("kontenanlage")
     mail = f"doppelt-{welt.s}@e2etest-mail.de"
-    mail2 = f"klick-{welt.s}@e2etest-mail.de"
 
     async def lauf():
         await welt.db.driver_accounts.insert_one(
             {"id": f"drv_{welt.s}", "email": mail, "active": True, "password_hash": "x"})
-        with pytest.raises(HTTPException) as e1:
-            await A.admin_create_sucher(
-                welt.dealer_id, A.AdminSucherIn(email=mail, password="Sucher12345!"), admin=SA)
-        n_users = await welt.db.users.count_documents({"email": mail})
-        # Doppelklick/Rennen: die Vorpruefung sieht das Konto noch nicht, der
-        # Unique-Index auf users.email entscheidet -> 409 statt 500.
-        await welt.db.users.create_index("email", unique=True)
-        await welt.db.users.insert_one({"id": f"u_{welt.s}", "email": mail2,
-                                        "role": "sucher", "dealer_id": welt.dealer_id})
+        erst = await A.admin_create_sucher(
+            welt.dealer_id, A.AdminSucherIn(email=mail, password="Sucher12345!"), admin=SA)
+        await welt.db.users.create_index(
+            "kontonummer", name="kontonummer_eindeutig", unique=True,
+            partialFilterExpression={"kontonummer": {"$type": "string"}})
 
-        async def _frei(_email):
-            return None
-        monkeypatch.setattr(deps, "email_vergeben", _frei)
+        async def immer_eins(db, dealer_id, kunden_nr):
+            return 1
+        monkeypatch.setattr(KA, "naechster_sucher_zusatz", immer_eins)
         with pytest.raises(HTTPException) as e2:
             await A.admin_create_sucher(
-                welt.dealer_id, A.AdminSucherIn(email=mail2, password="Sucher12345!"), admin=SA)
-        return e1.value.status_code, n_users, e2.value.status_code
+                welt.dealer_id, A.AdminSucherIn(password="Sucher12345!"), admin=SA)
+        n = await welt.db.users.count_documents({"dealer_id": welt.dealer_id, "role": "sucher"})
+        folge = iter([1, 7])
 
-    c1, n_users, c2 = welt.run(lauf())
-    assert c1 == 409 and n_users == 0, "Fahrerkonto mit derselben Adresse -> kein Sucher"
-    assert c2 == 409
+        async def erst_eins_dann_frei(db, dealer_id, kunden_nr):
+            return next(folge)
+        monkeypatch.setattr(KA, "naechster_sucher_zusatz", erst_eins_dann_frei)
+        dritt = await A.admin_create_sucher(
+            welt.dealer_id, A.AdminSucherIn(password="Sucher12345!"), admin=SA)
+        return erst, e2.value.status_code, n, dritt
+
+    erst, c2, n, dritt = welt.run(lauf())
+    assert erst["ok"] is True and erst["email"] == mail, erst
+    assert erst["kontonummer"].endswith("-1"), erst
+    assert c2 == 409 and n == 1, (c2, n)
+    assert dritt["kontonummer"].endswith("-7"), dritt
 
 
 # ============================================================ #43

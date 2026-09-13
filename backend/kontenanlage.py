@@ -6,10 +6,10 @@ Aufrufzeit) — Tests, die routes.admin.db, routes.marketplace.db oder deps.db
 ersetzen, greifen damit weiter. Kein Import von server.py oder routes.*.
 
 Regeln fuer Aufrufer:
-1. Eingaben, Ablaufdatum und (bis Schritt 5) email_vergeben VOR dem Ziehen
-   einer Nummer pruefen.
-2. DuplicateKeyError, der NICHT die Kontonummer betrifft (z.B. users.email),
-   wird durchgereicht und bleibt beim Aufrufer die bisherige 409.
+1. Eingaben und Ablaufdatum VOR dem Ziehen einer Nummer pruefen (die
+   E-Mail ist seit Schritt 5 nur Kontaktadresse und nicht mehr eindeutig).
+2. DuplicateKeyError, der NICHT die Kontonummer betrifft, wird durchgereicht
+   und bleibt beim Aufrufer eine 409.
 3. Nummern vergibt nur die Anlage — es gibt KEIN automatisches Nachziehen
    fuer Bestandskonten (konten_ohne_nummer zaehlt nur).
 """
