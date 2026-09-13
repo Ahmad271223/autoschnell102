@@ -124,9 +124,11 @@ export default function Datenschutz() {
           fuer Fahrerfotos ab dem Hochladen), routes/bestand.py
           (BESTAND_RETENTION_DAYS=50), routes/listings.py
           (LISTING_CACHE_TTL_HOURS). Wird eine Umgebungsvariable geaendert,
-          muss dieser Text nachgezogen werden. Abweichung Stand 09/2026:
-          LISTING_CACHE_TTL_HOURS steht per Default auf 8760 h (= 365 Tage),
-          zugesagt sind hier "max. 90 Tage" — Default oder Text angleichen. */}
+          muss dieser Text nachgezogen werden. Stand 13.09.2026:
+          LISTING_CACHE_TTL_HOURS steht per Default auf 2160 h (= 90 Tage);
+          cleanup_service.inseratscache_rotieren loescht Inseratsdaten
+          spaetestens INSERATSCACHE_MAX_TAGE = 90 Tage nach dem Abruf — passt
+          zu "max. 90 Tage". */}
       <p>
         <b>Account-Daten</b> speichern wir für die Dauer der
         Geschäftsbeziehung; nach Löschung des Accounts werden sie entfernt,

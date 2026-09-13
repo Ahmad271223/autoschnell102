@@ -415,6 +415,16 @@ def test_52b_riesige_seite_liefert_leere_liste_statt_500(welt):
     assert items == [] and resp.headers["X-Truncated"] == "0"
 
 
+def test_52c_nutzerliste_riesige_seite_liefert_leere_liste_statt_500(welt):
+    """Nachpruefung 13.09.2026: dieselbe Luecke wie #52 in GET /admin/users."""
+    A = _m("routes.admin")
+
+    async def lauf():
+        return await A.admin_list_users(_=SA, page=10 ** 16, limit=1000)
+
+    assert welt.run(lauf()) == []
+
+
 # ============================================================ #55
 def test_55_sucherliste_meldet_obergrenze(welt):
     T = _m("routes.team")

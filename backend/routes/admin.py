@@ -222,7 +222,9 @@ async def admin_list_users(_=Depends(current_admin),
     Admin-Oberflaeche ohne Umbau denselben Bestand sieht; page/limit
     stehen fuer kuenftige Pagination bereit."""
     limit = max(1, min(int(limit or 1000), 1000))
-    page = max(1, int(page or 1))
+    # Nachpruefung 13.09.2026 (wie #52): page nach oben begrenzen — sonst
+    # sprengt (page - 1) * limit int64 und pymongo wirft OverflowError (500).
+    page = max(1, min(int(page or 1), 10 ** 6))
     # Runde 12: Sitzungs-ID gehoert nicht in Admin-Antworten.
     users = await db.users.find({}, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
                                       "mfa.pending_secret": 0, "mfa.wiederherstellung": 0,

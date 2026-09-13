@@ -90,7 +90,7 @@ Schalter greift** (der frühere Beweis-Snapshot per Playwright ist seit
 | --- | --- |
 | `CLIENT_FETCH_KLEINANZEIGEN` (Standard aus) | AN = neue Kleinanzeigen-Links holt der Nutzer-Browser via Erweiterung; Server-Datenabruf für diese Links abgeschaltet (außer Restpfade oben) |
 | `MAX_CONCURRENT_KLEINANZEIGEN` (3) | globale Obergrenze gleichzeitiger Server-Abrufe, über alle Worker/Server |
-| `LISTING_CACHE_TTL_HOURS` (8760) | wie lange ein Server-Abruf im globalen Cache gilt |
+| `LISTING_CACHE_TTL_HOURS` (2160) | wie lange ein Server-Abruf im globalen Cache gilt; geloescht wird spaetestens 90 Tage nach dem Abruf (`cleanup_service.INSERATSCACHE_MAX_TAGE`) |
 | `CLIENT_INGEST_TTL_HOURS` (24) / `CLIENT_CONFIRMED_TTL_HOURS` (168) | Gültigkeit von Client-Einreichungen in Quarantäne / nach Freigabe |
 | `MOCK_PROVIDER_FETCH` (aus; nur Staging) | ersetzt JEDEN externen Abruf durch synthetische Daten; Produktions-Check verweigert damit den Start |
 | `PROXY_ENABLED`/`PROXY_URL` | optionaler Proxy für Server-Abrufe (dann sieht Kleinanzeigen die Proxy-IP) |

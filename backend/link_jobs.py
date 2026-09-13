@@ -266,53 +266,71 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
         db, identity["cache_key"], dealer_id, user_id)
     if bestehend:
         return bestehend
-    await _grenzen_pruefen(db, dealer_id, user_id)
-    job = {
-        "id": str(uuid.uuid4()),
-        "cache_key": identity["cache_key"],
-        "source": identity["source"],
-        "item_id": identity["item_id"],
-        "url": url,
-        "status": "queued",
-        "active": True,
-        "attempts": 0,
-        "error": None,
-        "requested_by_dealer": dealer_id,
-        "requested_by_user": user_id,
-        # Runde 28: das KONTO, das wartet — fuer Fairness und Statusabfrage.
-        "user_ids": [user_id] if user_id else [],
-        # Audit 09/2026 (Punkt 33): alle Firmen, die auf diesen Job warten —
-        # nur sie duerfen den Status abfragen.
-        "dealer_ids": [dealer_id] if dealer_id else [],
-        "updated_at": _now(),
-    }
-    try:
-        async with _einfuege_sperre():
-            job["created_at"] = _eingangszeit()
-            await db.link_jobs.insert_one(dict(job))
-    except DuplicateKeyError:
-        # Rennen zwischen Beitritt oben und Einfuegen: jetzt beitreten.
-        existing = await _aktivem_job_beitreten(
-            db, identity["cache_key"], dealer_id, user_id)
-        if existing:
-            return existing
-        # Seltenes Rennen: der aktive Job wurde JETZT gerade fertig —
-        # dann liegt das Ergebnis im Cache; ein frischer completed-Stub
-        # reicht dem Aufrufer.
-        return {**job, "status": "completed", "active": False}
-    job.pop("_id", None)
-    # Audit 13.09.2026 (#28): Rang-Pruefung NUR fuer den selbst eingefuegten
-    # Job — nie im Beitrittsweg; _grenzen_pruefen oben bleibt der Schnellweg.
-    try:
-        await _rang_pruefen(db, job, dealer_id, user_id)
-    except WarteschlangeVoll:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        # Der Job ist gespeichert und wird abgearbeitet — lieber minimal
-        # ueber der Grenze als ein 500 fuer einen vorhandenen Job.
-        log.warning("link_jobs: Rang-Pruefung fuer Job %s fehlgeschlagen: %s",
-                    job["id"], exc)
-    return job
+    job: dict = {}
+    for _versuch in range(3):
+        await _grenzen_pruefen(db, dealer_id, user_id)
+        job = {
+            "id": str(uuid.uuid4()),
+            "cache_key": identity["cache_key"],
+            "source": identity["source"],
+            "item_id": identity["item_id"],
+            "url": url,
+            "status": "queued",
+            "active": True,
+            "attempts": 0,
+            "error": None,
+            "requested_by_dealer": dealer_id,
+            "requested_by_user": user_id,
+            # Runde 28: das KONTO, das wartet — fuer Fairness und Statusabfrage.
+            "user_ids": [user_id] if user_id else [],
+            # Audit 09/2026 (Punkt 33): alle Firmen, die auf diesen Job warten —
+            # nur sie duerfen den Status abfragen.
+            "dealer_ids": [dealer_id] if dealer_id else [],
+            "updated_at": _now(),
+        }
+        try:
+            async with _einfuege_sperre():
+                job["created_at"] = _eingangszeit()
+                await db.link_jobs.insert_one(dict(job))
+        except DuplicateKeyError:
+            # Rennen zwischen Beitritt oben und Einfuegen: jetzt beitreten.
+            existing = await _aktivem_job_beitreten(
+                db, identity["cache_key"], dealer_id, user_id)
+            if existing:
+                return existing
+            # Der aktive Job ist zwischen Einfuegen und Beitritt verschwunden.
+            # Nachpruefung 13.09.2026 (#28): Das kann ein FERTIGER Job sein
+            # (Ergebnis liegt im Cache) — oder einer, den ein anderer Tab an
+            # der Grenze zurueckgerollt hat (_rang_pruefen). Ein completed-Stub
+            # meldete dann ein Ergebnis fuer einen Link, der nie abgerufen
+            # wurde, und das Frontend lud den Vergleich am Limit vorbei.
+            # Deshalb nur einen wirklich fertigen Job liefern, sonst neu
+            # versuchen (Grenze pruefen, einfuegen).
+            fertig = await db.link_jobs.find_one(
+                {"cache_key": identity["cache_key"], "status": "completed"},
+                {"_id": 0}, sort=[("updated_at", -1)])
+            if fertig:
+                return fertig
+            continue
+        job.pop("_id", None)
+        # Audit 13.09.2026 (#28): Rang-Pruefung NUR fuer den selbst eingefuegten
+        # Job — nie im Beitrittsweg; _grenzen_pruefen oben bleibt der Schnellweg.
+        try:
+            await _rang_pruefen(db, job, dealer_id, user_id)
+        except WarteschlangeVoll:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Der Job ist gespeichert und wird abgearbeitet — lieber minimal
+            # ueber der Grenze als ein 500 fuer einen vorhandenen Job.
+            log.warning("link_jobs: Rang-Pruefung fuer Job %s fehlgeschlagen: %s",
+                        job["id"], exc)
+        return job
+    # Dreimal hintereinander verschwand der aktive Job zwischen Einfuegen und
+    # Beitritt — praktisch ausgeschlossen. Dann wie bisher: das Ergebnis
+    # liegt (wahrscheinlich) im Cache.
+    log.warning("link_jobs: %s nach drei Einfuegeversuchen ohne aktiven Job",
+                identity["cache_key"])
+    return {**job, "status": "completed", "active": False}
 
 
 async def get_job(db, job_id: str) -> Optional[dict]:

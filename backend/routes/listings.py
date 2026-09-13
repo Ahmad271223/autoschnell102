@@ -11,7 +11,7 @@ from typing import Annotated, Any, Dict, Optional
 
 # Cache-Lebensdauer fuer abgerufene Inserate. Hoehere TTL = weniger echte
 # Scrape-/Proxy-Requests (dasselbe Inserat wird nur 1x je TTL geladen).
-# Default 24h, per ENV anpassbar.
+# Default 2160 h (90 Tage), per ENV anpassbar.
 # Einmal verglichen = dauerhaft gespeichert (Wunsch 08/2026): dieselbe URL
 # wird NICHT erneut von Kleinanzeigen/mobile geladen, sondern aus unserem
 # Speicher bedient. Default 1 Jahr; per ENV anpassbar.

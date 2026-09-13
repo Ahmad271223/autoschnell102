@@ -186,9 +186,16 @@ def test_28_zwei_tabs_an_der_grenze_keine_tote_job_id(welt, monkeypatch):
             return_exceptions=True)
         tot = []
         for r in res:
-            if isinstance(r, dict) and r.get("status") != "completed":
-                if not await w.db.link_jobs.count_documents({"id": r["id"]}):
-                    tot.append(r["id"])
+            if not isinstance(r, dict):
+                continue
+            if r.get("status") == "completed":
+                # Nachpruefung: "completed" nur, wenn es den fertigen Job gibt —
+                # sonst meldete die Antwort ein Ergebnis, das nie abgerufen wurde.
+                if not await w.db.link_jobs.count_documents(
+                        {"cache_key": r["cache_key"], "status": "completed"}):
+                    tot.append(("falsch fertig", r["id"]))
+            elif not await w.db.link_jobs.count_documents({"id": r["id"]}):
+                tot.append(r["id"])
         return res, tot
 
     for _ in range(20):
@@ -196,6 +203,69 @@ def test_28_zwei_tabs_an_der_grenze_keine_tote_job_id(welt, monkeypatch):
         assert not tot, res
         assert not [r for r in res if isinstance(r, Exception)
                     and not isinstance(r, LJ.WarteschlangeVoll)], res
+
+
+def _ueberholter_beitritt(LJ, monkeypatch, verschwinden):
+    """Simuliert: Die Vorabpruefung sieht den fremden Job noch nicht, das
+    Einfuegen scheitert am Unique-Index, und VOR dem zweiten Beitritt
+    verschwindet der fremde Job (`verschwinden` bestimmt wie)."""
+    echt = LJ._aktivem_job_beitreten
+    aufrufe = []
+
+    async def beitreten(db, cache_key, dealer_id, user_id):
+        aufrufe.append(cache_key)
+        if len(aufrufe) == 1:
+            return None
+        if len(aufrufe) == 2:
+            await verschwinden(db)
+        return await echt(db, cache_key, dealer_id, user_id)
+
+    monkeypatch.setattr(LJ, "_aktivem_job_beitreten", beitreten)
+    return aufrufe
+
+
+def test_28_zurueckgerollter_job_ergibt_keinen_falschen_completed_stub(welt, monkeypatch):
+    """Nachpruefung 13.09.2026: Rollte ein anderer Tab seinen Job an der Grenze
+    zurueck, bekam dieser Aufruf {status: completed} fuer einen Link, der nie
+    abgerufen wurde. Jetzt: neu versuchen und einen echten Job einreihen."""
+    import link_jobs as LJ
+    from listing_identity import get_listing_identity
+    w = welt
+    w.run(LJ.ensure_job_indexes(w.db))
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_KONTO", 5)
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_FIRMA", 999)
+    url = _neue_url()
+    fremd = _job(get_listing_identity(url)["cache_key"], w.b, w.dealer_id)
+    w.run(w.db.link_jobs.insert_one(dict(fremd)))
+
+    async def zurueckrollen(db):
+        await db.link_jobs.delete_one({"id": fremd["id"]})
+
+    _ueberholter_beitritt(LJ, monkeypatch, zurueckrollen)
+    r = w.run(LJ.enqueue_job(w.db, url, dealer_id=w.dealer_id, user_id=w.a["id"]))
+    assert r["status"] == "queued", r
+    assert w.run(w.db.link_jobs.count_documents({"id": r["id"], "status": "queued"})) == 1
+
+
+def test_28_wirklich_fertiger_job_wird_geliefert(welt, monkeypatch):
+    import link_jobs as LJ
+    from listing_identity import get_listing_identity
+    w = welt
+    w.run(LJ.ensure_job_indexes(w.db))
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_KONTO", 5)
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_FIRMA", 999)
+    url = _neue_url()
+    fremd = _job(get_listing_identity(url)["cache_key"], w.b, w.dealer_id)
+    w.run(w.db.link_jobs.insert_one(dict(fremd)))
+
+    async def fertig_werden(db):
+        await db.link_jobs.update_one({"id": fremd["id"]},
+                                      {"$set": {"status": "completed", "active": False}})
+
+    _ueberholter_beitritt(LJ, monkeypatch, fertig_werden)
+    r = w.run(LJ.enqueue_job(w.db, url, dealer_id=w.dealer_id, user_id=w.a["id"]))
+    assert (r["id"], r["status"]) == (fremd["id"], "completed"), r
+    assert w.run(w.db.link_jobs.count_documents({"cache_key": fremd["cache_key"]})) == 1
 
 
 def test_28_db_fehler_in_rang_pruefung_liefert_trotzdem_den_job(welt, monkeypatch):

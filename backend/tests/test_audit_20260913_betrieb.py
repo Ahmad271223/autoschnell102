@@ -376,7 +376,8 @@ def test_35_abgelaufener_inseratscache_wird_geloescht(welt):
 def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeypatch):
     """Nachbesserung #35: Eintraege aus der Zeit vor ce63a99 tragen
     expires_at = Abruf + 1 Jahr. Massgeblich ist der Abruf plus TTL plus
-    Karenz; Lease und Altbestand-Beweis schuetzen weiterhin."""
+    Karenz, hoechstens aber 90 Tage (Datenschutzerklaerung: "max. 90 Tage");
+    Lease und Altbestand-Beweis schuetzen weiterhin."""
     import cleanup_service as CS
     w = welt
     monkeypatch.setattr(CS, "LISTING_CACHE_TTL_HOURS", 2160)
@@ -394,7 +395,8 @@ def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeyp
         await w.db.listings_cache.insert_many([
             eintrag("alt", 120),                                          # weg
             eintrag("jung", 30),                                          # bleibt
-            eintrag("karenz", 95),                                        # 90 + 7 > 95
+            eintrag("ueber90", 95),                                       # weg: max. 90 Tage
+            eintrag("grenze", 89),                                        # bleibt
             eintrag("lease", 120, fetching_until=jetzt + timedelta(seconds=60)),
             eintrag("beweis", 120),
         ])
@@ -406,8 +408,17 @@ def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeyp
         return n, rest
 
     n, rest = w.run(lauf())
-    assert rest == {"35bjung", "35bkarenz", "35blease", "35bbeweis"}, rest
-    assert n == 1
+    assert rest == {"35bjung", "35bgrenze", "35blease", "35bbeweis"}, rest
+    assert n == 2
+    # Auch mit laengerer TTL bleibt es bei hoechstens 90 Tagen.
+    monkeypatch.setattr(CS, "LISTING_CACHE_TTL_HOURS", 24 * 365)
+
+    async def lauf_lang():
+        await w.db.listings_cache.insert_one(eintrag("lang", 91))
+        await CS.inseratscache_rotieren(w.db, jetzt)
+        return await w.db.listings_cache.count_documents({"item_id": "35blang"})
+
+    assert w.run(lauf_lang()) == 0
     s = _quelle("backend", "server.py")
     alle = s[s.index("async def _alle_indexe():"):s.index("async def run_abgleich_forever(")]
     assert 'create_index("fetched_at", name="cache_abruf")' in alle

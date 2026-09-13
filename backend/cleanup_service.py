@@ -779,6 +779,11 @@ LISTING_CACHE_KARENZ_TAGE = int(os.environ.get("LISTING_CACHE_KARENZ_TAGE", "7")
 # Gleicher Wert und Default wie routes/listings.py (dort Schreib-TTL); hier
 # direkt aus der Umgebung, um den Router nicht in den Cleanup zu importieren.
 LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
+# Nachpruefung 13.09.2026: Die Datenschutzerklaerung sagt "Inserats-Cache
+# max. 90 Tage". TTL (90 Tage) plus Karenz (7 Tage) waeren 97 — deshalb eine
+# harte Grenze ab dem Abruf, unabhaengig von TTL und Karenz. Wer sie aendert,
+# muss frontend/src/pages/legal/Datenschutz.jsx (Abschnitt 5) nachziehen.
+INSERATSCACHE_MAX_TAGE = 90
 
 
 async def inseratscache_rotieren(db, now: datetime,
@@ -805,10 +810,12 @@ async def inseratscache_rotieren(db, now: datetime,
     r = await db.listings_cache.delete_many(
         {"expires_at": {"$lt": now - timedelta(days=karenz)}, **frei, **ausnahme})
     n = r.deleted_count
-    # (d) nutzt den Index cache_abruf (server._alle_indexe).
+    # (d) nutzt den Index cache_abruf (server._alle_indexe). Hoechstens
+    # INSERATSCACHE_MAX_TAGE nach dem Abruf — das greift auch vor (a).
+    frist = min(timedelta(hours=LISTING_CACHE_TTL_HOURS) + timedelta(days=karenz),
+                timedelta(days=INSERATSCACHE_MAX_TAGE))
     r = await db.listings_cache.delete_many(
-        {"fetched_at": {"$lt": now - timedelta(hours=LISTING_CACHE_TTL_HOURS)
-                        - timedelta(days=karenz)}, **frei, **ausnahme})
+        {"fetched_at": {"$lt": now - frist}, **frei, **ausnahme})
     n += r.deleted_count
     # expires_at None trifft das fehlende Feld und nutzt den Index cache_ablauf.
     r = await db.listings_cache.delete_many(
