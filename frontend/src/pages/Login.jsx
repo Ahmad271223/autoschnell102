@@ -14,7 +14,10 @@ export default function Login() {
   const [mfaCode, setMfaCode] = useState("");
   const nav = useNavigate();
   const [params] = useSearchParams();
-  const [email, setEmail] = useState("");
+  // Kontonummer (13.09.2026): Anmeldung mit der Kontonummer (Chef '10023',
+  // Sucher '10023-2'). Das Feld bleibt Freitext — der Betreiber meldet sich
+  // hier mit seinem Benutzernamen an, ohne dass die Maske darauf hinweist.
+  const [kennung, setKennung] = useState("");
   const [pw, setPw] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -34,7 +37,7 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      let u = mfaToken ? await loginMfa(mfaToken, mfaCode) : await login(email, pw);
+      let u = mfaToken ? await loginMfa(mfaToken, mfaCode) : await login(kennung.trim(), pw);
       if (u?.mfa_erforderlich) {
         setMfaToken(u.mfa_token);
         toast.message("Bitte den Code aus deiner Authenticator-App eingeben");
@@ -99,10 +102,12 @@ export default function Login() {
 
           <div className="mt-6 space-y-3">
             <div>
-              <label className="overline">E-Mail oder Benutzername</label>
-              <input data-testid="login-email" type="text" required value={email} onChange={(e) => setEmail(e.target.value)}
-                     autoComplete="username"
-                     className="input-base w-full mt-1" placeholder="haendler@firma.de" />
+              <label className="overline">Kontonummer</label>
+              {/* Kein inputMode="numeric": der Zusatz '-2' und der Benutzername
+                  des Betreibers muessen eingebbar bleiben. */}
+              <input data-testid="login-kontonummer" type="text" required value={kennung} onChange={(e) => setKennung(e.target.value)}
+                     autoComplete="username" autoCapitalize="none" spellCheck={false}
+                     className="input-base w-full mt-1" placeholder="z. B. 10023 oder 10023-2" />
             </div>
             <div>
               <label className="overline">Passwort</label>
@@ -133,6 +138,10 @@ export default function Login() {
             </div>
             <div>
               Noch kein Konto? <Link to="/anfrage" className="text-white hover:underline">Zugang anfragen — wir schalten dich frei</Link>
+            </div>
+            <div className="text-xs text-zinc-500 space-x-3">
+              <Link to="/fahrer/login" data-testid="link-zur-fahrer-app" className="hover:text-white hover:underline">Fahrer? Zur Fahrer-App</Link>
+              <Link to="/markt/login" data-testid="link-zum-marktplatz" className="hover:text-white hover:underline">Zwischenhändler? Zum Marktplatz</Link>
             </div>
           </div>
 

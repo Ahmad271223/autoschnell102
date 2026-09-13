@@ -58,21 +58,12 @@ export function DriverAuthProvider({ children }) {
       .finally(() => setReady(true));
   }, []);
 
-  const login = async (email, password) => {
-    const { data } = await driverApi.post("/driver/login", { email, password });
+  // Kontonummer (13.09.2026): Anmeldung mit der Kontonummer. Fahrer-Konten
+  // legt der Betreiber an — keine Selbstregistrierung mehr.
+  const login = async (kennung, password) => {
+    const { data } = await driverApi.post("/driver/login", { kontonummer: kennung, password });
     tokenSetzen(TOKEN_FAHRER, data.token);
     // volle /me-Payload holen (inkl. dealers)
-    const me = await driverApi.get("/driver/me");
-    setDriver(me.data);
-    setFehler(null);
-    return me.data;
-  };
-
-  const register = async (email, password, display_name) => {
-    const { data } = await driverApi.post("/driver/register", {
-      email, password, display_name,
-    });
-    tokenSetzen(TOKEN_FAHRER, data.token);
     const me = await driverApi.get("/driver/me");
     setDriver(me.data);
     setFehler(null);
@@ -96,7 +87,7 @@ export function DriverAuthProvider({ children }) {
   };
 
   return (
-    <DriverCtx.Provider value={{ driver, ready, fehler, login, register, logout, refresh }}>
+    <DriverCtx.Provider value={{ driver, ready, fehler, login, logout, refresh }}>
       {children}
     </DriverCtx.Provider>
   );

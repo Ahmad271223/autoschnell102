@@ -407,7 +407,9 @@ async def create_invite(body: InviteIn, user=Depends(current_haendler)):
                                                    "nutzungen": body.max_uses})
     return {"ok": True, "token": token, "expires_at": expires,
             "max_uses": body.max_uses,
-            "link": f"/markt/registrieren?invite={token}"}
+            # Kontonummer (13.09.2026): Kaeufer registrieren sich nicht mehr
+            # selbst — der Link fuehrt zur Anmeldung, die die Einladung einloest.
+            "link": f"/markt/login?invite={token}"}
 
 
 @router.get("/dealer/invites")

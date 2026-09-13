@@ -85,8 +85,11 @@ export const AuthProvider = ({ children }) => {
     refresh();
   }, [refresh]);
 
-  const login = async (email, password) => {
-    const { data } = await api.post("/auth/login", { email, password });
+  // Kontonummer (13.09.2026): Anmeldekennung ist die Kontonummer (bzw. der
+  // Benutzername des Betreibers). Konten legt nur der Betreiber an — die
+  // fruehere register()-Funktion gibt es nicht mehr.
+  const login = async (kennung, password) => {
+    const { data } = await api.post("/auth/login", { kontonummer: kennung, password });
     if (data?.mfa_erforderlich) {
       // Zwei-Faktor (Admin/Super-Admin): noch kein Sitzungs-Token — die
       // Login-Seite fragt jetzt den Code aus der Authenticator-App ab.
@@ -98,13 +101,6 @@ export const AuthProvider = ({ children }) => {
   };
   const loginMfa = async (mfaToken, code) => {
     const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code });
-    tokenSetzen(TOKEN_APP, data.token);
-    await refresh();
-    return data.user;
-  };
-
-  const register = async (payload) => {
-    const { data } = await api.post("/auth/register", payload);
     tokenSetzen(TOKEN_APP, data.token);
     await refresh();
     return data.user;
@@ -124,7 +120,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthCtx.Provider value={{ user, dealer, subscription, loading, verbindungsfehler, login, loginMfa, register, logout, refresh, setDealer }}>
+    <AuthCtx.Provider value={{ user, dealer, subscription, loading, verbindungsfehler, login, loginMfa, logout, refresh, setDealer }}>
       {children}
     </AuthCtx.Provider>
   );

@@ -22,10 +22,7 @@ test.describe("Fahrer-App", () => {
   });
 
   test("Fahrt annehmen -> Abhol-Buttons, Terminplaner zeigt 'angenommen'", async ({ page, browser }) => {
-    await page.goto("/fahrer/login");
-    await page.getByTestId("driver-login-email").fill(driver.email);
-    await page.getByTestId("driver-login-password").fill(driver.password);
-    await page.getByTestId("driver-login-submit").click();
+    await h.formLogin(page, "driver", driver);
     await expect(page).toHaveURL(/\/fahrer\/?$/);
 
     const card = page.getByTestId(`appt-${appt.id}`);

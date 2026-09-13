@@ -61,24 +61,16 @@ export function BuyerAuthProvider({ children }) {
       .finally(() => setReady(true));
   }, []);
 
-  const login = async (email, password) => {
-    const { data } = await buyerApi.post("/buyer/login", { email, password });
+  // Kontonummer (13.09.2026): Anmeldung mit der Kontonummer. Kaeuferkonten
+  // legt der Betreiber nach einer Anfrage an; Einladungen loest BuyerLogin
+  // nach der Anmeldung ein.
+  const login = async (kennung, password) => {
+    const { data } = await buyerApi.post("/buyer/login", { kontonummer: kennung, password });
     tokenSetzen(TOKEN_KAEUFER, data.token);
     // Login war erfolgreich — ein Fehler beim Nachladen des Profils darf
     // NICHT als "Anmeldung fehlgeschlagen" erscheinen.
     try { return await refresh(); }
     catch { setBuyer(data.user || null); return data.user; }
-  };
-
-  const register = async (payload) => {
-    const { data } = await buyerApi.post("/buyer/register", payload);
-    tokenSetzen(TOKEN_KAEUFER, data.token);
-    let u = data.user || null;
-    try { u = await refresh(); }
-    catch { setBuyer(data.user || null); }
-    // network_joined kommt ehrlich vom Server: false bei ungueltiger,
-    // abgelaufener oder aufgebrauchter Einladung.
-    return { ...(u || {}), network_joined: !!data.network_joined };
   };
 
   const logout = () => {
@@ -89,7 +81,7 @@ export function BuyerAuthProvider({ children }) {
   };
 
   return (
-    <BuyerCtx.Provider value={{ buyer, ready, login, register, logout, refresh }}>
+    <BuyerCtx.Provider value={{ buyer, ready, login, logout, refresh }}>
       {children}
     </BuyerCtx.Provider>
   );

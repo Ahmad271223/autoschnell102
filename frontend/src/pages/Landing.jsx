@@ -388,13 +388,14 @@ export default function Landing() {
               </div>
               <p className="text-zinc-400 text-sm mt-2">Für Zwischenhändler: geprüfte Fahrzeuge von Händlern kaufen.
                 {markt.marktplatz_kostenlos
-                  ? " Registrieren und sofort loslegen."
-                  : " Online zahlen, sofort loslegen."}</p>
+                  ? " Zugang anfragen — wir schalten dich frei."
+                  : " Zugang anfragen, online zahlen, loslegen."}</p>
               <div className="mt-6 flex flex-col gap-2">
-                <Link to="/markt/registrieren" data-testid="cta-markt-register"
+                {/* Kontonummer (13.09.2026): Konten legt der Betreiber nach Anfrage an */}
+                <Link to="/anfrage?art=kaeufer" data-testid="cta-markt-anfrage"
                       className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
                       style={{ borderColor: "var(--border-default)" }}>
-                  Registrieren
+                  Zugang anfragen
                 </Link>
                 <Link to="/markt/login" data-testid="cta-markt-login"
                       className="block text-center w-full px-5 py-2.5 rounded-sm text-sm text-zinc-300 hover:text-white">
@@ -418,10 +419,10 @@ export default function Landing() {
               <p className="text-zinc-400 text-sm mt-2">Für Abholfahrer: Termine, digitales Abholprotokoll mit
                 Unterschrift, fertiges PDF — direkt am Handy.</p>
               <div className="mt-6 flex flex-col gap-2">
-                <Link to="/fahrer/register" data-testid="cta-fahrer-register"
+                <Link to="/anfrage?art=fahrer" data-testid="cta-fahrer-anfrage"
                       className="block text-center w-full px-5 py-3 rounded-sm bg-white/5 border hover:bg-white/10"
                       style={{ borderColor: "var(--border-default)" }}>
-                  Kostenlos registrieren
+                  Kostenlos Zugang anfragen
                 </Link>
                 <Link to="/fahrer/login" data-testid="cta-fahrer-login"
                       className="block text-center w-full px-5 py-2.5 rounded-sm text-sm text-zinc-300 hover:text-white">

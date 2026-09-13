@@ -122,8 +122,8 @@ export default function DriverSettings() {
           value={pw.repeat} onChange={(e) => setPw({ ...pw, repeat: e.target.value })}
           className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-repeat" />
         <p className="text-xs text-zinc-500 mt-2">
-          Nach der Änderung wirst du auf allen Geräten abgemeldet. Passwort vergessen? Über
-          „Passwort vergessen" auf der Anmeldeseite bekommst du einen Link per E-Mail.
+          Nach der Änderung wirst du auf allen Geräten abgemeldet. Passwort vergessen?
+          Ein neues Passwort setzt der Betreiber – bitte dort melden.
         </p>
         <button type="submit" disabled={pwBusy} data-testid="driver-pw-submit"
           className="kinetic-button mt-4 px-5 py-2.5 rounded-sm text-sm font-bold disabled:opacity-40">
@@ -162,7 +162,8 @@ export default function DriverSettings() {
       </div>
 
       <div className="mt-5 text-xs text-zinc-600 text-center">
-        Eingeloggt als {driver.email}
+        {/* Kontonummer (13.09.2026): Anmeldekennung statt E-Mail */}
+        Eingeloggt als <span data-testid="driver-kontonummer">{driver.kontonummer || driver.email || "—"}</span>
       </div>
     </div>
   );

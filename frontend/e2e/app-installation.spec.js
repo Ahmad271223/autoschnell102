@@ -110,7 +110,7 @@ test.describe("Installierbare App", () => {
     test("Sitzung inzwischen beendet: /start zeigt die Anmeldung MIT Grund", async ({ page }) => {
       const alt = sucher.token;
       // Neue Anmeldung desselben Kontos beendet die alte Sitzung (Single-Session).
-      sucher.token = await h.login(sucher.email, sucher.password);
+      sucher.token = await h.login(sucher.kontonummer, sucher.password);
       await h.authPage(page, "app", alt);
       await page.goto("/start");
       await expect(page).toHaveURL(/\/login\?reason=session$/);
@@ -140,7 +140,7 @@ test.describe("Installierbare App", () => {
       // haengen, falls das Neuladen ihm zuvorkommt.
       const knopf = page.getByRole("link", { name: "Erneut versuchen" });
       if (await knopf.isVisible().catch(() => false)) await knopf.click({ timeout: 3000 }).catch(() => {});
-      await expect(page.getByTestId("login-email")).toBeVisible();
+      await expect(page.getByTestId("login-kontonummer")).toBeVisible();
     });
   });
 });

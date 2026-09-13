@@ -76,7 +76,7 @@ export default function AdminAuditLog() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && load()}
-          placeholder="Suche (E-Mail, Aktion, Ref) …"
+          placeholder="Suche (Kontonummer, E-Mail, Aktion, Ref) …"
           className="ml-auto h-9 px-3 rounded-lg text-[13px] bg-white/5 border border-white/10 text-white placeholder-zinc-500 outline-none focus:border-white/25 w-64"
         />
       </div>
@@ -114,7 +114,11 @@ export default function AdminAuditLog() {
                         <Badge tone={toneFor(it.action)}>{it.action}</Badge>
                       </td>
                       <td className="px-4 py-2.5 text-white">
-                        {it.email || it.username || "—"}
+                        {/* Kontonummer (13.09.2026): erste Kennung, E-Mail nur noch Kontakt */}
+                        {it.kontonummer || it.username || it.email || "—"}
+                        {it.kontonummer && it.email && (
+                          <span className="ml-1.5 text-[11px] text-zinc-500">{it.email}</span>
+                        )}
                         {it.role === "admin" && (
                           <span className="ml-1.5 text-[10px] text-purple-300">Admin</span>
                         )}

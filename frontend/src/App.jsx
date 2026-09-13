@@ -93,7 +93,7 @@ function Vorladen() {
   }, [user]);
   return null;
 }
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
@@ -109,7 +109,6 @@ import AppStart from "@/pages/AppStart";
 const Anfrage = seite(() => import("@/pages/Anfrage"));
 const MarktZahlungErfolg = seite(() => import("@/pages/markt/ZahlungErfolg"));
 const PasswortVergessen = seite(() => import("@/pages/PasswortVergessen"));
-const PasswortReset = seite(() => import("@/pages/PasswortReset"));
 const Impressum = seite(() => import("@/pages/legal/Impressum"));
 const Datenschutz = seite(() => import("@/pages/legal/Datenschutz"));
 const AGB = seite(() => import("@/pages/legal/AGB"));
@@ -144,14 +143,12 @@ const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 
 const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
-const DriverRegister = seite(() => import("@/pages/driver/DriverRegister"));
 const DriverLayout = seite(() => import("@/pages/driver/DriverLayout"));
 const DriverDashboard = seite(() => import("@/pages/driver/DriverDashboard"));
 const DriverSettings = seite(() => import("@/pages/driver/DriverSettings"));
 const DriverProtokoll = seite(() => import("@/pages/driver/Protokoll"));
 
 const BuyerLogin = seite(() => import("@/pages/markt/BuyerLogin"));
-const BuyerRegister = seite(() => import("@/pages/markt/BuyerRegister"));
 const Marktplatz = seite(() => import("@/pages/markt/Marktplatz"));
 
 const Wrap = ({ children }) => (
@@ -174,6 +171,14 @@ const WrapFree = ({ children }) => (
 function AppHome() {
   const { user } = useAuth();
   return <Navigate to={startseite(user)} replace />;
+}
+
+// Kontonummer (13.09.2026): Konten legt nur noch der Betreiber an. Alte
+// Links landen auf der Anmeldung — MIT Query, damit ein schon verschickter
+// Einladungslink (?invite=…) nach der Anmeldung eingeloest wird.
+function WeiterleitungMitQuery({ nach }) {
+  const { search } = useLocation();
+  return <Navigate to={`${nach}${search}`} replace />;
 }
 
 export default function App() {
@@ -201,7 +206,9 @@ export default function App() {
             <Route path="/register" element={<Navigate to="/anfrage" replace />} />
             <Route path="/anfrage" element={<Anfrage />} />
             <Route path="/passwort-vergessen" element={<PasswortVergessen />} />
-            <Route path="/passwort-reset" element={<PasswortReset />} />
+            {/* Kontonummer (13.09.2026): kein Reset-Link per E-Mail mehr —
+                alte Links zeigen den Hinweis "Passwort vergibt der Betreiber". */}
+            <Route path="/passwort-reset" element={<Navigate to="/passwort-vergessen" replace />} />
             <Route path="/impressum" element={<Impressum />} />
             <Route path="/datenschutz" element={<Datenschutz />} />
             <Route path="/agb" element={<AGB />} />
@@ -229,13 +236,13 @@ export default function App() {
 
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
             <Route path="/markt/login" element={<BuyerLogin />} />
-            <Route path="/markt/registrieren" element={<BuyerRegister />} />
+            <Route path="/markt/registrieren" element={<WeiterleitungMitQuery nach="/markt/login" />} />
             <Route path="/markt/zahlung-erfolg" element={<MarktZahlungErfolg />} />
             <Route path="/markt" element={<Marktplatz />} />
 
             {/* Fahrer-App (eigenständig) */}
             <Route path="/fahrer/login" element={<DriverLogin />} />
-            <Route path="/fahrer/register" element={<DriverRegister />} />
+            <Route path="/fahrer/register" element={<Navigate to="/anfrage?art=fahrer" replace />} />
             <Route path="/fahrer" element={<DriverLayout />}>
               <Route index element={<DriverDashboard />} />
               <Route path="protokoll/:id" element={<DriverProtokoll />} />

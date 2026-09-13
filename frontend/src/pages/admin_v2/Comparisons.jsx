@@ -36,7 +36,8 @@ export default function AdminComparisons() {
     if (!s) return items;
     return items.filter((it) => {
       const v = it.vehicle || {};
-      const txt = [it.ad_id, v.make, v.model, v.vin, ...(it.users || []).map((u) => u.email + " " + (u.company_name || ""))].join(" ").toLowerCase();
+      const txt = [it.ad_id, v.make, v.model, v.vin, ...(it.users || []).map((u) => [u.kontonummer, u.username, u.email, u.company_name].filter(Boolean).join(" "))]
+        .filter(Boolean).join(" ").toLowerCase();   // Kontonummer (13.09.2026): kein "undefined" bei Konten ohne E-Mail
       return txt.includes(s);
     });
   }, [items, q]);
@@ -115,7 +116,7 @@ export default function AdminComparisons() {
                         ) : (
                           it.users.map((u) => (
                             <span key={u.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px]" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                              <span className="font-medium text-white">{u.company_name || u.username || u.email}</span>
+                              <span className="font-medium text-white">{u.company_name || u.username || u.kontonummer || u.email || "—"}</span>
                               {u.email && u.email !== (u.company_name || u.username) && <span className="text-zinc-400">{u.email}</span>}
                               {u.active === false && <Badge tone="red">gesperrt</Badge>}
                             </span>

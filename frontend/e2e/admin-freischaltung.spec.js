@@ -38,7 +38,8 @@ test.describe("Super-Admin: Firma & Sucher-Freischaltung", () => {
     await expect(page).toHaveURL(new RegExp(`/admin/users/${firma.userId}$`));
     await expect(page.getByText("Chef & Sucher — Freischaltung")).toBeVisible();
 
-    const sucherRow = page.locator("tr", { hasText: sucher.email });
+    // Kontonummer (13.09.2026): die Zeile traegt die Kontonummer des Suchers.
+    const sucherRow = page.locator("tr", { hasText: sucher.kontonummer });
     await expect(sucherRow.getByText("Sucher-Funktion: nein")).toBeVisible();
     await sucherRow.getByTestId(`abo-monat-${sucher.userId}`).click();
     await expect(sucherRow.getByText("Sucher-Funktion: ja")).toBeVisible();
@@ -66,7 +67,7 @@ test.describe("Super-Admin: Firma & Sucher-Freischaltung", () => {
       // Drei Klicks im selben Tick — schneller als jeder Mensch.
       await btn.evaluate((el) => { el.click(); el.click(); el.click(); });
 
-      const sucherRow = page.locator("tr", { hasText: sucher2.email });
+      const sucherRow = page.locator("tr", { hasText: sucher2.kontonummer });
       await expect(sucherRow.getByText("Sucher-Funktion: ja")).toBeVisible();
       await page.waitForTimeout(1000);
       expect(aboRequests).toHaveLength(1);

@@ -52,7 +52,7 @@ api.interceptors.response.use(
   (err) => {
     if (err?.response?.status === 401) {
       const url = err?.config?.url || "";
-      if (!url.includes("/auth/login") && !url.includes("/auth/register")) {
+      if (!url.includes("/auth/login")) {
         tokenLoeschen(TOKEN_APP);
         const pfad = window.location.pathname;
         const imBereich = pfad.startsWith("/app") || pfad.startsWith("/admin");

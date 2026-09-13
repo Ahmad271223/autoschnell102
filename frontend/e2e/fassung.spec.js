@@ -45,10 +45,7 @@ function ladevorgaengeZaehlen(page) {
 }
 
 async function anmelden(page, driver) {
-  await page.goto("/fahrer/login");
-  await page.getByTestId("driver-login-email").fill(driver.email);
-  await page.getByTestId("driver-login-password").fill(driver.password);
-  await page.getByTestId("driver-login-submit").click();
+  await h.formLogin(page, "driver", driver);
   await expect(page).toHaveURL(/\/fahrer\/?$/);
 }
 
@@ -78,11 +75,9 @@ test.describe("Neue Fassung (Runde 31)", () => {
     await fassungEinspielen(page, { wert: NEU });
 
     await page.goto("/fahrer/login");
-    await expect(page.getByTestId("driver-login-email")).toBeVisible();
+    await expect(page.getByTestId("driver-login-kontonummer")).toBeVisible();
     const vorher = ladungen.n;
-    await page.getByTestId("driver-login-email").fill(driver.email);
-    await page.getByTestId("driver-login-password").fill(driver.password);
-    await page.getByTestId("driver-login-submit").click();
+    await h.formLogin(page, "driver", driver, { navigieren: false });
 
     await expect(page).toHaveURL(/\/fahrer\/?$/);
     // Genau ein vollstaendiges Laden statt des Wechsels im Speicher ...

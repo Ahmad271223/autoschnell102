@@ -245,7 +245,9 @@ def test_13_werbetexte_nennen_keinen_festen_preis():
     """Regressionsschutz im Frontend: der Preis darf nicht wieder fest im
     Text stehen, sonst wirbt die Seite beim naechsten Umschalten falsch."""
     basis = Path(__file__).resolve().parents[2] / "frontend" / "src"
-    for datei in ("pages/Landing.jsx", "pages/markt/BuyerRegister.jsx"):
+    # Kontonummer (13.09.2026): BuyerRegister.jsx ist entfallen — Zwischen-
+    # haendler fragen ueber Anfrage.jsx (?art=kaeufer) an.
+    for datei in ("pages/Landing.jsx", "pages/Anfrage.jsx"):
         quelle = (basis / datei).read_text(encoding="utf-8")
         assert "marktplatz_kostenlos" in quelle, f"{datei} fragt den Server nicht"
         assert "20 €" not in quelle, f"{datei} nennt weiter einen festen Preis"

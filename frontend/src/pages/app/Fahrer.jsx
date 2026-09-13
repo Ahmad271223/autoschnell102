@@ -52,9 +52,9 @@ export default function Fahrer() {
         Fahrer-Verwaltung
       </h1>
       <p className="text-sm text-zinc-400 mt-2 max-w-2xl">
-        Jeder Fahrer hat einen eigenen Account in der Fahrer-App und bekommt dort
-        eine Fahrer-ID (z.B. <code className="px-1 rounded-sm bg-white/5">FD-A7K3M9X2</code>).
-        Gib dir diese ID vom Fahrer geben – und füge ihn hier hinzu.
+        Fahrer legt der Betreiber an – jeder Fahrer hat ein eigenes Konto in der
+        Fahrer-App und eine Fahrer-ID (z.B. <code className="px-1 rounded-sm bg-white/5">FD-A7K3M9X2</code>).
+        Die Fahrer-ID bekommst du vom Fahrer oder Betreiber – damit fügst du ihn hier hinzu.
       </p>
 
       {!chef && (

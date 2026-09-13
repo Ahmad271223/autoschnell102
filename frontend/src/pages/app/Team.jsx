@@ -7,9 +7,9 @@ import { TrendingUp, UserPlus, Info } from "lucide-react";
 /**
  * Mitarbeiter / Sucher-Übersicht + Weiterverkaufsplan.
  *
- * Seit 09/2026 legt der BETREIBER die Sucher-Konten an (inkl. Anmeldename
- * und Passwort), schaltet Abos nach Rechnungszahlung frei und kann sperren/
- * löschen. Diese Seite zeigt dem Chef sein Team, den Abo-Stand je Sucher
+ * Seit 09/2026 legt der BETREIBER die Sucher-Konten an (Kontonummer und
+ * Passwort, Kontonummer 13.09.2026), schaltet Abos nach Rechnungszahlung frei
+ * und kann sperren/löschen. Diese Seite zeigt dem Chef sein Team, den Abo-Stand je Sucher
  * (inkl. nächster Zahlung) und sendet Anfragen an den Betreiber.
  */
 
@@ -81,7 +81,7 @@ export default function Team() {
         <div className="text-zinc-300">
           <b>Sucher-Konten legt der Betreiber für dich an</b>{" "}
           <span className="text-zinc-500">
-            — Anmeldename und Passwort bekommt jeder Sucher direkt von uns.
+            — Kontonummer und Passwort vergibt der Betreiber; jeder Sucher bekommt sie direkt von uns.
             Sag uns einfach, wie viele Zugänge du brauchst (jederzeit erweiterbar).
             Freischaltung nach Rechnungszahlung: 150&nbsp;€/Monat oder
             1.500&nbsp;€/Jahr je Sucher. Willst du selbst suchen &amp; vergleichen,
@@ -154,7 +154,7 @@ export default function Team() {
           <thead>
             <tr className="text-left overline" style={{ background: "rgba(255,255,255,0.02)" }}>
               <th className="px-4 py-3">Name</th>
-              <th className="px-4 py-3">E-Mail</th>
+              <th className="px-4 py-3">Kontonummer</th>
               <th className="px-4 py-3">Sucher-Abo</th>
               <th className="px-4 py-3">Nächste Zahlung</th>
               <th className="px-4 py-3">Käufe (Monat)</th>
@@ -178,7 +178,11 @@ export default function Team() {
                   {s.first_name} {s.last_name}
                   {s.employee_id && <span className="ml-2 text-[10px] text-zinc-500">#{s.employee_id}</span>}
                 </td>
-                <td className="px-4 py-3 text-zinc-400">{s.email}</td>
+                <td className="px-4 py-3 text-zinc-400">
+                  {/* Kontonummer (13.09.2026): die eigenen Sucher-Nummern braucht der Chef */}
+                  <span className="font-mono text-zinc-200" data-testid={`team-kontonummer-${s.id}`}>{s.kontonummer || "—"}</span>
+                  {s.email && <div className="text-[11px] text-zinc-500">{s.email}</div>}
+                </td>
                 <td className="px-4 py-3">
                   {s.subscription?.active ? (
                     <span className="text-emerald-400 text-xs">aktiv ({s.subscription.plan === "yearly" ? "jährlich" : "monatlich"})</span>

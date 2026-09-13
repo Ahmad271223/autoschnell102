@@ -14,8 +14,14 @@ export default function Datenschutz() {
       <H2>2. Welche Daten wir verarbeiten</H2>
       <p>Bei der Nutzung der Plattform verarbeiten wir folgende Daten:</p>
       <ul className="list-disc pl-6 space-y-1">
-        <li><b>Account-Daten:</b> Firmenname, Ansprechpartner, E-Mail-Adresse,
-            Telefonnummer, Passwort (verschlüsselt als Hash gespeichert)</li>
+        {/* BETREIBER-HINWEIS (im Browser unsichtbar): Kontonummer (13.09.2026) —
+            Kontonummer ergaenzt, E-Mail nur noch optionale Kontaktadresse,
+            Passwort-Reset- und Einladungs-Mails gestrichen (der Code
+            verschickt nur den Kaufvertrag an den Verkaeufer und die Kopie an
+            den Sucher). Wortlaut vor dem Merge von Ahmad freigeben lassen. */}
+        <li><b>Account-Daten:</b> Kontonummer, Firmenname, Ansprechpartner,
+            Telefonnummer, E-Mail-Adresse (optional, als Kontaktadresse),
+            Passwort (verschlüsselt als Hash gespeichert)</li>
         <li><b>Geschäftsdaten:</b> Fahrzeugdaten, Kaufverträge, Verkäuferdaten
             (Name, Adresse, Kontaktdaten der Fahrzeugverkäufer), Termine,
             Abholberichte inkl. Fotos</li>
@@ -65,9 +71,8 @@ export default function Datenschutz() {
             Anwendung und Speicherung sämtlicher Plattformdaten (Account-,
             Geschäfts- und Nutzungsdaten). Rechenzentrum:
             [Standort eintragen, z.&nbsp;B. Falkenstein oder Nürnberg].</li>
-        <li><b>E-Mail-Versand:</b> System- und Vertrags-E-Mails (z.&nbsp;B.
-            Passwort zurücksetzen, Einladungen, Kaufvertrag an den Verkäufer)
-            versenden wir über Resend, Inc., 2261 Market Street #5039,
+        <li><b>E-Mail-Versand:</b> Vertrags-E-Mails (den Kaufvertrag an den
+            Verkäufer und die Kopie an den Sucher) versenden wir über Resend, Inc., 2261 Market Street #5039,
             San Francisco, CA 94114, USA. Der Versand läuft über die
             EU-Region des Anbieters (Irland). Übermittelt werden die
             Empfänger-Adresse, der Betreff, der Inhalt der Nachricht und
@@ -212,7 +217,7 @@ export default function Datenschutz() {
         protokolliert.
       </p>
 
-      <p className="text-zinc-500 text-sm">Stand: August 2026</p>
+      <p className="text-zinc-500 text-sm">Stand: September 2026</p>
     </LegalLayout>
   );
 }

@@ -13,11 +13,9 @@
 const { test, expect } = require("@playwright/test");
 const h = require("./helpers");
 
-async function formularLogin(page, email, password) {
-  await page.goto("/login");
-  await page.getByTestId("login-email").fill(email);
-  await page.getByTestId("login-password").fill(password);
-  await page.getByTestId("login-submit").click();
+// Kontonummer (13.09.2026): Formular-Anmeldung mit Kontonummer bzw. Benutzername.
+async function formularLogin(page, konto) {
+  await h.formLogin(page, "auth", konto);
 }
 
 /** Wen haelt DIESER Tab fuer angemeldet — laut Server, mit dem Token des Tabs. */
@@ -45,11 +43,11 @@ test.describe("Zwei Tabs, zwei Konten", () => {
 
   test("Super-Admin in Tab A bleibt Super-Admin, wenn Tab B eine Firma anmeldet", async ({ context }) => {
     const tabA = await context.newPage();
-    await formularLogin(tabA, h.SUPER_ADMIN.username, h.SUPER_ADMIN.password);
+    await formularLogin(tabA, h.SUPER_ADMIN);
     await expect(tabA).toHaveURL(/\/admin\/?$/);
 
     const tabB = await context.newPage();
-    await formularLogin(tabB, firma.email, firma.password);
+    await formularLogin(tabB, firma);
     await expect(tabB).toHaveURL(/\/app\/bestand/);
 
     // Genau der Befund: Tab A muss weiterhin mit dem Admin-Token arbeiten.
@@ -74,11 +72,11 @@ test.describe("Zwei Tabs, zwei Konten", () => {
 
   test("Chef und Sucher derselben Firma gleichzeitig, Abmelden trifft nur den eigenen Tab", async ({ context }) => {
     const chef = await context.newPage();
-    await formularLogin(chef, firma.email, firma.password);
+    await formularLogin(chef, firma);
     await expect(chef).toHaveURL(/\/app\/bestand/);
 
     const such = await context.newPage();
-    await formularLogin(such, sucher.email, sucher.password);
+    await formularLogin(such, sucher);
     await expect(such).toHaveURL(/\/app\/vergleich/);
 
     expect((await werBinIch(chef)).role).toBe("dealer");

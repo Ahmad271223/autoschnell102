@@ -8,10 +8,18 @@ import {
   UserPlus, X, Euro, Ban, Trash2, Check,
 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum } from "./_ui";
+import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
 
 // Nur der Kalendertag (aus dem ISO-String, ohne Zeitzonen-Verschiebung):
 // "2026-12-31T23:59:59+01:00" -> "31.12.2026"
 const fmtTag = (iso) => (iso ? String(iso).slice(0, 10).split("-").reverse().join(".") : "—");
+
+// Kontonummer (13.09.2026): Sucher haben nicht immer eine E-Mail — Dialoge
+// nennen Name und Kontonummer.
+const sucherLabel = (s) => {
+  const name = `${s.first_name || ""} ${s.last_name || ""}`.trim() || s.email || "Sucher";
+  return s.kontonummer ? `${name} (Kontonummer ${s.kontonummer})` : name;
+};
 
 export default function AdminUserDetail() {
   const { user: ich } = useAuth();
@@ -101,14 +109,14 @@ export default function AdminUserDetail() {
     finally { freigeben(); }
   };
   const revokeAbo = async (s) => {
-    if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${s.email} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
+    if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${sucherLabel(s)} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
     if (!sperren(s.id)) return;
     try { await api.post(`/admin/sucher/${s.id}/abo`, { plan: null }); toast.success("Abo aufgehoben"); loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
   const toggleSucherActive = async (s) => {
-    if (s.active && !window.confirm(`Konto ${s.email} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
+    if (s.active && !window.confirm(`Konto ${sucherLabel(s)} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
     try {
       await api.post(`/admin/users/${s.id}/active`, { active: !s.active });
       toast.success(s.active ? "Sucher gesperrt" : "Sucher entsperrt");
@@ -116,7 +124,7 @@ export default function AdminUserDetail() {
     } catch (e) { toast.error(errMsg(e)); }
   };
   const removeSucher = async (s) => {
-    if (!window.confirm(`Sucher ${s.email} endgültig löschen?`)) return;
+    if (!window.confirm(`Sucher ${sucherLabel(s)} endgültig löschen?`)) return;
     try { await api.delete(`/admin/users/${s.id}`); toast.success("Sucher gelöscht"); loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
   };
@@ -138,7 +146,7 @@ export default function AdminUserDetail() {
         <ArrowLeft size={14} /> Zurück zu Nutzern
       </Link>
       <PageHeader
-        title={u.company_name || u.username || u.email}
+        title={u.company_name || u.username || u.kontonummer || u.email}
         subtitle={dealerId ? "Firma: Profil, Sucher, Zahlungen & Verträge" : "Nutzerprofil & Verträge (read-only)"}
       />
 
@@ -148,7 +156,10 @@ export default function AdminUserDetail() {
             {u.is_super_admin && <Crown size={16} className="text-amber-400" />}
             <span className="text-[15px] font-semibold text-white">Profil</span>
           </div>
-          <Row icon={<Mail size={14} />}     label="E-Mail"        value={u.email} />
+          {u.kontonummer && (
+            <Row label="Kontonummer" value={<span className="font-mono" data-testid="profil-kontonummer">{u.kontonummer}</span>} />
+          )}
+          <Row icon={<Mail size={14} />}     label="Kontakt-E-Mail" value={u.email} />
           <Row icon={<Building2 size={14} />} label="Firma"        value={u.company_name || "—"} />
           {u.kunden_nr != null && <Row label="Kundennummer" value={<Badge tone="blue">#{u.kunden_nr}</Badge>} />}
           <Row icon={<Calendar size={14} />}  label="Erstellt"      value={fmtDate(u.created_at)} />
@@ -214,7 +225,7 @@ export default function AdminUserDetail() {
               </Button>
             </div>
             {!sucher?.length ? (
-              <EmptyState title="Noch keine Sucher" hint="Lege die Zugänge an — Anmeldename (E-Mail) + Passwort vergibst du hier." />
+              <EmptyState title="Noch keine Sucher" hint="Lege die Zugänge an — die Kontonummer vergibt das System, das Passwort vergibst du hier." />
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-[13px] min-w-[620px]">
@@ -235,7 +246,10 @@ export default function AdminUserDetail() {
                             {s.ist_chef ? (u.contact_person || u.company_name || "Firmenchef") : `${s.first_name || ""} ${s.last_name || ""}`.trim() || "—"}
                             {s.ist_chef && <Badge tone="yellow">Chef</Badge>}
                           </div>
-                          <div className="text-[11px] text-zinc-500">{s.email}</div>
+                          <div className="text-[11px] text-zinc-500">
+                            <span className="font-mono text-zinc-300" data-testid={`sucher-kontonummer-${s.id}`}>{s.kontonummer || "—"}</span>
+                            {s.email ? ` · ${s.email}` : ""}
+                          </div>
                         </td>
                         <td className="px-4 py-2.5">
                           {s.subscription?.active ? (
@@ -351,28 +365,31 @@ export default function AdminUserDetail() {
         <AddSucherDialog
           dealerId={dealerId}
           onClose={() => setShowAdd(false)}
-          onDone={() => { setShowAdd(false); loadFirma(); }}
+          onAngelegt={loadFirma}
         />
       )}
     </div>
   );
 }
 
-/** Betreiber legt einen Sucher an — Anmeldename (E-Mail) + Passwort. */
-function AddSucherDialog({ dealerId, onClose, onDone }) {
+/** Betreiber legt einen Sucher an. Kontonummer (13.09.2026): die Nummer
+ *  '<kunden_nr>-<zusatz>' vergibt das Backend, die E-Mail ist optional.
+ *  Nach der Anlage zeigt der Dialog die Zugangsdaten. */
+function AddSucherDialog({ dealerId, onClose, onAngelegt }) {
   const [f, setF] = useState({ email: "", password: "", first_name: "", last_name: "", phone: "" });
   const [busy, setBusy] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
 
   const submit = async () => {
-    if (!f.email || f.password.length < 8) {
-      toast.error("E-Mail und Passwort (min. 8 Zeichen) angeben"); return;
+    if (f.password.length < 8) {
+      toast.error("Passwort (min. 8 Zeichen) angeben"); return;
     }
     setBusy(true);
     try {
-      const r = await api.post(`/admin/dealers/${dealerId}/sucher`, f);
-      toast.success(r.data.hinweis || "Sucher angelegt");
-      onDone?.();
+      const r = await api.post(`/admin/dealers/${dealerId}/sucher`, { ...f, email: f.email.trim() });
+      setErgebnis({ ...r.data, name: `${f.first_name} ${f.last_name}`.trim() });
+      onAngelegt?.();
     } catch (e) { toast.error(errMsg(e)); }
     finally { setBusy(false); }
   };
@@ -391,20 +408,25 @@ function AddSucherDialog({ dealerId, onClose, onDone }) {
           <div className="text-lg font-bold text-white">Sucher anlegen</div>
           <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200"><X size={20} /></button>
         </div>
+        {ergebnis ? (
+          <ZugangsdatenKarte titel="Sucher angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                             bereich="app" hinweis={ergebnis.hinweis} onClose={onClose} />
+        ) : (<>
         <div className="grid grid-cols-2 gap-3">
-          <input value={f.first_name} onChange={set("first_name")} placeholder="Vorname" className={inputCls} style={inputStyle} autoFocus />
-          <input value={f.last_name} onChange={set("last_name")} placeholder="Nachname" className={inputCls} style={inputStyle} />
-          <div className="col-span-2"><input value={f.email} onChange={set("email")} placeholder="Anmelde-E-Mail *" type="email" className={inputCls} style={inputStyle} /></div>
-          <div className="col-span-2"><input value={f.password} onChange={set("password")} placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *" type="password" autoComplete="new-password" className={inputCls} style={inputStyle} /></div>
+          <input value={f.first_name} onChange={set("first_name")} placeholder="Vorname" className={inputCls} style={inputStyle} autoFocus data-testid="sucher-anlegen-vorname" />
+          <input value={f.last_name} onChange={set("last_name")} placeholder="Nachname" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-nachname" />
+          <div className="col-span-2"><input value={f.email} onChange={set("email")} placeholder="Kontakt-E-Mail (optional)" type="email" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-email" /></div>
+          <div className="col-span-2"><input value={f.password} onChange={set("password")} placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *" type="password" autoComplete="new-password" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-passwort" /></div>
           <input value={f.phone} onChange={set("phone")} placeholder="Telefon" className={inputCls} style={inputStyle} />
         </div>
         <div className="mt-3 text-[11px] text-zinc-500">
-          Zugangsdaten danach an die Firma weitergeben. Suchen &amp; Vergleichen
-          funktioniert erst nach Abo-Freischaltung (150 €/M · 1.500 €/J).
+          Die Kontonummer vergibt das System. Zugangsdaten danach an die Firma weitergeben.
+          Suchen &amp; Vergleichen funktioniert erst nach Abo-Freischaltung (150 €/M · 1.500 €/J).
         </div>
-        <Button className="mt-4 w-full" onClick={submit} disabled={busy}>
+        <Button className="mt-4 w-full" onClick={submit} disabled={busy} data-testid="sucher-anlegen-submit">
           {busy ? "Wird angelegt…" : "Sucher anlegen"}
         </Button>
+        </>)}
       </div>
     </div>
   );

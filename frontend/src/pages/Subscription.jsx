@@ -35,7 +35,8 @@ export default function Subscription() {
             <span className="font-display font-black text-lg">AUTOHANDEL<span style={{color:"var(--accent-red)"}}>.</span></span>
           </div>
           <div className="flex items-center gap-3 text-sm">
-            <span className="text-zinc-400">{user?.email}</span>
+            {/* Kontonummer (13.09.2026): Anmeldekennung statt E-Mail */}
+            <span className="text-zinc-400">{user?.kontonummer ? `Konto ${user.kontonummer}` : (user?.username || user?.email)}</span>
             <button data-testid="logout-paywall" onClick={async () => { await logout(); nav("/"); }}
                     className="px-3 py-1 rounded-sm border hover:bg-white/5"
                     style={{ borderColor: "var(--border-default)" }}>

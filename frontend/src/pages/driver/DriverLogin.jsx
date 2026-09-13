@@ -5,13 +5,15 @@ import { useDriver } from "@/context/DriverContext";
 import { TOKEN_FAHRER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Truck, Mail, Lock } from "lucide-react";
+import { Truck, Hash, Lock } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
 
 export default function DriverLogin() {
   const { driver, ready, login } = useDriver();
   const nav = useNavigate();
-  const [email, setEmail] = useState("");
+  // Kontonummer (13.09.2026): Fahrer melden sich mit ihrer Kontonummer an
+  // (ohne Zusatz, deshalb Ziffern-Tastatur). Konten legt der Betreiber an.
+  const [kennung, setKennung] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   // Wer von hier aus die App installiert, soll beim Start hier landen.
@@ -24,7 +26,7 @@ export default function DriverLogin() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(email, password);
+      await login(kennung.trim(), password);
       toast.success("Willkommen zurück!");
       // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
       // laden — direkt nach der Anmeldung geht dabei nichts verloren.
@@ -56,15 +58,16 @@ export default function DriverLogin() {
         <div className="tactical-card p-7">
           <h1 className="font-display font-black text-2xl tracking-tighter">Fahrer-Login</h1>
           <p className="text-sm text-zinc-400 mt-2">
-            Mit E-Mail & Passwort einloggen, um deine Abholfahrten zu sehen.
+            Mit Kontonummer &amp; Passwort einloggen, um deine Abholfahrten zu sehen.
           </p>
           <form onSubmit={submit} className="mt-6 space-y-4">
             <div>
               <label className="text-xs text-zinc-400 flex items-center gap-2">
-                <Mail size={12} /> E-Mail
+                <Hash size={12} /> Kontonummer
               </label>
-              <input data-testid="driver-login-email" type="email" required
-                value={email} onChange={(e) => setEmail(e.target.value)}
+              <input data-testid="driver-login-kontonummer" type="text" inputMode="numeric" required
+                value={kennung} onChange={(e) => setKennung(e.target.value)}
+                placeholder="z. B. 10031" autoCapitalize="none" spellCheck={false}
                 className="input-base w-full mt-1" autoComplete="username" />
             </div>
             <div>
@@ -83,14 +86,14 @@ export default function DriverLogin() {
 
           <div className="mt-3 text-center text-xs">
             <Link to="/passwort-vergessen" data-testid="link-driver-reset" className="text-zinc-400 hover:text-white underline">
-              Passwort vergessen?
+              Passwort vergessen? Der Betreiber setzt es neu
             </Link>
           </div>
           <div className="mt-5 text-center text-sm text-zinc-400">
-            Noch kein Fahrer-Account?{" "}
-            <Link to="/fahrer/register" data-testid="link-driver-register"
+            Noch kein Zugang?{" "}
+            <Link to="/anfrage?art=fahrer" data-testid="link-driver-anfrage"
               className="font-semibold" style={{ color: "var(--accent-red)" }}>
-              Registrieren
+              Zugang anfragen
             </Link>
           </div>
 

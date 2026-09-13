@@ -59,7 +59,7 @@ test.describe("Produktions-Stack (nginx + Container + MongoDB mit Auth)", () => 
     async ({ page }) => {
       test.skip(!BENUTZER || !PASSWORT, "Keine Super-Admin-Zugangsdaten gesetzt");
       await page.goto("/login");
-      await page.getByTestId("login-email").fill(BENUTZER);
+      await page.getByTestId("login-kontonummer").fill(BENUTZER);
       await page.getByTestId("login-password").fill(PASSWORT);
       await page.getByTestId("login-submit").click();
       await expect(page).toHaveURL(/\/admin\/?$/);

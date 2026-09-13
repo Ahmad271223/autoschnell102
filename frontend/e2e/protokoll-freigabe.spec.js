@@ -40,10 +40,7 @@ test.describe("Abholprotokoll: Freigabe und Knopfleiste", () => {
 
   test("Knopfleiste liegt ueber der Tableiste und ist klickbar", async ({ page, browser }) => {
     await page.setViewportSize(HANDY);
-    await page.goto("/fahrer/login");
-    await page.getByTestId("driver-login-email").fill(driver.email);
-    await page.getByTestId("driver-login-password").fill(driver.password);
-    await page.getByTestId("driver-login-submit").click();
+    await h.formLogin(page, "driver", driver);
     await expect(page).toHaveURL(/\/fahrer\/?$/);
 
     // Fahrt annehmen, dann das Protokoll oeffnen

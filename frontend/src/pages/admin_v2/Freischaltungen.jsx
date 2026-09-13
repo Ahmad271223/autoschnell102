@@ -2,19 +2,26 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
-import { RefreshCw, Check, X, Store, Building2 } from "lucide-react";
+import { RefreshCw, Check, X, Store, Building2, Truck, KeyRound, UserPlus } from "lucide-react";
+import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
 
 /**
  * Freischaltungen (Betreiber-Modell 09/2026):
- * - Zugangs-Anfragen neuer Firmen (Startseite) -> Firma direkt anlegen.
+ * - Zugangs-Anfragen (Startseite) -> Konto direkt anlegen. Kontonummer
+ *   (13.09.2026): je nach Art Firma, Zwischenhändler oder Fahrer; das Backend
+ *   schliesst die Anfrage beim Anlegen (anfrage_id) und vergibt die Nummer.
  * - Sucher-Abo-Anfragen (150/1500, Rechnung) -> freischalten (erfasst die Zahlung).
- * - Marktplatz-Zugang: 20 EUR via Stripe automatisch; hier manuell aktivieren/sperren.
+ * - Marktplatz-Zugang: hier manuell aktivieren/sperren; Passwort setzen.
  */
 export default function AdminFreischaltungen() {
   const [requests, setRequests] = useState(null);
   const [buyers, setBuyers] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [firmaReq, setFirmaReq] = useState(null); // Zugangs-Anfrage -> Dialog
+  const [firmaReq, setFirmaReq] = useState(null);     // Zugangs-Anfrage art=firma -> Dialog
+  const [kaeuferDialog, setKaeuferDialog] = useState(null);   // { request } (request null = frei)
+  const [fahrerReq, setFahrerReq] = useState(null);   // Zugangs-Anfrage art=fahrer -> Dialog
+  const [pwBuyer, setPwBuyer] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -56,7 +63,7 @@ export default function AdminFreischaltungen() {
       await api.post(`/admin/sucher/${req.subject_user_id}/abo`,
         { plan: req.wanted_plan || "monthly" });
       await closeReq(req.id);
-      toast.success(`Sucher-Abo aktiviert (${req.sucher_name || ""})`);
+      toast.success(`Sucher-Abo aktiviert (${req.sucher_name || req.kontonummer || ""})`);
       load();
     } catch (e) { toast.error(errMsg(e)); }
   };
@@ -87,11 +94,17 @@ export default function AdminFreischaltungen() {
     } catch (e) { toast.error(errMsg(e)); }
   };
 
+  const ZUGANG_ART = {
+    firma: { label: "Neue Firma", tone: "green" },
+    kaeufer: { label: "Neuer Zwischenhändler", tone: "blue" },
+    fahrer: { label: "Neuer Fahrer", tone: "orange" },
+  };
+
   return (
     <div>
       <PageHeader
         title="Freischaltungen"
-        subtitle="Sucher-Abos, Marktplatz-Zugänge & offene Anfragen — manuell freigeben"
+        subtitle="Zugänge anlegen, Sucher-Abos, Marktplatz-Zugänge & offene Anfragen — manuell freigeben"
         action={<Button variant="secondary" size="sm" onClick={load}><RefreshCw size={14} /> Aktualisieren</Button>}
       />
 
@@ -112,18 +125,19 @@ export default function AdminFreischaltungen() {
                   const isSucher = r.type === "sucher_abo";
                   const isBuyer = r.type === "buyer_access";
                   const isZugang = r.type === "zugang";
+                  const art = ZUGANG_ART[r.art] ? r.art : "firma";
                   return (
                     <Card key={r.id} padded={false}>
-                      <div className="p-4 flex flex-wrap items-center gap-3">
-                        <Badge tone={isZugang ? "green" : isSucher ? "purple" : isBuyer ? "blue" : "gray"}>
-                          {isZugang ? "Neue Firma" : isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang" : (r.type || "Paket")}
+                      <div className="p-4 flex flex-wrap items-center gap-3" data-testid={`anfrage-${r.id}`}>
+                        <Badge tone={isZugang ? ZUGANG_ART[art].tone : isSucher ? "purple" : isBuyer ? "blue" : "gray"}>
+                          {isZugang ? ZUGANG_ART[art].label : isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang" : (r.type || "Paket")}
                         </Badge>
                         <div className="min-w-0">
                           <div className="text-[14px] text-white font-medium">
                             {isSucher ? (
                               <>
                                 {r.subject_role === "dealer" ? "Chef " : "Sucher "}
-                                {r.sucher_name || r.sucher_email}
+                                {r.sucher_name || r.kontonummer || r.sucher_email}
                                 {r.company_name ? ` von Firma ${r.company_name}` : ""}
                                 {r.kunden_nr != null ? ` (#${r.kunden_nr})` : ""}
                                 {" möchte das Sucher-Abo verlängern"}
@@ -142,6 +156,8 @@ export default function AdminFreischaltungen() {
                             {isZugang ? (r.contact_person || "") : r.company_name}
                             {r.contact_email ? ` · ${r.contact_email}` : ""}
                             {isZugang && r.contact_phone ? ` · ${r.contact_phone}` : ""}
+                            {isZugang && art === "kaeufer" && r.ust_id ? ` · USt ${r.ust_id}` : ""}
+                            {isZugang && art === "kaeufer" && r.gewerblich_bestaetigt_am ? " · B2B bestätigt" : ""}
                             {" · "}{fmtDate(r.created_at)}
                           </div>
                           {isZugang && r.message ? (
@@ -149,9 +165,19 @@ export default function AdminFreischaltungen() {
                           ) : null}
                         </div>
                         <div className="ml-auto flex gap-2">
-                          {isZugang && (
-                            <Button size="sm" onClick={() => setFirmaReq(r)}>
+                          {isZugang && art === "firma" && (
+                            <Button size="sm" onClick={() => setFirmaReq(r)} data-testid={`firma-anlegen-${r.id}`}>
                               <Building2 size={14} /> Firma anlegen
+                            </Button>
+                          )}
+                          {isZugang && art === "kaeufer" && (
+                            <Button size="sm" onClick={() => setKaeuferDialog({ request: r })} data-testid={`kaeufer-anlegen-${r.id}`}>
+                              <Store size={14} /> Käufer anlegen
+                            </Button>
+                          )}
+                          {isZugang && art === "fahrer" && (
+                            <Button size="sm" onClick={() => setFahrerReq(r)} data-testid={`fahrer-anlegen-${r.id}`}>
+                              <Truck size={14} /> Fahrer anlegen
                             </Button>
                           )}
                           {isSucher && <Button size="sm" onClick={() => grantSucher(r)} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>}
@@ -173,17 +199,23 @@ export default function AdminFreischaltungen() {
 
           {/* Zwischenhändler */}
           <div>
-            <div className="text-[13px] font-semibold text-zinc-300 mb-3 uppercase tracking-wide inline-flex items-center gap-1.5">
-              <Store size={14} /> Zwischenhändler {buyers?.length ? `(${buyers.length})` : ""}
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div className="text-[13px] font-semibold text-zinc-300 uppercase tracking-wide inline-flex items-center gap-1.5">
+                <Store size={14} /> Zwischenhändler {buyers?.length ? `(${buyers.length})` : ""}
+              </div>
+              <Button size="sm" variant="outline" onClick={() => setKaeuferDialog({ request: null })} data-testid="kaeufer-anlegen-btn">
+                <UserPlus size={14} /> Käufer anlegen
+              </Button>
             </div>
             {!buyers?.length ? (
-              <EmptyState title="Noch keine Zwischenhändler" hint="Registrierte B2B-Käufer erscheinen hier." />
+              <EmptyState title="Noch keine Zwischenhändler" hint="Angelegte B2B-Käufer erscheinen hier." />
             ) : (
               <Card padded={false}>
                 <div className="overflow-x-auto">
                   <table className="w-full text-[13px]">
                     <thead>
                       <tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
+                        <th className="px-4 py-3 font-medium">Kontonummer</th>
                         <th className="px-4 py-3 font-medium">Firma</th>
                         <th className="px-4 py-3 font-medium">E-Mail</th>
                         <th className="px-4 py-3 font-medium">USt-IdNr.</th>
@@ -194,12 +226,15 @@ export default function AdminFreischaltungen() {
                     </thead>
                     <tbody>
                       {buyers.map((b) => (
-                        <tr key={b.id} className="border-t border-white/5">
+                        <tr key={b.id} className="border-t border-white/5" data-testid={`buyer-row-${b.id}`}>
+                          <td className="px-4 py-2.5 font-mono text-white" data-testid={`buyer-kontonummer-${b.id}`}>
+                            {b.kontonummer || "—"}
+                          </td>
                           <td className="px-4 py-2.5 text-white font-medium">
                             {b.company_name}
                             <div className="text-[11px] text-zinc-500 font-normal">{b.contact_name}</div>
                           </td>
-                          <td className="px-4 py-2.5 text-zinc-400">{b.email}</td>
+                          <td className="px-4 py-2.5 text-zinc-400">{b.email || <span className="text-zinc-600">—</span>}</td>
                           <td className="px-4 py-2.5 text-zinc-400" data-testid={`ustid-${b.id}`}>
                             {b.ust_id ? (
                               <div className="flex items-center gap-2">
@@ -221,11 +256,15 @@ export default function AdminFreischaltungen() {
                             </Badge>
                           </td>
                           <td className="px-4 py-2.5 text-zinc-500 tabular-nums">{fmtDate(b.access?.expires_at)}</td>
-                          <td className="px-4 py-2.5 text-right">
+                          <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                            <Button size="sm" variant="ghost" onClick={() => setPwBuyer(b)} data-testid={`buyer-pw-btn-${b.id}`}
+                                    title="Neues Passwort setzen (beendet die Sitzung, hebt eine Anmeldesperre auf)">
+                              <KeyRound size={13} /> Passwort setzen
+                            </Button>
                             {b.access?.active ? (
                               <Button size="sm" variant="ghost" onClick={() => setBuyerAccess(b, false)}>Sperren</Button>
                             ) : (
-                              <Button size="sm" onClick={() => setBuyerAccess(b, true)}>Freischalten (20 €)</Button>
+                              <Button size="sm" onClick={() => setBuyerAccess(b, true)}>Freischalten</Button>
                             )}
                           </td>
                         </tr>
@@ -242,57 +281,91 @@ export default function AdminFreischaltungen() {
       {firmaReq && (
         <FirmaAnlegenDialog
           request={firmaReq}
-          onClose={() => setFirmaReq(null)}
-          onDone={async () => { await closeReq(firmaReq.id); setFirmaReq(null); load(); }}
+          onClose={() => { setFirmaReq(null); load(); }}
         />
+      )}
+      {kaeuferDialog && (
+        <KaeuferAnlegenDialog
+          request={kaeuferDialog.request}
+          onClose={() => { setKaeuferDialog(null); load(); }}
+        />
+      )}
+      {fahrerReq && (
+        <FahrerAnlegenDialog
+          request={fahrerReq}
+          onClose={() => { setFahrerReq(null); load(); }}
+        />
+      )}
+      {pwBuyer && (
+        <PasswortSetzenDialog konto={pwBuyer} onClose={() => setPwBuyer(null)} />
       )}
     </div>
   );
 }
 
 
-/** Firmen-Konto direkt aus einer Zugangs-Anfrage anlegen (plan_type "none":
- *  der Hauptaccount ist kostenlos, Sucher-Abos werden separat freigeschaltet). */
-function FirmaAnlegenDialog({ request, onClose, onDone }) {
-  const [f, setF] = useState({
-    company_name: request.company_name || "",
-    email: request.contact_email || "",
-    password: "",
-  });
-  const [busy, setBusy] = useState(false);
-  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+// Admin-Dialoge sind fest dunkel (wie Fahrer.jsx). Das fruehere
+// "bg-white dark:bg-zinc-900" griff nie: Tailwind erwartet dafuer eine
+// "dark"-Klasse am Dokument, die die App nicht setzt — der Dialog war
+// weiss, Titel und vorbefuellte Felder (weisse Schrift) unsichtbar.
+const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
+const inputStyle = { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" };
 
-  const submit = async () => {
-    if (!f.company_name || !f.email || f.password.length < 8) {
-      toast.error("Firma, E-Mail und Passwort (min. 8 Zeichen) angeben"); return;
-    }
-    setBusy(true);
-    try {
-      await api.post("/admin/users", {
-        email: f.email, password: f.password,
-        company_name: f.company_name, plan_type: "none",
-      });
-      toast.success("Firmen-Konto angelegt — Zugangsdaten an den Kontakt geben");
-      onDone?.();
-    } catch (e) { toast.error(errMsg(e)); }
-    finally { setBusy(false); }
-  };
-
-  // Admin-Dialoge sind fest dunkel (wie Fahrer.jsx). Das fruehere
-  // "bg-white dark:bg-zinc-900" griff nie: Tailwind erwartet dafuer eine
-  // "dark"-Klasse am Dokument, die die App nicht setzt — der Dialog war
-  // weiss, Titel und vorbefuellte Felder (weisse Schrift) unsichtbar.
-  const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
-  const inputStyle = { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" };
+function DialogRahmen({ titel, testid, onClose, children }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
       <div className="w-full max-w-md rounded-2xl p-5"
            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
-           data-testid="firma-anlegen-dialog">
+           data-testid={testid}>
         <div className="flex items-center justify-between mb-1">
-          <div className="text-lg font-bold text-white">Firma anlegen</div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200"><X size={20} /></button>
+          <div className="text-lg font-bold text-white">{titel}</div>
+          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>
         </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Firmen-Konto direkt aus einer Zugangs-Anfrage anlegen (plan_type "none":
+ *  der Hauptaccount ist kostenlos, Sucher-Abos werden separat freigeschaltet).
+ *  Kontonummer (13.09.2026): Kontakt-E-Mail optional, anfrage_id schliesst
+ *  die Anfrage im Backend; danach die Zugangsdaten. */
+function FirmaAnlegenDialog({ request, onClose }) {
+  const [f, setF] = useState({
+    company_name: request.company_name || "",
+    contact_person: request.contact_person || "",
+    phone: request.contact_phone || "",
+    email: request.contact_email || "",
+    password: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  const submit = async () => {
+    if (!f.company_name.trim() || f.password.length < 8) {
+      toast.error("Firma und Passwort (min. 8 Zeichen) angeben"); return;
+    }
+    setBusy(true);
+    try {
+      const { data } = await api.post("/admin/users", {
+        email: f.email.trim(), password: f.password,
+        company_name: f.company_name.trim(), contact_person: f.contact_person.trim(),
+        phone: f.phone.trim(), plan_type: "none", anfrage_id: request.id,
+      });
+      setErgebnis({ ...data, name: f.company_name.trim() });
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <DialogRahmen titel="Firma anlegen" testid="firma-anlegen-dialog" onClose={onClose}>
+      {ergebnis ? (
+        <ZugangsdatenKarte titel="Firmen-Konto angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                           bereich="app" hinweis="Sucher danach über die Nutzer-Detailseite anlegen."
+                           onClose={onClose} />
+      ) : (<>
         <div className="text-[12px] text-zinc-500 mb-4">
           Aus Anfrage: {request.contact_person || "—"}
           {request.sucher_anzahl ? ` · gewünschte Sucher: ${request.sucher_anzahl}` : ""}
@@ -301,7 +374,13 @@ function FirmaAnlegenDialog({ request, onClose, onDone }) {
         <div className="space-y-3">
           <input value={f.company_name} onChange={set("company_name")} placeholder="Firmenname *"
                  className={inputCls} style={inputStyle} autoFocus />
-          <input value={f.email} onChange={set("email")} placeholder="Login-E-Mail des Chefs *"
+          <div className="grid grid-cols-2 gap-3">
+            <input value={f.contact_person} onChange={set("contact_person")} placeholder="Ansprechpartner"
+                   className={inputCls} style={inputStyle} />
+            <input value={f.phone} onChange={set("phone")} placeholder="Telefon"
+                   className={inputCls} style={inputStyle} />
+          </div>
+          <input value={f.email} onChange={set("email")} placeholder="Kontakt-E-Mail (optional)"
                  type="email" className={inputCls} style={inputStyle} />
           <input value={f.password} onChange={set("password")} placeholder="Start-Passwort (min. 8 Zeichen) *"
                  type="password" autoComplete="new-password" className={inputCls} style={inputStyle} />
@@ -309,7 +388,121 @@ function FirmaAnlegenDialog({ request, onClose, onDone }) {
         <Button className="mt-4 w-full" onClick={submit} disabled={busy}>
           {busy ? "Wird angelegt…" : "Firmen-Konto anlegen"}
         </Button>
+      </>)}
+    </DialogRahmen>
+  );
+}
+
+/** Kontonummer (13.09.2026): Zwischenhändler (b2b_buyer) anlegen — aus einer
+ *  Anfrage (art=kaeufer) oder frei. Der Betreiber bestätigt den B2B-Nachweis
+ *  ausdrücklich (AGB §1); das Backend lehnt die Anlage ohne ihn ab. */
+function KaeuferAnlegenDialog({ request, onClose }) {
+  const [f, setF] = useState({
+    company_name: request?.company_name || "",
+    contact_name: request?.contact_person || "",
+    phone: request?.contact_phone || "",
+    email: request?.contact_email || "",
+    ust_id: request?.ust_id || "",
+    password: "",
+  });
+  const [nachweis, setNachweis] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  const submit = async () => {
+    if (f.company_name.trim().length < 2 || f.contact_name.trim().length < 2 || f.password.length < 8) {
+      toast.error("Firma, Ansprechpartner und Passwort (min. 8 Zeichen) angeben"); return;
+    }
+    if (!nachweis) {
+      toast.error("Bitte bestätigen, dass der B2B-Nachweis vorliegt"); return;
+    }
+    setBusy(true);
+    try {
+      const { data } = await api.post("/admin/buyers", {
+        company_name: f.company_name.trim(), contact_name: f.contact_name.trim(),
+        phone: f.phone.trim(), email: f.email.trim(), ust_id: f.ust_id.trim(),
+        password: f.password, b2b_nachweis: nachweis,
+        ...(request?.id ? { anfrage_id: request.id } : {}),
+      });
+      setErgebnis({ ...data, name: f.company_name.trim() });
+    } catch (e) { toast.error(errMsg(e, "Käufer anlegen fehlgeschlagen")); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <DialogRahmen titel="Zwischenhändler anlegen" testid="kaeufer-anlegen-dialog" onClose={onClose}>
+      {ergebnis ? (
+        <ZugangsdatenKarte titel="Zwischenhändler angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                           bereich="kaeufer" onClose={onClose} />
+      ) : (<>
+        <div className="text-[12px] text-zinc-500 mb-4">
+          {request
+            ? `Aus Anfrage vom ${fmtDate(request.created_at)}${request.gewerblich_bestaetigt_am ? " · B2B im Formular bestätigt" : ""}`
+            : "Die Kontonummer vergibt das System."}
+          {" — E-Mail ist nur Kontaktadresse (optional)."}
+        </div>
+        <div className="space-y-3">
+          <input value={f.company_name} onChange={set("company_name")} placeholder="Firma *"
+                 data-testid="kaeufer-anlegen-firma" className={inputCls} style={inputStyle} autoFocus />
+          <div className="grid grid-cols-2 gap-3">
+            <input value={f.contact_name} onChange={set("contact_name")} placeholder="Ansprechpartner *"
+                   data-testid="kaeufer-anlegen-name" className={inputCls} style={inputStyle} />
+            <input value={f.phone} onChange={set("phone")} placeholder="Telefon"
+                   className={inputCls} style={inputStyle} />
+          </div>
+          <input value={f.email} onChange={set("email")} placeholder="Kontakt-E-Mail (optional)" type="email"
+                 data-testid="kaeufer-anlegen-email" className={inputCls} style={inputStyle} />
+          <input value={f.ust_id} onChange={set("ust_id")} maxLength={40}
+                 placeholder="USt-IdNr. oder Handelsregister-Nr. (optional)"
+                 className={inputCls} style={inputStyle} />
+          <input value={f.password} onChange={set("password")} type="password" autoComplete="new-password"
+                 placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *"
+                 data-testid="kaeufer-anlegen-passwort" className={inputCls} style={inputStyle} />
+          <label className="flex items-start gap-2.5 text-[13px] text-zinc-300 cursor-pointer select-none">
+            <input type="checkbox" checked={nachweis} onChange={(e) => setNachweis(e.target.checked)}
+                   data-testid="kaeufer-anlegen-b2b" className="mt-0.5 h-4 w-4 shrink-0"
+                   style={{ accentColor: "var(--accent-red)" }} />
+            <span>B2B-Nachweis liegt vor (gewerblicher Händler, AGB §1)</span>
+          </label>
+        </div>
+        <Button className="mt-4 w-full" onClick={submit} disabled={busy} data-testid="kaeufer-anlegen-submit">
+          {busy ? "Wird angelegt…" : "Käufer-Konto anlegen"}
+        </Button>
+      </>)}
+    </DialogRahmen>
+  );
+}
+
+/** Passwort eines Zwischenhändlers setzen — einziger Weg bei "Passwort
+ *  vergessen" (Kontonummer 13.09.2026). Beendet die Sitzung und hebt eine
+ *  Anmeldesperre des Kontos auf. */
+function PasswortSetzenDialog({ konto, onClose }) {
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (pw.length < 8) { toast.error("Mindestens 8 Zeichen"); return; }
+    setBusy(true);
+    try {
+      await api.post(`/admin/users/${konto.id}/password`, { new_password: pw });
+      toast.success("Passwort gesetzt — Sitzung beendet, Anmeldesperre aufgehoben");
+      onClose();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <DialogRahmen titel="Passwort setzen" testid="buyer-pw-dialog" onClose={onClose}>
+      <div className="text-[12.5px] text-zinc-500">
+        {konto.company_name || konto.contact_name || "Zwischenhändler"}
+        {konto.kontonummer ? ` · Kontonummer ${konto.kontonummer}` : ""}
       </div>
-    </div>
+      <input type="text" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus
+             placeholder="Neues Passwort (min. 8, Ziffer oder Sonderzeichen)"
+             data-testid="buyer-pw-input" className={`${inputCls} mt-3`} style={inputStyle} />
+      <div className="mt-4 flex gap-2 justify-end">
+        <Button variant="ghost" onClick={onClose}>Abbrechen</Button>
+        <Button onClick={submit} disabled={busy} data-testid="buyer-pw-submit">Setzen</Button>
+      </div>
+    </DialogRahmen>
   );
 }

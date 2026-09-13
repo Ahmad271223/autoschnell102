@@ -6,7 +6,7 @@ export default function AGB() {
     <LegalLayout title="Allgemeine Geschäftsbedingungen (AGB)">
       <p className="text-zinc-500">
         AutoSchnell — Inhaber Ahmad Fakih, Baldurstraße 5, 30657 Hannover
-        (nachfolgend „Anbieter"). Stand: August 2026.
+        (nachfolgend „Anbieter"). Stand: September 2026.
       </p>
 
       <H2>1. Geltungsbereich</H2>
@@ -16,14 +16,20 @@ export default function AGB() {
         B2B-Marktplatz, Fahrer-App). Das Angebot richtet sich ausschließlich
         an Unternehmer im Sinne von § 14 BGB (Autohändler, Zwischenhändler
         und deren Mitarbeiter). Eine Nutzung durch Verbraucher ist
-        ausgeschlossen. Mit der Registrierung bestätigt der Nutzer
-        ausdrücklich, als Unternehmer (B2B) zu handeln, und akzeptiert diese
-        AGB sowie die Datenschutzerklärung. Bei der Registrierung als
-        Zwischenhändler auf dem Marktplatz erfolgt diese Bestätigung über
-        eine Pflicht-Checkbox; die Angabe der USt-IdNr. oder
+        ausgeschlossen. Mit der Anlage des Kontos durch den Anbieter auf
+        Grundlage seiner Zugangs-Anfrage bestätigt der Nutzer ausdrücklich,
+        als Unternehmer (B2B) zu handeln, und akzeptiert diese AGB sowie die
+        Datenschutzerklärung. Zwischenhändler bestätigen die
+        Unternehmereigenschaft im Anfrage-Formular über eine
+        Pflicht-Checkbox, oder der Anbieter dokumentiert den Nachweis bei
+        der Anlage des Kontos; die Angabe der USt-IdNr. oder
         Handelsregister-Nummer ist freiwillig und dient der Prüfung der
         Unternehmereigenschaft.
       </p>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Kontonummer (13.09.2026) —
+          §1, §3, §4 und §11 wurden auf die Anmeldung mit Kontonummer
+          umgestellt (Konten legt nur der Anbieter an, E-Mail optional).
+          Wortlaut vor dem Merge von Ahmad freigeben lassen. */}
 
       <H2>2. Leistungen des Anbieters</H2>
       <p>
@@ -36,15 +42,19 @@ export default function AGB() {
         beteiligten Parteien (Händler, Verkäufer, Käufer) zustande.
       </p>
 
-      <H2>3. Registrierung und Accounts</H2>
+      <H2>3. Accounts</H2>
       <ul className="list-disc pl-6 space-y-1">
-        <li>Die Angaben bei der Registrierung müssen wahrheitsgemäß und
+        <li>Die Angaben in der Zugangs-Anfrage müssen wahrheitsgemäß und
             vollständig sein.</li>
+        <li>Accounts legt ausschließlich der Anbieter an. Die Anmeldung
+            erfolgt mit der vom Anbieter vergebenen Kontonummer und einem
+            Passwort. Passwörter vergibt und setzt ausschließlich der
+            Anbieter; Fahrer können ihr Passwort in der Fahrer-App zusätzlich
+            selbst ändern.</li>
         <li>Zugangsdaten sind geheim zu halten. Pro Account ist nur eine
             aktive Sitzung zulässig.</li>
-        <li>Der Händler-Hauptaccount ist für die von ihm angelegten
-            Unteraccounts (Sucher) und deren Handlungen verantwortlich;
-            Passwörter der Sucher verwaltet ausschließlich der Hauptaccount.</li>
+        <li>Der Händler-Hauptaccount ist für die Unteraccounts (Sucher)
+            seiner Firma und deren Handlungen verantwortlich.</li>
         <li>Der Anbieter kann Accounts bei Missbrauch, Zahlungsverzug oder
             Verstößen gegen diese AGB sperren.</li>
       </ul>
@@ -65,8 +75,8 @@ export default function AGB() {
         <li>Der Händler-Hauptaccount (Verwalten &amp; Verkaufen) ist kostenlos.</li>
         <li>Das Einstellen und Veröffentlichen von Fahrzeugen ist kostenlos
             und in der Anzahl nicht begrenzt.</li>
-        <li>Der Zugang zum B2B-Marktplatz ist kostenlos. Eine Registrierung
-            als Käufer ist ohne Freischaltung durch den Anbieter möglich.</li>
+        <li>Käuferkonten legt der Anbieter nach Anfrage an; der Zugang zum
+            B2B-Marktplatz ist kostenlos.</li>
         <li>Sucher-Abo (Suche &amp; Vergleich, pro Nutzer): 150 € / Monat
             (30 Tage) oder 1.500 € / Jahr (365 Tage) — jeweils netto zzgl.
             gesetzlicher Umsatzsteuer, Abrechnung per Rechnung; die
@@ -146,8 +156,9 @@ export default function AGB() {
       <H2>11. Änderungen der AGB</H2>
       <p>
         Der Anbieter kann diese AGB mit Wirkung für die Zukunft ändern.
-        Änderungen werden mindestens vier Wochen vor Inkrafttreten per
-        E-Mail oder in der Plattform angekündigt. Widerspricht der Nutzer
+        Änderungen werden mindestens vier Wochen vor Inkrafttreten in der
+        Plattform und zusätzlich per E-Mail angekündigt, soweit eine
+        Kontaktadresse hinterlegt ist. Widerspricht der Nutzer
         nicht innerhalb der Frist oder nutzt er die Plattform weiter, gelten
         die geänderten AGB als angenommen; hierauf wird in der Ankündigung
         hingewiesen.

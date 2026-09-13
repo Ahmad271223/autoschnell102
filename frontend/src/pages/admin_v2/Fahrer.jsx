@@ -1,17 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { KeyRound, Lock, LockOpen, Search, Trash2, Truck } from "lucide-react";
+import { KeyRound, Lock, LockOpen, Search, Trash2, Truck, UserPlus } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
+import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
 
 /**
  * Fahrer-Verwaltung (Review 09/2026: fehlte komplett).
  *
  * Fahrer-Konten sind firmenneutral — die Liste ist plattformweit; je Fahrer
  * werden die verknüpften Händler und die Terminzahl angezeigt. Aktionen:
- * sperren/entsperren (beendet die Sitzung), Passwort zurücksetzen,
- * löschen (DSGVO: Verknüpfungen weg, offene Termine getrennt).
+ * anlegen (Kontonummer 13.09.2026: nur der Betreiber legt Fahrer an),
+ * sperren/entsperren (beendet die Sitzung), Passwort setzen, löschen
+ * (DSGVO: Verknüpfungen weg, offene Termine getrennt).
  */
+const fahrerLabel = (r) => [r.display_name || "Fahrer", r.kontonummer ? `Kontonummer ${r.kontonummer}` : ""]
+  .filter(Boolean).join(" · ");
+
 export default function AdminFahrer() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -20,6 +25,7 @@ export default function AdminFahrer() {
   const [newPw, setNewPw] = useState("");
   const [deleteDriver, setDeleteDriver] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [anlegen, setAnlegen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -38,7 +44,8 @@ export default function AdminFahrer() {
     const t = q.trim().toLowerCase();
     if (!t) return rows;
     return rows.filter((r) =>
-      (r.display_name || "").toLowerCase().includes(t)
+      (r.kontonummer || "").toLowerCase().includes(t)
+      || (r.display_name || "").toLowerCase().includes(t)
       || (r.email || "").toLowerCase().includes(t)
       || (r.driver_code || "").toLowerCase().includes(t)
       || (r.firmen || []).some((f) => (f || "").toLowerCase().includes(t)));
@@ -56,7 +63,7 @@ export default function AdminFahrer() {
     if ((newPw || "").length < 8) { toast.error("Mindestens 8 Zeichen"); return; }
     try {
       await api.post(`/admin/drivers/${resetDriver.id}/password`, { new_password: newPw });
-      toast.success("Passwort gesetzt — alle Sitzungen des Fahrers wurden beendet");
+      toast.success("Passwort gesetzt — alle Sitzungen des Fahrers wurden beendet, eine Anmeldesperre ist aufgehoben");
       setResetDriver(null); setNewPw("");
     } catch (e) { toast.error(errMsg(e)); }
   };
@@ -78,7 +85,14 @@ export default function AdminFahrer() {
       <PageHeader
         title="Fahrer"
         subtitle="Alle Fahrer-Konten der Plattform — Verknüpfungen laufen über die Händler"
-        action={<span className="text-[12px] text-zinc-400">{rows.length} Konten</span>}
+        action={
+          <div className="flex items-center gap-3">
+            <span className="text-[12px] text-zinc-400">{rows.length} Konten</span>
+            <Button size="sm" onClick={() => setAnlegen(true)} data-testid="fahrer-anlegen-btn">
+              <UserPlus size={14} /> Fahrer anlegen
+            </Button>
+          </div>
+        }
       />
 
       <Card padded={false}>
@@ -87,7 +101,7 @@ export default function AdminFahrer() {
             <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
             <input
               value={q} onChange={(e) => setQ(e.target.value)}
-              placeholder="Name, E-Mail, Fahrer-Code oder Firma"
+              placeholder="Kontonummer, Name, E-Mail, Fahrer-Code oder Firma"
               data-testid="fahrer-suche"
               className="h-10 pl-9 pr-3 rounded-xl text-[14px] w-full outline-none focus:ring-2 focus:ring-red-500/40"
               style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }}
@@ -99,7 +113,7 @@ export default function AdminFahrer() {
           <div className="flex items-center gap-2 text-zinc-500 text-sm p-6"><Spinner /> lade…</div>
         ) : filtered.length === 0 ? (
           <EmptyState title={q ? "Keine Treffer" : "Noch keine Fahrer"}
-                      hint={q ? "Suche anpassen." : "Fahrer registrieren sich selbst über die Fahrer-App."} />
+                      hint={q ? "Suche anpassen." : "Fahrer legst du über „Fahrer anlegen“ an."} />
         ) : (
           <ul className="divide-y divide-white/5">
             {filtered.map((r) => (
@@ -111,11 +125,16 @@ export default function AdminFahrer() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[14px] font-semibold text-white truncate">{r.display_name || "—"}</span>
+                    {r.kontonummer && (
+                      <span className="font-mono text-[12.5px] text-zinc-200" data-testid={`fahrer-kontonummer-${r.id}`}>
+                        {r.kontonummer}
+                      </span>
+                    )}
                     <Badge tone="blue">{r.driver_code}</Badge>
                     <Badge tone={r.active ? "green" : "red"}>{r.active ? "Aktiv" : "Gesperrt"}</Badge>
                   </div>
                   <div className="text-[12px] text-zinc-500 truncate">
-                    {r.email} · seit {fmtDate(r.created_at)}
+                    {r.email ? `${r.email} · ` : ""}seit {fmtDate(r.created_at)}
                     {" · "}{r.verknuepfungen || 0} Händler{(r.firmen || []).length ? ` (${r.firmen.join(", ")})` : ""}
                     {" · "}{r.termine || 0} Termine{r.termine_offen ? ` (${r.termine_offen} offen)` : ""}
                   </div>
@@ -141,6 +160,10 @@ export default function AdminFahrer() {
         )}
       </Card>
 
+      {anlegen && (
+        <FahrerAnlegenDialog onClose={() => setAnlegen(false)} onAngelegt={load} />
+      )}
+
       {resetDriver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
              onClick={() => setResetDriver(null)}>
@@ -148,7 +171,7 @@ export default function AdminFahrer() {
                onClick={(e) => e.stopPropagation()}>
             <div className="text-[15px] font-semibold text-white">Passwort setzen</div>
             <div className="text-[12.5px] text-zinc-500 mt-1">
-              {resetDriver.display_name} · {resetDriver.email}. Alle Sitzungen des Fahrers werden beendet.
+              {fahrerLabel(resetDriver)}. Alle Sitzungen des Fahrers werden beendet.
             </div>
             <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)}
                    placeholder="Neues Passwort (min. 8, Ziffer oder Sonderzeichen)"
@@ -170,7 +193,7 @@ export default function AdminFahrer() {
                onClick={(e) => e.stopPropagation()}>
             <div className="text-[15px] font-semibold text-white">Fahrer löschen?</div>
             <div className="text-[12.5px] text-zinc-400 mt-2 leading-relaxed">
-              {deleteDriver.display_name} ({deleteDriver.email}) wird endgültig gelöscht.
+              {fahrerLabel(deleteDriver)} wird endgültig gelöscht.
               Händler-Verknüpfungen werden entfernt, offene Termine vom Fahrer getrennt.
               Abgeschlossene Abholungen behalten ihre Historie.
             </div>

@@ -56,8 +56,9 @@ export default function Marktplatz() {
     e.stopPropagation();
     // Merken braucht ein Konto — der Marktplatz selbst ist offen.
     if (!buyer) {
-      toast.info("Zum Merken kurz kostenlos registrieren");
-      nav("/markt/registrieren");
+      // Kontonummer (13.09.2026): Kaeuferkonten legt der Betreiber nach Anfrage an.
+      toast.info("Zum Merken brauchst du einen kostenlosen Zugang");
+      nav("/anfrage?art=kaeufer");
       return;
     }
     const was = favs.has(id);
@@ -210,9 +211,9 @@ export default function Marktplatz() {
           <>
             <button onClick={() => nav("/markt/login")} data-testid="markt-anmelden"
                     className="text-zinc-400 hover:text-white text-sm">Anmelden</button>
-            <button onClick={() => nav("/markt/registrieren")} data-testid="markt-registrieren"
+            <button onClick={() => nav("/anfrage?art=kaeufer")} data-testid="markt-anfrage"
                     className="rounded-lg px-3 py-1.5 text-sm font-semibold text-white"
-                    style={{ background: "var(--accent-red)" }}>Kostenlos registrieren</button>
+                    style={{ background: "var(--accent-red)" }}>Zugang anfragen</button>
           </>
         )}
       </div>
@@ -716,8 +717,8 @@ function InteresseForm({ v }) {
     if (busy) return;
     // Anfragen brauchen ein Konto — Ansehen nicht.
     if (!buyer) {
-      toast.info("Für eine Anfrage kurz kostenlos registrieren");
-      nav("/markt/registrieren");
+      toast.info("Für eine Anfrage brauchst du einen kostenlosen Zugang");
+      nav("/anfrage?art=kaeufer");
       return;
     }
     setBusy(true);

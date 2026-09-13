@@ -87,10 +87,7 @@ test.describe("Rollen-Navigation", () => {
     // Genau der Weg aus dem Befund: jemand wird auf einer Haendler-Seite
     // abgemeldet, danach meldet sich der Betreiber auf derselben
     // Anmeldeseite an.
-    await page.goto("/login?next=%2Fapp%2Fbestand");
-    await page.getByTestId("login-email").fill(h.SUPER_ADMIN.username);
-    await page.getByTestId("login-password").fill(h.SUPER_ADMIN.password);
-    await page.getByTestId("login-submit").click();
+    await h.formLogin(page, "auth", h.SUPER_ADMIN, { pfad: "/login?next=%2Fapp%2Fbestand" });
     await expect(page).toHaveURL(/\/admin\/?$/);
     await expect(page.getByText("Fahrzeugbestand & Weiterverkauf")).toHaveCount(0);
   });

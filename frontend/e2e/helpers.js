@@ -74,6 +74,26 @@ async function login(kennung, password, weg = "auth") {
   return d.token;
 }
 
+// Kontonummer (13.09.2026): Anmeldung ueber das FORMULAR der jeweiligen Maske.
+// konto: Objekt aus createFirma/createSucher/createDriver/createBuyer (Feld
+// kontonummer) oder SUPER_ADMIN (Feld username). Optionen: passwort (z.B.
+// falsches), pfad (z.B. /login?next=…), navigieren=false (Seite ist schon offen).
+const LOGIN_MASKE = {
+  auth: { pfad: "/login", kennung: "login-kontonummer", passwort: "login-password", senden: "login-submit" },
+  driver: { pfad: "/fahrer/login", kennung: "driver-login-kontonummer", passwort: "driver-login-password", senden: "driver-login-submit" },
+  buyer: { pfad: "/markt/login", kennung: "buyer-login-kontonummer", passwort: "buyer-login-password", senden: "buyer-login-submit" },
+};
+async function formLogin(page, bereich, konto, { passwort, pfad, navigieren = true } = {}) {
+  const maske = LOGIN_MASKE[bereich];
+  if (!maske) throw new Error(`Unbekannte Anmeldemaske: ${bereich}`);
+  const kennung = konto.kontonummer ?? konto.username;
+  if (!kennung) throw new Error("formLogin: Konto ohne Kontonummer/Benutzername");
+  if (navigieren) await page.goto(pfad || maske.pfad);
+  await page.getByTestId(maske.kennung).fill(String(kennung));
+  await page.getByTestId(maske.passwort).fill(passwort ?? konto.password);
+  await page.getByTestId(maske.senden).click();
+}
+
 let superToken = null;
 let superLogin = null;     // laufende Anmeldung — gleichzeitige Aufrufer teilen sie sich
 async function superAdmin({ fresh = false } = {}) {
@@ -275,7 +295,7 @@ async function newAuthedPage(browser, key, token, options = {}) {
 
 module.exports = {
   API_URL, PASSWORD, SUPER_ADMIN, ApiError,
-  api, get, post, put, del, login,
+  api, get, post, put, del, login, formLogin, LOGIN_MASKE,
   superAdmin, superGet, superPost, superPut, superDel,
   suffix, isoDate,
   createFirma, createSucher, createDriver, createBuyer,

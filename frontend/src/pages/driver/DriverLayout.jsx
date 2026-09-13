@@ -42,7 +42,7 @@ export default function DriverLayout() {
               <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Fahrer</div>
               <div className="text-sm font-bold tracking-tight -mt-0.5"
                    data-testid="driver-header-name">
-                {driver.display_name || driver.email || "—"}
+                {driver.display_name || driver.kontonummer || "—"}
               </div>
             </div>
           </Link>

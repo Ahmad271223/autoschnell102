@@ -634,7 +634,9 @@ function InvitePanel() {
   };
 
   const copy = async (inv) => {
-    const link = `${window.location.origin}/markt/registrieren?invite=${inv.token}`;
+    // Kontonummer (13.09.2026): gleicher Link wie in der Antwort beim Erstellen —
+    // Zwischenhaendler melden sich an, die Einladung wird danach eingeloest.
+    const link = `${window.location.origin}/markt/login?invite=${inv.token}`;
     try { await navigator.clipboard.writeText(link); toast.success("Link kopiert"); }
     catch { window.prompt("Link kopieren:", link); }
   };
@@ -718,7 +720,9 @@ function NetzwerkMitglieder() {
   useEffect(() => { load(); }, []);
 
   const revoke = async (m) => {
-    if (!window.confirm(`${m.company_name || m.email} aus dem Netzwerk entfernen? Er sieht deine privaten Inserate danach nicht mehr.`)) return;
+    // Kontonummer (13.09.2026): Kaeufer haben nicht immer eine E-Mail — Rueckfall
+    // auf Firma/Ansprechpartner, NIE auf die Kontonummer (halbe Zugangsdaten).
+    if (!window.confirm(`${m.company_name || m.contact_name || "Zwischenhändler"} aus dem Netzwerk entfernen? Er sieht deine privaten Inserate danach nicht mehr.`)) return;
     try { await api.delete(`/dealer/network/members/${m.buyer_user_id}`); toast.success("Zugang widerrufen"); load(); }
     catch (e) { toast.error(errMsg(e)); }
   };
@@ -738,9 +742,9 @@ function NetzwerkMitglieder() {
           {members.map((m) => (
             <div key={m.buyer_user_id} className="flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2"
                  style={{ borderColor: "var(--divider)" }}>
-              <span className="font-semibold">{m.company_name || "—"}</span>
-              <span className="text-zinc-400">{m.contact_name}</span>
-              <span className="text-zinc-500">{m.email}</span>
+              <span className="font-semibold">{m.company_name || m.contact_name || "Zwischenhändler"}</span>
+              {m.company_name && m.contact_name && <span className="text-zinc-400">{m.contact_name}</span>}
+              {m.email && <span className="text-zinc-500">{m.email}</span>}
               {m.joined_at && (
                 <span className="text-zinc-600">seit {new Date(m.joined_at).toLocaleDateString("de-DE")}</span>
               )}
