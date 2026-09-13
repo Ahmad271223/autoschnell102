@@ -6,24 +6,189 @@ common brute-force and credential-stuffing attacks on a single-server setup.
 
 Usage:
     from rate_limiter import login_limiter
-    if not login_limiter.check(ip):
+    if not await login_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
 """
+import ipaddress
+import logging
 import os
 import time
 from collections import defaultdict
+from pathlib import Path
 from threading import Lock
+
+# .env selbst laden — der Schalter darf nicht davon abhängen, in welcher
+# Reihenfolge die Module importiert werden (sonst liest er den Default,
+# bevor server.py/auth.py die .env geladen haben).
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")
 
 # Globaler Schalter: erlaubt das Deaktivieren des Rate-Limiters fuer
 # automatisierte Tests / CI (RATE_LIMIT_ENABLED=false). In Produktion
 # IMMER aktiv lassen (Default). Niemals in der Prod-.env auf false setzen.
 _RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").strip().lower() != "false"
 
+# Loopback-Ausnahme: Zugriffe vom selben Rechner (127.0.0.1/::1) zaehlen
+# nicht — sonst blockieren sich lokale Tests und die eigene Nutzung
+# gegenseitig (alle teilen sich EINE IP). Im echten Server-Betrieb kommen
+# Nutzer nie von Loopback; ein Angreifer auch nicht. Abschaltbar via
+# RATE_LIMIT_EXEMPT_LOOPBACK=false (z.B. hinter lokalem Reverse-Proxy,
+# der Client-IPs nicht weiterreicht — dort besser den Proxy fixen).
+_EXEMPT_LOOPBACK = os.environ.get(
+    "RATE_LIMIT_EXEMPT_LOOPBACK", "true").strip().lower() != "false"
+_LOOPBACK_KEYS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+# Hinter einem Reverse-Proxy (nginx/Ingress) ist request.client.host die
+# ADRESSE DES PROXYS (meist 127.0.0.1) — der Rate-Limiter wuerde dann alle
+# Nutzer in einen Bucket werfen ODER (mit Loopback-Ausnahme) gar nicht
+# greifen. Ist TRUST_PROXY gesetzt, nehmen wir die echte Client-IP aus
+# X-Forwarded-For (erster Eintrag = urspruenglicher Client). NUR aktivieren,
+# wenn WIRKLICH ein vertrauenswuerdiger Proxy davor sitzt, der den Header
+# setzt/ueberschreibt — sonst koennte ihn ein Angreifer selbst faelschen.
+_TRUST_PROXY = os.environ.get("TRUST_PROXY", "").strip().lower() in ("1", "true", "yes")
+
+# Sitzen MEHRERE Vermittler davor (z.B. Cloudflare -> Load Balancer ->
+# nginx), reicht "letzter Eintrag" nicht: der letzte stammt dann vom
+# Load Balancer, und ALLE Besucher landeten unter derselben Adresse —
+# eine einzige fehlgeschlagene Anmeldung wuerde alle anderen aussperren.
+# TRUSTED_PROXIES nennt die eigenen Vermittler als Netze (Komma-Liste,
+# z.B. "10.0.0.0/16,127.0.0.1"). Aus der Kette wird dann der letzte
+# Eintrag genommen, der NICHT zu den eigenen Vermittlern gehoert.
+_TRUSTED_PROXIES = []
+for _netz in os.environ.get("TRUSTED_PROXIES", "").split(","):
+    _netz = _netz.strip()
+    if not _netz:
+        continue
+    try:
+        _TRUSTED_PROXIES.append(ipaddress.ip_network(_netz, strict=False))
+    except ValueError:
+        pass
+# Pruefbericht Runde 8, Befund 4: Ist TRUST_PROXY an, aber keine Liste
+# gesetzt, galten die Kopfzeilen von JEDEM direkten Nachbarn — auch von
+# einem Angreifer, der das Backend ohne nginx erreicht. Ohne Liste gelten
+# jetzt nur die Netze, in denen ein eigener Vermittler ueberhaupt stehen
+# kann: der eigene Rechner und die privaten Bereiche (Docker, Hetzner-
+# Privatnetz). Ein oeffentlicher Nachbar ist nie ein Vermittler.
+# Runde 9: Die Nachbar-Sperre nimmt die konfigurierte Liste UND die privaten
+# Netze. Vorher galt bei gesetzter Liste NUR die Liste — stand dort z.B.
+# "127.0.0.1" oder "10.0.0.0/16", war der nginx-Container (172.x im
+# Docker-Netz) kein Vermittler mehr, und ALLE Besucher landeten unter der
+# Adresse des Containers in EINEM Zaehler: zehn Fehlversuche eines
+# Nutzers haetten alle anderen fuer eine Minute ausgesperrt. Ein Nachbar
+# aus einem privaten Netz ist nie ein Angreifer von aussen; wer im
+# privaten Netz sitzt, koennte ohnehin Schlimmeres.
+# Runde 10: Wer im privaten Netz weitere Mieter hat (geteiltes Hetzner-
+# Netz, fremde Container), kann mit TRUSTED_PROXIES_NUR_LISTE=true die
+# privaten Netze ausschalten — dann gelten Kopfzeilen NUR von den
+# ausdruecklich genannten Vermittlern. Achtung: dann muss der eigene
+# nginx-Container (Docker-Netz 172.x) in TRUSTED_PROXIES stehen.
+_NUR_LISTE = (os.environ.get("TRUSTED_PROXIES_NUR_LISTE") or "").strip().lower() in (
+    "1", "true", "ja", "yes")
+_PRIVATE_NETZE = [ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+if _NUR_LISTE and not _TRUSTED_PROXIES:
+    logging.getLogger("rate_limiter").warning(
+        "TRUSTED_PROXIES_NUR_LISTE=true, aber TRUSTED_PROXIES ist leer oder unlesbar — "
+        "es gelten weiterhin die privaten Netze als Vermittler")
+_VERMITTLER_NETZE = list(_TRUSTED_PROXIES) + ([] if (_NUR_LISTE and _TRUSTED_PROXIES)
+                                              else _PRIVATE_NETZE)
+
+
+def _gueltige_ip(wert: str) -> str:
+    """Nur echte Adressen zaehlen — sonst landet "not-an-ip" oder ein
+    beliebiger Text als Schluessel im Zaehler und im Fehlerarchiv."""
+    w = (wert or "").strip()
+    if w.startswith("[") and "]" in w:            # [::1]:1234
+        w = w[1:w.index("]")]
+    elif w.count(":") == 1:                       # 1.2.3.4:5678
+        w = w.split(":")[0]
+    try:
+        return str(ipaddress.ip_address(w))
+    except ValueError:
+        return ""
+
+
+def _ist_vermittler(adresse: str) -> bool:
+    """Darf dieser direkte Nachbar ueberhaupt Kopfzeilen setzen?"""
+    try:
+        ip = ipaddress.ip_address(adresse)
+    except ValueError:
+        return False
+    return any(ip in netz for netz in _VERMITTLER_NETZE)
+
+
+def _ist_eigener_proxy(adresse: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(adresse)
+    except ValueError:
+        return False
+    return any(ip in netz for netz in _TRUSTED_PROXIES)
+
+
+def client_ip(request) -> str:
+    """Echte Besucher-Adresse fuer die Anfragesperren — proxy-bewusst.
+
+    Ohne TRUSTED_PROXIES gilt wie bisher: der LETZTE Eintrag in
+    X-Forwarded-For stammt vom eigenen Proxy und ist damit der einzige,
+    dem zu trauen ist (der erste ist vom Besucher faelschbar).
+
+    Mit TRUSTED_PROXIES werden die eigenen Vermittler von hinten
+    uebersprungen; genommen wird der letzte fremde Eintrag. Nur dann
+    wird auch CF-Connecting-IP akzeptiert, und nur wenn die Anfrage
+    wirklich ueber einen eigenen Vermittler hereinkam."""
+    if not _TRUST_PROXY:
+        return (request.client.host if request.client else None) or "unknown"
+    nachbar = (request.client.host if request.client else "") or ""
+    # Zuerst der direkte Nachbar: Kommt die Anfrage NICHT von einem eigenen
+    # Vermittler, zaehlen die Kopfzeilen gar nicht — der Nachbar ist der
+    # Besucher, und was er in X-Forwarded-For schreibt, ist seine Sache.
+    if not _ist_vermittler(nachbar):
+        return nachbar or "unknown"
+    # Cloudflare traegt die echte Adresse hier ein. Nachpruefung Runde 10:
+    # Die Kopfzeile zaehlt nur, wenn sie zu der Adresse passt, die die
+    # eigene Kette (X-Forwarded-For / X-Real-IP vom eigenen nginx) ergibt —
+    # oder wenn es gar keine Kette gibt. Sonst koennte ein Besucher sie
+    # selbst setzen (nginx reicht fremde Kopfzeilen durch) und je Anfrage
+    # eine andere Adresse vortaeuschen.
+    cf = _gueltige_ip(request.headers.get("cf-connecting-ip", ""))
+    aus_kette = _aus_kette(request)
+    if cf and (not aus_kette or cf == aus_kette):
+        return cf
+    return aus_kette or nachbar or "unknown"
+
+
+def _aus_kette(request) -> str:
+    """Besucheradresse aus X-Forwarded-For / X-Real-IP; "" wenn nichts da."""
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        kette = [_gueltige_ip(t) for t in fwd.split(",")]
+        kette = [t for t in kette if t]
+        if kette and _TRUSTED_PROXIES:
+            # Liste gesetzt: eigene Vermittler von hinten ueberspringen.
+            for eintrag in reversed(kette):
+                if not _ist_eigener_proxy(eintrag):
+                    return eintrag
+            return kette[0]          # nur eigene Vermittler in der Kette
+        if kette:
+            return kette[-1]         # ohne Liste: was der Vermittler anhing
+    real = _gueltige_ip(request.headers.get("x-real-ip", ""))
+    if real:
+        return real
+    return ""
+
 
 class SlidingWindowRateLimiter:
-    """Thread-safe sliding-window rate limiter."""
+    """Rate-Limiter mit gemeinsamem Mongo-Zaehler (alle Worker) und
+    In-Prozess-Fallback."""
 
-    def __init__(self, max_attempts: int = 10, window_seconds: int = 60):
+    _index_ok = False
+
+    def __init__(self, max_attempts: int = 10, window_seconds: int = 60,
+                 name: str = ""):
+        # Stabiler Name = gemeinsamer Schluessel ueber ALLE Worker-Prozesse
+        # (id(self) o.ae. waere je Prozess anders und wuerde die Zaehler
+        # wieder trennen).
+        self.name = name or f"limit{max_attempts}per{window_seconds}"
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
         self._buckets: dict[str, list[float]] = defaultdict(list)
@@ -32,15 +197,46 @@ class SlidingWindowRateLimiter:
         self._gc_every = 500
         self._calls_since_gc = 0
 
-    def check(self, key: str) -> bool:
-        """Return True if the request is allowed; False if the key is rate-limited.
+    async def check(self, key: str) -> bool:
+        """True = erlaubt, False = limitiert. VOR der Verarbeitung rufen —
+        auch fehlgeschlagene Versuche zaehlen.
 
-        Call this BEFORE processing the request.  The attempt is counted even
-        when the login fails, so a failed login still increments the counter.
+        Der Zaehler liegt in MongoDB und gilt damit GEMEINSAM fuer alle
+        Uvicorn-Worker (vorher zaehlte jeder der z.B. 8 Prozesse separat —
+        aus 10 Versuchen/Minute wurden praktisch bis zu 80). Faellt die
+        Datenbank aus, greift der bisherige In-Prozess-Zaehler als Netz.
         """
         # Test/CI-Bypass — niemals in Produktion aktivieren.
         if not _RATE_LIMIT_ENABLED:
             return True
+        # Lokale Zugriffe (gleicher Rechner) nicht limitieren.
+        if _EXEMPT_LOOPBACK and key in _LOOPBACK_KEYS:
+            return True
+        try:
+            return await self._check_mongo(key)
+        except Exception:
+            return self._check_lokal(key)
+
+    async def _check_mongo(self, key: str) -> bool:
+        """Festes Zeitfenster, atomar per $inc — ein Dokument je
+        (Limiter, Schluessel, Fenster); TTL raeumt alte Fenster weg."""
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+        from pymongo import ReturnDocument
+        from deps import db
+        if not SlidingWindowRateLimiter._index_ok:
+            await db.rate_limits.create_index("ablauf", expireAfterSeconds=0)
+            SlidingWindowRateLimiter._index_ok = True
+        fenster = int(_t.time() // self.window_seconds)
+        doc = await db.rate_limits.find_one_and_update(
+            {"_id": f"{self.name}:{key}:{fenster}"},
+            {"$inc": {"n": 1},
+             "$setOnInsert": {"ablauf": datetime.now(timezone.utc)
+                              + timedelta(seconds=self.window_seconds * 2)}},
+            upsert=True, return_document=ReturnDocument.AFTER)
+        return doc["n"] <= self.max_attempts
+
+    def _check_lokal(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self.window_seconds
         with self._lock:
@@ -71,22 +267,61 @@ class SlidingWindowRateLimiter:
         for k in stale:
             del self._buckets[k]
 
-    def reset(self, key: str) -> None:
-        """Clear the counter for a key (e.g. after a successful login)."""
+    async def reset(self, key: str) -> None:
+        """Zaehler eines Schluessels leeren (z.B. nach erfolgreichem Login).
+
+        Audit 13.09.2026 (#47): exakte Schluessel statt Regex-Praefix. Die
+        Kennung ist frei waehlbar (eine E-Mail wie "a|.|b@x.de" ist gueltig)
+        und stand ungeschuetzt im Muster — "|" hob die Bindung an Limiter und
+        Schluessel auf, "." passte auf alles: ein einziger Login leerte
+        fremde Zaehler bis hin zur ganzen Sammlung rate_limits, ein "+" in
+        der Adresse machte das Muster ungueltig (Reset wirkungslos).
+        check() liest nur das aktuelle Fenster; die Nachbarfenster decken
+        Uhrabweichungen zwischen den App-Servern ab, aeltere raeumt die TTL
+        weg. Schluesselformat unveraendert (Mischbetrieb beim Rollout)."""
         with self._lock:
             self._buckets.pop(key, None)
+        try:
+            from deps import db
+            fenster = int(time.time() // self.window_seconds)
+            await db.rate_limits.delete_many(
+                {"_id": {"$in": [f"{self.name}:{key}:{f}"
+                                 for f in (fenster - 1, fenster, fenster + 1)]}})
+        except Exception:
+            pass
 
 
 # Shared instances — imported directly by route modules.
 # 10 attempts / 60 s per IP for the dealer/admin login.
-login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60)
+login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login")
+
+# Runde 26 (12.09.2026, Vorgabe Ahmad: kein Sucher bremst einen anderen aus):
+# Der Login-Zaehler haengt am KONTO (IP + Kennung), nicht mehr allein an der
+# IP — 30 Sucher im selben Buero teilten sich sonst 10 Versuche je Minute,
+# und schon richtige Anmeldungen zaehlten mit. Zusaetzlich ein weit
+# gefasstes Limit je IP, damit Rateversuche ueber viele Konten weiter
+# gebremst werden (Standard 120/min, per LOGIN_IP_LIMIT einstellbar).
+login_ip_limiter = SlidingWindowRateLimiter(
+    max_attempts=int(os.environ.get("LOGIN_IP_LIMIT", "120") or 120),
+    window_seconds=60, name="login-ip")
+
+
+def login_schluessel(ip: str, kennung: str) -> str:
+    """Zaehler-Schluessel je Konto UND IP ("1.2.3.4|name@firma.de")."""
+    k = (kennung or "").strip().lower()
+    return f"{ip or 'unknown'}|{k}" if k else (ip or "unknown")
 
 # Slightly more lenient for the driver app (mobile clients can have flaky
 # connectivity and may retry quickly), but still bounded.
-driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60)
+driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60, name="fahrer-login")
 
 # Registration: 5 new accounts per IP per hour prevents spam account creation.
-register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
+register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung")
 
-# Driver registration: same limit.
-driver_register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600)
+# Driver registration: same limit, EIGENER Zaehler (Runde 29, 12.09.2026).
+# Vorher trugen beide Limiter den Namen 'registrierung' und teilten sich
+# damit dieselben 5 Versuche je Stunde und IP: Fahrer, die sich in einem
+# Autohaus anmelden, verbrauchten das Kontingent der Firmenregistrierung
+# (und umgekehrt).
+driver_register_limiter = SlidingWindowRateLimiter(
+    max_attempts=5, window_seconds=3600, name="fahrer-registrierung")

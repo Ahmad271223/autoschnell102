@@ -16,6 +16,8 @@ Routern importiert.
 """
 import asyncio
 import logging
+from typing import Optional
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import uuid
@@ -26,47 +28,126 @@ from pathlib import Path
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+import traceback
+
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
+from rate_limiter import SlidingWindowRateLimiter
+
 from auth import hash_password
 from cleanup_service import run_cleanup_forever
-from listing_identity import ensure_cache_indexes
 from snapshot_service import init_storage
 
 # Shared deps (DB connection, helpers) — required for index/seed setup.
-from deps import client, db, log, now_iso
+from indizes import _termin_unique_index, _unique_index_sicher  # noqa: F401
+from deps import (client, db, kunden_nummern_nachziehen, log,
+                  naechste_kunden_nr, now_iso)
 
 # Modular routers.
 from routes import admin as admin_routes
+from routes import admin_auto_daten as admin_auto_daten_routes
 from routes import appointments as appointments_routes
 from routes import auth as auth_routes
+from routes import bestand as bestand_routes
 from routes import contracts as contracts_routes
 from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
 from routes import listings as listings_routes
 from routes import manual_search as manual_search_routes
 from routes import payments as payments_routes
+from routes import protocols as protocols_routes
+from routes import resale as resale_routes
+from routes import team as team_routes
+from routes import marketplace as marketplace_routes
+from routes import beweise as beweise_routes
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
+# Audit 09/2026 (Punkt 44): E-Mails, Token, Schluessel und Passwort-Fragmente
+# werden in JEDER Log-Zeile maskiert (zentrale Redaktion).
+from redaktion import logging_redaktion_aktivieren, redigieren  # noqa: E402
+logging_redaktion_aktivieren()
 
 # OpenAPI-Docs (/docs, /redoc, /openapi.json) legen die komplette API-Struktur
 # offen — wertvoll fuer Angreifer-Recon. In Produktion deaktiviert; nur mit
 # ENABLE_DOCS=true (z.B. lokal/Staging) eingeschaltet.
 _DOCS_ENABLED = os.environ.get("ENABLE_DOCS", "").strip().lower() == "true"
+from contextlib import asynccontextmanager  # noqa: E402
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    """FastAPI-Lifespan (Audit 09/2026, Punkt 52): ersetzt die veralteten
+    on_event-Hooks; on_start/on_stop stehen weiter unten."""
+    await on_start()
+    try:
+        yield
+    finally:
+        await on_stop()
+
+
 app = FastAPI(
     title="Autohändler SaaS",
     docs_url="/docs" if _DOCS_ENABLED else None,
     redoc_url="/redoc" if _DOCS_ENABLED else None,
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+    lifespan=lifespan,
 )
+
+
+def _json_sicher(wert):
+    """Nachpruefung Runde 14 (Nr. 80/95): Pydantic haengt an jeden
+    Validierungsfehler das Eingabe-Echo. Enthaelt es Unendlich oder NaN
+    (JSON-Token "Infinity"), scheitert die 422-Antwort selbst an
+    json.dumps (allow_nan=False) und der Client sah 500 statt 422."""
+    if isinstance(wert, float) and (wert != wert or wert in (float("inf"), float("-inf"))):
+        return str(wert)
+    if isinstance(wert, dict):
+        return {k: _json_sicher(v) for k, v in wert.items()}
+    if isinstance(wert, (list, tuple)):
+        return [_json_sicher(v) for v in wert]
+    if isinstance(wert, (str, int, bool)) or wert is None:
+        return wert
+    return str(wert)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validierungsfehler(request: Request, exc: RequestValidationError):
+    from fastapi.responses import JSONResponse
+    fehler = []
+    for e in exc.errors():
+        e = dict(e)
+        e.pop("url", None)
+        if "ctx" in e:
+            e["ctx"] = _json_sicher({k: (str(v) if isinstance(v, Exception) else v)
+                                     for k, v in e["ctx"].items()})
+        e["input"] = _json_sicher(e.get("input"))
+        fehler.append(e)
+    return JSONResponse(status_code=422, content={"detail": fehler})
+# Runde 29 (12.09.2026, Pruefbefund): Zustand der kritischen Startteile.
+# True = steht, False = fehlgeschlagen, gar nicht gesetzt = noch nicht
+# versucht (z.B. Tests, die ensure_indexes nicht aufrufen). /ready macht
+# aus False einen FEHLER — der Load Balancer nimmt die Instanz dann nicht
+# in die Rotation, statt kaputte Antworten an Besucher zu liefern.
+BETRIEBSBEREIT: dict = {}
+
 api = APIRouter(prefix="/api")
+
+
+# Runde 31 (12.09.2026): Fassungs-Stempel "<Commit-Zeit>-<Kurz-SHA>" aus
+# deploy/rollout.sh. Die Oberflaeche liest ihn aus jeder API-Antwort und
+# erfaehrt so von einer neuen Fassung — ohne eigene Abfrage und bevor sie
+# gegen eine fehlende Datei laeuft (Vorfall Fahrer-App/Super-Admin).
+APP_FASSUNG = os.environ.get("APP_FASSUNG", "").strip()
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -95,10 +176,76 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Content-Security-Policy",
             "default-src 'none'; frame-ancestors 'none'",
         )
+        if APP_FASSUNG:
+            response.headers.setdefault("X-AH-Fassung", APP_FASSUNG)
         return response
 
 
+class ErrorReportingMiddleware(BaseHTTPMiddleware):
+    """Fängt unbehandelte Exceptions ab, speichert sie in error_logs (für den
+    Admin-Bereich sichtbar) und liefert eine saubere JSON-500-Antwort — statt
+    eines nackten 500 ohne CORS-Header, der im Browser als 'Network Error'
+    erscheint."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            err_id = str(uuid.uuid4())
+            tb = redigieren(traceback.format_exc())
+            log.exception("Unhandled error on %s %s (ref=%s)",
+                          request.method, request.url.path, err_id[:8])
+            try:
+                await db.error_logs.insert_one({
+                    "id": err_id,
+                    "source": "backend",
+                    "method": request.method,
+                    "path": str(request.url.path)[:300],
+                    "error_type": type(exc).__name__,
+                    "message": redigieren(str(exc))[:1000],
+                    "traceback": tb[-8000:],
+                    "ip": (request.client.host if request.client else "") or "",
+                    "status": "open",
+                    "created_at": now_iso(),
+                })
+            except Exception:
+                log.exception("error_logs write failed (ref=%s)", err_id[:8])
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Interner Serverfehler — der Fehler wurde "
+                                   "automatisch an den Administrator gemeldet "
+                                   f"(Ref: {err_id[:8]})."},
+            )
+
+
+class WartungsmodusMiddleware(BaseHTTPMiddleware):
+    """Restore/Wartung (Audit 09/2026, Punkt 5): ist `system_flags`
+    {_id: "wartungsmodus", aktiv: true} gesetzt, antwortet die API mit 503
+    — ausser Health/Ready. Der Wert wird 5 s gecacht (kein DB-Zugriff je
+    Request)."""
+    _stand = {"aktiv": False, "bis": 0.0}
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        pfad = request.url.path
+        if pfad not in ("/api/health", "/api/ready", "/api/"):
+            import time as _t
+            if _t.monotonic() > self._stand["bis"]:
+                try:
+                    doc = await db.system_flags.find_one({"_id": "wartungsmodus"})
+                    self._stand["aktiv"] = bool((doc or {}).get("aktiv"))
+                except Exception:
+                    pass
+                self._stand["bis"] = _t.monotonic() + 5
+            if self._stand["aktiv"]:
+                return JSONResponse(status_code=503, headers={"Retry-After": "30"},
+                                    content={"detail": "Wartungsmodus — die Plattform "
+                                             "ist in wenigen Minuten wieder da."})
+        return await call_next(request)
+
+
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(ErrorReportingMiddleware)
+app.add_middleware(WartungsmodusMiddleware)
 
 
 @api.get("/")
@@ -106,25 +253,437 @@ async def api_root():
     return {"service": "autohandel", "status": "ok"}
 
 
+@api.get("/health")
+async def health_check(response: Response):
+    """Health-Check fuers Monitoring / automatischen Neustart.
+    Prueft die DB-Verbindung real (ping) — meldet 503, wenn die
+    Datenbank haengt, damit ein Watchdog eingreifen kann."""
+    try:
+        await db.command("ping")
+        return {"status": "healthy", "db": "up"}
+    except Exception as exc:
+        log.warning("health check DB ping failed: %s", exc)
+        response.status_code = 503
+        return {"status": "unhealthy", "db": "down"}
+
+
+@api.get("/ready")
+async def readiness_check(response: Response):
+    """Readiness (Audit 09/2026, Punkt 42) — getrennt von /health (Liveness).
+    Nicht bereit (503): Datenbank, Migrationsstand, Speicherplatz oder
+    Datei-Speicher fehlen. Warnungen (200): Backup-Alter, offene
+    Betriebsalarme, haengende Jobs, S3 nicht erreichbar."""
+    import shutil
+    from migrationen import ZIEL_VERSION, aktuelle_version
+    fehler, warnungen, info = [], [], {}
+    try:
+        await db.command("ping")
+        info["db"] = "up"
+    except Exception as exc:
+        fehler.append(f"db: {exc}")
+    try:
+        v = await aktuelle_version(db)
+        info["schema_version"] = v
+        if v < ZIEL_VERSION:
+            fehler.append(f"migration: Stand {v} < Ziel {ZIEL_VERSION}")
+    except Exception as exc:
+        fehler.append(f"migration: {exc}")
+    for name, pfad in (("uploads", ROOT_DIR / "uploads"),
+                       ("snapshots", ROOT_DIR / "local_storage"),
+                       ("backups", Path(os.environ.get("BACKUP_DIR") or (ROOT_DIR / "backups")))):
+        try:
+            pfad.mkdir(parents=True, exist_ok=True)
+            frei_mb = shutil.disk_usage(str(pfad)).free // (1024 * 1024)
+            info[f"frei_mb_{name}"] = frei_mb
+            if frei_mb < int(os.environ.get("MIN_FREI_MB", "500") or 500):
+                fehler.append(f"{name}: nur {frei_mb} MB frei")
+            probe = pfad / ".readiness"
+            probe.write_text("ok")
+            probe.unlink()
+        except Exception as exc:
+            fehler.append(f"{name}: nicht schreibbar ({exc})")
+    if os.environ.get("S3_BUCKET"):
+        # Pruefbericht 09/2026 (roter Befund): hier wurde eine Methode
+        # gesucht, die es nirgends gab. Fehlte sie, wurde der Datei-Speicher
+        # KOMMENTARLOS uebersprungen — die Bereitschaftspruefung meldete
+        # "bereit", obwohl R2 unerreichbar sein konnte. Jetzt gibt es die
+        # Methode, ihr Ergebnis steht in der Antwort, und ein Fehlen faellt
+        # als Warnung auf statt still zu verschwinden.
+        try:
+            from storage_service import storage
+            head = getattr(storage, "erreichbar", None)
+            if not callable(head):
+                info["s3"] = "ungeprueft"
+                warnungen.append("s3: keine Erreichbarkeitspruefung vorhanden")
+            else:
+                ok = await asyncio.to_thread(head)
+                info["s3"] = "up" if ok else "nicht erreichbar"
+                if not ok:
+                    warnungen.append("s3: nicht erreichbar")
+                    # Runde 8, Befund 5 — bewusste Entscheidung: Ein Ausfall
+                    # des Datei-Speichers nimmt den Server NICHT aus dem
+                    # Betrieb. Vertraege, Vergleiche, Termine und PDFs liegen
+                    # in der Datenbank und funktionieren weiter; nur Fotos
+                    # und Protokoll-Dateien haengen an R2. Ein 503 wuerde
+                    # ALLES abschalten, um einen Teil zu schuetzen. Dafuer
+                    # darf der Ausfall nicht stumm bleiben: Betriebsalarm
+                    # (einmal je Ausfall, hochgezaehlt statt dupliziert).
+                    try:
+                        from betrieb import alarm
+                        await alarm(db, "datei_speicher_nicht_erreichbar",
+                                    ref=os.environ.get("S3_BUCKET", ""),
+                                    hinweis="R2/S3 antwortet nicht. Foto-Upload und "
+                                            "Datei-Auslieferung sind gestoert; alles "
+                                            "andere laeuft. Zugangsdaten, Eimer und "
+                                            "Netz pruefen.")
+                    except Exception:               # noqa: BLE001
+                        pass
+        except Exception as exc:
+            info["s3"] = "fehler"
+            warnungen.append(f"s3: {exc}")
+    try:
+        from backup_service import letztes_backup_info_global
+        b = await letztes_backup_info_global(db)
+        info["backup"] = b
+        alter = b.get("alter_stunden")
+        # Runde 10: jung reicht nicht — vollstaendig und (wenn eingerichtet)
+        # offsite muss es sein. Ein gerade fehlgeschlagener Lauf darf die
+        # Warnung nicht unterdruecken.
+        offsite_noetig = bool(os.environ.get("BACKUP_S3_BUCKET", "").strip())
+        if alter is None or alter > 26 or not b.get("vollstaendig"):
+            warnungen.append("backup: kein vollstaendiges Backup in den letzten 26 h")
+        elif offsite_noetig and not b.get("offsite"):
+            warnungen.append("backup: letzte Sicherung ohne Offsite-Kopie")
+    except Exception as exc:
+        warnungen.append(f"backup: {exc}")
+    try:
+        n = await db.betriebsalarme.count_documents({"offen": True})
+        info["alarme_offen"] = n
+        if n:
+            warnungen.append(f"{n} offene Betriebsalarme")
+        alt = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        haengend = await db.link_jobs.count_documents(
+            {"status": "queued", "created_at": {"$lt": datetime.now(timezone.utc) - timedelta(minutes=15)}})
+        info["link_jobs_haengend"] = haengend
+        if haengend:
+            warnungen.append(f"{haengend} Link-Jobs warten > 15 min")
+        wm = await db.system_flags.find_one({"_id": "wartungsmodus"})
+        info["wartungsmodus"] = bool((wm or {}).get("aktiv"))
+        ohne_mfa = await db.users.count_documents(
+            {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
+             "mfa.aktiv": {"$ne": True}})
+        info["super_admins_ohne_mfa"] = ohne_mfa
+        if ohne_mfa:
+            warnungen.append(f"{ohne_mfa} Super-Admin-Konto/Konten ohne Zwei-Faktor-Anmeldung")
+        _ = alt
+    except Exception as exc:
+        warnungen.append(f"queue: {exc}")
+    try:
+        # Audit 13.09.2026 (#38): prozessunabhaengige Stau-Warnung — startet
+        # flottenweit kein Beweis-Worker, bliebe /ready sonst gruen. Warnung,
+        # kein Fehler (kein 503-Tor fuer rollout.sh).
+        from beweis_service import beweise_haengend as _beweise_haengend
+        beweise_stau = await _beweise_haengend(db, 15)
+        info["beweise_haengend"] = beweise_stau
+        if beweise_stau:
+            warnungen.append(f"{beweise_stau} Beweisdokumente warten > 15 min")
+    except Exception as exc:  # noqa: BLE001
+        warnungen.append(f"beweise: {exc}")
+    # Runde 29 (12.09.2026, Pruefbefund): Fehlt ein kritischer Unique-Index
+    # oder laeuft der Link-Worker nicht, darf diese Instanz NICHT in die
+    # Rotation. Vorher wurde das nur ins Protokoll geschrieben und der
+    # Server bediente trotzdem Besucher.
+    #
+    # Gegenpruefung 12.09.2026 (schwerer Befund): Die Indizes werden LIVE
+    # geprueft, nicht ueber einen Merker vom Start. Sonst meldete /ready nach
+    # dem Bereinigen der Dubletten weiter 503 — und weil deploy/rollout.sh und
+    # deploy/freigeben.sh genau diese Route abfragen, waere der Server nicht
+    # mehr aus dem Drain zu holen gewesen, ohne alle Prozesse neu zu starten.
+    # (Der Load Balancer prueft /api/health, nicht /ready — ein laufender
+    # Server faellt dadurch also nicht aus der Rotation.)
+    kritische_indizes = {
+        "vehicles": ("dealer_id", "id"),
+        "kaufvorgaenge": ("contract_id",),
+    }
+    steht = {}
+    for sammlung, felder in kritische_indizes.items():
+        try:
+            vorhanden = await db[sammlung].index_information()
+            steht[sammlung] = any(
+                i.get("unique") and [f for f, _r in i["key"]] == list(felder)
+                for i in vorhanden.values())
+        except Exception as exc:  # noqa: BLE001
+            warnungen.append(f"Index-Pruefung {sammlung}: {exc}")
+            continue
+        if not steht[sammlung]:
+            fehler.append(
+                f"Unique-Index {sammlung} ({', '.join(felder)}) fehlt — "
+                "Dubletten sind moeglich. Bereinigen mit "
+                "'python scripts/dubletten_pruefen.py', danach greift das "
+                "sofort (kein Neustart noetig).")
+    # Audit 13.09.2026 (#34): Die Anbieter-Begrenzung kann sich selbst heilen
+    # (ein kurzer Primaerwechsel waehrend on_start liess diesen Prozess sonst
+    # bis zum Neustart 503 melden, obwohl acquire_slot den Index laengst
+    # nachgeholt hatte). Nur rollout.sh/freigeben.sh fragen /ready ab.
+    if BETRIEBSBEREIT.get("anbieter_grenze") is False:
+        try:
+            from provider_limiter import ensure_slot_indexes
+            await ensure_slot_indexes(db)
+            BETRIEBSBEREIT["anbieter_grenze"] = True
+        except Exception as exc:  # noqa: BLE001
+            warnungen.append(f"anbieter_grenze: {exc}")
+    # Prozesslokale Teile: sie koennen sich nicht selbst heilen, ein Neustart
+    # dieses Prozesses ist der Weg.
+    _TEILE = {"link_worker": "Link-Abruf-Arbeiter",
+              "anbieter_grenze": "Anbieter-Begrenzung (provider_limiter)"}
+    for schluessel, klartext in _TEILE.items():
+        if BETRIEBSBEREIT.get(schluessel) is False:
+            fehler.append(f"{klartext} ist beim Start gescheitert — "
+                          "Protokoll pruefen und diesen Prozess neu starten")
+    info["betriebsbereit"] = {**BETRIEBSBEREIT, **{f"index_{k}": v
+                                                   for k, v in steht.items()}}
+    bereit = not fehler
+    if not bereit:
+        response.status_code = 503
+    return {"ready": bereit, "fehler": fehler, "warnungen": warnungen, **info}
+
+
+# ---------- Datei-Auslieferung (Storage-Abstraktion) ----------
+# Fotos/Videos aus dem Fahrzeug-/Verkaufsmodul. Keys enthalten eine
+# zufällige UUID (nicht erratbar) — Auslieferung erfolgt daher ohne Auth,
+# damit <img src=...> im Frontend ohne Header-Tricks funktioniert.
+#
+# SENSIBLE Kategorien sind hier GESPERRT: Abhol-Protokolle und die darin
+# eingebetteten HANDSCHRIFTLICHEN UNTERSCHRIFTEN (Prefix "protocol/")
+# enthalten personenbezogene Daten und werden ausschliesslich über die
+# authentifizierten Endpunkte mit Eigentümer-Prüfung ausgeliefert
+# (/api/driver/appointments/{id}/protocol.pdf bzw. /api/protocols/{id}.pdf).
+# pickup/: Schadenfotos aus Abholberichten zeigen fremde Fahrzeuge und
+# gehoeren nicht oeffentlich ins Netz — Abruf nur noch authentifiziert
+# ueber /api/pickup-fotos/{key} (Haendler der Firma oder deren Fahrer).
+_PRIVATE_FILE_PREFIXES = ("protocol/", "pickup/")
+
+
+# Audit 09/2026 (Punkt 45): nicht-oeffentliche Dateien (z.B. Fahrzeugfotos
+# unter resale/) nur noch mit kurzlebiger Signatur (?exp=&sig=), Cache
+# privat. Firmenlogos (logo/) bleiben oeffentlich. Uebergang: bis alle
+# Aufrufer signierte Links erzeugen, kann die Pflicht per
+# DATEI_SIGNATUR_PFLICHT=false ausgesetzt werden.
+# Runde 13: B4 — in Produktion gilt die Pflicht IMMER; der Schalter kann sie
+# nur noch ausserhalb (Entwicklung/Test) aussetzen. production_check bricht
+# den Start bei =false in Produktion ohnehin ab — das hier ist der zweite Riegel.
+_DATEI_SIGNATUR_PFLICHT = (
+    os.environ.get("APP_ENV", "").strip().lower() == "production"
+    or os.environ.get("DATEI_SIGNATUR_PFLICHT", "true").strip().lower() not in ("0", "false", "no"))
+
+
+@app.get("/api/files/{key:path}")
+async def serve_file(key: str, exp: Optional[str] = None, sig: Optional[str] = None):
+    from storage_service import guess_media_type, load_async, StorageError
+    from dateien import signatur_gueltig, signatur_noetig
+    if key.startswith(_PRIVATE_FILE_PREFIXES):
+        return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
+    geschuetzt = signatur_noetig(key)
+    if geschuetzt and _DATEI_SIGNATUR_PFLICHT and not signatur_gueltig(key, exp, sig):
+        return JSONResponse(status_code=403, content={"detail": "Link abgelaufen oder ungültig"})
+    try:
+        # Heissester Pfad der App (jedes Foto/Video) — nie im Loop lesen.
+        data = await load_async(key)
+    except StorageError:
+        return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
+    cache = "private, max-age=300" if geschuetzt else "public, max-age=86400"
+    return Response(content=data, media_type=guess_media_type(key),
+                    headers={"Cache-Control": cache})
+
+
+# ---------- Bild-Proxy fuer Inseratsfotos (10.09.2026) ----------
+# 300 Bilder / 60 s je IP: eine Vergleichsseite laedt hoechstens 10-40.
+# Runde 26 (12.09.2026): 30 Sucher im selben Buero teilen sich EINE oeffentliche
+# IP, und ein Vergleich laedt bis zu 40 Vorschaubilder — mit 300/min bekamen
+# spaetere Nutzer 429 und sahen Fahrzeuge ohne Bild. Die Adresse ist beim
+# signierten Bild-Link die einzige Kennung (kein Token im <img>-Tag), deshalb
+# bleibt es ein IP-Limit, aber mit realistischem Wert (BILD_PROXY_LIMIT).
+_bild_limiter = SlidingWindowRateLimiter(
+    max_attempts=int(os.environ.get("BILD_PROXY_LIMIT", "1500") or 1500),
+    window_seconds=60, name="bild_proxy")
+
+
+@app.get("/api/bild")
+async def bild_proxy_route(request: Request, u: str = "", exp: Optional[str] = None,
+                           sig: Optional[str] = None):
+    """Verkleinertes Vorschaubild eines Portal-Fotos (bild_proxy.py). Nur mit
+    gueltiger Signatur und nur fuer die bekannten Portal-Hosts — kein
+    offener Proxy."""
+    import bild_proxy
+    from rate_limiter import client_ip
+    if not u or not bild_proxy.erlaubt(u):
+        return JSONResponse(status_code=404, content={"detail": "Bild nicht verfügbar"})
+    if not bild_proxy.gueltig(u, exp, sig):
+        return JSONResponse(status_code=403, content={"detail": "Link abgelaufen oder ungültig"})
+    if not await _bild_limiter.check(client_ip(request)):
+        return JSONResponse(status_code=429, content={"detail": "Zu viele Bildanfragen"})
+    data = await bild_proxy.laden(u)
+    if not data:
+        return JSONResponse(status_code=404, content={"detail": "Bild nicht verfügbar"})
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
+# ---------- Frontend-Fehler-Meldung (landet im Admin-Bereich) ----------
+# 20 Meldungen / 60 s pro IP — verhindert, dass ein kaputter Client (oder
+# ein Angreifer) die error_logs-Collection flutet.
+_client_error_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60)
+
+
+class ClientErrorIn(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    stack: str = Field(default="", max_length=8000)
+    url: str = Field(default="", max_length=500)
+    user_email: str = Field(default="", max_length=200)
+
+
+@api.post("/client-errors")
+async def report_client_error(body: ClientErrorIn, request: Request):
+    # Pruefbericht 09/2026: hier stand request.client.host statt der
+    # proxy-bewussten client_ip(). Hinter nginx ist das IMMER die Adresse
+    # des Proxys. Das war nicht nur im Archiv unbrauchbar — alle Nutzer
+    # teilten sich dadurch EINEN Zaehler, ein einziger kaputter Browser
+    # haette die Fehlermeldung fuer alle anderen blockiert.
+    from rate_limiter import client_ip
+    ip = client_ip(request)
+    if not await _client_error_limiter.check(ip):
+        return {"ok": False}
+    import hashlib
+    pfad = body.url.split("?")[0].split("#")[0][:500]
+    nachricht = redigieren(body.message)[:1000]
+    # Audit 09/2026 (Punkt 30): Deduplizierung (gleiche Meldung + Pfad in 10
+    # Minuten wird hochgezaehlt), globale Obergrenze, Redaktion von
+    # E-Mail/Token; die Client-E-Mail ist unbestaetigt -> nur maskiert.
+    hash_ = hashlib.sha256(f"{pfad}|{nachricht}".encode("utf-8")).hexdigest()[:24]
+    frist = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    dup = await db.error_logs.find_one_and_update(
+        {"hash": hash_, "created_at": {"$gte": frist}},
+        {"$inc": {"anzahl": 1}, "$set": {"zuletzt": now_iso()}},
+        projection={"_id": 0, "id": 1})
+    if dup:
+        return {"ok": True, "ref": dup["id"][:8], "dedup": True}
+    maximum = int(os.environ.get("ERROR_LOG_MAX", "20000") or 20000)
+    if await db.error_logs.estimated_document_count() >= maximum:
+        return {"ok": False, "hinweis": "Fehlerarchiv voll"}
+    err_id = str(uuid.uuid4())
+    await db.error_logs.insert_one({
+        "id": err_id,
+        "source": "frontend",
+        "method": "",
+        "path": pfad,
+        "error_type": "ClientError",
+        "message": nachricht,
+        "traceback": redigieren(body.stack)[:8000],
+        "user_email": redigieren(body.user_email)[:200],
+        "hash": hash_, "anzahl": 1,
+        "ip": ip,
+        "status": "open",
+        "created_at": now_iso(),
+    })
+    return {"ok": True, "ref": err_id[:8]}
+
+
 # =========================================================
 #                  INDEX & SEED SETUP
 # =========================================================
+async def _kunden_nr_unique_index() -> None:
+    """Eindeutigkeit der Kundennummer auch auf DB-Ebene (Backstop gegen
+    Zaehler-Fehler). sparse: Firmen ohne Nummer (Migrationsmoment) stoeren
+    nicht. Ein aelterer nicht-eindeutiger Index gleicher Form wird ersetzt."""
+    dubletten = await db.dealers.aggregate([
+        {"$match": {"kunden_nr": {"$exists": True, "$ne": None}}},
+        {"$group": {"_id": "$kunden_nr", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+    if dubletten:
+        msg = ("dealers.kunden_nr: doppelte Kundennummern (%s) — Unique-Index "
+               "NICHT angelegt, bitte bereinigen" %
+               ", ".join(str(d["_id"]) for d in dubletten))
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            log.error("Start ABGEBROCHEN: %s", msg)
+            raise SystemExit(78)
+        log.error("ensure_indexes: %s", msg)
+        return
+    vorhandene = {i["name"]: i async for i in db.dealers.list_indexes()}
+    alt = vorhandene.get("kunden_nr_1")
+    if alt is not None and not alt.get("unique"):
+        await db.dealers.drop_index("kunden_nr_1")
+    if "kunden_nr_unique" not in vorhandene:
+        await db.dealers.create_index("kunden_nr", unique=True, sparse=True,
+                                      name="kunden_nr_unique")
+
+
+async def _bestand_lese_indizes() -> None:
+    """Audit 13.09.2026 (#53/#48), Nachbesserung: Lese-Indizes fuer den
+    Bestand. Beide sind NICHT unique — Altdaten koennen den Aufbau also nicht
+    verhindern. Scheitert einer trotzdem (z.B. gleicher Schluessel unter
+    anderem Namen), bricht der Start NICHT ab: Warnung + Betriebsalarm
+    `index_fehlt`, die Abfragen laufen dann nur langsamer.
+
+    - activity_logs (dealer_id, ref, created_at): Historie der Fahrzeugakte
+      (routes/bestand.vehicle_akte: dealer_id + ref $in/$or, sortiert nach
+      created_at). Ohne ihn lief Mongo den created_at-Index ueber alle Firmen
+      rueckwaerts — je Aktenaufruf praktisch die ganze Sammlung.
+    - vehicles archiv_aufraeumen_offen (partiell): stuendliche Nachhol-Abfrage
+      der 50-Tage-Archivierung (cleanup_service), die kein dealer_id kennt.
+    Bei sehr grosser activity_logs-Sammlung den Index vor dem Rollout bauen.
+    Rumpf liegt in indizes.bestand_lese_indizes (testbar ohne server.py);
+    server.db wird beim Aufruf gelesen."""
+    from indizes import bestand_lese_indizes
+    await bestand_lese_indizes(db)
+
+
+async def _storage_retry_unique_index() -> None:
+    """Nachpruefung Runde 14 (Nr. 61): Unique-Index `retry_je_ziel` auf
+    storage_delete_retry samt Normalisieren und Zusammenlegen der Altzeilen.
+    Audit 13.09.2026 (#41): Rumpf liegt in indizes.storage_retry_unique_index
+    (Betriebsalarm bei Scheitern, deterministisches Zusammenlegen; testbar
+    ohne server.py). server.db wird beim Aufruf gelesen."""
+    from indizes import storage_retry_unique_index
+    await storage_retry_unique_index(db)
+
+
+async def _plan_requests_unique_indizes() -> None:
+    """Nachpruefung Runde 14 (Nr. 56/57): hoechstens EINE offene Anfrage je
+    Sucher bzw. je Firma als Teil-Unique-Index. Audit 13.09.2026 (#40): Rumpf
+    liegt in indizes.plan_requests_unique_indizes (Betriebsalarm statt nur
+    Log, Dublettenpruefung kann den Start nicht mehr abbrechen)."""
+    from indizes import plan_requests_unique_indizes
+    await plan_requests_unique_indizes(db)
+
+
 async def ensure_indexes():
-    await db.users.create_index("email", unique=True)
-    await db.dealers.create_index("user_id", unique=True)
+    await _unique_index_sicher(db.users, "email")
+    await _unique_index_sicher(db.dealers, "user_id")
     await db.vehicle_cache.create_index("mobile_ad_id", unique=True)
+    # Genau EIN aktuelles Abholprotokoll je Termin (Race-Schutz: zwei
+    # parallele Entwurf-Anlagen koennen sonst zwei "aktuelle" Versionen
+    # erzeugen). Berichte: je Termin darf jede Versionsnummer nur einmal
+    # existieren — der Verlierer eines Rennens bekommt DuplicateKey und
+    # wiederholt mit frisch gelesener Version.
+    await db.pickup_protocols.create_index(
+        "appointment_id", unique=True,
+        partialFilterExpression={"superseded": False},
+        name="ein_aktuelles_protokoll_je_termin")
+    await db.pickup_reports.create_index(
+        [("appointment_id", 1), ("version", 1)], unique=True,
+        name="berichtsversion_eindeutig")
+    # Runde 21: Fahrerfotos laufen FAHRERFOTO_TAGE nach dem Hochladen ab
+    # (cleanup_service.berichtsfotos_nach_frist_loeschen sucht nach created_at).
+    await db.pickup_reports.create_index([("created_at", 1)], name="bericht_erstellt")
+    # Tagesbudget-Zaehler (provider_fetch) raeumen sich selbst weg.
+    await db.provider_budget.create_index("ablauf", expireAfterSeconds=0)
     # TTL on cache (30 minutes)
-    try:
-        await db.vehicle_cache.create_index("expires_at_dt", expireAfterSeconds=0)
-    except Exception:
-        pass
+    # Audit 13.09.2026 (#42): Scheitern meldet einen Betriebsalarm
+    # ttl_index_fehlt (vorher nur eine Warnung mit falschem Text).
+    from indizes import ttl_index_sicher
+    await ttl_index_sicher(db, "vehicle_cache", "expires_at_dt")
     # Vehicle comparisons – auto-cleanup after 14 days
-    try:
-        await db.vehicle_comparisons.create_index(
-            "expires_at_dt", expireAfterSeconds=0,
-        )
-    except Exception:
-        pass
+    await ttl_index_sicher(db, "vehicle_comparisons", "expires_at_dt")
     await db.subscriptions.create_index("dealer_id")
     # Unique index on session_id prevents duplicate subscriptions from race
     # conditions between concurrent payment-status polls and webhook deliveries.
@@ -134,27 +693,184 @@ async def ensure_indexes():
         await db.subscriptions.create_index(
             "session_id", unique=True, sparse=True,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
+                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
+    # Nachpruefung Runde 14 (Nr. 60): zugang_grants ist der Idempotenz-
+    # Schluessel der Stripe-Freischaltung (find_one_and_update mit upsert je
+    # session_id). Ohne Unique-Index erzeugen parallele Upserts nachweislich
+    # Dubletten (Abgleich startet eine haengende Aktivierung neu, waehrend
+    # der alte Aufruf noch laeuft). Mongo wiederholt einen Upsert bei
+    # DuplicateKey auf Gleichheitsfilter selbst — payments.py bleibt gleich.
+    # Altbestand mit Dubletten wird NICHT automatisch geloescht (Geld-Belege):
+    # dann bleibt es beim Warnhinweis, bereinigen mit scripts/dubletten_pruefen.py.
+    try:
+        await db.zugang_grants.create_index("session_id", unique=True,
+                                            name="grant_je_session")
+    except Exception as exc:
+        log.warning("ensure_indexes: zugang_grants.session_id (Dubletten im "
+                    "Altbestand? scripts/dubletten_pruefen.py): %s", exc)
+    await _storage_retry_unique_index()
+    await _plan_requests_unique_indizes()
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
+    # WhatsApp-Download-Link (09.09.2026): Token -> Vertrag, nur fuer
+    # Vertraege mit Freigabe (partial), eindeutig.
+    await db.generated_pdfs.create_index(
+        "freigabe.token", unique=True, name="vertrag_freigabe_token",
+        partialFilterExpression={"freigabe.token": {"$exists": True}})
+    # Audit-Log + Fehler-Meldungen (Admin-Bereich)
+    await db.activity_logs.create_index([("created_at", -1)])
+    await db.activity_logs.create_index([("action", 1), ("created_at", -1)])
+    # Audit 13.09.2026 (#53/#48): Akte-Historie + Archiv-Nachholung
+    await _bestand_lese_indizes()
+    await db.error_logs.create_index([("status", 1), ("created_at", -1)])
+    # B2B-Modul
+    await db.pickup_reports.create_index([("appointment_id", 1), ("version", -1)])
+    await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1)])
+    # Runde 16: Sucher-Bereich (owner_user_id) je Firma
+    await db.vehicles.create_index([("dealer_id", 1), ("owner_user_id", 1)])
+    await db.vehicles.create_index([("dealer_id", 1), ("mitbearbeiter_ids", 1)])
+    # Runde 17: EIN Fahrzeugdokument je (Firma, Fahrzeug-ID) — zwei
+    # gleichzeitige erste Vergleiche upserteten vorher zwei Dokumente.
+    # Altdubletten: kein Startabbruch, sondern Betriebsalarm.
+    # Runde 29 (12.09.2026, Pruefbefund): Stehen diese beiden Indizes nicht,
+    # sind Dubletten moeglich (zwei Fahrzeugdokumente, zwei Vorgaenge je
+    # Vertrag). Der Start bricht bewusst NICHT ab — sonst haette eine
+    # Altdublette den ganzen Server unbedienbar gemacht. Stattdessen meldet
+    # /ready einen FEHLER: der Load Balancer nimmt die Instanz gar nicht erst
+    # in die Rotation, und die Ursache laesst sich in Ruhe beheben
+    # (python scripts/dubletten_pruefen.py).
+    BETRIEBSBEREIT["index_vehicles"] = await _unique_index_sicher(
+        db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)
+    # Umbau Kaufvorgaenge 09.09.2026: ein Vorgang je Vertrag
+    BETRIEBSBEREIT["index_kaufvorgaenge"] = await _unique_index_sicher(
+        db.kaufvorgaenge, "contract_id", abbruch_in_produktion=False)
+    await db.kaufvorgaenge.create_index([("dealer_id", 1), ("vehicle_id", 1)])
+    await db.kaufvorgaenge.create_index([("dealer_id", 1), ("user_id", 1)])
+    await db.kaufvorgaenge.create_index("appointment_id")
+    # Runde 29 (12.09.2026): Fahrzeugstatus und Einkaufspreis fragen jetzt
+    # gezielt nach Status + juengster Aenderung (statt 200/500 Vorgaenge zu
+    # laden). Ohne diesen Index muesste Mongo dafuer sortieren.
+    await db.kaufvorgaenge.create_index([("dealer_id", 1), ("vehicle_id", 1),
+                                         ("status", 1), ("updated_at", -1)])
+    # Nachschlagen per id ist der haeufigste Zugriff ueberhaupt (jede
+    # Anmeldung, jede Berechtigungspruefung) — bisher ohne eigenen Index.
+    await db.users.create_index("id", name="by_user_id")
+    await db.dealers.create_index("id", name="by_dealer_id")
+    await db.appointments.create_index([("dealer_id", 1), ("contract_id", 1)])
+    # Runde 17: Vertragszeiger je Termin (idempotente Nachfuehrung beim PUT)
+    await db.generated_pdfs.create_index([("dealer_id", 1), ("appointment_id", 1)])
+    # Fahrzeugpool-Begrenzung sortiert je Firma nach updated_at (09/2026)
+    await db.vehicles.create_index([("dealer_id", 1), ("lifecycle", 1),
+                                    ("updated_at", -1)])
+    await db.resale_listings.create_index([("dealer_id", 1), ("status", 1)])
+    # Marktplatz-Liste: sortiert nach published_at innerhalb der sichtbaren
+    # Haendler — ohne diesen Index muesste Mongo den ganzen Bestand in den
+    # Speicher sortieren (08/2026, nach Umstellung auf Aggregation).
+    await db.resale_listings.create_index(
+        [("status", 1), ("dealer_id", 1), ("published_at", -1)])
+    # Haendlersuche filtert auf oeffentliche Profile.
+    await db.dealers.create_index("marketplace.public")
+    # Abo-Sammelabfragen (Admin-Nutzerliste, Sucherverwaltung): ohne diese
+    # Indizes waere die Sammelabfrage langsamer als die alten Einzelabrufe.
+    await db.subscriptions.create_index([("dealer_id", 1), ("created_at", -1)])
+    await db.subscriptions.create_index(
+        [("subject_user_id", 1), ("created_at", -1)])
+    # Monatsstatistik je Sucher.
+    await db.vehicle_comparisons.create_index(
+        [("user_id", 1), ("created_at", -1)])
+    # Runde 27 (12.09.2026): heisse Abfrage des LIVE-Zaehlers — bei vielen
+    # Suchern fragt die Vergleichsseite alle 30 s nach. Ohne diesen Index
+    # scannt Mongo dafuer die ganze Sammlung.
+    await db.vehicle_comparisons.create_index(
+        [("cache_key", 1), ("created_at", -1)])
+    # Runde 27 (Gegenpruefung): Die Fahrzeugakte zaehlt Vertraege und Termine
+    # je Fahrzeug. Ohne diese Indizes muss Mongo dafuer jedes Vertrags-
+    # dokument der Firma laden — samt eingebettetem PDF (mehrere hundert KB).
+    await db.generated_pdfs.create_index([("dealer_id", 1), ("vehicle_id", 1)])
+    await db.appointments.create_index([("dealer_id", 1), ("vehicle_id", 1)])
+    # Bestandsliste sortiert nach lifecycle_changed_at (mit Limit).
+    await db.vehicles.create_index([("dealer_id", 1), ("lifecycle_changed_at", -1)])
+    await db.generated_pdfs.create_index([("user_id", 1), ("created_at", -1)])
+    await db.resale_listings.create_index([("vehicle_id", 1)])
+    # Phase 3: Marktplatz
+    await db.dealer_invites.create_index("token", unique=True)
+    await db.network_members.create_index(
+        [("dealer_id", 1), ("buyer_user_id", 1)], unique=True)
+    await db.listing_interest.create_index([("dealer_id", 1), ("created_at", -1)])
+    await db.listing_interest.create_index([("buyer_user_id", 1), ("created_at", -1)])
+    # Audit 13.09.2026 (#18/#19/#27): neue Eindeutigkeitsregeln im Marktplatz
+    # (ein Merklisten-Eintrag, eine laufende Anfrage, eine offene Zugangs-
+    # anfrage). Altdubletten werden vorher automatisch bereinigt; scheitert
+    # es, Betriebsalarm statt Startabbruch (nicht in BETRIEBSBEREIT: die
+    # Routen pruefen weiter selbst vor).
+    from indizes import (_buyer_access_unique_index, _favoriten_unique_index,
+                         _interesse_unique_index)
+    await _favoriten_unique_index()
+    await _interesse_unique_index()
+    await _buyer_access_unique_index()
+    # Audit 13.09.2026 (#24): offene Einladungen je Firma zaehlen und listen
+    await db.dealer_invites.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
+    await _termin_unique_index()
     # Neue Fahrer-Accounts + Dealer-Driver-Links
-    await db.driver_accounts.create_index("email", unique=True)
-    await db.driver_accounts.create_index("driver_code", unique=True)
+    await _unique_index_sicher(db.driver_accounts, "email")
+    await _unique_index_sicher(db.driver_accounts, "driver_code")
     await db.dealer_drivers.create_index(
         [("dealer_id", 1), ("driver_account_id", 1)], unique=True,
     )
     await db.dealer_drivers.create_index("driver_account_id")
-    # Legacy-Index entfernen, falls noch vorhanden
-    try:
-        await db.drivers.drop()
-    except Exception:
-        pass
+    # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
+    # Audit 13.09.2026 (#36): Cache-Dubletten werden automatisch
+    # zusammengelegt; scheitert es trotzdem, Betriebsalarm statt Warnung.
+    # Wirft nie (kein Startabbruch im Migrations-Leader).
+    from indizes import listings_cache_unique_index
+    await listings_cache_unique_index(db)
+    # Snapshots: das Frontend pollt alle 4 s auf (id, dealer_id) — ohne Index
+    # ist das ab ein paar tausend Snapshots ein Collection-Scan pro Poll.
+    await db.listing_snapshots.create_index("id", unique=True)
+    await db.listing_snapshots.create_index([("dealer_id", 1), ("created_at", -1)])
+    await db.listing_snapshots.create_index([("vehicle_id", 1), ("status", 1)])
+    await db.listing_snapshots.create_index([("status", 1), ("created_at", 1)])
+    # Kundennummern (Wunsch 09/2026): Bestandsfirmen ohne Nummer bekommen
+    # eine — idempotent je Firma ($exists-Guard; parallele Worker erzeugen
+    # hoechstens Luecken, nie Dubletten), aelteste Firma zuerst.
+    neu = await kunden_nummern_nachziehen()
+    if neu:
+        log.info("Kundennummern nachgezogen: %d Firmen", neu)
+    await _kunden_nr_unique_index()
+    # Auto-Daten (dauerhaft, anonym — auto_daten.py): eindeutige Zufalls-id,
+    # Suche nach Marke/Modell, Filter; KEIN Index auf irgendeine Quell-ID,
+    # weil es keine gibt. Vertraege: created_at fuer die 90-Tage-Loeschung.
+    await db.admin_vehicle_data.create_index("id", unique=True)
+    await db.admin_vehicle_data.create_index([("brand", 1), ("model", 1)])
+    await db.admin_vehicle_data.create_index("purchase_price_cents")
+    await db.generated_pdfs.create_index("created_at")
+    # Passwort-Reset-Tokens: Lookup + automatisches Wegräumen
+    await db.password_resets.create_index("token_hash")
+    # Runde 5: automatisches Wegraeumen war nur versprochen, nicht angelegt.
+    await db.password_resets.create_index("loeschen_ab", expireAfterSeconds=0,
+                                          name="ttl_loeschen_ab")
+    # (N1, Review 09/2026) Frueher stand hier `db.drivers.drop()` bei JEDEM
+    # Start — als "Legacy-Index entfernen" beschriftet, tatsaechlich ein
+    # Collection-Drop. Die Migration ist laengst durch; ersatzlos gestrichen.
+
+
 
 
 async def seed_admin():
-    email = os.environ.get("ADMIN_EMAIL", "admin@autohandel.app")
+    """Runde 12 (Beschluss 06.09.2026): Es gibt nur den Super-Admin
+    (seed_super_admin). Der fruehere Bootstrap-"normale Admin" aus
+    ADMIN_EMAIL wird nicht mehr angelegt; ein vorhandenes Altkonto wird
+    weder geaendert noch reaktiviert und bekommt ueberall 403
+    (deps.current_admin). Es erscheint unter /admin/betrieb zum Loeschen."""
+    email = os.environ.get("ADMIN_EMAIL", "")
+    if email and await db.users.find_one({"email": email, "role": "admin",
+                                          "is_super_admin": {"$ne": True}}, {"_id": 1}):
+        log.warning("seed_admin: Altkonto %s hat Rolle admin ohne Super-Admin — "
+                    "es kann nichts mehr und sollte im Betrieb geloescht werden.", email)
+    return
     password = os.environ.get("ADMIN_PASSWORD", "")
     if not password:
         log.warning(
@@ -164,11 +880,18 @@ async def seed_admin():
         return
     existing = await db.users.find_one({"email": email})
     if existing:
-        # ensure role admin & lifetime
-        await db.users.update_one(
-            {"email": email},
-            {"$set": {"role": "admin", "active": True}},
-        )
+        if existing.get("role") == "admin":
+            # Runde 5: KEINE Reaktivierung — ein vom Super-Admin gesperrter
+            # Admin wurde sonst bei jedem Neustart wieder entsperrt.
+            pass
+        else:
+            # NIEMALS ein Fremdkonto hochstufen (PR-Review 09/2026): wer
+            # die Admin-Mail zuerst registriert hatte, wuerde sonst nach
+            # einer Fehlkonfiguration automatisch Admin.
+            log.error("seed_admin: unter %s existiert bereits ein NORMALES "
+                      "Konto (Rolle %s) — es wird NICHT zum Admin "
+                      "hochgestuft. ADMIN_EMAIL in der .env aendern.",
+                      email, existing.get("role"))
         return
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
@@ -181,6 +904,7 @@ async def seed_admin():
         "created_at": now_iso(),
     })
     await db.dealers.insert_one({
+        "kunden_nr": await naechste_kunden_nr(),
         "id": dealer_id, "user_id": user_id,
         "company_name": "Autohandel Admin", "contact_person": "Admin",
         "phone": "", "email": email, "address": "", "zip_code": "", "city": "",
@@ -216,7 +940,8 @@ async def seed_super_admin():
             {"$set": {
                 "role": "admin",
                 "is_super_admin": True,
-                "active": True,
+                # Runde 5: active wird NICHT angefasst (keine Reaktivierung
+                # eines bewusst gesperrten Kontos beim Neustart).
                 "username": username,
             }},
         )
@@ -237,6 +962,7 @@ async def seed_super_admin():
         "company_name": "Cash Car Hannover (Super-Admin)",
     })
     await db.dealers.insert_one({
+        "kunden_nr": await naechste_kunden_nr(),
         "id": dealer_id, "user_id": user_id,
         "company_name": "Cash Car Hannover", "contact_person": "Super Admin",
         "phone": "", "email": placeholder_email, "address": "", "zip_code": "",
@@ -250,87 +976,193 @@ async def seed_super_admin():
     log.info("seed_super_admin: created %s", username)
 
 
-@app.on_event("startup")
 async def on_start():
-    await ensure_indexes()
-    await seed_admin()
-    await seed_super_admin()
+    # Robustheit: Nach einem PC-/Server-Neustart braucht MongoDB manchmal ein
+    # paar Sekunden. Wir warten geduldig, statt den Backend-Prozess sterben zu
+    # lassen — so läuft die App zuverlässig hoch, "sobald das Backend startet".
+    import asyncio as _asyncio
+    # Produktions-Check WIRKLICH zuerst (Runde 5): vorher liefen Indexanlage
+    # und Admin-Seeding bereits, bevor eine fehlerhafte Produktions-
+    # konfiguration den Start abbrach — die Datenbank war dann schon
+    # veraendert.
     try:
-        await ensure_cache_indexes(db)
+        from production_check import pruefe_produktion
+        pruefe_produktion(log)
+    except SystemExit:
+        raise
     except Exception as exc:
-        log.warning("listings_cache index setup failed: %s", exc)
+        log.warning("production check failed to run: %s", exc)
+    # Audit 09/2026 (Punkt 18): GENAU EIN Prozess legt Indizes/Seeds an und
+    # fuehrt die versionierten Migrationen aus; die anderen warten auf den
+    # Zielstand. In Produktion bricht ein Fehler den Start ab.
+    from migrationen import ausfuehren_oder_warten
+    for attempt in range(1, 31):
+        try:
+            await db.command("ping")
+            break
+        except Exception as exc:
+            if attempt >= 30:
+                log.error("MongoDB nach 60s nicht bereit: %s", exc)
+                if os.environ.get("APP_ENV", "").strip().lower() == "production":
+                    raise SystemExit(78)
+            else:
+                log.warning("Warte auf MongoDB (%d/30): %s", attempt, exc)
+                await _asyncio.sleep(2)
+    ergebnis = await ausfuehren_oder_warten(
+        db, indexe=_alle_indexe, seeds=(seed_admin, seed_super_admin))
+    log.info("Migration/Indizes: %s", ergebnis)
     # Object storage for listing snapshots (PDF + PNG proof archives).
     # Non-fatal if EMERGENT_LLM_KEY missing — snapshot endpoints will 503.
     try:
         init_storage()
     except Exception as exc:
         log.warning("snapshot storage init failed at startup: %s", exc)
-    # Playwright Symlink self-heal — Kubernetes-Restarts verlieren
-    # gelegentlich den Versions-Symlink. Wir legen ihn beim Boot neu an.
+    # Job-Sperren-Index SYNCHRON anlegen, BEVOR irgendein Hintergrundjob
+    # startet — sonst koennten beim allerersten Start (frische Datenbank)
+    # mehrere Worker denselben Job uebernehmen, weil der Unique-Index
+    # noch fehlt (Snapshot-Recovery startet schon nach 5 Sekunden).
     try:
-        from snapshot_service import _ensure_browser_executable
-        _ensure_browser_executable()
+        from job_lock import ensure_lock_index
+        await ensure_lock_index(db)
     except Exception as exc:
-        log.warning("playwright self-heal at startup failed: %s", exc)
+        log.warning("job lock index setup failed: %s", exc)
+    try:
+        from provider_limiter import ensure_slot_indexes
+        await ensure_slot_indexes(db)
+        BETRIEBSBEREIT["anbieter_grenze"] = True
+    except Exception as exc:
+        log.warning("provider slot index setup failed: %s", exc)
+        BETRIEBSBEREIT["anbieter_grenze"] = False
+    # Linkpruefungs-Jobs: Indizes synchron, dann die Job-Schleife dieses
+    # Workers starten (Details in link_jobs.py).
+    try:
+        from link_jobs import ensure_job_indexes, run_job_worker_forever
+        await ensure_job_indexes(db)
+        import asyncio
+        asyncio.create_task(run_job_worker_forever(db))
+        BETRIEBSBEREIT["link_worker"] = True
+    except Exception as exc:
+        log.warning("link job worker start failed: %s", exc)
+        BETRIEBSBEREIT["link_worker"] = False
+    # Beweisdokumente je Inserat (ersetzt die Snapshots): Indizes synchron,
+    # dann die Erzeugungs-Schleife dieses Workers (beweis_service.py).
+    # Audit 13.09.2026 (#38): Indizes und Worker-Start getrennt. Vorher stand
+    # beides in einem try — eine dauerhafte Index-Ursache in der gemeinsamen
+    # DB (Dubletten, Namenskonflikt) liess nach jedem Rollout in KEINEM
+    # Prozess einen Beweis-Worker starten. Der Worker braucht den Unique-Index
+    # nicht (_beanspruchen ist ein atomarer Statuswechsel je Zeile);
+    # beweis_indizes_sichern wirft nie und meldet einen Betriebsalarm.
+    try:
+        from beweis_service import beweis_indizes_sichern, run_beweis_worker_forever
+        try:
+            await beweis_indizes_sichern(db)
+        except Exception as exc:
+            log.error("Beweis-Indizes: %s — Beweis-Worker startet trotzdem", exc)
+        import asyncio
+        asyncio.create_task(run_beweis_worker_forever(db))
+    except Exception as exc:
+        log.warning("beweis worker start failed: %s", exc)
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         import asyncio
         asyncio.create_task(run_cleanup_forever(db))
     except Exception as exc:
         log.warning("cleanup task start failed: %s", exc)
-    # Snapshot Self-Heal: Beim Boot alle Snapshots, die in pending/running
-    # hängen geblieben sind (z.B. weil das Backend während eines Jobs
-    # neu gestartet wurde), erneut anstoßen. Sonst würde das Frontend
-    # ewig „lade…" anzeigen.
     try:
-        import asyncio
-        asyncio.create_task(_resume_stuck_snapshots())
+        asyncio.create_task(run_abgleich_forever())
     except Exception as exc:
-        log.warning("snapshot resume task failed: %s", exc)
+        log.warning("abgleich task start failed: %s", exc)
+    # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
+    # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
+    # nach, wenn das letzte Backup älter als 24h ist.
+    try:
+        from backup_service import run_backup_forever
+        asyncio.create_task(run_backup_forever(db))
+    except Exception as exc:
+        log.warning("backup task start failed: %s", exc)
 
 
-async def _resume_stuck_snapshots():
-    """Findet Snapshots in pending/running und startet sie sequentiell neu.
+async def _alle_indexe():
+    """Bestehende Indizes + Audit-Indizes (Punkt 36: Protokollversion eindeutig;
+    Abo-Vorgaenge/Zahlungen idempotent; Alarme; Fehler-Dedup)."""
+    await ensure_indexes()
+    # Audit 13.09.2026 (#36): sichtbar im Betriebsstatus, nicht nur im Log;
+    # der Alarm wird geschlossen, sobald die Indizes stehen. Wirft nie.
+    from indizes import listings_cache_indizes
+    await listings_cache_indizes(db)
+    try:
+        # Audit 13.09.2026 (#35): inseratscache_rotieren sucht nach expires_at
+        # (stuendlich) — ohne Index ein Scan der ganzen Sammlung.
+        await db.listings_cache.create_index("expires_at", name="cache_ablauf")
+    except Exception as exc:
+        log.error("Index cache_ablauf: %s", exc)
+    try:
+        # Nachbesserung #35: Altbestand (expires_at = Abruf + 1 Jahr) wird
+        # ueber fetched_at geloescht — dieselbe Begruendung wie oben.
+        await db.listings_cache.create_index("fetched_at", name="cache_abruf")
+    except Exception as exc:
+        log.error("Index cache_abruf: %s", exc)
+    # Beweisdokumente: Unique-Index auf cache_key VOR allen Workern (ein
+    # Dokument je Inserat haengt an ihm). Audit 13.09.2026 (#37): wirft nie,
+    # fehlt der Index, gibt es einen Betriebsalarm.
+    from beweis_service import beweis_indizes_sichern
+    await beweis_indizes_sichern(db)
+    try:
+        await db.pickup_protocols.create_index(
+            [("appointment_id", 1), ("version", 1)], unique=True,
+            name="protokollversion_eindeutig")
+    except Exception as exc:
+        log.error("Index protokollversion_eindeutig: %s", exc)
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            raise
+    try:
+        # Gegenpruefung 12.09.2026: Der Zaehler "Freigaben" im Menue fragt alle
+        # 20 s je offenem Tab — ohne Index durchsuchte das die ganze Sammlung.
+        await db.pickup_protocols.create_index(
+            [("dealer_id", 1), ("status", 1), ("abgeschickt_am", -1)],
+            name="protokolle_je_firma_status")
+    except Exception as exc:
+        log.error("Index protokolle_je_firma_status: %s", exc)
+    await db.subscriptions.create_index([("subject_user_id", 1), ("status", 1), ("created_at", -1)])
+    # Audit 09/2026: "genau ein aktives Abo je Konto" gilt jetzt auch in
+    # der Datenbank. Findet sich Altbestand mit mehreren aktiven Abos,
+    # scheitert die Indexanlage — dann bleibt es bei der Pruefung im Code
+    # und ein Betriebsalarm nennt die betroffenen Konten.
+    # Audit 13.09.2026 (#39): Alarm bei JEDEM Scheitern, Schliessen nach der
+    # Bereinigung, und die Dublettenpruefung kann den Start nicht abbrechen.
+    from indizes import abo_unique_index
+    await abo_unique_index(db)
+    await db.manual_payments.create_index("vorgang_id", unique=True, sparse=True,
+                                          name="zahlung_je_vorgang")
+    await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
+    await db.betriebsalarme.create_index([("offen", 1), ("created_at", -1)])
+    await db.betriebsalarme.create_index([("typ", 1), ("ref", 1), ("offen", 1)])
+    await db.error_logs.create_index([("hash", 1), ("created_at", -1)])
+    await db.zugangs_aenderungen.create_index([("subject_user_id", 1), ("created_at", -1)])
+    await db.payment_transactions.create_index([("status", 1), ("updated_at", 1)])
+    await db.storage_delete_retry.create_index("aufgegeben")
 
-    Wir machen das sequentiell (eins nach dem anderen), damit der frisch
-    gestartete Backend nicht direkt unter Last steht. Snapshots, die schon
-    älter als 1 Stunde sind, markieren wir als failed (vermutlich wirklich
-    kaputt — wir wollen die nicht endlos wiederholen).
-    """
+
+async def run_abgleich_forever():
+    """Alle 10 Minuten (ein Prozess): abgebrochene Freischaltungs-Vorgaenge
+    nachholen, bezahlte Transaktionen ohne Zugang erneut aktivieren."""
     import asyncio
-    from datetime import datetime, timedelta, timezone
-    from snapshot_service import run_snapshot_job
-
-    # 5 Sekunden warten, bis der Webserver wirklich oben ist
-    await asyncio.sleep(5)
-
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    too_old = await db.listing_snapshots.update_many(
-        {"status": {"$in": ["pending", "running"]},
-         "created_at": {"$lt": cutoff}},
-        {"$set": {"status": "failed",
-                  "error": "Backend-Neustart — Job verloren",
-                  "completed_at": now_iso()}},
-    )
-    if too_old.modified_count:
-        log.info("snapshot resume: marked %d stale jobs as failed",
-                 too_old.modified_count)
-
-    stuck = await db.listing_snapshots.find(
-        {"status": {"$in": ["pending", "running"]}},
-        {"_id": 0, "id": 1},
-    ).to_list(50)
-    if not stuck:
-        return
-    log.info("snapshot resume: re-running %d stuck job(s)", len(stuck))
-    for s in stuck:
+    from job_lock import acquire
+    await asyncio.sleep(20)
+    while True:
         try:
-            await run_snapshot_job(db, s["id"])
+            if await acquire(db, "abgleich", ttl_seconds=540):
+                from routes.admin import abo_vorgaenge_nachholen
+                from routes.payments import zahlungen_abgleichen
+                a = await abo_vorgaenge_nachholen()
+                z = await zahlungen_abgleichen(db)
+                if a or (isinstance(z, dict) and any(z.values())):
+                    log.info("Abgleich: abo_vorgaenge=%s zahlungen=%s", a, z)
         except Exception as exc:
-            log.warning("snapshot resume %s failed: %s", s["id"], exc)
+            log.warning("Abgleich fehlgeschlagen: %s", exc)
+        await asyncio.sleep(600)
 
 
-@app.on_event("shutdown")
 async def on_stop():
     client.close()
 
@@ -340,6 +1172,7 @@ async def on_stop():
 # =========================================================
 api.include_router(auth_routes.router)
 api.include_router(admin_routes.router)
+api.include_router(admin_auto_daten_routes.router)
 api.include_router(dealer_routes.router)
 api.include_router(contracts_routes.router)
 api.include_router(appointments_routes.router)
@@ -347,6 +1180,12 @@ api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)
 api.include_router(manual_search_routes.router)
 api.include_router(payments_routes.router)
+api.include_router(bestand_routes.router)
+api.include_router(resale_routes.router)
+api.include_router(team_routes.router)
+api.include_router(marketplace_routes.router)
+api.include_router(beweise_routes.router)
+api.include_router(protocols_routes.router)
 
 app.include_router(api)
 
@@ -367,5 +1206,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=_cors_origins,
-    allow_methods=["*"], allow_headers=["*"],
+    # Runde 10: kein Freibrief mehr — nur was die Oberflaeche wirklich nutzt.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With",
+                   "Idempotency-Key", "X-CSRF-Token"],
 )

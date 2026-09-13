@@ -8,10 +8,30 @@ from typing import Optional
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
+import jwt                                   # PyJWT (python-jose entfernt: ecdsa ohne Fix)
+from jwt import PyJWTError as JWTError
+
+# .env muss geladen sein, BEVOR JWT_SECRET gelesen wird — sonst wird bei jedem
+# Start ein Zufalls-Secret erzeugt und alle Sessions werden ungültig.
+from pathlib import Path as _Path
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(_Path(__file__).parent / ".env")
 
 _jwt_secret_env = os.environ.get("JWT_SECRET", "")
 if not _jwt_secret_env or _jwt_secret_env == "dev-secret":
+    # Runde 11: Ein Zufalls-Secret je Prozess ist bei mehreren Workern oder
+    # zwei Servern hinter dem Load Balancer KEIN "Logout nach Neustart",
+    # sondern staendige "Token ungueltig"-Fehler, sobald ein Request auf
+    # einem anderen Prozess landet. Ohne ausdrueckliche Entwicklungs-
+    # umgebung startet das Backend deshalb gar nicht erst.
+    _umgebung = os.environ.get("APP_ENV", "").strip().lower()
+    if _umgebung not in ("development", "dev", "local", "test", "ci"):
+        raise SystemExit(
+            "JWT_SECRET fehlt (oder ist 'dev-secret'). Auf jedem Server und in "
+            "jedem Worker muss DASSELBE Secret gesetzt sein — sonst gelten "
+            "Anmeldungen nur auf dem Prozess, der sie ausgestellt hat. "
+            "Erzeugen mit: openssl rand -hex 32; fuer lokale Entwicklung "
+            "ohne Secret APP_ENV=development setzen.")
     import secrets as _secrets
     import warnings as _warnings
     _jwt_secret_env = _secrets.token_hex(32)
@@ -65,6 +85,36 @@ def create_token(user_id: str, session_id: str) -> str:
 
 def decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+
+
+MFA_TOKEN_TTL_MINUTES = 5
+
+
+def mfa_zustand(user: dict) -> str:
+    """Kurzer Fingerabdruck von Passwort und Zwei-Faktor-Geheimnis. Aendert
+    sich eines davon (Passwortwechsel, MFA zurueckgesetzt oder abgeschaltet),
+    passt ein vorher ausgestelltes Zwischen-Token nicht mehr (Runde 10)."""
+    import hashlib
+    m = user.get("mfa") or {}
+    roh = f"{user.get('password_hash', '')}|{m.get('secret', '')}|{int(bool(m.get('aktiv')))}"
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:16]
+
+
+def create_mfa_token(user: dict) -> str:
+    """Kurzlebiges Zwischen-Token nach korrektem Passwort — berechtigt NUR
+    zur Eingabe des zweiten Faktors, nie zu API-Aufrufen (typ=mfa). Traegt
+    den Kontozustand mit: nach Passwort- oder MFA-Aenderung ist es wertlos."""
+    exp = datetime.now(timezone.utc) + timedelta(minutes=MFA_TOKEN_TTL_MINUTES)
+    return jwt.encode({"sub": user["id"], "typ": "mfa", "z": mfa_zustand(user),
+                       "nonce": uuid.uuid4().hex[:12], "exp": exp},
+                      JWT_SECRET, algorithm=JWT_ALG)
+
+
+def decode_mfa_token(token: str) -> dict:
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    if payload.get("typ") != "mfa":
+        raise JWTError("kein MFA-Token")
+    return payload
 
 
 def new_session_id() -> str:

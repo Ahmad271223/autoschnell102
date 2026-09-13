@@ -2,10 +2,40 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 import { Search, KeyRound, Lock, Unlock, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 
+
+// Haendler-Hauptaccount: das Backend verlangt eine ausdrueckliche
+// Bestaetigung (?firma_loeschen=true), weil dabei die KOMPLETTE Firma
+// entfernt wird. Vorher zeigen wir die Loeschvorschau des Backends.
+async function deleteUserSmart(u) {
+  try {
+    await api.delete(`/admin/users/${u.id}`);
+    return true;
+  } catch (e) {
+    if (e?.response?.status !== 409) throw e;
+  }
+  let vorschau = "";
+  try {
+    const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
+    const w = data?.wuerde_loeschen || {};
+    vorschau = Object.entries(w).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n} × ${k}`).join(", ") || "keine weiteren Daten";
+  } catch { vorschau = "Vorschau nicht verfügbar"; }
+  const ok = window.confirm(
+    `ACHTUNG: "${u.company_name || u.email}" ist ein Händler-Hauptaccount.\n` +
+    `Die KOMPLETTE Firma wird gelöscht (${vorschau}).\n\n` +
+    `Wirklich unwiderruflich löschen?`);
+  if (!ok) return false;
+  await api.delete(`/admin/users/${u.id}?firma_loeschen=true`);
+  return true;
+}
+
 export default function AdminUsers() {
+  const { user: ich } = useAuth();
+  const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -31,10 +61,40 @@ export default function AdminUsers() {
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return users;
-    return users.filter((u) => [u.email, u.username, u.company_name].join(" ").toLowerCase().includes(s));
+    return users.filter((u) => [u.email, u.username, u.company_name,
+      u.kunden_nr != null ? `#${u.kunden_nr}` : "", String(u.kunden_nr ?? "")]
+      .join(" ").toLowerCase().includes(s));
   }, [users, q]);
 
+  // Zwei-Faktor eines AUSGESPERRTEN Admins zurücksetzen. Das eigene Konto
+  // ist ausgenommen; bei einem anderen Super-Admin verlangt der Server das
+  // eigene Passwort und einen Grund (Audit 09/2026).
+  const mfaZuruecksetzen = async (u) => {
+    if (!window.confirm(`Zwei-Faktor von ${u.email} zurücksetzen? Das Konto wird abgemeldet.`)) return;
+    const daten = {};
+    if (u.is_super_admin) {
+      const grund = window.prompt(`${u.email} ist Super-Admin. Bitte einen Grund angeben (wird protokolliert):`);
+      if (!grund) return;
+      const passwort = window.prompt("Zur Bestätigung dein eigenes Passwort:");
+      if (!passwort) return;
+      daten.grund = grund;
+      daten.passwort = passwort;
+    }
+    try {
+      await api.post(`/admin/users/${u.id}/mfa-zuruecksetzen`, daten);
+      toast.success("Zwei-Faktor zurückgesetzt");
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
   const toggleActive = async (u) => {
+    if (u.active) {
+      const firma = u.role === "dealer";
+      const text = firma
+        ? `Firma "${u.company_name || u.email}" komplett sperren?\n\nDer Chef UND alle Sucher dieser Firma werden sofort abgemeldet und koennen sich nicht mehr anmelden (auch die kostenlosen Bereiche). Das ist etwas anderes als "Abo aufheben" (nur Suche/Vergleich).`
+        : `Konto "${u.email}" sperren?\n\nAnmeldung wird sofort unmoeglich, die Sitzung beendet. "Abo aufheben" (nur Suche/Vergleich) findest du in der Firmenansicht.`;
+      if (!window.confirm(text)) return;
+    }
     try {
       await api.post(`/admin/users/${u.id}/active`, { active: !u.active });
       toast.success(u.active ? "Account gesperrt" : "Account entsperrt");
@@ -58,10 +118,12 @@ export default function AdminUsers() {
     if (!deleteUser) return;
     setDeleting(true);
     try {
-      await api.delete(`/admin/users/${deleteUser.id}`);
-      toast.success(`Account "${deleteUser.company_name || deleteUser.email}" dauerhaft gelöscht`);
-      setDeleteUser(null);
-      load();
+      const done = await deleteUserSmart(deleteUser);
+      if (done) {
+        toast.success(`Account "${deleteUser.company_name || deleteUser.email}" dauerhaft gelöscht`);
+        setDeleteUser(null);
+        load();
+      }
     } catch (e) {
       toast.error(errMsg(e, "Löschen fehlgeschlagen"));
     } finally {
@@ -75,7 +137,7 @@ export default function AdminUsers() {
         title="Nutzer"
         subtitle={`${users.length} Konten insgesamt`}
         action={
-          <Button
+          <Button disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin legt Firmen an"}
             data-testid="admin-create-user-btn"
             onClick={() => setCreating(true)}
             variant="primary"
@@ -92,7 +154,7 @@ export default function AdminUsers() {
             data-testid="admin-users-search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Nutzer suchen (E-Mail, Firma, Benutzername)"
+            placeholder="Firma suchen (Name, #Kundennummer, E-Mail)"
             className="flex-1 bg-transparent border-0 outline-none text-[14px] text-white placeholder:text-zinc-500"
           />
         </div>
@@ -112,6 +174,7 @@ export default function AdminUsers() {
                       <span className="text-[14.5px] font-semibold text-white truncate">
                         {u.company_name || u.username || u.email}
                       </span>
+                      {u.kunden_nr != null && <Badge tone="blue">#{u.kunden_nr}</Badge>}
                       {u.role === "admin" && <Badge tone="purple">Admin</Badge>}
                       {u.is_super_admin && <Crown size={13} className="text-amber-400" />}
                       {u.active === false ? <Badge tone="red">Gesperrt</Badge> : <Badge tone="green">Aktiv</Badge>}
@@ -127,9 +190,13 @@ export default function AdminUsers() {
                     <div className="text-[11.5px] text-zinc-500 mt-0.5">Erstellt: {fmtDate(u.created_at)}</div>
                   </Link>
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    {!superAdmin && <span className="text-[11px] text-zinc-500">nur lesen</span>}
+                    {superAdmin && (<>
                     <Button data-testid={`user-pw-btn-${u.id}`} variant="outline" size="sm" onClick={() => setResetUser(u)} title="Passwort setzen">
                       <KeyRound size={14} /> Passwort
                     </Button>
+                    </>)}
+                    {superAdmin && (<>
                     <Button
                       data-testid={`user-toggle-active-btn-${u.id}`}
                       variant={u.active ? "outline" : "primary"}
@@ -139,7 +206,21 @@ export default function AdminUsers() {
                     >
                       {u.active ? <><Lock size={14}/>Sperren</> : <><Unlock size={14}/>Entsperren</>}
                     </Button>
-                    {!u.is_super_admin && (
+                    </>)}
+                    {superAdmin && u.role === "admin" && u.mfa_aktiv && u.id !== ich?.id && (
+
+                      <Button variant="outline" size="sm" data-testid={`user-mfa-reset-${u.id}`}
+
+                              title="Zwei-Faktor zurücksetzen (ausgesperrter Admin richtet neu ein)"
+
+                              onClick={() => mfaZuruecksetzen(u)}>
+
+                        2FA zurücksetzen
+
+                      </Button>
+
+                    )}
+                    {superAdmin && !u.is_super_admin && (
                       <Button
                         data-testid={`user-delete-btn-${u.id}`}
                         variant="danger"

@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { thumbSrc } from "@/lib/bilder";
+import { checkLink, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
+import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
   ArrowRight, ExternalLink, Activity, Gauge, Calendar as CalendarIcon, Fuel,
@@ -8,34 +11,41 @@ import {
 } from "lucide-react";
 import ContractDialog from "@/components/ContractDialog";
 import SendDialog from "@/components/SendDialog";
-import SnapshotCard from "@/components/SnapshotCard";
+import BeweisCard from "@/components/BeweisCard";
 import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
-import { openInPopup, openMultiple } from "@/lib/popup";
+import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { hinweiseZeigen } from "@/lib/hinweise";
+import { useAuth } from "@/context/AuthContext";
+import {
+  einstellungLesen, einstellungSchreiben, vergleichLaden, vergleichSichern,
+} from "@/lib/vergleichSpeicher";
 
-const SAMPLE_URLS = [
-  "https://m.mobile.de/fahrzeuge/details.html?id=448228023",
-  "https://suchen.mobile.de/fahrzeuge/details.html?id=391155421",
-  "https://www.kleinanzeigen.de/s-anzeige/...",
-];
 
-const STORAGE_KEY = "ah_vergleich_state";
+// Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
+// und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
+// und das automatische Oeffnen nach dem Auslesen.
+function filterEintraege(data, { mobile = true, autoscout = true } = {}) {
+  return [
+    mobile    && data?.search_url    && { url: data.search_url,    name: "mobileFilterWindow",    label: "mobile.de" },
+    autoscout && data?.autoscout_url && { url: data.autoscout_url, name: "autoscoutFilterWindow", label: "AutoScout24" },
+  ].filter(Boolean);
+}
 
 export default function Vergleich() {
-  // Restore last comparison so the user can navigate to PDFs / Fahrer
-  // and come back without losing their result. Cleared on logout.
-  const restored = (() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  })();
+  // Runde 27 (12.09.2026, Pruefbefund P0): Der zuletzt angezeigte Vergleich
+  // haengt am KONTO. Vorher lag er unter einem festen Schluessel — meldete
+  // sich am selben Browser ein anderer Sucher an, sah er Fahrzeug,
+  // Verkaeuferdaten und den letzten Vertrag seines Kollegen.
+  const { user } = useAuth();
+  const kontoId = user?.id || null;
+  const restored = vergleichLaden(
+    typeof window !== "undefined" ? window.sessionStorage : null, kontoId);
 
   const [url, setUrl] = useState(restored?.url || "");
   const [loading, setLoading] = useState(false);
+  const [waitMsg, setWaitMsg] = useState(null);
   const [result, setResult] = useState(restored?.result || null);
   const [counter, setCounter] = useState(restored?.counter || null);
   const [showContract, setShowContract] = useState(false);
@@ -43,52 +53,171 @@ export default function Vergleich() {
   const [showSend, setShowSend] = useState(false);
   // Portal-Toggles — Zustand wird in localStorage gespeichert
   const [portalMobile, setPortalMobile] = useState(() => {
-    try { const v = localStorage.getItem("ah_portal_mobile"); return v === null ? true : v === "1"; }
-    catch { return true; }
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_portal_mobile", user?.id, true);
   });
   const [portalAutoscout, setPortalAutoscout] = useState(() => {
-    try { const v = localStorage.getItem("ah_portal_autoscout"); return v === null ? true : v === "1"; }
-    catch { return true; }
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_portal_autoscout", user?.id, true);
   });
+
+  // Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen —
+  // Standard AN (Wunsch Ahmad: Einfuegen genuegt, alles geht von selbst auf).
+  const [filterAuto, setFilterAuto] = useState(() => {
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_filter_automatisch", user?.id, true);
+  });
+  // Runde 22 (11.09.2026, Gegenpruefung): aktuelle Schalter-Staende fuer das
+  // automatische Oeffnen. Ein Lauf kann Minuten dauern — die Werte aus dem
+  // Moment des Starts waeren veraltet, wenn der Sucher inzwischen umschaltet.
+  const schalterRef = useRef({ mobile: portalMobile, autoscout: portalAutoscout, auto: filterAuto });
 
   const toggleMobile = (v) => {
     setPortalMobile(v);
-    try { localStorage.setItem("ah_portal_mobile", v ? "1" : "0"); } catch { /* ignore */ }
+    schalterRef.current.mobile = v;
+    einstellungSchreiben(window.localStorage, "ah_portal_mobile", kontoId, v);
   };
   const toggleAutoscout = (v) => {
     setPortalAutoscout(v);
-    try { localStorage.setItem("ah_portal_autoscout", v ? "1" : "0"); } catch { /* ignore */ }
+    schalterRef.current.autoscout = v;
+    einstellungSchreiben(window.localStorage, "ah_portal_autoscout", kontoId, v);
   };
+  const toggleFilterAuto = (v) => {
+    setFilterAuto(v);
+    schalterRef.current.auto = v;
+    einstellungSchreiben(window.localStorage, "ah_filter_automatisch", kontoId, v);
+  };
+
+  // Runde 22 (11.09.2026, Gegenpruefung): Seite verlassen -> ein noch
+  // laufender Vergleich oeffnet danach keine Filter-Tabs mehr. Im Effekt auf
+  // true setzen (nicht nur im Aufraeumen auf false): React.StrictMode spielt
+  // im Dev-Modus Einhaengen/Aushaengen/Einhaengen durch.
+  const aktivRef = useRef(true);
+  useEffect(() => {
+    aktivRef.current = true;
+    return () => { aktivRef.current = false; };
+  }, []);
+
+  // Runde 24 (11.09.2026): doppelte Hinweis-Toasts (Befund Ahmad).
+  //  - laeuftRef: Sperre gegen einen zweiten gleichzeitigen Lauf. "loading"
+  //    allein reicht nicht — es stammt aus dem Render, in dem der Aufrufer
+  //    entstand. ProfileBadge ruft onChange erst NACH dem await seines PUT
+  //    auf, mit der Funktion vom Klick-Zeitpunkt; ein inzwischen per
+  //    Einfuegen gestarteter Vergleich sah dort noch loading=false.
+  //  - hinweisIdsRef: ids der gezeigten Hinweise, damit der naechste Lauf
+  //    denselben Text ersetzt statt stapelt und veraltete schliesst.
+  const laeuftRef = useRef(false);
+  const hinweisIdsRef = useRef([]);
 
   // Persist on every meaningful state change.
   useEffect(() => {
     try {
       if (result) {
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ url, result, counter, contract }));
+        vergleichSichern(window.sessionStorage, kontoId, { url, result, counter, contract });
       }
     } catch { /* quota/private mode — silent */ }
-  }, [url, result, counter, contract]);
+  }, [url, result, counter, contract, kontoId]);
 
-  const startCompare = async (e) => {
+  const startCompare = async (e, direktUrl) => {
     e?.preventDefault?.();
-    if (!url.trim()) return;
+    const ziel = (direktUrl ?? url).trim();
+    if (!ziel) return;
+    if (loading || laeuftRef.current) return;   // Mehrfachklicks abfangen
+    laeuftRef.current = true;          // Runde 24: sofort, nicht erst nach dem Render
     setLoading(true);
+    setWaitMsg(null);
     setResult(null);
     setCounter(null);
     setContract(null);
+    // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
+    // traegt die Links des vorherigen Ergebnisses — mit dem alten Ergebnis weg.
+    toast.dismiss(FILTER_TOAST_ID);
     try {
       const t0 = Date.now();
-      const { data } = await api.post("/mobile/compare", { url });
+
+      // Schritt 1: Vorab-Check. Bekannte Inserate sind sofort da; neue
+      // laufen als Hintergrundjob — wir zeigen die Wartemeldung und
+      // fragen den Status ab, statt die Anfrage minutenlang zu halten.
+      const check = await checkLink(api, ziel, { onWait: setWaitMsg });
+      let data;
+      if (check.status === "needs_client_fetch") {
+        data = { needs_client_fetch: true, url: check.url };
+      } else {
+        // Schritt 2: eigentlicher Vergleich (trifft jetzt den Cache).
+        // Ein 503 (Rueckstau) wird automatisch wiederholt — der Nutzer
+        // sieht nur die Wartemeldung, keine technische Fehlermeldung.
+        ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                           { url: ziel },
+                                           { onWait: setWaitMsg }));
+      }
+
+      // Client-seitiges Abrufen (nur Kleinanzeigen, wenn serverseitig aktiv):
+      // Der Server kennt den Link noch nicht und bittet den Browser des
+      // Nutzers, die Seite zu holen. Wir laden sie über die Erweiterung,
+      // schicken das HTML an den Server und fragen erneut ab.
+      if (data?.needs_client_fetch) {
+        const ready = await extensionReady();
+        if (!ready) {
+          // Rueckfall (09/2026): ohne Abruf-Helfer holt der Server das
+          // Inserat selbst — vorher blockierte hier "Erweiterung installieren".
+          const check2 = await checkLink(api, ziel, { onWait: setWaitMsg, ohneErweiterung: true });
+          if (check2.status === "needs_client_fetch") {
+            throw new Error("Abruf ohne Erweiterung nicht möglich — bitte später erneut versuchen.");
+          }
+          ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                             { url: ziel, ohne_erweiterung: true },
+                                             { onWait: setWaitMsg }));
+        } else {
+        try {
+          const html = await fetchViaExtension(data.url || ziel);
+          await api.post("/listings/ingest", { url: data.url || ziel, html });
+          ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                             { url: ziel },
+                                             { onWait: setWaitMsg }));
+        } catch (fe) {
+          toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
+          setLoading(false);
+          return;
+        }
+        }
+      }
+
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0 });
+      // Runde 22 (11.09.2026): Filter der aktiven Portale gleich mit oeffnen.
+      // Nur hier (echter Vergleichslauf), nie beim Wiederherstellen aus der
+      // sessionStorage. Benannte Fenster -> derselbe Tab wird wiederverwendet;
+      // blockt der Browser (Klick-Erlaubnis abgelaufen), erklaert ein Hinweis
+      // mit Knopf den Rest. Schalter erst JETZT lesen (schalterRef) und nur,
+      // solange die Vergleichsseite noch offen ist (aktivRef).
+      const schalter = schalterRef.current;
+      if (aktivRef.current && schalter.auto) {
+        const eintraege = filterEintraege(data, { mobile: schalter.mobile, autoscout: schalter.autoscout });
+        if (eintraege.length > 0) filterOeffnen(eintraege, { automatisch: true });
+      }
+      // Runde 11: Firmenregeln, die der AutoScout-Link nicht umsetzt (z.B.
+      // Land CH, Hubraum, Navi) — vorher sahen beide Links "gleich" aus.
+      // Runde 16: Fahrzeug gehoert einem Kollegen -> Ergebnis ja, Vertrag nein
+      // Runde 24 (11.09.2026): feste id je Text — ein weiterer Lauf ersetzt
+      // denselben Hinweis, statt ihn ein zweites Mal darunter zu setzen.
+      hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
       try {
-        const { data: cnt } = await api.get(`/mobile/live-counter/${data.ad_id}`);
+        const { data: cnt } = await api.get(
+          `/mobile/live-counter/${data.ad_id}?quelle=${encodeURIComponent(data.source || "")}`);
         setCounter(cnt);
       } catch (_) { /* ignore */ }
     } catch (err) {
-      toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
+      // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
+      hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
+      if (err?.code === "timeout") {
+        toast.info(TIMEOUT_MESSAGE);
+      } else {
+        toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
+      }
     } finally {
+      laeuftRef.current = false;
       setLoading(false);
+      setWaitMsg(null);
     }
   };
 
@@ -96,12 +225,13 @@ export default function Vergleich() {
     if (!result?.ad_id) return;
     const t = setInterval(async () => {
       try {
-        const { data } = await api.get(`/mobile/live-counter/${result.ad_id}`);
+        const { data } = await api.get(
+          `/mobile/live-counter/${result.ad_id}?quelle=${encodeURIComponent(result.source || "")}`);
         setCounter(data);
       } catch (_) { /* ignore */ }
     }, 30000);
     return () => clearInterval(t);
-  }, [result?.ad_id]);
+  }, [result?.ad_id, result?.source]);
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="vergleich-page">
@@ -112,10 +242,20 @@ export default function Vergleich() {
             URL einfügen. <span style={{ color: "var(--accent-red)" }}>Vergleich starten.</span>
           </h1>
           <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            Mobile.de- oder Kleinanzeigen-Link einfügen — Daten laden, Regeln anwenden, mobile.de mit fertigem Filter öffnen.
+            Kleinanzeigen-, mobile.de- oder AutoScout24-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.
           </p>
         </div>
-        <ProfileBadge onChange={(p) => setResult((r) => r ? { ...r, active_profile: p } : r)} />
+        {/* Profilwechsel: die Portal-Links werden serverseitig aus dem
+            aktiven Regelwerk gebaut — deshalb den Vergleich neu laufen
+            lassen, statt nur das Badge umzuschalten (die alten Links
+            truegen sonst die Filter des vorherigen Profils). */}
+        <ProfileBadge onChange={(p) => {
+          if (result && url.trim() && !loading) {
+            startCompare(null, url);
+          } else {
+            setResult((r) => r ? { ...r, active_profile: p } : r);
+          }
+        }} />
       </div>
 
       {/* Search bar */}
@@ -130,7 +270,23 @@ export default function Vergleich() {
               required
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="mobile.de- oder kleinanzeigen.de-URL einfügen…"
+              onPaste={(e) => {
+                // Einfuegen genuegt: erkennt der Text einen gueltigen
+                // Inserats-Link (Kleinanzeigen ODER mobile.de), startet das
+                // Auslesen sofort — der Knopf bleibt fuers manuelle
+                // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
+                const text = (e.clipboardData?.getData("text") || "").trim();
+                const istInserat =
+                  /kleinanzeigen\.de\/s-anzeige\//i.test(text) ||
+                  /mobile\.de\/(?:[^\s]*\bauto-inserat\/|fahrzeuge\/details\.html\?)/i.test(text) ||
+                  /autoscout24\.[a-z.]{2,6}\/(?:angebote|offers)\//i.test(text);
+                if (istInserat && !loading) {
+                  e.preventDefault();
+                  setUrl(text);
+                  startCompare(null, text);
+                }
+              }}
+              placeholder="Inserats-Link einfügen (Kleinanzeigen, mobile.de, AutoScout24) – Auslesen startet automatisch…"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus
@@ -196,10 +352,9 @@ export default function Vergleich() {
             data-testid="open-filter-btn"
             disabled={!result || (!portalMobile && !portalAutoscout)}
             onClick={() => {
-              openMultiple([
-                portalMobile    && result?.search_url    && { url: result.search_url,    name: "mobileFilterWindow" },
-                portalAutoscout && result?.autoscout_url && { url: result.autoscout_url, name: "autoscoutFilterWindow" },
-              ].filter(Boolean));
+              // Runde 22: je Klick laesst der Browser nur EIN Fenster zu — den
+              // Rest holt der Hinweis-Knopf nach (oder Pop-ups erlauben).
+              filterOeffnen(filterEintraege(result, { mobile: portalMobile, autoscout: portalAutoscout }));
             }}
             className="shrink-0 apple-btn apple-btn-secondary !px-4 !py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
             title={result ? "Filter der aktiven Portale öffnen" : "Erst Vergleich auslesen"}
@@ -210,24 +365,34 @@ export default function Vergleich() {
           </button>
         </div>
 
-        {/* Demo-URLs */}
         <div className="mt-3 text-xs flex flex-wrap gap-2 items-center" style={{ color: "var(--text-muted)" }}>
-          <span style={{ color: "var(--text-secondary)" }}>Demo:</span>
-          {SAMPLE_URLS.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setUrl(s)}
-              data-testid={`sample-url-${s.split("=").pop()}`}
-              className="apple-btn apple-btn-secondary !py-1 !px-2.5 !text-[11px] !rounded-full font-mono"
-            >
-              ID: {s.split(/[=/]/).pop()}
-            </button>
-          ))}
+          {/* Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen */}
+          <label
+            className="inline-flex items-center gap-1.5 sm:ml-3 cursor-pointer select-none"
+            title="Nach dem Auslesen die Filter der aktiven Portale (mobile.de / AutoScout24) automatisch öffnen"
+          >
+            <input
+              type="checkbox"
+              data-testid="toggle-filter-auto"
+              checked={filterAuto}
+              onChange={(e) => toggleFilterAuto(e.target.checked)}
+              style={{ accentColor: "var(--accent-red)" }}
+            />
+            <span style={{ color: "var(--text-secondary)" }}>Filter nach dem Auslesen automatisch öffnen</span>
+          </label>
         </div>
       </form>
 
       {/* Loading skeleton */}
+      {waitMsg && loading && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-center gap-2"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}
+             data-testid="linkcheck-wait">
+          <Loader2 size={15} className="animate-spin shrink-0" />
+          {waitMsg}
+        </div>
+      )}
+
       {loading && !result && (
         <div className="mt-10 grid lg:grid-cols-12 gap-5">
           <div className="lg:col-span-8 space-y-5">
@@ -299,7 +464,11 @@ export default function Vergleich() {
                          className="block aspect-[4/3] rounded-lg overflow-hidden border hover:opacity-80 transition"
                          style={{ borderColor: "var(--hairline)" }}
                          data-testid={`gallery-thumb-${idx}`}>
-                        <img src={src} alt="" loading="lazy" className="w-full h-full object-cover" />
+                        {/* 10.09.2026: Vorschaubild ueber den eigenen Bild-Proxy (klein,
+                            zwischengespeichert); schlaegt es fehl, das Portalbild direkt. */}
+                        <img src={thumbSrc(result.vehicle.images_thumbs?.[idx], src)} alt="" loading="lazy"
+                             referrerPolicy="no-referrer" className="w-full h-full object-cover"
+                             onError={(e) => { if (e.currentTarget.src !== src) e.currentTarget.src = src; }} />
                       </a>
                     ))}
                     {result.vehicle.images.length > 10 && (
@@ -353,7 +522,7 @@ export default function Vergleich() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => openInPopup(result.search_url, "mobileFilterWindow")}
+                  onClick={() => filterOeffnen(filterEintraege(result, { autoscout: false }))}
                   data-testid="open-mobile-btn"
                   className="apple-btn apple-btn-primary"
                 >
@@ -376,7 +545,7 @@ export default function Vergleich() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => openInPopup(result.autoscout_url, "autoscoutFilterWindow")}
+                    onClick={() => filterOeffnen(filterEintraege(result, { mobile: false }))}
                     data-testid="open-autoscout-btn"
                     className="apple-btn apple-btn-secondary"
                   >
@@ -400,10 +569,12 @@ export default function Vergleich() {
               <div className="font-display font-black text-4xl mt-3 tracking-tight">
                 {counter?.active_now ?? 0}
               </div>
+              {/* Runde 27: Gezaehlt werden VERGLEICHE, nicht Haendler — ein
+                  Sucher kann mehrfach vergleichen. Und das Fenster steht dabei. */}
               <div className="text-sm mt-0.5 font-medium" style={{ color: "var(--text-primary)" }}>
-                {counter?.active_now === 1 ? "Händler prüft dieses Fahrzeug" :
-                 counter?.active_now > 1 ? `Händler prüfen dieses Fahrzeug` :
-                 "Du bist allein hier"}
+                {counter?.active_now
+                  ? `${counter.active_now === 1 ? "Vergleich" : "Vergleiche"} in den letzten ${counter?.fenster_minuten ?? 10} Minuten`
+                  : `Keine Vergleiche in den letzten ${counter?.fenster_minuten ?? 10} Minuten`}
               </div>
               <div className="text-[11px] mt-3 pt-3 border-t" style={{ color: "var(--text-muted)", borderColor: "var(--hairline)" }}>
                 Heute insg.: <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{counter?.today ?? 1}</span> Vergleiche
@@ -412,6 +583,14 @@ export default function Vergleich() {
 
             <div className="apple-surface p-5">
               <div className="overline mb-3">Aktionen</div>
+              {result.kollege && (
+                <div className="text-sm rounded-xl p-3 mb-3" data-testid="kollege-hinweis"
+                     style={{ background: "#f59e0b1c", color: "#fbbf24" }}>
+                  Dieses Fahrzeug vergleicht auch <b>{result.kollege.name}</b>.
+                  Ihr arbeitet unabhängig voneinander: Jeder kann einen eigenen
+                  Kaufvertrag mit eigenem Abholtermin anlegen.
+                </div>
+              )}
               <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"
                       className="apple-btn apple-btn-primary w-full !py-3">
                 <FileText size={15} /> Kaufvertrag erstellen
@@ -433,8 +612,8 @@ export default function Vergleich() {
               )}
             </div>
 
-            {result.snapshot_id && (
-              <SnapshotCard snapshotId={result.snapshot_id} />
+            {result.beweis?.id && (
+              <BeweisCard key={result.beweis.id} beweis={result.beweis} />
             )}
 
             <div className="text-[11px] leading-relaxed px-1" style={{ color: "var(--text-muted)" }}>

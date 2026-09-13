@@ -3,6 +3,7 @@
 Backend API Test Suite for Abholauftrag / Übergabeprotokoll PDF Feature
 Tests all scenarios for GET /api/appointments/{appointment_id}/pickup-order.pdf
 """
+import os
 import requests
 import json
 import sys
@@ -10,8 +11,8 @@ from datetime import datetime
 
 # Configuration
 BASE_URL = "https://vehicle-holder-auto.preview.emergentagent.com/api"
-ADMIN_EMAIL = "admin@autohandel.app"
-ADMIN_PASSWORD = "Admin123!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "ci-admin@ci.invalid")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 
 # Test results tracking
 test_results = []

@@ -158,6 +158,13 @@ def _parse_first_registration(raw) -> Optional[int]:
 
 
 # ---------- Public: URL builder ----------
+# ISO-Laendercode -> AutoScout24 "cy"-Code
+_AUTOSCOUT_COUNTRY = {
+    "DE": "D", "AT": "A", "BE": "B", "ES": "E", "FR": "F", "IT": "I",
+    "LU": "L", "NL": "NL",
+}
+
+
 def build_search_url(vehicle: dict, rules: dict) -> str:
     """Erzeugt eine AutoScout24-Suchurl, die zum übergebenen Fahrzeug passt.
 
@@ -193,10 +200,23 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     path = f"/lst/{slug}" if slug else "/lst"
 
     # ---- Query-Parameter ------------------------------------------------
-    params: list = [
-        ("atype", "C"),       # Car
-        ("cy", "D"),          # Country: Germany
-    ]
+    params: list = [("atype", "C")]        # Car
+    # Land aus dem Regelwerk (PR-Review 09/2026): vorher immer "D", sodass
+    # "Export – alle Laender" auf AutoScout eine Deutschland-Suche blieb.
+    country_rule = rules.get("country") or {"mode": "exact", "codes": ["DE"]}
+    if country_rule.get("mode") == "exact":
+        codes = [_AUTOSCOUT_COUNTRY.get(str(c).upper())
+                 for c in (country_rule.get("codes") or ["DE"])]
+        codes = [c for c in codes if c]
+        if codes:
+            params.append(("cy", ",".join(codes)))
+    # mode "all"/"any": kein cy-Parameter -> alle Laender
+    # Verkaeufertyp (Haendler/Privat) wie bei mobile.de
+    seller_mode = (rules.get("seller") or {}).get("mode", "all")
+    if seller_mode == "dealer":
+        params.append(("custtype", "D"))
+    elif seller_mode == "private":
+        params.append(("custtype", "P"))
 
     # Marke+Modell-Kombi (mawXmoY) — nur wenn beide bekannt
     if make and model:
@@ -206,7 +226,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Erstzulassung (fregfrom / fregto)
     fr_year = _parse_first_registration(vehicle.get("first_registration"))
-    fr_rule = rules.get("first_registration", {"mode": "older_exact", "years": 1})
+    fr_rule = rules.get("first_registration") or {"mode": "older_exact", "years": 1}
     if fr_rule.get("mode") == "year_range":
         from_y = fr_rule.get("from")
         to_y = fr_rule.get("to")
@@ -231,8 +251,15 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             km = int(re.sub(r"\D", "", km))
         except Exception:
             km = None
-    km_rule = rules.get("mileage", {"mode": "plus", "value": 30000})
-    if km and km_rule.get("mode") != "ignore":
+    km_rule = rules.get("mileage") or {"mode": "plus", "value": 30000}
+    if km_rule.get("mode") == "custom":
+        # Nachpruefung Runde 10: fester Bereich unabhaengig vom Fahrzeug-km
+        # (km=0 liess den Filter vorher still wegfallen).
+        if km_rule.get("min") is not None:
+            params.append(("kmfrom", str(int(km_rule["min"]))))
+        if km_rule.get("max") is not None:
+            params.append(("kmto", str(int(km_rule["max"]))))
+    elif km and km_rule.get("mode") != "ignore":
         mode = km_rule.get("mode")
         v = int(km_rule.get("value", 30000))
         if mode == "exact":
@@ -242,11 +269,6 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         elif mode == "range":
             params.append(("kmfrom", str(max(0, km - v))))
             params.append(("kmto", str(km + v)))
-        elif mode == "custom":
-            if km_rule.get("min") is not None:
-                params.append(("kmfrom", str(int(km_rule["min"]))))
-            if km_rule.get("max") is not None:
-                params.append(("kmto", str(int(km_rule["max"]))))
 
     # Leistung in kW (powerfrom / powerto)
     kw = vehicle.get("power_kw")
@@ -254,7 +276,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         kw = int(kw) if kw not in (None, "") else None
     except Exception:
         kw = None
-    pwr_rule = rules.get("power", {"mode": "tolerance_ps", "value": 5})
+    pwr_rule = (rules.get("power") or {"mode": "tolerance_ps", "value": 5})
     if kw and pwr_rule.get("mode") != "ignore":
         mode = pwr_rule.get("mode")
         if mode == "exact":
@@ -276,33 +298,107 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("powertype", "kw"))
 
     # Kraftstoff
-    fuel_rule = rules.get("fuel", {}).get("mode")
+    fuel_rule = (rules.get("fuel") or {}).get("mode")
     if fuel_rule == "exact":
         fuel = vehicle.get("fuel_label") or vehicle.get("fuel")
         if fuel:
             params.append(("fuel", _autoscout_fuel(fuel)))
 
     # Getriebe
-    gear_rule = rules.get("gearbox", {}).get("mode")
+    gear_rule = (rules.get("gearbox") or {}).get("mode")
     if gear_rule == "exact":
         gb = vehicle.get("gearbox_label") or vehicle.get("gearbox")
         gb_code = _autoscout_gearbox(gb)
         if gb_code:
             params.append(("gear", gb_code))
 
-    # Schaden
-    if rules.get("damage", {}).get("mode") == "no_accident":
+    # Schaden: NUR ausschliessen, wenn das Regelwerk es sagt. Vorher wurde
+    # immer ausgeschlossen — auch wenn das Exportprofil "Schaeden
+    # einschliessen" vorgab (PR-Review 09/2026). Fehlt die Regel, gilt der
+    # Inland-Default (keine Unfallwagen).
+    damage_mode = (rules.get("damage") or {}).get("mode", "no_accident")
+    if damage_mode == "no_accident":
         params.append(("damaged_listing", "exclude"))
-    else:
-        params.append(("damaged_listing", "exclude"))  # default: keine Unfaller
 
-    # Default-Polish: passt zum vom Nutzer geschickten Beispiel
+    # Tueren (doorfrom/doorto) — Runde 11: vorher endete die
+    # Regelverarbeitung nach Kraftstoff/Getriebe/Schaden, und beide Links
+    # sahen nach "derselben Suche" aus, obwohl AutoScout die Firmenregeln
+    # fuer Tueren nie umsetzte.
+    # Runde 24 (11.09.2026): Die Kategorie (body=) ist als Filter fuer beide
+    # Portale entfallen — AutoScout24 hatte nicht fuer jede mobile.de-
+    # Kategorie einen body-Code ("keine passende Kategorie fuer 'Kombi'").
+    # Kein body mehr, auch wenn gespeicherte Alt-Regeln "category" enthalten.
+    if (rules.get("doors") or {}).get("mode") == "exact":
+        tueren = _autoscout_tueren(vehicle.get("doors"))
+        if tueren:
+            params.append(("doorfrom", str(tueren[0])))
+            params.append(("doorto", str(tueren[1])))
+
     params.append(("ocs_listing", "include"))
-    params.append(("sort", "price"))
-    params.append(("desc", "0"))
+    # Sortierung aus dem Regelpaket (Runde 11: vorher starr sort=price&desc=0).
+    params.extend(_AUTOSCOUT_SORT.get(rules.get("sort") or "price_asc",
+                                      _AUTOSCOUT_SORT["price_asc"]))
     params.append(("ustate", "N,U"))
 
     return f"{base}{path}?{urlencode(params, safe=',')}"
+
+
+def _autoscout_tueren(wert) -> Optional[Tuple[int, int]]:
+    """mobile.de-Tuerenschluessel (TWO_OR_THREE …) oder Zahl -> (von, bis)."""
+    if wert in (None, ""):
+        return None
+    s = str(wert).strip().upper()
+    bereiche = {"TWO_OR_THREE": (2, 3), "FOUR_OR_FIVE": (4, 5), "SIX_OR_SEVEN": (6, 7)}
+    if s in bereiche:
+        return bereiche[s]
+    m = re.match(r"(\d)", s)
+    if m:
+        n = int(m.group(1))
+        return (n, n) if 1 <= n <= 7 else None
+    return None
+
+
+# Runde 24 (11.09.2026): Die Zuordnung mobile.de-Kategorie -> AutoScout24
+# body-Code (_AUTOSCOUT_BODY) ist mit dem Kategorie-Filter entfallen.
+_AUTOSCOUT_SORT = {
+    "price_asc": [("sort", "price"), ("desc", "0")],
+    "price_desc": [("sort", "price"), ("desc", "1")],
+    "mileage_asc": [("sort", "mileage"), ("desc", "0")],
+    "mileage_desc": [("sort", "mileage"), ("desc", "1")],
+    "first_registration_desc": [("sort", "year"), ("desc", "1")],
+    "first_registration_asc": [("sort", "year"), ("desc", "0")],
+    "relevance": [("sort", "standard"), ("desc", "0")],
+}
+
+
+def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
+    """Welche Firmenregeln kann der AutoScout-Link NICHT umsetzen?
+    Liefert lesbare Hinweise fuer den Nutzer (Runde 11) — vorher bekam er
+    zwei Links "nach denselben Regeln", die stillschweigend verschieden
+    filterten.
+
+    Runde 24 (11.09.2026): Kategorie, Navigation und Klimatisierung sind
+    als Filter fuer beide Portale entfallen — dazu gibt es deshalb auch
+    keinen Hinweis mehr (auch nicht bei Alt-Regeln mit diesen Schluesseln).
+    Land und Hubraum bleiben."""
+    from regeln import laender_ohne_autoscout
+    rules = rules or {}
+    hinweise = []
+    fehlend = laender_ohne_autoscout(rules)
+    if fehlend:
+        country = rules.get("country") or {}
+        alle = [str(c).upper() for c in (country.get("codes") or [])]
+        uebrig = [c for c in alle if c not in fehlend]
+        if uebrig:
+            hinweise.append(f"AutoScout24 kennt {', '.join(fehlend)} nicht als Land — "
+                            f"der AutoScout-Link sucht nur in {', '.join(uebrig)}.")
+        else:
+            hinweise.append(f"AutoScout24 bietet {', '.join(fehlend)} nicht als Land an — "
+                            "der AutoScout-Link sucht in ALLEN AutoScout-Laendern.")
+    cc_mode = (rules.get("displacement") or {}).get("mode")
+    if cc_mode in ("exact", "tolerance") and vehicle.get("displacement"):
+        hinweise.append("Hubraum filtert nur mobile.de — der AutoScout-Link zeigt alle Hubraeume.")
+    return hinweise
 
 
 # ---------- Fuel/Gearbox-Mappings ----------
@@ -317,9 +413,15 @@ def _autoscout_fuel(s: str) -> str:
         "diesel": "D",
         "elektro": "E",
         "electric": "E",
+        "electricity": "E",      # Nachpruefung Runde 10: mobile.de-Codes und
+        "strom": "E",            # Labels, die nur mobile.de kannte
+        "super": "B",
+        "hybridbenzin": "2",
         "hybrid": "2",  # Autoscout: 2 = hybrid (benz/E)
         "hybriddiesel": "3",
         "plugin": "2",
+        "pluginhybrid": "2",     # Runde 10: "Plug-in-Hybrid" normalisiert zu pluginhybrid
+        "plugin-hybrid": "2",
         "lpg": "L",
         "autogas": "L",
         "cng": "C",
@@ -354,3 +456,175 @@ def resolve(make_name: str, model_name: str) -> Tuple[Optional[int], Optional[in
         return None, None
     model = _find_model(make, model_name or "")
     return make["makeId"], model["modelId"] if model else None
+
+
+# =========================================================
+#        Apify-Scraper (ivanvs/autoscout-scraper)
+# =========================================================
+# AutoScout24 als QUELLE: Ein einzelnes Inserat wird ueber die
+# Apify-Plattform ausgelesen (ca. $0.004 je frischem Abruf; der
+# Listing-Cache verhindert Doppelabrufe). Gleicher Aufbau wie der
+# mobile.de-Scraper in mobile_service.py.
+import logging as _logging
+import os as _os
+
+import httpx as _httpx
+from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
+
+_log = _logging.getLogger("autoscout_service")
+
+APIFY_TOKEN = _os.environ.get("APIFY_TOKEN", "").strip()
+APIFY_AUTOSCOUT_ACTOR = _os.environ.get(
+    "APIFY_AUTOSCOUT_ACTOR", "ivanvs~autoscout-scraper").strip()
+
+
+def autoscout_quelle_verfuegbar() -> bool:
+    return bool(APIFY_TOKEN)
+
+
+def detail_looks_like_autoscout_listing(url: str) -> bool:
+    """Nur echte Inserats-URLs (/angebote/...) duerfen an den Actor —
+    eine Suchseiten-URL (/lst/...) wuerde hunderte Ergebnisse abrufen
+    und unnoetig Geld kosten."""
+    return bool(url) and "autoscout24." in url and "/angebote/" in url
+
+
+def parse_autoscout_item(item: dict, item_id: str,
+                         url: Optional[str] = None) -> dict:
+    """Ein Datensatz des Actors -> internes Fahrzeug-Schema.
+
+    Der Actor liefert flache Felder mit deutschen Werten ("Schaltgetriebe",
+    "Benzin", "242.000 km") und fertige Bild-URLs — deutlich einfacher als
+    bei mobile.de."""
+    from mobile_service import _apify_leistung, _apify_zahl
+
+    adresse = item.get("address") or {}
+    kw, ps = _apify_leistung(item.get("power"))
+
+    verkaeufer = (item.get("contactName") or "").strip()
+    if not verkaeufer:
+        art = (item.get("seller") or "").strip().lower()
+        verkaeufer = "Privatverkäufer" if art.startswith("privat") else "Händler"
+
+    telefone = item.get("phones") or []
+    telefon = ""
+    if telefone:
+        telefon = telefone[0].get("number", "") if isinstance(telefone[0], dict) \
+            else str(telefone[0])
+
+    beschreibung = (item.get("descriptionText") or "").strip()
+    if not beschreibung and item.get("description"):
+        import html as _h
+        beschreibung = _h.unescape(re.sub(r"<[^>]+>", " ", item["description"])).strip()
+
+    # comfort/media/safety/extras: je nach Inserat Liste oder Text.
+    features: list = []
+    for k in ("comfort", "media", "safety", "extras"):
+        v = item.get(k)
+        if isinstance(v, list):
+            features.extend(str(x) for x in v if x)
+        elif isinstance(v, str) and v.strip():
+            features.extend(t.strip() for t in v.split(",") if t.strip())
+
+    detail_url = (item.get("url") or url or "").split("?")[0]
+    farbe = (item.get("colour") or item.get("manufacturerColour") or "").strip()
+
+    preis = item.get("rawPrice")
+    if not isinstance(preis, (int, float)):
+        preis = _apify_zahl(item.get("price"))
+
+    halter = item.get("numberOfPreviousOwners")
+
+    return {
+        "mobile_ad_id": str(item.get("uniqueRef") or item_id),
+        "detail_url": detail_url,
+        "make": (item.get("manufacturer") or "").upper(),
+        "make_label": item.get("manufacturer") or "",
+        "model": item.get("model") or "",
+        "model_label": item.get("model") or "",
+        "model_description": item.get("modelVersion") or item.get("title") or "",
+        "category": item.get("bodyType") or "",
+        "category_label": item.get("bodyType") or "",
+        "first_registration": item.get("firstRegistration") or None,
+        "mileage": _apify_zahl(item.get("milage") or item.get("mileage")),
+        "fuel": (item.get("fuelType") or "").upper(),
+        "fuel_label": item.get("fuelType") or "",
+        "gearbox": (item.get("gearbox") or "").upper(),
+        "gearbox_label": item.get("gearbox") or "",
+        "power_kw": kw,
+        "power_ps": ps,
+        "displacement": _apify_zahl(item.get("engineSize")),
+        "doors": item.get("doors") or None,
+        "seats": _apify_zahl(item.get("seats")),
+        "color": farbe or None,
+        "vin": None,
+        "license_plate": None,
+        "hu": (item.get("generalInspection") or "").strip() or None,
+        "previous_owners": str(halter) if halter not in (None, "") else None,
+        # Der Actor liefert keine belastbare Unfall-/Fahrbereit-Angabe —
+        # ehrlich leer lassen statt "unfallfrei" zu erfinden.
+        "accident_damaged": None,
+        "roadworthy": None,
+        "features": features,
+        "description": beschreibung,
+        "list_price": float(preis) if preis is not None else None,
+        "currency": item.get("currency") or "EUR",
+        "seller_name": verkaeufer,
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": ("privat" if str(item.get("seller") or "").strip().lower().startswith("privat")
+                        else "haendler" if str(item.get("seller") or "").strip().lower().startswith(
+                            ("händler", "haendler", "dealer", "gewerb"))
+                        else None),
+        "seller_address": (adresse.get("street") or "") or None,
+        "seller_zip": adresse.get("zip") or None,
+        "seller_city": adresse.get("city") or None,
+        "seller_phone": telefon,
+        "seller_email": "",
+        "image_urls": [u for u in item.get("images") or []
+                       if isinstance(u, str) and u.startswith("http")],
+        "images": [u for u in item.get("images") or []
+                   if isinstance(u, str) and u.startswith("http")],
+        "image_count": len(item.get("images") or []),
+    }
+
+
+async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
+    """Einzelnes AutoScout24-Inserat ueber den Apify-Actor abrufen."""
+    if not autoscout_quelle_verfuegbar():
+        return None
+    if not detail_looks_like_autoscout_listing(url):
+        _log.warning("AutoScout: keine Inserats-URL, Abruf verweigert: %s", url[:120])
+        return None
+    endpoint = (f"https://api.apify.com/v2/acts/{APIFY_AUTOSCOUT_ACTOR}"
+                f"/run-sync-get-dataset-items")
+    try:
+        async with _httpx.AsyncClient(
+                timeout=_httpx.Timeout(180.0, connect=20.0)) as client:
+            r = await client.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+                params={"format": "json", "clean": "1"},
+                json={"urls": [{"url": url}], "maxRecords": 1},
+            )
+            fehler = aus_http_antwort(r.status_code, r.text, "AutoScout24")
+            if fehler is not None:
+                _log.warning("Apify AutoScout: HTTP %s fuer %s: %s",
+                             r.status_code, item_id, r.text[:300])
+                raise fehler
+            items = r.json()
+            if not isinstance(items, list) or not items \
+                    or not isinstance(items[0], dict):
+                _log.warning("Apify AutoScout: leere Antwort fuer %s", item_id)
+                return None
+            v = parse_autoscout_item(items[0], item_id, url=url)
+            # Wie bei mobile.de: ein Element ohne Inhalt bedeutet, das
+            # Inserat gibt es nicht (mehr) — nicht "leeres Fahrzeug".
+            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+                _log.warning("Apify AutoScout: Antwort ohne Inhalt fuer %s — Inserat weg", item_id)
+                return None
+            return v
+    except AnbieterFehler:
+        raise
+    except Exception as exc:
+        _log.exception("Apify AutoScout: Abruf fehlgeschlagen fuer %s", item_id)
+        raise aus_ausnahme(exc, "AutoScout24")

@@ -1,0 +1,190 @@
+"""Fahrzeug-Lebenszyklus (Statusmaschine) für das B2B-Händlermodul.
+
+Jedes Fahrzeug durchläuft einen festen Lebenszyklus:
+
+    gefunden → verglichen → besichtigung → verhandlung → vertrag_erstellt
+             → gekauft → abholung_geplant → abgeholt
+                                             ├─ bestand           (nur gespeichert)
+                                             ├─ verkaufsentwurf → verkaufsbereit
+                                             │        → veroeffentlicht → reserviert → verkauft
+                                             └─ geloescht
+    Seitenausgänge: nicht_abgeholt, storniert, archiviert
+
+Der Status wird ausschließlich über `set_lifecycle()` geändert — dort werden
+erlaubte Übergänge validiert und jede Änderung im Audit-Log protokolliert
+(Audit best effort nach dem Write, Audit 13.09.2026 #46).
+Alte Freitext-Status (vehicles.status) bleiben als `legacy_status` erhalten.
+"""
+import logging
+from typing import Optional
+
+from deps import db, log_activity_sicher, now_iso
+
+# Reihenfolge dient auch der Anzeige (Fortschrittsbalken im Frontend).
+LIFECYCLE_STATES = [
+    "gefunden",
+    "verglichen",
+    "besichtigung",
+    "verhandlung",
+    "vertrag_erstellt",
+    "gekauft",
+    "abholung_geplant",
+    "abgeholt",
+    "bestand",
+    "verkaufsentwurf",
+    "verkaufsbereit",
+    "veroeffentlicht",
+    "reserviert",
+    "verkauft",
+    # Seitenausgänge
+    "nicht_abgeholt",
+    "storniert",
+    "geloescht",
+    "archiviert",
+]
+
+# Erlaubte Folge-Status. "*" = aus jedem Status erreichbar (Admin/Aufräumen).
+ALLOWED_TRANSITIONS: dict = {
+    "gefunden":         {"verglichen", "besichtigung", "storniert"},
+    "verglichen":       {"besichtigung", "verhandlung", "vertrag_erstellt", "storniert"},
+    "besichtigung":     {"verhandlung", "vertrag_erstellt", "storniert"},
+    "verhandlung":      {"vertrag_erstellt", "storniert"},
+    # Weiterverkauf ist schon ab Vertragserstellung erlaubt (Wunsch 08/2026):
+    # der Chef kann inserieren, waehrend die Abholung noch laeuft. Der
+    # Abholbericht landet weiterhin in der Fahrzeugakte (pickup_reports).
+    "vertrag_erstellt": {"gekauft", "abholung_geplant", "verkaufsentwurf", "storniert"},
+    "gekauft":          {"abholung_geplant", "abgeholt", "verkaufsentwurf", "storniert"},
+    "abholung_geplant": {"abgeholt", "nicht_abgeholt", "verkaufsentwurf", "storniert"},
+    "abgeholt":         {"bestand", "verkaufsentwurf", "geloescht"},
+    "nicht_abgeholt":   {"abholung_geplant", "storniert", "geloescht"},
+    "bestand":          {"verkaufsentwurf", "geloescht", "archiviert"},
+    "verkaufsentwurf":  {"verkaufsbereit", "bestand", "geloescht"},
+    # reserviert/verkauft auch direkt aus verkaufsbereit — solange kein
+    # Marktplatz existiert (Phase 1/2), wird ohne "veroeffentlicht" verkauft.
+    "verkaufsbereit":   {"veroeffentlicht", "reserviert", "verkauft",
+                         "verkaufsentwurf", "bestand", "geloescht"},
+    "veroeffentlicht":  {"reserviert", "verkauft", "verkaufsbereit", "bestand"},
+    "reserviert":       {"verkauft", "veroeffentlicht"},
+    "verkauft":         {"archiviert"},
+    "storniert":        {"verglichen", "geloescht"},
+    "geloescht":        set(),
+    "archiviert":       set(),
+}
+
+# Mapping der alten Freitext-Status auf den neuen Lebenszyklus (Migration).
+_LEGACY_MAP = {
+    "verglichen": "verglichen",
+    "Vertrag erstellt": "vertrag_erstellt",
+    "Termin erstellt": "abholung_geplant",
+}
+
+
+log = logging.getLogger("autohandel")
+
+
+class LifecycleError(ValueError):
+    """Unerlaubter Statusübergang."""
+
+
+async def set_lifecycle(
+    vehicle_id: str, dealer_id: str, new_state: str, *,
+    user: Optional[dict] = None, force: bool = False,
+    extra_set: Optional[dict] = None, extra_unset: Optional[dict] = None,
+) -> dict:
+    """Setzt den Lebenszyklus-Status eines Fahrzeugs.
+
+    Validiert den Übergang (außer force=True, z.B. für Migrationen) und
+    schreibt einen Audit-Log-Eintrag. Gibt das aktualisierte Fahrzeug zurück.
+    """
+    if new_state not in LIFECYCLE_STATES:
+        raise LifecycleError(f"Unbekannter Status: {new_state}")
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id})
+    if not v:
+        raise LifecycleError("Fahrzeug nicht gefunden")
+    current = v.get("lifecycle") or _LEGACY_MAP.get(v.get("status") or "", "verglichen")
+    # Runde 17: Der Write prueft den GELESENEN Zustand mit (CAS) — ein
+    # paralleler Statuswechsel zwischen Lesen und Schreiben wird nicht mehr
+    # ueberschrieben. Altdokumente ohne lifecycle-Feld: Feld darf nicht
+    # inzwischen entstanden sein.
+    cas: dict = {"id": vehicle_id, "dealer_id": dealer_id,
+                 "lifecycle": v["lifecycle"] if "lifecycle" in v else {"$exists": False}}
+    if current == new_state:
+        # Zustand steht schon — nur die mitgegebenen Zusatzfelder schreiben
+        # (z.B. Bestandsfrist), ohne zweiten Statuswechsel/Audit.
+        if extra_set or extra_unset:
+            upd: dict = {}
+            if extra_set:
+                upd["$set"] = {**extra_set, "updated_at": now_iso()}
+            if extra_unset:
+                upd["$unset"] = dict(extra_unset)
+            r = await db.vehicles.update_one(cas, upd)
+            if r.matched_count == 0:
+                raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert — bitte neu laden")
+        return v
+    if not force and new_state not in ALLOWED_TRANSITIONS.get(current, set()):
+        raise LifecycleError(
+            f"Übergang '{current}' → '{new_state}' ist nicht erlaubt")
+    # Runde 17: Zusatzfelder (Fotos leeren, Bestandsfrist, deleted_at ...)
+    # im SELBEN Write wie der Statuswechsel — kein Zwischenzustand mehr
+    # ("geloescht" ohne Fotoloeschung, "bestand" ohne Frist).
+    upd = {"$set": {
+        "lifecycle": new_state,
+        "lifecycle_changed_at": now_iso(),
+        "updated_at": now_iso(),
+        **(extra_set or {}),
+    }}
+    if extra_unset:
+        upd["$unset"] = dict(extra_unset)
+    r = await db.vehicles.update_one(cas, upd)
+    if r.matched_count == 0:
+        raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert — bitte neu laden")
+    # Audit 13.09.2026 (#46), Runde-17-Muster: Der Statuswechsel ist bereits
+    # geschrieben (CAS) — das Audit darf ihn nicht mehr als Fehler melden.
+    # Vorher lief eine Exception hier an allen `except LifecycleError`-
+    # Rueckbauten vorbei (Fahrzeug im Zwischenstatus, Inserate zum geloeschten
+    # Fahrzeug blieben offen, Fahrer-App sah 500). Fehler stehen im Log.
+    await log_activity_sicher(
+        dealer_id, (user or {}).get("id", ""), f"fahrzeug.status.{new_state}",
+        ref=vehicle_id, meta={"von": current, "nach": new_state},
+    )
+    v["lifecycle"] = new_state
+    return v
+
+
+async def try_set_lifecycle(vehicle_id: str, dealer_id: str, new_state: str, *,
+                            user: Optional[dict] = None) -> None:
+    """Best-effort-Variante für Hooks in bestehenden Flows: ein ungültiger
+    Übergang (z.B. zweiter Vertrag für dasselbe Fahrzeug) darf den
+    Hauptvorgang niemals abbrechen."""
+    try:
+        await set_lifecycle(vehicle_id, dealer_id, new_state, user=user)
+    except LifecycleError as exc:
+        # Runde 17: nicht mehr stumm — im Log nachvollziehbar, warum ein
+        # Fahrzeug nach Vertrag/Termin nicht mitgezogen wurde.
+        log.info("Lifecycle uebersprungen %s -> %s: %s", vehicle_id, new_state, exc)
+
+
+async def migrate_missing_lifecycles() -> int:
+    """Startup-Migration: setzt `lifecycle` für Fahrzeuge, die noch keins
+    haben, anhand des alten Freitext-Status + Terminlage. Idempotent."""
+    migrated = 0
+    cursor = db.vehicles.find({"lifecycle": {"$exists": False}},
+                              {"_id": 0, "id": 1, "dealer_id": 1, "status": 1})
+    async for v in cursor:
+        state = _LEGACY_MAP.get(v.get("status") or "", "verglichen")
+        # Termin bereits abgeholt? Dann ist das Fahrzeug weiter im Zyklus.
+        appt = await db.appointments.find_one(
+            {"vehicle_id": v["id"], "dealer_id": v["dealer_id"],
+             "status": "abgeholt"},
+            {"_id": 0, "id": 1},
+        )
+        if appt:
+            state = "abgeholt"
+        await db.vehicles.update_one(
+            {"id": v["id"], "dealer_id": v["dealer_id"]},
+            {"$set": {"lifecycle": state,
+                      "legacy_status": v.get("status"),
+                      "lifecycle_changed_at": now_iso()}},
+        )
+        migrated += 1
+    return migrated

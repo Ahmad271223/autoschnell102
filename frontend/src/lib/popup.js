@@ -1,14 +1,48 @@
 /**
- * Öffnet eine URL in einem Popup-Fenster.
- * Falls der Browser den Popup blockiert → Fallback neuer Tab.
+ * Runde 22 (11.09.2026): Fenster-Oeffnen mit Blocker-Erkennung.
+ *
+ * Chrome und Edge erlauben je Nutzer-Geste nur EIN neues Fenster/Tab —
+ * window.open verbraucht die Aktivierung, jeder weitere Aufruf im selben
+ * Klick wird still blockiert (auch "_blank"-Tabs). Vorher oeffnete
+ * "Filter öffnen" deshalb nur mobile.de, AutoScout24 ging verloren. Und
+ * mit "noopener" liefert window.open IMMER null — ein Blockieren war so
+ * gar nicht erkennbar. Darum hier nie "noopener", sondern (OWASP-Reihen-
+ * folge) leeres Fenster oeffnen, opener kappen, erst dann navigieren. Die
+ * Funktionen melden zurueck, was blockiert wurde; lib/filterOeffnen.js
+ * zeigt dafuer einen Hinweis mit Knopf (= neue Geste) an.
+ */
+
+/**
+ * Oeffnet (oder wiederverwendet) einen BENANNTEN Tab und navigiert ihn.
+ * Benannt, damit der naechste Vergleich denselben Tab nutzt, statt neue
+ * Tabs anzuhaeufen. Rueckgabe: Fenster oder null (= vom Browser blockiert).
+ */
+function tabOeffnen(url, name) {
+  let w = null;
+  try { w = window.open("", name); } catch { w = null; }
+  if (!w || w.closed || typeof w.closed === "undefined") return null;
+  // opener kappen, BEVOR mobile.de/AutoScout geladen wird — setzt das
+  // "disowned"-Flag und ueberlebt die Navigation.
+  try { w.opener = null; } catch { /* Fremd-Origin (wiederverwendeter Tab): Flag ist vom ersten Oeffnen gesetzt */ }
+  try {
+    w.location.href = url;
+  } catch {
+    // Ersatz: benanntes Ziel direkt navigieren (bestehendes Fenster -> kein neues Popup)
+    try { w = window.open(url, name) || w; } catch { /* ignore */ }
+  }
+  try { w.focus(); } catch { /* ignore */ }
+  return w;
+}
+
+/**
+ * Öffnet eine URL in einem Popup-Fenster (kleine Bildschirme: benannter Tab).
+ * Blockiert der Browser das Popup → Ersatz benannter Tab.
+ * Rueckgabe: Fenster oder null (= blockiert).
  */
 export function openInPopup(url, name = "filterWindow", width = 1280, height = 1000) {
   if (!url) return null;
   const isSmallScreen = typeof window !== "undefined" && window.innerWidth < 900;
-  if (isSmallScreen) {
-    window.open(url, "_blank", "noopener,noreferrer");
-    return null;
-  }
+  if (isSmallScreen) return tabOeffnen(url, name);
   const screenW = window.screen?.availWidth || 1280;
   const screenH = window.screen?.availHeight || 900;
   const w = Math.min(width, Math.floor(screenW * 0.92));
@@ -20,41 +54,47 @@ export function openInPopup(url, name = "filterWindow", width = 1280, height = 1
     "menubar=no", "toolbar=no", "location=yes",
     "status=no", "scrollbars=yes", "resizable=yes", "popup=yes",
   ].join(",");
+  // Bewusst KEIN "noopener" in den Features: damit liefert window.open null,
+  // die Blocker-Erkennung unten hielte jeden Aufruf fuer geblockt, das
+  // benannte Fenster wuerde beim naechsten Klick nicht wiederverwendet und
+  // focus() entfiele. Stattdessen (OWASP-Reihenfolge): leeres Fenster
+  // oeffnen, opener kappen — das setzt das "disowned"-Flag des Browsing
+  // Context und ueberlebt die Navigation zu mobile.de/AutoScout — und erst
+  // dann navigieren.
   let popup = null;
-  try { popup = window.open(url, name, features); } catch { popup = null; }
+  try { popup = window.open("", name, features); } catch { popup = null; }
   if (!popup || popup.closed || typeof popup.closed === "undefined") {
-    window.open(url, "_blank", "noopener,noreferrer");
-    return null;
+    // Runde 22: manche Blocker lassen Tabs durch, aber keine Popups.
+    return tabOeffnen(url, name);
   }
-  try { popup.opener = null; } catch { /* ignore */ }
+  try { popup.opener = null; } catch { /* Fenster zeigt schon Fremd-Origin: Flag ist vom ersten Oeffnen gesetzt */ }
+  try {
+    popup.location.href = url;
+  } catch {
+    // Ersatz: benanntes Fenster direkt navigieren (existiert schon -> kein neues Popup)
+    try { popup = window.open(url, name) || popup; } catch { /* ignore */ }
+  }
   try { popup.focus(); } catch { /* ignore */ }
   return popup;
 }
 
 /**
- * Öffnet mehrere URLs auf einmal — zuverlässig ohne Popup-Blocker.
+ * Öffnet mehrere URLs ({ url, name, ... }) und gibt die Liste der vom
+ * Browser BLOCKIERTEN Eintraege zurueck ([] = alle offen).
  *
- * Chrome/Firefox erlauben pro User-Geste nur EIN benanntes Fenster.
- * Der zweite window.open(url, "anderer-name") wird als zweites Popup
- * gewertet und geblockt. Lösung: bei mehreren URLs IMMER "_blank" ohne
- * Name verwenden — neue Tabs werden vom Browser nie geblockt, solange
- * sie synchron im selben Click-Handler aufgerufen werden.
+ * Runde 22 (11.09.2026): Der alte Kommentar hier ("neue Tabs werden nie
+ * geblockt") war falsch — Chrome/Edge lassen je Geste nur EIN Fenster zu,
+ * der zweite Aufruf scheitert still. Hat der Nutzer Pop-ups fuer die Seite
+ * erlaubt, gehen alle auf einmal auf; sonst meldet die Rueckgabe den Rest,
+ * damit ein Knopf (neue Geste) ihn nachholen kann.
  */
 export function openMultiple(urls) {
-  // urls: Array von { url, name }
-  const valid = urls.filter((u) => u?.url);
-  if (valid.length === 0) return;
+  const valid = (urls || []).filter((u) => u?.url);
+  if (valid.length === 0) return [];
   if (valid.length === 1) {
     // Einzeln → Popup mit Namen (Wiederverwendung bei erneutem Klick)
-    openInPopup(valid[0].url, valid[0].name || "filterWindow");
-    return;
+    return openInPopup(valid[0].url, valid[0].name || "filterWindow") ? [] : [valid[0]];
   }
-  // Mehrere → _blank ohne Namen, sonst blockiert der Browser ab dem 2. Aufruf.
-  // noopener/noreferrer = isolierte Fenster, kein window.opener-Zugriff.
-  valid.forEach(({ url }) => {
-    try {
-      const w = window.open(url, "_blank", "noopener,noreferrer");
-      if (w) { try { w.opener = null; } catch { /* ignore */ } }
-    } catch { /* ignore */ }
-  });
+  // Mehrere → je ein benannter Tab (Wiederverwendung statt Tab-Stapel)
+  return valid.filter((e, i) => !tabOeffnen(e.url, e.name || `filterWindow${i + 1}`));
 }

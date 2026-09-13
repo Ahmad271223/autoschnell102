@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { neueFassungLaden } from "@/lib/fassung";
+import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
+import { TOKEN_FAHRER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Truck, Mail, Lock } from "lucide-react";
@@ -12,6 +14,8 @@ export default function DriverLogin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  // Wer von hier aus die App installiert, soll beim Start hier landen.
+  useEffect(() => { anmeldeartVormerken(TOKEN_FAHRER); }, []);
 
   if (!ready) return null;
   if (driver) return <Navigate to="/fahrer" replace />;
@@ -22,7 +26,9 @@ export default function DriverLogin() {
     try {
       await login(email, password);
       toast.success("Willkommen zurück!");
-      nav("/fahrer");
+      // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
+      // laden — direkt nach der Anmeldung geht dabei nichts verloren.
+      if (!neueFassungLaden("/fahrer")) nav("/fahrer");
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {
@@ -75,6 +81,11 @@ export default function DriverLogin() {
             </button>
           </form>
 
+          <div className="mt-3 text-center text-xs">
+            <Link to="/passwort-vergessen" data-testid="link-driver-reset" className="text-zinc-400 hover:text-white underline">
+              Passwort vergessen?
+            </Link>
+          </div>
           <div className="mt-5 text-center text-sm text-zinc-400">
             Noch kein Fahrer-Account?{" "}
             <Link to="/fahrer/register" data-testid="link-driver-register"

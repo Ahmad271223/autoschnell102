@@ -83,8 +83,46 @@ credentials.json
 *credentials.json*
 *.pem
 *.key
+# Server-Geheimnisse, die auf prod1/prod2 im Checkout liegen (07.09.2026):
+# Replikat-Schluessel und Zertifikatsordner duerfen nie ins Repo.
+deploy/mongo-keyfile
+deploy/certs/
 .credentials
 
 # Runtime data — Snapshot-PDF/JPG-Archive der App
 backend/local_storage/
 **/local_storage/
+
+# Hochgeladene Nutzerdateien (Logos, Fotos) - nicht ins Repo
+backend/uploads/
+uploads/
+
+# Generierter PDF-Skizzen-Cache (wird zur Laufzeit erzeugt)
+backend/assets/sketch_pdf_cache/
+
+# Beispiel-Config MUSS ins Repo
+!.env.example
+
+# Diagnose-Protokolle der lokalen Server (nicht ins Repository)
+backend-log.txt
+backend-err.txt
+frontend-log.txt
+matrix-lauf.log
+matrix-fehler.log
+stoss-lauf.log
+stoss-fehler.log
+AutoSchnell-Abruf-Helfer.zip
+
+# Playwright (E2E)
+frontend/playwright-report/
+frontend/test-results/
+
+# Drain-Marker des Rollout-Skripts (nur zur Laufzeit auf dem Server)
+deploy/drain/aktiv
+
+# Serverzustand des Rollouts (Runde 29): aufgehobene Bundle-Dateien des
+# vorherigen Standes und die Marke, mit welcher nginx-Vorlage der Proxy
+# zuletzt erzeugt wurde. Beides gehoert auf den Server, nicht ins Repo.
+deploy/assets-alt/*
+!deploy/assets-alt/.gitkeep
+deploy/.proxy-vorlage

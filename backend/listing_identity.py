@@ -33,6 +33,7 @@ Bonus (am Ende der Datei):
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional, Tuple
@@ -55,6 +56,9 @@ _RE_MOBILE_HTML = re.compile(r"/(\d{6,})\.html")
 _RE_AS24_UUID = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+
+
+URL_MAX_LAENGE = 2048
 
 
 class ListingIdentityError(ValueError):
@@ -183,6 +187,11 @@ def get_listing_identity(url: str) -> dict:
     Gibt {"source", "item_id", "cache_key"} zurück.
     Wirft ListingIdentityError, wenn nichts erkannt werden kann.
     """
+    # Runde 15 (Nr. 6): fail-fast fuer alle Aufrufer (Routen, Link-Jobs,
+    # Erweiterungs-Ingest) — auch die Fehlermeldung unten zitiert die URL.
+    if not isinstance(url, str) or len(url) > URL_MAX_LAENGE:
+        raise ListingIdentityError(
+            f"Adresse zu lang (max. {URL_MAX_LAENGE} Zeichen)")
     source = detect_source(url)
     if not source:
         raise ListingIdentityError(
@@ -226,12 +235,204 @@ def get_listing_identity(url: str) -> dict:
 #                                        unique=True)
 
 
+class ListingBusy(RuntimeError):
+    """Das Inserat wird gerade von einer anderen Anfrage geladen —
+    der Aufrufer soll kurz warten und erneut anfragen (HTTP 503)."""
+
+
 async def ensure_cache_indexes(db) -> None:
     """Idempotent: legt die nötigen Indizes auf der listings_cache Collection an."""
+    # Altlasten raus: fruehere Versionen legten Lease-Dokumente OHNE
+    # source/item_id an. So ein null/null-Relikt blockiert wegen des
+    # Unique-Index jeden weiteren neuen Link — vor der Index-Anlage loeschen.
+    # NUR Lease-Reste ohne Nutzdaten: fruehere Versionen legten beim
+    # Reservieren Dokumente ohne source/item_id an, die den Unique-Index
+    # blockierten. Eintraege MIT data bleiben unangetastet — sie zu
+    # loeschen wuerde den gesamten Cache-Bestand verwerfen.
+    await db.listings_cache.delete_many(
+        {"data": {"$exists": False},
+         "$or": [{"source": None}, {"source": {"$exists": False}},
+                 {"item_id": None}, {"item_id": {"$exists": False}}]})
     await db.listings_cache.create_index("cache_key", unique=True)
     await db.listings_cache.create_index(
         [("source", 1), ("item_id", 1)], unique=True, name="uniq_source_item"
     )
+    # Quarantaene fuer Client-Einreichungen: EIN Eintrag je Inserat+Haendler.
+    # Mongo-TTL-Index raeumt abgelaufene Eintraege selbststaendig weg.
+    await db.listings_cache_client.create_index(
+        [("cache_key", 1), ("dealer_id", 1)], unique=True,
+        name="uniq_key_dealer")
+    await db.listings_cache_client.create_index(
+        "expires_at", expireAfterSeconds=0, name="ttl_expires")
+
+
+def _is_fresh(doc: Optional[dict]) -> bool:
+    if not doc or not doc.get("data"):
+        return False
+    exp = doc.get("expires_at")
+    if not isinstance(exp, datetime):
+        return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp > datetime.now(timezone.utc)
+
+
+def _ohne_herkunft(daten):
+    """Runde 29 (12.09.2026): Wer ein Inserat eingereicht hat, steht als
+    ingested_by_user/-dealer im Datensatz. Das ist Buchhaltung fuer das
+    Aufraeumen, keine Information fuer andere Konten — beim Lesen raus.
+    (Die Felder bleiben in der Datenbank, das Aufraeumen braucht sie.)"""
+    if not isinstance(daten, dict):
+        return daten
+    return {k: v for k, v in daten.items()
+            if not str(k).startswith("ingested_by_")}
+
+async def peek_cached_listing(db, url: str,
+                              dealer_id: Optional[str] = None
+                              ) -> Optional[Tuple[dict, Optional[str]]]:
+    """Schaut NUR im Cache nach (kein Abruf, kein Lease). Liefert
+    (data, snapshot_id) bei gültigem Treffer, sonst None.
+
+    Mit dealer_id wird zusaetzlich die QUARANTAENE des Haendlers geprueft:
+    Client-Einreichungen sind zunaechst nur fuer den einreichenden Haendler
+    sichtbar (globale Freigabe erst nach unabhaengiger Bestaetigung —
+    siehe store_client_listing). So kann niemand mit gefaelschtem HTML
+    die Daten ALLER Haendler vergiften."""
+    identity = get_listing_identity(url)
+    cache_key = identity["cache_key"]
+    cached = await db.listings_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+    if _is_fresh(cached):
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key},
+            {"$inc": {"use_count": 1},
+             "$set": {"last_used_at": datetime.now(timezone.utc), "url": url}})
+        # Altbestand im geteilten Cache kann die Herkunft noch tragen.
+        return _ohne_herkunft(cached["data"]), cached.get("snapshot_id")
+    if dealer_id:
+        own = await db.listings_cache_client.find_one(
+            {"cache_key": cache_key, "dealer_id": dealer_id}, {"_id": 0})
+        if _is_fresh(own):
+            # Runde 29 (12.09.2026, Pruefbefund): Die Quarantaene liegt je
+            # FIRMA. Der Datensatz traegt aber, wer ihn eingereicht hat
+            # (ingested_by_user/-dealer) — damit haette ein Sucher gesehen,
+            # dass ein Kollege dasselbe Inserat schon geholt hat. Die
+            # Inseratsdaten selbst duerfen firmenweit geteilt werden, die
+            # Herkunft nicht. Zum Aufraeumen bleibt sie in der Datenbank.
+            return _ohne_herkunft(own["data"]), None
+    return None
+
+
+# Massstaebe fuer die Freigabe aus der Quarantaene — bewusst benannt, denn
+# diese Zahlen definieren die Sicherheitsschwelle gegen gefaelschtes HTML.
+CLIENT_MATCH_PRICE_TOLERANCE = 0.01   # Preis auf 1 % genau
+CLIENT_MATCH_TITLE_PREFIX = 40        # verglichene Titel-Laenge
+
+
+def _client_core_match(a: dict, b: dict) -> bool:
+    """Stimmen zwei unabhaengige Einreichungen im Kern ueberein?
+
+    Preis und Titel allein waeren zu wenig: die stehen oeffentlich in der
+    Suchergebnis-Liste — ein Angreifer koennte sie abschreiben und den REST
+    faelschen (km-Stand, Erstzulassung). Deshalb muessen auch km-Stand,
+    Erstzulassung und Marke uebereinstimmen, sofern beide Seiten sie
+    liefern."""
+    try:
+        pa, pb = float(a.get("list_price") or 0), float(b.get("list_price") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not pa or not pb or abs(pa - pb) > CLIENT_MATCH_PRICE_TOLERANCE * max(pa, pb):
+        return False
+    ta = (a.get("title") or "").strip().lower()[:CLIENT_MATCH_TITLE_PREFIX]
+    tb = (b.get("title") or "").strip().lower()[:CLIENT_MATCH_TITLE_PREFIX]
+    if not ta or ta != tb:
+        return False
+    try:
+        ka, kb = a.get("mileage"), b.get("mileage")
+        if ka is not None and kb is not None:
+            ka, kb = float(ka), float(kb)
+            if abs(ka - kb) > 0.01 * max(ka, kb, 1):
+                return False
+    except (TypeError, ValueError):
+        return False
+    ea = str(a.get("first_registration") or "").strip()
+    eb = str(b.get("first_registration") or "").strip()
+    if ea and eb and ea != eb:
+        return False
+    ma = str(a.get("make_label") or "").strip().lower()
+    mb = str(b.get("make_label") or "").strip().lower()
+    if ma and mb and ma != mb:
+        return False
+    return True
+
+
+async def store_client_listing(db, url: str, data: dict, dealer_id: str,
+                               ttl_hours: int = 24,
+                               confirmed_ttl_hours: int = 168) -> str:
+    """Client-Einreichung speichern — ZUERST in Quarantaene (nur fuer den
+    einreichenden Haendler sichtbar, kurze TTL). Global freigegeben wird
+    ein Inserat erst, wenn ein ZWEITER, unabhaengiger Haendler dieselben
+    Kerndaten einreicht (zwei fremde Browser luegen selten identisch).
+
+    Rueckgabe: "quarantined" oder "promoted"."""
+    identity = get_listing_identity(url)
+    cache_key = identity["cache_key"]
+    now = datetime.now(timezone.utc)
+    await db.listings_cache_client.update_one(
+        {"cache_key": cache_key, "dealer_id": dealer_id},
+        {"$set": {"source": identity["source"], "item_id": identity["item_id"],
+                  "url": url, "data": data,
+                  "expires_at": now + timedelta(hours=ttl_hours)},
+         "$setOnInsert": {"cache_key": cache_key, "dealer_id": dealer_id,
+                          "created_at": now}},
+        upsert=True)
+    # Globale Freigabe ("Promotion") ist standardmaessig AUS (Pruefbericht
+    # Runde 4): Wer zwei Haendlerkonten kontrolliert, konnte sich sein
+    # gefaelschtes HTML selbst "bestaetigen" und damit ALLEN Haendlern
+    # falsche Preise/Fahrzeugdaten unterschieben. Ohne Freigabe bleiben
+    # Client-Daten strikt beim einreichenden Haendler; jeder holt das
+    # Inserat einmal selbst aus seinem Browser (kostenlos, kein Server-
+    # Abruf). Wer die Freigabe bewusst will, setzt die Mindestzahl
+    # unabhaengiger Haendler per CLIENT_INGEST_PROMOTE_MIN_DEALERS (>= 3).
+    min_dealers = int(os.environ.get("CLIENT_INGEST_PROMOTE_MIN_DEALERS", "0") or 0)
+    if min_dealers < 3:
+        return "quarantined"
+    bestaetiger = []
+    async for other in db.listings_cache_client.find(
+            {"cache_key": cache_key, "dealer_id": {"$ne": dealer_id},
+             "expires_at": {"$gt": now}}, {"_id": 0}):
+        if _client_core_match(other.get("data") or {}, data):
+            bestaetiger.append(other)
+    if len(bestaetiger) + 1 >= min_dealers:
+        other = bestaetiger[0]
+        # Nachpruefung Runde 14 (Nr. 14): die Herkunftsfelder
+        # ingested_by_user/ingested_by_dealer (routes/listings.py) gehoeren
+        # in die Quarantaene des Einreichers — nicht in den geteilten Cache,
+        # den peek_cached_listing ALLEN Firmen liefert.
+        freigabe = {k: v for k, v in (other.get("data") or data).items()
+                    if not str(k).startswith("ingested_by_")}
+        if True:
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key},
+                {"$set": {"cache_key": cache_key,
+                          "source": identity["source"],
+                          "item_id": identity["item_id"],
+                          # Die AELTERE Einreichung wird veroeffentlicht:
+                          # wer als Zweiter bestaetigt, bestimmt nicht den
+                          # Inhalt, den alle Haendler sehen.
+                          "url": url, "data": freigabe,
+                          "fetched_at": now,
+                          # Kuerzere TTL als Server-Abrufe: Client-Daten
+                          # sind Momentaufnahmen zweier Browser, keine
+                          # API-Antwort.
+                          "expires_at": now + timedelta(hours=confirmed_ttl_hours),
+                          "last_used_at": now,
+                          "client_confirmed": True,
+                          "confirmed_by": [b.get("dealer_id") for b in bestaetiger]
+                          + [dealer_id]},
+                 "$setOnInsert": {"created_at": now}},
+                upsert=True)
+            return "promoted"
+    return "quarantined"
 
 
 async def get_or_fetch_listing(
@@ -277,9 +478,159 @@ async def get_or_fetch_listing(
                 )
                 return cached["data"], True, cached.get("snapshot_id")
 
-    # MISS oder abgelaufen -> einmal abrufen
-    data = await fetcher(source, item_id, url)
+    # MISS oder abgelaufen -> Single-Flight: nur EINE Anfrage ruft wirklich
+    # ab; gleichzeitige Anfragen derselben URL warten auf deren Ergebnis.
+    # Verhindert Doppel-Scrapes (Bot-Block-Risiko) und Doppel-Snapshots,
+    # wenn z.B. 5 Sucher zeitgleich dasselbe Inserat vergleichen.
+    import asyncio as _aio
+    from pymongo.errors import DuplicateKeyError
+
+    async def _fresh_cached():
+        c = await db.listings_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+        if not c or not c.get("data"):
+            return None
+        exp = c.get("expires_at")
+        if isinstance(exp, datetime):
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp > datetime.now(timezone.utc):
+                return c
+        return None
+
+    got_lease = False
+    for _wait in range(20):                    # max. ~30 s warten, dann klare Meldung
+        lease_now = datetime.now(timezone.utc)
+        try:
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key,
+                 "$or": [{"fetching_until": {"$exists": False}},
+                         {"fetching_until": None},
+                         {"fetching_until": {"$lt": lease_now}}]},
+                {"$set": {"fetching_until": lease_now + timedelta(seconds=90)},
+                 # WICHTIG: source/item_id MUESSEN schon beim Lease gesetzt
+                 # werden. Ohne sie legt der Upsert ein Dokument mit
+                 # source=null/item_id=null an — und der Unique-Index
+                 # uniq_source_item laesst nur EIN null/null-Paar zu. Folge
+                 # (vor diesem Fix): 100 VERSCHIEDENE neue Links blockierten
+                 # sich gegenseitig ~70 s und endeten im Fehler.
+                 "$setOnInsert": {"cache_key": cache_key, "source": source,
+                                  "item_id": item_id, "url": url,
+                                  "created_at": lease_now}},
+                upsert=True,
+            )
+            got_lease = True
+        except DuplicateKeyError:
+            got_lease = False                  # jemand anderes laedt gerade
+        if got_lease:
+            break
+        await _aio.sleep(1.5)
+        c = await _fresh_cached()
+        if c:                                  # der Erste ist fertig - uebernehmen
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key},
+                {"$inc": {"use_count": 1},
+                 "$set": {"last_used_at": datetime.now(timezone.utc)}})
+            return c["data"], True, c.get("snapshot_id")
+    if not got_lease:
+        raise ListingBusy(
+            "Das Inserat wird gerade von einer anderen Anfrage geladen - "
+            "bitte in ein paar Sekunden erneut versuchen.")
+
+    # Letzte Kontrolle vor dem externen Abruf: hat der vorherige Halter in
+    # der Zwischenzeit fertig geschrieben, sind seine Daten jetzt da — dann
+    # NICHT noch einmal abrufen (sonst zwei Abrufe derselben Anzeige).
+    frisch = await _fresh_cached()
+    if frisch:
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key},
+            {"$inc": {"use_count": 1},
+             "$set": {"last_used_at": datetime.now(timezone.utc),
+                      "fetching_until": None}})
+        return frisch["data"], True, frisch.get("snapshot_id")
+
+    # ZENTRALE PROVIDER-BEGRENZUNG: bevor wirklich extern abgerufen wird,
+    # einen Slot belegen (MongoDB — wirkt ueber ALLE Worker/Server). So
+    # loesen 300 gleichzeitige Nutzer nicht 300 externe Abrufe aus,
+    # sondern hoechstens MAX_CONCURRENT_<QUELLE> — der Rest wartet kurz
+    # oder bekommt eine freundliche "bitte gleich nochmal"-Antwort.
+    from provider_limiter import acquire_slot, extend_slot, release_slot
+    # Runde 29 (12.09.2026): Kleinanzeigen wird jetzt zuerst ueber die API
+    # geholt (bezahlter Dienst, 600 Anfragen/Minute) statt die Webseite
+    # abzugreifen. Dafuer gilt eine eigene, deutlich hoehere Obergrenze —
+    # sonst wuerde die strenge Bremse des Selbst-Abrufs (2-3 gleichzeitig)
+    # 30 Sucher ausbremsen, obwohl die API muehelos mithaelt.
+    begrenzung = source
+    if source == "kleinanzeigen":
+        try:
+            from kleinanzeigen_api import api_verfuegbar
+            if api_verfuegbar():
+                begrenzung = "kleinanzeigen_api"
+        except Exception:  # noqa: BLE001 — im Zweifel die strenge Bremse
+            pass
+    slot_id = None
+    try:
+        # 0,3-s-Takt statt 1,5 s: bei kurzen Abrufen (Mock 0,4 s; echte
+        # Abrufe 1-3 s) verschenkte der grobe Takt bis zu 1,5 s je
+        # Slot-Wechsel — das drittelte den Durchsatz der Warteschlange.
+        for _try in range(100):                # max. ~30 s auf einen Slot warten
+            slot_id = await acquire_slot(db, begrenzung)
+            if slot_id:
+                break
+            await _aio.sleep(0.3)
+    except Exception:
+        # Lease nicht haengen lassen, sonst warten alle anderen 90 s.
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        raise
+    if not slot_id:
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        raise ListingBusy(
+            "Gerade werden viele Inserate gleichzeitig geladen - "
+            "bitte in ein paar Sekunden erneut versuchen.")
+
+    async def _extend_lease_forever():
+        # Herzschlag: solange der Provider-Abruf laeuft, bleiben Lease UND
+        # Provider-Slot gueltig — kein zweiter Prozess uebernimmt mittendrin.
+        # JEDER Fehler wird geschluckt: stuerbe die Schleife an einem
+        # kurzen Datenbank-Schluckauf, liefen Lease und Slot mitten im
+        # Abruf ab — genau das, was der Herzschlag verhindern soll.
+        while True:
+            try:
+                await _aio.sleep(30)
+                await db.listings_cache.update_one(
+                    {"cache_key": cache_key},
+                    {"$set": {"fetching_until":
+                              datetime.now(timezone.utc) + timedelta(seconds=90)}})
+                await extend_slot(db, slot_id)
+            except _aio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    _heartbeat = _aio.create_task(_extend_lease_forever())
+    # Buchfuehrung: wie viele ECHTE externe Abrufe je Quelle und Tag —
+    # damit laesst sich providerfreundliches Verhalten jederzeit belegen.
+    try:
+        await db.provider_stats.update_one(
+            {"provider": source,
+             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
+            {"$inc": {"calls": 1}}, upsert=True)
+    except Exception:
+        pass
+    try:
+        data = await fetcher(source, item_id, url)
+    except Exception:
+        # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        raise
+    finally:
+        _heartbeat.cancel()
+        await release_slot(db, slot_id)
     if not isinstance(data, dict):
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
         raise RuntimeError(
             f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
         )
@@ -304,12 +655,34 @@ async def get_or_fetch_listing(
                 # verwiesen wird, falls der Caller das snapshot_id-
                 # Speichern (set_cache_snapshot) auslassen sollte.
                 "snapshot_id": None,
+                "fetching_until": None,
             },
-            "$inc": {"use_count": 1},
+            # fetch_count: Abrufzaehler je Inserat — belegt im Lasttest
+            # und im Betrieb, dass kein Inserat mehrfach extern geholt
+            # wird. WICHTIG: mit use_count in EINEM $inc — ein zweiter
+            # "$inc"-Schluessel im selben Dict wuerde den ersten still
+            # verdraengen (Python behaelt nur den letzten).
+            "$inc": {"use_count": 1, "fetch_count": 1},
             "$setOnInsert": {"created_at": now},
         },
         upsert=True,
     )
+    # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
+    # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
+    # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).
+    # Eigener Schutzblock: ein Fehler darf den Datenabruf nie brechen.
+    try:
+        from beweis_service import beweis_vormerken
+        # Runde 23 (11.09.2026): den Stand DIESES Abrufs mitgeben — er wird
+        # beim Anlegen eingefroren; der Worker liest sonst spaeter den
+        # veraenderlichen Cache (neuerer Stand nach Wiederholung/Neuabruf).
+        await beweis_vormerken(db, cache_key=cache_key, quelle=source,
+                               item_id=item_id, url=url, anlass="abruf",
+                               daten=data, abgerufen_am=now)
+    except Exception as exc:  # noqa: BLE001
+        import logging as _logging
+        _logging.getLogger("autohandel").warning(
+            "Beweis-Vormerkung %s: %s", cache_key, exc)
     return data, False, None
 
 
@@ -394,5 +767,7 @@ __all__ = [
     "get_or_fetch_listing",
     "set_cache_snapshot",
     "ensure_cache_indexes",
+    "ListingBusy",
+    "store_client_listing",
     "router",
 ]

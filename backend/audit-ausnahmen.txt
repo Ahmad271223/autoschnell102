@@ -1,0 +1,5 @@
+# pip-audit-Ausnahmen (Audit 09/2026, Blocker 1) — NUR einzeln, begruendet und befristet.
+# Format je Zeile:  <Schwachstellen-ID>  # <Grund>, bis JJJJ-MM-TT
+# Beispiel:
+# GHSA-xxxx-yyyy-zzzz  # betrifft nur Windows-Pfade, Fix in v2.x geplant, bis 2026-12-31
+# Abgelaufene Ausnahmen blockieren die CI wieder. Derzeit: keine.

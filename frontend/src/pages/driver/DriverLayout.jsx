@@ -1,13 +1,20 @@
+import { Suspense } from "react";
+import NachladeFehler from "@/components/NachladeFehler";
+import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, NavLink, Navigate, Outlet, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
 import { Truck, Calendar, Settings, LogOut } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
+import VerbindungsFehler from "@/components/VerbindungsFehler";
 
 export default function DriverLayout() {
-  const { driver, ready, logout } = useDriver();
+  const { driver, ready, fehler, logout } = useDriver();
   const nav = useNavigate();
 
   if (!ready) return null;
+  // Runde 22 (11.09.2026): Server nicht erreichbar -> Anmeldung behalten
+  // und "Keine Verbindung" zeigen, statt zur Login-Seite zu schicken.
+  if (!driver && fehler) return <VerbindungsFehler grund={fehler} />;
   if (!driver) return <Navigate to="/fahrer/login" replace />;
 
   const onLogout = () => { logout(); nav("/fahrer/login"); };
@@ -17,7 +24,12 @@ export default function DriverLayout() {
     `${tabBase} ${isActive ? "text-white" : "text-zinc-500"}`;
 
   return (
-    <div className="min-h-screen pb-20" style={{ background: "var(--bg-app)" }}>
+    // --fahrer-tabs ist die verbindliche Hoehe der unteren Tableiste.
+    // Seiten, die eine eigene Leiste darueber legen (Abholprotokoll),
+    // rechnen damit — geschaetzte Werte fuehrten zu 1-2 Pixel Ueberlappung
+    // und damit zu nicht klickbaren Knoepfen (Befund Ahmad 12.09.2026).
+    <div className="min-h-screen pb-20"
+         style={{ background: "var(--bg-app)", "--fahrer-tabs": "3.75rem" }}>
       <header className="glass-nav sticky top-0 z-40 border-b"
               style={{ borderColor: "var(--border-default)" }}>
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
@@ -35,7 +47,7 @@ export default function DriverLayout() {
             </div>
           </Link>
           <div className="flex items-center gap-2">
-            <InstallPWAButton compact />
+            <InstallPWAButton variante="kompakt" />
             <button onClick={onLogout} data-testid="driver-logout-btn"
               className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white px-3 py-2">
               <LogOut size={14} /> Abmelden
@@ -45,13 +57,22 @@ export default function DriverLayout() {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 pt-5 pb-24">
-        <Outlet />
+        <NachladeFehler>
+          <Suspense fallback={<SeiteLaedt />}>
+            <Outlet />
+          </Suspense>
+        </NachladeFehler>
       </main>
 
       {/* Bottom Tab Bar */}
       <nav className="fixed bottom-0 inset-x-0 border-t z-40"
+           data-testid="fahrer-tableiste"
            style={{ borderColor: "var(--border-default)", background: "rgba(10,10,10,0.92)",
-                    backdropFilter: "blur(12px)" }}>
+                    backdropFilter: "blur(12px)",
+                    // Gegenpruefung 12.09.2026: ohne safe-area lag die Leiste
+                    // auf dem iPhone unter dem Home-Balken.
+                    minHeight: "var(--fahrer-tabs)",
+                    paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
         <div className="max-w-3xl mx-auto flex">
           <NavLink to="/fahrer" end className={tabCss} data-testid="tab-termine">
             <Calendar size={18} />

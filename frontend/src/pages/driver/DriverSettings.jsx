@@ -5,10 +5,30 @@ import { toast } from "sonner";
 import { Copy, Check, Building2, User, KeyRound } from "lucide-react";
 
 export default function DriverSettings() {
-  const { driver, refresh } = useDriver();
+  const { driver, refresh, logout } = useDriver();
   const [name, setName] = useState(driver?.display_name || "");
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [pw, setPw] = useState({ current: "", next: "", repeat: "" });
+  const [pwBusy, setPwBusy] = useState(false);
+
+  const changePassword = async (e) => {
+    e.preventDefault();
+    if (pw.next.length < 8) return toast.error("Neues Passwort: mindestens 8 Zeichen");
+    if (pw.next !== pw.repeat) return toast.error("Die Wiederholung stimmt nicht überein");
+    setPwBusy(true);
+    try {
+      await driverApi.put("/driver/password", { current_password: pw.current, new_password: pw.next });
+      toast.success("Passwort geändert – bitte neu anmelden");
+      // Der Server hat alle Sitzungen beendet (Single-Session): sauber abmelden.
+      logout?.();
+      window.location.href = "/fahrer/login";
+    } catch (err) {
+      toast.error(errMsg(err, "Passwort konnte nicht geändert werden"));
+    } finally {
+      setPwBusy(false);
+    }
+  };
 
   const save = async (e) => {
     e.preventDefault();
@@ -84,6 +104,30 @@ export default function DriverSettings() {
           data-testid="save-name-btn"
           className="kinetic-button mt-4 px-5 py-2.5 rounded-sm text-sm font-bold disabled:opacity-40">
           {saving ? "Speichere …" : "Speichern"}
+        </button>
+      </form>
+
+      {/* Passwort ändern */}
+      <form onSubmit={changePassword} className="tactical-card p-5 mt-4" data-testid="driver-password-form">
+        <label className="flex items-center gap-2 text-zinc-400 text-xs">
+          <KeyRound size={12} /> PASSWORT ÄNDERN
+        </label>
+        <input type="password" autoComplete="current-password" placeholder="Aktuelles Passwort"
+          value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })}
+          className="input-base w-full mt-2" required data-testid="driver-pw-current" />
+        <input type="password" autoComplete="new-password" placeholder="Neues Passwort (min. 8 Zeichen)"
+          value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })}
+          className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-next" />
+        <input type="password" autoComplete="new-password" placeholder="Neues Passwort wiederholen"
+          value={pw.repeat} onChange={(e) => setPw({ ...pw, repeat: e.target.value })}
+          className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-repeat" />
+        <p className="text-xs text-zinc-500 mt-2">
+          Nach der Änderung wirst du auf allen Geräten abgemeldet. Passwort vergessen? Über
+          „Passwort vergessen" auf der Anmeldeseite bekommst du einen Link per E-Mail.
+        </p>
+        <button type="submit" disabled={pwBusy} data-testid="driver-pw-submit"
+          className="kinetic-button mt-4 px-5 py-2.5 rounded-sm text-sm font-bold disabled:opacity-40">
+          {pwBusy ? "Ändere …" : "Passwort ändern"}
         </button>
       </form>
 

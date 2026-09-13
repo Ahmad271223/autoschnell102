@@ -3,6 +3,33 @@ import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Plus, Trash2, Lock, Unlock, ShieldCheck } from "lucide-react";
 
+
+// Haendler-Hauptaccount: das Backend verlangt eine ausdrueckliche
+// Bestaetigung (?firma_loeschen=true), weil dabei die KOMPLETTE Firma
+// entfernt wird. Vorher zeigen wir die Loeschvorschau des Backends.
+async function deleteUserSmart(u) {
+  try {
+    await api.delete(`/admin/users/${u.id}`);
+    return true;
+  } catch (e) {
+    if (e?.response?.status !== 409) throw e;
+  }
+  let vorschau = "";
+  try {
+    const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
+    const w = data?.wuerde_loeschen || {};
+    vorschau = Object.entries(w).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n} × ${k}`).join(", ") || "keine weiteren Daten";
+  } catch { vorschau = "Vorschau nicht verfügbar"; }
+  const ok = window.confirm(
+    `ACHTUNG: "${u.company_name || u.email}" ist ein Händler-Hauptaccount.\n` +
+    `Die KOMPLETTE Firma wird gelöscht (${vorschau}).\n\n` +
+    `Wirklich unwiderruflich löschen?`);
+  if (!ok) return false;
+  await api.delete(`/admin/users/${u.id}?firma_loeschen=true`);
+  return true;
+}
+
 export default function AdminDashboard() {
   const [stats, setStats] = useState(null);
   const [users, setUsers] = useState([]);
@@ -42,8 +69,11 @@ export default function AdminDashboard() {
   };
   const remove = async (u) => {
     if (!window.confirm(`Account ${u.email} löschen?`)) return;
-    await api.delete(`/admin/users/${u.id}`);
-    load();
+    try {
+      if (await deleteUserSmart(u)) load();
+    } catch (e) {
+      toast.error(errMsg(e, "Löschen fehlgeschlagen"));
+    }
   };
 
   return (

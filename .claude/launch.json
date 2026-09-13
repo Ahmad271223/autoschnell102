@@ -3,17 +3,23 @@
   "configurations": [
     {
       "name": "Backend (FastAPI)",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--loop", "asyncio"],
-      "port": 8001,
-      "cwd": "backend"
+      "url": "http://localhost:8001",
+      "autoPort": false
     },
     {
       "name": "Frontend (React)",
-      "runtimeExecutable": "yarn",
-      "runtimeArgs": ["start"],
-      "port": 3000,
-      "cwd": "frontend"
+      "url": "http://localhost:3000",
+      "autoPort": false
+    },
+    {
+      "name": "Suite-Backend 8002",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd backend && set DB_NAME=autoschnell_r29&& set MOCK_PROVIDER_FETCH=true&& set AUTO_DATEN_SCHAEDEN_FREITEXT=true&& set RUNDE14_HTTP=1&& python -m uvicorn server:app --host 127.0.0.1 --port 8002 --loop asyncio"
+      ],
+      "port": 8002,
+      "autoPort": false
     }
   ]
 }

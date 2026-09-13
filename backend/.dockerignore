@@ -1,0 +1,11 @@
+# Niemals ins Image: Secrets, lokale Daten, Tests, Caches
+.env
+.env.*
+local_storage/
+uploads/
+__pycache__/
+*.pyc
+tests/
+scripts/lasttest*
+.pytest_cache/
+nohup.out

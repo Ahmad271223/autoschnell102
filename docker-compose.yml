@@ -1,0 +1,262 @@
+# AutoSchnell — Produktions-Stack (ein Server).
+# Start:  docker compose up -d --build
+# Der Reverse-Proxy (nginx) terminiert HTTPS, reicht die ECHTE Client-IP
+# an das Backend weiter (X-Forwarded-For) — deshalb greift der Rate-Limiter
+# korrekt (TRUST_PROXY=true im Backend).
+#
+# Audit 09/2026: Ressourcen-Limits je Dienst, weniger Worker/Snapshots als
+# Standard, Host-Allowlist im Proxy (PUBLIC_HOST), alle Betriebs-Schalter
+# aus der .env durchgereicht, Mongo-Verbindungspool begrenzt, Certbot-Volume.
+services:
+  mongo:
+    # 8.2, nicht 8.0: MongoDB 8.0 verweigert den Start auf Linux-Kernen ab
+    # 6.19 (bekannte Unvertraeglichkeit einer Speicherverwaltung, MongoDB-
+    # Ticket SERVER-121912). Ubuntu 26.04 bringt Kernel 7.0 mit. 8.2 laeuft
+    # dort einwandfrei.
+    image: mongo:8.2
+    restart: unless-stopped
+    # Authentifizierung ab dem ERSTEN Start (der Produktions-Check des
+    # Backends verlangt Zugangsdaten in MONGO_URL). Werte in .env setzen.
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:?MONGO_USER in .env setzen}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?MONGO_PASSWORD in .env setzen}
+    # MONGO_EXTRA_ARGS schaltet das Ein-Knoten-Replica-Set ein (noetig fuer
+    # stimmige Sicherungen — Snapshot statt Collection fuer Collection):
+    #   MONGO_EXTRA_ARGS=--replSet rs0 --keyFile /etc/mongo-keyfile
+    # Einmalig danach:
+    #   rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]})
+    # Der Name "mongo" ist der Dienstname in diesem Netz — er gilt fuer den
+    # Container selbst UND fuer das Backend. Eine Server-IP funktioniert hier
+    # NICHT: der Container erkennt sie nicht als eigene Adresse.
+    #
+    # WICHTIG: argv[0] muss "mongod" bleiben, sonst legt das Image beim ersten
+    # Start den Datenbank-Benutzer nicht an (der Einstiegspunkt prueft darauf).
+    command: mongod --auth --bind_ip_all --wiredTigerCacheSizeGB ${MONGO_CACHE_GB:-1} ${MONGO_EXTRA_ARGS:-}
+    volumes:
+      - mongo_data:/data/db
+      # Schluesseldatei fuer das Replica Set. VOR dem ersten Start anlegen:
+      #   openssl rand -base64 756 > deploy/mongo-keyfile
+      #   chmod 400 deploy/mongo-keyfile && chown 999:999 deploy/mongo-keyfile
+      # (Ohne Replica Set bleibt sie einfach ungenutzt.)
+      - ./deploy/mongo-keyfile:/etc/mongo-keyfile:ro
+    # Kein Port nach aussen — nur intern erreichbar.
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: ${MONGO_MEM_LIMIT:-2g}
+    cpus: ${MONGO_CPUS:-1.5}
+    logging: &log
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - APP_ENV=production
+      # Runde 31: derselbe Stempel wie im Oberflaechen-Bau — geht als
+      # X-AH-Fassung an jede API-Antwort (server.py).
+      - APP_FASSUNG=${APP_FASSUNG:-}
+      - SELF_SIGNUP=${SELF_SIGNUP:-false}
+      # maxPoolSize begrenzt die Verbindungen JE Worker (Audit 09/2026, Punkt 19)
+      - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin&maxPoolSize=20}
+      - DB_NAME=${DB_NAME:-autoschnell}
+      # Verbindungen je Worker. Der Wert in der MONGO_URL ist wirkungslos —
+      # der Code setzt maxPoolSize ausdruecklich aus dieser Variablen.
+      - MONGO_MAX_POOL_SIZE=${MONGO_MAX_POOL_SIZE:-20}
+      - MONGO_MIN_POOL_SIZE=${MONGO_MIN_POOL_SIZE:-5}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      # Beweisdokument je Inserat (ohne Browser, ersetzt die Snapshots):
+      # gleichzeitige Erstellungen je Worker, eingebettete Fotos, Aufbewahrung
+      # in Tagen (laenger bei Kaufvertrag, Termin, Inserat oder Bestand),
+      # BEWEIS_PRIVATDATEN=1 druckt Name/Telefon auch privater Anbieter.
+      - BEWEIS_PARALLEL=${BEWEIS_PARALLEL:-1}
+      - BEWEIS_FOTOS_MAX=${BEWEIS_FOTOS_MAX:-20}
+      - BEWEIS_AUFBEWAHRUNG_TAGE=${BEWEIS_AUFBEWAHRUNG_TAGE:-90}
+      - BEWEIS_PRIVATDATEN=${BEWEIS_PRIVATDATEN:-}
+      - TRUST_PROXY=true
+      # Eigene Vermittler (Load Balancer/Proxy) — sonst zaehlen die
+      # Anfragesperren alle Besucher als denselben.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1,172.16.0.0/12}
+      - TRUSTED_PROXIES_NUR_LISTE=${TRUSTED_PROXIES_NUR_LISTE:-false}
+      - RATE_LIMIT_EXEMPT_LOOPBACK=false
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      # E-Mail ueber Resend (bevorzugt). OHNE diese Zeilen erreicht der
+      # Schluessel aus der .env den Container NICHT — die Produktionspruefung
+      # findet dann keinen Versandweg und bricht den Start ab (Exit 78).
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - MAIL_FROM=${MAIL_FROM:-}
+      - MAIL_ABSENDER_NAME=${MAIL_ABSENDER_NAME:-}
+      # Betriebsschalter — ohne Durchreichen wirken Aenderungen in der .env nicht.
+      - ENABLE_DOCS=${ENABLE_DOCS:-false}
+      - MOCK_PROVIDER_FETCH=${MOCK_PROVIDER_FETCH:-false}
+      - MOBILE_SANDBOX_MODE=${MOBILE_SANDBOX_MODE:-false}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      # Anbieter-Abrufe: Tageslimits und Gleichzeitigkeit
+      # 0 = kein Limit (Betreiber-Entscheidung 09/2026)
+      - ANBIETER_TAGESLIMIT_JE_FIRMA=${ANBIETER_TAGESLIMIT_JE_FIRMA:-0}
+      - ANBIETER_TAGESLIMIT_GESAMT=${ANBIETER_TAGESLIMIT_GESAMT:-0}
+      - ANBIETER_TAGESWARNUNG=${ANBIETER_TAGESWARNUNG:-500}
+      - ABRUF_RUECKFALL_TAGESLIMIT=${ABRUF_RUECKFALL_TAGESLIMIT:-25}
+      - LOGIN_IP_LIMIT=${LOGIN_IP_LIMIT:-120}
+      - LINK_JOB_MAX_OFFEN_JE_KONTO=${LINK_JOB_MAX_OFFEN_JE_KONTO:-20}
+      - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-100}
+      - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
+      - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
+      - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-1500}
+      # Kleinanzeigen zuerst ueber die API (Runde 29) — ohne Schluessel
+      # unveraendert der eigene Abruf.
+      - KLEINANZEIGEN_API_KEY=${KLEINANZEIGEN_API_KEY:-}
+      - KLEINANZEIGEN_API_URL=${KLEINANZEIGEN_API_URL:-https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen}
+      - KLEINANZEIGEN_API_TIMEOUT=${KLEINANZEIGEN_API_TIMEOUT:-12}
+      - MAX_CONCURRENT_KLEINANZEIGEN_API=${MAX_CONCURRENT_KLEINANZEIGEN_API:-8}
+      - MAX_CONCURRENT_KLEINANZEIGEN=${MAX_CONCURRENT_KLEINANZEIGEN:-2}
+      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-2}
+      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-2}
+      - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-2}
+      # Eigenheiten S3-kompatibler Speicher (Cloudflare R2)
+      - S3_SSE=${S3_SSE:-auto}
+      - S3_PRUEFSUMMEN=${S3_PRUEFSUMMEN:-auto}
+      # Verkaufen kostenlos und unbegrenzt (false = Pakete/Kontingent)
+      - VERKAUF_KOSTENLOS=${VERKAUF_KOSTENLOS:-true}
+      # Marktplatz kostenlos und ohne Anmeldung einsehbar
+      - MARKTPLATZ_KOSTENLOS=${MARKTPLATZ_KOSTENLOS:-true}
+      - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-180}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - FRONTEND_URL=${FRONTEND_URL:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-}
+      # Aufbewahrung / Loeschung (Audit 09/2026: Vertragsloeschung erst nach
+      # Freigabe scharf schalten — bis dahin Dry-Run mit Loeschvorschau)
+      - VERTRAG_AUFBEWAHRUNG_TAGE=${VERTRAG_AUFBEWAHRUNG_TAGE:-90}
+      - VERTRAG_LOESCHUNG_AKTIV=${VERTRAG_LOESCHUNG_AKTIV:-false}
+      - AUTO_DATEN_SCHAEDEN_FREITEXT=${AUTO_DATEN_SCHAEDEN_FREITEXT:-false}
+      - SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-60}
+      - FAHRERFOTO_TAGE=${FAHRERFOTO_TAGE:-90}
+      - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-180}
+      - LOG_AUFBEWAHRUNG_TAGE_OFFEN=${LOG_AUFBEWAHRUNG_TAGE_OFFEN:-365}
+      - ERROR_LOG_MAX=${ERROR_LOG_MAX:-20000}
+      - ANFRAGEN_AUFBEWAHRUNG_TAGE=${ANFRAGEN_AUFBEWAHRUNG_TAGE:-90}
+      - LISTING_CACHE_TTL_HOURS=${LISTING_CACHE_TTL_HOURS:-2160}
+      - FAHRZEUGPOOL_MAX_VERGLEICHE=${FAHRZEUGPOOL_MAX_VERGLEICHE:-30}
+      - CLIENT_INGEST_PROMOTE_MIN_DEALERS=${CLIENT_INGEST_PROMOTE_MIN_DEALERS:-0}
+      - DATEI_SIGNATUR_PFLICHT=${DATEI_SIGNATUR_PFLICHT:-true}
+      # Backups: lokal im Volume + verschluesselte Offsite-Kopie (S3-kompatibel)
+      - BACKUP_DIR=/backups
+      - BACKUP_HOUR=${BACKUP_HOUR:-3}
+      - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
+      # Eigene Adresse, falls der Sicherungs-Bucket in einer anderen Zone
+      # liegt (bei Cloudflare R2 hat die EU-Zone eine eigene Adresse).
+      - BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT:-}
+      - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
+      - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
+      - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # Anbieter-Abrufe (mobile.de + AutoScout24 via Apify; optional
+      # offizielle mobile.de-API; optional Rotations-Proxy fuer
+      # Kleinanzeigen-Server-Abrufe)
+      - APIFY_TOKEN=${APIFY_TOKEN:-}
+      - APIFY_MOBILE_ACTOR=${APIFY_MOBILE_ACTOR:-}
+      - APIFY_AUTOSCOUT_ACTOR=${APIFY_AUTOSCOUT_ACTOR:-}
+      - MOBILE_API_USER=${MOBILE_API_USER:-}
+      - MOBILE_API_PASS=${MOBILE_API_PASS:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_ENABLED=${PROXY_ENABLED:-}
+      # Kleinanzeigen ueber die Browser-Erweiterung der Nutzer abrufen
+      - CLIENT_FETCH_KLEINANZEIGEN=${CLIENT_FETCH_KLEINANZEIGEN:-}
+      # Optionaler S3-kompatibler Objektspeicher (sonst lokales Volume)
+      - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - S3_REGION=${S3_REGION:-}
+    volumes:
+      - uploads_data:/app/uploads         # Fotos/Unterschriften/Protokolle
+      - snapshots_data:/app/local_storage # Alt-Snapshots (lesen bis zum Verfall)
+      - backups_data:/backups             # taegliche Backups (backup_service.py)
+    # Kein Port nach aussen — nur der Proxy spricht mit dem Backend.
+    # Limits an die Servergroesse anpassen (4 Worker, kein Browser mehr).
+    mem_limit: ${BACKEND_MEM_LIMIT:-4g}
+    cpus: ${BACKEND_CPUS:-2.0}
+    logging: *log
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # LEER lassen: api.js baut daraus `${BACKEND}/api` — mit "/api" hier
+        # wuerde die App /api/api/... aufrufen. Leer = gleiche Herkunft,
+        # der nginx-Proxy leitet /api an das Backend weiter.
+        REACT_APP_BACKEND_URL: ""
+        # Runde 31: Fassungs-Stempel "<Commit-Zeit>-<Kurz-SHA>", gesetzt von
+        # deploy/rollout.sh. Leer = die Oberflaeche zeigt keinen Versionshinweis.
+        APP_FASSUNG: ${APP_FASSUNG:-}
+    restart: unless-stopped
+    # Runde 29 (12.09.2026): Bundle-Dateien des vorherigen Standes. Wer die
+    # App offen hat, laedt nach einem Rollout noch alte Haeppchen nach —
+    # ohne diesen Rueckfall gibt es dafuer 404 (schwarzer Bildschirm bis zum
+    # Neuladen). deploy/rollout.sh fuellt den Ordner vor jedem Bau.
+    volumes:
+      - ./deploy/assets-alt:/usr/share/nginx/html/alt:ro
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *log
+
+  proxy:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on: [backend, web]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      # Audit 09/2026 (Punkt 9): NUR diese Domain wird bedient (Host-Allowlist),
+      # unbekannte Hosts bekommen 444, HTTP leitet fest hierhin um.
+      - PUBLIC_HOST=${PUBLIC_HOST:?PUBLIC_HOST in .env setzen (z.B. app.autoschnell.de)}
+      # Nur fuer die Betriebsart hinter einem Load Balancer: aus diesem Netz
+      # wird X-Forwarded-For geglaubt (privates Netz des Anbieters).
+      - PRIVATES_NETZ=${PRIVATES_NETZ:-127.0.0.1}
+      # Runde 31: Fehlt eine Bundle-Datei, fragt der Proxy beide Server im
+      # privaten Netz (hinter-loadbalancer.conf.template, Port 8081). Ohne
+      # Replikat-Betrieb zeigen beide auf diesen Server selbst.
+      - PROD1_IP=${PROD1_IP:-127.0.0.1}
+      - PROD2_IP=${PROD2_IP:-127.0.0.1}
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Drain-Marker fuer deploy/rollout.sh (Datei deploy/drain/aktiv auf dem
+      # Host): liegt sie, meldet /api/health 503 — auch nach einem Neustart
+      # des Proxy-Containers. Nur die LB-Vorlage wertet sie aus.
+      - ./deploy/drain:/etc/nginx/drain:ro
+      # PROXY_TEMPLATE waehlt die Betriebsart:
+      #   default.conf.template            = nginx macht TLS selbst (ein Server)
+      #   hinter-loadbalancer.conf.template = Load Balancer macht TLS
+      - ./deploy/${PROXY_TEMPLATE:-default.conf.template}:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/certs:/etc/nginx/certs:ro   # hier landen die TLS-Zertifikate
+      - certbot_www:/var/www/certbot         # ACME-Challenge (Let's Encrypt)
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *log
+
+volumes:
+  mongo_data:
+  uploads_data:
+  snapshots_data:
+  backups_data:
+  certbot_www:

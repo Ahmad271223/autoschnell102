@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "AutoSchnell Abruf-Helfer",
+  "version": "1.0.0",
+  "description": "Lädt Kleinanzeigen-Fahrzeugseiten über deine eigene Internetverbindung für den AutoSchnell-Vergleich (verhindert Sperren durch Massen-Abrufe).",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.kleinanzeigen.de/*",
+    "https://kleinanzeigen.de/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://autoschnell.de/*",
+        "https://www.autoschnell.de/*",
+        "http://localhost/*",
+        "http://localhost:3000/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { PageHeader, StatCard, Card, Spinner, fmtNum } from "./_ui";
 
@@ -43,11 +44,19 @@ export default function AdminOverview() {
         <div className="flex items-center gap-2 text-zinc-500 text-sm"><Spinner /> lade…</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
             <StatCard label="Nutzer"           value={fmtNum(stats?.users)}            color="blue" />
             <StatCard label="Aktive Abos"      value={fmtNum(stats?.active_subs)}      color="green" />
             <StatCard label="Verträge gesamt"  value={fmtNum(stats?.contracts)}        color="purple" />
             <StatCard label="Vergleiche heute" value={fmtNum(stats?.comparisons_today)} color="orange" />
+            <Link to="/admin/errors" className="block">
+              <StatCard
+                label="Offene Fehler"
+                value={fmtNum(stats?.open_errors)}
+                hint={stats?.open_errors > 0 ? "Jetzt ansehen →" : "Alles in Ordnung"}
+                color={stats?.open_errors > 0 ? "red" : "gray"}
+              />
+            </Link>
           </div>
 
           {urls && (

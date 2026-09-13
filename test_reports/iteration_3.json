@@ -35,7 +35,7 @@
     "/app/test_reports/iteration_3.json"
   ],
   "success_rate": {"backend": "100% (19/19)", "frontend": "100% (all 6 routes + redirect)"},
-  "test_credentials": "Super-Admin: CashCarHannover2025 / MaW34543WaM (verified). Legacy admin: admin@autohandel.app / Admin123! (verified, password is restored to original by the test_change_then_change_back test). Test dealer auto-created per pytest run with prefix test_admin_dash_*@example.com / InitialPass123 (final password after pwd-reset test: NewPass12345).",
+  "test_credentials": "Super-Admin: <SUPER_ADMIN_USERNAME> / <SUPER_ADMIN_PASSWORD> (verified). Legacy admin: <ADMIN_EMAIL> / <ADMIN_PASSWORD> (verified, password is restored to original by the test_change_then_change_back test). Test dealer auto-created per pytest run with prefix test_admin_dash_*@example.com / InitialPass123 (final password after pwd-reset test: NewPass12345).",
   "seed_data_creation": "Each pytest run creates one test dealer (TEST Dash Co {suffix}). Frontend non-admin redirect test creates one ephemeral dealer nonadmin_{ts}@example.com / TestPass123. None are torn down — minor data accumulation.",
   "retest_needed": false,
   "main_agent_can_self_test": true,
