@@ -215,10 +215,15 @@ async def _rang_pruefen(db, job: dict, dealer_id: str, user_id: str) -> None:
         return
     # Nur zurueckrollen, solange niemand beigetreten ist und kein Worker
     # den Job beansprucht hat — sonst behalten (minimale Ueberschreitung).
+    # Nachbesserung: tritt DASSELBE Konto bei (zweiter Tab), bleiben
+    # user_ids/dealer_ids gleich — deshalb zaehlt "beitritte" jeden Beitritt.
+    # Server der alten Fassung setzen das Feld nicht (Rollout): dort gilt
+    # das bisherige Verhalten.
     r = await db.link_jobs.delete_one({
         "id": job["id"], "status": "queued",
         "user_ids": [user_id] if user_id else [],
-        "dealer_ids": [dealer_id] if dealer_id else []})
+        "dealer_ids": [dealer_id] if dealer_id else [],
+        "beitritte": {"$exists": False}})
     if r.deleted_count == 1:
         raise grund
     log.warning("link_jobs: Job %s liegt ueber der Grenze, ist aber schon "
@@ -241,9 +246,11 @@ async def _aktivem_job_beitreten(db, cache_key: str, dealer_id: str,
     dazu = _beitritt(dealer_id, user_id)
     if not dazu:
         return await db.link_jobs.find_one(aktiv, {"_id": 0})
+    # "beitritte" macht den Beitritt am Dokument sichtbar, auch wenn $addToSet
+    # nichts aendert (siehe _rang_pruefen).
     return await db.link_jobs.find_one_and_update(
-        aktiv, {"$addToSet": dazu}, projection={"_id": 0},
-        return_document=ReturnDocument.AFTER)
+        aktiv, {"$addToSet": dazu, "$inc": {"beitritte": 1}},
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER)
 
 
 async def enqueue_job(db, url: str, dealer_id: str = "",
@@ -296,7 +303,15 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
     job.pop("_id", None)
     # Audit 13.09.2026 (#28): Rang-Pruefung NUR fuer den selbst eingefuegten
     # Job — nie im Beitrittsweg; _grenzen_pruefen oben bleibt der Schnellweg.
-    await _rang_pruefen(db, job, dealer_id, user_id)
+    try:
+        await _rang_pruefen(db, job, dealer_id, user_id)
+    except WarteschlangeVoll:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Der Job ist gespeichert und wird abgearbeitet — lieber minimal
+        # ueber der Grenze als ein 500 fuer einen vorhandenen Job.
+        log.warning("link_jobs: Rang-Pruefung fuer Job %s fehlgeschlagen: %s",
+                    job["id"], exc)
     return job
 
 
@@ -358,6 +373,8 @@ async def _requeue_stale(db) -> None:
             # Audit 13.09.2026 (#32): claim_id entfernen — beansprucht ein
             # Server der alten Fassung (setzt keine claim_id) den Job neu,
             # darf kein ueberholter Task mehr auf die alte Kennung passen.
+            # Schuetzt nur gegen Rueckstellungen der neuen Fassung: der
+            # _requeue_stale der alten Fassung laesst claim_id stehen.
             await db.link_jobs.update_one(
                 {"id": j["id"], "status": "processing"},
                 {"$set": {"status": "queued", "updated_at": _now()},

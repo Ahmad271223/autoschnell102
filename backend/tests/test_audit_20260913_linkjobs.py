@@ -146,6 +146,74 @@ def test_28_rueckrollen_trifft_keinen_job_mit_beigetretenem_konto(welt, monkeypa
     assert w.run(w.db.link_jobs.count_documents({"id": eigen["id"]})) == 0
 
 
+def test_28_beitritt_desselben_kontos_verhindert_rueckrollen(welt, monkeypatch):
+    """Nachbesserung: Tritt DASSELBE Konto (zweiter Tab) dem Job bei, aendert
+    $addToSet user_ids/dealer_ids nicht — der Beitritt muss trotzdem das
+    Zurueckrollen verhindern, sonst hat der zweite Aufruf eine tote Job-ID."""
+    import link_jobs as LJ
+    w = welt
+    w.run(LJ.ensure_job_indexes(w.db))
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_KONTO", 1)
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_FIRMA", 999)
+    w.run(w.db.link_jobs.insert_one(_job("kleinanzeigen:alt2", w.a, w.dealer_id, minuten=5)))
+    eigen = _job("kleinanzeigen:neu3", w.a, w.dealer_id)
+    w.run(w.db.link_jobs.insert_one(dict(eigen)))
+    beigetreten = w.run(LJ._aktivem_job_beitreten(
+        w.db, eigen["cache_key"], w.dealer_id, w.a["id"]))
+    assert beigetreten["id"] == eigen["id"]
+    assert beigetreten["user_ids"] == [w.a["id"]]
+    w.run(LJ._rang_pruefen(w.db, eigen, w.dealer_id, w.a["id"]))   # keine Ausnahme
+    assert w.run(w.db.link_jobs.count_documents({"id": eigen["id"]})) == 1
+
+
+def test_28_zwei_tabs_an_der_grenze_keine_tote_job_id(welt, monkeypatch):
+    """Grenze 1: ein anderer neuer Link plus zweimal derselbe neue Link
+    desselben Kontos parallel. Jede zurueckgegebene Job-ID muss existieren
+    (oder ein completed-Stub sein)."""
+    import link_jobs as LJ
+    w = welt
+    w.run(LJ.ensure_job_indexes(w.db))
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_KONTO", 1)
+    monkeypatch.setattr(LJ, "MAX_OFFEN_JE_FIRMA", 999)
+
+    async def runde():
+        await w.db.link_jobs.delete_many({})
+        gleich = _neue_url()
+        res = await asyncio.gather(
+            LJ.enqueue_job(w.db, _neue_url(), dealer_id=w.dealer_id, user_id=w.a["id"]),
+            LJ.enqueue_job(w.db, gleich, dealer_id=w.dealer_id, user_id=w.a["id"]),
+            LJ.enqueue_job(w.db, gleich, dealer_id=w.dealer_id, user_id=w.a["id"]),
+            return_exceptions=True)
+        tot = []
+        for r in res:
+            if isinstance(r, dict) and r.get("status") != "completed":
+                if not await w.db.link_jobs.count_documents({"id": r["id"]}):
+                    tot.append(r["id"])
+        return res, tot
+
+    for _ in range(20):
+        res, tot = w.run(runde())
+        assert not tot, res
+        assert not [r for r in res if isinstance(r, Exception)
+                    and not isinstance(r, LJ.WarteschlangeVoll)], res
+
+
+def test_28_db_fehler_in_rang_pruefung_liefert_trotzdem_den_job(welt, monkeypatch):
+    """Der Job ist gespeichert und wird abgearbeitet — ein voruebergehender
+    DB-Fehler in der Rang-Pruefung darf kein 500 daraus machen."""
+    import link_jobs as LJ
+    w = welt
+    w.run(LJ.ensure_job_indexes(w.db))
+
+    async def kaputt(*a, **k):
+        raise RuntimeError("Primary-Wechsel")
+
+    monkeypatch.setattr(LJ, "_rang_pruefen", kaputt)
+    job = w.run(LJ.enqueue_job(w.db, _neue_url(), dealer_id=w.dealer_id, user_id=w.a["id"]))
+    assert job["status"] == "queued"
+    assert w.run(w.db.link_jobs.count_documents({"id": job["id"]})) == 1
+
+
 # ------------------------------------------------------------------ #29
 def test_29_kandidatenfenster_reicht_ueber_50_konten(welt):
     """51 Konten warten; die 50 aeltesten haben schon einen laufenden Job.

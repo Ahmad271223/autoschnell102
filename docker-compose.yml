@@ -117,6 +117,8 @@ services:
       - LOGIN_IP_LIMIT=${LOGIN_IP_LIMIT:-120}
       - LINK_JOB_MAX_OFFEN_JE_KONTO=${LINK_JOB_MAX_OFFEN_JE_KONTO:-20}
       - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-100}
+      - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
+      - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-1500}
       # Kleinanzeigen zuerst ueber die API (Runde 29) — ohne Schluessel
       # unveraendert der eigene Abruf.

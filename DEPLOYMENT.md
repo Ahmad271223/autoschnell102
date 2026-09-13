@@ -857,6 +857,9 @@ gegenseitig ausbremsen:
   `LINK_JOB_MAX_OFFEN_JE_FIRMA` (100). Darüber kommt 429 mit klarer
   Meldung. Der Worker arbeitet die Konten **reihum** ab statt streng nach
   Alter — ein Sucher mit 500 Links blockiert die anderen nicht mehr.
+  Feineinstellung: `LINK_JOB_KANDIDATEN` (200 betrachtete Konten je
+  Auswahl) und `LINK_JOB_HERZSCHLAG_MAX` (900 s Höchstlaufzeit eines
+  Abrufs, bevor die Selbstheilung ihn zurückstellt).
 - **Termine:** Ein Sucher kann einen Abholtermin nur an ein Fahrzeug
   hängen, das ihm gehört oder zu dem er einen eigenen Kaufvertrag hat.
   Der Chef darf weiterhin alles.
