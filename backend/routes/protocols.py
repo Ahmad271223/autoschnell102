@@ -349,18 +349,32 @@ TERMIN_GESCHLOSSEN_RUECKFRAGE = ("Der Termin wurde geschlossen — die Freigabe 
                                  "Nach dem Wiederöffnen bitte erneut zur Freigabe schicken.")
 
 
+# Go-Live 13.09.2026 (P6-Nachbesserung): Merker an einem LAUFENDEN Abschluss
+# (wird_abgeschlossen), dessen Termin inzwischen geschlossen oder wieder-
+# geoeffnet wurde. Der Abschluss selbst darf weiterlaufen; laeuft sein Claim
+# aber ab oder scheitert er (Rollback), gilt die alte Freigabe nicht mehr.
+TERMIN_GESCHLOSSEN_MERKER = "termin_geschlossen_im_abschluss"
+
+
+def _zuruecknehmen_aenderung(user_id: Optional[str]) -> Dict[str, Any]:
+    """Go-Live 13.09.2026 (P6): zurueck in den Entwurf — mit Rueckfrage und
+    NEUEM Freigabe-Stand; Claim und Merker (P6-Nachbesserung) fallen weg."""
+    jetzt = now_iso()
+    return {"$set": {"status": "entwurf", "rueckfrage": TERMIN_GESCHLOSSEN_RUECKFRAGE,
+                     "rueckfrage_am": jetzt, "rueckfrage_von": user_id,
+                     "updated_at": jetzt, "freigabe_stand": jetzt},
+            "$unset": {"freigegeben_am": "", "freigegeben_von": "", "claim_bis": "",
+                       "claim_token": "", TERMIN_GESCHLOSSEN_MERKER: ""}}
+
+
 async def _freigabe_zuruecknehmen(bedingung: Dict[str, Any], user_id: Optional[str]) -> bool:
     """Go-Live 13.09.2026 (P6): Protokoll aus zur_freigabe/freigegeben zurueck
     in den Entwurf — mit Rueckfrage und NEUEM Freigabe-Stand, damit weder eine
     alte Freigabe noch ein alter Stand auf dem Handy weiter gilt. Ein laufender
     Abschluss (wird_abgeschlossen) wird nie angefasst."""
-    jetzt = now_iso()
     res = await db.pickup_protocols.update_one(
         {"status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}, **bedingung},
-        {"$set": {"status": "entwurf", "rueckfrage": TERMIN_GESCHLOSSEN_RUECKFRAGE,
-                  "rueckfrage_am": jetzt, "rueckfrage_von": user_id,
-                  "updated_at": jetzt, "freigabe_stand": jetzt},
-         "$unset": {"freigegeben_am": "", "freigegeben_von": ""}})
+        _zuruecknehmen_aenderung(user_id))
     return bool(res.matched_count)
 
 
@@ -371,11 +385,21 @@ async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
     oder freigegeben ist, lebte diese Freigabe nach dem Wiederoeffnen einfach
     wieder auf. Jetzt: zurueck in den Entwurf (neuer Stand), der Fahrer schickt
     neu ab. Korrektur-Versionen verwirft vorher korrektur_verwerfen.
-    Best effort — wirft nie; True, wenn zurueckgenommen wurde."""
+    Best effort — wirft nie; True, wenn zurueckgenommen wurde.
+
+    P6-Nachbesserung: auch beim WIEDEROEFFNEN aufgerufen (der Fahrer setzt
+    "nicht abgeholt" selbst, drivers.py nimmt nichts zurueck). Ein laufender
+    Abschluss bekommt den Merker — laeuft sein Claim spaeter ab oder scheitert
+    er, geht das Protokoll in den Entwurf statt zurueck auf freigegeben.
+    Merker ZUERST: ein Claim, der dazwischen ablaeuft, landet sonst auf
+    freigegeben und wird im zweiten Schritt zurueckgenommen."""
+    bedingung = {"appointment_id": appt_id, "superseded": {"$ne": True},
+                 "corrects_version": {"$exists": False}}
     try:
-        return await _freigabe_zuruecknehmen(
-            {"appointment_id": appt_id, "superseded": {"$ne": True},
-             "corrects_version": {"$exists": False}}, user_id)
+        await db.pickup_protocols.update_one(
+            {**bedingung, "status": "wird_abgeschlossen"},
+            {"$set": {TERMIN_GESCHLOSSEN_MERKER: True}})
+        return await _freigabe_zuruecknehmen(bedingung, user_id)
     except Exception:  # noqa: BLE001
         log.exception("Freigabe des Protokolls zu Termin %s konnte beim Schliessen "
                       "nicht zurueckgenommen werden", appt_id)
@@ -437,6 +461,47 @@ async def _preis_uebernehmen(appt: dict, doc: dict, *, nachholen: bool = False) 
         {"$set": {"purchase_price": kv["preis_vorher"], "updated_at": jetzt},
          "$unset": {"preis_nachverhandelt": "", "preis_vorher": "",
                     "preis_protokoll_id": "", "preis_quelle": ""}})
+
+
+def _nacharbeit_merker(appt: dict, doc: dict) -> Dict[str, Any]:
+    """Go-Live 13.09.2026 (P5-Nachbesserung): Merker im Termin-CAS. Scheitern
+    Preis- oder Statusuebernahme danach (500) und laedt der Fahrer die Seite
+    neu, statt erneut zu tippen, sieht er 'final' ohne Knopf — die
+    Selbstheilung liefe nie. Mit dem Merker holt der naechste PUT des Termins
+    Preis und Status nach (update_appointment). Die protokoll_id nur, wenn
+    nicht schon ein Merker der Terminanlage (Audit #5) steht — dessen
+    Nacharbeit raeumt nur update_appointment ab."""
+    merker: Dict[str, Any] = {"nacharbeit_offen": True}
+    if not appt.get("nacharbeit_offen"):
+        merker["nacharbeit_protokoll_id"] = doc["id"]
+    return merker
+
+
+async def _nacharbeit_erledigt(appt_id: str, doc: dict) -> None:
+    """Go-Live 13.09.2026 (P5-Nachbesserung): nur den Merker DIESES Abschlusses
+    entfernen. Best effort — ein stehengebliebener Merker ist harmlos (der
+    naechste PUT holt idempotent nach)."""
+    try:
+        await db.appointments.update_one(
+            {"id": appt_id, "nacharbeit_protokoll_id": doc["id"]},
+            {"$unset": {"nacharbeit_offen": "", "nacharbeit_protokoll_id": ""}})
+    except Exception:  # noqa: BLE001
+        log.exception("Merker nacharbeit_offen an Termin %s nicht entfernt", appt_id)
+
+
+async def preis_nachholen(appt: dict) -> None:
+    """Go-Live 13.09.2026 (P5-Nachbesserung): fuer update_appointment (Merker
+    nacharbeit_offen) den Preis des aktuellen finalen Protokolls in den Vorgang
+    DIESES Termins nachziehen — idempotent, ohne einen Handpreis zu
+    ueberschreiben. Nur, wenn der Termin noch am Vertrag des Abschlusses haengt;
+    sonst landete der Preis im Vorgang eines anderen Vertrags."""
+    doc = await db.pickup_protocols.find_one(
+        {"appointment_id": appt.get("id"), "status": "final", "superseded": {"$ne": True}},
+        {"_id": 0, "id": 1, "neuer_preis": 1, "contract_id": 1})
+    if not doc or "contract_id" not in doc \
+            or (doc.get("contract_id") or None) != (appt.get("contract_id") or None):
+        return
+    await _preis_uebernehmen(appt, doc, nachholen=True)
 
 
 @router.get("/driver/appointments/{appt_id}/protocol")
@@ -795,7 +860,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # gesetzt sind (try_set_lifecycle ist idempotent), und liefert das
         # bestehende Ergebnis. Netzabbruch oder Doppeltipp in der App
         # enden damit nicht mehr in einer Fehlermeldung.
-        setzen: Dict[str, Any] = {"protocol_id": doc["id"]}
+        # Go-Live 13.09.2026 (P5-Nachbesserung): Merker nacharbeit_offen.
+        setzen: Dict[str, Any] = {"protocol_id": doc["id"], **_nacharbeit_merker(appt, doc)}
         if (appt.get("status") or "") != "abgeholt":
             setzen.update({"status": "abgeholt",
                            "status_changed_at": now_iso()})
@@ -825,6 +891,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"],
                                     appt.get("dealer_id", ""), "abgeholt")
+        await _nacharbeit_erledigt(appt_id, doc)
         return heil_out
 
     # Gegenpruefung 12.09.2026: Starb ein frueherer Abschluss mittendrin
@@ -898,7 +965,10 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
                   "preis_notiz": doc.get("preis_notiz"),
                   "freigabe_stand": _stand_jetzt},
                  {"status": "wird_abgeschlossen",
-                  "claim_bis": {"$lt": _jetzt.isoformat()}}]},
+                  "claim_bis": {"$lt": _jetzt.isoformat()},
+                  # Go-Live 13.09.2026 (P6-Nachbesserung): nie die alte Freigabe
+                  # eines Abschlusses uebernehmen, dessen Termin geschlossen wurde.
+                  TERMIN_GESCHLOSSEN_MERKER: {"$ne": True}}]},
         {"$set": {"status": "wird_abgeschlossen",
                   "claim_bis": (_jetzt + _td(minutes=3)).isoformat(),
                   "claim_token": claim_token,
@@ -941,9 +1011,15 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         try:
             await db.pickup_protocols.update_one(
                 {"id": doc["id"], "status": "wird_abgeschlossen",
-                 "claim_token": claim_token},
+                 "claim_token": claim_token, TERMIN_GESCHLOSSEN_MERKER: {"$ne": True}},
                 {"$set": {"status": FREIGEGEBEN},
                  "$unset": {"claim_bis": "", "claim_token": ""}})
+            # Go-Live 13.09.2026 (P6-Nachbesserung): Wurde der Termin waehrend
+            # dieses Abschlusses geschlossen, gilt die alte Freigabe nicht mehr.
+            await db.pickup_protocols.update_one(
+                {"id": doc["id"], "status": "wird_abgeschlossen",
+                 "claim_token": claim_token, TERMIN_GESCHLOSSEN_MERKER: True},
+                _zuruecknehmen_aenderung(None))
         except Exception:  # noqa: BLE001
             log.exception("Protokoll-Rollback: Claim von %s konnte nicht "
                           "freigegeben werden (laeuft nach 3 Min. ab)", doc["id"])
@@ -1079,7 +1155,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
              "neuer_preis": claim.get("neuer_preis"),
              "preis_notiz": claim.get("preis_notiz"),
              "freigabe_stand": claim.get("freigabe_stand")},
-            {"$unset": {"claim_bis": "", "claim_token": ""},
+            {"$unset": {"claim_bis": "", "claim_token": "", TERMIN_GESCHLOSSEN_MERKER: ""},
              "$set": {"status": "final", "pdf_path": pdf_key,
                       "signature_driver_key": sig_driver,
                       "signature_seller_key": sig_seller,
@@ -1106,7 +1182,10 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     termin_gesetzt = await _termin_abgeholt_setzen(
         appt_id, driver["id"],
         {"status": "abgeholt", "status_changed_at": now_iso(),
-         "protocol_id": doc["id"]}, erwartet=appt)
+         "protocol_id": doc["id"],
+         # Go-Live 13.09.2026 (P5-Nachbesserung): Sicherheitsnetz, falls Preis-
+         # oder Statusuebernahme scheitern und der Fahrer nicht erneut tippt.
+         **_nacharbeit_merker(appt, doc)}, erwartet=appt)
     if termin_gesetzt:
         # Runde 30 (Wunsch Ahmad): Wurde vor Ort nachverhandelt, ist DAS der
         # Preis, den die Firma wirklich zahlt. Er gehoert deshalb in den
@@ -1122,6 +1201,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         import kaufvorgang as _kv
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
+        await _nacharbeit_erledigt(appt_id, doc)
     await log_activity(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",
                        ref=appt.get("vehicle_id"),
                        meta={"version": doc.get("version", 1),
@@ -1241,11 +1321,17 @@ async def _abgelaufene_claims_freigeben(bedingung: Dict[str, Any]) -> int:
     Protokoll verschwand aus Liste und Zaehler, der Chef las dauerhaft "wird
     gerade unterschrieben". Nach Ablauf gilt wieder die Freigabe."""
     from datetime import datetime as _dt, timezone as _tz
+    abgelaufen = {**bedingung, "status": "wird_abgeschlossen",
+                  "claim_bis": {"$lt": _dt.now(_tz.utc).isoformat()}}
+    # Go-Live 13.09.2026 (P6-Nachbesserung): Wurde der Termin waehrend dieses
+    # Abschlusses geschlossen (oder wiedergeoeffnet), gilt die alte Freigabe
+    # nicht mehr — zurueck in den Entwurf statt auf freigegeben.
+    zurueck = await db.pickup_protocols.update_many(
+        {**abgelaufen, TERMIN_GESCHLOSSEN_MERKER: True}, _zuruecknehmen_aenderung(None))
     res = await db.pickup_protocols.update_many(
-        {**bedingung, "status": "wird_abgeschlossen",
-         "claim_bis": {"$lt": _dt.now(_tz.utc).isoformat()}},
+        {**abgelaufen, TERMIN_GESCHLOSSEN_MERKER: {"$ne": True}},
         {"$set": {"status": FREIGEGEBEN}, "$unset": {"claim_bis": ""}})
-    return res.modified_count
+    return res.modified_count + zurueck.modified_count
 
 
 async def _wartende_protokolle(user, felder: Optional[Dict[str, int]] = None) -> List[tuple]:

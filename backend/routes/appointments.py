@@ -778,6 +778,16 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             and ("contract_id" in update or "status" in update) \
             and await _offener_termin_zum_vertrag(user["dealer_id"], contract_pruefen, ausser=appt_id):
         raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
+    # Go-Live 13.09.2026 (P6-Nachbesserung): auch beim WIEDEROEFFNEN eines
+    # geschlossenen Termins gilt eine alte Freigabe nicht mehr — sonst lebte
+    # sie auf, wenn der Fahrer selbst "nicht abgeholt" setzte (drivers.py nimmt
+    # nichts zurueck) oder ein Abschluss-Claim im geschlossenen Termin ablief.
+    # VOR dem Write: ein Abschluss darf den offenen Termin nie mit der alten
+    # Freigabe sehen. "abgeholt" bleibt aussen vor (finales Protokoll, Korrektur).
+    if existing.get("status") in ABGESCHLOSSEN and existing.get("status") != "abgeholt" \
+            and status_neu not in ABGESCHLOSSEN:
+        from routes.protocols import freigabe_beim_schliessen_zuruecknehmen
+        await freigabe_beim_schliessen_zuruecknehmen(appt_id, user.get("id"))
     aenderung: Dict[str, Any] = {"$set": update}
     if unset:
         aenderung["$unset"] = unset
@@ -838,6 +848,12 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             {"id": appt_id}, {"_id": 0, "id": 1, "contract_id": 1, "kaufvorgang_id": 1}) \
             or {"id": appt_id, "contract_id": contract_id}
         wirksamer_status = update.get("status", existing.get("status")) or "offen"
+        if nacharbeit_nachholen:
+            # Go-Live 13.09.2026 (P5-Nachbesserung): scheiterte der Protokoll-
+            # Abschluss nach dem Termin-Write, fehlt auch der nachverhandelte
+            # Preis — VOR der Statusuebernahme nachziehen (wie im Abschluss).
+            from routes.protocols import preis_nachholen
+            await preis_nachholen({**termin_nachher, "dealer_id": user["dealer_id"]})
         hat_vorgang = await _kv.termin_status_uebernehmen(termin_nachher, wirksamer_status, user=user)
         if not hat_vorgang and vehicle_id and status_gewechselt:
             if update["status"] == "abgeholt":
@@ -852,13 +868,19 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             # zog nichts nach und loeschte trotzdem den Merker. Abgeschlossene
             # Zielstati sind hier ausgeschlossen, der erste Zweig bleibt massgeblich.
             await try_set_lifecycle(vehicle_id, user["dealer_id"], "abholung_geplant", user=user)
+        if not hat_vorgang and vehicle_id and nacharbeit_nachholen and not status_gewechselt \
+                and wirksamer_status == "abgeholt":
+            # Go-Live 13.09.2026 (P5-Nachbesserung): Abschluss ohne Vorgang
+            # (Termin ohne Vertrag) brach nach dem Termin-Write ab.
+            await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
         if nacharbeit_nachholen:
             if hat_vorgang and termin_nachher.get("kaufvorgang_id"):
                 await db.kaufvorgaenge.update_one(
                     {"id": termin_nachher["kaufvorgang_id"], "dealer_id": user["dealer_id"]},
                     {"$set": {"appointment_id": appt_id}})
-            await db.appointments.update_one({"id": appt_id},
-                                             {"$unset": {"nacharbeit_offen": ""}})
+            await db.appointments.update_one(
+                {"id": appt_id},
+                {"$unset": {"nacharbeit_offen": "", "nacharbeit_protokoll_id": ""}})
     if status_neu in ABGESCHLOSSEN and status_neu != "abgeholt":
         # Runde 17 (Nr. 11): Termin storniert/nicht abgeholt/erledigt — ein
         # angefangener Korrektur-Entwurf des Protokolls wird verworfen und

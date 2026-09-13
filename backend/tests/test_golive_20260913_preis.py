@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from test_golive_20260913_abschluss import (  # noqa: E402,F401
-    welt, _abholung, _doc, _fin, _m)
+    welt, _abholung, _claim_ablaufen, _doc, _fin, _m)
 
 
 def _ohne_zeit(d):
@@ -341,3 +341,216 @@ def test_p6_freigabe_gegen_schliessen(welt, monkeypatch):
     assert fr.value.status_code == 409
     p = _doc(w, "pickup_protocols", t.pid)
     assert p["status"] == "entwurf" and p.get("neuer_preis") is None, p
+
+
+# ============================================================ Nachbesserung P6
+# Go-Live 13.09.2026 (P6-Nachbesserung): Die alte Freigabe galt nach dem
+# Wiederoeffnen weiter, wenn der Termin NICHT per PUT geschlossen wurde (Fahrer
+# "nicht abgeholt") oder ein Abschluss-Claim im geschlossenen Termin ablief.
+def _wird_abgeschlossen(w):
+    return _abholung(w, proto_status="wird_abgeschlossen",
+                     claim_bis="2099-01-01T00:00:00+00:00", claim_token="haengt")
+
+
+def _finalize_409(w, P, t):
+    with pytest.raises(HTTPException) as fin:
+        w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    assert fin.value.status_code == 409, fin.value.detail
+    assert _doc(w, "pickup_protocols", t.pid)["status"] != "final"
+    assert _doc(w, "kaufvorgaenge", t.ka)["status"] != "abgeholt"
+
+
+def test_p6n_fahrer_nicht_abgeholt_wiederoeffnen_nimmt_freigabe_zurueck(welt):
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    D = _m("routes.drivers")
+    t = _abholung(w)
+    w.run(D.driver_set_status(t.aid, D.DriverStatusIn(status="nicht abgeholt"), w.driver))
+    assert _doc(w, "appointments", t.aid)["status"] == "nicht abgeholt"
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(status="offen"), w.chef))
+    p = _doc(w, "pickup_protocols", t.pid)
+    assert p["status"] == "entwurf" and p.get("rueckfrage") and p["freigabe_stand"] != "s1", p
+    _finalize_409(w, P, t)
+
+
+def test_p6n_claim_laeuft_nach_wiederoeffnen_ab(welt):
+    """Beim Schliessen laeuft der Abschluss noch (unberuehrt), sein Claim laeuft
+    erst NACH dem Wiederoeffnen ab: kein Abschluss mit dem alten Stand."""
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _wird_abgeschlossen(w)
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(status="storniert"), w.chef))
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(status="offen"), w.chef))
+    p = _doc(w, "pickup_protocols", t.pid)
+    assert p["status"] == "wird_abgeschlossen" and p["claim_token"] == "haengt", p
+    w.run(_claim_ablaufen(w, t.pid))
+    _finalize_409(w, P, t)
+    p = _doc(w, "pickup_protocols", t.pid)
+    assert p["status"] == "entwurf" and p.get("rueckfrage") and p["freigabe_stand"] != "s1", p
+    assert "claim_token" not in p and P.TERMIN_GESCHLOSSEN_MERKER not in p, p
+    liste = w.run(P.protokolle_zur_freigabe(w.chef))
+    assert t.pid not in [e.get("protocol_id") for e in liste]
+
+
+def test_p6n_claim_lief_im_geschlossenen_termin_ab(welt):
+    """Der Claim laeuft ab, waehrend der Termin geschlossen ist (Zaehler des
+    Chefs gibt frei), danach wird wiedergeoeffnet."""
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _wird_abgeschlossen(w)
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(status="storniert"), w.chef))
+    w.run(_claim_ablaufen(w, t.pid))
+    w.run(P._abgelaufene_claims_freigeben({"dealer_id": w.dealer_id}))
+    assert _doc(w, "pickup_protocols", t.pid)["status"] == "entwurf"
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(status="offen"), w.chef))
+    _finalize_409(w, P, t)
+
+
+def test_p6n_rollback_nach_schliessen_nimmt_freigabe_zurueck(welt):
+    """Der Termin wird waehrend des Abschlusses geschlossen, danach scheitert
+    das PDF-Speichern (Rollback): nicht zurueck auf freigegeben."""
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    SS = _m("storage_service")
+    t = _abholung(w)
+
+    async def hook(key):
+        await A.update_appointment(t.aid, A.AppointmentIn(status="storniert"), w.chef)
+        raise SS.StorageError("Speicher weg")
+    w.save_hook = hook
+    with pytest.raises(HTTPException):
+        w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    w.save_hook = None
+    p = _doc(w, "pickup_protocols", t.pid)
+    assert p["status"] == "entwurf" and p.get("rueckfrage") and "claim_token" not in p, p
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(status="offen"), w.chef))
+    _finalize_409(w, P, t)
+
+
+def test_p6n_gegenprobe_laufender_abschluss_nach_wiederoeffnen_schliesst_ab(welt):
+    """Der Merker blockiert keinen lebenden Abschluss: geschlossen und wieder
+    geoeffnet, waehrend unterschrieben wird -> Abschluss geht durch."""
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _abholung(w)
+
+    async def hook(key):
+        await A.update_appointment(t.aid, A.AppointmentIn(status="storniert"), w.chef)
+        await A.update_appointment(t.aid, A.AppointmentIn(status="offen"), w.chef)
+    w.save_hook = hook
+    fertig = w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    w.save_hook = None
+    assert fertig["ok"] is True and "hinweis" not in fertig, fertig
+    p = _doc(w, "pickup_protocols", t.pid)
+    assert p["status"] == "final" and P.TERMIN_GESCHLOSSEN_MERKER not in p, p
+    assert _doc(w, "appointments", t.aid)["status"] == "abgeholt"
+    kv = _doc(w, "kaufvorgaenge", t.ka)
+    assert kv["status"] == "abgeholt" and kv["purchase_price"] == 9000.0, kv
+
+
+# ============================================================ Nachbesserung P5
+# Go-Live 13.09.2026 (P5-Nachbesserung): Scheitert Preis- oder Statusuebernahme
+# nach dem Termin-Write und laedt der Fahrer neu (final, kein Knopf), holt der
+# naechste PUT des Termins beides nach (Merker nacharbeit_offen).
+def test_p5n_preis_scheitert_ohne_neuen_tipp_chef_speichern_holt_nach(welt, monkeypatch):
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _abholung(w)
+    _stirbt_einmal(monkeypatch, P, "_preis_uebernehmen")
+    with pytest.raises(RuntimeError):
+        w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    termin = _doc(w, "appointments", t.aid)
+    assert termin["status"] == "abgeholt" and termin.get("nacharbeit_offen") is True, termin
+    assert _doc(w, "kaufvorgaenge", t.ka)["purchase_price"] == 10000.0
+
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(notes="Rueckruf Verkaeufer"), w.chef))
+    kv = _doc(w, "kaufvorgaenge", t.ka)
+    assert kv["status"] == "abgeholt" and kv["purchase_price"] == 9000.0, kv
+    assert kv["preis_nachverhandelt"] is True and kv["preis_protokoll_id"] == t.pid
+    v = _doc(w, "vehicles", t.vid)
+    assert v.get("purchase_price") == 9000.0 and v.get("lifecycle") == "abgeholt", v
+    termin = _doc(w, "appointments", t.aid)
+    assert "nacharbeit_offen" not in termin and "nacharbeit_protokoll_id" not in termin
+    assert _doc(w, "kaufvorgaenge", t.kb)["purchase_price"] == 20000.0
+
+
+def test_p5n_statusuebernahme_scheitert_chef_speichern_holt_nach(welt, monkeypatch):
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _abholung(w)
+    _stirbt_einmal(monkeypatch, _m("kaufvorgang"), "termin_status_uebernehmen")
+    with pytest.raises(RuntimeError):
+        w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    assert _doc(w, "kaufvorgaenge", t.ka)["status"] == "abholung_geplant"
+    assert _doc(w, "appointments", t.aid).get("nacharbeit_offen") is True
+
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(notes="x"), w.chef))
+    kv = _doc(w, "kaufvorgaenge", t.ka)
+    assert kv["status"] == "abgeholt" and kv["purchase_price"] == 9000.0, kv
+    assert _doc(w, "vehicles", t.vid).get("lifecycle") == "abgeholt"
+    assert "nacharbeit_offen" not in _doc(w, "appointments", t.aid)
+
+
+def test_p5n_merker_nach_erfolg_und_heilung_weg_anlage_merker_bleibt(welt, monkeypatch):
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _abholung(w, name="ok")
+    w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    assert "nacharbeit_offen" not in _doc(w, "appointments", t.aid)
+
+    t2 = _abholung(w, name="heil")
+    _stirbt_einmal(monkeypatch, P, "_preis_uebernehmen")
+    with pytest.raises(RuntimeError):
+        w.run(P.finalize_protocol(t2.aid, _fin(P), w.driver))
+    heil = w.run(P.finalize_protocol(t2.aid, _fin(P), w.driver))
+    assert heil.get("nachgezogen") is True, heil
+    termin = _doc(w, "appointments", t2.aid)
+    assert "nacharbeit_offen" not in termin and "nacharbeit_protokoll_id" not in termin, termin
+    assert _doc(w, "kaufvorgaenge", t2.ka)["purchase_price"] == 9000.0
+
+    # Gegenprobe: ein Merker der Terminanlage (Audit #5) raeumt nur der PUT ab.
+    t3 = _abholung(w, name="anlage")
+    w.run(w.db.appointments.update_one({"id": t3.aid}, {"$set": {"nacharbeit_offen": True}}))
+    w.run(P.finalize_protocol(t3.aid, _fin(P), w.driver))
+    assert _doc(w, "appointments", t3.aid).get("nacharbeit_offen") is True
+    w.run(A.update_appointment(t3.aid, A.AppointmentIn(notes="x"), w.chef))
+    assert "nacharbeit_offen" not in _doc(w, "appointments", t3.aid)
+
+
+def test_p5n_gegenprobe_umgehaengter_termin_preis_nicht_in_anderen_vorgang(welt, monkeypatch):
+    """Haengt der Chef den abgeholten Termin mit Merker an Vertrag B, darf der
+    Preis des Protokolls (Vertrag A) nicht in Vorgang B landen."""
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _abholung(w)
+    _stirbt_einmal(monkeypatch, P, "_preis_uebernehmen")
+    with pytest.raises(RuntimeError):
+        w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(contract_id=t.cb), w.chef))
+    kb = _doc(w, "kaufvorgaenge", t.kb)
+    assert kb["purchase_price"] == 20000.0 and "preis_protokoll_id" not in kb, kb
+    assert "nacharbeit_offen" not in _doc(w, "appointments", t.aid)
+
+
+def test_p5n_ohne_vorgang_fahrzeug_abgeholt_nach_speichern(welt, monkeypatch):
+    w = welt
+    P = _m("routes.protocols")
+    A = _m("routes.appointments")
+    t = _abholung(w, mit_vertrag=False)
+    _stirbt_einmal(monkeypatch, P, "try_set_lifecycle")
+    with pytest.raises(RuntimeError):
+        w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
+    assert _doc(w, "vehicles", t.vid)["lifecycle"] == "abholung_geplant"
+    assert _doc(w, "appointments", t.aid).get("nacharbeit_offen") is True
+    w.run(A.update_appointment(t.aid, A.AppointmentIn(notes="x"), w.chef))
+    assert _doc(w, "vehicles", t.vid)["lifecycle"] == "abgeholt"
+    assert "nacharbeit_offen" not in _doc(w, "appointments", t.aid)
