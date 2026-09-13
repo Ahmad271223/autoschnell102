@@ -48,7 +48,7 @@ PW = "AuditMarkt13!xY"
 MODULE = ("deps", "indizes", "routes.bestand", "routes.marketplace",
           "routes.resale", "routes.team", "kaufvorgang",
           # Kontonummer (13.09.2026): Import im Fixture VOR der Test-Schleife
-          "routes.admin")
+          "routes.admin", "kontenanlage")
 
 
 def _jetzt(**delta):
@@ -145,7 +145,11 @@ class _Welt:
     async def login_konten(self, n):
         """Kaeuferkonten mit Kontonummer (13.09.2026) — Anmeldung nur per Nummer.
         Zufallsnummern im oberen Bereich der Reihe (keine Kollision mit der
-        gemeinsamen Test-DB)."""
+        gemeinsamen Test-DB). Bewusst OHNE kontonummer_basis: die Anmeldung
+        sucht nur `kontonummer`, die Selbstheilung der Reihe
+        (kontenanlage._hoechste_vergebene) liest aber kontonummer_basis — sonst
+        zoege ein abgebrochener Lauf oder eine parallele Anlage auf derselben
+        DB den Zaehler dauerhaft auf ~8*10^8."""
         from auth import hash_password_async
         h = await hash_password_async(PW)
         nummern = []
@@ -154,7 +158,6 @@ class _Welt:
             nr = 800000000 + uuid.uuid4().int % 100000000
             await self.db.users.insert_one({"id": uid, "email": f"{uid}@{MAIL}",
                                             "role": "b2b_buyer", "kontonummer": str(nr),
-                                            "kontonummer_basis": nr,
                                             "active": True, "dealer_id": None,
                                             "password_hash": h, "created_at": _jetzt()})
             self.user_ids.append(uid)
@@ -633,6 +636,27 @@ def test_26_erfolgreicher_kaeufer_login_leert_den_zaehler(welt, monkeypatch):
     assert codes == [401] * 9 + [200]
     assert rest is None, "Zaehler des Kontos nach Erfolg nicht geleert"
     assert danach == [200] * 10
+
+
+def test_25_26_login_konten_heben_die_nummernreihe_nicht(welt):
+    """Kontonummer (13.09.2026): die Hilfskonten fuer Nr. 25/26 duerfen die
+    Selbstheilung der Nummernreihe nicht erreichen — auch nicht, solange sie
+    (vor dem Aufraeumen) noch in der gemeinsamen Test-DB liegen."""
+    K = _mod("kontenanlage")
+
+    async def lauf():
+        vorher = await K._hoechste_vergebene(welt.db)
+        nummern = await welt.login_konten(2)
+        nachher = await K._hoechste_vergebene(welt.db)
+        docs = await welt.db.users.find({"kontonummer": {"$in": nummern}},
+                                        {"_id": 0}).to_list(10)
+        return vorher, nachher, docs
+
+    vorher, nachher, docs = welt.run(lauf())
+    assert len(docs) == 2
+    assert all("kontonummer_basis" not in d for d in docs)
+    assert nachher < 800000000, "Hilfskonten ziehen die Nummernreihe hoch"
+    assert vorher < 800000000
 
 
 def test_25_26_quelltext_wie_auth_login():
