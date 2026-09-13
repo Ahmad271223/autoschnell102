@@ -1338,6 +1338,9 @@ async def _interessen_laden(filt: Dict[str, Any], response: Response,
         # nur per Kopfzeile melden, nicht ins Protokoll.
         abgeschnitten = (len(laufend) > ANFRAGEN_MAX
                          or len(erledigt) > ERLEDIGTE_ANFRAGEN_MAX)
+        # Nachbesserung (#20): X-Truncated ist hier fast immer 1 (erledigte);
+        # ob LAUFENDE fehlen, meldet eine eigene Kopfzeile.
+        response.headers["X-Truncated-Laufend"] = "1" if len(laufend) > ANFRAGEN_MAX else "0"
         items = laufend[:ANFRAGEN_MAX] + erledigt[:ERLEDIGTE_ANFRAGEN_MAX]
         items.sort(key=lambda i: i.get("created_at") or "", reverse=True)
     response.headers["X-Truncated"] = "1" if abgeschnitten else "0"

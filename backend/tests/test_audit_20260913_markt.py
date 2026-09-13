@@ -15,6 +15,8 @@ Einladungen, Netzwerk).
   25  Kaeufer-Login zaehlt je Konto (nicht je IP)
   26  erfolgreicher Kaeufer-Login leert den Zaehler
   27  hoechstens EINE offene Zugangsanfrage je Kaeufer
+  18/19/27 Nachbesserung: /admin/betrieb/nachholen holt die drei Indizes ohne
+      Neustart nach, /admin/betrieb zeigt je ein *_index_aktiv
   56  Audit-Fehler kippt die Kaeufer-Registrierung nicht
   57  Audit-Fehler kippt Einladung erstellen/loeschen nicht
   58  Netzwerk-Widerruf ist nach einem Teilfehler wiederholbar
@@ -311,7 +313,10 @@ def test_18_favorit_doppelklick_ergibt_einen_eintrag(welt, monkeypatch):
         await db.buyer_favorites.insert_many([
             {"id": str(uuid.uuid4()), "buyer_user_id": k["id"], "listing_id": alt,
              "dealer_id": welt.did, "created_at": _jetzt(minutes=-i)} for i in range(3)])
-        steht = await I._favoriten_unique_index()
+        # optional: auf der alten Fassung fehlt der Helfer, dann soll der
+        # Doppelklick selbst rot werden (nicht ein AttributeError)
+        helfer = getattr(I, "_favoriten_unique_index", None)
+        steht = await helfer() if helfer else None
         nach_bereinigung = await db.buyer_favorites.count_documents(
             {"buyer_user_id": k["id"], "listing_id": alt})
         erg = await asyncio.gather(M.toggle_favorit(lid, user=k), M.toggle_favorit(lid, user=k))
@@ -321,9 +326,9 @@ def test_18_favorit_doppelklick_ergibt_einen_eintrag(welt, monkeypatch):
         return steht, nach_bereinigung, erg, n1, weg, n0
 
     steht, nach_bereinigung, erg, n1, weg, n0 = welt.run(lauf())
-    assert steht is True and nach_bereinigung == 1
     assert erg == [{"favorit": True}, {"favorit": True}] and n1 == 1
     assert weg == {"favorit": False} and n0 == 0
+    assert steht is True and nach_bereinigung == 1
     assert "_zugang_erzwingen(user)" in inspect.getsource(M.toggle_favorit)
     assert "_favoriten_unique_index()" in (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
 
@@ -343,7 +348,8 @@ def test_19_hoechstens_eine_laufende_anfrage_je_kaeufer_und_inserat(welt, monkey
              "buyer_user_id": k["id"], "status": st, "history": [],
              "created_at": _jetzt(hours=-5 + i), "updated_at": _jetzt(hours=-5 + i)}
             for i, st in enumerate(("offen", "gegenangebot"))])
-        steht = await I._interesse_unique_index()
+        helfer = getattr(I, "_interesse_unique_index", None)
+        steht = await helfer() if helfer else None
         alt_stati = {d["id"]: d["status"] async for d in db.listing_interest.find({"listing_id": alt})}
 
         lid = await welt.inserat()
@@ -358,11 +364,11 @@ def test_19_hoechstens_eine_laufende_anfrage_je_kaeufer_und_inserat(welt, monkey
         return steht, alt_stati, zweite, n, dritte
 
     steht, alt_stati, zweite, n, dritte = welt.run(lauf())
+    assert zweite == 409 and n == 1
+    assert dritte == 200
     assert steht is True
     assert alt_stati == {f"alt0_{welt.s}": "abgelehnt", f"alt1_{welt.s}": "gegenangebot"}, \
         "die zuletzt bewegte Verhandlung bleibt, die Dublette wird geschlossen"
-    assert zweite == 409 and n == 1
-    assert dritte == 200
 
     # Rennen: beide bestehen die Vorabpruefung, der Index faengt die zweite
     async def langsam(user, listing):
@@ -407,11 +413,13 @@ def test_20_haendler_anfragen_laufende_nicht_verdraengt(welt):
         r2 = Response()
         abgelehnt = await M.dealer_list_interests(r2, status="abgelehnt", listing_id=None,
                                                   user=welt.chef)
-        return alle, r.headers.get("X-Truncated"), abgelehnt, r2.headers.get("X-Truncated")
+        return (alle, r.headers.get("X-Truncated"), abgelehnt, r2.headers.get("X-Truncated"),
+                r.headers.get("X-Truncated-Laufend"))
 
-    alle, kopf, abgelehnt, kopf2 = welt.run(lauf())
+    alle, kopf, abgelehnt, kopf2, kopf_laufend = welt.run(lauf())
     assert offen_id in {i["id"] for i in alle}, "laufende Anfrage fehlt in 'Alle'"
     assert len(alle) == 201 and kopf == "1", "erledigte ueber 200 werden als Abschnitt gemeldet"
+    assert kopf_laufend == "0", "laufende sind vollstaendig — eigene Kopfzeile (Nachbesserung)"
     assert [i["created_at"] for i in alle] == sorted((i["created_at"] for i in alle), reverse=True)
     assert len(abgelehnt) == 205 and kopf2 == "0"
 
@@ -638,7 +646,8 @@ def test_27_hoechstens_eine_offene_zugangsanfrage(welt):
         await db.plan_requests.insert_many([
             {"id": f"pr{i}_{welt.s}", "type": "buyer_access", "buyer_user_id": k2,
              "status": "offen", "created_at": _jetzt(minutes=-10 + i)} for i in range(2)])
-        steht = await I._buyer_access_unique_index()
+        helfer = getattr(I, "_buyer_access_unique_index", None)
+        steht = await helfer() if helfer else None
         k2_stati = {d["id"]: d["status"] async for d in db.plan_requests.find({"buyer_user_id": k2})}
         r1 = await M.request_marketplace_access(user=k)
         r2 = await M.request_marketplace_access(user=k)
@@ -653,12 +662,74 @@ def test_27_hoechstens_eine_offene_zugangsanfrage(welt):
         return steht, k2_stati, r1, r2, offen, logs, offen3
 
     steht, k2_stati, r1, r2, offen, logs, offen3 = welt.run(lauf())
-    assert steht is True
-    assert k2_stati == {f"pr0_{welt.s}": "offen", f"pr1_{welt.s}": "erledigt"}, "aelteste bleibt offen"
     assert r1["request_id"] == r2["request_id"]
     assert offen == 1 and logs == 1
     assert offen3 == 1
+    assert steht is True
+    assert k2_stati == {f"pr0_{welt.s}": "offen", f"pr1_{welt.s}": "erledigt"}, "aelteste bleibt offen"
     assert "_buyer_access_unique_index()" in (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
+
+
+# ============================================================ Nachbesserung #18/#19/#27
+def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(welt, monkeypatch):
+    """Rollout: die alte Fassung schrieb zwischen Bereinigung und create_index
+    eine Dublette, der Index fehlt. POST /admin/betrieb/nachholen muss ihn
+    ohne Neustart nachholen, GET /admin/betrieb den Zustand zeigen."""
+    A, I, P = _mod("routes.admin"), _mod("indizes"), _mod("routes.payments")
+    import betrieb as B
+    db = welt.db
+    k = welt.k["id"]
+    monkeypatch.setattr(A, "db", db)
+
+    async def null(*a, **kw):
+        return 0
+
+    async def wahr(*a, **kw):
+        return True
+    monkeypatch.setattr(A, "abo_vorgaenge_nachholen", null)
+    monkeypatch.setattr(P, "zahlungen_abgleichen", null)
+    monkeypatch.setattr(I, "_termin_unique_index", wahr)
+    monkeypatch.setattr(I, "_unique_index_sicher", wahr)
+    faelle = [(db.buyer_favorites, "favorit_je_kaeufer_inserat", "favoriten"),
+              (db.listing_interest, "interesse_offen_je_kaeufer", "interesse"),
+              (db.plan_requests, "uniq_offene_buyer_access_anfrage", "zugangsanfrage")]
+
+    async def lauf():
+        lid = await welt.inserat()
+        for coll, name, _ in faelle:
+            await _vor_dem_index(coll, name)
+            await B.alarm(db, "unique_index_fehlt", ref=f"{coll.name}.{name}")
+        await db.buyer_favorites.insert_many([
+            {"id": str(uuid.uuid4()), "buyer_user_id": k, "listing_id": lid,
+             "dealer_id": welt.did, "created_at": _jetzt(minutes=-i)} for i in range(2)])
+        await db.listing_interest.insert_many([
+            {"id": f"nh{i}_{welt.s}", "listing_id": lid, "dealer_id": welt.did,
+             "buyer_user_id": k, "status": "offen", "history": [],
+             "created_at": _jetzt(minutes=-i), "updated_at": _jetzt(minutes=-i)} for i in range(2)])
+        await db.plan_requests.insert_many([
+            {"id": f"nhpr{i}_{welt.s}", "type": "buyer_access", "buyer_user_id": k,
+             "status": "offen", "created_at": _jetzt(minutes=-i)} for i in range(2)])
+        vorher = await A.admin_betrieb(admin={})
+        erg = await A.admin_betrieb_nachholen(admin={})
+        nachher = await A.admin_betrieb(admin={})
+        offen = {
+            "fav": await db.buyer_favorites.count_documents({"buyer_user_id": k, "listing_id": lid}),
+            "int": await db.listing_interest.count_documents(
+                {"buyer_user_id": k, "listing_id": lid, "status": "offen"}),
+            "pr": await db.plan_requests.count_documents(
+                {"type": "buyer_access", "buyer_user_id": k, "status": "offen"})}
+        alarme = await db.betriebsalarme.count_documents(
+            {"typ": "unique_index_fehlt", "offen": True,
+             "ref": {"$in": [f"{c.name}.{n}" for c, n, _ in faelle]}})
+        return vorher, erg, nachher, offen, alarme
+
+    vorher, erg, nachher, offen, alarme = welt.run(lauf())
+    for _, _, kurz in faelle:
+        assert vorher[f"{kurz}_index_aktiv"] is False
+        assert erg[f"{kurz}_index"] is True, f"{kurz}: nachholen legt den Index nicht an"
+        assert nachher[f"{kurz}_index_aktiv"] is True
+    assert offen == {"fav": 1, "int": 1, "pr": 1}, "Dubletten beim Nachholen bereinigt"
+    assert alarme == 0, "Alarm unique_index_fehlt bleibt nach dem Nachholen offen"
 
 
 # ============================================================ Nr. 56

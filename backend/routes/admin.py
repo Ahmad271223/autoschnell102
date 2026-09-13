@@ -2063,6 +2063,14 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "fahrzeug_index_aktiv": any(
             i.get("unique") and i.get("key") == [("dealer_id", 1), ("id", 1)]
             for i in (await db.vehicles.index_information()).values()),
+        # Audit 13.09.2026 Nachbesserung (#18): Backstops Merkliste,
+        # laufende Kaufanfrage, offene Marktplatz-Zugangsanfrage
+        "favoriten_index_aktiv": "favorit_je_kaeufer_inserat"
+            in await db.buyer_favorites.index_information(),
+        "interesse_index_aktiv": "interesse_offen_je_kaeufer"
+            in await db.listing_interest.index_information(),
+        "zugangsanfrage_index_aktiv": "uniq_offene_buyer_access_anfrage"
+            in await db.plan_requests.index_information(),
     }
 
 
@@ -2080,12 +2088,19 @@ async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
     from routes.payments import zahlungen_abgleichen
     # Runde 17: fehlende Unique-Indizes (Altdubletten beim Start) ohne
     # Neustart nachholen, sobald die Daten bereinigt sind.
-    from indizes import _termin_unique_index, _unique_index_sicher
+    from indizes import (_termin_unique_index, _unique_index_sicher, _favoriten_unique_index,
+                         _interesse_unique_index, _buyer_access_unique_index)
     return {"abo_vorgaenge": await abo_vorgaenge_nachholen(),
             "zahlungen": await zahlungen_abgleichen(db),
             "termin_index": await _termin_unique_index(),
             "fahrzeug_index": await _unique_index_sicher(
-                db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False)}
+                db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False),
+            # Audit 13.09.2026 Nachbesserung (#18): Indizes mit automatischer
+            # Dublettenbereinigung — schrieb die alte Fassung beim Rollout
+            # dazwischen, fehlten sie sonst bis zum naechsten Neustart.
+            "favoriten_index": await _favoriten_unique_index(),
+            "interesse_index": await _interesse_unique_index(),
+            "zugangsanfrage_index": await _buyer_access_unique_index()}
 
 
 # ---------- Zwei-Faktor-Anmeldung (Admin / Super-Admin) ----------
