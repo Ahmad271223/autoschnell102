@@ -26,6 +26,7 @@ Statuswerte: queued | processing | completed | failed
 import asyncio
 import os
 import uuid
+import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -39,6 +40,14 @@ from deps import log
 JOB_CONCURRENCY = int(os.environ.get("LINK_JOB_CONCURRENCY", "4"))
 # Nach so vielen Sekunden gilt ein 'processing'-Job als verwaist.
 PROCESSING_TTL_SECONDS = int(os.environ.get("LINK_JOB_PROCESSING_TTL", "240"))
+# Audit 13.09.2026 (#32): Solange ein Job WIRKLICH laeuft, verlaengert ein
+# Herzschlag seine Frist — vorher stellte _requeue_stale jeden Abruf ueber
+# 240 s zurueck, obwohl der erste Task noch arbeitete. max(1, ...): bei
+# kleiner TTL wuerde sonst ohne Pause geschrieben.
+HERZSCHLAG_SEKUNDEN = max(1, PROCESSING_TTL_SECONDS // 3)
+# Ein wirklich haengender Abruf soll nicht ewig 'processing' bleiben: nach
+# dieser Laufzeit endet der Herzschlag, die Selbstheilung greift wieder.
+HERZSCHLAG_MAX_SEKUNDEN = int(os.environ.get("LINK_JOB_HERZSCHLAG_MAX", "900") or 900)
 # Maximale Wiederanlaeufe, bevor ein Job endgueltig failed wird.
 MAX_ATTEMPTS = int(os.environ.get("LINK_JOB_MAX_ATTEMPTS", "3"))
 # Fertige/gescheiterte Jobs verschwinden nach dieser Zeit automatisch.
@@ -50,6 +59,10 @@ FINISHED_TTL_SECONDS = int(os.environ.get("LINK_JOB_FINISHED_TTL", "3600"))
 # und je Firma, und der Worker bedient die Konten reihum.
 MAX_OFFEN_JE_KONTO = int(os.environ.get("LINK_JOB_MAX_OFFEN_JE_KONTO", "20") or 20)
 MAX_OFFEN_JE_FIRMA = int(os.environ.get("LINK_JOB_MAX_OFFEN_JE_FIRMA", "100") or 100)
+# Audit 13.09.2026 (#29): Wie viele Konten (mit dem aeltesten Warten) die
+# Reihum-Auswahl betrachtet. Vorher fest 50 — bei mehr gleichzeitig
+# wartenden Konten wurde ein Konto ohne laufende Jobs nicht vorgezogen.
+KANDIDATEN_FENSTER = int(os.environ.get("LINK_JOB_KANDIDATEN", "200") or 200)
 
 
 class WarteschlangeVoll(Exception):
@@ -67,6 +80,40 @@ _WORKER = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_letzter_eingang = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _eingangszeit() -> datetime:
+    """created_at eines neuen Jobs — je Prozess streng steigend, auf volle
+    Millisekunden (so speichert Mongo). Audit 13.09.2026 (#28): Die
+    Rang-Pruefung ordnet nach created_at; bei gleichen Millisekunden
+    entschied sonst die zufaellige Job-ID statt der Eingangsreihenfolge."""
+    global _letzter_eingang
+    t = _now()
+    t = t.replace(microsecond=t.microsecond // 1000 * 1000)
+    if t <= _letzter_eingang:
+        t = _letzter_eingang + timedelta(milliseconds=1)
+    _letzter_eingang = t
+    return t
+
+
+# Audit 13.09.2026 (#28): Eingangszeit vergeben und Einfuegen laufen je
+# Prozess nacheinander. Motor fuehrt Schreibzugriffe in einem Thread-Pool
+# aus; ohne Sperre konnte ein juengerer Job sichtbar werden und seinen Rang
+# zaehlen, bevor ein aelterer eingefuegt war (Grenze +1). Die Sperre haelt
+# nur das eine insert_one — Einreichen ist selten, der Durchsatz reicht.
+# Je Event-Loop eine Sperre: asyncio.Lock bindet sich an die erste Schleife.
+_einfuege_sperren: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _einfuege_sperre() -> asyncio.Lock:
+    schleife = asyncio.get_running_loop()
+    sperre = _einfuege_sperren.get(schleife)
+    if sperre is None:
+        sperre = _einfuege_sperren[schleife] = asyncio.Lock()
+    return sperre
 
 
 async def ensure_job_indexes(db) -> None:
@@ -118,18 +165,85 @@ async def _grenzen_pruefen(db, dealer_id: str, user_id: str) -> None:
         offen = await db.link_jobs.count_documents(
             {"status": {"$in": list(OFFEN)}, "user_ids": user_id})
         if offen >= MAX_OFFEN_JE_KONTO:
-            raise WarteschlangeVoll(
-                f"Du hast {offen} Links in der Warteschlange (Grenze {MAX_OFFEN_JE_KONTO}). "
-                "Bitte warte, bis die ersten fertig sind.",
-                offen, MAX_OFFEN_JE_KONTO)
+            raise _voll_konto(offen)
     if dealer_id and MAX_OFFEN_JE_FIRMA > 0:
         offen = await db.link_jobs.count_documents(
             {"status": {"$in": list(OFFEN)}, "dealer_ids": dealer_id})
         if offen >= MAX_OFFEN_JE_FIRMA:
-            raise WarteschlangeVoll(
-                f"Deine Firma hat {offen} Links in der Warteschlange (Grenze {MAX_OFFEN_JE_FIRMA}). "
-                "Bitte kurz warten.",
-                offen, MAX_OFFEN_JE_FIRMA)
+            raise _voll_firma(offen)
+
+
+def _voll_konto(offen: int) -> WarteschlangeVoll:
+    return WarteschlangeVoll(
+        f"Du hast {offen} Links in der Warteschlange (Grenze {MAX_OFFEN_JE_KONTO}). "
+        "Bitte warte, bis die ersten fertig sind.",
+        offen, MAX_OFFEN_JE_KONTO)
+
+
+def _voll_firma(offen: int) -> WarteschlangeVoll:
+    return WarteschlangeVoll(
+        f"Deine Firma hat {offen} Links in der Warteschlange (Grenze {MAX_OFFEN_JE_FIRMA}). "
+        "Bitte kurz warten.",
+        offen, MAX_OFFEN_JE_FIRMA)
+
+
+async def _rang_pruefen(db, job: dict, dealer_id: str, user_id: str) -> None:
+    """Nach dem Einfuegen: liegt der EIGENE Job ueber der Grenze? Dann den
+    noch unberuehrten Job zurueckrollen und WarteschlangeVoll werfen.
+
+    Audit 13.09.2026 (#28): count+insert ist nicht atomar — parallel
+    eingereichte Links rutschten ueber die Grenze (auch ueber beide
+    App-Server hinweg). Nur die Jobs VOR dem eigenen zaehlen (Rang), damit
+    ein neuerer Job nie einen aelteren verdraengt; die Gesamtzahl
+    nachzuzaehlen haette alle parallelen Anfragen abgelehnt. pymongo kuerzt
+    datetime beim Speichern und im Filter gleich auf Millisekunden, der
+    Gleichheitsvergleich passt also."""
+    vor_mir = {"$or": [{"created_at": {"$lt": job["created_at"]}},
+                       {"created_at": job["created_at"], "id": {"$lte": job["id"]}}]}
+    grund = None
+    if user_id and MAX_OFFEN_JE_KONTO > 0:
+        rang = await db.link_jobs.count_documents(
+            {"status": {"$in": list(OFFEN)}, "user_ids": user_id, **vor_mir})
+        if rang > MAX_OFFEN_JE_KONTO:
+            grund = _voll_konto(rang - 1)
+    if grund is None and dealer_id and MAX_OFFEN_JE_FIRMA > 0:
+        rang = await db.link_jobs.count_documents(
+            {"status": {"$in": list(OFFEN)}, "dealer_ids": dealer_id, **vor_mir})
+        if rang > MAX_OFFEN_JE_FIRMA:
+            grund = _voll_firma(rang - 1)
+    if grund is None:
+        return
+    # Nur zurueckrollen, solange niemand beigetreten ist und kein Worker
+    # den Job beansprucht hat — sonst behalten (minimale Ueberschreitung).
+    r = await db.link_jobs.delete_one({
+        "id": job["id"], "status": "queued",
+        "user_ids": [user_id] if user_id else [],
+        "dealer_ids": [dealer_id] if dealer_id else []})
+    if r.deleted_count == 1:
+        raise grund
+    log.warning("link_jobs: Job %s liegt ueber der Grenze, ist aber schon "
+                "beansprucht/geteilt — bleibt", job["id"])
+
+
+def _beitritt(dealer_id: str, user_id: str) -> dict:
+    """$addToSet-Teil, mit dem ein Konto/eine Firma einem Job beitritt."""
+    dazu = {}
+    if dealer_id:
+        dazu["dealer_ids"] = dealer_id
+    if user_id:
+        dazu["user_ids"] = user_id
+    return dazu
+
+
+async def _aktivem_job_beitreten(db, cache_key: str, dealer_id: str,
+                                 user_id: str) -> Optional[dict]:
+    aktiv = {"cache_key": cache_key, "active": True}
+    dazu = _beitritt(dealer_id, user_id)
+    if not dazu:
+        return await db.link_jobs.find_one(aktiv, {"_id": 0})
+    return await db.link_jobs.find_one_and_update(
+        aktiv, {"$addToSet": dazu}, projection={"_id": 0},
+        return_document=ReturnDocument.AFTER)
 
 
 async def enqueue_job(db, url: str, dealer_id: str = "",
@@ -138,6 +252,13 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
     Inserats zurueckgeben (idempotent, race-fest ueber den Unique-Index)."""
     from listing_identity import get_listing_identity
     identity = get_listing_identity(url)
+    # Audit 13.09.2026 (#31): Einem schon aktiven Job beizutreten kostet
+    # keinen Abruf — deshalb vor der Grenzpruefung. Vorher bekam ein Sucher
+    # am Limit 429, obwohl ein anderer denselben Link gerade holte.
+    bestehend = await _aktivem_job_beitreten(
+        db, identity["cache_key"], dealer_id, user_id)
+    if bestehend:
+        return bestehend
     await _grenzen_pruefen(db, dealer_id, user_id)
     job = {
         "id": str(uuid.uuid4()),
@@ -156,31 +277,27 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
         # Audit 09/2026 (Punkt 33): alle Firmen, die auf diesen Job warten —
         # nur sie duerfen den Status abfragen.
         "dealer_ids": [dealer_id] if dealer_id else [],
-        "created_at": _now(),
         "updated_at": _now(),
     }
     try:
-        await db.link_jobs.insert_one(dict(job))
-        job.pop("_id", None)
-        return job
+        async with _einfuege_sperre():
+            job["created_at"] = _eingangszeit()
+            await db.link_jobs.insert_one(dict(job))
     except DuplicateKeyError:
-        if dealer_id or user_id:
-            dazu = {}
-            if dealer_id:
-                dazu["dealer_ids"] = dealer_id
-            if user_id:
-                dazu["user_ids"] = user_id
-            await db.link_jobs.update_one(
-                {"cache_key": identity["cache_key"], "active": True},
-                {"$addToSet": dazu})
-        existing = await db.link_jobs.find_one(
-            {"cache_key": identity["cache_key"], "active": True}, {"_id": 0})
+        # Rennen zwischen Beitritt oben und Einfuegen: jetzt beitreten.
+        existing = await _aktivem_job_beitreten(
+            db, identity["cache_key"], dealer_id, user_id)
         if existing:
             return existing
         # Seltenes Rennen: der aktive Job wurde JETZT gerade fertig —
         # dann liegt das Ergebnis im Cache; ein frischer completed-Stub
         # reicht dem Aufrufer.
         return {**job, "status": "completed", "active": False}
+    job.pop("_id", None)
+    # Audit 13.09.2026 (#28): Rang-Pruefung NUR fuer den selbst eingefuegten
+    # Job — nie im Beitrittsweg; _grenzen_pruefen oben bleibt der Schnellweg.
+    await _rang_pruefen(db, job, dealer_id, user_id)
+    return job
 
 
 async def get_job(db, job_id: str) -> Optional[dict]:
@@ -238,9 +355,13 @@ async def _requeue_stale(db) -> None:
                                    "ausgefallen", "finished_at": _now(),
                           "updated_at": _now()}})
         else:
+            # Audit 13.09.2026 (#32): claim_id entfernen — beansprucht ein
+            # Server der alten Fassung (setzt keine claim_id) den Job neu,
+            # darf kein ueberholter Task mehr auf die alte Kennung passen.
             await db.link_jobs.update_one(
                 {"id": j["id"], "status": "processing"},
-                {"$set": {"status": "queued", "updated_at": _now()}})
+                {"$set": {"status": "queued", "updated_at": _now()},
+                 "$unset": {"claim_id": ""}})
 
 
 async def _beanspruchen(db, filter_zusatz: dict) -> Optional[dict]:
@@ -248,12 +369,40 @@ async def _beanspruchen(db, filter_zusatz: dict) -> Optional[dict]:
     return await db.link_jobs.find_one_and_update(
         {"status": "queued", "active": True, **filter_zusatz},
         {"$set": {"status": "processing", "worker": _WORKER,
+                  # Audit 13.09.2026 (#32): Kennung DIESES Claims — Herzschlag
+                  # und Rueckstellung beruehren nur den eigenen Claim.
+                  "claim_id": uuid.uuid4().hex,
                   "processing_until": _now() + timedelta(
                       seconds=PROCESSING_TTL_SECONDS),
                   "updated_at": _now()},
          "$inc": {"attempts": 1}},
         sort=[("created_at", 1)],
         return_document=ReturnDocument.AFTER)
+
+
+async def _frist_verlaengern(db, job_id: str, claim_id: str) -> None:
+    """Herzschlag eines laufenden Jobs (Audit 13.09.2026, #32): haelt
+    processing_until frisch, solange der eigene Claim gilt. Stirbt der
+    Worker, endet der Herzschlag und _requeue_stale heilt wie bisher.
+    Fehler werden geschluckt (wie listing_identity._extend_lease_forever),
+    sonst liefe die Frist nach einem kurzen DB-Schluckauf mitten im Abruf ab."""
+    beginn = _now()
+    while True:
+        try:
+            await asyncio.sleep(HERZSCHLAG_SEKUNDEN)
+            if (_now() - beginn).total_seconds() > HERZSCHLAG_MAX_SEKUNDEN:
+                log.warning("link_jobs: Job %s laeuft laenger als %s s — "
+                            "Frist wird nicht mehr verlaengert", job_id,
+                            HERZSCHLAG_MAX_SEKUNDEN)
+                return
+            await db.link_jobs.update_one(
+                {"id": job_id, "status": "processing", "claim_id": claim_id},
+                {"$set": {"processing_until": _now() + timedelta(
+                    seconds=PROCESSING_TTL_SECONDS), "updated_at": _now()}})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            continue
 
 
 async def _claim_one(db) -> Optional[dict]:
@@ -263,22 +412,31 @@ async def _claim_one(db) -> Optional[dict]:
     dahinter. Jetzt wird je Konto der aelteste wartende Job betrachtet;
     zuerst kommt das Konto, das gerade am wenigsten in Arbeit hat, dann
     das mit dem laengsten Warten."""
+    # Audit 13.09.2026 (#30): ein geteilter Link gehoert ALLEN wartenden
+    # Konten (user_ids) — sonst erbte Sucher B die Warteposition von A, der
+    # den Link zuerst eingereicht hatte. Altjobs ohne user_ids fallen auf
+    # requested_by_user zurueck. Steht derselbe Job in mehreren Gruppen,
+    # trifft der zweite Beanspruchen-Versuch nichts und die Schleife geht weiter.
+    je_konto = [{"$unwind": {"path": "$user_ids", "preserveNullAndEmptyArrays": True}}]
+    konto = {"$ifNull": ["$user_ids", "$requested_by_user"]}
     laufend: dict = {}
     async for reihe in db.link_jobs.aggregate([
         {"$match": {"status": "processing"}},
-        {"$group": {"_id": "$requested_by_user", "n": {"$sum": 1}}},
+        *je_konto,
+        {"$group": {"_id": konto, "n": {"$sum": 1}}},
     ]):
         laufend[reihe["_id"] or ""] = reihe["n"]
     kandidaten = [reihe async for reihe in db.link_jobs.aggregate([
         {"$match": {"status": "queued", "active": True}},
+        *je_konto,
         {"$sort": {"created_at": 1}},
-        {"$group": {"_id": "$requested_by_user",
+        {"$group": {"_id": konto,
                     "job_id": {"$first": "$id"},
                     "created_at": {"$first": "$created_at"}}},
         # Aeltestes Warten zuerst betrachten: so rutscht kein Konto
         # dauerhaft aus der Auswahl, auch wenn sehr viele warten.
         {"$sort": {"created_at": 1}},
-        {"$limit": 50},
+        {"$limit": KANDIDATEN_FENSTER},
     ])]
     if not kandidaten:
         return None
@@ -317,42 +475,58 @@ async def _process(db, job: dict) -> None:
         return await fetch_listing(db, src, iid, url,
                                    dealer_id=job.get("requested_by_dealer", ""))
 
+    # Audit 13.09.2026 (#32): Herzschlag fuer die Job-Frist, und die
+    # Rueckstellung trifft nur den EIGENEN Claim — ein ueberholter Task
+    # ueberschrieb vorher den Claim seines Nachfolgers mit 'queued'.
+    # Claims ohne claim_id (alte Fassung beim Rollout): Verhalten wie bisher.
+    claim_id = job.get("claim_id")
+    eigener_claim = {"id": job["id"], "status": "processing"}
+    herz = None
+    if claim_id:
+        eigener_claim["claim_id"] = claim_id
+        herz = asyncio.create_task(_frist_verlaengern(db, job["id"], claim_id))
     try:
-        await get_or_fetch_listing(db, job["url"], _fetcher,
-                                   ttl_hours=LISTING_CACHE_TTL_HOURS)
-    except ListingBusy:
-        # Anbieter gerade voll ausgelastet — zurueck in die Schlange,
-        # zaehlt nicht als Fehlversuch.
-        await db.link_jobs.update_one(
-            {"id": job["id"], "status": "processing"},
-            {"$set": {"status": "queued", "updated_at": _now()},
-             "$inc": {"attempts": -1}})
-        return
-    except ListingGone as exc:
-        await db.link_jobs.update_one(
-            {"id": job["id"]},
-            {"$set": {"status": "failed", "active": False,
-                      "error": str(exc), "finished_at": _now(),
-                      "updated_at": _now()}})
-        return
-    except Exception as exc:  # noqa: BLE001
-        endgueltig = job.get("attempts", 1) >= MAX_ATTEMPTS
-        if endgueltig:
+        try:
+            await get_or_fetch_listing(db, job["url"], _fetcher,
+                                       ttl_hours=LISTING_CACHE_TTL_HOURS)
+        except ListingBusy:
+            # Anbieter gerade voll ausgelastet — zurueck in die Schlange,
+            # zaehlt nicht als Fehlversuch.
+            await db.link_jobs.update_one(
+                eigener_claim,
+                {"$set": {"status": "queued", "updated_at": _now()},
+                 "$unset": {"claim_id": ""},
+                 "$inc": {"attempts": -1}})
+            return
+        except ListingGone as exc:
             await db.link_jobs.update_one(
                 {"id": job["id"]},
                 {"$set": {"status": "failed", "active": False,
-                          "error": str(exc)[:300], "finished_at": _now(),
+                          "error": str(exc), "finished_at": _now(),
                           "updated_at": _now()}})
-        else:
-            await db.link_jobs.update_one(
-                {"id": job["id"], "status": "processing"},
-                {"$set": {"status": "queued",
-                          "error": str(exc)[:300], "updated_at": _now()}})
-        return
-    await db.link_jobs.update_one(
-        {"id": job["id"]},
-        {"$set": {"status": "completed", "active": False, "error": None,
-                  "finished_at": _now(), "updated_at": _now()}})
+            return
+        except Exception as exc:  # noqa: BLE001
+            endgueltig = job.get("attempts", 1) >= MAX_ATTEMPTS
+            if endgueltig:
+                await db.link_jobs.update_one(
+                    {"id": job["id"]},
+                    {"$set": {"status": "failed", "active": False,
+                              "error": str(exc)[:300], "finished_at": _now(),
+                              "updated_at": _now()}})
+            else:
+                await db.link_jobs.update_one(
+                    eigener_claim,
+                    {"$set": {"status": "queued",
+                              "error": str(exc)[:300], "updated_at": _now()},
+                     "$unset": {"claim_id": ""}})
+            return
+        await db.link_jobs.update_one(
+            {"id": job["id"]},
+            {"$set": {"status": "completed", "active": False, "error": None,
+                      "finished_at": _now(), "updated_at": _now()}})
+    finally:
+        if herz is not None:
+            herz.cancel()
 
 
 async def run_job_worker_forever(db) -> None:
