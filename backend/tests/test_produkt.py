@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -30,7 +31,7 @@ def _db():
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -64,7 +65,7 @@ def test_00_aufbau(welt):
         "created_at": "2026-01-01T00:00:00+00:00"})
     welt["A"] = _login(mail)
     # Haendler
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"pk_chef_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Produkt Autohaus", "contact_person": "P Chef",
         "phone": "0511 7"}, timeout=30)
@@ -80,7 +81,7 @@ def test_00_aufbau(welt):
                      json={"public": True, "description": "Produkt-Test"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     # Kaeufer mit aktivem Zugang
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "PK Kaeufer", "contact_name": "K P",
         "email": f"pk_kaeufer_{SUF}@e2etest-mail.de", "password": PW,
         "phone": "0511 8"}, timeout=30)
@@ -92,7 +93,7 @@ def test_00_aufbau(welt):
         "active": True, "plan": "monthly",
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}}})
     # Fahrer
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"pk_fahrer_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "PK Fahrer"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -156,14 +157,12 @@ def test_02_admin_sperrt_fahrer_und_beendet_sitzung(welt):
     r = requests.get(f"{API}/driver/me", headers=welt["D"], timeout=30)
     assert r.status_code == 401, f"gesperrter Fahrer noch aktiv: {r.status_code}"
     # Login gesperrt
-    r = requests.post(f"{API}/driver/login", json={
-        "email": f"pk_fahrer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
+    r = konten.login_per_mail(f"pk_fahrer_{SUF}@e2etest-mail.de", PW, "driver", timeout=30)
     assert r.status_code in (401, 403)
     # Entsperren + neu anmelden
     assert requests.post(f"{API}/admin/drivers/{welt['driver_id']}/active",
                          headers=welt["A"], json={"active": True}, timeout=30).status_code == 200
-    r = requests.post(f"{API}/driver/login", json={
-        "email": f"pk_fahrer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
+    r = konten.login_per_mail(f"pk_fahrer_{SUF}@e2etest-mail.de", PW, "driver", timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["D"] = {"Authorization": f"Bearer {r.json()['token']}"}
 
@@ -179,11 +178,9 @@ def test_03_admin_setzt_fahrer_passwort(welt):
     assert r.status_code == 200, r.text[:200]
     # Alte Sitzung beendet, altes Passwort ungueltig, neues funktioniert
     assert requests.get(f"{API}/driver/me", headers=welt["D"], timeout=30).status_code == 401
-    assert requests.post(f"{API}/driver/login", json={
-        "email": f"pk_fahrer_{SUF}@e2etest-mail.de", "password": PW},
+    assert konten.login_per_mail(f"pk_fahrer_{SUF}@e2etest-mail.de", PW, "driver",
         timeout=30).status_code in (401, 403)
-    r = requests.post(f"{API}/driver/login", json={
-        "email": f"pk_fahrer_{SUF}@e2etest-mail.de", "password": neu}, timeout=30)
+    r = konten.login_per_mail(f"pk_fahrer_{SUF}@e2etest-mail.de", neu, "driver", timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["D"] = {"Authorization": f"Bearer {r.json()['token']}"}
     # Nicht-Admin darf nicht
@@ -253,7 +250,7 @@ def test_07_gegenangebot_und_kaeufer_nimmt_an(welt):
     it = next(x for x in r.json() if x["id"] == welt["interest_a"])
     assert it["status"] == "gegenangebot" and it["counter_offer"] == 9500
     # Fremder Kaeufer darf nicht antworten (404 — nicht seine Anfrage)
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "PK Fremd", "contact_name": "F P",
         "email": f"pk_fremd_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
     fremd = {"Authorization": f"Bearer {r.json()['token']}"}

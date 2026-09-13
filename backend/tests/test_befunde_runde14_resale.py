@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 from fastapi import HTTPException
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -684,7 +685,7 @@ def _kopf(token):
 def firma():
     if not HTTP:
         pytest.skip(HTTP_GRUND)
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r14_resale_{SUF}@{MAIL}", "password": PW,
         "company_name": f"R14 Resale {SUF}", "contact_person": "Chef R", "phone": "0511 4"}, timeout=30)
     assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"

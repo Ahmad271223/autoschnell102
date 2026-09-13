@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -66,7 +67,7 @@ def _admin():
         "dealer_id": None, "is_super_admin": True,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, r.text[:200]
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -123,7 +124,7 @@ def welt():
 
 
 def test_00_aufbau(welt):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"kq_chef_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Kontingent Autohaus", "contact_person": "K Chef",
         "phone": "0511 5"}, timeout=30)

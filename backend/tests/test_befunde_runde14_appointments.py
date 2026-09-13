@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 from fastapi import HTTPException
 from pydantic import ValidationError
 
@@ -437,7 +438,7 @@ def firma():
     if not HTTP:
         pytest.skip(HTTP_GRUND)
     from auth import create_token
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r14appt_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "R14 Termine GmbH", "contact_person": "R T", "phone": "0511 14"},
         timeout=30)

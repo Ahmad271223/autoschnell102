@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -145,7 +146,7 @@ def welt():
     except requests.RequestException:
         pytest.skip("Backend nicht erreichbar")
     z = {}
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r19_chef_{SUF}@r19test-mail.de", "password": PW,
         "company_name": f"R19 Autohaus {SUF}", "contact_person": "R Chef", "phone": "0511 3"},
         timeout=30)

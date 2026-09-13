@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -117,7 +118,7 @@ def test_c5_funktion_sucher_liest_ohne_zu_schreiben_chef_fuellt_auf():
 #                          HTTP-Tests
 # =====================================================================
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return {"Authorization": f"Bearer {r.json()['token']}"}
 
@@ -135,7 +136,7 @@ def welt():
         "created_at": "2026-01-01T00:00:00+00:00"})
     A = _login(admin_mail)
 
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r13_chef_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Runde13 {SUF}", "contact_person": "R E", "phone": "0511 13"}, timeout=30)
     assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
@@ -143,7 +144,7 @@ def welt():
     chef = requests.get(f"{API}/auth/me", headers=C, timeout=30).json()["user"]
 
     sucher_mail = f"r13_sucher_{SUF}@{MAIL}"
-    r = requests.post(f"{API}/dealer/sucher", headers=C, json={
+    r = konten.sucher_als_chef_anlegen(headers=C, json={
         "email": sucher_mail, "password": PW,
         "first_name": "Su", "last_name": "Cher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]

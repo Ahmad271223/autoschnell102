@@ -764,7 +764,7 @@ def test_56_audit_fehler_kippt_registrierung_nicht(welt, monkeypatch):
                              password=PW, phone="0511", gewerblich_bestaetigt=True)
 
     async def lauf():
-        r = await M.buyer_register(body, _request(path="/api/buyer/register"))
+        r = await M.buyer_register(body, _request(path="/api/buyer/register"))  # ALTWEG – Schritt 5
         u = await welt.db.users.find_one({"email": mail})
         return r, u
 

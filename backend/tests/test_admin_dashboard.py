@@ -19,6 +19,8 @@ import time
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
+
 # REACT_APP_BACKEND_URL ist seit dem Proxy-Umbau bewusst LEER (relative
 # /api-Aufrufe). Fuer Tests brauchen wir eine absolute Adresse -> lokales
 # Backend, per TEST_BASE_URL ueberschreibbar.
@@ -34,12 +36,9 @@ LEGACY_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ci-only-admin-pw-1")
 
 # --------------------- helpers / fixtures ---------------------
 def _login(identifier: str, password: str):
-    r = requests.post(
-        f"{BASE_URL}/api/auth/login",
-        json={"email": identifier, "password": password},
-        timeout=30,
-    )
-    return r
+    # Kontonummer (13.09.2026): Benutzername bleibt Kennung, Konten mit
+    # Kontakt-E-Mail melden sich ueber ihre Kontonummer an (tests/konten.py).
+    return konten.login_per_mail(identifier, password, "auth", timeout=30)
 
 
 @pytest.fixture(scope="module")
@@ -70,8 +69,8 @@ def test_dealer():
     suffix = uuid.uuid4().hex[:8]
     email = f"test_admin_dash_{suffix}@example.com"
     pw = "InitialPass123"
-    r = requests.post(
-        f"{BASE_URL}/api/auth/register",
+    # Kontonummer (13.09.2026): Anlage durch den Super-Admin statt Selbstregistrierung
+    r = konten.registrieren(
         json={
             "email": email,
             "password": pw,

@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import production_check  # noqa: E402
@@ -269,7 +270,7 @@ def welt():
     """Firma mit Chef (Abo) und einem Fahrzeug im Bestand — genug fuer einen
     Inserats-Entwurf mit Foto-Upload."""
     dbx = _db()
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r13g2_chef_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Runde13g2 {SUF}", "contact_person": "R E", "phone": "0511 13"}, timeout=30)
     assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"

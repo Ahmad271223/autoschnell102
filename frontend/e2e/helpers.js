@@ -65,8 +65,12 @@ const post = (p, body, o) => api("POST", p, { ...o, body: body ?? {} }).then((r)
 const put = (p, body, o) => api("PUT", p, { ...o, body }).then((r) => r.data);
 const del = (p, o) => api("DELETE", p, o).then((r) => r.data);
 
-async function login(email, password) {
-  const d = await post("/auth/login", { email, password });
+// Kontonummer (13.09.2026): Anmeldung mit der Kontonummer (Chef '10023',
+// Sucher '10023-2', Kaeufer/Fahrer eigene Nummer) bzw. dem Benutzernamen des
+// Super-Admins. weg: "auth" (App), "buyer" (Marktplatz), "driver" (Fahrer-App).
+const LOGIN_WEG = { auth: "/auth/login", buyer: "/buyer/login", driver: "/driver/login" };
+async function login(kennung, password, weg = "auth") {
+  const d = await post(LOGIN_WEG[weg], { kontonummer: String(kennung), password });
   return d.token;
 }
 
@@ -115,13 +119,21 @@ function isoDate(offsetDays = 0) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+// Kontonummer (13.09.2026): Konten legt ausschliesslich der Super-Admin an; die
+// Antwort liefert die Kontonummer, mit der sich das Konto EINMAL anmeldet
+// (Single-Session). Die Kontakt-E-Mail bleibt — sweepLeftovers erkennt Reste
+// weiter am E2E_MAIL-Muster.
+
 /** Firma (Haendler-Hauptaccount) ohne Abo, angelegt vom Super-Admin. */
 async function createFirma({ s = suffix(), companyName } = {}) {
   const email = mail("e2e-chef", s);
   const company_name = companyName || `E2E Autohaus ${s}`;
   const r = await superPost("/admin/users", { email, password: PASSWORD, company_name, plan_type: "none" });
-  const token = await login(email, PASSWORD);
-  return { s, email, password: PASSWORD, userId: r.user_id, dealerId: r.dealer_id, companyName: company_name, token };
+  const token = await login(r.kontonummer, PASSWORD);
+  return {
+    s, email, kontonummer: r.kontonummer, kundenNr: r.kunden_nr, password: PASSWORD,
+    userId: r.user_id, dealerId: r.dealer_id, companyName: company_name, token,
+  };
 }
 
 /** Sucher der Firma; abo=true schaltet die Sucher-Funktion (Monat) frei. */
@@ -132,30 +144,39 @@ async function createSucher(firma, { s = suffix(), abo = false } = {}) {
   const r = await superPost(`/admin/dealers/${firma.dealerId}/sucher`,
     { email, password: PASSWORD, first_name: firstName, last_name: lastName });
   if (abo) await superPost(`/admin/sucher/${r.sucher_id}/abo`, { plan: "monthly" });
-  const token = await login(email, PASSWORD);
-  return { s, email, password: PASSWORD, userId: r.sucher_id, dealerId: firma.dealerId, name: `${firstName} ${lastName}`, token };
+  const token = await login(r.kontonummer, PASSWORD);
+  return {
+    s, email, kontonummer: r.kontonummer, password: PASSWORD, userId: r.sucher_id,
+    dealerId: firma.dealerId, name: `${firstName} ${lastName}`, token,
+  };
 }
 
 // createNormalAdmin gibt es nicht mehr: seit Runde 12 ist die Rolle "admin"
 // nicht vergebbar (Beschluss: nur der Super-Admin ist Betreiber).
 
+/** Fahrer-Konto (Kontonummer + FD-Code), angelegt vom Super-Admin. */
 async function createDriver({ s = suffix() } = {}) {
   const email = mail("e2e-fahrer", s);
   const displayName = `Fahrer ${s}`;
-  const r = await post("/driver/register", { email, password: PASSWORD, display_name: displayName });
-  return { s, email, password: PASSWORD, id: r.driver.id, driverCode: r.driver.driver_code, displayName, token: r.token };
+  const r = await superPost("/admin/drivers", { email, password: PASSWORD, display_name: displayName });
+  const token = await login(r.kontonummer, PASSWORD, "driver");
+  return {
+    s, email, kontonummer: r.kontonummer, password: PASSWORD, id: r.driver_id,
+    driverCode: r.driver_code, displayName, token,
+  };
 }
 
 /** Zwischenhaendler (b2b_buyer); access=true schaltet den Marktplatz frei. */
 async function createBuyer({ s = suffix(), access = true } = {}) {
   const email = mail("e2e-kaeufer", s);
   const companyName = `E2E Zwischenhandel ${s}`;
-  const r = await post("/buyer/register", {
+  const r = await superPost("/admin/buyers", {
     company_name: companyName, contact_name: "Kai Kaeufer", email, password: PASSWORD,
-    phone: "0511 123456", gewerblich_bestaetigt: true,
+    phone: "0511 123456", b2b_nachweis: true,
   });
-  if (access) await superPost(`/admin/buyers/${r.user.id}/access`, { plan: "monthly" });
-  return { s, email, password: PASSWORD, id: r.user.id, companyName, token: r.token };
+  if (access) await superPost(`/admin/buyers/${r.user_id}/access`, { plan: "monthly" });
+  const token = await login(r.kontonummer, PASSWORD, "buyer");
+  return { s, email, kontonummer: r.kontonummer, password: PASSWORD, id: r.user_id, companyName, token };
 }
 
 async function createAppointment(firma, body) {

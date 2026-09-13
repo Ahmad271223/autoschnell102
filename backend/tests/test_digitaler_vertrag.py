@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pypdf import PdfReader  # noqa: E402
@@ -191,7 +192,7 @@ def welt():
     except requests.RequestException:
         pytest.skip("Backend nicht erreichbar")
     z = {}
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"digi_chef_{SUF}@digitest-mail.de", "password": PW,
         "company_name": f"Digi Autohaus {SUF}", "contact_person": "D Chef",
         "phone": "0511 7"}, timeout=30)
@@ -201,15 +202,14 @@ def welt():
     me = requests.get(f"{API}/auth/me", headers=z["H"], timeout=30).json()
     z["chef"] = me["user"]
     z["dealer_id"] = me["user"]["dealer_id"]
-    r = requests.post(f"{API}/dealer/sucher", headers=z["H"], json={
+    r = konten.sucher_als_chef_anlegen(headers=z["H"], json={
         "email": f"digi_sucher_{SUF}@digitest-mail.de", "password": PW,
         "first_name": "Digi", "last_name": "Sucher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     z["sucher_id"] = r.json()["sucher_id"]
     _seed_sub(z["dealer_id"], z["chef"]["id"])
     _seed_sub(z["dealer_id"], z["sucher_id"])
-    r = requests.post(f"{API}/auth/login", json={
-        "email": f"digi_sucher_{SUF}@digitest-mail.de", "password": PW}, timeout=30)
+    r = konten.login_per_mail(f"digi_sucher_{SUF}@digitest-mail.de", PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     z["S"] = {"Authorization": f"Bearer {r.json()['token']}"}
     yield z

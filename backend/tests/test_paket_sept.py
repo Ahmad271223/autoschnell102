@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -35,7 +36,7 @@ def _db():
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -96,7 +97,7 @@ def test_00_aufbau(welt):
     welt["dealer_id"], welt["chef_id"] = r.json()["dealer_id"], r.json()["user_id"]
     welt["H"] = _login(f"ps_chef_{SUF}@{MAIL}")
     r = requests.post(f"{API}/admin/dealers/{welt['dealer_id']}/sucher", headers=welt["A"],
-                      json={"email": f"ps_sucher_{SUF}@{MAIL}", "password": PW,
+                      json={"password": PW, "email": f"ps_sucher_{SUF}@{MAIL}",
                             "first_name": "Sina", "last_name": "Sucher"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     welt["sucher_id"] = r.json()["sucher_id"]
@@ -211,7 +212,7 @@ def test_04_sucher_abo_anfrage_und_freigabe(welt):
 # ---------- Fahrer: Zuteilung annehmen / ablehnen ----------
 def test_05_fahrer_nimmt_fahrt_an_oder_lehnt_ab(welt):
     dbx = _db()
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"ps_fahrer_{SUF}@{MAIL}", "password": PW, "display_name": "Paket Fahrer"},
         timeout=30)
     assert r.status_code == 200, r.text[:300]
@@ -298,7 +299,7 @@ def test_06_marktplatz_verhandlung_beide_seiten(welt):
                       json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     # Kaeufer mit Zugang
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "Paket Kaeufer", "contact_name": "K P",
         "email": f"ps_kaeufer_{SUF}@{MAIL}", "password": PW, "phone": "0511 8"}, timeout=30)
     assert r.status_code == 200, r.text[:300]

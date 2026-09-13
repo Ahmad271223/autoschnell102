@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 from fastapi import HTTPException
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -476,7 +477,7 @@ def welt():
     z = {}
     for nr in (1, 2):
         mail = f"r14drv_chef{nr}_{SUF}@{MAIL}"
-        r = requests.post(f"{API}/auth/register", json={
+        r = konten.registrieren(json={
             "email": mail, "password": PW, "company_name": f"R14 Fahrer-Autohaus {nr} {SUF}",
             "contact_person": f"Chef {nr}", "phone": "0511 1"}, timeout=30)
         assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"

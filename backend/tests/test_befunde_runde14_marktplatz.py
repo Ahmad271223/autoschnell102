@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -259,7 +260,7 @@ class _DbHaken:
 
 def _request():
     from starlette.requests import Request
-    return Request({"type": "http", "method": "POST", "path": "/api/buyer/register",
+    return Request({"type": "http", "method": "POST", "path": "/api/buyer/register",  # ALTWEG – Schritt 5
                     "headers": [], "client": ("127.0.0.1", 40000), "query_string": b""})
 
 
@@ -516,14 +517,14 @@ def test_u_119_profil_felder_getrennt_und_parallel(welt_unit):
 #                              HTTP-Tests
 # =====================================================================
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return _kopf(r.json()["token"])
 
 
 def _haendler():
     mail = f"r14mp_chef_{SUF}@{MAIL}"
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": mail, "password": PW, "company_name": f"R14 Autohaus {SUF}",
         "contact_person": "Chef", "phone": "0511 1"}, timeout=30)
     assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
@@ -729,7 +730,8 @@ def test_h_62_parallele_registrierung_gleiche_mail(welt):
             "contact_name": "K M", "email": mail, "password": PW, "phone": "0511 2"}
 
     def schuss(_):
-        return requests.post(f"{API}/buyer/register", json=body, timeout=30).status_code
+        # ALTWEG – Schritt 5: Rennen zweier Selbstregistrierungen (h_62)
+        return requests.post(f"{API}/buyer/register", json=body, timeout=30).status_code  # ALTWEG – Schritt 5
     with ThreadPoolExecutor(max_workers=2) as ex:
         codes = sorted(ex.map(schuss, range(2)))
     assert codes == [200, 409], codes

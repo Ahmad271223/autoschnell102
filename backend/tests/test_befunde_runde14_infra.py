@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
@@ -673,7 +674,7 @@ def test_25_dateien_rechnet_mit_auth_geheimnis(monkeypatch):
 #                          HTTP-Tests (nach Neustart)
 # =====================================================================
 def _register(name):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r14infra_{name}_{SUF}@{MAIL}", "password": PW,
         "company_name": f"R14 {name} GmbH", "contact_person": "N T",
         "phone": "0511 9"}, timeout=30)

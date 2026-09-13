@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -55,7 +56,7 @@ def _seed_sub(dealer_id, user_id):
 
 
 def _login(mail, pw=PW):
-    return requests.post(f"{API}/auth/login", json={"email": mail, "password": pw},
+    return konten.login_per_mail(mail, pw, "auth",
                          timeout=30)
 
 
@@ -80,7 +81,7 @@ def _admin(is_super):
 
 
 def _register_dealer(name):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"rt_{name}_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": f"Rollen {name}", "contact_person": "R T",
         "phone": "0511 1"}, timeout=30)
@@ -142,7 +143,7 @@ def welt():
 def test_00_aufbau(welt):
     welt["HA"], chef = _register_dealer("chefa")
     welt["chef_a"], welt["dealer_a"] = chef, chef["dealer_id"]
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["HA"], json={
+    r = konten.sucher_als_chef_anlegen(headers=welt["HA"], json={
         "email": f"rt_sucher_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "R", "last_name": "Sucher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -160,7 +161,7 @@ def test_00_aufbau(welt):
     welt["sa_id"], welt["SA"] = _admin(True)
     welt["ad_id"], welt["A"] = _admin(False)
 
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"rt_fahrer_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "Rollen Fahrer"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -307,11 +308,9 @@ def test_07_fahrer_passwort_wechsel(welt):
                      timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert requests.get(f"{API}/driver/me", headers=welt["D"], timeout=30).status_code == 401
-    r = requests.post(f"{API}/driver/login", json={
-        "email": f"rt_fahrer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
+    r = konten.login_per_mail(f"rt_fahrer_{SUF}@e2etest-mail.de", PW, "driver", timeout=30)
     assert r.status_code == 401
-    r = requests.post(f"{API}/driver/login", json={
-        "email": f"rt_fahrer_{SUF}@e2etest-mail.de", "password": "NeuesPw12345!"},
+    r = konten.login_per_mail(f"rt_fahrer_{SUF}@e2etest-mail.de", "NeuesPw12345!", "driver",
         timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["D"] = _hdr(r.json()["token"])
@@ -328,8 +327,7 @@ def test_08_fahrer_passwort_reset_bestaetigung(welt):
     r = requests.post(f"{API}/auth/password-reset/confirm",
                       json={"token": token, "new_password": "ResetPw12345!"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    r = requests.post(f"{API}/driver/login", json={
-        "email": f"rt_fahrer_{SUF}@e2etest-mail.de", "password": "ResetPw12345!"},
+    r = konten.login_per_mail(f"rt_fahrer_{SUF}@e2etest-mail.de", "ResetPw12345!", "driver",
         timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["D"] = _hdr(r.json()["token"])
@@ -345,7 +343,7 @@ def test_09_netzwerk_mitglieder_und_widerruf(welt):
                       json={"validity_hours": 24, "max_uses": 1}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     token = r.json()["token"]
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "RT Kaeufer", "contact_name": "K R",
         "email": f"rt_kaeufer_{SUF}@e2etest-mail.de", "password": PW,
         "invite_token": token}, timeout=30)
@@ -370,7 +368,7 @@ def test_09_netzwerk_mitglieder_und_widerruf(welt):
     r = requests.post(f"{API}/invites/{token}/redeem", headers=welt["K"], timeout=30)
     assert r.status_code == 400
     # Ungueltige Einladung -> ehrlich network_joined false
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "RT Kaeufer 2", "contact_name": "K Z",
         "email": f"rt_kaeufer2_{SUF}@e2etest-mail.de", "password": PW,
         "invite_token": "gibt-es-nicht"}, timeout=30)

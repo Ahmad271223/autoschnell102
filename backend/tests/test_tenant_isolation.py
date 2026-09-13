@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -34,7 +35,7 @@ def _db():
 
 
 def _firma(name):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"tenant_{name}_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": f"Tenant {name}", "contact_person": name,
         "phone": "0511 7"}, timeout=30)
@@ -73,7 +74,7 @@ def welt():
                                         timeout=30).json()
                 if x.get("contract_id") == contract_id)
 
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"tenant_drvA_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "Fahrer A"}, timeout=30).json()
     requests.post(f"{API}/drivers/add", headers=h,
@@ -82,7 +83,7 @@ def welt():
                  json={"driver_id": r["driver"]["id"]}, timeout=60)
 
     # Fremder Fahrer (nirgends zugeteilt)
-    fremd = requests.post(f"{API}/driver/register", json={
+    fremd = konten.fahrer_registrieren(json={
         "email": f"tenant_drvB_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "Fahrer B"}, timeout=30).json()
 
@@ -161,7 +162,7 @@ def test_fremdes_inserat_nicht_bearbeitbar(welt):
 
 def test_fremde_sucher_unsichtbar(welt):
     ha, hb = welt["a"]["h"], welt["b"]["h"]
-    r = requests.post(f"{API}/dealer/sucher", headers=ha, json={
+    r = konten.sucher_als_chef_anlegen(headers=ha, json={
         "email": f"tenant_sucher_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "T", "last_name": "S"}, timeout=30)
     assert r.status_code == 200

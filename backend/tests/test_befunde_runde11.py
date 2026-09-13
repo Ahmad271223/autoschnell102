@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -240,11 +241,11 @@ def welt():
         "dealer_id": None, "is_super_admin": True,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
-    r = requests.post(f"{API}/auth/login", json={"email": admin_mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(admin_mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     A = {"Authorization": f"Bearer {r.json()['token']}"}
 
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r11_chef_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Runde11 {SUF}", "contact_person": "R E", "phone": "0511 11"}, timeout=30)
     assert r.status_code == 200, f"Backend braucht SELF_SIGNUP=true: {r.text[:200]}"
@@ -252,7 +253,7 @@ def welt():
     chef = requests.get(f"{API}/auth/me", headers=C, timeout=30).json()["user"]
     _abo(chef["dealer_id"], chef["id"])
 
-    r = requests.post(f"{API}/dealer/sucher", headers=C, json={
+    r = konten.sucher_als_chef_anlegen(headers=C, json={
         "email": f"r11_sucher_{SUF}@{MAIL}", "password": PW,
         "first_name": "Su", "last_name": "Cher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -354,7 +355,7 @@ def test_j1_zweiter_chef_je_firma_nur_als_chefwechsel(welt):
     r = requests.put(f"{API}/admin/users/{chef['id']}", headers=A,
                      json={"role": "dealer", "chef_wechsel": True}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    r = requests.post(f"{API}/auth/login", json={"email": chef["email"], "password": PW}, timeout=30)
+    r = konten.login_per_mail(chef["email"], PW, "auth", timeout=30)
     assert r.status_code == 200
     welt["C"] = {"Authorization": f"Bearer {r.json()['token']}"}
 
@@ -400,14 +401,14 @@ def test_k5_freischaltung_status_fest(welt):
 #   M7 Sucher sehen nur ihre Einstellungsfelder M8 Loesch-Audit vor dem ersten Schritt
 # =====================================================================
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return {"Authorization": f"Bearer {r.json()['token']}"}
 
 
 @pytest.fixture(scope="module")
 def sucher2(welt):
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["C"], json={
+    r = konten.sucher_als_chef_anlegen(headers=welt["C"], json={
         "email": f"r12_sucher_{SUF}@{MAIL}", "password": PW,
         "first_name": "Zwei", "last_name": "Ter"}, timeout=30)
     assert r.status_code == 200, r.text[:200]

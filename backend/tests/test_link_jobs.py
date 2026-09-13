@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -48,7 +49,7 @@ def _mongo():
 def chef():
     from datetime import datetime, timedelta, timezone
     mail = f"jobtest_{SUFFIX}@e2etest-mail.de"
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": mail, "password": PW, "company_name": "Jobtest GmbH",
         "contact_person": "J T", "phone": "0511 2"}, timeout=30)
     assert r.status_code == 200, f"Registrierung: {r.status_code} {r.text[:200]}"

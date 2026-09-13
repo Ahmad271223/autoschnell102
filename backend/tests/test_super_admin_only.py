@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -41,7 +42,7 @@ def _db():
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
 
@@ -80,7 +81,7 @@ def test_00_aufbau(welt):
     assert r.status_code == 200, r.text[:300]
     welt["dealer_id"], welt["chef_id"] = r.json()["dealer_id"], r.json()["user_id"]
     r = requests.post(f"{API}/admin/dealers/{welt['dealer_id']}/sucher", headers=welt["S"],
-                      json={"email": f"sa_sucher_{SUF}@{MAIL}", "password": PW,
+                      json={"password": PW, "email": f"sa_sucher_{SUF}@{MAIL}",
                             "first_name": "Sina", "last_name": "Test"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     welt["sucher_id"] = r.json()["sucher_id"]

@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, unquote_plus, urlparse
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pypdf import PdfReader  # noqa: E402
@@ -106,7 +107,7 @@ def welt():
     except requests.RequestException:
         pytest.skip("Backend nicht erreichbar")
     z = {}
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"wa_chef_{SUF}@watest-mail.de", "password": PW,
         "company_name": f"WA Autohaus {SUF}", "contact_person": "W Chef",
         "phone": "0511 5"}, timeout=30)

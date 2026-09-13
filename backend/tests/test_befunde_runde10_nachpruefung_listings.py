@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 try:
@@ -50,7 +51,7 @@ def _mit_db(fn):
 # =============================================================== Vertragsversand
 @pytest.fixture(scope="module")
 def vertrag():
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"nachlisting_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Nach GmbH", "contact_person": "N T", "phone": "0511 9"}, timeout=30)
     assert r.status_code == 200, r.text[:200]

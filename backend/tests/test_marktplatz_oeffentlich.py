@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -44,7 +45,7 @@ def _kopf(token):
 
 
 def _haendler(nr: int, oeffentlich: bool):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"mo_chef{nr}_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Markt Autohaus {nr} {SUF}",
         "contact_person": f"Chef {nr}", "phone": "0511 1"}, timeout=30)
@@ -97,7 +98,7 @@ def welt():
     daten["h2"] = h2
     daten["h2_inserat"] = _inserat(h2, f"Golf geheim {SUF}", "public")
     # Kaeufer OHNE Netzwerk und ohne jedes Zugangs-Abo
-    r = requests.post(f"{API}/buyer/register", json={
+    r = konten.kaeufer_registrieren(json={
         "gewerblich_bestaetigt": True, "company_name": f"MO Kaeufer {SUF}",
         "contact_name": "K M", "email": f"mo_kaeufer_{SUF}@{MAIL}",
         "password": PW, "phone": "0511 2"}, timeout=30)

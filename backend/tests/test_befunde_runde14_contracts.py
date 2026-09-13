@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -277,7 +278,7 @@ def test_73_list_contracts_limit_2000_mit_kopfzeile():
 def welt():
     if not HTTP:
         pytest.skip(HTTP_GRUND)
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r14c_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "R14 Contracts GmbH", "contact_person": "R T",
         "phone": "0511 14"}, timeout=30)

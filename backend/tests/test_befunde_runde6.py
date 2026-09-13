@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE_URL = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -46,13 +47,13 @@ def welt():
     """Firma + Fahrer + Termin, am Ende alles wieder weg."""
     dbx = _db()
     firma_mail = f"r6_firma_{SUF}@{MAIL}"
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": firma_mail, "password": PW, "company_name": f"Runde6 GmbH {SUF}",
         "contact_person": "Rita Runde", "phone": "+4915100000"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     firma = r.json()
     fahrer_mail = f"r6_fahrer_{SUF}@{MAIL}"
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": fahrer_mail, "password": PW, "display_name": "Frank Fahrer",
         "phone": "+4915200000"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
@@ -72,13 +73,13 @@ def welt():
 
 
 def _neu_anmelden(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return r.json()["token"]
 
 
 def _fahrer_anmelden(mail):
-    r = requests.post(f"{API}/driver/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "driver", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return r.json()["token"]
 

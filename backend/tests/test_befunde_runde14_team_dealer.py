@@ -31,6 +31,7 @@ from threading import Barrier
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
@@ -478,7 +479,7 @@ def test_96_sucher_upload_setzt_nur_override(monkeypatch, storage_attrappe):
 def welt():
     if not HTTP:
         pytest.skip(HTTP_GRUND)
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r14td_{SUF}@{MAIL}", "password": PW,
         "company_name": "R14 Team GmbH", "contact_person": "R T", "phone": "0511 14"},
         timeout=30)
@@ -486,7 +487,7 @@ def welt():
     C = _kopf(r.json()["token"])
     chef = requests.get(f"{API}/auth/me", headers=C, timeout=30).json()["user"]
     dealer_id = chef["dealer_id"]
-    r = requests.post(f"{API}/dealer/sucher", headers=C, json={
+    r = konten.sucher_als_chef_anlegen(headers=C, json={
         "first_name": "Sina", "last_name": "Sucht", "email": f"r14td_s_{SUF}@{MAIL}",
         "password": PW}, timeout=30)
     if r.status_code == 403:

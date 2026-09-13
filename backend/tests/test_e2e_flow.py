@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -59,7 +60,7 @@ def _make_admin():
         "dealer_id": None, "is_super_admin": True,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Admin-Login: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -84,7 +85,7 @@ def welt():
 
 
 def test_01_registrierung_firma(welt):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"e2e_chef_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "E2E Autohaus", "contact_person": "E Chef",
         "phone": "0511 9"}, timeout=30)
@@ -99,7 +100,7 @@ def test_01_registrierung_firma(welt):
 
 
 def test_02_sucher_und_abo(welt):
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["H"], json={
+    r = konten.sucher_als_chef_anlegen(headers=welt["H"], json={
         "email": f"e2e_sucher_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "E2E", "last_name": "Sucher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -107,8 +108,7 @@ def test_02_sucher_und_abo(welt):
     # Abos (Chef + Sucher) — Zahlungsweg ist separat getestet.
     _seed_sub(welt["dealer_id"], welt["chef"]["id"])
     _seed_sub(welt["dealer_id"], welt["sucher_id"])
-    r = requests.post(f"{API}/auth/login", json={
-        "email": f"e2e_sucher_{SUF}@e2etest-mail.de", "password": PW},
+    r = konten.login_per_mail(f"e2e_sucher_{SUF}@e2etest-mail.de", PW, "auth",
         timeout=30)
     assert r.status_code == 200
     welt["S"] = {"Authorization": f"Bearer {r.json()['token']}"}
@@ -158,7 +158,7 @@ def test_04_kaufvertrag_und_termin(welt):
 
 
 def test_05_fahrer_zuweisen(welt):
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"e2e_fahrer_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "E2E Fahrer"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -300,7 +300,7 @@ def test_08_inserat_und_marktplatz(welt):
     welt["listing_id"] = listing_id
 
     # Kaeufer registrieren, Zugang freischalten, Inserat finden
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "E2E Kaeufer", "contact_name": "K B",
         "email": f"e2e_kaeufer_{SUF}@e2etest-mail.de", "password": PW,
         "phone": "0511 8"}, timeout=30)

@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -55,7 +56,7 @@ def _run(coro_factory):
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -142,7 +143,7 @@ def test_03_betreiber_legt_sucher_an(welt):
         "email": f"bt_sucher_{SUF}@e2etest-mail.de", "password": PW},
         timeout=30).status_code == 409
     assert requests.post(f"{API}/admin/dealers/gibtesnicht/sucher", headers=welt["A"],
-                         json={"email": f"bt_x_{SUF}@e2etest-mail.de", "password": PW},
+                         json={"password": PW, "email": f"bt_x_{SUF}@e2etest-mail.de"},
                          timeout=30).status_code == 404
     assert requests.post(url, headers=welt["H"], json={
         "email": f"bt_y_{SUF}@e2etest-mail.de", "password": PW},
@@ -240,7 +241,7 @@ def test_08_firmen_checkout_geschlossen(welt):
         assert r.status_code == 403, r.text[:200]
         assert "Rechnung" in r.text
     # Kaeufer mit unbekanntem Plan -> 400
-    r = requests.post(f"{API}/buyer/register", json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
         "company_name": "BT Kaeufer", "contact_name": "K B",
         "email": f"bt_kaeufer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -323,7 +324,7 @@ PROD_BASE = os.environ.get("BETREIBER_PROD_URL", "").rstrip("/")
                     "(eigener Backend-Prozess mit SELF_SIGNUP=false)")
 def test_11_self_signup_aus(welt):
     api = f"{PROD_BASE}/api"
-    r = requests.post(f"{api}/auth/register", json={
+    r = requests.post(f"{api}/auth/register", json={  # ALTWEG – Schritt 5
         "email": f"bt_prod_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Prod Test", "contact_person": "P T",
         "phone": "0511 1"}, timeout=30)
@@ -334,11 +335,11 @@ def test_11_self_signup_aus(welt):
     k_mail = f"bt_prodk_{SUF}@e2etest-mail.de"
     f_mail = f"bt_prodf_{SUF}@e2etest-mail.de"
     try:
-        r = requests.post(f"{api}/buyer/register", json={
+        r = requests.post(f"{api}/buyer/register", json={  # ALTWEG – Schritt 5
             "gewerblich_bestaetigt": True, "company_name": "Prod Kaeufer",
             "contact_name": "P K", "email": k_mail, "password": PW}, timeout=30)
         assert r.status_code == 403 and "Zugangs-Anfrage" in r.text, r.text[:200]
-        r = requests.post(f"{api}/driver/register", json={
+        r = requests.post(f"{api}/driver/register", json={  # ALTWEG – Schritt 5
             "email": f_mail, "password": PW, "display_name": "Prod Fahrer"},
             timeout=30)
         assert r.status_code == 403 and "Zugangs-Anfrage" in r.text, r.text[:200]

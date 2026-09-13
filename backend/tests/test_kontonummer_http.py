@@ -10,7 +10,7 @@
     Teil-Unique-Index kontonummer_eindeutig in users und driver_accounts
 
 Braucht ein laufendes Backend auf TEST_BASE_URL (RUNDE14_HTTP=1, SELF_SIGNUP=true
-fuer /buyer/register und /driver/register) und dieselbe DB (DB_NAME).
+fuer /buyer/register und /driver/register) und dieselbe DB (DB_NAME).  (ALTWEG – Schritt 5)
 Die Sperre des Konto-Limiters wird in-process geprueft (test_kontonummer.py) —
 ueber 127.0.0.1 gilt die Loopback-Ausnahme.
 """
@@ -85,13 +85,13 @@ def welt():
         z["sucher"] = r.json()
         z["user_ids"].append(z["sucher"]["sucher_id"])
         # Kaeufer und Fahrer (bis Schritt 5 per Selbstregistrierung, SELF_SIGNUP=true)
-        r = _post("/buyer/register", {"company_name": f"KN Kaeufer {SUF}",
+        r = _post("/buyer/register", {"company_name": f"KN Kaeufer {SUF}",  # ALTWEG – Schritt 5
                                       "contact_name": "K M", "email": f"kn_kauf_{SUF}@{MAIL}",
                                       "password": PW, "gewerblich_bestaetigt": True})
         assert r.status_code == 200, r.text[:200]
         z["kaeufer"] = r.json()["user"]
         z["user_ids"].append(z["kaeufer"]["id"])
-        r = _post("/driver/register", {"email": f"kn_fahr_{SUF}@{MAIL}", "password": PW,
+        r = _post("/driver/register", {"email": f"kn_fahr_{SUF}@{MAIL}", "password": PW,  # ALTWEG – Schritt 5
                                        "display_name": "KN Fahrer"})
         assert r.status_code == 200, r.text[:200]
         z["fahrer"] = r.json()["driver"]

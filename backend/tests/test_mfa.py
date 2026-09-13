@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -62,7 +63,7 @@ def _frischer_code(secret, user_id):
 
 
 def _login(mail):
-    return requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    return konten.login_per_mail(mail, PW, "auth", timeout=30)
 
 
 def _hdr(token):
@@ -226,7 +227,8 @@ def test_05_abschalten_nur_mit_code_und_zuruecksetzen(welt):
     assert _login(f"mfa_super_{SUF}@{MAIL}").json().get("token")
     # Betrieb-Uebersicht nennt Super-Admins ohne 2FA
     b = requests.get(f"{API}/admin/betrieb", headers=_hdr(_login(f"mfa_super_{SUF}@{MAIL}").json()["token"]), timeout=30).json()
-    assert f"mfa_super_{SUF}@{MAIL}" in b["super_admins_ohne_mfa"]
+    # Kontonummer (13.09.2026): die Liste nennt die Anmeldekennung (Benutzername)
+    assert konten.kennung_fuer_mail(f"mfa_super_{SUF}@{MAIL}") in b["super_admins_ohne_mfa"]
 
 
 def test_06_einrichten_mehrfach_liefert_dasselbe_geheimnis():

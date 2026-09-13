@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -62,7 +63,7 @@ def _abo(dealer_id, user_id):
 @pytest.fixture(scope="module")
 def welt():
     """Eine Firma, zwei Sucher, ein Vertrag von Sucher A."""
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r8chef_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Runde8 GmbH", "contact_person": "R A",
         "phone": "0511 8"}, timeout=30)
@@ -73,15 +74,14 @@ def welt():
 
     sucher = {}
     for name in ("a", "b"):
-        r = requests.post(f"{API}/dealer/sucher", headers=chef_h, json={
+        r = konten.sucher_als_chef_anlegen(headers=chef_h, json={
             "first_name": "Sucher", "last_name": name.upper(),
             "email": f"r8sucher{name}_{SUF}@e2etest-mail.de", "password": PW},
             timeout=30)
         assert r.status_code == 200, r.text[:200]
         uid = r.json()["sucher_id"]
         _abo(dealer_id, uid)
-        r = requests.post(f"{API}/auth/login", json={
-            "email": f"r8sucher{name}_{SUF}@e2etest-mail.de", "password": PW},
+        r = konten.login_per_mail(f"r8sucher{name}_{SUF}@e2etest-mail.de", PW, "auth",
             timeout=30)
         assert r.status_code == 200, r.text[:200]
         sucher[name] = {"id": uid, "h": {"Authorization": f"Bearer {r.json()['token']}"}}

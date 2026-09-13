@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -381,7 +382,7 @@ def http_welt(aufraeumen):
         "dealer_id": None, "is_super_admin": True,
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
-    r = requests.post(f"{API}/auth/login", json={"email": sa_mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(sa_mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     z = {"S": _kopf(r.json()["token"])}
     yield z
@@ -392,7 +393,7 @@ def http_welt(aufraeumen):
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return _kopf(r.json()["token"])
 

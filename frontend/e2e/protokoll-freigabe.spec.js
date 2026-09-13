@@ -80,8 +80,8 @@ test.describe("Abholprotokoll: Freigabe und Knopfleiste", () => {
     await page.setViewportSize(HANDY);
     // Einmal-Sitzung: der Formular-Login im ersten Test hat das alte Token
     // entwertet — hier ein frisches holen.
-    const tok = (await h.post("/driver/login",
-      { email: driver.email, password: driver.password })).token;
+    // Kontonummer (13.09.2026): API-Neuanmeldung ueber den zentralen Helfer
+    const tok = await h.login(driver.kontonummer, driver.password, "driver");
     await h.authPage(page, "driver", tok);
 
     // Protokoll vollstaendig ueber die API fuellen (die Tipparbeit selbst

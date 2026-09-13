@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -60,7 +61,7 @@ def _run(coro_factory):
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -122,7 +123,9 @@ def test_00_admin(welt):
         "created_at": "2026-01-01T00:00:00+00:00"})
     welt["A"] = _login(mail)
     welt["max_vor_probe"] = _max_nr()      # hoechste Nummer VOR allen Testfirmen
-    welt["self_signup"] = requests.post(f"{API}/auth/register", json={
+    # ALTWEG – Schritt 5: prueft bewusst die Selbstregistrierung (vergibt bis
+    # dahin ebenfalls Nummern aus derselben Reihe)
+    welt["self_signup"] = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
         "email": f"fv_probe_{SUF}@{MAIL}", "password": PW,
         "company_name": f"Probe {SUF}", "contact_person": "P",
         "phone": "0511 1"}, timeout=60).status_code == 200
@@ -136,7 +139,8 @@ def test_01_parallel_anlegen_eindeutige_nummern(welt):
         return _firma(welt, f"par{i}")
 
     def selbst_registrieren(i):
-        return requests.post(f"{API}/auth/register", json={
+        # ALTWEG – Schritt 5: parallele Selbstregistrierung neben der Admin-Anlage
+        return requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
             "email": f"fv_reg{i}_{SUF}@{MAIL}", "password": PW,
             "company_name": f"Firma reg{i} {SUF}", "contact_person": "R",
             "phone": "0511 2"}, timeout=60)
@@ -176,7 +180,8 @@ def test_02_doppelte_email_auch_anders_geschrieben(welt):
     assert r.status_code == 409, r.text[:200]
     # Selbstregistrierung mit derselben Adresse
     if welt["self_signup"]:
-        r = requests.post(f"{API}/auth/register", json={
+        # ALTWEG – Schritt 5: Dublette ueber die Selbstregistrierung
+        r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
             "email": f"Fv_Dup_{SUF}@{MAIL}", "password": PW,
             "company_name": "Reg dup", "contact_person": "D", "phone": "1"},
             timeout=60)
@@ -186,8 +191,7 @@ def test_02_doppelte_email_auch_anders_geschrieben(welt):
     # gespeichert klein geschrieben, genau ein Konto, Login mit anderer Schreibweise
     assert dbx.users.count_documents({"email": {"$regex": f"^fv_dup_{SUF}@", "$options": "i"}}) == 1
     assert dbx.users.find_one({"dealer_id": dealer_id})["email"] == f"fv_dup_{SUF}@{MAIL}"
-    r = requests.post(f"{API}/auth/login", json={
-        "email": f"FV_DUP_{SUF}@{MAIL}", "password": PW}, timeout=30)
+    r = konten.login_per_mail(f"FV_DUP_{SUF}@{MAIL}", PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["dup_dealer"] = dealer_id
     welt["dup_chef"] = dbx.users.find_one({"dealer_id": dealer_id})["id"]
@@ -215,7 +219,7 @@ def test_03_sucher_mit_vergebener_email(welt):
     assert _n_users() == n
     # unbekannte Firma -> 404, kein Konto
     r = requests.post(f"{API}/admin/dealers/gibtesnicht/sucher", headers=welt["A"],
-                      json={"email": f"fv_nix_{SUF}@{MAIL}", "password": PW,
+                      json={"password": PW, "email": f"fv_nix_{SUF}@{MAIL}",
                             "first_name": "X", "last_name": "Y"}, timeout=60)
     assert r.status_code == 404
     assert _n_users() == n

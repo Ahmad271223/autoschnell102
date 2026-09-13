@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -36,7 +37,7 @@ def _db():
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -75,7 +76,7 @@ def test_00_aufbau(welt):
     welt["SA"], welt["A1"] = _login(welt["sa_mail"]), _login(welt["a1_mail"])
     welt["a2_id"] = f"r5a2_{SUF}"
     for k in ("a", "b"):
-        r = requests.post(f"{API}/auth/register", json={
+        r = konten.registrieren(json={
             "email": f"r5_chef{k}_{SUF}@e2etest-mail.de", "password": PW,
             "company_name": f"R5 Autohaus {k.upper()}", "contact_person": "R5",
             "phone": "0511 5"}, timeout=30)
@@ -101,7 +102,7 @@ def test_01_admin_sperrt_keine_anderen_admins(welt):
 
 
 def test_02_fahrer_logout_widerruft_token(welt):
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"r5_fahrer_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "R5 Fahrer"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -165,7 +166,7 @@ def test_05_seed_reaktiviert_gesperrten_admin_nicht(welt):
 def test_06_chef_sperre_kaskadiert_auf_sucher(welt):
     """Review 09/2026: gesperrter Haendler-Hauptaccount = gesperrte Firma."""
     dbx = _db()
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["HA"], json={
+    r = konten.sucher_als_chef_anlegen(headers=welt["HA"], json={
         "email": f"r5_sucher_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "R5", "last_name": "Sucher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ustid  # noqa: E402
 
@@ -123,7 +124,7 @@ def test_registrierung_weist_falsche_ustid_ab():
         requests.get(f"{API}/health", timeout=5)
     except requests.RequestException:
         pytest.skip("Backend nicht erreichbar")
-    r = requests.post(f"{API}/buyer/register", json={
+    r = konten.kaeufer_registrieren(json={
         "company_name": "USt Test GmbH", "contact_name": "Test Person",
         "email": "ustid-test-nicht-anlegen@example.invalid",
         "password": "UstIdTest123!x", "gewerblich_bestaetigt": True,

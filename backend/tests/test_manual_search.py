@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
@@ -35,7 +36,7 @@ def _db():
 
 @pytest.fixture(scope="module")
 def chef():
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"suche_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Suche GmbH", "contact_person": "S U", "phone": "0511 7"}, timeout=30)
     assert r.status_code == 200, r.text[:200]

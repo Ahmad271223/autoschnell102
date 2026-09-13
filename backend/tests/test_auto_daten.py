@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
@@ -77,7 +78,7 @@ def _seed_sub(dealer_id, user_id):
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    r = konten.login_per_mail(mail, PW, "auth",
                       timeout=30)
     assert r.status_code == 200, f"Login {mail}: {r.text[:200]}"
     return {"Authorization": f"Bearer {r.json()['token']}"}
@@ -124,7 +125,7 @@ def welt():
 
 # ---------------------------------------------------------------- Aufbau
 def test_00_aufbau(welt):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"ad_chef_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Autodaten Autohaus", "contact_person": "A Chef",
         "phone": "0511 1"}, timeout=30)
@@ -165,12 +166,12 @@ def test_00_aufbau(welt):
         "created_at": "2026-01-01T00:00:00+00:00"})
     welt["A"] = _login(mail)
     welt["B"] = _user_anlegen("b2b_buyer", marketplace_access=True)
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["H"], json={
+    r = konten.sucher_als_chef_anlegen(headers=welt["H"], json={
         "email": f"ad_sucher_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "AD", "last_name": "Sucher"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     welt["S"] = _login(f"ad_sucher_{SUF}@e2etest-mail.de")
-    r = requests.post(f"{API}/driver/register", json={
+    r = konten.fahrer_registrieren(json={
         "email": f"ad_fahrer_{SUF}@e2etest-mail.de", "password": PW,
         "display_name": "AD Fahrer"}, timeout=30)
     assert r.status_code == 200, r.text[:200]

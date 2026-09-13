@@ -28,7 +28,7 @@ def _hdr(token):
 
 
 def _login(email, pwd):
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": pwd})
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": pwd})  # ALTWEG – Schritt 5
     assert r.status_code == 200, f"Login failed for {email}: {r.status_code} {r.text}"
     return r.json()["token"]
 
@@ -42,7 +42,7 @@ def admin_creds():
 @pytest.fixture(scope="module")
 def dealer_a_creds():
     email = f"TEST_dealer_a_{uuid.uuid4().hex[:8]}@autohandel.app"
-    r = requests.post(f"{API}/auth/register", json={
+    r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
         "email": email, "password": "Password123!", "company_name": "TEST AutoHaus A",
         "contact_person": "Hans", "phone": "+491234567890",
     })
@@ -59,7 +59,7 @@ def dealer_a_creds():
 @pytest.fixture(scope="module")
 def dealer_b_creds():
     email = f"TEST_dealer_b_{uuid.uuid4().hex[:8]}@autohandel.app"
-    r = requests.post(f"{API}/auth/register", json={
+    r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
         "email": email, "password": "Password123!", "company_name": "TEST AutoHaus B",
     })
     assert r.status_code == 200
@@ -86,7 +86,7 @@ def dealer_b_token(dealer_b_creds):
 class TestAuth:
     def test_register(self):
         email = f"TEST_reg_{uuid.uuid4().hex[:8]}@autohandel.app"
-        r = requests.post(f"{API}/auth/register", json={
+        r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
             "email": email, "password": "Password123!", "company_name": "TEST Reg Inc",
         })
         assert r.status_code == 200, r.text
@@ -97,12 +97,12 @@ class TestAuth:
 
     def test_register_duplicate(self):
         email = f"TEST_dup_{uuid.uuid4().hex[:8]}@autohandel.app"
-        requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "x"})
-        r = requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "y"})
+        requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "x"})  # ALTWEG – Schritt 5
+        r = requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "y"})  # ALTWEG – Schritt 5
         assert r.status_code == 409
 
     def test_login_invalid(self):
-        r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": "wrong"})
+        r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": "wrong"})  # ALTWEG – Schritt 5
         assert r.status_code == 401
 
     def test_me(self, admin_token):
@@ -115,7 +115,7 @@ class TestAuth:
 
     def test_single_session_invalidates_old(self):
         email = f"TEST_sess_{uuid.uuid4().hex[:8]}@autohandel.app"
-        requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "TEST Sess"})
+        requests.post(f"{API}/auth/register", json={"email": email, "password": "Password123!", "company_name": "TEST Sess"})  # ALTWEG – Schritt 5
         t1 = _login(email, "Password123!")
         t2 = _login(email, "Password123!")
         assert t1 != t2

@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -57,13 +58,13 @@ def _kopf(token):
 
 
 def _login(mail):
-    r = requests.post(f"{API}/auth/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "auth", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return _kopf(r.json()["token"])
 
 
 def _buyer_login(mail):
-    r = requests.post(f"{API}/buyer/login", json={"email": mail, "password": PW}, timeout=30)
+    r = konten.login_per_mail(mail, PW, "buyer", timeout=30)
     assert r.status_code == 200, r.text[:200]
     return _kopf(r.json()["token"])
 
@@ -206,7 +207,7 @@ def test_b8_snapshots_pseudonymisieren():
 #                          HTTP-Tests
 # =====================================================================
 def _haendler(nr, oeffentlich):
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": f"r13_chef{nr}_{SUF}@{MAIL}", "password": PW,
         "company_name": f"R13 Autohaus {nr} {SUF}", "contact_person": f"Chef {nr}",
         "phone": "0511 1"}, timeout=30)
@@ -244,7 +245,7 @@ def _inserat(h, name, sichtbarkeit):
 
 def _kaeufer(nr):
     mail = f"r13_kaeufer{nr}_{SUF}@{MAIL}"
-    r = requests.post(f"{API}/buyer/register", json={
+    r = konten.kaeufer_registrieren(json={
         "gewerblich_bestaetigt": True, "company_name": f"R13 Kaeufer {nr} {SUF}",
         "contact_name": "K M", "email": mail, "password": PW, "phone": "0511 2"}, timeout=30)
     assert r.status_code == 200, r.text[:300]
@@ -390,15 +391,17 @@ def test_b5_doppelkonto_ueber_kontotypen_abgelehnt(welt):
     mail = f"r13_fahrer_{SUF}@{MAIL}"
     dbx.driver_accounts.insert_one({"id": f"r13drv2_{SUF}", "email": mail, "active": True,
                                     "password_hash": "x", "created_at": _jetzt()})
-    r = requests.post(f"{API}/auth/register", json={
+    # ALTWEG – Schritt 5: prueft bewusst die B5-Pruefung JEDES alten
+    # Anlagewegs (Selbstregistrierung Firma/Kaeufer, Chef-Sucheranlage)
+    r = requests.post(f"{API}/auth/register", json={  # ALTWEG – Schritt 5
         "email": mail, "password": PW, "company_name": f"Dup {SUF}", "contact_person": "D",
         "phone": "0511 1"}, timeout=30)
     assert r.status_code == 409, r.text[:200]
-    r = requests.post(f"{API}/buyer/register", json={
+    r = requests.post(f"{API}/buyer/register", json={  # ALTWEG – Schritt 5
         "gewerblich_bestaetigt": True, "company_name": f"Dup K {SUF}", "contact_name": "D K",
         "email": mail, "password": PW, "phone": "0511 2"}, timeout=30)
     assert r.status_code == 409, r.text[:200]
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["h1"]["kopf"], json={
+    r = requests.post(f"{API}/dealer/sucher", headers=welt["h1"]["kopf"], json={  # ALTWEG – Schritt 5
         "email": mail, "password": PW, "first_name": "D", "last_name": "S"}, timeout=30)
     assert r.status_code == 409, r.text[:200]
     r = requests.post(f"{API}/admin/users", headers=welt["A"], json={
@@ -410,7 +413,7 @@ def test_b5_doppelkonto_ueber_kontotypen_abgelehnt(welt):
 def test_b8_sucher_loeschen_pseudonymisiert_snapshots(welt):
     from snapshot_service import snapshot_pseudonym
     dbx = _db()
-    r = requests.post(f"{API}/dealer/sucher", headers=welt["h1"]["kopf"], json={
+    r = konten.sucher_als_chef_anlegen(headers=welt["h1"]["kopf"], json={
         "email": f"r13_sucher_{SUF}@{MAIL}", "password": PW, "first_name": "S", "last_name": "N"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     sid = r.json()["sucher_id"]

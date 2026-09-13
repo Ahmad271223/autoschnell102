@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import konten  # noqa: E402  Kontonummer (13.09.2026): zentrale Konto-Helfer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deps import sitzung_beendet_grund  # noqa: E402
@@ -66,7 +67,7 @@ def konto():
     except requests.RequestException:
         pytest.skip("Backend nicht erreichbar")
     mail = f"sitzung_{SUF}@sitzungtest-mail.de"
-    r = requests.post(f"{API}/auth/register", json={
+    r = konten.registrieren(json={
         "email": mail, "password": PW, "company_name": f"Sitzung {SUF}",
         "contact_person": "S Chef", "phone": "0511 9"}, timeout=30)
     if r.status_code != 200:
@@ -82,7 +83,7 @@ def konto():
 
 
 def _login(mail, ua):
-    return requests.post(f"{API}/auth/login", json={"email": mail, "password": PW},
+    return konten.login_per_mail(mail, PW, "auth",
                          headers={"User-Agent": ua}, timeout=30)
 
 
