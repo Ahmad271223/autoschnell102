@@ -243,21 +243,56 @@ async def _current(appt_id: str) -> Optional[dict]:
 _TERMIN_GESCHLOSSEN = ["storniert", "nicht abgeholt", "erledigt"]
 TERMIN_GESCHLOSSEN_HINWEIS = ("Protokoll gespeichert — der Termin wurde inzwischen "
                               "vom Händler geschlossen oder der Fahrer entfernt.")
+# Go-Live 13.09.2026 (P3): Termin haengt inzwischen an einem anderen Vertrag.
+TERMIN_UMGEHAENGT_HINWEIS = ("Protokoll gespeichert — der Termin wurde inzwischen einem "
+                             "anderen Vertrag zugeordnet. Bitte den Händler kontaktieren.")
+WIRD_ABGESCHLOSSEN = ("Das Protokoll wird gerade abgeschlossen — bitte einen Moment "
+                      "warten und neu laden.")
+ABSCHLUSS_UEBERHOLT = ("Der Abschluss wurde inzwischen geändert oder neu gestartet — "
+                       "bitte die Seite neu laden.")
+TERMIN_GEAENDERT = ("Der Termin wurde inzwischen geändert (anderer Vertrag oder anderes "
+                    "Fahrzeug) — bitte die Seite neu laden.")
+
+# Go-Live 13.09.2026 (P3): Diese Verweise des Termins bestimmen, WELCHER
+# Vertrag/Vorgang abgeschlossen wird.
+_TERMIN_ZEIGER = ("contract_id", "vehicle_id")
+
+
+def _termin_umgehaengt(vorher: dict, jetzt: dict, felder=_TERMIN_ZEIGER) -> bool:
+    """Go-Live 13.09.2026 (P3): Zeigt der Termin JETZT auf einen anderen
+    Vertrag/ein anderes Fahrzeug als beim Start des Abschlusses? Ein
+    geleerter Verweis zaehlt nicht (Vertragsloeschung setzt contract_id=None,
+    der Vorgang des Abschlusses bleibt dabei richtig)."""
+    return any((jetzt.get(f) or None) not in ((vorher.get(f) or None), None) for f in felder)
 
 
 async def _termin_abgeholt_setzen(appt_id: str, driver_id: str,
-                                  setzen: Dict[str, Any]) -> bool:
+                                  setzen: Dict[str, Any],
+                                  erwartet: Optional[Dict[str, Any]] = None) -> bool:
     """Runde 17 (Nr. 7): Termin-Write als Compare-and-Set — nur, wenn der
     Termin noch diesem Fahrer gehoert und nicht inzwischen geschlossen
     wurde. Vorher machte der Abschluss auch einen zwischenzeitlich
     stornierten Termin (oder den eines entfernten Fahrers) zu "abgeholt".
-    Liefert False (mit Betriebsalarm), wenn der Termin nicht mehr passt."""
-    res = await db.appointments.update_one(
-        {"id": appt_id, "driver_id": driver_id,
-         "status": {"$nin": _TERMIN_GESCHLOSSEN}},
-        {"$set": setzen})
+    Liefert False (mit Betriebsalarm), wenn der Termin nicht mehr passt.
+
+    Go-Live 13.09.2026 (P3): mit `erwartet` zusaetzlich nur, wenn Vertrag und
+    Fahrzeug noch dieselben sind (oder geleert) — sonst wuerde der Termin
+    eines anderen Vertrags mit dem PDF dieses Abschlusses "abgeholt"."""
+    filt: Dict[str, Any] = {"id": appt_id, "driver_id": driver_id,
+                            "status": {"$nin": _TERMIN_GESCHLOSSEN}}
+    if erwartet is not None:
+        for f in _TERMIN_ZEIGER:
+            filt[f] = {"$in": ([erwartet[f]] if erwartet.get(f) else []) + [None, ""]}
+    res = await db.appointments.update_one(filt, {"$set": setzen})
     if res.matched_count == 0:
-        await betrieb.alarm(db, "protokoll_final_termin_geschlossen", ref=appt_id,
+        typ = "protokoll_final_termin_geschlossen"
+        if erwartet is not None:
+            akt = await db.appointments.find_one(
+                {"id": appt_id, "driver_id": driver_id, "status": {"$nin": _TERMIN_GESCHLOSSEN}},
+                {"_id": 0, "contract_id": 1, "vehicle_id": 1})
+            if akt and _termin_umgehaengt(erwartet, akt):
+                typ = "protokoll_final_termin_umgehaengt"
+        await betrieb.alarm(db, typ, ref=appt_id,
                             driver_id=driver_id,
                             protocol_id=setzen.get("protocol_id"))
         return False
@@ -579,6 +614,9 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
                if k not in ("id", "status", "pdf_path", "finalized_at",
                             "signature_driver_key", "signature_seller_key",
                             "superseded_at", "claim_bis",
+                            # Go-Live 13.09.2026 (P1): kein Rest-Token und keine
+                            # Abschluss-Verweise in die Folgeversion.
+                            "claim_token", "contract_id", "kaufvorgang_id",
                             # Gegenpruefung 12.09.2026: Die Korrektur wartet
                             # NEU — sonst stand sie in der Freigabe-Liste als
                             # "wartet seit 50 Std." ganz oben.
@@ -663,7 +701,18 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
                     "version": doc.get("version", 1),
                     "nachgezogen": True,
                     "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
-        if not await _termin_abgeholt_setzen(appt_id, driver["id"], setzen):
+        # Go-Live 13.09.2026 (P3): Haengt der Termin inzwischen an einem
+        # ANDEREN Vertrag als beim Abschluss, nicht heilen — sonst bekaeme
+        # dessen Vorgang "abgeholt" mit dem PDF des alten Vertrags.
+        # Altprotokolle ohne das Feld: wie bisher.
+        if "contract_id" in doc and _termin_umgehaengt(
+                {"contract_id": doc.get("contract_id")}, appt, ("contract_id",)):
+            await betrieb.alarm(db, "protokoll_final_termin_umgehaengt", ref=appt_id,
+                                driver_id=driver["id"], protocol_id=doc["id"])
+            heil_out["hinweis"] = TERMIN_UMGEHAENGT_HINWEIS
+            return heil_out
+        if not await _termin_abgeholt_setzen(appt_id, driver["id"], setzen,
+                                             erwartet=appt):
             heil_out["hinweis"] = TERMIN_GESCHLOSSEN_HINWEIS
             return heil_out
         import kaufvorgang as _kv
@@ -679,6 +728,11 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     if (doc.get("status") == "wird_abgeschlossen"
             and await _abgelaufene_claims_freigeben({"id": doc["id"]})):
         doc = await _current(appt_id) or doc
+    # Go-Live 13.09.2026 (N1): Laeuft der Abschluss noch (gueltiger Claim),
+    # las der Fahrer nach einem Abbruch (524) sonst "zuerst zur Freigabe
+    # schicken" — obwohl laengst freigegeben ist.
+    if doc.get("status") == "wird_abgeschlossen":
+        raise HTTPException(409, WIRD_ABGESCHLOSSEN)
 
     # ---- Runde 30 (Wunsch Ahmad): Erst die Freigabe des Chefs ----
     # Unterschrieben wird NACH der Nachverhandlung. Ohne Freigabe gibt es
@@ -726,6 +780,11 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     # Runde 33 (Gegenpruefung 12.09.2026): Der Claim verlangt auch den
     # gerade geprueften Preis. Aenderte der Chef ihn genau zwischen Pruefung
     # und Claim, stand sonst ein Preis im PDF, den der Verkaeufer nie sah.
+    # Go-Live 13.09.2026 (P1/P2): Der Claim bekommt einen BESITZER. Vorher war
+    # er rein zeitbasiert — nach Ablauf konnte ein zweiter Abschluss uebernehmen,
+    # und der erste schrieb danach trotzdem final (PDF von A, Preis von B) bzw.
+    # sein Rollback gab den Claim von B frei.
+    claim_token = uuid.uuid4().hex
     claim = await db.pickup_protocols.find_one_and_update(
         {"id": doc["id"],
          "$or": [{"status": FREIGEGEBEN, "neuer_preis": _preis_jetzt,
@@ -736,6 +795,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
                   "claim_bis": {"$lt": _jetzt.isoformat()}}]},
         {"$set": {"status": "wird_abgeschlossen",
                   "claim_bis": (_jetzt + _td(minutes=3)).isoformat(),
+                  "claim_token": claim_token,
                   "updated_at": now_iso()}})
     if not claim:
         akt = await db.pickup_protocols.find_one({"id": doc["id"]},
@@ -768,12 +828,16 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
 
         Runde 30: zurueck auf FREIGEGEBEN (nicht auf 'entwurf'). Sonst
         haette ein gescheiterter Abschluss die Freigabe des Chefs geloescht
-        und der Fahrer haette vor Ort erneut auf ihn warten muessen."""
+        und der Fahrer haette vor Ort erneut auf ihn warten muessen.
+
+        Go-Live 13.09.2026 (P2): nur den EIGENEN Claim — ein inzwischen neu
+        gestarteter Abschluss (Claim abgelaufen, uebernommen) bleibt stehen."""
         try:
             await db.pickup_protocols.update_one(
-                {"id": doc["id"], "status": "wird_abgeschlossen"},
+                {"id": doc["id"], "status": "wird_abgeschlossen",
+                 "claim_token": claim_token},
                 {"$set": {"status": FREIGEGEBEN},
-                 "$unset": {"claim_bis": ""}})
+                 "$unset": {"claim_bis": "", "claim_token": ""}})
         except Exception:  # noqa: BLE001
             log.exception("Protokoll-Rollback: Claim von %s konnte nicht "
                           "freigegeben werden (laeuft nach 3 Min. ab)", doc["id"])
@@ -883,30 +947,60 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         await _rollback()
         raise
 
+    # Go-Live 13.09.2026 (P3): PDF, Kaufvorgang und Termin-Status stammen aus
+    # dem Termin-Stand vom START. Wurde der Termin inzwischen an einen anderen
+    # Vertrag/ein anderes Fahrzeug gehaengt (PUT ist gesperrt, direkte Writes
+    # nicht), wuerden sonst zwei Vorgaenge vermischt: nicht abschliessen.
+    frisch = await db.appointments.find_one(
+        {"id": appt_id}, {"_id": 0, "contract_id": 1, "vehicle_id": 1})
+    if frisch is not None and _termin_umgehaengt(appt, frisch):
+        await _rollback()
+        raise HTTPException(409, TERMIN_GEAENDERT)
+
     # Ab hier sind die Dateien im Protokoll referenziert — erst wenn DIESER
     # Schritt fehlschlaegt, waeren sie verwaist, deshalb auch hier Rollback.
+    # Go-Live 13.09.2026 (P1/P2): nur mit dem EIGENEN Claim-Token und nur,
+    # solange der unterschriebene Stand (Preis, Vermerk, Freigabe-Stand) gilt.
+    # FREIGEGEBEN ist erlaubt: ein langsamer, aber unbestrittener Abschluss,
+    # dessen Claim nur per Ablauf freigegeben wurde, endet nicht unnoetig mit
+    # 409 — jede echte Aenderung (neuer Claim, Zurueckschicken, neue Freigabe,
+    # Autospeichern) aendert Token, Stand oder Status.
     try:
-        await db.pickup_protocols.update_one(
-            {"id": doc["id"]},
-            {"$unset": {"claim_bis": ""},
+        res = await db.pickup_protocols.update_one(
+            {"id": doc["id"], "claim_token": claim_token,
+             "superseded": {"$ne": True},
+             "status": {"$in": ["wird_abgeschlossen", FREIGEGEBEN]},
+             "neuer_preis": claim.get("neuer_preis"),
+             "preis_notiz": claim.get("preis_notiz"),
+             "freigabe_stand": claim.get("freigabe_stand")},
+            {"$unset": {"claim_bis": "", "claim_token": ""},
              "$set": {"status": "final", "pdf_path": pdf_key,
                       "signature_driver_key": sig_driver,
                       "signature_seller_key": sig_seller,
                       "seller_name": filled["seller_name"],
                       "place": filled["place"],
+                      # Go-Live 13.09.2026 (P3): fuer die Selbstheilung
+                      "contract_id": appt.get("contract_id"),
+                      "kaufvorgang_id": appt.get("kaufvorgang_id"),
                       "finalized_at": now_iso(), "updated_at": now_iso()}})
     except Exception:
         await _rollback()
         raise
+    if res.matched_count == 0:
+        # Ueberholt: Status NICHT anfassen (gehoert jetzt einem anderen
+        # Vorgang), nur die eigenen Dateien verwerfen.
+        await _dateien_verwerfen(geschrieben, dealer_id)
+        raise HTTPException(409, ABSCHLUSS_UEBERHOLT)
 
     # Termin + Fahrzeug-Lebenszyklus nachziehen: abgeschlossen = abgeholt.
     # Runde 17 (Nr. 7): Compare-and-Set — ein inzwischen geschlossener
     # Termin (oder ein entfernter Fahrer) bleibt unangetastet; das Protokoll
     # ist trotzdem gespeichert (Beweis), der Fahrer bekommt einen Hinweis.
+    # Go-Live 13.09.2026 (P3): auch nur mit demselben Vertrag/Fahrzeug.
     termin_gesetzt = await _termin_abgeholt_setzen(
         appt_id, driver["id"],
         {"status": "abgeholt", "status_changed_at": now_iso(),
-         "protocol_id": doc["id"]})
+         "protocol_id": doc["id"]}, erwartet=appt)
     if termin_gesetzt:
         # Runde 30 (Wunsch Ahmad): Wurde vor Ort nachverhandelt, ist DAS der
         # Preis, den die Firma wirklich zahlt. Er gehoert deshalb in den

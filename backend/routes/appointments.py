@@ -262,6 +262,13 @@ NACHARBEIT_FEHLGESCHLAGEN_HINWEIS = ("Termin gespeichert — Vertrag und "
                                      "werden, bitte beides prüfen.")
 NACHARBEIT_HINWEIS = ("Termin gespeichert — Vertrag und Fahrzeugstatus werden "
                       "beim nächsten Speichern des Termins nachgezogen.")
+# Go-Live 13.09.2026 (P3): Protokoll-Stati, in denen Vertrag/Fahrzeug des
+# Termins feststehen (Werte wie routes.protocols; dort kein Import wegen Zyklus).
+PROTOKOLL_LAEUFT = ("zur_freigabe", "freigegeben", "wird_abgeschlossen")
+PROTOKOLL_LAEUFT_HINWEIS = ("Das Abholprotokoll liegt zur Freigabe oder wird gerade "
+                            "unterschrieben — Vertrag oder Fahrzeug lassen sich jetzt "
+                            "nicht ändern. Bitte das Protokoll erst an den Fahrer "
+                            "zurückschicken.")
 
 
 async def _offener_termin_zum_vertrag(dealer_id: str, contract_id: Optional[str],
@@ -668,6 +675,23 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         if status_neu not in ABGESCHLOSSEN:
             raise HTTPException(403, "Abgeschlossene Termine öffnet nur der "
                                      "Händler-Hauptaccount wieder")
+    # Go-Live 13.09.2026 (P3, P6-Zusatz-Umhaengen): Liegt das Protokoll beim
+    # Chef, ist es freigegeben oder wird gerade unterschrieben, darf der Termin
+    # nicht an einen anderen Vertrag/ein anderes Fahrzeug gehaengt werden —
+    # der Abschluss wuerde sonst PDF von Vertrag A mit Termin/Vorgang B
+    # vermischen. Nur ein TATSAECHLICHER Wechsel zaehlt (die Oberflaeche
+    # sendet das ganze Objekt); Fahrerwechsel, neue Vertraege und weitere
+    # Termine je Auto bleiben frei.
+    vertrag_wechsel = bool((contract_loesen and existing.get("contract_id")) or (
+        "contract_id" in update
+        and (update.get("contract_id") or "") != (existing.get("contract_id") or "")))
+    fahrzeug_wechsel = bool((fahrzeug_loesen and existing.get("vehicle_id")) or (
+        "vehicle_id" in update
+        and (update.get("vehicle_id") or "") != (existing.get("vehicle_id") or "")))
+    if (vertrag_wechsel or fahrzeug_wechsel) and await db.pickup_protocols.count_documents(
+            {"appointment_id": appt_id, "superseded": {"$ne": True},
+             "status": {"$in": list(PROTOKOLL_LAEUFT)}}, limit=1):
+        raise HTTPException(409, PROTOKOLL_LAEUFT_HINWEIS)
     if "driver_id" in update:
         await _fahrer_pruefen(user["dealer_id"], update.get("driver_id"))
         if update.get("driver_id") and update["driver_id"] != existing.get("driver_id"):

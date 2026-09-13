@@ -6,6 +6,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
 import { preisText } from "@/lib/preis";
+import { protokollZustand } from "@/lib/protokollZustand";
 import { toast } from "sonner";
 import {
   ArrowLeft, Save, CheckCircle2, FileText, AlertTriangle, Pencil,
@@ -101,11 +102,10 @@ export default function Protokoll() {
   // verhandelt ggf. nach und gibt mit dem neuen Preis frei — DANN wird
   // unterschrieben. Solange etwas beim Chef liegt, sind alle Eingaben
   // gesperrt: er soll genau das sehen, was am Ende unterschrieben wird.
-  const status = data?.protocol?.status || "entwurf";
-  const isFinal = status === "final";
-  const wartetAufFreigabe = status === "zur_freigabe";
-  const freigegeben = status === "freigegeben";
-  const gesperrt = isFinal || wartetAufFreigabe || freigegeben;
+  // Go-Live 13.09.2026 (N1): auch "wird_abgeschlossen" sperrt (protokollZustand).
+  const {
+    isFinal, wartetAufFreigabe, freigegeben, wirdAbgeschlossen, gesperrt, nachladen, unterschriften,
+  } = protokollZustand(data?.protocol?.status);
   const neuerPreis = data?.protocol?.neuer_preis ?? null;
   const rueckfrage = data?.protocol?.rueckfrage || "";
   // Runde 31: Die Unterschriften liegen bis zum Abschluss NUR im Speicher —
@@ -117,17 +117,20 @@ export default function Protokoll() {
   // tippte. Eingaben sind in dieser Zeit ohnehin gesperrt.
   // Gegenpruefung 12.09.2026: auch NACH der Freigabe — der Chef kann Preis
   // oder Vermerk noch aendern. Ort und Verkaeufername bleiben unangetastet.
+  // Go-Live 13.09.2026 (N1): ebenso waehrend "wird_abgeschlossen".
   useEffect(() => {
-    if (!wartetAufFreigabe && !freigegeben) return undefined;
+    if (!nachladen) return undefined;
     const takt = setInterval(() => {
       if (document.visibilityState === "visible") load({ still: true });
     }, 15000);
     return () => clearInterval(takt);
-  }, [wartetAufFreigabe, freigegeben, load]);
+  }, [nachladen, load]);
 
   // Aendert der Chef nach der Freigabe Preis oder Vermerk, gelten Unterschriften,
   // die schon auf dem Handy stehen, nicht mehr: loeschen und deutlich sagen.
-  const freigabeKennung = freigegeben
+  // Go-Live 13.09.2026: die Kennung bleibt auch waehrend des Abschlusses stehen —
+  // sonst fiele eine Aenderung nach einem gescheiterten Abschluss nicht auf.
+  const freigabeKennung = unterschriften
     ? [data?.protocol?.freigabe_stand || "", neuerPreis ?? "", data?.protocol?.preis_notiz || ""].join("|")
     : null;
   const [sigRunde, setSigRunde] = useState(0);
@@ -329,6 +332,17 @@ export default function Protokoll() {
             {data?.protocol?.preis_notiz && (
               <div className="mt-1 text-[11px] opacity-80">{data.protocol.preis_notiz}</div>
             )}
+          </div>
+        </div>
+      )}
+      {wirdAbgeschlossen && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-wird-abgeschlossen"
+             style={{ borderColor: "#0a84ff55", background: "#0a84ff14", color: "#64a8ff" }}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Wird gerade abgeschlossen — bitte einen Moment warten. Die Ansicht
+            aktualisiert sich von selbst.
           </div>
         </div>
       )}
@@ -585,24 +599,26 @@ export default function Protokoll() {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] text-zinc-500">Ort</label>
-            <input value={f.place} disabled={isFinal}
+            <input value={f.place} disabled={isFinal || wirdAbgeschlossen}
                    onChange={(e) => { ortGetippt.current = true; upd({ place: e.target.value }); }}
                    className={inputCls} style={st} placeholder="z.B. Hannover" />
           </div>
           <div>
             <label className="text-[11px] text-zinc-500">Name Verkäufer</label>
-            <input value={sellerName} disabled={isFinal}
+            <input value={sellerName} disabled={isFinal || wirdAbgeschlossen}
                    onChange={(e) => { nameGetippt.current = true; setSellerName(e.target.value); }}
                    className={inputCls} style={st} />
           </div>
         </div>
-        {freigegeben && (
-          <div className="mt-4 space-y-4">
+        {unterschriften && (
+          // Go-Live 13.09.2026 (N1): waehrend des Abschlusses sichtbar, aber gesperrt.
+          <div className={`mt-4 space-y-4 ${wirdAbgeschlossen ? "pointer-events-none opacity-50" : ""}`}
+               aria-disabled={wirdAbgeschlossen || undefined}>
             <SignaturePad key={`v${sigRunde}`} label="Unterschrift Verkäufer" onChange={setSigSeller} />
             <SignaturePad key={`f${sigRunde}`} label="Unterschrift Fahrer" onChange={setSigDriver} />
           </div>
         )}
-        {!isFinal && !freigegeben && (
+        {!isFinal && !unterschriften && (
           <div className="mt-4 text-[11px] text-zinc-500">
             Die Unterschriftsfelder erscheinen, sobald der Händler freigegeben hat.
           </div>
@@ -642,6 +658,13 @@ export default function Protokoll() {
                   className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
                   style={{ ...st, color: "#ff9f0a" }}>
             <AlertTriangle size={15} /> Wartet auf Freigabe · aktualisieren
+          </button>
+        ) : wirdAbgeschlossen ? (
+          <button onClick={() => load()} disabled={busy}
+                  data-testid="protokoll-abschluss-aktualisieren"
+                  className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                  style={{ ...st, color: "#64a8ff" }}>
+            <AlertTriangle size={15} /> Wird abgeschlossen · aktualisieren
           </button>
         ) : freigegeben ? (
           <button onClick={finalize} disabled={busy}
