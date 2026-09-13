@@ -412,6 +412,175 @@ def test_07_handelnder_ist_benutzername_und_betrieb_zaehlt(welt):
     assert all(isinstance(v, int) for v in ohne.values())
 
 
+# ============================================ Nachbesserung: Anfrage-Abschluss
+def _anfrage_einfuegen(dbx, welt, art, name):
+    """Offene Zugangs-Anfrage direkt in der DB (ohne Formular-Limiter)."""
+    mail = f"ka_{name}_{SUF}@{MAIL}"
+    welt["anfrage_mails"].append(mail)
+    aid = f"ka_anfrage_{name}_{SUF}"
+    dbx.plan_requests.insert_one({"id": aid, "type": "zugang", "art": art,
+                                  "company_name": f"KA {name} {SUF}",
+                                  "contact_person": "Ada Anfrage", "contact_email": mail,
+                                  "status": "offen", "created_at": _jetzt()})
+    return aid
+
+
+def _erledigt(dbx, aid, konto_id, kontonummer):
+    req = dbx.plan_requests.find_one({"id": aid})
+    assert req["status"] == "erledigt", req
+    assert req["angelegt_konto_id"] == konto_id and req["kontonummer"] == kontonummer, req
+    assert "anlage_marke" not in req and "anlage_seit" not in req, req
+
+
+@http
+def test_08_anfrage_abschluss_firma_mit_und_ohne_abo_und_fahrer(welt):
+    dbx = _db()
+    S = welt["S"]
+    # (a) Firma plan_type none und Firma mit Abo (trial)
+    for plan in ("none", "trial"):
+        aid = _anfrage_einfuegen(dbx, welt, "firma", f"firma_{plan}")
+        r = _post("/admin/users", {"password": PW, "company_name": f"KA AnfrageFirma {plan} {SUF}",
+                                   "plan_type": plan, "anfrage_id": aid}, S)
+        assert r.status_code == 200, (plan, r.text[:300])
+        d = r.json()
+        welt["user_ids"].append(d["user_id"])
+        welt["dealer_ids"].append(d["dealer_id"])
+        _erledigt(dbx, aid, d["user_id"], d["kontonummer"])
+        abos = dbx.subscriptions.count_documents({"dealer_id": d["dealer_id"]})
+        assert abos == (0 if plan == "none" else 1), (plan, abos)
+        # zweiter Aufruf mit derselben Anfrage: 409, keine zweite Firma
+        r = _post("/admin/users", {"password": PW, "company_name": f"KA AnfrageFirma {plan} {SUF}",
+                                   "plan_type": plan, "anfrage_id": aid}, S)
+        assert r.status_code == 409, r.text[:200]
+        assert dbx.dealers.count_documents(
+            {"company_name": f"KA AnfrageFirma {plan} {SUF}"}) == 1
+    # Firmen-Anfrage passt nicht zur Kaeufer-Anlage
+    aid = _anfrage_einfuegen(dbx, welt, "firma", "firma_falsch")
+    r = _post("/admin/buyers", {"company_name": f"KA Falsch {SUF}", "contact_name": "F F",
+                                "password": PW, "b2b_nachweis": True, "anfrage_id": aid}, S)
+    assert r.status_code == 400, r.text[:200]
+    assert "anlage_marke" not in dbx.plan_requests.find_one({"id": aid})
+    # (b) Fahrer
+    aid = _anfrage_einfuegen(dbx, welt, "fahrer", "fahrer")
+    r = _post("/admin/drivers", {"display_name": f"KA AnfrageFahrer {SUF}", "password": PW,
+                                 "anfrage_id": aid}, S)
+    assert r.status_code == 200, r.text[:300]
+    f = r.json()
+    welt["driver_ids"].append(f["driver_id"])
+    _erledigt(dbx, aid, f["driver_id"], f["kontonummer"])
+
+
+@http
+def test_09_gleichzeitige_anlage_mit_derselben_anfrage(welt):
+    """Doppelklick: drei gleichzeitige POST /admin/buyers mit derselben
+    anfrage_id -> genau einmal 200, sonst 409, genau ein Konto."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    dbx = _db()
+    aid = _anfrage_einfuegen(dbx, welt, "kaeufer", "parallel")
+    name = f"KA Parallel {SUF}"
+    body = {"company_name": name, "contact_name": "P P", "password": PW,
+            "b2b_nachweis": True, "anfrage_id": aid}
+    start = threading.Barrier(3)
+
+    def anlegen(_):
+        start.wait()
+        return _post("/admin/buyers", body, welt["S"])
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        antworten = list(pool.map(anlegen, range(3)))
+    codes = sorted(r.status_code for r in antworten)
+    ok = [r.json() for r in antworten if r.status_code == 200]
+    welt["user_ids"].extend(k["user_id"] for k in ok)
+    assert codes == [200, 409, 409], [(r.status_code, r.text[:120]) for r in antworten]
+    assert dbx.users.count_documents({"company_name": name}) == 1
+    _erledigt(dbx, aid, ok[0]["user_id"], ok[0]["kontonummer"])
+
+
+class _DbMitKaputtemAbo:
+    """Wie test_befunde_runde14_admin::test_50_49: nur der Abo-Insert scheitert."""
+
+    class _KaputtesAbo:
+        async def insert_one(self, *args, **kwargs):
+            raise RuntimeError("simulierter DB-Ausfall")
+
+    def __init__(self, echt):
+        self._echt = echt
+
+    @property
+    def subscriptions(self):
+        return self._KaputtesAbo()
+
+    def __getattr__(self, name):
+        return getattr(self._echt, name)
+
+    def __getitem__(self, name):
+        return self._echt[name]
+
+
+@pytest.fixture
+def wegwerf_db(monkeypatch):
+    from motor.motor_asyncio import AsyncIOMotorClient
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    name = f"autoschnell_ka_{uuid.uuid4().hex[:10]}"
+    db = client[name]
+    monkeypatch.setattr(deps, "db", db)
+    monkeypatch.setattr(ADMIN, "db", db)
+    try:
+        yield SimpleNamespace(db=db, run=loop.run_until_complete)
+    finally:
+        try:
+            loop.run_until_complete(client.drop_database(name))
+        finally:
+            client.close()
+            loop.close()
+
+
+def test_abo_fehler_gibt_anfrage_frei(wegwerf_db, monkeypatch):
+    """Scheitert der Abo-Insert, ist die Firma zurueckgerollt UND die
+    Reservierung der Anfrage entfernt; ein zweiter Versuch schliesst sie."""
+    from fastapi import HTTPException
+    w = wegwerf_db
+    db = w.db
+    sa = {"id": "t_ka_sa", "role": "admin", "is_super_admin": True,
+          "username": "t-ka-sa", "dealer_id": ""}
+
+    def body():
+        return ADMIN.AdminUserIn(password=PW, company_name="KA Abofehler",
+                                 plan_type="monthly", anfrage_id="anf-abo")
+
+    async def lauf():
+        z = {}
+        await db.plan_requests.insert_one({"id": "anf-abo", "type": "zugang", "art": "firma",
+                                           "status": "offen", "created_at": _jetzt()})
+        monkeypatch.setattr(ADMIN, "db", _DbMitKaputtemAbo(db))
+        try:
+            await ADMIN.admin_create_user(body(), admin=sa)
+        except HTTPException as e:
+            z["code"] = e.status_code
+        finally:
+            monkeypatch.setattr(ADMIN, "db", db)
+        z["nach_fehler"] = await db.plan_requests.find_one({"id": "anf-abo"}, {"_id": 0})
+        z["konten"] = await db.users.count_documents({})
+        z["firmen"] = await db.dealers.count_documents({})
+        z["erg"] = await ADMIN.admin_create_user(body(), admin=sa)
+        z["nach_erfolg"] = await db.plan_requests.find_one({"id": "anf-abo"}, {"_id": 0})
+        z["abos"] = await db.subscriptions.count_documents({"dealer_id": z["erg"]["dealer_id"]})
+        return z
+
+    z = w.run(lauf())
+    assert z["code"] == 500
+    assert z["konten"] == 0 and z["firmen"] == 0, "Rollback von Konto und Firma"
+    assert z["nach_fehler"]["status"] == "offen", z["nach_fehler"]
+    assert "anlage_marke" not in z["nach_fehler"] and "anlage_seit" not in z["nach_fehler"]
+    req = z["nach_erfolg"]
+    assert req["status"] == "erledigt" and req["angelegt_konto_id"] == z["erg"]["user_id"]
+    assert req["kontonummer"] == z["erg"]["kontonummer"] and "anlage_marke" not in req
+    assert z["abos"] == 1
+
+
 # ============================================ in-process: Passwort hebt Sperre auf
 def _fenster_abwarten(sekunden: int, puffer: float = 8.0) -> None:
     rest = sekunden - (time.time() % sekunden)

@@ -1353,7 +1353,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 nachricht=body.message, betreff=body.subject)
             # Kontonummer (13.09.2026): Konten ohne E-Mail — Antworten gehen an
             # die eigene Adresse des Suchers, sonst an die Firmenadresse; die
-            # Belegkopie NUR an eine eigene Adresse (sonst kopie=nicht_moeglich).
+            # Belegkopie NUR an eine eigene Adresse (sonst kopie=nicht_moeglich);
+            # beim Chef zaehlt die Firmenadresse als seine eigene.
             sucher_mail, antwort_adresse = sucher_kontakt(user, firma)
             ok, beleg = await email_service.send_email_mit_beleg(
                 body.recipient, betreff, text, anhang=pdf_bytes,

@@ -138,13 +138,20 @@ def sucher_kontakt(user: dict, firma: dict) -> Tuple[str, str]:
     Liefert (eigene_adresse, antwort_adresse):
       * eigene_adresse = users.email, sonst die eigene Kontaktadresse aus den
         Sucher-Einstellungen (settings_override.email), sonst "" —
-        NUR dorthin geht die Belegkopie (keine Kopie still beim Chef);
+        NUR dorthin geht die Belegkopie (keine Kopie eines Suchers still
+        beim Chef);
+      * beim Chef selbst (role dealer) ist die Firmenadresse (dealers.email)
+        seine eigene: er pflegt nur sie in den Einstellungen, und der
+        Betreiber legt Chefs ohne users.email an (Nachbesserung Schritt 2);
       * antwort_adresse = eigene_adresse, sonst die Firmenadresse (bei
         Suchern die effective_dealer-Sicht, also ggf. ueberschrieben)."""
     user = user or {}
+    firmen_adresse = str((firma or {}).get("email") or "").strip()
     eigene = ((user.get("email") or "").strip()
               or str((user.get("settings_override") or {}).get("email") or "").strip())
-    antwort = eigene or str((firma or {}).get("email") or "").strip()
+    if not eigene and user.get("role") == "dealer":
+        eigene = firmen_adresse
+    antwort = eigene or firmen_adresse
     return eigene, antwort
 
 

@@ -100,7 +100,16 @@ def test_sucher_kontakt_eigene_und_antwortadresse():
     # keine eigene Adresse: Antwort an die Firma, keine eigene fuer die Kopie
     assert vertrag_mail.sucher_kontakt({"kontonummer": "10023-2"}, firma) == (
         "", "info@autohaus-muster.de")
+    assert vertrag_mail.sucher_kontakt(
+        {"role": "sucher", "kontonummer": "10023-2"}, firma) == ("", "info@autohaus-muster.de")
     assert vertrag_mail.sucher_kontakt({}, {}) == ("", "")
+    # Nachbesserung Schritt 2: beim Chef ist die Firmenadresse seine eigene
+    assert vertrag_mail.sucher_kontakt({"role": "dealer", "kontonummer": "10023"}, firma) == (
+        "info@autohaus-muster.de", "info@autohaus-muster.de")
+    assert vertrag_mail.sucher_kontakt(
+        {"role": "dealer", "email": "chef@autohaus-muster.de"}, firma) == (
+        "chef@autohaus-muster.de", "chef@autohaus-muster.de")
+    assert vertrag_mail.sucher_kontakt({"role": "dealer"}, {"email": ""}) == ("", "")
 
 
 def test_vertrag_mail_ohne_eigene_adresse_nennt_firmenadresse():
@@ -135,11 +144,14 @@ class _FakeVertragsDb:
         raise AssertionError(f"unerwarteter Zugriff auf db.{name}")
 
 
-@pytest.mark.parametrize("fall", ["users_email", "override_email", "keine_eigene"])
+@pytest.mark.parametrize("fall", ["users_email", "override_email", "keine_eigene",
+                                  "chef_firmenadresse", "chef_ohne_adresse"])
 def test_versand_antwort_und_kopie_je_sucher_adresse(monkeypatch, fall):
     """send_contract (in-process, ohne DB): reply_to und Kopie folgen
     sucher_kontakt — ohne eigene Adresse Antwort an die Firma und
-    kopie='nicht_moeglich' (keine Belegkopie still beim Chef)."""
+    kopie='nicht_moeglich' (keine Belegkopie eines Suchers still beim Chef).
+    Nachbesserung Schritt 2: ein Chef ohne users.email bekommt die Kopie an
+    die Firmenadresse (seine eigene)."""
     import deps
     import kaufvorgang
     import provider_fetch
@@ -151,14 +163,22 @@ def test_versand_antwort_und_kopie_je_sucher_adresse(monkeypatch, fall):
                "send_status": [], "pdf_digital_b64": "JVBERi0xLjQgdGVzdA=="}
     sucher = {"id": "u1", "dealer_id": "d1", "role": "sucher", "first_name": "Sina",
               "last_name": "S", "kontonummer": "10023-2"}
+    chef = {"id": "d1", "company_name": "Chef GmbH", "email": "chef@e2etest-mail.de"}
     if fall == "users_email":
         sucher["email"] = "sina@e2etest-mail.de"
     elif fall == "override_email":
         sucher["settings_override"] = {"email": "filiale@e2etest-mail.de"}
-    chef = {"id": "d1", "company_name": "Chef GmbH", "email": "chef@e2etest-mail.de"}
+    elif fall.startswith("chef_"):
+        # der Chef selbst versendet, ohne users.email (seit Schritt 2 moeglich)
+        sucher = {"id": "u1", "dealer_id": "d1", "role": "dealer", "first_name": "Carl",
+                  "last_name": "C", "kontonummer": "10023"}
+        if fall == "chef_ohne_adresse":
+            chef["email"] = ""
     erwartet = {"users_email": "sina@e2etest-mail.de",
                 "override_email": "filiale@e2etest-mail.de",
-                "keine_eigene": "chef@e2etest-mail.de"}[fall]
+                "keine_eigene": "chef@e2etest-mail.de",
+                "chef_firmenadresse": "chef@e2etest-mail.de",
+                "chef_ohne_adresse": ""}[fall]
     monkeypatch.setattr(cm, "db", _FakeVertragsDb(vertrag))
 
     async def _eff(user):
@@ -195,8 +215,9 @@ def test_versand_antwort_und_kopie_je_sucher_adresse(monkeypatch, fall):
     haupt = gesendet[0]
     assert haupt["to"] == "kunde@e2etest-mail.de"
     assert haupt["reply_to"] == erwartet
-    assert f"({erwartet})" in haupt["text"], "Mailtext nennt die Antwortadresse"
-    if fall == "keine_eigene":
+    if erwartet:
+        assert f"({erwartet})" in haupt["text"], "Mailtext nennt die Antwortadresse"
+    if fall in ("keine_eigene", "chef_ohne_adresse"):
         assert out["kopie"] == "nicht_moeglich" and len(gesendet) == 1, out
     else:
         assert out["kopie"] == "gesendet" and gesendet[1]["to"] == erwartet, out
