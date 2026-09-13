@@ -2,7 +2,7 @@
 Backend tests for the new Apple-style Admin Dashboard endpoints.
 
 Covers:
-  * POST /api/auth/login (username + email + soft-block 403)
+  * POST /api/auth/login (Benutzername/Kontonummer + soft-block 403)
   * POST /api/admin/users/{id}/active (soft-block, super-admin guard, self-block guard)
   * POST /api/admin/users/{id}/password (admin reset, min 8 chars)
   * POST /api/admin/me/password (self change, wrong current → 401)

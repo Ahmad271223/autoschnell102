@@ -343,13 +343,17 @@ def test_09_netzwerk_mitglieder_und_widerruf(welt):
                       json={"validity_hours": 24, "max_uses": 1}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     token = r.json()["token"]
-    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
+    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True,
         "company_name": "RT Kaeufer", "contact_name": "K R",
-        "email": f"rt_kaeufer_{SUF}@e2etest-mail.de", "password": PW,
-        "invite_token": token}, timeout=30)
+        "email": f"rt_kaeufer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    assert r.json()["network_joined"] is True
     welt["K"] = _hdr(r.json()["token"])
+    # Kontonummer (13.09.2026): Einladung wird NACH der Anmeldung eingeloest
+    # (so macht es BuyerLogin ab Schritt 4) — geprueft wird die Antwort des
+    # Backends, nicht das network_joined des Test-Helfers.
+    r = requests.post(f"{API}/invites/{token}/redeem", headers=welt["K"], timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    assert r.json()["ok"] is True and r.json()["dealer"], r.text[:200]
     me = requests.get(f"{API}/buyer/me", headers=welt["K"], timeout=30).json()
     welt["buyer_id"] = me["id"]
     assert welt["dealer_a"] in me["network_dealer_ids"]
@@ -367,12 +371,13 @@ def test_09_netzwerk_mitglieder_und_widerruf(welt):
     # Der alte Einmal-Link bringt den Zugang nicht zurueck
     r = requests.post(f"{API}/invites/{token}/redeem", headers=welt["K"], timeout=30)
     assert r.status_code == 400
-    # Ungueltige Einladung -> ehrlich network_joined false
-    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
-        "company_name": "RT Kaeufer 2", "contact_name": "K Z",
-        "email": f"rt_kaeufer2_{SUF}@e2etest-mail.de", "password": PW,
-        "invite_token": "gibt-es-nicht"}, timeout=30)
-    assert r.status_code == 200 and r.json()["network_joined"] is False
+    # Ungueltige Einladung -> ehrliche Ablehnung des Backends (400 mit Text,
+    # den BuyerLogin ab Schritt 4 anzeigt), kein stiller Beitritt
+    r = requests.post(f"{API}/invites/gibt-es-nicht/redeem", headers=welt["K"], timeout=30)
+    assert r.status_code == 400, r.text[:200]
+    assert "abgelaufen oder bereits verwendet" in r.json()["detail"], r.text[:200]
+    me = requests.get(f"{API}/buyer/me", headers=welt["K"], timeout=30).json()
+    assert me["network_dealer_ids"] == [], me
 
 
 def test_10_marktplatz_nur_fuer_zwischenhaendler(welt):

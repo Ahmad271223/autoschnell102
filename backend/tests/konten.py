@@ -100,6 +100,11 @@ def anmelden(kennung, pw, weg="auth", headers=None, timeout=30, **kw):
                          headers=headers, timeout=timeout, **kw)
 
 
+# Kontonummer (13.09.2026): Die folgenden Funktionen sind SYNCHRONE Kopien aus
+# backend/kontenanlage.py (naechste_nummer, kunden_nr_sicherstellen,
+# _hoechster_zusatz, naechster_sucher_zusatz) — konten.py importiert bewusst
+# nur requests/pymongo. Wer dort Reihe oder Nummernschema aendert, zieht es
+# hier mit; tests/test_konten_helfer.py gleicht beide Seiten ab.
 def _naechste_nummer(dbx) -> int:
     """Wie kontenanlage.naechste_nummer (synchron): EINE Reihe
     counters._id='kunden_nr', nie auf oder unter die hoechste vergebene Nummer."""
@@ -126,23 +131,96 @@ def _naechste_nummer(dbx) -> int:
     raise AssertionError("konten: keine freie Kontonummer gefunden")
 
 
-def _nummer_vergeben(sammlung: str, konto_id: str) -> str:
-    """Direkt eingefuegtes Konto ohne Nummer (Altbestand im Test): Nummer aus
-    der gemeinsamen Reihe samt kontonummer_basis — nur, falls noch keine da ist."""
+def _kunden_nr_sicherstellen(dbx, dealer_id):
+    """Wie kontenanlage.kunden_nr_sicherstellen: fehlt der Firma die
+    kunden_nr, eine nachziehen ($exists-Schutz). None, wenn die Firma fehlt."""
+    from pymongo.errors import DuplicateKeyError
+    proj = {"_id": 0, "id": 1, "kunden_nr": 1}
+    firma = dbx.dealers.find_one({"id": dealer_id}, proj)
+    if not firma:
+        return None
+    for _ in range(3):
+        if isinstance(firma.get("kunden_nr"), int):
+            return firma["kunden_nr"]
+        try:
+            dbx.dealers.update_one({"id": dealer_id, "kunden_nr": {"$exists": False}},
+                                   {"$set": {"kunden_nr": _naechste_nummer(dbx)}})
+        except DuplicateKeyError as exc:
+            if "kunden_nr" not in str(exc):
+                raise
+        firma = dbx.dealers.find_one({"id": dealer_id}, proj) or {}
+    if isinstance(firma.get("kunden_nr"), int):
+        return firma["kunden_nr"]
+    raise AssertionError(f"konten: Kundennummer fuer Firma {dealer_id} nicht vergeben")
+
+
+def _hoechster_zusatz(dbx, kunden_nr) -> int:
+    praefix = f"{int(kunden_nr)}-"
+    hoechster = 0
+    for u in dbx.users.find({"kontonummer": {"$regex": f"^{praefix}", "$type": "string"}},
+                            {"_id": 0, "kontonummer": 1}):
+        try:
+            hoechster = max(hoechster, int(str(u["kontonummer"])[len(praefix):]))
+        except (KeyError, ValueError):
+            continue
+    return hoechster
+
+
+def _naechster_sucher_zusatz(dbx, dealer_id, kunden_nr) -> int:
+    """Wie kontenanlage.naechster_sucher_zusatz: dealers.sucher_seq nur per
+    $inc; liegt er nicht ueber dem hoechsten vorhandenen Zusatz, erst $max."""
+    from pymongo import ReturnDocument
+    for _ in range(5):
+        doc = dbx.dealers.find_one_and_update(
+            {"id": dealer_id}, {"$inc": {"sucher_seq": 1}},
+            projection={"_id": 0, "sucher_seq": 1}, return_document=ReturnDocument.AFTER)
+        assert doc, f"konten: Firma {dealer_id} fehlt"
+        zusatz = int(doc["sucher_seq"])
+        hoechster = _hoechster_zusatz(dbx, kunden_nr)
+        if zusatz > hoechster:
+            return zusatz
+        dbx.dealers.update_one({"id": dealer_id}, {"$max": {"sucher_seq": hoechster}})
+    raise AssertionError("konten: kein freier Sucher-Zusatz")
+
+
+def _nummer_vergeben(sammlung: str, konto: dict) -> str:
+    """Direkt eingefuegtes Konto ohne Nummer (Altbestand im Test): Nummer nach
+    dem Schema der Kontenanlage — nur, falls noch keine da ist.
+      - Chef (dealer): str(kunden_nr) der Firma, kontonummer_basis = kunden_nr.
+        Traegt schon ein anderes Konto die Firmennummer (wie nach einem
+        Chefwechsel, die Nummern bleiben am Konto): '<kunden_nr>-<zusatz>'.
+      - Sucher: '<kunden_nr>-<zusatz>' ueber dealers.sucher_seq,
+        kontonummer_basis = kunden_nr. Fehlt der Firma die kunden_nr: nachziehen.
+      - Kaeufer und Fahrer: eigene Nummer aus der gemeinsamen Reihe.
+      - Chef/Sucher ohne vorhandene Firma (reiner Testrest): eigene Nummer,
+        damit die Anmeldung testbar bleibt."""
     from pymongo.errors import DuplicateKeyError
     dbx = _db()
     coll = dbx[sammlung]
+    rolle = konto.get("role") if sammlung == "users" else None
+    firma_nr = None
+    if rolle in ("dealer", "sucher") and konto.get("dealer_id"):
+        firma_nr = _kunden_nr_sicherstellen(dbx, konto["dealer_id"])
     for _ in range(5):
-        nr = _naechste_nummer(dbx)
+        if firma_nr is None:
+            nr = _naechste_nummer(dbx)
+            nummer, basis = str(nr), nr
+        elif rolle == "dealer" and not coll.find_one(
+                {"kontonummer": {"$eq": str(firma_nr), "$type": "string"}}, {"_id": 1}):
+            nummer, basis = str(firma_nr), firma_nr
+        else:
+            # wie kontonummer.sucher_nummer
+            zusatz = _naechster_sucher_zusatz(dbx, konto["dealer_id"], firma_nr)
+            nummer, basis = f"{int(firma_nr)}-{int(zusatz)}", firma_nr
         try:
-            coll.update_one({"id": konto_id, "kontonummer": {"$exists": False}},
-                            {"$set": {"kontonummer": str(nr), "kontonummer_basis": nr}})
+            coll.update_one({"id": konto["id"], "kontonummer": {"$exists": False}},
+                            {"$set": {"kontonummer": nummer, "kontonummer_basis": basis}})
         except DuplicateKeyError:
             continue
-        doc = coll.find_one({"id": konto_id}, {"_id": 0, "kontonummer": 1}) or {}
+        doc = coll.find_one({"id": konto["id"]}, {"_id": 0, "kontonummer": 1}) or {}
         if doc.get("kontonummer"):
             return doc["kontonummer"]
-    raise AssertionError(f"konten: Nummer fuer {sammlung}/{konto_id} nicht vergeben")
+    raise AssertionError(f"konten: Nummer fuer {sammlung}/{konto['id']} nicht vergeben")
 
 
 def kennung_fuer_mail(mail, sammlung="users"):
@@ -153,7 +231,7 @@ def kennung_fuer_mail(mail, sammlung="users"):
       - normaler Admin -> die Adresse selbst (bis Schritt 4 greift der
         '@'-Altzweig; admin_konten_ohne_super_admin zeigt weiter die Adresse)
       - direkt eingefuegtes Chef/Sucher/Kaeufer- bzw. Fahrerkonto ohne
-        Nummer -> Nummer aus der gemeinsamen Reihe vergeben
+        Nummer -> Nummer nach dem Schema der Kontenanlage (_nummer_vergeben)
       - unbekannte Adresse -> die Adresse (Negativtests bleiben 401)
     Mehr als ein Treffer ist ein Testfehler (AssertionError)."""
     if not mail or "@" not in str(mail):
@@ -162,7 +240,7 @@ def kennung_fuer_mail(mail, sammlung="users"):
     treffer = list(coll.find(
         {"email": {"$regex": f"^{re.escape(str(mail).strip())}$", "$options": "i"}},
         {"_id": 0, "id": 1, "role": 1, "is_super_admin": 1, "username": 1,
-         "kontonummer": 1}).limit(3))
+         "kontonummer": 1, "dealer_id": 1}).limit(3))
     assert len(treffer) <= 1, f"konten: {len(treffer)} Konten mit der Adresse {mail} in {sammlung}"
     if not treffer:
         return mail
@@ -182,7 +260,7 @@ def kennung_fuer_mail(mail, sammlung="users"):
             return (coll.find_one({"id": konto["id"]}, {"username": 1}) or {}).get("username") or mail
         if rolle not in NUMMERN_ROLLEN:
             return mail
-    return _nummer_vergeben(sammlung, konto["id"])
+    return _nummer_vergeben(sammlung, konto)
 
 
 def login_per_mail(mail, pw, weg="auth", headers=None, timeout=30, **kw):
@@ -296,20 +374,19 @@ def sucher_als_chef_anlegen(chef=None, json=None, timeout=30, headers=None, **_)
     """Ersatz fuer POST /dealer/sucher mit dem Token des Chefs: /auth/me ->
     dealer_id -> POST /admin/dealers/{id}/sucher. Antwort {ok, sucher_id,
     kontonummer, …}. Kein Login des Suchers.
-    Nicht-Chef (Sucher, Kaeufer, …), fehlende Pflichtfelder der alten Route
-    oder ungueltiges Token: der Aufruf geht an die alte Route, damit deren
-    Ablehnung (401/403/422) erhalten bleibt."""
+    E-Mail, Vor- und Nachname sind optional (E-Mail nur Kontakt) und gehen
+    unveraendert an die Admin-Route. Es gibt KEINE Weiterleitung an die alte
+    Chef-Route: ungueltiges Token -> die 401 von /auth/me; ein Nicht-Chef ist
+    ein Fehler im Test. Wer die Ablehnung der alten Route pruefen will, ruft
+    POST /dealer/sucher direkt auf (mit '# ALTWEG – Schritt 5')."""
     kopf = headers or (chef if isinstance(chef, dict) else _kopf(chef))
     body = dict(json or {})
     me = requests.get(f"{API}/auth/me", headers=kopf, timeout=timeout)
-    alt = (me.status_code != 200
-           or (me.json().get("user") or {}).get("role") != "dealer"
-           or not body.get("email") or not body.get("first_name")
-           or not body.get("last_name"))
-    if alt:
-        return requests.post(f"{API}/dealer/sucher", headers=kopf, json=body,  # ALTWEG – Schritt 5
-                             timeout=timeout)
-    chef_user = me.json()["user"]
+    if me.status_code != 200:
+        return me
+    chef_user = me.json().get("user") or {}
+    assert chef_user.get("role") == "dealer" and chef_user.get("dealer_id"), \
+        f"konten: sucher_als_chef_anlegen braucht das Token eines Chefs, nicht {chef_user.get('role')!r}"
     r = _super("POST", f"/admin/dealers/{chef_user['dealer_id']}/sucher", _ohne_none({
         "email": body.get("email"), "password": body.get("password"),
         "first_name": body.get("first_name"), "last_name": body.get("last_name"),

@@ -353,12 +353,17 @@ def test_11_self_signup_aus(welt):
         "email": f"bt_prod_{SUF}@e2etest-mail.de"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     _db().plan_requests.delete_many({"contact_email": f"bt_prod_{SUF}@e2etest-mail.de"})
-    # Chef-Sucher-Verwaltung ist zu (403 mit Betreiber-Hinweis)
+    # Chef-Sucher-Verwaltung ist zu (403 mit Betreiber-Hinweis).
+    # Kontonummer (13.09.2026): Anmeldung am Betreiber-Backend (gleiche DB)
+    # per Kontonummer des Chefs — konten.anmelden spricht nur TEST_BASE_URL an.
+    chef_nr = (_db().users.find_one({"id": welt["chef_id"]},
+                                    {"_id": 0, "kontonummer": 1}) or {}).get("kontonummer")
+    assert chef_nr, "Chef ohne Kontonummer"
     r = requests.post(f"{api}/auth/login", json={
-        "email": f"bt_chef_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
-    assert r.status_code == 200
+        "kontonummer": chef_nr, "password": PW}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
     H = {"Authorization": f"Bearer {r.json()['token']}"}
-    r = requests.post(f"{api}/dealer/sucher", headers=H, json={
+    r = requests.post(f"{api}/dealer/sucher", headers=H, json={  # ALTWEG – Schritt 5
         "email": f"bt_neu_{SUF}@e2etest-mail.de", "password": PW,
         "first_name": "N", "last_name": "S"}, timeout=30)
     assert r.status_code == 403 and "Betreiber" in r.text, r.text[:200]
