@@ -469,12 +469,13 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
     r_prot = await db.pickup_protocols.update_many(
         {"driver_account_id": driver_id}, ersatz)
     # 3) Audit-Log: Handelnder pseudonymisieren, personenbezogene
-    #    Meta-Felder entfernen (E-Mail, Fahrer-Code, Anzeigename)
+    #    Meta-Felder entfernen (E-Mail, Fahrer-Code, Anzeigename und —
+    #    Kontonummer 13.09.2026 — die Kontonummer)
     r_log = await db.activity_logs.update_many(
         {"user_id": driver_id},
         {"$set": {"user_id": pseudonym},
          "$unset": {"meta.email": "", "meta.driver_code": "",
-                    "meta.display_name": ""}})
+                    "meta.display_name": "", "meta.kontonummer": ""}})
     # 4) Reset-Tokens weg (Haendler-Verknuepfungen: Schritt 0)
     r_reset = await db.password_resets.delete_many({"user_id": driver_id})
     return {

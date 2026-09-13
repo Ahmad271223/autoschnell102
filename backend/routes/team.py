@@ -464,6 +464,9 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
         {"type": "verkaufspaket", "dealer_id": user["dealer_id"], "status": "offen"},
         {"id": req_id,
          "company_name": (dealer or {}).get("company_name", ""),
+         # Kontonummer (13.09.2026): Anfragende Kennung fuer den Betreiber
+         "kontonummer": user.get("kontonummer"),
+         "kunden_nr": (dealer or {}).get("kunden_nr"),
          "contact_email": user.get("email", ""),
          "contact_phone": (dealer or {}).get("phone", ""),
          "current_tier": status.get("tier"),
@@ -514,8 +517,10 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
              "dealer_id": user["dealer_id"], "status": "offen"},
             {"id": req_id,
              "subject_role": user.get("role", "dealer"),
-         "sucher_name": name or user.get("email", ""),
+         # Kontonummer (13.09.2026): Kontonummer statt E-Mail als Rueckfall
+         "sucher_name": name or user.get("kontonummer") or user.get("email", ""),
          "sucher_email": user.get("email", ""),
+         "kontonummer": user.get("kontonummer"),
          "company_name": (dealer or {}).get("company_name", ""),
          "kunden_nr": (dealer or {}).get("kunden_nr"),
          "contact_email": user.get("email", ""),
@@ -561,7 +566,8 @@ async def sucher_abo_request(sucher_id: str, body: dict = Body(default={}),
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
     sucher = await db.users.find_one(
         {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"},
-        {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "active": 1})
+        {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "active": 1,
+         "kontonummer": 1})
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
     # Nachpruefung Runde 14 (Nr. 104): fuer ein deaktiviertes Konto landete
@@ -585,6 +591,9 @@ async def sucher_abo_request(sucher_id: str, body: dict = Body(default={}),
             {"id": req_id,
              "sucher_name": f"{sucher.get('first_name','')} {sucher.get('last_name','')}".strip(),
              "sucher_email": sucher.get("email", ""),
+             # Kontonummer (13.09.2026): Sucher-Nummer und Firmennummer
+             "kontonummer": sucher.get("kontonummer"),
+             "kunden_nr": (dealer or {}).get("kunden_nr"),
              "company_name": (dealer or {}).get("company_name", ""),
              "contact_email": user.get("email", ""),
              "contact_phone": (dealer or {}).get("phone", ""),

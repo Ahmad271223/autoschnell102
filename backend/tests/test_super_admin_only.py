@@ -67,6 +67,7 @@ def welt():
             dbx[coll].delete_many({"dealer_id": z["dealer_id"]})
         dbx.dealers.delete_many({"id": z["dealer_id"]})
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
+    dbx.driver_accounts.delete_many({"email": {"$regex": f"_{SUF}@"}})
     dbx.subscriptions.delete_many({"subject_user_id": {"$regex": f"^sa_test_{SUF}"}})
 
 
@@ -126,6 +127,50 @@ def test_01_normaler_admin_darf_nicht_verwalten(welt):
     assert r.status_code == 400 and "Super-Admin" in r.text, r.text[:200]
     # Super-Admin darf
     assert requests.get(f"{API}/admin/betrieb", headers=welt["S"], timeout=30).status_code == 200
+
+
+# ---------- Kontonummer (13.09.2026): Kaeufer- und Fahrer-Anlage ----------
+def test_01b_kaeufer_und_fahrer_anlage_nur_super_admin(welt):
+    """POST /admin/buyers und POST /admin/drivers: nur der Super-Admin. Chef,
+    Sucher, Kaeufer und normaler Admin bekommen 403; ein Fahrer-Token ist
+    fuer /admin kein Nutzer-Token (401)."""
+    dbx = _db()
+    S, N = welt["S"], welt["N"]
+    r = requests.post(f"{API}/admin/buyers", headers=S, json={
+        "company_name": f"SA Kaeufer {SUF}", "contact_name": "K M",
+        "email": f"sa_kauf_{SUF}@{MAIL}", "password": PW, "b2b_nachweis": True}, timeout=30)
+    assert r.status_code == 200, r.text[:300]
+    k = r.json()
+    r = requests.post(f"{API}/admin/drivers", headers=S, json={
+        "display_name": f"SA Fahrer {SUF}", "email": f"sa_fahr_{SUF}@{MAIL}",
+        "password": PW}, timeout=30)
+    assert r.status_code == 200, r.text[:300]
+    f = r.json()
+    r = requests.post(f"{API}/buyer/login", json={"kontonummer": k["kontonummer"],
+                                                  "password": PW}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    kaeufer = {"Authorization": f"Bearer {r.json()['token']}"}
+    r = requests.post(f"{API}/driver/login", json={"kontonummer": f["kontonummer"],
+                                                   "password": PW}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    fahrer = {"Authorization": f"Bearer {r.json()['token']}"}
+    verboten = f"SA verboten {SUF}"
+    versuche = [
+        ("/admin/buyers", {"company_name": verboten, "contact_name": "X Y",
+                           "password": PW, "b2b_nachweis": True}),
+        ("/admin/drivers", {"display_name": verboten, "password": PW}),
+    ]
+    for rolle, kopf in (("chef", _login(f"sa_chef_{SUF}@{MAIL}")),
+                        ("sucher", _login(f"sa_sucher_{SUF}@{MAIL}")),
+                        ("kaeufer", kaeufer), ("normaler_admin", N), ("fahrer", fahrer)):
+        for pfad, body in versuche:
+            r = requests.post(f"{API}{pfad}", headers=kopf, json=body, timeout=30)
+            erlaubt = (401, 403) if rolle == "fahrer" else (403,)
+            assert r.status_code in erlaubt, (rolle, pfad, r.status_code, r.text[:120])
+    assert dbx.users.count_documents({"company_name": verboten}) == 0
+    assert dbx.driver_accounts.count_documents({"display_name": verboten}) == 0
+    dbx.users.delete_many({"id": k["user_id"]})
+    dbx.driver_accounts.delete_many({"id": f["driver_id"]})
 
 
 # ---------- Abo-Aufloesung fail-closed ----------

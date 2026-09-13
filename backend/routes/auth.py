@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pymongo.errors import DuplicateKeyError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Optional
+from typing import Literal, Optional
 
 from auth import (
     create_mfa_token, create_token, decode_mfa_token, hash_password_async,
@@ -92,13 +92,32 @@ class TokenOut(BaseModel):
 class ZugangsAnfrageIn(BaseModel):
     """Öffentliche Zugangs-Anfrage von der Startseite (Beschluss 09/2026):
     Firmen registrieren sich nicht mehr selbst — sie stellen eine Anfrage,
-    der Betreiber legt danach das Firmen-Konto an und schaltet frei."""
+    der Betreiber legt danach das Firmen-Konto an und schaltet frei.
+    Kontonummer (13.09.2026): auch Zwischenhaendler (art=kaeufer) und Fahrer
+    (art=fahrer) fragen hier an. Die E-Mail bleibt PFLICHT — sie ist der
+    Rueckkanal fuer Kontonummer und Passwort."""
+    art: Literal["firma", "kaeufer", "fahrer"] = "firma"
     company_name: str = Field(min_length=2, max_length=200)
     contact_person: str = Field(min_length=2, max_length=120)
     email: EmailStr
     phone: str = Field(default="", max_length=50)
     message: str = Field(default="", max_length=2000)
     sucher_anzahl: int = Field(default=0, ge=0, le=50)
+    # Nur art=kaeufer: USt-IdNr./Handelsregister (Formatpruefung) und die
+    # B2B-Bestaetigung (AGB §1, Pflicht)
+    ust_id: str = Field(default="", max_length=40)
+    gewerblich_bestaetigt: bool = False
+
+    @field_validator("ust_id")
+    @classmethod
+    def _ustid(cls, v):
+        from ustid import feld_pruefen
+        return feld_pruefen(v)
+
+
+_ANFRAGE_WUNSCH = {"firma": "Zugang zum Programm",
+                   "kaeufer": "Marktplatz-Zugang (Zwischenhändler)",
+                   "fahrer": "Fahrer-Zugang"}
 
 
 @router.post("/zugang-anfrage")
@@ -106,25 +125,32 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
     """Startseiten-Formular: 'Ich möchte das Programm nutzen.' Landet beim
     Betreiber unter Freischaltungen. Kein Konto, kein Passwort — der
     Betreiber legt das Firmen-Konto nach Kontaktaufnahme selbst an."""
+    if body.art == "kaeufer" and not body.gewerblich_bestaetigt:
+        raise HTTPException(400, "Bitte bestätige, dass du als Unternehmer handelst")
     ip = client_ip(request)
     if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anfragen von dieser IP – bitte "
                                  "später erneut versuchen.")
     req_id = str(uuid.uuid4())
-    await db.plan_requests.insert_one({
-        "id": req_id, "type": "zugang",
+    sucher = body.sucher_anzahl if body.art == "firma" else 0
+    doc = {
+        "id": req_id, "type": "zugang", "art": body.art,
         "company_name": body.company_name.strip(),
         "contact_person": body.contact_person.strip(),
         "contact_email": body.email.strip().lower(),
         "contact_phone": body.phone.strip(),
         "message": body.message.strip(),
-        "sucher_anzahl": body.sucher_anzahl,
-        "wanted": ("Zugang zum Programm"
-                   + (f" + {body.sucher_anzahl} Sucher" if body.sucher_anzahl else "")),
+        "sucher_anzahl": sucher,
+        "wanted": (_ANFRAGE_WUNSCH[body.art]
+                   + (f" + {sucher} Sucher" if sucher else "")),
         "status": "offen", "created_at": now_iso(),
-    })
+    }
+    if body.art == "kaeufer":
+        doc["ust_id"] = body.ust_id
+        doc["gewerblich_bestaetigt_am"] = now_iso()
+    await db.plan_requests.insert_one(doc)
     await log_activity("", "", "zugang.anfrage",
-                       ref=req_id, meta={"firma": body.company_name,
+                       ref=req_id, meta={"firma": body.company_name, "art": body.art,
                                          "email": body.email, "ip": ip})
     return {"ok": True, "hinweis": "Anfrage ist eingegangen — wir melden uns "
                                    "und schalten dein Firmen-Konto frei."}

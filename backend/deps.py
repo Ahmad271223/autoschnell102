@@ -630,12 +630,14 @@ async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:
     out: Dict[str, str] = {}
     konten = await db.users.find(
         {"id": {"$in": ids}, "dealer_id": dealer_id},
-        {"_id": 0, "id": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1}).to_list(1000)
+        {"_id": 0, "id": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1,
+         "kontonummer": 1}).to_list(1000)
     for u in konten:
         name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip()
         if not name:
+            # Kontonummer (13.09.2026): Konten ohne E-Mail -> Kontonummer
             name = ("Händler-Hauptaccount" if u.get("role") == "dealer"
-                    else (u.get("email") or u["id"]))
+                    else (u.get("email") or u.get("kontonummer") or u["id"]))
         out[u["id"]] = name
     return out
 

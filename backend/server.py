@@ -657,7 +657,11 @@ async def _plan_requests_unique_indizes() -> None:
 
 
 async def ensure_indexes():
-    await _unique_index_sicher(db.users, "email")
+    # Kontonummer (13.09.2026), Schritt 2: users.email / driver_accounts.email
+    # nur noch als Teil-Unique-Index 'email_alt_eindeutig' (Konten ohne
+    # E-Mail moeglich); ersetzt _unique_index_sicher(..., "email").
+    from indizes import email_uebergang
+    await email_uebergang(db)
     await _unique_index_sicher(db.dealers, "user_id")
     await db.vehicle_cache.create_index("mobile_ad_id", unique=True)
     # Genau EIN aktuelles Abholprotokoll je Termin (Race-Schutz: zwei
@@ -814,8 +818,7 @@ async def ensure_indexes():
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
     await _termin_unique_index()
-    # Neue Fahrer-Accounts + Dealer-Driver-Links
-    await _unique_index_sicher(db.driver_accounts, "email")
+    # Neue Fahrer-Accounts + Dealer-Driver-Links (E-Mail-Index: email_uebergang oben)
     await _unique_index_sicher(db.driver_accounts, "driver_code")
     await db.dealer_drivers.create_index(
         [("dealer_id", 1), ("driver_account_id", 1)], unique=True,

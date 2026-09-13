@@ -36,15 +36,42 @@ router = APIRouter()
 
 
 # ---------- Models ----------
+def _leer_zu_none(v):
+    """Kontonummer (13.09.2026): die E-Mail ist nur noch Kontaktadresse und
+    optional — ein leeres Formularfeld ("") gilt als "keine Angabe" statt 422."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    return v.strip() if isinstance(v, str) else v
+
+
+def _handelnder(admin: dict) -> str:
+    """Kontonummer (13.09.2026): Kennung des handelnden Betreibers in
+    Buchhaltungs- und Verlaufsfeldern (resolved_by, recorded_by, admin_email,
+    ...). Der Super-Admin hat einen Benutzernamen; seine E-Mail ist nur der
+    Platzhalter '<username>@cashcar.local' und gehoert dort nicht hin."""
+    return (admin or {}).get("username") or (admin or {}).get("id") or ""
+
+
 class AdminUserIn(BaseModel):
-    email: EmailStr
+    # Kontonummer (13.09.2026): Anmeldung per Kontonummer — die E-Mail ist
+    # optionale Kontaktadresse der Firma (dealers.email).
+    email: Optional[EmailStr] = None
     password: str = Field(min_length=8, max_length=200)
     company_name: str = Field(min_length=1, max_length=200)
+    contact_person: str = Field(default="", max_length=120)
+    phone: str = Field(default="", max_length=50)
     # Audit 09/2026: nur feste Werte — "lifetime" und Freitext erzeugten
     # unbegrenzten Zugang. Betreiber-Modell: "none" (Firma ohne Abo).
     plan_type: Literal["none", "monthly", "yearly", "trial"] = "none"
     expires_at: Optional[str] = None
     active: Optional[bool] = True
+    # Zugangs-Anfrage (type zugang, art firma), die mit der Anlage erledigt ist
+    anfrage_id: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email_leer(cls, v):
+        return _leer_zu_none(v)
 
     @field_validator("password")
     @classmethod
@@ -120,30 +147,122 @@ def _ablaufdatum_pruefen_400(wert, feld: str = "expires_at"):
     return d.isoformat()
 
 
+# ---------- Zugangs-Anfrage beim Anlegen schliessen (Kontonummer, 13.09.2026) ----------
+ANFRAGE_RESERVIERUNG_S = 120
+
+
+async def _anfrage_reservieren(anfrage_id: Optional[str], art: str) -> Optional[dict]:
+    """Offene Zugangs-Anfrage (type zugang) fuer die Kontenanlage reservieren —
+    VOR dem Ziehen einer Nummer, damit ein Doppelklick nicht zwei Konten zu
+    derselben Anfrage anlegt. Alt-Anfragen ohne `art` gelten als 'firma'.
+    404: unbekannt; 400: andere Kontoart; 409: erledigt oder gerade in Anlage.
+    Eine liegengebliebene Reservierung (Absturz) verfaellt nach 120 s."""
+    if not anfrage_id:
+        return None
+    anfrage = await db.plan_requests.find_one({"id": anfrage_id, "type": "zugang"},
+                                              {"_id": 0})
+    if not anfrage:
+        raise HTTPException(404, "Zugangs-Anfrage nicht gefunden")
+    anfrage_art = anfrage.get("art") or "firma"
+    if anfrage_art != art:
+        raise HTTPException(400, f"Die Anfrage gehört zur Kontoart '{anfrage_art}', "
+                                 f"nicht '{art}'")
+    if anfrage.get("status") != "offen":
+        raise HTTPException(409, "Die Zugangs-Anfrage ist bereits erledigt")
+    marke = str(uuid.uuid4())
+    jetzt = datetime.now(timezone.utc)
+    frist = (jetzt - timedelta(seconds=ANFRAGE_RESERVIERUNG_S)).isoformat()
+    r = await db.plan_requests.update_one(
+        {"id": anfrage_id, "type": "zugang", "status": "offen",
+         "$or": [{"anlage_marke": {"$exists": False}},
+                 {"anlage_seit": {"$lt": frist}}]},
+        {"$set": {"anlage_marke": marke, "anlage_seit": jetzt.isoformat()}})
+    if r.modified_count != 1:
+        raise HTTPException(409, "Zu dieser Anfrage wird gerade ein Konto angelegt")
+    anfrage["anlage_marke"] = marke
+    return anfrage
+
+
+async def _anfrage_freigeben(anfrage: Optional[dict]) -> None:
+    """Reservierung nach einem Fehler der Anlage zuruecknehmen (nur die eigene)."""
+    if not anfrage:
+        return
+    try:
+        await db.plan_requests.update_one(
+            {"id": anfrage["id"], "anlage_marke": anfrage["anlage_marke"]},
+            {"$unset": {"anlage_marke": "", "anlage_seit": ""}})
+    except Exception:
+        log.exception("Reservierung der Anfrage %s nicht freigegeben", anfrage.get("id"))
+
+
+async def _anfrage_abschliessen(anfrage: Optional[dict], konto_id: str,
+                                kontonummer: str, admin: dict) -> None:
+    """Anfrage 'erledigt' mit angelegt_konto_id und kontonummer. Das Konto
+    steht schon — ein Fehler hier bricht die Anlage nicht mehr ab."""
+    if not anfrage:
+        return
+    try:
+        await db.plan_requests.update_one(
+            {"id": anfrage["id"], "anlage_marke": anfrage["anlage_marke"]},
+            {"$set": {"status": "erledigt", "erledigt_durch": "kontenanlage",
+                      "angelegt_konto_id": konto_id, "kontonummer": kontonummer,
+                      "erledigt_von": _handelnder(admin), "updated_at": now_iso()},
+             "$unset": {"anlage_marke": "", "anlage_seit": ""}})
+    except Exception:
+        log.exception("Anfrage %s nach Kontenanlage nicht geschlossen", anfrage.get("id"))
+
+
+async def _email_frei_409(email: Optional[str]) -> None:
+    """Bis Schritt 5 (Kontonummer, 13.09.2026): Kontaktadresse plattformweit
+    eindeutig — nur geprueft, wenn eine angegeben ist. Import zur Aufrufzeit
+    (Tests ersetzen deps.email_vergeben)."""
+    if not email:
+        return
+    from deps import email_vergeben
+    if await email_vergeben(email):
+        raise HTTPException(409, "E-Mail bereits registriert")
+
+
+async def _konto_sperre_aufheben(konto: dict) -> None:
+    """Kontonummer (13.09.2026): Passwort-Setzen durch den Betreiber hebt die
+    Sperre des Konto-Limiters auf (einziger Weg bei 'Passwort vergessen')."""
+    nr = (konto or {}).get("kontonummer")
+    if not nr:
+        return
+    try:
+        from kontonummer import anmeldekennung
+        from rate_limiter import login_konto_limiter
+        await login_konto_limiter.reset(anmeldekennung(nr))
+    except Exception:
+        log.exception("Konto-Sperre fuer %s nicht aufgehoben", nr)
+
+
 # ---------- Users ----------
 @router.post("/admin/users")
 async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin)):
     # Haertung 09/2026: E-Mail wie bei Registrierung/Sucher normalisieren und
     # schreibungsunabhaengig pruefen — vorher konnten "Chef@X.de" und
     # "chef@x.de" als zwei Konten existieren (Login trifft dann das falsche).
-    email = body.email.strip().lower()
+    # Kontonummer (13.09.2026): Die E-Mail ist optional (Kontaktadresse).
+    email = (body.email or "").strip().lower() or None
     # Nachpruefung Runde 14 (Befund 50): Ablauf VOR dem ersten Insert
     # pruefen — ein 400 hier laesst weder Konto noch Firmenprofil zurueck.
-    # Kontonummer (13.09.2026): Reihenfolge Ablauf -> E-Mail -> Nummer.
+    # Kontonummer (13.09.2026): Reihenfolge Ablauf -> E-Mail -> Anfrage -> Nummer.
     ablauf_eingabe = _ablaufdatum_pruefen_400(body.expires_at)
     # Runde 13: B5 — plattformweit (users UND driver_accounts) statt nur users.
-    from deps import email_vergeben
-    if await email_vergeben(email):
-        raise HTTPException(409, "E-Mail bereits registriert")
+    await _email_frei_409(email)
+    anfrage = await _anfrage_reservieren(body.anfrage_id, "firma")
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
     chef_doc = {
-        "id": user_id, "email": email,
+        "id": user_id,
         "password_hash": await hash_password_async(body.password),
         "role": "dealer", "active": body.active if body.active is not None else True,
         "dealer_id": dealer_id, "current_session_id": None,
         "created_at": now_iso(),
     }
+    if email:                       # ohne Angabe fehlt das Feld (nie "")
+        chef_doc["email"] = email
     # Kontonummer (13.09.2026): erst die Firma mit Nummer, dann der Chef mit
     # kontonummer = str(kunden_nr) — kontenanlage raeumt die Firma bei jedem
     # Fehler des Chef-Inserts wieder weg (kein Profil ohne Konto).
@@ -151,7 +270,8 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     try:
         erg = await firma_mit_chef_anlegen(db, {
         "id": dealer_id, "user_id": user_id, "company_name": body.company_name,
-        "contact_person": "", "phone": "", "email": email,
+        "contact_person": body.contact_person.strip(), "phone": body.phone.strip(),
+        "email": email or "",
         "address": "", "zip_code": "", "city": "", "logo_url": "",
         "comparison_rules": DEFAULT_RULES,
         "export_rules": DEFAULT_EXPORT_RULES,
@@ -167,10 +287,13 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
         }, chef_doc)
     except DuplicateKeyError:
         # Rennen zweier gleichzeitiger Anlagen: Unique-Index entscheidet.
+        await _anfrage_freigeben(anfrage)
         raise HTTPException(409, "E-Mail bereits registriert")
     except HTTPException:
+        await _anfrage_freigeben(anfrage)
         raise
     except Exception:
+        await _anfrage_freigeben(anfrage)
         log.exception("admin_create_user: Firma/Konto-Insert fehlgeschlagen")
         raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
     antwort = {"ok": True, "user_id": user_id, "dealer_id": dealer_id,
@@ -179,10 +302,11 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     # jedes Abo anlegen — Verkaufen/Verwalten ist kostenlos, Sucher-Abos
     # werden einzeln nach Rechnungszahlung freigeschaltet.
     if body.plan_type == "none":
+        await _anfrage_abschliessen(anfrage, user_id, erg["kontonummer"], admin)
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.erstellt", ref=user_id,
-                           meta={"email": body.email, "plan": "none",
-                                 "kontonummer": erg["kontonummer"]})
+                           meta={"plan": "none", "kontonummer": erg["kontonummer"],
+                                 "anfrage": bool(anfrage)})
         return antwort
     expires = ablauf_eingabe
     if not expires and body.plan_type in ("monthly", "trial"):
@@ -205,11 +329,14 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     except Exception:
         await db.dealers.delete_one({"id": dealer_id})
         await db.users.delete_one({"id": user_id})
+        await _anfrage_freigeben(anfrage)
         log.exception("admin_create_user: Abo-Insert fehlgeschlagen")
         raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
+    await _anfrage_abschliessen(anfrage, user_id, erg["kontonummer"], admin)
     await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.erstellt",
-                       ref=user_id, meta={"email": body.email, "plan": body.plan_type,
-                                          "kontonummer": erg["kontonummer"]})
+                       ref=user_id, meta={"plan": body.plan_type,
+                                          "kontonummer": erg["kontonummer"],
+                                          "anfrage": bool(anfrage)})
     return antwort
 
 
@@ -328,11 +455,14 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                 chef = await db.users.find_one(
                     {"dealer_id": target["dealer_id"], "role": "dealer",
                      "id": {"$ne": target["id"]}},
-                    {"_id": 0, "id": 1, "email": 1})
+                    {"_id": 0, "id": 1, "email": 1, "kontonummer": 1})
                 if chef and not body.get("chef_wechsel"):
+                    # Kontonummer (13.09.2026): Meldung nennt die Kontonummer
+                    # (die E-Mail ist optional). Die Nummern bleiben beim
+                    # Chefwechsel am Konto.
                     raise HTTPException(
                         400, "Diese Firma hat bereits einen Hauptaccount "
-                             f"({chef.get('email', '')}). Eine Firma hat genau "
+                             f"(Kontonummer {chef.get('kontonummer') or '—'}). Eine Firma hat genau "
                              "einen Chef. Soll dieses Konto der neue Chef werden "
                              "und der bisherige zum Sucher, dann chef_wechsel=true "
                              "mitschicken.")
@@ -349,8 +479,8 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                     await log_activity(
                         admin.get("dealer_id", ""), admin["id"], "admin.firma.chefwechsel",
                         ref=target["dealer_id"],
-                        meta={"alter_chef": chef.get("email", ""),
-                              "neuer_chef": target.get("email", "")})
+                        meta={"alter_chef": chef.get("kontonummer") or chef["id"],
+                              "neuer_chef": target.get("kontonummer") or target["id"]})
             if alte_rolle == "dealer" and target.get("dealer_id"):
                 # Runde 12: Der Hauptaccount wird NIE direkt herabgestuft.
                 # Vorher war es erlaubt, sobald kein weiterer Zugang
@@ -420,6 +550,8 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     if fields:
         await db.users.update_one({"id": user_id},
                                   {"$set": {**fields, "updated_at": now_iso()}})
+    if "password_hash" in fields:
+        await _konto_sperre_aufheben(target)
     if "plan_type" in body:
         u = await db.users.find_one({"id": user_id})
         if not u:
@@ -447,11 +579,11 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         await db.subscriptions.insert_one(sub_doc)
         await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.abo.vergeben",
                            ref=user_id, meta={"plan": plan, "expires_at": expires,
-                                              "email": u.get("email", "")})
+                                              "kontonummer": u.get("kontonummer", "")})
     if fields:
         await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.aktualisiert",
                            ref=user_id, meta={"felder": sorted(fields.keys()),
-                                              "email": target.get("email", ""),
+                                              "kontonummer": target.get("kontonummer", ""),
                                               "sucher_abgemeldet": sucher_abgemeldet})
     return {"ok": True, "sucher_abgemeldet": sucher_abgemeldet}
 
@@ -581,7 +713,8 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.users.delete_one({"id": user_id})
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.geloescht", ref=user_id,
-                           meta={"email": u.get("email", ""),
+                           # Kontonummer (13.09.2026): keine E-Mail im Audit
+                           meta={"kontonummer": u.get("kontonummer", ""),
                                  "rolle": u.get("role", ""),
                                  "wiederaufnahme": grab.get("status") == "laeuft"})
         return {"ok": True, "geloescht": "nur_nutzer"}
@@ -599,7 +732,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
     # Loeschung mittendrin ab, steht sonst nirgends, wer sie ausgeloest hat.
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.firma.loeschung.gestartet", ref=dealer_id or user_id,
-                       meta={"email": u.get("email", ""), "dealer_id": dealer_id})
+                       meta={"kontonummer": u.get("kontonummer", ""), "dealer_id": dealer_id})
     geloescht = {}
     if dealer_id:
         # Beweis-Snapshots bleiben BEWUSST stehen: Snapshots sind
@@ -686,7 +819,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
 
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.firma.geloescht", ref=dealer_id or user_id,
-                       meta={"email": u.get("email", ""),
+                       meta={"kontonummer": u.get("kontonummer", ""),
                              "geloescht": geloescht})
     return {"ok": True, "geloescht": geloescht or "nur_nutzer"}
 
@@ -739,7 +872,7 @@ async def admin_user_set_active(
         sucher_abgemeldet = r.modified_count
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.user.entsperrt" if body.active else "admin.user.gesperrt",
-                       ref=user_id, meta={"email": u.get("email", ""),
+                       ref=user_id, meta={"kontonummer": u.get("kontonummer", ""),
                                           "sucher_abgemeldet": sucher_abgemeldet})
     return {"ok": True, "active": bool(body.active),
             "sucher_abgemeldet": sucher_abgemeldet}
@@ -771,9 +904,10 @@ async def admin_user_set_password(
             "updated_at": now_iso(),
         }},
     )
+    await _konto_sperre_aufheben(u)
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.passwort.zurueckgesetzt",
-                       ref=user_id, meta={"email": u.get("email", "")})
+                       ref=user_id, meta={"kontonummer": u.get("kontonummer", "")})
     return {"ok": True}
 
 
@@ -880,7 +1014,7 @@ async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
                                          "termine": termin_ids})
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.entsperrt" if body.active else "admin.fahrer.gesperrt",
-                       ref=driver_id, meta={"email": d.get("email", ""),
+                       ref=driver_id, meta={"kontonummer": d.get("kontonummer", ""),
                                             "offene_termine_getrennt": termine_getrennt})
     return {"ok": True, "active": body.active,
             "offene_termine_getrennt": termine_getrennt}
@@ -901,9 +1035,10 @@ async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
         {"id": driver_id},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   "current_session_id": None, "updated_at": now_iso()}})
+    await _konto_sperre_aufheben(d)
     await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.passwort.zurueckgesetzt",
-                       ref=driver_id, meta={"email": d.get("email", "")})
+                       ref=driver_id, meta={"kontonummer": d.get("kontonummer", "")})
     return {"ok": True}
 
 
@@ -958,9 +1093,9 @@ async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)
     # ("Fahrer nicht gefunden") mehr ausloesen.
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                               "admin.fahrer.geloescht", ref=driver_id,
-                              meta={"email": d.get("email", ""),
-                                    "driver_code": d.get("driver_code", ""),
-                                    "verknuepfungen": links.deleted_count,
+                              # Kontonummer (13.09.2026): weder E-Mail noch
+                              # Fahrer-Code des geloeschten Kontos im Audit
+                              meta={"verknuepfungen": links.deleted_count,
                                     "offene_termine_getrennt": getrennt.modified_count,
                                     "wiederaufnahme": wiederaufnahme})
     return {"ok": True, "verknuepfungen_entfernt": links.deleted_count,
@@ -1090,7 +1225,7 @@ async def admin_audit_log(
     user_ids = {i.get("user_id") for i in items if i.get("user_id")}
     users = await db.users.find(
         {"id": {"$in": list(user_ids)}},
-        {"_id": 0, "id": 1, "email": 1, "username": 1, "role": 1},
+        {"_id": 0, "id": 1, "email": 1, "username": 1, "role": 1, "kontonummer": 1},
     ).to_list(len(user_ids) or 1)
     by_id = {u["id"]: u for u in users}
     out = []
@@ -1100,12 +1235,16 @@ async def admin_audit_log(
             **i,
             "email": u.get("email") or (i.get("meta") or {}).get("email")
                      or (i.get("meta") or {}).get("identifier") or "",
+            # Kontonummer (13.09.2026): erste Kennung des Handelnden
+            "kontonummer": u.get("kontonummer") or (i.get("meta") or {}).get("kontonummer")
+                           or "",
             "username": u.get("username", ""),
             "role": u.get("role", ""),
         }
         if q:
             hay = " ".join(str(v) for v in (
-                entry.get("email"), entry.get("action"), entry.get("ref"),
+                entry.get("kontonummer"), entry.get("email"), entry.get("username"),
+                entry.get("action"), entry.get("ref"),
                 str(entry.get("meta") or ""),
             )).lower()
             if q.lower() not in hay:
@@ -1141,7 +1280,7 @@ async def admin_resolve_error(
         raise HTTPException(400, "status muss 'open' oder 'resolved' sein")
     r = await db.error_logs.update_one(
         {"id": error_id},
-        {"$set": {"status": new_status, "resolved_by": admin.get("email", ""),
+        {"$set": {"status": new_status, "resolved_by": _handelnder(admin),
                   "resolved_at": now_iso() if new_status == "resolved" else None}},
     )
     if not r.matched_count:
@@ -1360,7 +1499,7 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
         await db.subscriptions.update_many(
             {"subject_user_id": sucher_id, "status": {"$in": ["active", "cancelled"]}},
             {"$set": {"status": "cancelled", "expires_at": now_iso(),
-                      "aufgehoben_von": admin.get("email", ""),
+                      "aufgehoben_von": _handelnder(admin),
                       "updated_at": now_iso()}})
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.sucher.abo.aufgehoben", ref=sucher_id,
@@ -1473,7 +1612,7 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
         "waehrung": "EUR", "zahlungsart": body.zahlungsart,
         "grund": body.grund.strip(), "gezahlt_am": gezahlt_am or now_iso()[:10],
         "notiz": body.notiz.strip(),
-        "admin_id": admin["id"], "admin_email": admin.get("email", ""),
+        "admin_id": admin["id"], "admin_email": _handelnder(admin),
         "status": "laeuft", "schritte": {},
         "created_at": now_iso(), "updated_at": now_iso(),
     }
@@ -1601,7 +1740,7 @@ async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
         "plan": aktiv.get("plan"),
         "alt": aktiv.get("expires_at"), "neu": gueltig_bis,
         "art": "laufzeit_geaendert", "grund": grund,
-        "admin_id": admin["id"], "admin_email": admin.get("email", ""),
+        "admin_id": admin["id"], "admin_email": _handelnder(admin),
         "created_at": now_iso(),
     })
     await log_activity(admin.get("dealer_id", ""), admin["id"],
@@ -1626,15 +1765,23 @@ def _restlaufzeit_basis(expires_at) -> datetime:
 
 
 # ---------- Sucher-Konten anlegen/verwalten (Betreiber, 09/2026) ----------
-# Der Betreiber legt Sucher-Konten für eine Firma an (Anmeldename =
-# E-Mail + Passwort), auch nachträglich, und kann sie sperren/löschen
+# Der Betreiber legt Sucher-Konten für eine Firma an (Anmeldung mit
+# Kontonummer '<kunden_nr>-<zusatz>' + Passwort, Kontonummer 13.09.2026),
+# auch nachträglich, und kann sie sperren/löschen
 # (Sperren/Löschen laufen über die bestehenden /admin/users-Routen).
 class AdminSucherIn(BaseModel):
-    email: EmailStr
+    # Kontonummer (13.09.2026): Anmeldung per '<kunden_nr>-<zusatz>', die
+    # E-Mail ist optionale Kontaktadresse des Suchers.
+    email: Optional[EmailStr] = None
     password: str = Field(min_length=8, max_length=200)
     first_name: str = Field(default="", max_length=80)
     last_name: str = Field(default="", max_length=80)
     phone: str = Field(default="", max_length=50)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email_leer(cls, v):
+        return _leer_zu_none(v)
 
     @field_validator("password")
     @classmethod
@@ -1645,50 +1792,192 @@ class AdminSucherIn(BaseModel):
 @router.post("/admin/dealers/{dealer_id}/sucher")
 async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
                               admin=Depends(current_super_admin)):
+    # Kontonummer (13.09.2026): 404 ohne Firma, 409 waehrend ihrer Loeschung —
+    # beides VOR jeder Pruefung und vor dem Ziehen einer Nummer.
     dealer = await db.dealers.find_one({"id": dealer_id},
-                                       {"_id": 0, "id": 1, "company_name": 1})
+                                       {"_id": 0, "id": 1, "company_name": 1,
+                                        "kunden_nr": 1, "loeschung": 1})
     if not dealer:
         raise HTTPException(404, "Firma nicht gefunden")
-    email = body.email.strip().lower()
+    if (dealer.get("loeschung") or {}).get("status") == "laeuft":
+        raise HTTPException(409, "Die Firma wird gerade gelöscht")
+    email = (body.email or "").strip().lower() or None
     # Audit 13.09.2026 (#11): Plattformregel B5 wie in allen anderen
     # Anlagepfaden — users UND driver_accounts. Vorher pruefte dieser Pfad
     # nur users und legte neben einem Fahrerkonto immer ein Doppelkonto an.
-    from deps import email_vergeben
-    if await email_vergeben(email):
-        raise HTTPException(409, "E-Mail ist bereits registriert")
+    # Kontonummer (13.09.2026): nur mit Angabe (bis Schritt 5).
+    if email:
+        from deps import email_vergeben
+        if await email_vergeben(email):
+            raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
+    konto = {
+        "id": sucher_id,
+        "password_hash": await hash_password_async(body.password),
+        "role": "sucher", "active": True,
+        "dealer_id": dealer_id,
+        "first_name": body.first_name.strip(),
+        "last_name": body.last_name.strip(),
+        "phone": body.phone.strip(),
+        "created_by": admin["id"],
+        "current_session_id": None,
+        "created_at": now_iso(),
+    }
+    if email:                       # ohne Angabe fehlt das Feld (nie "")
+        konto["email"] = email
     # Kontonummer (13.09.2026): Nummer '<kunden_nr>-<zusatz>' erst NACH der
     # E-Mail-Pruefung ziehen; eine Firma ohne kunden_nr bekommt eine. Neuer
     # Zusatz nur bei einer Kontonummer-Dublette (kontenanlage), jede andere
     # Dublette bleibt 409.
     from kontenanlage import sucher_anlegen
     try:
-        erg = await sucher_anlegen(db, dealer_id, {
-            "id": sucher_id, "email": email,
-            "password_hash": await hash_password_async(body.password),
-            "role": "sucher", "active": True,
-            "dealer_id": dealer_id,
-            "first_name": body.first_name.strip(),
-            "last_name": body.last_name.strip(),
-            "phone": body.phone.strip(),
-            "created_by": admin["id"],
-            "current_session_id": None,
-            "created_at": now_iso(),
-        })
+        erg = await sucher_anlegen(db, dealer_id, konto)
     except DuplicateKeyError:
         # Doppelklick/Rennen: der Unique-Index auf users.email entscheidet
         # (409 statt 500), wie in admin_create_user.
         raise HTTPException(409, "E-Mail ist bereits registriert")
     # Konto ist angelegt — ein Audit-Fehler darf keinen 500 mit Retry ausloesen.
     await log_activity_sicher(dealer_id, admin["id"], "admin.sucher.angelegt",
-                              ref=sucher_id, meta={"email": email,
-                                                   "kontonummer": erg["kontonummer"],
+                              ref=sucher_id, meta={"kontonummer": erg["kontonummer"],
                                                    "firma": dealer.get("company_name", "")})
-    return {"ok": True, "sucher_id": sucher_id, "email": email,
+    return {"ok": True, "sucher_id": sucher_id, "email": email or "",
             "kontonummer": erg["kontonummer"],
             "hinweis": "Konto angelegt — zum Suchen/Vergleichen noch das "
                        "Sucher-Abo freischalten (150 €/Monat bzw. "
                        "1.500 €/Jahr)."}
+
+
+# ---------- Kaeufer- und Fahrer-Anlage durch den Betreiber (Kontonummer, 13.09.2026) ----------
+class AdminKaeuferIn(BaseModel):
+    """Zwischenhaendler (b2b_buyer) anlegen — Konten legt nur der Betreiber an."""
+    company_name: str = Field(min_length=2, max_length=200)
+    contact_name: str = Field(min_length=2, max_length=120)
+    email: Optional[EmailStr] = None
+    phone: str = Field(default="", max_length=50)
+    # USt-IdNr. oder Handelsregister-Nr. (freiwillig, Formatpruefung wie im
+    # Anfrage-Formular — gemeinsamer Validator in ustid.py)
+    ust_id: str = Field(default="", max_length=40)
+    password: str = Field(min_length=8, max_length=200)
+    # AGB §1: der Betreiber bestaetigt, dass der B2B-Nachweis vorliegt
+    b2b_nachweis: bool = False
+    anfrage_id: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email_leer(cls, v):
+        return _leer_zu_none(v)
+
+    @field_validator("ust_id")
+    @classmethod
+    def _ustid(cls, v):
+        from ustid import feld_pruefen
+        return feld_pruefen(v)
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return pruefe_passwort(v)
+
+
+@router.post("/admin/buyers")
+async def admin_create_buyer(body: AdminKaeuferIn, admin=Depends(current_super_admin)):
+    """Zwischenhaendler mit eigener Kontonummer aus der gemeinsamen Reihe.
+    Kein Token (Single-Session: die erste Anmeldung macht der Kaeufer selbst);
+    der Marktplatz-Zugang laeuft weiter ueber POST /admin/buyers/{id}/access."""
+    if not body.b2b_nachweis:
+        raise HTTPException(400, "Bitte bestätigen, dass der Nachweis der "
+                                 "gewerblichen Tätigkeit (B2B) vorliegt")
+    email = (body.email or "").strip().lower() or None
+    await _email_frei_409(email)
+    anfrage = await _anfrage_reservieren(body.anfrage_id, "kaeufer")
+    try:
+        bestaetigt_am = (anfrage or {}).get("gewerblich_bestaetigt_am")
+        konto = {
+            "id": str(uuid.uuid4()),
+            "password_hash": await hash_password_async(body.password),
+            "role": "b2b_buyer", "active": True, "dealer_id": None,
+            "company_name": body.company_name.strip(),
+            "contact_name": body.contact_name.strip(),
+            "phone": body.phone.strip(),
+            "ust_id": body.ust_id or (anfrage or {}).get("ust_id", "") or "",
+            "gewerblich_bestaetigt_am": bestaetigt_am or now_iso(),
+            "gewerblich_bestaetigt_durch": "anfrage" if bestaetigt_am else "betreiber",
+            "created_by": admin["id"],
+            "current_session_id": None,
+            "created_at": now_iso(),
+        }
+        if email:
+            konto["email"] = email
+        from kontenanlage import kaeufer_anlegen
+        try:
+            erg = await kaeufer_anlegen(db, konto)
+        except DuplicateKeyError:
+            raise HTTPException(409, "E-Mail bereits registriert")
+    except BaseException:
+        await _anfrage_freigeben(anfrage)
+        raise
+    await _anfrage_abschliessen(anfrage, erg["user_id"], erg["kontonummer"], admin)
+    await log_activity_sicher("", admin["id"], "admin.kaeufer.angelegt", ref=erg["user_id"],
+                              meta={"kontonummer": erg["kontonummer"],
+                                    "anfrage": bool(anfrage)})
+    return {"ok": True, "user_id": erg["user_id"], "kontonummer": erg["kontonummer"]}
+
+
+class AdminFahrerIn(BaseModel):
+    """Fahrer-Konto anlegen. Die Zuordnung zur Firma macht weiter der Chef per
+    Fahrer-Code (POST /drivers/add)."""
+    display_name: str = Field(min_length=2, max_length=120)
+    password: str = Field(min_length=8, max_length=200)
+    email: Optional[EmailStr] = None
+    phone: str = Field(default="", max_length=50)
+    anfrage_id: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email_leer(cls, v):
+        return _leer_zu_none(v)
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return pruefe_passwort(v)
+
+
+@router.post("/admin/drivers")
+async def admin_create_driver(body: AdminFahrerIn, admin=Depends(current_super_admin)):
+    """Fahrer mit Kontonummer (gemeinsame Reihe) und FD-Code, ohne Token."""
+    email = (body.email or "").strip().lower() or None
+    await _email_frei_409(email)
+    anfrage = await _anfrage_reservieren(body.anfrage_id, "fahrer")
+    try:
+        konto = {
+            "id": str(uuid.uuid4()),
+            "password_hash": await hash_password_async(body.password),
+            "display_name": body.display_name.strip(),
+            "active": True,
+            "created_by": admin["id"],
+            "current_session_id": None,
+            "created_at": now_iso(),
+        }
+        if email:
+            konto["email"] = email
+        if body.phone.strip():
+            konto["phone"] = body.phone.strip()
+        from kontenanlage import fahrer_anlegen
+        try:
+            erg = await fahrer_anlegen(db, konto)
+        except DuplicateKeyError:
+            raise HTTPException(409, "E-Mail bereits registriert")
+    except BaseException:
+        await _anfrage_freigeben(anfrage)
+        raise
+    await _anfrage_abschliessen(anfrage, erg["driver_id"], erg["kontonummer"], admin)
+    # Ohne Klartext (weder E-Mail noch Name) im Audit
+    await log_activity_sicher("", admin["id"], "admin.fahrer.angelegt", ref=erg["driver_id"],
+                              meta={"kontonummer": erg["kontonummer"],
+                                    "anfrage": bool(anfrage)})
+    return {"ok": True, "driver_id": erg["driver_id"], "kontonummer": erg["kontonummer"],
+            "driver_code": erg["driver_code"]}
 
 
 @router.get("/admin/dealers/{dealer_id}/sucher")
@@ -1749,7 +2038,7 @@ async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
         "paid_at": (body.paid_at or now_iso()[:10]),
         "period_until": None,
         "note": body.note.strip(),
-        "recorded_by": admin.get("email", ""),
+        "recorded_by": _handelnder(admin),
         "created_at": now_iso(),
     }
     # KOPIE einfuegen: insert_one haengt dem uebergebenen dict die Mongo-_id
@@ -1793,7 +2082,7 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
             {"$set": {"marketplace_access.active": False,
                       "marketplace_access.gesperrt": True,
                       "marketplace_access.gesperrt_am": now_iso(),
-                      "marketplace_access.gesperrt_von": admin.get("email", ""),
+                      "marketplace_access.gesperrt_von": _handelnder(admin),
                       "marketplace_access.updated_at": now_iso()}})
         await log_activity("", admin["id"], "admin.buyer.zugang.gesperrt",
                            ref=buyer_id)
@@ -1819,14 +2108,14 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
         "currency": "EUR", "paid_at": now_iso()[:10], "period_until": expires_at,
         "zahlungsart": zahlungsart, "kostenlos": zahlungsart == "kulanz",
         "grund": grund, "note": str(body.get("notiz", ""))[:500],
-        "quelle": "manuell", "recorded_by": admin.get("email", ""),
+        "quelle": "manuell", "recorded_by": _handelnder(admin),
         "created_at": now_iso()})
     await db.users.update_one(
         {"id": buyer_id},
         {"$set": {"marketplace_access": {
             "active": True, "plan": "monthly",
             "price": BUYER_ACCESS_PRICE, "expires_at": expires_at,
-            "activated_by": admin.get("email", ""), "updated_at": now_iso()}}})
+            "activated_by": _handelnder(admin), "updated_at": now_iso()}}})
     await log_activity("", admin["id"], "admin.buyer.zugang.freigeschaltet",
                        ref=buyer_id, meta={"expires_at": expires_at})
     await db.plan_requests.update_many(
@@ -2058,7 +2347,8 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "wartungsmodus": bool(((await db.system_flags.find_one(
             {"_id": "wartungsmodus"})) or {}).get("aktiv")),
         # Abo-Audit: Super-Admins ohne Zwei-Faktor sichtbar machen
-        "super_admins_ohne_mfa": [u.get("email") or u.get("username") async for u in db.users.find(
+        # (Kontonummer 13.09.2026: Benutzername zuerst)
+        "super_admins_ohne_mfa": [u.get("username") or u.get("email") async for u in db.users.find(
             {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
              "mfa.aktiv": {"$ne": True}}, {"_id": 0, "email": 1, "username": 1})],
         # Runde 12: Es gibt nur den Super-Admin. Alte Konten mit Rolle admin
@@ -2080,13 +2370,21 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
             in await db.listing_interest.index_information(),
         "zugangsanfrage_index_aktiv": "uniq_offene_buyer_access_anfrage"
             in await db.plan_requests.index_information(),
+        # Kontonummer (13.09.2026): Konten, die sich per Nummer anmelden
+        # muessten, aber keine haben — nur Zaehlung, keine Vergabe.
+        "konten_ohne_nummer": await _konten_ohne_nummer_zaehlen(),
     }
+
+
+async def _konten_ohne_nummer_zaehlen() -> dict:
+    from kontenanlage import konten_ohne_nummer
+    return await konten_ohne_nummer(db)
 
 
 @router.post("/admin/betrieb/alarme/{alarm_id}/quittieren")
 async def admin_alarm_quittieren(alarm_id: str, admin=Depends(current_super_admin)):
     from betrieb import quittieren
-    if not await quittieren(db, alarm_id, admin.get("email", admin["id"])):
+    if not await quittieren(db, alarm_id, _handelnder(admin)):
         raise HTTPException(404, "Alarm nicht gefunden oder bereits quittiert")
     return {"ok": True}
 
@@ -2155,7 +2453,8 @@ async def admin_mfa_einrichten(admin=Depends(current_admin)):
         {"$set": {"mfa.pending_secret": _mfa.verschluesseln(secret),
                   "mfa.pending_seit": now_iso() if neu_erzeugt
                   else vorhanden.get("pending_seit", now_iso())}})
-    return {"secret": secret, "otpauth_uri": _mfa.provisioning_uri(secret, admin.get("email") or admin.get("username") or admin["id"]),
+    # Kontonummer (13.09.2026): Label in der Authenticator-App = Benutzername
+    return {"secret": secret, "otpauth_uri": _mfa.provisioning_uri(secret, admin.get("username") or admin.get("email") or admin["id"]),
             "hinweis": "Code aus der App eingeben, um die Zwei-Faktor-Anmeldung zu aktivieren."}
 
 
@@ -2220,7 +2519,8 @@ async def admin_mfa_zuruecksetzen(user_id: str, body: dict = Body(default={}),
                  "bei Verlust des Geraets muss ein anderer Super-Admin "
                  "zuruecksetzen.")
     u = await db.users.find_one({"id": user_id, "role": "admin"},
-                                {"_id": 0, "id": 1, "email": 1, "is_super_admin": 1})
+                                {"_id": 0, "id": 1, "email": 1, "username": 1,
+                                 "is_super_admin": 1})
     if not u:
         raise HTTPException(404, "Admin-Konto nicht gefunden")
     grund = str(body.get("grund", ""))[:300].strip()
@@ -2240,14 +2540,17 @@ async def admin_mfa_zuruecksetzen(user_id: str, body: dict = Body(default={}),
         "subject_super_admin": bool(u.get("is_super_admin")),
         "alt": "zwei_faktor_aktiv", "neu": "zwei_faktor_entfernt",
         "grund": grund, "admin_id": admin["id"],
-        "admin_email": admin.get("email", ""), "created_at": now_iso()})
+        "admin_email": _handelnder(admin), "created_at": now_iso()})
+    # Kontonummer (13.09.2026): Admin-Konten werden ueber den Benutzernamen
+    # benannt (die E-Mail des Super-Admins ist nur ein Platzhalter).
+    kennung = u.get("username") or u.get("email") or user_id
     await log_activity("", admin["id"], "admin.mfa.zurueckgesetzt", ref=user_id,
-                       meta={"email": u.get("email", ""), "grund": grund,
+                       meta={"konto": kennung, "grund": grund,
                              "super_admin": bool(u.get("is_super_admin"))})
     if u.get("is_super_admin"):
         from betrieb import alarm
-        await alarm(db, "mfa_zurueckgesetzt", ref=u.get("email", user_id),
-                    von=admin.get("email", ""), grund=grund or "ohne Angabe")
+        await alarm(db, "mfa_zurueckgesetzt", ref=kennung,
+                    von=_handelnder(admin), grund=grund or "ohne Angabe")
     return {"ok": True}
 
 
@@ -2262,7 +2565,7 @@ async def admin_buyer_ustid_pruefen(buyer_id: str, admin=Depends(current_admin))
     if not buyer:
         raise HTTPException(404, "Zwischenhändler nicht gefunden")
     ergebnis = await vies_pruefen(buyer.get("ust_id") or "")
-    ergebnis["geprueft_von"] = admin.get("email", "")
+    ergebnis["geprueft_von"] = _handelnder(admin)
     await db.users.update_one({"id": buyer_id}, {"$set": {"ust_id_pruefung": ergebnis}})
     await log_activity("", admin["id"], "admin.buyer.ustid.geprueft", ref=buyer_id,
                        meta={"status": ergebnis["status"], "ust_id": ergebnis.get("ust_id")})

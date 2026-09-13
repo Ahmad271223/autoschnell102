@@ -85,6 +85,123 @@ def test_kopie_mail_nennt_empfaenger_und_zeitpunkt():
     assert "wie besprochen" in html
 
 
+# ------------------------------- Kontonummer (13.09.2026): Konten ohne E-Mail
+def test_sucher_kontakt_eigene_und_antwortadresse():
+    firma = {"email": "info@autohaus-muster.de"}
+    # users.email gewinnt
+    assert vertrag_mail.sucher_kontakt(
+        {"email": "max@autohaus-muster.de",
+         "settings_override": {"email": "filiale@autohaus-muster.de"}},
+        firma) == ("max@autohaus-muster.de", "max@autohaus-muster.de")
+    # nur die eigene Kontaktadresse aus den Sucher-Einstellungen
+    assert vertrag_mail.sucher_kontakt(
+        {"settings_override": {"email": " filiale@autohaus-muster.de "}},
+        firma) == ("filiale@autohaus-muster.de", "filiale@autohaus-muster.de")
+    # keine eigene Adresse: Antwort an die Firma, keine eigene fuer die Kopie
+    assert vertrag_mail.sucher_kontakt({"kontonummer": "10023-2"}, firma) == (
+        "", "info@autohaus-muster.de")
+    assert vertrag_mail.sucher_kontakt({}, {}) == ("", "")
+
+
+def test_vertrag_mail_ohne_eigene_adresse_nennt_firmenadresse():
+    sucher = {"first_name": "Max", "last_name": "Sucher", "kontonummer": "10023-2"}
+    _, text, html = vertrag_mail.vertrag_mail(
+        vertrag=VERTRAG, firma={**FIRMA, "email": "info@autohaus-muster.de"},
+        sucher=sucher, nachricht="", betreff=None)
+    assert "Max Sucher (info@autohaus-muster.de)" in text
+    assert "mailto:info@autohaus-muster.de" in html
+    assert "10023-2" not in text and "10023-2" not in html
+
+
+class _FakeVertraege:
+    def __init__(self, doc):
+        self.doc = doc
+
+    async def find_one(self, *a, **k):
+        return dict(self.doc)
+
+    async def update_one(self, *a, **k):
+        class R:
+            modified_count = 1
+            matched_count = 1
+        return R()
+
+
+class _FakeVertragsDb:
+    def __init__(self, vertrag):
+        self.generated_pdfs = _FakeVertraege(vertrag)
+
+    def __getattr__(self, name):
+        raise AssertionError(f"unerwarteter Zugriff auf db.{name}")
+
+
+@pytest.mark.parametrize("fall", ["users_email", "override_email", "keine_eigene"])
+def test_versand_antwort_und_kopie_je_sucher_adresse(monkeypatch, fall):
+    """send_contract (in-process, ohne DB): reply_to und Kopie folgen
+    sucher_kontakt — ohne eigene Adresse Antwort an die Firma und
+    kopie='nicht_moeglich' (keine Belegkopie still beim Chef)."""
+    import deps
+    import kaufvorgang
+    import provider_fetch
+    import routes.contracts as cm
+
+    vertrag = {"id": "c1", "dealer_id": "d1", "user_id": "u1", "contract_no": "KV-1",
+               "seller_name": "Max Kunde", "make": "BMW", "model": "320d",
+               "purchase_price": 5000, "pdf_b64": "", "filename": "Kaufvertrag.pdf",
+               "send_status": [], "pdf_digital_b64": "JVBERi0xLjQgdGVzdA=="}
+    sucher = {"id": "u1", "dealer_id": "d1", "role": "sucher", "first_name": "Sina",
+              "last_name": "S", "kontonummer": "10023-2"}
+    if fall == "users_email":
+        sucher["email"] = "sina@e2etest-mail.de"
+    elif fall == "override_email":
+        sucher["settings_override"] = {"email": "filiale@e2etest-mail.de"}
+    chef = {"id": "d1", "company_name": "Chef GmbH", "email": "chef@e2etest-mail.de"}
+    erwartet = {"users_email": "sina@e2etest-mail.de",
+                "override_email": "filiale@e2etest-mail.de",
+                "keine_eigene": "chef@e2etest-mail.de"}[fall]
+    monkeypatch.setattr(cm, "db", _FakeVertragsDb(vertrag))
+
+    async def _eff(user):
+        m = dict(chef)
+        m.update({k: v for k, v in (user.get("settings_override") or {}).items()
+                  if k in deps.SUCHER_SETTINGS_FIELDS})
+        return m
+    monkeypatch.setattr(deps, "effective_dealer", _eff)
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+
+    async def _kein_vorgang(*a, **k):
+        return None
+    monkeypatch.setattr(kaufvorgang, "fuer_vertrag", _kein_vorgang)
+    gesendet = []
+
+    async def _send_mit_beleg(to, subject, text, anhang=None, anhang_name="", **kw):
+        gesendet.append({"to": to, "text": text, **kw})
+        return True, "resend:test"
+
+    async def _send(to, subject, text, *a, **kw):
+        gesendet.append({"to": to, "text": text, **kw})
+        return True
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _send_mit_beleg)
+    monkeypatch.setattr(email_service, "send_email", _send)
+
+    async def _log(*a, **k):
+        return None
+    monkeypatch.setattr(cm, "log_activity", _log)
+
+    body = cm.SendIn(channel="email", recipient="kunde@e2etest-mail.de",
+                     message="Hier der Vertrag.", idempotency_key="k1")
+    out = asyncio.run(cm.send_contract("c1", body, user=sucher))
+    haupt = gesendet[0]
+    assert haupt["to"] == "kunde@e2etest-mail.de"
+    assert haupt["reply_to"] == erwartet
+    assert f"({erwartet})" in haupt["text"], "Mailtext nennt die Antwortadresse"
+    if fall == "keine_eigene":
+        assert out["kopie"] == "nicht_moeglich" and len(gesendet) == 1, out
+    else:
+        assert out["kopie"] == "gesendet" and gesendet[1]["to"] == erwartet, out
+
+
 # ------------------------------------------------------------- Versand
 class _Antwort:
     status_code = 200

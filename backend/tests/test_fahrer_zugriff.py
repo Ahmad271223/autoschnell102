@@ -251,13 +251,16 @@ def test_fahrer_konto_anonymisieren_ersetzt_ids_und_namen():
             {"id": str(uuid.uuid4()), "dealer_id": t.dealer_id, "user_id": t.driver_id,
              "action": "termin.fahrer.angenommen", "ref": t.tag,
              "meta": {"email": t.driver["email"], "driver_code": t.driver["driver_code"],
-                      "display_name": t.driver["display_name"], "grund": "bleibt"}},
+                      "display_name": t.driver["display_name"], "grund": "bleibt",
+                      # Kontonummer (13.09.2026): auch die Nummer faellt weg
+                      "kontonummer": "10077"}},
             {"id": str(uuid.uuid4()), "dealer_id": "", "user_id": t.driver_id,
              "action": "fahrer.passwort.geaendert", "ref": t.tag, "meta": {}},
             {"id": str(uuid.uuid4()), "dealer_id": "", "user_id": t.driver_id,
              "action": "x", "ref": t.tag},                       # ohne meta
             {"id": str(uuid.uuid4()), "dealer_id": t.dealer_id, "user_id": t.user["id"],
-             "action": "termin.zugewiesen", "ref": t.tag, "meta": {"email": "chef@x"}},
+             "action": "termin.zugewiesen", "ref": t.tag,
+             "meta": {"email": "chef@x", "kontonummer": "10023"}},
         ])
         await db.password_resets.insert_one({
             "id": str(uuid.uuid4()), "user_id": t.driver_id, "token_hash": "abc"})
@@ -294,10 +297,12 @@ def test_fahrer_konto_anonymisieren_ersetzt_ids_und_namen():
         assert len(logs) == 3
         for l in logs:
             meta = l.get("meta") or {}
-            assert not ({"email", "driver_code", "display_name"} & set(meta)), l
+            assert not ({"email", "driver_code", "display_name", "kontonummer"}
+                        & set(meta)), l
         assert any((l.get("meta") or {}).get("grund") == "bleibt" for l in logs)
         chef = await db.activity_logs.find_one({"user_id": t.user["id"], "ref": t.tag})
         assert chef["meta"]["email"] == "chef@x"      # fremde Eintraege unberuehrt
+        assert chef["meta"]["kontonummer"] == "10023"
 
         assert await db.password_resets.count_documents({"user_id": t.driver_id}) == 0
         assert await db.dealer_drivers.count_documents(

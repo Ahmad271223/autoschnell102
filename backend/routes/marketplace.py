@@ -485,6 +485,8 @@ async def list_network_members(response: Response, user=Depends(current_haendler
     konten: Dict[str, dict] = {}
     ids = [m["buyer_user_id"] for m in mitglieder if m.get("buyer_user_id")]
     if ids:
+        # Kontonummer (13.09.2026): feste Projektion OHNE kontonummer — die
+        # Kaeufernummer ist ein halbes Zugangsdatum und geht nie an Firmen.
         async for u in db.users.find(
                 {"id": {"$in": ids}},
                 {"_id": 0, "id": 1, "company_name": 1, "contact_name": 1,
@@ -652,11 +654,10 @@ class BuyerRegisterIn(BaseModel):
     @field_validator("ust_id")
     @classmethod
     def _ustid(cls, v):
-        from ustid import format_pruefen
-        fehler, wert = format_pruefen(v or "")
-        if fehler:
-            raise ValueError(fehler)
-        return wert
+        # Kontonummer (13.09.2026): gemeinsamer Validator (auch AdminKaeuferIn,
+        # ZugangsAnfrageIn)
+        from ustid import feld_pruefen
+        return feld_pruefen(v)
 
     @field_validator("password")
     @classmethod
@@ -843,6 +844,8 @@ async def request_marketplace_access(user=Depends(current_buyer)):
         {"type": "buyer_access", "buyer_user_id": user["id"], "status": "offen"},
         {"id": str(uuid.uuid4()), "created_at": now_iso(),
          "company_name": user.get("company_name", ""),
+         # Kontonummer (13.09.2026): fuer den Betreiber (Freischaltungen)
+         "kontonummer": user.get("kontonummer"),
          "contact_email": user.get("email", ""),
          "contact_phone": user.get("phone", "")},
         # Beschluss Ahmad 10.09.2026: Marktplatz vorerst 0 € — keine Kosten
@@ -1318,8 +1321,10 @@ async def send_interest(listing_id: str, body: InterestIn,
         "dealer_id": l["dealer_id"],
         "listing_title": l.get("title", ""),
         "buyer_user_id": user["id"],
+        # Kontonummer (13.09.2026): Ersatzname weder E-Mail noch Kontonummer
+        # (die Kaeufernummer ist ein halbes Zugangsdatum und geht nie an Firmen)
         "buyer_name": user.get("company_name") or user.get("contact_name")
-                      or user.get("email", ""),
+                      or "Zwischenhändler",
         "buyer_email": user.get("email", ""),
         "offer": body.offer,
         "message": body.message,

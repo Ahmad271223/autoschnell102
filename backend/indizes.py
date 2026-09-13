@@ -159,6 +159,24 @@ async def konto_indizes(db) -> dict:
     return ergebnis
 
 
+async def email_uebergang(db) -> dict:
+    """Kontonummer (13.09.2026), Schritt 2: Konten brauchen keine E-Mail mehr.
+    Der volle Unique-Index email_1 in users und driver_accounts liess nur EIN
+    Konto ohne Adresse zu (fehlendes Feld = null kollidiert). Er wird durch
+    'email_alt_eindeutig' ersetzt: unique, aber nur fuer Dokumente mit
+    String-Adresse (Teil-Index). Die 409 bei doppelter Adresse bleiben so bis
+    Schritt 5 (email_eindeutigkeit_entfernen) erhalten.
+    Nebenlaeufigkeitsfest ueber _index_sicher_ersetzen (Leader und wartende
+    Prozesse gleichzeitig); Dubletten brechen wie bisher den Produktionsstart
+    ab, sonst Betriebsalarm."""
+    ergebnis = {}
+    for coll in (db.users, db.driver_accounts):
+        ergebnis[coll.name] = await _index_sicher_ersetzen(
+            coll, "email", "email_alt_eindeutig", unique=True,
+            partial={"email": {"$type": "string"}})
+    return ergebnis
+
+
 async def _termin_unique_index() -> bool:
     """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug und
     Firma. Zwei parallele Vertragsanlagen (oder Doppelklicks) erzeugten

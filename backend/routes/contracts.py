@@ -1329,7 +1329,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # Mail-Anbieter freigeschaltet). Der Anzeigename nennt die Firma,
             # und die Antwortadresse ist der Sucher: antwortet der Verkaeufer,
             # landet die Antwort direkt bei ihm (Wunsch 09/2026).
-            from vertrag_mail import kopie_mail, vertrag_mail
+            from vertrag_mail import kopie_mail, sucher_kontakt, vertrag_mail
             # Verschickt wird die DIGITALE Ausfertigung (ohne Unterschrifts-
             # linien, mit dem digitalen Vertragstext) — Wunsch 09.09.2026.
             pdf_bytes = await _digitales_pdf_bytes(c, user)
@@ -1351,11 +1351,14 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             betreff, text, html = vertrag_mail(
                 vertrag=c, firma=firma, sucher=user,
                 nachricht=body.message, betreff=body.subject)
-            sucher_mail = (user.get("email") or "").strip()
+            # Kontonummer (13.09.2026): Konten ohne E-Mail — Antworten gehen an
+            # die eigene Adresse des Suchers, sonst an die Firmenadresse; die
+            # Belegkopie NUR an eine eigene Adresse (sonst kopie=nicht_moeglich).
+            sucher_mail, antwort_adresse = sucher_kontakt(user, firma)
             ok, beleg = await email_service.send_email_mit_beleg(
                 body.recipient, betreff, text, anhang=pdf_bytes,
                 anhang_name=dateiname, html=html,
-                reply_to=sucher_mail,
+                reply_to=antwort_adresse,
                 absender_name=firma.get("company_name") or "",
                 idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}")
             if ok and beleg:

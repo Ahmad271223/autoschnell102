@@ -101,6 +101,16 @@ def format_pruefen(wert: str) -> Tuple[Optional[str], str]:
     return None, s
 
 
+def feld_pruefen(wert) -> str:
+    """Gemeinsamer Pydantic-Feldvalidator (Kontonummer, 13.09.2026) fuer
+    BuyerRegisterIn, AdminKaeuferIn und ZugangsAnfrageIn: liefert den
+    normalisierten Wert oder wirft ValueError mit der deutschen Meldung."""
+    fehler, s = format_pruefen(wert or "")
+    if fehler:
+        raise ValueError(fehler)
+    return s
+
+
 async def vies_pruefen(wert: str, timeout: float = 12.0) -> Dict:
     """Online-Pruefung beim EU-Dienst VIES (REST). Ergebnis:
       {"status": "gueltig" | "ungueltig" | "nicht_pruefbar", "ust_id": ...,

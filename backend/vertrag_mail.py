@@ -132,6 +132,22 @@ def _preisblock(preis) -> str:
         f'</td></tr></table>')
 
 
+def sucher_kontakt(user: dict, firma: dict) -> Tuple[str, str]:
+    """Kontonummer (13.09.2026): Konten brauchen keine E-Mail mehr.
+
+    Liefert (eigene_adresse, antwort_adresse):
+      * eigene_adresse = users.email, sonst die eigene Kontaktadresse aus den
+        Sucher-Einstellungen (settings_override.email), sonst "" —
+        NUR dorthin geht die Belegkopie (keine Kopie still beim Chef);
+      * antwort_adresse = eigene_adresse, sonst die Firmenadresse (bei
+        Suchern die effective_dealer-Sicht, also ggf. ueberschrieben)."""
+    user = user or {}
+    eigene = ((user.get("email") or "").strip()
+              or str((user.get("settings_override") or {}).get("email") or "").strip())
+    antwort = eigene or str((firma or {}).get("email") or "").strip()
+    return eigene, antwort
+
+
 def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
                  nachricht: str, betreff: Optional[str] = None) -> Tuple[str, str, str]:
     """E-Mail an den Verkäufer/Kunden. Liefert (betreff, text, html)."""
@@ -143,7 +159,9 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
     zeilen = _zeilen(vertrag)
     sucher_name = (f"{sucher.get('first_name', '')} {sucher.get('last_name', '')}".strip()
                    or sucher.get("name") or firmenname)
-    sucher_mail = (sucher.get("email") or "").strip()
+    # Kontonummer (13.09.2026): die Adresse, an die Antworten wirklich gehen
+    # (eigene Adresse des Suchers, sonst die Firmenadresse)
+    _, sucher_mail = sucher_kontakt(sucher, firma)
     sucher_tel = (sucher.get("phone") or firma.get("phone") or "").strip()
 
     betreff = (betreff or "").strip() or f"Ihr Kaufvertrag – {titel}"

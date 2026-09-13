@@ -312,6 +312,51 @@ def test_konto_indizes_parallel_und_dubletten(wegwerf, monkeypatch):
     assert z["bereinigt"]["users"] is True and z["alarm_danach"] == 0
 
 
+def test_email_uebergang_parallel_konten_ohne_email(wegwerf, monkeypatch):
+    """Schritt 2: email_1 (voller Unique-Index) -> email_alt_eindeutig (Teil-
+    Index auf String-Adressen). Zwei parallele Aufrufe plus konto_indizes
+    ohne Ausnahme (Codes 27/85/86); danach viele Konten ohne E-Mail moeglich,
+    doppelte Adresse weiter DuplicateKey (keine Kontonummer-Dublette)."""
+    monkeypatch.delenv("APP_ENV", raising=False)
+    db = wegwerf.db
+    partial = {"email": {"$type": "string"}}
+
+    async def lauf():
+        z = {}
+        for coll in (db.users, db.driver_accounts):
+            await coll.create_index("email", unique=True)          # Altbestand email_1
+            await coll.insert_one({"id": f"mit_{coll.name}", "email": "a@konto.test"})
+        z["erg"] = await asyncio.gather(indizes.email_uebergang(db),
+                                        indizes.email_uebergang(db),
+                                        indizes.konto_indizes(db), return_exceptions=True)
+        z["info"] = [await db.users.index_information(),
+                     await db.driver_accounts.index_information()]
+        await db.users.insert_many([{"id": f"ohne{i}"} for i in range(3)])
+        await db.driver_accounts.insert_many([{"id": f"fohne{i}"} for i in range(3)])
+        try:
+            await db.users.insert_one({"id": "doppelt", "email": "a@konto.test"})
+            z["dublette"] = None
+        except DuplicateKeyError as exc:
+            z["dublette"] = exc
+        z["nochmal"] = await indizes.email_uebergang(db)
+        return z
+
+    z = wegwerf.run(lauf())
+    assert z["erg"][0] == {"users": True, "driver_accounts": True}, z["erg"]
+    assert z["erg"][1] == {"users": True, "driver_accounts": True}, z["erg"]
+    assert z["erg"][2] == {"users": True, "driver_accounts": True}, z["erg"]
+    for info in z["info"]:
+        assert "email_1" not in info, sorted(info)
+        idx = info["email_alt_eindeutig"]
+        assert idx.get("unique") is True and idx["partialFilterExpression"] == partial, idx
+    assert z["dublette"] is not None and not ist_kontonummer_dublette(z["dublette"])
+    assert z["nochmal"] == {"users": True, "driver_accounts": True}
+    ensure = _funktion("server.py", "ensure_indexes")
+    assert "email_uebergang(db)" in ensure
+    assert '_unique_index_sicher(db.users, "email")' not in ensure
+    assert '_unique_index_sicher(db.driver_accounts, "email")' not in ensure
+
+
 # =========================================================== Konto-Limiter
 def _fenster_abwarten(sekunden: int, puffer: float = 8.0) -> None:
     rest = sekunden - (time.time() % sekunden)
