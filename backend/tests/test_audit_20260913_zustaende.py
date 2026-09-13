@@ -402,6 +402,19 @@ def test_52_admin_vertragsliste_blaettert_und_meldet_kappung(welt):
     assert all("pdf_b64" not in c for c in alle)
 
 
+def test_52b_riesige_seite_liefert_leere_liste_statt_500(welt):
+    A = _m("routes.admin")
+
+    async def lauf():
+        await welt.db.generated_pdfs.insert_one(_vertrag(welt, f"c_gross_{welt.s}"))
+        resp = Response()
+        items = await A.admin_all_contracts(resp, _=SA, page=10 ** 16, limit=2000)
+        return items, resp
+
+    items, resp = welt.run(lauf())
+    assert items == [] and resp.headers["X-Truncated"] == "0"
+
+
 # ============================================================ #55
 def test_55_sucherliste_meldet_obergrenze(welt):
     T = _m("routes.team")
@@ -471,6 +484,36 @@ def test_59_fahrer_loeschung_sperrt_zuerst_und_ist_wiederaufnehmbar(welt, monkey
                 await welt.db.appointments.count_documents({"driver_id": did}),
                 await welt.db.dealer_drivers.count_documents({"driver_account_id": did}))
     assert welt.run(rest()) == (0, 0, 0)
+
+
+def test_59c_entsperren_verliert_gegen_parallelen_grabstein(welt, monkeypatch):
+    """Tab 1 liest das Konto noch ohne Grabstein, Tab 2 setzt ihn dazwischen:
+    der Entsperren-Write darf das Konto nicht wieder aktivieren."""
+    A = _m("routes.admin")
+    did = f"drv_cas_{welt.s}"
+    ohne_grabstein = {"id": did, "email": f"{did}@x.de", "driver_code": "FC0913",
+                      "active": False}
+
+    async def _veraltet(driver_id):
+        return dict(ohne_grabstein)
+    monkeypatch.setattr(A, "_fahrer_or_404", _veraltet)
+
+    welt.run(welt.db.driver_accounts.insert_one({
+        **ohne_grabstein, "current_session_id": None,
+        "loeschung": {"status": "laeuft", "gestartet": _jetzt(), "grund": "admin"}}))
+    with pytest.raises(HTTPException) as e:
+        welt.run(A.admin_driver_set_active(did, A.AdminActiveIn(active=True), admin=SA))
+    assert e.value.status_code == 409
+    d = welt.run(welt.db.driver_accounts.find_one({"id": did}, {"_id": 0}))
+    assert d["active"] is False
+    assert welt.run(welt.db.activity_logs.count_documents(
+        {"action": "admin.fahrer.entsperrt", "ref": did})) == 0
+
+    # Konto zwischenzeitlich ganz geloescht -> 404 statt stillem ok
+    welt.run(welt.db.driver_accounts.delete_one({"id": did}))
+    with pytest.raises(HTTPException) as e:
+        welt.run(A.admin_driver_set_active(did, A.AdminActiveIn(active=True), admin=SA))
+    assert e.value.status_code == 404
 
 
 def test_59b_zuweisung_waehrend_loeschung_wird_zurueckgenommen(welt, monkeypatch):

@@ -834,7 +834,18 @@ async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
     if not body.active:
         # Sperren beendet die laufende Sitzung sofort (Single-Session strikt).
         fields["current_session_id"] = None
-    await db.driver_accounts.update_one({"id": driver_id}, {"$set": fields})
+    filt_konto = {"id": driver_id}
+    if body.active:
+        # Nachbesserung #59: Die Pruefung oben ist Lesen-dann-Schreiben. Setzt
+        # ein paralleler DELETE den Grabstein dazwischen, darf dieser Write das
+        # Konto nicht wieder aktivieren — Bedingung im Filter (CAS).
+        filt_konto["loeschung.status"] = {"$ne": "laeuft"}
+    r_konto = await db.driver_accounts.update_one(filt_konto, {"$set": fields})
+    if r_konto.matched_count == 0:
+        if not await db.driver_accounts.find_one({"id": driver_id}, {"_id": 1}):
+            raise HTTPException(404, "Fahrer nicht gefunden")
+        raise HTTPException(409, "Löschung läuft — bitte 'Löschen' erneut "
+                                 "ausführen, um sie abzuschließen")
     termine_getrennt = 0
     if not body.active:
         # Nachpruefung Runde 14 (Befund 17): offene Fahrten (offen/
@@ -970,7 +981,9 @@ async def admin_all_contracts(response: Response, _=Depends(current_admin),
     Kopfzeile X-Truncated: "1", wenn es weitere Vertraege gibt. Die Antwort
     bleibt eine Liste."""
     limit = max(1, min(int(limit or ADMIN_VERTRAEGE_MAX), ADMIN_VERTRAEGE_MAX))
-    page = max(1, int(page or 1))
+    # Nachbesserung #52: page auch nach oben begrenzen — sonst sprengt
+    # (page - 1) * limit int64 und pymongo wirft OverflowError (500).
+    page = max(1, min(int(page or 1), 10 ** 6))
     items = await db.generated_pdfs.find(
         {}, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     ).sort("created_at", -1).skip((page - 1) * limit).to_list(limit + 1)
