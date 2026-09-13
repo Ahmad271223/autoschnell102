@@ -365,6 +365,8 @@ async def _cleanup_once(db) -> dict:
     # ---- Aufbewahrungsfristen (Go-Live-Audit 09/2026) ----
     stats["anfragen_rotiert"] = await anfragen_rotieren(db, now)
     stats["fehlerlogs_begrenzt"] = await fehlerlogs_begrenzen(db, now)
+    # Audit 13.09.2026 (#35/#42): abgelaufene Inserats-Zwischenspeicher
+    stats["inseratscache_rotiert"] = await inseratscache_rotieren(db, now)
     stats.update(await marktplatz_rotieren(db, now))
 
     if any(stats.values()):
@@ -767,6 +769,46 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
     return n
 
 
+# Audit 13.09.2026 (#35): Punkt 39 (Inserats-Cache hoechstens 90 Tage) war nur
+# als Frischegrenze umgesetzt — nach Ablauf wurde neu abgerufen, geloescht
+# wurde nie. listings_cache.data traegt Verkaeuferangaben (Name, Telefon,
+# Anschrift; bei Kleinanzeigen meist Privatpersonen). Kein TTL-Index: der
+# koennte einen Eintrag mitten im Neuabruf (laufender Lease) loeschen und
+# erfasst keine Lease-Reste ohne expires_at.
+LISTING_CACHE_KARENZ_TAGE = int(os.environ.get("LISTING_CACHE_KARENZ_TAGE", "7"))
+
+
+async def inseratscache_rotieren(db, now: datetime,
+                                 karenz_tage: Optional[int] = None) -> int:
+    """listings_cache: (a) Eintraege, deren expires_at seit mehr als
+    LISTING_CACHE_KARENZ_TAGE abgelaufen ist, (b) Lease-Reste ohne Daten
+    (gescheiterter Erstabruf) nach einem Tag. Laufende Leases bleiben
+    unberuehrt. Ausgenommen sind Inserate mit einem noch nicht erzeugten
+    Beweisdokument aus der Zeit vor Runde 23 (ohne quelle_daten) — der Worker
+    liest deren Daten noch aus dem Zwischenspeicher.
+    (c) vehicle_cache (mobile.de, 30 min): zweite Absicherung, falls der
+    TTL-Index fehlt (#42) — abgelaufene Eintraege liefert cache_get ohnehin
+    nie mehr aus."""
+    karenz = LISTING_CACHE_KARENZ_TAGE if karenz_tage is None else karenz_tage
+    frei = {"$or": [{"fetching_until": None}, {"fetching_until": {"$lt": now}}]}
+    geschuetzt = await db.inserat_beweise.distinct(
+        "cache_key", {"status": {"$in": ["offen", "in_arbeit"]},
+                      "quelle_daten": {"$exists": False}})
+    ausnahme = {"cache_key": {"$nin": [k for k in geschuetzt if k]}} if geschuetzt else {}
+    r = await db.listings_cache.delete_many(
+        {"expires_at": {"$lt": now - timedelta(days=karenz)}, **frei, **ausnahme})
+    n = r.deleted_count
+    # expires_at None trifft das fehlende Feld und nutzt den Index cache_ablauf.
+    r = await db.listings_cache.delete_many(
+        {"expires_at": None, "data": {"$exists": False},
+         "created_at": {"$lt": now - timedelta(days=1)}, **frei, **ausnahme})
+    n += r.deleted_count
+    r = await db.vehicle_cache.delete_many(
+        {"expires_at_dt": {"$lt": now - timedelta(days=1)}})
+    n += r.deleted_count
+    return n
+
+
 async def _inserat_mit_fotos_loeschen(db, listing: dict, *, grund: str,
                                       dealer_id: str = "") -> bool:
     """Inserat samt hochgeladener Fotos loeschen. Fotos, die sich nicht
@@ -1112,7 +1154,8 @@ async def firmenreste_bereinigen(db) -> int:
     Firmen-IDs in link_jobs (dealer_ids, requested_by_dealer), die
     Quarantaene listings_cache_client (samt ingested_by_*-Herkunft) und
     im geteilten listings_cache (confirmed_by, data.ingested_by_*) — bis
-    zur TTL bzw. bei listings_cache unbefristet. Hier laeuft je Zyklus ein
+    zur TTL bzw. bei listings_cache bis inseratscache_rotieren (Ablauf plus
+    Karenz, Audit 13.09.2026 #35). Hier laeuft je Zyklus ein
     Nachlauf fuer alle Firmen-IDs, die nicht mehr in dealers existieren.
     Liefert die Zahl der bereinigten Dokumente."""
     kandidaten: set = set()
@@ -1355,9 +1398,10 @@ async def _reap_stuck_snapshots(db) -> None:
 # unbegrenzt — bei 500k neuen Inseraten/Monat ~300 GB monatlich).
 # AUSNAHME: Snapshots zu Fahrzeugen, fuer die ein KAUFVERTRAG existiert,
 # bleiben fuer immer — sie sind Teil des Beweis-Archivs des Vertrags.
-# Die Inserats-DATEN (listings_cache) bleiben unabhaengig davon erhalten;
-# ein erneuter Vergleich nach Ablauf erzeugt bei Bedarf einen frischen
-# Snapshot, ohne die Quelle fuer die Daten erneut anzurufen.
+# Die Inserats-DATEN (listings_cache) haben ihre eigene Frist (expires_at plus
+# Karenz, inseratscache_rotieren — Audit 13.09.2026 #35); bis dahin erzeugt
+# ein erneuter Vergleich bei Bedarf einen frischen Snapshot, ohne die Quelle
+# fuer die Daten erneut anzurufen.
 # ---------------------------------------------------------------------------
 SNAPSHOT_RETENTION_DAYS = int(os.environ.get("SNAPSHOT_RETENTION_DAYS", "60"))
 

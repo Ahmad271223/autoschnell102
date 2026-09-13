@@ -131,6 +131,58 @@ async def ensure_beweis_indexes(db) -> None:
                                    sparse=True)
 
 
+# Audit 13.09.2026 (#37): Nach einem gescheiterten Aufbau erst nach dieser
+# Pause erneut versuchen (je Prozess und Datenbank).
+INDEX_NEUVERSUCH_SEKUNDEN = 300
+_index_versuch: Dict[str, float] = {}
+
+
+async def beweis_indizes_sichern(db) -> bool:
+    """Audit 13.09.2026 (#37): Wie ensure_beweis_indexes, aber wirft nie und
+    trennt den Unique-Index (die Garantie "EIN Dokument je Inserat") von den
+    uebrigen. Fehlt er, gibt es einen Betriebsalarm (sichtbar in
+    /admin/betrieb und als Warnung in /ready) statt nur einer Log-Zeile; steht
+    er wieder, wird der Alarm geschlossen. Die anderen drei Indizes sind
+    Beiwerk und blockieren nichts. Liefert True, wenn der Unique-Index steht.
+
+    Beweis-Dubletten werden bewusst NICHT automatisch bereinigt: beide Zeilen
+    koennen PDFs mit IDs tragen, die Oberflaeche und Fahrer-App schon kennen."""
+    import betrieb
+    ref = "inserat_beweise.cache_key"
+    try:
+        await db.inserat_beweise.create_index("cache_key", unique=True,
+                                              name="beweis_je_inserat")
+    except Exception as exc:  # noqa: BLE001 — z.B. Dubletten im Altbestand
+        log.error("Beweisdokumente: Unique-Index beweis_je_inserat fehlt (%s) — "
+                  "doppelte Dokumente moeglich", exc)
+        await betrieb.alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300],
+                            hinweis="Doppelte cache_key in inserat_beweise von Hand "
+                                    "pruefen; der Index wird danach automatisch angelegt.")
+        return False
+    await betrieb.alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    try:
+        await db.inserat_beweise.create_index("id", unique=True, name="beweis_id")
+        await db.inserat_beweise.create_index([("status", 1), ("erstellt_am", 1)],
+                                              name="beweis_status")
+        await db.vehicles.create_index("inserat_schluessel", name="fahrzeug_inserat",
+                                       sparse=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Beweis-Indizes unvollstaendig: %s", exc)
+    return True
+
+
+async def beweise_haengend(db, minuten: int = 15) -> int:
+    """Audit 13.09.2026 (#38): Beweisdokumente, die abholbereit laenger als
+    `minuten` warten. Prozessunabhaengig — faellt der Beweis-Worker flotten-
+    weit aus, bleibt /ready sonst gruen, und die Nutzer sehen nur 409. Der
+    Index beweis_status (status, erstellt_am) deckt die Abfrage."""
+    jetzt = _jetzt()
+    return await db.inserat_beweise.count_documents(
+        {"status": "offen", "erstellt_am": {"$lt": jetzt - timedelta(minutes=minuten)},
+         "$or": [{"naechster_versuch_ab": None},
+                 {"naechster_versuch_ab": {"$lte": jetzt}}]})
+
+
 def kanonische_url(quelle: Any, item_id: Any, url: Any) -> str:
     """Firmenneutrale Inserats-Adresse fuer Dokument und Oberflaeche: ohne
     Such-/Tracking-Parameter und Fragment (die gingen sonst an alle Firmen
@@ -242,12 +294,16 @@ async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
         return None
     marke = f"{id(db.client) if hasattr(db, 'client') else id(db)}:{getattr(db, 'name', '')}"
     if marke not in _index_sicher:
-        try:
-            await ensure_beweis_indexes(db)
-            _index_sicher.add(marke)
-        except Exception as exc:  # noqa: BLE001 — z.B. Dubletten im Altbestand
-            log.error("Beweisdokumente: Unique-Index auf cache_key fehlt (%s) — "
-                      "doppelte Dokumente moeglich", exc)
+        # Audit 13.09.2026 (#37): fail-open bleibt (Beweis darf den Abruf nie
+        # brechen), aber sichtbar (Betriebsalarm) und gedrosselt — vorher
+        # startete jeder Vergleich einen scheiternden Unique-Aufbau.
+        zuletzt = _index_versuch.get(marke)
+        if zuletzt is None or time.monotonic() - zuletzt >= INDEX_NEUVERSUCH_SEKUNDEN:
+            if await beweis_indizes_sichern(db):
+                _index_sicher.add(marke)
+                _index_versuch.pop(marke, None)
+            else:
+                _index_versuch[marke] = time.monotonic()
     felder = {"_id": 0, "id": 1, "status": 1, "quelle": 1, "item_id": 1, "url": 1,
               "erstellt_am": 1, "fertig_am": 1, "pdf_bytes": 1, "fehler": 1,
               "fotos_eingebettet": 1, "fotos_gesamt": 1, "daten_abgerufen_am": 1,

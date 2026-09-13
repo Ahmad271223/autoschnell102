@@ -115,6 +115,26 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
         raise
 
 
+# Audit 13.09.2026 (#33): Der innere Scrape-Slot hatte keinen Herzschlag.
+# Ein eigener Abruf dauert mit 3 Versuchen (15 s + 30 s je Phase plus
+# Backoff) leicht laenger als PROVIDER_SLOT_TTL (120 s) — dann galt der
+# Slot als verwaist, und die Selbstheilung gab den Platz frei, obwohl noch
+# gescrapt wurde.
+SCRAPE_HERZSCHLAG_SEKUNDEN = 30
+
+
+async def _scrape_slot_herzschlag(db, slot_id: str) -> None:
+    from provider_limiter import extend_slot
+    while True:
+        try:
+            await asyncio.sleep(SCRAPE_HERZSCHLAG_SEKUNDEN)
+            await extend_slot(db, slot_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — naechster Schlag versucht es erneut
+            continue
+
+
 async def _mit_scrape_bremse(db, ueber_api: bool, holen, url: str) -> Dict[str, Any]:
     """Den eigenen HTML-Abruf unter der STRENGEN Kleinanzeigen-Grenze laufen
     lassen (Gegenpruefung 12.09.2026).
@@ -142,9 +162,11 @@ async def _mit_scrape_bremse(db, ueber_api: bool, holen, url: str) -> Dict[str, 
         raise ListingBusy(
             "Gerade werden viele Inserate gleichzeitig geladen - "
             "bitte in ein paar Sekunden erneut versuchen.")
+    herzschlag = asyncio.create_task(_scrape_slot_herzschlag(db, slot))
     try:
         return await holen(url)
     finally:
+        herzschlag.cancel()
         await release_slot(db, slot)
 
 

@@ -208,3 +208,204 @@ async def _buyer_access_unique_index() -> bool:
         db.plan_requests, "uniq_offene_buyer_access_anfrage", ["type", "buyer_user_id"],
         {"type": "buyer_access", "status": "offen", "buyer_user_id": {"$type": "string"}},
         [("created_at", 1)], zusammenfuehren)
+# ---------------------------------------------------------------------------
+# Audit 13.09.2026 (#36/#39/#40/#41/#42): Index-Anlagen, die bisher bei einem
+# Fehler nur eine Log-Zeile schrieben. Jetzt: Betriebsalarm (sichtbar in
+# /admin/betrieb und als Warnung in /ready), Schliessen des Alarms, sobald der
+# Index steht, und nie eine Exception nach aussen — ensure_indexes laeuft im
+# Migrations-Leader, dort wuerde jede Exception in Produktion zu SystemExit(78).
+# Die Funktionen bekommen die Datenbank als Argument, damit Tests sie ohne
+# server.py pruefen koennen.
+# ---------------------------------------------------------------------------
+async def listings_cache_unique_index(db) -> bool:
+    """#36: Die Single-Flight-Sperre (Lease-Upsert in listing_identity) haengt
+    allein am Unique-Index auf listings_cache.cache_key. Dubletten sind reiner
+    Zwischenspeicher und werden automatisch zusammengelegt (protokolliert):
+    es bleibt der Eintrag MIT Daten und juengstem Abruf, sonst der aelteste.
+    Liefert True, wenn der Index steht."""
+    from betrieb import alarm, alarm_schliessen
+    ref = "listings_cache.cache_key"
+    try:
+        vorhanden = await db.listings_cache.index_information()
+        if not any(i.get("unique") and [f for f, _r in i["key"]] == ["cache_key"]
+                   for i in vorhanden.values()):
+            async for gruppe in db.listings_cache.aggregate([
+                    {"$match": {"cache_key": {"$exists": True, "$ne": None}}},
+                    {"$group": {"_id": "$cache_key", "n": {"$sum": 1}}},
+                    {"$match": {"n": {"$gt": 1}}}], allowDiskUse=True):
+                ck = gruppe["_id"]
+                behalten = await db.listings_cache.find(
+                    {"cache_key": ck, "data": {"$exists": True}}, {"_id": 1}) \
+                    .sort([("fetched_at", -1), ("_id", 1)]).limit(1).to_list(1)
+                if not behalten:
+                    behalten = await db.listings_cache.find(
+                        {"cache_key": ck}, {"_id": 1}).sort("_id", 1).limit(1).to_list(1)
+                r = await db.listings_cache.delete_many(
+                    {"cache_key": ck, "_id": {"$ne": behalten[0]["_id"]}})
+                log.warning("ensure_indexes: listings_cache-Dubletten zusammengelegt: "
+                            "%s (%d Eintraege entfernt)", ck, r.deleted_count)
+            # Gleiche Definition wie listing_identity.ensure_cache_indexes
+            # (Standardname cache_key_1) — sonst Namenskonflikt.
+            await db.listings_cache.create_index("cache_key", unique=True)
+    except Exception as exc:  # noqa: BLE001
+        log.error("ensure_indexes: listings_cache.cache_key: %s — "
+                  "Single-Flight-Sperre fehlt (Doppelabrufe moeglich)", exc)
+        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        return False
+    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    return True
+
+
+async def abo_unique_index(db) -> bool:
+    """#39: "genau ein aktives Abo je Konto" als Teil-Unique-Index. Altbestand
+    mit mehreren aktiven Abos wird NICHT automatisch veraendert (Geld- und
+    Zugangsdaten): dann Betriebsalarm mit den Konten. Bei jedem anderen
+    Fehler ebenfalls ein Alarm; steht der Index, werden beide geschlossen."""
+    from betrieb import alarm, alarm_schliessen
+    name = "ein_aktives_abo_je_konto"
+    ref = f"subscriptions.{name}"
+    filter_ = {"status": "active", "subject_user_id": {"$type": "string"}}
+    try:
+        # Nur echte Konto-Zuordnungen: Alt-Abos ohne subject_user_id (reine
+        # Firmen-Abos aus der Anfangszeit) sind vom Index ausgenommen.
+        await db.subscriptions.create_index(
+            [("subject_user_id", 1)], unique=True,
+            partialFilterExpression=filter_, name=name)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Index %s nicht anlegbar: %s", name, exc)
+        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        try:
+            doppelte = await db.subscriptions.aggregate([
+                {"$match": filter_},
+                {"$group": {"_id": "$subject_user_id", "n": {"$sum": 1}}},
+                {"$match": {"n": {"$gt": 1}}}, {"$limit": 20}]).to_list(20)
+        except Exception as exc2:  # noqa: BLE001
+            log.error("Index %s: Dublettenpruefung gescheitert: %s", name, exc2)
+            return False
+        if doppelte:
+            await alarm(db, "mehrfache_aktive_abos", ref="subscriptions",
+                        konten=", ".join(str(d["_id"]) for d in doppelte),
+                        hinweis="Alt-Abos auf status=ersetzt setzen, danach "
+                                "startet der Index automatisch")
+        else:
+            await alarm_schliessen(db, "mehrfache_aktive_abos", ref="subscriptions")
+        return False
+    await alarm_schliessen(db, "mehrfache_aktive_abos", ref="subscriptions")
+    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    return True
+
+
+async def plan_requests_unique_indizes(db) -> None:
+    """#40 (Rumpf aus server._plan_requests_unique_indizes): hoechstens EINE
+    offene Anfrage je Sucher (sucher_abo) bzw. je Firma (verkaufspaket) — als
+    Teil-Unique-Index; der atomare Upsert in routes/team.py ist nur damit
+    rennfest. Altbestand mit mehreren offenen Anfragen wird nicht automatisch
+    veraendert (Betreiber-Entscheidung): dann Betriebsalarm mit den
+    betroffenen Schluesseln statt nur einer Log-Zeile."""
+    from betrieb import alarm, alarm_schliessen
+    for name, felder, typ in (
+            ("uniq_offene_sucher_abo_anfrage", "subject_user_id", "sucher_abo"),
+            ("uniq_offene_verkaufspaket_anfrage", "dealer_id", "verkaufspaket")):
+        ref = f"plan_requests.{name}"
+        try:
+            await db.plan_requests.create_index(
+                [("type", 1), (felder, 1)], unique=True, name=name,
+                partialFilterExpression={"type": typ, "status": "offen"})
+        except Exception as exc:  # noqa: BLE001
+            try:
+                doppelte = await db.plan_requests.aggregate([
+                    {"$match": {"type": typ, "status": "offen"}},
+                    {"$group": {"_id": f"${felder}", "n": {"$sum": 1}}},
+                    {"$match": {"n": {"$gt": 1}}}, {"$limit": 10}]).to_list(10)
+                beispiele = ", ".join(str(d["_id"]) for d in doppelte) or "?"
+            except Exception:  # noqa: BLE001
+                beispiele = "?"
+            log.error("ensure_indexes: plan_requests.%s nicht anlegbar: %s — "
+                      "mehrfach offene Anfragen fuer %s: %s (aeltere auf "
+                      "erledigt/abgelehnt setzen, dann greift der Index)",
+                      name, exc, felder, beispiele)
+            await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300],
+                        beispiele=beispiele,
+                        hinweis="Aeltere offene Anfragen auf erledigt/abgelehnt "
+                                "setzen, beim naechsten Start greift der Index.")
+            continue
+        await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+
+
+async def storage_retry_unique_index(db) -> None:
+    """#41 (Rumpf aus server._storage_retry_unique_index, Nachpruefung Runde 14
+    Nr. 61): storage_delete_retry hatte nur einen Index auf `aufgegeben`; der
+    Upsert in storage_service (Filter art/key/prefix) lief ohne Unique-Index
+    und erzeugte unter Last mehrere Zeilen je Ziel — getrennte
+    Versuchszaehler und doppelte Alarme datei_loeschung_aufgegeben. Dazu zwei
+    feste Dublettenquellen: die Firmenloeschung (admin.py) schrieb Praefix-
+    Eintraege OHNE art/key, der Protokoll-Rollback per insert_one ohne
+    Deduplizierung.
+
+    Ablauf (idempotent): Alt-Eintraege ohne `art` auf die storage_service-
+    Form normalisieren, Dubletten je (art, key, prefix) auf die aelteste
+    Zeile zusammenlegen (reine Nachhol-Buchhaltung — es geht nichts
+    verloren, das Ziel ist dasselbe), dann Unique-Index `retry_je_ziel`.
+    Audit 13.09.2026: Scheitern meldet einen Betriebsalarm, und bei gleichem
+    created_at entscheidet _id — sonst konnten zwei gleichzeitig startende
+    Prozesse je die Zeile des anderen loeschen (Vormerkung weg)."""
+    from betrieb import alarm, alarm_schliessen
+    ref = "storage_delete_retry.retry_je_ziel"
+    try:
+        # Altzeilen einzeln normalisieren: Existiert der Unique-Index schon
+        # (zweiter Start) und liegt bereits eine normalisierte Zwillingszeile
+        # vor, wuerde ein pauschales update_many am Index scheitern und die
+        # ganze Nachhol-Buchhaltung abbrechen.
+        async for alt in db.storage_delete_retry.find({"art": {"$exists": False}}):
+            zwilling = await db.storage_delete_retry.find_one(
+                {"art": "prefix", "key": None, "prefix": alt.get("prefix"),
+                 "_id": {"$ne": alt["_id"]}}, {"_id": 1, "created_at": 1})
+            if zwilling and str(zwilling.get("created_at") or "") <= str(alt.get("created_at") or ""):
+                # Zwilling ist aelter (oder gleich alt): Altzeile weg
+                await db.storage_delete_retry.delete_one({"_id": alt["_id"]})
+                continue
+            if zwilling:
+                # Altzeile ist die aeltere: Zwilling weg, Altzeile normalisieren
+                await db.storage_delete_retry.delete_one({"_id": zwilling["_id"]})
+            await db.storage_delete_retry.update_one(
+                {"_id": alt["_id"]}, {"$set": {"art": "prefix", "key": None}})
+        await db.storage_delete_retry.update_many(
+            {"prefix": {"$exists": False}}, {"$set": {"prefix": None}})
+        async for row in db.storage_delete_retry.aggregate([
+                {"$sort": {"created_at": 1, "_id": 1}},
+                {"$group": {"_id": {"art": "$art", "key": "$key",
+                                    "prefix": "$prefix"},
+                            "keep": {"$first": "$_id"}, "n": {"$sum": 1}}},
+                {"$match": {"n": {"$gt": 1}}}]):
+            z = row["_id"]
+            await db.storage_delete_retry.delete_many(
+                {"art": z.get("art"), "key": z.get("key"),
+                 "prefix": z.get("prefix"), "_id": {"$ne": row["keep"]}})
+            log.warning("ensure_indexes: storage_delete_retry-Dubletten "
+                        "zusammengelegt: %s (%d Zeilen)", z, row["n"])
+        await db.storage_delete_retry.create_index(
+            [("art", 1), ("key", 1), ("prefix", 1)], unique=True,
+            name="retry_je_ziel")
+    except Exception as exc:  # noqa: BLE001
+        log.error("ensure_indexes: storage_delete_retry.retry_je_ziel: %s", exc)
+        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        return
+    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+
+
+async def ttl_index_sicher(db, sammlung: str, feld: str = "expires_at_dt") -> bool:
+    """#42: TTL-Index (expireAfterSeconds=0) anlegen. Scheitert das (z.B. ein
+    von Hand angelegter Index gleichen Schluessels ohne TTL), waechst die
+    Sammlung unbegrenzt — bisher nur eine Warnung mit falschem Text
+    ("Eindeutigkeits-Garantie"). Jetzt Betriebsalarm ttl_index_fehlt."""
+    from betrieb import alarm, alarm_schliessen
+    ref = f"{sammlung}.{feld}"
+    try:
+        await db[sammlung].create_index(feld, expireAfterSeconds=0)
+    except Exception as exc:  # noqa: BLE001
+        log.error("ensure_indexes: TTL-Index %s fehlt — abgelaufene Eintraege "
+                  "werden nicht automatisch geloescht: %s", ref, exc)
+        await alarm(db, "ttl_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        return False
+    await alarm_schliessen(db, "ttl_index_fehlt", ref=ref)
+    return True

@@ -379,6 +379,17 @@ async def readiness_check(response: Response):
         _ = alt
     except Exception as exc:
         warnungen.append(f"queue: {exc}")
+    try:
+        # Audit 13.09.2026 (#38): prozessunabhaengige Stau-Warnung — startet
+        # flottenweit kein Beweis-Worker, bliebe /ready sonst gruen. Warnung,
+        # kein Fehler (kein 503-Tor fuer rollout.sh).
+        from beweis_service import beweise_haengend as _beweise_haengend
+        beweise_stau = await _beweise_haengend(db, 15)
+        info["beweise_haengend"] = beweise_stau
+        if beweise_stau:
+            warnungen.append(f"{beweise_stau} Beweisdokumente warten > 15 min")
+    except Exception as exc:  # noqa: BLE001
+        warnungen.append(f"beweise: {exc}")
     # Runde 29 (12.09.2026, Pruefbefund): Fehlt ein kritischer Unique-Index
     # oder laeuft der Link-Worker nicht, darf diese Instanz NICHT in die
     # Rotation. Vorher wurde das nur ins Protokoll geschrieben und der
@@ -411,6 +422,17 @@ async def readiness_check(response: Response):
                 "Dubletten sind moeglich. Bereinigen mit "
                 "'python scripts/dubletten_pruefen.py', danach greift das "
                 "sofort (kein Neustart noetig).")
+    # Audit 13.09.2026 (#34): Die Anbieter-Begrenzung kann sich selbst heilen
+    # (ein kurzer Primaerwechsel waehrend on_start liess diesen Prozess sonst
+    # bis zum Neustart 503 melden, obwohl acquire_slot den Index laengst
+    # nachgeholt hatte). Nur rollout.sh/freigeben.sh fragen /ready ab.
+    if BETRIEBSBEREIT.get("anbieter_grenze") is False:
+        try:
+            from provider_limiter import ensure_slot_indexes
+            await ensure_slot_indexes(db)
+            BETRIEBSBEREIT["anbieter_grenze"] = True
+        except Exception as exc:  # noqa: BLE001
+            warnungen.append(f"anbieter_grenze: {exc}")
     # Prozesslokale Teile: sie koennen sich nicht selbst heilen, ein Neustart
     # dieses Prozesses ist der Weg.
     _TEILE = {"link_worker": "Link-Abruf-Arbeiter",
@@ -597,83 +619,22 @@ async def _kunden_nr_unique_index() -> None:
 
 
 async def _storage_retry_unique_index() -> None:
-    """Nachpruefung Runde 14 (Nr. 61): storage_delete_retry hatte nur einen
-    Index auf `aufgegeben`; der Upsert in storage_service (Filter art/key/
-    prefix) lief ohne Unique-Index und erzeugte unter Last mehrere Zeilen je
-    Ziel — getrennte Versuchszaehler und doppelte Alarme
-    datei_loeschung_aufgegeben. Dazu zwei feste Dublettenquellen: die
-    Firmenloeschung (admin.py) schrieb Praefix-Eintraege OHNE art/key, der
-    Protokoll-Rollback per insert_one ohne Deduplizierung.
-
-    Ablauf (idempotent): Alt-Eintraege ohne `art` auf die storage_service-
-    Form normalisieren, Dubletten je (art, key, prefix) auf die aelteste
-    Zeile zusammenlegen (reine Nachhol-Buchhaltung — es geht nichts
-    verloren, das Ziel ist dasselbe), dann Unique-Index `retry_je_ziel`."""
-    try:
-        # Altzeilen einzeln normalisieren: Existiert der Unique-Index schon
-        # (zweiter Start) und liegt bereits eine normalisierte Zwillingszeile
-        # vor, wuerde ein pauschales update_many am Index scheitern und die
-        # ganze Nachhol-Buchhaltung abbrechen.
-        async for alt in db.storage_delete_retry.find({"art": {"$exists": False}}):
-            zwilling = await db.storage_delete_retry.find_one(
-                {"art": "prefix", "key": None, "prefix": alt.get("prefix"),
-                 "_id": {"$ne": alt["_id"]}}, {"_id": 1, "created_at": 1})
-            if zwilling and str(zwilling.get("created_at") or "") <= str(alt.get("created_at") or ""):
-                # Zwilling ist aelter (oder gleich alt): Altzeile weg
-                await db.storage_delete_retry.delete_one({"_id": alt["_id"]})
-                continue
-            if zwilling:
-                # Altzeile ist die aeltere: Zwilling weg, Altzeile normalisieren
-                await db.storage_delete_retry.delete_one({"_id": zwilling["_id"]})
-            await db.storage_delete_retry.update_one(
-                {"_id": alt["_id"]}, {"$set": {"art": "prefix", "key": None}})
-        await db.storage_delete_retry.update_many(
-            {"prefix": {"$exists": False}}, {"$set": {"prefix": None}})
-        async for row in db.storage_delete_retry.aggregate([
-                {"$sort": {"created_at": 1}},
-                {"$group": {"_id": {"art": "$art", "key": "$key",
-                                    "prefix": "$prefix"},
-                            "keep": {"$first": "$_id"}, "n": {"$sum": 1}}},
-                {"$match": {"n": {"$gt": 1}}}]):
-            z = row["_id"]
-            await db.storage_delete_retry.delete_many(
-                {"art": z.get("art"), "key": z.get("key"),
-                 "prefix": z.get("prefix"), "_id": {"$ne": row["keep"]}})
-            log.warning("ensure_indexes: storage_delete_retry-Dubletten "
-                        "zusammengelegt: %s (%d Zeilen)", z, row["n"])
-        await db.storage_delete_retry.create_index(
-            [("art", 1), ("key", 1), ("prefix", 1)], unique=True,
-            name="retry_je_ziel")
-    except Exception as exc:
-        log.warning("ensure_indexes: storage_delete_retry.retry_je_ziel: %s", exc)
+    """Nachpruefung Runde 14 (Nr. 61): Unique-Index `retry_je_ziel` auf
+    storage_delete_retry samt Normalisieren und Zusammenlegen der Altzeilen.
+    Audit 13.09.2026 (#41): Rumpf liegt in indizes.storage_retry_unique_index
+    (Betriebsalarm bei Scheitern, deterministisches Zusammenlegen; testbar
+    ohne server.py). server.db wird beim Aufruf gelesen."""
+    from indizes import storage_retry_unique_index
+    await storage_retry_unique_index(db)
 
 
 async def _plan_requests_unique_indizes() -> None:
-    """Nachpruefung Runde 14 (Nr. 56/57, Vorarbeit fuer den atomaren Upsert
-    in routes/team.py): hoechstens EINE offene Anfrage je Sucher (sucher_abo)
-    bzw. je Firma (verkaufspaket) — als Teil-Unique-Index, damit erledigte/
-    abgelehnte Anfragen die Historie behalten. Altbestand mit mehreren
-    offenen Anfragen wird nicht automatisch veraendert (das ist eine
-    Betreiber-Entscheidung): dann bleibt es beim Fehlerhinweis mit den
-    betroffenen Schluesseln, und der Code-Pfad (find_one vor insert) gilt
-    weiter."""
-    for name, felder, typ in (
-            ("uniq_offene_sucher_abo_anfrage", "subject_user_id", "sucher_abo"),
-            ("uniq_offene_verkaufspaket_anfrage", "dealer_id", "verkaufspaket")):
-        try:
-            await db.plan_requests.create_index(
-                [("type", 1), (felder, 1)], unique=True, name=name,
-                partialFilterExpression={"type": typ, "status": "offen"})
-        except Exception as exc:
-            doppelte = await db.plan_requests.aggregate([
-                {"$match": {"type": typ, "status": "offen"}},
-                {"$group": {"_id": f"${felder}", "n": {"$sum": 1}}},
-                {"$match": {"n": {"$gt": 1}}}, {"$limit": 10}]).to_list(10)
-            log.error("ensure_indexes: plan_requests.%s nicht anlegbar: %s — "
-                      "mehrfach offene Anfragen fuer %s: %s (aeltere auf "
-                      "erledigt/abgelehnt setzen, dann greift der Index)",
-                      name, exc, felder,
-                      ", ".join(str(d["_id"]) for d in doppelte) or "?")
+    """Nachpruefung Runde 14 (Nr. 56/57): hoechstens EINE offene Anfrage je
+    Sucher bzw. je Firma als Teil-Unique-Index. Audit 13.09.2026 (#40): Rumpf
+    liegt in indizes.plan_requests_unique_indizes (Betriebsalarm statt nur
+    Log, Dublettenpruefung kann den Start nicht mehr abbrechen)."""
+    from indizes import plan_requests_unique_indizes
+    await plan_requests_unique_indizes(db)
 
 
 async def ensure_indexes():
@@ -698,19 +659,12 @@ async def ensure_indexes():
     # Tagesbudget-Zaehler (provider_fetch) raeumen sich selbst weg.
     await db.provider_budget.create_index("ablauf", expireAfterSeconds=0)
     # TTL on cache (30 minutes)
-    try:
-        await db.vehicle_cache.create_index("expires_at_dt", expireAfterSeconds=0)
-    except Exception as exc:
-        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
-                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
+    # Audit 13.09.2026 (#42): Scheitern meldet einen Betriebsalarm
+    # ttl_index_fehlt (vorher nur eine Warnung mit falschem Text).
+    from indizes import ttl_index_sicher
+    await ttl_index_sicher(db, "vehicle_cache", "expires_at_dt")
     # Vehicle comparisons – auto-cleanup after 14 days
-    try:
-        await db.vehicle_comparisons.create_index(
-            "expires_at_dt", expireAfterSeconds=0,
-        )
-    except Exception as exc:
-        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
-                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
+    await ttl_index_sicher(db, "vehicle_comparisons", "expires_at_dt")
     await db.subscriptions.create_index("dealer_id")
     # Unique index on session_id prevents duplicate subscriptions from race
     # conditions between concurrent payment-status polls and webhook deliveries.
@@ -847,11 +801,11 @@ async def ensure_indexes():
     )
     await db.dealer_drivers.create_index("driver_account_id")
     # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
-    try:
-        await db.listings_cache.create_index("cache_key", unique=True)
-    except Exception as exc:
-        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
-                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
+    # Audit 13.09.2026 (#36): Cache-Dubletten werden automatisch
+    # zusammengelegt; scheitert es trotzdem, Betriebsalarm statt Warnung.
+    # Wirft nie (kein Startabbruch im Migrations-Leader).
+    from indizes import listings_cache_unique_index
+    await listings_cache_unique_index(db)
     # Snapshots: das Frontend pollt alle 4 s auf (id, dealer_id) — ohne Index
     # ist das ab ein paar tausend Snapshots ein Collection-Scan pro Poll.
     await db.listing_snapshots.create_index("id", unique=True)
@@ -1071,9 +1025,18 @@ async def on_start():
         BETRIEBSBEREIT["link_worker"] = False
     # Beweisdokumente je Inserat (ersetzt die Snapshots): Indizes synchron,
     # dann die Erzeugungs-Schleife dieses Workers (beweis_service.py).
+    # Audit 13.09.2026 (#38): Indizes und Worker-Start getrennt. Vorher stand
+    # beides in einem try — eine dauerhafte Index-Ursache in der gemeinsamen
+    # DB (Dubletten, Namenskonflikt) liess nach jedem Rollout in KEINEM
+    # Prozess einen Beweis-Worker starten. Der Worker braucht den Unique-Index
+    # nicht (_beanspruchen ist ein atomarer Statuswechsel je Zeile);
+    # beweis_indizes_sichern wirft nie und meldet einen Betriebsalarm.
     try:
-        from beweis_service import ensure_beweis_indexes, run_beweis_worker_forever
-        await ensure_beweis_indexes(db)
+        from beweis_service import beweis_indizes_sichern, run_beweis_worker_forever
+        try:
+            await beweis_indizes_sichern(db)
+        except Exception as exc:
+            log.error("Beweis-Indizes: %s — Beweis-Worker startet trotzdem", exc)
         import asyncio
         asyncio.create_task(run_beweis_worker_forever(db))
     except Exception as exc:
@@ -1105,14 +1068,22 @@ async def _alle_indexe():
     try:
         await ensure_cache_indexes(db)
     except Exception as exc:
-        log.warning("listings_cache index setup failed: %s", exc)
-    # Beweisdokumente: Unique-Index auf cache_key VOR allen Workern (ein
-    # Dokument je Inserat haengt an ihm).
+        # Audit 13.09.2026 (#36): sichtbar im Betriebsstatus, nicht nur im Log.
+        log.error("listings_cache index setup failed: %s", exc)
+        from betrieb import alarm
+        await alarm(db, "unique_index_fehlt", ref="listings_cache.indizes",
+                    fehler=str(exc)[:300])
     try:
-        from beweis_service import ensure_beweis_indexes
-        await ensure_beweis_indexes(db)
+        # Audit 13.09.2026 (#35): inseratscache_rotieren sucht nach expires_at
+        # (stuendlich) — ohne Index ein Scan der ganzen Sammlung.
+        await db.listings_cache.create_index("expires_at", name="cache_ablauf")
     except Exception as exc:
-        log.error("Index beweis_je_inserat: %s", exc)
+        log.error("Index cache_ablauf: %s", exc)
+    # Beweisdokumente: Unique-Index auf cache_key VOR allen Workern (ein
+    # Dokument je Inserat haengt an ihm). Audit 13.09.2026 (#37): wirft nie,
+    # fehlt der Index, gibt es einen Betriebsalarm.
+    from beweis_service import beweis_indizes_sichern
+    await beweis_indizes_sichern(db)
     try:
         await db.pickup_protocols.create_index(
             [("appointment_id", 1), ("version", 1)], unique=True,
@@ -1134,26 +1105,10 @@ async def _alle_indexe():
     # der Datenbank. Findet sich Altbestand mit mehreren aktiven Abos,
     # scheitert die Indexanlage — dann bleibt es bei der Pruefung im Code
     # und ein Betriebsalarm nennt die betroffenen Konten.
-    try:
-        # Nur echte Konto-Zuordnungen: Alt-Abos ohne subject_user_id (reine
-        # Firmen-Abos aus der Anfangszeit) sind vom Index ausgenommen.
-        await db.subscriptions.create_index(
-            [("subject_user_id", 1)], unique=True,
-            partialFilterExpression={"status": "active",
-                                     "subject_user_id": {"$type": "string"}},
-            name="ein_aktives_abo_je_konto")
-    except Exception as exc:            # noqa: BLE001
-        log.error("Index ein_aktives_abo_je_konto nicht anlegbar: %s", exc)
-        doppelte = await db.subscriptions.aggregate([
-            {"$match": {"status": "active", "subject_user_id": {"$type": "string"}}},
-            {"$group": {"_id": "$subject_user_id", "n": {"$sum": 1}}},
-            {"$match": {"n": {"$gt": 1}}}, {"$limit": 20}]).to_list(20)
-        if doppelte:
-            from betrieb import alarm
-            await alarm(db, "mehrfache_aktive_abos", ref="subscriptions",
-                        konten=", ".join(str(d["_id"]) for d in doppelte),
-                        hinweis="Alt-Abos auf status=ersetzt setzen, danach "
-                                "startet der Index automatisch")
+    # Audit 13.09.2026 (#39): Alarm bei JEDEM Scheitern, Schliessen nach der
+    # Bereinigung, und die Dublettenpruefung kann den Start nicht abbrechen.
+    from indizes import abo_unique_index
+    await abo_unique_index(db)
     await db.manual_payments.create_index("vorgang_id", unique=True, sparse=True,
                                           name="zahlung_je_vorgang")
     await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
