@@ -45,6 +45,120 @@ async def _unique_index_sicher(coll, feld, abbruch_in_produktion: bool = True) -
     return True
 
 
+def _schluessel_liste(schluessel) -> list:
+    if isinstance(schluessel, str):
+        return [(schluessel, 1)]
+    return [(f, int(r)) for f, r in schluessel]
+
+
+async def _index_sicher_ersetzen(coll, schluessel, name: str, unique: bool = False,
+                                 partial=None, sparse: bool = False,
+                                 abbruch_in_produktion: bool = True) -> bool:
+    """Kontonummer (13.09.2026): Index mit festem Namen und festen Optionen
+    anlegen oder ersetzen — nebenlaeufigkeitsfest. Leader und wartende
+    Prozesse fuehren ensure_indexes gleichzeitig aus (migrationen.py,
+    Version schon 7), deshalb:
+
+    1. Passt ein Index mit diesem Namen und diesen Optionen: fertig.
+    2. Gleicher Name oder Schluessel mit anderen Optionen: drop_index;
+       OperationFailure 27 (IndexNotFound, der andere war schneller) = erledigt.
+    3. unique: Dublettenpruefung (bei partial nur im Filter). In Produktion
+       Abbruch (SystemExit 78), sonst Betriebsalarm unique_index_fehlt.
+    4. create_index; bei 85/86/68 (IndexOptionsConflict, IndexKeySpecsConflict,
+       IndexAlreadyExists) neu lesen und nur werfen, wenn er weiter nicht passt.
+    Liefert True, wenn der Index steht."""
+    from pymongo.errors import OperationFailure
+    from betrieb import alarm, alarm_schliessen
+    keys = _schluessel_liste(schluessel)
+    felder = [f for f, _ in keys]
+    datenbank = coll.database
+    ref = f"{coll.name}.{name}"
+
+    def _passt(info: dict) -> bool:
+        i = info.get(name)
+        if not i:
+            return False
+        return ([(f, int(r)) for f, r in i.get("key", [])] == keys
+                and bool(i.get("unique")) == bool(unique)
+                and bool(i.get("sparse")) == bool(sparse)
+                and (i.get("partialFilterExpression") or None) == (partial or None))
+
+    optionen = {"name": name}
+    if unique:
+        optionen["unique"] = True
+    if sparse:
+        optionen["sparse"] = True
+    if partial:
+        optionen["partialFilterExpression"] = partial
+    # 276 IndexBuildAborted / 12587 BackgroundOperationInProgress: der andere
+    # Prozess hat unseren Aufbau per drop_index abgebrochen — neu lesen, erneut.
+    wiederholbar = (85, 86, 68, 27, 276, 12587)
+    for versuch in range(3):
+        info = await coll.index_information()
+        if _passt(info):
+            break
+        for iname, i in info.items():
+            if iname == "_id_":
+                continue
+            gleicher_schluessel = [(f, int(r)) for f, r in i.get("key", [])] == keys
+            if iname == name or gleicher_schluessel:
+                try:
+                    await coll.drop_index(iname)
+                except OperationFailure as exc:
+                    if exc.code != 27:
+                        raise
+        if unique:
+            filter_ = dict(partial) if partial else {f: {"$exists": True, "$ne": None}
+                                                     for f in felder}
+            dubletten = await coll.aggregate([
+                {"$match": filter_},
+                {"$group": {"_id": {f: f"${f}" for f in felder}, "n": {"$sum": 1}}},
+                {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+            if dubletten:
+                beispiele = ", ".join(
+                    str(d["_id"].get(felder[0]) if len(felder) == 1 else d["_id"])
+                    for d in dubletten)
+                msg = (f"{ref}: doppelte Werte vorhanden ({beispiele}) — Unique-Index "
+                       "NICHT angelegt. Bereinigen: python scripts/dubletten_pruefen.py")
+                if (abbruch_in_produktion
+                        and os.environ.get("APP_ENV", "").strip().lower() == "production"):
+                    log.error("Start ABGEBROCHEN: %s", msg)
+                    raise SystemExit(78)
+                log.error("ensure_indexes: %s", msg)
+                await alarm(datenbank, "unique_index_fehlt", ref=ref, beispiele=beispiele)
+                return False
+        try:
+            await coll.create_index(keys, **optionen)
+            break
+        except OperationFailure as exc:
+            if _passt(await coll.index_information()):
+                break
+            if exc.code not in wiederholbar or versuch == 2:
+                raise
+    if unique:
+        await alarm_schliessen(datenbank, "unique_index_fehlt", ref=ref)
+    return True
+
+
+async def konto_indizes(db) -> dict:
+    """Kontonummer (13.09.2026): Indizes fuer die Anmeldung per Nummer in
+    users und driver_accounts.
+    - kontonummer_eindeutig: unique, NUR fuer Dokumente mit String-Nummer
+      (Teil-Index) — Konten ohne Nummer (Super-Admin, Altbestand) stoeren nicht.
+    - kontonummer_basis: sparse, fuer die Selbstheilung der Nummernreihe.
+    Dubletten in kontonummer brechen den Produktionsstart ab (gewollt: sonst
+    waere die Anmeldung nicht eindeutig). Einen Index ueber beide Sammlungen
+    gibt es nicht; das sichert der gemeinsame Zaehler."""
+    ergebnis = {}
+    for coll in (db.users, db.driver_accounts):
+        ergebnis[coll.name] = await _index_sicher_ersetzen(
+            coll, "kontonummer", "kontonummer_eindeutig", unique=True,
+            partial={"kontonummer": {"$type": "string"}})
+        await _index_sicher_ersetzen(coll, "kontonummer_basis", "kontonummer_basis",
+                                     sparse=True)
+    return ergebnis
+
+
 async def _termin_unique_index() -> bool:
     """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug und
     Firma. Zwei parallele Vertragsanlagen (oder Doppelklicks) erzeugten

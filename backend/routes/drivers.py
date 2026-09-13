@@ -1,7 +1,6 @@
 """Driver endpoints: dealer-driver linking + standalone driver-app accounts."""
 import base64
 import hashlib
-import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -25,7 +24,13 @@ from deps import (bearer, current_user, db, log_activity, log_activity_sicher, n
 # bcrypt-Grenze).
 from passwoerter import pruefe_passwort as _check_password_strength
 from rate_limiter import (client_ip, driver_login_limiter, driver_register_limiter,
-                          login_ip_limiter, login_schluessel)
+                          login_ip_limiter, login_schluessel,
+                          bekannte_ip_merken, konto_fehlversuch, konto_gesperrt,
+                          konto_gesperrt_text)
+# Kontonummer (13.09.2026): Fahrer-Code-Erzeugung liegt in kontenanlage und
+# bleibt unter demselben Namen hier importierbar.
+from kontenanlage import (DRIVER_CODE_ALPHABET, ensure_unique_driver_code,  # noqa: F401
+                          generate_driver_code)
 from snapshot_service import get_object as snapshot_get_object
 
 import logging
@@ -47,7 +52,11 @@ class DriverAccountRegister(BaseModel):
 
 
 class DriverAccountLogin(BaseModel):
-    email: EmailStr
+    """Kontonummer (13.09.2026): `kontonummer`; `email` ist str statt EmailStr
+    (sonst 422 fuer eine Nummer aus einer gecachten Oberflaeche) und bleibt
+    als alter Feldname."""
+    kontonummer: Optional[str] = Field(default=None, max_length=80)
+    email: Optional[str] = Field(default=None, max_length=254)
     password: str
 
 
@@ -104,24 +113,7 @@ class PickupReportIn(BaseModel):
 
 
 # ---------- Driver code generation & auth ----------
-DRIVER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # ohne I,O,0,1
-
-
-def generate_driver_code() -> str:
-    """Public Fahrer-ID im Format `FD-XXXXXXXX` (8 Zeichen, gut lesbar)."""
-    suffix = "".join(secrets.choice(DRIVER_CODE_ALPHABET) for _ in range(8))
-    return f"FD-{suffix}"
-
-
-async def ensure_unique_driver_code() -> str:
-    for _ in range(30):
-        code = generate_driver_code()
-        existing = await db.driver_accounts.find_one(
-            {"driver_code": code}, {"_id": 0, "id": 1},
-        )
-        if not existing:
-            return code
-    raise HTTPException(500, "Konnte keinen eindeutigen Fahrer-Code erzeugen")
+# generate_driver_code / ensure_unique_driver_code: siehe kontenanlage (Import oben).
 
 
 def create_driver_token(driver_id: str, session_id: str) -> str:
@@ -527,19 +519,20 @@ async def driver_register(body: DriverAccountRegister, request: Request):
         raise HTTPException(409, "E-Mail ist bereits registriert (Firmen-, "
                                  "Sucher- oder Käuferkonto). Bitte eine andere "
                                  "Adresse verwenden.")
-    code = await ensure_unique_driver_code()
     did = str(uuid.uuid4())
     sid = str(uuid.uuid4())
     doc = {
         "id": did, "email": email,
         "password_hash": await hash_password_async(body.password),
         "display_name": body.display_name.strip(),
-        "driver_code": code, "active": True,
+        "active": True,
         "current_session_id": sid,
         "created_at": now_iso(),
     }
+    # Kontonummer (13.09.2026): Nummer aus der gemeinsamen Reihe + FD-Code.
+    from kontenanlage import fahrer_anlegen
     try:
-        await db.driver_accounts.insert_one(doc)
+        erg = await fahrer_anlegen(db, doc)
     except DuplicateKeyError:
         # Runde 13: B5 — Rennen zweier Registrierungen: der Unique-Index
         # driver_accounts.email entscheidet (vorher 500).
@@ -548,9 +541,9 @@ async def driver_register(body: DriverAccountRegister, request: Request):
     return {
         "token": token,
         "driver": {
-            "id": did, "email": email,
+            "id": did, "email": email, "kontonummer": erg["kontonummer"],
             "display_name": body.display_name.strip(),
-            "driver_code": code,
+            "driver_code": erg["driver_code"],
         },
     }
 
@@ -561,30 +554,50 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     # Runde 26 (12.09.2026): wie beim Haendler-Login — Zaehler je KONTO,
     # damit mehrere Fahrer im selben WLAN sich nicht gegenseitig aussperren.
     ip = client_ip(request)
-    email = body.email.lower().strip()
-    schluessel = login_schluessel(ip, email)
+    kennung = (body.kontonummer or body.email or "").strip()
+    schluessel = login_schluessel(ip, kennung)
     if not await driver_login_limiter.check(schluessel):
         raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
     if not await login_ip_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
-    da = await db.driver_accounts.find_one({"email": email})
+    # Kontonummer (13.09.2026): Nummer zuerst, bis Schritt 5 der E-Mail-Zweig.
+    # Nummern sind ueber alle Kontoarten eindeutig -> gemeinsamer Konto-Limiter.
+    from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+    nr = normalisieren(kennung)
+    da = None
+    if nr:
+        da = await db.driver_accounts.find_one({"kontonummer": nummer_bedingung(nr)})
+    elif "@" in kennung:
+        da = await db.driver_accounts.find_one({"email": kennung.lower()})  # ALTWEG – Schritt 5
+    konto_k = anmeldekennung(kennung)
+    if await konto_gesperrt(konto_k, ip, da):
+        raise HTTPException(429, konto_gesperrt_text())
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = da["password_hash"] if da else _DUMMY_HASH
     if not await verify_password_async(body.password, pw_hash) or not da:
+        await konto_fehlversuch(konto_k, ip)
         raise HTTPException(401, "E-Mail oder Passwort falsch")
     if not da.get("active", True):
         raise HTTPException(403, "Account deaktiviert")
     await driver_login_limiter.reset(schluessel)
+    # Kontonummer (13.09.2026): den Konto-Zaehler (login_konto_limiter) bei
+    # Erfolg bewusst NICHT leeren — sonst bekaeme ein Angreifer, der die
+    # Nummer ueber viele IPs probiert, mit jeder Anmeldung des echten Nutzers
+    # wieder volle Versuche. Der Nutzer selbst ist von seinen bekannten IPs
+    # ohnehin frei; der Zaehler laeuft mit dem Fenster ab, vorher hebt nur der
+    # Betreiber die Sperre auf (Passwort setzen, anmeldesperre_aufheben.py).
     # Rotate session ID on every login to invalidate previous tokens.
     sid = str(uuid.uuid4())
     await db.driver_accounts.update_one(
         {"id": da["id"]}, {"$set": {"current_session_id": sid}},
     )
+    await bekannte_ip_merken(db, "driver_accounts", da["id"], ip)
     token = create_driver_token(da["id"], sid)
     return {
         "token": token,
         "driver": {
-            "id": da["id"], "email": da["email"],
+            "id": da["id"], "kontonummer": da.get("kontonummer"),
+            "email": da.get("email"),
             "display_name": da.get("display_name"),
             "driver_code": da.get("driver_code"),
         },
@@ -626,6 +639,7 @@ async def driver_me(driver=Depends(current_driver)):
     ]
     return {
         "id": driver["id"],
+        "kontonummer": driver.get("kontonummer"),
         "email": driver.get("email"),
         "display_name": driver.get("display_name"),
         "driver_code": driver.get("driver_code"),

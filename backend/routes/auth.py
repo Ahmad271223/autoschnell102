@@ -20,8 +20,11 @@ from deps import (
     log_activity, log,
 )
 from mobile_service import DEFAULT_RULES
-from rate_limiter import (client_ip, SlidingWindowRateLimiter, login_ip_limiter,
+from rate_limiter import (client_ip, SlidingWindowRateLimiter, bekannte_ip_merken,
+                          konto_fehlversuch, konto_gesperrt, konto_gesperrt_text,
+                          login_ip_limiter,
                           login_limiter, login_schluessel, register_limiter)
+from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
 
 # Passwort-Reset: eng limitiert (Missbrauch = E-Mail-Spam an fremde Adressen)
 reset_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="passwort-reset")
@@ -54,11 +57,31 @@ class RegisterIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    """Login akzeptiert sowohl E-Mail (für Händler) als auch Benutzername
-    (z.B. für Plattform-Admins). Wir behalten den Feld-Namen `email` aus
-    Backwards-Compat-Gründen — der Wert wird im Endpoint validiert/aufgelöst."""
-    email: str  # email-or-username
+    """Kontonummer (13.09.2026): Anmeldung mit `kontonummer` (Chef '10023',
+    Sucher '10023-2', Kaeufer '10031'); der Super-Admin nutzt dasselbe Feld
+    fuer seinen Benutzernamen. `email` bleibt als alter FELDNAME fuer
+    gecachte Oberflaechen (Alias) — bis Schritt 5 auch fuer E-Mail-Adressen."""
+    kontonummer: Optional[str] = Field(default=None, max_length=80)
+    email: Optional[str] = Field(default=None, max_length=254)
     password: str
+
+
+_NUMMERN_ROLLEN = ["dealer", "sucher", "b2b_buyer"]
+
+
+async def _konto_fuer_login(kennung: str):
+    """Kontosuche fuer /auth/login: Nummer -> Super-Admin-Benutzername ->
+    (bis Schritt 5) alter E-Mail-Zweig fuer jede Rolle."""
+    nr = normalisieren(kennung)
+    if nr:
+        return await db.users.find_one({"kontonummer": nummer_bedingung(nr),
+                                        "role": {"$in": _NUMMERN_ROLLEN}})
+    if "@" not in kennung:
+        return await db.users.find_one({"username": kennung, "role": "admin",
+                                        "is_super_admin": True})
+    # ALTWEG – Schritt 5: Anmeldung per E-Mail (auch normale Admins, Tests).
+    return await db.users.find_one(
+        {"email": {"$regex": f"^{re.escape(kennung)}$", "$options": "i"}})
 
 
 class TokenOut(BaseModel):
@@ -156,7 +179,7 @@ async def register(body: RegisterIn, request: Request):
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
     sid = new_session_id()
-    user_doc = {
+    user_doc = {  # kontonummer setzt kontenanlage (Chef = str(kunden_nr))
         "id": user_id, "email": email,
         "password_hash": await hash_password_async(body.password),
         "role": "dealer", "active": True,
@@ -193,23 +216,24 @@ async def register(body: RegisterIn, request: Request):
     # profil, dann der Benutzer. Scheitert der Benutzer-Insert, wird das
     # Profil wieder entfernt — es bleibt nie ein aktives, aber unvollstaendiges
     # Konto zurueck (vorher: Benutzer ohne Haendlerprofil).
-    from deps import naechste_kunden_nr
-    from routes.admin import _dealer_anlegen_mit_kunden_nr
-    await _dealer_anlegen_mit_kunden_nr(dealer_doc, naechste_kunden_nr)
+    # Kontonummer (13.09.2026): beides ueber kontenanlage (Chef bekommt
+    # kontonummer = str(kunden_nr), die Firma wird bei Fehlern entfernt).
+    from kontenanlage import firma_mit_chef_anlegen
     try:
-        await db.users.insert_one(user_doc)
+        erg = await firma_mit_chef_anlegen(db, dealer_doc, user_doc)
     except DuplicateKeyError:
         # Rennen zweier Registrierungen mit derselben E-Mail
-        await db.dealers.delete_one({"id": dealer_id})
         raise HTTPException(409, "E-Mail bereits registriert")
     except Exception:
-        await db.dealers.delete_one({"id": dealer_id})
         log.exception("Registrierung: Benutzer-Insert fehlgeschlagen")
         raise HTTPException(500, "Registrierung fehlgeschlagen — bitte erneut "
                                  "versuchen.")
+    user_doc["kontonummer"] = erg["kontonummer"]
+    user_doc["kontonummer_basis"] = erg["kunden_nr"]
     token = create_token(user_id, sid)
     await log_activity(dealer_id, user_id, "auth.registriert",
-                       meta={"email": body.email, "ip": ip})
+                       meta={"email": body.email, "ip": ip,
+                             "kontonummer": erg["kontonummer"]})
     user = clean_doc({k: v for k, v in user_doc.items() if k != "password_hash"})
     return TokenOut(token=token, user=user)
 
@@ -266,8 +290,15 @@ async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
     await db.users.update_one({"id": user["id"]}, {"$set": {
         "current_session_id": sid, "current_session_seit": now_iso(),
         "current_session_geraet": geraet[:60], "current_session_ip": ip}})
-    await log_activity(user.get("dealer_id", ""), user["id"], "auth.login",
-                       meta={"email": user.get("email", ""), "ip": ip, "geraet": geraet[:60]})
+    # Kontonummer (13.09.2026): Anmeldung ist vollstaendig (beim Super-Admin
+    # nach der 2FA) — diese IP gilt fuer den Konto-Limiter ab jetzt als bekannt.
+    await bekannte_ip_merken(db, "users", user["id"], ip)
+    meta = {"email": user.get("email", ""), "ip": ip, "geraet": geraet[:60]}
+    if user.get("kontonummer"):
+        meta["kontonummer"] = user["kontonummer"]
+    elif user.get("username"):
+        meta["username"] = user["username"]
+    await log_activity(user.get("dealer_id", ""), user["id"], "auth.login", meta=meta)
     token = create_token(user["id"], sid)
     user_clean = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "mfa")}
     user_clean["current_session_id"] = sid
@@ -371,36 +402,44 @@ async def login(body: LoginIn, request: Request):
     # im selben Buero gegenseitig aus. Das weiter gefasste IP-Limit bremst
     # weiterhin Rateversuche ueber viele Konten.
     ip = client_ip(request)
-    schluessel = login_schluessel(ip, body.email or "")
+    # Kontonummer (13.09.2026): neues Feld kontonummer, email als Alias.
+    identifier = (body.kontonummer or body.email or "").strip()
+    schluessel = login_schluessel(ip, identifier)
     if not await login_limiter.check(schluessel):
         raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
     if not await login_ip_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
 
-    # Accept email OR username. Email lookup is case-insensitive.
-    identifier = (body.email or "").strip()
     if not identifier:
         raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
-    user = None
-    if "@" in identifier:
-        user = await db.users.find_one({"email": {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}})
-    else:
-        user = await db.users.find_one({"username": identifier})
-        if not user:
-            # Fallback: account where email == identifier (case-insensitive)
-            user = await db.users.find_one({"email": {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}})
+    # Suchreihenfolge: Nummer, Benutzername NUR fuer den Super-Admin, dann
+    # (bis Schritt 5) der alte E-Mail-Zweig. Email lookup is case-insensitive.
+    user = await _konto_fuer_login(identifier)
+    # Konto-Limiter VOR bcrypt — gleicher Text und Weg fuer vorhandene und
+    # unbekannte Kennungen (keine Aufzaehlung der Nummern).
+    konto_k = anmeldekennung(identifier)
+    if await konto_gesperrt(konto_k, ip, user):
+        raise HTTPException(429, konto_gesperrt_text())
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = user["password_hash"] if user else _DUMMY_HASH
     if not await verify_password_async(body.password, pw_hash) or not user:
+        await konto_fehlversuch(konto_k, ip)
         # Audit: fehlgeschlagener Versuch (nur Kennung + IP, nie das Passwort).
         await log_activity("", "", "auth.login.fehlgeschlagen",
-                           meta={"identifier": identifier[:120], "ip": ip})
+                           meta={"identifier": (normalisieren(identifier) or identifier)[:120],
+                                 "ip": ip})
         raise HTTPException(401, "E-Mail/Benutzername oder Passwort falsch")
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
     # Passwort stimmte: Zaehler dieses Kontos leeren, damit fruehere
     # Fehlversuche eine richtige Anmeldung spaeter nicht blockieren.
     await login_limiter.reset(schluessel)
+    # Kontonummer (13.09.2026): den Konto-Zaehler (login_konto_limiter) bei
+    # Erfolg bewusst NICHT leeren — sonst bekaeme ein Angreifer, der die
+    # Nummer ueber viele IPs probiert, mit jeder Anmeldung des echten Nutzers
+    # wieder volle Versuche. Der Nutzer selbst ist von seinen bekannten IPs
+    # ohnehin frei; der Zaehler laeuft mit dem Fenster ab, vorher hebt nur der
+    # Betreiber die Sperre auf (Passwort setzen, anmeldesperre_aufheben.py).
     if (user.get("mfa") or {}).get("aktiv"):
         # Zwei-Faktor (Abo-Audit 09/2026): noch KEINE Sitzung — erst der
         # zweite Faktor in /auth/login/mfa stellt das Sitzungs-Token aus.

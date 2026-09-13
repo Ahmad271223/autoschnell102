@@ -220,6 +220,9 @@ class SlidingWindowRateLimiter:
     async def _check_mongo(self, key: str) -> bool:
         """Festes Zeitfenster, atomar per $inc — ein Dokument je
         (Limiter, Schluessel, Fenster); TTL raeumt alte Fenster weg."""
+        return await self._zaehle_mongo(key) <= self.max_attempts
+
+    async def _zaehle_mongo(self, key: str) -> int:
         import time as _t
         from datetime import datetime, timedelta, timezone
         from pymongo import ReturnDocument
@@ -234,7 +237,39 @@ class SlidingWindowRateLimiter:
              "$setOnInsert": {"ablauf": datetime.now(timezone.utc)
                               + timedelta(seconds=self.window_seconds * 2)}},
             upsert=True, return_document=ReturnDocument.AFTER)
-        return doc["n"] <= self.max_attempts
+        return int(doc["n"])
+
+    async def zaehlen(self, key: str) -> int:
+        """Kontonummer (13.09.2026): wie check(), liefert aber den Zaehlerstand
+        NACH dem Zaehlen (atomar — genau ein Aufrufer sieht jeden Wert).
+        Schalter und Loopback-Ausnahme pruefen die Aufrufer selbst."""
+        try:
+            return await self._zaehle_mongo(key)
+        except Exception:
+            now = time.monotonic()
+            cutoff = now - self.window_seconds
+            with self._lock:
+                fresh = [t for t in self._buckets[key] if t > cutoff]
+                fresh.append(now)
+                self._buckets[key] = fresh
+                self._maybe_gc(cutoff)
+                return len(fresh)
+
+    async def stand(self, key: str) -> int:
+        """Kontonummer (13.09.2026): Zaehlung des aktuellen Fensters LESEN,
+        ohne zu zaehlen. Mongo, Rueckfall auf den lokalen Zaehler."""
+        if not _RATE_LIMIT_ENABLED:
+            return 0
+        try:
+            from deps import db
+            fenster = int(time.time() // self.window_seconds)
+            doc = await db.rate_limits.find_one(
+                {"_id": f"{self.name}:{key}:{fenster}"}, {"n": 1})
+            return int((doc or {}).get("n", 0))
+        except Exception:
+            cutoff = time.monotonic() - self.window_seconds
+            with self._lock:
+                return len([t for t in self._buckets.get(key, []) if t > cutoff])
 
     def _check_lokal(self, key: str) -> bool:
         now = time.monotonic()
@@ -307,9 +342,115 @@ login_ip_limiter = SlidingWindowRateLimiter(
 
 
 def login_schluessel(ip: str, kennung: str) -> str:
-    """Zaehler-Schluessel je Konto UND IP ("1.2.3.4|name@firma.de")."""
-    k = (kennung or "").strip().lower()
+    """Zaehler-Schluessel je Konto UND IP ("1.2.3.4|name@firma.de").
+    Kontonummer (13.09.2026): die Kennung laeuft ueber anmeldekennung —
+    '10023 2', '10023/2' und '10023-2' zaehlen im selben Zaehler."""
+    k = anmeldekennung(kennung or "")
     return f"{ip or 'unknown'}|{k}" if k else (ip or "unknown")
+
+
+# =========================================================
+#   KONTO-LIMITER (Kontonummer, 13.09.2026)
+# =========================================================
+# Fortlaufende Nummern sind erratbar — ueber viele IPs liesse sich ein
+# Passwort gegen alle Nummern probieren (Spraying), IP+Kennung (10/min) und
+# IP (120/min) bremsen das nicht. Deshalb zusaetzlich ein Zaehler je
+# KENNUNG ohne IP, nur fuer Fehlversuche: ab LOGIN_KONTO_LIMIT (Standard 30)
+# im Fenster LOGIN_KONTO_FENSTER (Standard 900 s) antwortet der Login 429 —
+# gleicher Text und gleicher Weg fuer vorhandene und unbekannte Kennungen.
+# Ausgenommen sind IPs, von denen sich dieses Konto schon erfolgreich
+# angemeldet hat (bis zu 5 HMAC-Werte am Konto): ein Angreifer kann niemanden
+# an seinem gewohnten Ort aussperren. LOGIN_KONTO_LIMIT=0 sperrt nie, der
+# Betriebsalarm kommt trotzdem. Eine erfolgreiche Anmeldung leert den Zaehler
+# NICHT (sonst gaebe jede Anmeldung des echten Nutzers einem Angreifer
+# wieder volle Versuche) — er laeuft mit dem Fenster ab; vorher hebt nur der
+# Betreiber die Sperre auf. "Warnen statt bremsen" betrifft Kosten- und
+# Nutzungsgrenzen der Sucher, nicht Passwortraten.
+from kontonummer import anmeldekennung  # noqa: E402
+
+
+def _int_env(name: str, standard: int) -> int:
+    try:
+        return max(0, int((os.environ.get(name) or "").strip() or standard))
+    except ValueError:
+        return standard
+
+
+_LOGIN_KONTO_LIMIT = _int_env("LOGIN_KONTO_LIMIT", 30)
+_LOGIN_KONTO_FENSTER = _int_env("LOGIN_KONTO_FENSTER", 900) or 900
+# Schwelle fuer den Alarm — auch mit LOGIN_KONTO_LIMIT=0 (nur Warnen).
+_KONTO_ALARM_SCHWELLE = _LOGIN_KONTO_LIMIT or 30
+
+login_konto_limiter = SlidingWindowRateLimiter(
+    max_attempts=_KONTO_ALARM_SCHWELLE, window_seconds=_LOGIN_KONTO_FENSTER,
+    name="login-konto")
+
+
+def konto_gesperrt_text() -> str:
+    minuten = max(1, round(login_konto_limiter.window_seconds / 60))
+    return (f"Zu viele Fehlversuche für dieses Konto – bitte {minuten} Minuten "
+            "warten oder den Betreiber kontaktieren.")
+
+
+def ip_merkwert(ip: str) -> str:
+    """HMAC der IP (kein Klartext am Konto), 16 Hex-Zeichen."""
+    import hashlib
+    import hmac
+    from auth import JWT_SECRET
+    return hmac.new(str(JWT_SECRET).encode(), (ip or "").encode(),
+                    hashlib.sha256).hexdigest()[:16]
+
+
+async def konto_gesperrt(kennung: str, ip: str, konto=None) -> bool:
+    """True = Anmeldung fuer diese Kennung von dieser IP vorerst gesperrt.
+    VOR bcrypt rufen. Liest nur (zaehlt nicht)."""
+    if not _RATE_LIMIT_ENABLED or _LOGIN_KONTO_LIMIT <= 0:
+        return False
+    if _EXEMPT_LOOPBACK and ip in _LOOPBACK_KEYS:
+        return False
+    k = anmeldekennung(kennung or "")
+    if not k:
+        return False
+    if konto and ip and ip_merkwert(ip) in (konto.get("login_ips_bekannt") or []):
+        return False
+    return await login_konto_limiter.stand(k) >= _LOGIN_KONTO_LIMIT
+
+
+async def konto_fehlversuch(kennung: str, ip: str) -> None:
+    """Fehlversuch fuer die Kennung zaehlen (auch unbekannte Kennungen —
+    sonst verraet die Sperre, welche Nummern existieren). Beim ersten
+    Erreichen der Schwelle im Fenster: Betriebsalarm. Wirft nie."""
+    if not _RATE_LIMIT_ENABLED:
+        return
+    if _EXEMPT_LOOPBACK and ip in _LOOPBACK_KEYS:
+        return
+    k = anmeldekennung(kennung or "")
+    if not k:
+        return
+    try:
+        n = await login_konto_limiter.zaehlen(k)
+        if n == _KONTO_ALARM_SCHWELLE:
+            from betrieb import alarm
+            from deps import db
+            await alarm(db, "login_konto_angegriffen", ref=k[:40],
+                        fehlversuche=n, fenster_sekunden=login_konto_limiter.window_seconds,
+                        sperre_aktiv=_LOGIN_KONTO_LIMIT > 0)
+    except Exception:
+        logging.getLogger("rate_limiter").exception("Konto-Limiter: Zaehlen fehlgeschlagen")
+
+
+async def bekannte_ip_merken(db, sammlung: str, konto_id: str, ip: str) -> None:
+    """Nach vollstaendig erfolgreicher Anmeldung: HMAC der IP am Konto merken
+    (hoechstens 5, aelteste fallen raus). Wirft nie."""
+    if not konto_id or not ip or ip == "unknown":
+        return
+    try:
+        wert = ip_merkwert(ip)
+        await db[sammlung].update_one(
+            {"id": konto_id, "login_ips_bekannt": {"$ne": wert}},
+            {"$push": {"login_ips_bekannt": {"$each": [wert], "$slice": -5}}})
+    except Exception:
+        logging.getLogger("rate_limiter").exception("Konto-Limiter: IP nicht gemerkt")
 
 # Slightly more lenient for the driver app (mobile clients can have flaky
 # connectivity and may retry quickly), but still bounded.

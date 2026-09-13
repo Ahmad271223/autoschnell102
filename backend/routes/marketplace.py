@@ -29,7 +29,9 @@ from deps import (_ablauf_parsen, current_user, db, email_vergeben,
                   firma_gesperrt, gesperrte_firmen_ids, log_activity,
                   log_activity_sicher, now_iso)
 from rate_limiter import (client_ip, register_limiter, login_limiter,
-                          login_ip_limiter, login_schluessel)
+                          login_ip_limiter, login_schluessel,
+                          bekannte_ip_merken, konto_fehlversuch, konto_gesperrt,
+                          konto_gesperrt_text)
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
@@ -684,8 +686,11 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
         raise HTTPException(409, "E-Mail bereits registriert")
     user_id = str(uuid.uuid4())
     sid = new_session_id()
+    # Kontonummer (13.09.2026): eigene Nummer aus der gemeinsamen Reihe; neuer
+    # Versuch NUR bei einer Kontonummer-Dublette, sonst 409 wie bisher.
+    from kontenanlage import kaeufer_anlegen
     try:
-        await db.users.insert_one({
+        erg = await kaeufer_anlegen(db, {
             "id": user_id, "email": email,
             "password_hash": await hash_password_async(body.password),
             "role": "b2b_buyer", "active": True,
@@ -727,12 +732,15 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
                                     "einladung": bool(joined)})
     return {"ok": True, "token": create_token(user_id, sid),
             "user": {"id": user_id, "email": body.email, "role": "b2b_buyer",
+                     "kontonummer": erg["kontonummer"],
                      "company_name": body.company_name},
             "network_joined": bool(joined)}
 
 
 class BuyerLoginIn(BaseModel):
-    email: str
+    """Kontonummer (13.09.2026): `kontonummer`, `email` als alter Feldname."""
+    kontonummer: Optional[str] = Field(default=None, max_length=80)
+    email: Optional[str] = Field(default=None, max_length=254)
     password: str
 
 
@@ -746,33 +754,57 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     # Bewusst derselbe Limiter "login" wie /auth/login (ein Kaeuferkonto kann
     # sich ueber beide Wege anmelden).
     ip = client_ip(request)
-    schluessel = login_schluessel(ip, body.email or "")
+    kennung = (body.kontonummer or body.email or "").strip()
+    schluessel = login_schluessel(ip, kennung)
     if not await login_limiter.check(schluessel):
         raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
     if not await login_ip_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
-    email = body.email.lower().strip()
-    u = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$",
-                                           "$options": "i"},
-                                 "role": "b2b_buyer"})
+    # Kontonummer (13.09.2026): Nummer zuerst, bis Schritt 5 der E-Mail-Zweig.
+    from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+    nr = normalisieren(kennung)
+    u = None
+    if nr:
+        u = await db.users.find_one({"kontonummer": nummer_bedingung(nr),
+                                     "role": "b2b_buyer"})
+    elif "@" in kennung:
+        # ALTWEG – Schritt 5
+        email = kennung.lower()
+        u = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$",
+                                               "$options": "i"},
+                                     "role": "b2b_buyer"})
+    # Konto-Limiter VOR bcrypt (gleicher Weg fuer bekannte und unbekannte).
+    konto_k = anmeldekennung(kennung)
+    if await konto_gesperrt(konto_k, ip, u):
+        raise HTTPException(429, konto_gesperrt_text())
     # Immer bcrypt rechnen (Dummy-Hash), um User-Enumeration per Timing zu
     # verhindern. Deaktivierte Accounts geben dieselbe 401 wie falsche Daten.
     pw_hash = u["password_hash"] if u else _DUMMY_HASH
     ok = await verify_password_async(body.password, pw_hash)
+    if not u or not ok:
+        await konto_fehlversuch(konto_k, ip)
     if not u or not ok or not u.get("active", True):
         raise HTTPException(401, "E-Mail oder Passwort falsch")
     # Audit 13.09.2026 (#26): Passwort stimmte — Zaehler dieses Kontos leeren,
     # damit fruehere Fehlversuche eine richtige Anmeldung nicht blockieren.
     await login_limiter.reset(schluessel)
+    # Kontonummer (13.09.2026): den Konto-Zaehler (login_konto_limiter) bei
+    # Erfolg bewusst NICHT leeren — sonst bekaeme ein Angreifer, der die
+    # Nummer ueber viele IPs probiert, mit jeder Anmeldung des echten Nutzers
+    # wieder volle Versuche. Der Nutzer selbst ist von seinen bekannten IPs
+    # ohnehin frei; der Zaehler laeuft mit dem Fenster ab, vorher hebt nur der
+    # Betreiber die Sperre auf (Passwort setzen, anmeldesperre_aufheben.py).
     sid = new_session_id()
     await db.users.update_one({"id": u["id"]},
                               {"$set": {"current_session_id": sid}})
+    await bekannte_ip_merken(db, "users", u["id"], ip)
     return {"ok": True, "token": create_token(u["id"], sid),
             "user": _buyer_public(u)}
 
 
 def _buyer_public(u: dict) -> dict:
     return {"id": u["id"], "email": u.get("email"),
+            "kontonummer": u.get("kontonummer"),
             "role": "b2b_buyer",
             "company_name": u.get("company_name"),
             "contact_name": u.get("contact_name"),

@@ -452,22 +452,14 @@ async def naechste_kunden_nr() -> int:
     Zaehler zurueck und gab es Luecken (geloeschte Firmen), bekam eine neue
     Firma still die Nummer einer GELOESCHTEN Firma. Jetzt gilt: nie unter
     oder auf die hoechste vergebene Nummer (Index kunden_nr_unique, also
-    ein billiger Indexzugriff; Firmen werden selten angelegt)."""
-    for _ in range(5):
-        doc = await db.counters.find_one_and_update(
-            {"_id": "kunden_nr"},
-            {"$inc": {"seq": 1}, "$setOnInsert": {"start": 1000}},
-            upsert=True, return_document=True)
-        nr = 1000 + int(doc["seq"])
-        top = await db.dealers.find_one(
-            {"kunden_nr": {"$type": "number"}}, {"kunden_nr": 1},
-            sort=[("kunden_nr", -1)])
-        hoechste = int(top["kunden_nr"]) if top else 0
-        if nr > hoechste:
-            return nr
-        await db.counters.update_one(
-            {"_id": "kunden_nr"}, {"$max": {"seq": hoechste - 1000}})
-    raise RuntimeError("Kundennummer: kein freier Wert gefunden")
+    ein billiger Indexzugriff; Firmen werden selten angelegt).
+
+    Kontonummer (13.09.2026): EINE Reihe fuer Firmen, Kaeufer und Fahrer —
+    der Rumpf liegt in kontenanlage.naechste_nummer (Selbstheilung ueber
+    dealers, users und driver_accounts). Der Name bleibt fuer seed_super_admin,
+    kunden_nummern_nachziehen und die Tests."""
+    from kontenanlage import naechste_nummer
+    return await naechste_nummer(db)
 
 
 async def kunden_nummern_nachziehen() -> int:

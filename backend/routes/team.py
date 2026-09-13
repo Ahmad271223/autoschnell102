@@ -126,24 +126,31 @@ async def create_sucher(body: SucherIn, user=Depends(current_haendler)):
     if await email_vergeben(email):
         raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
-    await db.users.insert_one({
-        "id": sucher_id,
-        "email": email,
-        "password_hash": await hash_password_async(body.password),
-        "role": "sucher",
-        "active": True,
-        "dealer_id": user["dealer_id"],          # gehört zum Händler
-        "first_name": body.first_name,
-        "last_name": body.last_name,
-        "phone": body.phone,
-        "employee_id": body.employee_id,
-        "created_by": user["id"],
-        "current_session_id": None,
-        "created_at": now_iso(),
-    })
+    # Kontonummer (13.09.2026): dieselbe Anlage wie beim Betreiber
+    # (Nummer '<kunden_nr>-<zusatz>'). Neu: Dublette -> 409 statt 500.
+    from kontenanlage import sucher_anlegen
+    try:
+        erg = await sucher_anlegen(db, user["dealer_id"], {
+            "id": sucher_id,
+            "email": email,
+            "password_hash": await hash_password_async(body.password),
+            "role": "sucher",
+            "active": True,
+            "dealer_id": user["dealer_id"],          # gehört zum Händler
+            "first_name": body.first_name,
+            "last_name": body.last_name,
+            "phone": body.phone,
+            "employee_id": body.employee_id,
+            "created_by": user["id"],
+            "current_session_id": None,
+            "created_at": now_iso(),
+        })
+    except DuplicateKeyError:
+        raise HTTPException(409, "E-Mail ist bereits registriert")
     await log_activity(user["dealer_id"], user["id"], "sucher.angelegt",
-                       ref=sucher_id, meta={"email": body.email})
-    return {"ok": True, "sucher_id": sucher_id,
+                       ref=sucher_id, meta={"email": body.email,
+                                            "kontonummer": erg["kontonummer"]})
+    return {"ok": True, "sucher_id": sucher_id, "kontonummer": erg["kontonummer"],
             "hinweis": "Der Sucher benötigt ein aktives Sucher-Abo, um "
                        "Fahrzeuge suchen und vergleichen zu können."}
 
@@ -159,7 +166,8 @@ async def list_sucher(response: Response, user=Depends(current_haendler)):
     # Projektion ist klein, die Sammelabfragen skalieren ueber $in.
     items = await db.users.find(
         {"dealer_id": user["dealer_id"], "role": "sucher"},
-        {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1, "dealer_id": 1,
+        {"_id": 0, "id": 1, "email": 1, "kontonummer": 1, "role": 1, "active": 1,
+         "dealer_id": 1,
          "first_name": 1, "last_name": 1, "phone": 1, "employee_id": 1,
          "created_by": 1, "created_at": 1, "updated_at": 1},
     ).sort("created_at", 1).to_list(1000)

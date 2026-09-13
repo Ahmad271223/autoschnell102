@@ -840,6 +840,20 @@ async def ensure_indexes():
     if neu:
         log.info("Kundennummern nachgezogen: %d Firmen", neu)
     await _kunden_nr_unique_index()
+    # Kontonummer (13.09.2026): Teil-Unique-Index kontonummer_eindeutig und
+    # kontonummer_basis in users/driver_accounts (nebenlaeufigkeitsfest).
+    # KEIN Nachziehen von Nummern — Konten ohne Nummer werden nur gemeldet.
+    from indizes import konto_indizes
+    await konto_indizes(db)
+    try:
+        from kontenanlage import konten_ohne_nummer
+        ohne = await konten_ohne_nummer(db)
+        if ohne["users"] or ohne["driver_accounts"]:
+            log.warning("Konten ohne Kontonummer: %d in users, %d Fahrer — sie "
+                        "koennen sich kuenftig nicht mehr anmelden (keine "
+                        "automatische Vergabe).", ohne["users"], ohne["driver_accounts"])
+    except Exception as exc:
+        log.warning("Zaehlung Konten ohne Kontonummer fehlgeschlagen: %s", exc)
     # Auto-Daten (dauerhaft, anonym — auto_daten.py): eindeutige Zufalls-id,
     # Suche nach Marke/Modell, Filter; KEIN Index auf irgendeine Quell-ID,
     # weil es keine gibt. Vertraege: created_at fuer die 90-Tage-Loeschung.
@@ -930,6 +944,14 @@ async def seed_super_admin():
             "seed_super_admin: SUPER_ADMIN_USERNAME / SUPER_ADMIN_PASSWORD sind "
             "nicht gesetzt — Super-Admin wird nicht angelegt. In .env eintragen."
         )
+        return
+    # Kontonummer (13.09.2026): Ein Benutzername im Nummernmuster wuerde vom
+    # Nummern-Zweig des Logins verdeckt — dann gar nicht erst anlegen.
+    from kontonummer import normalisieren
+    if normalisieren(username):
+        log.error("seed_super_admin: SUPER_ADMIN_USERNAME %r sieht wie eine "
+                  "Kontonummer aus — Super-Admin wird NICHT angelegt. Bitte einen "
+                  "Benutzernamen mit Buchstaben waehlen.", username)
         return
     placeholder_email = f"{username.lower()}@cashcar.local"
     existing = await db.users.find_one({"username": username})

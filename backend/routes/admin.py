@@ -87,16 +87,10 @@ def _vertragstext_start_admin() -> str:
 async def _dealer_anlegen_mit_kunden_nr(doc: dict, naechste_kunden_nr) -> None:
     """Firmenprofil mit frischer Kundennummer einfuegen; bei DuplicateKey
     (Unique-Index kunden_nr, nur im Rennen mit einem korrigierten Zaehler)
-    neue Nummer ziehen — max. 3 Versuche."""
-    for versuch in range(3):
-        doc.pop("_id", None)            # insert_one schreibt _id ins dict
-        doc["kunden_nr"] = await naechste_kunden_nr()
-        try:
-            await db.dealers.insert_one(doc)
-            return
-        except DuplicateKeyError as e:
-            if "kunden_nr" not in str(e) or versuch == 2:
-                raise
+    neue Nummer ziehen — max. 3 Versuche.
+    Kontonummer (13.09.2026): Weiterleitung auf kontenanlage.firma_einfuegen."""
+    from kontenanlage import firma_einfuegen
+    await firma_einfuegen(db, doc, naechste_kunden_nr)
 
 
 def _ablaufdatum_pruefen_400(wert, feld: str = "expires_at"):
@@ -133,29 +127,29 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     # schreibungsunabhaengig pruefen — vorher konnten "Chef@X.de" und
     # "chef@x.de" als zwei Konten existieren (Login trifft dann das falsche).
     email = body.email.strip().lower()
+    # Nachpruefung Runde 14 (Befund 50): Ablauf VOR dem ersten Insert
+    # pruefen — ein 400 hier laesst weder Konto noch Firmenprofil zurueck.
+    # Kontonummer (13.09.2026): Reihenfolge Ablauf -> E-Mail -> Nummer.
+    ablauf_eingabe = _ablaufdatum_pruefen_400(body.expires_at)
     # Runde 13: B5 — plattformweit (users UND driver_accounts) statt nur users.
     from deps import email_vergeben
     if await email_vergeben(email):
         raise HTTPException(409, "E-Mail bereits registriert")
-    # Nachpruefung Runde 14 (Befund 50): Ablauf VOR dem ersten Insert
-    # pruefen — ein 400 hier laesst weder Konto noch Firmenprofil zurueck.
-    ablauf_eingabe = _ablaufdatum_pruefen_400(body.expires_at)
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
+    chef_doc = {
+        "id": user_id, "email": email,
+        "password_hash": await hash_password_async(body.password),
+        "role": "dealer", "active": body.active if body.active is not None else True,
+        "dealer_id": dealer_id, "current_session_id": None,
+        "created_at": now_iso(),
+    }
+    # Kontonummer (13.09.2026): erst die Firma mit Nummer, dann der Chef mit
+    # kontonummer = str(kunden_nr) — kontenanlage raeumt die Firma bei jedem
+    # Fehler des Chef-Inserts wieder weg (kein Profil ohne Konto).
+    from kontenanlage import firma_mit_chef_anlegen
     try:
-        await db.users.insert_one({
-            "id": user_id, "email": email,
-            "password_hash": await hash_password_async(body.password),
-            "role": "dealer", "active": body.active if body.active is not None else True,
-            "dealer_id": dealer_id, "current_session_id": None,
-            "created_at": now_iso(),
-        })
-    except DuplicateKeyError:
-        # Rennen zweier gleichzeitiger Anlagen: Unique-Index entscheidet.
-        raise HTTPException(409, "E-Mail bereits registriert")
-    from deps import naechste_kunden_nr
-    try:
-        await _dealer_anlegen_mit_kunden_nr({
+        erg = await firma_mit_chef_anlegen(db, {
         "id": dealer_id, "user_id": user_id, "company_name": body.company_name,
         "contact_person": "", "phone": "", "email": email,
         "address": "", "zip_code": "", "city": "", "logo_url": "",
@@ -170,21 +164,26 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
         "digital_vertragstext": _vertragstext_start_admin(),
         "default_special_agreements": "",
         "created_at": now_iso(),
-        }, naechste_kunden_nr)
+        }, chef_doc)
+    except DuplicateKeyError:
+        # Rennen zweier gleichzeitiger Anlagen: Unique-Index entscheidet.
+        raise HTTPException(409, "E-Mail bereits registriert")
+    except HTTPException:
+        raise
     except Exception:
-        # Kein Konto ohne Firmenprofil zuruecklassen (Login liefe sonst
-        # auf ein Profil-404) — Benutzer wieder entfernen.
-        await db.users.delete_one({"id": user_id})
-        log.exception("admin_create_user: Firmenprofil-Insert fehlgeschlagen")
+        log.exception("admin_create_user: Firma/Konto-Insert fehlgeschlagen")
         raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
+    antwort = {"ok": True, "user_id": user_id, "dealer_id": dealer_id,
+               "kunden_nr": erg["kunden_nr"], "kontonummer": erg["kontonummer"]}
     # plan_type "none" (Betreiber-Modell 09/2026): Firmen-Hauptaccount ohne
     # jedes Abo anlegen — Verkaufen/Verwalten ist kostenlos, Sucher-Abos
     # werden einzeln nach Rechnungszahlung freigeschaltet.
     if body.plan_type == "none":
         await log_activity(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.erstellt", ref=user_id,
-                           meta={"email": body.email, "plan": "none"})
-        return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
+                           meta={"email": body.email, "plan": "none",
+                                 "kontonummer": erg["kontonummer"]})
+        return antwort
     expires = ablauf_eingabe
     if not expires and body.plan_type in ("monthly", "trial"):
         expires = (datetime.now(timezone.utc) + timedelta(days=30 if body.plan_type == "monthly" else 14)).isoformat()
@@ -209,8 +208,9 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
         log.exception("admin_create_user: Abo-Insert fehlgeschlagen")
         raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
     await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.erstellt",
-                       ref=user_id, meta={"email": body.email, "plan": body.plan_type})
-    return {"ok": True, "user_id": user_id, "dealer_id": dealer_id}
+                       ref=user_id, meta={"email": body.email, "plan": body.plan_type,
+                                          "kontonummer": erg["kontonummer"]})
+    return antwort
 
 
 @router.get("/admin/users")
@@ -1657,8 +1657,13 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
     if await email_vergeben(email):
         raise HTTPException(409, "E-Mail ist bereits registriert")
     sucher_id = str(uuid.uuid4())
+    # Kontonummer (13.09.2026): Nummer '<kunden_nr>-<zusatz>' erst NACH der
+    # E-Mail-Pruefung ziehen; eine Firma ohne kunden_nr bekommt eine. Neuer
+    # Zusatz nur bei einer Kontonummer-Dublette (kontenanlage), jede andere
+    # Dublette bleibt 409.
+    from kontenanlage import sucher_anlegen
     try:
-        await db.users.insert_one({
+        erg = await sucher_anlegen(db, dealer_id, {
             "id": sucher_id, "email": email,
             "password_hash": await hash_password_async(body.password),
             "role": "sucher", "active": True,
@@ -1677,8 +1682,10 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
     # Konto ist angelegt — ein Audit-Fehler darf keinen 500 mit Retry ausloesen.
     await log_activity_sicher(dealer_id, admin["id"], "admin.sucher.angelegt",
                               ref=sucher_id, meta={"email": email,
+                                                   "kontonummer": erg["kontonummer"],
                                                    "firma": dealer.get("company_name", "")})
     return {"ok": True, "sucher_id": sucher_id, "email": email,
+            "kontonummer": erg["kontonummer"],
             "hinweis": "Konto angelegt — zum Suchen/Vergleichen noch das "
                        "Sucher-Abo freischalten (150 €/Monat bzw. "
                        "1.500 €/Jahr)."}
