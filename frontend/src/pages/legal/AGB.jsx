@@ -14,15 +14,17 @@ export default function AGB() {
         Diese AGB gelten für die Nutzung der Software-Plattform AutoSchnell
         (Fahrzeugvergleich, Vertragserstellung, Bestandsverwaltung,
         B2B-Marktplatz, Fahrer-App). Das Angebot richtet sich ausschließlich
-        an Unternehmer im Sinne von § 14 BGB (Autohändler, Zwischenhändler
-        und deren Mitarbeiter). Eine Nutzung durch Verbraucher ist
-        ausgeschlossen. Mit der Anlage des Kontos durch den Anbieter auf
-        Grundlage seiner Zugangs-Anfrage bestätigt der Nutzer ausdrücklich,
-        als Unternehmer (B2B) zu handeln, und akzeptiert diese AGB sowie die
-        Datenschutzerklärung. Zwischenhändler bestätigen die
-        Unternehmereigenschaft im Anfrage-Formular über eine
-        Pflicht-Checkbox, oder der Anbieter dokumentiert den Nachweis bei
-        der Anlage des Kontos; die Angabe der USt-IdNr. oder
+        an Unternehmer im Sinne von § 14 BGB (Autohändler, Zwischenhändler,
+        selbstständige Fahrer sowie Mitarbeiter und Beauftragte dieser
+        Unternehmen). Eine Nutzung durch Verbraucher ist ausgeschlossen.
+        In der Zugangs-Anfrage bestätigt der Nutzer über eine
+        Pflicht-Checkbox, als Unternehmer (B2B) bzw. im Auftrag eines
+        Unternehmers zu handeln, akzeptiert diese AGB und nimmt die
+        Datenschutzerklärung zur Kenntnis; der Anbieter hält den Zeitpunkt
+        fest. Legt der Anbieter ein Konto ohne vorherige Zugangs-Anfrage an,
+        holt er diese Bestätigung vor der Übergabe der Zugangsdaten ein und
+        dokumentiert sie (bei Zwischenhändlern zusammen mit dem Nachweis der
+        Unternehmereigenschaft). Die Angabe der USt-IdNr. oder
         Handelsregister-Nummer ist freiwillig und dient der Prüfung der
         Unternehmereigenschaft.
       </p>

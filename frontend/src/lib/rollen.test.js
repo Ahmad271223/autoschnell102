@@ -116,4 +116,21 @@ describe("Anmeldung folgt keinem fremden Ziel", () => {
   test("oeffentliche Ziele bleiben erlaubt", () => {
     expect(sicheresZiel(CHEF, "/impressum")).toBe("/impressum");
   });
+
+  test("Backslash, Tab und Zeilenumbruch werden verworfen", () => {
+    // Kontonummer (13.09.2026): Browser lesen "/\\x" und "/\t/x" wie "//x".
+    for (const boes of ["/\\fremd.example", "/\t/fremd.example", "/\n/fremd.example", "/markt\\..\\x"]) {
+      expect(sicheresZiel(CHEF, boes)).toBe("/app/bestand");
+    }
+  });
+
+  test("Kaeufer-Anmeldung: nur eigene Marktplatz- oder oeffentliche Ziele", () => {
+    // Kontonummer (13.09.2026): BuyerLogin prueft ?next= ueber diese Funktion.
+    const KAEUFER = { role: "b2b_buyer" };
+    expect(sicheresZiel(KAEUFER, "https://fremd.example")).toBe("/markt");
+    expect(sicheresZiel(KAEUFER, "//fremd.example")).toBe("/markt");
+    expect(sicheresZiel(KAEUFER, "/app/bestand")).toBe("/markt");
+    expect(sicheresZiel(KAEUFER, null)).toBe("/markt");
+    expect(sicheresZiel(KAEUFER, "/markt/merkliste")).toBe("/markt/merkliste");
+  });
 });

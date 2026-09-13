@@ -251,3 +251,17 @@ def test_13_werbetexte_nennen_keinen_festen_preis():
         quelle = (basis / datei).read_text(encoding="utf-8")
         assert "marktplatz_kostenlos" in quelle, f"{datei} fragt den Server nicht"
         assert "20 €" not in quelle, f"{datei} nennt weiter einen festen Preis"
+
+
+def test_14_anfrage_bestaetigung_fuer_alle_arten():
+    """Kontonummer (13.09.2026, Gegenpruefung): AGB §1 stuetzt sich auf die
+    Pflicht-Checkbox der Zugangs-Anfrage — sie muss fuer Firma, Kaeufer und
+    Fahrer gelten und immer mitgesendet werden, nicht nur bei art=kaeufer."""
+    basis = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    quelle = (basis / "pages" / "Anfrage.jsx").read_text(encoding="utf-8")
+    assert "if (!gewerblich) {" in quelle
+    assert 'art === "kaeufer" && !gewerblich' not in quelle
+    assert "gewerblich_bestaetigt: gewerblich," in quelle
+    # Checkbox steht ausserhalb des Kaeufer-Blocks (nach dessen Ende)
+    kaeufer_ende = quelle.index('data-testid="anfrage-ust-id"')
+    assert quelle.index('data-testid="anfrage-b2b"') > quelle.index(")}", kaeufer_ende)

@@ -13,9 +13,12 @@ import { Bolt, Check, ArrowRight } from "lucide-react";
  *
  * Kontonummer (13.09.2026): Auch Zwischenhändler (?art=kaeufer) und Fahrer
  * (?art=fahrer) fragen hier an — Konten legt ausschließlich der Betreiber
- * an. Zwischenhändler bestätigen die Unternehmereigenschaft (AGB §1) per
- * Pflicht-Checkbox und können die USt-IdNr. angeben. Die E-Mail bleibt
+ * an. Zwischenhändler können die USt-IdNr. angeben. Die E-Mail bleibt
  * Pflicht: über sie bekommt der Anfragende Kontonummer und Passwort.
+ *
+ * Kontonummer (13.09.2026, Gegenpruefung): Die Pflicht-Checkbox
+ * (Unternehmer, AGB, Datenschutzerklärung — AGB §1) gilt für ALLE Arten,
+ * nicht nur für Zwischenhändler; der Server hält den Zeitpunkt fest.
  */
 const ARTEN = [
   { key: "firma", label: "Autohändler-Firma" },
@@ -58,8 +61,8 @@ export default function Anfrage() {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (art === "kaeufer" && !gewerblich) {
-      toast.error("Bitte bestätige, dass du als Unternehmer handelst und AGB sowie Datenschutzerklärung akzeptierst");
+    if (!gewerblich) {
+      toast.error("Bitte bestätige die gewerbliche Nutzung und die AGB");
       return;
     }
     setBusy(true);
@@ -69,7 +72,8 @@ export default function Anfrage() {
         company_name: f.company_name, contact_person: f.contact_person,
         email: f.email, phone: f.phone, message: f.message,
         sucher_anzahl: art === "firma" ? (parseInt(f.sucher_anzahl, 10) || 0) : 0,
-        ...(art === "kaeufer" ? { ust_id: f.ust_id.trim(), gewerblich_bestaetigt: gewerblich } : {}),
+        gewerblich_bestaetigt: gewerblich,
+        ...(art === "kaeufer" ? { ust_id: f.ust_id.trim() } : {}),
       });
       setDone(true);
     } catch (err) {
@@ -187,31 +191,34 @@ export default function Anfrage() {
                 </div>
               )}
               {art === "kaeufer" && (
-                <>
-                  <div>
-                    <label className="overline">USt-IdNr. oder Handelsregister-Nr.</label>
-                    <input value={f.ust_id} onChange={set("ust_id")} maxLength={40}
-                           data-testid="anfrage-ust-id" placeholder="z. B. DE123456789 (optional)"
-                           className={feldCls} style={feldStil} />
-                  </div>
-                  <label className="flex items-start gap-3 text-sm text-zinc-300 cursor-pointer select-none">
-                    <input type="checkbox" checked={gewerblich}
-                           onChange={(e) => setGewerblich(e.target.checked)}
-                           data-testid="anfrage-b2b"
-                           className="mt-0.5 h-4 w-4 shrink-0"
-                           style={{ accentColor: "var(--accent-red)" }} />
-                    <span>
-                      Ich handle als Unternehmer/gewerblicher Kfz-Händler (B2B) und
-                      akzeptiere die{" "}
-                      <Link to="/agb" target="_blank" rel="noopener noreferrer"
-                            className="text-white font-semibold underline">AGB</Link>{" "}
-                      und die{" "}
-                      <Link to="/datenschutz" target="_blank" rel="noopener noreferrer"
-                            className="text-white font-semibold underline">Datenschutzerklärung</Link>. *
-                    </span>
-                  </label>
-                </>
+                <div>
+                  <label className="overline">USt-IdNr. oder Handelsregister-Nr.</label>
+                  <input value={f.ust_id} onChange={set("ust_id")} maxLength={40}
+                         data-testid="anfrage-ust-id" placeholder="z. B. DE123456789 (optional)"
+                         className={feldCls} style={feldStil} />
+                </div>
               )}
+              <label className="flex items-start gap-3 text-sm text-zinc-300 cursor-pointer select-none">
+                <input type="checkbox" checked={gewerblich}
+                       onChange={(e) => setGewerblich(e.target.checked)}
+                       data-testid="anfrage-b2b"
+                       className="mt-0.5 h-4 w-4 shrink-0"
+                       style={{ accentColor: "var(--accent-red)" }} />
+                <span>
+                  {art === "fahrer"
+                    ? "Ich nutze die Fahrer-App beruflich — als selbstständiger Unternehmer oder im Auftrag eines Unternehmens —"
+                    : art === "kaeufer"
+                      ? "Ich handle als Unternehmer/gewerblicher Kfz-Händler (B2B),"
+                      : "Ich handle als Unternehmer (B2B) für die oben genannte Firma,"}
+                  {" "}akzeptiere die{" "}
+                  <Link to="/agb" target="_blank" rel="noopener noreferrer"
+                        className="text-white font-semibold underline">AGB</Link>{" "}
+                  und habe die{" "}
+                  <Link to="/datenschutz" target="_blank" rel="noopener noreferrer"
+                        className="text-white font-semibold underline">Datenschutzerklärung</Link>{" "}
+                  zur Kenntnis genommen. *
+                </span>
+              </label>
               <div>
                 <label className="overline">Nachricht</label>
                 <textarea rows={3} value={f.message} onChange={set("message")}

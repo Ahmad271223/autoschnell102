@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { buyerApi, useBuyer } from "@/context/BuyerContext";
 import { TOKEN_KAEUFER, anmeldeartVormerken } from "@/lib/sitzung";
+import { sicheresZiel } from "@/lib/rollen";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Store, ArrowRight } from "lucide-react";
@@ -44,7 +45,10 @@ export default function BuyerLogin() {
       setBusy(false);
       return;
     }
-    let ziel = sp.get("next") || "/markt";
+    // Kontonummer (13.09.2026, Gegenpruefung): ?next= wie in Login.jsx pruefen —
+    // neueFassungLaden ruft window.location.assign, fremde Adressen waeren
+    // sonst eine offene Weiterleitung.
+    let ziel = sicheresZiel({ role: "b2b_buyer" }, sp.get("next"));
     if (invite) {
       // Einladung direkt nach der Anmeldung einloesen. Ein Fehler hier ist
       // KEIN Anmeldefehler — die Sitzung steht, nur der Beitritt fehlt.

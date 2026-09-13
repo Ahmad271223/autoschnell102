@@ -71,6 +71,10 @@ export function sicheresZiel(user, next) {
   const heim = startseite(user);
   if (!next || typeof next !== "string") return heim;
   if (!next.startsWith("/") || next.startsWith("//")) return heim;
+  // Kontonummer (13.09.2026, Gegenpruefung): Browser machen aus "/\fremd"
+  // und "/<Tab>/fremd" ebenfalls "//fremd" — Backslash, Tab und
+  // Zeilenumbruch haben in unseren Pfaden nichts zu suchen.
+  if (/[\\\t\n\r]/.test(next)) return heim;
   const bereich = bereichVonPfad(next);
   if (bereich && !darfBereich(user, bereich)) return heim;
   return next;

@@ -147,6 +147,11 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
     }
     if body.art == "kaeufer":
         doc["ust_id"] = body.ust_id
+    # Kontonummer (13.09.2026, Gegenpruefung): Das Formular verlangt die
+    # Bestaetigung (Unternehmer, AGB, Datenschutz) fuer JEDE Art — der
+    # Zeitpunkt wird festgehalten (AGB §1). Pflicht im Backend bleibt sie
+    # nur fuer Zwischenhaendler.
+    if body.gewerblich_bestaetigt:
         doc["gewerblich_bestaetigt_am"] = now_iso()
     await db.plan_requests.insert_one(doc)
     await log_activity("", "", "zugang.anfrage",
