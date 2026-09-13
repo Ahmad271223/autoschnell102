@@ -344,6 +344,101 @@ async def korrektur_verwerfen(appt_id: str) -> bool:
         return False
 
 
+# Go-Live 13.09.2026 (P6): Rueckfrage, wenn der Termin geschlossen wurde.
+TERMIN_GESCHLOSSEN_RUECKFRAGE = ("Der Termin wurde geschlossen — die Freigabe gilt nicht mehr. "
+                                 "Nach dem Wiederöffnen bitte erneut zur Freigabe schicken.")
+
+
+async def _freigabe_zuruecknehmen(bedingung: Dict[str, Any], user_id: Optional[str]) -> bool:
+    """Go-Live 13.09.2026 (P6): Protokoll aus zur_freigabe/freigegeben zurueck
+    in den Entwurf — mit Rueckfrage und NEUEM Freigabe-Stand, damit weder eine
+    alte Freigabe noch ein alter Stand auf dem Handy weiter gilt. Ein laufender
+    Abschluss (wird_abgeschlossen) wird nie angefasst."""
+    jetzt = now_iso()
+    res = await db.pickup_protocols.update_one(
+        {"status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}, **bedingung},
+        {"$set": {"status": "entwurf", "rueckfrage": TERMIN_GESCHLOSSEN_RUECKFRAGE,
+                  "rueckfrage_am": jetzt, "rueckfrage_von": user_id,
+                  "updated_at": jetzt, "freigabe_stand": jetzt},
+         "$unset": {"freigegeben_am": "", "freigegeben_von": ""}})
+    return bool(res.matched_count)
+
+
+async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
+                                                user_id: Optional[str] = None) -> bool:
+    """Go-Live 13.09.2026 (P6): Schliesst der Haendler den Termin (storniert /
+    nicht abgeholt / erledigt), waehrend das aktuelle Protokoll beim Chef liegt
+    oder freigegeben ist, lebte diese Freigabe nach dem Wiederoeffnen einfach
+    wieder auf. Jetzt: zurueck in den Entwurf (neuer Stand), der Fahrer schickt
+    neu ab. Korrektur-Versionen verwirft vorher korrektur_verwerfen.
+    Best effort — wirft nie; True, wenn zurueckgenommen wurde."""
+    try:
+        return await _freigabe_zuruecknehmen(
+            {"appointment_id": appt_id, "superseded": {"$ne": True},
+             "corrects_version": {"$exists": False}}, user_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Freigabe des Protokolls zu Termin %s konnte beim Schliessen "
+                      "nicht zurueckgenommen werden", appt_id)
+        return False
+
+
+async def _preis_uebernehmen(appt: dict, doc: dict, *, nachholen: bool = False) -> None:
+    """Go-Live 13.09.2026 (P5, N2, P5-Zusatz-Korrektur): Preis des finalen
+    Protokolls in den Kaufvorgang DIESES Termins uebernehmen. Idempotent ueber
+    preis_protokoll_id — deshalb im Normalpfad UND in der Selbstheilung. Vorher
+    schrieb nur der Normalpfad den Preis; brach der Abschluss davor ab, zog die
+    Selbstheilung Termin und Status nach, der Preis blieb der Vertragspreis.
+
+    * neuer_preis gesetzt: Preis, preis_nachverhandelt, preis_vorher (Vertrags-
+      preis) und preis_protokoll_id — nur, wenn der Vorgang nicht schon den Preis
+      GENAU dieser Protokollversion traegt.
+    * kein neuer_preis: stammt der Preis des Vorgangs aus einer ANDEREN Version
+      dieses Termins (Korrektur, Chef hat auf den Vertragspreis zurueckgesetzt),
+      zurueck auf den Vertragspreis. Ohne fruehere Verhandlung: nichts.
+    * Selbstheilung (nachholen=True): einen inzwischen von Hand eingetragenen
+      Preis (final_price, preis_quelle 'vor_ort') nicht ueberschreiben."""
+    import kaufvorgang as _kv
+    kv = await _kv.fuer_termin(appt)
+    dealer_id = appt.get("dealer_id")
+    if not kv or kv.get("dealer_id") != dealer_id:
+        return
+    jetzt = now_iso()
+    preis = doc.get("neuer_preis")
+    if preis is not None:
+        vertragspreis = None
+        if kv.get("contract_id"):
+            c = await db.generated_pdfs.find_one(
+                {"id": kv["contract_id"], "dealer_id": dealer_id},
+                {"_id": 0, "contract_data.purchase_price": 1})
+            vertragspreis = ((c or {}).get("contract_data") or {}).get("purchase_price")
+        if vertragspreis is None:
+            vertragspreis = (kv.get("preis_vorher") if kv.get("preis_nachverhandelt")
+                             else kv.get("purchase_price"))
+        filt: Dict[str, Any] = {"id": kv["id"], "dealer_id": dealer_id,
+                                "preis_protokoll_id": {"$ne": doc["id"]}}
+        if nachholen:
+            filt["preis_quelle"] = {"$ne": "vor_ort"}
+        await db.kaufvorgaenge.update_one(
+            filt, {"$set": {"purchase_price": float(preis), "preis_nachverhandelt": True,
+                            "preis_vorher": vertragspreis, "preis_protokoll_id": doc["id"],
+                            "preis_quelle": "protokoll", "updated_at": jetzt}})
+        return
+    alt = kv.get("preis_protokoll_id")
+    if not alt or alt == doc["id"] or kv.get("preis_quelle") == "vor_ort" \
+            or kv.get("preis_vorher") is None:
+        return
+    # Nur eine Version DIESES Termins — der Preis eines anderen Termins bleibt.
+    if not await db.pickup_protocols.find_one(
+            {"id": alt, "appointment_id": appt.get("id")}, {"_id": 1}):
+        return
+    await db.kaufvorgaenge.update_one(
+        {"id": kv["id"], "dealer_id": dealer_id, "preis_protokoll_id": alt,
+         "preis_quelle": {"$ne": "vor_ort"}},
+        {"$set": {"purchase_price": kv["preis_vorher"], "updated_at": jetzt},
+         "$unset": {"preis_nachverhandelt": "", "preis_vorher": "",
+                    "preis_protokoll_id": "", "preis_quelle": ""}})
+
+
 @router.get("/driver/appointments/{appt_id}/protocol")
 async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     """Aktuellen Entwurf (oder das abgeschlossene Protokoll) + Vorlage laden."""
@@ -584,6 +679,14 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
                                                  {"_id": 0, "status": 1})
         return {"ok": True, "status": (akt or {}).get("status", "unbekannt"),
                 "protocol_id": doc["id"], "bereits": True}
+    # Go-Live 13.09.2026 (P6): Schloss der Haendler den Termin genau zwischen
+    # Vorabpruefung und diesem Write, fand sein Zuruecknehmen noch den Entwurf —
+    # das Protokoll laege sonst beim Chef an einem geschlossenen Termin.
+    frisch = await db.appointments.find_one({"id": appt_id}, {"_id": 0, "status": 1})
+    if frisch and (frisch.get("status") or "offen") in _ABGESCHLOSSEN:
+        await _freigabe_zuruecknehmen(
+            {"id": doc["id"], "status": ZUR_FREIGABE, "freigabe_stand": jetzt}, None)
+        _termin_offen_oder_409(frisch)
     await log_activity(appt.get("dealer_id", ""), driver["id"],
                        "protokoll.zur_freigabe", ref=doc["id"],
                        meta={"appointment_id": appt_id,
@@ -715,6 +818,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
                                              erwartet=appt):
             heil_out["hinweis"] = TERMIN_GESCHLOSSEN_HINWEIS
             return heil_out
+        # Go-Live 13.09.2026 (P5/N2): auch den nachverhandelten Preis nachziehen
+        # (idempotent) — VOR der Statusuebernahme, wie im Normalpfad.
+        await _preis_uebernehmen(appt, doc, nachholen=True)
         import kaufvorgang as _kv
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"],
@@ -1007,13 +1113,10 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # Kaufvorgang — sonst stuende in Akte und Auswertung weiter der alte
         # Vertragspreis. VOR der Statusuebernahme, damit die Zusammenfassung
         # gleich den richtigen Preis ans Fahrzeug schreibt.
-        if _preis_final is not None and appt.get("kaufvorgang_id"):
-            await db.kaufvorgaenge.update_one(
-                {"id": appt["kaufvorgang_id"], "dealer_id": appt.get("dealer_id")},
-                {"$set": {"purchase_price": float(_preis_final),
-                          "preis_nachverhandelt": True,
-                          "preis_vorher": (contract or {}).get("purchase_price"),
-                          "updated_at": now_iso()}})
+        # Go-Live 13.09.2026 (P5/P5-Zusatz-Korrektur): ueber denselben
+        # idempotenten Helfer wie die Selbstheilung; auch Termine ohne
+        # kaufvorgang_id und eine zurueckgenommene Verhandlung einer Korrektur.
+        await _preis_uebernehmen(appt, {"id": doc["id"], "neuer_preis": _preis_final})
         # Umbau Kaufvorgaenge: abgeholt gilt fuer den VORGANG dieses Termins,
         # das Fahrzeug bekommt die Zusammenfassung (und den realisierten Preis).
         import kaufvorgang as _kv

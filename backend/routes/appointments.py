@@ -864,8 +864,11 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         # angefangener Korrektur-Entwurf des Protokolls wird verworfen und
         # die korrigierte Version ist wieder die massgebliche (sonst blieb
         # der Termin ohne aktuelles Protokoll). Best effort, wirft nie.
-        from routes.protocols import korrektur_verwerfen
+        from routes.protocols import freigabe_beim_schliessen_zuruecknehmen, korrektur_verwerfen
         await korrektur_verwerfen(appt_id)
+        # Go-Live 13.09.2026 (P6): Lag das Protokoll beim Chef oder war es schon
+        # freigegeben, gilt diese Freigabe nach dem Wiederoeffnen nicht mehr.
+        await freigabe_beim_schliessen_zuruecknehmen(appt_id, user.get("id"))
     # Verschobener Abholtermin -> Kaufvertrag mit dem NEUEN Datum neu
     # erzeugen. Das PDF ist eine gespeicherte Datei und wuerde sonst
     # dauerhaft den alten Termin zeigen (Wunsch 08/2026).

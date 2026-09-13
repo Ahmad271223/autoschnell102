@@ -135,14 +135,27 @@ export default function Protokoll() {
     : null;
   const [sigRunde, setSigRunde] = useState(0);
   const vorigeKennung = useRef(null);
+  // Go-Live 13.09.2026 (P4): Stehen gerade Unterschriften im Speicher? (Effekt VOR
+  // dem Kennungs-Effekt, damit er beim Wechsel noch den alten Stand liest.)
+  const hatUnterschriften = useRef(false);
+  useEffect(() => { hatUnterschriften.current = Boolean(sigDriver || sigSeller); });
   useEffect(() => {
-    if (freigabeKennung === null) { vorigeKennung.current = null; return; }
+    // Go-Live 13.09.2026 (P4): Bei null (Rueckfrage -> Entwurf, erneut zur Freigabe)
+    // die letzte Kennung NICHT vergessen. Sonst loeschte der Wechsel null -> neuer
+    // Stand nichts, und die unter dem ALTEN Preis geleisteten Unterschriften gingen
+    // mit dem neuen Preis ab. Rueckfrage und jede Freigabe erzeugen einen neuen
+    // Stand; ein gescheiterter Abschluss (gleicher Stand) behaelt die Unterschriften.
+    if (freigabeKennung === null) return;
     if (vorigeKennung.current !== null && vorigeKennung.current !== freigabeKennung) {
+      const warenDa = hatUnterschriften.current;
       setSigDriver(null);
       setSigSeller(null);
       setSigRunde((n) => n + 1);
-      toast.warning("Der Händler hat Preis oder Vermerk geändert — bitte dem Verkäufer den neuen Stand "
-                    + "zeigen und neu unterschreiben lassen.", { duration: 15000 });
+      // Hinweis nur, wenn wirklich Unterschriften verworfen wurden.
+      if (warenDa) {
+        toast.warning("Der Händler hat Preis oder Vermerk geändert — bitte dem Verkäufer den neuen Stand "
+                      + "zeigen und neu unterschreiben lassen.", { duration: 15000 });
+      }
     }
     vorigeKennung.current = freigabeKennung;
   }, [freigabeKennung]);
