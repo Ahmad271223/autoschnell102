@@ -42,7 +42,6 @@ from rate_limiter import SlidingWindowRateLimiter
 
 from auth import hash_password
 from cleanup_service import run_cleanup_forever
-from listing_identity import ensure_cache_indexes
 from snapshot_service import init_storage
 
 # Shared deps (DB connection, helpers) — required for index/seed setup.
@@ -1065,20 +1064,22 @@ async def _alle_indexe():
     """Bestehende Indizes + Audit-Indizes (Punkt 36: Protokollversion eindeutig;
     Abo-Vorgaenge/Zahlungen idempotent; Alarme; Fehler-Dedup)."""
     await ensure_indexes()
-    try:
-        await ensure_cache_indexes(db)
-    except Exception as exc:
-        # Audit 13.09.2026 (#36): sichtbar im Betriebsstatus, nicht nur im Log.
-        log.error("listings_cache index setup failed: %s", exc)
-        from betrieb import alarm
-        await alarm(db, "unique_index_fehlt", ref="listings_cache.indizes",
-                    fehler=str(exc)[:300])
+    # Audit 13.09.2026 (#36): sichtbar im Betriebsstatus, nicht nur im Log;
+    # der Alarm wird geschlossen, sobald die Indizes stehen. Wirft nie.
+    from indizes import listings_cache_indizes
+    await listings_cache_indizes(db)
     try:
         # Audit 13.09.2026 (#35): inseratscache_rotieren sucht nach expires_at
         # (stuendlich) — ohne Index ein Scan der ganzen Sammlung.
         await db.listings_cache.create_index("expires_at", name="cache_ablauf")
     except Exception as exc:
         log.error("Index cache_ablauf: %s", exc)
+    try:
+        # Nachbesserung #35: Altbestand (expires_at = Abruf + 1 Jahr) wird
+        # ueber fetched_at geloescht — dieselbe Begruendung wie oben.
+        await db.listings_cache.create_index("fetched_at", name="cache_abruf")
+    except Exception as exc:
+        log.error("Index cache_abruf: %s", exc)
     # Beweisdokumente: Unique-Index auf cache_key VOR allen Workern (ein
     # Dokument je Inserat haengt an ihm). Audit 13.09.2026 (#37): wirft nie,
     # fehlt der Index, gibt es einen Betriebsalarm.

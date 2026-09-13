@@ -90,9 +90,14 @@ async def _zaehler_dubletten_bereinigen(db) -> int:
         ids = sorted(gruppe["ids"], key=str)
         behalten, weg = ids[0], ids[1:]
         r = await db.provider_limits.delete_many({"_id": {"$in": weg}})
+        # Nachbesserung: Stand (rev) VOR dem Zaehlen lesen und nur per
+        # Vergleich setzen — ein Belegen dazwischen wird sonst ueberschrieben
+        # (Zaehler eins zu tief). Scheitert der Vergleich, heilt _heal_stale.
+        stand = await db.provider_limits.find_one({"_id": behalten}, {"rev": 1}) or {}
         slots = await db.provider_slots.count_documents({"provider": gruppe["_id"]})
         await db.provider_limits.update_one(
-            {"_id": behalten}, {"$set": {"active": slots}, "$inc": {"rev": 1}})
+            {"_id": behalten, "rev": stand.get("rev")},
+            {"$set": {"active": slots}, "$inc": {"rev": 1}})
         entfernt += r.deleted_count
         log.warning("provider_limiter: %d doppelte Zaehler fuer %r entfernt "
                     "(Stand auf %d Slots gesetzt)", r.deleted_count,

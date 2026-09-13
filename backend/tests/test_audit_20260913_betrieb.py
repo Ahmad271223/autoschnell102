@@ -288,6 +288,36 @@ def test_34b_indexfehler_wird_gemeldet_und_gedrosselt(welt, monkeypatch):
     assert w.alarm("anbieter_grenze_index_fehlt", "provider_limits"), "Betriebsalarm fehlt"
 
 
+def test_34d_dublettenreparatur_ueberschreibt_belegen_nicht(welt):
+    """Nachbesserung: ein Belegen zwischen "Slots zaehlen" und "Stand setzen"
+    der Dublettenreparatur liess den Zaehler eins zu tief zurueck."""
+    w, PL, p = welt, welt.PL, "kleinanzeigen"
+
+    async def lauf():
+        await w.db.provider_limits.insert_many(
+            [{"provider": p, "active": 0}, {"provider": p, "active": 0}])
+        ids = sorted([d["_id"] for d in await w.db.provider_limits.find({}).to_list(5)], key=str)
+        behalten = ids[0]
+        echt = w.db.provider_slots
+
+        async def count_mit_belegen(filt, *a, **k):
+            n = await echt.count_documents(filt, *a, **k)
+            await w.db.provider_limits.update_one(
+                {"_id": behalten}, {"$inc": {"active": 1, "rev": 1}})
+            await echt.insert_one({"provider": p, "slot": "34d",
+                                   "expires_at": _jetzt() + timedelta(minutes=5)})
+            return n
+
+        proxy = _DbProxy(w.db, provider_slots=_CollProxy(echt, count_documents=count_mit_belegen))
+        await PL._zaehler_dubletten_bereinigen(proxy)
+        stand = (await w.db.provider_limits.find_one({"_id": behalten}))["active"]
+        slots = await w.db.provider_slots.count_documents({"provider": p})
+        return stand, slots
+
+    stand, slots = w.run(lauf())
+    assert stand == slots == 1, f"Zaehler {stand}, Slots {slots}"
+
+
 def test_34c_ready_holt_die_anbieter_grenze_nach():
     s = _quelle("backend", "server.py")
     block = s[s.index("kritische_indizes = {"):s.index("bereit = not fehler")]
@@ -343,6 +373,46 @@ def test_35_abgelaufener_inseratscache_wird_geloescht(welt):
     assert "inseratscache_rotieren(db, now)" in block, "im stuendlichen Lauf verdrahtet"
 
 
+def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeypatch):
+    """Nachbesserung #35: Eintraege aus der Zeit vor ce63a99 tragen
+    expires_at = Abruf + 1 Jahr. Massgeblich ist der Abruf plus TTL plus
+    Karenz; Lease und Altbestand-Beweis schuetzen weiterhin."""
+    import cleanup_service as CS
+    w = welt
+    monkeypatch.setattr(CS, "LISTING_CACHE_TTL_HOURS", 2160)
+    jetzt = _jetzt()
+    tag = timedelta(days=1)
+    daten = {"seller_name": "Max Privat", "seller_phone": "0170 1234567"}
+
+    def eintrag(k, abruf_tage, **felder):
+        abruf = jetzt - abruf_tage * tag
+        return {"cache_key": f"kleinanzeigen:35b{k}", "source": "kleinanzeigen",
+                "item_id": f"35b{k}", "data": daten, "fetched_at": abruf,
+                "expires_at": abruf + 365 * tag, "created_at": abruf, **felder}
+
+    async def lauf():
+        await w.db.listings_cache.insert_many([
+            eintrag("alt", 120),                                          # weg
+            eintrag("jung", 30),                                          # bleibt
+            eintrag("karenz", 95),                                        # 90 + 7 > 95
+            eintrag("lease", 120, fetching_until=jetzt + timedelta(seconds=60)),
+            eintrag("beweis", 120),
+        ])
+        await w.db.inserat_beweise.insert_one(
+            {"id": "b35b", "cache_key": "kleinanzeigen:35bbeweis", "status": "offen",
+             "erstellt_am": jetzt - 120 * tag})
+        n = await CS.inseratscache_rotieren(w.db, jetzt)
+        rest = {d["item_id"] for d in await w.db.listings_cache.find({}, {"item_id": 1}).to_list(50)}
+        return n, rest
+
+    n, rest = w.run(lauf())
+    assert rest == {"35bjung", "35bkarenz", "35blease", "35bbeweis"}, rest
+    assert n == 1
+    s = _quelle("backend", "server.py")
+    alle = s[s.index("async def _alle_indexe():"):s.index("async def run_abgleich_forever(")]
+    assert 'create_index("fetched_at", name="cache_abruf")' in alle
+
+
 # ----------------------------------------------------------------- #36 ----
 def test_36a_cache_dubletten_werden_zusammengelegt(welt):
     import indizes as IX
@@ -394,8 +464,30 @@ def test_36c_server_verdrahtet_cache_index_mit_alarm():
     assert "listings_cache_unique_index(db)" in ensure
     assert 'db.listings_cache.create_index("cache_key", unique=True)' not in ensure
     alle = s[s.index("async def _alle_indexe():"):s.index("async def run_abgleich_forever(")]
-    stelle = alle.index("await ensure_cache_indexes(db)")
-    assert 'ref="listings_cache.indizes"' in alle[stelle:stelle + 600]
+    assert "await listings_cache_indizes(db)" in alle
+    assert "ensure_cache_indexes(db)" not in alle, "nur ueber den Helfer mit Alarm"
+
+
+def test_36d_cache_indizes_alarm_wird_bei_erfolg_geschlossen(welt, monkeypatch):
+    """Nachbesserung #36: ein einmaliges Scheitern (z.B. Primaerwechsel beim
+    Start) liess den Alarm listings_cache.indizes fuer immer offen."""
+    import indizes as IX
+    import listing_identity as LI
+    w = welt
+    ref = "listings_cache.indizes"
+    echt = LI.ensure_cache_indexes
+
+    async def kaputt(db):
+        raise RuntimeError("Primaerwechsel")
+
+    monkeypatch.setattr(LI, "ensure_cache_indexes", kaputt)
+    assert w.run(IX.listings_cache_indizes(w.db)) is False
+    assert w.alarm("unique_index_fehlt", ref), "Alarm fehlt"
+    monkeypatch.setattr(LI, "ensure_cache_indexes", echt)
+    assert w.run(IX.listings_cache_indizes(w.db)) is True
+    assert w.alarm("unique_index_fehlt", ref) is None, "Alarm muss geschlossen sein"
+    idx = w.run(w.db.listings_cache.index_information())
+    assert idx.get("uniq_source_item", {}).get("unique") is True
 
 
 # ----------------------------------------------------------------- #37 ----
@@ -627,6 +719,11 @@ def test_41b_gleich_alte_dubletten_bleiben_genau_einmal(welt):
         return await w.db.storage_delete_retry.count_documents({"key": "x/41.jpg"})
 
     assert w.run(lauf()) == 1
+    # Ein lokaler mongod liefert gleich alte Zeilen meist ohnehin in derselben
+    # Reihenfolge — der Lauf allein beweist die _id-Stufe nicht.
+    import inspect
+    assert '{"$sort": {"created_at": 1, "_id": 1}}' in inspect.getsource(
+        IX.storage_retry_unique_index)
 
 
 # ----------------------------------------------------------------- #42 ----

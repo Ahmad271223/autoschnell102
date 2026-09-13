@@ -776,6 +776,9 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
 # koennte einen Eintrag mitten im Neuabruf (laufender Lease) loeschen und
 # erfasst keine Lease-Reste ohne expires_at.
 LISTING_CACHE_KARENZ_TAGE = int(os.environ.get("LISTING_CACHE_KARENZ_TAGE", "7"))
+# Gleicher Wert und Default wie routes/listings.py (dort Schreib-TTL); hier
+# direkt aus der Umgebung, um den Router nicht in den Cleanup zu importieren.
+LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
 
 
 async def inseratscache_rotieren(db, now: datetime,
@@ -788,7 +791,11 @@ async def inseratscache_rotieren(db, now: datetime,
     liest deren Daten noch aus dem Zwischenspeicher.
     (c) vehicle_cache (mobile.de, 30 min): zweite Absicherung, falls der
     TTL-Index fehlt (#42) — abgelaufene Eintraege liefert cache_get ohnehin
-    nie mehr aus."""
+    nie mehr aus.
+    (d) Nachbesserung #35: Eintraege, deren Abruf (fetched_at) laenger als
+    LISTING_CACHE_TTL_HOURS plus Karenz zurueckliegt — egal was in
+    expires_at steht. Betrifft den Altbestand vor ce63a99 (04.09.2026) mit
+    expires_at = Abruf + 1 Jahr; neue Eintraege erfasst (a) vorher."""
     karenz = LISTING_CACHE_KARENZ_TAGE if karenz_tage is None else karenz_tage
     frei = {"$or": [{"fetching_until": None}, {"fetching_until": {"$lt": now}}]}
     geschuetzt = await db.inserat_beweise.distinct(
@@ -798,6 +805,11 @@ async def inseratscache_rotieren(db, now: datetime,
     r = await db.listings_cache.delete_many(
         {"expires_at": {"$lt": now - timedelta(days=karenz)}, **frei, **ausnahme})
     n = r.deleted_count
+    # (d) nutzt den Index cache_abruf (server._alle_indexe).
+    r = await db.listings_cache.delete_many(
+        {"fetched_at": {"$lt": now - timedelta(hours=LISTING_CACHE_TTL_HOURS)
+                        - timedelta(days=karenz)}, **frei, **ausnahme})
+    n += r.deleted_count
     # expires_at None trifft das fehlende Feld und nutzt den Index cache_ablauf.
     r = await db.listings_cache.delete_many(
         {"expires_at": None, "data": {"$exists": False},

@@ -256,6 +256,25 @@ async def listings_cache_unique_index(db) -> bool:
     return True
 
 
+async def listings_cache_indizes(db) -> bool:
+    """#36 (Nachbesserung): listing_identity.ensure_cache_indexes (cache_key,
+    uniq_source_item, Quarantaene-Indizes). Scheitern -> Betriebsalarm
+    unique_index_fehlt/listings_cache.indizes; laeuft es beim naechsten Start
+    durch, wird der Alarm wieder geschlossen (vorher blieb er offen und /ready
+    meldete ihn dauerhaft). Wirft nie. Liefert True, wenn alles steht."""
+    import listing_identity
+    from betrieb import alarm, alarm_schliessen
+    ref = "listings_cache.indizes"
+    try:
+        await listing_identity.ensure_cache_indexes(db)
+    except Exception as exc:  # noqa: BLE001
+        log.error("listings_cache index setup failed: %s", exc)
+        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        return False
+    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    return True
+
+
 async def abo_unique_index(db) -> bool:
     """#39: "genau ein aktives Abo je Konto" als Teil-Unique-Index. Altbestand
     mit mehreren aktiven Abos wird NICHT automatisch veraendert (Geld- und

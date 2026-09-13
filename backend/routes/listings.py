@@ -17,6 +17,10 @@ from typing import Annotated, Any, Dict, Optional
 # Speicher bedient. Default 1 Jahr; per ENV anpassbar.
 # Audit 09/2026 (Punkt 39): Inserats-Cache (kann Verkaeuferangaben enthalten)
 # hoechstens 90 Tage statt ein Jahr.
+# Ueberholt (Audit 13.09.2026 #35): die Zeilen "dauerhaft gespeichert ...
+# Default 1 Jahr" gelten nicht mehr. cleanup_service.inseratscache_rotieren
+# loescht den Eintrag nach expires_at plus LISTING_CACHE_KARENZ_TAGE,
+# Altbestand spaetestens nach fetched_at + dieser TTL plus Karenz.
 LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
 # Client-Einreichungen (Browser-HTML) sind nur Momentaufnahmen: kurze TTL in
 # der Quarantaene, und auch nach unabhaengiger Bestaetigung deutlich kuerzer
