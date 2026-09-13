@@ -617,6 +617,38 @@ async def _kunden_nr_unique_index() -> None:
                                       name="kunden_nr_unique")
 
 
+async def _bestand_lese_indizes() -> None:
+    """Audit 13.09.2026 (#53/#48), Nachbesserung: Lese-Indizes fuer den
+    Bestand. Beide sind NICHT unique — Altdaten koennen den Aufbau also nicht
+    verhindern. Scheitert einer trotzdem (z.B. gleicher Schluessel unter
+    anderem Namen), bricht der Start NICHT ab: Warnung + Betriebsalarm
+    `index_fehlt`, die Abfragen laufen dann nur langsamer.
+
+    - activity_logs (dealer_id, ref, created_at): Historie der Fahrzeugakte
+      (routes/bestand.vehicle_akte: dealer_id + ref $in/$or, sortiert nach
+      created_at). Ohne ihn lief Mongo den created_at-Index ueber alle Firmen
+      rueckwaerts — je Aktenaufruf praktisch die ganze Sammlung.
+    - vehicles archiv_aufraeumen_offen (partiell): stuendliche Nachhol-Abfrage
+      der 50-Tage-Archivierung (cleanup_service), die kein dealer_id kennt.
+    Bei sehr grosser activity_logs-Sammlung den Index vor dem Rollout bauen."""
+    from betrieb import alarm, alarm_schliessen
+    for sammlung, schluessel, optionen in (
+            ("activity_logs", [("dealer_id", 1), ("ref", 1), ("created_at", -1)],
+             {"name": "akte_historie"}),
+            ("vehicles", [("archiv_aufraeumen_offen", 1)],
+             {"name": "archiv_aufraeumen_offen",
+              "partialFilterExpression": {"archiv_aufraeumen_offen": True}})):
+        ref = f"{sammlung}.{optionen['name']}"
+        try:
+            await db[sammlung].create_index(schluessel, **optionen)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen "
+                        "laufen ohne ihn langsamer: %s", ref, exc)
+            await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+        else:
+            await alarm_schliessen(db, "index_fehlt", ref=ref)
+
+
 async def _storage_retry_unique_index() -> None:
     """Nachpruefung Runde 14 (Nr. 61): Unique-Index `retry_je_ziel` auf
     storage_delete_retry samt Normalisieren und Zusammenlegen der Altzeilen.
@@ -701,6 +733,8 @@ async def ensure_indexes():
     # Audit-Log + Fehler-Meldungen (Admin-Bereich)
     await db.activity_logs.create_index([("created_at", -1)])
     await db.activity_logs.create_index([("action", 1), ("created_at", -1)])
+    # Audit 13.09.2026 (#53/#48): Akte-Historie + Archiv-Nachholung
+    await _bestand_lese_indizes()
     await db.error_logs.create_index([("status", 1), ("created_at", -1)])
     # B2B-Modul
     await db.pickup_reports.create_index([("appointment_id", 1), ("version", -1)])

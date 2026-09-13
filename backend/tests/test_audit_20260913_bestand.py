@@ -308,6 +308,61 @@ def test_53_akte_meldet_gekuerzte_historie(welt, monkeypatch):
     assert len(akte_s["history"]) == 3 and akte_s["history_gekuerzt"] is False
 
 
+def _plan_indizes(plan):
+    """Alle Indexnamen aus einem explain()-Gewinnerplan (rekursiv)."""
+    namen = set()
+    if isinstance(plan, dict):
+        if plan.get("indexName"):
+            namen.add(plan["indexName"])
+        for v in plan.values():
+            namen |= _plan_indizes(v)
+    elif isinstance(plan, list):
+        for v in plan:
+            namen |= _plan_indizes(v)
+    return namen
+
+
+def test_53_nachbesserung_akte_historie_hat_index(welt):
+    """Nachbesserung #53/#48: server._bestand_lese_indizes legt die Lese-Indizes
+    an (idempotent, ohne Alarm), und die Aktenabfrage nutzt den neuen Index
+    statt den created_at-Index ueber alle Firmen."""
+    import server
+    alt = server.db
+    server.db = welt.db
+    try:
+        for _ in range(2):
+            welt.run(server._bestand_lese_indizes())
+    finally:
+        server.db = alt
+    assert "akte_historie" in welt.run(welt.db.activity_logs.index_information())
+    v_idx = welt.run(welt.db.vehicles.index_information())
+    assert v_idx["archiv_aufraeumen_offen"]["partialFilterExpression"] == \
+        {"archiv_aufraeumen_offen": True}
+    assert welt.run(welt.db.betriebsalarme.count_documents({"typ": "index_fehlt"})) == 0
+    # Wie in ensure_indexes: der alte created_at-Index steht daneben
+    welt.run(welt.db.activity_logs.create_index([("created_at", -1)]))
+
+    vid, tid = f"v53i_{welt.s}", f"t53i_{welt.s}"
+    basis = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    welt.run(welt.db.activity_logs.insert_many(
+        [{"dealer_id": f"fremd_{i % 7}", "ref": f"x{i}", "action": "a",
+          "created_at": (basis + timedelta(minutes=i)).isoformat()} for i in range(2000)]
+        + [{"dealer_id": welt.dealer_id, "ref": vid, "user_id": welt.sucher["id"],
+            "action": "a", "created_at": basis.isoformat()}]))
+    filter_chef = {"ref": {"$in": [vid, tid]}, "dealer_id": welt.dealer_id}
+    filter_sucher = {"dealer_id": welt.dealer_id, "$or": [
+        {"ref": vid, "user_id": welt.sucher["id"]}, {"ref": {"$in": [tid]}}]}
+    for f in (filter_chef, filter_sucher):
+        exp = welt.run(welt.db.activity_logs.find(f).sort("created_at", -1).limit(101).explain())
+        gewinner = exp["queryPlanner"]["winningPlan"]
+        assert _plan_indizes(gewinner) == {"akte_historie"}, gewinner
+
+    # Nachhol-Abfrage der Archivierung (cleanup_service) nutzt den partiellen Index
+    exp = welt.run(welt.db.vehicles.find(
+        {"lifecycle": "archiviert", "archiv_aufraeumen_offen": True}).explain())
+    assert "archiv_aufraeumen_offen" in _plan_indizes(exp["queryPlanner"]["winningPlan"])
+
+
 # ================================================= Nr. 54
 def test_54_zuweisbar_an_ohne_1000er_grenze(welt, monkeypatch):
     B = _modul("routes.bestand")
@@ -382,6 +437,21 @@ def test_48_snapshotfehler_bricht_den_lauf_nicht_ab(welt, monkeypatch):
     v = welt.run(welt.db.vehicles.find_one({"id": vid}, {"_id": 0}))
     assert n == 1 and v["lifecycle"] == "archiviert"
     assert v.get("archiv_aufraeumen_offen") is True
+
+    # Nachbesserung: Lauf 2 — Fehler bleibt, Nachholung scheitert: offener Alarm
+    ref = f"{welt.dealer_id}/{vid}"
+    alarm_filter = {"typ": "bestand_archiv_aufraeumen_offen", "ref": ref}
+    welt.run(CS._archive_expired_bestand(welt.db, datetime.now(timezone.utc)))
+    alarme = welt.run(welt.db.betriebsalarme.find(alarm_filter, {"_id": 0}).to_list(10))
+    assert len(alarme) == 1 and alarme[0]["offen"] is True and alarme[0]["anzahl"] == 1, alarme
+
+    # Lauf 3 — Fehler behoben: Marker weg, derselbe Alarm (typ/ref) geschlossen
+    monkeypatch.undo()
+    welt.run(CS._archive_expired_bestand(welt.db, datetime.now(timezone.utc)))
+    v3 = welt.run(welt.db.vehicles.find_one({"id": vid}, {"_id": 0}))
+    assert "archiv_aufraeumen_offen" not in v3
+    alarme = welt.run(welt.db.betriebsalarme.find(alarm_filter, {"_id": 0}).to_list(10))
+    assert len(alarme) == 1 and alarme[0]["offen"] is False, "Alarm bleibt fuer immer offen"
 
 
 def test_49_chef_entscheidung_waehrend_des_laufs_gewinnt(welt):

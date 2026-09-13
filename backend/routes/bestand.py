@@ -24,6 +24,8 @@ from lifecycle import LifecycleError, set_lifecycle
 router = APIRouter()
 
 BESTAND_RETENTION_DAYS = 50
+# Audit 13.09.2026 (#53): so viele Historien-Eintraege zeigt die Akte
+HISTORIE_MAX = 100
 
 # Nachpruefung Runde 14 (Nr. 39/40/41): nach diesen Lifecycles ist das
 # Fahrzeug abgeschlossen — Bestandsdaten, Abweichungen und manuelle
@@ -524,16 +526,16 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
             {"ref": {"$in": alle_termin_ids}}]}
     # Audit 13.09.2026 (#53): Die Historie endete still bei 100 Eintraegen —
     # bei mehreren Suchern mit eigenen Terminen fehlten die aeltesten (Vertrag,
-    # Abholung) ohne Hinweis. Einen Eintrag mehr lesen statt count_documents:
-    # fuer ref gibt es keinen Index, ein Zaehler wuerde die Sammlung je
-    # Aktenaufruf ein zweites Mal durchlaufen.
-    HISTORIE_MAX = 100
+    # Abholung) ohne Hinweis. Einen Eintrag mehr lesen statt count_documents
+    # (kein zweiter Durchlauf). Index: activity_logs "akte_historie"
+    # (dealer_id, ref, created_at), angelegt in server._bestand_lese_indizes.
     history = await db.activity_logs.find(history_filter, {"_id": 0}) \
         .sort("created_at", -1).to_list(HISTORIE_MAX + 1)
     history_gekuerzt = len(history) > HISTORIE_MAX
     if history_gekuerzt:
         history = history[:HISTORIE_MAX]
-        logging.getLogger("autohandel").warning(
+        # info statt warning: kommt bei jedem Aufruf derselben Akte wieder
+        logging.getLogger("autohandel").info(
             "Akte %s/%s: Historie auf %d Eintraege gekuerzt",
             user["dealer_id"], vehicle_id, HISTORIE_MAX)
 
