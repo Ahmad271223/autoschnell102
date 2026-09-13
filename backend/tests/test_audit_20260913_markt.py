@@ -746,6 +746,9 @@ def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(w
 def test_56_audit_fehler_kippt_registrierung_nicht(welt, monkeypatch):
     M, deps = _mod("routes.marketplace"), _mod("deps")
     from auth import decode_token
+    # Kontonummer (13.09.2026), Schritt 0: buyer_register hat jetzt das
+    # SELF_SIGNUP-Gate — ausdruecklich an, unabhaengig von der Umgebung.
+    monkeypatch.setenv("SELF_SIGNUP", "true")
 
     async def frei(_ip):
         return True

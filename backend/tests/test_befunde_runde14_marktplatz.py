@@ -283,6 +283,9 @@ def test_u_62_dublette_beim_insert_gibt_409(monkeypatch, ohne_limiter):
     import routes.marketplace as m
     from fastapi import HTTPException
     from pymongo.errors import DuplicateKeyError
+    # Kontonummer (13.09.2026), Schritt 0: buyer_register hat jetzt das
+    # SELF_SIGNUP-Gate — ausdruecklich an, unabhaengig von der Umgebung.
+    monkeypatch.setenv("SELF_SIGNUP", "true")
 
     def ersatz(_echt):
         async def insert_one(doc, *a, **kw):
@@ -299,6 +302,8 @@ def test_u_62_dublette_beim_insert_gibt_409(monkeypatch, ohne_limiter):
 def test_u_63_einladungsfehler_kippt_registrierung_nicht(monkeypatch, ohne_limiter):
     import routes.marketplace as m
     from auth import decode_token
+    # Kontonummer (13.09.2026), Schritt 0: SELF_SIGNUP-Gate ausdruecklich an.
+    monkeypatch.setenv("SELF_SIGNUP", "true")
 
     async def kaputt(token, uid):
         raise RuntimeError("Mongo weg")

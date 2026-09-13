@@ -503,6 +503,14 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
 @router.post("/driver/register")
 async def driver_register(body: DriverAccountRegister, request: Request):
     """Fahrer registriert sich in der Fahrer-App."""
+    # Kontonummer (13.09.2026), Schritt 0: dasselbe fail-closed-Gate wie
+    # /auth/register — vorher war die Fahrer-Registrierung in Produktion
+    # offen, obwohl Konten nur der Betreiber anlegt.
+    from routes.auth import _self_signup_enabled
+    if not _self_signup_enabled():
+        raise HTTPException(403, "Die Selbst-Registrierung ist deaktiviert. "
+                                 "Bitte stelle eine Zugangs-Anfrage – der "
+                                 "Betreiber legt dein Konto an.")
     # Rate-limit: 5 new accounts per IP per hour.
     ip = client_ip(request)
     if not await driver_register_limiter.check(ip):

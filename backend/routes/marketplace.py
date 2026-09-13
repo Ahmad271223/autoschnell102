@@ -664,6 +664,14 @@ class BuyerRegisterIn(BaseModel):
 
 @router.post("/buyer/register")
 async def buyer_register(body: BuyerRegisterIn, request: Request):
+    # Kontonummer (13.09.2026), Schritt 0: dasselbe fail-closed-Gate wie
+    # /auth/register — vorher war die Kaeufer-Registrierung in Produktion
+    # offen, obwohl Konten nur der Betreiber anlegt.
+    from routes.auth import _self_signup_enabled
+    if not _self_signup_enabled():
+        raise HTTPException(403, "Die Selbst-Registrierung ist deaktiviert. "
+                                 "Bitte stelle eine Zugangs-Anfrage – der "
+                                 "Betreiber legt dein Konto an.")
     if not body.gewerblich_bestaetigt:
         raise HTTPException(400, "Bitte bestätige, dass du als Unternehmer handelst")
     ip = client_ip(request)

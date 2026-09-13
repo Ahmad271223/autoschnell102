@@ -329,6 +329,23 @@ def test_11_self_signup_aus(welt):
         "phone": "0511 1"}, timeout=30)
     assert r.status_code == 403, r.text[:200]
     assert "Zugangs-Anfrage" in r.text
+    # Kontonummer (13.09.2026), Schritt 0: auch Kaeufer- und Fahrer-
+    # Registrierung sind zu — 403 mit Anfrage-Hinweis, kein Konto angelegt.
+    k_mail = f"bt_prodk_{SUF}@e2etest-mail.de"
+    f_mail = f"bt_prodf_{SUF}@e2etest-mail.de"
+    try:
+        r = requests.post(f"{api}/buyer/register", json={
+            "gewerblich_bestaetigt": True, "company_name": "Prod Kaeufer",
+            "contact_name": "P K", "email": k_mail, "password": PW}, timeout=30)
+        assert r.status_code == 403 and "Zugangs-Anfrage" in r.text, r.text[:200]
+        r = requests.post(f"{api}/driver/register", json={
+            "email": f_mail, "password": PW, "display_name": "Prod Fahrer"},
+            timeout=30)
+        assert r.status_code == 403 and "Zugangs-Anfrage" in r.text, r.text[:200]
+        assert _db().users.count_documents({"email": k_mail}) == 0
+        assert _db().driver_accounts.count_documents({"email": f_mail}) == 0
+    finally:
+        _db().driver_accounts.delete_many({"email": f_mail})
     # Zugangs-Anfrage selbst bleibt offen (oeffentlich erlaubt)
     r = requests.post(f"{api}/zugang-anfrage", json={
         "company_name": f"Prod Firma {SUF}", "contact_person": "P T",
