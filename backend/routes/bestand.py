@@ -522,8 +522,20 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         history_filter = {"dealer_id": user["dealer_id"], "$or": [
             {"ref": vehicle_id, "user_id": user["id"]},
             {"ref": {"$in": alle_termin_ids}}]}
+    # Audit 13.09.2026 (#53): Die Historie endete still bei 100 Eintraegen —
+    # bei mehreren Suchern mit eigenen Terminen fehlten die aeltesten (Vertrag,
+    # Abholung) ohne Hinweis. Einen Eintrag mehr lesen statt count_documents:
+    # fuer ref gibt es keinen Index, ein Zaehler wuerde die Sammlung je
+    # Aktenaufruf ein zweites Mal durchlaufen.
+    HISTORIE_MAX = 100
     history = await db.activity_logs.find(history_filter, {"_id": 0}) \
-        .sort("created_at", -1).to_list(100)
+        .sort("created_at", -1).to_list(HISTORIE_MAX + 1)
+    history_gekuerzt = len(history) > HISTORIE_MAX
+    if history_gekuerzt:
+        history = history[:HISTORIE_MAX]
+        logging.getLogger("autohandel").warning(
+            "Akte %s/%s: Historie auf %d Eintraege gekuerzt",
+            user["dealer_id"], vehicle_id, HISTORIE_MAX)
 
     # Restlaufzeit
     retention_days_left = None
@@ -544,11 +556,14 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         if v.get("owner_user_id"):
             owner = {"id": v["owner_user_id"],
                      "name": namen.get(v["owner_user_id"]) or "unbekanntes Konto"}
+        # Audit 13.09.2026 (#54): ohne 1000er-Grenze — wegen der aufsteigenden
+        # Sortierung fehlten sonst gerade die neuesten Konten im Auswahlfeld.
+        # Kleine Projektion, auch fuer einige Tausend Konten unkritisch.
         konten = await db.users.find(
             {"dealer_id": user["dealer_id"], "role": {"$in": ["dealer", "sucher"]},
              "active": {"$ne": False}},
             {"_id": 0, "id": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1}
-        ).sort("created_at", 1).to_list(1000)
+        ).sort("created_at", 1).to_list(None)
         for u in konten:
             name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip()
             if not name:
@@ -563,9 +578,13 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # Umbau Kaufvorgaenge: je Vertrag ein Vorgang (Sucher, Preis, Status,
     # Termin) — Chef sieht alle, Sucher nur eigene.
     import kaufvorgang as _kv
+    kv_filter = {"vehicle_id": vehicle_id, **_kv.bereich(user)}
     kaufvorgaenge = await db.kaufvorgaenge.find(
-        {"vehicle_id": vehicle_id, **_kv.bereich(user)}, {"_id": 0}
+        kv_filter, {"_id": 0}
     ).sort("created_at", -1).to_list(50)
+    # Audit 13.09.2026 (#10): Gesamtzahl wie bei contracts_gesamt (Runde 27),
+    # derselbe Bereichsfilter (Sucher: nur eigene). Index (dealer_id, vehicle_id).
+    kaufvorgaenge_gesamt = await db.kaufvorgaenge.count_documents(kv_filter)
     kv_namen = await besitzer_namen(user["dealer_id"], [k.get("user_id") for k in kaufvorgaenge])
     for k in kaufvorgaenge:
         k["user_name"] = kv_namen.get(k.get("user_id"), k.get("user_id"))
@@ -587,6 +606,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         # "Fotos werden am ... geloescht").
         "fahrerfoto_tage": __import__("cleanup_service").FAHRERFOTO_TAGE,
         "kaufvorgaenge": kaufvorgaenge,
+        "kaufvorgaenge_gesamt": kaufvorgaenge_gesamt,
         "owner": owner,
         "mitbearbeiter": [] if ist_sucher else [
             {"id": m, "name": mit_namen.get(m, m)}
@@ -604,6 +624,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "listings": listings,
         "protocols": protocols,
         "history": history,
+        "history_gekuerzt": history_gekuerzt,
     }
 
 
@@ -638,7 +659,11 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
         raise HTTPException(404, "Kein Abholbericht vorhanden")
 
     by_id = {d["id"]: d for d in report.get("deviations", [])}
-    data = v.get("data") or {}
+    # Audit 13.09.2026 (#7): nur die tatsaechlich geaenderten data-Felder
+    # sammeln und per Dotted-Path schreiben. Vorher ging das ganze data-Objekt
+    # aus dem Lesestand zurueck — zwischenzeitlich geleerte Fotofelder
+    # (Loeschen, Tagesregel des Aufraeumers) standen danach wieder drin.
+    geaendert: Dict[str, Any] = {}
     known_defects = list(v.get("known_defects") or [])
     applied = []
     for dev_id in body.deviation_ids:
@@ -647,11 +672,11 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
             continue
         target_field = _FIELD_MAP.get(d.get("field"))
         if target_field == "mileage" and report.get("mileage_at_pickup"):
-            data["mileage"] = report["mileage_at_pickup"]
+            geaendert["mileage"] = report["mileage_at_pickup"]
             applied.append({"feld": "Kilometerstand",
                             "neu": report["mileage_at_pickup"]})
         elif d.get("actual") and target_field:
-            data[target_field] = d["actual"]
+            geaendert[target_field] = d["actual"]
             applied.append({"feld": d.get("label"), "neu": d["actual"]})
         else:
             txt = d.get("label") or "Abweichung"
@@ -661,16 +686,30 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
                 known_defects.append(txt)
             applied.append({"mangel": txt})
 
-    # km auch ohne explizite Abweichungs-ID übernehmen, wenn gewünscht
-    await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"$set": {"data": data, "known_defects": known_defects,
-                  "deviations_applied_at": now_iso(),
-                  "updated_at": now_iso()}})
-    await log_activity(user["dealer_id"], user["id"],
-                       "fahrzeug.abweichungen.uebernommen", ref=vehicle_id,
-                       meta={"anzahl": len(applied), "bericht": report.get("id"),
-                             "termin": report.get("appointment_id")})
+    update: Dict[str, Any] = {"known_defects": known_defects,
+                              "deviations_applied_at": now_iso(),
+                              "updated_at": now_iso()}
+    if isinstance(v.get("data"), dict):
+        update.update({f"data.{k}": wert for k, wert in geaendert.items()})
+    elif geaendert:
+        # data null/kein Objekt: $set auf data.<feld> scheitert dort
+        # ("Cannot create field") — dann einmalig als ganzes Objekt.
+        update["data"] = dict(geaendert)
+    # Audit 13.09.2026 (#7): Write mit Lifecycle-CAS wie update_bestand. Die
+    # Sperre oben prueft nur den gelesenen Stand; dazwischen liegt das Laden
+    # des Berichts — ein Verkauf/Loeschen/Archivieren in diesem Fenster wurde
+    # sonst still ueberschrieben (matched 0 -> 409, kein Audit-Eintrag).
+    res = await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"],
+         "lifecycle": {"$nin": list(_ABGESCHLOSSEN)}},
+        {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich abgeschlossen — "
+                                 "Abweichungen nicht uebernommen, bitte neu laden")
+    await log_activity_sicher(user["dealer_id"], user["id"],
+                              "fahrzeug.abweichungen.uebernommen", ref=vehicle_id,
+                              meta={"anzahl": len(applied), "bericht": report.get("id"),
+                                    "termin": report.get("appointment_id")})
     return {"ok": True, "applied": applied, "known_defects": known_defects}
 
 
@@ -718,9 +757,12 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     um (Sucher-Wechsel, Krankheit, Kollege hat es zuerst verglichen).
     Termine, Snapshots, Berichte und Protokolle folgen dem Fahrzeug
     automatisch; Vertraege bleiben bei dem Konto, das sie erstellt hat."""
+    # Audit 13.09.2026 (#9): "id" mitprojizieren — ohne owner_user_id kam
+    # sonst {} zurueck, galt als "nicht gefunden" (404), und Altbestand ohne
+    # Besitzer liess sich nie zuweisen.
     v = await db.vehicles.find_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "owner_user_id": 1})
+        {"_id": 0, "id": 1, "owner_user_id": 1})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     ziel = await db.users.find_one(
@@ -736,12 +778,20 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
                 "owner_name": namen.get(ziel["id"]), "unveraendert": True}
     # Der neue Hauptbearbeiter ist nicht zugleich Mitbearbeiter; andere
     # Mitbearbeiter (haben das Inserat selbst verglichen) bleiben.
-    await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
+    # Audit 13.09.2026 (#9): CAS auf den gelesenen Besitzer — bei zwei
+    # parallelen Umhaengungen stand sonst ein falsches "von" im Audit. Ist
+    # alt None, trifft der Filter auch das fehlende Feld (Altbestand).
+    # Abgeschlossene Fahrzeuge bleiben bewusst umhaengbar (Sucher-Wechsel,
+    # team.delete_sucher) — Einfrieren waere eine Produktentscheidung.
+    res = await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": alt},
         {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()},
          "$pull": {"mitbearbeiter_ids": ziel["id"]}})
-    await log_activity(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
-                       ref=vehicle_id, meta={"von": alt, "nach": ziel["id"]})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehaengt — "
+                                 "bitte neu laden")
+    await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
+                              ref=vehicle_id, meta={"von": alt, "nach": ziel["id"]})
     return {"ok": True, "owner_user_id": ziel["id"], "owner_name": namen.get(ziel["id"])}
 
 
@@ -759,14 +809,23 @@ async def update_manual_vehicle(vehicle_id: str, body: ManualVehicleIn,
     # Audit-Eintrag mit dem alten Preis, den es hier bisher nicht gab.
     _abgeschlossen_sperren(
         v, "Verkaufte/archivierte Fahrzeuge koennen nicht mehr bearbeitet werden")
-    await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
+    # Audit 13.09.2026 (#8): Write mit Lifecycle-CAS wie update_bestand —
+    # archiviert der Stundenjob (oder verkauft ein zweiter Tab) zwischen
+    # Lesen und Schreiben, aenderten sich sonst Preis und Stammdaten eines
+    # abgeschlossenen Fahrzeugs mit Antwort 200. data bleibt bewusst ein
+    # Ganzobjekt: das Formular ersetzt die Stammdaten komplett.
+    res = await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"], "source": "manuell",
+         "lifecycle": {"$nin": list(_ABGESCHLOSSEN)}},
         {"$set": {"data": body.model_dump(exclude={"purchase_price"}),
                   "purchase_price": body.purchase_price,
                   "updated_at": now_iso()}})
-    await log_activity(user["dealer_id"], user["id"],
-                       "fahrzeug.manuell.geaendert", ref=vehicle_id,
-                       meta={"fahrzeug": f"{body.make_label} {body.model_label}",
-                             "einkaufspreis_alt": v.get("purchase_price"),
-                             "einkaufspreis_neu": body.purchase_price})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich abgeschlossen — "
+                                 "bitte neu laden")
+    await log_activity_sicher(user["dealer_id"], user["id"],
+                              "fahrzeug.manuell.geaendert", ref=vehicle_id,
+                              meta={"fahrzeug": f"{body.make_label} {body.model_label}",
+                                    "einkaufspreis_alt": v.get("purchase_price"),
+                                    "einkaufspreis_neu": body.purchase_price})
     return {"ok": True}

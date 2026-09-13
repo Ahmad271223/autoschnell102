@@ -330,6 +330,13 @@ export default function FahrzeugAkte() {
                 </div>
               </div>
             ))}
+            {/* Audit 13.09.2026 (#10): Liste endet bei 50 — nicht still. */}
+            {akte.kaufvorgaenge_gesamt > akte.kaufvorgaenge.length && (
+              <div className="mt-2 text-xs" style={{ color: "var(--text-secondary)" }}
+                   data-testid="akte-kaufvorgaenge-gekuerzt">
+                {akte.kaufvorgaenge.length} von {akte.kaufvorgaenge_gesamt} Kaufvorgängen angezeigt (die neuesten).
+              </div>
+            )}
           </Section>
         )}
         <Section title="Beschaffung & Kauf">
@@ -452,6 +459,14 @@ export default function FahrzeugAkte() {
           ))}
           {akte.history.length === 0 && <div className="text-xs text-zinc-500">Noch keine Einträge.</div>}
         </div>
+        {/* Audit 13.09.2026 (#53): nicht still abschneiden. Fehlt das Feld
+            (alter Server beim Rollout), bleibt der Hinweis weg. */}
+        {akte.history_gekuerzt && (
+          <div className="mt-2 text-xs" style={{ color: "var(--text-secondary)" }}
+               data-testid="akte-historie-gekuerzt">
+            Die {akte.history.length} neuesten Einträge werden angezeigt — ältere sind vorhanden.
+          </div>
+        )}
       </Section>
     </div>
   );

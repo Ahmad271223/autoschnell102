@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 import auto_daten
-from betrieb import alarm
+from betrieb import alarm, alarm_schliessen
 from snapshot_service import delete_object
 from storage_service import loeschen_oder_vormerken
 
@@ -1280,10 +1280,35 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
                       "bestand.frist_nachgetragen_at": now.isoformat()}})
         log.info("bestand: Frist fuer %s/%s nachgetragen (%s)",
                  v.get("dealer_id"), v["id"], frist)
+    # Audit 13.09.2026 (#48): Nachholung — archivierte Fahrzeuge, deren
+    # Aufraeumen (Inserats-Entwuerfe, Snapshots) in einem frueheren Lauf
+    # scheiterte. Vorher: Fehler nur geloggt, das Fahrzeug fiel mit dem
+    # Statuswechsel aus dem Selektor und der Entwurf blieb samt Fotos fuer
+    # immer liegen. VOR der Hauptschleife, damit ein neuer Fehlschlag nicht
+    # im selben Lauf gleich zweimal versucht wird.
+    async for v in db.vehicles.find(
+            {"lifecycle": "archiviert", "archiv_aufraeumen_offen": True},
+            {"_id": 0, "id": 1, "dealer_id": 1}):
+        firma = v.get("dealer_id", "")
+        if await _archiv_nebenaufraeumen(db, v["id"], firma):
+            await alarm_schliessen(db, "bestand_archiv_aufraeumen_offen",
+                                   ref=f"{firma}/{v['id']}")
+        else:
+            await alarm(db, "bestand_archiv_aufraeumen_offen", ref=f"{firma}/{v['id']}",
+                        dealer_id=firma, vehicle_id=v["id"],
+                        hinweis="Inserats-Entwuerfe/Snapshots eines archivierten "
+                                "Fahrzeugs lassen sich wiederholt nicht raeumen — "
+                                "wird stuendlich erneut versucht.")
+
+    frist_abgelaufen = {"$lte": now.isoformat(), "$ne": None}
+    # Audit 13.09.2026 (#50): nur die Fotofelder lesen und schreiben (Muster
+    # der Tagesregel oben, Runde 18). Vorher ging das ganze data-Objekt aus
+    # dem Lesestand zurueck — eine zwischenzeitliche Kilometer- oder
+    # Stammdaten-Korrektur war still verloren.
     cursor = db.vehicles.find(
-        {"lifecycle": "bestand",
-         "bestand.expires_at": {"$lte": now.isoformat(), "$ne": None}},
-        {"_id": 0, "id": 1, "dealer_id": 1, "data": 1},
+        {"lifecycle": "bestand", "bestand.expires_at": frist_abgelaufen},
+        {"_id": 0, "id": 1, "dealer_id": 1,
+         **{f"data.{key}": 1 for key in _iter_photo_keys()}},
     )
     async for v in cursor:
         vid = v["id"]
@@ -1292,39 +1317,69 @@ async def _archive_expired_bestand(db, now: datetime) -> int:
         # werden deshalb NUR innerhalb der eigenen Firma angefasst — sonst
         # verlor Firma B ihre Inserats-Fotos, weil bei Firma A die Frist ablief.
         firma = v.get("dealer_id", "")
-        # Fotos aus den Fahrzeugdaten räumen
-        data = v.get("data") or {}
-        for key in _iter_photo_keys():
-            if data.get(key):
-                data[key] = []
-        # Hochgeladene Dateien (Storage) + Inserats-Entwürfe entfernen.
+        data = v.get("data")
+        # Bei data null/kein Objekt nie in data.* schreiben ("Cannot create field").
+        leeren = ({f"data.{key}": [] for key in _iter_photo_keys() if data.get(key)}
+                  if isinstance(data, dict) else {})
+        # Audit 13.09.2026 (#49): Statuswechsel als CAS VOR dem Aufraeumen.
+        # Vorher lief der Write ohne Bedingung auf dem Lesestand: klickte der
+        # Chef waehrenddessen "Weiterverkaufen"/"Frist verlaengern"/"Loeschen",
+        # wurde seine Entscheidung zu "archiviert" (Endzustand) ueberschrieben
+        # und sein neuer Entwurf mitgeloescht. Trifft der CAS nicht, bleibt
+        # alles unberuehrt. Der Marker haelt das Aufraeumen bis zum Erfolg offen.
+        r = await db.vehicles.update_one(
+            {"id": vid, "dealer_id": firma, "lifecycle": "bestand",
+             "bestand.expires_at": frist_abgelaufen},
+            {"$set": {**leeren, "lifecycle": "archiviert",
+                      "lifecycle_changed_at": now.isoformat(),
+                      "archived_at": now.isoformat(),
+                      "archiv_aufraeumen_offen": True}},
+        )
+        if r.matched_count == 0:
+            log.info("bestand archive: %s/%s zwischenzeitlich geaendert — uebersprungen",
+                     firma, vid)
+            continue
+        archived += 1
+        try:
+            await db.activity_logs.insert_one({
+                "id": __import__("uuid").uuid4().hex,
+                "dealer_id": v.get("dealer_id"), "user_id": "",
+                "action": "fahrzeug.archiviert.50tage", "ref": vid,
+                "meta": {}, "created_at": now.isoformat(),
+            })
+        except Exception:  # noqa: BLE001
+            # Zustand ist schon geschrieben — der Lauf geht weiter.
+            log.exception("bestand archive: Audit-Eintrag fuer %s/%s fehlt", firma, vid)
+        await _archiv_nebenaufraeumen(db, vid, firma)
+    return archived
+
+
+async def _archiv_nebenaufraeumen(db, vid: str, firma: str) -> bool:
+    """Audit 13.09.2026 (#48): Inserats-Entwuerfe (samt hochgeladener Fotos)
+    und Snapshots eines archivierten Fahrzeugs entfernen, danach den Marker
+    `archiv_aufraeumen_offen` loeschen. Wirft nie — vorher lief ein Fehler in
+    _delete_snapshots_for_vehicle durch _cleanup_once und liess fuer diesen
+    Zyklus u.a. die 90-Tage-Vertragsloeschung aus. Beide Schritte sind
+    idempotent. True = erledigt."""
+    try:
         # Nicht loeschbare Fotos werden vorgemerkt, das Inserat bleibt dann
         # bis zur Nachholung mit `loeschung_offen` stehen (kein Key geht verloren).
-        try:
-            async for listing in db.resale_listings.find(
-                {"vehicle_id": vid, "dealer_id": firma,
-                 "status": {"$in": ["entwurf", "verkaufsbereit"]}},
-                {"_id": 0, "id": 1, "photos": 1},
-            ):
-                await _inserat_mit_fotos_loeschen(
-                    db, listing, grund="bestand_archiv_inserat", dealer_id=firma)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("bestand archive: listing cleanup failed for %s: %s", vid, exc)
-        await _delete_snapshots_for_vehicle(db, vid, dealer_id=v.get("dealer_id", ""))
+        async for listing in db.resale_listings.find(
+            {"vehicle_id": vid, "dealer_id": firma,
+             "status": {"$in": ["entwurf", "verkaufsbereit"]}},
+            {"_id": 0, "id": 1, "photos": 1},
+        ):
+            await _inserat_mit_fotos_loeschen(
+                db, listing, grund="bestand_archiv_inserat", dealer_id=firma)
+        await _delete_snapshots_for_vehicle(db, vid, dealer_id=firma)
         await db.vehicles.update_one(
-            {"id": vid, "dealer_id": firma},
-            {"$set": {"data": data, "lifecycle": "archiviert",
-                      "lifecycle_changed_at": now.isoformat(),
-                      "archived_at": now.isoformat()}},
-        )
-        await db.activity_logs.insert_one({
-            "id": __import__("uuid").uuid4().hex,
-            "dealer_id": v.get("dealer_id"), "user_id": "",
-            "action": "fahrzeug.archiviert.50tage", "ref": vid,
-            "meta": {}, "created_at": now.isoformat(),
-        })
-        archived += 1
-    return archived
+            {"id": vid, "dealer_id": firma, "lifecycle": "archiviert"},
+            {"$unset": {"archiv_aufraeumen_offen": ""}})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("bestand archive: Aufraeumen fuer %s/%s fehlgeschlagen, "
+                    "wird nachgeholt: %s", firma, vid, exc)
+        return False
+    return True
 
 
 async def run_cleanup_forever(db):

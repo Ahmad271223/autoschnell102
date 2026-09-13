@@ -212,7 +212,8 @@ def test_46_apply_deviations_nutzt_massgeblichen_bericht(monkeypatch):
     async def _log(*a, **k):
         logs.append((a, k))
     monkeypatch.setattr(rb, "db", fake)
-    monkeypatch.setattr(rb, "log_activity", _log)
+    # Audit 13.09.2026 (#7): Audit nach dem Write ueber log_activity_sicher.
+    monkeypatch.setattr(rb, "log_activity_sicher", _log)
     user = {"id": "u1", "dealer_id": "f1", "role": "chef"}
     out = asyncio.run(rb.apply_deviations(
         "v1", rb.ApplyDeviationsIn(deviation_ids=["d1", "d2"]), user=user))
@@ -220,7 +221,8 @@ def test_46_apply_deviations_nutzt_massgeblichen_bericht(monkeypatch):
     assert [a for a in out["applied"] if a.get("feld") == "Kilometerstand"][0]["neu"] == 155000
     assert "Kratzer: Tuer links" in out["known_defects"]
     gesetzt = fake.vehicles.updates[-1][1]["$set"]
-    assert gesetzt["data"]["mileage"] == 155000
+    # Audit 13.09.2026 (#7): nur geaenderte data-Felder per Dotted-Path.
+    assert gesetzt["data.mileage"] == 155000 and "data" not in gesetzt
     assert logs and logs[0][1]["meta"]["bericht"] == "r-neu"
 
 
@@ -268,7 +270,8 @@ def test_41_update_manual_nach_verkauf_409_sonst_audit(monkeypatch):
 
     async def _log(*a, **k):
         logs.append((a, k))
-    monkeypatch.setattr(rb, "log_activity", _log)
+    # Audit 13.09.2026 (#8): Audit nach dem Write ueber log_activity_sicher.
+    monkeypatch.setattr(rb, "log_activity_sicher", _log)
     body = rb.ManualVehicleIn(**{**AUTO, "purchase_price": 15000})
     user = {"id": "u", "dealer_id": "f1"}
     fake = _Db(vehicles=_Coll([{"id": "m1", "dealer_id": "f1", "source": "manuell",
