@@ -9,12 +9,13 @@ Fahrzeugakte dürfen ein bestehendes Inserat nicht unbemerkt verändern.
 """
 import base64
 import logging
+import math
 import uuid
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 from pymongo import ReturnDocument
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, StringConstraints
 
 from deps import (clean_doc, current_user, db, log_activity, log_activity_sicher,
@@ -75,6 +76,75 @@ class ListingStatusIn(BaseModel):
     status: Literal["entwurf", "verkaufsbereit", "reserviert", "verkauft",
                     "zurueckgezogen"]
     sold_price: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+# Audit 13.09.2026 (#17): ListingUpdateIn.data ist bewusst ein freies Dict
+# (Inserat.jsx schickt das komplette l.data, alle Werte als Text aus den
+# Eingabefeldern). Die Whitelist pruefte aber nur die SCHLUESSEL: ein
+# `{"mileage": 1e400}` landete als inf in Mongo, und danach brach
+# /marktplatz/listings fuer jeden Besucher mit 500 ab (JSON kennt kein inf);
+# Objekte in Textfeldern legten die Marktplatz-Seite lahm, Megabyte-Listen in
+# features blaehten jede Antwort auf. Jetzt je Feld Typ, Endlichkeit und
+# Laenge; ungueltige Werte werden verworfen (alter Wert bleibt), zu lange
+# Texte und Listen gekuerzt. Bewusst KEIN 422 und keine bool-Pflicht fuer
+# accident_free ("Ja"/"Nein"/"" aus der Oberflaeche und den Vertraegen).
+_DATEN_TEXT_MAX = {"make_label": 100, "model_label": 150, "model_description": 300,
+                   "first_registration": 20, "fuel_label": 50, "gearbox_label": 50,
+                   "color": 80, "vin": 30, "previous_owners": 10,
+                   # Beschreibung wie ListingUpdateIn.description: importierte
+                   # Portaltexte duerfen beim Speichern nicht still schrumpfen
+                   "description": 30000, "accident_free": 20}
+_DATEN_ZAHL = ("mileage", "power_kw", "power_ps")
+_DATEN_ZAHL_TEXT_MAX = 30
+_FEATURES_MAX, _FEATURE_LEN = 150, 200
+_INT64 = 2 ** 63
+
+
+def _zahl_ok(val: Any) -> bool:
+    """Endliche Zahl, die BSON speichern kann (bool zaehlt als Zahl)."""
+    if isinstance(val, bool):
+        return True
+    if isinstance(val, int):
+        return -_INT64 <= val < _INT64
+    if isinstance(val, float):
+        return math.isfinite(val)
+    return False
+
+
+def _fahrzeugwert_bereinigen(k: str, val: Any) -> Tuple[bool, Any]:
+    """Audit 13.09.2026 (#17): (uebernehmen?, bereinigter Wert) fuer ein Feld
+    aus ListingUpdateIn.data."""
+    if val is None:
+        return True, None
+    if k == "features":
+        if not isinstance(val, list):
+            return False, None
+        out = []
+        for f in val:
+            if len(out) >= _FEATURES_MAX:
+                break
+            if isinstance(f, str) or (isinstance(f, (int, float))
+                                      and not isinstance(f, bool) and _zahl_ok(f)):
+                out.append(str(f)[:_FEATURE_LEN])
+        return True, out
+    if k in _DATEN_ZAHL:
+        if isinstance(val, str):
+            s = val.strip()
+            if len(s) > _DATEN_ZAHL_TEXT_MAX:
+                return False, None
+            try:
+                if s and not math.isfinite(float(s.replace(",", "."))):
+                    return False, None          # "inf", "nan", "1e400"
+            except ValueError:
+                pass                            # Freitext wie "ca. 150.000" bleibt
+            return True, val
+        return (True, val) if _zahl_ok(val) else (False, None)
+    grenze = _DATEN_TEXT_MAX.get(k)
+    if grenze is None:
+        return False, None
+    if isinstance(val, str):
+        return True, val[:grenze]
+    return (True, val) if _zahl_ok(val) else (False, None)
 
 
 # ---------- Helpers ----------
@@ -386,14 +456,35 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
 # =========================================================
 #                 LESEN / BEARBEITEN
 # =========================================================
+# Audit 13.09.2026 (#16): Abschnittsgroesse von GET /resale
+RESALE_LISTE_MAX = 300
+
+
 @router.get("/resale")
-async def list_listings(user=Depends(current_haendler), status: Optional[str] = None):
+async def list_listings(response: Response, user=Depends(current_haendler),
+                        status: Optional[str] = None, before: Optional[str] = None):
+    """Inserate der Firma, neueste Aenderung zuerst.
+
+    Audit 13.09.2026 (#16): vorher still die neuesten 300 — verkaufte Inserate
+    bleiben als Historie stehen, ab dem 301. fehlten aeltere ohne Hinweis.
+    Jetzt eins mehr lesen, Abschnitt per X-Truncated melden und per before
+    (updated_at des letzten Eintrags) weiterblaettern (wie
+    /dealer/network/members). Den Deckel nicht anheben: _preis_ergaenzen fragt
+    je Inserat ohne Einkaufspreis einzeln nach."""
     query: Dict[str, Any] = {"dealer_id": user["dealer_id"],
                              "status": {"$ne": "geloescht"}}
     if status:
         query["status"] = status
+    if before:
+        query["updated_at"] = {"$lt": before}
     items = await db.resale_listings.find(query, {"_id": 0}) \
-        .sort("updated_at", -1).to_list(300)
+        .sort("updated_at", -1).to_list(RESALE_LISTE_MAX + 1)
+    abgeschnitten = len(items) > RESALE_LISTE_MAX
+    response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
+    if abgeschnitten:
+        log.warning("GET /resale Firma %s: mehr als %d Inserate — Abschnitt gemeldet",
+                    user["dealer_id"], RESALE_LISTE_MAX)
+        items = items[:RESALE_LISTE_MAX]
     return [_mit_foto_urls(_with_margin(await _preis_ergaenzen(i))) for i in items]
 
 
@@ -500,9 +591,21 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
                    "previous_owners", "features", "description",
                    "accident_free"}
         merged = dict(l.get("data") or {})
+        # Audit 13.09.2026 (#17): Werte je Feld bereinigen (siehe
+        # _fahrzeugwert_bereinigen); verworfene behalten den alten Wert.
+        uebernommen: Dict[str, Any] = {}
+        verworfen: List[str] = []
         for k, val in body.data.items():
-            if k in allowed:
-                merged[k] = val
+            if k not in allowed:
+                continue
+            ok, wert = _fahrzeugwert_bereinigen(k, val)
+            if ok:
+                merged[k] = uebernommen[k] = wert
+            else:
+                verworfen.append(k)
+        if verworfen:
+            log.warning("Inserat %s: ungueltige Fahrzeugdaten verworfen: %s",
+                        listing_id, sorted(verworfen))
         update["data"] = merged
     # Nachpruefung Runde 14 (Nr. 89): bedingter Write auf den GELESENEN
     # Status — ein paralleler Verkauf/Loeschung/Reservierung zwischen Lesen
@@ -524,8 +627,11 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
         meta["preise_neu"] = prices
     if "data" in update:
         alt = l.get("data") or {}
+        # Audit 13.09.2026 (#17): gegen die bereinigten Werte vergleichen
         meta["fahrzeugdaten_geaendert"] = sorted(
-            k for k, val in body.data.items() if k in allowed and alt.get(k) != val)
+            k for k, val in uebernommen.items() if alt.get(k) != val)
+        if verworfen:
+            meta["fahrzeugdaten_verworfen"] = sorted(verworfen)
     await log_activity(user["dealer_id"], user["id"], "inserat.geaendert",
                        ref=listing_id, meta=meta)
     fresh = await db.resale_listings.find_one(

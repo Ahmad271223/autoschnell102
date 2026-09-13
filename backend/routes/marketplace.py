@@ -9,6 +9,7 @@
   privates Netzwerk (per Einladung)
 """
 import logging
+import math
 import os
 import re
 import secrets
@@ -25,8 +26,10 @@ from pymongo.errors import DuplicateKeyError
 from auth import (hash_password_async, new_session_id, create_token,
                   verify_password_async, _DUMMY_HASH)
 from deps import (_ablauf_parsen, current_user, db, email_vergeben,
-                  firma_gesperrt, gesperrte_firmen_ids, log_activity, now_iso)
-from rate_limiter import client_ip, register_limiter, login_limiter
+                  firma_gesperrt, gesperrte_firmen_ids, log_activity,
+                  log_activity_sicher, now_iso)
+from rate_limiter import (client_ip, register_limiter, login_limiter,
+                          login_ip_limiter, login_schluessel)
 from routes.auth import _check_password_strength
 from routes.bestand import current_haendler
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
@@ -253,6 +256,17 @@ def _price_for(listing: dict, *, is_member: bool, is_trade: bool) -> Optional[fl
     return p.get("public")
 
 
+def _json_sicher(wert: Any) -> Any:
+    """Audit 13.09.2026 (#17): nicht endliche Zahlen (inf/nan) aus Altbestand
+    oder von der alten Fassung im Rollout. Ein einziger solcher Wert liess
+    vorher die JSON-Antwort der ganzen oeffentlichen Liste mit 500 abbrechen."""
+    if isinstance(wert, float) and not math.isfinite(wert):
+        return None
+    if isinstance(wert, list):
+        return [w for w in wert if not (isinstance(w, float) and not math.isfinite(w))]
+    return wert
+
+
 def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
     """Reduzierte Sicht für Fremde: keine internen Kosten/Margen/EK-Preise."""
     data = l.get("data") or {}
@@ -271,7 +285,7 @@ def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
         "title": l.get("title"), "description": l.get("description"),
         "known_defects": l.get("known_defects") or [],
         "status": l.get("status"),
-        "data": {k: data.get(k) for k in (
+        "data": {k: _json_sicher(data.get(k)) for k in (
             "make_label", "model_label", "model_description",
             "first_registration", "mileage", "fuel_label", "gearbox_label",
             "power_ps", "power_kw", "color", "previous_owners", "features",
@@ -353,8 +367,27 @@ class InviteIn(BaseModel):
     max_uses: Literal[1, 5, 10] = 1                 # Default: 1 Nutzung
 
 
+# Audit 13.09.2026 (#24): Verwaltungsgrenze fuer den Chef (keine Nutzungs-
+# grenze fuer Sucher). Ohne sie fielen ab der 501. gueltigen Einladung
+# aeltere still aus GET /dealer/invites — weiter einloesbar, aber ohne id
+# weder kopier- noch widerrufbar.
+OFFENE_EINLADUNGEN_MAX = 500
+
+
+def _einladung_gueltig(jetzt: str) -> Dict[str, Any]:
+    return {"expires_at": {"$gt": jetzt},
+            "$expr": {"$lt": ["$used_count", "$max_uses"]}}
+
+
 @router.post("/dealer/invites")
 async def create_invite(body: InviteIn, user=Depends(current_haendler)):
+    # Audit 13.09.2026 (#24): hoechstens OFFENE_EINLADUNGEN_MAX gueltige Links
+    # je Firma — so bleibt jeder gueltige Link in der Liste und widerrufbar.
+    offen = await db.dealer_invites.count_documents(
+        {"dealer_id": user["dealer_id"], **_einladung_gueltig(now_iso())})
+    if offen >= OFFENE_EINLADUNGEN_MAX:
+        raise HTTPException(409, f"Zu viele offene Einladungslinks ({offen}) – bitte "
+                                 "nicht mehr benötigte löschen")
     token = secrets.token_urlsafe(18)
     expires = (datetime.now(timezone.utc)
                + timedelta(hours=body.validity_hours)).isoformat()
@@ -365,30 +398,42 @@ async def create_invite(body: InviteIn, user=Depends(current_haendler)):
         "created_at": now_iso(),
     }
     await db.dealer_invites.insert_one(doc)
-    await log_activity(user["dealer_id"], user["id"], "einladung.erstellt",
-                       ref=doc["id"], meta={"gueltig_h": body.validity_hours,
-                                            "nutzungen": body.max_uses})
+    # Audit 13.09.2026 (#57): der Link existiert schon — ein Audit-Fehler darf
+    # die Antwort nicht mehr mit 500 kippen (Chef klickte sonst erneut).
+    await log_activity_sicher(user["dealer_id"], user["id"], "einladung.erstellt",
+                              ref=doc["id"], meta={"gueltig_h": body.validity_hours,
+                                                   "nutzungen": body.max_uses})
     return {"ok": True, "token": token, "expires_at": expires,
             "max_uses": body.max_uses,
             "link": f"/markt/registrieren?invite={token}"}
 
 
 @router.get("/dealer/invites")
-async def list_invites(user=Depends(current_haendler)):
+async def list_invites(user=Depends(current_haendler), response: Response = None):
     # Nachpruefung Runde 14 (Nr. 87): vorher pauschal die neuesten 50 —
     # ab der 51. Einladung in 30 Tagen fiel eine aeltere, noch einloesbare
     # Einladung aus der Oberflaeche, blieb aber gueltig und war ohne ihre
     # id nicht mehr loeschbar. Jetzt: ALLE noch gueltigen (Deckel 500 nur
     # als Notbremse), dazu die neuesten 50 abgelaufenen/verbrauchten.
     # Antwort bleibt eine Liste (Einstellungen.jsx erwartet invites.map).
+    # Audit 13.09.2026 (#24): der Deckel war still. Jetzt begrenzt create_invite
+    # die offenen Links; die Liste liest Luft fuer parallele Erstellungen und
+    # meldet einen Abschnitt trotzdem per X-Truncated.
     now = now_iso()
     basis: Dict[str, Any] = {"dealer_id": user["dealer_id"]}
-    gueltig = {"expires_at": {"$gt": now},
-               "$expr": {"$lt": ["$used_count", "$max_uses"]}}
+    gueltig = _einladung_gueltig(now)
     ungueltig = {"$or": [{"expires_at": {"$lte": now}},
                          {"$expr": {"$gte": ["$used_count", "$max_uses"]}}]}
+    grenze = OFFENE_EINLADUNGEN_MAX + 50
     items = await db.dealer_invites.find(
-        {**basis, **gueltig}, {"_id": 0}).sort("created_at", -1).to_list(500)
+        {**basis, **gueltig}, {"_id": 0}).sort("created_at", -1).to_list(grenze + 1)
+    abgeschnitten = len(items) > grenze
+    if abgeschnitten:
+        log.warning("Einladungen Firma %s: mehr als %d gueltige — Liste gekuerzt",
+                    user["dealer_id"], grenze)
+        items = items[:grenze]
+    if response is not None:
+        response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
     items += await db.dealer_invites.find(
         {**basis, **ungueltig}, {"_id": 0}).sort("created_at", -1).to_list(50)
     for i in items:
@@ -403,7 +448,10 @@ async def delete_invite(invite_id: str, user=Depends(current_haendler)):
     if not r.deleted_count:
         raise HTTPException(404, "Einladung nicht gefunden")
     # Runde 15 (Nr. 8): Erstellen war geloggt, Loeschen nicht.
-    await log_activity(user["dealer_id"], user["id"], "einladung.geloescht", ref=invite_id)
+    # Audit 13.09.2026 (#57): nach dem Loeschen darf das Audit nicht mehr
+    # kippen (die Wiederholung lieferte sonst 404).
+    await log_activity_sicher(user["dealer_id"], user["id"], "einladung.geloescht",
+                              ref=invite_id)
     return {"ok": True}
 
 
@@ -463,9 +511,12 @@ async def remove_network_member(buyer_user_id: str,
                                 user=Depends(current_haendler)):
     """Netzwerk-Zugang eines Zwischenhaendlers widerrufen: er sieht private
     Inserate und Netzwerkpreise dieses Haendlers ab sofort nicht mehr."""
-    r = await db.network_members.delete_one(
-        {"dealer_id": user["dealer_id"], "buyer_user_id": buyer_user_id})
-    if not r.deleted_count:
+    # Audit 13.09.2026 (#58): vorher wurde die Mitgliedschaft ZUERST geloescht.
+    # Scheiterte danach die Merklisten-Bereinigung oder das Audit (500), endete
+    # die Wiederholung mit 404 — Bereinigung und Audit liefen nie mehr. Jetzt:
+    # Merkliste zuerst (idempotent), Mitgliedschaft zuletzt.
+    mitglied_filt = {"dealer_id": user["dealer_id"], "buyer_user_id": buyer_user_id}
+    if not await db.network_members.find_one(mitglied_filt, {"_id": 1}):
         raise HTTPException(404, "Mitglied nicht gefunden")
     # Einmal-Einladungen des Kaeufers nicht wieder freigeben: der Widerruf
     # soll nicht ueber denselben alten Link umgehbar sein.
@@ -490,8 +541,12 @@ async def remove_network_member(buyer_user_id: str,
                               {"listing_id": {"$in": weg}}]}
     if weg or not oeffentlich:
         await db.buyer_favorites.delete_many(fav_filter)
-    await log_activity(user["dealer_id"], user["id"], "netzwerk.mitglied.entfernt",
-                       ref=buyer_user_id)
+    r = await db.network_members.delete_one(mitglied_filt)
+    # Nur wer tatsaechlich geloescht hat, schreibt das Audit (Doppelklick auf
+    # zwei Servern: ein Eintrag); ok auch, wenn ein paralleler Aufruf schneller war.
+    if r.deleted_count:
+        await log_activity_sicher(user["dealer_id"], user["id"],
+                                  "netzwerk.mitglied.entfernt", ref=buyer_user_id)
     return {"ok": True}
 
 
@@ -542,12 +597,30 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     # Erhoehung passieren in EINEM Schritt. Vorher (lesen, dann erhoehen)
     # konnten zwei GLEICHZEITIGE Aufrufe denselben Einmal-Link beide
     # erfolgreich einloesen.
+    # Audit 13.09.2026 (#23): "hat dieser Kaeufer schon eingeloest" gehoert in
+    # die atomare Bedingung. Vorher verbrauchte derselbe Kaeufer mit parallelen
+    # Aufrufen mehrere Nutzungen eines 5er/10er-Links.
     verbraucht = await db.dealer_invites.find_one_and_update(
         {"id": inv["id"],
          "expires_at": {"$gt": now_iso()},
+         "used_by": {"$ne": buyer_user_id},
          "$expr": {"$lt": ["$used_count", "$max_uses"]}},
         {"$inc": {"used_count": 1}, "$push": {"used_by": buyer_user_id}})
     if not verbraucht:
+        # Audit 13.09.2026 (#23): hat ein PARALLELER Aufruf desselben Kaeufers
+        # die Nutzung schon verbucht, verlaesst er sich auf genau die eben
+        # angelegte Mitgliedschaft (sein Upsert war wirkungslos) — dann nicht
+        # zuruecknehmen. Vorher blieb der Beitritt als "erfolgreich" gemeldet,
+        # aber ohne Mitgliedschaft, und der Link war verloren. Restfenster: ein
+        # Widerruf genau in diesen Millisekunden kann ueberholt werden
+        # (vernachlaessigbar, der Chef sieht das Mitglied erst danach).
+        schon = await db.dealer_invites.find_one(
+            {"id": inv["id"], "used_by": buyer_user_id}, {"_id": 1})
+        if schon:
+            noch = await db.network_members.find_one(
+                {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
+                {"_id": 1})
+            return inv["dealer_id"] if noch else None
         if r.upserted_id is not None:
             # Nur die EBEN angelegte Mitgliedschaft zuruecknehmen — eine
             # aeltere ueber eine andere Einladung bleibt unberuehrt.
@@ -638,9 +711,12 @@ async def buyer_register(body: BuyerRegisterIn, request: Request):
             log.exception("Einladung nach Registrierung nicht einloesbar "
                           "(Kaeufer %s)", user_id)
             joined = None
-    await log_activity(joined or "", user_id, "buyer.registriert",
-                       meta={"email": body.email, "ip": ip,
-                             "einladung": bool(joined)})
+    # Audit 13.09.2026 (#56): das Konto ist schon dauerhaft angelegt — ein
+    # Audit-Fehler darf die Registrierung nicht mehr kippen (vorher 500 ohne
+    # Token, erneute Registrierung 409).
+    await log_activity_sicher(joined or "", user_id, "buyer.registriert",
+                              meta={"email": body.email, "ip": ip,
+                                    "einladung": bool(joined)})
     return {"ok": True, "token": create_token(user_id, sid),
             "user": {"id": user_id, "email": body.email, "role": "b2b_buyer",
                      "company_name": body.company_name},
@@ -655,9 +731,18 @@ class BuyerLoginIn(BaseModel):
 @router.post("/buyer/login")
 async def buyer_login(body: BuyerLoginIn, request: Request):
     """Login für Zwischenhändler (eigener Account, Rolle b2b_buyer)."""
+    # Audit 13.09.2026 (#25): wie /auth/login seit Runde 26 — der Zaehler haengt
+    # am KONTO (IP + E-Mail), nicht an der IP allein; sonst sperrten sich
+    # Zwischenhaendler hinter derselben Adresse gegenseitig aus. Das weit
+    # gefasste IP-Limit bremst weiter Rateversuche ueber viele Konten.
+    # Bewusst derselbe Limiter "login" wie /auth/login (ein Kaeuferkonto kann
+    # sich ueber beide Wege anmelden).
     ip = client_ip(request)
-    if not await login_limiter.check(ip):
-        raise HTTPException(429, "Zu viele Anmeldeversuche – bitte 60 Sekunden warten.")
+    schluessel = login_schluessel(ip, body.email or "")
+    if not await login_limiter.check(schluessel):
+        raise HTTPException(429, "Zu viele Anmeldeversuche für dieses Konto – bitte 60 Sekunden warten.")
+    if not await login_ip_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
     email = body.email.lower().strip()
     u = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$",
                                            "$options": "i"},
@@ -668,6 +753,9 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     ok = await verify_password_async(body.password, pw_hash)
     if not u or not ok or not u.get("active", True):
         raise HTTPException(401, "E-Mail oder Passwort falsch")
+    # Audit 13.09.2026 (#26): Passwort stimmte — Zaehler dieses Kontos leeren,
+    # damit fruehere Fehlversuche eine richtige Anmeldung nicht blockieren.
+    await login_limiter.reset(schluessel)
     sid = new_session_id()
     await db.users.update_one({"id": u["id"]},
                               {"$set": {"current_session_id": sid}})
@@ -705,21 +793,27 @@ async def request_marketplace_access(user=Depends(current_buyer)):
         raise HTTPException(400, "Nur Zwischenhändler benötigen einen Zugang")
     if _access_status(user)["active"]:
         return {"ok": True, "hinweis": "Zugang ist bereits aktiv."}
-    req_id = str(uuid.uuid4())
-    await db.plan_requests.insert_one({
-        "id": req_id, "type": "buyer_access",
-        "buyer_user_id": user["id"],
-        "company_name": user.get("company_name", ""),
-        "contact_email": user.get("email", ""),
-        "contact_phone": user.get("phone", ""),
+    # Audit 13.09.2026 (#27): vorher legte jeder Klick eine NEUE offene Anfrage
+    # an (auch fuer gesperrte Kaeufer) und konnte die Freischaltungsliste des
+    # Betreibers fluten. Jetzt atomarer Upsert wie bei Sucher-Abo und
+    # Verkaufspaket; Backstop ist der Teil-Unique-Index
+    # uniq_offene_buyer_access_anfrage (indizes.py).
+    from routes.team import _offene_anfrage_upsert   # spaet: kein Import-Zyklus
+    doc, neu = await _offene_anfrage_upsert(
+        {"type": "buyer_access", "buyer_user_id": user["id"], "status": "offen"},
+        {"id": str(uuid.uuid4()), "created_at": now_iso(),
+         "company_name": user.get("company_name", ""),
+         "contact_email": user.get("email", ""),
+         "contact_phone": user.get("phone", "")},
         # Beschluss Ahmad 10.09.2026: Marktplatz vorerst 0 € — keine Kosten
         # mehr in Anfragen und Freischaltungen nennen.
-        "wanted": ("Marktplatz-Zugang (kostenlos)" if MARKTPLATZ_KOSTENLOS
-                   else f"Marktplatz-Zugang ({BUYER_ACCESS_PRICE:.2f} €/Monat)"),
-        "status": "offen", "created_at": now_iso(),
-    })
-    await log_activity("", user["id"], "marktplatz.zugang.anfrage", ref=req_id)
-    return {"ok": True, "request_id": req_id,
+        {"wanted": ("Marktplatz-Zugang (kostenlos)" if MARKTPLATZ_KOSTENLOS
+                    else f"Marktplatz-Zugang ({BUYER_ACCESS_PRICE:.2f} €/Monat)"),
+         "updated_at": now_iso()})
+    if neu:
+        await log_activity_sicher("", user["id"], "marktplatz.zugang.anfrage",
+                                  ref=doc["id"])
+    return {"ok": True, "request_id": doc["id"],
             "hinweis": "Anfrage wurde an den Administrator übermittelt."}
 
 
@@ -1026,10 +1120,14 @@ async def toggle_favorit(listing_id: str, user=Depends(buyer_nicht_gesperrt)):
     """Fahrzeug merken / Merken aufheben (Toggle). Bewusst ohne Zugangs-Abo-
     Pflicht beim ENTFERNEN; zum Setzen muss der Zugang aktiv und das
     Inserat sichtbar sein (Betreiber-Sperre: gar nichts, Runde 13 C6)."""
-    existing = await db.buyer_favorites.find_one(
+    # Audit 13.09.2026 (#18): vorher find_one, dann (nach bis zu drei weiteren
+    # Abfragen) insert_one — ein Doppelklick legte zwei Eintraege an, und der
+    # naechste Klick loeschte nur einen. Jetzt ZUERST alle Eintraege loeschen
+    # (raeumt Altdubletten mit weg); Backstop beim Setzen ist der Unique-Index
+    # favorit_je_kaeufer_inserat (indizes.py).
+    weg = await db.buyer_favorites.delete_many(
         {"buyer_user_id": user["id"], "listing_id": listing_id})
-    if existing:
-        await db.buyer_favorites.delete_one({"_id": existing["_id"]})
+    if weg.deleted_count:
         return {"favorit": False}
     # Runde 13: C2 — abgelaufener Marktplatz-Zugang konnte weiterhin
     # Favoriten SETZEN (nur current_buyer; _inserat_sichtbar_fuer prueft den
@@ -1042,13 +1140,16 @@ async def toggle_favorit(listing_id: str, user=Depends(buyer_nicht_gesperrt)):
         {"_id": 0, "dealer_id": 1, "visibility": 1})
     if not l or not await _inserat_sichtbar_fuer(user, l):
         raise HTTPException(404, "Inserat nicht gefunden")
-    await db.buyer_favorites.insert_one({
-        "id": str(uuid.uuid4()),
-        "buyer_user_id": user["id"],
-        "listing_id": listing_id,
-        "dealer_id": l.get("dealer_id"),
-        "created_at": now_iso(),
-    })
+    try:
+        await db.buyer_favorites.insert_one({
+            "id": str(uuid.uuid4()),
+            "buyer_user_id": user["id"],
+            "listing_id": listing_id,
+            "dealer_id": l.get("dealer_id"),
+            "created_at": now_iso(),
+        })
+    except DuplicateKeyError:
+        pass          # paralleler Klick hat schon gemerkt — Ergebnis ist dasselbe
     return {"favorit": True}
 
 
@@ -1092,13 +1193,22 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
     eigene_firma = user.get("dealer_id") if user else None
     if not mp.get("public") and not member and dl["id"] != eigene_firma:
         raise HTTPException(403, "Dieses Händlerprofil ist privat (nur auf Einladung)")
-    listings = await db.resale_listings.find(
-        {"dealer_id": dl["id"], "status": "veroeffentlicht"}, {"_id": 0},
-    ).sort("published_at", -1).to_list(200)
     # Private Inserate nur für Netzwerk-Mitglieder (und den Händler selbst).
+    # Audit 13.09.2026 (#22): der Sichtbarkeitsfilter lief NACH dem 200er-
+    # Deckel, und die Fahrzeugzahl kam aus der gedeckelten Liste (250
+    # Inserate -> "200"; 180 neuere private -> ein Fremder sah "20" statt 60).
+    # Jetzt filtert Mongo vor dem Limit ($ne trifft auch fehlendes Feld, wie
+    # bisher "public"), gezaehlt wird ohne Deckel.
+    filt: Dict[str, Any] = {"dealer_id": dl["id"], "status": "veroeffentlicht"}
     if not member and dl["id"] != eigene_firma:
-        listings = [l for l in listings
-                    if (l.get("visibility") or "public") != "private"]
+        filt["visibility"] = {"$ne": "private"}
+    vehicle_count = await db.resale_listings.count_documents(filt)
+    listings = await db.resale_listings.find(filt, {"_id": 0}) \
+        .sort("published_at", -1).to_list(200)
+    abgeschnitten = vehicle_count > len(listings)
+    if abgeschnitten:
+        log.warning("Haendlerseite %s: %d sichtbare Inserate, Liste auf %d gekuerzt",
+                    dl["id"], vehicle_count, len(listings))
     return {
         "profile": {
             "id": dl.get("id", ""),
@@ -1112,8 +1222,11 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
             "description": mp.get("description", ""),
             "member_since": mp.get("member_since"),
             "network_member": member,
-            "vehicle_count": len(listings),
+            "vehicle_count": vehicle_count,
         },
+        # Audit 13.09.2026 (#22): Liste gekuerzt (die Fahrzeuge laedt die
+        # Oberflaeche ueber /marktplatz/listings?dealer=...).
+        "listings_abgeschnitten": abgeschnitten,
         # Runde 17 (Nr. 381): B2B-Preis nur fuer angemeldete Zwischenhaendler
         # (siehe browse_listings).
         "listings": [_public_listing_view(l, is_member=member,
@@ -1149,6 +1262,16 @@ async def send_interest(listing_id: str, body: InterestIn,
         raise HTTPException(400, "Eigene Inserate können nicht angefragt werden")
     if not await _inserat_sichtbar_fuer(user, l):
         raise HTTPException(404, "Inserat nicht gefunden oder nicht verfügbar")
+    # Audit 13.09.2026 (#19): hoechstens EINE laufende Verhandlung je Kaeufer
+    # und Inserat. Vorher entstand bei jedem erneuten Senden (oder per Skript)
+    # eine weitere offene Anfrage beim Haendler. Backstop gegen das Rennen ist
+    # der Teil-Unique-Index interesse_offen_je_kaeufer (indizes.py).
+    laufend_meldung = ("Zu diesem Fahrzeug läuft bereits deine Anfrage – bitte unter "
+                       "'Meine Anfragen' antworten")
+    if await db.listing_interest.find_one(
+            {"listing_id": listing_id, "buyer_user_id": user["id"],
+             "status": {"$in": list(INTERESSE_OFFEN)}}, {"_id": 1}):
+        raise HTTPException(409, laufend_meldung)
     doc = {
         "id": str(uuid.uuid4()),
         "listing_id": listing_id,
@@ -1167,14 +1290,63 @@ async def send_interest(listing_id: str, body: InterestIn,
                      "zeit": now_iso()}],
         "created_at": now_iso(), "updated_at": now_iso(),
     }
-    await db.listing_interest.insert_one(doc)
-    await log_activity(l["dealer_id"], user["id"], "interesse.gesendet",
-                       ref=listing_id, meta={"angebot": body.offer})
+    try:
+        await db.listing_interest.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, laufend_meldung)
+    # Audit 13.09.2026 (#19): die Anfrage steht schon — eine Wiederholung nach
+    # einem Audit-Fehler bekaeme sonst 409 statt der Bestaetigung.
+    await log_activity_sicher(l["dealer_id"], user["id"], "interesse.gesendet",
+                              ref=listing_id, meta={"angebot": body.offer})
     return {"ok": True, "interest_id": doc["id"]}
 
 
+# Audit 13.09.2026 (#20/#21): Obergrenzen der Anfragelisten
+ANFRAGEN_MAX = 2000
+ERLEDIGTE_ANFRAGEN_MAX = 200
+
+
+async def _interessen_laden(filt: Dict[str, Any], response: Response,
+                            gefiltert: bool) -> list:
+    """Audit 13.09.2026 (#20/#21): vorher die neuesten 200 Anfragen ueber ALLE
+    Stati. Abgeschlossene bleiben 180 Tage stehen — eine aeltere, noch
+    laufende Verhandlung (Kaeufer oder Haendler am Zug) fiel still aus der
+    Standardansicht. Ohne Filter jetzt: alle laufenden (bis ANFRAGEN_MAX)
+    plus die neuesten ERLEDIGTE_ANFRAGEN_MAX abgeschlossenen, zusammen nach
+    created_at sortiert. Mit Filter: bis ANFRAGEN_MAX. Fehlt etwas, meldet
+    X-Truncated=1 den Abschnitt (die Status-Tabs zeigen den Rest). Die
+    Antwort bleibt eine Liste."""
+    if gefiltert:
+        items = await db.listing_interest.find(filt, {"_id": 0}) \
+            .sort("created_at", -1).to_list(ANFRAGEN_MAX + 1)
+        abgeschnitten = len(items) > ANFRAGEN_MAX
+        if abgeschnitten:
+            log.warning("Anfrageliste %s: mehr als %d Treffer — gekuerzt", filt, ANFRAGEN_MAX)
+        items = items[:ANFRAGEN_MAX]
+    else:
+        offen = list(INTERESSE_OFFEN)
+        laufend = await db.listing_interest.find(
+            {**filt, "status": {"$in": offen}}, {"_id": 0}) \
+            .sort("created_at", -1).to_list(ANFRAGEN_MAX + 1)
+        erledigt = await db.listing_interest.find(
+            {**filt, "status": {"$nin": offen}}, {"_id": 0}) \
+            .sort("created_at", -1).to_list(ERLEDIGTE_ANFRAGEN_MAX + 1)
+        if len(laufend) > ANFRAGEN_MAX:
+            log.warning("Anfrageliste %s: mehr als %d laufende Anfragen — gekuerzt",
+                        filt, ANFRAGEN_MAX)
+        # Mehr als 200 abgeschlossene sind der Normalfall grosser Firmen:
+        # nur per Kopfzeile melden, nicht ins Protokoll.
+        abgeschnitten = (len(laufend) > ANFRAGEN_MAX
+                         or len(erledigt) > ERLEDIGTE_ANFRAGEN_MAX)
+        items = laufend[:ANFRAGEN_MAX] + erledigt[:ERLEDIGTE_ANFRAGEN_MAX]
+        items.sort(key=lambda i: i.get("created_at") or "", reverse=True)
+    response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
+    return items
+
+
 @router.get("/dealer/interessen")  # noqa: E302
-async def dealer_list_interests(status: Optional[str] = None,
+async def dealer_list_interests(response: Response,
+                                status: Optional[str] = None,
                                 listing_id: Optional[str] = None,
                                 user=Depends(current_haendler)):
     """Kaufanfragen der Firma — optional nach Status und/oder Inserat
@@ -1184,15 +1356,14 @@ async def dealer_list_interests(status: Optional[str] = None,
         q["status"] = status
     if listing_id:
         q["listing_id"] = listing_id
-    return await db.listing_interest.find(q, {"_id": 0}) \
-        .sort("created_at", -1).to_list(200)
+    return await _interessen_laden(q, response, gefiltert=bool(status or listing_id))
 
 
 @router.get("/buyer/interessen")
-async def buyer_interests(user=Depends(buyer_nicht_gesperrt)):
-    return await db.listing_interest.find(
-        {"buyer_user_id": user["id"]}, {"_id": 0},
-    ).sort("created_at", -1).to_list(200)
+async def buyer_interests(response: Response, user=Depends(buyer_nicht_gesperrt)):
+    # Audit 13.09.2026 (#21): laufende Verhandlungen nicht mehr verdraengt
+    return await _interessen_laden({"buyer_user_id": user["id"]}, response,
+                                   gefiltert=False)
 
 
 class BuyerInterestAnswerIn(BaseModel):

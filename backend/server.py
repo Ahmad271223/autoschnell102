@@ -824,6 +824,18 @@ async def ensure_indexes():
         [("dealer_id", 1), ("buyer_user_id", 1)], unique=True)
     await db.listing_interest.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.listing_interest.create_index([("buyer_user_id", 1), ("created_at", -1)])
+    # Audit 13.09.2026 (#18/#19/#27): neue Eindeutigkeitsregeln im Marktplatz
+    # (ein Merklisten-Eintrag, eine laufende Anfrage, eine offene Zugangs-
+    # anfrage). Altdubletten werden vorher automatisch bereinigt; scheitert
+    # es, Betriebsalarm statt Startabbruch (nicht in BETRIEBSBEREIT: die
+    # Routen pruefen weiter selbst vor).
+    from indizes import (_buyer_access_unique_index, _favoriten_unique_index,
+                         _interesse_unique_index)
+    await _favoriten_unique_index()
+    await _interesse_unique_index()
+    await _buyer_access_unique_index()
+    # Audit 13.09.2026 (#24): offene Einladungen je Firma zaehlen und listen
+    await db.dealer_invites.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.appointments.create_index([("dealer_id", 1), ("pickup_date", 1)])
     await db.appointments.create_index([("driver_id", 1), ("pickup_date", 1)])
     await _termin_unique_index()
