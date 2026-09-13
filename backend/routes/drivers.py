@@ -192,9 +192,10 @@ async def _verknuepfte_dealer_ids(driver_id: str) -> List[str]:
     Chefs sperrt die Firma (deps.firma_gesperrt) fuer Chef und Sucher,
     die Fahrer-Verknuepfung blieb aber bestehen, und damit Termine,
     Status, Bericht und PDFs der gesperrten Firma fuer den Fahrer offen."""
+    # Audit 13.09.2026 (#13): ohne feste Grenze (Unique-Index je Firma).
     links = await db.dealer_drivers.find(
         {"driver_account_id": driver_id}, {"_id": 0, "dealer_id": 1},
-    ).to_list(500)
+    ).to_list(None)
     ids = [link["dealer_id"] for link in links if link.get("dealer_id")]
     if not ids:
         return []
@@ -593,9 +594,12 @@ async def driver_logout(driver=Depends(current_driver)):
 
 @router.get("/driver/me")
 async def driver_me(driver=Depends(current_driver)):
+    # Audit 13.09.2026 (#13/#60): ohne feste Grenze — die Menge ist ueber den
+    # Unique-Index (dealer_id, driver_account_id) durch die Firmenzahl begrenzt;
+    # vorher fehlte ab der 501. Firma eine beliebige still (auch in PUT /driver/me).
     links = await db.dealer_drivers.find(
         {"driver_account_id": driver["id"]}, {"_id": 0},
-    ).to_list(500)
+    ).to_list(None)
     dealer_ids = [link["dealer_id"] for link in links]
     dealers = {}
     if dealer_ids:
@@ -672,7 +676,8 @@ def _termin_offen_oder_409(appt: dict) -> None:
 
 
 @router.get("/driver/appointments")
-async def driver_appointments(driver=Depends(current_driver)):
+async def driver_appointments(driver=Depends(current_driver),
+                              response: Response = None):
     """Alle Termine (aller Händler), die diesem Fahrer-Account zugewiesen sind."""
     # Nur Firmen, in deren Fahrerliste der Fahrer AKTUELL steht: nach dem
     # Entfernen durch den Haendler verschwinden dessen Termine aus der App
@@ -680,10 +685,28 @@ async def driver_appointments(driver=Depends(current_driver)):
     dealer_ids_aktiv = await _verknuepfte_dealer_ids(driver["id"])
     if not dealer_ids_aktiv:
         return []
-    appts = await db.appointments.find(
-        {"driver_id": driver["id"], "dealer_id": {"$in": dealer_ids_aktiv}},
-        {"_id": 0},
-    ).sort("pickup_date", 1).to_list(500)
+    # Audit 13.09.2026 (#12): die Fahrthistorie waechst dauerhaft. Aufsteigend
+    # nach Datum gekappt fielen ab 500 Terminen genau die NEUEN, noch zu
+    # beantwortenden Fahrten weg. Jetzt: alle nicht abgeschlossenen zuerst
+    # ($nin — auch fehlender/unbekannter Status), der Rest der Grenze mit den
+    # JUENGSTEN abgeschlossenen; Antwort weiter aufsteigend nach Datum.
+    basis = {"driver_id": driver["id"], "dealer_id": {"$in": dealer_ids_aktiv}}
+    grenze = 500
+    offen = await db.appointments.find(
+        {**basis, "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}}, {"_id": 0},
+    ).sort("pickup_date", 1).to_list(grenze)
+    rest = max(0, grenze - len(offen))
+    # rest + 1 (nie to_list(0) — das liefert in Motor ALLE) erkennt den Abschnitt.
+    alt = await db.appointments.find(
+        {**basis, "status": {"$in": sorted(_TERMIN_ABGESCHLOSSEN)}}, {"_id": 0},
+    ).sort("pickup_date", -1).to_list(rest + 1)
+    if len(offen) >= grenze or len(alt) > rest:
+        log.warning("Fahrer %s: Terminliste auf %d gekappt (offen %d)",
+                    driver["id"], grenze, len(offen))
+        if response is not None:
+            response.headers["X-Truncated"] = "1"
+    appts = offen + alt[:rest]
+    appts.sort(key=lambda a: str(a.get("pickup_date") or ""))
 
     # Fahrzeuge STRENG ueber (dealer_id, vehicle_id) laden (PR-Review
     # 09/2026): Fahrzeug-IDs leiten sich aus der Inserats-ID ab, zwei

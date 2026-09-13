@@ -18,14 +18,14 @@ import math
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
 import betrieb
 import protokoll_vergleich as PV
 from deps import (besitzer_namen, db, fahrzeug_im_bereich, ist_sucher, log_activity,
-                  now_iso, termin_im_bereich)
+                  now_iso, termin_bereich, termin_im_bereich)
 from lifecycle import try_set_lifecycle
 # Runde 17 (Nr. 10): dieselbe Schadensform wie im Kaufvertrag (contracts.py
 # importiert appointments/protocols nur lazy — kein Zyklus).
@@ -965,28 +965,46 @@ async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
     return bool(appt) and await termin_im_bereich(user, appt)
 
 
+# Audit 13.09.2026 (#2): Obergrenze nur gegen Ausreisser — mehr als 20
+# Versionen je Fahrzeug sind selten, aber moeglich (vorher still gekappt).
+_PROTOKOLLE_JE_FAHRZEUG = 200
+
+
 # ---------- Händler-Sicht ----------
 @router.get("/vehicles/{vehicle_id}/protocols")
-async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep)):
+async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep),
+                                response: Response = None):
     """Alle Protokoll-Versionen eines Fahrzeugs (Händler/Chef)."""
     # Runde 16: Sucher nur zu Fahrzeugen im eigenen Bereich (verglichen
     # oder eigener Vertrag); Umbau Kaufvorgaenge: darin nur die Protokolle
     # der EIGENEN Termine.
     if ist_sucher(user) and not await fahrzeug_im_bereich(user, vehicle_id):
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    filt: Dict[str, Any] = {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+                            "status": "final"}
+    if ist_sucher(user):
+        # Audit 13.09.2026 (#1): erst auf die EIGENEN Termine eingrenzen, DANN
+        # begrenzen (wie die Akte). Vorher wurden firmenweit 20 Versionen
+        # geladen und erst danach je Dokument gefiltert — 20 fremde Versionen
+        # verdraengten das eigene Protokoll still. Regel wie
+        # _protokoll_im_bereich (Termin per id + Firma, termin_bereich).
+        termin_ids = [t for t in await db.pickup_protocols.distinct("appointment_id", filt) if t]
+        filt["appointment_id"] = {"$in": await db.appointments.distinct(
+            "id", {"id": {"$in": termin_ids}, **await termin_bereich(user)})}
+    # Audit 13.09.2026 (#2): nach Abschlusszeit statt nach Versionsnummer
+    # (jeder Termin zaehlt ab 1 — ein neues v1 fiel hinter alte Korrekturen)
+    # und eine Obergrenze nur gegen Ausreisser, mit Kopf und Warnung.
     docs = await db.pickup_protocols.find(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "status": "final"},
+        filt,
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
          "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1,
          "appointment_id": 1},
-    ).sort("version", -1).to_list(20)
-    if ist_sucher(user):
-        eigene = []
-        for d in docs:
-            if await _protokoll_im_bereich(user, d):
-                eigene.append(d)
-        docs = eigene
+    ).sort([("finalized_at", -1), ("version", -1)]).to_list(_PROTOKOLLE_JE_FAHRZEUG)
+    if len(docs) >= _PROTOKOLLE_JE_FAHRZEUG:
+        log.warning("Protokollliste Fahrzeug %s: Obergrenze %d erreicht, aeltere "
+                    "Versionen abgeschnitten", vehicle_id, _PROTOKOLLE_JE_FAHRZEUG)
+        if response is not None:
+            response.headers["X-Truncated"] = "1"
     for d in docs:
         d.pop("appointment_id", None)
     return docs

@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
 from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, datum_iso_pruefen, db,
-                  fahrzeug_bereich, log_activity, now_iso, current_firma, termin_bereich,
+                  fahrzeug_bereich, log_activity, log_activity_sicher, now_iso,
+                  current_firma, termin_bereich,
                   termin_im_bereich, uhrzeit_hhmm_pruefen)
 from lifecycle import try_set_lifecycle
 
@@ -252,6 +253,10 @@ FAHRER_ENTFERNT_HINWEIS = ("Der Fahrer wurde soeben aus der Firma entfernt — "
 TERMIN_DOPPELT_HINWEIS = ("Für diesen Vertrag gibt es bereits einen offenen "
                           "Abholtermin — bitte den bestehenden Termin ändern "
                           "oder zuerst abschließen.")
+# Audit 13.09.2026 (#5): Nacharbeit nach dem Anlegen gescheitert (Merker
+# nacharbeit_offen am Termin, update_appointment holt sie nach).
+NACHARBEIT_HINWEIS = ("Termin gespeichert — Vertrag und Fahrzeugstatus werden "
+                      "beim nächsten Speichern des Termins nachgezogen.")
 
 
 async def _offener_termin_zum_vertrag(dealer_id: str, contract_id: Optional[str],
@@ -391,23 +396,44 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         doc.pop("driver_id", None)
         doc["zuteilung"] = None
         hinweis = FAHRER_ENTFERNT_HINWEIS
-    if body.contract_id:
-        await db.generated_pdfs.update_one(
-            {"id": body.contract_id, "dealer_id": user["dealer_id"]},
-            {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
-        )
-    # Fahrzeugstatus: ueber den Kaufvorgang (Zusammenfassung aller Vorgaenge);
-    # manueller Termin ohne Vertrag wie frueher direkt am Fahrzeug.
-    import kaufvorgang as _kv
-    if not await _kv.termin_status_uebernehmen(doc, doc.get("status") or "offen", user=user) \
-            and body.vehicle_id:
-        await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
-                                "abholung_geplant", user=user)
-    if doc.get("kaufvorgang_id"):
-        await db.kaufvorgaenge.update_one({"id": doc["kaufvorgang_id"]},
-                                          {"$set": {"appointment_id": appt_id}})
-    await log_activity(user["dealer_id"], user["id"], "termin.erstellt", ref=appt_id)
+    # Audit 13.09.2026 (#5): der Termin ist ab hier dauerhaft gespeichert und
+    # fuer Fahrer/Kollegen sichtbar. Scheitert die Nacharbeit (DB-Aussetzer,
+    # Primary-Wechsel), gab es vorher 500 — der Client wiederholte und lief
+    # in 409, Kaufvorgang und Fahrzeugstatus blieben dauerhaft alt (ein
+    # normales Speichern zog sie nicht nach). Jetzt: Merker nacharbeit_offen,
+    # update_appointment holt alles beim naechsten Speichern nach.
+    nacharbeit_offen = False
+    try:
+        if body.contract_id:
+            await db.generated_pdfs.update_one(
+                {"id": body.contract_id, "dealer_id": user["dealer_id"]},
+                {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
+            )
+        # Fahrzeugstatus: ueber den Kaufvorgang (Zusammenfassung aller Vorgaenge);
+        # manueller Termin ohne Vertrag wie frueher direkt am Fahrzeug.
+        import kaufvorgang as _kv
+        if not await _kv.termin_status_uebernehmen(doc, doc.get("status") or "offen", user=user) \
+                and body.vehicle_id:
+            await try_set_lifecycle(body.vehicle_id, user["dealer_id"],
+                                    "abholung_geplant", user=user)
+        if doc.get("kaufvorgang_id"):
+            await db.kaufvorgaenge.update_one({"id": doc["kaufvorgang_id"]},
+                                              {"$set": {"appointment_id": appt_id}})
+    except Exception:  # noqa: BLE001  (Termin existiert bereits — kein 500)
+        log.exception("Nacharbeit nach Termin %s fehlgeschlagen", appt_id)
+        nacharbeit_offen = True
+        try:
+            await db.appointments.update_one({"id": appt_id},
+                                             {"$set": {"nacharbeit_offen": True}})
+        except Exception:  # noqa: BLE001
+            log.exception("Merker nacharbeit_offen fuer Termin %s nicht gesetzt", appt_id)
+    # Audit 13.09.2026 (#5): Audit nach dem dauerhaften Insert darf nicht mehr
+    # mit 500 abbrechen (Muster create_contract).
+    await log_activity_sicher(user["dealer_id"], user["id"], "termin.erstellt", ref=appt_id)
     out = clean_doc(doc)
+    if nacharbeit_offen:
+        out["nacharbeit_offen"] = True
+        hinweis = f"{hinweis} {NACHARBEIT_HINWEIS}" if hinweis else NACHARBEIT_HINWEIS
     if hinweis:
         out["hinweis"] = hinweis
     return out
@@ -419,14 +445,35 @@ async def list_appointments(response: Response, user=Depends(current_firma),
     # Runde 16: Sucher sehen nur Termine im eigenen Bereich (selbst angelegt,
     # eigenes Fahrzeug, eigener Vertrag); der Chef die ganze Firma.
     query: dict = await termin_bereich(user)
-    if status:
-        query["status"] = status
     # Nachpruefung Runde 14 (Nr. 74): Termine werden nie automatisch
     # geloescht, der Bestand waechst dauerhaft. Bei aufsteigender Sortierung
     # fielen ab 500 Terminen genau die KOMMENDEN weg. Limit 2000; die
     # Antwort bleibt eine Liste (Frontend), ein Kopf meldet den Abschnitt.
-    items = await db.appointments.find(query, {"_id": 0}).sort("pickup_date", 1).to_list(2000)
-    if len(items) >= 2000:
+    # Audit 13.09.2026 (#6): die Sortierung blieb trotzdem aufsteigend — ab
+    # 2000 fielen weiter die neuen/kommenden Termine weg. Jetzt ohne Filter:
+    # alle nicht abgeschlossenen ($nin — auch fehlender/unbekannter Status),
+    # der Rest der Grenze mit den JUENGSTEN abgeschlossenen; mit Filter die
+    # juengsten. Die Antwort bleibt aufsteigend (Termine.jsx "Kommend").
+    grenze = 2000
+    if status:
+        items = await db.appointments.find(
+            {**query, "status": status}, {"_id": 0}).sort("pickup_date", -1).to_list(2000)
+        abgeschnitten = len(items) >= grenze
+    else:
+        items = await db.appointments.find(
+            {**query, "status": {"$nin": sorted(ABGESCHLOSSEN)}}, {"_id": 0},
+        ).sort("pickup_date", 1).to_list(2000)
+        rest = max(0, grenze - len(items))
+        # rest + 1 (nie to_list(0) — das liefert in Motor ALLE) erkennt den Abschnitt.
+        alt = await db.appointments.find(
+            {**query, "status": {"$in": sorted(ABGESCHLOSSEN)}}, {"_id": 0},
+        ).sort("pickup_date", -1).to_list(rest + 1)
+        abgeschnitten = len(items) >= grenze or len(alt) > rest
+        items = items + alt[:rest]
+    items.sort(key=lambda a: str(a.get("pickup_date") or ""))
+    if abgeschnitten:
+        log.warning("Terminliste Firma %s: auf %d gekappt (Filter %r)",
+                    user.get("dealer_id"), grenze, status)
         response.headers["X-Truncated"] = "1"
     # Enrich with vehicle + driver (driver = globaler Fahrer-Account)
     drivers_map = {}
@@ -727,7 +774,11 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             await _kv.status_setzen(_vorgang["id"], _vorgang["status"], user=user,
                                     extra={"purchase_price": float(update["final_price"]),
                                            "preis_quelle": "vor_ort"})
-    if status_gewechselt or contract_gewechselt:
+    # Audit 13.09.2026 (#5): scheiterte beim Anlegen die Nacharbeit (Merker
+    # nacharbeit_offen), jetzt Vorgangs-/Fahrzeugstatus auch OHNE Status- oder
+    # Vertragswechsel nachziehen — ein normales Speichern tat das vorher nicht.
+    nacharbeit_nachholen = bool(existing.get("nacharbeit_offen"))
+    if status_gewechselt or contract_gewechselt or nacharbeit_nachholen:
         # Umbau Kaufvorgaenge: der Status wirkt auf den VORGANG dieses Termins;
         # das Fahrzeug bekommt nur die Zusammenfassung (nicht_abgeholt erst,
         # wenn kein anderer Vorgang mehr offen ist). Ohne Vorgang (manueller
@@ -743,12 +794,23 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             {"id": appt_id}, {"_id": 0, "id": 1, "contract_id": 1, "kaufvorgang_id": 1}) \
             or {"id": appt_id, "contract_id": contract_id}
         wirksamer_status = update.get("status", existing.get("status")) or "offen"
-        if not await _kv.termin_status_uebernehmen(termin_nachher, wirksamer_status, user=user) \
-                and vehicle_id and status_gewechselt:
+        hat_vorgang = await _kv.termin_status_uebernehmen(termin_nachher, wirksamer_status, user=user)
+        if not hat_vorgang and vehicle_id and status_gewechselt:
             if update["status"] == "abgeholt":
                 await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
             elif update["status"] == "nicht abgeholt":
                 await try_set_lifecycle(vehicle_id, user["dealer_id"], "nicht_abgeholt", user=user)
+        elif not hat_vorgang and vehicle_id and nacharbeit_nachholen \
+                and wirksamer_status in TERMIN_OFFEN_WERTE:
+            # Audit 13.09.2026 (#5): wie beim Anlegen (manueller Termin ohne Vorgang).
+            await try_set_lifecycle(vehicle_id, user["dealer_id"], "abholung_geplant", user=user)
+        if nacharbeit_nachholen:
+            if hat_vorgang and termin_nachher.get("kaufvorgang_id"):
+                await db.kaufvorgaenge.update_one(
+                    {"id": termin_nachher["kaufvorgang_id"], "dealer_id": user["dealer_id"]},
+                    {"$set": {"appointment_id": appt_id}})
+            await db.appointments.update_one({"id": appt_id},
+                                             {"$unset": {"nacharbeit_offen": ""}})
     if status_neu in ABGESCHLOSSEN and status_neu != "abgeholt":
         # Runde 17 (Nr. 11): Termin storniert/nicht abgeholt/erledigt — ein
         # angefangener Korrektur-Entwurf des Protokolls wird verworfen und
