@@ -323,17 +323,14 @@ def _plan_indizes(plan):
 
 
 def test_53_nachbesserung_akte_historie_hat_index(welt):
-    """Nachbesserung #53/#48: server._bestand_lese_indizes legt die Lese-Indizes
+    """Nachbesserung #53/#48: indizes.bestand_lese_indizes legt die Lese-Indizes
     an (idempotent, ohne Alarm), und die Aktenabfrage nutzt den neuen Index
     statt den created_at-Index ueber alle Firmen."""
-    import server
-    alt = server.db
-    server.db = welt.db
-    try:
-        for _ in range(2):
-            welt.run(server._bestand_lese_indizes())
-    finally:
-        server.db = alt
+    # Ohne "import server": der Import band den gemeinsamen Motor-Client an
+    # diese Test-Schleife, spaetere Tests scheiterten mit "Event loop is closed".
+    import indizes as IX
+    for _ in range(2):
+        welt.run(IX.bestand_lese_indizes(welt.db))
     assert "akte_historie" in welt.run(welt.db.activity_logs.index_information())
     v_idx = welt.run(welt.db.vehicles.index_information())
     assert v_idx["archiv_aufraeumen_offen"]["partialFilterExpression"] == \

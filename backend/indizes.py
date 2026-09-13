@@ -428,3 +428,32 @@ async def ttl_index_sicher(db, sammlung: str, feld: str = "expires_at_dt") -> bo
         return False
     await alarm_schliessen(db, "ttl_index_fehlt", ref=ref)
     return True
+
+
+async def bestand_lese_indizes(db) -> None:
+    """Audit 13.09.2026 (#53/#48), Nachbesserung: Lese-Indizes fuer den Bestand
+    (Aufruf aus server._bestand_lese_indizes). Beide NICHT unique — Altdaten
+    koennen den Aufbau nicht verhindern. Scheitert einer trotzdem, bricht der
+    Start NICHT ab: Warnung + Betriebsalarm `index_fehlt`.
+
+    - activity_logs (dealer_id, ref, created_at): Historie der Fahrzeugakte
+    - vehicles archiv_aufraeumen_offen (partiell): Nachhol-Abfrage der
+      50-Tage-Archivierung (cleanup_service)
+    Die Datenbank kommt als Argument — Tests duerfen server.py nicht importieren
+    (bindet den gemeinsamen Motor-Client an die Test-Schleife)."""
+    from betrieb import alarm, alarm_schliessen
+    for sammlung, schluessel, optionen in (
+            ("activity_logs", [("dealer_id", 1), ("ref", 1), ("created_at", -1)],
+             {"name": "akte_historie"}),
+            ("vehicles", [("archiv_aufraeumen_offen", 1)],
+             {"name": "archiv_aufraeumen_offen",
+              "partialFilterExpression": {"archiv_aufraeumen_offen": True}})):
+        ref = f"{sammlung}.{optionen['name']}"
+        try:
+            await db[sammlung].create_index(schluessel, **optionen)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen "
+                        "laufen ohne ihn langsamer: %s", ref, exc)
+            await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+        else:
+            await alarm_schliessen(db, "index_fehlt", ref=ref)

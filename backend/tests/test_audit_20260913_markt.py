@@ -671,28 +671,25 @@ def test_27_hoechstens_eine_offene_zugangsanfrage(welt):
 
 
 # ============================================================ Nachbesserung #18/#19/#27
-def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(welt, monkeypatch):
+def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(welt):
     """Rollout: die alte Fassung schrieb zwischen Bereinigung und create_index
     eine Dublette, der Index fehlt. POST /admin/betrieb/nachholen muss ihn
-    ohne Neustart nachholen, GET /admin/betrieb den Zustand zeigen."""
-    A, I, P = _mod("routes.admin"), _mod("indizes"), _mod("routes.payments")
+    ohne Neustart nachholen, GET /admin/betrieb den Zustand zeigen.
+
+    Die Routen selbst laufen hier NICHT: sie beruehren weitere Module mit
+    globalem db (Abo-Vorgaenge, Zahlungen, Backups) und banden den gemeinsamen
+    Motor-Client an diese Test-Schleife — 19 spaetere Tests scheiterten mit
+    "Event loop is closed". Geprueft werden die Helfer gegen die Wegwerf-DB und
+    die Verdrahtung im Quelltext."""
+    # routes.admin NICHT importieren: der Erstimport innerhalb dieser Test-Schleife
+    # band Objekte an sie (spaeter "Event loop is closed"). Verdrahtung per Quelltext.
+    I = _mod("indizes")
     import betrieb as B
     db = welt.db
     k = welt.k["id"]
-    monkeypatch.setattr(A, "db", db)
-
-    async def null(*a, **kw):
-        return 0
-
-    async def wahr(*a, **kw):
-        return True
-    monkeypatch.setattr(A, "abo_vorgaenge_nachholen", null)
-    monkeypatch.setattr(P, "zahlungen_abgleichen", null)
-    monkeypatch.setattr(I, "_termin_unique_index", wahr)
-    monkeypatch.setattr(I, "_unique_index_sicher", wahr)
-    faelle = [(db.buyer_favorites, "favorit_je_kaeufer_inserat", "favoriten"),
-              (db.listing_interest, "interesse_offen_je_kaeufer", "interesse"),
-              (db.plan_requests, "uniq_offene_buyer_access_anfrage", "zugangsanfrage")]
+    faelle = [(db.buyer_favorites, "favorit_je_kaeufer_inserat", I._favoriten_unique_index),
+              (db.listing_interest, "interesse_offen_je_kaeufer", I._interesse_unique_index),
+              (db.plan_requests, "uniq_offene_buyer_access_anfrage", I._buyer_access_unique_index)]
 
     async def lauf():
         lid = await welt.inserat()
@@ -709,9 +706,9 @@ def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(w
         await db.plan_requests.insert_many([
             {"id": f"nhpr{i}_{welt.s}", "type": "buyer_access", "buyer_user_id": k,
              "status": "offen", "created_at": _jetzt(minutes=-i)} for i in range(2)])
-        vorher = await A.admin_betrieb(admin={})
-        erg = await A.admin_betrieb_nachholen(admin={})
-        nachher = await A.admin_betrieb(admin={})
+        vorher = [name in await coll.index_information() for coll, name, _ in faelle]
+        erg = [await helfer() for _, _, helfer in faelle]
+        nachher = [name in await coll.index_information() for coll, name, _ in faelle]
         offen = {
             "fav": await db.buyer_favorites.count_documents({"buyer_user_id": k, "listing_id": lid}),
             "int": await db.listing_interest.count_documents(
@@ -724,15 +721,28 @@ def test_18_19_27_nachholen_legt_indizes_ohne_neustart_an_und_status_zeigt_sie(w
         return vorher, erg, nachher, offen, alarme
 
     vorher, erg, nachher, offen, alarme = welt.run(lauf())
-    for _, _, kurz in faelle:
-        assert vorher[f"{kurz}_index_aktiv"] is False
-        assert erg[f"{kurz}_index"] is True, f"{kurz}: nachholen legt den Index nicht an"
-        assert nachher[f"{kurz}_index_aktiv"] is True
+    assert vorher == [False, False, False]
+    assert erg == [True, True, True], "Helfer legen die Indizes nicht an"
+    assert nachher == [True, True, True]
     assert offen == {"fav": 1, "int": 1, "pr": 1}, "Dubletten beim Nachholen bereinigt"
     assert alarme == 0, "Alarm unique_index_fehlt bleibt nach dem Nachholen offen"
 
+    # Verdrahtung: Nachholen ruft alle drei Helfer, der Status zeigt alle drei.
+    quelle = (Path(__file__).resolve().parents[1] / "routes" / "admin.py").read_text(encoding="utf-8")
 
-# ============================================================ Nr. 56
+    def block(name):
+        start = quelle.index(f"async def {name}(")
+        ende = quelle.find("\n@router", start)
+        return quelle[start:ende if ende != -1 else len(quelle)]
+
+    nachholen = block("admin_betrieb_nachholen")
+    for helfer in ("_favoriten_unique_index", "_interesse_unique_index", "_buyer_access_unique_index"):
+        assert f"await {helfer}()" in nachholen, helfer
+    status = block("admin_betrieb")
+    for flag, name in (("favoriten_index_aktiv", "favorit_je_kaeufer_inserat"),
+                       ("interesse_index_aktiv", "interesse_offen_je_kaeufer"),
+                       ("zugangsanfrage_index_aktiv", "uniq_offene_buyer_access_anfrage")):
+        assert f'"{flag}"' in status and name in status, flag
 def test_56_audit_fehler_kippt_registrierung_nicht(welt, monkeypatch):
     M, deps = _mod("routes.marketplace"), _mod("deps")
     from auth import decode_token
