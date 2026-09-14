@@ -46,7 +46,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 28 | Preisangaben widersprüchlich | ✅ UI/AGB einheitlich (150/1.500 netto, 20 € inkl. USt); PR-Text 🔧 |
 | 29 | Zugangs-Anfragen ohne Frist | ✅ `ANFRAGEN_AUFBEWAHRUNG_TAGE` |
 | 30 | Fehlerberichte unbegrenzt | ✅ Dedup, Obergrenze, Frist auch für offene, Redaktion |
-| 31 | Reset-Token vor Passwortänderung verbraucht | ✅ Claim-Zustand mit Rücksetzung |
+| 31 | Reset-Token vor Passwortänderung verbraucht | ✅ Claim-Zustand mit Rücksetzung — *historisch:* der Passwort-Reset per Mail ist seit der Anmeldung mit Kontonummer (13.09.2026) entfernt; ein neues Passwort setzt nur der Betreiber |
 | 32 | Passwortregeln uneinheitlich | ✅ `passwoerter.py` für alle Rollen (min. 10, max. 72 Byte, Blockliste); Zwei-Faktor (TOTP) für Admin/Super-Admin ✅ — Einstellungen → Zwei-Faktor; Betrieb und `/api/ready` warnen bei Super-Admins ohne 2FA |
 | 33 | Job-Status nicht mandantengebunden | ✅ `dealer_ids` |
 | 34 | Protokollabschluss verwaist Dateien | ✅ Rollback löscht/vormerkt |
@@ -58,7 +58,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 40 | B2B ohne Verifikation | ✅ Pflicht-Bestätigung + USt-IdNr. mit Landesformat-Prüfung bei der Registrierung (`ustid.py`, 29 Länder; Handelsregister-Nr. weiter erlaubt) + Online-Prüfung beim EU-Dienst VIES durch den Admin (Freischaltungen → Prüfen, Ergebnis mit Firmenname/Adresse am Käufer gespeichert) |
 | 41 | Verkäuferadresse in Übersicht | ✅ standardmäßig eingeklappt |
 | 42 | Readiness nur Mongo | ✅ `/api/ready` |
-| 43 | Konfiguration nicht fail-closed | ✅ SELF_SIGNUP prod-Default false, Stripe halb → Abbruch, Prod-Test läuft in CI |
+| 43 | Konfiguration nicht fail-closed | ✅ SELF_SIGNUP prod-Default false, Stripe halb → Abbruch, Prod-Test läuft in CI — *historisch:* `SELF_SIGNUP` (und `ADMIN_EMAIL`/`ADMIN_PASSWORD`) entfielen am 13.09.2026, Konten legt nur der Super-Admin an |
 | 44 | Logs mit sensiblen Inhalten | ✅ zentrale Redaktion, Fristen |
 | 45 | Datei-URLs als Bearer-Links | ✅ signierte kurzlebige Links, Cache privat |
 

@@ -19,6 +19,12 @@
 # angefasst: der Wegwerf-Stack hat ein eigenes Netz und eine eigene
 # MongoDB.
 #
+# Konten (Kontonummer, 13.09.2026): Eine Selbstregistrierung gibt es nicht
+# mehr. Die Lasttests legen in der Wegwerf-MongoDB einen eigenen Super-Admin
+# an, erzeugen darueber Firmen, Sucher, Fahrer und Kaeufer und melden sie per
+# Kontonummer an (backend/scripts/lasttest_konten.py). SUPER_ADMIN_* bleibt
+# fuer den Seed beim Containerstart (migrationen.py).
+#
 # Bewusste Messeinschraenkungen (Nachpruefung Runde 10): RATE_LIMIT_ENABLED=false
 # (alle virtuellen Nutzer kommen von EINER Adresse — sonst wuerde die
 # Anmeldesperre gemessen statt der Kapazitaet), APP_ENV=development (die
@@ -68,9 +74,8 @@ docker run -d --name last-backend --network "$NETZ" --memory 4g --shm-size 512m 
     -v last-uploads:/app/uploads \
     -e MONGO_URL=mongodb://last-mongo:27017 -e DB_NAME=autoschnell_last \
     -e APP_ENV=development -e MOCK_PROVIDER_FETCH=true -e RATE_LIMIT_ENABLED=false \
-    -e SELF_SIGNUP=true -e AUTO_DATEN_SCHAEDEN_FREITEXT=true \
+    -e AUTO_DATEN_SCHAEDEN_FREITEXT=true \
     -e JWT_SECRET=lasttest-nur-wegwerf-nicht-produktiv \
-    -e ADMIN_EMAIL=last-admin@ci.invalid -e ADMIN_PASSWORD=last-only-admin-pw-1 \
     -e SUPER_ADMIN_USERNAME=last-superadmin -e SUPER_ADMIN_PASSWORD=last-only-superadmin-pw-1 \
     -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" \
     -e TZ=Europe/Berlin \
@@ -97,7 +102,6 @@ docker run --rm --user 0 --network "$NETZ" --volumes-from last-backend \
     -v "$VERZ/docs/lasttests:/docs/lasttests" \
     -e TEST_BASE_URL=http://last-backend:8001 \
     -e MONGO_URL=mongodb://last-mongo:27017 -e DB_NAME=autoschnell_last \
-    -e ADMIN_EMAIL=last-admin@ci.invalid -e ADMIN_PASSWORD=last-only-admin-pw-1 \
     -e SUPER_ADMIN_USERNAME=last-superadmin -e SUPER_ADMIN_PASSWORD=last-only-superadmin-pw-1 \
     -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-4}" \
     "$IMAGE" sh -c "pip install -q psutil >/dev/null 2>&1; \

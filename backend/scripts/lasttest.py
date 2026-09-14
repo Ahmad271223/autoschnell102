@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 
 import aiohttp
 
+import lasttest_konten as LK
+
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -91,26 +93,30 @@ async def _timed(session, stats, name, method, url, capture=False, **kw):
         return 599
 
 
+# Kontonummer (13.09.2026): Konten legt der Super-Admin an, angemeldet wird
+# per Kontonummer; aufgeraeumt ueber die gesammelten IDs (lasttest_konten).
+IDS = LK.neue_ids()
+ADMIN_H = {}
+
+
 async def register_user(session, i):
-    mail = f"last_{SUFFIX}_{i}@e2etest-mail.de"
-    async with session.post(f"{API}/auth/register", json={
-            "email": mail, "password": PW,
-            "company_name": f"Lasttest {i}", "contact_person": "L T",
-            "phone": "0511 0"}) as r:
-        if r.status != 200:
-            return None
-        tok = (await r.json())["token"]
-    return {"mail": mail, "token": tok}
+    st, js = await LK.firma_anlegen(session, API, ADMIN_H, IDS, PW, f"Lasttest {i}",
+                                    kontakt="L T", telefon="0511 0")
+    if st != 200:
+        return None
+    st, login = await LK.anmelden(session, API, js["kontonummer"], PW)
+    if st != 200:
+        return None
+    return {"kontonummer": js["kontonummer"], "token": login["token"],
+            "id": js["user_id"], "dealer_id": js["dealer_id"]}
 
 
-def seed_subscriptions_and_get_metrics_before():
-    """Abos fuer alle Lasttest-Nutzer direkt in der DB setzen (compare
-    verlangt ein aktives Abo) + Provider-Zaehler VOR dem Test lesen."""
+def seed_subscriptions_and_get_metrics_before(users=()):
+    """Abos fuer die uebergebenen Lasttest-Nutzer direkt in der DB setzen
+    (compare verlangt ein aktives Abo) + Provider-Zaehler VOR dem Test lesen."""
     from pymongo import MongoClient
     from datetime import timedelta
     dbx = MongoClient(MONGO_URL)[DB_NAME]
-    users = list(dbx.users.find({"email": {"$regex": f"^last_{SUFFIX}_"}},
-                                {"id": 1, "dealer_id": 1}))
     now = datetime.now(timezone.utc)
     for u in users:
         dbx.subscriptions.insert_one({
@@ -151,17 +157,13 @@ def metrics_after(calls_before):
 def cleanup():
     from pymongo import MongoClient
     dbx = MongoClient(MONGO_URL)[DB_NAME]
-    uids = [u["id"] for u in dbx.users.find(
-        {"email": {"$regex": f"^last_{SUFFIX}_"}}, {"id": 1})]
-    dids = [d["id"] for d in dbx.dealers.find(
-        {"user_id": {"$in": uids}}, {"id": 1})]
-    for c in ("subscriptions", "vehicle_comparisons", "vehicles"):
+    dids = IDS["dealers"]
+    for c in ("vehicle_comparisons", "vehicles"):
         dbx[c].delete_many({"dealer_id": {"$in": dids}})
-    dbx.subscriptions.delete_many({"subject_user_id": {"$in": uids}})
     dbx.listings_cache.delete_many({"item_id": {"$regex": "^99"}})
     dbx.listings_cache_client.delete_many({"item_id": {"$regex": "^99"}})
-    dbx.dealers.delete_many({"id": {"$in": dids}})
-    dbx.users.delete_many({"id": {"$in": uids}})
+    # Konten, Firmen und Abos genau ueber die IDs (inkl. Wegwerf-Super-Admin)
+    LK.konten_loeschen(dbx, IDS)
 
 
 async def user_loop(session, user, stats, deadline, n_links):
@@ -239,9 +241,18 @@ async def main():
         # dieser Lasttest hunderte ECHTE Abrufe bei Kleinanzeigen ausloesen.
         # Wir pruefen das mit einem einzigen Vergleich und brechen ab, wenn
         # die Antwort nicht als synthetisch markiert ist.
+        from pymongo import MongoClient
+        sa = LK.wegwerf_super_admin(MongoClient(MONGO_URL)[DB_NAME], SUFFIX, IDS)
+        try:
+            ADMIN_H.update(await LK.super_admin_anmelden(session, API, sa))
+        except SystemExit:
+            cleanup()
+            raise
         probe_user = await register_user(session, "probe")
-        assert probe_user, "Registrierung kaputt — Backend erreichbar?"
-        seed_subscriptions_and_get_metrics_before()
+        if not probe_user:
+            cleanup()
+            raise SystemExit("Kontenanlage kaputt — Backend erreichbar?")
+        seed_subscriptions_and_get_metrics_before([probe_user])
         async with session.post(
                 f"{API}/mobile/compare",
                 headers={"Authorization": f"Bearer {probe_user['token']}"},
@@ -256,16 +267,16 @@ async def main():
                 "echte Abrufe bei Kleinanzeigen/mobile.de ausloesen.")
         print("[0/4] Mock-Modus bestaetigt — keine echten Anbieter-Abrufe.")
 
-        print(f"[1/4] Registriere {args.users} Test-Nutzer …")
+        print(f"[1/4] Lege {args.users} Test-Nutzer an (Super-Admin, Kontonummer) …")
         users = []
         for batch in range(0, args.users, 25):
             batch_users = await asyncio.gather(
                 *[register_user(session, i)
                   for i in range(batch, min(batch + 25, args.users))])
             users += [u for u in batch_users if u]
-        print(f"      {len(users)} Nutzer registriert")
+        print(f"      {len(users)} Nutzer angelegt und angemeldet")
 
-        n_users, calls_before = seed_subscriptions_and_get_metrics_before()
+        n_users, calls_before = seed_subscriptions_and_get_metrics_before(users)
         print(f"[2/4] {n_users} Abos gesetzt. Provider-Abrufe vorher: {calls_before}")
 
         stats = Stats()

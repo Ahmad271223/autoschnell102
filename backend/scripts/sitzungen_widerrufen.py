@@ -35,7 +35,8 @@ def main() -> int:
     jetzt = datetime.now(timezone.utc).isoformat()
     r1 = db.users.update_many({}, {"$set": {"current_session_id": None, "sitzungen_widerrufen_am": jetzt}})
     r2 = db.driver_accounts.update_many({}, {"$set": {"current_session_id": None, "sitzungen_widerrufen_am": jetzt}})
-    db.password_resets.delete_many({})
+    # Kontonummer (13.09.2026): keine Passwort-Reset-Links mehr (ein neues
+    # Passwort setzt nur der Betreiber) — password_resets wird nicht angefasst.
     db.activity_logs.insert_one({
         "id": str(uuid.uuid4()), "dealer_id": "", "user_id": "system",
         "action": "auth.sitzungen.widerrufen",
@@ -44,7 +45,7 @@ def main() -> int:
         "created_at": jetzt,
     })
     print(f"WIDERRUFEN: {r1.modified_count} Konten, {r2.modified_count} Fahrer — "
-          "alle muessen sich neu anmelden. Offene Passwort-Reset-Links geloescht.")
+          "alle muessen sich neu anmelden.")
     return 0
 
 

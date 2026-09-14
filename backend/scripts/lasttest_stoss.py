@@ -33,6 +33,8 @@ from pathlib import Path
 
 import aiohttp
 
+import lasttest_konten as LK
+
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -81,16 +83,24 @@ async def _post(sess, url, js, h, timeout=60):
                           else {})
 
 
-async def welt(sess):
+# Kontonummer (13.09.2026): Konten legt ein Wegwerf-Super-Admin an, angemeldet
+# wird per Kontonummer; aufgeraeumt ueber die gesammelten IDs.
+IDS = LK.neue_ids()
+
+
+async def welt(sess, firmen):
+    """Baut die Firmen in `firmen` auf (auch halb fertig aufraeumbar)."""
     dbx = _db()
     now = datetime.now(timezone.utc)
-    firmen = []
+    admin_h = await LK.super_admin_anmelden(
+        sess, API, LK.wegwerf_super_admin(dbx, SUF, IDS))
     for i in range(N_FIRMEN):
-        mail = f"st_chef_{i}_{SUF}@e2etest-mail.de"
-        st, js = await _post(sess, f"{API}/auth/register", {
-            "email": mail, "password": PW, "company_name": f"Stoss {i}",
-            "contact_person": f"C {i}", "phone": "0511 5"}, None)
-        assert st == 200, f"Register {st}: {str(js)[:300]}"
+        st, js = await LK.firma_anlegen(
+            sess, API, admin_h, IDS, PW, f"Stoss {i}", kontakt=f"C {i}",
+            telefon="0511 5", email=f"st_chef_{i}_{SUF}@e2etest-mail.de")
+        assert st == 200, f"Firma anlegen {st}: {str(js)[:300]}"
+        st, js = await LK.anmelden(sess, API, js["kontonummer"], PW)
+        assert st == 200, f"Chef-Anmeldung {st}: {str(js)[:300]}"
         h = {"Authorization": f"Bearer {js['token']}"}
         async with sess.get(f"{API}/auth/me", headers=h) as r:
             me = (await r.json())["user"]
@@ -101,20 +111,19 @@ async def welt(sess):
             "expires_at": (now + timedelta(days=1)).isoformat(),
             "created_at": now.isoformat()})
         firma = {"h": h, "me": me, "sucher": []}
+        firmen.append(firma)
         for k in range(2):
-            smail = f"st_such_{i}_{k}_{SUF}@e2etest-mail.de"
-            st, js = await _post(sess, f"{API}/dealer/sucher", {
-                "email": smail, "password": PW,
-                "first_name": "St", "last_name": f"S{i}{k}"}, h)
-            assert st == 200
+            st, js = await LK.sucher_anlegen(sess, API, admin_h, IDS, me["dealer_id"],
+                                             PW, "St", f"S{i}{k}")
+            assert st == 200, f"Sucher anlegen {st}: {str(js)[:300]}"
             dbx.subscriptions.insert_one({
                 "id": str(uuid.uuid4()), "dealer_id": me["dealer_id"],
                 "subject_user_id": js["sucher_id"], "plan": "monthly",
                 "status": "active",
                 "expires_at": (now + timedelta(days=1)).isoformat(),
                 "created_at": now.isoformat()})
-            st, js = await _post(sess, f"{API}/auth/login",
-                                 {"email": smail, "password": PW}, None)
+            st, js = await LK.anmelden(sess, API, js["kontonummer"], PW)
+            assert st == 200, f"Sucher-Anmeldung {st}: {str(js)[:300]}"
             firma["sucher"].append({"Authorization": f"Bearer {js['token']}"})
         # 1 Fahrzeug + Vertrag + Inserat je Firma (fuer S8: PDF/Foto)
         link = SERIE.links(1)[0]
@@ -135,7 +144,6 @@ async def welt(sess):
                              {}, h)
         assert st == 200
         firma["listing_id"] = js["id"]
-        firmen.append(firma)
     return firmen
 
 
@@ -154,7 +162,13 @@ def aufraeumen(firmen):
             d = root / unter / did
             if d.exists():
                 _sh.rmtree(d, ignore_errors=True)
-    dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
+    # Konten, Firmen, Abos genau ueber die IDs (inkl. Wegwerf-Super-Admin) —
+    # auch Firmen, deren Aufbau mittendrin abbrach.
+    for did in IDS["dealers"]:
+        for c in ("subscriptions", "vehicles", "appointments", "generated_pdfs",
+                  "resale_listings", "vehicle_comparisons", "listing_snapshots"):
+            dbx[c].delete_many({"dealer_id": did})
+    LK.konten_loeschen(dbx, IDS)
     dbx.listings_cache.delete_many({"item_id": {"$regex": "^89"}})
     dbx.link_jobs.delete_many({"item_id": {"$regex": "^89"}})
 
@@ -417,8 +431,9 @@ async def main():
     async with aiohttp.ClientSession(
             connector=conn,
             timeout=aiohttp.ClientTimeout(total=180)) as sess:
-        firmen = await welt(sess)
+        firmen = []
         try:
+            await welt(sess, firmen)
             for sz in szenarien:
                 for n in stufen:
                     await lauf(sess, firmen, sz, n)

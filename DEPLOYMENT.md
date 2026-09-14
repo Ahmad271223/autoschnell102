@@ -18,7 +18,7 @@ git clone <dein-repo> autoschnell && cd autoschnell
 ## 2. Konfiguration setzen
 ```bash
 cp .env.example .env
-nano .env          # JWT_SECRET, ADMIN_PASSWORD, SMTP, Domain … eintragen
+nano .env          # JWT_SECRET, SUPER_ADMIN_USERNAME, SUPER_ADMIN_PASSWORD, SMTP, Domain … eintragen
 ```
 - `JWT_SECRET` erzeugen: `openssl rand -hex 32`
 - `WEB_CONCURRENCY` = Anzahl CPU-Kerne des Servers.
@@ -168,6 +168,93 @@ COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml
 
 Ohne diese Zeile immer ausdruecklich
 `docker compose -f docker-compose.yml -f deploy/docker-compose.replica.yml up -d --build`.
+
+## Go-Live: Anmeldung mit Kontonummer und Live-Reset (Runbook)
+
+Einmaliger Ablauf beim Live-Gang der Anmeldung mit Kontonummer (Entscheidung
+13.09.2026): Die Testdaten werden gelöscht, nur der Super-Admin bleibt; danach
+legt er die echten Konten an. Alle `docker compose`-Befehle laufen mit BEIDEN
+Compose-Dateien (Vorfall 07.09.2026): `COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml`
+steht in der `.env` — sonst jeden Aufruf ausdrücklich mit
+`-f docker-compose.yml -f deploy/docker-compose.replica.yml`.
+
+1. **Voraussetzungen:** Der Hotfix, der die Selbstregistrierung von Käufern
+   und Fahrern in Produktion schließt, ist längst live. Alle Schritte der
+   Umstellung sind gemergt, die CI ist grün, der Wortlaut von AGB und
+   Datenschutzerklärung ist freigegeben. Das Wartungsfenster ist angekündigt,
+   mit dem Hinweis „nach der Umstellung die Seite einmal neu laden“.
+2. **Backup** (prod1, Backend läuft noch):
+   ```bash
+   docker compose exec backend python scripts/backup_mongo.py
+   docker compose exec backend python scripts/offsite_pruefen.py --laden
+   ```
+   Dieses Backup ist nach dem Reset der EINZIGE Weg zurück.
+3. **Nur das Backend stoppen, auf BEIDEN Servern:**
+   ```bash
+   cd /opt/autoschnell && docker compose stop backend
+   ```
+   mongo, web und proxy laufen weiter. Die Gesundheitsprüfung des Load
+   Balancers schlägt fehl, Besucher sehen die Wartung. `unless-stopped` startet
+   einen gestoppten Container auch nach einem Neustart des Docker-Dienstes
+   nicht wieder. Beweis-, Aufräum- und Link-Jobs laufen im Backend-Prozess —
+   danach schreibt niemand mehr in die Datenbank.
+4. **prod2: neuen Stand holen und bauen, noch NICHT starten:**
+   ```bash
+   cd /opt/autoschnell && git pull --ff-only
+   docker compose build backend web
+   ```
+   Nötig, weil `scripts/live_reset.py` erst im neuen Image liegt;
+   `deploy/rollout.sh` baut das Image sonst erst mitten im eigenen Ablauf.
+5. **prod2: Probelauf** (ändert nichts):
+   ```bash
+   docker compose run --rm --no-deps backend python scripts/live_reset.py --db autoschnell
+   ```
+   Ahmad prüft die Tabelle je Sammlung („wird gelöscht / bleibt“), die
+   Dateizahlen je Präfix und die Warnung zu echten Zahlungen. Eine Sammlung
+   „UNBEKANNT“ blockiert das Ausführen — erst klären.
+6. **prod2: Ausführen:**
+   ```bash
+   docker compose run --rm --no-deps backend python scripts/live_reset.py --db autoschnell \
+       --ausfuehren --bestaetige autoschnell --nummern-ab 10001
+   ```
+   Das Skript fragt zusätzlich `LOESCHEN` ab. `--nummern-ab` nur, wenn die
+   Nummern ab einem festen Wert beginnen sollen (hebt den Zähler nur an).
+   Bricht der Lauf ab, setzt ein erneuter Aufruf fort.
+7. **prod2: Rollout:**
+   ```bash
+   ERSTER_SERVER=1 sh deploy/rollout.sh
+   ```
+   Beim Start entfernt `ensure_indexes` die Eindeutigkeit der E-Mail und legt
+   `kontonummer_eindeutig` an. Ab „FERTIG“ trägt prod2 allein.
+8. **prod1 bleibt gestoppt bis zu seinem eigenen Rollout.** Er darf NICHT mit
+   dem alten Stand starten (kein `docker compose start backend`): der alte Code
+   legt `email_1` wieder eindeutig an, scheitert an den Konten ohne E-Mail und
+   bricht als Leader mit Exit 78 ab. Stattdessen direkt:
+   ```bash
+   cd /opt/autoschnell && sh deploy/rollout.sh
+   ```
+   Die Warnung „kein laufender Oberflaechen-Container“ kommt dabei nicht, weil
+   web die ganze Zeit lief.
+9. **Cloudflare → Purge Everything.**
+10. **Super-Admin anmelden** (Benutzername, Passwort, Zwei-Faktor) und die
+    echten Konten anlegen: Firma mit Chef, Sucher, Zwischenhändler, Fahrer.
+    Kontonummer und Passwort vergibt der Betreiber und teilt sie den Kunden
+    auf sicherem Weg mit. Hinweis an alle mit installierter App: **Seite einmal
+    neu laden** — eine noch zwischengespeicherte alte Anmeldemaske (E-Mail-Feld)
+    kann keine Nummer senden.
+11. **Erst jetzt** `ADMIN_EMAIL`, `ADMIN_PASSWORD` und `SELF_SIGNUP` aus der
+    `.env` BEIDER Server entfernen (kein Neustart nötig). Die Server-.env erst
+    nach beiden Rollouts bereinigen: solange ein alter Stand noch hätte
+    starten können, verlangte dessen Produktionsprüfung `ADMIN_PASSWORD`.
+12. **Zurück auf den alten Stand:**
+    - bis einschließlich Punkt 5 (noch nichts gelöscht): auf beiden Servern
+      `docker compose start backend` — die alten Container starten wieder;
+    - ab Punkt 6 nur per Restore des Backups aus Punkt 2 (siehe „Restore“),
+      danach alter Commit (`git reset --hard <alt>`) und `sh deploy/rollout.sh`
+      auf beiden Servern. Konten ohne E-Mail lassen den alten Code nicht starten.
+13. **Sicherungen:** Die lokalen Backups (14 Tage) und die Offsite-Kopien
+    enthalten die Testdaten bis zur Rotation. Wer sie früher loswerden will,
+    löscht sie von Hand.
 
 ## Backups
 Das Backend sichert **täglich um 03:00** MongoDB + alle Dateien nach
@@ -664,7 +751,7 @@ docker compose exec -T backend python scripts/replikat_pruefen.py
 
 ## Sicherheits-Checkliste vor dem Live-Gang
 - [ ] `JWT_SECRET` auf langen Zufallswert gesetzt
-- [ ] `ADMIN_PASSWORD` stark und geändert (nicht der Entwicklungswert)
+- [ ] `SUPER_ADMIN_PASSWORD` stark und geändert (nicht der Entwicklungswert); `SUPER_ADMIN_USERNAME` sieht nicht wie eine Kontonummer aus
 - [ ] `.env` ist **nicht** im Git (steht in .gitignore)
 - [ ] HTTPS-Zertifikat aktiv, HTTP leitet auf HTTPS um
 - [ ] Backups werden auf einen zweiten Ort gespiegelt
@@ -681,13 +768,13 @@ Historien-Bereinigung. Reihenfolge:
 ```bash
 # 1. Neue Werte erzeugen (jeweils >= 32 Zeichen Zufall bzw. starke Passwörter)
 openssl rand -base64 48        # JWT_SECRET
-# 2. In .env eintragen: JWT_SECRET, ADMIN_PASSWORD, SUPER_ADMIN_PASSWORD,
+# 2. In .env eintragen: JWT_SECRET, SUPER_ADMIN_PASSWORD,
 #    MONGO_PASSWORD (+ Mongo-Benutzer ändern: mongosh db.changeUserPassword),
 #    SMTP_PASS, STRIPE_*, APIFY_TOKEN, S3_SECRET_KEY
 # 3. Stack neu starten (neue Werte greifen; alte JWTs sind durch den neuen
 #    JWT_SECRET ungültig)
 docker compose up -d --build
-# 4. Alle Sitzungen widerrufen (auch Fahrer/Käufer) + Reset-Links löschen
+# 4. Alle Sitzungen widerrufen (auch Fahrer/Käufer)
 docker compose exec backend python scripts/sitzungen_widerrufen.py --yes
 # 5. Nachweis: Datum, wer, welche Werte — im Betriebsprotokoll festhalten
 ```
@@ -828,10 +915,25 @@ Browser es kann und die App dort noch nicht installiert ist.
 Alle Sucher einer Firma sind eigenständige Konten und dürfen sich nie
 gegenseitig ausbremsen:
 
-- **Anmeldung:** 10 Versuche je Minute und **Konto** (IP + Kennung). Nach
-  einer erfolgreichen Anmeldung wird der Zähler geleert. Zusätzlich ein
-  weiter gefasstes Limit je IP gegen Rateversuche (`LOGIN_IP_LIMIT`,
-  Standard 120/min) — 30 Sucher hinter einer Büro-IP passen hinein.
+- **Anmeldung:** 10 Versuche je Minute und **Konto** (IP + Kontonummer bzw.
+  Benutzername des Super-Admins). Nach einer erfolgreichen Anmeldung wird
+  dieser Zähler geleert. Zusätzlich ein weiter gefasstes Limit je IP gegen
+  Rateversuche (`LOGIN_IP_LIMIT`, Standard 120/min) — 30 Sucher hinter einer
+  Büro-IP passen hinein.
+- **Sperre je Kontonummer (13.09.2026):** Fortlaufende Nummern sind erratbar;
+  über viele IPs ließe sich ein Passwort gegen alle Nummern probieren. Deshalb
+  zählt ein dritter Zähler die Fehlversuche je Kontonummer OHNE IP: nach
+  `LOGIN_KONTO_LIMIT` (Standard 30) Fehlversuchen in `LOGIN_KONTO_FENSTER`
+  (Standard 900 s) antwortet die Anmeldung 429 — gleicher Text für vorhandene
+  und unbekannte Nummern. Ausgenommen sind IPs, von denen sich das Konto schon
+  erfolgreich angemeldet hat (bis zu 5, nur als HMAC am Konto). Beim Erreichen
+  der Grenze meldet der Betrieb den Alarm `login_konto_angegriffen`. Eine
+  erfolgreiche Anmeldung leert diesen Zähler bewusst NICHT, er läuft mit dem
+  Fenster ab. Vorher aufheben: **Passwort setzen** durch den Betreiber (Chef,
+  Sucher, Zwischenhändler, Fahrer) oder
+  `docker compose exec backend python scripts/anmeldesperre_aufheben.py <kontonummer> --ausfuehren`
+  (auch mit dem Benutzernamen des Super-Admins; ohne `--ausfuehren` nur
+  Probelauf). `LOGIN_KONTO_LIMIT=0` sperrt nie und meldet nur noch den Alarm.
 - **Kleinanzeigen-Rückfall:** `ABRUF_RUECKFALL_TAGESLIMIT` (25) gilt je
   **Sucher** und Tag, nicht mehr je Firma.
 - **Vorschaubilder:** `BILD_PROXY_LIMIT` (1500/min je IP). Der Bild-Link ist
@@ -937,7 +1039,7 @@ python scripts/backup_mongo.py --wartung
 
 ## E-Mail-Versand über Resend
 
-Alle Mails (Kaufverträge, Passwort-Reset) gehen über **eine eigene Absenderadresse**, nicht über die Adresse des Händlers. Nur so bleiben die Mails zustellbar, weil nur die eigene Domain bei Resend verifiziert ist.
+Alle Mails (Kaufverträge und die Belegkopie an den Sucher) gehen über **eine eigene Absenderadresse**, nicht über die Adresse des Händlers. Nur so bleiben die Mails zustellbar, weil nur die eigene Domain bei Resend verifiziert ist.
 
 1. Domain in Resend anlegen und die drei DNS-Einträge (SPF, DKIM, DMARC) setzen, bis der Status „verified" ist.
 2. In der `.env`:
@@ -977,7 +1079,7 @@ und ohne Kosten:
   wer den Link hat, kann ihn öffnen.
 
 Voraussetzung: `FRONTEND_URL` in der `.env` muss die öffentliche
-https-Adresse sein (steht dort ohnehin für den Passwort-Reset). Der Index
+https-Adresse sein (die Produktionsprüfung verlangt das ohnehin). Der Index
 `vertrag_freigabe_token` auf `generated_pdfs` wird beim Start angelegt.
 
 Was das System belegen kann und was nicht: belegt sind Erstellung, Inhalt
@@ -1201,6 +1303,8 @@ docker compose run --rm backend python scripts/betriebsprobe.py app.auto-schnell
 Der Host-Kopf ist nötig, weil der Webserver nur die eingetragene Domain bedient; `-k` überspringt die Zertifikatsprüfung, weil `localhost` nicht im Zertifikat steht.
 
 Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
+
+Konten gibt es nur über den Super-Admin (Kontonummer, 13.09.2026): Er legt Firma mit Chef, Sucher, Zwischenhändler und Fahrer an. **Kontonummer und Passwort vergibt der Betreiber** und teilt sie den Kunden mit — Chef z. B. `10023`, Sucher `10023-2`, Zwischenhändler und Fahrer eine eigene Nummer. Eine Selbstregistrierung gibt es nicht; ein vergessenes Passwort setzt der Betreiber neu (Admin → Passwort setzen).
 
 ### Stufe 2 — zweiter Server und Load Balancer (später)
 

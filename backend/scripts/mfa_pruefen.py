@@ -32,8 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Zwei-Faktor-Anmeldung pruefen (nur lesend)")
+    # Kontonummer (13.09.2026): Zwei-Faktor hat nur der Super-Admin, und der
+    # meldet sich mit Benutzername an (Kontonummern haben kein MFA).
     ap.add_argument("--konto", required=True,
-                    help="Benutzername oder E-Mail des Admin-Kontos")
+                    help="Benutzername des Super-Admin-Kontos (SUPER_ADMIN_USERNAME)")
     ap.add_argument("--code", default="", help="6-stelliger Code aus der App")
     ap.add_argument("--fenster", type=int, default=20,
                     help="wie viele 30-Sekunden-Schritte in beide Richtungen "
@@ -54,17 +56,21 @@ def main() -> int:
 
     such = args.konto.strip()
     nutzer = db.users.find_one(
-        {"$or": [{"username": such}, {"email": such.lower()},
-                 {"email": {"$regex": f"^{such}$", "$options": "i"}}]},
-        {"_id": 0, "id": 1, "email": 1, "username": 1, "role": 1, "mfa": 1})
+        {"username": such, "role": "admin"},
+        {"_id": 0, "id": 1, "username": 1, "role": 1, "is_super_admin": 1, "mfa": 1})
     if not nutzer:
-        print(f"FEHLER: Kein Konto '{such}' gefunden.")
-        print("Vorhandene Admin-Konten:")
-        for u in db.users.find({"role": "admin"}, {"_id": 0, "email": 1, "username": 1}):
-            print("   ", u.get("username") or "", u.get("email") or "")
+        print(f"FEHLER: Kein Admin-Konto mit dem Benutzernamen '{such}' gefunden.")
+        from kontonummer import normalisieren
+        if normalisieren(such):
+            print("HINWEIS: Das ist eine Kontonummer — Chef, Sucher, Zwischenhaendler "
+                  "und Fahrer haben keine Zwei-Faktor-Anmeldung.")
+        print("Vorhandene Admin-Konten (Benutzername):")
+        for u in db.users.find({"role": "admin"}, {"_id": 0, "username": 1}):
+            print("   ", u.get("username") or "(ohne Benutzernamen — Anmeldung nicht moeglich)")
         return 1
 
-    print(f"Konto : {nutzer.get('username') or nutzer.get('email')}  (Rolle {nutzer.get('role')})")
+    print(f"Konto : {nutzer.get('username')}  (Rolle {nutzer.get('role')}"
+          f"{', Super-Admin' if nutzer.get('is_super_admin') else ''})")
     m = nutzer.get("mfa") or {}
     aktiv = bool(m.get("aktiv"))
     print(f"Status: {'AKTIV' if aktiv else 'noch nicht aktiv'}")

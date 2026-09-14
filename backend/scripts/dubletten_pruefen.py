@@ -11,34 +11,40 @@ from pymongo import MongoClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 DB_NAME = os.environ.get("DB_NAME", "autoschnell")
-PRUEFUNGEN = (("users", "email"), ("dealers", "user_id"),
-              ("driver_accounts", "email"), ("driver_accounts", "driver_code"))
+# Kontonummer (13.09.2026): Angemeldet wird per Kontonummer — sie muss je
+# Sammlung eindeutig sein (Teil-Index kontonummer_eindeutig; eine Dublette
+# bricht den Produktionsstart ab). Die E-Mail ist nur noch Kontaktadresse und
+# darf mehrfach vorkommen, sie wird nicht mehr geprueft.
+PRUEFUNGEN = (("users", "kontonummer"), ("dealers", "user_id"),
+              ("driver_accounts", "kontonummer"), ("driver_accounts", "driver_code"))
 
 
 def kreuz_dubletten(db) -> int:
-    """Runde 13: B5 — dieselbe Login-E-Mail in users UND driver_accounts.
-    Vorher wurde jede Sammlung nur fuer sich geprueft; seit Runde 13 lehnen
-    alle Anlagepfade ein solches Doppelkonto ab, ein Altbestand muss aber
-    von Hand bereinigt werden (Fahrer loeschen via DELETE /admin/drivers/{id}
-    oder der Fahrer nimmt eine andere Adresse) — sonst findet der gemeinsame
-    Passwort-Reset weiterhin beide Konten. Vergleich schreibungsunabhaengig
-    (klein, getrimmt). Liefert die Zahl betroffener Adressen."""
+    """Kontonummer (13.09.2026): dieselbe Kontonummer in users UND
+    driver_accounts. Einen Index ueber beide Sammlungen gibt es nicht — die
+    Eindeutigkeit sichert der gemeinsame Zaehler (counters.kunden_nr) samt
+    Selbstheilung. Ein Treffer hier heisst: Nummer von Hand vergeben oder
+    Zaehler zurueckgesetzt. Die Anmeldemasken sind zwar getrennt, Limiter und
+    Audit zaehlen aber je Nummer; ein Konto muss eine neue Nummer bekommen
+    (Konto loeschen und vom Super-Admin neu anlegen lassen).
+    Liefert die Zahl betroffener Nummern."""
     fahrer = {}
-    for d in db.driver_accounts.find({"email": {"$type": "string"}},
-                                     {"_id": 0, "id": 1, "email": 1, "created_at": 1}):
-        fahrer.setdefault(d["email"].strip().lower(), []).append(d)
-    n = 0
-    for u in db.users.find({"email": {"$type": "string"}},
-                           {"_id": 0, "id": 1, "email": 1, "role": 1, "created_at": 1}):
-        schluessel = u["email"].strip().lower()
+    for d in db.driver_accounts.find({"kontonummer": {"$type": "string"}},
+                                     {"_id": 0, "id": 1, "kontonummer": 1, "created_at": 1}):
+        fahrer.setdefault(d["kontonummer"].strip(), []).append(d)
+    gemeldet = set()
+    for u in db.users.find({"kontonummer": {"$type": "string"}},
+                           {"_id": 0, "id": 1, "kontonummer": 1, "role": 1, "created_at": 1}):
+        schluessel = u["kontonummer"].strip()
         if schluessel not in fahrer:
             continue
-        n += 1
-        print(f"users+driver_accounts.email = {schluessel!r}: Konto in BEIDEN Sammlungen")
+        if schluessel not in gemeldet:
+            gemeldet.add(schluessel)
+            print(f"users+driver_accounts.kontonummer = {schluessel!r}: Nummer in BEIDEN Sammlungen")
+            for e in fahrer[schluessel]:
+                print(f"    driver_accounts id={e.get('id')}  created_at={e.get('created_at')}")
         print(f"    users id={u.get('id')}  role={u.get('role')}  created_at={u.get('created_at')}")
-        for e in fahrer[schluessel]:
-            print(f"    driver_accounts id={e.get('id')}  created_at={e.get('created_at')}")
-    return n
+    return len(gemeldet)
 
 
 def doppelte_offene_termine(db) -> int:
@@ -91,8 +97,9 @@ def doppelte_fahrzeuge(db) -> int:
     return n
 
 
-def main() -> int:
-    db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
+def main(db=None) -> int:
+    if db is None:
+        db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
     gefunden = 0
     for coll, feld in PRUEFUNGEN:
         for d in db[coll].aggregate([

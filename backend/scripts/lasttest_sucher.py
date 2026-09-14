@@ -20,16 +20,22 @@ Dazu die Laufzeiten je Weg (p50/p95/p99) und die Zahl echter Anbieter-Abrufe.
 
 Zwei Betriebsarten:
 
-  1) Konten selbst anlegen (lokal, braucht SELF_SIGNUP=true):
-       python -X utf8 scripts/lasttest_sucher.py --sucher 30
-       python -X utf8 scripts/lasttest_sucher.py --sucher 100 --stufen 30,50,100
+  1) Konten selbst anlegen (lokal/Staging). Kontonummer (13.09.2026): Konten
+     legt nur der Super-Admin an. Mit --db-name legt das Skript dafuer einen
+     Wegwerf-Super-Admin in dieser Datenbank an (und loescht ihn nach der
+     Anlage wieder); ohne --db-name meldet es SUPER_ADMIN_USERNAME/
+     SUPER_ADMIN_PASSWORD an (dessen offene Sitzung endet dabei):
+       python -X utf8 scripts/lasttest_sucher.py --sucher 30 --db-name autoschnell_last
+       python -X utf8 scripts/lasttest_sucher.py --sucher 100 --stufen 30,50,100 --db-name autoschnell_last
 
   2) VORHANDENE Konten benutzen (z.B. die echten Testkonten einer Firma):
        python -X utf8 scripts/lasttest_sucher.py --konten konten.json
-     konten.json:
+     konten.json (Anmeldung per Kontonummer):
        {"basis": "https://app.auto-schnellkauf.de",
-        "chef": {"email": "...", "passwort": "..."},
-        "sucher": [{"email": "...", "passwort": "..."}, ...]}
+        "chef": {"kontonummer": "10023", "passwort": "..."},
+        "sucher": [{"kontonummer": "10023-2", "passwort": "..."}, ...]}
+     Alte Dateien mit "email" statt "kontonummer" werden noch gelesen — eine
+     Anmeldung per E-Mail gibt es aber nicht mehr (401); Nummern eintragen.
 
 Ohne --echte-abrufe verlangt das Skript ein Backend mit
 MOCK_PROVIDER_FETCH=true und ruft KEINE echten Anbieter an. Mit
@@ -47,6 +53,8 @@ import uuid
 from datetime import datetime, timezone
 
 import aiohttp
+
+import lasttest_konten as LK
 
 STANDARD_BASIS = (os.environ.get("TEST_BASE_URL") or "http://localhost:8002").rstrip("/")
 
@@ -127,9 +135,16 @@ class Klient:
             return 599, str(exc)
 
 
-async def anmelden(k: Klient, email: str, passwort: str, fahrer=False):
+def kennung(konto: dict) -> str:
+    """Kontonummer (13.09.2026) des Eintrags; alte konten.json-Dateien mit
+    "email" werden noch gelesen (die Anmeldung damit ergibt 401)."""
+    return str(konto.get("kontonummer") or konto.get("email") or "").strip()
+
+
+async def anmelden(k: Klient, kontonummer: str, passwort: str, fahrer=False):
     pfad = "/driver/login" if fahrer else "/auth/login"
-    code, daten = await k.ruf("POST", pfad, daten={"email": email, "password": passwort},
+    code, daten = await k.ruf("POST", pfad,
+                              daten={"kontonummer": kontonummer, "password": passwort},
                               weg="anmelden")
     if code != 200 or not isinstance(daten, dict):
         return None, f"{code}: {str(daten)[:160]}"
@@ -137,28 +152,64 @@ async def anmelden(k: Klient, email: str, passwort: str, fahrer=False):
 
 
 # ------------------------------------------------------------- Aufbau
-async def konten_anlegen(k: Klient, anzahl: int, passwort: str):
-    """Eine Firma mit Chef und N Suchern anlegen (nur lokal/Staging)."""
+def _sa_loeschen(args, ids):
+    from pymongo import MongoClient
+    c = MongoClient(args.mongo, serverSelectionTimeoutMS=5000)
+    try:
+        LK.konten_loeschen(c[args.db_name], ids)
+    finally:
+        c.close()
+
+
+async def super_admin_fuer_anlage(k: Klient, args):
+    """Kontonummer (13.09.2026): Token eines Super-Admins fuer die Anlage.
+    -> (Kopfzeilen, ids des Wegwerf-Kontos oder None)."""
+    if args.db_name:
+        from pymongo import MongoClient
+        ids = LK.neue_ids()
+        c = MongoClient(args.mongo, serverSelectionTimeoutMS=5000)
+        try:
+            sa = LK.wegwerf_super_admin(c[args.db_name], uuid.uuid4().hex[:8], ids)
+        finally:
+            c.close()
+        try:
+            return await LK.super_admin_anmelden(k.s, k.api, sa), ids
+        except BaseException:
+            _sa_loeschen(args, ids)
+            raise
+    name = (os.environ.get("SUPER_ADMIN_USERNAME") or "").strip()
+    pw = os.environ.get("SUPER_ADMIN_PASSWORD") or ""
+    if name and pw:
+        print("     Anlage ueber SUPER_ADMIN_USERNAME — dessen offene Sitzung endet.")
+        return await LK.super_admin_anmelden(k.s, k.api, {"username": name, "passwort": pw}), None
+    raise SystemExit("Konten anlegen braucht --db-name (Wegwerf-Super-Admin in dieser "
+                     "Datenbank) oder SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD — "
+                     "sonst --konten benutzen.")
+
+
+async def konten_anlegen(k: Klient, anzahl: int, passwort: str, admin_h: dict):
+    """Eine Firma mit Chef und N Suchern anlegen (nur lokal/Staging) — ueber
+    den Super-Admin; der Chef meldet sich einmal per Kontonummer an."""
     s = uuid.uuid4().hex[:8]
-    email = f"lt_chef_{s}@e2etest-mail.de"
-    code, daten = await k.ruf("POST", "/auth/register", daten={
-        "email": email, "password": passwort, "company_name": f"Lasttest Firma {s}",
-        "contact_person": "Chef", "phone": "0511 1"}, weg="registrieren")
+    ids = LK.neue_ids()
+    code, daten = await LK.firma_anlegen(
+        k.s, k.api, admin_h, ids, passwort, f"Lasttest Firma {s}", kontakt="Chef",
+        telefon="0511 1", email=f"lt_chef_{s}@e2etest-mail.de")
     if code != 200:
-        raise SystemExit(f"Firma anlegen fehlgeschlagen ({code}): {str(daten)[:200]}\n"
-                         "Lokal SELF_SIGNUP=true setzen oder --konten benutzen.")
-    chef_token = daten["token"]
+        raise SystemExit(f"Firma anlegen fehlgeschlagen ({code}): {str(daten)[:200]}")
+    chef = {"kontonummer": daten["kontonummer"], "passwort": passwort, "id": daten["user_id"]}
+    chef["token"], fehler = await anmelden(k, chef["kontonummer"], passwort)
+    if not chef["token"]:
+        raise SystemExit(f"Chef-Anmeldung fehlgeschlagen: {fehler}")
     sucher = []
     for i in range(anzahl):
-        se = f"lt_s{i}_{s}@e2etest-mail.de"
-        code, d = await k.ruf("POST", "/dealer/sucher", token=chef_token, daten={
-            "email": se, "password": passwort, "first_name": "Sucher",
-            "last_name": f"{i}"}, weg="sucher anlegen")
+        code, d = await LK.sucher_anlegen(k.s, k.api, admin_h, ids, daten["dealer_id"],
+                                          passwort, "Sucher", f"{i}")
         if code != 200:
             raise SystemExit(f"Sucher {i} anlegen fehlgeschlagen ({code}): {str(d)[:200]}")
-        sucher.append({"email": se, "passwort": passwort, "id": d.get("sucher_id")})
-    return {"chef": {"email": email, "passwort": passwort, "token": chef_token},
-            "sucher": sucher, "suffix": s}
+        sucher.append({"kontonummer": d["kontonummer"], "passwort": passwort,
+                       "id": d.get("sucher_id")})
+    return {"chef": chef, "sucher": sucher, "suffix": s}
 
 
 def abos_seeden(mongo_url: str, db_name: str, dealer_id: str, nutzer: list) -> int:
@@ -187,18 +238,23 @@ def abos_seeden(mongo_url: str, db_name: str, dealer_id: str, nutzer: list) -> i
 async def alle_anmelden(k: Klient, konten: dict):
     """Jeder bekommt ein EIGENES Token — die Einmal-Sitzungs-Regel verbietet
     das Teilen, und genau darum geht es hier."""
+    ohne_nummer = [kennung(x) for x in [konten["chef"]] + konten["sucher"]
+                   if not x.get("kontonummer")]
+    if ohne_nummer:
+        print(f"!! {len(ohne_nummer)} Eintraege ohne 'kontonummer' (z.B. {ohne_nummer[0]!r}) — "
+              "die Anmeldung per E-Mail gibt es nicht mehr, Kontonummern eintragen.")
     if not konten["chef"].get("token"):
-        tok, fehler = await anmelden(k, konten["chef"]["email"], konten["chef"]["passwort"])
+        tok, fehler = await anmelden(k, kennung(konten["chef"]), konten["chef"]["passwort"])
         if not tok:
             raise SystemExit(f"Chef-Anmeldung fehlgeschlagen: {fehler}")
         konten["chef"]["token"] = tok
     ergebnis = await asyncio.gather(*[
-        anmelden(k, su["email"], su["passwort"]) for su in konten["sucher"]])
+        anmelden(k, kennung(su), su["passwort"]) for su in konten["sucher"]])
     gescheitert = []
     for su, (tok, fehler) in zip(konten["sucher"], ergebnis):
         su["token"] = tok
         if not tok:
-            gescheitert.append(f"{su['email']}: {fehler}")
+            gescheitert.append(f"{kennung(su)}: {fehler}")
     return gescheitert
 
 
@@ -256,12 +312,13 @@ async def szenario_chef_liest(k: Klient, chef_token: str, runden: int = 5):
 
 # ------------------------------------------------------------ Pruefungen
 async def pruefe_trennung(k: Klient, sucher: list, eigene: dict) -> list:
-    """Sieht ein Sucher Daten eines Kollegen? `eigene` = {user_email: {ids}}."""
+    """Sieht ein Sucher Daten eines Kollegen? `eigene` = {kontonummer: {ids}}."""
     verstoesse = []
     KONTO_FELDER = ("owner_user_id", "mitbearbeiter_ids", "uebernommen_von")
 
     async def einer(su):
-        meine = eigene.get(su["email"], set())
+        wer = kennung(su)
+        meine = eigene.get(wer, set())
         code, fahrzeuge = await k.ruf("GET", "/vehicles", token=su["token"],
                                       weg="sucher /vehicles")
         if code != 200 or not isinstance(fahrzeuge, list):
@@ -269,18 +326,18 @@ async def pruefe_trennung(k: Klient, sucher: list, eigene: dict) -> list:
         for f in fahrzeuge:
             fid = f.get("id")
             if fid and meine and fid not in meine:
-                fremd = [e for e, ids in eigene.items() if e != su["email"] and fid in ids]
+                fremd = [e for e, ids in eigene.items() if e != wer and fid in ids]
                 if fremd:
                     verstoesse.append(
-                        f"FREMDES FAHRZEUG: {su['email']} sieht {fid} von {fremd[0]}")
+                        f"FREMDES FAHRZEUG: {wer} sieht {fid} von {fremd[0]}")
             for feld in KONTO_FELDER:
                 if feld in f:
                     verstoesse.append(
-                        f"KONTO-KENNUNG: {su['email']} bekommt '{feld}' in /vehicles")
+                        f"KONTO-KENNUNG: {wer} bekommt '{feld}' in /vehicles")
             for feld in ("owner_name", "mitbearbeiter_namen"):
                 if f.get(feld):
                     verstoesse.append(
-                        f"KOLLEGENNAME: {su['email']} bekommt '{feld}' = {f[feld]}")
+                        f"KOLLEGENNAME: {wer} bekommt '{feld}' = {f[feld]}")
         code, bestand = await k.ruf("GET", "/bestand", token=su["token"],
                                     weg="sucher /bestand")
         if code == 200 and isinstance(bestand, dict):
@@ -288,14 +345,14 @@ async def pruefe_trennung(k: Klient, sucher: list, eigene: dict) -> list:
                 for feld in KONTO_FELDER:
                     if feld in f:
                         verstoesse.append(
-                            f"KONTO-KENNUNG: {su['email']} bekommt '{feld}' in /bestand")
+                            f"KONTO-KENNUNG: {wer} bekommt '{feld}' in /bestand")
         code, vertraege = await k.ruf("GET", "/contracts", token=su["token"],
                                       weg="sucher /contracts")
         if code == 200 and isinstance(vertraege, list):
             for v in vertraege:
                 if v.get("user_id") and v["user_id"] != su.get("id"):
                     verstoesse.append(
-                        f"FREMDER VERTRAG: {su['email']} sieht Vertrag von {v['user_id']}")
+                        f"FREMDER VERTRAG: {wer} sieht Vertrag von {v['user_id']}")
 
     await asyncio.gather(*[einer(su) for su in sucher])
     return verstoesse
@@ -377,7 +434,12 @@ async def lauf(args):
                   f"gegen {args.basis}")
         else:
             print(f"Lege Firma mit {args.sucher} Suchern an ...")
-            konten = await konten_anlegen(k, args.sucher, args.passwort)
+            admin_h, sa_ids = await super_admin_fuer_anlage(k, args)
+            try:
+                konten = await konten_anlegen(k, args.sucher, args.passwort, admin_h)
+            finally:
+                if sa_ids:          # Wegwerf-Super-Admin nur fuer die Anlage
+                    _sa_loeschen(args, sa_ids)
             if args.db_name:
                 code, me = await k.ruf("GET", "/auth/me",
                                        token=konten["chef"]["token"], weg="auth/me")
@@ -430,11 +492,11 @@ async def lauf(args):
         eigene: dict = {}
         for su, url, code, daten in eigene_roh:
             if code == 200 and isinstance(daten, dict) and daten.get("vehicle_id"):
-                eigene.setdefault(su["email"], set()).add(daten["vehicle_id"])
+                eigene.setdefault(kennung(su), set()).add(daten["vehicle_id"])
         for su, code, daten in gleiche:
             if code == 200 and isinstance(daten, dict) and daten.get("vehicle_id"):
                 # Das gemeinsame Auto gehoert allen, die es verglichen haben.
-                eigene.setdefault(su["email"], set()).add(daten["vehicle_id"])
+                eigene.setdefault(kennung(su), set()).add(daten["vehicle_id"])
 
         # --- Szenario 3: Trennung pruefen ---
         print("3/4  pruefe Trennung der Konten ...")

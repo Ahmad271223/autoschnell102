@@ -7,11 +7,13 @@ Befehl und Abnahmekriterium stehen jeweils dabei.
 ## 1. Konfiguration (.env)
 
 - [ ] **[Server]** `.env` aus `.env.example` erstellen und füllen:
-  `JWT_SECRET` (openssl rand -hex 32), starkes `ADMIN_PASSWORD`,
+  `JWT_SECRET` (openssl rand -hex 32), `SUPER_ADMIN_USERNAME` (keine Zahl)
+  und starkes `SUPER_ADMIN_PASSWORD`,
   `FRONTEND_URL=https://…`, `CORS_ORIGINS=https://…`
 - [x] Das Backend **verweigert den Start** mit Entwicklungswerten:
   `APP_ENV=production` ist im docker-compose gesetzt, `production_check.py`
-  prüft JWT_SECRET, Admin-Passwörter, FRONTEND_URL, CORS, Mongo-Auth und
+  prüft JWT_SECRET, das Super-Admin-Passwort (und dass der Benutzername nicht
+  wie eine Kontonummer aussieht), FRONTEND_URL, CORS, Mongo-Auth und
   einen versehentlich aktiven Anbieter-Mock (Exit 78 mit klarer Meldung —
   automatisiert getestet).
 
@@ -41,11 +43,20 @@ Befehl und Abnahmekriterium stehen jeweils dabei.
   `curl -I http://autoschnell.de` → 301 auf https;
   SSL-Labs-Note mindestens A.
 
-## 4. E-Mail (Passwort vergessen)
+## 4. Anmeldung mit Kontonummer und E-Mail-Versand
 
-- [ ] **[Server]** Resend-/SMTP-Zugang in `.env` (`SMTP_*`), Absender-Domain
-  verifizieren (SPF/DKIM). Abnahme: „Passwort vergessen" auf Staging
-  auslösen → Mail kommt an, Link zeigt auf `FRONTEND_URL`.
+- [ ] **[Server]** Login mit Kontonummer: Der Super-Admin legt eine Testfirma
+  an (Admin → Nutzer) und einen Sucher dazu. Abnahme: Chef meldet sich mit der
+  angezeigten Nummer (z. B. `10023`) an, der Sucher mit `10023-2`; eine
+  falsche Nummer ergibt „Kontonummer oder Passwort falsch“.
+- [ ] **[Server]** Betreiber setzt Passwort: Admin → Konto → Passwort setzen.
+  Abnahme: die offene Sitzung des Kontos endet, die Anmeldung klappt nur mit
+  dem neuen Passwort; die Seite „Passwort vergessen?“ zeigt nur den Hinweis auf
+  den Betreiber (kein Formular, keine Mail).
+- [ ] **[Server]** Resend-/SMTP-Zugang in `.env` (`RESEND_API_KEY` bzw.
+  `SMTP_*`), Absender-Domain verifizieren (SPF/DKIM). Abnahme: einen
+  Kaufvertrag an eine Test-Adresse schicken → Mail kommt an, die Antwort geht
+  an den Sucher (ohne eigene Adresse an die Firmenadresse).
 
 ## 5. Browser-Erweiterung (Client-Abruf)
 

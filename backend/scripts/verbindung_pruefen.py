@@ -12,7 +12,8 @@ Geprueft wird:
   4. Replica Set (noetig fuer stimmige Sicherungen) oder Einzelserver
   5. Inhalt: vorhandene Collections mit Dokumentzahlen — ist die Datenbank
      leer (Erstinbetriebnahme) oder liegen schon Daten darin?
-  6. Wichtige Eindeutigkeits-Indizes (users.email, subscriptions)
+  6. Wichtige Eindeutigkeits-Indizes (kontonummer_eindeutig in users und
+     driver_accounts — Anmeldung per Kontonummer, 13.09.2026)
   7. optional: Schreibtest in einer eigenen Wegwerf-Collection
 
 Aufruf:
@@ -43,6 +44,26 @@ def warn(m):
 
 def fehler(m):
     FEHLER.append(m); print(f"  FEHLER {m}")
+
+
+# Kontonummer (13.09.2026): Name des Teil-Index aus indizes.konto_indizes —
+# ohne ihn ist die Anmeldung per Nummer nicht eindeutig.
+KONTO_INDEX = "kontonummer_eindeutig"
+KONTO_SAMMLUNGEN = ("users", "driver_accounts")
+
+
+def konto_index_status(db) -> dict:
+    """{sammlung: True/False} — True, wenn KONTO_INDEX dort als Unique-Index
+    auf `kontonummer` steht. Fehlt die Sammlung, ist es False. Nur lesend."""
+    status = {}
+    for name in KONTO_SAMMLUNGEN:
+        try:
+            info = db[name].index_information()
+        except Exception:                           # noqa: BLE001
+            info = {}
+        i = info.get(KONTO_INDEX) or {}
+        status[name] = bool(i.get("unique")) and [f for f, _r in i.get("key", [])] == ["kontonummer"]
+    return status
 
 
 def _verschleiert(url: str) -> str:
@@ -180,11 +201,14 @@ def main() -> int:
     print("6. Eindeutigkeits-Indizes")
     if "users" in namen:
         try:
-            idx = list(db.users.list_indexes())
-            eindeutig = [i["name"] for i in idx if i.get("unique")]
-            (ok if eindeutig else warn)(
-                "users: " + (", ".join(eindeutig) if eindeutig
-                             else "kein Eindeutigkeits-Index — legt das Backend beim Start an"))
+            status = konto_index_status(db)
+            for sammlung, steht in status.items():
+                if steht:
+                    ok(f"{sammlung}: {KONTO_INDEX} (Anmeldung per Kontonummer eindeutig)")
+                elif sammlung in namen:
+                    warn(f"{sammlung}: {KONTO_INDEX} fehlt — legt das Backend beim Start an; "
+                         "bleibt er aus, doppelte Nummern mit "
+                         "'python scripts/dubletten_pruefen.py' suchen")
         except PyMongoError as exc:
             warn(f"Indizes nicht lesbar: {str(exc)[:120]}")
     else:

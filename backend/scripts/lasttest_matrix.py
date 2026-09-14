@@ -6,6 +6,8 @@ Allgemeine Bedingungen (Standard, per CLI aenderbar):
   - 100 gleichzeitig aktive Nutzer (T9: 140), Denkpause 0,2-1,2 s
   - 30 s Aufwaermphase (unbewertet), 300 s Messphase, 3 Wiederholungen
   - 10 Firmen mit je Chef + 2 Suchern + 1 Fahrer, 1 Kaeufer, 1 Admin
+    (Kontonummer 13.09.2026: angelegt vom Wegwerf-Super-Admin ueber die
+    Admin-Routen, Anmeldung per Kontonummer — lasttest_konten.py)
   - Backend mit MOCK_PROVIDER_FETCH=true (Anbieter/E-Mail/WhatsApp sind
     serverseitig gemockt; /contracts/send versendet NIE echt)
   - zwischen den Laeufen: Warteschlangen-Drain, Haenger-Pruefung, RAM
@@ -38,6 +40,8 @@ from pathlib import Path
 
 import aiohttp
 
+import lasttest_konten as LK
+
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
@@ -45,6 +49,9 @@ DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 AUSGABE = Path(__file__).resolve().parent.parent.parent / "docs" / "lasttests" / "matrix"
 
 SUF = uuid.uuid4().hex[:6]   # wird je Lauf neu gewuerfelt (siehe lauf())
+# Kontonummer (13.09.2026): IDs der angelegten Konten (je Lauf neu) —
+# aufgeraeumt wird darueber, nicht mehr per E-Mail-Regex.
+IDS = LK.neue_ids()
 PW = "Matrix123!"
 N_FIRMEN = 10
 
@@ -198,28 +205,20 @@ async def welt_aufbauen(sess) -> Welt:
     dbx = _db()
     now = datetime.now(timezone.utc)
     print(f"[Welt] baue {N_FIRMEN} Firmen auf …")
-    import bcrypt
-    dbx.users.insert_one({
-        "id": f"mxadm_{SUF}", "email": f"mx_admin_{SUF}@e2etest-mail.de",
-        # Seit Runde 7 (09/2026) sind Verkaufsplan und Rollen Super-Admin-Sache.
-        "role": "admin", "is_super_admin": True, "active": True, "dealer_id": None,
-        "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
-        "created_at": "2026-01-01T00:00:00+00:00"})
-    st, js = await _post_json(sess, f"{API}/auth/login",
-                              {"email": f"mx_admin_{SUF}@e2etest-mail.de",
-                               "password": PW})
-    assert st == 200, f"Admin-Login {st}"
-    w.admin_h = {"Authorization": f"Bearer {js['token']}"}
+    # Seit Runde 7 (09/2026) sind Verkaufsplan und Rollen Super-Admin-Sache;
+    # Kontonummer (13.09.2026): er legt auch alle Konten an (Wegwerf-Konto
+    # mit Benutzername, direkt in der Datenbank des Laufs).
+    w.admin_h = await LK.super_admin_anmelden(
+        sess, API, LK.wegwerf_super_admin(dbx, SUF, IDS))
 
     for i in range(N_FIRMEN):
-        mail = f"mx_chef_{i}_{SUF}@e2etest-mail.de"
-        st, js = await _post_json(sess, f"{API}/auth/register", {
-            "email": mail, "password": PW, "company_name": f"Matrix {i}",
-            "contact_person": f"Chef {i}", "phone": "0511 1"})
-        assert st == 200, f"Register {st}: {js}"
-        h = {"Authorization": f"Bearer {js['token']}"}
-        st, me = await _post_json(sess, f"{API}/auth/login",
-                                  {"email": mail, "password": PW})
+        # Kontakt-E-Mail bleibt (Antwortadresse beim Vertragsversand in T5)
+        st, js = await LK.firma_anlegen(
+            sess, API, w.admin_h, IDS, PW, f"Matrix {i}", kontakt=f"Chef {i}",
+            telefon="0511 1", email=f"mx_chef_{i}_{SUF}@e2etest-mail.de")
+        assert st == 200, f"Firma anlegen {st}: {js}"
+        st, me = await LK.anmelden(sess, API, js["kontonummer"], PW)
+        assert st == 200, f"Chef-Anmeldung {st}: {me}"
         tok = me["token"]
         h = {"Authorization": f"Bearer {tok}"}
         async with sess.get(f"{API}/auth/me", headers=h) as r:
@@ -233,30 +232,29 @@ async def welt_aufbauen(sess) -> Welt:
             "created_at": now.isoformat()})
 
         for k in range(2):
-            smail = f"mx_such_{i}_{k}_{SUF}@e2etest-mail.de"
-            st, js = await _post_json(sess, f"{API}/dealer/sucher", {
-                "email": smail, "password": PW,
-                "first_name": "Mx", "last_name": f"S{i}{k}"}, h=h)
-            assert st == 200, f"Sucher {st}"
+            st, js = await LK.sucher_anlegen(sess, API, w.admin_h, IDS, me["dealer_id"],
+                                             PW, "Mx", f"S{i}{k}")
+            assert st == 200, f"Sucher {st}: {js}"
             dbx.subscriptions.insert_one({
                 "id": str(uuid.uuid4()), "dealer_id": me["dealer_id"],
                 "subject_user_id": js["sucher_id"], "plan": "monthly",
                 "status": "active",
                 "expires_at": (now + timedelta(days=1)).isoformat(),
                 "created_at": now.isoformat()})
-            st, js = await _post_json(sess, f"{API}/auth/login",
-                                      {"email": smail, "password": PW})
+            st, js = await LK.anmelden(sess, API, js["kontonummer"], PW)
+            assert st == 200, f"Sucher-Anmeldung {st}: {js}"
             firma["sucher_h"].append(
                 {"Authorization": f"Bearer {js['token']}"})
 
-        dmail = f"mx_drv_{i}_{SUF}@e2etest-mail.de"
-        st, js = await _post_json(sess, f"{API}/driver/register", {
-            "email": dmail, "password": PW, "display_name": f"Fahrer {i}"})
-        assert st == 200, f"Fahrer registrieren {st}: {str(js)[:200]}"
+        st, js = await LK.fahrer_anlegen(sess, API, w.admin_h, IDS, PW, f"Fahrer {i}")
+        assert st == 200, f"Fahrer anlegen {st}: {str(js)[:200]}"
+        fahrer_code = js["driver_code"]
+        st, js = await LK.anmelden(sess, API, js["kontonummer"], PW, weg="driver")
+        assert st == 200, f"Fahrer-Anmeldung {st}: {str(js)[:200]}"
         firma["drv_h"] = {"Authorization": f"Bearer {js['token']}"}
         firma["drv_id"] = js["driver"]["id"]
         await _post_json(sess, f"{API}/drivers/add",
-                         {"driver_code": js["driver"]["driver_code"]}, h=h)
+                         {"driver_code": fahrer_code}, h=h)
 
         # Fahrzeug (Mock-Link) + Vertrag + Termin + Fahrer + Inserat
         url = w.neue_links(1)[0]
@@ -307,11 +305,11 @@ async def welt_aufbauen(sess) -> Welt:
         await protokoll_abschliessen(sess, firma, erste_runde=True)
         w.firmen.append(firma)
 
-    st, js = await _post_json(sess, f"{API}/buyer/register", {
-        "company_name": "Mx Kaeufer", "contact_name": "Kaeufer M",
-        "email": f"mx_kauf_{SUF}@e2etest-mail.de", "password": PW,
-        "phone": "0511 3", "gewerblich_bestaetigt": True})
-    assert st == 200, f"Kaeufer registrieren {st}: {str(js)[:200]}"
+    st, js = await LK.kaeufer_anlegen(sess, API, w.admin_h, IDS, PW, "Mx Kaeufer",
+                                      "Kaeufer M", telefon="0511 3")
+    assert st == 200, f"Kaeufer anlegen {st}: {str(js)[:200]}"
+    st, js = await LK.anmelden(sess, API, js["kontonummer"], PW, weg="buyer")
+    assert st == 200, f"Kaeufer-Anmeldung {st}: {str(js)[:200]}"
     ktok = js["token"]
     async with sess.get(f"{API}/buyer/me",
                         headers={"Authorization": f"Bearer {ktok}"}) as r:
@@ -955,8 +953,9 @@ def versand_zaehlung(w):
 async def lauf(szenario, rep, nutzer, dauer, warmup):
     # Frischer Namensraum je Lauf: ein abgestuerzter Vorlauf (halbe Welt,
     # Admin-Konto) kann so NIE einen DuplicateKey im naechsten ausloesen.
-    global SUF
+    global SUF, IDS
     SUF = uuid.uuid4().hex[:6]
+    IDS = LK.neue_ids()
     AUSGABE.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     conn = aiohttp.TCPConnector(limit=nutzer + 60)
@@ -1107,20 +1106,15 @@ async def lauf(szenario, rep, nutzer, dauer, warmup):
 
 
 def _notaufraeumen():
-    """Reste eines abgebrochenen Welt-Aufbaus (aktueller SUF) entfernen."""
+    """Reste eines abgebrochenen Welt-Aufbaus (IDs dieses Laufs) entfernen."""
     try:
         dbx = _db()
-        uids = [u["id"] for u in dbx.users.find(
-            {"email": {"$regex": f"_{SUF}@"}}, {"id": 1})]
-        dids = [d["id"] for d in dbx.dealers.find(
-            {"user_id": {"$in": uids}}, {"id": 1})]
+        dids = IDS["dealers"]
         for c in ("subscriptions", "vehicles", "appointments",
                   "generated_pdfs", "resale_listings", "pickup_protocols",
                   "dealer_drivers"):
             dbx[c].delete_many({"dealer_id": {"$in": dids}})
-        dbx.dealers.delete_many({"id": {"$in": dids}})
-        dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
-        dbx.driver_accounts.delete_many({"email": {"$regex": f"_{SUF}@"}})
+        LK.konten_loeschen(dbx, IDS)
     except Exception:
         pass
 
@@ -1135,8 +1129,8 @@ def aufraeumen(w):
                   "dealer_drivers", "vehicle_comparisons"):
             dbx[c].delete_many({"dealer_id": did})
         dbx.dealers.delete_many({"id": did})
-    dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
-    dbx.driver_accounts.delete_many({"email": {"$regex": f"_{SUF}@"}})
+    # Konten genau ueber die IDs (Chefs, Sucher, Fahrer, Kaeufer, Super-Admin)
+    LK.konten_loeschen(dbx, IDS)
     dbx.buyer_favorites.delete_many(
         {"buyer_user_id": {"$regex": "^.*$"},
          "listing_id": {"$in": [f["listing_id"] for f in w.firmen]}})

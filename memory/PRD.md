@@ -11,7 +11,7 @@ Eine SaaS-Web-App für deutsche Autohändler. Händler gibt mobile.de-URL ein �
 - Vergleichs-URL im kompakten `ms=`-Format generieren
 - Kaufvertrag-PDF (reportlab) inkl. AGBs/Vereinbarungen
 - Apple-Style UI: Termine, Einstellungen, Vergleich
-- Auth (Admin-Zugang: Werte aus der .env — ADMIN_EMAIL/ADMIN_PASSWORD; niemals im Repo)
+- Auth: Anmeldung mit Kontonummer + Passwort (Chef `10023`, Sucher `10023-2`, Zwischenhändler/Fahrer eigene Nummer); Konten und Passwörter vergibt nur der Super-Admin (Zugang aus der .env — SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD; niemals im Repo). ADMIN_EMAIL/ADMIN_PASSWORD und die Selbstregistrierung entfielen am 13.09.2026.
 
 ## Implemented (Changelog)
 - 2026-02: Apple-Style UI (Termine, Einstellungen, Vergleich, AppLayout)
@@ -116,8 +116,8 @@ Siehe `/app/memory/test_credentials.md`
   - `driver_accounts` – echte Fahrer-Accounts mit E-Mail/Passwort/display_name/driver_code (`FD-XXXXXXXX`)
   - `dealer_drivers` – Link-Collection dealer↔driver_account (Fahrer kann bei mehreren Händlern aktiv sein)
 - **Fahrer-Endpoints (neu)**:
-  - `POST /api/driver/register` – direkt eingeloggt (kein Bestätigungs-Schritt)
-  - `POST /api/driver/login` (E-Mail + Passwort statt Code)
+  - `POST /api/driver/register` – direkt eingeloggt (kein Bestätigungs-Schritt) — *seit 13.09.2026 entfallen (410): Fahrer legt der Super-Admin an (`POST /api/admin/drivers`)*
+  - `POST /api/driver/login` (E-Mail + Passwort statt Code) — *seit 13.09.2026 Kontonummer + Passwort*
   - `GET /api/driver/me` (inkl. dealers[])
   - `PUT /api/driver/me` (nur display_name, propagiert zu allen Dealer-Links)
   - `GET /api/driver/appointments` – alle Fahrten über alle Händler
