@@ -599,10 +599,12 @@ _COMPANY_COLLECTIONS = (
     # Runde 18: Kaufvorgaenge (Umbau 09.09.2026) tragen dealer_id, Sucher,
     # Vertrag, Fahrzeug und Kaufpreis — blieben bei der Firmenloeschung liegen.
     "kaufvorgaenge",
-    # Nachpruefung Runde 14 (Befund 58): users ZULETZT — bricht die
-    # Firmenloeschung mittendrin ab, findet der erneute Aufruf ueber den
-    # Chef-Account den Vorgang noch (vorher: 404, Rest blieb verwaist).
-    "users",
+    # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
+    # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
+    # und dealers.delete_many — brach einer dieser Schritte ab, fand der
+    # erneute Aufruf ueber die Chef-ID nichts mehr (404), Grabstein, Dateien
+    # und Snapshots blieben liegen. users loescht admin_delete_user jetzt als
+    # eigenen letzten Schritt NACH dealers; die Vorschau zaehlt sie getrennt.
 )
 
 
@@ -616,6 +618,8 @@ async def admin_delete_preview(dealer_id: str, admin=Depends(current_admin)):
     counts = {}
     for coll in _COMPANY_COLLECTIONS:
         counts[coll] = await db[coll].count_documents({"dealer_id": dealer_id})
+    # Go-Live 14.09.2026 (B6): users nicht mehr in _COMPANY_COLLECTIONS
+    counts["users"] = await db.users.count_documents({"dealer_id": dealer_id})
     return {"dealer_id": dealer_id,
             "hinweis": "Beweis-Snapshots werden NICHT geloescht (haendler"
                        "neutral geteilt, verfallen ueber die Aufbewahrungs"
@@ -730,13 +734,15 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         from snapshot_service import snapshots_pseudonymisieren
         await snapshots_pseudonymisieren(db, user_id=user_id)
         await db.users.delete_one({"id": user_id})
-        await log_activity(admin.get("dealer_id", ""), admin["id"],
-                           "admin.user.geloescht", ref=user_id,
-                           # Kontonummer (13.09.2026): keine E-Mail im Audit
-                           meta={"kontonummer": u.get("kontonummer", ""),
-                                 "rolle": u.get("role", ""),
-                                 "fahrzeuge_uebernommen": uebernommen,
-                                 "wiederaufnahme": grab.get("status") == "laeuft"})
+        # Go-Live 14.09.2026 (B6c): Konto ist geloescht — ein Audit-Fehler darf
+        # keinen 500 mehr ausloesen, dessen Wiederholung auf 404 laeuft.
+        await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+                                  "admin.user.geloescht", ref=user_id,
+                                  # Kontonummer (13.09.2026): keine E-Mail im Audit
+                                  meta={"kontonummer": u.get("kontonummer", ""),
+                                        "rolle": u.get("role", ""),
+                                        "fahrzeuge_uebernommen": uebernommen,
+                                        "wiederaufnahme": grab.get("status") == "laeuft"})
         return {"ok": True, "geloescht": "nur_nutzer"}
 
     dealer_id = u.get("dealer_id")
@@ -765,15 +771,32 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         #
         # Nachpruefung Runde 14 (Befund 58): Grabstein am Firmenprofil
         # (Muster cleanup_service.vertrag_endgueltig_loeschen) — die
-        # Firma ist ab jetzt als "in Loeschung" erkennbar; dealers wird
-        # weiterhin als Letztes entfernt, users (in _COMPANY_COLLECTIONS)
-        # erst nach allen Nebendaten.
+        # Firma ist ab jetzt als "in Loeschung" erkennbar.
+        #
+        # Go-Live 14.09.2026 (B6): Reihenfolge Nebendaten -> Snapshots ->
+        # Dateien -> dealers -> users. Die Konten bleiben bis zum Schluss
+        # stehen, damit ein abgebrochener Lauf ueber die Chef-ID wieder-
+        # aufnehmbar ist; jeder Schritt ist idempotent (update_one/delete_many
+        # ohne Treffer, delete_prefix auf leerem Praefix).
         jetzt = now_iso()
+        wiederaufnahme = False
+        firma_doc = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "loeschung": 1})
+        if firma_doc is None or (firma_doc.get("loeschung") or {}).get("status") == "laeuft":
+            wiederaufnahme = True
         await db.dealers.update_one(
             {"id": dealer_id},
             {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
                                     "grund": "admin", "durch": admin["id"]},
                       "updated_at": jetzt}})
+        # Go-Live 14.09.2026 (B6a): ALLE Konten der Firma sofort sperren und
+        # abmelden. Vorher arbeiteten Chef und Sucher waehrend der Kaskade
+        # (und nach einem Abbruch unbegrenzt) weiter: der Grabstein am
+        # dealers-Dokument wertet niemand aus. Mit gesperrtem Chef greift
+        # firma_gesperrt — current_user weist Sucher ab, der Marktplatz blendet
+        # die Firma aus.
+        await db.users.update_many(
+            {"dealer_id": dealer_id},
+            {"$set": {"active": False, "current_session_id": None, "updated_at": jetzt}})
         for coll in _COMPANY_COLLECTIONS:
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
@@ -826,13 +849,24 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
                 "traceback": "", "ip": "", "status": "open",
                 "created_at": now_iso()})
         await db.dealers.delete_many({"id": dealer_id})
+        # Go-Live 14.09.2026 (B6b): users als eigener LETZTER Schritt nach
+        # dealers — erst jetzt verschwindet die Chef-ID, ueber die ein
+        # erneuter Aufruf den Vorgang findet. (password_resets gibt es seit
+        # Kontonummer 13.09.2026, Schritt 5 nicht mehr.)
+        res = await db.users.delete_many({"dealer_id": dealer_id})
+        if res.deleted_count:
+            geloescht["users"] = res.deleted_count
     else:
+        wiederaufnahme = False
         await db.users.delete_one({"id": user_id})
 
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
-                       "admin.firma.geloescht", ref=dealer_id or user_id,
-                       meta={"kontonummer": u.get("kontonummer", ""),
-                             "geloescht": geloescht})
+    # Go-Live 14.09.2026 (B6c): alles ist geloescht — ein Audit-Fehler darf
+    # keinen 500 mehr liefern (die Wiederholung liefe auf 404).
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+                              "admin.firma.geloescht", ref=dealer_id or user_id,
+                              meta={"kontonummer": u.get("kontonummer", ""),
+                                    "geloescht": geloescht,
+                                    "wiederaufnahme": wiederaufnahme})
     return {"ok": True, "geloescht": geloescht or "nur_nutzer"}
 
 
@@ -2363,6 +2397,11 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "fahrzeug_index_aktiv": any(
             i.get("unique") and i.get("key") == [("dealer_id", 1), ("id", 1)]
             for i in (await db.vehicles.index_information()).values()),
+        # Go-Live 14.09.2026 (B5, Punkt 3): "ein Kaufvorgang je Vertrag" haengt
+        # allein am Unique-Index kaufvorgaenge(contract_id) (kaufvorgang.py
+        # verlaesst sich auf DuplicateKeyError). Fehlt er (z.B. nach drop()),
+        # meldete das bisher nur /api/ready — hier war nichts zu sehen.
+        "kaufvorgang_index_aktiv": await _kaufvorgang_index_aktiv(),
         # Audit 13.09.2026 Nachbesserung (#18): Backstops Merkliste,
         # laufende Kaufanfrage, offene Marktplatz-Zugangsanfrage
         "favoriten_index_aktiv": "favorit_je_kaeufer_inserat"
@@ -2375,6 +2414,12 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         # muessten, aber keine haben — nur Zaehlung, keine Vergabe.
         "konten_ohne_nummer": await _konten_ohne_nummer_zaehlen(),
     }
+
+
+async def _kaufvorgang_index_aktiv() -> bool:
+    """Go-Live 14.09.2026 (B5): steht der Unique-Index kaufvorgaenge(contract_id)?"""
+    return any(i.get("unique") and [f for f, _r in i.get("key", [])] == ["contract_id"]
+               for i in (await db.kaufvorgaenge.index_information()).values())
 
 
 async def _konten_ohne_nummer_zaehlen() -> dict:
@@ -2403,6 +2448,10 @@ async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
             "termin_index": await _termin_unique_index(),
             "fahrzeug_index": await _unique_index_sicher(
                 db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False),
+            # Go-Live 14.09.2026 (B5, Punkt 3): wie in server.ensure_indexes —
+            # nach einem drop()-Reset ohne Neustart nachholbar.
+            "kaufvorgang_index": await _unique_index_sicher(
+                db.kaufvorgaenge, "contract_id", abbruch_in_produktion=False),
             # Audit 13.09.2026 Nachbesserung (#18): Indizes mit automatischer
             # Dublettenbereinigung — schrieb die alte Fassung beim Rollout
             # dazwischen, fehlten sie sonst bis zum naechsten Neustart.

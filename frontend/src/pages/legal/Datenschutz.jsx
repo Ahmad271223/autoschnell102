@@ -18,7 +18,8 @@ export default function Datenschutz() {
             Kontonummer ergaenzt, E-Mail nur noch optionale Kontaktadresse,
             Passwort-Reset- und Einladungs-Mails gestrichen (der Code
             verschickt nur den Kaufvertrag an den Verkaeufer und die Kopie an
-            den Sucher). Wortlaut vor dem Merge von Ahmad freigeben lassen. */}
+            den Sucher). Wortlaut von Ahmad am 14.09.2026 freigegeben;
+            rechtliche Pruefung steht aus. */}
         <li><b>Account-Daten:</b> Kontonummer, Firmenname, Ansprechpartner,
             Telefonnummer, E-Mail-Adresse (optional, als Kontaktadresse),
             Passwort (verschlüsselt als Hash gespeichert)</li>

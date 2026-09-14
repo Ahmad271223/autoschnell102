@@ -31,7 +31,8 @@ export default function AGB() {
       {/* BETREIBER-HINWEIS (im Browser unsichtbar): Kontonummer (13.09.2026) —
           §1, §3, §4 und §11 wurden auf die Anmeldung mit Kontonummer
           umgestellt (Konten legt nur der Anbieter an, E-Mail optional).
-          Wortlaut vor dem Merge von Ahmad freigeben lassen. */}
+          Wortlaut von Ahmad am 14.09.2026 freigegeben (Vorschau der
+          Aenderungen in §1, §3, §4, §11); rechtliche Pruefung steht aus. */}
 
       <H2>2. Leistungen des Anbieters</H2>
       <p>

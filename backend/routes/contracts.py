@@ -944,10 +944,12 @@ async def list_contracts(
     if creator_ids:
         names = {}
         async for u in db.users.find({"id": {"$in": creator_ids}},
-                                     {"_id": 0, "id": 1, "email": 1,
+                                     {"_id": 0, "id": 1, "email": 1, "kontonummer": 1,
                                       "first_name": 1, "last_name": 1, "role": 1}):
+            # Kontonummer (13.09.2026): E-Mail ist nur noch optionale Kontakt-
+            # adresse — ohne Namen zeigt die Liste die Kontonummer des Erstellers.
             label = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() \
-                    or u.get("email", "")
+                    or u.get("kontonummer") or u.get("email", "")
             names[u["id"]] = {"name": label, "role": u.get("role")}
         for i in items:
             c = names.get(i.get("user_id"))

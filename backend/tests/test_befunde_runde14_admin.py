@@ -239,9 +239,16 @@ def test_12_firmenloeschung_entfernt_konten(aufraeumen):
 
 
 def test_58_users_zuletzt_in_company_collections():
-    from routes.admin import _COMPANY_COLLECTIONS
-    assert _COMPANY_COLLECTIONS[-1] == "users"
-    assert "driver_accounts" not in _COMPANY_COLLECTIONS
+    # Go-Live 14.09.2026 (B6): users nicht mehr im Tupel, sondern als eigener
+    # letzter Schritt NACH dealers.delete_many (Verhalten:
+    # tests/test_golive_20260914_konten.py).
+    import inspect
+    import routes.admin as a
+    assert "users" not in a._COMPANY_COLLECTIONS
+    assert "driver_accounts" not in a._COMPANY_COLLECTIONS
+    src = inspect.getsource(a.admin_delete_user)
+    assert src.index('db.dealers.delete_many({"id": dealer_id})') \
+        < src.index('db.users.delete_many({"dealer_id": dealer_id})')
 
 
 def test_24_58_kaeufer_loeschung_grabstein_und_wiederaufnahme(aufraeumen, monkeypatch):
