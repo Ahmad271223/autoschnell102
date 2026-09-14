@@ -20,11 +20,16 @@ Dazu die Laufzeiten je Weg (p50/p95/p99) und die Zahl echter Anbieter-Abrufe.
 
 Zwei Betriebsarten:
 
-  1) Konten selbst anlegen (lokal/Staging). Kontonummer (13.09.2026): Konten
-     legt nur der Super-Admin an. Mit --db-name legt das Skript dafuer einen
-     Wegwerf-Super-Admin in dieser Datenbank an (und loescht ihn nach der
-     Anlage wieder); ohne --db-name meldet es SUPER_ADMIN_USERNAME/
-     SUPER_ADMIN_PASSWORD an (dessen offene Sitzung endet dabei):
+  1) Konten selbst anlegen (nur lokal/Staging). Kontonummer (13.09.2026):
+     Konten legt nur der Super-Admin an. Das Skript legt dafuer einen
+     Wegwerf-Super-Admin in der Datenbank --db-name an und loescht ihn nach
+     der Anlage wieder. Ohne --db-name bricht es ab — KEIN Rueckfall auf den
+     Betreiber-Zugang (SUPER_ADMIN_*): sonst entstuenden bei einem Aufruf
+     gegen Produktion dauerhafte Konten mit fortlaufenden Nummern, und die
+     Sitzung des Betreibers endete. Vor der Anlage der Sucher prueft ein
+     Vergleich des Chefs den Mock-Modus (wie lasttest.py). Das Passwort ist je
+     Lauf zufaellig (--passwort setzt es bewusst); nach jedem Lauf werden
+     Firma, Konten, Abos und Fahrzeuge der Lauf-Firma wieder geloescht:
        python -X utf8 scripts/lasttest_sucher.py --sucher 30 --db-name autoschnell_last
        python -X utf8 scripts/lasttest_sucher.py --sucher 100 --stufen 30,50,100 --db-name autoschnell_last
 
@@ -46,6 +51,7 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import statistics
 import sys
 import time
@@ -162,36 +168,41 @@ def _sa_loeschen(args, ids):
 
 
 async def super_admin_fuer_anlage(k: Klient, args):
-    """Kontonummer (13.09.2026): Token eines Super-Admins fuer die Anlage.
-    -> (Kopfzeilen, ids des Wegwerf-Kontos oder None)."""
-    if args.db_name:
-        from pymongo import MongoClient
-        ids = LK.neue_ids()
-        c = MongoClient(args.mongo, serverSelectionTimeoutMS=5000)
-        try:
-            sa = LK.wegwerf_super_admin(c[args.db_name], uuid.uuid4().hex[:8], ids)
-        finally:
-            c.close()
-        try:
-            return await LK.super_admin_anmelden(k.s, k.api, sa), ids
-        except BaseException:
-            _sa_loeschen(args, ids)
-            raise
-    name = (os.environ.get("SUPER_ADMIN_USERNAME") or "").strip()
-    pw = os.environ.get("SUPER_ADMIN_PASSWORD") or ""
-    if name and pw:
-        print("     Anlage ueber SUPER_ADMIN_USERNAME — dessen offene Sitzung endet.")
-        return await LK.super_admin_anmelden(k.s, k.api, {"username": name, "passwort": pw}), None
-    raise SystemExit("Konten anlegen braucht --db-name (Wegwerf-Super-Admin in dieser "
-                     "Datenbank) oder SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD — "
-                     "sonst --konten benutzen.")
+    """Kontonummer (13.09.2026): Token eines Wegwerf-Super-Admins fuer die
+    Anlage (Plan, Risiko 7). -> (Kopfzeilen, ids des Wegwerf-Kontos).
 
-
-async def konten_anlegen(k: Klient, anzahl: int, passwort: str, admin_h: dict):
-    """Eine Firma mit Chef und N Suchern anlegen (nur lokal/Staging) — ueber
-    den Super-Admin; der Chef meldet sich einmal per Kontonummer an."""
-    s = uuid.uuid4().hex[:8]
+    Nur mit --db-name. KEIN Rueckfall auf SUPER_ADMIN_USERNAME/PASSWORD: der
+    Betreiber-Zugang funktioniert gegen jede --basis, auch gegen Produktion —
+    dort entstuenden dauerhafte Konten mit fortlaufenden Nummern, und seine
+    offene Sitzung endete."""
+    if not args.db_name:
+        raise SystemExit("Konten anlegen braucht --db-name (Wegwerf-Super-Admin in der "
+                         "Datenbank des Test-Backends, nur lokal/Staging). Fuer vorhandene "
+                         "Konten --konten benutzen.")
+    from pymongo import MongoClient
     ids = LK.neue_ids()
+    c = MongoClient(args.mongo, serverSelectionTimeoutMS=5000)
+    try:
+        sa = LK.wegwerf_super_admin(c[args.db_name], uuid.uuid4().hex[:8], ids)
+    finally:
+        c.close()
+    try:
+        return await LK.super_admin_anmelden(k.s, k.api, sa), ids
+    except BaseException:
+        _sa_loeschen(args, ids)
+        raise
+
+
+def lauf_passwort() -> str:
+    """Kontonummer (13.09.2026): Passwort der angelegten Konten — je Lauf
+    zufaellig statt eines festen Werts im Repository."""
+    return f"Lt-{secrets.token_urlsafe(12)}!7"
+
+
+async def chef_anlegen(k: Klient, passwort: str, admin_h: dict, ids: dict):
+    """Firma + Chef ueber den Super-Admin (IDs landen in `ids`); der Chef
+    meldet sich einmal per Kontonummer an. -> (chef, dealer_id)"""
+    s = uuid.uuid4().hex[:8]
     code, daten = await LK.firma_anlegen(
         k.s, k.api, admin_h, ids, passwort, f"Lasttest Firma {s}", kontakt="Chef",
         telefon="0511 1", email=f"lt_chef_{s}@e2etest-mail.de")
@@ -201,15 +212,61 @@ async def konten_anlegen(k: Klient, anzahl: int, passwort: str, admin_h: dict):
     chef["token"], fehler = await anmelden(k, chef["kontonummer"], passwort)
     if not chef["token"]:
         raise SystemExit(f"Chef-Anmeldung fehlgeschlagen: {fehler}")
+    return chef, daten["dealer_id"]
+
+
+async def sucher_anlegen(k: Klient, anzahl: int, passwort: str, admin_h: dict,
+                         ids: dict, dealer_id: str) -> list:
     sucher = []
     for i in range(anzahl):
-        code, d = await LK.sucher_anlegen(k.s, k.api, admin_h, ids, daten["dealer_id"],
+        code, d = await LK.sucher_anlegen(k.s, k.api, admin_h, ids, dealer_id,
                                           passwort, "Sucher", f"{i}")
         if code != 200:
             raise SystemExit(f"Sucher {i} anlegen fehlgeschlagen ({code}): {str(d)[:200]}")
         sucher.append({"kontonummer": d["kontonummer"], "passwort": passwort,
                        "id": d.get("sucher_id")})
-    return {"chef": chef, "sucher": sucher, "suffix": s}
+    return sucher
+
+
+MOCK_PROBE_URL = "https://www.kleinanzeigen.de/s-anzeige/lasttest-probe/95999999-216-1"
+
+
+async def mock_pruefen(k: Klient, token: str):
+    """Kontonummer (13.09.2026): VOR der Anlage der Sucher muss ein Vergleich
+    des Chefs als synthetisch markiert sein (vehicle._mock, wie lasttest.py).
+    /health allein sagt nichts ueber den Mock — ein Backend ohne
+    MOCK_PROVIDER_FETCH (z.B. Produktion, production_check verbietet ihn dort)
+    bekommt so keine N Konten und keine echten Abrufe."""
+    code, daten = await k.ruf("POST", "/mobile/compare", token=token,
+                              daten=_vergleich_rumpf(MOCK_PROBE_URL), weg="mock-probe")
+    fahrzeug = (daten.get("vehicle") or {}) if isinstance(daten, dict) else {}
+    if code != 200 or not fahrzeug.get("_mock"):
+        raise SystemExit(
+            f"ABBRUCH: Das Backend laeuft NICHT im Mock-Modus (MOCK_PROVIDER_FETCH=true; "
+            f"Probe gab {code}). Ohne ihn loeste der Lasttest echte Abrufe aus — "
+            "bewusst nur mit --echte-abrufe.")
+
+
+def aufraeumen(args, angelegt: dict) -> dict:
+    """Kontonummer (13.09.2026): alles entfernen, was dieser Lauf angelegt hat —
+    Fahrzeuge und Vergleiche der Lauf-Firma, dann Konten, Firma und Abos genau
+    ueber die gesammelten IDs (LK.konten_loeschen). So bleiben keine Konten
+    mit bekanntem Passwort liegen."""
+    if not args.db_name or not any(angelegt.values()):
+        return {}
+    from pymongo import MongoClient
+    c = MongoClient(args.mongo, serverSelectionTimeoutMS=5000)
+    try:
+        dbx = c[args.db_name]
+        n = {}
+        if angelegt["dealers"]:
+            for sammlung in ("vehicle_comparisons", "vehicles"):
+                n[sammlung] = dbx[sammlung].delete_many(
+                    {"dealer_id": {"$in": angelegt["dealers"]}}).deleted_count
+        n.update(LK.konten_loeschen(dbx, angelegt))
+        return n
+    finally:
+        c.close()
 
 
 def abos_seeden(mongo_url: str, db_name: str, dealer_id: str, nutzer: list) -> int:
@@ -410,7 +467,9 @@ async def pruefe_dubletten_http(k: Klient, chef_token: str) -> list:
 
 
 # ---------------------------------------------------------------- Lauf
-async def lauf(args):
+async def lauf(args, angelegt: dict):
+    """`angelegt` sammelt die IDs selbst angelegter Konten; main() raeumt sie
+    nach dem Lauf ab — auch bei einem Abbruch."""
     global OHNE_ERWEITERUNG
     OHNE_ERWEITERUNG = bool(args.echte_abrufe) and not args.mit_erweiterung
     grenze = aiohttp.TCPConnector(limit=max(50, args.sucher * 2))
@@ -436,19 +495,19 @@ async def lauf(args):
             print(f"Lege Firma mit {args.sucher} Suchern an ...")
             admin_h, sa_ids = await super_admin_fuer_anlage(k, args)
             try:
-                konten = await konten_anlegen(k, args.sucher, args.passwort, admin_h)
+                chef, dealer_id = await chef_anlegen(k, args.passwort, admin_h, angelegt)
+                n = abos_seeden(args.mongo, args.db_name, dealer_id, [chef["id"]])
+                if not args.echte_abrufe:
+                    await mock_pruefen(k, chef["token"])
+                    print("     Mock-Modus bestaetigt — keine echten Anbieter-Abrufe.")
+                sucher_liste = await sucher_anlegen(k, args.sucher, args.passwort,
+                                                    admin_h, angelegt, dealer_id)
             finally:
-                if sa_ids:          # Wegwerf-Super-Admin nur fuer die Anlage
-                    _sa_loeschen(args, sa_ids)
-            if args.db_name:
-                code, me = await k.ruf("GET", "/auth/me",
-                                       token=konten["chef"]["token"], weg="auth/me")
-                did = (me or {}).get("user", {}).get("dealer_id") if isinstance(me, dict) else None
-                if did:
-                    ids = [(me or {}).get("user", {}).get("id")] + [
-                        su.get("id") for su in konten["sucher"]]
-                    n = abos_seeden(args.mongo, args.db_name, did, ids)
-                    print(f"     {n} Abos gesetzt (nur fuer diesen Lauf)")
+                _sa_loeschen(args, sa_ids)   # Wegwerf-Super-Admin nur fuer die Anlage
+            n += abos_seeden(args.mongo, args.db_name, dealer_id,
+                             [su.get("id") for su in sucher_liste])
+            print(f"     {n} Abos gesetzt (nur fuer diesen Lauf, wird danach geloescht)")
+            konten = {"chef": chef, "sucher": sucher_liste}
 
         gescheitert = await alle_anmelden(k, konten)
         if gescheitert:
@@ -582,11 +641,13 @@ def main():
     p.add_argument("--stufen", help="mehrere Laeufe, z.B. 30,50,100")
     p.add_argument("--konten", help="JSON mit vorhandenen Konten (siehe Kopf)")
     p.add_argument("--basis", default=STANDARD_BASIS, help="Adresse des Backends")
-    p.add_argument("--passwort", default="LastTest123!")
+    p.add_argument("--passwort", default=None,
+                   help="Passwort der angelegten Konten (Standard: je Lauf zufaellig)")
     p.add_argument("--timeout", type=float, default=120.0)
     p.add_argument("--mongo", default=os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017")
     p.add_argument("--db-name", default=os.environ.get("DB_NAME"),
-                   help="fuer die Dublettenpruefung (nur lokal)")
+                   help="Datenbank des Test-Backends (nur lokal/Staging): Pflicht fuer "
+                        "die Kontenanlage, dazu Dublettenpruefung")
     p.add_argument("--mit-erweiterung", action="store_true",
                    help="NICHT ohne_erweiterung senden — dann verweist ein "
                         "Server im Client-Abruf-Modus auf die Erweiterung "
@@ -596,11 +657,22 @@ def main():
     p.add_argument("--bericht", help="Ergebnis zusaetzlich als JSON hier ablegen")
     args = p.parse_args()
 
+    if not args.passwort:
+        args.passwort = lauf_passwort()
     stufen = ([int(x) for x in args.stufen.split(",")] if args.stufen else [args.sucher])
     schlecht = 0
     for n in stufen:
         args.sucher = n
-        bericht = asyncio.run(lauf(args))
+        angelegt = LK.neue_ids()
+        try:
+            bericht = asyncio.run(lauf(args, angelegt))
+        finally:
+            # Kontonummer (13.09.2026): selbst angelegte Konten nie liegen lassen
+            if any(angelegt.values()):
+                try:
+                    print(f"Aufgeraeumt: {aufraeumen(args, angelegt)}")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"!! Aufraeumen fehlgeschlagen ({exc}) — angelegte IDs: {angelegt}")
         schlecht += bewerten(bericht)
         if args.bericht:
             pfad = args.bericht if len(stufen) == 1 else f"{args.bericht}.{n}"

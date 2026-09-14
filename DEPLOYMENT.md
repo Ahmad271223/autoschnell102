@@ -187,8 +187,12 @@ steht in der `.env` — sonst jeden Aufruf ausdrücklich mit
    ```bash
    docker compose exec backend python scripts/backup_mongo.py
    docker compose exec backend python scripts/offsite_pruefen.py --laden
+   docker compose exec backend ls /backups          # Ordner autoschnell-<zeit> notieren
+   git -C /opt/autoschnell rev-parse HEAD           # auf BEIDEN Servern: Commit <alt> notieren
    ```
-   Dieses Backup ist nach dem Reset der EINZIGE Weg zurück.
+   Dieses Backup ist nach dem Reset der EINZIGE Weg zurück. Es liegt im
+   Volume `backups_data` von **prod1** — ein Restore läuft deshalb dort
+   (Punkt 12).
 3. **Nur das Backend stoppen, auf BEIDEN Servern:**
    ```bash
    cd /opt/autoschnell && docker compose stop backend
@@ -246,12 +250,45 @@ steht in der `.env` — sonst jeden Aufruf ausdrücklich mit
     `.env` BEIDER Server entfernen (kein Neustart nötig). Die Server-.env erst
     nach beiden Rollouts bereinigen: solange ein alter Stand noch hätte
     starten können, verlangte dessen Produktionsprüfung `ADMIN_PASSWORD`.
-12. **Zurück auf den alten Stand:**
-    - bis einschließlich Punkt 5 (noch nichts gelöscht): auf beiden Servern
-      `docker compose start backend` — die alten Container starten wieder;
-    - ab Punkt 6 nur per Restore des Backups aus Punkt 2 (siehe „Restore“),
-      danach alter Commit (`git reset --hard <alt>`) und `sh deploy/rollout.sh`
-      auf beiden Servern. Konten ohne E-Mail lassen den alten Code nicht starten.
+12. **Zurück auf den alten Stand** (`<alt>` = der in Punkt 2 notierte Commit,
+    `<zeit>` = der dort notierte Backup-Ordner). NICHT `sh deploy/rollout.sh`:
+    es holt mit `git pull --ff-only` wieder den neuen Stand. Stattdessen von
+    Hand wie unter „Rollback“:
+    - **bis einschließlich Punkt 5** (noch nichts gelöscht): prod2 steht seit
+      Punkt 4 schon auf dem neuen Commit, das neue Image ist gebaut. Das
+      nächste `docker compose up -d` oder Rollout spielte den neuen Code über
+      die alten Daten ein — die Konten dort haben keine Kontonummer, niemand
+      könnte sich anmelden, und `ensure_indexes` entfernte die Eindeutigkeit
+      der E-Mail. Deshalb erst prod2 zurücksetzen und die alten Images bauen:
+      ```bash
+      # prod2
+      cd /opt/autoschnell && git reset --hard <alt>
+      export APP_FASSUNG=$(git log -1 --format=%ct-%h)
+      docker compose build backend web
+      # danach auf BEIDEN Servern (prod1 ist unverändert)
+      cd /opt/autoschnell && docker compose start backend
+      ```
+    - **ab Punkt 6** (Daten gelöscht): nur per Restore des Backups aus Punkt 2.
+      Reihenfolge: Backend überall stoppen → Restore auf prod1 → alter Commit
+      und alte Images auf beiden Servern → Start. Konten ohne E-Mail lassen den
+      alten Code nicht starten, deshalb nie vor dem Restore starten. Das
+      Backend ist gestoppt, `docker compose exec` geht nicht — der Restore
+      läuft als Einmal-Container auf **prod1** (dort liegt das Backup):
+      ```bash
+      # BEIDE Server (prod2 läuft nach Punkt 7 schon mit dem neuen Code)
+      cd /opt/autoschnell && docker compose stop backend
+      # prod1: Restore
+      docker compose run --rm --no-deps backend python -X utf8 scripts/restore_mongo.py /backups/autoschnell-<zeit> --dry-run
+      docker compose run --rm --no-deps backend python -X utf8 scripts/restore_mongo.py /backups/autoschnell-<zeit> --yes
+      # erst nach "RESTORE OK": BEIDE Server, zuerst prod1, dann prod2
+      git reset --hard <alt>
+      export APP_FASSUNG=$(git log -1 --format=%ct-%h)
+      docker compose up -d --build
+      sh deploy/freigeben.sh
+      ```
+      Danach Cloudflare → Purge Everything. `freigeben.sh` entfernt einen
+      Drain-Marker aus einem abgebrochenen Rollout erst nach erfolgreicher
+      Prüfung.
 13. **Sicherungen:** Die lokalen Backups (14 Tage) und die Offsite-Kopien
     enthalten die Testdaten bis zur Rotation. Wer sie früher loswerden will,
     löscht sie von Hand.

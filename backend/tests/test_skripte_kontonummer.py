@@ -241,3 +241,109 @@ def test_06_lasttest_sucher_liest_kontonummer_und_alte_dateien():
     assert LS.kennung({}) == ""
     quelle = inspect.getsource(LS.anmelden)
     assert '"kontonummer": kontonummer' in quelle and '"email"' not in quelle
+
+
+# ------------------------------------------------ Nachbesserung (Gegenpruefung)
+def test_07_lasttest_sucher_ohne_betreiberzugang_mit_mockprobe_und_aufraeumen(db, monkeypatch):
+    """Kein Rueckfall auf SUPER_ADMIN_*, kein festes Passwort, Mock-Probe vor
+    der Anlage der Sucher, Aufraeumen genau der angelegten IDs — auch wenn der
+    Lauf abbricht."""
+    import argparse
+    import asyncio
+    LS = _skript("lasttest_sucher")
+    quelle = (SCRIPTS / "lasttest_sucher.py").read_text(encoding="utf-8")
+    assert 'environ.get("SUPER_ADMIN' not in quelle, "kein Rueckfall auf den Betreiber-Zugang"
+    assert "LastTest123" not in quelle, "kein festes Passwort im Repository"
+
+    # ohne --db-name: Abbruch vor jeder Anfrage (k=None), Hinweis auf --konten
+    with pytest.raises(SystemExit) as fehler:
+        asyncio.run(LS.super_admin_fuer_anlage(None, argparse.Namespace(db_name=None, mongo=MONGO_URL)))
+    assert "--db-name" in str(fehler.value) and "--konten" in str(fehler.value)
+
+    # Passwort je Lauf zufaellig und fuer die Admin-Routen gueltig
+    from passwoerter import pruefe_passwort
+    a, b = LS.lauf_passwort(), LS.lauf_passwort()
+    assert a != b and pruefe_passwort(a) == a
+
+    # Mock-Probe: nur ein als synthetisch markiertes Fahrzeug laesst weiter
+    class _Klient:
+        def __init__(self, antwort):
+            self.antwort, self.rufe = antwort, []
+
+        async def ruf(self, methode, pfad, **kw):
+            self.rufe.append((methode, pfad))
+            return self.antwort
+
+    for antwort in ((200, {"vehicle": {"make": "VW"}, "vehicle_id": "v"}),
+                    (200, {"needs_client_fetch": True}), (402, {"detail": "Abo"}), (599, "weg")):
+        with pytest.raises(SystemExit, match="Mock-Modus"):
+            asyncio.run(LS.mock_pruefen(_Klient(antwort), "tok"))
+    k = _Klient((200, {"vehicle": {"_mock": True}, "vehicle_id": "v"}))
+    asyncio.run(LS.mock_pruefen(k, "tok"))
+    assert k.rufe == [("POST", "/mobile/compare")]
+    lauf = inspect.getsource(LS.lauf)
+    assert lauf.index("mock_pruefen(k, chef") < lauf.index("await sucher_anlegen("), \
+        "Mock-Probe muss VOR der Anlage der Sucher laufen"
+
+    # Aufraeumen: genau die IDs und die Fahrzeuge der Lauf-Firma
+    args = argparse.Namespace(db_name=db.name, mongo=MONGO_URL)
+    angelegt = LS.LK.neue_ids()
+    angelegt["users"] += ["u_chef", "u_s1"]
+    angelegt["dealers"] += ["d_lt"]
+    db.users.insert_many([{"id": "u_chef"}, {"id": "u_s1"}, {"id": "u_fremd"}])
+    db.dealers.insert_many([{"id": "d_lt"}, {"id": "d_fremd"}])
+    db.vehicles.insert_many([{"id": "v1", "dealer_id": "d_lt"}, {"id": "v2", "dealer_id": "d_fremd"}])
+    db.vehicle_comparisons.insert_many([{"id": "c1", "dealer_id": "d_lt"},
+                                        {"id": "c2", "dealer_id": "d_fremd"}])
+    db.subscriptions.insert_many([{"id": "s1", "dealer_id": "d_lt", "subject_user_id": "u_s1"},
+                                  {"id": "s2", "dealer_id": "d_fremd"}])
+    n = LS.aufraeumen(args, angelegt)
+    assert (n["vehicles"], n["vehicle_comparisons"], n["users"], n["dealers"], n["subscriptions"]) == (1, 1, 2, 1, 1)
+    assert [u["id"] for u in db.users.find({})] == ["u_fremd"]
+    assert [v["id"] for v in db.vehicles.find({})] == ["v2"]
+    assert [s["id"] for s in db.subscriptions.find({})] == ["s2"]
+    assert LS.aufraeumen(args, LS.LK.neue_ids()) == {}
+
+    # main raeumt auch nach einem Abbruch mitten im Lauf auf
+    aufgeraeumt = []
+
+    async def lauf_bricht_ab(args, angelegt):
+        angelegt["users"].append("u_x")
+        angelegt["dealers"].append("d_x")
+        raise RuntimeError("Abbruch mitten im Lauf")
+
+    monkeypatch.setattr(LS, "lauf", lauf_bricht_ab)
+    monkeypatch.setattr(LS, "aufraeumen",
+                        lambda args, angelegt: aufgeraeumt.append((args.passwort, dict(angelegt))) or {})
+    monkeypatch.setattr(sys, "argv", ["lasttest_sucher.py", "--sucher", "2", "--db-name", db.name])
+    with pytest.raises(RuntimeError):
+        LS.main()
+    assert len(aufgeraeumt) == 1 and aufgeraeumt[0][1]["users"] == ["u_x"]
+    assert aufgeraeumt[0][0] and pruefe_passwort(aufgeraeumt[0][0])
+
+
+def test_08_runbook_rueckweg_konkret():
+    """Rueckweg im Go-Live-Runbook: Commit und Backup-Ordner in Punkt 2
+    notiert; bis Punkt 5 prod2 zuruecksetzen, ab Punkt 6 Restore als
+    Einmal-Container auf prod1, dann alter Commit — nie ueber rollout.sh
+    (holt per git pull wieder den neuen Stand)."""
+    d = (WURZEL / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    runbook = d[d.index("## Go-Live: Anmeldung mit Kontonummer"):d.index("## Backups")]
+    p2 = runbook[runbook.index("2. **Backup**"):runbook.index("3. **Nur das Backend")]
+    assert "rev-parse HEAD" in p2 and "BEIDEN" in p2 and "prod1" in p2 and "ls /backups" in p2
+
+    def befehle(text):
+        return "\n".join(re.findall(r"```bash\n(.*?)```", text, re.S))
+
+    p12 = runbook[runbook.index("12. **Zurück"):runbook.index("13. **Sicherungen")]
+    assert "git pull --ff-only" in p12 and "rollout.sh" not in befehle(p12)
+    bis5 = befehle(p12[p12.index("bis einschließlich Punkt 5"):p12.index("ab Punkt 6")])
+    assert (bis5.index("# prod2") < bis5.index("git reset --hard <alt>")
+            < bis5.index("docker compose build backend web") < bis5.index("docker compose start backend"))
+    ab6_text = p12[p12.index("ab Punkt 6"):]
+    ab6 = befehle(ab6_text)
+    assert "exec" not in ab6 and "**prod1**" in ab6_text
+    restore = "docker compose run --rm --no-deps backend python -X utf8 scripts/restore_mongo.py /backups/"
+    assert (ab6.index("docker compose stop backend") < ab6.index(restore)
+            < ab6.index("--yes") < ab6.index("git reset --hard <alt>")
+            < ab6.index("docker compose up -d --build") < ab6.index("sh deploy/freigeben.sh"))
