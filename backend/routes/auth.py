@@ -22,7 +22,8 @@ from rate_limiter import (client_ip, SlidingWindowRateLimiter, bekannte_ip_merke
                           konto_fehlversuch, konto_gesperrt, konto_gesperrt_text,
                           login_ip_limiter,
                           login_limiter, login_schluessel, register_limiter)
-from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+from kontonummer import (anmeldekennung, kaeufer_normalisieren, kennung_normalisieren,
+                         normalisieren, nummer_bedingung)
 
 # Zweiter Anmeldeschritt (Authenticator-Code) mit eigenem Zaehler.
 login_mfa_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login-mfa")
@@ -56,6 +57,15 @@ async def _konto_fuer_login(kennung: str):
     if nr:
         return await db.users.find_one({"kontonummer": nummer_bedingung(nr),
                                         "role": {"$in": _NUMMERN_ROLLEN}})
+    # Kaeufer-Code (14.09.2026): Zwischenhaendler duerfen sich auch hier
+    # anmelden. Findet der Code kein Konto, bleibt der Benutzername-Zweig fuer
+    # den Super-Admin (ein Benutzername wie 'ADMIN7' saehe sonst wie ein Code aus).
+    code = kaeufer_normalisieren(kennung)
+    if code:
+        u = await db.users.find_one({"kontonummer": nummer_bedingung(code),
+                                     "role": "b2b_buyer"})
+        if u:
+            return u
     if "@" not in kennung:
         return await db.users.find_one({"username": kennung, "role": "admin",
                                         "is_super_admin": True})
@@ -342,7 +352,7 @@ async def login(body: LoginIn, request: Request):
         await konto_fehlversuch(konto_k, ip)
         # Audit: fehlgeschlagener Versuch (nur Kennung + IP, nie das Passwort).
         await log_activity_sicher("", "", "auth.login.fehlgeschlagen",
-                           meta={"identifier": (normalisieren(identifier) or identifier)[:120],
+                           meta={"identifier": (kennung_normalisieren(identifier) or identifier)[:120],
                                  "ip": ip})
         raise HTTPException(401, LOGIN_FALSCH)
     if not user.get("active"):

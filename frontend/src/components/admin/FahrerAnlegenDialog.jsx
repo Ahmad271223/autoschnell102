@@ -3,6 +3,8 @@ import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { X } from "lucide-react";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import { passwortProblem } from "@/lib/passwort";
 
 /**
  * Kontonummer (13.09.2026): Fahrer-Konto durch den Betreiber anlegen —
@@ -23,9 +25,9 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
 
   const submit = async () => {
-    if (f.display_name.trim().length < 2 || f.password.length < 8) {
-      toast.error("Name und Passwort (min. 8 Zeichen) angeben"); return;
-    }
+    if (f.display_name.trim().length < 2) { toast.error("Name des Fahrers angeben"); return; }
+    const problem = passwortProblem(f.password);
+    if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
       const { data } = await api.post("/admin/drivers", {
@@ -33,7 +35,7 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
         email: f.email.trim(), phone: f.phone.trim(),
         ...(request?.id ? { anfrage_id: request.id } : {}),
       });
-      setErgebnis({ ...data, name: f.display_name.trim() });
+      setErgebnis({ ...data, name: f.display_name.trim(), passwort: f.password });
       onAngelegt?.(data);
     } catch (e) { toast.error(errMsg(e, "Fahrer anlegen fehlgeschlagen")); }
     finally { setBusy(false); }
@@ -52,6 +54,7 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
         </div>
         {ergebnis ? (
           <ZugangsdatenKarte titel="Fahrer angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                             passwort={ergebnis.passwort}
                              driverCode={ergebnis.driver_code} bereich="fahrer" onClose={onClose} />
         ) : (
           <>
@@ -66,9 +69,8 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
                      data-testid="fahrer-anlegen-email" className={inputCls} style={inputStyle} />
               <input value={f.phone} onChange={set("phone")} placeholder="Telefon (optional)"
                      className={inputCls} style={inputStyle} />
-              <input value={f.password} onChange={set("password")} type="password" autoComplete="new-password"
-                     placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *"
-                     data-testid="fahrer-anlegen-passwort" className={inputCls} style={inputStyle} />
+              <PasswortFeld value={f.password} onChange={(v) => setF((s) => ({ ...s, password: v }))}
+                            testid="fahrer-anlegen-passwort" className={inputCls} style={inputStyle} />
             </div>
             <button onClick={submit} disabled={busy} data-testid="fahrer-anlegen-submit"
                     className="mt-4 w-full h-10 rounded-xl text-[14px] font-medium text-white disabled:opacity-50"

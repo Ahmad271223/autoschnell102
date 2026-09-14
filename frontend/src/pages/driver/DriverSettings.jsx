@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useDriver, driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
+import { passwortProblem } from "@/lib/passwort";
 import { toast } from "sonner";
 import { Copy, Check, Building2, User, KeyRound } from "lucide-react";
 
@@ -14,7 +15,9 @@ export default function DriverSettings() {
 
   const changePassword = async (e) => {
     e.preventDefault();
-    if (pw.next.length < 8) return toast.error("Neues Passwort: mindestens 8 Zeichen");
+    // Dieselbe Regel wie das Backend (passwoerter.py): mind. 10 Zeichen, Ziffer/Sonderzeichen.
+    const problem = passwortProblem(pw.next);
+    if (problem) return toast.error(problem);
     if (pw.next !== pw.repeat) return toast.error("Die Wiederholung stimmt nicht überein");
     setPwBusy(true);
     try {
@@ -115,9 +118,9 @@ export default function DriverSettings() {
         <input type="password" autoComplete="current-password" placeholder="Aktuelles Passwort"
           value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })}
           className="input-base w-full mt-2" required data-testid="driver-pw-current" />
-        <input type="password" autoComplete="new-password" placeholder="Neues Passwort (min. 8 Zeichen)"
+        <input type="password" autoComplete="new-password" placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
           value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })}
-          className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-next" />
+          className="input-base w-full mt-2" minLength={10} required data-testid="driver-pw-next" />
         <input type="password" autoComplete="new-password" placeholder="Neues Passwort wiederholen"
           value={pw.repeat} onChange={(e) => setPw({ ...pw, repeat: e.target.value })}
           className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-repeat" />

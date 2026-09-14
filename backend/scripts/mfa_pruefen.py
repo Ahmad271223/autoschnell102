@@ -18,7 +18,12 @@ Typische Ergebnisse:
     App behalten wurde. Loesung: Eintrag in der App loeschen, einmal neu
     einrichten, den frisch angezeigten Schluessel verwenden.
 
-Aendert nichts an der Datenbank.
+Aendert nichts an der Datenbank — AUSSER mit --abschalten --ja (14.09.2026,
+Betreiber ausgesperrt: "Code ungueltig", obwohl er vorher immer passte):
+schaltet die Zwei-Faktor-Anmeldung des Kontos ab und beendet seine Sitzung.
+Danach Anmeldung nur mit Benutzername + Passwort; in den Einstellungen
+anschliessend NEU einrichten (neuer Schluessel, neue Wiederherstellungscodes).
+    python scripts/mfa_pruefen.py --konto chef-f525c3 --abschalten --ja
 """
 import argparse
 import os
@@ -40,6 +45,10 @@ def main() -> int:
     ap.add_argument("--fenster", type=int, default=20,
                     help="wie viele 30-Sekunden-Schritte in beide Richtungen "
                          "gesucht wird (Standard 20 = +/- 10 Minuten)")
+    ap.add_argument("--abschalten", action="store_true",
+                    help="Zwei-Faktor-Anmeldung dieses Kontos abschalten (Notfall, "
+                         "nur zusammen mit --ja)")
+    ap.add_argument("--ja", action="store_true", help="Bestaetigung fuer --abschalten")
     args = ap.parse_args()
 
     try:
@@ -60,10 +69,10 @@ def main() -> int:
         {"_id": 0, "id": 1, "username": 1, "role": 1, "is_super_admin": 1, "mfa": 1})
     if not nutzer:
         print(f"FEHLER: Kein Admin-Konto mit dem Benutzernamen '{such}' gefunden.")
-        from kontonummer import normalisieren
-        if normalisieren(such):
-            print("HINWEIS: Das ist eine Kontonummer — Chef, Sucher, Zwischenhaendler "
-                  "und Fahrer haben keine Zwei-Faktor-Anmeldung.")
+        from kontonummer import kennung_normalisieren
+        if kennung_normalisieren(such):
+            print("HINWEIS: Das ist eine Kontonummer bzw. ein Kaeufer-Code — Chef, "
+                  "Sucher, Zwischenhaendler und Fahrer haben keine Zwei-Faktor-Anmeldung.")
         print("Vorhandene Admin-Konten (Benutzername):")
         for u in db.users.find({"role": "admin"}, {"_id": 0, "username": 1}):
             print("   ", u.get("username") or "(ohne Benutzernamen — Anmeldung nicht moeglich)")
@@ -74,6 +83,29 @@ def main() -> int:
     m = nutzer.get("mfa") or {}
     aktiv = bool(m.get("aktiv"))
     print(f"Status: {'AKTIV' if aktiv else 'noch nicht aktiv'}")
+
+    if args.abschalten:
+        if not args.ja:
+            print("\nABBRUCH: --abschalten braucht die Bestaetigung --ja. Nichts geaendert.")
+            return 2
+        if not m:
+            print("\nKeine Zwei-Faktor-Daten vorhanden — nichts abzuschalten.")
+            return 0
+        # Geheimnis, Wiederherstellungscodes und Sperre komplett entfernen;
+        # laufende Sitzung beenden (das Zwischen-Token der Anmeldung passt
+        # danach ohnehin nicht mehr zum Kontozustand).
+        res = db.users.update_one({"id": nutzer["id"]},
+                                  {"$unset": {"mfa": ""},
+                                   "$set": {"current_session_id": None}})
+        db.activity_logs.insert_one({
+            "id": __import__("uuid").uuid4().hex, "dealer_id": "", "user_id": nutzer["id"],
+            "action": "auth.mfa.abgeschaltet.betreiber",
+            "meta": {"skript": "mfa_pruefen.py", "username": nutzer.get("username")},
+            "created_at": datetime.now(timezone.utc).isoformat()})
+        print(f"\nZwei-Faktor-Anmeldung ABGESCHALTET ({res.modified_count} Konto geaendert).")
+        print("-> Jetzt mit Benutzername + Passwort anmelden, dann in den Einstellungen")
+        print("   die Zwei-Faktor-Anmeldung NEU einrichten (alten Eintrag in der App loeschen).")
+        return 0
 
     quelle = "secret" if aktiv else "pending_secret"
     roh = m.get(quelle)

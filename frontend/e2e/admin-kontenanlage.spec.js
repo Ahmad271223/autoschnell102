@@ -36,7 +36,8 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
   /** Zugangsdaten-Karte lesen und schliessen. */
   async function kontonummerAusKarte(page) {
     const nr = page.getByTestId("zugangsdaten-kontonummer");
-    await expect(nr).toHaveText(/^\d+(-\d+)?$/);
+    // Kontonummer (Chef/Sucher/Fahrer) oder Kaeufer-Code (14.09.2026, z. B. 6FE7K2M)
+    await expect(nr).toHaveText(/^(\d+(-\d+)?|[A-HJ-NP-Z2-9]{6,9})$/);
     const wert = (await nr.textContent()).trim();
     return wert;
   }
@@ -100,7 +101,8 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
     await page.getByTestId("kaeufer-anlegen-b2b").check();
     await page.getByTestId("kaeufer-anlegen-submit").click();
     const kaeuferNr = await kontonummerAusKarte(page);
-    expect(kaeuferNr).toMatch(/^\d+$/);
+    // Kaeufer-Code statt Nummer aus der Reihe (14.09.2026): Buchstaben + Ziffern
+    expect(kaeuferNr).toMatch(/^(?=.*[A-Z])[A-HJ-NP-Z2-9]{6,9}$/);
     await page.getByTestId("zugangsdaten-fertig").click();
     const kaeufer = (await h.superGet("/admin/users")).find((u) => u.email === mails.kaeufer);
     await expect(page.getByTestId(`buyer-kontonummer-${kaeufer.id}`)).toHaveText(kaeuferNr);

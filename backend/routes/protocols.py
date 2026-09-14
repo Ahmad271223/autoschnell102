@@ -25,8 +25,9 @@ from pymongo.errors import DuplicateKeyError
 
 import betrieb
 import protokoll_vergleich as PV
-from deps import (besitzer_namen, db, fahrzeug_im_bereich, ist_sucher, log_activity,
-                  log_activity_sicher, now_iso, termin_bereich, termin_im_bereich)
+from deps import (besitzer_namen, current_chef, db, fahrzeug_im_bereich, ist_sucher,
+                  log_activity, log_activity_sicher, now_iso, termin_bereich,
+                  termin_im_bereich)
 from lifecycle import try_set_lifecycle
 # Runde 17 (Nr. 10): dieselbe Schadensform wie im Kaufvertrag (contracts.py
 # importiert appointments/protocols nur lazy — kein Zyklus).
@@ -36,6 +37,11 @@ from routes.drivers import current_driver, _zugriff_pruefen
 # Haendler-/Sucher-Zugriff auf die fertigen Protokolle (Fahrzeugakte).
 # current_firma = Chef UND seine Sucher; Admin/Kaeufer bleiben aussen vor.
 from routes.bestand import current_firma as _dealer_dep
+# Freigabe (14.09.2026, Wunsch Ahmad): "Nur der Firmenchef darf mit dem Fahrer
+# vor Ort kommunizieren, Sucher nicht." Die Freigabe-Liste, der Zaehler und
+# die Freigabe/Rueckgabe selbst sind Chefsache; Sucher sehen weiter nur die
+# fertigen Protokolle ihrer eigenen Vorgaenge (Akte, PDF).
+_chef_dep = current_chef
 
 log = logging.getLogger("autohandel")
 
@@ -1793,7 +1799,7 @@ def _eur(preis) -> str:
 
 
 @router.get("/protocols/zur-freigabe/anzahl")
-async def protokolle_zur_freigabe_anzahl(user=Depends(_dealer_dep)):
+async def protokolle_zur_freigabe_anzahl(user=Depends(_chef_dep)):
     """Runde 33: Zaehler fuers Menue — der Chef merkt auf jeder Seite, dass
     ein Fahrer beim Verkaeufer auf seine Freigabe wartet."""
     paare = await _wartende_protokolle(user, _ZAEHLER_FELDER)
@@ -1807,7 +1813,7 @@ async def protokolle_zur_freigabe_anzahl(user=Depends(_dealer_dep)):
 
 
 @router.get("/protocols/zur-freigabe")
-async def protokolle_zur_freigabe(user=Depends(_dealer_dep)):
+async def protokolle_zur_freigabe(user=Depends(_chef_dep)):
     """Runde 30 (Wunsch Ahmad): Was wartet gerade auf die Freigabe des Chefs?
 
     Liefert das ausgefuellte Protokoll — Vergleich Vertrag/vor Ort, neue
@@ -1938,7 +1944,7 @@ async def _freigabe_konflikt(protocol_id: str, user: dict) -> str:
 
 @router.post("/protocols/{protocol_id}/freigabe")
 async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
-                              user=Depends(_dealer_dep)):
+                              user=Depends(_chef_dep)):
     """Runde 30: Der Chef gibt das abgeschickte Protokoll frei — mit dem
     neuen Preis, falls er nachverhandelt hat. Oder er schickt es zurueck,
     wenn der Fahrer etwas nachtragen soll.

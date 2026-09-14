@@ -975,6 +975,15 @@ gegenseitig ausbremsen:
   `docker compose exec backend python scripts/anmeldesperre_aufheben.py <kontonummer> --ausfuehren`
   (auch mit dem Benutzernamen des Super-Admins; ohne `--ausfuehren` nur
   Probelauf). `LOGIN_KONTO_LIMIT=0` sperrt nie und meldet nur noch den Alarm.
+- **Konto prüfen (14.09.2026):** Bekommt jemand „Kontonummer oder Passwort
+  falsch“, zeigt der Super-Admin unter **Nutzer** bzw. **Fahrer → Konto prüfen**
+  (`GET /admin/konten/pruefen?kennung=…`) zu einer Kontonummer oder einem
+  Käufer-Code: Kontoart und Anmeldeseite (Firma/Sucher `/login`, Zwischenhändler
+  `/markt/login`, Fahrer `/fahrer/login`), aktiv, Passwort gesetzt, Fehlversuche
+  und Anmeldesperre. Häufigster Fall: eine Fahrernummer in der Firmen-Anmeldung
+  oder eine Firmennummer in der Fahrer-App — die Masken selbst nennen bewusst
+  keine Kontoart. „Passwort setzen“ meldet seitdem nur dann eine aufgehobene
+  Sperre, wenn wirklich eine bestand.
 - **Kleinanzeigen-Rückfall:** `ABRUF_RUECKFALL_TAGESLIMIT` (25) gilt je
   **Sucher** und Tag, nicht mehr je Firma.
 - **Vorschaubilder:** `BILD_PROXY_LIMIT` (1500/min je IP). Der Bild-Link ist
@@ -1056,6 +1065,10 @@ Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`).
 - Jeder Admin/Super-Admin richtet sie selbst ein: **Einstellungen → Zwei-Faktor-Anmeldung → Einrichten**, Geheimnis bzw. `otpauth://`-Link in eine Authenticator-App (Google Authenticator, Aegis, 1Password …) übernehmen, Code eingeben → **8 Wiederherstellungscodes** erscheinen genau einmal — sicher ablegen.
 - Danach fragt die Anmeldung nach dem Passwort zusätzlich den 6-stelligen Code (5 Minuten Zeit, 5 Fehlversuche → 15 Minuten Sperre). Ein Wiederherstellungscode gilt je einmal.
 - App verloren: ein anderer Super-Admin setzt unter **Nutzer → 2FA zurücksetzen** die Zwei-Faktor-Anmeldung zurück (Sitzung wird beendet).
+- **Ausgesperrt („Code ungültig“, obwohl er vorher passte):** erst mit einem **Wiederherstellungscode** im Code-Feld anmelden. Sonst auf dem Server prüfen, ob die Uhr der App oder ein fremdes Geheimnis schuld ist:
+  `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --code 123456`
+  (nur lesend). Notfall ohne Wiederherstellungscode — Zwei-Faktor abschalten, dann mit Benutzername + Passwort anmelden und neu einrichten:
+  `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --abschalten --ja`
 - `/api/ready` und der Bereich **Betrieb** zeigen, welche Super-Admin-Konten noch ohne Zwei-Faktor sind — vor dem Go-Live alle einrichten.
 - Sucher/Fahrer/Zwischenhändler sind nicht betroffen (nur Admin-Rollen).
 
@@ -1345,7 +1358,7 @@ Der Host-Kopf ist nötig, weil der Webserver nur die eingetragene Domain bedient
 
 Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
 
-Konten gibt es nur über den Super-Admin (Kontonummer, 13.09.2026): Er legt Firma mit Chef, Sucher, Zwischenhändler und Fahrer an. **Kontonummer und Passwort vergibt der Betreiber** und teilt sie den Kunden mit — Chef z. B. `10023`, Sucher `10023-2`, Zwischenhändler und Fahrer eine eigene Nummer. Eine Selbstregistrierung gibt es nicht; ein vergessenes Passwort setzt der Betreiber neu (Admin → Passwort setzen).
+Konten gibt es nur über den Super-Admin (Kontonummer, 13.09.2026): Er legt Firma mit Chef, Sucher, Zwischenhändler und Fahrer an. **Kontonummer und Passwort vergibt der Betreiber** und teilt sie den Kunden mit — Chef z. B. `10023`, Sucher `10023-2`, Fahrer eine eigene Nummer aus derselben Reihe, Zwischenhändler seit 14.09.2026 einen **Käufer-Code** wie `6FE7K2M` (7 Zeichen, Buchstaben und Ziffern ohne I/O/0/1, Groß-/Kleinschreibung und Trenner egal; ältere numerische Käufernummern gelten weiter). Passwörter: mindestens 10 Zeichen mit Ziffer oder Sonderzeichen, bis 72 Zeichen — die Admin-Formulare bieten „Sicheres Passwort mit 20 Zeichen vorschlagen“ und zeigen das Passwort nach dem Anlegen einmalig neben der Kontonummer. Eine Selbstregistrierung gibt es nicht; ein vergessenes Passwort setzt der Betreiber neu (Admin → Passwort setzen).
 
 ### Stufe 2 — zweiter Server und Load Balancer (später)
 

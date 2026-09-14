@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { RefreshCw, Check, X, Store, Building2, Truck, KeyRound, UserPlus } from "lucide-react";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import { passwortProblem } from "@/lib/passwort";
 import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
 
 /**
@@ -344,9 +346,9 @@ function FirmaAnlegenDialog({ request, onClose }) {
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
 
   const submit = async () => {
-    if (!f.company_name.trim() || f.password.length < 8) {
-      toast.error("Firma und Passwort (min. 8 Zeichen) angeben"); return;
-    }
+    if (!f.company_name.trim()) { toast.error("Firma angeben"); return; }
+    const problem = passwortProblem(f.password);
+    if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
       const { data } = await api.post("/admin/users", {
@@ -354,7 +356,7 @@ function FirmaAnlegenDialog({ request, onClose }) {
         company_name: f.company_name.trim(), contact_person: f.contact_person.trim(),
         phone: f.phone.trim(), plan_type: "none", anfrage_id: request.id,
       });
-      setErgebnis({ ...data, name: f.company_name.trim() });
+      setErgebnis({ ...data, name: f.company_name.trim(), passwort: f.password });
     } catch (e) { toast.error(errMsg(e)); }
     finally { setBusy(false); }
   };
@@ -363,6 +365,7 @@ function FirmaAnlegenDialog({ request, onClose }) {
     <DialogRahmen titel="Firma anlegen" testid="firma-anlegen-dialog" onClose={onClose}>
       {ergebnis ? (
         <ZugangsdatenKarte titel="Firmen-Konto angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                           passwort={ergebnis.passwort}
                            bereich="app" hinweis="Sucher danach über die Nutzer-Detailseite anlegen."
                            onClose={onClose} />
       ) : (<>
@@ -382,8 +385,9 @@ function FirmaAnlegenDialog({ request, onClose }) {
           </div>
           <input value={f.email} onChange={set("email")} placeholder="Kontakt-E-Mail (optional)"
                  type="email" className={inputCls} style={inputStyle} />
-          <input value={f.password} onChange={set("password")} placeholder="Start-Passwort (min. 8 Zeichen) *"
-                 type="password" autoComplete="new-password" className={inputCls} style={inputStyle} />
+          <PasswortFeld value={f.password} onChange={(v) => setF((s) => ({ ...s, password: v }))}
+                        placeholder="Start-Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen) *"
+                        testid="firma-anlegen-passwort" className={inputCls} style={inputStyle} />
         </div>
         <Button className="mt-4 w-full" onClick={submit} disabled={busy}>
           {busy ? "Wird angelegt…" : "Firmen-Konto anlegen"}
@@ -411,9 +415,11 @@ function KaeuferAnlegenDialog({ request, onClose }) {
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
 
   const submit = async () => {
-    if (f.company_name.trim().length < 2 || f.contact_name.trim().length < 2 || f.password.length < 8) {
-      toast.error("Firma, Ansprechpartner und Passwort (min. 8 Zeichen) angeben"); return;
+    if (f.company_name.trim().length < 2 || f.contact_name.trim().length < 2) {
+      toast.error("Firma und Ansprechpartner angeben"); return;
     }
+    const problem = passwortProblem(f.password);
+    if (problem) { toast.error(problem); return; }
     if (!nachweis) {
       toast.error("Bitte bestätigen, dass der B2B-Nachweis vorliegt"); return;
     }
@@ -425,7 +431,7 @@ function KaeuferAnlegenDialog({ request, onClose }) {
         password: f.password, b2b_nachweis: nachweis,
         ...(request?.id ? { anfrage_id: request.id } : {}),
       });
-      setErgebnis({ ...data, name: f.company_name.trim() });
+      setErgebnis({ ...data, name: f.company_name.trim(), passwort: f.password });
     } catch (e) { toast.error(errMsg(e, "Käufer anlegen fehlgeschlagen")); }
     finally { setBusy(false); }
   };
@@ -434,6 +440,8 @@ function KaeuferAnlegenDialog({ request, onClose }) {
     <DialogRahmen titel="Zwischenhändler anlegen" testid="kaeufer-anlegen-dialog" onClose={onClose}>
       {ergebnis ? (
         <ZugangsdatenKarte titel="Zwischenhändler angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                           passwort={ergebnis.passwort}
+                           hinweis="Der Käufer-Code ist die Anmeldekennung im B2B-Marktplatz (Groß-/Kleinschreibung egal)."
                            bereich="kaeufer" onClose={onClose} />
       ) : (<>
         <div className="text-[12px] text-zinc-500 mb-4">
@@ -456,9 +464,8 @@ function KaeuferAnlegenDialog({ request, onClose }) {
           <input value={f.ust_id} onChange={set("ust_id")} maxLength={40}
                  placeholder="USt-IdNr. oder Handelsregister-Nr. (optional)"
                  className={inputCls} style={inputStyle} />
-          <input value={f.password} onChange={set("password")} type="password" autoComplete="new-password"
-                 placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *"
-                 data-testid="kaeufer-anlegen-passwort" className={inputCls} style={inputStyle} />
+          <PasswortFeld value={f.password} onChange={(v) => setF((s) => ({ ...s, password: v }))}
+                        testid="kaeufer-anlegen-passwort" className={inputCls} style={inputStyle} />
           <label className="flex items-start gap-2.5 text-[13px] text-zinc-300 cursor-pointer select-none">
             <input type="checkbox" checked={nachweis} onChange={(e) => setNachweis(e.target.checked)}
                    data-testid="kaeufer-anlegen-b2b" className="mt-0.5 h-4 w-4 shrink-0"

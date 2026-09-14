@@ -23,7 +23,8 @@ from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from kontonummer import ist_kontonummer_dublette, nummer_bedingung, sucher_nummer
+from kontonummer import (ist_kontonummer_dublette, kaeufer_code_erzeugen,
+                         nummer_bedingung, sucher_nummer)
 
 # Rollen in users, die sich mit Kontonummer anmelden.
 NUMMERN_ROLLEN = ("dealer", "sucher", "b2b_buyer")
@@ -238,13 +239,22 @@ async def sucher_anlegen(db, dealer_id: str, konto: dict) -> dict:
 
 
 async def kaeufer_anlegen(db, konto: dict) -> dict:
-    """Zwischenhaendler (b2b_buyer) mit eigener Nummer aus der Reihe.
+    """Zwischenhaendler (b2b_buyer) mit eigenem Kaeufer-Code.
+
+    14.09.2026 (Wunsch Ahmad): kein Wert mehr aus der Nummernreihe der Firmen
+    und Fahrer, sondern ein Buchstaben-Ziffern-Code wie '6FE7K2M' — damit ein
+    B2B-Konto nie mit einer Firmen- oder Fahrernummer verwechselt wird. Der
+    Code steht wie bisher in `kontonummer` (Anmeldekennung, eindeutiger
+    Teil-Index); kontonummer_basis entfaellt (die Selbstheilung der Reihe
+    betrifft Kaeufer nicht mehr). Aeltere numerische Kaeufernummern bleiben
+    gueltig (Login akzeptiert beides).
     Rueckgabe {user_id, kontonummer}."""
     for versuch in range(_VERSUCHE):
-        nr = await naechste_nummer(db)
+        code = kaeufer_code_erzeugen()
         doc = dict(konto)
         doc.pop("_id", None)
-        doc.update({"kontonummer": str(nr), "kontonummer_basis": nr,
+        doc.pop("kontonummer_basis", None)
+        doc.update({"kontonummer": code, "kontonummer_art": "kaeufer_code",
                     "role": "b2b_buyer", "dealer_id": None})
         doc.setdefault("current_session_id", None)
         try:
@@ -254,7 +264,7 @@ async def kaeufer_anlegen(db, konto: dict) -> dict:
                 continue
             raise
         return {"user_id": doc["id"], "kontonummer": doc["kontonummer"]}
-    raise RuntimeError("Kaeufer: keine freie Kontonummer")  # pragma: no cover
+    raise RuntimeError("Kaeufer: kein freier Kaeufer-Code")  # pragma: no cover
 
 
 # ------------------------------------------------------------ Fahrer

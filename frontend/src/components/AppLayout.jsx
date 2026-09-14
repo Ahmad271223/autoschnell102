@@ -18,7 +18,8 @@ const NAV = [
   { to: "/app/vertraege", label: "Verträge / PDFs", icon: FileText },
   { to: "/app/termine", label: "Terminplaner", icon: Calendar },
   // Runde 33: Abholprotokolle, die auf die Freigabe warten — mit Zaehler.
-  { to: "/app/freigaben", label: "Freigaben", icon: ClipboardCheck, zaehler: true },
+  // 14.09.2026 (Wunsch Ahmad): nur der Chef kommuniziert mit dem Fahrer vor Ort.
+  { to: "/app/freigaben", label: "Freigaben", icon: ClipboardCheck, zaehler: true, haendlerOnly: true },
   { to: "/app/fahrzeuge", label: "Fahrzeugpool", icon: Car },
   { to: "/app/bestand", label: "Bestand & Verkauf", icon: Warehouse, haendlerOnly: true },
   { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true },
@@ -51,7 +52,9 @@ export default function AppLayout({ children }) {
   // Runde 33 (Wunsch Ahmad): Warten Fahrer beim Verkaeufer auf die Freigabe,
   // soll man das auf JEDER Seite merken — Zahl im Menue, im Tab-Titel und ein
   // Hinweis, sobald ein neues Protokoll dazukommt.
-  const freigabe = useFreigabeZaehler(Boolean(user) && user.role !== "admin");
+  // 14.09.2026: Freigaben sind Chefsache — Sucher fragen den Zaehler nicht ab
+  // (das Backend antwortet ihnen mit 403).
+  const freigabe = useFreigabeZaehler(Boolean(user) && user.role === "dealer");
   const vorherWartend = useRef(null);
   useEffect(() => {
     if (!freigabe.geladen) {

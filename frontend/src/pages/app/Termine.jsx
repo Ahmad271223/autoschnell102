@@ -14,6 +14,7 @@ import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
 import { Link } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
@@ -743,7 +744,9 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
 // Runde 33 (Wunsch Ahmad): Mehrere Fahrer koennen gleichzeitig warten — die
 // Freigaben liegen deshalb auf einer eigenen Seite (/app/freigaben).
 function FreigabeHinweis() {
-  const { wartet, freigegeben } = useFreigabeZaehler(true);
+  // 14.09.2026: Freigaben sind Chefsache — Sucher sehen den Hinweis nicht.
+  const { user } = useAuth();
+  const { wartet, freigegeben } = useFreigabeZaehler(user?.role === "dealer");
   if (!wartet && !freigegeben) return null;
   const text = wartet > 0
     ? `${wartet} Abholprotokoll${wartet === 1 ? " wartet" : "e warten"} auf deine Freigabe`

@@ -6,6 +6,9 @@ import { useAuth } from "@/context/AuthContext";
 import { Search, KeyRound, Lock, Unlock, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import KontoPruefen from "@/components/admin/KontoPruefen";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import { passwortProblem, sperreHinweis } from "@/lib/passwort";
 
 
 // Kontonummer (13.09.2026): Konten tragen nicht mehr zwingend eine E-Mail —
@@ -120,13 +123,13 @@ export default function AdminUsers() {
   };
 
   const submitReset = async () => {
-    if (!resetUser || !newPw || newPw.length < 8) {
-      toast.error("Passwort muss mind. 8 Zeichen haben");
-      return;
-    }
+    if (!resetUser) return;
+    const problem = passwortProblem(newPw);
+    if (problem) { toast.error(problem); return; }
     try {
-      await api.post(`/admin/users/${resetUser.id}/password`, { new_password: newPw });
-      toast.success("Passwort aktualisiert — Sitzung beendet, Anmeldesperre aufgehoben");
+      const { data } = await api.post(`/admin/users/${resetUser.id}/password`, { new_password: newPw });
+      // 14.09.2026: nur von einer Sperre sprechen, wenn wirklich eine bestand.
+      toast.success(`Passwort aktualisiert — Sitzung beendet.${sperreHinweis(data)}`);
       setResetUser(null); setNewPw("");
     } catch (e) { toast.error(errMsg(e, "Fehler")); }
   };
@@ -163,6 +166,8 @@ export default function AdminUsers() {
           </Button>
         }
       />
+
+      {superAdmin && <KontoPruefen />}
 
       <Card padded={false}>
         <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
@@ -280,19 +285,12 @@ export default function AdminUsers() {
             <div className="text-[13px] text-zinc-400 mt-1">
               für {kontoLabel(resetUser)}
             </div>
-            <input
-              data-testid="admin-pw-reset-input"
-              type="text"
-              autoFocus
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              className="mt-4 w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
-              style={{
-                background: "rgba(255,255,255,0.05)",
-                border: "1px solid rgba(255,255,255,0.10)",
-              }}
-              placeholder="Neues Passwort (mind. 8 Zeichen)"
-            />
+            <div className="mt-4">
+              <PasswortFeld value={newPw} onChange={setNewPw} testid="admin-pw-reset-input" autoFocus
+                            placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
+                            className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
+                            style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }} />
+            </div>
             <div className="flex gap-2 mt-5 justify-end">
               <Button data-testid="admin-pw-reset-cancel" variant="ghost" onClick={() => { setResetUser(null); setNewPw(""); }}>Abbrechen</Button>
               <Button data-testid="admin-pw-reset-submit" onClick={submitReset}>Setzen</Button>
@@ -384,10 +382,8 @@ function CreateUserModal({ onClose, onCreated }) {
       toast.error("Bitte Firma und Passwort angeben");
       return;
     }
-    if (password.length < 8) {
-      toast.error("Passwort muss mind. 8 Zeichen haben");
-      return;
-    }
+    const problem = passwortProblem(password);
+    if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
       const { data } = await api.post("/admin/users", {
@@ -398,7 +394,7 @@ function CreateUserModal({ onClose, onCreated }) {
         phone: phone.trim(),
         plan_type: planType,
       });
-      setErgebnis({ ...data, name: companyName.trim() });
+      setErgebnis({ ...data, name: companyName.trim(), passwort: password });
       onCreated?.(data);
     } catch (e) {
       toast.error(errMsg(e, "Fehler beim Anlegen"));
@@ -420,6 +416,7 @@ function CreateUserModal({ onClose, onCreated }) {
       >
         {ergebnis ? (
           <ZugangsdatenKarte titel="Firma angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                             passwort={ergebnis.passwort}
                              bereich="app" hinweis="Sucher legst du danach in der Firmenansicht an."
                              onClose={onClose} />
         ) : (<>
@@ -442,9 +439,15 @@ function CreateUserModal({ onClose, onCreated }) {
           <Field label="Kontakt-E-Mail (optional)" testid="create-user-email" type="email"
                  value={email} onChange={setEmail}
                  placeholder="haendler@firma.de" />
-          <Field label="Passwort (mind. 8 Zeichen)" testid="create-user-password"
-                 value={password} onChange={setPassword}
-                 placeholder="initiales Passwort" />
+          <div>
+            <label className="block text-[12px] font-medium text-zinc-400 mb-1">
+              Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)
+            </label>
+            <PasswortFeld value={password} onChange={setPassword} testid="create-user-password"
+                          placeholder="Start-Passwort"
+                          className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
+                          style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }} />
+          </div>
 
           <div>
             <label className="block text-[12px] font-medium text-zinc-400 mb-1.5">Abo-Plan</label>

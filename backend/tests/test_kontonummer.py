@@ -177,22 +177,22 @@ def test_kontenanlage_und_nummernreihe(wegwerf, monkeypatch):
             await KA.sucher_anlegen(db, z["firmen"][2]["dealer_id"], _konto("sx2"))
         codes.append(e.value.status_code)
         z["codes"] = codes
-        # Kaeufer und Fahrer in derselben Reihe
+        # Kaeufer: Code (14.09.2026), Fahrer: Nummer aus der Reihe
         z["kaeufer"] = await KA.kaeufer_anlegen(db, _konto("k1"))
         z["fahrer"] = await KA.fahrer_anlegen(db, _konto("f1", display_name="Fahrer 1"))
         z["k_doc"] = await db.users.find_one({"id": "k1"})
         z["f_doc"] = await db.driver_accounts.find_one({"id": "f1"})
-        # andere Dublette (E-Mail): kein neuer Versuch, genau eine Nummer verbraucht
+        # andere Dublette (E-Mail): Kaeufer verbrauchen keine Nummer der Reihe
         vor = (await db.counters.find_one({"_id": "kunden_nr"}))["seq"]
         with pytest.raises(DuplicateKeyError):
             await KA.kaeufer_anlegen(db, _konto("k2", email="k1@konto.test"))
         z["seq_diff_email"] = (await db.counters.find_one({"_id": "kunden_nr"}))["seq"] - vor
-        # Kontonummer-Dublette -> neuer Versuch mit der naechsten Nummer
+        # Kontonummer-Dublette (Fahrer) -> neuer Versuch mit der naechsten Nummer
         seq = (await db.counters.find_one({"_id": "kunden_nr"}))["seq"]
-        await db.users.insert_one(_konto("blocker", role="b2b_buyer",
-                                         kontonummer=str(1000 + seq + 1)))
+        await db.driver_accounts.insert_one(_konto("blocker", kontonummer=str(1000 + seq + 1),
+                                                   driver_code="FD-BLOCKER1"))
         z["blocker_nr"] = 1000 + seq + 1
-        z["nach_blocker"] = await KA.kaeufer_anlegen(db, _konto("k3"))
+        z["nach_blocker"] = await KA.fahrer_anlegen(db, _konto("k3", display_name="F3"))
         # Selbstheilung ueber drei Sammlungen
         heil = []
         for coll, doc in ((db.driver_accounts, _konto("fx", kontonummer="50000",
@@ -202,7 +202,8 @@ def test_kontenanlage_und_nummernreihe(wegwerf, monkeypatch):
                           (db.dealers, {"id": "dx", "user_id": "dxu", "kunden_nr": 70000})):
             await coll.insert_one(doc)
             await db.counters.update_one({"_id": "kunden_nr"}, {"$set": {"seq": 1}})
-            heil.append(int((await KA.kaeufer_anlegen(db, _konto(f"h{len(heil)}")))["kontonummer"]))
+            heil.append(int((await KA.fahrer_anlegen(
+                db, _konto(f"h{len(heil)}", display_name="H")))["kontonummer"]))
         await db.counters.delete_one({"_id": "kunden_nr"})
         heil.append(int((await KA.fahrer_anlegen(db, _konto("h_fahrer")))["kontonummer"]))
         z["heil"] = heil
@@ -238,14 +239,19 @@ def test_kontenanlage_und_nummernreihe(wegwerf, monkeypatch):
     assert isinstance(z["alt"]["kunden_nr"], int)
     assert z["alt_sucher"]["kontonummer"] == f"{z['alt']['kunden_nr']}-1"
     assert z["codes"] == [404, 409]
-    k_nr, f_nr = int(z["kaeufer"]["kontonummer"]), int(z["fahrer"]["kontonummer"])
-    assert k_nr > max(nummern + [z["alt"]["kunden_nr"]]) and f_nr > k_nr
+    from kontonummer import KAEUFER_MUSTER, normalisieren
+    f_nr = int(z["fahrer"]["kontonummer"])
+    assert f_nr > max(nummern + [z["alt"]["kunden_nr"]])
+    # Kaeufer-Code (14.09.2026): Buchstaben+Ziffern, keine Nummer der Reihe
+    assert KAEUFER_MUSTER.match(z["kaeufer"]["kontonummer"]), z["kaeufer"]
+    assert normalisieren(z["kaeufer"]["kontonummer"]) is None
     assert z["k_doc"]["role"] == "b2b_buyer" and z["k_doc"]["dealer_id"] is None
-    assert z["k_doc"]["kontonummer_basis"] == k_nr
+    assert "kontonummer_basis" not in z["k_doc"]
+    assert z["k_doc"]["kontonummer_art"] == "kaeufer_code"
     assert z["f_doc"]["kontonummer_basis"] == f_nr
     assert z["f_doc"]["driver_code"] == z["fahrer"]["driver_code"]
     assert z["fahrer"]["driver_code"].startswith("FD-")
-    assert z["seq_diff_email"] == 1
+    assert z["seq_diff_email"] == 0
     assert int(z["nach_blocker"]["kontonummer"]) == z["blocker_nr"] + 1
     assert z["heil"][:3] == [50001, 60001, 70001], z["heil"]
     assert z["heil"][3] > 70001

@@ -20,7 +20,7 @@ def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     return safe[:200] or fallback
 
 from pymongo.errors import DuplicateKeyError
-from fastapi import APIRouter, Body, Depends, HTTPException, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -264,18 +264,115 @@ _KONTO_DUBLETTE = ("Konto konnte wegen einer Dublette nicht angelegt werden — 
                    "bitte erneut versuchen")
 
 
-async def _konto_sperre_aufheben(konto: dict) -> None:
+async def _konto_sperre_aufheben(konto: dict) -> dict:
     """Kontonummer (13.09.2026): Passwort-Setzen durch den Betreiber hebt die
-    Sperre des Konto-Limiters auf (einziger Weg bei 'Passwort vergessen')."""
+    Sperre des Konto-Limiters auf (einziger Weg bei 'Passwort vergessen').
+
+    14.09.2026 (Ahmad: "Meldung 'Sperre aufgehoben', obwohl nie eine Sperre
+    war"): liefert, was wirklich passiert ist — {sperre_aufgehoben, fehlversuche}
+    — damit die Oberflaeche nicht pauschal von einer Sperre spricht."""
     nr = (konto or {}).get("kontonummer")
     if not nr:
-        return
+        return {"sperre_aufgehoben": False, "fehlversuche": 0}
     try:
         from kontonummer import anmeldekennung
-        from rate_limiter import login_konto_limiter
-        await login_konto_limiter.reset(anmeldekennung(nr))
+        from rate_limiter import login_konto_limiter, _LOGIN_KONTO_LIMIT
+        k = anmeldekennung(nr)
+        stand = int(await login_konto_limiter.stand(k))
+        await login_konto_limiter.reset(k)
+        return {"sperre_aufgehoben": bool(_LOGIN_KONTO_LIMIT) and stand >= _LOGIN_KONTO_LIMIT,
+                "fehlversuche": stand}
     except Exception:
         log.exception("Konto-Sperre fuer %s nicht aufgehoben", nr)
+        return {"sperre_aufgehoben": False, "fehlversuche": 0, "unklar": True}
+
+
+_KONTOART = {"dealer": ("firma", "/login", "Firmen-Hauptaccount (Chef)"),
+             "sucher": ("sucher", "/login", "Sucher einer Firma"),
+             "b2b_buyer": ("kaeufer", "/markt/login", "Zwischenhändler (B2B-Marktplatz)"),
+             "admin": ("admin", "/login", "Admin-Konto")}
+
+
+@router.get("/admin/konten/pruefen")
+async def admin_konto_pruefen(kennung: str = Query(..., min_length=1, max_length=80),
+                              admin=Depends(current_super_admin)):
+    """Betreiber-Diagnose (14.09.2026, Ahmad: "Fahrer-Login mit 10004 gibt 401,
+    B2B-Anmeldung geht nicht"): Zu welcher KONTOART gehoert die Kennung, wo
+    meldet sie sich an, ist das Konto aktiv, hat es ein Passwort, und laeuft
+    eine Anmeldesperre? Die Anmeldemasken selbst sagen bewusst nur
+    "Kontonummer oder Passwort falsch" (keine Konto-Aufzaehlung fuer Fremde);
+    hier sieht es nur der Super-Admin."""
+    from kontonummer import anmeldekennung, kaeufer_normalisieren, normalisieren, nummer_bedingung
+    from rate_limiter import login_konto_limiter, _LOGIN_KONTO_LIMIT, _LOGIN_KONTO_FENSTER
+    roh = kennung.strip()
+    kanon = normalisieren(roh) or kaeufer_normalisieren(roh)
+    grund = {"limit": _LOGIN_KONTO_LIMIT, "fenster_minuten": max(1, _LOGIN_KONTO_FENSTER // 60)}
+    if not kanon:
+        return {"gefunden": False, "kennung": roh, **grund,
+                "hinweis": "Das ist weder eine Kontonummer (z. B. 10023 oder 10023-2) "
+                           "noch ein Käufer-Code (z. B. 6FE7K2M)."}
+    proj = {"_id": 0, "id": 1, "role": 1, "active": 1, "password_hash": 1, "dealer_id": 1,
+            "company_name": 1, "first_name": 1, "last_name": 1, "contact_name": 1,
+            "display_name": 1, "driver_code": 1, "kontonummer": 1, "created_at": 1,
+            "login_ips_bekannt": 1, "loeschung": 1}
+    konto = await db.users.find_one({"kontonummer": nummer_bedingung(kanon)}, proj)
+    fahrer = None if konto else await db.driver_accounts.find_one(
+        {"kontonummer": nummer_bedingung(kanon)}, proj)
+    stand = int(await login_konto_limiter.stand(anmeldekennung(kanon)))
+    gesperrt = bool(_LOGIN_KONTO_LIMIT) and stand >= _LOGIN_KONTO_LIMIT
+    if not konto and not fahrer:
+        return {"gefunden": False, "kennung": kanon, "fehlversuche": stand,
+                "anmeldesperre": gesperrt, **grund,
+                "hinweis": "Kein Konto mit dieser Kennung — weder Firma, Sucher, "
+                           "Zwischenhändler noch Fahrer. Bitte die Kontonummer aus der "
+                           "Nutzer- bzw. Fahrerliste vergleichen."}
+    doc = konto or fahrer
+    if fahrer:
+        art, seite, art_text = "fahrer", "/fahrer/login", "Fahrer-Konto (Fahrer-App)"
+        name = doc.get("display_name") or ""
+    else:
+        art, seite, art_text = _KONTOART.get(
+            doc.get("role"), ("unbekannt", "/login", doc.get("role") or "?"))
+        name = (doc.get("company_name") or doc.get("contact_name")
+                or f"{doc.get('first_name') or ''} {doc.get('last_name') or ''}".strip())
+    firma = None
+    if doc.get("dealer_id") and not fahrer:
+        f = await db.dealers.find_one({"id": doc["dealer_id"]}, {"_id": 0, "company_name": 1})
+        firma = (f or {}).get("company_name")
+        if not name:
+            name = firma or ""       # Chef: der Firmenname steht am Haendlerprofil
+    aktiv = doc.get("active", True) is not False
+    hinweise = [f"{art_text}: Anmeldung unter {seite}."]
+    if art == "fahrer":
+        hinweise.append("Nicht unter /login (Firmen) und nicht im B2B-Marktplatz — dort gibt "
+                        "es für diese Nummer immer „Kontonummer oder Passwort falsch“.")
+    elif art in ("firma", "sucher"):
+        hinweise.append("Nicht in der Fahrer-App und nicht im B2B-Marktplatz anmelden.")
+    elif art == "kaeufer":
+        hinweise.append("Nicht in der Fahrer-App anmelden; unter /login geht es ebenfalls.")
+    if not aktiv:
+        hinweise.append("Das Konto ist GESPERRT (deaktiviert) — Anmeldung wird abgelehnt. "
+                        "In der Liste „Entsperren“.")
+    if (doc.get("loeschung") or {}).get("status") == "laeuft":
+        hinweise.append("Die Löschung dieses Kontos läuft — keine Anmeldung mehr möglich.")
+    if not doc.get("password_hash"):
+        hinweise.append("Es ist KEIN Passwort gesetzt — bitte „Passwort setzen“.")
+    if gesperrt:
+        hinweise.append(f"Anmeldesperre aktiv: {stand} Fehlversuche in {grund['fenster_minuten']} "
+                        f"Minuten (Grenze {_LOGIN_KONTO_LIMIT}). „Passwort setzen“ hebt sie auf; "
+                        "von bekannten Geräten des Nutzers greift sie nicht.")
+    elif stand:
+        hinweise.append(f"{stand} Fehlversuch(e) im aktuellen Fenster — noch keine Sperre.")
+    if aktiv and doc.get("password_hash") and not gesperrt:
+        hinweise.append("Konto ist in Ordnung. Bleibt es bei „falsch“: Passwort neu setzen "
+                        "(Tippfehler, Leerzeichen am Ende, Groß-/Kleinschreibung).")
+    return {"gefunden": True, "kennung": kanon, "art": art, "art_text": art_text,
+            "anmeldeseite": seite, "name": name, "firma": firma, "aktiv": aktiv,
+            "passwort_gesetzt": bool(doc.get("password_hash")),
+            "fehlversuche": stand, "anmeldesperre": gesperrt, **grund,
+            "driver_code": doc.get("driver_code"), "konto_id": doc.get("id"),
+            "bekannte_geraete": len(doc.get("login_ips_bekannt") or []),
+            "erstellt_am": doc.get("created_at"), "hinweise": hinweise}
 
 
 # ---------- Users ----------
@@ -1069,11 +1166,12 @@ async def admin_user_set_password(
             "updated_at": now_iso(),
         }},
     )
-    await _konto_sperre_aufheben(u)
+    sperre = await _konto_sperre_aufheben(u)
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.passwort.zurueckgesetzt",
-                       ref=user_id, meta={"kontonummer": u.get("kontonummer", "")})
-    return {"ok": True}
+                       ref=user_id, meta={"kontonummer": u.get("kontonummer", ""),
+                                          "sperre_aufgehoben": sperre.get("sperre_aufgehoben")})
+    return {"ok": True, **sperre}
 
 
 # ---------- Fahrer-Verwaltung (Review 09/2026: fehlte komplett) ----------
@@ -1200,11 +1298,12 @@ async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
         {"id": driver_id},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   "current_session_id": None, "updated_at": now_iso()}})
-    await _konto_sperre_aufheben(d)
+    sperre = await _konto_sperre_aufheben(d)
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.passwort.zurueckgesetzt",
-                       ref=driver_id, meta={"kontonummer": d.get("kontonummer", "")})
-    return {"ok": True}
+                       ref=driver_id, meta={"kontonummer": d.get("kontonummer", ""),
+                                            "sperre_aufgehoben": sperre.get("sperre_aufgehoben")})
+    return {"ok": True, **sperre}
 
 
 @router.delete("/admin/drivers/{driver_id}")

@@ -92,11 +92,13 @@ export default function BuyerLogin() {
         </p>
         <form onSubmit={submit} className="space-y-3">
           <div>
-            <label className="text-[11px] text-zinc-500 uppercase tracking-wide">Kontonummer</label>
-            <input value={kennung} onChange={(e) => setKennung(e.target.value)} type="text" inputMode="numeric"
-                   autoComplete="username" autoCapitalize="none" spellCheck={false} required
+            <label className="text-[11px] text-zinc-500 uppercase tracking-wide">Käufer-Code</label>
+            {/* Kaeufer-Code (14.09.2026): Buchstaben und Ziffern wie 6FE7K2M — keine
+                Zifferntastatur; Gross-/Kleinschreibung ist egal (Server normalisiert). */}
+            <input value={kennung} onChange={(e) => setKennung(e.target.value)} type="text" inputMode="text"
+                   autoComplete="username" autoCapitalize="characters" spellCheck={false} required
                    data-testid="buyer-login-kontonummer"
-                   placeholder="z. B. 10031" className={inputCls} style={st} />
+                   placeholder="z. B. 6FE7K2M" className={inputCls} style={st} />
           </div>
           <div>
             <label className="text-[11px] text-zinc-500 uppercase tracking-wide">Passwort</label>
@@ -114,6 +116,11 @@ export default function BuyerLogin() {
           <Link to="/passwort-vergessen" className="text-zinc-500 hover:text-white underline">
             Passwort vergessen? Der Betreiber setzt es neu
           </Link>
+        </div>
+        <div className="mt-3 text-center text-[11.5px] text-zinc-600" data-testid="buyer-login-hinweis">
+          Hier melden sich nur Zwischenhändler an. Firmen und Sucher:{" "}
+          <Link to="/login" className="underline">/login</Link> · Fahrer:{" "}
+          <Link to="/fahrer/login" className="underline">Fahrer-App</Link>
         </div>
         <div className="mt-4 text-center text-sm text-zinc-500">
           Noch kein Zugang?{" "}

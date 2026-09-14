@@ -88,7 +88,7 @@ def main(argv=None, db=None, jetzt=None) -> int:
         db = MongoClient(url, serverSelectionTimeoutMS=8000)[
             args.db or os.environ.get("DB_NAME") or "autoschnell"]
 
-    from kontonummer import anmeldekennung, normalisieren
+    from kontonummer import anmeldekennung, kaeufer_normalisieren, normalisieren
     fenster_s = args.fenster if args.fenster and args.fenster > 0 else fenster_sekunden()
     ids = schluessel(args.kennung, fenster_s, jetzt)
     if not ids:
@@ -96,7 +96,9 @@ def main(argv=None, db=None, jetzt=None) -> int:
         return 2
     k = anmeldekennung(args.kennung)
     grenze = _int_env("LOGIN_KONTO_LIMIT", 30)
-    art = "Kontonummer" if normalisieren(args.kennung) else "Benutzername/Kennung"
+    art = ("Kontonummer" if normalisieren(args.kennung)
+           else "Kaeufer-Code" if kaeufer_normalisieren(args.kennung)
+           else "Benutzername/Kennung")
     print(f"{art}: {k}   (Fenster {fenster_s} s, Grenze {grenze or 'aus (nur Alarm)'})")
 
     treffer = list(db.rate_limits.find({"_id": {"$in": ids}}, {"n": 1}))

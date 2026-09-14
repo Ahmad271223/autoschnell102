@@ -122,7 +122,10 @@ def test_02_gemeinsame_reihe_mit_kontenanlage(dbx):
     s_ka, k_ka = asyncio.run(_kontenanlage())
     # kontenanlage setzt nach den Nummern der Helfer fort ...
     assert s_ka == "7000-2"
-    assert int(k_ka) > k_nr
+    from kontonummer import KAEUFER_MUSTER
+    assert KAEUFER_MUSTER.match(k_ka), k_ka      # Kaeufer-Code seit 14.09.2026
     # ... und die Helfer nach denen der kontenanlage
     assert konten.kennung_fuer_mail(_konto(d, "gs3", "sucher", "G1")) == "7000-3"
-    assert int(konten.kennung_fuer_mail(_konto(d, "gk3", "b2b_buyer"))) > int(k_ka)
+    # Kaeufer der kontenanlage verbrauchen keine Nummer mehr (Kaeufer-Code) —
+    # die Helfer-Nummer folgt weiter der Reihe (nach dem ersten Helfer-Kaeufer)
+    assert int(konten.kennung_fuer_mail(_konto(d, "gk3", "b2b_buyer"))) > k_nr

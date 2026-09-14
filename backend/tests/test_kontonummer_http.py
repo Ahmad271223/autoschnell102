@@ -145,7 +145,9 @@ def test_01_anlage_liefert_nummern_und_speichert_sie(welt):
     f = dbx.driver_accounts.find_one({"id": welt["fahrer"]["id"]})
     for doc, antwort in ((k, welt["kaeufer"]), (f, welt["fahrer"])):
         assert isinstance(doc["kontonummer"], str) and doc["kontonummer"] == antwort["kontonummer"]
-        assert doc["kontonummer_basis"] == int(doc["kontonummer"])
+    assert f["kontonummer_basis"] == int(f["kontonummer"])
+    from kontonummer import KAEUFER_MUSTER
+    assert KAEUFER_MUSTER.match(k["kontonummer"]) and "kontonummer_basis" not in k
     # gemeinsame Reihe: keine Nummer doppelt ueber die Kontoarten
     assert len({firma["kontonummer"], k["kontonummer"], f["kontonummer"]}) == 3
     for coll in (dbx.users, dbx.driver_accounts):

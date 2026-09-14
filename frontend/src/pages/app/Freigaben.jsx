@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { freigabeZaehlerAktualisieren } from "@/lib/freigaben";
 import { preisAusText, preisText } from "@/lib/preis";
 import { useUngespeichert } from "@/lib/ungespeichert";
@@ -284,12 +285,18 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
 }
 
 export default function Freigaben() {
+  const { user } = useAuth();
+  // 14.09.2026 (Wunsch Ahmad): "Nur der Firmenchef darf mit dem Fahrer vor Ort
+  // kommunizieren, Sucher nicht." Das Backend antwortet Suchern mit 403 —
+  // hier gar nicht erst laden, sondern erklaeren.
+  const chef = user?.role === "dealer";
   const [liste, setListe] = useState(null);
   const [ladeFehler, setLadeFehler] = useState("");
   const [entwurf, setEntwurf] = useState({});
   const [busy, setBusy] = useState({});
 
   const laden = useCallback(async () => {
+    if (!chef) { setListe([]); return; }
     try {
       const { data } = await api.get("/protocols/zur-freigabe");
       const neu = Array.isArray(data) ? data : [];
@@ -307,7 +314,7 @@ export default function Freigaben() {
       setLadeFehler(errMsg(e, "Freigaben konnten nicht geladen werden"));
       setListe((l) => l ?? []);
     }
-  }, []);
+  }, [chef]);
 
   useEffect(() => {
     laden();
@@ -389,9 +396,18 @@ export default function Freigaben() {
         </div>
       )}
 
-      {liste === null && <div className="mt-8 text-sm text-zinc-500">lädt …</div>}
+      {!chef && (
+        <div className="mt-6 rounded-xl border px-4 py-3 text-sm" data-testid="freigaben-chefsache"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
+          Freigaben sind Chefsache: Nur der Firmen-Hauptaccount prüft die Abholprotokolle, verhandelt
+          mit dem Verkäufer und gibt frei. Deine eigenen Vorgänge findest du weiter im Terminplaner
+          und im Fahrzeugpool.
+        </div>
+      )}
 
-      {liste !== null && !liste.length && !ladeFehler && (
+      {chef && liste === null && <div className="mt-8 text-sm text-zinc-500">lädt …</div>}
+
+      {chef && liste !== null && !liste.length && !ladeFehler && (
         <div className="mt-10 text-center text-sm text-zinc-500" data-testid="freigaben-leer">
           Gerade wartet kein Fahrer auf eine Freigabe.
         </div>

@@ -4,6 +4,9 @@ import { toast } from "sonner";
 import { KeyRound, Lock, LockOpen, Search, Trash2, Truck, UserPlus } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
+import KontoPruefen from "@/components/admin/KontoPruefen";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import { passwortProblem, sperreHinweis } from "@/lib/passwort";
 
 /**
  * Fahrer-Verwaltung (Review 09/2026: fehlte komplett).
@@ -60,10 +63,12 @@ export default function AdminFahrer() {
   };
 
   const submitReset = async () => {
-    if ((newPw || "").length < 8) { toast.error("Mindestens 8 Zeichen"); return; }
+    const problem = passwortProblem(newPw);
+    if (problem) { toast.error(problem); return; }
     try {
-      await api.post(`/admin/drivers/${resetDriver.id}/password`, { new_password: newPw });
-      toast.success("Passwort gesetzt — alle Sitzungen des Fahrers wurden beendet, eine Anmeldesperre ist aufgehoben");
+      const { data } = await api.post(`/admin/drivers/${resetDriver.id}/password`, { new_password: newPw });
+      // 14.09.2026: nur von einer Sperre sprechen, wenn wirklich eine bestand.
+      toast.success(`Passwort gesetzt — alle Sitzungen des Fahrers wurden beendet.${sperreHinweis(data)}`);
       setResetDriver(null); setNewPw("");
     } catch (e) { toast.error(errMsg(e)); }
   };
@@ -94,6 +99,8 @@ export default function AdminFahrer() {
           </div>
         }
       />
+
+      <KontoPruefen />
 
       <Card padded={false}>
         <div className="px-4 py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
@@ -173,11 +180,12 @@ export default function AdminFahrer() {
             <div className="text-[12.5px] text-zinc-500 mt-1">
               {fahrerLabel(resetDriver)}. Alle Sitzungen des Fahrers werden beendet.
             </div>
-            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)}
-                   placeholder="Neues Passwort (min. 8, Ziffer oder Sonderzeichen)"
-                   data-testid="fahrer-pw-input" autoFocus
-                   className="mt-3 h-10 px-3 rounded-xl text-[14px] w-full outline-none"
-                   style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }} />
+            <div className="mt-3">
+              <PasswortFeld value={newPw} onChange={setNewPw} testid="fahrer-pw-input" autoFocus
+                            placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
+                            className="h-10 px-3 rounded-xl text-[14px] w-full outline-none"
+                            style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }} />
+            </div>
             <div className="mt-4 flex gap-2 justify-end">
               <Button variant="ghost" onClick={() => setResetDriver(null)}>Abbrechen</Button>
               <Button data-testid="fahrer-pw-submit" onClick={submitReset}>Setzen</Button>

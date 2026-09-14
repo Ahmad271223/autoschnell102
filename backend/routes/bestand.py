@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from deps import (besitzer_anreichern, besitzer_namen, clean_doc, current_chef,
                   konten_maskieren,
-                  current_firma, db, fahrzeug_bereich,
+                  current_firma, db, fahrzeug_bereich, ist_sucher,
                   log_activity, log_activity_sicher, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
 
@@ -197,6 +197,63 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
     await log_activity_sicher(user["dealer_id"], user["id"],
                        f"fahrzeug.entscheidung.{body.decision}", ref=vehicle_id)
     return {"ok": True, "lifecycle": target, "expires_at": expires}
+
+
+# Termine, die noch laufen (alles ausser diesen Zustaenden) — gleiche Liste
+# wie appointments.ABGESCHLOSSEN (kein Import: appointments importiert bestand).
+_TERMIN_GESCHLOSSEN = ("abgeholt", "nicht abgeholt", "storniert", "erledigt")
+
+
+@router.post("/vehicles/{vehicle_id}/entfernen")
+async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_firma)):
+    """Wunsch Ahmad 14.09.2026: "Wenn ein Sucher ein Auto loescht, soll das
+    nur bei ihm loeschen — nicht beim Chef."
+
+    Der Sucher nimmt das Fahrzeug aus SEINEM Bereich: ist er Hauptbearbeiter,
+    geht das Fahrzeug an den Chef (Hauptaccount) ueber; als Mitbearbeiter wird
+    er ausgetragen. Fahrzeug, Fotos, Vertraege, Termine, Protokolle und
+    Berichte bleiben fuer den Chef unveraendert (kein Lebenszyklus-Wechsel).
+    Der Chef selbst loescht weiter ueber POST /vehicles/{id}/decision
+    (Fotos weg, Lebenszyklus "geloescht"). Ein noch laufender Termin des
+    Suchers blockiert (409) — sonst verloere er seinen eigenen Vorgang aus
+    der Akte, waehrend der Fahrer unterwegs ist."""
+    if not ist_sucher(user):
+        raise HTTPException(400, "Der Chef löscht ein Fahrzeug über „Löschen“ in der "
+                                 "Fahrzeugakte — dieser Weg ist für Sucher gedacht")
+    v = await db.vehicles.find_one(
+        {"id": vehicle_id, **fahrzeug_bereich(user)},
+        {"_id": 0, "id": 1, "owner_user_id": 1, "mitbearbeiter_ids": 1})
+    if not v:
+        raise HTTPException(404, "Fahrzeug nicht gefunden")
+    offen = await db.appointments.count_documents(
+        {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
+         "created_by": user["id"], "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}},
+        limit=1)
+    if offen:
+        raise HTTPException(409, "Zu diesem Fahrzeug läuft noch ein Termin von dir — "
+                                 "erst abschließen oder stornieren")
+    war_besitzer = v.get("owner_user_id") == user["id"]
+    filt: Dict[str, Any] = {"id": vehicle_id, "dealer_id": user["dealer_id"]}
+    upd: Dict[str, Any] = {"$pull": {"mitbearbeiter_ids": user["id"]},
+                           "$set": {"updated_at": now_iso()}}
+    neuer_besitzer = v.get("owner_user_id")
+    if war_besitzer:
+        firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "user_id": 1})
+        chef_id = (firma or {}).get("user_id")
+        if not chef_id:
+            raise HTTPException(409, "Firma ohne Hauptaccount — bitte den Betreiber informieren")
+        filt["owner_user_id"] = user["id"]          # CAS wie bei /besitzer
+        upd["$set"].update({"owner_user_id": chef_id, "entfernt_von_sucher": user["id"],
+                            "entfernt_von_sucher_am": now_iso()})
+        neuer_besitzer = chef_id
+    res = await db.vehicles.update_one(filt, upd)
+    if res.matched_count == 0:
+        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehängt — bitte neu laden")
+    await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.sucher.entfernt",
+                              ref=vehicle_id, meta={"an_chef": war_besitzer,
+                                                    "owner_user_id": neuer_besitzer})
+    return {"ok": True, "entfernt": True, "an_chef": war_besitzer,
+            "owner_user_id": neuer_besitzer}
 
 
 async def _inserate_zum_fahrzeug_schliessen(vehicle_id: str, user: Dict[str, Any]) -> List[str]:

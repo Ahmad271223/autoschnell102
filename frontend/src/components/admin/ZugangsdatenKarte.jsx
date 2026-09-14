@@ -5,9 +5,13 @@ import { Check, Copy, KeyRound } from "lucide-react";
 /**
  * Kontonummer (13.09.2026): Zugangsdaten direkt nach der Anlage durch den
  * Betreiber. Die Kontonummer ist die Anmeldekennung (Chef '10023', Sucher
- * '10023-2', Kaeufer/Fahrer eigene Nummer); das Passwort hat der Betreiber
- * selbst vergeben und es ist danach nicht mehr abrufbar. Beim Fahrer kommt
- * der FD-Code dazu — den gibt der Fahrer seiner Firma zum Verknuepfen.
+ * '10023-2', Fahrer eigene Nummer, Zwischenhaendler seit 14.09.2026 ein
+ * Kaeufer-Code wie '6FE7K2M'); das Passwort hat der Betreiber selbst vergeben.
+ * 14.09.2026 (Wunsch Ahmad, "Kontonummer und Passwort muessen immer klappen"):
+ * das eben vergebene Passwort wird hier noch einmal im Klartext gezeigt —
+ * zum Abgleich und Kopieren — und ist nach dem Schliessen nicht mehr abrufbar.
+ * Beim Fahrer kommt der FD-Code dazu — den gibt der Fahrer seiner Firma zum
+ * Verknuepfen.
  *
  * Fest dunkel wie die uebrigen Admin-Dialoge.
  */
@@ -18,17 +22,17 @@ const ANMELDESEITE = {
 };
 
 export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kontonummer,
-                                            driverCode, bereich = "app", hinweis, onClose }) {
-  const [kopiert, setKopiert] = useState(false);
+                                            driverCode, bereich = "app", hinweis, passwort, onClose }) {
+  const [kopiert, setKopiert] = useState("");
 
-  const kopieren = async () => {
+  const kopieren = async (was, wert) => {
     try {
-      await navigator.clipboard.writeText(String(kontonummer || ""));
-      setKopiert(true);
-      toast.success("Kontonummer kopiert");
-      setTimeout(() => setKopiert(false), 2000);
+      await navigator.clipboard.writeText(String(wert || ""));
+      setKopiert(was);
+      toast.success(`${was} kopiert`);
+      setTimeout(() => setKopiert(""), 2000);
     } catch {
-      window.prompt("Kontonummer kopieren:", String(kontonummer || ""));
+      window.prompt(`${was} kopieren:`, String(wert || ""));
     }
   };
 
@@ -47,12 +51,27 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
                 data-testid="zugangsdaten-kontonummer">
             {kontonummer || "—"}
           </span>
-          <button type="button" onClick={kopieren} data-testid="zugangsdaten-kopieren"
+          <button type="button" onClick={() => kopieren("Kontonummer", kontonummer)} data-testid="zugangsdaten-kopieren"
                   className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-[12.5px] text-white"
                   style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)" }}>
-            {kopiert ? <Check size={14} /> : <Copy size={14} />} Kopieren
+            {kopiert === "Kontonummer" ? <Check size={14} /> : <Copy size={14} />} Kopieren
           </button>
         </div>
+        {passwort && (
+          <div className="mt-4">
+            <div className="text-[11px] uppercase tracking-wide text-zinc-500">Passwort (nur jetzt sichtbar)</div>
+            <div className="mt-1 flex items-center justify-between gap-3">
+              <span className="font-mono text-[17px] text-white break-all" data-testid="zugangsdaten-passwort">
+                {passwort}
+              </span>
+              <button type="button" onClick={() => kopieren("Passwort", passwort)} data-testid="zugangsdaten-passwort-kopieren"
+                      className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-[12.5px] text-white shrink-0"
+                      style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)" }}>
+                {kopiert === "Passwort" ? <Check size={14} /> : <Copy size={14} />} Kopieren
+              </button>
+            </div>
+          </div>
+        )}
         {driverCode && (
           <div className="mt-3 text-[12.5px] text-zinc-400">
             Fahrer-ID für die Firma:{" "}
@@ -67,8 +86,8 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
       <div className="mt-3 flex items-start gap-2 text-[12px] text-zinc-400">
         <KeyRound size={13} className="mt-0.5 shrink-0" />
         <span>
-          Passwort hast du vergeben – es ist nicht erneut abrufbar. Kontonummer und
-          Passwort jetzt an den Kontakt weitergeben.
+          Passwort hast du vergeben – nach dem Schließen ist es nicht mehr abrufbar. Kontonummer und
+          Passwort jetzt an den Kontakt weitergeben; bei Problemen „Passwort setzen“.
           {hinweis ? ` ${hinweis}` : ""}
         </span>
       </div>

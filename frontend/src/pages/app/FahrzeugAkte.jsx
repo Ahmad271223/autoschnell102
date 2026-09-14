@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
 import BeweisCard from "@/components/BeweisCard";
@@ -34,6 +35,12 @@ export default function FahrzeugAkte() {
   const [selectedDevs, setSelectedDevs] = useState([]);
   const [bestandForm, setBestandForm] = useState(null);
   const [busy, setBusy] = useState(false);
+  const { user } = useAuth();
+  // Wunsch Ahmad 14.09.2026: "Wenn ein Sucher ein Auto loescht, soll das nur
+  // bei ihm loeschen, nicht beim Chef." Sucher sehen deshalb keine Chef-
+  // Entscheidungen (Bestand/Weiterverkauf/Loeschen), sondern nur "Aus meiner
+  // Liste entfernen" (POST /vehicles/{id}/entfernen).
+  const sucher = user?.role === "sucher";
 
   const load = useCallback(async () => {
     try {
@@ -74,6 +81,18 @@ export default function FahrzeugAkte() {
       toast.success("Gespeichert");
       load();
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+  };
+
+  const entfernen = async () => {
+    if (busy) return;
+    if (!window.confirm("Fahrzeug aus deiner Liste entfernen?\n"
+        + "Es verschwindet nur bei dir — der Chef behält Fahrzeug, Vertrag, Termine und Historie.")) return;
+    setBusy(true);
+    try {
+      await api.post(`/vehicles/${v.id}/entfernen`);
+      toast.success("Aus deiner Liste entfernt — der Chef behält das Fahrzeug");
+      nav("/app/fahrzeuge");
+    } catch (e) { toast.error(errMsg(e)); setBusy(false); }
   };
 
   const applyDeviations = async () => {
@@ -175,7 +194,13 @@ export default function FahrzeugAkte() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2 lg:justify-end lg:shrink-0 lg:max-w-[50%]">
-          {v.lifecycle === "abgeholt" && (
+          {sucher && (
+            <button onClick={entfernen} disabled={busy} data-testid="akte-sucher-entfernen"
+                    className="rounded-lg px-3 py-2 text-xs text-zinc-500 hover:text-red-400 inline-flex items-center gap-1.5 disabled:opacity-50">
+              <Trash2 size={13} /> Aus meiner Liste entfernen
+            </button>
+          )}
+          {!sucher && v.lifecycle === "abgeholt" && (
             <>
               <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
                 <Tag size={13} /> Speichern & weiterverkaufen
@@ -188,13 +213,13 @@ export default function FahrzeugAkte() {
               </button>
             </>
           )}
-          {v.lifecycle === "bestand" && (
+          {!sucher && v.lifecycle === "bestand" && (
             <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
               <Tag size={13} /> Weiterverkaufen
             </button>
           )}
           {/* Ab Vertragserstellung sofort inserierbar (Abholung läuft parallel) */}
-          {["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
+          {!sucher && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
             <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
               <Tag size={13} /> Jetzt inserieren
             </button>

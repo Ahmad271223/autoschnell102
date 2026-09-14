@@ -700,9 +700,11 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     if not await login_ip_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
     # Kontonummer (13.09.2026): nur per Nummer (Schritt 5: kein E-Mail-Zweig).
-    from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+    # Kaeufer-Code (14.09.2026): '6FE7K2M' (auch klein geschrieben oder mit
+    # Trennern getippt) ODER eine aeltere numerische Kaeufernummer.
+    from kontonummer import anmeldekennung, kennung_normalisieren, nummer_bedingung
     from routes.auth import LOGIN_FALSCH
-    nr = normalisieren(kennung)
+    nr = kennung_normalisieren(kennung)
     u = None
     if nr:
         u = await db.users.find_one({"kontonummer": nummer_bedingung(nr),

@@ -7,9 +7,16 @@ Skripte es ohne Datenbank nutzen koennen.
 Format:
 - Chef einer Firma:   "10023"    (= dealers.kunden_nr)
 - Sucher einer Firma: "10023-2"  (Zusatz aus dealers.sucher_seq)
-- Kaeufer/Fahrer:     "10031"    (eigene Nummer aus derselben Reihe)
+- Fahrer:             "10031"    (eigene Nummer aus derselben Reihe)
+- Zwischenhaendler:   "6FE7K2M"  (Kaeufer-Code, seit 14.09.2026 — Wunsch
+                                  Ahmad: B2B-Konten sollen sich auf den ersten
+                                  Blick von Firmen- und Fahrernummern
+                                  unterscheiden; Buchstaben+Ziffern, bis 9
+                                  Stellen; alte numerische Kaeufernummern
+                                  bleiben gueltig)
 """
 import re
+import secrets
 import unicodedata
 from typing import Optional
 
@@ -44,10 +51,55 @@ def normalisieren(roh) -> Optional[str]:
     return kandidat if MUSTER.match(kandidat) else None
 
 
+# Kaeufer-Code (14.09.2026): Alphabet ohne I, O, 0, 1 (Verwechslung auf dem
+# Handy), mindestens ein Buchstabe (sonst waere es eine Nummer der Reihe),
+# erzeugt werden 7 Zeichen, angenommen 6-9 (Spielraum fuer spaetere Formate).
+KAEUFER_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+KAEUFER_LAENGE = 7
+KAEUFER_MUSTER = re.compile(r"^(?=.*[A-Z])[A-HJ-NP-Z2-9]{6,9}$")
+_KAEUFER_TRENNER = re.compile(r"[ \-._/]")
+
+
+def kaeufer_code_erzeugen() -> str:
+    """Zufaelliger Kaeufer-Code (kryptografischer Zufall, 32^7 Moeglichkeiten);
+    reine Ziffernfolgen werden verworfen."""
+    while True:
+        code = "".join(secrets.choice(KAEUFER_ALPHABET) for _ in range(KAEUFER_LAENGE))
+        if KAEUFER_MUSTER.match(code):
+            return code
+
+
+def kaeufer_normalisieren(roh) -> Optional[str]:
+    """Eingabe -> kanonischer Kaeufer-Code oder None.
+
+    ' 6fe7k2m ', '6FE-7K2M', '6FE 7K2M' -> '6FE7K2M'. Eine Nummer der Reihe
+    ('10023') ist KEIN Code (kein Buchstabe) — die beiden Muster sind
+    disjunkt, eine Kennung ist also nie beides."""
+    if not isinstance(roh, str):
+        return None
+    s = unicodedata.normalize("NFKC", roh).strip()
+    if not s or len(s) > 40:
+        return None
+    for strich in _STRICHE:
+        s = s.replace(strich, "-")
+    s = _KAEUFER_TRENNER.sub("", s).upper()
+    return s if KAEUFER_MUSTER.match(s) else None
+
+
+def ist_kaeufer_code(s) -> bool:
+    return isinstance(s, str) and bool(KAEUFER_MUSTER.match(s))
+
+
+def kennung_normalisieren(roh) -> Optional[str]:
+    """Kontonummer ODER Kaeufer-Code in kanonischer Form, sonst None."""
+    return normalisieren(roh) or kaeufer_normalisieren(roh)
+
+
 def anmeldekennung(roh) -> str:
     """Einheitlicher Schluessel fuer Limiter und Audit: die normalisierte
-    Kontonummer, sonst die getrimmte, klein geschriebene Eingabe (max. 80)."""
-    nr = normalisieren(roh)
+    Kontonummer bzw. der Kaeufer-Code, sonst die getrimmte, klein
+    geschriebene Eingabe (max. 80)."""
+    nr = kennung_normalisieren(roh)
     if nr:
         return nr
     return (roh if isinstance(roh, str) else "").strip().lower()[:80]

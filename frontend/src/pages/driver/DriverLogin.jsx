@@ -89,6 +89,11 @@ export default function DriverLogin() {
               Passwort vergessen? Der Betreiber setzt es neu
             </Link>
           </div>
+          <div className="mt-3 text-center text-[11.5px] text-zinc-500" data-testid="driver-login-hinweis">
+            Hier melden sich nur Fahrer an. Firmen und Sucher:{" "}
+            <Link to="/login" className="underline">/login</Link> · Zwischenhändler:{" "}
+            <Link to="/markt/login" className="underline">B2B-Marktplatz</Link>
+          </div>
           <div className="mt-5 text-center text-sm text-zinc-400">
             Noch kein Zugang?{" "}
             <Link to="/anfrage?art=fahrer" data-testid="link-driver-anfrage"

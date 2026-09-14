@@ -234,8 +234,10 @@ def test_03_kaeufer_anlage_und_anfrage_geschlossen(welt):
     assert doc["role"] == "b2b_buyer" and doc["dealer_id"] is None
     assert "email" not in doc and doc["current_session_id"] is None
     assert doc["ust_id"] == "DE123456789" and doc["gewerblich_bestaetigt_durch"] == "betreiber"
-    assert doc["kontonummer_basis"] == int(k["kontonummer"])
-    r = _post("/buyer/login", {"kontonummer": k["kontonummer"], "password": PW})
+    # Kaeufer-Code (14.09.2026): kein Wert aus der Reihe; Login auch klein geschrieben
+    from kontonummer import KAEUFER_MUSTER
+    assert KAEUFER_MUSTER.match(k["kontonummer"]) and "kontonummer_basis" not in doc
+    r = _post("/buyer/login", {"kontonummer": k["kontonummer"].lower(), "password": PW})
     assert r.status_code == 200, r.text[:200]
     welt["K"] = _kopf(r.json()["token"])
     welt["kaeufer"] = k
@@ -668,5 +670,7 @@ def test_passwort_setzen_hebt_konto_sperre_auf(wegwerf_limiter):
     assert z["vor"] == [True, True, True]
     assert z["nach"] == [False, False, False], "Passwort-Setzen muss die Sperre aufheben"
     assert z["sitzungen"] == [None, None, None]
-    assert z["audit"]["meta"] == {"kontonummer": "10091"}, z["audit"]
-    assert z["audit_fahrer"]["meta"] == {"kontonummer": "10092"}, z["audit_fahrer"]
+    # 14.09.2026: das Audit haelt fest, ob wirklich eine Sperre bestand (hier ja)
+    assert z["audit"]["meta"] == {"kontonummer": "10091", "sperre_aufgehoben": True}, z["audit"]
+    assert z["audit_fahrer"]["meta"] == {"kontonummer": "10092",
+                                         "sperre_aufgehoben": True}, z["audit_fahrer"]

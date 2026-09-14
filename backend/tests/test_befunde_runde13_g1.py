@@ -174,8 +174,9 @@ def test_b5_b6_abgeloest_durch_kontonummer():
     assert not hasattr(deps, "email_vergeben")
     src = inspect.getsource(a.password_reset_request) + inspect.getsource(a.password_reset_confirm)
     assert "410" in src and "send_email" not in src and "password_resets" not in src
-    for anlage in (kontenanlage.kaeufer_anlegen, kontenanlage.fahrer_anlegen):
-        assert "naechste_nummer(db)" in inspect.getsource(anlage)
+    assert "naechste_nummer(db)" in inspect.getsource(kontenanlage.fahrer_anlegen)
+    # Kaeufer-Code seit 14.09.2026 (kein Wert aus der Reihe)
+    assert "kaeufer_code_erzeugen()" in inspect.getsource(kontenanlage.kaeufer_anlegen)
 
 
 def test_b8_snapshots_pseudonymisieren():

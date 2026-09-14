@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum } from "./_ui";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import { passwortProblem } from "@/lib/passwort";
 
 // Nur der Kalendertag (aus dem ISO-String, ohne Zeitzonen-Verschiebung):
 // "2026-12-31T23:59:59+01:00" -> "31.12.2026"
@@ -382,13 +384,12 @@ function AddSucherDialog({ dealerId, onClose, onAngelegt }) {
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
 
   const submit = async () => {
-    if (f.password.length < 8) {
-      toast.error("Passwort (min. 8 Zeichen) angeben"); return;
-    }
+    const problem = passwortProblem(f.password);
+    if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
       const r = await api.post(`/admin/dealers/${dealerId}/sucher`, { ...f, email: f.email.trim() });
-      setErgebnis({ ...r.data, name: `${f.first_name} ${f.last_name}`.trim() });
+      setErgebnis({ ...r.data, name: `${f.first_name} ${f.last_name}`.trim(), passwort: f.password });
       onAngelegt?.();
     } catch (e) { toast.error(errMsg(e)); }
     finally { setBusy(false); }
@@ -410,13 +411,17 @@ function AddSucherDialog({ dealerId, onClose, onAngelegt }) {
         </div>
         {ergebnis ? (
           <ZugangsdatenKarte titel="Sucher angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                             passwort={ergebnis.passwort}
                              bereich="app" hinweis={ergebnis.hinweis} onClose={onClose} />
         ) : (<>
         <div className="grid grid-cols-2 gap-3">
           <input value={f.first_name} onChange={set("first_name")} placeholder="Vorname" className={inputCls} style={inputStyle} autoFocus data-testid="sucher-anlegen-vorname" />
           <input value={f.last_name} onChange={set("last_name")} placeholder="Nachname" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-nachname" />
           <div className="col-span-2"><input value={f.email} onChange={set("email")} placeholder="Kontakt-E-Mail (optional)" type="email" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-email" /></div>
-          <div className="col-span-2"><input value={f.password} onChange={set("password")} placeholder="Passwort (min. 8 Zeichen, Ziffer/Sonderzeichen) *" type="password" autoComplete="new-password" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-passwort" /></div>
+          <div className="col-span-2">
+            <PasswortFeld value={f.password} onChange={(v) => setF((s) => ({ ...s, password: v }))}
+                          testid="sucher-anlegen-passwort" className={inputCls} style={inputStyle} />
+          </div>
           <input value={f.phone} onChange={set("phone")} placeholder="Telefon" className={inputCls} style={inputStyle} />
         </div>
         <div className="mt-3 text-[11px] text-zinc-500">
