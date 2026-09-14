@@ -186,6 +186,12 @@ services:
       - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
       - S3_SECRET_KEY=${S3_SECRET_KEY:-}
       - S3_REGION=${S3_REGION:-}
+      # Pruefung 14.09.2026: Einzelserver ohne S3 muss das ausdruecklich erlauben
+      # (Produktion mit zwei Servern verlangt gemeinsamen S3/R2-Speicher).
+      - STORAGE_LOKAL_ERLAUBT=${STORAGE_LOKAL_ERLAUBT:-}
+      - BERICHT_AUFBEWAHRUNG_TAGE=${BERICHT_AUFBEWAHRUNG_TAGE:-}
+      - FAHRER_SICHT_ABGEHOLT_TAGE=${FAHRER_SICHT_ABGEHOLT_TAGE:-}
+      - FAHRER_SICHT_GESCHLOSSEN_TAGE=${FAHRER_SICHT_GESCHLOSSEN_TAGE:-}
     volumes:
       - uploads_data:/app/uploads         # Fotos/Unterschriften/Protokolle
       - snapshots_data:/app/local_storage # Alt-Snapshots (lesen bis zum Verfall)
