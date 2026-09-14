@@ -163,8 +163,8 @@ async def current_driver(request: Request, auth: Optional[str] = None,
 # gesperrt; eine Korrektur laeuft ueber den Haendler (Termin wieder oeffnen).
 _TERMIN_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
 # Wunsch Ahmad 14.09.2026: Sichtbarkeit abgeschlossener Fahrten in der Fahrer-App.
-FAHRER_SICHT_ABGEHOLT_TAGE = int(os.environ.get("FAHRER_SICHT_ABGEHOLT_TAGE", "14"))
-FAHRER_SICHT_GESCHLOSSEN_TAGE = int(os.environ.get("FAHRER_SICHT_GESCHLOSSEN_TAGE", "30"))
+FAHRER_SICHT_ABGEHOLT_TAGE = int(os.environ.get("FAHRER_SICHT_ABGEHOLT_TAGE") or "14")
+FAHRER_SICHT_GESCHLOSSEN_TAGE = int(os.environ.get("FAHRER_SICHT_GESCHLOSSEN_TAGE") or "30")
 
 
 def _abgeschlossen_seit_filter(status, tage: int) -> dict:
