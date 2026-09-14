@@ -206,7 +206,8 @@ def test_07_abholprotokoll_und_pdfs(welt):
                                  "place": "Hannover"}, timeout=60)
     assert r.status_code in (400, 422), f"leeres Protokoll durchgerutscht: {r.status_code}"
 
-    # Alle Pflichtabschnitte fuellen
+    # Wunsch Ahmad 14.09.2026: ALLE Abschnitte Pflicht — ein Protokoll mit
+    # Luecken (nur ein Dokument, Zustand halb) wird nicht zur Freigabe genommen.
     r = requests.put(f"{API}/driver/appointments/{welt['appt_id']}/protocol",
                      headers=welt["D"], json={
         "vehicle_check": {k: {"status": antworten[k]} for k in felder},
@@ -214,6 +215,24 @@ def test_07_abholprotokoll_und_pdfs(welt):
         "keys_count": "2", "keys_expected": "2",
         "condition": {"mileage": "90000", "fuel_level": "1/2"},
         "damages_confirmed": True,
+        "notes": "E2E-Testlauf"}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    r = requests.post(f"{API}/driver/appointments/{welt['appt_id']}/protocol/submit",
+                      headers=welt["D"], timeout=30)
+    assert r.status_code == 422 and "Abschnitt" in r.text, r.text[:200]
+    # Alle Pflichtabschnitte fuellen
+    zustand = {f["key"]: (f["options"][0] if f.get("options") else "5/5/4/4")
+               for f in tpl["template"]["condition_fields"]}
+    zustand["mileage"] = "90000"
+    r = requests.put(f"{API}/driver/appointments/{welt['appt_id']}/protocol",
+                     headers=welt["D"], json={
+        "vehicle_check": {k: {"status": antworten[k]} for k in felder},
+        "documents": {d: True for d in tpl["template"]["documents"]},
+        "features": {ft: True for ft in tpl["template"].get("features") or []},
+        "keys_count": "2", "keys_expected": "2",
+        "condition": zustand, "place": "Hannover", "seller_name": "E2E Verkaeufer",
+        "damages_confirmed": True,
+        "preis_vorschlag": 8700, "sondervereinbarung": "Winterreifen werden nachgeliefert",
         "notes": "E2E-Testlauf"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
 
@@ -240,6 +259,8 @@ def test_07_abholprotokoll_und_pdfs(welt):
                     if x["appointment_id"] == welt["appt_id"]), None)
     assert eintrag, offen.text[:300]
     pid = eintrag["protocol_id"]
+    # Wunsch Ahmad 14.09.2026: der Chef sieht Vorschlag und Sondervereinbarung des Fahrers
+    assert eintrag["preis_vorschlag_fahrer"] == 8700 and "Winterreifen" in eintrag["sondervereinbarung"]
     # Pruefung 14.09.2026 (C7): ohne Stand keine Freigabe.
     r = requests.post(f"{API}/protocols/{pid}/freigabe", headers=welt["H"],
                       json={"neuer_preis": 8500, "notiz": "Rost am Schweller"},

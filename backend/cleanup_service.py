@@ -367,6 +367,7 @@ async def _cleanup_once(db) -> dict:
         await protokoll_freigaben_nachziehen(db)
     stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
     stats["fahrernamen_nachgezogen"] = await fahrernamen_nachziehen(db)
+    stats["konten_ohne_firma_gesperrt"] = await konten_ohne_firma_sperren(db)
     stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)
     stats["storage_nachgeholt"] = await storage_loeschungen_nachholen(db)
     stats["logs_rotiert"] = await logs_rotieren(db, now)
@@ -997,12 +998,67 @@ async def _inserat_mit_fotos_loeschen(db, listing: dict, *, grund: str,
     return False
 
 
+async def inserate_geloeschter_fahrzeuge_schliessen(db) -> int:
+    """Pruefung 14.09.2026 (M2): Ein Fahrzeug war geloescht, sein Marktplatz-
+    Inserat lebte weiter (das Schliessen nach dem Loeschen ist best effort).
+    Hier werden aktive Inserate zu geloeschten Fahrzeugen nachgeschlossen
+    und der Alarm inserat_zu_geloeschtem_fahrzeug_offen geschlossen."""
+    n = 0
+    jetzt = now_iso()
+    async for l in db.resale_listings.find(
+            {"status": {"$nin": ["verkauft", "geloescht"]}},
+            {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1}).limit(2000):
+        v = await db.vehicles.find_one({"id": l.get("vehicle_id"), "dealer_id": l.get("dealer_id")},
+                                       {"_id": 0, "lifecycle": 1})
+        if not v or v.get("lifecycle") != "geloescht":
+            continue
+        r = await db.resale_listings.update_one(
+            {"id": l["id"], "status": {"$nin": ["verkauft", "geloescht"]}},
+            {"$set": {"status": "geloescht", "deleted_at": jetzt, "updated_at": jetzt,
+                      "geloescht_grund": "fahrzeug_geloescht"}})
+        if r.matched_count:
+            n += 1
+            try:
+                from routes.resale import _anfragen_schliessen
+                await _anfragen_schliessen(l["id"], "fahrzeug_geloescht", auch_akzeptierte=True)
+            except Exception:  # noqa: BLE001
+                log.exception("Kaufanfragen zu Inserat %s nicht geschlossen", l["id"])
+            await alarm_schliessen(db, "inserat_zu_geloeschtem_fahrzeug_offen",
+                                   ref=str(l.get("vehicle_id") or ""))
+    return n
+
+
+async def konten_ohne_firma_sperren(db) -> int:
+    """Pruefung 14.09.2026 (M8): Ein abgebrochener Rollback der Firmenanlage
+    (oder eine halb gelaufene Loeschung) kann ein Konto mit dealer_id ohne
+    Firmen-Dokument hinterlassen. Solche Konten werden gesperrt und gemeldet,
+    damit der Betreiber sie sieht statt dass sie still 'irgendwie' weiterlaufen."""
+    n = 0
+    dealer_ids = [d for d in await db.users.distinct("dealer_id", {"dealer_id": {"$type": "string"}}) if d]
+    if not dealer_ids:
+        return 0
+    vorhanden = set(await db.dealers.distinct("id", {"id": {"$in": dealer_ids}}))
+    fehlt = [d for d in dealer_ids if d not in vorhanden]
+    for d in fehlt:
+        r = await db.users.update_many(
+            {"dealer_id": d, "active": {"$ne": False}, "loeschung": {"$exists": False}},
+            {"$set": {"active": False, "current_session_id": None, "firma_fehlt": True,
+                      "updated_at": now_iso()}})
+        if r.modified_count:
+            n += r.modified_count
+            await alarm(db, "konto_ohne_firma", ref=d, konten=r.modified_count,
+                        hinweis="Konten mit dealer_id ohne Firmen-Dokument gesperrt — "
+                                "bitte pruefen (abgebrochene Firmenanlage/-loeschung)")
+    return n
+
+
 async def marktplatz_rotieren(db, now: datetime) -> dict:
     """Marktplatz-Altdaten: abgeschlossene Interessensanfragen nach 180
     Tagen, geloeschte Inserate (Soft-Delete) samt Fotos nach 90 Tagen,
     verwaiste Merklisten-Eintraege (Inserat existiert nicht mehr)."""
     stats = {"interessen_geloescht": 0, "inserate_geloescht": 0,
              "favoriten_geloescht": 0, "interessen_verwaist_geschlossen": 0}
+    stats["inserate_geloeschter_fahrzeuge"] = await inserate_geloeschter_fahrzeuge_schliessen(db)
     # Nachpruefung Runde 14 (Befund 54): Verhandlungen zu Inseraten, die
     # verkauft oder geloescht sind (Altbestand vor dem Fix in resale.py),
     # werden geschlossen — sonst zeigten Kaeufer und Haendler ewig eine

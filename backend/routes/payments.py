@@ -208,6 +208,18 @@ async def create_checkout(body: CheckoutIn, user=Depends(current_user)):
         "user_id": user["id"], "dealer_id": user.get("dealer_id") or "",
         "plan": body.plan, "tx_id": tx_id,
     }
+    # Pruefung 14.09.2026 (M11): ZUERST die Transaktion speichern, DANN die
+    # Stripe-Session anlegen. Vorher konnte ein Kunde eine gueltige Session
+    # besitzen und bezahlen, waehrend AutoSchnell (Mongo-Aussetzer zwischen
+    # beiden Schritten) nichts davon wusste.
+    jetzt = now_iso()
+    await db.payment_transactions.insert_one({
+        "id": tx_id, "session_id": None,
+        "user_id": user["id"], "dealer_id": user.get("dealer_id"),
+        "plan": body.plan, "amount": pkg["amount"], "currency": pkg["currency"],
+        "status": "initiated", "payment_status": "unpaid",
+        "metadata": metadata, "created_at": jetzt, "updated_at": jetzt,
+    })
     try:
         # Sync-SDK -> to_thread, damit der Event-Loop waehrend des
         # HTTP-Roundtrips zu Stripe nicht steht. Idempotency-Key je
@@ -232,18 +244,17 @@ async def create_checkout(body: CheckoutIn, user=Depends(current_user)):
         )
     except Exception as exc:
         log.warning("Stripe-Checkout konnte nicht angelegt werden: %s", exc)
+        await db.payment_transactions.update_one(
+            {"id": tx_id, "session_id": None},
+            {"$set": {"status": "failed", "fehler": "stripe_session", "updated_at": now_iso()}})
         raise HTTPException(502, "Stripe ist gerade nicht erreichbar — bitte "
                                  "in einer Minute erneut versuchen.")
     s = _als_dict(session)
-    jetzt = now_iso()
-    await db.payment_transactions.insert_one({
-        "id": tx_id, "session_id": s["id"],
-        "user_id": user["id"], "dealer_id": user.get("dealer_id"),
-        "plan": body.plan, "amount": pkg["amount"], "currency": pkg["currency"],
-        "status": "initiated",
-        "payment_status": s.get("payment_status") or "unpaid",
-        "metadata": metadata, "created_at": jetzt, "updated_at": jetzt,
-    })
+    await db.payment_transactions.update_one(
+        {"id": tx_id},
+        {"$set": {"session_id": s["id"],
+                  "payment_status": s.get("payment_status") or "unpaid",
+                  "updated_at": now_iso()}})
     return {"url": s.get("url"), "session_id": s["id"]}
 
 
@@ -488,6 +499,17 @@ async def _zahlung_bestaetigt(session_id: str, obj: dict) -> None:
     Session.retrieve mit unserem API-Key): initiated -> paid, dann
     freischalten. Beide Schritte sind idempotent."""
     tx = await _tx(session_id)
+    if not tx:
+        # Pruefung 14.09.2026 (M11): Session angelegt, aber session_id nicht
+        # mehr gespeichert (Aussetzer direkt danach) — ueber unsere tx_id
+        # (client_reference_id / metadata) wiederfinden und nachtragen.
+        tx_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("tx_id")
+        if tx_id:
+            r = await db.payment_transactions.update_one(
+                {"id": tx_id, "session_id": None},
+                {"$set": {"session_id": session_id, "updated_at": now_iso()}})
+            if r.modified_count:
+                tx = await _tx(session_id)
     if not tx:
         # Geld eingenommen, aber kein Vorgang dazu — muss ein Mensch ansehen.
         log.error("Stripe meldet Zahlung fuer unbekannte Session %s", session_id)

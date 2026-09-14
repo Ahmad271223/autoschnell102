@@ -86,10 +86,15 @@ test.describe("Abholprotokoll: Freigabe und Knopfleiste", () => {
     const tpl = await h.get(`/driver/appointments/${appt.id}/protocol`, { token: tok });
     // Pruefung 14.09.2026 (C12): je Zeile eine der angebotenen Antworten.
     const felder = tpl.template.vehicle_check_fields;
+    // Wunsch Ahmad 14.09.2026: alle Abschnitte Pflicht (Dokumente je Ja/Nein, Zustand komplett).
+    const zustand = Object.fromEntries(tpl.template.condition_fields.map((f) =>
+      [f.key, f.key === "mileage" ? "75200" : (f.options ? f.options[0] : "5/5/4/4")]));
     await h.put(`/driver/appointments/${appt.id}/protocol`, {
       vehicle_check: Object.fromEntries(felder.map((f) => [f.key, { status: f.options[0] }])),
-      keys_count: "2", condition: { mileage: "75200" }, damages_confirmed: true,
-      place: "Hannover", notes: "E2E",
+      documents: Object.fromEntries(tpl.template.documents.map((d) => [d, true])),
+      features: Object.fromEntries((tpl.template.features || []).map((d) => [d, true])),
+      keys_count: "2", keys_expected: "2", condition: zustand, damages_confirmed: true,
+      place: "Hannover", seller_name: "Vera", notes: "E2E",
     }, { token: tok });
 
     await page.goto(`/fahrer/protokoll/${appt.id}`);

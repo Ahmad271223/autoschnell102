@@ -794,7 +794,7 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
                                 appointment_id=appt_id)
     else:
         await try_set_lifecycle(body.vehicle_id, dealer_id, "abholung_geplant", user=user)
-    await log_activity(dealer_id, user["id"], aktion, ref=appt_id,
+    await log_activity_sicher(dealer_id, user["id"], aktion, ref=appt_id,
                        meta={"contract_id": pdf_id, "vehicle_id": body.vehicle_id})
     return appt_id, None
 
@@ -1451,7 +1451,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         await log_activity_sicher(user["dealer_id"], user["id"],
                                   "pdf.gesendet.ohne_vermerk", ref=contract_id,
                                   meta={"channel": body.channel})
-    await log_activity(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
+    await log_activity_sicher(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
     return out
 
 
@@ -1470,6 +1470,18 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
         raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
                                  "löschen — fremde Verträge löscht der "
                                  "Händler-Hauptaccount")
+    # Pruefung 14.09.2026 (F3/F4): Liegt zu einem Termin dieses Vertrags ein
+    # Protokoll beim Chef, ist es freigegeben oder wird gerade unterschrieben,
+    # bleibt der Vertrag — sonst verliert der laufende Abschluss seinen
+    # Vertrag (und ein Scrub koennte mit dem Abschluss um Personendaten ringen).
+    termin_ids = [a["id"] async for a in db.appointments.find(
+        {"contract_id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})]
+    if termin_ids and await db.pickup_protocols.count_documents(
+            {"appointment_id": {"$in": termin_ids}, "superseded": {"$ne": True},
+             "status": {"$in": ["zur_freigabe", "freigegeben", "wird_abgeschlossen"]}}, limit=1):
+        raise HTTPException(409, "Zu diesem Vertrag läuft gerade ein Abholprotokoll "
+                                 "(Freigabe oder Unterschrift) — der Vertrag kann jetzt "
+                                 "nicht gelöscht werden.")
     # Kaskade ueber EINE idempotente, wiederaufnehmbare Funktion (Go-Live-
     # Audit 09/2026): Grabstein am Vertrag, dann Versionen loeschen, Termin-
     # Verweise kappen, zuletzt der Vertrag. Bricht der Vorgang ab, fuehrt

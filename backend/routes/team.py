@@ -21,7 +21,7 @@ from pymongo.errors import DuplicateKeyError
 import re
 
 from deps import (current_firma, current_user, db, get_subscription_status,
-                  log_activity, now_iso,
+                  log_activity, log_activity_sicher, now_iso,
 )
 from routes.bestand import current_haendler
 
@@ -347,12 +347,12 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
     if not neu:
         # Runde 17 (Nr. 376): der Upsert aendert den Wunsch der offenen
         # Anfrage — vorher ohne Audit-Spur (nur das Anlegen war geloggt).
-        await log_activity(user["dealer_id"], user["id"],
+        await log_activity_sicher(user["dealer_id"], user["id"],
                            "verkaufsplan.anfrage.geaendert", ref=doc["id"],
                            meta={"wunsch": body.wanted_tier})
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Eine Anfrage liegt bereits beim Administrator."}
-    await log_activity(user["dealer_id"], user["id"], "verkaufsplan.anfrage",
+    await log_activity_sicher(user["dealer_id"], user["id"], "verkaufsplan.anfrage",
                        ref=req_id, meta={"wunsch": body.wanted_tier})
     return {"ok": True, "request_id": req_id,
             "hinweis": "Anfrage wurde an den Administrator übermittelt."}
@@ -407,12 +407,12 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
     if not neu:
         # Runde 17 (Nr. 376): geaenderter Wunsch an der offenen Anfrage
         # bekommt eine Audit-Spur.
-        await log_activity(user["dealer_id"], user["id"],
+        await log_activity_sicher(user["dealer_id"], user["id"],
                            "abo.anfrage.selbst.geaendert", ref=doc["id"],
                            meta={"plan": plan})
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Deine Anfrage liegt bereits beim Betreiber."}
-    await log_activity(user["dealer_id"], user["id"], "abo.anfrage.selbst",
+    await log_activity_sicher(user["dealer_id"], user["id"], "abo.anfrage.selbst",
                        ref=req_id, meta={"plan": plan})
     return {"ok": True, "request_id": req_id,
             "hinweis": "Anfrage wurde an den Betreiber übermittelt."}
@@ -479,13 +479,13 @@ async def sucher_abo_request(sucher_id: str, body: dict = Body(default={}),
     if not neu:
         # Runde 17 (Nr. 376): geaenderter Wunsch an der offenen Anfrage
         # bekommt eine Audit-Spur.
-        await log_activity(user["dealer_id"], user["id"],
+        await log_activity_sicher(user["dealer_id"], user["id"],
                            "sucher.abo.anfrage.geaendert", ref=doc["id"],
                            meta={"sucher": sucher_id, "plan": plan})
         return {"ok": True, "request_id": doc["id"], "bereits_offen": True,
                 "hinweis": "Eine Anfrage fuer diesen Sucher liegt bereits beim "
                            "Administrator."}
-    await log_activity(user["dealer_id"], user["id"], "sucher.abo.anfrage",
+    await log_activity_sicher(user["dealer_id"], user["id"], "sucher.abo.anfrage",
                        ref=req_id, meta={"sucher": sucher_id, "plan": plan})
     return {"ok": True, "request_id": req_id,
             "hinweis": "Anfrage wurde an den Administrator übermittelt."}

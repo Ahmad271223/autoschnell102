@@ -146,7 +146,7 @@ async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma))
     Sucher wechseln nur IHR eigenes Profil (Override), nicht das des Chefs."""
     if body.active_profile not in ("inland", "export"):
         raise HTTPException(400, "active_profile muss 'inland' oder 'export' sein")
-    from deps import log_activity
+    from deps import log_activity_sicher
     if user.get("role") == "sucher":
         await db.users.update_one(
             {"id": user["id"]},
@@ -159,7 +159,7 @@ async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma))
         )
     # Runde 11: Dieses eine Feld entscheidet, welches komplette Regelpaket
     # Vergleich und manuelle Suche verwenden — der Wechsel gehoert ins Protokoll.
-    await log_activity(user["dealer_id"], user["id"], "einstellungen.profil.gewechselt",
+    await log_activity_sicher(user["dealer_id"], user["id"], "einstellungen.profil.gewechselt",
                        meta={"active_profile": body.active_profile,
                              "bereich": "persoenlich" if user.get("role") == "sucher" else "firma"})
     return {"active_profile": body.active_profile}
@@ -267,7 +267,7 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
     from deps import SUCHER_SETTINGS_FIELDS, effective_dealer
     update = _collect_settings_update(body)
     if user.get("role") == "sucher":
-        from deps import log_activity
+        from deps import log_activity_sicher
         # Nur ECHTE Abweichungen von der Chef-Vorgabe werden Override. Die
         # Oberflaeche schickt beim Speichern alle effektiven Werte zurueck —
         # vorher wurden dadurch geerbte Chef-Werte als persoenliche Overrides
@@ -305,7 +305,7 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
             await db.users.update_one({"id": user["id"]}, ops)
             # Audit-Log: welcher Sucher welche Felder fuer sich abweichend
             # gesetzt bzw. wieder auf die Chef-Vorgabe zurueckgesetzt hat.
-            await log_activity(
+            await log_activity_sicher(
                 user["dealer_id"], user["id"], "sucher.einstellungen.override",
                 meta={"gesetzt": sorted(k.split(".", 1)[1] for k in setzen),
                       "zurueckgesetzt": sorted(k.split(".", 1)[1] for k in loeschen)})
@@ -316,8 +316,8 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
     # Runde 11: Firmenweite Aenderungen des Chefs ins Protokoll — vorher
     # war nur der persoenliche Sucher-Override nachvollziehbar, nicht wann
     # der Chef die Vergleichsregeln der ganzen Firma geaendert hat.
-    from deps import log_activity
-    await log_activity(user["dealer_id"], user["id"], "einstellungen.firma.geaendert",
+    from deps import log_activity_sicher
+    await log_activity_sicher(user["dealer_id"], user["id"], "einstellungen.firma.geaendert",
                        meta={"felder": sorted(k for k in update if k != "updated_at")})
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     return dealer
@@ -545,8 +545,8 @@ async def dealer_cancel_subscription(user=Depends(current_firma)):
     )
     # Runde 15 (Nr. 8): finanz- und zugriffsrelevanter Zustandswechsel —
     # bisher ohne Audit-Eintrag.
-    from deps import log_activity
-    await log_activity(user["dealer_id"], user["id"], "abo.gekuendigt", ref=sub["id"],
+    from deps import log_activity_sicher
+    await log_activity_sicher(user["dealer_id"], user["id"], "abo.gekuendigt", ref=sub["id"],
                        meta={"plan": sub.get("plan"), "expires_at": sub.get("expires_at"),
                              "subject_user_id": sub.get("subject_user_id")})
     return {

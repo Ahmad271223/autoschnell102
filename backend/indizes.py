@@ -231,6 +231,7 @@ async def _termin_unique_index() -> bool:
                   "oder loeschen, dann Backend neu starten.", beispiele)
         # Runde 17: sichtbar im Admin-Bereich (/admin/betrieb), nicht nur im Log
         await alarm(db, "termin_index_fehlt", ref="appointments", beispiele=beispiele)
+        _in_produktion_abbrechen("termin_offen_je_vertrag: doppelte offene Termine")
         return False
     try:
         vorhanden = await db.appointments.index_information()
@@ -246,6 +247,7 @@ async def _termin_unique_index() -> bool:
     except Exception as exc:
         log.error("ensure_indexes: termin_offen_je_vertrag: %s", exc)
         await alarm(db, "termin_index_fehlt", ref="appointments", fehler=str(exc)[:300])
+        _in_produktion_abbrechen(f"termin_offen_je_vertrag: {exc}")
         return False
 
 
@@ -558,6 +560,7 @@ async def storage_retry_unique_index(db) -> None:
     except Exception as exc:  # noqa: BLE001
         log.error("ensure_indexes: storage_delete_retry.retry_je_ziel: %s", exc)
         await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        _in_produktion_abbrechen(f"{ref}: {exc}")
         return
     await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
 
@@ -575,9 +578,21 @@ async def ttl_index_sicher(db, sammlung: str, feld: str = "expires_at_dt") -> bo
         log.error("ensure_indexes: TTL-Index %s fehlt — abgelaufene Eintraege "
                   "werden nicht automatisch geloescht: %s", ref, exc)
         await alarm(db, "ttl_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        _in_produktion_abbrechen(f"TTL-Index {ref}: {exc}")
         return False
     await alarm_schliessen(db, "ttl_index_fehlt", ref=ref)
     return True
+
+
+def _in_produktion_abbrechen(grund: str) -> None:
+    """Pruefung 14.09.2026 (M4/M5/M6): Fehlt in Produktion eine Schutzregel
+    der Datenbank (ein offener Termin je Vertrag, eine Loeschvormerkung je
+    Ziel, TTL-Ablauf), startet das Backend NICHT — wie bei kunden_nr und
+    kontonummer. Ein Alarm allein wurde uebersehen, und die Routen-Vorpruefung
+    ist bei parallelen Requests nicht atomar."""
+    if os.environ.get("APP_ENV", "").strip().lower() == "production":
+        log.error("Start ABGEBROCHEN: %s", grund)
+        raise SystemExit(78)
 
 
 async def bestand_lese_indizes(db) -> None:

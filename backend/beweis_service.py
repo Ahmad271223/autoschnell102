@@ -332,20 +332,35 @@ async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
     except Exception as exc:  # noqa: BLE001 — Beweis darf den Abruf nie brechen
         log.warning("Beweisdokument fuer %s nicht vorgemerkt: %s", cache_key, exc)
         return None
-    if doc and doc.get("status") == "fehlgeschlagen":
+    if doc and doc.get("status") in ("fehlgeschlagen", "geloescht"):
         # Nach einer Stoerung (Speicher, Neustart) bekaeme das Inserat sonst
         # nie ein Dokument: beim naechsten Gebrauch erneut versuchen, aber
-        # fruehestens nach WIEDERBELEBEN_MINUTEN (kein Dauerfeuer). Ein
-        # Grabstein (geloescht) wird nie wiederbelebt.
+        # fruehestens nach WIEDERBELEBEN_MINUTEN (kein Dauerfeuer).
+        # Pruefung 14.09.2026 (F8): auch ein Grabstein (geloescht) wird
+        # wiederbelebt, wenn NIE ein Dokument entstand (kein fertig_am) —
+        # sonst konnte ein Inserat, dessen erster Versuch scheiterte und das
+        # 90 Tage ruhte, nie mehr ein Beweisdokument bekommen. Ein Grabstein
+        # eines echten (fertigen) Dokuments bleibt: kein zweites "erstes"
+        # Dokument (Runde 23). Neuer Erstellzeitpunkt (F9).
         try:
             r = await db.inserat_beweise.update_one(
-                {"cache_key": cache_key, "status": "fehlgeschlagen",
-                 "$or": [{"fehlgeschlagen_am": {"$exists": False}},
-                         {"fehlgeschlagen_am": None},
-                         {"fehlgeschlagen_am": {"$lt": _jetzt() - timedelta(
-                             minutes=WIEDERBELEBEN_MINUTEN)}}]},
+                {"cache_key": cache_key,
+                 "$and": [
+                     {"$or": [{"status": "fehlgeschlagen"},
+                              {"status": "geloescht", "status_vor_loeschung": "fehlgeschlagen"},
+                              {"status": "geloescht", "status_vor_loeschung": {"$exists": False},
+                               "fertig_am": {"$in": [None]}},
+                              {"status": "geloescht", "status_vor_loeschung": {"$exists": False},
+                               "fertig_am": {"$exists": False}}]},
+                     {"$or": [{"fehlgeschlagen_am": {"$exists": False}},
+                              {"fehlgeschlagen_am": None},
+                              {"fehlgeschlagen_am": {"$lt": _jetzt() - timedelta(
+                                  minutes=WIEDERBELEBEN_MINUTEN)}}]}]},
                 {"$set": {"status": "offen", "versuche": 0, "fehler": None,
-                          "naechster_versuch_ab": None, "bearbeitung_bis": None}})
+                          "naechster_versuch_ab": None, "bearbeitung_bis": None,
+                          "erstellt_am": _jetzt(), "fertig_am": None,
+                          "verfall_pruefen_ab": None, "wiederbelebt_am": _jetzt()},
+                 "$unset": {"geloescht_am": ""}})
             if r.modified_count:
                 doc = dict(doc, status="offen", fehler=None)
         except Exception as exc:  # noqa: BLE001
@@ -672,14 +687,22 @@ async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500
     except Exception as exc:  # noqa: BLE001
         log.warning("Beweisdokumente: Altbestand-Zuordnung: %s", exc)
     grenze = now - timedelta(days=BEWEIS_AUFBEWAHRUNG_TAGE)
-    filt = {"status": {"$in": ["fertig", "fehlgeschlagen"]}, "erstellt_am": {"$lt": grenze},
-            "$or": [{"verfall_pruefen_ab": {"$exists": False}}, {"verfall_pruefen_ab": None},
-                    {"verfall_pruefen_ab": {"$lte": now}}]}
+    # Pruefung 14.09.2026 (F9): Die Frist zaehlt ab der ERFOLGREICHEN Erzeugung
+    # (fertig_am); ohne fertig_am (fehlgeschlagen, Altbestand) ab erstellt_am.
+    # "wird_geloescht": ein frueherer Lauf ist mitten im Loeschen gestorben.
+    filt = {"$and": [
+        {"$or": [{"status": {"$in": ["fertig", "fehlgeschlagen"]},
+                  "$or": [{"fertig_am": {"$lt": grenze}},
+                          {"fertig_am": {"$in": [None]}, "erstellt_am": {"$lt": grenze}},
+                          {"fertig_am": {"$exists": False}, "erstellt_am": {"$lt": grenze}}]},
+                 {"status": "wird_geloescht"}]},
+        {"$or": [{"verfall_pruefen_ab": {"$exists": False}}, {"verfall_pruefen_ab": None},
+                 {"verfall_pruefen_ab": {"$lte": now}}]}]}
     geloescht = 0
     for _ in range(max_seiten):
         kandidaten = await db.inserat_beweise.find(
             filt, {"_id": 0, "id": 1, "cache_key": 1, "quelle": 1, "pdf_key": 1,
-                   "alle_keys": 1}).sort("erstellt_am", 1).to_list(seite)
+                   "alle_keys": 1, "status": 1}).sort("erstellt_am", 1).to_list(seite)
         if not kandidaten:
             break
         for d in kandidaten:
@@ -687,6 +710,24 @@ async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500
                 await db.inserat_beweise.update_one(
                     {"id": d["id"]}, {"$set": {"verfall_pruefen_ab": now + timedelta(days=1)}})
                 continue
+            # Pruefung 14.09.2026 (F6/F7): Zeile ZUERST beanspruchen (nur aus
+            # fertig/fehlgeschlagen — eine inzwischen wiederbelebte Zeile
+            # (offen/in_arbeit) bleibt unangetastet), dann den Geschaeftsbezug
+            # ERNEUT pruefen; erst danach Dateien loeschen.
+            vorher = d.get("status")
+            if vorher != "wird_geloescht":
+                r = await db.inserat_beweise.update_one(
+                    {"id": d["id"], "status": {"$in": ["fertig", "fehlgeschlagen"]}},
+                    {"$set": {"status": "wird_geloescht", "status_vor_loeschung": vorher}})
+                if not r.modified_count:
+                    continue
+                if await _gehalten(db, d["cache_key"]):
+                    await db.inserat_beweise.update_one(
+                        {"id": d["id"], "status": "wird_geloescht"},
+                        {"$set": {"status": vorher,
+                                  "verfall_pruefen_ab": now + timedelta(days=1)},
+                         "$unset": {"status_vor_loeschung": ""}})
+                    continue
             from storage_service import loeschen_oder_vormerken
             keys = {k for k in (d.get("alle_keys") or []) if k}
             keys.add(d.get("pdf_key") or speicher_key(d))
@@ -696,10 +737,12 @@ async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500
                     db, key=key, grund="beweis_verfall",
                     ref={"collection": "inserat_beweise", "id": d["id"]})
             await db.inserat_beweise.update_one(
-                {"id": d["id"]},
+                {"id": d["id"], "status": "wird_geloescht"},
                 {"$set": {"status": "geloescht", "geloescht_am": now, "pdf_key": None},
                  # Runde 23: der eingefrorene Datenstand geht mit — Grabstein
                  # ohne Inseratsdaten.
+                 # status_vor_loeschung bleibt am Grabstein: nur ein NIE erzeugtes
+                 # Dokument wird spaeter wiederbelebt (beweis_vormerken, F8).
                  "$unset": {"url": "", "pdf_sha256": "", "fehler": "", "alle_keys": "",
                             "quelle_daten": ""}})
             geloescht += 1

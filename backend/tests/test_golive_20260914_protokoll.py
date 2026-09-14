@@ -148,8 +148,7 @@ def test_c12_abschnitt1_nur_angebotene_antworten(welt):
     assert e.value.status_code == 422 and "FIN" in e.value.detail and "Wert" in e.value.detail
     mit_wert = {**gut, "vin": {"status": "weicht ab", "value": "WVWZZZ1KZAW000001"}}
     w.run(w.db.pickup_protocols.update_one(
-        {"id": t.pid}, {"$set": {"vehicle_check": mit_wert, "condition": {"mileage": "1"},
-                                 "keys_count": "2", "damages_confirmed": True}}))
+        {"id": t.pid}, {"$set": {"vehicle_check": mit_wert}}))
     assert w.run(P.submit_protocol(t.aid, w.driver))["status"] == P.ZUR_FREIGABE
 
 

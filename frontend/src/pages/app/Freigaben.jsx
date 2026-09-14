@@ -230,6 +230,18 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
                    style={{ borderColor: "var(--border-default)" }} />
           </div>
         </div>
+        {/* Wunsch Ahmad 14.09.2026: Vorschlag und Sondervereinbarung des Fahrers vor Ort */}
+        {e.preis_vorschlag_fahrer != null && (
+          <div className="mt-2 text-[12px] text-amber-300" data-testid={`freigabe-vorschlag-${e.protocol_id}`}>
+            Vorschlag des Fahrers vor Ort: {eur(e.preis_vorschlag_fahrer)}
+            {e.neuer_preis == null && !freigegeben ? " — gilt, wenn du ohne eigenen Preis freigibst" : ""}
+          </div>
+        )}
+        {e.sondervereinbarung && (
+          <div className="mt-1 text-[12px] text-zinc-300" data-testid={`freigabe-sonder-${e.protocol_id}`}>
+            Sondervereinbarung vor Ort: {e.sondervereinbarung}
+          </div>
+        )}
         {e.neuer_preis != null && (
           <div className="mt-2 text-[12px] flex flex-wrap items-center gap-2" style={{ color: freigegeben ? "#34c759" : "#a1a1aa" }}>
             <span data-testid={`freigabe-aktueller-preis-${e.protocol_id}`}>

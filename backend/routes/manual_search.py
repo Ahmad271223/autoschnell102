@@ -22,7 +22,7 @@ from autoscout_service import _find_make as _as_find_make
 from autoscout_service import _find_model as _as_find_model
 from autoscout_service import _load_data as _load_autoscout
 from autoscout_service import build_search_url as build_autoscout_url
-from deps import current_firma, current_user, db, log_activity, require_active_sub
+from deps import current_firma, current_user, db, log_activity, log_activity_sicher, require_active_sub
 from mobile_service import DEFAULT_RULES
 from mobile_service import _resolve_make as _mo_resolve_make
 from mobile_service import _resolve_model as _mo_resolve_model
@@ -301,7 +301,7 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
     from autoscout_service import regeln_nicht_abgebildet
     hinweise += regeln_nicht_abgebildet(vehicle, rules)
 
-    await log_activity(user["dealer_id"], user["id"], "suche.manuell",
+    await log_activity_sicher(user["dealer_id"], user["id"], "suche.manuell",
                        meta={"make": vehicle["make"], "model": vehicle["model"],
                              "fuel": fuel_code or "", "gearbox": gear_code or "",
                              "profil": profil})

@@ -270,9 +270,9 @@ TERMIN_MIT_PROTOKOLL_HINWEIS = ("Zu diesem Termin gibt es ein unterschriebenes o
                                 "laufendes Abholprotokoll — er kann nicht gelöscht werden. "
                                 "Bitte den Termin stattdessen stornieren.")
 PROTOKOLL_LAEUFT_HINWEIS = ("Das Abholprotokoll liegt zur Freigabe oder wird gerade "
-                            "unterschrieben — Fahrer, Vertrag oder Fahrzeug lassen sich "
-                            "jetzt nicht ändern. Bitte das Protokoll erst an den Fahrer "
-                            "zurückschicken.")
+                            "unterschrieben — Fahrer, Vertrag, Fahrzeug, Verkäufer, "
+                            "Anschrift und Termin lassen sich jetzt nicht ändern. Bitte "
+                            "das Protokoll erst an den Fahrer zurückschicken.")
 
 
 async def _offener_termin_zum_vertrag(dealer_id: str, contract_id: Optional[str],
@@ -698,7 +698,14 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     fahrer_wechsel = bool(
         "driver_id" in update
         and (update.get("driver_id") or "") != (existing.get("driver_id") or ""))
-    if (vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel) \
+    # Pruefung 14.09.2026 (P11): auch Verkaeufer, Abholanschrift, Datum und
+    # Uhrzeit stehen im unterschriebenen PDF — waehrend Freigabe/Abschluss
+    # nicht aenderbar (der Abschluss arbeitet mit dem Stand vom Start).
+    termindaten_wechsel = any(
+        f in update and (update.get(f) or "") != (existing.get(f) or "")
+        for f in ("seller_name", "seller_phone", "seller_email", "pickup_address",
+                  "pickup_date", "pickup_time"))
+    if (vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel or termindaten_wechsel) \
             and await db.pickup_protocols.count_documents(
             {"appointment_id": appt_id, "superseded": {"$ne": True},
              "status": {"$in": list(PROTOKOLL_LAEUFT)}}, limit=1):
@@ -1048,7 +1055,7 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     # konnte selbst werfen — dann war der Termin weg und die Spur fehlte.
     # Jetzt vorher, und ein Fehler dabei stoppt das Loeschen nicht.
     try:
-        await log_activity(user["dealer_id"], user["id"], "termin.geloescht",
+        await log_activity_sicher(user["dealer_id"], user["id"], "termin.geloescht",
                            ref=appt_id,
                            meta={"status": appt.get("status") or "offen",
                                  "vehicle_id": appt.get("vehicle_id"),
@@ -1173,7 +1180,7 @@ async def get_pickup_order_pdf(appt_id: str, download: int = 0,
         log.exception("pickup PDF build failed for %s", appt_id)
         raise HTTPException(500, "PDF-Erzeugung fehlgeschlagen.")
 
-    await log_activity(user["dealer_id"], user["id"],
+    await log_activity_sicher(user["dealer_id"], user["id"],
                        "abholauftrag.erzeugt", ref=appt_id)
 
     label = (vehicle.get("make_label") or vehicle.get("make") or "Fahrzeug")

@@ -8,6 +8,8 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+
+import betrieb
 from decimal import Decimal
 from typing import Dict, Literal, Optional
 
@@ -147,6 +149,23 @@ def _ablaufdatum_pruefen_400(wert, feld: str = "expires_at"):
     return d.isoformat()
 
 
+async def kaeufer_reservierungen_freigeben(user_id: str, grund: str) -> int:
+    """Pruefung 14.09.2026 (M1): Fuer einen Kaeufer reservierte Inserate
+    (Status reserviert, reserved_for) wieder veroeffentlichen und seine
+    akzeptierten Anfragen beenden. Liefert die Zahl der freigegebenen Inserate."""
+    jetzt = now_iso()
+    r = await db.resale_listings.update_many(
+        {"reserved_for": user_id, "status": "reserviert"},
+        {"$set": {"status": "veroeffentlicht", "updated_at": jetzt,
+                  "reservierung_aufgehoben_grund": grund},
+         "$unset": {"reserved_for": ""}})
+    await db.listing_interest.update_many(
+        {"buyer_user_id": user_id, "status": "akzeptiert"},
+        {"$set": {"status": "abgelehnt", "beendet_grund": grund, "updated_at": jetzt},
+         "$push": {"history": {"von": "system", "aktion": grund, "zeit": jetzt}}})
+    return r.modified_count
+
+
 # ---------- Zugangs-Anfrage beim Anlegen schliessen (Kontonummer, 13.09.2026) ----------
 ANFRAGE_RESERVIERUNG_S = 120
 
@@ -169,6 +188,23 @@ async def _anfrage_reservieren(anfrage_id: Optional[str], art: str) -> Optional[
                                  f"nicht '{art}'")
     if anfrage.get("status") != "offen":
         raise HTTPException(409, "Die Zugangs-Anfrage ist bereits erledigt")
+    # Pruefung 14.09.2026 (M7): Konnte die Anfrage nach der Anlage nicht auf
+    # 'erledigt' gesetzt werden, lief die Reservierung nach 120 s ab und ein
+    # zweites Konto liess sich zur selben Anfrage anlegen. Jedes Konto traegt
+    # jetzt zugangsanfrage_id — existiert eines, wird die Anfrage hier
+    # geschlossen und die Anlage abgelehnt.
+    for sammlung in ("users", "driver_accounts"):
+        konto = await db[sammlung].find_one({"zugangsanfrage_id": anfrage_id},
+                                            {"_id": 0, "id": 1, "kontonummer": 1})
+        if konto:
+            await db.plan_requests.update_one(
+                {"id": anfrage_id, "status": "offen"},
+                {"$set": {"status": "erledigt", "erledigt_durch": "kontenanlage_nachgeholt",
+                          "angelegt_konto_id": konto["id"],
+                          "kontonummer": konto.get("kontonummer") or "", "updated_at": now_iso()},
+                 "$unset": {"anlage_marke": "", "anlage_seit": ""}})
+            raise HTTPException(409, "Zu dieser Zugangs-Anfrage wurde bereits ein Konto "
+                                     f"angelegt (Kontonummer {konto.get('kontonummer') or '—'}).")
     marke = str(uuid.uuid4())
     jetzt = datetime.now(timezone.utc)
     frist = (jetzt - timedelta(seconds=ANFRAGE_RESERVIERUNG_S)).isoformat()
@@ -258,6 +294,8 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     }
     if email:                       # ohne Angabe fehlt das Feld (nie "")
         chef_doc["email"] = email
+    if anfrage:
+        chef_doc["zugangsanfrage_id"] = anfrage["id"]      # Pruefung 14.09.2026 (M7)
     # Kontonummer (13.09.2026): erst die Firma mit Nummer, dann der Chef mit
     # kontonummer = str(kunden_nr) — kontenanlage raeumt die Firma bei jedem
     # Fehler des Chef-Inserts wieder weg (kein Profil ohne Konto).
@@ -297,7 +335,7 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     # werden einzeln nach Rechnungszahlung freigeschaltet.
     if body.plan_type == "none":
         await _anfrage_abschliessen(anfrage, user_id, erg["kontonummer"], admin)
-        await log_activity(admin.get("dealer_id", ""), admin["id"],
+        await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                            "admin.user.erstellt", ref=user_id,
                            meta={"plan": "none", "kontonummer": erg["kontonummer"],
                                  "anfrage": bool(anfrage)})
@@ -321,13 +359,21 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
             "created_at": now_iso(),
         })
     except Exception:
-        await db.dealers.delete_one({"id": dealer_id})
-        await db.users.delete_one({"id": user_id})
+        # Pruefung 14.09.2026 (M8): kein atomarer Rollback moeglich — jeder
+        # Schritt einzeln; was liegen bleibt, meldet ein Betriebsalarm, und
+        # cleanup_service.konten_ohne_firma_sperren sperrt Konten ohne Firma.
+        for sammlung, ident in (("users", user_id), ("dealers", dealer_id)):
+            try:
+                await db[sammlung].delete_one({"id": ident})
+            except Exception:  # noqa: BLE001
+                log.exception("admin_create_user: Rollback %s/%s fehlgeschlagen", sammlung, ident)
+                await betrieb.alarm(db, "firmenanlage_rollback_offen", ref=ident,
+                                    sammlung=sammlung, dealer_id=dealer_id, user_id=user_id)
         await _anfrage_freigeben(anfrage)
         log.exception("admin_create_user: Abo-Insert fehlgeschlagen")
         raise HTTPException(500, "Firma anlegen fehlgeschlagen — bitte erneut versuchen")
     await _anfrage_abschliessen(anfrage, user_id, erg["kontonummer"], admin)
-    await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.erstellt",
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"], "admin.user.erstellt",
                        ref=user_id, meta={"plan": body.plan_type,
                                           "kontonummer": erg["kontonummer"],
                                           "anfrage": bool(anfrage)})
@@ -434,6 +480,11 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         neue_rolle = fields["role"]
         alte_rolle = target.get("role")
         if neue_rolle != alte_rolle:
+            if neue_rolle in ("dealer", "sucher") and not target.get("dealer_id")                     and target.get("ehemalige_dealer_id") and await db.dealers.count_documents(
+                        {"id": target["ehemalige_dealer_id"]}, limit=1):
+                # Pruefung 14.09.2026 (M17): ein Zwischenhaendler, der frueher
+                # Sucher dieser Firma war, kehrt zu ihr zurueck.
+                target["dealer_id"] = fields["dealer_id"] = target["ehemalige_dealer_id"]
             if neue_rolle in ("dealer", "sucher") and not target.get("dealer_id"):
                 raise HTTPException(
                     400, "Dieses Konto gehört zu keiner Firma. Ein Wechsel zu "
@@ -461,16 +512,23 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                              "und der bisherige zum Sucher, dann chef_wechsel=true "
                              "mitschicken.")
                 if chef:
-                    # Chefwechsel: bisheriger Chef wird Sucher (seine Sitzung
-                    # endet), das Firmenprofil zeigt auf den neuen Chef.
+                    # Chefwechsel. Pruefung 14.09.2026 (M12): Reihenfolge so, dass
+                    # ein Abbruch die Firma nie OHNE Chef laesst — erst zeigt das
+                    # Profil auf den Nachfolger und er bekommt die Rolle, dann
+                    # wird der bisherige Chef Sucher (seine Sitzung endet). Ein
+                    # Wiederholen desselben Aufrufs fuehrt den Rest zu Ende.
+                    await db.dealers.update_one(
+                        {"id": target["dealer_id"]},
+                        {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
+                    await db.users.update_one(
+                        {"id": target["id"]},
+                        {"$set": {"role": "dealer", "current_session_id": None,
+                                  "updated_at": now_iso()}})
                     await db.users.update_one(
                         {"id": chef["id"], "role": "dealer"},
                         {"$set": {"role": "sucher", "current_session_id": None,
                                   "updated_at": now_iso()}})
-                    await db.dealers.update_one(
-                        {"id": target["dealer_id"]},
-                        {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
-                    await log_activity(
+                    await log_activity_sicher(
                         admin.get("dealer_id", ""), admin["id"], "admin.firma.chefwechsel",
                         ref=target["dealer_id"],
                         meta={"alter_chef": chef.get("kontonummer") or chef["id"],
@@ -489,6 +547,31 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                          "Nachfolger bestimmen: dessen Konto mit role=dealer "
                          "und chef_wechsel=true befördern; der bisherige Chef "
                          "wird dabei zum Sucher.")
+            if neue_rolle == "b2b_buyer" and target.get("dealer_id"):
+                # Pruefung 14.09.2026 (M17): Ein Sucher, der Zwischenhaendler
+                # wird, haengt sonst weiter an seiner Firma (dealer_id) und
+                # besitzt ihre Fahrzeuge. Firmenbindung loesen, Fahrzeuge an
+                # den Chef, aus den Mitbearbeitern raus, Abo-Anfragen weg.
+                firma = {"dealer_id": target["dealer_id"]}
+                chef_alt = await db.users.find_one(
+                    {**firma, "role": "dealer", "id": {"$ne": target["id"]}},
+                    {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+                if chef_alt:
+                    await db.vehicles.update_many(
+                        {**firma, "owner_user_id": target["id"]},
+                        {"$set": {"owner_user_id": chef_alt["id"],
+                                  "uebernommen_von": target["id"], "updated_at": now_iso()}})
+                await db.vehicles.update_many(
+                    {**firma, "mitbearbeiter_ids": target["id"]},
+                    {"$pull": {"mitbearbeiter_ids": target["id"]}})
+                await db.plan_requests.delete_many(
+                    {"subject_user_id": target["id"], "status": "offen"})
+                await db.subscriptions.update_many(
+                    {"subject_user_id": target["id"], "status": "active"},
+                    {"$set": {"status": "ersetzt", "ersetzt_durch": "rollenwechsel",
+                              "updated_at": now_iso()}})
+                fields["dealer_id"] = None
+                fields["ehemalige_dealer_id"] = target["dealer_id"]
             # Runde 12: Jede Rollenaenderung beendet die laufende Sitzung.
             # current_user() liest die Rolle bei jedem Request frisch — ein
             # bestehendes Haendler-Token bekam so ohne neue Anmeldung (und
@@ -551,11 +634,17 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         if not u:
             raise HTTPException(404)
         plan = body["plan_type"]
+        # Pruefung 14.09.2026 (M14/M15): dieselben festen Werte wie bei der
+        # Firmenanlage — "lifetime" (unbefristet) und Freitext sind hier
+        # nicht mehr anlegbar; Altbestand bleibt lesbar (deps.ABO_PLAENE_ERLAUBT).
+        if plan not in ("monthly", "yearly", "trial"):
+            raise HTTPException(400, "plan_type muss monthly, yearly oder trial sein")
         # Nachpruefung Runde 14 (Befund 50): derselbe Altpfad wie bei der
         # Firmenanlage — Rohwert nie ungeprueft ins Abo schreiben.
         expires = _ablaufdatum_pruefen_400(body.get("expires_at"))
-        if plan == "lifetime":
-            expires = None
+        if not expires:
+            expires = (datetime.now(timezone.utc) + timedelta(
+                days={"monthly": 30, "trial": 14, "yearly": 365}[plan])).isoformat()
         sub_doc = {
             "id": str(uuid.uuid4()), "dealer_id": u["dealer_id"],
             "plan": plan, "status": "active",
@@ -570,12 +659,28 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                 {"subject_user_id": u["id"], "status": "active"},
                 {"$set": {"status": "ersetzt", "ersetzt_durch": sub_doc["id"],
                           "updated_at": now_iso()}})
-        await db.subscriptions.insert_one(sub_doc)
-        await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.abo.vergeben",
+        try:
+            await db.subscriptions.insert_one(sub_doc)
+        except Exception as exc:
+            # Pruefung 14.09.2026 (M13): Scheitert der Insert, darf das Konto
+            # sein bisheriges Abo nicht verlieren — die eben ersetzten wieder aktiv.
+            log.exception("admin_update_user: Abo-Insert fehlgeschlagen")
+            try:
+                await db.subscriptions.update_many(
+                    {"ersetzt_durch": sub_doc["id"], "status": "ersetzt"},
+                    {"$set": {"status": "active", "updated_at": now_iso()},
+                     "$unset": {"ersetzt_durch": ""}})
+            except Exception:  # noqa: BLE001
+                log.exception("admin_update_user: altes Abo nicht wiederhergestellt")
+                await betrieb.alarm(db, "abo_wechsel_offen", ref=user_id,
+                                    fehler=str(exc)[:300])
+            raise HTTPException(500, "Abo konnte nicht gespeichert werden — das bisherige "
+                                     "Abo bleibt bestehen, bitte erneut versuchen")
+        await log_activity_sicher(admin.get("dealer_id", ""), admin["id"], "admin.abo.vergeben",
                            ref=user_id, meta={"plan": plan, "expires_at": expires,
                                               "kontonummer": u.get("kontonummer", "")})
     if fields:
-        await log_activity(admin.get("dealer_id", ""), admin["id"], "admin.user.aktualisiert",
+        await log_activity_sicher(admin.get("dealer_id", ""), admin["id"], "admin.user.aktualisiert",
                            ref=user_id, meta={"felder": sorted(fields.keys()),
                                               "kontonummer": target.get("kontonummer", ""),
                                               "sucher_abgemeldet": sucher_abgemeldet})
@@ -712,6 +817,9 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.subscriptions.delete_many({"subject_user_id": user_id})
         await db.network_members.delete_many({"buyer_user_id": user_id})
         await db.buyer_favorites.delete_many({"buyer_user_id": user_id})
+        # Pruefung 14.09.2026 (M1): fuer diesen Kaeufer reservierte Fahrzeuge
+        # wieder freigeben — sonst blieben sie fuer immer blockiert.
+        await kaeufer_reservierungen_freigeben(user_id, "kaeufer_geloescht")
         await db.listing_interest.delete_many({"buyer_user_id": user_id})
         await db.plan_requests.delete_many({"buyer_user_id": user_id})
         # Nachpruefung Runde 14 (Befund 24): zugang_grants (Stripe-
@@ -756,7 +864,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
 
     # Runde 12: Audit VOR dem ersten destruktiven Schritt. Bricht die
     # Loeschung mittendrin ab, steht sonst nirgends, wer sie ausgeloest hat.
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.firma.loeschung.gestartet", ref=dealer_id or user_id,
                        meta={"kontonummer": u.get("kontonummer", ""), "dealer_id": dealer_id})
     geloescht = {}
@@ -907,6 +1015,9 @@ async def admin_user_set_active(
                       "updated_at": now_iso()},
              "$push": {"history": {"von": "system", "aktion": "kaeufer_gesperrt",
                                    "zeit": now_iso()}}})
+        # Pruefung 14.09.2026 (M1): auch bereits akzeptierte (reservierte)
+        # Fahrzeuge werden frei — ein gesperrter Kaeufer kauft nicht.
+        await kaeufer_reservierungen_freigeben(user_id, "kaeufer_gesperrt")
     sucher_abgemeldet = 0
     if not body.active and u.get("role") == "dealer" and u.get("dealer_id"):
         # Firmensperre (Audit 09/2026): auch die Sitzungen aller Sucher der
@@ -916,7 +1027,7 @@ async def admin_user_set_active(
             {"dealer_id": u["dealer_id"], "role": "sucher"},
             {"$set": {"current_session_id": None, "updated_at": now_iso()}})
         sucher_abgemeldet = r.modified_count
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.user.entsperrt" if body.active else "admin.user.gesperrt",
                        ref=user_id, meta={"kontonummer": u.get("kontonummer", ""),
                                           "sucher_abgemeldet": sucher_abgemeldet})
@@ -951,7 +1062,7 @@ async def admin_user_set_password(
         }},
     )
     await _konto_sperre_aufheben(u)
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.passwort.zurueckgesetzt",
                        ref=user_id, meta={"kontonummer": u.get("kontonummer", "")})
     return {"ok": True}
@@ -1053,12 +1164,12 @@ async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
             for a in betroffen:
                 je_firma.setdefault(a.get("dealer_id") or "", []).append(a["id"])
             for firma_id, termin_ids in je_firma.items():
-                await log_activity(firma_id, admin["id"],
+                await log_activity_sicher(firma_id, admin["id"],
                                    "fahrer.gesperrt.termine_freigegeben",
                                    ref=driver_id,
                                    meta={"driver_code": d.get("driver_code", ""),
                                          "termine": termin_ids})
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.entsperrt" if body.active else "admin.fahrer.gesperrt",
                        ref=driver_id, meta={"kontonummer": d.get("kontonummer", ""),
                                             "offene_termine_getrennt": termine_getrennt})
@@ -1082,7 +1193,7 @@ async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   "current_session_id": None, "updated_at": now_iso()}})
     await _konto_sperre_aufheben(d)
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.passwort.zurueckgesetzt",
                        ref=driver_id, meta={"kontonummer": d.get("kontonummer", "")})
     return {"ok": True}
@@ -1122,7 +1233,7 @@ async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)
     # Start-Audit VOR dem ersten destruktiven Schritt mit der WERFENDEN
     # Variante (wie admin.firma.loeschung.gestartet): scheitert es, wird
     # nichts pseudonymisiert. Ohne E-Mail in meta.
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.loeschung.gestartet", ref=driver_id,
                        meta={"wiederaufnahme": wiederaufnahme})
     # Audit 09/2026: nicht nur trennen, sondern pseudonymisieren (Termine,
@@ -1415,7 +1526,7 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
     tier = body.get("tier")
     if tier is None:
         await db.dealers.update_one({"id": dealer_id}, {"$unset": {"sale_plan": ""}})
-        await log_activity(admin.get("dealer_id", ""), admin["id"],
+        await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                            "admin.verkaufsplan.entfernt", ref=dealer_id)
         return {"ok": True, "sale_plan": None}
     if tier not in SALE_PLANS:
@@ -1474,7 +1585,7 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
                 raise HTTPException(400, "custom_quota darf nicht negativ sein")
             plan["custom_quota"] = n or None
     await db.dealers.update_one({"id": dealer_id}, {"$set": {"sale_plan": plan}})
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.verkaufsplan.gesetzt", ref=dealer_id,
                        meta={"tier": tier})
     return {"ok": True, "sale_plan": plan}
@@ -1547,7 +1658,7 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
             {"$set": {"status": "cancelled", "expires_at": now_iso(),
                       "aufgehoben_von": _handelnder(admin),
                       "updated_at": now_iso()}})
-        await log_activity(admin.get("dealer_id", ""), admin["id"],
+        await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                            "admin.sucher.abo.aufgehoben", ref=sucher_id,
                            meta={"grund": body.grund})
         return {"ok": True, "active": False}
@@ -1707,7 +1818,7 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
         {"$set": {"status": "erledigt", "updated_at": jetzt,
                   "erledigt_durch": "freischaltung", "vorgang_id": vid}})
     if not (v.get("schritte") or {}).get("audit"):
-        await log_activity(v.get("dealer_id", "") or "", v.get("admin_id", ""),
+        await log_activity_sicher(v.get("dealer_id", "") or "", v.get("admin_id", ""),
                            "admin.sucher.abo.freigeschaltet", ref=sid,
                            meta={"plan": v["plan"], "betrag": v["betrag"],
                                  "zahlungsart": v.get("zahlungsart"),
@@ -1789,7 +1900,7 @@ async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
         "admin_id": admin["id"], "admin_email": _handelnder(admin),
         "created_at": now_iso(),
     })
-    await log_activity(admin.get("dealer_id", ""), admin["id"],
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.sucher.abo.gueltig_bis", ref=sucher_id,
                        meta={"alt": aktiv.get("expires_at"), "gueltig_bis": gueltig_bis[:10]})
     return {"ok": True, "expires_at": gueltig_bis}
@@ -1944,6 +2055,8 @@ async def admin_create_buyer(body: AdminKaeuferIn, admin=Depends(current_super_a
         }
         if email:
             konto["email"] = email
+        if anfrage:
+            konto["zugangsanfrage_id"] = anfrage["id"]     # Pruefung 14.09.2026 (M7)
         from kontenanlage import kaeufer_anlegen
         try:
             erg = await kaeufer_anlegen(db, konto)
@@ -1998,6 +2111,8 @@ async def admin_create_driver(body: AdminFahrerIn, admin=Depends(current_super_a
             konto["email"] = email
         if body.phone.strip():
             konto["phone"] = body.phone.strip()
+        if anfrage:
+            konto["zugangsanfrage_id"] = anfrage["id"]     # Pruefung 14.09.2026 (M7)
         from kontenanlage import fahrer_anlegen
         try:
             erg = await fahrer_anlegen(db, konto)
@@ -2079,7 +2194,7 @@ async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
     # KOPIE einfuegen: insert_one haengt dem uebergebenen dict die Mongo-_id
     # (ObjectId) an — die Antwort waere sonst nicht JSON-serialisierbar (500).
     await db.manual_payments.insert_one(dict(doc))
-    await log_activity(dealer_id, admin["id"], "admin.zahlung.erfasst",
+    await log_activity_sicher(dealer_id, admin["id"], "admin.zahlung.erfasst",
                        meta={"betrag": doc["amount"], "sucher":
                              body.subject_user_id or ""})
     return {"ok": True, "zahlung": doc}
@@ -2119,7 +2234,7 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
                       "marketplace_access.gesperrt_am": now_iso(),
                       "marketplace_access.gesperrt_von": _handelnder(admin),
                       "marketplace_access.updated_at": now_iso()}})
-        await log_activity("", admin["id"], "admin.buyer.zugang.gesperrt",
+        await log_activity_sicher("", admin["id"], "admin.buyer.zugang.gesperrt",
                            ref=buyer_id)
         return {"ok": True, "active": False, "gesperrt": True}
     if plan != "monthly":
@@ -2151,7 +2266,7 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
             "active": True, "plan": "monthly",
             "price": BUYER_ACCESS_PRICE, "expires_at": expires_at,
             "activated_by": _handelnder(admin), "updated_at": now_iso()}}})
-    await log_activity("", admin["id"], "admin.buyer.zugang.freigeschaltet",
+    await log_activity_sicher("", admin["id"], "admin.buyer.zugang.freigeschaltet",
                        ref=buyer_id, meta={"expires_at": expires_at})
     await db.plan_requests.update_many(
         {"type": "buyer_access", "buyer_user_id": buyer_id, "status": "offen"},
@@ -2530,7 +2645,7 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
         {"$set": {"mfa": {"aktiv": True, "secret": _mfa.verschluesseln(secret),
                           "letzter_zaehler": zaehler, "fehlversuche": 0,
                           "wiederherstellung": hashes, "aktiviert_am": now_iso()}}})
-    await log_activity("", admin["id"], "admin.mfa.aktiviert")
+    await log_activity_sicher("", admin["id"], "admin.mfa.aktiviert")
     return {"ok": True, "aktiv": True, "wiederherstellungscodes": codes,
             "hinweis": "Diese Codes jetzt sicher aufbewahren — sie werden nur einmal angezeigt."}
 
@@ -2546,7 +2661,7 @@ async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
     if _mfa.code_pruefen(secret, body.code, int(m.get("letzter_zaehler", -1))) is None:
         raise HTTPException(401, "Code ungültig")
     await db.users.update_one({"id": admin["id"]}, {"$unset": {"mfa": ""}})
-    await log_activity("", admin["id"], "admin.mfa.deaktiviert")
+    await log_activity_sicher("", admin["id"], "admin.mfa.deaktiviert")
     return {"ok": True, "aktiv": False}
 
 
@@ -2594,7 +2709,7 @@ async def admin_mfa_zuruecksetzen(user_id: str, body: dict = Body(default={}),
     # Kontonummer (13.09.2026): Admin-Konten werden ueber den Benutzernamen
     # benannt (die E-Mail des Super-Admins ist nur ein Platzhalter).
     kennung = u.get("username") or u.get("email") or user_id
-    await log_activity("", admin["id"], "admin.mfa.zurueckgesetzt", ref=user_id,
+    await log_activity_sicher("", admin["id"], "admin.mfa.zurueckgesetzt", ref=user_id,
                        meta={"konto": kennung, "grund": grund,
                              "super_admin": bool(u.get("is_super_admin"))})
     if u.get("is_super_admin"):
@@ -2617,6 +2732,6 @@ async def admin_buyer_ustid_pruefen(buyer_id: str, admin=Depends(current_admin))
     ergebnis = await vies_pruefen(buyer.get("ust_id") or "")
     ergebnis["geprueft_von"] = _handelnder(admin)
     await db.users.update_one({"id": buyer_id}, {"$set": {"ust_id_pruefung": ergebnis}})
-    await log_activity("", admin["id"], "admin.buyer.ustid.geprueft", ref=buyer_id,
+    await log_activity_sicher("", admin["id"], "admin.buyer.ustid.geprueft", ref=buyer_id,
                        meta={"status": ergebnis["status"], "ust_id": ergebnis.get("ust_id")})
     return ergebnis

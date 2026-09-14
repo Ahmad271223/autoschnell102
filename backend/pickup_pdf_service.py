@@ -1041,6 +1041,13 @@ def build_pickup_pdf(
         preis_block += [Spacer(1, 4),
                         Paragraph(f"Vermerk zur Verhandlung: {_preis_notiz}",
                                   st["small"])]
+    # Wunsch Ahmad 14.09.2026: vor Ort getroffene Sondervereinbarung steht
+    # ueber den Unterschriften.
+    _sonder = _xe(_txt(filled.get("sondervereinbarung")))
+    if _sonder:
+        preis_block += [Spacer(1, 4),
+                        Paragraph(f"<b>Sondervereinbarung vor Ort:</b> {_sonder}",
+                                  st["small"])]
     elif _preis_neu in (None, ""):
         preis_block += [
             Spacer(1, 3),

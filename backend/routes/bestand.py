@@ -169,7 +169,7 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
         # veroeffentlichen, obwohl das Fahrzeug geloescht war.
         geloeschte_inserate = await _inserate_zum_fahrzeug_schliessen(
             vehicle_id, user)
-        await log_activity(user["dealer_id"], user["id"],
+        await log_activity_sicher(user["dealer_id"], user["id"],
                            "fahrzeug.entscheidung.geloescht", ref=vehicle_id,
                            meta={"inserate_geloescht": geloeschte_inserate})
         return {"ok": True, "lifecycle": "geloescht",
@@ -194,7 +194,7 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
                             extra_set=extra)
     except LifecycleError as exc:
         raise HTTPException(409, str(exc))
-    await log_activity(user["dealer_id"], user["id"],
+    await log_activity_sicher(user["dealer_id"], user["id"],
                        f"fahrzeug.entscheidung.{body.decision}", ref=vehicle_id)
     return {"ok": True, "lifecycle": target, "expires_at": expires}
 
@@ -233,9 +233,15 @@ async def _inserate_zum_fahrzeug_schliessen(vehicle_id: str, user: Dict[str, Any
                 user["dealer_id"], user["id"], "inserat.geloescht", ref=l["id"],
                 meta={"war_status": l.get("status"), "grund": "fahrzeug_geloescht",
                       "vehicle_id": vehicle_id})
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logging.getLogger("autohandel").exception(
             "Inserate zu geloeschtem Fahrzeug %s nicht geschlossen", vehicle_id)
+        # Pruefung 14.09.2026 (M2): nicht still — Betriebsalarm, und der
+        # Aufraeum-Job (cleanup_service.inserate_geloeschter_fahrzeuge_schliessen)
+        # schliesst die Inserate nach.
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "inserat_zu_geloeschtem_fahrzeug_offen", ref=vehicle_id,
+                             dealer_id=user["dealer_id"], fehler=str(exc)[:300])
     return ids
 
 
@@ -276,7 +282,7 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
     # Runde 15 (Nr. 5): Kosten beeinflussen die Marge — wer wann aus 500 EUR
     # Aufbereitung 5.000 gemacht hat, muss nachvollziehbar bleiben.
     felder = [f for f in ("location", "notes", "costs") if getattr(body, f) is not None]
-    await log_activity(user["dealer_id"], user["id"], "bestand.geaendert", ref=vehicle_id,
+    await log_activity_sicher(user["dealer_id"], user["id"], "bestand.geaendert", ref=vehicle_id,
                        meta={"felder": felder,
                              "kosten_summe_alt": round(kosten_alt, 2),
                              "kosten_summe_neu": round(sum(c["amount"] for c in (b.get("costs") or [])), 2)})
@@ -742,7 +748,7 @@ async def create_manual_vehicle(body: ManualVehicleIn,
         "created_at": now_iso(), "updated_at": now_iso(),
     }
     await db.vehicles.insert_one(doc)
-    await log_activity(user["dealer_id"], user["id"],
+    await log_activity_sicher(user["dealer_id"], user["id"],
                        "fahrzeug.manuell.angelegt", ref=vid,
                        meta={"fahrzeug": f"{body.make_label} {body.model_label}"})
     return clean_doc(doc)

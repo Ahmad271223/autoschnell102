@@ -29,6 +29,8 @@ import pytest
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from protokoll_daten import vollstaendig  # noqa: E402
 
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
@@ -190,9 +192,9 @@ def _abholung(w, *, mit_vertrag=True, name="a", proto_status="freigegeben", **pr
                "vehicle_id": t.vid, "driver_account_id": w.driver["id"],
                "driver_name": w.driver["display_name"], "version": 1, "status": proto_status,
                "superseded": False,
-               "vehicle_check": {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
-               "condition": {"mileage": "123456"}, "keys_count": "2", "damages_confirmed": True,
-               "place": "Hannover", "neuer_preis": 9000.0, "freigabe_stand": "s1",
+               # Wunsch Ahmad 14.09.2026: alle Abschnitte Pflicht (tests/protokoll_daten.py)
+               **vollstaendig(P, place="Hannover", seller_name="Vera", mileage="123456"),
+               "neuer_preis": 9000.0, "freigabe_stand": "s1",
                "created_at": _jetzt()}
         doc.update(proto_extra)
         await w.db.pickup_protocols.insert_one(doc)

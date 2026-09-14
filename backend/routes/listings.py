@@ -39,7 +39,7 @@ from autoscout_service import autoscout_quelle_verfuegbar
 from deps import (
     besitzer_anreichern, besitzer_namen, current_firma, eigene_fahrzeug_ids,
     fahrzeug_bereich, fahrzeug_im_bereich, ist_sucher,
-    current_user, db, log_activity, now_iso, require_active_sub,
+    current_user, db, log_activity, log_activity_sicher, now_iso, require_active_sub,
 )
 from kleinanzeigen_service import (
     ListingGone, fetch_kleinanzeigen_vehicle,
@@ -487,7 +487,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     await db.vehicles.update_one(
         {"id": vid, "dealer_id": user["dealer_id"]},
         {"$set": {"inserat_schluessel": identity["cache_key"]}})
-    await log_activity(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
+    await log_activity_sicher(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
                        meta={"kollege": kollege["user_id"]} if kollege else None)
 
     # Beweisdokument (ersetzt die Snapshots, 10.09.2026): EIN PDF je Inserat,

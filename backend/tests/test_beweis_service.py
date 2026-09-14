@@ -429,15 +429,22 @@ def test_14_kanonische_url_ohne_parameter_und_ohne_einschleusung():
 def test_15_fehlgeschlagen_wird_beim_naechsten_gebrauch_wiederbelebt(welt):
     alt = _jetzt() - timedelta(minutes=30)
     for n, status, am in (("alt", "fehlgeschlagen", alt), ("frisch", "fehlgeschlagen", _jetzt()),
-                          ("grab", "geloescht", alt)):
+                          ("grab", "geloescht", alt), ("grabnie", "geloescht", alt)):
         welt.run(welt.db.inserat_beweise.insert_one({
             "id": f"id{welt.s}{n}", "cache_key": welt.ck(n), "status": status, "versuche": 3,
-            "fehler": "R2 weg", "fehlgeschlagen_am": am, "erstellt_am": alt}))
+            "fehler": "R2 weg", "fehlgeschlagen_am": am, "erstellt_am": alt,
+            # "grab" war einmal fertig (echtes Dokument), "grabnie" nie
+            **({"fertig_am": alt} if n == "grab" else {})}))
     assert _vormerken(welt, welt.ck("alt"))["status"] == "offen"
     z = welt.run(welt.db.inserat_beweise.find_one({"cache_key": welt.ck("alt")}))
     assert z["versuche"] == 0 and z["fehler"] is None
     assert _vormerken(welt, welt.ck("frisch"))["status"] == "fehlgeschlagen", "Pause vor Wiederbelebung"
     assert _vormerken(welt, welt.ck("grab"))["status"] == "geloescht", "Grabstein bleibt"
+    # Pruefung 14.09.2026 (F8/F9): nie erzeugt -> bei neuem Gebrauch ein erstes Dokument,
+    # mit neuem Erstellzeitpunkt (die Frist zaehlt nicht ab dem alten Datum).
+    assert _vormerken(welt, welt.ck("grabnie"))["status"] == "offen", "nie erzeugt -> neuer Versuch"
+    z = welt.run(welt.db.inserat_beweise.find_one({"cache_key": welt.ck("grabnie")}))
+    assert z["erstellt_am"].replace(tzinfo=timezone.utc) > alt and z.get("wiederbelebt_am")
 
 
 def _alt_fertig(welt, n, key=None):

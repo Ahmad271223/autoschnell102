@@ -353,7 +353,7 @@ async def update_marketplace_profile(body: ProfileIn, user=Depends(current_haend
         await db.dealers.update_one({"id": did}, {"$set": sets})
     mp = ((await db.dealers.find_one({"id": did}, {"_id": 0, "marketplace": 1}))
           or {}).get("marketplace") or {}
-    await log_activity(did, user["id"],
+    await log_activity_sicher(did, user["id"],
                        "marktplatz.profil.aktualisiert",
                        meta={"public": mp.get("public", False)})
     return {"ok": True, "public": mp.get("public", False),
@@ -1381,7 +1381,7 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
         if upd.modified_count == 0:
             raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
                                      "beantwortet — bitte neu laden.")
-        await log_activity(it.get("dealer_id", ""), user["id"],
+        await log_activity_sicher(it.get("dealer_id", ""), user["id"],
                            "interesse.kaeufer.gegenangebot", ref=interest_id,
                            meta={"listing_id": it.get("listing_id"), "betrag": betrag})
         return {"ok": True, "status": "gegenangebot_kaeufer", "betrag": betrag}
@@ -1426,7 +1426,7 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
                  "$unset": {"reserved_for": ""}})
         raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
                                  "beantwortet — bitte neu laden.")
-    await log_activity("", user["id"], f"interesse.kaeufer.{body.action}",
+    await log_activity_sicher("", user["id"], f"interesse.kaeufer.{body.action}",
                        ref=interest_id,
                        meta={"listing_id": it.get("listing_id"),
                              "betrag": it.get("counter_offer")})
@@ -1534,6 +1534,6 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
                  "$unset": {"reserved_for": ""}})
         raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
                                  "beantwortet — bitte neu laden.")
-    await log_activity(user["dealer_id"], user["id"], f"interesse.{new_status}",
+    await log_activity_sicher(user["dealer_id"], user["id"], f"interesse.{new_status}",
                        ref=interest_id)
     return {"ok": True, "status": new_status}

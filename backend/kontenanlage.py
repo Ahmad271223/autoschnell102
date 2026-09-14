@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """Kontonummer (13.09.2026): EINE Stelle fuer Nummernvergabe und Kontenanlage.
 
+import logging
+
+log = logging.getLogger("autohandel")
+
 Alle Funktionen bekommen `db` vom Aufrufer (Modul-Global des Routenmoduls zur
 Aufrufzeit) — Tests, die routes.admin.db, routes.marketplace.db oder deps.db
 ersetzen, greifen damit weiter. Kein Import von server.py oder routes.*.
@@ -160,6 +164,23 @@ async def firma_einfuegen(db, doc: dict, nummer_ziehen=None) -> int:
     raise RuntimeError("Firma: keine freie Kundennummer")  # pragma: no cover
 
 
+async def _firma_aufraeumen(db, dealer_id: str) -> None:
+    """Pruefung 14.09.2026 (M8): Firmen-Dokument nach einem gescheiterten
+    Chef-Insert entfernen; scheitert auch das, Betriebsalarm statt stiller
+    Firmenleiche (cleanup_service.konten_ohne_firma_sperren deckt die
+    umgekehrte Richtung ab)."""
+    try:
+        await db.dealers.delete_one({"id": dealer_id})
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Firma %s nach gescheiterter Anlage nicht entfernt", dealer_id)
+        try:
+            from betrieb import alarm
+            await alarm(db, "firmenanlage_rollback_offen", ref=dealer_id,
+                        sammlung="dealers", fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def firma_mit_chef_anlegen(db, firma: dict, chef: dict) -> dict:
     """Erst die Firma mit Nummer, dann der Chef mit kontonummer=str(kunden_nr).
 
@@ -179,12 +200,12 @@ async def firma_mit_chef_anlegen(db, firma: dict, chef: dict) -> dict:
         try:
             await db.users.insert_one(chef_doc)
         except DuplicateKeyError as e:
-            await db.dealers.delete_one({"id": firma_doc["id"]})
+            await _firma_aufraeumen(db, firma_doc["id"])
             if ist_kontonummer_dublette(e) and versuch < _VERSUCHE - 1:
                 continue
             raise
         except Exception:
-            await db.dealers.delete_one({"id": firma_doc["id"]})
+            await _firma_aufraeumen(db, firma_doc["id"])
             raise
         return {"user_id": chef_doc["id"], "dealer_id": firma_doc["id"],
                 "kunden_nr": nr, "kontonummer": str(nr)}

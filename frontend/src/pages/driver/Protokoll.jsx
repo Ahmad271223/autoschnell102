@@ -31,6 +31,16 @@ const Section = ({ n, title, children, hint }) => (
 );
 
 
+// Wunsch Ahmad 14.09.2026: jede Zeile muss beantwortet werden — Ja ODER Nein
+// (vorher ein Haken, bei dem "nicht angeklickt" und "fehlt" dasselbe waren).
+// Wunsch Ahmad 14.09.2026: Preisvorschlag als Zahl schicken (0 = kein Vorschlag —
+// der Server kann ein fehlendes Feld nicht von "unveraendert" unterscheiden).
+const nutzlast = (s) => ({
+  ...s,
+  preis_vorschlag: s.preis_vorschlag === "" || s.preis_vorschlag == null
+    ? 0 : (Number(String(s.preis_vorschlag).replace(",", ".")) || 0),
+});
+
 const Check = ({ on, onClick, disabled, children }) => (
   <button type="button" onClick={onClick} disabled={disabled}
           className="w-full flex items-center gap-2.5 py-2 text-left text-sm disabled:opacity-60">
@@ -42,6 +52,28 @@ const Check = ({ on, onClick, disabled, children }) => (
     <span className={on ? "text-white" : "text-zinc-400"}>{children}</span>
   </button>
 );
+
+const JaNein = ({ wert, onChange, disabled, children, testId }) => {
+  const knopf = (label, ziel, farbe) => (
+    <button type="button" disabled={disabled} onClick={() => onChange(ziel)}
+            data-testid={testId ? `${testId}-${label.toLowerCase()}` : undefined}
+            className={`px-3 py-1 rounded-lg text-xs border disabled:opacity-60 ${
+              wert === ziel ? "font-semibold text-white" : "text-zinc-400"}`}
+            style={{ borderColor: wert === ziel ? farbe : "var(--border-default)",
+                     background: wert === ziel ? `${farbe}33` : "transparent" }}>
+      {label}
+    </button>
+  );
+  return (
+    <div className="w-full flex items-center justify-between gap-3 py-2 text-sm">
+      <span className={typeof wert === "boolean" ? "text-white" : "text-zinc-400"}>{children}</span>
+      <span className="flex gap-1.5 shrink-0">
+        {knopf("Ja", true, "#34c759")}
+        {knopf("Nein", false, "#ff453a")}
+      </span>
+    </div>
+  );
+};
 
 /**
  * Digitales Abhol-Protokoll — dieselben Abschnitte wie das PDF, nur
@@ -56,7 +88,7 @@ export default function Protokoll() {
   const [f, setF] = useState({
     documents: {}, features: {}, condition: {}, keys_count: "", keys_expected: "",
     notes: "", place: "", damages_confirmed: false, new_damages: [],
-    vehicle_check: {},
+    vehicle_check: {}, preis_vorschlag: "", sondervereinbarung: "",
   });
   const [sigDriver, setSigDriver] = useState(null);
   const [sigSeller, setSigSeller] = useState(null);
@@ -80,6 +112,8 @@ export default function Protokoll() {
         setF((s) => ({
           ...s,
           documents: p.documents || {}, features: p.features || {},
+          preis_vorschlag: p.preis_vorschlag ? String(p.preis_vorschlag) : "",
+          sondervereinbarung: p.sondervereinbarung || "",
           condition: p.condition || {}, keys_count: p.keys_count || "",
           keys_expected: p.keys_expected || "", notes: p.notes || "",
           place: ortGetippt.current ? s.place : (p.place || ""),
@@ -171,7 +205,7 @@ export default function Protokoll() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await driverApi.put(`/driver/appointments/${id}/protocol`, fRef.current);
+        await driverApi.put(`/driver/appointments/${id}/protocol`, nutzlast(fRef.current));
         setSavedAt(new Date());
       } catch (e) { /* stiller Retry beim nächsten Tippen */ }
     }, 1200);
@@ -184,10 +218,10 @@ export default function Protokoll() {
     setF((s) => ({ ...s, ...(typeof patch === "function" ? patch(s) : patch) }));
     queueSave();
   };
-  const toggleDoc = (name) =>
-    upd((s) => ({ documents: { ...s.documents, [name]: !s.documents[name] } }));
-  const toggleFeat = (name) =>
-    upd((s) => ({ features: { ...s.features, [name]: !s.features[name] } }));
+  const setDoc = (name, wert) =>
+    upd((s) => ({ documents: { ...s.documents, [name]: wert } }));
+  const setFeat = (name, wert) =>
+    upd((s) => ({ features: { ...s.features, [name]: wert } }));
   const setCond = (k, v) =>
     upd((s) => ({ condition: { ...s.condition, [k]: v } }));
   // Abschnitt 1: pro Zeile Status (stimmt/weicht ab) bzw. Korrekturwert
@@ -198,7 +232,7 @@ export default function Protokoll() {
   const saveNow = async () => {
     setBusy(true);
     try {
-      await driverApi.put(`/driver/appointments/${id}/protocol`, f);
+      await driverApi.put(`/driver/appointments/${id}/protocol`, nutzlast(f));
       setSavedAt(new Date());
       toast.success("Zwischenstand gespeichert");
     } catch (e) { toast.error(errMsg(e)); }
@@ -226,7 +260,7 @@ export default function Protokoll() {
                         + "möglich.")) return;
     setBusy(true);
     try {
-      await driverApi.put(`/driver/appointments/${id}/protocol`, f);
+      await driverApi.put(`/driver/appointments/${id}/protocol`, nutzlast(f));
       await driverApi.post(`/driver/appointments/${id}/protocol/submit`);
       toast.success("Abgeschickt — der Händler prüft jetzt");
       load();
@@ -470,9 +504,10 @@ export default function Protokoll() {
       </Section>
 
       {/* 2 Dokumente */}
-      <Section n="2" title="Dokumente & Zubehör" hint="Vor Ort einsammeln und abhaken.">
+      <Section n="2" title="Dokumente & Zubehör" hint="Vor Ort einsammeln — bei jedem Punkt Ja oder Nein.">
         {(tpl.documents || []).map((doc) => (
-          <Check key={doc} disabled={gesperrt} on={!!f.documents[doc]} onClick={() => toggleDoc(doc)}>{doc}</Check>
+          <JaNein key={doc} disabled={gesperrt} wert={f.documents[doc]}
+                  onChange={(w) => setDoc(doc, w)}>{doc}</JaNein>
         ))}
         <div className="mt-3 grid grid-cols-2 gap-3">
           <div>
@@ -492,9 +527,10 @@ export default function Protokoll() {
 
       {/* 3 Ausstattung */}
       {(tpl.features || []).length > 0 && (
-        <Section n="3" title="Ausstattung laut Inserat" hint="Vorhanden? Abhaken.">
+        <Section n="3" title="Ausstattung laut Inserat" hint="Vorhanden? Bei jedem Punkt Ja oder Nein.">
           {tpl.features.map((ft) => (
-            <Check key={ft} disabled={gesperrt} on={!!f.features[ft]} onClick={() => toggleFeat(ft)}>{ft}</Check>
+            <JaNein key={ft} disabled={gesperrt} wert={f.features[ft]}
+                    onChange={(w) => setFeat(ft, w)}>{ft}</JaNein>
           ))}
         </Section>
       )}
@@ -609,6 +645,27 @@ export default function Protokoll() {
             Vermerk des Händlers: {data.protocol.preis_notiz}
           </div>
         )}
+        {/* Wunsch Ahmad 14.09.2026: Preis und Sondervereinbarung auch vom Fahrer vor Ort.
+            Der Händler sieht beides bei der Freigabe; gibt er ohne eigenen Preis frei,
+            gilt der hier eingetragene. */}
+        <div className="grid grid-cols-1 gap-3 mb-3">
+          <div>
+            <label className="text-[11px] text-zinc-500">Vor Ort vereinbarter Preis (optional, Vorschlag an den Händler)</label>
+            <input type="text" inputMode="decimal" disabled={gesperrt}
+                   data-testid="protokoll-preis-vorschlag"
+                   value={f.preis_vorschlag ?? ""}
+                   onChange={(e) => upd({ preis_vorschlag: e.target.value.replace(/[^0-9.,]/g, "") })}
+                   className={inputCls} style={st} placeholder="z. B. 15000" />
+          </div>
+          <div>
+            <label className="text-[11px] text-zinc-500">Sondervereinbarung vor Ort (erscheint im Protokoll)</label>
+            <textarea value={f.sondervereinbarung || ""} disabled={gesperrt} rows={2}
+                      data-testid="protokoll-sondervereinbarung"
+                      onChange={(e) => upd({ sondervereinbarung: e.target.value })}
+                      className={inputCls} style={st}
+                      placeholder="z. B. Verkäufer liefert Winterreifen nach" />
+          </div>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] text-zinc-500">Ort</label>

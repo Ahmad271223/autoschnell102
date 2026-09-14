@@ -185,6 +185,15 @@ async def _verknuepfte_dealer_ids(driver_id: str) -> List[str]:
     return [d for d in ids if d not in gesperrt]
 
 
+def notiz_anhaengen_ausdruck(zusatz: str) -> dict:
+    """Pruefung 14.09.2026 (P6/P7): Aggregations-Ausdruck, der `zusatz` an die
+    VORHANDENEN Notizen anhaengt (Zeilenumbruch nur, wenn schon Text da ist).
+    Damit ueberschreibt der Fahrer nie eine gleichzeitig geschriebene Notiz
+    des Chefs — der Server liest den Text erst beim Schreiben."""
+    alt = {"$ifNull": [{"$toString": {"$ifNull": ["$notes", ""]}}, ""]}
+    return {"$concat": [alt, {"$cond": [{"$eq": [alt, ""]}, "", "\n"]}, zusatz]}
+
+
 async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
     """Fahrer-Zugriff auf einen Termin (Pruefbericht 09/2026): die Zuweisung
     (appointments.driver_id) allein reicht NICHT. Entfernt der Haendler den
@@ -649,7 +658,7 @@ async def driver_change_password(body: DriverPasswordIn,
         {"id": driver["id"]},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   "current_session_id": None, "updated_at": now_iso()}})
-    await log_activity("", driver["id"], "fahrer.passwort.geaendert")
+    await log_activity_sicher("", driver["id"], "fahrer.passwort.geaendert")
     return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}
 
 
@@ -966,26 +975,29 @@ async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
                 {"id": appt_id}, {"_id": 0, "zuteilung": 1}) or {}
             return {"ok": True, "zuteilung": jetzt.get("zuteilung") or "abgelehnt",
                     "unveraendert": True}
-        await log_activity(appt.get("dealer_id"), driver["id"],
+        await log_activity_sicher(appt.get("dealer_id"), driver["id"],
                            "termin.fahrer.angenommen", ref=appt_id)
         return {"ok": True, "zuteilung": "angenommen"}
     grund = (body.grund or "").strip()[:500]
     notiz = f"[Fahrer] Fahrt abgelehnt" + (f": {grund}" if grund else "")
+    # Pruefung 14.09.2026 (P6): Notiz ATOMAR anhaengen (Aggregations-Update)
+    # statt gelesenen Text + Zusatz zurueckzuschreiben — eine parallel vom
+    # Chef geschriebene Notiz ging sonst verloren.
     r = await db.appointments.update_one(
         {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"},
-        {"$set": {"zuteilung": "abgelehnt",
-                  "zuteilung_beantwortet_am": now_iso(),
-                  "zuteilung_abgelehnt_von": driver.get("name") or driver["id"],
-                  "zuteilung_abgelehnt_grund": grund,
-                  "updated_at": now_iso(),
-                  "notes": ((appt.get("notes") or "") + ("\n" if appt.get("notes") else "") + notiz)},
-         "$unset": {"driver_id": "", "zuteilung_neu_wegen_aenderung": ""}})
+        [{"$set": {"zuteilung": "abgelehnt",
+                   "zuteilung_beantwortet_am": now_iso(),
+                   "zuteilung_abgelehnt_von": driver.get("name") or driver["id"],
+                   "zuteilung_abgelehnt_grund": grund,
+                   "updated_at": now_iso(),
+                   "notes": notiz_anhaengen_ausdruck(notiz)}},
+         {"$unset": ["driver_id", "zuteilung_neu_wegen_aenderung"]}])
     if r.modified_count == 0:
         jetzt = await db.appointments.find_one(
             {"id": appt_id}, {"_id": 0, "zuteilung": 1}) or {}
         return {"ok": True, "zuteilung": jetzt.get("zuteilung") or "angenommen",
                 "unveraendert": True}
-    await log_activity(appt.get("dealer_id"), driver["id"],
+    await log_activity_sicher(appt.get("dealer_id"), driver["id"],
                        "termin.fahrer.abgelehnt", ref=appt_id, meta={"grund": grund})
     return {"ok": True, "zuteilung": "abgelehnt"}
 
@@ -1033,16 +1045,15 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     # Aufraeum-Frist rechnet ab dem ERSTEN Erreichen eines Endstatus
     # (abgeschlossen_seit) — ein Statuswechsel hin und her startet sie nicht neu.
     if body.notes:
-        update["notes"] = (appt.get("notes") or "") + (
-            "\n" if appt.get("notes") else ""
-        ) + f"[Fahrer] {body.notes}"
+        # Pruefung 14.09.2026 (P7): atomar anhaengen (siehe driver_zuteilung).
+        update["notes"] = notiz_anhaengen_ausdruck(f"[Fahrer] {body.notes}")
     # Runde 18: Fahrer und Ausgangsstatus im SCHREIBFILTER erneut pruefen —
     # zwischen Lesen und Schreiben kann der Termin storniert oder einem
     # anderen Fahrer zugeteilt worden sein; vorher setzte der alte Aufruf
     # den Status trotzdem.
     res = await db.appointments.update_one(
         {"id": appt_id, "driver_id": driver["id"], "status": appt.get("status")},
-        {"$set": update})
+        [{"$set": update}])
     if res.matched_count == 0:
         raise HTTPException(409, "Der Termin wurde zwischenzeitlich geändert "
                                  "(storniert oder anderem Fahrer zugeteilt) — "
@@ -1062,7 +1073,7 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
             "abgeholt" if body.status == "abgeholt" else "nicht_abgeholt",
             user={"id": driver["id"]},
         )
-    await log_activity(
+    await log_activity_sicher(
         appt.get("dealer_id"), driver["id"],
         f"termin.fahrer.{body.status.replace(' ', '_')}", ref=appt_id,
     )
@@ -1112,8 +1123,10 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
         data = await load_async(key)
     except StorageError:
         raise HTTPException(404, "Datei nicht gefunden")
+    # Pruefung 14.09.2026 (P9): Beweisfotos nie im Browser-Cache halten —
+    # nach Entzug des Zugriffs oder Loeschung darf keine Kopie weiterleben.
     return Response(content=data, media_type=guess_media_type(key),
-                    headers={"Cache-Control": "private, max-age=3600"})
+                    headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/driver/pickup-fotos/{key:path}")
@@ -1146,8 +1159,10 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
         data = await load_async(key)
     except StorageError:
         raise HTTPException(404, "Datei nicht gefunden")
+    # Pruefung 14.09.2026 (P9): Beweisfotos nie im Browser-Cache halten —
+    # nach Entzug des Zugriffs oder Loeschung darf keine Kopie weiterleben.
     return Response(content=data, media_type=guess_media_type(key),
-                    headers={"Cache-Control": "private, max-age=3600"})
+                    headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/driver/appointments/{appt_id}/report")
@@ -1322,7 +1337,7 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                   "has_pickup_report": True,
                   "updated_at": now_iso()}},
     )
-    await log_activity(
+    await log_activity_sicher(
         appt.get("dealer_id"), driver["id"],
         "abholung.bericht" if version == 1 else "abholung.bericht.korrektur",
         ref=appt_id,

@@ -448,7 +448,7 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         await db.resale_listings.delete_one({"id": listing["id"], "status": "entwurf"})
         raise HTTPException(409, "Fahrzeugstatus passt nicht zum Inserat: "
                                  f"{exc}")
-    await log_activity(user["dealer_id"], user["id"], "inserat.entwurf",
+    await log_activity_sicher(user["dealer_id"], user["id"], "inserat.entwurf",
                        ref=listing["id"], meta={"vehicle_id": vehicle_id})
     return _with_margin(clean_doc(listing))
 
@@ -632,7 +632,7 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
             k for k, val in uebernommen.items() if alt.get(k) != val)
         if verworfen:
             meta["fahrzeugdaten_verworfen"] = sorted(verworfen)
-    await log_activity(user["dealer_id"], user["id"], "inserat.geaendert",
+    await log_activity_sicher(user["dealer_id"], user["id"], "inserat.geaendert",
                        ref=listing_id, meta=meta)
     fresh = await db.resale_listings.find_one(
         {"id": listing_id}, {"_id": 0})
@@ -700,7 +700,7 @@ async def delete_listing(listing_id: str, user=Depends(current_haendler)):
     # akzeptierte Reservierung enden mit dem Inserat.
     await _anfragen_schliessen(listing_id, "inserat_geloescht",
                                auch_akzeptierte=True)
-    await log_activity(user["dealer_id"], user["id"], "inserat.geloescht",
+    await log_activity_sicher(user["dealer_id"], user["id"], "inserat.geloescht",
                        ref=listing_id,
                        meta={"war_status": current,
                              "kontingent_bleibt": bool(l.get("counted_periods"))})
@@ -792,7 +792,7 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
         {"id": listing_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "photos.uploaded_keys": 1})
     total = len((doc.get("photos") or {}).get("uploaded_keys") or [])
-    await log_activity(user["dealer_id"], user["id"], "inserat.foto.hinzugefuegt",
+    await log_activity_sicher(user["dealer_id"], user["id"], "inserat.foto.hinzugefuegt",
                        ref=listing_id, meta={"anzahl": len(added), "gesamt": total,
                                              "status": l.get("status")})
     return {"ok": True, "uploaded": [signierte_datei_url(k) for k in added],
@@ -902,7 +902,7 @@ async def fotos_aus_abholbericht(listing_id: str, body: Optional[AbholfotosIn] =
     await db.resale_listings.update_one(
         {"id": listing_id, "dealer_id": user["dealer_id"], "photos.mode": "einkauf"},
         {"$set": {"photos.mode": "beide"}})
-    await log_activity(user["dealer_id"], user["id"], "inserat.foto.aus_abholbericht",
+    await log_activity_sicher(user["dealer_id"], user["id"], "inserat.foto.aus_abholbericht",
                        ref=listing_id, meta={"anzahl": len(added)})
     return {"ok": True, "uebernommen": len(added),
             "uploaded": [signierte_datei_url(k) for k in added]}
@@ -977,7 +977,7 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
             {"_id": 0, "photos.uploaded_keys": 1})
         # Runde 15 (Nr. 6): Foto-Entfernen ist sofort live und war nicht
         # nachvollziehbar (Hochladen ebenfalls).
-        await log_activity(user["dealer_id"], user["id"], "inserat.foto.entfernt",
+        await log_activity_sicher(user["dealer_id"], user["id"], "inserat.foto.entfernt",
                            ref=listing_id, meta={"art": "upload", "key": body.key,
                                                  "status": l.get("status")})
         return {"ok": True, "uploaded_keys":
@@ -997,7 +997,7 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         doc = await db.resale_listings.find_one(
             {"id": listing_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "photos.einkauf_urls": 1})
-        await log_activity(user["dealer_id"], user["id"], "inserat.foto.entfernt",
+        await log_activity_sicher(user["dealer_id"], user["id"], "inserat.foto.entfernt",
                            ref=listing_id, meta={"art": "einkauf", "url": body.url[:300],
                                                  "status": l.get("status")})
         return {"ok": True, "einkauf_urls":
@@ -1304,7 +1304,7 @@ async def set_listing_status(listing_id: str, body: ListingStatusIn,
         log.exception("Kaufanfragen zu Inserat %s nach '%s' nicht geschlossen",
                       listing_id, new)
     try:
-        await log_activity(user["dealer_id"], user["id"], f"inserat.{new}",
+        await log_activity_sicher(user["dealer_id"], user["id"], f"inserat.{new}",
                            ref=listing_id)
     except Exception:  # noqa: BLE001
         log.exception("Audit-Eintrag inserat.%s (%s) nicht gespeichert", new, listing_id)

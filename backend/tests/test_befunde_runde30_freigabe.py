@@ -26,6 +26,8 @@ import pytest
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from protokoll_daten import vollstaendig  # noqa: E402
 
 MONGO_URL = "mongodb://127.0.0.1:27017"
 _PNG_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
@@ -134,9 +136,8 @@ def _vollstaendig(w, P, **extra):
         "vehicle_id": w.vid, "driver_account_id": w.driver["id"],
         "driver_name": w.driver["display_name"], "version": 1,
         "status": "entwurf", "superseded": False,
-        "vehicle_check": {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
-        "condition": {"mileage": "75200"}, "keys_count": "2",
-        "damages_confirmed": True, "place": "Warschau",
+        # Wunsch Ahmad 14.09.2026: alle Abschnitte Pflicht (tests/protokoll_daten.py)
+        **vollstaendig(P, place="Warschau", seller_name="Verkäufer V", mileage="75200"),
         "created_at": _jetzt(), "updated_at": _jetzt(),
     }
     doc.update(extra)
