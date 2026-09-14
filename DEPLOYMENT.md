@@ -223,7 +223,11 @@ steht in der `.env` — sonst jeden Aufruf ausdrücklich mit
    ```
    Das Skript fragt zusätzlich `LOESCHEN` ab. `--nummern-ab` nur, wenn die
    Nummern ab einem festen Wert beginnen sollen (hebt den Zähler nur an).
-   Bricht der Lauf ab, setzt ein erneuter Aufruf fort.
+   Bricht der Lauf ab, setzt ein erneuter Aufruf fort. **Exit 5** heißt:
+   Datenbank erledigt, aber einzelne Dateien nicht gelöscht. Die Ziele stehen
+   auf der Konsole und in `system_flags.live_reset.datei_fehler`; ein erneuter
+   Aufruf versucht genau diese Ziele noch einmal (der vorige Lauf bleibt unter
+   `vorige_laeufe`, sein `system.live_reset`-Eintrag bleibt).
 7. **prod2: Rollout:**
    ```bash
    ERSTER_SERVER=1 sh deploy/rollout.sh

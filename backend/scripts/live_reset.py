@@ -38,7 +38,9 @@ Optionen:
 Exit 0 = Probelauf bzw. erledigt, 1 = keine Verbindung / DB-Name fehlt,
 2 = Super-Admin fehlt oder ist doppelt, 3 = unbekannte Sammlung blockiert,
 4 = Bestaetigung fehlt oder falsch (nichts geaendert),
-5 = Datenbank erledigt, aber nicht alle Dateien geloescht (siehe Bericht).
+5 = Datenbank erledigt, aber nicht alle Dateien geloescht (Ziele auf der
+    Konsole und in system_flags.live_reset.datei_fehler; ein erneuter Aufruf
+    versucht sie erneut, der vorige Lauf bleibt unter vorige_laeufe).
 """
 import argparse
 import json
@@ -80,6 +82,10 @@ GANZ_LEEREN = (
     "password_resets", "activity_logs", "error_logs", "storage_delete_retry",
     "rate_limits", "system_reports", "betriebsalarme", "kaputte_docs",
 )
+# Ausnahmen beim Leeren: Abschluss-Eintraege system.live_reset frueherer
+# Laeufe bleiben (Nachbesserung Schritt 7 — ein zweiter Lauf loescht den
+# Nachweis des ersten nicht)
+LEEREN_AUSSER = {"activity_logs": {"action": {"$ne": "system.live_reset"}}}
 # Teilweise geleert: alles ausser dem Super-Admin (Filter siehe _teil_filter)
 TEILWEISE = ("subscriptions", "dealers", "users")
 # Bleiben unberuehrt (Schema-Version, Wartungsmodus, Backup-Stand, die
@@ -122,8 +128,20 @@ def _teil_filter(name: str, sa_id: str, sa_dealer_id) -> dict:
     if name == "dealers":
         return {"id": {"$ne": sa_dealer_id}} if sa_dealer_id else {}
     if name == "subscriptions":
-        return {"dealer_id": {"$ne": sa_dealer_id}} if sa_dealer_id else {}
+        # Nachbesserung Schritt 7: persoenliche Abos anderer Konten
+        # (subject_user_id, z.B. Sucher in der Firma des Super-Admins) gehen
+        # mit ihrem Konto — wie bei der Kontoloeschung in routes/admin.py.
+        if not sa_dealer_id:
+            return {}
+        return {"$or": [{"dealer_id": {"$ne": sa_dealer_id}},
+                        {"subject_user_id": {"$type": "string", "$ne": sa_id}}]}
     raise KeyError(name)
+
+
+def _leeren_filter(name: str) -> dict:
+    """Filter der ganz geleerten Sammlungen: alles, nur die Abschluss-
+    Eintraege frueherer Live-Resets bleiben (Nachweis, Nachbesserung)."""
+    return LEEREN_AUSSER.get(name, {})
 
 
 def _leeren(db, name: str, filt: dict) -> int:
@@ -137,12 +155,18 @@ def _plan(db, sa_id, sa_dealer_id, caches_leeren: bool):
     for name in sorted(n for n in db.list_collection_names() if not n.startswith("system.")):
         gesamt = db[name].count_documents({})
         if name in GANZ_LEEREN:
-            zeilen.append((name, "leeren", gesamt, 0, "alles"))
+            if name in LEEREN_AUSSER:
+                n = db[name].count_documents(_leeren_filter(name))
+                zeilen.append((name, "leeren", n, gesamt - n,
+                               "alles ausser Eintraegen system.live_reset"))
+            else:
+                zeilen.append((name, "leeren", gesamt, 0, "alles"))
         elif name in TEILWEISE:
             n = db[name].count_documents(_teil_filter(name, sa_id, sa_dealer_id))
             text = {"users": "alles ausser Super-Admin",
                     "dealers": "alles ausser Firma des Super-Admins",
-                    "subscriptions": "alles ausser Abo der Super-Admin-Firma"}[name]
+                    "subscriptions": "alles ausser Firmen-Abo der Super-Admin-Firma "
+                                     "(persoenliche Abos anderer Konten weg)"}[name]
             zeilen.append((name, "teilweise", n, gesamt - n, text))
         elif name in BEHALTEN:
             zeilen.append((name, "behalten", 0, gesamt, "bleibt"))
@@ -267,6 +291,14 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
     if fortsetzung:
         print(f"HINWEIS: Ein Live-Reset von {flag.get('gestartet_am', '?')} ist nicht "
               "abgeschlossen - dieser Lauf ist eine Fortsetzung.")
+    # Nachbesserung Schritt 7: nicht geloeschte Dateien eines abgeschlossenen
+    # Laufs (Exit 5) gehen nicht verloren — sie werden zuerst erneut versucht
+    # (die Dokumente mit den Referenzen sind dann schon weg).
+    nachholen = list((flag.get("nachholen") if fortsetzung else flag.get("datei_fehler")) or [])
+    bericht["nachholen"] = nachholen
+    if nachholen:
+        print(f"HINWEIS: {len(nachholen)} Dateien/Praefixe des vorigen Laufs sind nicht "
+              "geloescht - dieser Lauf versucht sie erneut.")
 
     # 2. Tabelle je Sammlung
     zeilen, unbekannt = _plan(db, sa_id, sa_dealer_id, args.caches_leeren)
@@ -359,11 +391,15 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
             {"_id": FLAG_ID},
             {"$set": {"fortgesetzt_am": jetzt, "sa_id": sa_id}, "$inc": {"laeufe": 1}})
     else:
+        # voriger abgeschlossener Lauf bleibt als Verlauf erhalten (max. 10)
+        vorige = list(flag.get("vorige_laeufe") or [])
+        if flag:
+            vorige.append({k: v for k, v in flag.items() if k not in ("_id", "vorige_laeufe")})
         db.system_flags.replace_one(
             {"_id": FLAG_ID},
             {"_id": FLAG_ID, "status": "laeuft", "gestartet_am": jetzt, "db": db.name,
              "sa_id": sa_id, "laeufe": 1, "dateien_fertig": False, "stats": {},
-             "datei_fehler": []},
+             "datei_fehler": [], "nachholen": nachholen, "vorige_laeufe": vorige[-10:]},
             upsert=True)
 
     # 5. Dateien — vor den Dokumenten
@@ -372,9 +408,14 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
         if (db.system_flags.find_one({"_id": FLAG_ID}) or {}).get("dateien_fertig"):
             print("\nDateien: im abgebrochenen Lauf schon erledigt - uebersprungen.")
         else:
-            datei_fehler.extend(bericht["dateien"].get("ziel_fehler") or [])
+            ziel_fehler = bericht["dateien"].get("ziel_fehler") or []
+            datei_fehler.extend(ziel_fehler)
+            schon = {f.get("ziel") for f in ziel_fehler}
+            nach_praefixe = [f.get("ziel") for f in nachholen
+                             if f.get("art") == "prefix" and f.get("ziel") not in schon]
+            nach_keys = [f.get("ziel") for f in nachholen if f.get("art") == "snapshot"]
             inc = {}
-            for p in list(praefixe) + list(logos):
+            for p in dict.fromkeys(nach_praefixe + list(praefixe) + list(logos)):
                 art = p.split("/", 1)[0]
                 try:
                     n = int(speicher.delete_prefix(p) or 0)
@@ -383,7 +424,7 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
                     continue
                 inc[f"stats.dateien.{art}"] = inc.get(f"stats.dateien.{art}", 0) + n
             snap_ok = 0
-            for k in keys:
+            for k in dict.fromkeys(nach_keys + list(keys)):
                 try:
                     ok = bool(snapshot_loescher(k))
                     fehler = None if ok else "Loeschen meldet Fehlschlag"
@@ -401,7 +442,7 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
             print(f"\nDateien geloescht: {inc}")
 
     # 6. Dokumente — Nebendaten, dann dealers und users zuletzt
-    reihenfolge = [(n, {}) for n in GANZ_LEEREN]
+    reihenfolge = [(n, _leeren_filter(n)) for n in GANZ_LEEREN]
     reihenfolge.append(("subscriptions", _teil_filter("subscriptions", sa_id, sa_dealer_id)))
     if args.caches_leeren:
         reihenfolge += [(n, {}) for n in CACHES]
@@ -424,11 +465,14 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
     # 8. Abschluss
     flag_doc = db.system_flags.find_one({"_id": FLAG_ID}) or {}
     stats = flag_doc.get("stats") or {}
-    alle_fehler = flag_doc.get("datei_fehler") or []
-    db.system_flags.update_one(
-        {"_id": FLAG_ID},
-        {"$set": {"status": "fertig", "beendet_am": _jetzt(),
-                  "nummern_ab": args.nummern_ab}})
+    alle_fehler = list(flag_doc.get("datei_fehler") or [])
+    abschluss = {"$set": {"status": "fertig", "beendet_am": _jetzt(),
+                          "nummern_ab": args.nummern_ab}}
+    if not flag_doc.get("dateien_fertig") and flag_doc.get("nachholen"):
+        # --ohne-dateien: die offenen Ziele des vorigen Laufs bleiben offen
+        alle_fehler += flag_doc["nachholen"]
+        abschluss["$push"] = {"datei_fehler": {"$each": flag_doc["nachholen"], "$slice": -500}}
+    db.system_flags.update_one({"_id": FLAG_ID}, abschluss)
     db.activity_logs.insert_one({
         "id": str(uuid.uuid4()), "dealer_id": "", "user_id": "system",
         "action": "system.live_reset",
@@ -446,7 +490,12 @@ def main(argv=None, db=None, speicher=None, snapshot_loescher=None) -> int:
     _bericht_schreiben()
     if alle_fehler:
         print(f"\nFERTIG (Datenbank), aber {len(alle_fehler)} Dateien/Praefixe NICHT "
-              "geloescht - Liste im Bericht bzw. system_flags.live_reset.datei_fehler.")
+              "geloescht - Liste in system_flags.live_reset.datei_fehler; ein erneuter "
+              "Aufruf versucht sie erneut:")
+        for f in alle_fehler[:50]:
+            print(f"  {f.get('art', '?'):<9} {f.get('ziel', '?')}  ({f.get('fehler') or '-'})")
+        if len(alle_fehler) > 50:
+            print(f"  ... {len(alle_fehler) - 50} weitere")
         return 5
     print("\nFERTIG: nur der Super-Admin und die Systemdaten sind geblieben. "
           "Super-Admin neu anmelden (Benutzername + 2FA).")

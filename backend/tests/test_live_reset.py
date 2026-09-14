@@ -47,16 +47,19 @@ LR = _skript()
 class FalscherSpeicher:
     name = "falsch"
 
-    def __init__(self, keys):
+    def __init__(self, keys, scheitert=()):
         self.keys = set(keys)
         self.geloescht = []
         self.gezaehlt = []
+        self.scheitert = set(scheitert)
 
     def zaehle_prefix(self, prefix):
         self.gezaehlt.append(prefix)
         return sum(1 for k in self.keys if k.startswith(prefix))
 
     def delete_prefix(self, prefix):
+        if prefix in self.scheitert:
+            raise OSError(f"Speicher nicht erreichbar: {prefix}")
         self.geloescht.append(prefix)
         weg = {k for k in self.keys if k.startswith(prefix)}
         self.keys -= weg
@@ -109,12 +112,16 @@ def _welt(db):
         {"id": "c2", "role": "dealer", "dealer_id": "d_2", "kontonummer": "1003"},
         {"id": "s2", "role": "sucher", "dealer_id": "d_2", "kontonummer": "1003-1"},
         {"id": "k1", "role": "b2b_buyer", "kontonummer": "1004"},
+        # Nachbesserung: Sucher in der Firma des Super-Admins (eigenes Abo)
+        {"id": "s_sa", "role": "sucher", "dealer_id": "d_sa", "kontonummer": "1001-1"},
     ])
     db.dealers.insert_many([
         {"id": "d_sa", "kunden_nr": 1001, "user_id": "sa"},
         {"id": "d_1", "kunden_nr": 1002}, {"id": "d_2", "kunden_nr": 1003}])
     db.subscriptions.insert_many([
         {"id": "sub_sa", "dealer_id": "d_sa", "plan": "lifetime"},
+        {"id": "sub_s_sa", "dealer_id": "d_sa", "subject_user_id": "s_sa",
+         "plan": "monthly", "status": "active"},
         {"id": "sub_1", "dealer_id": "d_1"}, {"id": "sub_s1", "dealer_id": "d_1", "user_id": "s1"},
         {"id": "sub_2", "dealer_id": "d_2"}, {"id": "sub_ohne"}])
     db.driver_accounts.insert_one({"id": "f1", "kontonummer": "1005", "driver_code": "FD-X"})
@@ -181,8 +188,8 @@ def test_01_probelauf_aendert_nichts_und_listet(db, capsys, tmp_path):
     assert b["dateien"]["logo"] == {"firmen": 2, "dateien": 2}
     assert b["dateien"]["snapshot_keys"] == 3
     zeilen = {z["name"]: z for z in b["sammlungen"]}
-    assert zeilen["users"]["loeschen"] == 7 and zeilen["users"]["bleibt"] == 1
-    assert zeilen["subscriptions"]["loeschen"] == 4 and zeilen["subscriptions"]["bleibt"] == 1
+    assert zeilen["users"]["loeschen"] == 8 and zeilen["users"]["bleibt"] == 1
+    assert zeilen["subscriptions"]["loeschen"] == 5 and zeilen["subscriptions"]["bleibt"] == 1
     assert zeilen["counters"]["loeschen"] == 0 and zeilen["listings_cache"]["loeschen"] == 0
     assert b["zahlungen"]["payment_transactions_paid"] == 1
 
@@ -251,7 +258,7 @@ def test_03_ausfuehren_laesst_nur_super_admin_und_systemdaten(db, monkeypatch, t
         if name == "activity_logs":
             logs = list(db.activity_logs.find())
             assert len(logs) == 1 and logs[0]["action"] == "system.live_reset"
-            assert logs[0]["meta"]["geloescht"]["users"] == 7
+            assert logs[0]["meta"]["geloescht"]["users"] == 8
         else:
             assert db[name].count_documents({}) == 0, name
     # behalten
@@ -340,7 +347,7 @@ def test_06_abbruch_mitten_im_lauf_wird_fortgesetzt(db, monkeypatch, capsys):
         LR.main(basis, db=db, speicher=sp, snapshot_loescher=sl)
     flag = db.system_flags.find_one({"_id": "live_reset"})
     assert flag["status"] == "laeuft" and flag["dateien_fertig"] is True
-    assert db.users.count_documents({}) == 8 and db.dealers.count_documents({}) == 3
+    assert db.users.count_documents({}) == 9 and db.dealers.count_documents({}) == 3
     assert db.driver_accounts.count_documents({}) == 0          # schon geleert
     geloescht_vorher, snaps_vorher = list(sp.geloescht), list(sl.keys)
     capsys.readouterr()
@@ -356,6 +363,59 @@ def test_06_abbruch_mitten_im_lauf_wird_fortgesetzt(db, monkeypatch, capsys):
     flag = db.system_flags.find_one({"_id": "live_reset"})
     assert flag["status"] == "fertig" and flag["laeufe"] == 2
     assert flag["stats"]["geloescht"]["driver_accounts"] == 1
+
+
+# ------------------------------------------- Nachbesserung: Exit 5 wiederholen
+def test_09_nach_exit_5_bleibt_fehlerliste_und_wird_erneut_versucht(db, capsys):
+    """Ein zweiter Lauf nach Exit 5 verliert die Liste der nicht geloeschten
+    Dateien nicht: sie steht auf der Konsole, bleibt unter vorige_laeufe,
+    wird erneut versucht und der Abschluss-Eintrag des ersten Laufs bleibt."""
+    _welt(db)
+    db.zz_unbekannt.drop()
+    kaputt = "autohandel/snapshots/v2/b.jpg"
+    sp = FalscherSpeicher(DATEIEN, scheitert={"logo/d_2/"})
+    basis = ["--super-admin-username", SA, "--ausfuehren", "--bestaetige", db.name, "--ja"]
+    assert LR.main(basis, db=db, speicher=sp,
+                   snapshot_loescher=FalscherSnapshotLoescher(scheitert={kaputt})) == 5
+    out = capsys.readouterr().out
+    assert kaputt in out and "logo/d_2/" in out, "Ziele auf der Konsole, nicht nur die Anzahl"
+    ziele = {"logo/d_2/", kaputt}
+    flag = db.system_flags.find_one({"_id": "live_reset"})
+    assert {f["ziel"] for f in flag["datei_fehler"]} == ziele
+
+    # Probelauf weist auf die offenen Ziele hin und aendert nichts
+    assert LR.main(["--super-admin-username", SA], db=db, speicher=sp,
+                   snapshot_loescher=FalscherSnapshotLoescher()) == 0
+    assert "erneut" in capsys.readouterr().out
+    assert db.system_flags.find_one({"_id": "live_reset"}) == flag
+
+    # zweiter Lauf ohne Dateien: Ziele bleiben offen (Exit 5), erster Lauf im Verlauf
+    assert LR.main(basis + ["--ohne-dateien"], db=db) == 5
+    flag = db.system_flags.find_one({"_id": "live_reset"})
+    assert {f["ziel"] for f in flag["datei_fehler"]} == ziele
+    assert len(flag["vorige_laeufe"]) == 1
+    assert {f["ziel"] for f in flag["vorige_laeufe"][0]["datei_fehler"]} == ziele
+
+    # dritter Lauf: Ziele werden erneut versucht, scheitern wieder
+    sl = FalscherSnapshotLoescher(scheitert={kaputt})
+    assert LR.main(basis, db=db, speicher=sp, snapshot_loescher=sl) == 5
+    assert sl.keys == [kaputt]
+    assert {f["ziel"] for f in
+            db.system_flags.find_one({"_id": "live_reset"})["datei_fehler"]} == ziele
+
+    # vierter Lauf: Speicher wieder da -> alles geloescht, Exit 0
+    sp.scheitert = set()
+    sl = FalscherSnapshotLoescher()
+    capsys.readouterr()
+    assert LR.main(basis, db=db, speicher=sp, snapshot_loescher=sl) == 0
+    assert sl.keys == [kaputt]
+    assert "logo/d_2/" in sp.geloescht
+    assert sp.keys == {"logo/d_sa/logo.png", "test/bleibt.jpg"}
+    flag = db.system_flags.find_one({"_id": "live_reset"})
+    assert flag["datei_fehler"] == [] and len(flag["vorige_laeufe"]) == 3
+    # Abschluss-Eintraege aller vier Laeufe bleiben erhalten
+    assert db.activity_logs.count_documents({"action": "system.live_reset"}) == 4
+    assert db.activity_logs.count_documents({}) == 4
 
 
 # ---------------------------------------------------------- zaehle_prefix
