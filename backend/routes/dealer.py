@@ -536,13 +536,18 @@ async def dealer_cancel_subscription(user=Depends(current_firma)):
     if sub.get("status") == "cancelled":
         raise HTTPException(400, "Abo ist bereits gekündigt")
 
-    await db.subscriptions.update_one(
-        {"id": sub["id"]},
+    # Pruefung 14.09.2026 (Liste 1, Nr. 17): nur, wenn das Abo noch im GELESENEN
+    # Zustand ist — eine parallele Sperre/Ersetzung durch den Betreiber wird
+    # nicht mit "cancelled" (= laeuft bis Ablauf weiter) ueberschrieben.
+    r = await db.subscriptions.update_one(
+        {"id": sub["id"], "status": sub.get("status")},
         {"$set": {
             "status": "cancelled",
             "cancelled_at": now_iso(),
         }},
     )
+    if r.matched_count == 0:
+        raise HTTPException(409, "Das Abo wurde gerade geändert — bitte die Seite neu laden.")
     # Runde 15 (Nr. 8): finanz- und zugriffsrelevanter Zustandswechsel —
     # bisher ohne Audit-Eintrag.
     from deps import log_activity_sicher

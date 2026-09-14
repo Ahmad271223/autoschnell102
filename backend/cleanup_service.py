@@ -46,6 +46,8 @@ CLEANUP_RULES = (
     ("abgeholt", 7),
     ("nicht abgeholt", 14),
     ("erledigt", 7),
+    # Pruefung 14.09.2026 (Liste 1, Nr. 2): stornierte Termine hatten keine Frist.
+    ("storniert", 14),
 )
 
 # Lebenszyklus-Status, in denen der Händler bereits entschieden hat —
@@ -193,6 +195,79 @@ def _fahrerfoto_tage() -> int:
 # stornierter Termine blieben fuer immer liegen, und wiedergeoeffnete
 # Termine verloren frische Fotos schon beim naechsten stuendlichen Lauf.
 FAHRERFOTO_TAGE = _fahrerfoto_tage()
+
+
+def _bericht_aufbewahrung_tage() -> int:
+    try:
+        wert = int(os.environ.get("BERICHT_AUFBEWAHRUNG_TAGE") or 180)
+    except ValueError:
+        wert = 180
+    return max(30, min(wert, 3650))
+
+
+# Pruefung 14.09.2026 (Liste 2, Nr. 4): Abholberichte hatten keine Frist —
+# Kilometerstand, Maengel, Notizen, Fahrername blieben unbegrenzt.
+BERICHT_AUFBEWAHRUNG_TAGE = _bericht_aufbewahrung_tage()
+
+
+async def berichte_nach_frist_loeschen(db, now: datetime, stats: dict) -> int:
+    """Abholberichte loeschen, deren Termin nicht mehr existiert oder die
+    aelter als BERICHT_AUFBEWAHRUNG_TAGE sind (Fotos vorher weg bzw. hier
+    mit vorgemerkt). Hoechstens 500 je Lauf."""
+    cutoff = (now - timedelta(days=BERICHT_AUFBEWAHRUNG_TAGE)).isoformat()
+    n = 0
+    async for rep in db.pickup_reports.find(
+            {"created_at": {"$lte": cutoff}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).limit(500):
+        await _fotos_eines_berichts_loeschen(db, rep, now, stats, rep.get("dealer_id") or "")
+        offen = any((d or {}).get("photo_key") for d in (rep.get("deviations") or []))
+        if offen:
+            continue            # Fotos noch vorgemerkt — naechster Lauf
+        await db.pickup_reports.delete_one({"id": rep["id"]})
+        n += 1
+    # verwaiste Berichte (Termin geloescht) — Pruefung 14.09.2026 (Liste 2, Nr. 3)
+    termin_ids = await db.pickup_reports.distinct("appointment_id")
+    for i in range(0, len(termin_ids), 500):
+        teil = termin_ids[i:i + 500]
+        vorhanden = set(await db.appointments.distinct("id", {"id": {"$in": teil}}))
+        weg = [t for t in teil if t not in vorhanden]
+        if not weg:
+            continue
+        async for rep in db.pickup_reports.find(
+                {"appointment_id": {"$in": weg}}, {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}):
+            await _fotos_eines_berichts_loeschen(db, rep, now, stats, rep.get("dealer_id") or "")
+            if any((d or {}).get("photo_key") for d in (rep.get("deviations") or [])):
+                continue
+            await db.pickup_reports.delete_one({"id": rep["id"]})
+            n += 1
+    return n
+
+
+async def berichte_pii_entfernen(db, termin_ids: list, jetzt: str) -> int:
+    """Pruefung 14.09.2026 (Liste 2, Nr. 5/6): mit dem Vertrag verlieren auch
+    die Abholberichte der Termine ihre Freitexte und Fotos."""
+    if not termin_ids:
+        return 0
+    n = 0
+    now = datetime.now(timezone.utc)
+    async for rep in db.pickup_reports.find(
+            {"appointment_id": {"$in": termin_ids}, "pii_geloescht_at": {"$in": [None, ""]}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}):
+        await _fotos_eines_berichts_loeschen(db, rep, now, {}, rep.get("dealer_id") or "")
+        frisch = await db.pickup_reports.find_one({"id": rep["id"]}, {"_id": 0, "deviations": 1}) or {}
+        devs = []
+        for d in (frisch.get("deviations") or []):
+            d = dict(d or {})
+            for feld in ("note", "expected", "actual"):
+                if d.get(feld):
+                    d[feld] = ""
+            devs.append(d)
+        await db.pickup_reports.update_one(
+            {"id": rep["id"]},
+            {"$set": {"notes": "", "deviations": devs, "driver_name": "",
+                      "pii_geloescht_at": jetzt}})
+        n += 1
+    return n
 
 
 async def berichtsfotos_nach_frist_loeschen(db, now: datetime, stats: dict) -> int:
@@ -343,6 +418,7 @@ async def _cleanup_once(db) -> dict:
 
     # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
     stats["berichtsfotos_frist"] = await berichtsfotos_nach_frist_loeschen(db, now, stats)
+    stats["berichte_frist"] = await berichte_nach_frist_loeschen(db, now, stats)
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
     stats["archived"] = await _archive_expired_bestand(db, now)
     # ---- Versand, der nie ein Ergebnis bekam (Runde 8, Befund 3) ----
@@ -363,6 +439,7 @@ async def _cleanup_once(db) -> dict:
     # Freigabe-Ruecknahmen (C19), Termine ohne aktuelle Protokollversion
     # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
     stats["termin_nacharbeit_nachgeholt"] = await termin_nacharbeit_nachholen(db, now)
+    stats["vertrags_nacharbeit_nachgeholt"] = await vertrags_nacharbeit_nachholen(db)
     stats["protokoll_freigaben_zurueckgenommen"] = \
         await protokoll_freigaben_nachziehen(db)
     stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
@@ -565,6 +642,34 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         await db.pickup_protocols.update_one({"id": p["id"]}, upd)
 
 
+async def vertrags_nacharbeit_nachholen(db) -> int:
+    """Pruefung 14.09.2026 (Liste 3, Nr. 2): Nach dem Vertrags-Insert scheiterte
+    das Nachziehen (Fahrzeugstatus, Kaufvorgang) — bisher nur ein Hinweis in
+    der Antwort. Jetzt Merker nacharbeit_offen am Vertrag, hier nachgeholt."""
+    n = 0
+    async for c in db.generated_pdfs.find(
+            {"nacharbeit_offen": True, "loeschung.status": {"$ne": "laeuft"}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "vehicle_id": 1,
+             "purchase_price": 1, "kaufvorgang_id": 1}).limit(200):
+        try:
+            import kaufvorgang as _kv
+            if not await db.kaufvorgaenge.count_documents({"contract_id": c["id"]}, limit=1):
+                await _kv.anlegen(dealer_id=c["dealer_id"], user_id=c.get("user_id"),
+                                  vehicle_id=c.get("vehicle_id"), contract_id=c["id"],
+                                  purchase_price=c.get("purchase_price"),
+                                  kaufvorgang_id=c.get("kaufvorgang_id"))
+            await db.vehicles.update_one(
+                {"id": c.get("vehicle_id"), "dealer_id": c["dealer_id"],
+                 "status": {"$in": [None, "", "verglichen", "Verglichen"]}},
+                {"$set": {"status": "Vertrag erstellt"}})
+            await _kv.fahrzeug_status_aggregieren(c.get("vehicle_id"), c["dealer_id"])
+            await db.generated_pdfs.update_one({"id": c["id"]}, {"$unset": {"nacharbeit_offen": ""}})
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Vertrags-Nacharbeit zu %s nicht nachgeholt", c.get("id"))
+    return n
+
+
 async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int = 10) -> int:
     """Pruefung 14.09.2026 (C4): Termine mit Merker nacharbeit_offen (Vorgangs-
     und Fahrzeugstatus bzw. Preis nach einem DB-Aussetzer nicht nachgezogen)
@@ -723,6 +828,7 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
     if scrub_pii:
         await _protokolle_pii_entfernen(db, termin_ids, dealer_id, jetzt,
                                         contract_id=contract_id)
+        await berichte_pii_entfernen(db, termin_ids, jetzt)
         # Termin: Verweis kappen UND die dort kopierten Verkaeuferdaten
         # (Name, Telefon, E-Mail, Abholanschrift) entfernen — sie blieben
         # sonst nach der Vertragsloeschung erhalten (Runde 5).
@@ -1223,14 +1329,27 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
     ausgeloest — statt es ewig still zu versuchen."""
     from storage_service import storage
     erledigt = 0
+    jetzt_dt = datetime.now(timezone.utc)
+    # Pruefung 14.09.2026 (Liste 5, Nr. 7): nach STORAGE_RETRY_MAX_VERSUCHE
+    # wurde nie wieder versucht — ein laengerer Speicherausfall machte aus
+    # einer Stoerung einen dauerhaften Dateirest. Aufgegebene Eintraege
+    # bekommen taeglich eine neue Runde (Alarm bleibt bis zum Erfolg).
+    await db.storage_delete_retry.update_many(
+        {"aufgegeben": True,
+         "aufgegeben_am": {"$lt": (jetzt_dt - timedelta(hours=24)).isoformat()}},
+        {"$set": {"aufgegeben": False, "versuche": 0, "wiederbelebt_am": jetzt_dt.isoformat()},
+         "$unset": {"aufgegeben_am": ""}})
     eintraege = await db.storage_delete_retry.find(
-        {"aufgegeben": {"$ne": True}}, {"_id": 0}).limit(limit).to_list(limit)
+        {"aufgegeben": {"$ne": True},
+         "$or": [{"claim_bis": {"$exists": False}}, {"claim_bis": None},
+                 {"claim_bis": {"$lt": jetzt_dt.isoformat()}}]},
+        {"_id": 0}).limit(limit).to_list(limit)
     async def _fehlschlag(e: dict, art: str, fehler: str, zusatz=None) -> None:
         """Versuch zaehlen, ggf. aufgeben und Alarm schlagen — die Vormerkung
         bleibt in jedem Fall liegen (Runde 29)."""
         versuche = int(e.get("versuche", 0)) + 1
         upd = {"letzter_fehler": fehler[:300], "versuche": versuche,
-               "updated_at": now_iso(), **(zusatz or {})}
+               "updated_at": now_iso(), "claim_bis": None, **(zusatz or {})}
         if versuche >= STORAGE_RETRY_MAX_VERSUCHE:
             upd["aufgegeben"] = True
             upd["aufgegeben_am"] = now_iso()
@@ -1242,6 +1361,15 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
         await db.storage_delete_retry.update_one({"id": e["id"]}, {"$set": upd})
 
     for e in eintraege:
+        # Pruefung 14.09.2026 (Liste 5, Nr. 6): den Eintrag ATOMAR beanspruchen —
+        # zwei Server (zwei Aufraeum-Laeufe) nahmen sonst denselben Eintrag und
+        # zaehlten die Versuche doppelt.
+        claim = await db.storage_delete_retry.update_one(
+            {"id": e["id"], "$or": [{"claim_bis": {"$exists": False}}, {"claim_bis": None},
+                                    {"claim_bis": {"$lt": jetzt_dt.isoformat()}}]},
+            {"$set": {"claim_bis": (jetzt_dt + timedelta(minutes=10)).isoformat()}})
+        if not claim.modified_count:
+            continue
         art = e.get("art") or "prefix"
         # Runde 29: Ist die Datei bereits weg (frueherer Lauf), nur noch die
         # Referenz bereinigen — ein zweites Loeschen koennte fehlschlagen.
@@ -1349,7 +1477,27 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 9
         ]},
         {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1, "created_at": 1,
          "contract_id": 1})
-    async for a in cursor:
+    kandidaten = [a async for a in cursor]
+    # Pruefung 14.09.2026 (Liste 5, Nr. 8): Termine, deren eigene Felder schon
+    # leer sind, aber deren PROTOKOLL noch Personendaten/Dateien traegt, fielen
+    # durch — jetzt ebenfalls Kandidaten.
+    gesehen = {a["id"] for a in kandidaten}
+    async for p in db.pickup_protocols.find(
+            {"pii_geloescht_at": {"$in": [None, ""]},
+             "$or": [{"seller_name": {"$nin": [None, ""]}}, {"place": {"$nin": [None, ""]}},
+                     {"pdf_path": {"$type": "string"}},
+                     {"signature_seller_key": {"$type": "string"}}]},
+            {"_id": 0, "appointment_id": 1}).limit(2000):
+        aid = p.get("appointment_id")
+        if not aid or aid in gesehen:
+            continue
+        a = await db.appointments.find_one(
+            {"id": aid}, {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1,
+                          "created_at": 1, "contract_id": 1})
+        if a:
+            gesehen.add(aid)
+            kandidaten.append(a)
+    for a in kandidaten:
         stichtag = (a.get("pickup_date") or a.get("created_at") or "")[:10]
         if not stichtag or stichtag > grenze_iso[:10]:
             continue

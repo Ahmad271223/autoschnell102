@@ -424,8 +424,10 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
            "erstellt_von": user.get("id"), "version": version, "abrufe": 0}
     # Nur schreiben, wenn die Freigabe noch genau so aussieht wie gelesen —
     # sonst hat ein paralleler Aufruf bereits eine gesetzt.
+    # Pruefung 14.09.2026 (Liste 5, Nr. 2): nur, wenn die Fassung noch dieselbe
+    # ist — sonst zeigte ein frischer Link auf eine alte Version.
     res = await db.generated_pdfs.update_one(
-        {"id": contract_id, **bereich,
+        {"id": contract_id, **bereich, "version": c.get("version"),
          **({"freigabe.token": f["token"]} if f.get("token")
             else {"freigabe": {"$exists": False}})},
         {"$set": {"freigabe": neu}})
@@ -655,6 +657,13 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Vertrags-Insert, wird der Datensatz sofort wieder entfernt — es gibt
     # nie einen Vertrag ohne Auto-Daten und keinen Datensatz ohne Vertrag.
 
+    # Pruefung 14.09.2026 (Liste 6, Nr. 1): zwischen Vorpruefung und Speichern
+    # kann das Fahrzeug verkauft/archiviert/geloescht worden sein.
+    v_jetzt = await db.vehicles.find_one(
+        {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
+    if not v_jetzt or (v_jetzt.get("lifecycle") or "") in VERTRAG_GESPERRT:
+        raise HTTPException(409, "Fahrzeug ist inzwischen verkauft/gelöscht/archiviert "
+                                 "— kein neuer Kaufvertrag möglich")
     auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
     doc["admin_vehicle_data_id"] = auto_daten_id
     try:
@@ -705,6 +714,13 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         log.exception("Fahrzeugstatus nach Vertrag %s konnte nicht aktualisiert werden", pdf_id)
         nacharbeit_hinweis = ("Vertrag gespeichert; Fahrzeugstatus/Protokoll konnten "
                               "nicht aktualisiert werden.")
+        # Pruefung 14.09.2026 (Liste 6, Nr. 2): Merker am Vertrag — der
+        # Aufraeum-Job holt Kaufvorgang/Fahrzeugstatus nach
+        # (cleanup_service.vertrags_nacharbeit_nachholen).
+        try:
+            await db.generated_pdfs.update_one({"id": pdf_id}, {"$set": {"nacharbeit_offen": True}})
+        except Exception:  # noqa: BLE001
+            log.exception("Merker nacharbeit_offen fuer Vertrag %s nicht gesetzt", pdf_id)
     # Audit wirft nie (log_activity_sicher) — der Vertrag steht bereits.
     if not await log_activity_sicher(user["dealer_id"], user["id"], "pdf.erstellt", ref=pdf_id):
         nacharbeit_hinweis = nacharbeit_hinweis or (
@@ -809,6 +825,11 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
         appt_id = str(uuid.uuid4())
         title = (f"{vehicle.get('make_label','')} {vehicle.get('model_label','')} abholen".strip()
                  or "Fahrzeug abholen")
+        # Pruefung 14.09.2026 (Liste 6, Nr. 7): kein Termin auf einen Vertrag,
+        # der inzwischen geloescht wird.
+        if not await db.generated_pdfs.count_documents(
+                {"id": pdf_id, "loeschung.status": {"$ne": "laeuft"}}, limit=1):
+            return None, ("Der Vertrag wird gerade gelöscht — kein Abholtermin angelegt.")
         try:
             await db.appointments.insert_one({
                 "id": appt_id, "dealer_id": dealer_id,
@@ -823,19 +844,32 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
             if versuch == 2:
                 raise
             continue                        # paralleler Termin desselben Vertrags gewann
-    await db.generated_pdfs.update_one(
-        {"id": pdf_id},
-        {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
-    )
-    import kaufvorgang as _kv
-    if kaufvorgang_id:
-        await _kv.status_setzen(kaufvorgang_id, "abholung_geplant", user=user,
-                                appointment_id=appt_id)
-    else:
-        await try_set_lifecycle(body.vehicle_id, dealer_id, "abholung_geplant", user=user)
+    # Pruefung 14.09.2026 (Liste 6, Nr. 3): Der Termin STEHT ab hier. Scheitert
+    # das Nachziehen, meldete der Aufrufer "Termin konnte nicht angelegt werden"
+    # — obwohl er existierte (zweiter Termin -> 409). Jetzt: Termin melden,
+    # Rest per Merker nacharbeit_offen (update_appointment / Aufraeum-Job).
+    hinweis = None
+    try:
+        await db.generated_pdfs.update_one(
+            {"id": pdf_id},
+            {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
+        )
+        import kaufvorgang as _kv
+        if kaufvorgang_id:
+            await _kv.status_setzen(kaufvorgang_id, "abholung_geplant", user=user,
+                                    appointment_id=appt_id)
+        else:
+            await try_set_lifecycle(body.vehicle_id, dealer_id, "abholung_geplant", user=user)
+    except Exception:  # noqa: BLE001
+        log.exception("Auto-Termin %s: Nacharbeit fehlgeschlagen", appt_id)
+        try:
+            await db.appointments.update_one({"id": appt_id}, {"$set": {"nacharbeit_offen": True}})
+        except Exception:  # noqa: BLE001
+            log.exception("Merker nacharbeit_offen fuer Termin %s nicht gesetzt", appt_id)
+        hinweis = ("Abholtermin angelegt; Vertrags-/Fahrzeugstatus werden nachgezogen.")
     await log_activity_sicher(dealer_id, user["id"], aktion, ref=appt_id,
                        meta={"contract_id": pdf_id, "vehicle_id": body.vehicle_id})
-    return appt_id, None
+    return appt_id, hinweis
 
 
 # Nach so vielen Sekunden gilt eine Zustellung "laeuft" als abgebrochen.
@@ -1115,6 +1149,11 @@ async def public_vertrag_pdf(token: str, request: Request):
             raise HTTPException(503, "Der Vertrag kann gerade nicht bereitgestellt "
                                      "werden — bitte in ein paar Minuten erneut versuchen.")
         fname_quelle = c.get("filename") or ""
+    # Pruefung 14.09.2026 (Liste 5, Nr. 3): begann die Loeschung waehrend der
+    # PDF-Erzeugung, wird nichts mehr ausgeliefert.
+    if not await db.generated_pdfs.count_documents(
+            {"id": c["id"], "loeschung.status": {"$ne": "laeuft"}}, limit=1):
+        raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
     await db.generated_pdfs.update_one(
         {"id": c["id"], "freigabe.token": token},
         {"$inc": {"freigabe.abrufe": 1},
@@ -1136,16 +1175,22 @@ async def public_vertrag_pdf(token: str, request: Request):
 
 
 @router.get("/contracts/{contract_id}/versions")
-async def list_contract_versions(contract_id: str, user=Depends(current_firma)):
-    """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten)."""
+async def list_contract_versions(contract_id: str, response: Response,
+                                 user=Depends(current_firma)):
+    """Archivierte Vertragsfassungen (ohne PDF-Inhalt, nur Metadaten).
+    Pruefung 14.09.2026 (Liste 6, Nr. 10): 1000 statt 100, und ein
+    Abschneiden wird per X-Truncated gemeldet statt still zu geschehen."""
     c = await db.generated_pdfs.find_one(
         {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0, "id": 1})
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    return await db.generated_pdf_versions.find(
+    grenze = 1000
+    fassungen = await db.generated_pdf_versions.find(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "contract_data": 0},
-    ).sort("version", 1).to_list(100)
+    ).sort("version", 1).to_list(grenze + 1)
+    response.headers["X-Truncated"] = "1" if len(fassungen) > grenze else "0"
+    return fassungen[:grenze]
 
 
 @router.get("/contracts/{contract_id}/versions/{version}/pdf")
@@ -1175,7 +1220,8 @@ async def get_contract_version_pdf(contract_id: str, version: int,
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+        headers={"Content-Disposition": f'inline; filename="{fname}"',
+                 "Cache-Control": "no-store"},
     )
 
 
@@ -1313,9 +1359,18 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # den Vertrag aus dem Bereich. Unmittelbar vor dem Versand noch einmal
     # nachsehen, sonst ginge ein PDF raus, dessen Vertrag gerade
     # verschwindet (und der Status-Vermerk liefe ins Leere).
-    if not await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 1}):
+    frisch = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                              {"_id": 0, "version": 1})
+    if frisch is None:            # {} = Altvertrag ohne version-Feld, nicht "weg"
         await _reservierung_zurueck()
         raise HTTPException(409, "Vertrag wird gerade gelöscht")
+    # Pruefung 14.09.2026 (Liste 5, Nr. 1): wurde der Vertrag seit dem Lesen neu
+    # erzeugt (Terminverschiebung, neuer Preis nach Abholung), geht NICHT die
+    # alte Fassung raus — der Nutzer laedt neu und sendet die aktuelle.
+    if int(frisch.get("version") or 1) != int(c.get("version") or 1):
+        await _reservierung_zurueck()
+        raise HTTPException(409, "Der Vertrag wurde gerade neu erstellt — bitte die Seite "
+                                 "neu laden und erneut senden.")
     # Ehrlicher Versand-Status (PR-Review 09/2026): "versendet" gibt es
     # NUR nach tatsaechlicher Zustellung an den Anbieter. WhatsApp oeffnet
     # lediglich den Chat (PDF haengt der Nutzer selbst an) -> der Vertrag
@@ -1527,8 +1582,11 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Verweise kappen, zuletzt der Vertrag. Bricht der Vorgang ab, fuehrt
     # der Aufraeumjob ihn zu Ende. Vorher wurde der Vertrag ZUERST geloescht
     # und die Kaskade konnte verwaiste Versionen/Termine hinterlassen.
+    # Pruefung 14.09.2026 (Liste 6, Nr. 5): auch die manuelle Loeschung
+    # entfernt Verkaeuferdaten aus Termin, Protokoll und Bericht — ein
+    # geloeschter Vertrag hinterlaesst keine Personendaten.
     ok = await vertrag_endgueltig_loeschen(
-        db, contract_id, scrub_pii=False, grund="manuell", audit=False)
+        db, contract_id, scrub_pii=True, grund="manuell", audit=False)
     if not ok:
         raise HTTPException(404, "Vertrag nicht gefunden")
     # Audit 13.09.2026 (#45): Der Vertrag ist bereits geloescht — ein 500

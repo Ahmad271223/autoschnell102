@@ -105,6 +105,12 @@ class _Daten:
         doc.update(extra)
         return doc
 
+    def protokoll_final(self, appt_id):
+        return {"id": f"p_{appt_id}", "appointment_id": appt_id, "dealer_id": self.dealer_id,
+                "driver_account_id": self.driver_id, "status": "final", "superseded": False,
+                "version": 1, "pdf_path": "test/x.pdf", "finalized_at": _jetzt(),
+                "created_at": _jetzt()}
+
     def bericht(self, appt_id, version, superseded, **extra):
         doc = {"id": f"b_{appt_id}_{version}", "appointment_id": appt_id,
                "dealer_id": self.dealer_id, "driver_account_id": self.driver_id,
@@ -119,6 +125,7 @@ class _Daten:
         await db.appointments.delete_many({"dealer_id": {"$in": dealers}})
         await db.dealer_drivers.delete_many({"driver_account_id": self.driver_id})
         await db.pickup_reports.delete_many({"dealer_id": {"$in": dealers}})
+        await db.pickup_protocols.delete_many({"dealer_id": {"$in": dealers}})
         await db.users.delete_many({"dealer_id": {"$in": dealers}})
         await db.storage_delete_retry.delete_many({"dealer_id": {"$in": dealers}})
         await db.activity_logs.delete_many({"dealer_id": {"$in": dealers}})
@@ -262,6 +269,8 @@ def test_36_foto1_gueltig_foto2_muell_hinterlaesst_keine_waise():
         a = f"a_{t.tag}"
         await db.dealer_drivers.insert_one(t.link())
         await db.appointments.insert_one(t.appt(a, "offen"))
+        # Pruefung 14.09.2026 (Liste 2, Nr. 1): Bericht erst nach unterschriebenem Protokoll
+        await db.pickup_protocols.insert_one(t.protokoll_final(a))
         await _erwarte(400, D.driver_submit_report(a, _bericht_in(D, JPEG_B64, MUELL_B64), t.driver))
         assert _dateien(t.dealer_id) == [], "Foto 1 blieb als Waise im Storage"
         assert await db.pickup_reports.count_documents({"appointment_id": a}) == 0
@@ -282,6 +291,8 @@ def test_36_loeschfehler_beim_rollback_wird_vorgemerkt(monkeypatch):
         a = f"a_{t.tag}"
         await db.dealer_drivers.insert_one(t.link())
         await db.appointments.insert_one(t.appt(a, "offen"))
+        # Pruefung 14.09.2026 (Liste 2, Nr. 1): Bericht erst nach unterschriebenem Protokoll
+        await db.pickup_protocols.insert_one(t.protokoll_final(a))
 
         async def _kaputt(key):
             raise storage_service.StorageError("Speicher weg")
@@ -305,6 +316,8 @@ def test_37_nur_ersetzte_version_1_ergibt_version_2():
         a = f"a_{t.tag}"
         await db.dealer_drivers.insert_one(t.link())
         await db.appointments.insert_one(t.appt(a, "offen"))
+        # Pruefung 14.09.2026 (Liste 2, Nr. 1): Bericht erst nach unterschriebenem Protokoll
+        await db.pickup_protocols.insert_one(t.protokoll_final(a))
         await db.pickup_reports.insert_one(t.bericht(a, 1, True))
         r = await D.driver_submit_report(a, _bericht_in(D, JPEG_B64, notes="neu"), t.driver)
         assert r["version"] == 2, r
@@ -348,6 +361,8 @@ def test_38_doppelzustand_wird_beim_speichern_geheilt_und_leser_sortieren():
         a = f"a_{t.tag}"
         await db.dealer_drivers.insert_one(t.link())
         await db.appointments.insert_one(t.appt(a, "offen"))
+        # Pruefung 14.09.2026 (Liste 2, Nr. 1): Bericht erst nach unterschriebenem Protokoll
+        await db.pickup_protocols.insert_one(t.protokoll_final(a))
         await db.pickup_reports.insert_many([t.bericht(a, 1, False), t.bericht(a, 2, False)])
         # Leser: hoechste Version, egal welchen Index der Planer nimmt
         assert (await D.driver_get_report(a, t.driver))["version"] == 2
@@ -375,6 +390,8 @@ def test_38_selbstheilung_ersetzt_keinen_juengeren_parallelen_bericht():
         a = f"a_{t.tag}"
         await db.dealer_drivers.insert_one(t.link())
         await db.appointments.insert_one(t.appt(a, "offen"))
+        # Pruefung 14.09.2026 (Liste 2, Nr. 1): Bericht erst nach unterschriebenem Protokoll
+        await db.pickup_protocols.insert_one(t.protokoll_final(a))
         await db.pickup_reports.insert_one(t.bericht(a, 1, False))
         # Parallel-Simulation: erster Insert kollidiert, dazwischen legt ein
         # "anderer" Lauf Version 2 an.
@@ -597,6 +614,11 @@ def test_37_38_http_nur_ersetzte_version_und_ein_aktueller(welt):
         dict(basis, id=f"b3_{a}", version=3, superseded=False)])
     r = requests.get(f"{API}/driver/appointments/{a}/report", headers=f, timeout=30)
     assert r.status_code == 200 and r.json()["version"] == 3
+    # Pruefung 14.09.2026 (Liste 2, Nr. 1): Bericht erst nach unterschriebenem Protokoll
+    dbx.pickup_protocols.insert_one({
+        "id": f"p_{a}", "appointment_id": a, "dealer_id": d, "status": "final",
+        "superseded": False, "version": 1, "pdf_path": "test/x.pdf",
+        "driver_account_id": welt["fahrer"]["id"], "finalized_at": _jetzt(), "created_at": _jetzt()})
     r = requests.post(f"{API}/driver/appointments/{a}/report", headers=f, json={
         "deviations": [{"field": "damage", "label": "Kratzer", "photo_b64": JPEG_B64}]}, timeout=60)
     assert r.status_code == 200 and r.json()["version"] == 4, r.text[:200]

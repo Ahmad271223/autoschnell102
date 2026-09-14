@@ -548,7 +548,7 @@ def test_348_grabstein_vertrag_unsichtbar_loeschen_idempotent(welt, monkeypatch)
         for name, coro in (
             ("get", C.get_contract(grab, w.chef)),
             ("pdf", C.get_contract_pdf(grab, w.chef)),
-            ("versions", C.list_contract_versions(grab, w.chef)),
+            ("versions", C.list_contract_versions(grab, Response(), w.chef)),
             ("version_pdf", C.get_contract_version_pdf(grab, 1, w.chef)),
             ("send", C.send_contract(grab, C.SendIn(channel="whatsapp", recipient="+4917",
                                                     message="x", idempotency_key="k1"), w.chef)),
@@ -695,7 +695,8 @@ def test_370_send_409_wenn_loeschung_zwischen_lesen_und_versand_beginnt(welt, mo
     async def _grabstein_vor_recheck(orig, self, *a, **k):
         filt = a[0] if a else k.get("filter")
         proj = a[1] if len(a) > 1 else k.get("projection")
-        if proj == {"_id": 1} and "loeschung.status" in (filt or {}):
+        # Pruefung 14.09.2026 (L5-1): der Recheck liest jetzt {"_id": 0, "version": 1}
+        if proj == {"_id": 0, "version": 1} and "loeschung.status" in (filt or {}):
             # Loeschung beginnt genau jetzt (Frist- oder manuelle Loeschung)
             await self.update_one({"id": filt["id"]},
                                   {"$set": {"loeschung": {"status": "laeuft"}}})

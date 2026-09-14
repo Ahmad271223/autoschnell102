@@ -311,9 +311,82 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
             if not smtp_aktiv():
                 return False, ""
             log.warning("email_service: Resend fehlgeschlagen — versuche SMTP")
-        await asyncio.to_thread(lambda: _send_sync(**argumente))
+        # Pruefung 14.09.2026 (Liste 4, Nr. 79 / Liste 5, Nr. 10): SMTP kennt
+        # keinen Idempotency-Key. Deshalb merkt sich die Datenbank je Schluessel,
+        # ob eine Abgabe laeuft oder geschah — eine Wiederaufnahme nach einem
+        # Absturz schickt dieselbe Mail nicht ein zweites Mal, sondern meldet
+        # "unklar" (der Nutzer sieht das im Versandstatus).
+        if idempotency_key:
+            stand = await _smtp_idempotenz_beanspruchen(idempotency_key, to)
+            if stand == "gesendet":
+                log.info("email_service: '%s' an %s war ueber SMTP bereits abgegeben", subject, to)
+                return True, "smtp:bereits"
+            if stand == "unklar":
+                log.error("email_service: SMTP-Abgabe an %s unter %s ist unklar (frueherer "
+                          "Versuch ohne Ergebnis) — NICHT erneut gesendet", to, idempotency_key)
+                return False, ""
+        try:
+            await asyncio.to_thread(lambda: _send_sync(**argumente))
+        except Exception:
+            if idempotency_key:
+                await _smtp_idempotenz_freigeben(idempotency_key)
+            raise
+        if idempotency_key:
+            await _smtp_idempotenz_abschliessen(idempotency_key)
         log.info("email_service: '%s' an %s über SMTP gesendet", subject, to)
         return True, "smtp"
     except Exception as exc:  # noqa: BLE001
         log.error("email_service: Versand an %s fehlgeschlagen: %s", to, exc)
         return False, ""
+
+
+# Laeuft ein SMTP-Versuch laenger als das, gilt sein Ausgang als unklar
+# (Prozess gestorben) — dann wird NICHT automatisch wiederholt.
+SMTP_VERSUCH_MAX_SEKUNDEN = 180
+
+
+async def _smtp_idempotenz_beanspruchen(key: str, to: str) -> str:
+    """'neu' = jetzt senden; 'gesendet' = schon abgegeben; 'unklar' = ein
+    frueherer Versuch hat kein Ergebnis hinterlassen."""
+    from datetime import datetime, timezone
+    try:
+        from deps import db
+        jetzt = datetime.now(timezone.utc)
+        r = await db.mail_idempotenz.update_one(
+            {"key": key},
+            {"$setOnInsert": {"key": key, "empfaenger": to, "status": "laeuft",
+                              "begonnen": jetzt}},
+            upsert=True)
+        if r.upserted_id is not None:
+            return "neu"
+        alt = await db.mail_idempotenz.find_one({"key": key}, {"_id": 0}) or {}
+        if alt.get("status") == "gesendet":
+            return "gesendet"
+        begonnen = alt.get("begonnen")
+        if begonnen is not None and begonnen.tzinfo is None:
+            begonnen = begonnen.replace(tzinfo=timezone.utc)
+        if begonnen and (jetzt - begonnen).total_seconds() > SMTP_VERSUCH_MAX_SEKUNDEN:
+            return "unklar"
+        return "unklar"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("email_service: SMTP-Idempotenz nicht pruefbar (%s) — sende", exc)
+        return "neu"
+
+
+async def _smtp_idempotenz_abschliessen(key: str) -> None:
+    try:
+        from deps import db
+        from datetime import datetime, timezone
+        await db.mail_idempotenz.update_one(
+            {"key": key}, {"$set": {"status": "gesendet", "gesendet": datetime.now(timezone.utc)}})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("email_service: SMTP-Idempotenz nicht gespeichert (%s)", exc)
+
+
+async def _smtp_idempotenz_freigeben(key: str) -> None:
+    """SMTP hat abgelehnt (keine Zustellung) — der Schluessel darf erneut."""
+    try:
+        from deps import db
+        await db.mail_idempotenz.delete_one({"key": key, "status": "laeuft"})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("email_service: SMTP-Idempotenz nicht freigegeben (%s)", exc)

@@ -267,7 +267,15 @@ class LocalDiskStorage:
             return 0
         n = sum(1 for p in ordner.rglob("*") if p.is_file())
         import shutil
-        shutil.rmtree(ordner, ignore_errors=True)
+        # Pruefung 14.09.2026 (Liste 5, Nr. 5): Fehler beim Loeschen nicht
+        # schlucken — bleibt etwas liegen, meldet die Loeschung einen Fehler
+        # (loeschen_oder_vormerken merkt sie dann zur Nachholung vor).
+        fehler: list = []
+        shutil.rmtree(ordner, onexc=lambda fn, pfad, exc: fehler.append(f"{pfad}: {exc}"))
+        rest = sum(1 for p in ordner.rglob("*") if p.is_file()) if ordner.exists() else 0
+        if fehler or rest:
+            raise StorageError(f"Praefix {prefix}: {rest} Datei(en) nicht geloescht "
+                               f"({'; '.join(fehler[:3])})")
         return n
 
     def zaehle_prefix(self, prefix: str) -> int:
@@ -328,8 +336,15 @@ class S3Storage:
             seite = self.client.list_objects_v2(**kwargs)
             keys = [{"Key": o["Key"]} for o in seite.get("Contents", [])]
             if keys:
-                self.client.delete_objects(Bucket=self.bucket,
-                                           Delete={"Objects": keys})
+                antwort = self.client.delete_objects(Bucket=self.bucket,
+                                                     Delete={"Objects": keys}) or {}
+                # Pruefung 14.09.2026 (Liste 5, Nr. 5): Teilfehler der Stapel-
+                # loeschung auswerten — vorher zaehlten alle Keys als geloescht.
+                probleme = antwort.get("Errors") or []
+                if probleme:
+                    raise StorageError(
+                        f"Praefix {prefix}: {len(probleme)} Objekt(e) nicht geloescht "
+                        f"({probleme[0].get('Key')}: {probleme[0].get('Message')})")
                 n += len(keys)
             if not seite.get("IsTruncated"):
                 return n
@@ -494,9 +509,19 @@ async def loeschen_oder_vormerken(db, *, key: Optional[str] = None,
              "$set": {"grund": grund, "dealer_id": dealer_id or "",
                       "ref": ref, "letzter_fehler": fehler, "updated_at": jetzt}},
             upsert=True)
-    except Exception:  # noqa: BLE001
+    except Exception as exc2:  # noqa: BLE001
+        # Pruefung 14.09.2026 (Liste 5, Nr. 4): Datei liegt noch UND die
+        # Vormerkung fehlt — das darf nicht still bleiben: Betriebsalarm.
         log.exception("storage_delete_retry konnte nicht geschrieben werden (%s)",
                       key or prefix)
+        try:
+            from betrieb import alarm
+            await alarm(db, "datei_loeschung_nicht_vorgemerkt", ref=str(key or prefix),
+                        grund=grund, dealer_id=dealer_id or "", fehler=str(exc2)[:300],
+                        hinweis="Datei nicht geloescht und keine Nachholung vorgemerkt — "
+                                "von Hand loeschen (Key/Praefix siehe ref).")
+        except Exception:  # noqa: BLE001
+            pass
     return False
 
 

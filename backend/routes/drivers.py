@@ -1087,21 +1087,42 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         raise HTTPException(409, "Der Termin wurde zwischenzeitlich geändert "
                                  "(storniert oder anderem Fahrer zugeteilt) — "
                                  "bitte die Termine neu laden.")
-    if body.status in ("abgeholt", "nicht abgeholt", "erledigt", "storniert"):
-        await db.appointments.update_one(
-            {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
-            {"$set": {"abgeschlossen_seit": update["status_changed_at"]}})
-    # Fahrzeug-Lebenszyklus nachziehen — Umbau Kaufvorgaenge: ueber den
-    # Vorgang dieses Termins (Zusammenfassung), sonst wie frueher direkt.
-    import kaufvorgang as _kv
-    if not await _kv.termin_status_uebernehmen(appt, body.status, user={"id": driver["id"]}) \
-            and appt.get("vehicle_id"):
-        from lifecycle import try_set_lifecycle
-        await try_set_lifecycle(
-            appt["vehicle_id"], appt.get("dealer_id"),
-            "abgeholt" if body.status == "abgeholt" else "nicht_abgeholt",
-            user={"id": driver["id"]},
-        )
+    # Pruefung 14.09.2026 (Liste 1, Nr. 25 / Liste 2, Nr. 9): Der Termin ist
+    # ab hier abgeschlossen. Scheitert ein Folgeschritt, bleibt der Merker
+    # nacharbeit_offen (Aufraeum-Job holt nach) — und bei "nicht abgeholt"
+    # gilt eine laufende Freigabe/Korrektur nicht mehr (wie beim Schliessen
+    # durch den Haendler).
+    try:
+        if body.status in ("abgeholt", "nicht abgeholt", "erledigt", "storniert"):
+            await db.appointments.update_one(
+                {"id": appt_id, "abgeschlossen_seit": {"$in": [None, ""]}},
+                {"$set": {"abgeschlossen_seit": update["status_changed_at"]}})
+        if body.status == "nicht abgeholt":
+            from routes.protocols import (freigabe_beim_schliessen_zuruecknehmen,
+                                          korrektur_verwerfen)
+            await korrektur_verwerfen(appt_id)
+            if await freigabe_beim_schliessen_zuruecknehmen(appt_id, driver["id"]) is None:
+                import betrieb as _betrieb
+                await _betrieb.alarm(db, "protokoll_freigabe_ruecknahme_offen", ref=appt_id,
+                                     dealer_id=appt.get("dealer_id", ""), status=body.status)
+        # Fahrzeug-Lebenszyklus nachziehen — Umbau Kaufvorgaenge: ueber den
+        # Vorgang dieses Termins (Zusammenfassung), sonst wie frueher direkt.
+        import kaufvorgang as _kv
+        if not await _kv.termin_status_uebernehmen(appt, body.status, user={"id": driver["id"]}) \
+                and appt.get("vehicle_id"):
+            from lifecycle import try_set_lifecycle
+            await try_set_lifecycle(
+                appt["vehicle_id"], appt.get("dealer_id"),
+                "abgeholt" if body.status == "abgeholt" else "nicht_abgeholt",
+                user={"id": driver["id"]},
+            )
+    except Exception:  # noqa: BLE001
+        log.exception("Nacharbeit nach Fahrer-Status %s an Termin %s fehlgeschlagen",
+                      body.status, appt_id)
+        try:
+            await db.appointments.update_one({"id": appt_id}, {"$set": {"nacharbeit_offen": True}})
+        except Exception:  # noqa: BLE001
+            log.exception("Merker nacharbeit_offen fuer Termin %s nicht gesetzt", appt_id)
     await log_activity_sicher(
         appt.get("dealer_id"), driver["id"],
         f"termin.fahrer.{body.status.replace(' ', '_')}", ref=appt_id,
@@ -1132,8 +1153,12 @@ async def pickup_foto(key: str, user=Depends(current_firma)):
     # Firma gehoeren (wie die Fahrer-Variante unten). Seit Runde 16 und dem
     # Umbau Kaufvorgaenge gilt: der Chef sieht alle Berichte der Firma, ein
     # Sucher nur Berichte zu Terminen im eigenen Bereich (direkt darunter).
+    # Pruefung 14.09.2026 (Liste 2, Nr. 7): ein zur Loeschung vorgemerktes
+    # Foto (photo_loeschung_offen) gilt als geloescht — 404 statt Auslieferung.
     bericht = await db.pickup_reports.find_one(
-        {"deviations.photo_key": key, "dealer_id": user["dealer_id"]},
+        {"dealer_id": user["dealer_id"],
+         "deviations": {"$elemMatch": {"photo_key": key,
+                                       "photo_loeschung_offen": {"$ne": True}}}},
         {"_id": 0, "id": 1, "appointment_id": 1, "vehicle_id": 1})
     if not bericht:
         raise HTTPException(404, "Datei nicht gefunden")
@@ -1168,7 +1193,9 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
     # vorher genuegte irgendein Termin bei der Firma, um bei bekanntem
     # Key beliebige Abholfotos dieser Firma zu laden.
     eigener_bericht = await db.pickup_reports.find_one(
-        {"deviations.photo_key": key, "driver_account_id": driver["id"]},
+        {"driver_account_id": driver["id"],
+         "deviations": {"$elemMatch": {"photo_key": key,
+                                       "photo_loeschung_offen": {"$ne": True}}}},
         {"_id": 0, "dealer_id": 1, "appointment_id": 1})
     if not eigener_bericht:
         raise HTTPException(404, "Datei nicht gefunden")
@@ -1241,6 +1268,14 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         reserviert = True
     else:
         _termin_offen_oder_409(appt)
+        # Pruefung 14.09.2026 (Liste 2, Nr. 1): Der Abweichungsbericht gehoert
+        # zur Uebergabe — ohne unterschriebenes Protokoll (oder Terminstatus
+        # abgeholt) gibt es keinen "bestaetigten" Abholbericht.
+        if not await db.pickup_protocols.count_documents(
+                {"appointment_id": appt_id, "status": "final", "superseded": {"$ne": True}},
+                limit=1):
+            raise HTTPException(409, "Der Abholbericht kann erst nach dem unterschriebenen "
+                                     "Abholprotokoll eingereicht werden.")
 
     # Nachpruefung Runde 14, Nr. 36/37/43: alles ab hier laeuft unter EINEM
     # Rollback. Vorher blieb bei jedem Fehlerpfad der Foto-Schleife (400)
@@ -1294,6 +1329,15 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                 sort=[("version", -1)])
             return ((hoechste or {}).get("version") or 0) + 1, (prev or {}).get("id")
 
+        # Pruefung 14.09.2026 (Liste 2, Nr. 2/10): Der Foto-Upload dauert —
+        # inzwischen kann der Termin geloescht, storniert oder einem anderen
+        # Fahrer zugeteilt worden sein. Vor dem Speichern erneut pruefen.
+        frisch = await db.appointments.find_one(
+            {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0, "status": 1})
+        if not frisch or ((frisch.get("status") or "offen") in _TERMIN_ABGESCHLOSSEN
+                          and frisch.get("status") != "abgeholt"):
+            raise HTTPException(409, "Der Termin wurde inzwischen geändert oder gelöscht — "
+                                     "der Bericht wurde nicht gespeichert.")
         version, replaces_id = await _naechste_version()
         report_id = str(uuid.uuid4())
         doc = {

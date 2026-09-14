@@ -1109,8 +1109,18 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     # Unterschriften) haengen an nichts mehr — mit loeschen statt verwaisen.
     try:
         await db.pickup_protocols.delete_many({"appointment_id": appt_id, "status": "entwurf"})
+        # Pruefung 14.09.2026 (Liste 2, Nr. 3): Abholberichte des Termins mit —
+        # Fotos werden geloescht bzw. zur Nachholung vorgemerkt, danach die
+        # Berichte selbst (kein verwaister Bericht mit Fahrername/Notizen).
+        from cleanup_service import _fotos_eines_berichts_loeschen
+        from datetime import datetime as _dt, timezone as _tz
+        async for rep in db.pickup_reports.find({"appointment_id": appt_id},
+                                                {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}):
+            await _fotos_eines_berichts_loeschen(db, rep, _dt.now(_tz.utc), {},
+                                                 rep.get("dealer_id") or "")
+        await db.pickup_reports.delete_many({"appointment_id": appt_id})
     except Exception:  # noqa: BLE001
-        log.exception("Protokoll-Entwuerfe zu Termin %s nicht geloescht", appt_id)
+        log.exception("Protokoll-Entwuerfe/Berichte zu Termin %s nicht geloescht", appt_id)
     # Die Audit-Spur (Runde 15, Nr. 7) steht oben — VOR dem Loeschen
     # (Abnahme 12.09.2026), damit sie auch bei einem Abbruch existiert.
     return {"ok": True}

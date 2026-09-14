@@ -151,13 +151,17 @@ async def _indizes_sicherstellen(db) -> None:
             return  # ein paralleler Aufruf war erfolgreich
         _fehlversuch[marke] = time.monotonic()
         log.warning("provider_limiter: Indexaufbau fehlgeschlagen (%s) — "
-                    "Begrenzung laeuft ohne Absicherung weiter, naechster "
-                    "Versuch in %d s", exc, INDEX_NEUVERSUCH_SEKUNDEN)
+                    "naechster Versuch in %d s", exc, INDEX_NEUVERSUCH_SEKUNDEN)
         from betrieb import alarm
         await alarm(db, "anbieter_grenze_index_fehlt", ref="provider_limits",
                     fehler=str(exc)[:300],
                     hinweis="Eindeutiger Index provider_limits.provider fehlt — "
                             "das Abruf-Limit kann mehrfach gelten.")
+        # Pruefung 14.09.2026 (Liste 4, Nr. 71): in Produktion NICHT ohne
+        # Absicherung weiterlaufen — der Abruf wird abgelehnt (fail-closed),
+        # bis der Index steht.
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            raise RuntimeError("Anbieter-Begrenzung ohne eindeutigen Index — Abruf abgelehnt")
 
 
 async def _heal_stale(db, provider: str) -> None:

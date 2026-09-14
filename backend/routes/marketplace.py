@@ -555,6 +555,34 @@ async def remove_network_member(buyer_user_id: str,
     return {"ok": True}
 
 
+async def reservierung_zurueckgeben(listing_id: str, buyer_user_id: str) -> None:
+    """Reservierung eines Inserats fuer diesen Kaeufer aufheben (idempotent)."""
+    await db.resale_listings.update_one(
+        {"id": listing_id, "status": "reserviert", "reserved_for": buyer_user_id},
+        {"$set": {"status": "veroeffentlicht", "updated_at": now_iso()},
+         "$unset": {"reserved_for": ""}})
+
+
+async def fahrzeug_reserviert_markieren(listing_id: str) -> None:
+    """Pruefung 14.09.2026 (Liste 1, Nr. 21): Der Verhandlungsweg setzte nur das
+    Inserat auf 'reserviert', das Fahrzeug blieb 'veroeffentlicht'. Jetzt wird
+    der Fahrzeug-Lebenszyklus nachgezogen (best effort, Alarm bei Desync)."""
+    try:
+        l = await db.resale_listings.find_one({"id": listing_id},
+                                              {"_id": 0, "vehicle_id": 1, "dealer_id": 1})
+        if not l or not l.get("vehicle_id"):
+            return
+        from lifecycle import LifecycleError, set_lifecycle
+        try:
+            await set_lifecycle(l["vehicle_id"], l.get("dealer_id"), "reserviert")
+        except LifecycleError as exc:
+            import betrieb as _betrieb
+            await _betrieb.alarm(db, "inserat_fahrzeug_desync", ref=listing_id,
+                                 vehicle_id=l["vehicle_id"], fehler=str(exc)[:300])
+    except Exception:  # noqa: BLE001
+        log.exception("Fahrzeug zu Inserat %s nicht auf reserviert gesetzt", listing_id)
+
+
 async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     """Löst eine Einladung ein. Liefert dealer_id oder None."""
     inv = await db.dealer_invites.find_one({"token": token})
@@ -704,6 +732,10 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     await db.users.update_one({"id": u["id"]},
                               {"$set": {"current_session_id": sid}})
     await bekannte_ip_merken(db, "users", u["id"], ip)
+    # Pruefung 14.09.2026 (Liste 1, Nr. 18): dieselbe Anmeldespur wie /auth/login.
+    await log_activity_sicher("", u["id"], "auth.login",
+                              meta={"ip": ip, "weg": "kaeufer",
+                                    "geraet": (request.headers.get("user-agent") or "")[:200]})
     return {"ok": True, "token": create_token(u["id"], sid),
             "user": _buyer_public(u)}
 
@@ -1064,7 +1096,8 @@ async def _inserat_sichtbar_fuer(user: dict, listing: dict) -> bool:
 
 # ---------- Favoriten (Merkliste) ----------
 @router.post("/marktplatz/favoriten/{listing_id}")
-async def toggle_favorit(listing_id: str, user=Depends(buyer_nicht_gesperrt)):
+async def toggle_favorit(listing_id: str, aktiv: Optional[bool] = None,
+                         user=Depends(buyer_nicht_gesperrt)):
     """Fahrzeug merken / Merken aufheben (Toggle). Bewusst ohne Zugangs-Abo-
     Pflicht beim ENTFERNEN; zum Setzen muss der Zugang aktiv und das
     Inserat sichtbar sein (Betreiber-Sperre: gar nichts, Runde 13 C6)."""
@@ -1073,10 +1106,18 @@ async def toggle_favorit(listing_id: str, user=Depends(buyer_nicht_gesperrt)):
     # naechste Klick loeschte nur einen. Jetzt ZUERST alle Eintraege loeschen
     # (raeumt Altdubletten mit weg); Backstop beim Setzen ist der Unique-Index
     # favorit_je_kaeufer_inserat (indizes.py).
-    weg = await db.buyer_favorites.delete_many(
-        {"buyer_user_id": user["id"], "listing_id": listing_id})
-    if weg.deleted_count:
+    # Pruefung 14.09.2026 (Liste 1, Nr. 19): mit ?aktiv=true|false wird der
+    # ZIELZUSTAND gesetzt — zwei gleichzeitige "aus"-Klicks ergaben beim reinen
+    # Toggle sonst wieder "an". Ohne Angabe wie bisher umschalten.
+    if aktiv is False:
+        await db.buyer_favorites.delete_many(
+            {"buyer_user_id": user["id"], "listing_id": listing_id})
         return {"favorit": False}
+    if aktiv is None:
+        weg = await db.buyer_favorites.delete_many(
+            {"buyer_user_id": user["id"], "listing_id": listing_id})
+        if weg.deleted_count:
+            return {"favorit": False}
     # Runde 13: C2 — abgelaufener Marktplatz-Zugang konnte weiterhin
     # Favoriten SETZEN (nur current_buyer; _inserat_sichtbar_fuer prueft den
     # Zugang nicht). Vorher: 200 {"favorit": true} per bekannter Inserats-ID;
@@ -1401,31 +1442,36 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
                                      f"(Status '{(l or {}).get('status', 'unbekannt')}').")
         reserviert = True
     neuer_status = "akzeptiert" if body.action == "annehmen" else "abgelehnt"
-    upd = await db.listing_interest.update_one(
-        {"id": interest_id, "buyer_user_id": user["id"], "status": "gegenangebot",
-         # Preis festnageln: sendet der Haendler PARALLEL ein neues
-         # Gegenangebot, darf die Annahme des ALTEN Betrags nicht auf den
-         # neuen durchschlagen (Review-Workflow 09/2026).
-         "counter_offer": it.get("counter_offer")},
-        {"$set": {"status": neuer_status, "updated_at": now_iso(),
-                  # Audit 09/2026: vereinbarter Preis verbindlich festhalten —
-                  # aus GENAU dem Gegenangebot, das der Kaeufer gelesen hat.
-                  **({"agreed_price": round(float(it.get("counter_offer") or 0), 2)}
-                     if body.action == "annehmen" else {})},
-         "$push": {"history": {"von": "kaeufer", "aktion": body.action,
-                               "angebot": it.get("counter_offer") if body.action == "annehmen" else None,
-                               "nachricht": body.message, "zeit": now_iso()}}})
+    try:
+        upd = await db.listing_interest.update_one(
+            {"id": interest_id, "buyer_user_id": user["id"], "status": "gegenangebot",
+             # Preis festnageln: sendet der Haendler PARALLEL ein neues
+             # Gegenangebot, darf die Annahme des ALTEN Betrags nicht auf den
+             # neuen durchschlagen (Review-Workflow 09/2026).
+             "counter_offer": it.get("counter_offer")},
+            {"$set": {"status": neuer_status, "updated_at": now_iso(),
+                      # Audit 09/2026: vereinbarter Preis verbindlich festhalten —
+                      # aus GENAU dem Gegenangebot, das der Kaeufer gelesen hat.
+                      **({"agreed_price": round(float(it.get("counter_offer") or 0), 2)}
+                         if body.action == "annehmen" else {})},
+             "$push": {"history": {"von": "kaeufer", "aktion": body.action,
+                                   "angebot": it.get("counter_offer") if body.action == "annehmen" else None,
+                                   "nachricht": body.message, "zeit": now_iso()}}})
+    except Exception:
+        # Pruefung 14.09.2026 (Liste 1, Nr. 20): wirft der zweite Write, bleibt
+        # das Auto nicht reserviert.
+        if reserviert:
+            await reservierung_zurueckgeben(it["listing_id"], user["id"])
+        raise
     if upd.modified_count == 0:
         # Paralleler Statuswechsel (z.B. Haendler hat gerade geantwortet):
         # Reservierung zurueckgeben und ehrlich ablehnen.
         if reserviert:
-            await db.resale_listings.update_one(
-                {"id": it["listing_id"], "status": "reserviert",
-                 "reserved_for": user["id"]},
-                {"$set": {"status": "veroeffentlicht", "updated_at": now_iso()},
-                 "$unset": {"reserved_for": ""}})
+            await reservierung_zurueckgeben(it["listing_id"], user["id"])
         raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
                                  "beantwortet — bitte neu laden.")
+    if reserviert:
+        await fahrzeug_reserviert_markieren(it["listing_id"])
     await log_activity_sicher("", user["id"], f"interesse.kaeufer.{body.action}",
                        ref=interest_id,
                        meta={"listing_id": it.get("listing_id"),
@@ -1517,23 +1563,28 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
     # parallel geantwortet (z.B. Gegenangebot angenommen) und ein
     # ungefilterter Write wuerde dessen "akzeptiert" ueberschreiben,
     # waehrend das Inserat reserviert bliebe (Lost Update).
-    upd = await db.listing_interest.update_one(
-        {"id": interest_id, "dealer_id": user["dealer_id"],
-         "status": it["status"]},
-        {"$set": update,
-         "$push": {"history": {"von": "haendler", "aktion": body.action,
-                               "angebot": body.counter_offer,
-                               "nachricht": body.message, "zeit": now_iso()}}})
+    try:
+        upd = await db.listing_interest.update_one(
+            {"id": interest_id, "dealer_id": user["dealer_id"],
+             "status": it["status"]},
+            {"$set": update,
+             "$push": {"history": {"von": "haendler", "aktion": body.action,
+                                   "angebot": body.counter_offer,
+                                   "nachricht": body.message, "zeit": now_iso()}}})
+    except Exception:
+        # Pruefung 14.09.2026 (Liste 1, Nr. 20): Ausnahme im zweiten Write —
+        # Reservierung zurueck, sonst bliebe das Auto blockiert.
+        if body.action == "akzeptieren":
+            await reservierung_zurueckgeben(it["listing_id"], it["buyer_user_id"])
+        raise
     if upd.modified_count == 0:
         if body.action == "akzeptieren":
             # Die eben gezogene Reservierung wieder freigeben.
-            await db.resale_listings.update_one(
-                {"id": it["listing_id"], "status": "reserviert",
-                 "reserved_for": it["buyer_user_id"]},
-                {"$set": {"status": "veroeffentlicht", "updated_at": now_iso()},
-                 "$unset": {"reserved_for": ""}})
+            await reservierung_zurueckgeben(it["listing_id"], it["buyer_user_id"])
         raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
                                  "beantwortet — bitte neu laden.")
+    if body.action == "akzeptieren":
+        await fahrzeug_reserviert_markieren(it["listing_id"])
     await log_activity_sicher(user["dealer_id"], user["id"], f"interesse.{new_status}",
                        ref=interest_id)
     return {"ok": True, "status": new_status}

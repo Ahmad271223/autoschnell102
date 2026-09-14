@@ -294,7 +294,10 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
             + ("" if filter_gesetzt else
                " ohne weitere Filter (Erstzulassung, km, Leistung, Kraftstoff, Getriebe)")
             + ".")
-    mobile_url = build_mobile_url(vehicle, rules)
+    # Pruefung 14.09.2026 (Liste 4, Nr. 80): kennt mobile.de die Marke nicht,
+    # gibt es keinen mobile.de-Link (vorher eine Suche OHNE Markenfilter —
+    # der Sucher bekam beliebige Fahrzeuge).
+    mobile_url = build_mobile_url(vehicle, rules) if mo_make_id else None
     autoscout_url = build_autoscout_url(vehicle, rules)
     # Runde 11: Was der AutoScout-Link von den Firmenregeln NICHT umsetzt
     # (z.B. Land CH), sagt der Server — vorher sah der Link nur "erfolgreich" aus.

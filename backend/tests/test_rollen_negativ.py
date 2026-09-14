@@ -259,6 +259,15 @@ def test_05_fahrer_nach_abschluss_gesperrt(welt):
     r = requests.put(f"{API}/appointments/{a}", headers=welt["HA"],
                      json={"driver_id": welt["driver_id"]}, timeout=60)
     assert r.status_code == 200, r.text[:200]
+    # Pruefung 14.09.2026 (Liste 2, Nr. 1): ohne unterschriebenes Protokoll kein Bericht
+    r = requests.post(f"{API}/driver/appointments/{a}/report", headers=welt["D"],
+                      json={"notes": "vor Ort ok"}, timeout=60)
+    assert r.status_code == 409, r.text[:200]
+    _db().pickup_protocols.insert_one({
+        "id": f"p_rn_{a}", "appointment_id": a, "dealer_id": welt["dealer_a"],
+        "driver_account_id": welt["driver_id"], "status": "final", "superseded": False,
+        "version": 1, "pdf_path": "test/x.pdf", "finalized_at": "2026-09-14T10:00:00+00:00",
+        "created_at": "2026-09-14T10:00:00+00:00"})
     r = requests.post(f"{API}/driver/appointments/{a}/report", headers=welt["D"],
                       json={"notes": "vor Ort ok"}, timeout=60)
     assert r.status_code == 200, r.text[:200]

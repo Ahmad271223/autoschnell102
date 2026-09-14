@@ -36,9 +36,12 @@ async def ensure_lock_index(db) -> None:
         await db.job_locks.create_index("name", unique=True)
     except Exception as exc:
         # Ohne den Index schuetzt die Sperre nicht zuverlaessig — laut sein.
+        # Pruefung 14.09.2026 (Liste 5, Nr. 7): und den Fehler WEITERGEBEN —
+        # vorher glaubte server.py, der Index stehe (in Produktion Startabbruch).
         import logging
         logging.getLogger("autohandel").error(
             "job_locks-Index konnte nicht angelegt werden: %s", exc)
+        raise
 
 
 async def acquire(db, name: str, ttl_seconds: int = 3600) -> bool:

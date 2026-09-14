@@ -139,6 +139,13 @@ def pruefe_produktion(log) -> None:
             "Domain sein (Links der Plattform, z.B. in Vertragsmails und "
             "Einladungen, werden daraus gebaut).")
 
+    # Pruefung 14.09.2026 (Liste 4, Nr. 74): hinter Proxy/Load Balancer muss
+    # TRUST_PROXY gesetzt sein — sonst zaehlt der Limiter alle Nutzer unter der
+    # Proxy-Adresse (und Sperren treffen alle auf einmal).
+    if ist_prod and os.environ.get("TRUST_PROXY", "").strip().lower() not in ("1", "true", "yes"):
+        fehler.append("TRUST_PROXY=true fehlt — hinter nginx/Load Balancer sieht das Backend "
+                      "sonst nur die Proxy-Adresse (Rate-Limiter, Anmeldesperren, Audit).")
+
     cors = os.environ.get("CORS_ORIGINS", "").strip()
     if not cors or "localhost" in cors or cors == "*":
         fehler.append(

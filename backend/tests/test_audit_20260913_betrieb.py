@@ -596,7 +596,8 @@ def test_38b_worker_startet_auch_ohne_indizes_und_ready_warnt():
     start = s.index("from beweis_service import beweis_indizes_sichern, run_beweis_worker_forever")
     block = s[start:s.index("run_cleanup_forever(db)", start)]
     index = block.index("await beweis_indizes_sichern(db)")
-    worker = block.index("asyncio.create_task(run_beweis_worker_forever(db))")
+    # Pruefung 14.09.2026 (L1-9): der Worker laeuft unter Aufsicht (_worker_starten)
+    worker = block.index('_worker_starten("beweise"')
     assert "except Exception" in block[index:worker], \
         "ein Indexfehler darf den Worker-Start nicht ueberspringen"
     ready = s[s.index("async def readiness_check("):s.index("kritische_indizes = {")]

@@ -104,7 +104,15 @@ class AdminSelfPasswordIn(BaseModel):
 async def admin_trigger_cleanup(user=Depends(current_super_admin)):
     """Manuell einen Cleanup-Durchlauf anstoßen (Debug/QA).
     Regulär läuft der Loop 1× pro Stunde automatisch."""
-    stats = await _cleanup_once(db)
+    # Pruefung 14.09.2026 (Liste 1, Nr. 30): dieselbe Sperre wie der stuendliche
+    # Lauf — kein zweiter Lauf parallel (auch nicht durch zwei Admin-Klicks).
+    from job_lock import acquire, release
+    if not await acquire(db, "cleanup-cycle", ttl_seconds=3300):
+        raise HTTPException(409, "Ein Aufräumlauf läuft gerade — bitte später erneut.")
+    try:
+        stats = await _cleanup_once(db)
+    finally:
+        await release(db, "cleanup-cycle")
     return stats
 
 

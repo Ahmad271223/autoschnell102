@@ -139,6 +139,45 @@ async def _validierungsfehler(request: Request, exc: RequestValidationError):
 # aus False einen FEHLER — der Load Balancer nimmt die Instanz dann nicht
 # in die Rotation, statt kaputte Antworten an Besucher zu liefern.
 BETRIEBSBEREIT: dict = {}
+# Pruefung 14.09.2026 (Liste 1, Nr. 9-12): Hintergrundjobs (Beweis-Worker,
+# Aufraeumen, Zahlungsabgleich, Backup, Link-Jobs) laufen unter Aufsicht —
+# ein Absturz startet den Job nach einer Pause neu, und /ready meldet einen
+# Job, der nicht laeuft, als Fehler (vorher blieb der Prozess "ready", obwohl
+# z.B. nie mehr aufgeraeumt oder gesichert wurde).
+WORKER_STATUS: dict = {}
+
+
+def _worker_starten(name: str, fabrik) -> None:
+    import asyncio as _asyncio
+
+    async def _laufen():
+        neustarts = 0
+        while True:
+            WORKER_STATUS[name] = {"laeuft": True, "neustarts": neustarts,
+                                   "letzter_fehler": None, "seit": now_iso()}
+            try:
+                await fabrik()
+                WORKER_STATUS[name] = {"laeuft": False, "neustarts": neustarts,
+                                       "letzter_fehler": "Schleife beendet", "seit": now_iso()}
+                return
+            except _asyncio.CancelledError:
+                WORKER_STATUS[name] = {"laeuft": False, "neustarts": neustarts,
+                                       "letzter_fehler": "abgebrochen", "seit": now_iso()}
+                raise
+            except Exception as exc:  # noqa: BLE001
+                neustarts += 1
+                WORKER_STATUS[name] = {"laeuft": False, "neustarts": neustarts,
+                                       "letzter_fehler": str(exc)[:300], "seit": now_iso()}
+                log.exception("Hintergrundjob %s abgestuerzt (Neustart %d)", name, neustarts)
+                try:
+                    from betrieb import alarm
+                    await alarm(db, "hintergrundjob_abgestuerzt", ref=name,
+                                fehler=str(exc)[:300], neustarts=neustarts)
+                except Exception:  # noqa: BLE001
+                    pass
+                await _asyncio.sleep(min(300, 10 * (2 ** min(neustarts, 5))))
+
+    _asyncio.create_task(_laufen())
 
 api = APIRouter(prefix="/api")
 
@@ -440,6 +479,14 @@ async def readiness_check(response: Response):
         if BETRIEBSBEREIT.get(schluessel) is False:
             fehler.append(f"{klartext} ist beim Start gescheitert — "
                           "Protokoll pruefen und diesen Prozess neu starten")
+    # Pruefung 14.09.2026 (Liste 1, Nr. 9-12): ein Hintergrundjob, der nicht
+    # laeuft (Absturz, wartet auf Neustart), macht die Instanz nicht bereit.
+    for name, st in WORKER_STATUS.items():
+        if not st.get("laeuft"):
+            fehler.append(f"Hintergrundjob {name} laeuft nicht "
+                          f"({st.get('letzter_fehler') or 'unbekannt'}; Neustarts: "
+                          f"{st.get('neustarts', 0)})")
+    info["hintergrundjobs"] = dict(WORKER_STATUS)
     info["betriebsbereit"] = {**BETRIEBSBEREIT, **{f"index_{k}": v
                                                    for k, v in steht.items()}}
     bereit = not fehler
@@ -703,8 +750,12 @@ async def ensure_indexes():
             "session_id", unique=True, sparse=True,
         )
     except Exception as exc:
-        log.warning("ensure_indexes: Index konnte nicht angelegt werden "
-                       "— Eindeutigkeits-Garantie fehlt! %s", exc)
+        log.error("ensure_indexes: subscriptions.session_id konnte nicht angelegt werden "
+                  "— Eindeutigkeits-Garantie fehlt! %s", exc)
+        # Pruefung 14.09.2026 (Liste 1, Nr. 5): in Produktion kein Start ohne
+        # den Schutz gegen doppelte Abos aus parallelen Freischaltungen.
+        from indizes import _in_produktion_abbrechen
+        _in_produktion_abbrechen(f"subscriptions.session_id: {exc}")
     # Nachpruefung Runde 14 (Nr. 60): zugang_grants ist der Idempotenz-
     # Schluessel der Stripe-Freischaltung (find_one_and_update mit upsert je
     # session_id). Ohne Unique-Index erzeugen parallele Upserts nachweislich
@@ -717,8 +768,11 @@ async def ensure_indexes():
         await db.zugang_grants.create_index("session_id", unique=True,
                                             name="grant_je_session")
     except Exception as exc:
-        log.warning("ensure_indexes: zugang_grants.session_id (Dubletten im "
-                    "Altbestand? scripts/dubletten_pruefen.py): %s", exc)
+        log.error("ensure_indexes: zugang_grants.session_id (Dubletten im "
+                  "Altbestand? scripts/dubletten_pruefen.py): %s", exc)
+        # Pruefung 14.09.2026 (Liste 1, Nr. 6): in Produktion kein Start.
+        from indizes import _in_produktion_abbrechen
+        _in_produktion_abbrechen(f"zugang_grants.session_id: {exc}")
     await _storage_retry_unique_index()
     await _plan_requests_unique_indizes()
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
@@ -917,6 +971,26 @@ async def seed_super_admin():
                 "username": username,
             }},
         )
+        # Pruefung 14.09.2026 (Liste 1, Nr. 13): brach der erste Seed nach dem
+        # Konto ab, fehlten Firmenprofil und Abo fuer immer — hier nachziehen.
+        d_id = existing.get("dealer_id")
+        if d_id and not await db.dealers.count_documents({"id": d_id}, limit=1):
+            await db.dealers.insert_one({
+                "kunden_nr": await naechste_kunden_nr(),
+                "id": d_id, "user_id": existing["id"],
+                "company_name": existing.get("company_name") or "Betreiber",
+                "contact_person": "Super Admin", "phone": "", "email": "", "address": "",
+                "zip_code": "", "city": "", "created_at": now_iso(),
+            })
+            log.warning("seed_super_admin: fehlendes Firmenprofil nachgezogen")
+        if d_id and not await db.subscriptions.count_documents(
+                {"dealer_id": d_id, "status": "active"}, limit=1):
+            await db.subscriptions.insert_one({
+                "id": str(uuid.uuid4()), "dealer_id": d_id,
+                "plan": "lifetime", "status": "active",
+                "expires_at": None, "created_at": now_iso(),
+            })
+            log.warning("seed_super_admin: fehlendes Abo nachgezogen")
         return
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
@@ -996,11 +1070,16 @@ async def on_start():
     # startet — sonst koennten beim allerersten Start (frische Datenbank)
     # mehrere Worker denselben Job uebernehmen, weil der Unique-Index
     # noch fehlt (Snapshot-Recovery startet schon nach 5 Sekunden).
+    from indizes import _in_produktion_abbrechen
     try:
         from job_lock import ensure_lock_index
         await ensure_lock_index(db)
     except Exception as exc:
-        log.warning("job lock index setup failed: %s", exc)
+        # Pruefung 14.09.2026 (Liste 1, Nr. 7/8): ohne Job-Sperre laufen
+        # Aufraeumen, Backup und Zahlungsabgleich mehrfach — in Produktion
+        # kein Start.
+        log.error("job lock index setup failed: %s", exc)
+        _in_produktion_abbrechen(f"job_locks.name: {exc}")
     try:
         from provider_limiter import ensure_slot_indexes
         await ensure_slot_indexes(db)
@@ -1008,13 +1087,13 @@ async def on_start():
     except Exception as exc:
         log.warning("provider slot index setup failed: %s", exc)
         BETRIEBSBEREIT["anbieter_grenze"] = False
+        _in_produktion_abbrechen(f"provider_limits.provider: {exc}")
     # Linkpruefungs-Jobs: Indizes synchron, dann die Job-Schleife dieses
     # Workers starten (Details in link_jobs.py).
     try:
         from link_jobs import ensure_job_indexes, run_job_worker_forever
         await ensure_job_indexes(db)
-        import asyncio
-        asyncio.create_task(run_job_worker_forever(db))
+        _worker_starten("link_jobs", lambda: run_job_worker_forever(db))
         BETRIEBSBEREIT["link_worker"] = True
     except Exception as exc:
         log.warning("link job worker start failed: %s", exc)
@@ -1033,28 +1112,30 @@ async def on_start():
             await beweis_indizes_sichern(db)
         except Exception as exc:
             log.error("Beweis-Indizes: %s — Beweis-Worker startet trotzdem", exc)
-        import asyncio
-        asyncio.create_task(run_beweis_worker_forever(db))
+        _worker_starten("beweise", lambda: run_beweis_worker_forever(db))
     except Exception as exc:
         log.warning("beweis worker start failed: %s", exc)
+        WORKER_STATUS["beweise"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
-        import asyncio
-        asyncio.create_task(run_cleanup_forever(db))
+        _worker_starten("aufraeumen", lambda: run_cleanup_forever(db))
     except Exception as exc:
         log.warning("cleanup task start failed: %s", exc)
+        WORKER_STATUS["aufraeumen"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     try:
-        asyncio.create_task(run_abgleich_forever())
+        _worker_starten("zahlungsabgleich", lambda: run_abgleich_forever())
     except Exception as exc:
         log.warning("abgleich task start failed: %s", exc)
+        WORKER_STATUS["zahlungsabgleich"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
     # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
     # nach, wenn das letzte Backup älter als 24h ist.
     try:
         from backup_service import run_backup_forever
-        asyncio.create_task(run_backup_forever(db))
+        _worker_starten("backup", lambda: run_backup_forever(db))
     except Exception as exc:
         log.warning("backup task start failed: %s", exc)
+        WORKER_STATUS["backup"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
 
 
 async def _alle_indexe():

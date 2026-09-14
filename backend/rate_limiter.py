@@ -218,9 +218,26 @@ class SlidingWindowRateLimiter:
             return self._check_lokal(key)
 
     async def _check_mongo(self, key: str) -> bool:
-        """Festes Zeitfenster, atomar per $inc — ein Dokument je
-        (Limiter, Schluessel, Fenster); TTL raeumt alte Fenster weg."""
-        return await self._zaehle_mongo(key) <= self.max_attempts
+        """Gleitendes Fenster ueber zwei feste Zeitfenster (atomar per $inc,
+        ein Dokument je Limiter/Schluessel/Fenster; TTL raeumt alte weg).
+
+        Pruefung 14.09.2026 (Liste 4, Nr. 73): Ein rein festes Fenster liess
+        kurz vor und kurz nach dem Fensterwechsel fast das Doppelte durch.
+        Jetzt zaehlt das vorige Fenster anteilig mit (Naeherung des gleitenden
+        Fensters, wie sie Cloudflare/nginx verwenden)."""
+        import time as _t
+        n_jetzt = await self._zaehle_mongo(key)
+        if n_jetzt > self.max_attempts:
+            return False
+        from deps import db
+        fenster = int(_t.time() // self.window_seconds)
+        vorher = await db.rate_limits.find_one(
+            {"_id": f"{self.name}:{key}:{fenster - 1}"}, {"n": 1})
+        n_vorher = int((vorher or {}).get("n") or 0)
+        if not n_vorher:
+            return True
+        anteil = 1.0 - (_t.time() % self.window_seconds) / self.window_seconds
+        return n_jetzt + n_vorher * anteil <= self.max_attempts
 
     async def _zaehle_mongo(self, key: str) -> int:
         import time as _t
