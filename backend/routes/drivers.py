@@ -72,7 +72,8 @@ class DriverLinkIn(BaseModel):
 class DriverStatusIn(BaseModel):
     """Fahrer-App: Termin als abgeholt / nicht abgeholt markieren."""
     status: Literal["abgeholt", "nicht abgeholt"]
-    notes: Optional[str] = None
+    # Pruefung 14.09.2026 (A4): vorher unbegrenzt (Megabytes in einem Termin).
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 class DriverZuteilungIn(BaseModel):
@@ -588,6 +589,23 @@ async def driver_me(driver=Depends(current_driver)):
     }
 
 
+async def fahrername_verteilen(driver_id: str, name: str, dbx=None) -> bool:
+    """Pruefung 14.09.2026 (A6): Anzeigename in alle Firmen-Verknuepfungen
+    schreiben und den Merker loeschen. Best effort, wirft nie."""
+    dbx = dbx if dbx is not None else db
+    try:
+        await dbx.dealer_drivers.update_many(
+            {"driver_account_id": driver_id},
+            {"$set": {"display_name": name}})
+        await dbx.driver_accounts.update_one(
+            {"id": driver_id, "display_name": name},
+            {"$unset": {"name_sync_offen": ""}})
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("Fahrername %s konnte nicht an die Firmen verteilt werden", driver_id)
+        return False
+
+
 @router.put("/driver/me")
 async def driver_update_me(body: DriverProfileUpdate,
                             driver=Depends(current_driver)):
@@ -600,12 +618,15 @@ async def driver_update_me(body: DriverProfileUpdate,
     if not update:
         raise HTTPException(400, "Nichts zu aktualisieren")
     update["updated_at"] = now_iso()
+    # Pruefung 14.09.2026 (A6): zwei Schreibvorgaenge ohne Transaktion — brach
+    # der zweite ab, zeigte der Haendler den alten Namen fuer immer. Jetzt:
+    # Merker am Konto (name_sync_offen), der Aufraeum-Job zieht nach
+    # (cleanup_service.fahrernamen_nachziehen); der Aufruf bleibt erfolgreich.
+    if "display_name" in update:
+        update["name_sync_offen"] = True
     await db.driver_accounts.update_one({"id": driver["id"]}, {"$set": update})
     if "display_name" in update:
-        await db.dealer_drivers.update_many(
-            {"driver_account_id": driver["id"]},
-            {"$set": {"display_name": update["display_name"]}},
-        )
+        await fahrername_verteilen(driver["id"], update["display_name"])
     fresh = await db.driver_accounts.find_one(
         {"id": driver["id"]}, {"_id": 0, "password_hash": 0},
     )
@@ -794,6 +815,10 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
     await _zugriff_pruefen(appt, driver)
+    # Pruefung 14.09.2026 (C22): Verkaeuferadresse und Telefon erst nach dem
+    # Annehmen der Fahrt.
+    from routes.protocols import zuteilung_offen_oder_409
+    zuteilung_offen_oder_409(appt)
     vehicle: Dict[str, Any] = {}
     if appt.get("vehicle_id"):
         v_doc = await db.vehicles.find_one(
@@ -842,8 +867,14 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
 
 @router.get("/driver/contracts/{contract_id}/pdf")
 async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
+    # Pruefung 14.09.2026 (C22/C23): nur ueber einen ANGENOMMENEN, nicht
+    # stornierten Termin — vorher genuegte eine offene Anfrage oder ein
+    # stornierter Termin, um den ganzen Kaufvertrag (Verkaeuferdaten, Preis)
+    # zu laden.
     appt = await db.appointments.find_one(
-        {"driver_id": driver["id"], "contract_id": contract_id},
+        {"driver_id": driver["id"], "contract_id": contract_id,
+         "status": {"$ne": "storniert"},
+         "zuteilung": {"$nin": ["offen", "abgelehnt"]}},
         {"_id": 0, "id": 1, "dealer_id": 1},
     )
     if not appt:

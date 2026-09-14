@@ -91,11 +91,28 @@ async def _pdf_antwort(doc: dict) -> Response:
     except Exception:  # noqa: BLE001
         log.exception("Beweisdokument %s nicht ladbar", doc.get("id"))
         raise HTTPException(502, "Datei-Speicher gerade nicht erreichbar.")
+    # Pruefung 14.09.2026 (B10): Die Pruefsumme im Kopf war bisher nur der
+    # gespeicherte Wert — eine veraenderte oder vertauschte Datei im Speicher
+    # waere mit "passender" Pruefsumme ausgeliefert worden. Jetzt wird die
+    # Datei selbst gehasht; weicht sie ab, gibt es kein Dokument, sondern
+    # einen Betriebsalarm.
+    import hashlib
+    ist = hashlib.sha256(daten).hexdigest()
+    soll = str(doc.get("pdf_sha256") or "")
+    if soll and ist != soll:
+        log.error("Beweisdokument %s: Pruefsumme weicht ab (gespeichert %s, Datei %s)",
+                  doc.get("id"), soll[:12], ist[:12])
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "beweis_pruefsumme_abweichend", ref=str(doc.get("id") or ""),
+                             pdf_key=str(doc.get("pdf_key") or ""), soll=soll, ist=ist)
+        raise HTTPException(409, "Die gespeicherte Datei stimmt nicht mit der Prüfsumme "
+                                 "des Beweisdokuments überein — bitte den Betreiber "
+                                 "informieren.")
     return Response(
         content=daten, media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{_dateiname(doc)}"',
                  "Cache-Control": "no-store",
-                 "X-Beweis-SHA256": str(doc.get("pdf_sha256") or "")})
+                 "X-Beweis-SHA256": ist})
 
 
 @router.get("/beweise")
@@ -153,7 +170,11 @@ async def driver_beweis_pdf(beweis_id: str, driver=Depends(current_driver)):
                 {"dealer_id": {"$in": firmen}, "inserat_schluessel": doc.get("cache_key")},
                 {"_id": 0, "id": 1, "dealer_id": 1}).limit(50):
             paare.append({"vehicle_id": v["id"], "dealer_id": v["dealer_id"]})
+    # Pruefung 14.09.2026 (C22/C23): nur ueber einen ANGENOMMENEN, nicht
+    # stornierten Termin.
     if not paare or not await db.appointments.count_documents(
-            {"driver_id": driver["id"], "$or": paare}, limit=1):
+            {"driver_id": driver["id"], "$or": paare,
+             "status": {"$ne": "storniert"},
+             "zuteilung": {"$nin": ["offen", "abgelehnt"]}}, limit=1):
         raise HTTPException(404, _NICHT_GEFUNDEN)
     return await _pdf_antwort(doc)

@@ -202,11 +202,14 @@ def _korrektur_freigeben(w, P, t, *, preis=None):
         await w.db.appointments.update_one({"id": t.aid}, {"$set": {"status": "offen"}})
         neu = await P.start_correction(t.aid, w.driver)
         await P.submit_protocol(t.aid, w.driver)
+        st = (await w.db.pickup_protocols.find_one({"id": neu["id"]}))["freigabe_stand"]
         if preis is None:
-            z = await P.protokoll_freigeben(neu["id"], P.FreigabeIn(preis_zuruecksetzen=True), w.chef)
+            z = await P.protokoll_freigeben(neu["id"], P.FreigabeIn(preis_zuruecksetzen=True, stand=st),
+                                            w.chef)
             fr = await P.protokoll_freigeben(neu["id"], P.FreigabeIn(stand=z["stand"]), w.chef)
         else:
-            fr = await P.protokoll_freigeben(neu["id"], P.FreigabeIn(neuer_preis=preis), w.chef)
+            fr = await P.protokoll_freigeben(neu["id"], P.FreigabeIn(neuer_preis=preis, stand=st),
+                                             w.chef)
         return neu["id"], fr["stand"]
     return w.run(lauf())
 
@@ -336,7 +339,7 @@ def test_p6_freigabe_gegen_schliessen(welt, monkeypatch):
         monkeypatch, P, lambda f, a: (a.get("$set") or {}).get("status") == P.FREIGEGEBEN,
         schliessen)
     with pytest.raises(HTTPException) as fr:
-        w.run(P.protokoll_freigeben(t.pid, P.FreigabeIn(neuer_preis=8500), w.chef))
+        w.run(P.protokoll_freigeben(t.pid, P.FreigabeIn(neuer_preis=8500, stand="s1"), w.chef))
     monkeypatch.setattr(P, "db", echt_db)
     assert fr.value.status_code == 409
     p = _doc(w, "pickup_protocols", t.pid)

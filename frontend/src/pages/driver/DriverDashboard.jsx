@@ -24,16 +24,34 @@ const dayKey = (s) => (s || "unbekannt").slice(0, 10);
 export default function DriverDashboard() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Pruefung 14.09.2026 (A1): Ladefehler getrennt merken — vorher stand nach
+  // einem Funkloch "Noch keine Fahrten", obwohl Fahrten zugeteilt waren.
+  const [ladeFehler, setLadeFehler] = useState(null);
   const [open, setOpen] = useState({});
   const [busy, setBusy] = useState(null);
   const [checkAppt, setCheckAppt] = useState(null); // Abhol-Check-Dialog
 
-  useEffect(() => {
-    driverApi.get("/driver/appointments")
-      .then((r) => setItems(r.data))
-      .catch((e) => toast.error(errMsg(e, "Termine konnten nicht geladen werden")))
+  const laden = () => {
+    setLoading(true);
+    setLadeFehler(null);
+    return driverApi.get("/driver/appointments")
+      .then((r) => { setItems(r.data); setLadeFehler(null); })
+      .catch((e) => setLadeFehler(errMsg(e, "Termine konnten nicht geladen werden")))
       .finally(() => setLoading(false));
-  }, []);
+  };
+  useEffect(() => { laden(); }, []);
+
+  // Pruefung 14.09.2026 (A2): Nach einer gelungenen Aenderung die Liste neu
+  // laden — scheitert NUR das Nachladen, gibt es keinen widerspruechlichen
+  // Fehler-Toast mehr ("Statuswechsel fehlgeschlagen" nach "Als … markiert").
+  const nachladen = async () => {
+    try {
+      const r = await driverApi.get("/driver/appointments");
+      setItems(r.data);
+    } catch (e) {
+      toast.warning(errMsg(e, "Liste konnte nicht aktualisiert werden — bitte neu laden"));
+    }
+  };
 
   // Zugeteilte Fahrt annehmen / ablehnen (09/2026)
   const zuteilung = async (id, action) => {
@@ -47,13 +65,13 @@ export default function DriverDashboard() {
     try {
       await driverApi.put(`/driver/appointments/${id}/zuteilung`, { action, grund });
       toast.success(action === "annehmen" ? "Fahrt angenommen" : "Fahrt abgelehnt — der Händler wurde informiert");
-      const r = await driverApi.get("/driver/appointments");
-      setItems(r.data);
     } catch (e) {
       toast.error(errMsg(e, "Antwort fehlgeschlagen"));
-    } finally {
       setBusy(null);
+      return;
     }
+    await nachladen();
+    setBusy(null);
   };
 
   const setStatus = async (id, status) => {
@@ -71,13 +89,13 @@ export default function DriverDashboard() {
     try {
       await driverApi.put(`/driver/appointments/${id}/status`, { status });
       toast.success(status === "abgeholt" ? "Als abgeholt markiert" : "Als nicht abgeholt markiert");
-      const r = await driverApi.get("/driver/appointments");
-      setItems(r.data);
     } catch (e) {
       toast.error(errMsg(e, "Statuswechsel fehlgeschlagen"));
-    } finally {
       setBusy(null);
+      return;
     }
+    await nachladen();
+    setBusy(null);
   };
 
   const grouped = useMemo(() => {
@@ -86,6 +104,10 @@ export default function DriverDashboard() {
       const k = dayKey(a.pickup_date);
       (g[k] = g[k] || []).push(a);
     });
+    // Pruefung 14.09.2026 (A7): innerhalb eines Tages nach Uhrzeit — vorher
+    // stand die 14-Uhr-Fahrt je nach Datenbankreihenfolge vor der 9-Uhr-Fahrt.
+    Object.values(g).forEach((liste) =>
+      liste.sort((a, b) => String(a.pickup_time || "").localeCompare(String(b.pickup_time || ""))));
     return Object.entries(g).sort(([a], [b]) => a.localeCompare(b));
   }, [items]);
 
@@ -103,7 +125,19 @@ export default function DriverDashboard() {
         <div className="tactical-card p-8 text-center text-zinc-500 text-sm">Lade …</div>
       )}
 
-      {!loading && items.length === 0 && (
+      {!loading && ladeFehler && (
+        <div className="tactical-card p-8 text-center" data-testid="driver-ladefehler">
+          <XCircle size={32} className="mx-auto" style={{ color: "var(--accent-red)" }} />
+          <div className="mt-3 font-semibold text-zinc-300">Termine konnten nicht geladen werden</div>
+          <div className="mt-1 text-xs text-zinc-500">{ladeFehler}</div>
+          <button onClick={laden} data-testid="driver-erneut-laden"
+                  className="mt-4 px-4 py-2 rounded-sm text-xs font-semibold bg-white/10 hover:bg-white/20">
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+
+      {!loading && !ladeFehler && items.length === 0 && (
         <div className="tactical-card p-10 text-center">
           <Car size={32} className="mx-auto text-zinc-600" />
           <div className="mt-3 font-semibold text-zinc-300">Noch keine Fahrten</div>

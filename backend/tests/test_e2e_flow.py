@@ -172,6 +172,13 @@ def test_05_fahrer_zuweisen(welt):
                      json={"driver_id": welt["drv_id"]}, timeout=60)
     assert r.status_code == 200, r.text[:200]
     welt["D"] = {"Authorization": f"Bearer {welt['drv_tok']}"}
+    # Pruefung 14.09.2026 (C22): ohne angenommene Fahrt kein Protokoll.
+    r = requests.get(f"{API}/driver/appointments/{welt['appt_id']}/protocol",
+                     headers=welt["D"], timeout=60)
+    assert r.status_code == 409, r.text[:200]
+    r = requests.put(f"{API}/driver/appointments/{welt['appt_id']}/zuteilung",
+                     headers=welt["D"], json={"action": "annehmen"}, timeout=30)
+    assert r.status_code == 200 and r.json()["zuteilung"] == "angenommen", r.text[:200]
 
 
 def test_06_abholung_ohne_protokoll_verboten(welt):
@@ -187,6 +194,8 @@ def test_07_abholprotokoll_und_pdfs(welt):
     felder = [f[0] if isinstance(f, (list, tuple)) else f.get("key")
               for f in tpl["template"]["vehicle_check_fields"]]
     assert len(felder) == 12, f"12 Fahrzeugdaten-Zeilen erwartet: {felder}"
+    # Pruefung 14.09.2026 (C12): je Zeile eine der ANGEBOTENEN Antworten.
+    antworten = {f["key"]: f["options"][0] for f in tpl["template"]["vehicle_check_fields"]}
 
     # Unvollstaendiger Abschluss muss abgelehnt werden (422)
     r = requests.post(
@@ -200,7 +209,7 @@ def test_07_abholprotokoll_und_pdfs(welt):
     # Alle Pflichtabschnitte fuellen
     r = requests.put(f"{API}/driver/appointments/{welt['appt_id']}/protocol",
                      headers=welt["D"], json={
-        "vehicle_check": {k: {"status": "stimmt"} for k in felder},
+        "vehicle_check": {k: {"status": antworten[k]} for k in felder},
         "documents": {"Fahrzeugschein": True},
         "keys_count": "2", "keys_expected": "2",
         "condition": {"mileage": "90000", "fuel_level": "1/2"},
@@ -231,10 +240,17 @@ def test_07_abholprotokoll_und_pdfs(welt):
                     if x["appointment_id"] == welt["appt_id"]), None)
     assert eintrag, offen.text[:300]
     pid = eintrag["protocol_id"]
+    # Pruefung 14.09.2026 (C7): ohne Stand keine Freigabe.
     r = requests.post(f"{API}/protocols/{pid}/freigabe", headers=welt["H"],
                       json={"neuer_preis": 8500, "notiz": "Rost am Schweller"},
                       timeout=30)
+    assert r.status_code == 409, r.text[:200]
+    r = requests.post(f"{API}/protocols/{pid}/freigabe", headers=welt["H"],
+                      json={"neuer_preis": 8500, "notiz": "Rost am Schweller",
+                            "stand": eintrag["stand"]},
+                      timeout=30)
     assert r.status_code == 200 and r.json()["status"] == "freigegeben", r.text[:200]
+    stand = r.json()["stand"]
 
     # 3a. Mit einem VERALTETEN Preis wird nicht unterschrieben (Gegenpruefung
     #     12.09.2026: sonst stuende ein anderer Betrag ueber den Unterschriften,
@@ -248,7 +264,7 @@ def test_07_abholprotokoll_und_pdfs(welt):
                                  "neuer_preis_gesehen": 9999}, timeout=120)
     assert r.status_code == 409 and "Preis" in r.text, r.text[:200]
 
-    # 3b. Mit dem angezeigten Preis geht es durch
+    # 3b. Ohne gesehenen Freigabe-Stand nicht (Pruefung 14.09.2026, C16) ...
     r = requests.post(
         f"{API}/driver/appointments/{welt['appt_id']}/protocol/finalize",
         headers=welt["D"], json={"signature_driver_b64": SIG,
@@ -256,6 +272,16 @@ def test_07_abholprotokoll_und_pdfs(welt):
                                  "seller_name": "E2E Verkaeufer",
                                  "place": "Hannover",
                                  "neuer_preis_gesehen": 8500}, timeout=120)
+    assert r.status_code == 409 and "Stand" in r.text, r.text[:200]
+    # ... mit dem angezeigten Preis und Stand geht es durch
+    r = requests.post(
+        f"{API}/driver/appointments/{welt['appt_id']}/protocol/finalize",
+        headers=welt["D"], json={"signature_driver_b64": SIG,
+                                 "signature_seller_b64": SIG,
+                                 "seller_name": "E2E Verkaeufer",
+                                 "place": "Hannover",
+                                 "neuer_preis_gesehen": 8500,
+                                 "freigabe_stand_gesehen": stand}, timeout=120)
     assert r.status_code == 200, f"Abschluss: {r.status_code} {r.text[:300]}"
 
     # PDFs: Abholauftrag + ausgefuelltes Protokoll

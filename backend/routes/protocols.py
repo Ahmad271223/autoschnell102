@@ -25,7 +25,7 @@ from pymongo.errors import DuplicateKeyError
 import betrieb
 import protokoll_vergleich as PV
 from deps import (besitzer_namen, db, fahrzeug_im_bereich, ist_sucher, log_activity,
-                  now_iso, termin_bereich, termin_im_bereich)
+                  log_activity_sicher, now_iso, termin_bereich, termin_im_bereich)
 from lifecycle import try_set_lifecycle
 # Runde 17 (Nr. 10): dieselbe Schadensform wie im Kaufvertrag (contracts.py
 # importiert appointments/protocols nur lazy — kein Zyklus).
@@ -202,7 +202,22 @@ async def _appt_or_404(appt_id: str, driver: dict) -> dict:
     # Zuweisung allein reicht nicht: der Fahrer muss bei dieser Firma noch
     # in der Fahrerliste stehen (Pruefbericht 09/2026, routes.drivers).
     await _zugriff_pruefen(appt, driver)
+    # Pruefung 14.09.2026 (C22): ... und die Fahrt angenommen haben. Vorher
+    # konnte ein Fahrer, der die Fahrt noch nicht (oder nicht mehr) angenommen
+    # hatte, Protokoll, Verkaeuferdaten und PDF laden und sogar abschliessen.
+    zuteilung_offen_oder_409(appt)
     return appt
+
+
+ZUTEILUNG_OHNE_ZUGRIFF = ("offen", "abgelehnt")
+
+
+def zuteilung_offen_oder_409(appt: dict) -> None:
+    """Pruefung 14.09.2026 (C22): Nur eine ANGENOMMENE Fahrt gibt Zugriff auf
+    Protokoll und Dokumente. `zuteilung` fehlt bei Altterminen (= angenommen)."""
+    if (appt.get("zuteilung") or "angenommen") in ZUTEILUNG_OHNE_ZUGRIFF:
+        raise HTTPException(409, "Bitte zuerst die Fahrt annehmen — erst dann sind "
+                                 "Protokoll und Dokumente zugänglich.")
 
 
 async def _dateien_verwerfen(keys: List[str], dealer_id: str) -> None:
@@ -232,9 +247,57 @@ async def _dateien_verwerfen(keys: List[str], dealer_id: str) -> None:
 
 
 async def _current(appt_id: str) -> Optional[dict]:
-    return await db.pickup_protocols.find_one(
+    doc = await db.pickup_protocols.find_one(
         {"appointment_id": appt_id, "superseded": {"$ne": True}}, {"_id": 0},
         sort=[("version", -1)])
+    if doc is None:
+        doc = await ohne_aktuelle_version_reparieren(appt_id)
+    return doc
+
+
+# Pruefung 14.09.2026 (C17/C18): Reparatur erst, wenn die Abloesung nicht
+# mehr frisch ist — eine gerade laufende Korrektur (Abloesen -> Insert) oder
+# ein laufendes Verwerfen (zwei Writes) darf nicht dazwischen "repariert" werden.
+_REPARATUR_KARENZ_SEKUNDEN = 120
+
+
+async def ohne_aktuelle_version_reparieren(appt_id: str, dbx=None) -> Optional[dict]:
+    """Pruefung 14.09.2026 (C17/C18): Hat ein Termin NUR abgeloeste Versionen
+    (zweiter Write von korrektur_verwerfen gescheitert, Prozess nach dem
+    Abloesen in start_correction gestorben), gab es vorher keinen Weg zurueck:
+    der Fahrer sah "kein Protokoll", ein neuer Entwurf scheiterte am Unique-
+    Index (appointment_id, version) mit 500, das unterschriebene PDF war fuer
+    den Haendler unerreichbar. Jetzt wird die massgebliche Version wieder
+    aktuell geschaltet: die hoechste FINALE, sonst die hoechste Version.
+    Best effort, wirft nie; liefert die reaktivierte Version oder None."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    dbx = dbx if dbx is not None else db
+    try:
+        versionen = await dbx.pickup_protocols.find(
+            {"appointment_id": appt_id, "superseded": True}, {"_id": 0},
+            sort=[("version", -1)]).to_list(50)
+        if not versionen:
+            return None
+        finale = [v for v in versionen if v.get("status") == "final"]
+        kandidat = (finale or versionen)[0]
+        grenze = (_dt.now(_tz.utc) - _td(seconds=_REPARATUR_KARENZ_SEKUNDEN)).isoformat()
+        stempel = kandidat.get("superseded_at") or kandidat.get("verworfen_am") or ""
+        if stempel and stempel > grenze:
+            return None
+        jetzt = now_iso()
+        res = await dbx.pickup_protocols.update_one(
+            {"id": kandidat["id"], "superseded": True},
+            {"$set": {"superseded": False, "updated_at": jetzt, "repariert_am": jetzt},
+             "$unset": {"superseded_at": "", "verworfen_am": ""}})
+        if not res.matched_count:
+            return None
+        log.warning("Protokoll zu Termin %s hatte keine aktuelle Version — Version %s "
+                    "(%s) wieder aktiv geschaltet", appt_id, kandidat.get("version"),
+                    kandidat.get("status"))
+        return await dbx.pickup_protocols.find_one({"id": kandidat["id"]}, {"_id": 0})
+    except Exception:  # noqa: BLE001
+        log.exception("Protokoll-Reparatur zu Termin %s fehlgeschlagen", appt_id)
+        return None
 
 
 # Runde 17 (Nr. 7): Termin-Zustaende, in denen der Protokoll-Abschluss den
@@ -379,7 +442,7 @@ async def _freigabe_zuruecknehmen(bedingung: Dict[str, Any], user_id: Optional[s
 
 
 async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
-                                                user_id: Optional[str] = None) -> bool:
+                                                user_id: Optional[str] = None) -> Optional[bool]:
     """Go-Live 13.09.2026 (P6): Schliesst der Haendler den Termin (storniert /
     nicht abgeholt / erledigt), waehrend das aktuelle Protokoll beim Chef liegt
     oder freigegeben ist, lebte diese Freigabe nach dem Wiederoeffnen einfach
@@ -392,7 +455,11 @@ async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
     Abschluss bekommt den Merker — laeuft sein Claim spaeter ab oder scheitert
     er, geht das Protokoll in den Entwurf statt zurueck auf freigegeben.
     Merker ZUERST: ein Claim, der dazwischen ablaeuft, landet sonst auf
-    freigegeben und wird im zweiten Schritt zurueckgenommen."""
+    freigegeben und wird im zweiten Schritt zurueckgenommen.
+
+    Pruefung 14.09.2026 (C19): Rueckgabe None = Fehler (der Aufrufer setzt
+    einen Betriebsalarm; cleanup_service holt die Ruecknahme ueber
+    freigaben_geschlossener_termine_zuruecknehmen nach). False = nichts zu tun."""
     bedingung = {"appointment_id": appt_id, "superseded": {"$ne": True},
                  "corrects_version": {"$exists": False}}
     try:
@@ -403,7 +470,45 @@ async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
     except Exception:  # noqa: BLE001
         log.exception("Freigabe des Protokolls zu Termin %s konnte beim Schliessen "
                       "nicht zurueckgenommen werden", appt_id)
-        return False
+        return None
+
+
+async def freigaben_geschlossener_termine_zuruecknehmen(dbx=None) -> int:
+    """Pruefung 14.09.2026 (C4/C19): Nachholer fuer den Aufraeum-Job. Findet
+    Protokolle, die beim Chef liegen oder freigegeben sind, obwohl ihr Termin
+    geschlossen ist (Ruecknahme beim Schliessen gescheitert), und nimmt die
+    Freigabe zurueck; offene Korrektur-Versionen an geschlossenen Terminen
+    werden verworfen. Nutzt das uebergebene db-Handle (Aufraeum-Job) — die
+    Hilfsfunktionen dieses Moduls haengen am Modul-db, deshalb hier direkt.
+    Liefert die Zahl der bereinigten Protokolle."""
+    dbx = dbx if dbx is not None else db
+    n = 0
+    async for p in dbx.pickup_protocols.find(
+            {"status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}, "superseded": {"$ne": True}},
+            {"_id": 0, "id": 1, "appointment_id": 1, "corrects_version": 1}).limit(500):
+        appt = await dbx.appointments.find_one({"id": p.get("appointment_id")},
+                                               {"_id": 0, "status": 1})
+        if not appt or (appt.get("status") or "offen") not in _ABGESCHLOSSEN \
+                or appt.get("status") == "abgeholt":
+            continue
+        if "corrects_version" in p:
+            jetzt = now_iso()
+            res = await dbx.pickup_protocols.update_one(
+                {"id": p["id"], "status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}},
+                {"$set": {"superseded": True, "verworfen_am": jetzt, "updated_at": jetzt}})
+            if res.matched_count:
+                await dbx.pickup_protocols.update_one(
+                    {"appointment_id": p["appointment_id"], "version": p["corrects_version"]},
+                    {"$set": {"superseded": False, "updated_at": jetzt},
+                     "$unset": {"superseded_at": ""}})
+                n += 1
+            continue
+        res = await dbx.pickup_protocols.update_one(
+            {"id": p["id"], "status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}},
+            _zuruecknehmen_aenderung(None))
+        if res.matched_count:
+            n += 1
+    return n
 
 
 async def _preis_uebernehmen(appt: dict, doc: dict, *, nachholen: bool = False) -> None:
@@ -673,14 +778,32 @@ def _pflichtfelder_pruefen(doc: dict, appt: dict, *,
     Verkaeufername aus (die traegt der Fahrer erst beim Unterschreiben ein).
     """
     # Abschnitt 1: alle 12 Fahrzeugdaten-Zeilen muessen beantwortet sein.
+    # Pruefung 14.09.2026 (C12): und zwar mit einer der ANGEBOTENEN Antworten —
+    # vorher genuegte irgendein Text ("x"), und "weicht ab" ohne den
+    # tatsaechlichen Wert stand als leere Abweichung im unterschriebenen PDF.
     vc = doc.get("vehicle_check") or {}
-    fehlend = [label for key, label, _opts in VEHICLE_CHECK_FIELDS
-               if not str((vc.get(key) or {}).get("status")
-                          if isinstance(vc.get(key), dict)
-                          else vc.get(key) or "").strip()]
+    fehlend, ungueltig, ohne_wert = [], [], []
+    for key, label, opts in VEHICLE_CHECK_FIELDS:
+        eintrag = vc.get(key)
+        status = str((eintrag or {}).get("status") if isinstance(eintrag, dict)
+                     else eintrag or "").strip()
+        if not status:
+            fehlend.append(label)
+        elif status not in opts:
+            ungueltig.append(label)
+        elif status == "weicht ab" and not str(
+                (eintrag or {}).get("value") if isinstance(eintrag, dict) else "").strip():
+            ohne_wert.append(label)
     if fehlend:
         raise HTTPException(422, "Abschnitt 1 unvollständig — bitte noch "
                                  "ankreuzen: " + ", ".join(fehlend))
+    if ungueltig:
+        raise HTTPException(422, "Abschnitt 1: ungültige Antwort bei "
+                                 + ", ".join(ungueltig) + " — bitte eine der "
+                                 "angebotenen Antworten wählen.")
+    if ohne_wert:
+        raise HTTPException(422, "Abschnitt 1: bei \"weicht ab\" bitte den tatsächlichen "
+                                 "Wert eintragen: " + ", ".join(ohne_wert))
     cond = doc.get("condition") or {}
     if not str(cond.get("mileage") or "").strip():
         raise HTTPException(422, "Bitte den Kilometerstand bei Abholung "
@@ -752,10 +875,13 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
         await _freigabe_zuruecknehmen(
             {"id": doc["id"], "status": ZUR_FREIGABE, "freigabe_stand": jetzt}, None)
         _termin_offen_oder_409(frisch)
-    await log_activity(appt.get("dealer_id", ""), driver["id"],
-                       "protokoll.zur_freigabe", ref=doc["id"],
-                       meta={"appointment_id": appt_id,
-                             "vehicle_id": appt.get("vehicle_id")})
+    # Pruefung 14.09.2026 (C8): Das Protokoll liegt ab hier beim Chef — ein
+    # scheiternder Audit-Eintrag gab vorher 500, die App zeigte einen Fehler
+    # und der Fahrer tippte erneut (dann "bereits").
+    await log_activity_sicher(appt.get("dealer_id", ""), driver["id"],
+                              "protokoll.zur_freigabe", ref=doc["id"],
+                              meta={"appointment_id": appt_id,
+                                    "vehicle_id": appt.get("vehicle_id")})
     return {"ok": True, "status": ZUR_FREIGABE, "protocol_id": doc["id"]}
 
 
@@ -791,12 +917,22 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
                             "abgeschickt_am", "abgeschickt_von", "erstmals_abgeschickt_am",
                             "freigegeben_am", "freigegeben_von", "freigabe_stand",
                             "rueckfrage", "rueckfrage_am", "rueckfrage_von")}
+    # Pruefung 14.09.2026 (C3): NICHT "aktuelle + 1" — nach einer verworfenen
+    # Korrektur (Version 2 verworfen, Version 1 wieder aktuell) kollidierte die
+    # naechste Korrektur mit der verworfenen 2 (Unique-Index) und lief in 409.
+    hoechste = await db.pickup_protocols.find_one(
+        {"appointment_id": appt_id}, {"_id": 0, "version": 1}, sort=[("version", -1)])
+    naechste = max(int((hoechste or {}).get("version") or 1), int(doc.get("version", 1))) + 1
     new_doc.update({
         "id": str(uuid.uuid4()),
-        "version": int(doc.get("version", 1)) + 1,
+        "version": naechste,
         "status": "entwurf",
         "superseded": False,
         "corrects_version": doc.get("version", 1),
+        # Pruefung 14.09.2026 (C2): die Korrektur macht DER Fahrer, der sie
+        # startet — vorher blieb der Name des Vorgaengers in der Folgeversion.
+        "driver_account_id": driver["id"],
+        "driver_name": driver.get("display_name", ""),
         "created_at": now_iso(), "updated_at": now_iso(),
     })
 
@@ -928,7 +1064,13 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     # Gegenpruefung 12.09.2026: auch Vermerk und Freigabe-Stand. Aenderte der
     # Chef nur den Vermerk, stand der neue Text sonst ueber Unterschriften,
     # die ihn nie gesehen hatten.
+    # Pruefung 14.09.2026 (C16): Der Stand ist PFLICHT. Ohne ihn (aeltere
+    # App, manipulierter Aufruf) liess sich die Pruefung umgehen und ein
+    # inzwischen geaenderter Vermerk stand ueber Unterschriften, die ihn nie
+    # gesehen hatten. Alle Apps schicken den Stand seit Runde 33.
     _stand_jetzt = doc.get("freigabe_stand")
+    if _stand_jetzt and body.freigabe_stand_gesehen is None:
+        raise HTTPException(409, STAND_FEHLT)
     if (body.freigabe_stand_gesehen is not None
             and body.freigabe_stand_gesehen != (_stand_jetzt or "")):
         raise HTTPException(409, STAND_GEAENDERT)
@@ -1202,11 +1344,13 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
         await _nacharbeit_erledigt(appt_id, doc)
-    await log_activity(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",
-                       ref=appt.get("vehicle_id"),
-                       meta={"version": doc.get("version", 1),
-                             "appointment_id": appt_id,
-                             "termin_gesetzt": termin_gesetzt})
+    # Pruefung 14.09.2026 (C8): Protokoll und Termin sind fertig — kein 500 mehr
+    # durch einen scheiternden Audit-Eintrag.
+    await log_activity_sicher(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",
+                              ref=appt.get("vehicle_id"),
+                              meta={"version": doc.get("version", 1),
+                                    "appointment_id": appt_id,
+                                    "termin_gesetzt": termin_gesetzt})
     out: Dict[str, Any] = {
         "ok": True, "protocol_id": doc["id"], "version": doc.get("version", 1),
         "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}
@@ -1218,17 +1362,37 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
 @router.get("/driver/appointments/{appt_id}/protocol.pdf")
 async def driver_protocol_pdf(appt_id: str, driver=Depends(current_driver)):
     """Das ausgefüllte, abgeschlossene Protokoll als PDF (Fahrer-Ansicht)."""
-    from fastapi import Response
     await _appt_or_404(appt_id, driver)
     doc = await _current(appt_id)
+    if not doc or doc.get("status") != "final":
+        # Pruefung 14.09.2026 (C9): Waehrend einer Korrektur (neue Version im
+        # Entwurf) ist die letzte UNTERSCHRIEBENE Version weiter das gueltige
+        # Dokument — vorher 404, obwohl das PDF existierte.
+        doc = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "status": "final"}, {"_id": 0},
+            sort=[("version", -1)])
     if not doc or doc.get("status") != "final" or not doc.get("pdf_path"):
         raise HTTPException(404, "Noch kein abgeschlossenes Protokoll vorhanden")
+    return await _protokoll_pdf_antwort(doc)
+
+
+async def _protokoll_pdf_antwort(doc: dict):
+    """Pruefung 14.09.2026 (C10/C20): Personendaten — nie im Browser-Cache
+    (no-store, wie Abholauftrag und Vertrag); eine vorgemerkte, noch nicht
+    nachgeholte Dateiloeschung (pdf_path_loeschung_offen) liefert 410 statt
+    das PDF weiter auszugeben."""
+    from fastapi import Response
+    if doc.get("pdf_path_loeschung_offen"):
+        raise HTTPException(410, "Das Protokoll-PDF wurde nach Ablauf der "
+                                 "Aufbewahrungsfrist gelöscht.")
     from storage_service import load_async, StorageError
     try:
         data = await load_async(doc["pdf_path"])
     except StorageError:
         raise HTTPException(404, "PDF nicht gefunden")
-    return Response(content=data, media_type="application/pdf")
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="Abholprotokoll.pdf"',
+                             "Cache-Control": "no-store"})
 
 
 async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
@@ -1308,6 +1472,11 @@ _FREIGABE_MAX = 500
 STAND_GEAENDERT = ("Der Händler hat Preis oder Vermerk inzwischen geändert. Bitte die "
                    "Seite neu laden und dem Verkäufer den neuen Stand zeigen, bevor "
                    "unterschrieben wird.")
+# Pruefung 14.09.2026 (C7/C16): ohne Stand keine Freigabe / kein Abschluss.
+STAND_FEHLT = ("Die App hat den Freigabe-Stand nicht mitgeschickt — bitte die Seite neu "
+               "laden und die Freigabe erneut anzeigen, bevor unterschrieben wird.")
+STAND_FEHLT_FREIGABE = ("Die Freigabe-Ansicht ist veraltet — bitte die Seite neu laden und "
+                        "erneut freigeben.")
 
 # Gegenpruefung 12.09.2026: Der Zaehler im Menue fragt alle 20 s je offenem
 # Tab — dafuer nur die Felder, die er braucht, nicht ganze Protokolle.
@@ -1563,12 +1732,20 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
                                  "eine Freigabe ist nicht mehr möglich.")
     jetzt = now_iso()
     bedingung: Dict[str, Any] = {"id": protocol_id, "status": {"$in": _FREIGABE_STATI}}
-    if body.stand:
+    # Pruefung 14.09.2026 (C7): Der Stand ist PFLICHT — ohne ihn gewann bei
+    # zwei gleichzeitigen Freigaben (Chef und Sucher, verschiedene Preise)
+    # stillschweigend der Letzte. Die Oberflaeche schickt ihn seit Runde 33.
+    # Protokolle von vor dieser Fassung (ohne Stand) wie bisher: mit Stand
+    # gegen updated_at, ohne Stand ungeprueft.
+    if doc.get("freigabe_stand"):
+        if not body.stand:
+            raise HTTPException(409, STAND_FEHLT_FREIGABE)
         # Gegenpruefung 12.09.2026: gegen den Freigabe-Stand, nicht updated_at —
         # den aendern auch Claim und Rollback eines gescheiterten Abschlusses,
-        # und der Chef las dann von einer "fremden" Freigabe. Protokolle von vor
-        # dieser Fassung haben noch keinen Stand: dann wie bisher.
-        bedingung["freigabe_stand" if doc.get("freigabe_stand") else "updated_at"] = body.stand
+        # und der Chef las dann von einer "fremden" Freigabe.
+        bedingung["freigabe_stand"] = body.stand
+    elif body.stand:
+        bedingung["updated_at"] = body.stand
 
     if body.zurueck:
         res = await db.pickup_protocols.update_one(
@@ -1579,9 +1756,12 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
              "$unset": {"freigegeben_am": "", "freigegeben_von": ""}})
         if not res.matched_count:
             raise HTTPException(409, await _freigabe_konflikt(protocol_id, user))
-        await log_activity(user["dealer_id"], user["id"],
-                           "protokoll.zurueck_an_fahrer", ref=protocol_id,
-                           meta={"notiz": (body.notiz or "")[:200]})
+        # Pruefung 14.09.2026 (C8): Die Freigabe ist geschrieben — ein
+        # scheiternder Audit-Eintrag gab 500 und die Oberflaeche liess den
+        # Chef wiederholen (dann Konflikt 409, weil der Stand neu ist).
+        await log_activity_sicher(user["dealer_id"], user["id"],
+                                  "protokoll.zurueck_an_fahrer", ref=protocol_id,
+                                  meta={"notiz": (body.notiz or "")[:200]})
         return {"ok": True, "status": "entwurf", "stand": jetzt}
 
     if body.preis_zuruecksetzen:
@@ -1596,8 +1776,9 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
             {"$set": zuruecksetzen, "$unset": {"neuer_preis": "", "preis_notiz": ""}})
         if not res.matched_count:
             raise HTTPException(409, await _freigabe_konflikt(protocol_id, user))
-        await log_activity(user["dealer_id"], user["id"], "protokoll.preis_zurueckgesetzt",
-                           ref=protocol_id, meta={"vorher": doc.get("neuer_preis")})
+        await log_activity_sicher(user["dealer_id"], user["id"],
+                                  "protokoll.preis_zurueckgesetzt",
+                                  ref=protocol_id, meta={"vorher": doc.get("neuer_preis")})
         return {"ok": True, "status": doc.get("status"), "neuer_preis": None, "stand": jetzt}
 
     setzen: Dict[str, Any] = {"status": FREIGEGEBEN, "freigegeben_am": jetzt,
@@ -1612,10 +1793,10 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         {"$set": setzen, "$unset": {"rueckfrage": "", "rueckfrage_am": ""}})
     if not res.matched_count:
         raise HTTPException(409, await _freigabe_konflikt(protocol_id, user))
-    await log_activity(user["dealer_id"], user["id"], "protokoll.freigegeben",
-                       ref=protocol_id,
-                       meta={"neuer_preis": body.neuer_preis,
-                             "notiz": (body.notiz or "")[:200]})
+    await log_activity_sicher(user["dealer_id"], user["id"], "protokoll.freigegeben",
+                              ref=protocol_id,
+                              meta={"neuer_preis": body.neuer_preis,
+                                    "notiz": (body.notiz or "")[:200]})
     return {"ok": True, "status": FREIGEGEBEN,
             "neuer_preis": setzen.get("neuer_preis", doc.get("neuer_preis")),
             "stand": jetzt}
@@ -1623,7 +1804,6 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
 
 @router.get("/protocols/{protocol_id}.pdf")
 async def dealer_protocol_pdf(protocol_id: str, user=Depends(_dealer_dep)):
-    from fastapi import Response
     doc = await db.pickup_protocols.find_one(
         {"id": protocol_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not doc or not doc.get("pdf_path"):
@@ -1631,9 +1811,4 @@ async def dealer_protocol_pdf(protocol_id: str, user=Depends(_dealer_dep)):
     # Runde 16: Sucher nur im eigenen Bereich (Fahrzeug oder Termin).
     if ist_sucher(user) and not await _protokoll_im_bereich(user, doc):
         raise HTTPException(404, "Protokoll nicht gefunden")
-    from storage_service import load_async, StorageError
-    try:
-        data = await load_async(doc["pdf_path"])
-    except StorageError:
-        raise HTTPException(404, "PDF nicht gefunden")
-    return Response(content=data, media_type="application/pdf")
+    return await _protokoll_pdf_antwort(doc)

@@ -84,9 +84,10 @@ test.describe("Abholprotokoll: Freigabe und Knopfleiste", () => {
     // Protokoll vollstaendig ueber die API fuellen (die Tipparbeit selbst
     // deckt die Unit-Ebene ab; hier geht es um den Ablauf).
     const tpl = await h.get(`/driver/appointments/${appt.id}/protocol`, { token: tok });
-    const felder = tpl.template.vehicle_check_fields.map((f) => f.key);
+    // Pruefung 14.09.2026 (C12): je Zeile eine der angebotenen Antworten.
+    const felder = tpl.template.vehicle_check_fields;
     await h.put(`/driver/appointments/${appt.id}/protocol`, {
-      vehicle_check: Object.fromEntries(felder.map((k) => [k, { status: "stimmt" }])),
+      vehicle_check: Object.fromEntries(felder.map((f) => [f.key, { status: f.options[0] }])),
       keys_count: "2", condition: { mileage: "75200" }, damages_confirmed: true,
       place: "Hannover", notes: "E2E",
     }, { token: tok });

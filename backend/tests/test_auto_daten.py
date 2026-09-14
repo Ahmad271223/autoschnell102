@@ -303,6 +303,9 @@ def test_08_vertrag_nach_90_tagen_vollstaendig_geloescht(welt):
     alt = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
     dbx.generated_pdfs.update_one({"id": cid}, {"$set": {"created_at": alt}})
     assert dbx.generated_pdf_versions.count_documents({"contract_id": cid}) >= 1
+    # Pruefung 14.09.2026 (D1): ein Vertrag mit noch OFFENEM Termin wird
+    # zurueckgestellt — die Abholung ist hier laengst vorbei.
+    dbx.appointments.update_one({"id": welt["appt_id"]}, {"$set": {"status": "erledigt"}})
     now = datetime.now(timezone.utc)
     n = _run(lambda mdb: vertraege_nach_frist_loeschen(mdb, now, aktiv=True))
     assert n >= 1

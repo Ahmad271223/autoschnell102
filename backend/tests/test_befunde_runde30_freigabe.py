@@ -134,7 +134,7 @@ def _vollstaendig(w, P, **extra):
         "vehicle_id": w.vid, "driver_account_id": w.driver["id"],
         "driver_name": w.driver["display_name"], "version": 1,
         "status": "entwurf", "superseded": False,
-        "vehicle_check": {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
+        "vehicle_check": {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
         "condition": {"mileage": "75200"}, "keys_count": "2",
         "damages_confirmed": True, "place": "Warschau",
         "created_at": _jetzt(), "updated_at": _jetzt(),
@@ -143,14 +143,15 @@ def _vollstaendig(w, P, **extra):
     return doc
 
 
-def _fin(P, preis=None):
+def _fin(P, preis=None, stand=None):
     """Unterschreiben. `preis` = der Preis, den die App angezeigt hat —
     der Server vergleicht ihn mit dem freigegebenen Stand (Gegenpruefung
-    12.09.2026)."""
+    12.09.2026). `stand` = der gesehene Freigabe-Stand (Pflicht seit der
+    Pruefung 14.09.2026, sobald das Protokoll einen Stand traegt)."""
     return P.FinalizeIn(signature_driver_b64=_PNG_B64,
                         signature_seller_b64=_PNG_B64,
                         seller_name="Verkäufer V", place="Warschau",
-                        neuer_preis_gesehen=preis)
+                        neuer_preis_gesehen=preis, freigabe_stand_gesehen=stand)
 
 
 # ------------------------------------------------------- Der ganze Ablauf
@@ -161,7 +162,7 @@ def test_01_fahrer_schickt_ab_chef_gibt_mit_neuem_preis_frei(welt):
     async def lauf():
         await w.db.pickup_protocols.insert_one(_vollstaendig(w, P, **{
             "vehicle_check": {
-                **{k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
+                **{k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
                 "mileage_contract": {"status": "weicht ab", "value": "75.200 km"}},
             "new_damages": [{"view": "front", "zone": "hood", "x": 0.5, "y": 0.5,
                              "type": "SS", "zone_label": "Motorhaube"}],
@@ -184,11 +185,12 @@ def test_01_fahrer_schickt_ab_chef_gibt_mit_neuem_preis_frei(welt):
         # 5. Er gibt mit neuem Preis frei
         frei = await P.protokoll_freigeben(
             liste[0]["protocol_id"],
-            P.FreigabeIn(neuer_preis=17250, notiz="Steinschlag, 1.250 € Abzug"),
+            P.FreigabeIn(neuer_preis=17250, notiz="Steinschlag, 1.250 € Abzug",
+                         stand=liste[0]["stand"]),
             w.chef)
 
         # 6. Jetzt wird unterschrieben
-        fertig = await P.finalize_protocol(w.aid, _fin(P, 17250), w.driver)
+        fertig = await P.finalize_protocol(w.aid, _fin(P, 17250, frei["stand"]), w.driver)
         proto = await w.db.pickup_protocols.find_one({"id": liste[0]["protocol_id"]},
                                                      {"_id": 0})
         kv = await w.db.kaufvorgaenge.find_one({"id": w.kid}, {"_id": 0})
@@ -228,8 +230,9 @@ def test_02_ohne_verhandlung_bleibt_der_vertragspreis(welt):
         await w.db.pickup_protocols.insert_one(_vollstaendig(w, P))
         await P.submit_protocol(w.aid, w.driver)
         liste = await P.protokolle_zur_freigabe(w.chef)
-        await P.protokoll_freigeben(liste[0]["protocol_id"], P.FreigabeIn(), w.chef)
-        await P.finalize_protocol(w.aid, _fin(P), w.driver)
+        frei = await P.protokoll_freigeben(liste[0]["protocol_id"],
+                                           P.FreigabeIn(stand=liste[0]["stand"]), w.chef)
+        await P.finalize_protocol(w.aid, _fin(P, None, frei["stand"]), w.driver)
         proto = await w.db.pickup_protocols.find_one({"id": liste[0]["protocol_id"]},
                                                      {"_id": 0})
         kv = await w.db.kaufvorgaenge.find_one({"id": w.kid}, {"_id": 0})
@@ -251,7 +254,8 @@ def test_03_chef_schickt_zurueck_fahrer_kann_wieder_aendern(welt):
         liste = await P.protokolle_zur_freigabe(w.chef)
         zurueck = await P.protokoll_freigeben(
             liste[0]["protocol_id"],
-            P.FreigabeIn(zurueck=True, notiz="Bitte Reifenprofil nachtragen"),
+            P.FreigabeIn(zurueck=True, notiz="Bitte Reifenprofil nachtragen",
+                         stand=liste[0]["stand"]),
             w.chef)
         # Der Fahrer darf jetzt wieder speichern
         gespeichert = await P.save_protocol(
@@ -394,10 +398,12 @@ def test_10_zurueckgezogene_freigabe_verhindert_den_abschluss(welt):
         await P.submit_protocol(w.aid, w.driver)
         liste = await P.protokolle_zur_freigabe(w.chef)
         pid = liste[0]["protocol_id"]
-        await P.protokoll_freigeben(pid, P.FreigabeIn(neuer_preis=17250), w.chef)
+        fr = await P.protokoll_freigeben(
+            pid, P.FreigabeIn(neuer_preis=17250, stand=liste[0]["stand"]), w.chef)
         # Der Chef zieht zurueck, waehrend der Fahrer unterschreibt
         await P.protokoll_freigeben(
-            pid, P.FreigabeIn(zurueck=True, notiz="STOPP, neu verhandeln"), w.chef)
+            pid, P.FreigabeIn(zurueck=True, notiz="STOPP, neu verhandeln", stand=fr["stand"]),
+            w.chef)
         with pytest.raises(HTTPException) as e:
             await P.finalize_protocol(
                 w.aid, P.FinalizeIn(signature_driver_b64=_PNG_B64,
@@ -426,9 +432,11 @@ def test_11_geaenderter_preis_stoppt_den_abschluss(welt):
         await P.submit_protocol(w.aid, w.driver)
         liste = await P.protokolle_zur_freigabe(w.chef)
         pid = liste[0]["protocol_id"]
-        await P.protokoll_freigeben(pid, P.FreigabeIn(neuer_preis=17250), w.chef)
+        fr1 = await P.protokoll_freigeben(
+            pid, P.FreigabeIn(neuer_preis=17250, stand=liste[0]["stand"]), w.chef)
         # Der Fahrer hat 17250 gesehen; der Chef aendert auf 16500.
-        await P.protokoll_freigeben(pid, P.FreigabeIn(neuer_preis=16500), w.chef)
+        fr2 = await P.protokoll_freigeben(
+            pid, P.FreigabeIn(neuer_preis=16500, stand=fr1["stand"]), w.chef)
         with pytest.raises(HTTPException) as e:
             await P.finalize_protocol(
                 w.aid, P.FinalizeIn(signature_driver_b64=_PNG_B64,
@@ -440,7 +448,8 @@ def test_11_geaenderter_preis_stoppt_den_abschluss(welt):
             w.aid, P.FinalizeIn(signature_driver_b64=_PNG_B64,
                                 signature_seller_b64=_PNG_B64,
                                 seller_name="V", place="Warschau",
-                                neuer_preis_gesehen=16500), w.driver)
+                                neuer_preis_gesehen=16500,
+                                freigabe_stand_gesehen=fr2["stand"]), w.driver)
         kv = await w.db.kaufvorgaenge.find_one({"id": w.kid}, {"_id": 0})
         return e.value, ok, kv
 
@@ -478,15 +487,17 @@ def test_13_vermerk_mit_spitzer_klammer_bricht_das_pdf_nicht(welt):
         await w.db.pickup_protocols.insert_one(_vollstaendig(w, P))
         await P.submit_protocol(w.aid, w.driver)
         liste = await P.protokolle_zur_freigabe(w.chef)
-        await P.protokoll_freigeben(
+        fr = await P.protokoll_freigeben(
             liste[0]["protocol_id"],
-            P.FreigabeIn(neuer_preis=16000, notiz="Bremsen <b> vorn & Rost <u 500"),
+            P.FreigabeIn(neuer_preis=16000, notiz="Bremsen <b> vorn & Rost <u 500",
+                         stand=liste[0]["stand"]),
             w.chef)
         return await P.finalize_protocol(
             w.aid, P.FinalizeIn(signature_driver_b64=_PNG_B64,
                                 signature_seller_b64=_PNG_B64,
                                 seller_name="V", place="Warschau",
-                                neuer_preis_gesehen=16000), w.driver)
+                                neuer_preis_gesehen=16000,
+                                freigabe_stand_gesehen=fr["stand"]), w.driver)
 
     r = w.run(lauf())
     assert r["ok"] is True, "der Abschluss darf an einem Vermerk nicht scheitern"

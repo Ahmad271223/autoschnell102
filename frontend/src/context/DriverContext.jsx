@@ -64,7 +64,19 @@ export function DriverAuthProvider({ children }) {
     const { data } = await driverApi.post("/driver/login", { kontonummer: kennung, password });
     tokenSetzen(TOKEN_FAHRER, data.token);
     // volle /me-Payload holen (inkl. dealers)
-    const me = await driverApi.get("/driver/me");
+    // Pruefung 14.09.2026 (A5): Scheitert /me nach dem Speichern des Tokens,
+    // blieb ein Token ohne Fahrerdaten zurueck (Seite halb angemeldet). Lehnt
+    // der Server die Sitzung ab, Token weg; bei Netzfehlern bleibt er, die
+    // Layout-Anzeige "Keine Verbindung" greift (wie beim Start).
+    let me;
+    try {
+      me = await driverApi.get("/driver/me");
+    } catch (e) {
+      const status = e?.response?.status;
+      if (status === 401 || status === 403) tokenLoeschen(TOKEN_FAHRER);
+      else setFehler(verbindungsGrund(e));
+      throw e;
+    }
     setDriver(me.data);
     setFehler(null);
     return me.data;

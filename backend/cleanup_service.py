@@ -359,6 +359,14 @@ async def _cleanup_once(db) -> dict:
         db, now, stats=stats)
     stats["termine_ohne_vertrag_bereinigt"] = await termine_ohne_vertrag_bereinigen(db, now)
     stats["protokoll_orte_nachgezogen"] = await protokoll_orte_nachziehen(db)
+    # Pruefung 14.09.2026: liegengebliebene Nacharbeit (C4), gescheiterte
+    # Freigabe-Ruecknahmen (C19), Termine ohne aktuelle Protokollversion
+    # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
+    stats["termin_nacharbeit_nachgeholt"] = await termin_nacharbeit_nachholen(db, now)
+    stats["protokoll_freigaben_zurueckgenommen"] = \
+        await protokoll_freigaben_nachziehen(db)
+    stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
+    stats["fahrernamen_nachgezogen"] = await fahrernamen_nachziehen(db)
     stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)
     stats["storage_nachgeholt"] = await storage_loeschungen_nachholen(db)
     stats["logs_rotiert"] = await logs_rotieren(db, now)
@@ -449,6 +457,7 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
         return 0
     geloescht = 0
     uebersprungen = 0
+    zurueckgestellt = 0
     for c in kandidaten:
         avd_id = c.get("admin_vehicle_data_id")
         if not avd_id or not await db[auto_daten.COLLECTION].count_documents(
@@ -459,23 +468,63 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
                         contract_no=c.get("contract_no") or "",
                         admin_vehicle_data_id=avd_id or "")
             continue
+        # Pruefung 14.09.2026 (D1): Die Frist lief bisher ab dem ANLEGEN des
+        # Vertrags — ein Vertrag mit noch offenem Abholtermin oder einem
+        # frisch unterschriebenen Protokoll wurde mitsamt Unterschriften und
+        # Protokoll-PDF geloescht, waehrend die Abholung noch lief oder gerade
+        # erst stattgefunden hatte. Solche Vertraege warten, bis Termin
+        # geschlossen und Protokoll aelter als die Frist sind.
+        if await vertrag_noch_in_gebrauch(db, c["id"], cutoff):
+            zurueckgestellt += 1
+            continue
         if await vertrag_endgueltig_loeschen(db, c["id"], scrub_pii=True,
                                              grund="90tage"):
             geloescht += 1
     if stats is not None:
         stats["contracts_uebersprungen"] = uebersprungen
+        stats["contracts_zurueckgestellt"] = zurueckgestellt
     return geloescht
 
 
+async def vertrag_noch_in_gebrauch(db, contract_id: str, cutoff: str) -> bool:
+    """Pruefung 14.09.2026 (D1): offener Termin zum Vertrag oder ein finales
+    Protokoll, das juenger als die Frist ist -> Vertrag bleibt."""
+    if await db.appointments.count_documents(
+            {"contract_id": contract_id,
+             "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}}, limit=1):
+        return True
+    termin_ids = [a["id"] async for a in db.appointments.find(
+        {"contract_id": contract_id}, {"_id": 0, "id": 1})]
+    bedingung = {"status": "final", "finalized_at": {"$gt": cutoff}}
+    oder = [{"contract_id": contract_id}]
+    if termin_ids:
+        oder.append({"appointment_id": {"$in": termin_ids}})
+    return bool(await db.pickup_protocols.count_documents(
+        {**bedingung, "$or": oder}, limit=1))
+
+
+_TERMIN_GESCHLOSSEN = ("abgeholt", "nicht abgeholt", "storniert", "erledigt")
+
+
 async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
-                                    jetzt: str) -> None:
+                                    jetzt: str, contract_id: Optional[str] = None) -> None:
     """Abhol-Protokolle dieser Termine: Verkaeufername, Ort, Unterschriften
     und das unterschriebene PDF entfernen (Review 09/2026: blieben
     unbefristet). Der technische Zustandsteil des Protokolls bleibt.
     Dateien, die sich nicht loeschen lassen, bleiben referenziert
-    (`<feld>_loeschung_offen: True`) und werden nachgeholt."""
+    (`<feld>_loeschung_offen: True`) und werden nachgeholt.
+
+    Pruefung 14.09.2026 (C21): zusaetzlich ueber pickup_protocols.contract_id
+    (seit Go-Live 13.09. im finalen Protokoll) — wurde der Termin nach dem
+    Abschluss an einen anderen Vertrag gehaengt oder vom Vertrag geloest,
+    fand die Suche ueber die Termine das unterschriebene Protokoll nicht."""
+    oder = [{"appointment_id": {"$in": termin_ids}}] if termin_ids else []
+    if contract_id:
+        oder.append({"contract_id": contract_id})
+    if not oder:
+        return
     async for p in db.pickup_protocols.find(
-            {"appointment_id": {"$in": termin_ids}},
+            {"$or": oder},
             {"_id": 0, "id": 1, "pdf_path": 1, "signature_driver_key": 1,
              "signature_seller_key": 1}):
         unset, offen = {}, {}
@@ -501,6 +550,98 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         if unset:
             upd["$unset"] = unset
         await db.pickup_protocols.update_one({"id": p["id"]}, upd)
+
+
+async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int = 10) -> int:
+    """Pruefung 14.09.2026 (C4): Termine mit Merker nacharbeit_offen (Vorgangs-
+    und Fahrzeugstatus bzw. Preis nach einem DB-Aussetzer nicht nachgezogen)
+    wurden nur beim NAECHSTEN SPEICHERN des Termins nachgeholt — kam keins,
+    blieb der Kaufvorgang fuer immer alt. Jetzt zieht der Aufraeum-Job nach,
+    sobald der Merker aelter als `mindestalter_min` ist. Liefert die Anzahl."""
+    grenze = (now - timedelta(minutes=mindestalter_min)).isoformat()
+    n = 0
+    async for appt in db.appointments.find({"nacharbeit_offen": True}, {"_id": 0}).limit(200):
+        stempel = appt.get("updated_at") or appt.get("created_at") or ""
+        if stempel > grenze:
+            continue
+        try:
+            from routes.protocols import preis_nachholen
+            import kaufvorgang as _kv
+            from lifecycle import try_set_lifecycle
+            status = appt.get("status") or "offen"
+            await preis_nachholen(appt)
+            hat_vorgang = await _kv.termin_status_uebernehmen(appt, status)
+            if not hat_vorgang and appt.get("vehicle_id"):
+                ziel = {"abgeholt": "abgeholt", "nicht abgeholt": "nicht_abgeholt"}.get(
+                    status, "abholung_geplant" if status not in _TERMIN_GESCHLOSSEN else None)
+                if ziel:
+                    await try_set_lifecycle(appt["vehicle_id"], appt.get("dealer_id", ""), ziel)
+            await db.appointments.update_one(
+                {"id": appt["id"]},
+                {"$unset": {"nacharbeit_offen": "", "nacharbeit_protokoll_id": ""}})
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Nacharbeit zu Termin %s konnte nicht nachgeholt werden",
+                          appt.get("id"))
+    return n
+
+
+async def protokoll_freigaben_nachziehen(db) -> int:
+    """Pruefung 14.09.2026 (C19): Freigaben an geschlossenen Terminen
+    zuruecknehmen, deren Ruecknahme beim Schliessen gescheitert war; der
+    zugehoerige Betriebsalarm wird geschlossen."""
+    try:
+        from routes.protocols import freigaben_geschlossener_termine_zuruecknehmen
+        n = await freigaben_geschlossener_termine_zuruecknehmen(db)
+    except Exception:  # noqa: BLE001
+        log.exception("Freigaben geschlossener Termine konnten nicht nachgezogen werden")
+        return 0
+    async for a in db.betriebsalarme.find(
+            {"typ": "protokoll_freigabe_ruecknahme_offen", "offen": True},
+            {"_id": 0, "ref": 1}).limit(200):
+        if not await db.pickup_protocols.count_documents(
+                {"appointment_id": a.get("ref"), "superseded": {"$ne": True},
+                 "status": {"$in": ["zur_freigabe", "freigegeben"]}}, limit=1):
+            await alarm_schliessen(db, "protokoll_freigabe_ruecknahme_offen", ref=a.get("ref"))
+    return n
+
+
+async def protokolle_ohne_aktuelle_version_reparieren(db) -> int:
+    """Pruefung 14.09.2026 (C17/C18): Termine, deren Protokollversionen ALLE
+    abgeloest sind, bekommen ihre massgebliche Version zurueck (siehe
+    routes.protocols.ohne_aktuelle_version_reparieren)."""
+    try:
+        from routes.protocols import ohne_aktuelle_version_reparieren
+    except Exception:  # noqa: BLE001
+        return 0
+    n = 0
+    termine = await db.pickup_protocols.distinct("appointment_id", {"superseded": True})
+    for appt_id in termine[:500]:
+        if await db.pickup_protocols.count_documents(
+                {"appointment_id": appt_id, "superseded": {"$ne": True}}, limit=1):
+            continue
+        if await ohne_aktuelle_version_reparieren(appt_id, db):
+            n += 1
+    return n
+
+
+async def fahrernamen_nachziehen(db) -> int:
+    """Pruefung 14.09.2026 (A6): Anzeigenamen, die nach einer Aenderung nicht in
+    alle Firmen-Verknuepfungen kamen (Merker name_sync_offen), verteilen."""
+    n = 0
+    async for konto in db.driver_accounts.find(
+            {"name_sync_offen": True}, {"_id": 0, "id": 1, "display_name": 1}).limit(200):
+        try:
+            await db.dealer_drivers.update_many(
+                {"driver_account_id": konto["id"]},
+                {"$set": {"display_name": konto.get("display_name") or ""}})
+            await db.driver_accounts.update_one(
+                {"id": konto["id"], "display_name": konto.get("display_name")},
+                {"$unset": {"name_sync_offen": ""}})
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Fahrername %s konnte nicht nachgezogen werden", konto.get("id"))
+    return n
 
 
 async def protokoll_orte_nachziehen(db) -> int:
@@ -566,8 +707,9 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
         {"contract_id": contract_id}, {"_id": 0, "id": 1})]
     # 3) Personendaten (Protokolle VOR dem Loesen der Termine — sonst
     #    findet eine Wiederaufnahme die Protokolle nicht mehr)
-    if scrub_pii and termin_ids:
-        await _protokolle_pii_entfernen(db, termin_ids, dealer_id, jetzt)
+    if scrub_pii:
+        await _protokolle_pii_entfernen(db, termin_ids, dealer_id, jetzt,
+                                        contract_id=contract_id)
         # Termin: Verweis kappen UND die dort kopierten Verkaeuferdaten
         # (Name, Telefon, E-Mail, Abholanschrift) entfernen — sie blieben
         # sonst nach der Vertragsloeschung erhalten (Runde 5).

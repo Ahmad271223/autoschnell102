@@ -122,18 +122,22 @@ def test_aktiv_loescht_nur_mit_auto_datensatz_und_alarmiert_sonst(monkeypatch):
         ])
         await db.generated_pdf_versions.insert_one(
             {"id": f"v_{SUF}", "contract_id": gut, "dealer_id": DEALER, "version": 1})
+        # Pruefung 14.09.2026 (D1): Termin geschlossen, Protokoll aelter als
+        # die Frist — sonst wird der Vertrag zurueckgestellt (eigener Test).
         await db.appointments.insert_one(
-            {"id": appt, "dealer_id": DEALER, "contract_id": gut,
+            {"id": appt, "dealer_id": DEALER, "contract_id": gut, "status": "abgeholt",
              "seller_name": "Max Muster", "seller_phone": "0170",
              "seller_email": "m@x.de", "pickup_address": "Weg 1"})
         await db.pickup_protocols.insert_one(
             {"id": prot, "appointment_id": appt, "dealer_id": DEALER,
+             "status": "final", "finalized_at": ALT,
              "seller_name": "Max Muster", "pickup_address": "Weg 1",
              "pdf_path": f"protocol/{DEALER}/{SUF}.pdf",
              "signature_seller_key": f"protocol/{DEALER}/{SUF}_s.png"})
         stats = {}
         n = await cs.vertraege_nach_frist_loeschen(db, NOW, stats=stats)
         assert n == 1 and stats["contracts_uebersprungen"] == 2
+        assert stats["contracts_zurueckgestellt"] == 0
         assert await db.generated_pdfs.find_one({"id": gut}) is None
         assert await db.generated_pdfs.find_one({"id": haengend}) is not None
         assert await db.generated_pdfs.find_one({"id": ohne}) is not None

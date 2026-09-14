@@ -133,7 +133,7 @@ def _protokoll(w, aid, P, **extra):
            "vehicle_id": aid.replace("t_", "v_", 1), "driver_account_id": w.driver["id"],
            "driver_name": w.driver["display_name"], "version": 1, "status": "entwurf",
            "superseded": False,
-           "vehicle_check": {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
+           "vehicle_check": {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
            "condition": {"mileage": "85000"}, "keys_count": "2", "damages_confirmed": True,
            "place": "Warschau", "created_at": _jetzt(), "updated_at": _jetzt()}
     doc.update(extra)
@@ -141,9 +141,10 @@ def _protokoll(w, aid, P, **extra):
     return doc["id"]
 
 
-def _fin(P, preis=None):
+def _fin(P, preis=None, stand=None):
     return P.FinalizeIn(signature_driver_b64=_PNG_B64, signature_seller_b64=_PNG_B64,
-                        seller_name="MTRADEX", place="Warschau", neuer_preis_gesehen=preis)
+                        seller_name="MTRADEX", place="Warschau", neuer_preis_gesehen=preis,
+                        freigabe_stand_gesehen=stand)
 
 
 def _status(exc):
@@ -197,7 +198,7 @@ def test_03_vergleich_vertrag_vor_ort(welt):
     aid = _abholung(w, "vergleich", vertrag_extra={"vehicle_first_registration": "03/2019",
                                                    "previous_owners": "2", "accident_free": "Ja",
                                                    "commercial_since_ez": "Nein"})
-    vc = {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
+    vc = {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
     vc.update({"first_registration": {"status": "weicht ab", "value": "1.2020"},
                "previous_owners": {"status": "weicht ab", "value": "3"},
                "commercial": {"status": "Nein"}, "accident_free": {"status": "Nein"}})
@@ -248,14 +249,23 @@ def test_05_zweite_freigabe_mit_altem_stand_wird_abgelehnt(welt):
     assert doc["neuer_preis"] == 42000
 
 
-def test_06_ohne_stand_bleibt_der_bisherige_weg(welt):
-    """Aeltere Oberflaeche im Rollout schickt keinen Stand — das muss gehen."""
+def test_06_ohne_stand_nur_bei_altbestand_ohne_freigabe_stand(welt):
+    """Pruefung 14.09.2026 (C7): Traegt das Protokoll einen Freigabe-Stand
+    (jedes seit Runde 33 abgeschickte), ist der Stand PFLICHT — sonst gewann
+    bei zwei gleichzeitigen Freigaben stillschweigend der Letzte. Nur
+    Altbestand ohne Stand geht noch ohne."""
     w = welt
     P = _modul("routes.protocols")
     aid = _abholung(w, "ohnestand")
     _protokoll(w, aid, P, status=P.ZUR_FREIGABE)
     r = w.run(P.protokoll_freigeben(f"p_{aid}", P.FreigabeIn(neuer_preis=41000), w.chef))
     assert r["status"] == P.FREIGEGEBEN and r["neuer_preis"] == 41000
+    # ... jetzt hat es einen Stand: ohne Stand -> 409
+    with pytest.raises(HTTPException) as fehler:
+        w.run(P.protokoll_freigeben(f"p_{aid}", P.FreigabeIn(neuer_preis=40000), w.chef))
+    code, text = _status(fehler.value)
+    assert code == 409 and text == P.STAND_FEHLT_FREIGABE
+    assert w.run(w.db.pickup_protocols.find_one({"id": f"p_{aid}"}))["neuer_preis"] == 41000
 
 
 def test_07_preis_zuruecksetzen_und_abschluss_zum_vertragspreis(welt):
@@ -271,7 +281,7 @@ def test_07_preis_zuruecksetzen_und_abschluss_zum_vertragspreis(welt):
     doc = w.run(w.db.pickup_protocols.find_one({"id": pid}, {"_id": 0}))
     assert "neuer_preis" not in doc and "preis_notiz" not in doc and doc["status"] == P.FREIGEGEBEN
 
-    fertig = w.run(P.finalize_protocol(aid, _fin(P, None), w.driver))
+    fertig = w.run(P.finalize_protocol(aid, _fin(P, None, r["stand"]), w.driver))
     assert fertig["ok"] is True
     kv = w.run(w.db.kaufvorgaenge.find_one({"appointment_id": aid}, {"_id": 0}))
     assert kv["purchase_price"] == 45000
@@ -333,7 +343,9 @@ def test_11_erneutes_abschicken_behaelt_den_platz_in_der_liste(welt):
     _protokoll(w, aid, P)
     w.run(P.submit_protocol(aid, w.driver))
     erstes = w.run(w.db.pickup_protocols.find_one({"id": f"p_{aid}"}))["erstmals_abgeschickt_am"]
-    w.run(P.protokoll_freigeben(f"p_{aid}", P.FreigabeIn(zurueck=True, notiz="Foto fehlt"), w.chef))
+    stand = w.run(P.protokolle_zur_freigabe(w.chef))[0]["stand"]
+    w.run(P.protokoll_freigeben(f"p_{aid}", P.FreigabeIn(zurueck=True, notiz="Foto fehlt", stand=stand),
+                                w.chef))
     w.run(P.submit_protocol(aid, w.driver))
     doc = w.run(w.db.pickup_protocols.find_one({"id": f"p_{aid}"}))
     assert doc["erstmals_abgeschickt_am"] == erstes and doc["status"] == P.ZUR_FREIGABE
@@ -358,7 +370,7 @@ def test_13_pdf_druckt_bei_stimmt_keinen_alten_korrekturwert():
     import io
     PDF = _modul("pickup_pdf_service")
     P = _modul("routes.protocols")
-    vc = {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
+    vc = {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
     vc["first_registration"] = {"status": "stimmt", "value": "07/2011"}     # alter Wert
     vc["color"] = {"status": "weicht ab", "value": "Anthrazit"}
     pdf = PDF.build_pickup_pdf(
@@ -407,7 +419,9 @@ def test_14_vermerk_geaendert_nach_freigabe_stoppt_den_abschluss(welt):
 
 def test_15_claim_prueft_auch_den_vermerk(welt, monkeypatch):
     """Aendert der Chef den Vermerk genau zwischen Pruefung und Claim, darf
-    auch eine aeltere App (ohne Stand) nicht abschliessen."""
+    der Abschluss nicht durchgehen — der Claim prueft den Stand erneut.
+    (Pruefung 14.09.2026, C16: ohne Stand gibt es gar keinen Abschluss mehr,
+    deshalb schickt die App hier den zuletzt gesehenen Stand mit.)"""
     from pymongo import MongoClient
     w = welt
     P = _modul("routes.protocols")
@@ -426,7 +440,7 @@ def test_15_claim_prueft_auch_den_vermerk(welt, monkeypatch):
     monkeypatch.setattr(P, "_pflichtfelder_pruefen", dazwischen)
     try:
         with pytest.raises(HTTPException) as fehler:
-            w.run(P.finalize_protocol(aid, _fin(P, 42000), w.driver))
+            w.run(P.finalize_protocol(aid, _fin(P, 42000, "2026-09-12T10:00:00+00:00"), w.driver))
     finally:
         sync.close()
     code, text = _status(fehler.value)
@@ -545,8 +559,8 @@ def test_21_zuruecksetzen_nennt_wer_zurueckgesetzt_hat(welt):
     aid = _abholung(w, "wer", von=w.sucher)
     _protokoll(w, aid, P, status=P.ZUR_FREIGABE)
     pid = f"p_{aid}"
-    w.run(P.protokoll_freigeben(pid, P.FreigabeIn(neuer_preis=20000), w.sucher))
-    w.run(P.protokoll_freigeben(pid, P.FreigabeIn(preis_zuruecksetzen=True), w.chef))
+    fr = w.run(P.protokoll_freigeben(pid, P.FreigabeIn(neuer_preis=20000), w.sucher))
+    w.run(P.protokoll_freigeben(pid, P.FreigabeIn(preis_zuruecksetzen=True, stand=fr["stand"]), w.chef))
     e = w.run(P.protokolle_zur_freigabe(w.chef))[0]
     assert e["freigegeben_von_name"] == "Serkan Chef" and e["neuer_preis"] is None
 
@@ -582,7 +596,7 @@ def test_23_pdf_kein_kilometerpfeil_bei_stimmt():
             filled={"vehicle_check": vc, "condition": {"mileage": "88000"}})
         return "".join(seite.extract_text() or "" for seite in pypdf.PdfReader(io.BytesIO(pdf)).pages)
 
-    vc = {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
+    vc = {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
     bestaetigt = text(vc)
     assert "86.000 km" in bestaetigt
     assert "88.000 km" not in bestaetigt, "bei 'stimmt' keine Korrektur neben dem Vertragswert"

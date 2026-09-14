@@ -190,7 +190,7 @@ def _abholung(w, *, mit_vertrag=True, name="a", proto_status="freigegeben", **pr
                "vehicle_id": t.vid, "driver_account_id": w.driver["id"],
                "driver_name": w.driver["display_name"], "version": 1, "status": proto_status,
                "superseded": False,
-               "vehicle_check": {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
+               "vehicle_check": {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
                "condition": {"mileage": "123456"}, "keys_count": "2", "damages_confirmed": True,
                "place": "Hannover", "neuer_preis": 9000.0, "freigabe_stand": "s1",
                "created_at": _jetzt()}
@@ -453,14 +453,22 @@ def test_p3_put_sperrt_umhaengen_waehrend_freigabe_und_abschluss(welt):
         termin = _doc(w, "appointments", t.aid)
         assert termin["contract_id"] == t.ca and termin["notes"] == f"n-{status}"
 
-    # Fahrerwechsel bleibt bei freigegebenem Protokoll erlaubt.
+    # Pruefung 14.09.2026 (C11): auch der Fahrerwechsel ist bei freigegebenem
+    # Protokoll gesperrt — der neue Fahrer unterschriebe sonst das vom
+    # Vorgaenger ausgefuellte Protokoll unter seinem Namen.
     w.run(w.db.pickup_protocols.update_one({"id": t.pid}, {"$set": {"status": "freigegeben"}}))
+    with pytest.raises(HTTPException) as fehler:
+        put(driver_id=w.driver2["id"])
+    assert fehler.value.status_code == 409 and "Fahrer" in fehler.value.detail
+    assert _doc(w, "appointments", t.aid)["driver_id"] == w.driver["id"]
+    # Derselbe Fahrer (Oberflaeche schickt das ganze Objekt) stoert nicht.
+    assert put(driver_id=w.driver["id"], notes="gleicher Fahrer")
+
+    # Entwurf: Fahrerwechsel und Umhaengen erlaubt.
+    w.run(w.db.pickup_protocols.update_one({"id": t.pid}, {"$set": {"status": "entwurf"}}))
     put(driver_id=w.driver2["id"])
     assert _doc(w, "appointments", t.aid)["driver_id"] == w.driver2["id"]
     assert _doc(w, "kaufvorgaenge", t.kb)["status"] == "vertrag_erstellt"
-
-    # Entwurf: Umhaengen erlaubt.
-    w.run(w.db.pickup_protocols.update_one({"id": t.pid}, {"$set": {"status": "entwurf"}}))
     put(contract_id=t.cb)
     assert _doc(w, "appointments", t.aid)["contract_id"] == t.cb
 

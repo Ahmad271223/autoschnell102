@@ -406,7 +406,7 @@ def test_15_protokoll_abschluss_archiviert_den_auftraggeber(welt, monkeypatch):
             # Freigabe des Chefs — dieser Test prueft den Abschluss selbst,
             # deshalb startet das Protokoll direkt als freigegeben.
             "version": 1, "status": P.FREIGEGEBEN, "superseded": False,
-            "vehicle_check": {k: {"status": "stimmt"} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
+            "vehicle_check": {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
             "condition": {"mileage": "123456"}, "keys_count": "2",
             "damages_confirmed": True, "place": "Hannover", "created_at": _jetzt()}))
     fin = P.FinalizeIn(signature_driver_b64=_PNG_B64, signature_seller_b64=_PNG_B64)

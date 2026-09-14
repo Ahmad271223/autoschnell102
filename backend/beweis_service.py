@@ -442,10 +442,17 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
             {"_id": 0, "data": 1, "fetched_at": 1, "url": 1})
         daten = (cache or {}).get("data")
         if not isinstance(daten, dict) or not daten:
-            raise RuntimeError("Inseratsdaten fehlen im Zwischenspeicher")
+            raise BeweisFehler("Inseratsdaten fehlen im Zwischenspeicher")
         abgerufen_am, cache_url = (cache or {}).get("fetched_at"), (cache or {}).get("url")
     urls = foto_urls(daten)
     fotos = await _fotos_laden(urls[:BEWEIS_FOTOS_MAX])
+    # Pruefung 14.09.2026 (B7): Inserat MIT Fotos, aber KEINES ladbar (Portal
+    # drosselt, Netz weg) — das Dokument wurde trotzdem "fertig", ohne ein
+    # einziges Bild, und nie wieder angefasst. Jetzt: erneut versuchen; erst
+    # der letzte Versuch stellt ohne Fotos fertig (fotos_eingebettet=0 bleibt
+    # sichtbar), damit ein Inserat mit toten Bildlinks nicht ewig offen bleibt.
+    if urls and not any(fotos) and (doc.get("versuche") or 1) < MAX_VERSUCHE:
+        raise BeweisFehler("Inseratsfotos konnten nicht geladen werden")
     from beweis_pdf import beweis_pdf
     erstellt = _jetzt()
     pdf = await asyncio.to_thread(
@@ -500,12 +507,21 @@ async def _bearbeiten(db, doc: dict) -> None:
     except Exception as exc:  # noqa: BLE001 — auch Zeitlimit (TimeoutError)
         versuche = doc.get("versuche") or 1
         endgueltig = versuche >= MAX_VERSUCHE
-        grund = ("Zeitlimit ueberschritten" if isinstance(exc, asyncio.TimeoutError)
-                 else str(exc) or exc.__class__.__name__)[:300]
+        intern = (str(exc) or exc.__class__.__name__)[:300]
+        # Pruefung 14.09.2026 (B4): `fehler` geht ueber oeffentlich() an die
+        # Oberflaeche — vorher der rohe Ausnahmetext (Pfade, Hostnamen, Treiber-
+        # meldungen). Nach aussen nur eigene Sachtexte; der Rest steht im Log
+        # und in fehler_intern.
+        if isinstance(exc, asyncio.TimeoutError):
+            grund = "Zeitlimit ueberschritten"
+        elif isinstance(exc, BeweisFehler):
+            grund = intern
+        else:
+            grund = "Technischer Fehler bei der Erzeugung"
         log.warning("Beweisdokument %s (%s) Versuch %s fehlgeschlagen: %s",
-                    doc.get("id"), doc.get("cache_key"), versuche, grund)
+                    doc.get("id"), doc.get("cache_key"), versuche, intern)
         setzen = {"status": "fehlgeschlagen" if endgueltig else "offen",
-                  "fehler": grund, "bearbeitung_bis": None,
+                  "fehler": grund, "fehler_intern": intern, "bearbeitung_bis": None,
                   "naechster_versuch_ab": None if endgueltig
                   else _jetzt() + timedelta(seconds=60 * versuche)}
         if endgueltig:
@@ -612,6 +628,14 @@ async def _altbestand_zuordnen(db, limit: int = 500, filt: Optional[dict] = None
     return n
 
 
+_TERMIN_GESCHLOSSEN = ("storniert", "nicht abgeholt", "erledigt", "abgeholt")
+
+
+class BeweisFehler(RuntimeError):
+    """Pruefung 14.09.2026 (B4): eigener Sachtext, der so an die Oberflaeche
+    darf (im Gegensatz zu fremden Ausnahmetexten)."""
+
+
 async def _gehalten(db, cache_key: str) -> bool:
     """Haelt ein echter Vorgang das Dokument? Bestand/Kauf/Abholung/Verkauf
     oder ein Vertrag, Termin bzw. Inserat zum Fahrzeug der jeweiligen Firma.
@@ -624,9 +648,15 @@ async def _gehalten(db, cache_key: str) -> bool:
     if any((v.get("lifecycle") or "verglichen") not in OHNE_GESCHAEFT for v in fz):
         return True
     paare = [{"vehicle_id": v["id"], "dealer_id": v.get("dealer_id")} for v in fz]
-    for coll in ("generated_pdfs", "appointments", "resale_listings"):
+    for coll in ("generated_pdfs", "resale_listings"):
         if await db[coll].count_documents({"$or": paare}, limit=1):
             return True
+    # Pruefung 14.09.2026 (B9): Ein stornierter oder "nicht abgeholt"
+    # geschlossener Termin hielt das Dokument fuer immer — nur OFFENE Termine
+    # halten; ein abgeholtes Fahrzeug haelt ueber seinen Lebenszyklus.
+    if await db.appointments.count_documents(
+            {"$or": paare, "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}}, limit=1):
+        return True
     return False
 
 

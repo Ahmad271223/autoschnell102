@@ -265,9 +265,13 @@ NACHARBEIT_HINWEIS = ("Termin gespeichert — Vertrag und Fahrzeugstatus werden 
 # Go-Live 13.09.2026 (P3): Protokoll-Stati, in denen Vertrag/Fahrzeug des
 # Termins feststehen (Werte wie routes.protocols; dort kein Import wegen Zyklus).
 PROTOKOLL_LAEUFT = ("zur_freigabe", "freigegeben", "wird_abgeschlossen")
+# Pruefung 14.09.2026 (C15)
+TERMIN_MIT_PROTOKOLL_HINWEIS = ("Zu diesem Termin gibt es ein unterschriebenes oder gerade "
+                                "laufendes Abholprotokoll — er kann nicht gelöscht werden. "
+                                "Bitte den Termin stattdessen stornieren.")
 PROTOKOLL_LAEUFT_HINWEIS = ("Das Abholprotokoll liegt zur Freigabe oder wird gerade "
-                            "unterschrieben — Vertrag oder Fahrzeug lassen sich jetzt "
-                            "nicht ändern. Bitte das Protokoll erst an den Fahrer "
+                            "unterschrieben — Fahrer, Vertrag oder Fahrzeug lassen sich "
+                            "jetzt nicht ändern. Bitte das Protokoll erst an den Fahrer "
                             "zurückschicken.")
 
 
@@ -680,15 +684,22 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # nicht an einen anderen Vertrag/ein anderes Fahrzeug gehaengt werden —
     # der Abschluss wuerde sonst PDF von Vertrag A mit Termin/Vorgang B
     # vermischen. Nur ein TATSAECHLICHER Wechsel zaehlt (die Oberflaeche
-    # sendet das ganze Objekt); Fahrerwechsel, neue Vertraege und weitere
-    # Termine je Auto bleiben frei.
+    # sendet das ganze Objekt); neue Vertraege und weitere Termine je Auto
+    # bleiben frei.
+    # Pruefung 14.09.2026 (C11): auch der FAHRER nicht — der neue Fahrer haette
+    # sonst das vom Vorgaenger ausgefuellte, freigegebene Protokoll unter
+    # seinem Namen unterschrieben (Fahrername steht im PDF, C2).
     vertrag_wechsel = bool((contract_loesen and existing.get("contract_id")) or (
         "contract_id" in update
         and (update.get("contract_id") or "") != (existing.get("contract_id") or "")))
     fahrzeug_wechsel = bool((fahrzeug_loesen and existing.get("vehicle_id")) or (
         "vehicle_id" in update
         and (update.get("vehicle_id") or "") != (existing.get("vehicle_id") or "")))
-    if (vertrag_wechsel or fahrzeug_wechsel) and await db.pickup_protocols.count_documents(
+    fahrer_wechsel = bool(
+        "driver_id" in update
+        and (update.get("driver_id") or "") != (existing.get("driver_id") or ""))
+    if (vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel) \
+            and await db.pickup_protocols.count_documents(
             {"appointment_id": appt_id, "superseded": {"$ne": True},
              "status": {"$in": list(PROTOKOLL_LAEUFT)}}, limit=1):
         raise HTTPException(409, PROTOKOLL_LAEUFT_HINWEIS)
@@ -787,7 +798,12 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     if existing.get("status") in ABGESCHLOSSEN and existing.get("status") != "abgeholt" \
             and status_neu not in ABGESCHLOSSEN:
         from routes.protocols import freigabe_beim_schliessen_zuruecknehmen
-        await freigabe_beim_schliessen_zuruecknehmen(appt_id, user.get("id"))
+        # Pruefung 14.09.2026 (C19): Scheitert die Ruecknahme, darf der Termin
+        # NICHT mit einer alten Freigabe wieder aufgehen.
+        if await freigabe_beim_schliessen_zuruecknehmen(appt_id, user.get("id")) is None:
+            raise HTTPException(503, "Die Freigabe des Abholprotokolls konnte nicht "
+                                     "zurückgenommen werden — bitte in einem Moment "
+                                     "erneut öffnen.")
     aenderung: Dict[str, Any] = {"$set": update}
     if unset:
         aenderung["$unset"] = unset
@@ -890,7 +906,12 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         await korrektur_verwerfen(appt_id)
         # Go-Live 13.09.2026 (P6): Lag das Protokoll beim Chef oder war es schon
         # freigegeben, gilt diese Freigabe nach dem Wiederoeffnen nicht mehr.
-        await freigabe_beim_schliessen_zuruecknehmen(appt_id, user.get("id"))
+        # Pruefung 14.09.2026 (C19): Der Termin ist schon geschlossen — bei
+        # einem Fehler Betriebsalarm; cleanup_service holt die Ruecknahme nach.
+        if await freigabe_beim_schliessen_zuruecknehmen(appt_id, user.get("id")) is None:
+            import betrieb as _betrieb
+            await _betrieb.alarm(db, "protokoll_freigabe_ruecknahme_offen", ref=appt_id,
+                                 dealer_id=user["dealer_id"], status=status_neu)
     # Verschobener Abholtermin -> Kaufvertrag mit dem NEUEN Datum neu
     # erzeugen. Das PDF ist eine gespeicherte Datei und wuerde sonst
     # dauerhaft den alten Termin zeigen (Wunsch 08/2026).
@@ -1014,6 +1035,15 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         if (appt.get("status") or "offen") not in ("offen", "verschoben"):
             raise HTTPException(409, "Abgeschlossene oder stornierte Termine "
                                      "löscht nur der Händler-Hauptaccount")
+    # Pruefung 14.09.2026 (C15): Ein Termin mit unterschriebenem Protokoll
+    # (Beweiskette: Unterschriften, PDF) oder mit laufender Freigabe/laufendem
+    # Abschluss wird nicht geloescht — das Protokoll bliebe verwaist bzw. der
+    # Abschluss schriebe auf einen Termin, den es nicht mehr gibt. Stattdessen
+    # stornieren; das Protokoll bleibt als Beleg erreichbar.
+    if await db.pickup_protocols.count_documents(
+            {"appointment_id": appt_id,
+             "status": {"$in": [*PROTOKOLL_LAEUFT, "final"]}}, limit=1):
+        raise HTTPException(409, TERMIN_MIT_PROTOKOLL_HINWEIS)
     # Abnahme 12.09.2026: Der Audit-Eintrag stand NACH dem Hard-Delete und
     # konnte selbst werfen — dann war der Termin weg und die Spur fehlte.
     # Jetzt vorher, und ein Fehler dabei stoppt das Loeschen nicht.
@@ -1047,6 +1077,12 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         # Jemand anderes war schneller — dessen Lauf hat dieselben Verweise
         # geloest, es bleibt nichts Halbes zurueck.
         raise HTTPException(404, "Termin nicht gefunden")
+    # Pruefung 14.09.2026 (C15): nicht unterschriebene Entwuerfe (ohne PDF und
+    # Unterschriften) haengen an nichts mehr — mit loeschen statt verwaisen.
+    try:
+        await db.pickup_protocols.delete_many({"appointment_id": appt_id, "status": "entwurf"})
+    except Exception:  # noqa: BLE001
+        log.exception("Protokoll-Entwuerfe zu Termin %s nicht geloescht", appt_id)
     # Die Audit-Spur (Runde 15, Nr. 7) steht oben — VOR dem Loeschen
     # (Abnahme 12.09.2026), damit sie auch bei einem Abbruch existiert.
     return {"ok": True}

@@ -162,7 +162,9 @@ def test_01_pdf_zeigt_den_erststand_auch_nach_fehlversuch_und_neuem_cache(welt, 
 
     monkeypatch.setattr(storage_service, "save_async", _stoerung)
     zeile = _durchlaufen(welt)
-    assert zeile["status"] == "offen" and "Speicher kurz weg" in zeile["fehler"]
+    # Pruefung 14.09.2026 (B4): fremder Ausnahmetext nur intern, nach aussen Sachtext.
+    assert zeile["status"] == "offen" and "Speicher kurz weg" in zeile["fehler_intern"]
+    assert zeile["fehler"] == "Technischer Fehler bei der Erzeugung"
     # ... in der Zwischenzeit ruft jemand das Inserat neu ab (neuer Stand).
     _cache(welt, ck, _daten(item, preis=12345, text="Neuer Stand",
                             images=["https://img.classistatic.de/neu"]), fetched_at=_jetzt())

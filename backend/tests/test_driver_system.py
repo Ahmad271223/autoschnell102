@@ -398,6 +398,15 @@ class TestDriverAppointments:
 
         # 5) Driver sees appointment
         DH = {"Authorization": f"Bearer {drv_token}"}
+        # Pruefung 14.09.2026 (C22/C23): Abholauftrag und Vertrag erst nach
+        # dem Annehmen der Fahrt.
+        for pfad in (f"/driver/appointments/{appt['id']}/pickup-order.pdf",
+                     f"/driver/contracts/{contract_id}/pdf"):
+            r = requests.get(f"{API}{pfad}", headers=DH, timeout=60)
+            assert r.status_code in (404, 409), f"{pfad} vor Annahme: {r.status_code}"
+        r = requests.put(f"{API}/driver/appointments/{appt['id']}/zuteilung",
+                         headers=DH, json={"action": "annehmen"}, timeout=30)
+        assert r.status_code == 200, r.text
         seen = requests.get(f"{API}/driver/appointments", headers=DH, timeout=30)
         assert seen.status_code == 200
         listed = seen.json()

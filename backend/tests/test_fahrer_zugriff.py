@@ -491,7 +491,7 @@ def _vollstaendiger_entwurf(P, t, appt_id, proto_id):
             # des Chefs. Diese Tests pruefen den Abschluss selbst, deshalb
             # startet das Protokoll direkt als freigegeben.
             "version": 1, "status": P.FREIGEGEBEN, "superseded": False,
-            "vehicle_check": {k: {"status": "stimmt"}
+            "vehicle_check": {k: {"status": _o[0]}
                               for k, _l, _o in P.VEHICLE_CHECK_FIELDS},
             "condition": {"mileage": "123456"}, "keys_count": "2",
             "damages_confirmed": True, "place": "Hannover",
