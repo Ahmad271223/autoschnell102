@@ -121,7 +121,8 @@ def welt(monkeypatch):
             erg = await K.fahrer_anlegen(w.db, {**d, "created_at": _jetzt()})
             d.update(kontonummer=erg["kontonummer"], driver_code=erg["driver_code"])
             konto = await w.db.driver_accounts.find_one({"id": d["id"]}, {"_id": 0})
-            assert konto["kontonummer"].isdigit() and "email" not in konto, konto
+            # Fahrer-ID (14.09.2026): Kontonummer = "FD-..."
+            assert konto["kontonummer"].startswith("FD-") and "email" not in konto, konto
             await w.db.dealer_drivers.insert_one(
                 {"id": str(uuid.uuid4()), "dealer_id": w.dealer_id, "driver_account_id": d["id"],
                  "display_name": d["display_name"], "added_at": _jetzt()})

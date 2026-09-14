@@ -321,13 +321,19 @@ async def ohne_aktuelle_version_reparieren(appt_id: str, dbx=None) -> Optional[d
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     dbx = dbx if dbx is not None else db
     try:
-        versionen = await dbx.pickup_protocols.find(
-            {"appointment_id": appt_id, "superseded": True}, {"_id": 0},
-            sort=[("version", -1)]).to_list(50)
-        if not versionen:
+        # Pruefung 14.09.2026 (Nr. 6): nicht die 50 hoechsten Versionen laden
+        # und darin suchen (eine aeltere finale Version fiel bei mehr als 50
+        # Entwuerfen darueber heraus), sondern gezielt fragen: hoechste FINALE
+        # Version, sonst die hoechste Version ueberhaupt.
+        kandidat = await dbx.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "superseded": True, "status": "final"},
+            {"_id": 0}, sort=[("version", -1)])
+        if kandidat is None:
+            kandidat = await dbx.pickup_protocols.find_one(
+                {"appointment_id": appt_id, "superseded": True}, {"_id": 0},
+                sort=[("version", -1)])
+        if kandidat is None:
             return None
-        finale = [v for v in versionen if v.get("status") == "final"]
-        kandidat = (finale or versionen)[0]
         grenze = (_dt.now(_tz.utc) - _td(seconds=_REPARATUR_KARENZ_SEKUNDEN)).isoformat()
         stempel = kandidat.get("superseded_at") or kandidat.get("verworfen_am") or ""
         if stempel and stempel > grenze:
@@ -1708,7 +1714,10 @@ def _abweichungen(doc: dict, werte: Optional[Dict[str, Any]] = None) -> List[dic
 
 _FREIGABE_STATI = [ZUR_FREIGABE, FREIGEGEBEN]
 # Obergrenze gegen Ausreisser; realistisch warten nur wenige gleichzeitig.
-_FREIGABE_MAX = 500
+# Pruefung 14.09.2026 (Nr. 13): 500 war zu knapp gedacht — ab der Grenze fielen
+# die am laengsten wartenden Fahrer still aus der Liste. Jetzt 5000 und ein
+# Betriebsalarm, sobald eine Firma die Grenze erreicht.
+_FREIGABE_MAX = 5000
 
 STAND_GEAENDERT = ("Der Händler hat Preis oder Vermerk inzwischen geändert. Bitte die "
                    "Seite neu laden und dem Verkäufer den neuen Stand zeigen, bevor "
@@ -1768,6 +1777,11 @@ async def _wartende_protokolle(user, felder: Optional[Dict[str, int]] = None) ->
     if len(docs) >= _FREIGABE_MAX:
         log.warning("Freigaben: Firma %s hat %s oder mehr offene Protokolle — die aeltesten "
                     "werden nicht gezeigt", user["dealer_id"], _FREIGABE_MAX)
+        try:
+            await betrieb.alarm(db, "freigaben_liste_abgeschnitten", ref=user["dealer_id"],
+                                meta={"max": _FREIGABE_MAX})
+        except Exception:
+            log.exception("Alarm freigaben_liste_abgeschnitten nicht abgesetzt")
     termin_ids = sorted({d.get("appointment_id") for d in docs if d.get("appointment_id")})
     termine: Dict[str, dict] = {}
     if termin_ids:

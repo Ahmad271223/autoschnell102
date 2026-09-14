@@ -300,8 +300,44 @@ async def _lifecycle_pfad_oder_409(vehicle_id: Optional[str], dealer_id: str,
 
 async def _lifecycle_anwenden(vehicle_id: str, dealer_id: str,
                               pfad: List[str], user: dict) -> None:
+    """Pruefung 14.09.2026 (Nr. 9): ein mehrstufiger Weg (z.B. abgeholt ->
+    verkaufsentwurf -> veroeffentlicht) wurde Schritt fuer Schritt geschrieben;
+    scheiterte der zweite Schritt, blieb das Fahrzeug im Zwischenzustand,
+    waehrend das Inserat schon zurueckgesetzt war. Jetzt EIN Write mit
+    Compare-and-Set auf den gelesenen Stand; das Audit haelt jeden Schritt
+    einzeln fest."""
+    if not pfad:
+        return
+    if len(pfad) == 1:
+        # Ein Schritt: wie bisher (Compare-and-Set in set_lifecycle).
+        await set_lifecycle(vehicle_id, dealer_id, pfad[0], user=user)
+        return
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                   {"_id": 0, "lifecycle": 1})
+    if not v:
+        raise LifecycleError("Fahrzeug nicht gefunden")
+    current = v.get("lifecycle") or "verglichen"
+    zustand, schritte = current, []
     for schritt in pfad:
-        await set_lifecycle(vehicle_id, dealer_id, schritt, user=user)
+        if schritt == zustand:
+            continue
+        if schritt not in ALLOWED_TRANSITIONS.get(zustand, set()):
+            raise LifecycleError(f"Übergang '{zustand}' → '{schritt}' ist nicht erlaubt")
+        schritte.append((zustand, schritt))
+        zustand = schritt
+    if not schritte:
+        return
+    ziel = pfad[-1]
+    cas = {"id": vehicle_id, "dealer_id": dealer_id,
+           "lifecycle": v["lifecycle"] if "lifecycle" in v else {"$exists": False}}
+    r = await db.vehicles.update_one(cas, {"$set": {
+        "lifecycle": ziel, "lifecycle_changed_at": now_iso(), "updated_at": now_iso()}})
+    if r.matched_count == 0:
+        raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert — bitte neu laden")
+    for von, nach in schritte:
+        await log_activity_sicher(dealer_id, (user or {}).get("id", ""),
+                                  f"fahrzeug.status.{nach}", ref=vehicle_id,
+                                  meta={"von": von, "nach": nach})
 
 
 async def _anfragen_schliessen(listing_id: str, grund: str, *,
@@ -1027,12 +1063,18 @@ async def publish_listing(listing_id: str, body: PublishIn,
     if not await db.resale_listings.count_documents(
             {"id": listing_id, "dealer_id": user["dealer_id"]}):
         raise HTTPException(404, "Inserat nicht gefunden")
+    # Pruefung 14.09.2026 (Nr. 7): Sperre mit Besitzer-Token — das finally
+    # unten gibt nur die EIGENE Sperre frei. Vorher loeschte ein Aufruf, der
+    # laenger als 30 s brauchte, am Ende die inzwischen von einem zweiten
+    # Aufruf gesetzte Sperre.
+    _token = uuid.uuid4().hex
     _sperre = await db.resale_listings.find_one_and_update(
         {"id": listing_id, "dealer_id": user["dealer_id"],
          "$or": [{"publish_lock_until": {"$exists": False}},
                  {"publish_lock_until": None},
                  {"publish_lock_until": {"$lt": _jetzt}}]},
-        {"$set": {"publish_lock_until": _jetzt + timedelta(seconds=30)}})
+        {"$set": {"publish_lock_until": _jetzt + timedelta(seconds=30),
+                  "publish_lock_token": _token}})
     if _sperre is None:
         raise HTTPException(409, "Dieses Inserat wird gerade veroeffentlicht — "
                                  "bitte einen Moment warten und neu laden.")
@@ -1086,6 +1128,26 @@ async def publish_listing(listing_id: str, body: PublishIn,
                     {"$pull": {"counted_periods": period_key}})
 
         if not already:
+            quota = plan.get("quota")
+            did = user["dealer_id"]
+            field = f"quota_usage.{period_key}"
+            if quota:
+                # Pruefung 14.09.2026 (Nr. 8): den Zaehler VOR der Markierung
+                # dieses Inserats aus dem Ist-Stand befuellen. Vorher lag das
+                # Seeding NACH Schritt 1: zwei gleichzeitige Publishes
+                # verschiedener Inserate zaehlten die frische Markierung des
+                # jeweils anderen mit und erhoehten danach beide — ein Slot zu
+                # viel, das naechste Inserat wurde zu frueh abgelehnt. Vor der
+                # Markierung kann eine "in Arbeit"-Markierung nur existieren,
+                # wenn der Zaehler schon gesetzt ist ($exists-Guard greift).
+                seeded = await db.dealers.find_one({"id": did}, {field: 1})
+                if ((seeded or {}).get("quota_usage") or {}).get(period_key) is None:
+                    cur = await db.resale_listings.count_documents(
+                        {"dealer_id": did, "counted_periods": period_key,
+                         "id": {"$ne": listing_id}})
+                    await db.dealers.update_one(
+                        {"id": did, field: {"$exists": False}},
+                        {"$set": {field: cur}})
             # Schritt 1: Den Abrechnungszeitraum ATOMAR am Inserat markieren.
             # Der $ne-Guard sorgt dafür, dass von BELIEBIG vielen gleichzeitigen
             # Publishes desselben Inserats genau EINER die Markierung setzt —
@@ -1112,28 +1174,12 @@ async def publish_listing(listing_id: str, body: PublishIn,
                     raise HTTPException(402, "Dein monatliches Kontingent ist "
                                              "erreicht. Upgrade auf ein größeres "
                                              "Paket oder Enterprise anfragen.")
-            quota = plan.get("quota")
             if marker.modified_count and quota:
                 # Schritt 2: ATOMARE Kontingent-Beanspruchung (race-fest, auch
                 # bei mehreren Worker-Prozessen): ein Zähler pro Händler+Zeitraum
                 # wird atomar erhöht — jeder Gewinner bekommt eine EINDEUTIGE
                 # Nummer. Wer über der Quota landet, gibt Slot UND Markierung
-                # zurück und wird abgelehnt.
-                did = user["dealer_id"]
-                field = f"quota_usage.{period_key}"
-                # Zähler einmalig aus dem Ist-Stand befüllen (idempotent, per
-                # $exists-Guard gegen paralleles Doppel-Seeding). Das EIGENE
-                # Inserat traegt schon die Markierung aus Schritt 1 — deshalb
-                # ausklammern, sonst zaehlte es doppelt (Seed + $inc).
-                seeded = await db.dealers.find_one(
-                    {"id": did}, {field: 1})
-                if (seeded.get("quota_usage") or {}).get(period_key) is None:
-                    cur = await db.resale_listings.count_documents(
-                        {"dealer_id": did, "counted_periods": period_key,
-                         "id": {"$ne": listing_id}})
-                    await db.dealers.update_one(
-                        {"id": did, field: {"$exists": False}},
-                        {"$set": {field: cur}})
+                # zurück und wird abgelehnt. (Seeding: siehe oben, VOR Schritt 1.)
                 claimed = await db.dealers.find_one_and_update(
                     {"id": did},
                     {"$inc": {field: 1}},
@@ -1189,8 +1235,9 @@ async def publish_listing(listing_id: str, body: PublishIn,
                 "visibility": body.visibility}
     finally:
         await db.resale_listings.update_one(
-            {"id": listing_id, "dealer_id": user["dealer_id"]},
-            {"$unset": {"publish_lock_until": ""}})
+            {"id": listing_id, "dealer_id": user["dealer_id"],
+             "publish_lock_token": _token},
+            {"$unset": {"publish_lock_until": "", "publish_lock_token": ""}})
 
 
 # =========================================================

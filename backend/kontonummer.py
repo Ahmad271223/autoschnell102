@@ -7,7 +7,10 @@ Skripte es ohne Datenbank nutzen koennen.
 Format:
 - Chef einer Firma:   "10023"    (= dealers.kunden_nr)
 - Sucher einer Firma: "10023-2"  (Zusatz aus dealers.sucher_seq)
-- Fahrer:             "10031"    (eigene Nummer aus derselben Reihe)
+- Fahrer:             "FD-7K2M9QX4" (seit 14.09.2026 die Fahrer-ID — dieselbe
+                                  Kennung, mit der die Firma den Fahrer
+                                  verknuepft; aeltere Fahrerkonten mit reiner
+                                  Nummer bleiben gueltig)
 - Zwischenhaendler:   "6FE7K2M"  (Kaeufer-Code, seit 14.09.2026 — Wunsch
                                   Ahmad: B2B-Konten sollen sich auf den ersten
                                   Blick von Firmen- und Fahrernummern
@@ -90,9 +93,36 @@ def ist_kaeufer_code(s) -> bool:
     return isinstance(s, str) and bool(KAEUFER_MUSTER.match(s))
 
 
+# Fahrer-ID (14.09.2026, Wunsch Ahmad: "Fahrer und Marktplatz bekommen ein
+# anderes Muster als Sucher und Firmenchef"): "FD-" + 8 Zeichen aus dem
+# Fahrer-Alphabet (kontenanlage.DRIVER_CODE_ALPHABET, ohne I/O/0/1).
+FAHRER_MUSTER = re.compile(r"^FD-[A-HJ-NP-Z2-9]{8}$")
+
+
+def fahrer_normalisieren(roh) -> Optional[str]:
+    """' fd-7k2m9qx4 ', 'FD 7K2M9QX4', 'fd7k2m9qx4' -> 'FD-7K2M9QX4'; sonst None.
+    Nie eine Nummer der Reihe und nie ein Kaeufer-Code (10 Zeichen, Praefix FD)."""
+    if not isinstance(roh, str):
+        return None
+    s = unicodedata.normalize("NFKC", roh).strip()
+    if not s or len(s) > 40:
+        return None
+    for strich in _STRICHE:
+        s = s.replace(strich, "-")
+    s = _KAEUFER_TRENNER.sub("", s).upper()
+    if len(s) != 10 or not s.startswith("FD"):
+        return None
+    kandidat = f"FD-{s[2:]}"
+    return kandidat if FAHRER_MUSTER.match(kandidat) else None
+
+
+def ist_fahrer_code(s) -> bool:
+    return isinstance(s, str) and bool(FAHRER_MUSTER.match(s))
+
+
 def kennung_normalisieren(roh) -> Optional[str]:
-    """Kontonummer ODER Kaeufer-Code in kanonischer Form, sonst None."""
-    return normalisieren(roh) or kaeufer_normalisieren(roh)
+    """Kontonummer, Kaeufer-Code ODER Fahrer-ID in kanonischer Form, sonst None."""
+    return normalisieren(roh) or kaeufer_normalisieren(roh) or fahrer_normalisieren(roh)
 
 
 def anmeldekennung(roh) -> str:

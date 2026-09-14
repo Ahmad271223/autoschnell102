@@ -74,7 +74,9 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
         )}
         {driverCode && (
           <div className="mt-3 text-[12.5px] text-zinc-400">
-            Fahrer-ID für die Firma:{" "}
+            {driverCode === kontonummer
+              ? "Die Fahrer-ID ist zugleich die Kontonummer — damit verknüpft die Firma den Fahrer: "
+              : "Fahrer-ID für die Firma: "}
             <span className="font-mono text-white" data-testid="zugangsdaten-fahrer-code">{driverCode}</span>
           </div>
         )}

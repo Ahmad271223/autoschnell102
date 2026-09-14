@@ -90,10 +90,13 @@ def test_01_schema_wie_kontenanlage(dbx):
     k_nr = konten.kennung_fuer_mail(kaeufer)
     fa_nr = konten.kennung_fuer_mail(fahrer, "driver_accounts")
     r_nr = konten.kennung_fuer_mail(rest)
-    for nr, coll, kid in ((k_nr, d.users, "k1"), (fa_nr, d.driver_accounts, "fa1"),
-                          (r_nr, d.users, "s9")):
+    for nr, coll, kid in ((k_nr, d.users, "k1"), (r_nr, d.users, "s9")):
         assert nr.isdigit() and int(nr) > f2["kunden_nr"], nr
         assert coll.find_one({"id": kid})["kontonummer_basis"] == int(nr)
+    # Fahrer (14.09.2026): Kontonummer = Fahrer-ID, wie kontenanlage.fahrer_anlegen
+    fa_doc = d.driver_accounts.find_one({"id": "fa1"})
+    assert fa_nr.startswith("FD-") and len(fa_nr) == 11 and fa_doc["driver_code"] == fa_nr
+    assert "kontonummer_basis" not in fa_doc
     assert len({k_nr, fa_nr, r_nr}) == 3
 
     # Idempotent: zweiter Aufruf aendert nichts, Zaehler bleibt

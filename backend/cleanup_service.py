@@ -182,9 +182,9 @@ async def _fotos_eines_berichts_loeschen(db, rep: dict, now: datetime, stats: di
 
 def _fahrerfoto_tage() -> int:
     try:
-        wert = int(os.environ.get("FAHRERFOTO_TAGE") or 90)
+        wert = int(os.environ.get("FAHRERFOTO_TAGE") or 60)
     except ValueError:
-        wert = 90
+        wert = 60
     return max(1, min(wert, 3650))
 
 
@@ -199,9 +199,9 @@ FAHRERFOTO_TAGE = _fahrerfoto_tage()
 
 def _bericht_aufbewahrung_tage() -> int:
     try:
-        wert = int(os.environ.get("BERICHT_AUFBEWAHRUNG_TAGE") or 180)
+        wert = int(os.environ.get("BERICHT_AUFBEWAHRUNG_TAGE") or 60)
     except ValueError:
-        wert = 180
+        wert = 60
     return max(30, min(wert, 3650))
 
 
@@ -463,7 +463,9 @@ async def _cleanup_once(db) -> dict:
 # Kaufvertraege (Personendaten des Verkaeufers, Unterschriften, PDF) werden
 # nach dieser Frist VOLLSTAENDIG geloescht. Der anonyme Auto-Datensatz in
 # admin_vehicle_data bleibt bewusst bestehen (auto_daten.py).
-VERTRAG_AUFBEWAHRUNG_TAGE = int(os.environ.get("VERTRAG_AUFBEWAHRUNG_TAGE", "90"))
+# Fristen (Wunsch Ahmad 14.09.2026): keine Aufbewahrung laenger als 60 Tage —
+# gilt fuer Vertraege, Berichte, Fahrerfotos, Beweise, Logs, Anfragen, Cache.
+VERTRAG_AUFBEWAHRUNG_TAGE = int(os.environ.get("VERTRAG_AUFBEWAHRUNG_TAGE", "60"))
 # Grabsteine (`loeschung.status == laeuft`), die aelter sind, gelten als
 # abgebrochen und werden wiederaufgenommen.
 VERTRAG_LOESCHUNG_WIEDERAUFNAHME_MINUTEN = 10
@@ -956,7 +958,7 @@ async def vertragsloeschungen_wiederaufnehmen(db, now: datetime) -> int:
 # Audit-/Fehlerprotokolle und Job-Sperren wuchsen unbegrenzt (N3, Review
 # 09/2026). Aufbewahrung in Tagen; created_at ist ISO-String (lexikografisch
 # vergleichbar), deshalb Rotation hier statt TTL-Index.
-LOG_AUFBEWAHRUNG_TAGE = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE", "180"))
+LOG_AUFBEWAHRUNG_TAGE = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE", "60"))
 
 
 async def logs_rotieren(db, now: datetime) -> int:
@@ -980,11 +982,11 @@ async def logs_rotieren(db, now: datetime) -> int:
 # unbegrenzt. created_at/updated_at sind ISO-Strings (lexikografisch
 # vergleichbar).
 # ---------------------------------------------------------------------------
-ANFRAGEN_AUFBEWAHRUNG_TAGE = int(os.environ.get("ANFRAGEN_AUFBEWAHRUNG_TAGE", "90"))
-LOG_AUFBEWAHRUNG_TAGE_OFFEN = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE_OFFEN", "365"))
+ANFRAGEN_AUFBEWAHRUNG_TAGE = int(os.environ.get("ANFRAGEN_AUFBEWAHRUNG_TAGE", "60"))
+LOG_AUFBEWAHRUNG_TAGE_OFFEN = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE_OFFEN", "60"))
 ERROR_LOG_MAX = int(os.environ.get("ERROR_LOG_MAX", "20000"))
-INTERESSEN_AUFBEWAHRUNG_TAGE = 180        # abgeschlossene Interessensanfragen
-INSERATE_GELOESCHT_AUFBEWAHRUNG_TAGE = 90  # geloeschte Inserate (Soft-Delete)
+INTERESSEN_AUFBEWAHRUNG_TAGE = 60         # abgeschlossene Interessensanfragen
+INSERATE_GELOESCHT_AUFBEWAHRUNG_TAGE = 60  # geloeschte Inserate (Soft-Delete)
 
 
 def _aelter_als(cutoff: str) -> dict:
@@ -1039,7 +1041,7 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
 LISTING_CACHE_KARENZ_TAGE = int(os.environ.get("LISTING_CACHE_KARENZ_TAGE", "7"))
 # Gleicher Wert und Default wie routes/listings.py (dort Schreib-TTL); hier
 # direkt aus der Umgebung, um den Router nicht in den Cleanup zu importieren.
-LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
+LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "1440"))
 # Nachpruefung 13.09.2026: Die Datenschutzerklaerung sagt "Inserats-Cache
 # max. 90 Tage". TTL (90 Tage) plus Karenz (7 Tage) waeren 97 — deshalb eine
 # harte Grenze ab dem Abruf, unabhaengig von TTL und Karenz. Wer sie aendert,

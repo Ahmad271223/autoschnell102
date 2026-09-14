@@ -206,6 +206,25 @@ def _nummer_vergeben(sammlung: str, konto: dict) -> str:
     if rolle in ("dealer", "sucher") and konto.get("dealer_id"):
         firma_nr = _kunden_nr_sicherstellen(dbx, konto["dealer_id"])
     for _ in range(5):
+        if sammlung == "driver_accounts":
+            # Fahrer (14.09.2026): Kontonummer = Fahrer-ID "FD-XXXXXXXX" wie
+            # kontenanlage.fahrer_anlegen; ein vorhandener driver_code wird uebernommen.
+            vorhanden = coll.find_one({"id": konto["id"]}, {"_id": 0, "driver_code": 1}) or {}
+            code = konto.get("driver_code") or vorhanden.get("driver_code")
+            if not code:
+                import secrets as _secrets
+                alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+                code = "FD-" + "".join(_secrets.choice(alphabet) for _ in range(8))
+            try:
+                coll.update_one({"id": konto["id"], "kontonummer": {"$exists": False}},
+                                {"$set": {"kontonummer": code, "driver_code": code,
+                                          "kontonummer_art": "fahrer_code"}})
+            except DuplicateKeyError:
+                continue
+            doc = coll.find_one({"id": konto["id"]}, {"_id": 0, "kontonummer": 1}) or {}
+            if doc.get("kontonummer"):
+                return doc["kontonummer"]
+            continue
         if firma_nr is None:
             nr = _naechste_nummer(dbx)
             nummer, basis = str(nr), nr

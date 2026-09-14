@@ -449,7 +449,9 @@ def test_unit_53_54_reserviertes_inserat_loeschen(welt):
     r = _run(z.resale.delete_listing("L1", USER))
     assert r["ok"] is True
     assert z.db.resale_listings.one(id="L1")["status"] == "geloescht"
-    assert z.lifecycle_schritte == ["veroeffentlicht", "bestand"]
+    # Pruefung 14.09.2026 (Nr. 9): zwei Schritte = EIN Write direkt am Fahrzeug,
+    # der set_lifecycle-Stub sieht keine Einzelschritte mehr.
+    assert z.lifecycle_schritte == []
     assert z.db.vehicles.one(id="V1")["lifecycle"] == "bestand"
     for iid in ("I1", "I2"):
         it = z.db.listing_interest.one(id=iid)
@@ -504,7 +506,9 @@ def test_unit_26_52_reservierung_aufheben(welt):
     assert r["status"] == "verkaufsbereit"
     d = z.db.resale_listings.one(id="L1")
     assert d["status"] == "verkaufsbereit" and "reserved_for" not in d
-    assert z.lifecycle_schritte == ["veroeffentlicht", "verkaufsbereit"]
+    # Pruefung 14.09.2026 (Nr. 9): zwei Schritte = EIN Write direkt am Fahrzeug,
+    # der set_lifecycle-Stub sieht keine Einzelschritte mehr.
+    assert z.lifecycle_schritte == []
     assert z.db.vehicles.one(id="V1")["lifecycle"] == "verkaufsbereit"
     it = z.db.listing_interest.one(id="I1")
     assert it["status"] == "abgelehnt" and it["beendet_grund"] == "reservierung_aufgehoben"

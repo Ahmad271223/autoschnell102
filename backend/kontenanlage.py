@@ -299,14 +299,21 @@ def _ist_code_dublette(exc) -> bool:
 
 
 async def fahrer_anlegen(db, konto: dict) -> dict:
-    """Fahrerkonto mit Nummer aus derselben Reihe und FD-Code.
-    Rueckgabe {driver_id, kontonummer, driver_code}."""
+    """Fahrerkonto: Kontonummer = Fahrer-ID ("FD-XXXXXXXX").
+
+    14.09.2026 (Wunsch Ahmad): kein Wert mehr aus der Nummernreihe der Firmen
+    — der Fahrer hat EINE Kennung fuer Anmeldung und Verknuepfung mit der
+    Firma, die sich auf den ersten Blick von Firmen-/Suchernummern und
+    Kaeufer-Codes unterscheidet. kontonummer_basis entfaellt. Aeltere
+    Fahrerkonten mit reiner Nummer bleiben gueltig (Login akzeptiert beides).
+    Rueckgabe {driver_id, kontonummer, driver_code} (beide gleich)."""
     for versuch in range(_VERSUCHE):
-        nr = await naechste_nummer(db)
+        code = await ensure_unique_driver_code(db)
         doc = dict(konto)
         doc.pop("_id", None)
-        doc.update({"kontonummer": str(nr), "kontonummer_basis": nr,
-                    "driver_code": await ensure_unique_driver_code(db)})
+        doc.pop("kontonummer_basis", None)
+        doc.update({"kontonummer": code, "kontonummer_art": "fahrer_code",
+                    "driver_code": code})
         doc.setdefault("current_session_id", None)
         try:
             await db.driver_accounts.insert_one(doc)
@@ -317,7 +324,7 @@ async def fahrer_anlegen(db, konto: dict) -> dict:
             raise
         return {"driver_id": doc["id"], "kontonummer": doc["kontonummer"],
                 "driver_code": doc["driver_code"]}
-    raise RuntimeError("Fahrer: keine freie Kontonummer")  # pragma: no cover
+    raise RuntimeError("Fahrer: keine freie Fahrer-ID")  # pragma: no cover
 
 
 # ------------------------------------------------------------ Betrieb

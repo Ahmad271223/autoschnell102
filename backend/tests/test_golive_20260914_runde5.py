@@ -181,7 +181,7 @@ def test_10_alle_vier_konten_melden_sich_an(welt):
     chef_nr, sucher_nr = welt["chef_nr"], welt["sucher_nr"]
     assert sucher_nr == f"{chef_nr}-1", (chef_nr, sucher_nr)
     assert KAEUFER_MUSTER.match(welt["kaeufer_nr"]) and not welt["kaeufer_nr"].isdigit()
-    assert welt["fahrer_nr"].isdigit()
+    assert welt["fahrer_nr"].startswith("FD-") and len(welt["fahrer_nr"]) == 11
     # Chef und Sucher unter /login (Single-Session: jede Anmeldung ersetzt die
     # vorige Sitzung — die zuletzt ausgestellten Token gelten fuer die naechsten Tests)
     for kennung in (chef_nr, f" {chef_nr} ", f"{chef_nr}"):
@@ -194,7 +194,8 @@ def test_10_alle_vier_konten_melden_sich_an(welt):
         assert r.status_code == 200, (kennung, r.status_code, r.text[:200])
     welt["S"] = _kopf(r.json()["token"])
     # Fahrer in der Fahrer-App
-    for kennung in (welt["fahrer_nr"], f" {welt['fahrer_nr']} "):
+    fn = welt["fahrer_nr"]
+    for kennung in (fn, f" {fn} ", fn.lower(), fn.replace("-", " "), fn.replace("-", "")):
         r = K.anmelden(kennung, PW20, "driver")
         assert r.status_code == 200, (kennung, r.status_code, r.text[:200])
     # Zwischenhaendler: Code in jeder Schreibweise, im Marktplatz und unter /login

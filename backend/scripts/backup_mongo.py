@@ -48,7 +48,7 @@ Ergebnis-Status ("BACKUP OK" nur, wenn wirklich alles gesichert wurde):
 
 Aufbewahrung: lokal die letzten 14 Backups, dazu immer das juengste GUTE
 (auch wenn es aelter ist); offsite die letzten BACKUP_S3_KEEP (Standard
-30) Archive, best effort — rotiert wird offsite nur nach einem guten Lauf.
+14) Archive, best effort — rotiert wird offsite nur nach einem guten Lauf.
 
 Umgebung:
   MONGO_URL, DB_NAME, BACKUP_DIR
@@ -62,7 +62,7 @@ Umgebung:
   BACKUP_S3_PREFIX            Schlüssel-Präfix, Standard "autoschnell-backups/"
   BACKUP_S3_OBJECT_LOCK_DAYS  > 0: ObjectLockMode COMPLIANCE bis +N Tage.
                               Der Bucket muss MIT Object Lock angelegt sein.
-  BACKUP_S3_KEEP              Offsite-Aufbewahrung in Archiven (30)
+  BACKUP_S3_KEEP              Offsite-Aufbewahrung in Archiven (14)
   BACKUP_UPLOADS_DIR, BACKUP_LOCAL_STORAGE_DIR   nur für Tests
 
 Aufruf:  python -X utf8 backup_mongo.py [--dir <Zielordner>]
@@ -107,7 +107,7 @@ LOCAL_STORAGE_DIR = Path(os.environ.get("BACKUP_LOCAL_STORAGE_DIR")
                          or BACKEND / "local_storage")
 MANIFEST_VERSION = 4          # Runde 21: Feld "inkonsistent", Pflicht-Indexdaten
 OFFSITE_PREFIX_DEFAULT = "autoschnell-backups/"
-OFFSITE_KEEP_DEFAULT = 30
+OFFSITE_KEEP_DEFAULT = 14
 _OFFSITE_ARCHIV = re.compile(r"autoschnell-\d{4}-\d{2}-\d{2}_\d{4}\.tar\.gz$")
 
 

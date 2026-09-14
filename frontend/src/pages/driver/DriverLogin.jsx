@@ -63,11 +63,13 @@ export default function DriverLogin() {
           <form onSubmit={submit} className="mt-6 space-y-4">
             <div>
               <label className="text-xs text-zinc-400 flex items-center gap-2">
-                <Hash size={12} /> Kontonummer
+                <Hash size={12} /> Fahrer-ID (Kontonummer)
               </label>
-              <input data-testid="driver-login-kontonummer" type="text" inputMode="numeric" required
+              {/* Fahrer-ID (14.09.2026): "FD-7K2M9QX4" — Buchstaben und Ziffern,
+                  Gross-/Kleinschreibung egal; aeltere reine Nummern gehen weiter. */}
+              <input data-testid="driver-login-kontonummer" type="text" inputMode="text" required
                 value={kennung} onChange={(e) => setKennung(e.target.value)}
-                placeholder="z. B. 10031" autoCapitalize="none" spellCheck={false}
+                placeholder="z. B. FD-7K2M9QX4" autoCapitalize="characters" spellCheck={false}
                 className="input-base w-full mt-1" autoComplete="username" />
             </div>
             <div>

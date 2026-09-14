@@ -329,7 +329,7 @@ vermerkt das im Manifest unter `offsite` (`bucket`, `key`, `uploaded_at`,
 | `BACKUP_S3_BUCKET` | Ziel-Bucket. **Eigener Bucket**, nicht der Datei-Speicher `S3_BUCKET` (Zugangsdaten/Endpoint: `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`). |
 | `BACKUP_S3_PREFIX` | Schlüssel-Präfix, Standard `autoschnell-backups/` |
 | `BACKUP_S3_OBJECT_LOCK_DAYS` | `> 0`: Objekt wird mit `ObjectLockMode=COMPLIANCE` für N Tage unlöschbar (Schutz vor Ransomware/Admin-Fehler). Der Bucket muss **beim Anlegen mit Object Lock (Versionierung) erstellt** worden sein, sonst schlägt der Upload fehl. |
-| `BACKUP_S3_KEEP` | Offsite-Aufbewahrung in Archiven, Standard 30 (Rotation best effort; gesperrte Objekte bleiben bis zum Ablauf). |
+| `BACKUP_S3_KEEP` | Offsite-Aufbewahrung in Archiven, Standard 14 (Rotation best effort; gesperrte Objekte bleiben bis zum Ablauf). |
 
 Ohne S3-Offsite das Volume regelmäßig auf einen ANDEREN Ort kopieren
 (z. B. Hetzner Storage Box), damit ein Server-Ausfall nicht auch die Backups
@@ -858,8 +858,9 @@ für ALLE Antworten (auch die React-Oberfläche). Prüfen nach dem Start:
 ### Ressourcen
 Standard 4 Worker, seit 10.09.2026 ohne Browser (Beweisdokumente
 entstehen mit ReportLab; je Dokument mit 20 Fotos etwa 1–2 s Rechenzeit und
-1–2,5 MB in R2 — bei 100.000 neuen Inseraten im Monat und 90 Tagen
-Aufbewahrung grob 0,3–0,75 TB). `docker-compose.yml`
+1–2,5 MB in R2 — bei 100.000 neuen Inseraten im Monat und 60 Tagen
+Aufbewahrung grob 0,2–0,5 TB; Entscheidung Ahmad 14.09.2026: keine Frist
+über 60 Tage, Backups offsite 14 Archive). `docker-compose.yml`
 setzt Speicher-/CPU-Limits (`BACKEND_MEM_LIMIT`, `MONGO_MEM_LIMIT`, …) und
 begrenzt den Mongo-Pool (`maxPoolSize=20` in MONGO_URL). Faustregel:
 Backend-RAM ≈ 400 MB × Worker + 500 MB.
@@ -1023,7 +1024,7 @@ gegenseitig ausbremsen:
   und erzeugt den Proxy neu; von Hand:
   `docker compose up -d --force-recreate --no-deps proxy`.
 
-### Vertragslöschung (90 Tage) ist standardmäßig NUR Vorschau
+### Vertragslöschung (60 Tage) ist standardmäßig NUR Vorschau
 `VERTRAG_LOESCHUNG_AKTIV=false`: der stündliche Lauf schreibt eine
 Löschvorschau (`system_reports`, typ `vertrag_loeschvorschau`) und löscht
 nichts. Vor dem Scharfschalten: `python scripts/vertraege_bestand_pruefen.py`
@@ -1180,8 +1181,8 @@ Backend-Image nicht enthält — in Produktion fehlten die Skizzen deshalb).
 
 Seit 10.09.2026 (Runde 21):
 
-- **Frist:** 90 Tage nach dem Hochladen des Berichts (`FAHRERFOTO_TAGE`,
-  Standard 90, also so lange wie der Kaufvertrag). Unabhängig vom
+- **Frist:** 60 Tage nach dem Hochladen des Berichts (`FAHRERFOTO_TAGE`,
+  Standard 60, also so lange wie der Kaufvertrag). Unabhängig vom
   Terminstatus: gelöschte, stornierte und wiedergeöffnete Termine sind
   damit abgedeckt. Gelöscht wird nur das Bild; der Berichtstext bleibt.
 - **Wer sieht sie:** der Chef alle, ein Sucher nur zu Terminen in seinem
@@ -1358,7 +1359,7 @@ Der Host-Kopf ist nötig, weil der Webserver nur die eingetragene Domain bedient
 
 Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
 
-Konten gibt es nur über den Super-Admin (Kontonummer, 13.09.2026): Er legt Firma mit Chef, Sucher, Zwischenhändler und Fahrer an. **Kontonummer und Passwort vergibt der Betreiber** und teilt sie den Kunden mit — Chef z. B. `10023`, Sucher `10023-2`, Fahrer eine eigene Nummer aus derselben Reihe, Zwischenhändler seit 14.09.2026 einen **Käufer-Code** wie `6FE7K2M` (7 Zeichen, Buchstaben und Ziffern ohne I/O/0/1, Groß-/Kleinschreibung und Trenner egal; ältere numerische Käufernummern gelten weiter). Passwörter: mindestens 10 Zeichen mit Ziffer oder Sonderzeichen, bis 72 Zeichen — die Admin-Formulare bieten „Sicheres Passwort mit 20 Zeichen vorschlagen“ und zeigen das Passwort nach dem Anlegen einmalig neben der Kontonummer. Eine Selbstregistrierung gibt es nicht; ein vergessenes Passwort setzt der Betreiber neu (Admin → Passwort setzen).
+Konten gibt es nur über den Super-Admin (Kontonummer, 13.09.2026): Er legt Firma mit Chef, Sucher, Zwischenhändler und Fahrer an. **Kontonummer und Passwort vergibt der Betreiber** und teilt sie den Kunden mit — Chef z. B. `10023`, Sucher `10023-2`, Fahrer seit 14.09.2026 ihre **Fahrer-ID** wie `FD-7K2M9QX4` (zugleich der Code, mit dem die Firma den Fahrer verknüpft; ältere Fahrerkonten mit reiner Nummer gelten weiter), Zwischenhändler seit 14.09.2026 einen **Käufer-Code** wie `6FE7K2M` (7 Zeichen, Buchstaben und Ziffern ohne I/O/0/1, Groß-/Kleinschreibung und Trenner egal; ältere numerische Käufernummern gelten weiter). Passwörter: mindestens 10 Zeichen mit Ziffer oder Sonderzeichen, bis 72 Zeichen — die Admin-Formulare bieten „Sicheres Passwort mit 20 Zeichen vorschlagen“ und zeigen das Passwort nach dem Anlegen einmalig neben der Kontonummer. Eine Selbstregistrierung gibt es nicht; ein vergessenes Passwort setzt der Betreiber neu (Admin → Passwort setzen). Konten aus der Zeit vor dem 14.09.2026, die als Zwischenhändler oder Fahrer noch eine reine Nummer tragen, listet und löscht `docker compose exec backend python scripts/alte_kontonummern_loeschen.py` (ohne `--ausfuehren` nur Probelauf; Firmen und Sucher werden nie angefasst).
 
 ### Stufe 2 — zweiter Server und Load Balancer (später)
 

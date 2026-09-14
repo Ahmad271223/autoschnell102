@@ -37,7 +37,7 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
   async function kontonummerAusKarte(page) {
     const nr = page.getByTestId("zugangsdaten-kontonummer");
     // Kontonummer (Chef/Sucher/Fahrer) oder Kaeufer-Code (14.09.2026, z. B. 6FE7K2M)
-    await expect(nr).toHaveText(/^(\d+(-\d+)?|[A-HJ-NP-Z2-9]{6,9})$/);
+    await expect(nr).toHaveText(/^(\d+(-\d+)?|[A-HJ-NP-Z2-9]{6,9}|FD-[A-HJ-NP-Z2-9]{8})$/);
     const wert = (await nr.textContent()).trim();
     return wert;
   }
@@ -115,7 +115,8 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
     await page.getByTestId("fahrer-anlegen-passwort").fill(h.PASSWORD);
     await page.getByTestId("fahrer-anlegen-submit").click();
     const fahrerNr = await kontonummerAusKarte(page);
-    expect(fahrerNr).toMatch(/^\d+$/);
+    // Fahrer-ID = Kontonummer (14.09.2026)
+    expect(fahrerNr).toMatch(/^FD-[A-HJ-NP-Z2-9]{8}$/);
     await expect(page.getByTestId("zugangsdaten-fahrer-code")).toHaveText(/^FD-/);
     await page.getByTestId("zugangsdaten-fertig").click();
     const fahrer = (await h.superGet("/admin/drivers")).find((d) => d.kontonummer === fahrerNr);

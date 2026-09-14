@@ -137,7 +137,7 @@ export default function AdminFahrer() {
                         {r.kontonummer}
                       </span>
                     )}
-                    <Badge tone="blue">{r.driver_code}</Badge>
+                    {r.driver_code && r.driver_code !== r.kontonummer && <Badge tone="blue">{r.driver_code}</Badge>}
                     <Badge tone={r.active ? "green" : "red"}>{r.active ? "Aktiv" : "Gesperrt"}</Badge>
                   </div>
                   <div className="text-[12px] text-zinc-500 truncate">

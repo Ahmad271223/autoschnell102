@@ -45,12 +45,12 @@ export default function KontoPruefen() {
          style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.10)" }}>
       <div className="text-[13px] font-semibold text-white">Konto prüfen</div>
       <div className="text-[12px] text-zinc-500 mt-0.5">
-        Kontonummer (z. B. 10023, 10023-2) oder Käufer-Code (z. B. 6FE7K2M) eingeben — zeigt Kontoart,
+        Kontonummer (z. B. 10023, 10023-2), Käufer-Code (z. B. 6FE7K2M) oder Fahrer-ID (z. B. FD-7K2M9QX4) eingeben — zeigt Kontoart,
         Anmeldeseite, Passwort und Anmeldesperre. Hilft, wenn jemand „Kontonummer oder Passwort falsch“ bekommt.
       </div>
       <form onSubmit={pruefen} className="mt-3 flex gap-2">
         <input value={kennung} onChange={(e) => setKennung(e.target.value)}
-               placeholder="Kontonummer oder Käufer-Code" data-testid="konto-pruefen-kennung"
+               placeholder="Kontonummer, Käufer-Code oder Fahrer-ID" data-testid="konto-pruefen-kennung"
                autoCapitalize="characters" spellCheck={false}
                className="h-10 px-3 rounded-xl text-[14px] flex-1 outline-none focus:ring-2 focus:ring-red-500/40"
                style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }} />
@@ -89,7 +89,7 @@ export default function KontoPruefen() {
                 {zeile("Kennung", <span className="font-mono">{erg.kennung}</span>, "konto-pruefen-kennung-wert")}
                 {zeile("Name", erg.name || "—")}
                 {erg.firma && zeile("Firma", erg.firma)}
-                {erg.driver_code && zeile("Fahrer-ID", <span className="font-mono">{erg.driver_code}</span>)}
+                {erg.driver_code && erg.driver_code !== erg.kennung && zeile("Fahrer-ID", <span className="font-mono">{erg.driver_code}</span>)}
                 {zeile("Anmeldeseite", <span className="font-mono">{erg.anmeldeseite}</span>, "konto-pruefen-seite")}
                 {zeile("Konto", erg.aktiv ? "aktiv" : "GESPERRT (deaktiviert)", "konto-pruefen-aktiv")}
                 {zeile("Passwort", erg.passwort_gesetzt ? "gesetzt" : "FEHLT")}

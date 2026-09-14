@@ -532,9 +532,11 @@ async def driver_login(body: DriverAccountLogin, request: Request):
         raise HTTPException(429, "Zu viele Anmeldeversuche aus diesem Netz – bitte 60 Sekunden warten.")
     # Kontonummer (13.09.2026): nur per Nummer (Schritt 5: kein E-Mail-Zweig).
     # Nummern sind ueber alle Kontoarten eindeutig -> gemeinsamer Konto-Limiter.
-    from kontonummer import anmeldekennung, normalisieren, nummer_bedingung
+    # Fahrer-ID (14.09.2026): "FD-7K2M9QX4" in jeder Schreibweise ODER eine
+    # aeltere reine Nummer.
+    from kontonummer import anmeldekennung, fahrer_normalisieren, normalisieren, nummer_bedingung
     from routes.auth import LOGIN_FALSCH
-    nr = normalisieren(kennung)
+    nr = normalisieren(kennung) or fahrer_normalisieren(kennung)
     da = None
     if nr:
         da = await db.driver_accounts.find_one({"kontonummer": nummer_bedingung(nr)})

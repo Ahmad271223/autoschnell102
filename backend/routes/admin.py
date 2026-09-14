@@ -302,15 +302,17 @@ async def admin_konto_pruefen(kennung: str = Query(..., min_length=1, max_length
     eine Anmeldesperre? Die Anmeldemasken selbst sagen bewusst nur
     "Kontonummer oder Passwort falsch" (keine Konto-Aufzaehlung fuer Fremde);
     hier sieht es nur der Super-Admin."""
-    from kontonummer import anmeldekennung, kaeufer_normalisieren, normalisieren, nummer_bedingung
+    from kontonummer import (anmeldekennung, fahrer_normalisieren, kaeufer_normalisieren,
+                             normalisieren, nummer_bedingung)
     from rate_limiter import login_konto_limiter, _LOGIN_KONTO_LIMIT, _LOGIN_KONTO_FENSTER
     roh = kennung.strip()
-    kanon = normalisieren(roh) or kaeufer_normalisieren(roh)
+    kanon = normalisieren(roh) or kaeufer_normalisieren(roh) or fahrer_normalisieren(roh)
     grund = {"limit": _LOGIN_KONTO_LIMIT, "fenster_minuten": max(1, _LOGIN_KONTO_FENSTER // 60)}
     if not kanon:
         return {"gefunden": False, "kennung": roh, **grund,
                 "hinweis": "Das ist weder eine Kontonummer (z. B. 10023 oder 10023-2) "
-                           "noch ein Käufer-Code (z. B. 6FE7K2M)."}
+                           "noch ein Käufer-Code (z. B. 6FE7K2M) noch eine Fahrer-ID "
+                           "(z. B. FD-7K2M9QX4)."}
     proj = {"_id": 0, "id": 1, "role": 1, "active": 1, "password_hash": 1, "dealer_id": 1,
             "company_name": 1, "first_name": 1, "last_name": 1, "contact_name": 1,
             "display_name": 1, "driver_code": 1, "kontonummer": 1, "created_at": 1,

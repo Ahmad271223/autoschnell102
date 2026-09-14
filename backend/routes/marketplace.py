@@ -546,6 +546,16 @@ async def remove_network_member(buyer_user_id: str,
                               {"listing_id": {"$in": weg}}]}
     if weg or not oeffentlich:
         await db.buyer_favorites.delete_many(fav_filter)
+    # Pruefung 14.09.2026 (Nr. 10/11): ALLE noch gueltigen Einladungen dieser
+    # Firma fuer diesen Kaeufer sperren — auch Mehrfach-Links, die er noch nie
+    # benutzt hat (vorher liess sich der Widerruf mit so einem Link umgehen).
+    # VOR dem Loeschen der Mitgliedschaft: ein gleichzeitiges Einloesen prueft
+    # die Sperre nach dem Verbrauch noch einmal (siehe _redeem_invite) und
+    # nimmt seine eben angelegte Mitgliedschaft zurueck. Neue Einladungen, die
+    # der Chef danach ausspricht, gelten wieder.
+    await db.dealer_invites.update_many(
+        {"dealer_id": user["dealer_id"], "expires_at": {"$gt": now_iso()}},
+        {"$addToSet": {"gesperrt_fuer": buyer_user_id}})
     r = await db.network_members.delete_one(mitglied_filt)
     # Nur wer tatsaechlich geloescht hat, schreibt das Audit (Doppelklick auf
     # zwei Servern: ein Eintrag); ok auch, wenn ein paralleler Aufruf schneller war.
@@ -596,6 +606,10 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     # mehr bestaetigt. Die Nutzung wird dabei NICHT verbraucht: nach dem
     # Entsperren funktioniert der Link wieder.
     if await firma_gesperrt(inv["dealer_id"]):
+        return None
+    # Pruefung 14.09.2026 (Nr. 10): nach einem Widerruf ist dieser Link fuer
+    # diesen Kaeufer gesperrt — egal, ob er ihn schon einmal benutzt hat.
+    if buyer_user_id in (inv.get("gesperrt_fuer") or []):
         return None
     if buyer_user_id in (inv.get("used_by") or []):
         # Bereits eingeloest: nur dann noch Mitglied, wenn der Haendler den
@@ -658,6 +672,16 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
             # Nur die EBEN angelegte Mitgliedschaft zuruecknehmen — eine
             # aeltere ueber eine andere Einladung bleibt unberuehrt.
             await db.network_members.delete_one({"_id": r.upserted_id})
+        return None
+    # Pruefung 14.09.2026 (Nr. 11): Rennen mit dem Widerruf. Hat der Chef
+    # zwischen der Pruefung oben und dem Verbrauch den Zugang widerrufen
+    # (Einladung fuer diesen Kaeufer gesperrt, Mitgliedschaft geloescht), darf
+    # die eben per Upsert angelegte Mitgliedschaft nicht stehen bleiben.
+    nach = await db.dealer_invites.find_one({"id": inv["id"]}, {"_id": 0, "gesperrt_fuer": 1})
+    if buyer_user_id in ((nach or {}).get("gesperrt_fuer") or []):
+        await db.network_members.delete_one(
+            {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id,
+             "via_invite_id": inv["id"]})
         return None
     return inv["dealer_id"]
 

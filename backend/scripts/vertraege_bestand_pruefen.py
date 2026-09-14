@@ -23,7 +23,7 @@ from pymongo import MongoClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 DB_NAME = os.environ.get("DB_NAME", "autoschnell")
-AUFBEWAHRUNG_TAGE = int(os.environ.get("VERTRAG_AUFBEWAHRUNG_TAGE", "90"))
+AUFBEWAHRUNG_TAGE = int(os.environ.get("VERTRAG_AUFBEWAHRUNG_TAGE", "60"))
 AVD = "admin_vehicle_data"
 _OHNE_ID = {"$or": [{"admin_vehicle_data_id": {"$exists": False}},
                     {"admin_vehicle_data_id": {"$in": [None, ""]}}]}

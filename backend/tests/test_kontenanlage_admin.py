@@ -392,7 +392,12 @@ def test_06_keine_fahrer_oder_kaeufernummer_an_firmen(welt):
                   kopf)
         assert r.status_code == 200, r.text[:200]
 
-    nummern = {fahrer["kontonummer"], kaeufer["kontonummer"], k2["kontonummer"]}
+    # Fahrer-ID (14.09.2026): die Kontonummer des Fahrers IST der FD-Code, den
+    # die Firma zum Verknuepfen kennt — er darf (und muss) in /drivers stehen.
+    # Kaeufer-Codes bleiben tabu.
+    nummern = {kaeufer["kontonummer"], k2["kontonummer"]}
+    if fahrer["kontonummer"] != fahrer["driver_code"]:
+        nummern.add(fahrer["kontonummer"])
     antworten = {}
     for pfad in ("/drivers", "/appointments", f"/appointments/{termin}",
                  "/dealer/network/members", "/dealer/interessen"):

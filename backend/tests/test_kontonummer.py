@@ -187,12 +187,21 @@ def test_kontenanlage_und_nummernreihe(wegwerf, monkeypatch):
         with pytest.raises(DuplicateKeyError):
             await KA.kaeufer_anlegen(db, _konto("k2", email="k1@konto.test"))
         z["seq_diff_email"] = (await db.counters.find_one({"_id": "kunden_nr"}))["seq"] - vor
-        # Kontonummer-Dublette (Fahrer) -> neuer Versuch mit der naechsten Nummer
-        seq = (await db.counters.find_one({"_id": "kunden_nr"}))["seq"]
-        await db.driver_accounts.insert_one(_konto("blocker", kontonummer=str(1000 + seq + 1),
-                                                   driver_code="FD-BLOCKER1"))
-        z["blocker_nr"] = 1000 + seq + 1
-        z["nach_blocker"] = await KA.fahrer_anlegen(db, _konto("k3", display_name="F3"))
+        # Fahrer-ID-Dublette (14.09.2026): der Unique-Index auf kontonummer weist
+        # eine schon vergebene Fahrer-ID ab -> neuer Versuch mit frischer ID
+        z["blocker_code"] = z["f_doc"]["driver_code"]
+        codes = iter([z["blocker_code"], z["blocker_code"]])
+        echt = KA.ensure_unique_driver_code
+
+        async def _code(dbx=None):
+            naechster = next(codes, None)
+            return naechster if naechster else await echt(dbx)
+
+        monkeypatch.setattr(KA, "ensure_unique_driver_code", _code)
+        try:
+            z["nach_blocker"] = await KA.fahrer_anlegen(db, _konto("k3", display_name="F3"))
+        finally:
+            monkeypatch.setattr(KA, "ensure_unique_driver_code", echt)
         # Selbstheilung ueber drei Sammlungen
         heil = []
         for coll, doc in ((db.driver_accounts, _konto("fx", kontonummer="50000",
@@ -202,10 +211,16 @@ def test_kontenanlage_und_nummernreihe(wegwerf, monkeypatch):
                           (db.dealers, {"id": "dx", "user_id": "dxu", "kunden_nr": 70000})):
             await coll.insert_one(doc)
             await db.counters.update_one({"_id": "kunden_nr"}, {"$set": {"seq": 1}})
-            heil.append(int((await KA.fahrer_anlegen(
-                db, _konto(f"h{len(heil)}", display_name="H")))["kontonummer"]))
+            # Nur Firmen ziehen noch aus der Reihe (Kaeufer: Code, Fahrer: Fahrer-ID);
+            # die gezogene Nummer wird wie bei einer Firma verbraucht (kunden_nr).
+            nr = await KA.naechste_nummer(db)
+            await db.dealers.insert_one({"id": f"dh{len(heil)}", "user_id": f"dhu{len(heil)}",
+                                         "kunden_nr": nr})
+            heil.append(nr)
         await db.counters.delete_one({"_id": "kunden_nr"})
-        heil.append(int((await KA.fahrer_anlegen(db, _konto("h_fahrer")))["kontonummer"]))
+        nr = await KA.naechste_nummer(db)
+        await db.dealers.insert_one({"id": "dh_ende", "user_id": "dhu_ende", "kunden_nr": nr})
+        heil.append(nr)
         z["heil"] = heil
         # deps.naechste_kunden_nr delegiert
         monkeypatch.setattr(deps, "db", db)
@@ -239,20 +254,24 @@ def test_kontenanlage_und_nummernreihe(wegwerf, monkeypatch):
     assert isinstance(z["alt"]["kunden_nr"], int)
     assert z["alt_sucher"]["kontonummer"] == f"{z['alt']['kunden_nr']}-1"
     assert z["codes"] == [404, 409]
-    from kontonummer import KAEUFER_MUSTER, normalisieren
-    f_nr = int(z["fahrer"]["kontonummer"])
-    assert f_nr > max(nummern + [z["alt"]["kunden_nr"]])
+    from kontonummer import FAHRER_MUSTER, KAEUFER_MUSTER, normalisieren
+    # Fahrer-ID (14.09.2026): Kontonummer = driver_code, keine Nummer der Reihe
+    assert FAHRER_MUSTER.match(z["fahrer"]["kontonummer"]), z["fahrer"]
+    assert z["fahrer"]["kontonummer"] == z["fahrer"]["driver_code"]
+    assert normalisieren(z["fahrer"]["kontonummer"]) is None
     # Kaeufer-Code (14.09.2026): Buchstaben+Ziffern, keine Nummer der Reihe
     assert KAEUFER_MUSTER.match(z["kaeufer"]["kontonummer"]), z["kaeufer"]
     assert normalisieren(z["kaeufer"]["kontonummer"]) is None
     assert z["k_doc"]["role"] == "b2b_buyer" and z["k_doc"]["dealer_id"] is None
     assert "kontonummer_basis" not in z["k_doc"]
     assert z["k_doc"]["kontonummer_art"] == "kaeufer_code"
-    assert z["f_doc"]["kontonummer_basis"] == f_nr
-    assert z["f_doc"]["driver_code"] == z["fahrer"]["driver_code"]
+    assert "kontonummer_basis" not in z["f_doc"]
+    assert z["f_doc"]["kontonummer_art"] == "fahrer_code"
+    assert z["f_doc"]["driver_code"] == z["fahrer"]["driver_code"] == z["f_doc"]["kontonummer"]
     assert z["fahrer"]["driver_code"].startswith("FD-")
     assert z["seq_diff_email"] == 0
-    assert int(z["nach_blocker"]["kontonummer"]) == z["blocker_nr"] + 1
+    assert FAHRER_MUSTER.match(z["nach_blocker"]["kontonummer"])
+    assert z["nach_blocker"]["kontonummer"] != z["blocker_code"]
     assert z["heil"][:3] == [50001, 60001, 70001], z["heil"]
     assert z["heil"][3] > 70001
     assert z["deps_nr"] > z["heil"][3]

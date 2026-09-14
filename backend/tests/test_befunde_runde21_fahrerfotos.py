@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Runde 21 (Befund Ahmad 10.09.2026): Fahrerfotos — wer, wie lange, wo.
 
-  * Frist ab dem HOCHLADEN (FAHRERFOTO_TAGE, Standard 90) statt 7/14 Tage ab
+  * Frist ab dem HOCHLADEN (FAHRERFOTO_TAGE, Standard 60 seit 14.09.2026) statt 7/14 Tage ab
     Terminabschluss: geloeschte, stornierte, wiedergeoeffnete Termine sind
     abgedeckt; die Terminschleife loescht Berichtsfotos nicht mehr
   * vorgemerkte Loeschungen werden nicht jede Stunde neu angestossen
@@ -120,7 +120,8 @@ def welt():
 # ------------------------------------------------------------------ Frist
 def test_01_frist_standard_90_tage_und_terminschleife_loescht_keine_berichtsfotos():
     import cleanup_service as C
-    assert C.FAHRERFOTO_TAGE == int(os.environ.get("FAHRERFOTO_TAGE") or 90)
+    # Fristen 14.09.2026 (Wunsch Ahmad): Standard 60 Tage (vorher 90)
+    assert C.FAHRERFOTO_TAGE == int(os.environ.get("FAHRERFOTO_TAGE") or 60)
     quelle = inspect.getsource(C._cleanup_once)
     assert "_delete_report_photos(" not in quelle, "Terminschleife darf Berichtsfotos nicht mehr loeschen"
     assert "berichtsfotos_nach_frist_loeschen(" in quelle
