@@ -338,8 +338,13 @@ def test_12_fahrer_sieht_neue_fahrt_trotz_langer_historie(welt):
     _fahrer_welt(w)
 
     async def lauf():
+        # Wunsch Ahmad 14.09.2026: abgeholte Fahrten bleiben 14 Tage sichtbar —
+        # hier alle frisch abgeschlossen, damit die Kappung selbst geprueft wird.
+        from datetime import datetime as _dt, timezone as _tz
+        frisch = _dt.now(_tz.utc).isoformat()
         await w.db.appointments.insert_many(
-            [_termin(w, f"alt{i}_{w.s}", "abgeholt", _tag(i), driver_id=w.driver["id"])
+            [{**_termin(w, f"alt{i}_{w.s}", "abgeholt", _tag(i), driver_id=w.driver["id"]),
+              "abgeschlossen_seit": frisch}
              for i in range(500)])
         await w.db.appointments.insert_one(
             _termin(w, f"neu_{w.s}", "offen", "2099-01-01", driver_id=w.driver["id"], zuteilung="offen"))
