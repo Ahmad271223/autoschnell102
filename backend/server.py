@@ -725,6 +725,11 @@ async def ensure_indexes():
         [("dealer_id", 1), ("user_id", 1), ("idempotency_key", 1)], unique=True,
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="vertrag_idempotenz")
+    # Pruefung 14.09.2026 (Liste 4, Nr. 79): SMTP-Idempotenz — ein Eintrag je
+    # Schluessel (parallele Upserts), nach 30 Tagen automatisch weg.
+    await db.mail_idempotenz.create_index("key", unique=True, name="mail_schluessel")
+    await db.mail_idempotenz.create_index("begonnen", expireAfterSeconds=30 * 86400,
+                                          name="mail_idempotenz_ttl")
     await db.pickup_reports.create_index(
         [("appointment_id", 1), ("version", 1)], unique=True,
         name="berichtsversion_eindeutig")
