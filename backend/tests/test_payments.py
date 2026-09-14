@@ -343,7 +343,9 @@ def test_04_completed_schaltet_30_tage_frei_und_bucht_einmal(env, welt):
         assert acc["active"] is True and acc["activated_by"] == "stripe"
         assert acc["session_id"] == sid and acc["price"] == 20.0
         ablauf = datetime.fromisoformat(acc["expires_at"])
-        assert abs((ablauf - (vorher + timedelta(days=30))).total_seconds()) < 120
+        # 15 min Toleranz: unter Last (CI, volle Suite) dauerte der Webhook-Aufruf
+        # samt App-Start schon >2 min — geprueft wird "30 Tage ab jetzt", nicht die Sekunde.
+        assert abs((ablauf - (vorher + timedelta(days=30))).total_seconds()) < 900
         assert tx["period_until"] == acc["expires_at"]
         belege = await mdb.manual_payments.find({"zahlung_ref": sid}, {"_id": 0}).to_list(10)
         assert len(belege) == 1, belege
