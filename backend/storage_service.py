@@ -270,6 +270,16 @@ class LocalDiskStorage:
         shutil.rmtree(ordner, ignore_errors=True)
         return n
 
+    def zaehle_prefix(self, prefix: str) -> int:
+        """Kontonummer (13.09.2026), Live-Reset-Probelauf: Dateien unter einem
+        Praefix nur ZAEHLEN (nichts loeschen). Gleicher Traversal-Schutz wie
+        delete_prefix."""
+        _validate_key(prefix.rstrip("/") + "/x.jpg")   # Traversal-Schutz
+        ordner = self.root / prefix.rstrip("/")
+        if not ordner.is_dir():
+            return 0
+        return sum(1 for p in ordner.rglob("*") if p.is_file())
+
 
 class S3Storage:
     """S3-kompatibles Backend (MinIO / AWS S3 / Cloudflare R2 / …).
@@ -321,6 +331,22 @@ class S3Storage:
                 self.client.delete_objects(Bucket=self.bucket,
                                            Delete={"Objects": keys})
                 n += len(keys)
+            if not seite.get("IsTruncated"):
+                return n
+            token = seite.get("NextContinuationToken")
+
+    def zaehle_prefix(self, prefix: str) -> int:
+        """Kontonummer (13.09.2026), Live-Reset-Probelauf: Objekte unter einem
+        Praefix zaehlen (paginiertes list_objects_v2, OHNE zu loeschen)."""
+        _validate_key(prefix.rstrip("/") + "/x.jpg")
+        n = 0
+        token = None
+        while True:
+            kwargs = {"Bucket": self.bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            seite = self.client.list_objects_v2(**kwargs)
+            n += len(seite.get("Contents", []) or [])
             if not seite.get("IsTruncated"):
                 return n
             token = seite.get("NextContinuationToken")
