@@ -2,11 +2,14 @@ import MonatJahrEingabe from "@/components/MonatJahrEingabe";
 import { monatJahrFehler } from "@/lib/monatJahr";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, errMsg } from "@/lib/api";
+import { api, errMsg, openAuthedFile } from "@/lib/api";
+import { openContractPdf } from "@/lib/pdf";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { INSERAT_LABELS } from "@/lib/fahrzeugStatus";
 import { toast } from "sonner";
-import { ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X } from "lucide-react";
+import {
+  ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X, FileText, PenLine,
+} from "lucide-react";
 
 /**
  * Inserats-Editor: automatisch vorausgefüllter Entwurf aus der Fahrzeugakte
@@ -24,6 +27,12 @@ export default function Inserat() {
   const [l, setL] = useState(null);
   const [busy, setBusy] = useState(false);
   const [abholBusy, setAbholBusy] = useState(false);
+  // Wunsch Ahmad 14.09.2026: Beim Inserieren soll der Chef das unterschriebene
+  // Abholprotokoll und den abschliessenden Kaufvertrag weiter oeffnen koennen —
+  // nur in SEINER Ansicht. Der Marktplatz bekommt davon nichts: die
+  // oeffentliche Sicht (routes/marketplace._public_listing_view) ist eine
+  // feste Feldliste ohne Fahrzeug-ID, Vertraege oder Protokolle.
+  const [unterlagen, setUnterlagen] = useState(null);
   const fileRef = useRef(null);
   const backend = process.env.REACT_APP_BACKEND_URL;
 
@@ -35,6 +44,16 @@ export default function Inserat() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  const vehicleId = l?.vehicle_id;
+  useEffect(() => {
+    if (!vehicleId) return undefined;
+    let aktiv = true;
+    api.get(`/vehicles/${vehicleId}/akte`)
+      .then((r) => { if (aktiv) setUnterlagen({ protocols: r.data.protocols || [], contracts: r.data.contracts || [] }); })
+      .catch(() => { if (aktiv) setUnterlagen({ protocols: [], contracts: [] }); });
+    return () => { aktiv = false; };
+  }, [vehicleId]);
 
   if (!l) return <div className="p-10 text-zinc-500 text-sm">lade…</div>;
 
@@ -150,6 +169,36 @@ export default function Inserat() {
       <Link to={`/app/akte/${l.vehicle_id}`} className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
         <ArrowLeft size={14} /> Zur Fahrzeugakte
       </Link>
+      {unterlagen && (unterlagen.protocols.length > 0 || unterlagen.contracts.length > 0) && (
+        <div className="mt-3 rounded-xl border px-4 py-3" data-testid="inserat-unterlagen"
+             style={{ borderColor: "var(--border-default)" }}>
+          <div className="text-[11px] uppercase tracking-wide text-zinc-500">
+            Unterlagen zum Auto — nur für dich, nie im Marktplatz sichtbar
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {unterlagen.protocols.map((p) => (
+              <button key={p.id} type="button" data-testid={`inserat-protokoll-${p.id}`}
+                      onClick={() => openAuthedFile(`/protocols/${p.id}.pdf`)
+                        .catch(() => toast.error("Protokoll konnte nicht geladen werden"))}
+                      className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-zinc-200 hover:bg-white/5"
+                      style={{ borderColor: "var(--border-default)" }}>
+                <PenLine size={13} className="text-[color:var(--accent-green,#34c759)]" />
+                Abhol-Protokoll (unterschrieben){p.version > 1 ? ` v${p.version}` : ""}
+              </button>
+            ))}
+            {unterlagen.contracts.map((c, i) => (
+              <button key={c.id} type="button" data-testid={`inserat-vertrag-${c.id}`}
+                      onClick={() => openContractPdf(c.id)
+                        .catch((e) => toast.error(errMsg(e, "Kaufvertrag konnte nicht geladen werden")))}
+                      className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-zinc-200 hover:bg-white/5"
+                      style={{ borderColor: "var(--border-default)" }}>
+                <FileText size={13} />
+                Kaufvertrag {c.contract_no || c.id.slice(0, 8)}{i === 0 ? " · aktuelle Fassung" : ""}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="overline">Verkaufsinserat · {STATUS_LABELS[l.status] || l.status}</div>

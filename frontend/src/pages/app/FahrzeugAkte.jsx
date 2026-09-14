@@ -13,6 +13,7 @@ import {
 import {
   ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
 } from "lucide-react";
+import { openContractPdf } from "@/lib/pdf";
 
 /**
  * Durchgehende Fahrzeugakte: Beschaffung · Kauf · Abholung (mit Abweichungs-
@@ -376,13 +377,17 @@ export default function FahrzeugAkte() {
             <KV key={a.id} k="Geplante Abholung"
                 val={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time}\u00a0Uhr` : ""} · ${lesbar(a.status || "offen")}`} />
           ))}
-          {akte.contracts.map((c) => (
-            <div key={c.id} className="mt-2 flex items-center justify-between text-sm">
+          {akte.contracts.map((c, i) => (
+            <button key={c.id} type="button" data-testid={`akte-vertrag-${c.id}`}
+                    onClick={() => openContractPdf(c.id)
+                      .catch((e) => toast.error(errMsg(e, "Kaufvertrag konnte nicht geladen werden")))}
+                    className="mt-2 w-full flex items-center justify-between text-sm rounded-lg px-2 py-1.5 hover:bg-white/[0.04] text-left">
               <span className="inline-flex items-center gap-1.5 text-zinc-300">
                 <FileText size={13} /> Kaufvertrag {c.contract_no || c.id.slice(0, 8)}
+                {i === 0 && <span className="text-[10px] text-zinc-500">aktuelle Fassung</span>}
               </span>
               <span className="text-zinc-500 text-xs">{fmtDate(c.created_at)}</span>
-            </div>
+            </button>
           ))}
           {/* Runde 27: Die Akte zeigt die 10 neuesten — bei mehreren Suchern
               am selben Auto gibt es mehr. Das darf nicht still verschwinden. */}
