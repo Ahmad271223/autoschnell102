@@ -279,7 +279,8 @@ def test_17_fahrzeugdaten_werden_je_feld_bereinigt(welt):
     assert d["mileage"] == 1000, "nicht endlicher km-Stand verworfen, alter Wert bleibt"
     assert d["first_registration"] == "03/2019", "Objekt statt Text verworfen"
     assert len(d["features"]) <= 150 and all(len(f) <= 200 for f in d["features"])
-    assert d["accident_free"] == "Nein" and d["power_ps"] == "150"
+    # Pruefung 14.09.2026 (F15): Zahlenfelder werden als Zahl gespeichert
+    assert d["accident_free"] == "Nein" and d["power_ps"] == 150
     assert "power_kw" not in d, "'1e400' ist nicht endlich"
     assert len(d["color"]) == 80 and "unbekannt" not in d
     geaendert = audit["meta"]["fahrzeugdaten_geaendert"]

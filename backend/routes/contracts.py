@@ -552,15 +552,31 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     )
 
 
+def _anfrage_hash(body) -> str:
+    """Pruefung 14.09.2026 (F16): Fingerabdruck der Vertragsanfrage ohne den
+    Schluessel selbst — bindet einen Idempotenz-Schluessel an seinen Inhalt."""
+    import hashlib
+    import json
+    daten = body.model_dump(exclude={"idempotency_key"})
+    roh = json.dumps(daten, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:32]
+
+
 @router.post("/contracts")
 async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Pruefung 14.09.2026 (Liste 3, Nr. 1): derselbe Schluessel -> derselbe Vertrag.
+    anfrage_hash = _anfrage_hash(body)
     if body.idempotency_key:
         vorhanden = await db.generated_pdfs.find_one(
             {"dealer_id": user["dealer_id"], "user_id": user["id"],
              "idempotency_key": body.idempotency_key},
             {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
         if vorhanden:
+            # Pruefung 14.09.2026 (F16): derselbe Schluessel mit ANDEREN
+            # Vertragsdaten ist ein Fehler, nicht "der alte Vertrag".
+            if vorhanden.get("idempotency_hash") and vorhanden["idempotency_hash"] != anfrage_hash:
+                raise HTTPException(409, "Dieser Idempotenz-Schlüssel wurde schon für einen "
+                                         "anderen Vertrag verwendet — bitte neu laden")
             return {**clean_doc(vorhanden), "bereits_vorhanden": True}
     # Umbau Kaufvorgaenge 09.09.2026: Inserat firmenweit gemeinsam — jeder
     # Sucher darf einen eigenen Vertrag (= eigenen Kaufvorgang) anlegen.
@@ -652,6 +668,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     }
     if body.idempotency_key:
         doc["idempotency_key"] = body.idempotency_key
+        doc["idempotency_hash"] = anfrage_hash
     # Dauerhafte, anonyme Auto-Daten (siehe auto_daten.py): ZUERST der
     # Datensatz, dann der Vertrag mit dessen zufaelliger id. Scheitert der
     # Vertrags-Insert, wird der Datensatz sofort wieder entfernt — es gibt
@@ -1273,6 +1290,17 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         vorhanden = next((e for e in eintraege
                           if e.get("idempotency_key") == body.idempotency_key), None)
         if vorhanden is None:
+            # Pruefung 14.09.2026 (A5): der Schluessel kann aus der 200er-
+            # Verlaufsliste herausgefallen sein — die eigene Sammlung kennt ihn noch.
+            try:
+                archiv = await db.versand_schluessel.find_one(
+                    {"contract_id": contract_id, "key": body.idempotency_key}, {"_id": 0})
+            except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand laeuft
+                archiv = None
+            if archiv:
+                return {"channel": archiv.get("channel"), "status": "ok",
+                        "sent_at": archiv.get("sent_at"), "zustellung": "archiv",
+                        "bereits_gesendet": True}
             # Nachpruefung Runde 10: Die Oberflaeche schickt je Klick einen
             # NEUEN Schluessel. Haengt zu demselben Kanal und Empfaenger noch
             # ein Versand ohne Ergebnis (Prozess starb, Timeout), haette der
@@ -1332,6 +1360,15 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 "recipient": body.recipient, "subject": body.subject,
                 "sent_at": reserviert_am, "zustellung": "laeuft"}],
                 "$slice": -SEND_STATUS_MAX}}})
+        if res.modified_count:
+            try:
+                await db.versand_schluessel.update_one(
+                    {"contract_id": contract_id, "key": body.idempotency_key},
+                    {"$setOnInsert": {"dealer_id": c.get("dealer_id"), "channel": body.channel,
+                                      "recipient": body.recipient, "sent_at": reserviert_am}},
+                    upsert=True)
+            except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand laeuft
+                log.exception("Versand-Schluessel %s nicht archiviert", contract_id)
         if res.modified_count == 0:
             return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
                     "zustellung": "laeuft", "bereits_gesendet": True}
@@ -1573,7 +1610,9 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})]
     if termin_ids and await db.pickup_protocols.count_documents(
             {"appointment_id": {"$in": termin_ids}, "superseded": {"$ne": True},
-             "status": {"$in": ["zur_freigabe", "freigegeben", "wird_abgeschlossen"]}}, limit=1):
+             # Pruefung 14.09.2026 (B28): auch ein begonnener Entwurf zaehlt
+             "status": {"$in": ["entwurf", "zur_freigabe", "freigegeben",
+                                "wird_abgeschlossen"]}}, limit=1):
         raise HTTPException(409, "Zu diesem Vertrag läuft gerade ein Abholprotokoll "
                                  "(Freigabe oder Unterschrift) — der Vertrag kann jetzt "
                                  "nicht gelöscht werden.")

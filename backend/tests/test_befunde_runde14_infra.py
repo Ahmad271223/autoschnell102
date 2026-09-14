@@ -97,130 +97,6 @@ def _tx(db_sync, uid, sid):
     return db_sync.payment_transactions.find_one({"session_id": sid}, {"_id": 0})
 
 
-def _race_aufraeumen(uid, sids):
-    d = _db()
-    d.users.delete_many({"id": uid})
-    d.payment_transactions.delete_many({"session_id": {"$in": sids}})
-    d.zugang_grants.delete_many({"session_id": {"$in": sids}})
-    d.manual_payments.delete_many({"zahlung_ref": {"$in": sids}})
-    d.betriebsalarme.delete_many({"ref": {"$in": sids}})
-    d.job_locks.delete_many({"name": f"zugang_freischalten:{uid}"})
-
-
-def test_59_zwei_parallele_zahlungen_ergeben_60_tage():
-    uid = f"r14_buyer_{SUF}"
-    sa, sb = f"cs_r14a_{SUF}", f"cs_r14b_{SUF}"
-    ablauf = (JETZT + timedelta(days=24)).replace(microsecond=0)
-    d = _db()
-    _kaeufer(d, uid, _iso(ablauf))
-    txa, txb = _tx(d, uid, sa), _tx(d, uid, sb)
-
-    async def lauf(db):
-        import job_lock
-        import routes.payments as p
-        alt = p.db
-        p.db = db
-        try:
-            await job_lock.ensure_lock_index(db)
-            erg = await asyncio.gather(p._activate_paid_transaction(txa, sa),
-                                       p._activate_paid_transaction(txb, sb))
-            assert erg == [True, True], erg
-            u = await db.users.find_one({"id": uid}, {"_id": 0})
-            acc = u["marketplace_access"]
-            erwartet = (ablauf + timedelta(days=60)).isoformat()
-            assert acc["expires_at"] == erwartet, (acc, erwartet)
-            grants = await db.zugang_grants.find(
-                {"session_id": {"$in": [sa, sb]}}, {"_id": 0}).to_list(10)
-            assert len(grants) == 2
-            assert len({g["basis"] for g in grants}) == 2, \
-                "beide Grants mit derselben Basis = nur einmal verlaengert"
-            assert sorted(g["expires_at"] for g in grants) == \
-                [(ablauf + timedelta(days=30)).isoformat(), erwartet]
-            txs = await db.payment_transactions.find(
-                {"session_id": {"$in": [sa, sb]}}, {"_id": 0}).to_list(10)
-            assert {t["status"] for t in txs} == {"active"}, txs
-            # Wiederholungslauf derselben Session verlaengert NICHT erneut
-            assert await p._zugang_freischalten(txa, sa) == erwartet
-            u2 = await db.users.find_one({"id": uid}, {"_id": 0})
-            assert u2["marketplace_access"]["expires_at"] == erwartet
-            assert await db.zugang_grants.count_documents(
-                {"session_id": {"$in": [sa, sb]}}) == 2
-            # Sperre ist wieder frei
-            assert await job_lock.acquire(db, f"zugang_freischalten:{uid}", 5)
-            await job_lock.release(db, f"zugang_freischalten:{uid}")
-        finally:
-            p.db = alt
-
-    try:
-        _run(lauf)
-    finally:
-        _race_aufraeumen(uid, [sa, sb])
-
-
-def test_59_cas_backstop_verwirft_veralteten_stand_und_eigenen_grant():
-    """Faellt die Sperre aus, faengt der Compare-and-Swap den veralteten
-    Lesestand ab: nichts geschrieben, frischer Grant wieder entfernt, damit
-    der Reparaturlauf die Basis neu berechnet (statt den alten Grant-Wert
-    zu schreiben und Laufzeit zu verlieren)."""
-    uid = f"r14_cas_{SUF}"
-    sid = f"cs_r14cas_{SUF}"
-    echt = (JETZT + timedelta(days=40)).replace(microsecond=0)
-    d = _db()
-    _kaeufer(d, uid, _iso(echt))
-    tx = _tx(d, uid, sid)
-
-    class _UsersVeraltet:
-        """users.find_one liefert einen aelteren Ablauf als in der DB."""
-        def __init__(self, coll):
-            self._c = coll
-
-        async def find_one(self, *a, **k):
-            doc = await self._c.find_one(*a, **k)
-            if doc and doc.get("marketplace_access"):
-                doc["marketplace_access"]["expires_at"] = \
-                    (echt - timedelta(days=10)).isoformat()
-            return doc
-
-        def __getattr__(self, name):
-            return getattr(self._c, name)
-
-    class _DbVeraltet:
-        def __init__(self, db):
-            self._db = db
-            self.users = _UsersVeraltet(db.users)
-
-        def __getattr__(self, name):
-            return getattr(self._db, name)
-
-    async def lauf(db):
-        import job_lock
-        import routes.payments as p
-        alt = p.db
-        p.db = _DbVeraltet(db)
-        try:
-            await job_lock.ensure_lock_index(db)
-            with pytest.raises(RuntimeError):
-                await p._zugang_freischalten(tx, sid)
-            u = await db.users.find_one({"id": uid}, {"_id": 0})
-            assert u["marketplace_access"]["expires_at"] == _iso(echt), \
-                "veralteter Lesestand darf nicht geschrieben werden"
-            assert await db.zugang_grants.count_documents({"session_id": sid}) == 0, \
-                "eigener Grant mit veralteter Basis muss wieder weg sein"
-            # Sperre freigegeben (finally)
-            assert await job_lock.acquire(db, f"zugang_freischalten:{uid}", 5)
-            await job_lock.release(db, f"zugang_freischalten:{uid}")
-        finally:
-            p.db = alt
-
-    try:
-        _run(lauf)
-    finally:
-        _race_aufraeumen(uid, [sid])
-
-
-# =====================================================================
-#            Nr. 60 / 61 — Unique-Indizes (unit ueber server.py)
-# =====================================================================
 def _index_namen(sync_coll):
     return set(sync_coll.index_information().keys())
 
@@ -557,8 +433,11 @@ _PROD_UMGEBUNG = {
     "APP_ENV": "production",
     "TRUST_PROXY": "true",                # Pruefung 14.09.2026 (L4-74)
     "STORAGE_LOKAL_ERLAUBT": "true",      # Pruefung 14.09.2026 (L3-31): Einzelserver
+    # Pruefung 14.09.2026 (Phase 1): Betreiberkonto und Anbieter-Zugang sind Pflicht
+    "SUPER_ADMIN_USERNAME": "ci-test-superadmin",
+    "SUPER_ADMIN_PASSWORD": "Ci-Test-Super-2026!x",
+    "APIFY_TOKEN": "ci-test-apify-token",
     "JWT_SECRET": uuid.uuid4().hex + uuid.uuid4().hex,
-    "SUPER_ADMIN_PASSWORD": "",
     "FRONTEND_URL": "https://app.example.de",
     "CORS_ORIGINS": "https://app.example.de",
     "MONGO_URL": "mongodb://u:p@db:27017/autoschnell?authSource=admin&maxPoolSize=20",

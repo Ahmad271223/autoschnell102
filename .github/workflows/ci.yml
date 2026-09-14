@@ -175,6 +175,8 @@ jobs:
           WEB_CONCURRENCY=2
           TRUST_PROXY=true
           STORAGE_LOKAL_ERLAUBT=true
+          APIFY_TOKEN=ci-stack-dummy-token
+          MFA_PFLICHT=false
           ENV
           docker compose up -d --quiet-pull
           for i in $(seq 1 60); do

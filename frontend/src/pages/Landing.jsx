@@ -15,15 +15,7 @@ export default function Landing() {
   // festzuschreiben. Sonst wirbt die Startseite mit 20 Euro weiter,
   // obwohl der Betreiber den Zugang laengst kostenlos gestellt hat.
   // Vorbelegung = der Standard im Code (kostenlos).
-  const [markt, setMarkt] = useState({ marktplatz_kostenlos: true, preis: 20 });
-
-  useEffect(() => {
-    let aktiv = true;
-    api.get("/payments/config")
-      .then((r) => { if (aktiv && r.data) setMarkt(r.data); })
-      .catch(() => {});
-    return () => { aktiv = false; };
-  }, []);
+  const [markt] = useState({ marktplatz_kostenlos: true, preis: 20 });
 
   // Schließt das Mobile-Menü, wenn der Browser gross wird oder Escape kommt
   useEffect(() => {
@@ -403,7 +395,7 @@ export default function Landing() {
                 </Link>
               </div>
               <ul className="mt-5 space-y-2 text-sm">
-                {["Alle veröffentlichten Fahrzeuge + Händlerseiten", "B2B- und Netzwerk-Preise", "Favoriten-Merkliste", "Zahlung sicher über Stripe", "Monatlich, jederzeit beendbar"].map(t => (
+                {["Alle veröffentlichten Fahrzeuge + Händlerseiten", "B2B- und Netzwerk-Preise", "Favoriten-Merkliste", "Freischaltung per Rechnung durch den Betreiber", "Monatlich, jederzeit beendbar"].map(t => (
                   <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>
                 ))}
               </ul>

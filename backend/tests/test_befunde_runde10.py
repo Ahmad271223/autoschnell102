@@ -133,15 +133,6 @@ def test_e1b_login_mfa_lehnt_alten_zustand_und_abgeschaltete_mfa_ab():
 
 
 # ---------------------------------------------------------------- E2
-def test_e2_zahlungswiederholung_verkuerzt_laufzeit_nicht():
-    quelle = (BACKEND / "routes" / "payments.py").read_text(encoding="utf-8")
-    start = quelle.index('expires_at = grant["expires_at"]')
-    block = quelle[start:start + 700]
-    assert 'if aktuell and str(aktuell) > str(expires_at):' in block
-    assert 'expires_at = aktuell' in block
-
-
-# ---------------------------------------------------------------- F1
 def test_f1_protokoll_wird_nur_im_entwurf_beschrieben():
     import routes.protocols as p
     quelle = inspect.getsource(p.save_protocol)

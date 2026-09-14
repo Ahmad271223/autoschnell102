@@ -124,45 +124,6 @@ def test_c1_c2_zugang_erzwingen_und_abhaengigkeiten(monkeypatch):
     assert "_zugang_erzwingen(user)" in inspect.getsource(m.toggle_favorit)
 
 
-def test_a3_a4_zahlungsstatus_quelle():
-    import routes.payments as p
-    src = inspect.getsource(p.payment_status)
-    assert "is_super_admin" in src, "Rolle admin allein darf fremde Zahlungen nicht lesen"
-    # Der Betreiber liest nur: return VOR der Freischaltung
-    assert src.index("return tx") < src.index("_activate_paid_transaction")
-
-
-def test_a5_a6_stripe_freischaltung_prueft_rolle_und_sperre():
-    import routes.payments as p
-    from deps import db
-    dbx = _db()
-    uid_s, uid_b, uid_g = (f"r13pay_{k}_{SUF}" for k in ("sucher", "buyer", "gesperrt"))
-    dbx.users.insert_many([
-        {"id": uid_s, "email": f"r13pay_s_{SUF}@{MAIL}", "role": "sucher", "active": True,
-         "dealer_id": "x", "created_at": _jetzt()},
-        {"id": uid_b, "email": f"r13pay_b_{SUF}@{MAIL}", "role": "b2b_buyer", "active": False,
-         "created_at": _jetzt()},
-        {"id": uid_g, "email": f"r13pay_g_{SUF}@{MAIL}", "role": "b2b_buyer", "active": True,
-         "marketplace_access": {"active": False, "gesperrt": True, "gesperrt_am": _jetzt(),
-                                "gesperrt_von": "test"},
-         "created_at": _jetzt()},
-    ])
-    try:
-        for uid, wort in ((uid_s, "kein Zwischenhaendler"), (uid_b, "gesperrt")):
-            with pytest.raises(RuntimeError, match=wort):
-                asyncio.run(p._zugang_freischalten({"user_id": uid, "plan": "marktplatz"},
-                                                   f"cs_test_{SUF}_{uid}"))
-        # gesperrter, aber aktiver Kaeufer: Laufzeit wird gebucht, Sperre bleibt
-        asyncio.run(p._zugang_freischalten({"user_id": uid_g, "plan": "marktplatz"}, f"cs_test_{SUF}_g"))
-        acc = dbx.users.find_one({"id": uid_g})["marketplace_access"]
-        assert acc["active"] is True and acc.get("gesperrt") is True and acc.get("gesperrt_von") == "test"
-        import routes.marketplace as m
-        assert m._access_status({"role": "b2b_buyer", "marketplace_access": acc})["gesperrt"] is True
-    finally:
-        dbx.users.delete_many({"id": {"$in": [uid_s, uid_b, uid_g]}})
-        dbx.manual_payments.delete_many({"subject_user_id": {"$in": [uid_s, uid_b, uid_g]}})
-
-
 def test_b5_b6_abgeloest_durch_kontonummer():
     """Kontonummer (13.09.2026), Schritt 5: B5 (E-Mail plattformweit eindeutig)
     und B6 (Reset fuer beide Kontotypen) sind abgeloest — angemeldet wird per
@@ -366,23 +327,6 @@ def test_c6_betreiber_sperre_gilt_im_kostenlos_modus(welt):
     acc = _db().users.find_one({"id": k2["id"]})["marketplace_access"]
     assert acc["active"] is True and not acc.get("gesperrt")
     assert requests.get(f"{API}/marktplatz/listings", headers=k2["kopf"], timeout=30).status_code == 200
-
-
-def test_a3_a4_zahlungsstatus_http(welt):
-    sid = f"cs_r13_{SUF}"
-    dbx = _db()
-    dbx.payment_transactions.insert_one({
-        "session_id": sid, "user_id": welt["k2"]["id"], "plan": "marktplatz",
-        "status": "activation_failed", "payment_status": "paid", "amount": 2000,
-        "currency": "eur", "created_at": _jetzt(), "updated_at": _jetzt()})
-    vorher = dbx.users.find_one({"id": welt["k2"]["id"]}).get("marketplace_access")
-    # fremder Firmenchef: 403
-    assert requests.get(f"{API}/payments/status/{sid}", headers=welt["h1"]["kopf"], timeout=30).status_code == 403
-    # Betreiber: lesen ja, Freischaltung nein
-    r = requests.get(f"{API}/payments/status/{sid}", headers=welt["A"], timeout=30)
-    assert r.status_code == 200, r.text[:200]
-    assert dbx.payment_transactions.find_one({"session_id": sid})["status"] == "activation_failed"
-    assert dbx.users.find_one({"id": welt["k2"]["id"]}).get("marketplace_access") == vorher
 
 
 def test_b5_gleiche_adresse_ueber_kontotypen_erlaubt(welt):

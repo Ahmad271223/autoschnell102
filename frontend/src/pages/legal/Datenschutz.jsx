@@ -50,11 +50,11 @@ export default function Datenschutz() {
       {/* BETREIBER-HINWEIS (im Browser unsichtbar): Stand 04.09.2026 —
           die Liste bildet den TATSAECHLICHEN Produktionsbetrieb ab:
           Hetzner (Hosting), Resend (E-Mail), Cloudflare R2 (Dateien),
-          Apify (Inserats-Abruf). Stripe ist aktuell NICHT
-          im Einsatz und deshalb als solche gekennzeichnet — werden sie
-          eingeschaltet, muss der jeweilige Absatz wieder aktiv formuliert
-          werden. Herkunft: backend/email_service.py, storage_service.py,
-          mobile_service.py + autoscout_service.py, routes/payments.py,
+          Apify (Inserats-Abruf). Es gibt keinen Zahlungsdienstleister:
+          Zugaenge werden per Rechnung abgerechnet und vom Betreiber
+          freigeschaltet (Stripe wurde am 14.09.2026 entfernt).
+          Herkunft: backend/email_service.py, storage_service.py,
+          mobile_service.py + autoscout_service.py,
           beweis_service.py (Beweisdokumente ohne externen Dienst). Der EINZIGE offene Punkt
           ist der Rechenzentrums-Standort in eckigen Klammern. */}
       <p>
@@ -123,18 +123,16 @@ export default function Datenschutz() {
       {/* BETREIBER-HINWEIS (im Browser unsichtbar): Die genannten Fristen
           sind technisch konfigurierte Werte, keine rechtlich geprueften
           Zusagen — eine abschliessende rechtliche Pruefung steht noch aus.
-          Quellen: backend/cleanup_service.py (VERTRAG_AUFBEWAHRUNG_TAGE=90,
-          LOG_AUFBEWAHRUNG_TAGE=180, SNAPSHOT_RETENTION_DAYS=60 (nur Alt-Snapshots),
-          beweis_service.py BEWEIS_AUFBEWAHRUNG_TAGE=90,
-          CLEANUP_RULES 7/14 Tage fuer Inseratsfotos, FAHRERFOTO_TAGE=90
+          Quellen: backend/cleanup_service.py (VERTRAG_AUFBEWAHRUNG_TAGE=60,
+          LOG_AUFBEWAHRUNG_TAGE=60, SNAPSHOT_RETENTION_DAYS=60 (nur Alt-Snapshots),
+          beweis_service.py BEWEIS_AUFBEWAHRUNG_TAGE=60,
+          CLEANUP_RULES 7/14 Tage fuer Inseratsfotos, FAHRERFOTO_TAGE=60
           fuer Fahrerfotos ab dem Hochladen), routes/bestand.py
           (BESTAND_RETENTION_DAYS=50), routes/listings.py
           (LISTING_CACHE_TTL_HOURS). Wird eine Umgebungsvariable geaendert,
-          muss dieser Text nachgezogen werden. Stand 13.09.2026:
-          LISTING_CACHE_TTL_HOURS steht per Default auf 2160 h (= 90 Tage);
-          cleanup_service.inseratscache_rotieren loescht Inseratsdaten
-          spaetestens INSERATSCACHE_MAX_TAGE = 90 Tage nach dem Abruf — passt
-          zu "max. 90 Tage". */}
+          muss dieser Text nachgezogen werden. Stand 14.09.2026 (Entscheidung
+          Ahmad: keine Frist ueber 60 Tage): LISTING_CACHE_TTL_HOURS steht per
+          Default auf 1440 h (= 60 Tage). */}
       <p>
         <b>Account-Daten</b> speichern wir für die Dauer der
         Geschäftsbeziehung; nach Löschung des Accounts werden sie entfernt,
@@ -146,7 +144,7 @@ export default function Datenschutz() {
         Vertragsdokumente (PDF) und die darin enthaltenen personenbezogenen
         Daten (insbesondere Name, Anschrift und Kontaktdaten des
         Fahrzeugverkäufers sowie Unterschriften) werden nach Ablauf der
-        eingestellten Aufbewahrungsfrist (derzeit 90 Tage nach Erstellung)
+        eingestellten Aufbewahrungsfrist (derzeit 60 Tage nach Erstellung)
         automatisch und vollständig gelöscht. Für die handels- und
         steuerrechtliche Aufbewahrung des Kaufvertrags (6 bzw. 10 Jahre nach
         HGB/AO) ist der Händler selbst verantwortlich: Er lädt das
@@ -157,14 +155,14 @@ export default function Datenschutz() {
       </p>
       <p>
         Fotos, die der Fahrer bei der Abholung zu Abweichungen aufnimmt,
-        werden 90 Tage nach dem Hochladen automatisch gelöscht, also etwa so
+        werden 60 Tage nach dem Hochladen automatisch gelöscht, also etwa so
         lange, wie der zugehörige Kaufvertrag aufbewahrt wird; der Text des
         Abholberichts bleibt als Geschäftsunterlage erhalten. Aus dem
         Inserat übernommene Fahrzeugfotos werden 7 Tage nach der Abholung
         (bei nicht abgeholten Fahrzeugen nach 14 Tagen) gelöscht, sofern das
         Fahrzeug nicht in den Bestand oder Verkauf übernommen wurde.
         Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert.
-        Beweisdokumente zu Inseraten löschen wir 90 Tage nach ihrer
+        Beweisdokumente zu Inseraten löschen wir 60 Tage nach ihrer
         Erstellung, außer zu dem Inserat besteht bei einem Händler noch ein
         Kaufvertrag, ein Abholtermin, ein Verkaufsinserat oder ein
         Bestandsfahrzeug — dann so lange wie dieser Vorgang. Beweis-Aufnahmen aus der Zeit vor dem
@@ -173,12 +171,12 @@ export default function Datenschutz() {
       </p>
       <p>Weitere Fristen:</p>
       <ul className="list-disc pl-6 space-y-1">
-        <li>Zugangs- und Abo-Anfragen (erledigt oder abgelehnt): 90 Tage</li>
-        <li>Fehlerprotokolle: max. 365 Tage</li>
-        <li>Marktplatz-Anfragen: 180 Tage nach Abschluss</li>
-        <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 90 Tage</li>
+        <li>Zugangs- und Abo-Anfragen (erledigt oder abgelehnt): 60 Tage</li>
+        <li>Fehlerprotokolle: max. 60 Tage</li>
+        <li>Marktplatz-Anfragen: 60 Tage nach Abschluss</li>
+        <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 60 Tage</li>
         <li>Backups: täglich; auf unseren Servern 14 Tage, zusätzlich
-            verschlüsselt außer Haus bis zu 30 Tage</li>
+            verschlüsselt außer Haus die letzten 14 Sicherungen</li>
       </ul>
 
       <H2>6. Deine Rechte</H2>

@@ -133,27 +133,6 @@ def test_rollentrennung(chef):
     assert r.status_code == 403, f"Kaeufer kam in den Bestand ({r.status_code})"
 
 
-def test_fremde_zahlung_unsichtbar(chef):
-    """Mandantentest: bezahlte Transaktion eines ANDEREN Nutzers darf
-    ueber /payments/status nicht einsehbar sein (PR-Review Blocker)."""
-    from pymongo import MongoClient
-    session_id = f"cs_smoke_{SUFFIX}"
-    MongoClient(MONGO_URL)[DB_NAME].payment_transactions.insert_one({
-        "session_id": session_id, "user_id": "jemand_anderes",
-        "dealer_id": "fremde_firma", "plan": "monthly",
-        "payment_status": "paid", "status": "complete",
-        "amount": 160.0, "created_at": "2026-01-01T00:00:00+00:00"})
-    try:
-        r = requests.get(f"{API}/payments/status/{session_id}",
-                         headers={"Authorization": f"Bearer {chef['token']}"},
-                         timeout=30)
-        assert r.status_code == 403, (
-            f"Fremde Zahlung wurde ausgeliefert ({r.status_code}): {r.text[:200]}")
-    finally:
-        MongoClient(MONGO_URL)[DB_NAME].payment_transactions.delete_one(
-            {"session_id": session_id})
-
-
 def test_sucher_loeschen_zerstoert_firma_nicht(chef):
     """Mandantentest: loescht der Admin einen SUCHER, muessen Firma und
     Haendler-Abo bestehen bleiben (PR-Review Blocker: Admin-Loeschung)."""

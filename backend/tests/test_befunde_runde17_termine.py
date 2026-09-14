@@ -225,8 +225,11 @@ def test_01_betraege_nicht_negativ_kein_inf_nan(kw):
 
 def test_01b_betraege_normal_bleiben():
     A = _module("routes.appointments")
-    a = A.AppointmentIn(final_price=0, extra_costs=12.5)
-    assert a.final_price == 0 and a.extra_costs == 12.5
+    # 14.09.2026 (Entscheidung Ahmad): 0 ist kein Preis mehr — ein echter Betrag bleibt
+    a = A.AppointmentIn(final_price=4500, extra_costs=12.5)
+    assert a.final_price == 4500 and a.extra_costs == 12.5
+    with pytest.raises(ValidationError):
+        A.AppointmentIn(final_price=0)
     assert A.AppointmentIn().final_price is None
 
 

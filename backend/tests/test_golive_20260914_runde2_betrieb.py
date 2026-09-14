@@ -32,10 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "autoschnell_r2_betrieb")
 import routes.admin as ADMIN  # noqa: E402
-import routes.payments as PAY  # noqa: E402
 from test_beweis_service import _alt_fertig, _jetzt, welt as beweis_welt  # noqa: E402,F401
-from test_payments import (API_KEY, ORIGIN, env, fake, stripe_fake,  # noqa: E402,F401
-                           welt as pay_welt)
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
@@ -230,35 +227,6 @@ def test_m17_sucher_wird_zwischenhaendler_ohne_firmenbindung(aufraeumen):
 
 
 # ============================================================ M11
-def test_m11_transaktion_vor_stripe_session_und_webhook_fallback(env, stripe_fake, pay_welt,
-                                                                  monkeypatch):
-    import stripe
-    dbx = _db()
-    k = pay_welt["K1"]
-    # Stripe faellt aus -> Transaktion bleibt als "failed" nachvollziehbar
-    def _kaputt(**params):
-        raise RuntimeError("Stripe weg")
-    monkeypatch.setattr(stripe.checkout.Session, "create", staticmethod(_kaputt))
-    code, _ = _fehler(PAY.create_checkout(PAY.CheckoutIn(plan="marktplatz", origin_url=ORIGIN), user=k))
-    assert code == 502
-    tx = dbx.payment_transactions.find_one({"user_id": k["id"], "status": "failed"})
-    assert tx and tx["session_id"] is None and tx["fehler"] == "stripe_session"
-    # Stripe geht: Transaktion existiert schon VOR der Session, session_id nachgetragen
-    monkeypatch.setattr(stripe.checkout.Session, "create", staticmethod(stripe_fake.create))
-    r = _run(PAY.create_checkout(PAY.CheckoutIn(plan="marktplatz", origin_url=ORIGIN), user=k))
-    tx = dbx.payment_transactions.find_one({"session_id": r["session_id"]})
-    assert tx and tx["status"] == "initiated"
-    # Webhook-Fallback: session_id ging verloren, Stripe nennt unsere tx_id
-    dbx.payment_transactions.update_one({"id": tx["id"]}, {"$set": {"session_id": None}})
-    _run(PAY._zahlung_bestaetigt(r["session_id"], {"id": r["session_id"], "payment_status": "paid",
-                                                   "client_reference_id": tx["id"],
-                                                   "metadata": {"tx_id": tx["id"]}}))
-    tx2 = dbx.payment_transactions.find_one({"id": tx["id"]})
-    assert tx2["session_id"] == r["session_id"] and tx2["status"] in ("paid", "activating", "active")
-    dbx.payment_transactions.delete_many({"user_id": k["id"]})
-
-
-# ============================================================ F6 / F7
 def test_f6_f7_verfall_prueft_nach_dem_claim_erneut_und_schont_wiederbelebte(beweis_welt, monkeypatch):
     import beweis_service as BS
     w = beweis_welt

@@ -94,8 +94,11 @@ _PROD_UMGEBUNG = {
     "APP_ENV": "production",
     "TRUST_PROXY": "true",                # Pruefung 14.09.2026 (L4-74)
     "STORAGE_LOKAL_ERLAUBT": "true",      # Pruefung 14.09.2026 (L3-31): Einzelserver
+    # Pruefung 14.09.2026 (Phase 1): Betreiberkonto und Anbieter-Zugang sind Pflicht
+    "SUPER_ADMIN_USERNAME": "ci-test-superadmin",
+    "SUPER_ADMIN_PASSWORD": "Ci-Test-Super-2026!x",
+    "APIFY_TOKEN": "ci-test-apify-token",
     "JWT_SECRET": uuid.uuid4().hex + uuid.uuid4().hex,       # 64 Hex-Zeichen
-    "SUPER_ADMIN_PASSWORD": "",
     "FRONTEND_URL": "https://app.example.de",
     "CORS_ORIGINS": "https://app.example.de",
     "MONGO_URL": "mongodb://u:p@db:27017/autoschnell?authSource=admin&maxPoolSize=20",

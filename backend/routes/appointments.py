@@ -68,7 +68,10 @@ class AppointmentIn(BaseModel):
     notes: Optional[str] = ""
     # Runde 17 (Nr. 1): keine negativen Betraege, kein inf/nan (Mongo
     # speichert NaN, die Oberflaeche rechnet damit weiter).
-    final_price: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    # 14.09.2026 (Entscheidung Ahmad): kein Endpreis-Feld mehr im Termineditor —
+    # der Preis kommt ueber Protokoll und Freigabe in den Vertrag. Das Feld
+    # bleibt fuer aeltere Clients lesbar, 0 ist kein Preis.
+    final_price: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     extra_costs: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     # Runde 17 (Nr. 2): Steuerfelder, nur beim PUT ausgewertet (s. Docstring).
     contract_loesen: bool = False

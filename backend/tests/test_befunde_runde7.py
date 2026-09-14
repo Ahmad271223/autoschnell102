@@ -26,19 +26,6 @@ import storage_service  # noqa: E402
 
 
 # ---------------------------------------------------------------- Befund 1
-def test_01_kostenloser_marktplatz_kassiert_nicht():
-    """Solange MARKTPLATZ_KOSTENLOS gilt, darf /payments/checkout fuer den
-    Marktplatz NICHT durchgehen. Sonst zahlt jemand 20 Euro fuer etwas,
-    das er schon kostenlos hat."""
-    quelle = inspect.getsource(
-        __import__("routes.payments", fromlist=["x"]).create_checkout)
-    assert "MARKTPLATZ_KOSTENLOS" in quelle, \
-        "checkout prueft den Kostenlos-Schalter nicht"
-    # Die Pruefung muss VOR dem Anlegen der Stripe-Sitzung stehen.
-    assert quelle.index("MARKTPLATZ_KOSTENLOS") < quelle.index("Session.create"), \
-        "Der Schalter wird erst nach dem Anlegen der Zahlung geprueft"
-
-
 def test_01b_beide_zustaende_koennen_nicht_gleichzeitig_gelten():
     """Entweder kostenlos ODER bezahlbar — nie beides."""
     import importlib

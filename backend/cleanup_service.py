@@ -465,7 +465,8 @@ async def _cleanup_once(db) -> dict:
 # admin_vehicle_data bleibt bewusst bestehen (auto_daten.py).
 # Fristen (Wunsch Ahmad 14.09.2026): keine Aufbewahrung laenger als 60 Tage —
 # gilt fuer Vertraege, Berichte, Fahrerfotos, Beweise, Logs, Anfragen, Cache.
-VERTRAG_AUFBEWAHRUNG_TAGE = int(os.environ.get("VERTRAG_AUFBEWAHRUNG_TAGE", "60"))
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+VERTRAG_AUFBEWAHRUNG_TAGE = zahl_env("VERTRAG_AUFBEWAHRUNG_TAGE", 60, unten=1)
 # Grabsteine (`loeschung.status == laeuft`), die aelter sind, gelten als
 # abgebrochen und werden wiederaufgenommen.
 VERTRAG_LOESCHUNG_WIEDERAUFNAHME_MINUTEN = 10
@@ -822,6 +823,7 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
                                     "grund": grund, "scrub_pii": scrub_pii}}})
     # 1) Vorversionen
     await db.generated_pdf_versions.delete_many({"contract_id": contract_id})
+    await db.versand_schluessel.delete_many({"contract_id": contract_id})
     # 2) Termine
     termin_ids = [a["id"] async for a in db.appointments.find(
         {"contract_id": contract_id}, {"_id": 0, "id": 1})]
@@ -958,7 +960,7 @@ async def vertragsloeschungen_wiederaufnehmen(db, now: datetime) -> int:
 # Audit-/Fehlerprotokolle und Job-Sperren wuchsen unbegrenzt (N3, Review
 # 09/2026). Aufbewahrung in Tagen; created_at ist ISO-String (lexikografisch
 # vergleichbar), deshalb Rotation hier statt TTL-Index.
-LOG_AUFBEWAHRUNG_TAGE = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE", "60"))
+LOG_AUFBEWAHRUNG_TAGE = zahl_env("LOG_AUFBEWAHRUNG_TAGE", 60, unten=1)
 
 
 async def logs_rotieren(db, now: datetime) -> int:
@@ -982,9 +984,9 @@ async def logs_rotieren(db, now: datetime) -> int:
 # unbegrenzt. created_at/updated_at sind ISO-Strings (lexikografisch
 # vergleichbar).
 # ---------------------------------------------------------------------------
-ANFRAGEN_AUFBEWAHRUNG_TAGE = int(os.environ.get("ANFRAGEN_AUFBEWAHRUNG_TAGE", "60"))
-LOG_AUFBEWAHRUNG_TAGE_OFFEN = int(os.environ.get("LOG_AUFBEWAHRUNG_TAGE_OFFEN", "60"))
-ERROR_LOG_MAX = int(os.environ.get("ERROR_LOG_MAX", "20000"))
+ANFRAGEN_AUFBEWAHRUNG_TAGE = zahl_env("ANFRAGEN_AUFBEWAHRUNG_TAGE", 60, unten=1)
+LOG_AUFBEWAHRUNG_TAGE_OFFEN = zahl_env("LOG_AUFBEWAHRUNG_TAGE_OFFEN", 60, unten=1)
+ERROR_LOG_MAX = zahl_env("ERROR_LOG_MAX", 20000, unten=100)
 INTERESSEN_AUFBEWAHRUNG_TAGE = 60         # abgeschlossene Interessensanfragen
 INSERATE_GELOESCHT_AUFBEWAHRUNG_TAGE = 60  # geloeschte Inserate (Soft-Delete)
 
@@ -1023,12 +1025,18 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
     n = r.deleted_count
     ueberhang = await db.error_logs.count_documents({}) - maximum
     if ueberhang > 0:
-        aelteste = await db.error_logs.find({}, {"_id": 1}) \
-            .sort("created_at", 1).limit(ueberhang).to_list(ueberhang)
-        ids = [d["_id"] for d in aelteste]
-        for i in range(0, len(ids), 1000):
-            r = await db.error_logs.delete_many({"_id": {"$in": ids[i:i + 1000]}})
-            n += r.deleted_count
+        # Pruefung 14.09.2026 (A13): erst erledigte Eintraege (aelteste zuerst),
+        # offene nur, wenn der Deckel sonst nicht zu halten ist.
+        for filt in ({"status": {"$ne": "open"}}, {}):
+            if ueberhang <= 0:
+                break
+            aelteste = await db.error_logs.find(filt, {"_id": 1}) \
+                .sort("created_at", 1).limit(ueberhang).to_list(ueberhang)
+            ids = [d["_id"] for d in aelteste]
+            for i in range(0, len(ids), 1000):
+                r = await db.error_logs.delete_many({"_id": {"$in": ids[i:i + 1000]}})
+                n += r.deleted_count
+                ueberhang -= r.deleted_count
     return n
 
 
@@ -1038,10 +1046,10 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
 # Anschrift; bei Kleinanzeigen meist Privatpersonen). Kein TTL-Index: der
 # koennte einen Eintrag mitten im Neuabruf (laufender Lease) loeschen und
 # erfasst keine Lease-Reste ohne expires_at.
-LISTING_CACHE_KARENZ_TAGE = int(os.environ.get("LISTING_CACHE_KARENZ_TAGE", "7"))
+LISTING_CACHE_KARENZ_TAGE = zahl_env("LISTING_CACHE_KARENZ_TAGE", 7, unten=0)
 # Gleicher Wert und Default wie routes/listings.py (dort Schreib-TTL); hier
 # direkt aus der Umgebung, um den Router nicht in den Cleanup zu importieren.
-LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "1440"))
+LISTING_CACHE_TTL_HOURS = zahl_env("LISTING_CACHE_TTL_HOURS", 1440, unten=1)
 # Nachpruefung 13.09.2026: Die Datenschutzerklaerung sagt "Inserats-Cache
 # max. 90 Tage". TTL (90 Tage) plus Karenz (7 Tage) waeren 97 — deshalb eine
 # harte Grenze ab dem Abruf, unabhaengig von TTL und Karenz. Wer sie aendert,
@@ -1837,7 +1845,7 @@ async def _reap_stuck_snapshots(db) -> None:
 # ein erneuter Vergleich bei Bedarf einen frischen Snapshot, ohne die Quelle
 # fuer die Daten erneut anzurufen.
 # ---------------------------------------------------------------------------
-SNAPSHOT_RETENTION_DAYS = int(os.environ.get("SNAPSHOT_RETENTION_DAYS", "60"))
+SNAPSHOT_RETENTION_DAYS = zahl_env("SNAPSHOT_RETENTION_DAYS", 60, unten=1)
 
 
 async def _expire_old_snapshots(db) -> int:

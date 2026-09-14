@@ -20,7 +20,8 @@ from urllib.parse import quote
 
 OEFFENTLICHE_PREFIXE = ("logo/",)
 PRIVATE_PREFIXE = ("protocol/", "pickup/")
-STANDARD_TTL = int(os.environ.get("DATEI_LINK_TTL_SEKUNDEN", "3600") or 3600)
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+STANDARD_TTL = zahl_env("DATEI_LINK_TTL_SEKUNDEN", 3600, unten=60)
 
 
 def _geheimnis() -> bytes:

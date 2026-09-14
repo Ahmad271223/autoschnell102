@@ -27,6 +27,7 @@ siehe DEPLOYMENT.md-Hinweis). Statt einer Schein-Transaktion gilt hier:
 4) Reparatur: der Aufraeumjob traegt fuer Bestandsvertraege ohne
    admin_vehicle_data_id den Datensatz nach (auto_daten_nachtragen).
 """
+import math
 import re
 import uuid
 from typing import Any, Dict, List, Optional
@@ -63,13 +64,41 @@ SCHAEDEN_FREITEXT = _os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "false") \
     .strip().lower() in ("1", "true", "yes", "ja")
 
 
+_DEZIMAL = re.compile(r"^(\d[\d.,]*?)[.,](\d{1,2})$")
+
+
 def _zahl(wert) -> Optional[int]:
-    """'242.000 km' / '110' / 110.0 -> int; sonst None."""
-    if wert is None:
+    """'242.000 km' / '111,016 km' / '1.984 ccm' / '110' / '110.5' / 110.0 -> int;
+    sonst None.
+
+    Pruefung 14.09.2026 (A19): vorher wurden ALLE Nicht-Ziffern entfernt —
+    aus '110.5' wurde 1105, aus '12,5' 125, und das landete dauerhaft in den
+    anonymen Auto-Daten. Jetzt: ein Punkt oder Komma mit genau drei Ziffern
+    dahinter ist ein Tausendertrenner, mit ein oder zwei Ziffern ein
+    Dezimaltrenner (kaufmaennisch gerundet). Buchstaben mitten in der Zahl
+    ('1e400') ergeben None."""
+    if wert is None or isinstance(wert, bool):
         return None
     if isinstance(wert, (int, float)):
-        return int(wert)
-    ziffern = re.sub(r"[^0-9]", "", str(wert))
+        if isinstance(wert, float) and not math.isfinite(wert):
+            return None
+        return int(math.floor(wert + 0.5)) if wert >= 0 else int(wert)
+    s = str(wert).strip()
+    if not s:
+        return None
+    m = re.match(r"^\s*-?\s*(\d[\d.,\s]*)", s)
+    if not m:
+        return None
+    rest = s[m.end():].strip()
+    if rest and not re.match(r"^[A-Za-z€/²³]{1,6}$", rest):
+        return None          # '1e400', '12x' — kein Zahlwert
+    t = m.group(1).replace(" ", "")
+    dm = _DEZIMAL.match(t)
+    if dm:
+        ganz = re.sub(r"[.,]", "", dm.group(1))
+        wert_f = float(f"{ganz}.{dm.group(2)}")
+        return int(math.floor(wert_f + 0.5))
+    ziffern = re.sub(r"[^0-9]", "", t)
     return int(ziffern) if ziffern else None
 
 

@@ -91,7 +91,8 @@ def validate_image_bytes(raw: bytes, wo: str = "Foto") -> None:
 # Runde 26 (12.09.2026, Wunsch Ahmad: Fotos immer komprimieren): 1600 px
 # statt 2000 px reichen fuer Inserat, Protokoll und Vertrags-PDF voellig
 # aus und sparen rund ein Drittel Speicher je Foto.
-MAX_BILD_KANTE = int(os.environ.get("MAX_IMAGE_EDGE", "1600"))
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+MAX_BILD_KANTE = zahl_env("MAX_IMAGE_EDGE", 1600, unten=200, oben=8000)
 BILD_QUALITAET = int(os.environ.get("IMAGE_QUALITY", "80"))
 # Schutz vor "Bildbomben": eine 2 MB grosse PNG-Datei kann entpackt
 # mehrere Gigabyte Arbeitsspeicher belegen. Die Groesse steht im Kopf der

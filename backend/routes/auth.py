@@ -57,18 +57,19 @@ async def _konto_fuer_login(kennung: str):
     if nr:
         return await db.users.find_one({"kontonummer": nummer_bedingung(nr),
                                         "role": {"$in": _NUMMERN_ROLLEN}})
-    # Kaeufer-Code (14.09.2026): Zwischenhaendler duerfen sich auch hier
-    # anmelden. Findet der Code kein Konto, bleibt der Benutzername-Zweig fuer
-    # den Super-Admin (ein Benutzername wie 'ADMIN7' saehe sonst wie ein Code aus).
+    # Pruefung 14.09.2026 (A23): der Benutzername des Super-Admins hat Vorrang
+    # vor dem Kaeufer-Code — sonst traefe ein Kaeufer-Code, der zufaellig wie
+    # der Benutzername aussieht, das falsche Konto. Seed und Produktions-
+    # pruefung lehnen Benutzernamen im Nummern-, Code- und Fahrer-ID-Muster ab.
+    if "@" not in kennung:
+        admin = await db.users.find_one({"username": kennung, "role": "admin",
+                                         "is_super_admin": True})
+        if admin:
+            return admin
     code = kaeufer_normalisieren(kennung)
     if code:
-        u = await db.users.find_one({"kontonummer": nummer_bedingung(code),
-                                     "role": "b2b_buyer"})
-        if u:
-            return u
-    if "@" not in kennung:
-        return await db.users.find_one({"username": kennung, "role": "admin",
-                                        "is_super_admin": True})
+        return await db.users.find_one({"kontonummer": nummer_bedingung(code),
+                                        "role": "b2b_buyer"})
     return None
 
 
@@ -120,7 +121,9 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
     """Startseiten-Formular: 'Ich möchte das Programm nutzen.' Landet beim
     Betreiber unter Freischaltungen. Kein Konto, kein Passwort — der
     Betreiber legt das Firmen-Konto nach Kontaktaufnahme selbst an."""
-    if body.art == "kaeufer" and not body.gewerblich_bestaetigt:
+    # Pruefung 14.09.2026 (E10): die Bestaetigung (Unternehmer, AGB) ist fuer
+    # JEDE Kontoart Pflicht — nicht nur fuer Zwischenhaendler.
+    if not body.gewerblich_bestaetigt:
         raise HTTPException(400, "Bitte bestätige, dass du als Unternehmer handelst")
     ip = client_ip(request)
     if not await register_limiter.check(ip):

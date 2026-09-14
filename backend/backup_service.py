@@ -32,7 +32,8 @@ from pathlib import Path
 from backup_bewertung import inkonsistenz, ist_gut, ist_stichtagsgenau, mangel
 from deps import log
 
-BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "3"))
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+BACKUP_HOUR = zahl_env("BACKUP_HOUR", 3, unten=0, oben=23)
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", r"C:\AutoSchnell-Backups")
                   if sys.platform == "win32"
                   else os.environ.get("BACKUP_DIR", "/var/backups/autoschnell"))

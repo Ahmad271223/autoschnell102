@@ -187,7 +187,8 @@ GESPERRT_FUER_FAHRER = (ZUR_FREIGABE, FREIGEGEBEN)
 
 class FreigabeIn(BaseModel):
     """Freigabe des Chefs. `neuer_preis` nur, wenn nachverhandelt wurde."""
-    neuer_preis: Optional[float] = Field(default=None, ge=0, le=10_000_000)
+    # Pruefung 14.09.2026 (A16): kein 0-Euro-Preis bei der Freigabe
+    neuer_preis: Optional[float] = Field(default=None, gt=0, le=10_000_000)
     notiz: Optional[str] = Field(default=None, max_length=2000)
     # True = zurueck an den Fahrer (er soll etwas nachtragen/korrigieren).
     zurueck: bool = False
@@ -877,8 +878,14 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         vorhandenes = await _current(appt_id)
         if not vorhandenes:
             raise
+        # Pruefung 14.09.2026 (B27): derselbe Stand von Fahrer und Fahrzeug
+        # wie im Normalweg — sonst lief der Entwurf nach einer Umbuchung mit
+        # veralteten Metadaten weiter.
         res = await db.pickup_protocols.update_one(
-            _entwurf_filter(vorhandenes["id"]), _entwurf_update(payload))
+            _entwurf_filter(vorhandenes["id"]),
+            _entwurf_update({**payload, "driver_account_id": driver["id"],
+                             "driver_name": driver.get("display_name", ""),
+                             "vehicle_id": appt.get("vehicle_id")}))
         if res.matched_count == 0:
             await _speichern_abgelehnt(vorhandenes["id"])
         return await db.pickup_protocols.find_one(

@@ -97,7 +97,7 @@ def test_01_zugangs_anfrage(welt):
         "contact_person": "B Chef",
         "email": f"bt_chef_{SUF}@e2etest-mail.de",
         "phone": "0511 9", "message": "Bitte freischalten",
-        "sucher_anzahl": 2}, timeout=30)
+        "sucher_anzahl": 2, "gewerblich_bestaetigt": True}, timeout=30)
     assert r.status_code == 200, r.text[:300]
     req = _db().plan_requests.find_one({"contact_email": f"bt_chef_{SUF}@e2etest-mail.de"})
     assert req and req["type"] == "zugang" and req["status"] == "offen"
@@ -239,79 +239,20 @@ def test_07_zahlungen_einsehen_und_nachtragen(welt):
 
 
 # ---------- Stripe nur fuer den Marktplatz ----------
-def test_08_firmen_checkout_geschlossen(welt):
-    origin = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")[0].strip()
-    for H in (welt["H"], welt["S"]):
-        r = requests.post(f"{API}/payments/checkout", headers=H,
-                          json={"plan": "monthly", "origin_url": origin}, timeout=30)
-        assert r.status_code == 403, r.text[:200]
-        assert "Rechnung" in r.text
-    # Kaeufer mit unbekanntem Plan -> 400
-    r = konten.kaeufer_registrieren(json={"gewerblich_bestaetigt": True, 
-        "company_name": "BT Kaeufer", "contact_name": "K B",
-        "email": f"bt_kaeufer_{SUF}@e2etest-mail.de", "password": PW}, timeout=30)
-    assert r.status_code == 200, r.text[:200]
-    welt["K"] = {"Authorization": f"Bearer {r.json()['token']}"}
-    welt["kaeufer_id"] = requests.get(f"{API}/buyer/me", headers=welt["K"],
-                                      timeout=30).json()["id"]
-    r = requests.post(f"{API}/payments/checkout", headers=welt["K"],
-                      json={"plan": "monthly", "origin_url": origin}, timeout=30)
-    assert r.status_code == 400, r.text[:200]
-
-
-def test_09_marktplatz_aktivierung_verlaengert_ab_ablauf(welt):
-    """Funktionstest der Aktivierung (ohne echten Stripe-Aufruf):
-    'marktplatz' verlaengert um 30 Tage ab bisherigem Ablauf; der atomare
-    paid-Uebergang aktiviert genau einmal."""
-    from routes.payments import _activate_paid_transaction
-    dbx = _db()
-    kid = welt["kaeufer_id"]
-    kuenftig = datetime.now(timezone.utc) + timedelta(days=10)
-    dbx.users.update_one({"id": kid}, {"$set": {"marketplace_access": {
-        "active": True, "plan": "monthly",
-        "expires_at": kuenftig.isoformat()}}})
-    assert _activate_paid_transaction is not None
-    sid = f"bt_{SUF}_1"
-    tx = {"user_id": kid, "dealer_id": None, "plan": "marktplatz"}
-    _run(lambda mdb: _aktivieren(mdb, tx, sid))
-    u = dbx.users.find_one({"id": kid})
-    ablauf = datetime.fromisoformat(u["marketplace_access"]["expires_at"])
-    erwartet = kuenftig + timedelta(days=30)
-    assert abs((ablauf - erwartet).total_seconds()) < 120, (ablauf, erwartet)
-    assert u["marketplace_access"]["active"] is True
-    assert u["marketplace_access"]["price"] == 20.00
-    # Alt-Plan monthly (Bestands-Transaktion) erzeugt weiterhin ein Abo
-    sid2 = f"bt_{SUF}_2"
-    tx2 = {"user_id": welt["chef_id"], "dealer_id": welt["dealer_id"],
-           "plan": "monthly"}
-    _run(lambda mdb: _aktivieren(mdb, tx2, sid2))
-    sub = dbx.subscriptions.find_one({"session_id": sid2})
-    assert sub and sub["plan"] == "monthly" and sub["status"] == "active"
-    # Idempotent per session_id: zweiter Lauf erzeugt kein zweites Abo
-    _run(lambda mdb: _aktivieren(mdb, tx2, sid2))
-    assert dbx.subscriptions.count_documents({"session_id": sid2}) == 1
-
-
-async def _aktivieren(mdb, tx, sid):
-    """_activate_paid_transaction gegen eine eigene Motor-DB ausfuehren
-    (die Route nutzt das globale db-Objekt; patchen + awaiten muessen im
-    SELBEN async-Kontext passieren, sonst laeuft die Coroutine schon
-    wieder gegen das Original-db)."""
-    import routes.payments as p
-    alt = p.db
-    p.db = mdb
-    try:
-        return await p._activate_paid_transaction(tx, sid)
-    finally:
-        p.db = alt
-
-
 def test_10_marktplatz_ist_kostenlos(welt):
     """Beschluss 09/2026: Der Marktplatz kostet Zwischenhaendler nichts.
 
     Frueher wurden hier 20,00 EUR je Monat geprueft. Die Abrechnung steckt
     weiterhin im Code (MARKTPLATZ_KOSTENLOS=false) — die Sichtbarkeit
     privater Inserate deckt tests/test_marktplatz_oeffentlich.py ab."""
+    # 14.09.2026: Stripe ist weg — der Zwischenhaendler kommt ueber den Betreiber
+    if "K" not in welt:
+        r = konten.kaeufer_registrieren(json={"company_name": f"Betreiber Kaeufer {SUF}",
+                                              "contact_name": "Kai Kauf", "password": PW,
+                                              "gewerblich_bestaetigt": True, "email": ""})
+        assert r.status_code == 200, r.text[:300]
+        welt["K"] = {"Authorization": f"Bearer {r.json()['token']}"}
+        welt.setdefault("user_ids", []).append(r.json()["user"]["id"])
     r = requests.get(f"{API}/marktplatz/zugang", headers=welt["K"], timeout=30)
     assert r.status_code == 200, r.text[:200]
     d = r.json()
@@ -350,7 +291,7 @@ def test_11_alte_anlagewege_geschlossen(welt):
     # Zugangs-Anfrage selbst bleibt offen (oeffentlich erlaubt)
     r = requests.post(f"{API}/zugang-anfrage", json={
         "company_name": f"Prod Firma {SUF}", "contact_person": "P T",
-        "email": mail_f}, timeout=30)
+        "email": mail_f, "gewerblich_bestaetigt": True}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     _db().plan_requests.delete_many({"contact_email": mail_f})
     # Chef-Sucher-Verwaltung ist zu (403 mit Betreiber-Hinweis)

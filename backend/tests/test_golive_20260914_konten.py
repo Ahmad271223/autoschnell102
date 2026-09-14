@@ -224,7 +224,6 @@ def test_b5_betrieb_zeigt_und_holt_kaufvorgang_index_nach(monkeypatch):
     bis zum naechsten Neustart. Die Betrieb-Seite muss das zeigen, "Nachholen"
     muss ihn ohne Neustart anlegen."""
     import routes.admin as a
-    import routes.payments as p
     dbx = _db()
 
     def unique_contract_index():
@@ -235,7 +234,6 @@ def test_b5_betrieb_zeigt_und_holt_kaufvorgang_index_nach(monkeypatch):
         return {"uebersprungen": True}
     # Zahlungs-/Abo-Abgleich gehoert nicht zu diesem Befund
     monkeypatch.setattr(a, "abo_vorgaenge_nachholen", nichts)
-    monkeypatch.setattr(p, "zahlungen_abgleichen", nichts)
 
     for name in unique_contract_index():
         dbx.kaufvorgaenge.drop_index(name)

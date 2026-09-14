@@ -41,16 +41,7 @@ export default function Anfrage() {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   // Ob der Marktplatz-Zugang Geld kostet, sagt der Server (kein fester Preis im Text).
-  const [marktplatzKostenlos, setMarktplatzKostenlos] = useState(true);
-
-  useEffect(() => {
-    if (art !== "kaeufer") return undefined;
-    let aktiv = true;
-    axios.get(`${API_BASE}/payments/config`).then((r) => {
-      if (aktiv && r.data) setMarktplatzKostenlos(r.data.marktplatz_kostenlos !== false);
-    }).catch(() => {});
-    return () => { aktiv = false; };
-  }, [art]);
+  const [marktplatzKostenlos] = useState(true);
 
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const artWaehlen = (key) => {

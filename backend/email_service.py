@@ -51,7 +51,8 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
 RESEND_URL = "https://api.resend.com/emails"
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587") or 587)
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+SMTP_PORT = zahl_env("SMTP_PORT", 587, unten=1, oben=65535)
 SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
 SMTP_FROM = os.environ.get("SMTP_FROM", "").strip() or SMTP_USER

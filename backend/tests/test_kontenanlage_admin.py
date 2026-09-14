@@ -255,18 +255,22 @@ def test_03_kaeufer_anlage_und_anfrage_geschlossen(welt):
     req = dbx.plan_requests.find_one({"contact_email": mail})
     assert req["type"] == "zugang" and req["art"] == "kaeufer" and req["status"] == "offen"
     assert req["ust_id"] == "DE123456789" and req.get("gewerblich_bestaetigt_am")
-    # Gegenpruefung (14.09.2026): Die Bestaetigung (Unternehmer, AGB) haelt
-    # der Server fuer JEDE Art fest, Pflicht bleibt sie nur fuer Kaeufer.
+    # Pruefung 14.09.2026 (E10): Die Bestaetigung (Unternehmer, AGB) ist fuer
+    # JEDE Art Pflicht — ohne sie entsteht keine Anfrage.
     for art, bestaetigt in (("fahrer", True), ("firma", True), ("firma", False)):
         m = f"ka_agb_{art}_{int(bestaetigt)}_{SUF}@{MAIL}"
         welt["anfrage_mails"].append(m)
         r = _post("/zugang-anfrage", {"art": art, "company_name": f"KA AGB {SUF}",
                                       "contact_person": "Ada Agb", "email": m,
                                       "gewerblich_bestaetigt": bestaetigt})
+        if not bestaetigt:
+            assert r.status_code == 400, r.text[:200]
+            assert dbx.plan_requests.find_one({"contact_email": m}) is None
+            continue
         assert r.status_code == 200, r.text[:200]
         d = dbx.plan_requests.find_one({"contact_email": m})
         assert d["art"] == art and "ust_id" not in d
-        assert bool(d.get("gewerblich_bestaetigt_am")) is bestaetigt, (art, bestaetigt)
+        assert d.get("gewerblich_bestaetigt_am"), (art, bestaetigt)
     # Anfrage passt nicht zur Kontoart / unbekannte Anfrage
     r = _post("/admin/drivers", {"display_name": f"KA Falsch {SUF}", "password": PW,
                                  "anfrage_id": req["id"]}, S)

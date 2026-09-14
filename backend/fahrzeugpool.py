@@ -19,7 +19,8 @@ import os
 
 log = logging.getLogger("autohandel")
 
-POOL_MAX = int(os.environ.get("FAHRZEUGPOOL_MAX_VERGLEICHE", "30") or 30)
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+POOL_MAX = zahl_env("FAHRZEUGPOOL_MAX_VERGLEICHE", 30, unten=1)
 
 
 async def _aktive_konten(db, dealer_id: str, ids) -> set:

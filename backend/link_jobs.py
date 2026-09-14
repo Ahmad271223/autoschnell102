@@ -37,9 +37,10 @@ from deps import log
 
 # Wie viele Jobs EIN Worker-Prozess gleichzeitig bearbeitet. Die Zahl der
 # echten Anbieter-Abrufe deckelt ohnehin provider_limiter.
-JOB_CONCURRENCY = int(os.environ.get("LINK_JOB_CONCURRENCY", "4"))
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+JOB_CONCURRENCY = zahl_env("LINK_JOB_CONCURRENCY", 4, unten=1)
 # Nach so vielen Sekunden gilt ein 'processing'-Job als verwaist.
-PROCESSING_TTL_SECONDS = int(os.environ.get("LINK_JOB_PROCESSING_TTL", "240"))
+PROCESSING_TTL_SECONDS = zahl_env("LINK_JOB_PROCESSING_TTL", 240, unten=30)
 # Audit 13.09.2026 (#32): Solange ein Job WIRKLICH laeuft, verlaengert ein
 # Herzschlag seine Frist — vorher stellte _requeue_stale jeden Abruf ueber
 # 240 s zurueck, obwohl der erste Task noch arbeitete. max(1, ...): bei

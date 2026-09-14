@@ -107,13 +107,11 @@ import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
 import AppStart from "@/pages/AppStart";
 const Anfrage = seite(() => import("@/pages/Anfrage"));
-const MarktZahlungErfolg = seite(() => import("@/pages/markt/ZahlungErfolg"));
 const PasswortVergessen = seite(() => import("@/pages/PasswortVergessen"));
 const Impressum = seite(() => import("@/pages/legal/Impressum"));
 const Datenschutz = seite(() => import("@/pages/legal/Datenschutz"));
 const AGB = seite(() => import("@/pages/legal/AGB"));
 const Subscription = seite(() => import("@/pages/Subscription"));
-const PaymentSuccess = seite(() => import("@/pages/PaymentSuccess"));
 const AdminLayout = seite(() => import("@/pages/admin_v2/AdminLayout"));
 const AdminOverview = seite(() => import("@/pages/admin_v2/Overview"));
 const AdminUsers = seite(() => import("@/pages/admin_v2/Users"));
@@ -214,7 +212,6 @@ export default function App() {
             <Route path="/agb" element={<AGB />} />
 
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
-            <Route path="/abo/erfolg" element={<ProtectedRoute requireSub={false}><PaymentSuccess /></ProtectedRoute>} />
 
             <Route path="/app" element={<ProtectedRoute requireSub={false}><AppHome /></ProtectedRoute>} />
             {/* Sucher-Funktionen: brauchen ein aktives (persönliches) Abo */}
@@ -237,7 +234,6 @@ export default function App() {
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
             <Route path="/markt/login" element={<BuyerLogin />} />
             <Route path="/markt/registrieren" element={<WeiterleitungMitQuery nach="/markt/login" />} />
-            <Route path="/markt/zahlung-erfolg" element={<MarktZahlungErfolg />} />
             <Route path="/markt" element={<Marktplatz />} />
 
             {/* Fahrer-App (eigenständig) */}

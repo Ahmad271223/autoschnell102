@@ -604,14 +604,9 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
             </div>
           </div>
 
-          {/* Pricing */}
+          {/* 14.09.2026 (Entscheidung Ahmad): kein Endpreis-Feld mehr — der Preis
+              kommt ueber Abholprotokoll und Freigabe in den Kaufvertrag. */}
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Endpreis (€)</label>
-              <input data-testid="edit-final-price" type="number" value={a.final_price || ""}
-                     onChange={(e) => set("final_price", Number(e.target.value) || null)}
-                     className="apple-input" />
-            </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sonstige Kosten (€)</label>
               <input data-testid="edit-extra-costs" type="number" value={a.extra_costs || ""}

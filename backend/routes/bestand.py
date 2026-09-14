@@ -130,6 +130,10 @@ def _clean_costs(costs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not math.isfinite(amount) or abs(amount) > 1e9:
             raise HTTPException(422, f"Ungültiger Betrag bei '{label or 'Kosten'}' — "
                                      "bitte eine Zahl bis 1.000.000.000 eingeben")
+        if amount < 0:
+            # Pruefung 14.09.2026 (F13): negative Kosten erhoehten die Marge.
+            raise HTTPException(422, f"Kosten bei '{label or 'Kosten'}' dürfen nicht "
+                                     "negativ sein")
         if label:
             out.append({"label": label, "amount": amount})
     return out

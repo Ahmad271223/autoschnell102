@@ -172,7 +172,6 @@ def main() -> int:
         "ABRUF_RUECKFALL_TAGESLIMIT=25",
         "",
         "# ---- Zahlungen (leer lassen, solange nicht genutzt) ----",
-        f"STRIPE_API_KEY={alt.get('STRIPE_API_KEY', '')}",
         f"STRIPE_WEBHOOK_SECRET={alt.get('STRIPE_WEBHOOK_SECRET', '')}",
         "",
         "# ---- Fachliche Schalter ----",

@@ -137,6 +137,8 @@ services:
       - VERKAUF_KOSTENLOS=${VERKAUF_KOSTENLOS:-true}
       # Marktplatz kostenlos und ohne Anmeldung einsehbar
       - MARKTPLATZ_KOSTENLOS=${MARKTPLATZ_KOSTENLOS:-true}
+      # Entscheidung Ahmad 14.09.2026: Zwei-Faktor fuer den Super-Admin ist Pflicht
+      - MFA_PFLICHT=${MFA_PFLICHT:-true}
       - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-60}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
@@ -144,7 +146,7 @@ services:
       # Aufbewahrung / Loeschung (Audit 09/2026: Vertragsloeschung erst nach
       # Freigabe scharf schalten — bis dahin Dry-Run mit Loeschvorschau)
       - VERTRAG_AUFBEWAHRUNG_TAGE=${VERTRAG_AUFBEWAHRUNG_TAGE:-60}
-      - VERTRAG_LOESCHUNG_AKTIV=${VERTRAG_LOESCHUNG_AKTIV:-false}
+      - VERTRAG_LOESCHUNG_AKTIV=${VERTRAG_LOESCHUNG_AKTIV:-true}
       - AUTO_DATEN_SCHAEDEN_FREITEXT=${AUTO_DATEN_SCHAEDEN_FREITEXT:-false}
       - SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-60}
       - FAHRERFOTO_TAGE=${FAHRERFOTO_TAGE:-60}
@@ -166,8 +168,6 @@ services:
       - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
       - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
       - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}
-      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
-      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
       # Anbieter-Abrufe (mobile.de + AutoScout24 via Apify; optional
       # offizielle mobile.de-API; optional Rotations-Proxy fuer
       # Kleinanzeigen-Server-Abrufe)

@@ -215,54 +215,6 @@ def test_04_super_admin_kann_eigene_mfa_nicht_zuruecksetzen():
 
 
 # --------------------------------------------------------------- Befund 2
-def test_05_stripe_freischaltung_verlaengert_nur_einmal():
-    """_zugang_freischalten zweimal mit derselben Session -> gleiches Datum.
-
-    Laeuft direkt gegen die Funktion (kein echter Stripe-Aufruf); die
-    Datenbank-Bruecke aus deps.py erzeugt fuer diese Schleife eine eigene
-    Verbindung, deshalb wird deps NICHT ersetzt."""
-    dbx = _db()
-    sid = f"cs_test_r6_{uuid.uuid4().hex[:12]}"
-    uid = f"r6_kaeufer_{uuid.uuid4().hex[:8]}"
-    dbx.users.insert_one({"id": uid, "email": f"{uid}@{MAIL}", "role": "b2b_buyer",
-                          "active": True, "created_at": "2026-01-01T00:00:00+00:00"})
-    tx = {"user_id": uid, "dealer_id": None, "plan": "marktplatz",
-          "amount": 20.0, "currency": "eur"}
-
-    async def lauf():
-        import routes.payments as pay
-        from deps import db as db_async
-        eins = await pay._zugang_freischalten(tx, sid)
-        zwei = await pay._zugang_freischalten(tx, sid)          # Wiederholung
-        gespeichert = (await db_async.users.find_one(
-            {"id": uid}, {"_id": 0, "marketplace_access": 1})
-        )["marketplace_access"]["expires_at"]
-        # Eine ANDERE Zahlung muss dagegen weiter verlaengern
-        drei = await pay._zugang_freischalten(tx, sid + "_zweite")
-        return eins, zwei, gespeichert, drei
-    try:
-        eins, zwei, gespeichert, drei = asyncio.run(lauf())
-        assert eins == zwei == gespeichert, "Wiederholung darf NICHT erneut verlaengern"
-        assert drei > eins, "eine zweite Zahlung muss weiter verlaengern"
-        assert dbx.zugang_grants.count_documents({"session_id": sid}) == 1
-    finally:
-        dbx.users.delete_many({"id": uid})
-        dbx.zugang_grants.delete_many({"session_id": {"$regex": f"^{sid}"}})
-
-
-def test_06_stripe_freischaltung_ohne_konto_meldet_fehler():
-    """Kein Konto zur Zahlung -> klarer Fehler (statt stiller Nicht-Freischaltung)."""
-    async def lauf():
-        import routes.payments as pay
-        with pytest.raises(RuntimeError) as e:
-            await pay._zugang_freischalten(
-                {"user_id": f"gibt-es-nicht-{uuid.uuid4().hex[:8]}", "plan": "marktplatz"},
-                f"cs_test_r6_{uuid.uuid4().hex[:12]}")
-        return str(e.value)
-    assert "Konto" in asyncio.run(lauf())
-
-
-# -------------------------------------------------------------- Befund 12
 def test_07_laufzeitaenderung_braucht_grund(welt):
     import bcrypt
     dbx = _db()

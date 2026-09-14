@@ -47,7 +47,7 @@ SA = {"id": "sa_a0913", "role": "admin", "is_super_admin": True, "active": True,
 # Module mit eigenem `db` (from deps import db) — alle auf die Wegwerf-DB.
 _MODULE = ["deps", "lifecycle", "auto_daten", "auftraggeber", "kaufvorgang",
            "cleanup_service", "routes.contracts", "routes.appointments",
-           "routes.bestand", "routes.admin", "routes.drivers", "routes.payments",
+           "routes.bestand", "routes.admin", "routes.drivers",
            "routes.team"]
 
 
@@ -177,54 +177,6 @@ def test_11_sucher_anlage_gleiche_adresse_und_kontonummer_dublette(welt, monkeyp
 
 
 # ============================================================ #43
-def test_43_abgleich_rotiert_dauerfehler_nach_hinten(welt, monkeypatch):
-    p = _m("routes.payments")
-    jetzt = datetime.now(timezone.utc)
-    gesperrt = f"k_gesperrt_{welt.s}"
-    sid_k1 = f"cs_test_k1_{welt.s}"
-    verbucht = []
-
-    async def _freischalten(tx, sid):
-        if tx.get("user_id") == gesperrt:
-            raise RuntimeError("Konto gesperrt")
-        return (jetzt + timedelta(days=30)).isoformat()
-
-    async def _verbuchen(tx, sid, bis):
-        verbucht.append(sid)
-
-    async def _kein_alarm(*a, **k):
-        return None
-    monkeypatch.setattr(p, "_zugang_freischalten", _freischalten)
-    monkeypatch.setattr(p, "_zahlung_verbuchen", _verbuchen)
-    monkeypatch.setattr(p, "alarm", _kein_alarm)
-    monkeypatch.setattr(p.log, "exception", lambda *a, **k: None)   # 500 Tracebacks
-
-    basis = {"dealer_id": None, "plan": "marktplatz", "amount": 20.0,
-             "currency": "eur", "payment_status": "paid"}
-    docs = [{**basis, "id": f"tx_{i}_{welt.s}", "session_id": f"cs_test_f{i}_{welt.s}",
-             "user_id": gesperrt, "status": "activation_failed",
-             "created_at": (jetzt - timedelta(days=2)).isoformat(),
-             "updated_at": (jetzt - timedelta(days=1)).isoformat()}
-            for i in range(500)]
-    docs.append({**basis, "id": f"tx_k1_{welt.s}", "session_id": sid_k1,
-                 "user_id": f"k1_{welt.s}", "status": "paid",
-                 "created_at": (jetzt - timedelta(hours=1)).isoformat(),
-                 "updated_at": (jetzt - timedelta(minutes=5)).isoformat()})
-
-    async def lauf():
-        await welt.db.payment_transactions.insert_many(docs)
-        st1 = await p.zahlungen_abgleichen(welt.db)
-        st2 = await p.zahlungen_abgleichen(welt.db)
-        k1 = await welt.db.payment_transactions.find_one({"session_id": sid_k1}, {"_id": 0})
-        return st1, st2, k1
-
-    st1, st2, k1 = welt.run(lauf())
-    assert k1["status"] == "active", (st1, st2, k1["status"])
-    assert verbucht == [sid_k1], "genau ein Beleg fuer K1"
-    assert p.ABGLEICH_MAX == 500
-
-
-# ============================================================ #44
 def test_44_neuerzeugung_nach_cas_wirft_nicht(welt, monkeypatch):
     C = _m("routes.contracts")
     AD = _m("auto_daten")

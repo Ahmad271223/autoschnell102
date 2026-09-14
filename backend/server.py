@@ -8,7 +8,6 @@ Alle Endpoints sind in modulare Router unter `/app/backend/routes/` ausgelagert:
   - routes/contracts.py     →  /api/contracts/*
   - routes/appointments.py  →  /api/appointments/*
   - routes/drivers.py       →  /api/drivers/*, /api/driver/*
-  - routes/payments.py      →  /api/payments/*  + /api/webhook/stripe
 
 Geteilte Dependencies (DB-Client, current_user/admin, require_active_sub,
 get_subscription_status, helpers) leben in `deps.py` und werden von allen
@@ -60,7 +59,6 @@ from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
 from routes import listings as listings_routes
 from routes import manual_search as manual_search_routes
-from routes import payments as payments_routes
 from routes import protocols as protocols_routes
 from routes import resale as resale_routes
 from routes import team as team_routes
@@ -306,6 +304,9 @@ async def health_check(response: Response):
         return {"status": "unhealthy", "db": "down"}
 
 
+_PROZESS_START = datetime.now(timezone.utc)
+
+
 @api.get("/ready")
 async def readiness_check(response: Response):
     """Readiness (Audit 09/2026, Punkt 42) — getrennt von /health (Liveness).
@@ -389,10 +390,16 @@ async def readiness_check(response: Response):
         # offsite muss es sein. Ein gerade fehlgeschlagener Lauf darf die
         # Warnung nicht unterdruecken.
         offsite_noetig = bool(os.environ.get("BACKUP_S3_BUCKET", "").strip())
+        # Entscheidung Ahmad 14.09.2026: ein fehlendes oder zu altes Backup ist
+        # in Produktion ein FEHLER — aber erst, wenn die Instanz laenger als
+        # 26 h laeuft (frischer Stack, Rollout).
+        _ist_prod = os.environ.get("APP_ENV", "").strip().lower() == "production"
+        _laeuft_h = (datetime.now(timezone.utc) - _PROZESS_START).total_seconds() / 3600
+        _ziel = fehler if (_ist_prod and _laeuft_h > 26) else warnungen
         if alter is None or alter > 26 or not b.get("vollstaendig"):
-            warnungen.append("backup: kein vollstaendiges Backup in den letzten 26 h")
+            _ziel.append("backup: kein vollstaendiges Backup in den letzten 26 h")
         elif offsite_noetig and not b.get("offsite"):
-            warnungen.append("backup: letzte Sicherung ohne Offsite-Kopie")
+            _ziel.append("backup: letzte Sicherung ohne Offsite-Kopie")
     except Exception as exc:
         warnungen.append(f"backup: {exc}")
     try:
@@ -412,8 +419,21 @@ async def readiness_check(response: Response):
             {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
              "mfa.aktiv": {"$ne": True}})
         info["super_admins_ohne_mfa"] = ohne_mfa
+        _ist_prod = os.environ.get("APP_ENV", "").strip().lower() == "production"
+        # Entscheidung Ahmad 14.09.2026: Zwei-Faktor ist fuer den Super-Admin
+        # Pflicht (MFA_PFLICHT=false nur fuer Testumgebungen).
+        _mfa_pflicht = os.environ.get("MFA_PFLICHT", "true").strip().lower() not in (
+            "0", "false", "nein", "no")
         if ohne_mfa:
-            warnungen.append(f"{ohne_mfa} Super-Admin-Konto/Konten ohne Zwei-Faktor-Anmeldung")
+            (fehler if (_ist_prod and _mfa_pflicht) else warnungen).append(
+                f"{ohne_mfa} Super-Admin-Konto/Konten ohne Zwei-Faktor-Anmeldung")
+        # Pruefung 14.09.2026 (F5/F6): gar kein aktives Betreiberkonto
+        aktive_sa = await db.users.count_documents(
+            {"role": "admin", "is_super_admin": True, "active": {"$ne": False}})
+        info["super_admins"] = aktive_sa
+        if aktive_sa == 0:
+            (fehler if _ist_prod else warnungen).append(
+                "kein aktives Super-Admin-Konto (SUPER_ADMIN_USERNAME/PASSWORD pruefen)")
         _ = alt
     except Exception as exc:
         warnungen.append(f"queue: {exc}")
@@ -728,6 +748,9 @@ async def ensure_indexes():
     # Pruefung 14.09.2026 (Liste 4, Nr. 79): SMTP-Idempotenz — ein Eintrag je
     # Schluessel (parallele Upserts), nach 30 Tagen automatisch weg.
     await db.mail_idempotenz.create_index("key", unique=True, name="mail_schluessel")
+    # Pruefung 14.09.2026 (A5): Versand-Schluessel ueberleben die Verlaufsliste
+    await db.versand_schluessel.create_index([("contract_id", 1), ("key", 1)], unique=True,
+                                             name="versand_schluessel")
     await db.mail_idempotenz.create_index("begonnen", expireAfterSeconds=30 * 86400,
                                           name="mail_idempotenz_ttl")
     await db.pickup_reports.create_index(
@@ -954,11 +977,12 @@ async def seed_super_admin():
         return
     # Kontonummer (13.09.2026): Ein Benutzername im Nummernmuster wuerde vom
     # Nummern-Zweig des Logins verdeckt — dann gar nicht erst anlegen.
-    from kontonummer import normalisieren
-    if normalisieren(username):
+    from kontonummer import kennung_normalisieren
+    if kennung_normalisieren(username):
         log.error("seed_super_admin: SUPER_ADMIN_USERNAME %r sieht wie eine "
-                  "Kontonummer aus — Super-Admin wird NICHT angelegt. Bitte einen "
-                  "Benutzernamen mit Buchstaben waehlen.", username)
+                  "Kontonummer, ein Kaeufer-Code oder eine Fahrer-ID aus — Super-Admin "
+                  "wird NICHT angelegt. Bitte einen laengeren Benutzernamen mit "
+                  "Kleinbuchstaben und Bindestrich waehlen.", username)
         return
     # Kontonummer (13.09.2026), Schritt 5: keine Platzhalter-E-Mail mehr fuer
     # neue Seeds (die E-Mail ist nur Kontaktadresse); ein vorhandenes Konto
@@ -1127,11 +1151,13 @@ async def on_start():
     except Exception as exc:
         log.warning("cleanup task start failed: %s", exc)
         WORKER_STATUS["aufraeumen"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+    # 14.09.2026: kein Stripe mehr (Entscheidung Ahmad: Rechnung, Zahlung, dann
+    # Zugangsdaten) — der Abgleich holt nur noch Abo-Vorgaenge nach.
     try:
-        _worker_starten("zahlungsabgleich", lambda: run_abgleich_forever())
+        _worker_starten("abo_abgleich", lambda: run_abgleich_forever())
     except Exception as exc:
         log.warning("abgleich task start failed: %s", exc)
-        WORKER_STATUS["zahlungsabgleich"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+        WORKER_STATUS["abo_abgleich"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
     # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
     # nach, wenn das letzte Backup älter als 24h ist.
@@ -1214,11 +1240,9 @@ async def run_abgleich_forever():
         try:
             if await acquire(db, "abgleich", ttl_seconds=540):
                 from routes.admin import abo_vorgaenge_nachholen
-                from routes.payments import zahlungen_abgleichen
                 a = await abo_vorgaenge_nachholen()
-                z = await zahlungen_abgleichen(db)
-                if a or (isinstance(z, dict) and any(z.values())):
-                    log.info("Abgleich: abo_vorgaenge=%s zahlungen=%s", a, z)
+                if a:
+                    log.info("Abgleich: abo_vorgaenge=%s", a)
         except Exception as exc:
             log.warning("Abgleich fehlgeschlagen: %s", exc)
         await asyncio.sleep(600)
@@ -1240,7 +1264,6 @@ api.include_router(appointments_routes.router)
 api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)
 api.include_router(manual_search_routes.router)
-api.include_router(payments_routes.router)
 api.include_router(bestand_routes.router)
 api.include_router(resale_routes.router)
 api.include_router(team_routes.router)
@@ -1252,7 +1275,6 @@ app.include_router(api)
 
 # Stripe-Webhook ist direkt an `app` gemountet (vollständiger Pfad inkl.
 # /api-Prefix wird von Stripe so aufgerufen).
-app.post("/api/webhook/stripe")(payments_routes.stripe_webhook)
 
 _cors_raw = os.environ.get("CORS_ORIGINS", "").strip()
 if not _cors_raw:

@@ -718,7 +718,18 @@ def prod_umgebung(monkeypatch, tmp_path):
 
 
 def test_production_check_ohne_admin_passwort_kein_fehler(prod_umgebung):
+    """Kontonummer (13.09.2026): das alte ADMIN_PASSWORD wird nicht mehr verlangt.
+    Pruefung 14.09.2026 (F5, Entscheidung Ahmad): OHNE Betreiberkonto startet
+    Produktion aber nicht mehr — SUPER_ADMIN_USERNAME/PASSWORD sind Pflicht."""
     import production_check
+    prod_umgebung.delenv("SUPER_ADMIN_PASSWORD", raising=False)
+    log = _Protokoll()
+    with pytest.raises(SystemExit) as exc:
+        production_check.pruefe_produktion(log)
+    assert exc.value.code == 78
+    assert any("SUPER_ADMIN_USERNAME und SUPER_ADMIN_PASSWORD" in t for t in log.texte("error"))
+    prod_umgebung.setenv("SUPER_ADMIN_USERNAME", "ci-test-superadmin")
+    prod_umgebung.setenv("SUPER_ADMIN_PASSWORD", "Ci-Test-Super-2026!x")
     log = _Protokoll()
     production_check.pruefe_produktion(log)                  # kein SystemExit
     assert log.texte("error") == [], log.texte("error")

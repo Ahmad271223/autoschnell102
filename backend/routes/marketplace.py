@@ -1256,13 +1256,13 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
 class InterestIn(BaseModel):
     # Runde 17 (Nr. 397): ge=0 liess inf/nan durch — "Infinity" landete als
     # Angebot in der Historie und beim Haendler; jetzt 422.
-    offer: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    offer: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)   # 14.09.2026: kein 0 €
     message: str = Field(default="", max_length=2000)
 
 
 class InterestAnswerIn(BaseModel):
     action: Literal["akzeptieren", "ablehnen", "gegenangebot"]
-    counter_offer: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    counter_offer: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
 
 
@@ -1390,7 +1390,7 @@ class BuyerInterestAnswerIn(BaseModel):
     # 09/2026: der Kaeufer kann jetzt auch selbst ein Gegenangebot machen
     action: Literal["annehmen", "ablehnen", "gegenangebot"]
     # Runde 17 (Nr. 397): kein inf/nan als Gegenangebot.
-    counter_offer: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    counter_offer: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
 
 
@@ -1424,10 +1424,16 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
     # Anfrage, es geht um entzogenen Zugang. Kein Status-Filter beim Laden,
     # damit die Pruefung auch beim Kaeufer-Gegenangebot greift.
     l = await db.resale_listings.find_one(
-        {"id": it["listing_id"]}, {"_id": 0, "dealer_id": 1, "visibility": 1})
+        {"id": it["listing_id"]},
+        {"_id": 0, "dealer_id": 1, "visibility": 1, "status": 1, "reserved_for": 1})
     if not l or not await _inserat_sichtbar_fuer(user, l):
         raise HTTPException(403, "Kein Zugang mehr zu diesem Inserat — die "
                                  "Anfrage kann nicht weitergeführt werden")
+    if body.action == "gegenangebot" and not _inserat_verhandelbar(l, user["id"]):
+        # Pruefung 14.09.2026 (D14): wie beim Haendler — kein Gegenangebot auf
+        # ein nicht mehr verfuegbares Inserat.
+        raise HTTPException(409, "Das Inserat ist nicht mehr verfügbar — ein "
+                                 "Gegenangebot ist nicht mehr möglich")
     if body.action == "gegenangebot":
         # Kaeufer macht (erneut) ein Angebot — solange nichts abgeschlossen ist
         # und der Haendler nicht gerade auf DIESES Kaeufer-Angebot antworten muss.
@@ -1505,6 +1511,18 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
     return {"ok": True, "status": neuer_status}
 
 
+def _inserat_verhandelbar(l: dict, buyer_user_id) -> bool:
+    """Pruefung 14.09.2026 (D13/D14): verhandelt wird nur auf einem
+    veroeffentlichten Inserat — oder auf einem, das fuer GENAU diesen Kaeufer
+    reserviert ist."""
+    status = l.get("status")
+    if status == "veroeffentlicht":
+        return True
+    if status == "reserviert":
+        return l.get("reserved_for") in (None, buyer_user_id)
+    return False
+
+
 async def _kaeufer_darf_noch(it: dict) -> None:
     """Nachpruefung Runde 14 (Nr. 1/2/3): Darf der Kaeufer dieser Anfrage
     die Verhandlung AKTUELL noch fuehren? Vorher pruefte answer_interest nur
@@ -1524,7 +1542,13 @@ async def _kaeufer_darf_noch(it: dict) -> None:
         raise HTTPException(409, "Der Käufer ist nicht mehr aktiv — die "
                                  "Anfrage kann nicht weitergeführt werden")
     l = await db.resale_listings.find_one(
-        {"id": it.get("listing_id")}, {"_id": 0, "dealer_id": 1, "visibility": 1})
+        {"id": it.get("listing_id")},
+        {"_id": 0, "dealer_id": 1, "visibility": 1, "status": 1, "reserved_for": 1})
+    if l and not _inserat_verhandelbar(l, it.get("buyer_user_id")):
+        # Pruefung 14.09.2026 (D13): kein Gegenangebot auf ein Inserat, das
+        # inzwischen verkauft, zurueckgezogen oder fuer jemand anderen reserviert ist.
+        raise HTTPException(409, "Das Inserat ist nicht mehr verfügbar — die Anfrage "
+                                 "kann nicht weitergeführt werden")
     if not l or not await _inserat_sichtbar_fuer(k, l):
         raise HTTPException(409, "Der Käufer hat keinen Zugang mehr zu diesem "
                                  "Inserat — die Anfrage kann nicht "

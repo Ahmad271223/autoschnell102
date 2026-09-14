@@ -10,6 +10,7 @@ Fahrzeugakte dürfen ein bestehendes Inserat nicht unbemerkt verändern.
 import base64
 import logging
 import math
+import re
 import uuid
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
@@ -101,7 +102,9 @@ _INT64 = 2 ** 63
 
 
 def _zahl_ok(val: Any) -> bool:
-    """Endliche Zahl, die BSON speichern kann (bool zaehlt als Zahl)."""
+    """Endliche Zahl, die BSON speichern kann (bool zaehlt hier als Zahl —
+    Ja/Nein-Felder wie accident_free brauchen das; die ZAHLENFELDER lehnen
+    bool in _fahrzeugwert_bereinigen ab, Pruefung 14.09.2026 F14)."""
     if isinstance(val, bool):
         return True
     if isinstance(val, int):
@@ -132,13 +135,18 @@ def _fahrzeugwert_bereinigen(k: str, val: Any) -> Tuple[bool, Any]:
             s = val.strip()
             if len(s) > _DATEN_ZAHL_TEXT_MAX:
                 return False, None
-            try:
-                if s and not math.isfinite(float(s.replace(",", "."))):
-                    return False, None          # "inf", "nan", "1e400"
-            except ValueError:
-                pass                            # Freitext wie "ca. 150.000" bleibt
-            return True, val
-        return (True, val) if _zahl_ok(val) else (False, None)
+            if not s:
+                return True, ""
+            # Pruefung 14.09.2026 (F15): Freitext in Zahlenfeldern ablehnen —
+            # die Marktplatzfilter rechnen mit $gte/$lte auf diesen Feldern.
+            # '150.000 km' und '110,5' werden als Zahl uebernommen, 'viel' nicht.
+            from auto_daten import _zahl
+            zahl = _zahl(s)
+            if zahl is None or not re.match(r"^\s*-?[\d.,\s]+\s*[A-Za-z€/²³]{0,6}\s*$", s):
+                return False, None
+            return True, zahl
+        # Pruefung 14.09.2026 (F14): true/false ist kein Kilometerstand
+        return (True, val) if (_zahl_ok(val) and not isinstance(val, bool)) else (False, None)
     grenze = _DATEN_TEXT_MAX.get(k)
     if grenze is None:
         return False, None

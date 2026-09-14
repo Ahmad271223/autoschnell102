@@ -125,12 +125,32 @@ def pruefe_produktion(log) -> None:
     # gar nicht an — der Betreiber waere ausgesperrt.
     super_name = os.environ.get("SUPER_ADMIN_USERNAME", "").strip()
     if super_name:
-        from kontonummer import normalisieren
-        if normalisieren(super_name):
+        from kontonummer import kennung_normalisieren
+        if kennung_normalisieren(super_name):
             fehler.append(
-                f"SUPER_ADMIN_USERNAME '{super_name}' sieht wie eine Kontonummer aus "
-                "— bitte einen Benutzernamen mit Buchstaben waehlen (sonst ist "
-                "die Betreiber-Anmeldung nicht moeglich).")
+                f"SUPER_ADMIN_USERNAME '{super_name}' sieht wie eine Kontonummer, ein "
+                "Kaeufer-Code oder eine Fahrer-ID aus — bitte einen laengeren Benutzernamen "
+                "mit Kleinbuchstaben und Bindestrich waehlen (sonst ist die "
+                "Betreiber-Anmeldung nicht moeglich).")
+    # Pruefung 14.09.2026 (F5): ohne Betreiberkonto startet Produktion nicht.
+    if ist_prod and (not super_name or not super_pw):
+        fehler.append("SUPER_ADMIN_USERNAME und SUPER_ADMIN_PASSWORD muessen in Produktion "
+                      "gesetzt sein — sonst gibt es kein Betreiberkonto.")
+    # Pruefung 14.09.2026 (A18/B30): Zahlen-Variablen mit Tippfehler
+    from konfig import FEHLERHAFT, zahl_pruefen
+    for name, roh in sorted(FEHLERHAFT.items()):
+        (fehler if ist_prod else warnungen).append(
+            f"{name}='{roh}' ist keine ganze Zahl — Standardwert aktiv, bitte korrigieren.")
+    for name in ("LOGIN_KONTO_LIMIT", "LOGIN_KONTO_FENSTER", "LOGIN_IP_LIMIT", "BACKUP_S3_KEEP",
+                 "WEB_CONCURRENCY", "MIN_FREI_MB", "BEWEIS_FOTOS_MAX", "BEWEIS_AUFBEWAHRUNG_TAGE",
+                 "BEWEIS_PARALLEL", "FAHRERFOTO_TAGE", "BERICHT_AUFBEWAHRUNG_TAGE",
+                 "ANBIETER_TAGESLIMIT_JE_FIRMA", "ANBIETER_TAGESLIMIT_GESAMT",
+                 "ANBIETER_TAGESWARNUNG", "ABRUF_RUECKFALL_TAGESLIMIT", "BILD_PROXY_LIMIT"):
+        if name not in FEHLERHAFT:
+            roh = zahl_pruefen(name)
+            if roh is not None:
+                (fehler if ist_prod else warnungen).append(
+                    f"{name}='{roh}' ist keine ganze Zahl — bitte korrigieren.")
 
     frontend = os.environ.get("FRONTEND_URL", "").strip()
     if not frontend.startswith("https://") or "localhost" in frontend:
@@ -224,13 +244,21 @@ def pruefe_produktion(log) -> None:
             ", ".join(smtp_fehlt) + ") — sonst koennen Passwort-Reset-Mails "
             "und der Vertragsversand nicht gesendet werden.")
 
-    if not os.environ.get("STRIPE_API_KEY", "").strip() or \
-            not os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip():
-        warnungen.append("Stripe ist nicht (vollstaendig) konfiguriert — Abo-"
-                         "Zahlungen laufen dann nur ueber manuelle Freischaltung.")
+    _mock = os.environ.get("MOCK_PROVIDER_FETCH", "").strip().lower() in ("1", "true", "yes")
     if not os.environ.get("APIFY_TOKEN", "").strip():
-        warnungen.append("APIFY_TOKEN fehlt — mobile.de/AutoScout24-Abrufe sind "
-                         "nicht moeglich.")
+        # Entscheidung Ahmad 14.09.2026: die Fahrzeugsuche ist Kernfunktion —
+        # ohne Anbieter-Zugang startet Produktion nicht (Ausnahme: Mock im Test).
+        (fehler if (ist_prod and not _mock) else warnungen).append(
+            "APIFY_TOKEN fehlt — mobile.de/AutoScout24-Abrufe sind nicht moeglich.")
+    _lokal = os.environ.get("STORAGE_LOKAL_ERLAUBT", "").strip().lower() in ("1", "true", "yes")
+    if ist_prod and not _lokal and not os.environ.get("BACKUP_S3_BUCKET", "").strip():
+        # Entscheidung Ahmad 14.09.2026: Offsite-Backup ist Pflicht im Zwei-Server-Betrieb.
+        fehler.append("BACKUP_S3_BUCKET fehlt — ohne Offsite-Backup startet Produktion nicht "
+                      "(Einzelserver mit STORAGE_LOKAL_ERLAUBT=true ausgenommen).")
+    if ist_prod and os.environ.get("BEWEIS_PRIVATDATEN", "").strip().lower() in ("1", "true", "yes"):
+        # Pruefung 14.09.2026 (A21): Privatverkaeuferdaten gehoeren nicht in
+        # firmenuebergreifend genutzte Beweisdokumente.
+        fehler.append("BEWEIS_PRIVATDATEN=true ist in Produktion nicht erlaubt.")
     s3 = {v: os.environ.get(v, "").strip()
           for v in ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")}
     if any(s3.values()) and not all(s3.values()):
@@ -257,12 +285,12 @@ def pruefe_produktion(log) -> None:
             warnungen.append(meldung)
 
     # Audit 09/2026 (Punkt 43): fail-closed fuer angebotene Pflichtfunktionen
+    # 14.09.2026: Stripe ist entfernt — gesetzte Reste in der .env sind nur ein Hinweis.
     stripe_key = os.environ.get("STRIPE_API_KEY", "").strip()
     stripe_whsec = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
-    if bool(stripe_key) != bool(stripe_whsec):
-        (fehler if ist_prod else warnungen).append(
-            "Stripe nur halb konfiguriert (STRIPE_API_KEY und STRIPE_WEBHOOK_SECRET "
-            "beide setzen oder beide leer lassen — sonst ist Online-Zahlung aus).")
+    if stripe_key or stripe_whsec:
+        warnungen.append("STRIPE_* ist gesetzt, wird aber nicht mehr verwendet (Stripe entfernt "
+                         "am 14.09.2026) — aus der .env entfernen.")
     if os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "").strip().lower() in ("1", "true", "yes"):
         warnungen.append("AUTO_DATEN_SCHAEDEN_FREITEXT=true: Freitext-Schaeden koennen "
                          "Personendaten enthalten (Standard: false).")

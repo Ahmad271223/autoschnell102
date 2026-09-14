@@ -811,7 +811,7 @@ Historien-Bereinigung. Reihenfolge:
 openssl rand -base64 48        # JWT_SECRET
 # 2. In .env eintragen: JWT_SECRET, SUPER_ADMIN_PASSWORD,
 #    MONGO_PASSWORD (+ Mongo-Benutzer ändern: mongosh db.changeUserPassword),
-#    SMTP_PASS, STRIPE_*, APIFY_TOKEN, S3_SECRET_KEY
+#    SMTP_PASS, APIFY_TOKEN, S3_SECRET_KEY
 # 3. Stack neu starten (neue Werte greifen; alte JWTs sind durch den neuen
 #    JWT_SECRET ungültig)
 docker compose up -d --build
@@ -1057,7 +1057,7 @@ Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`).
    Rollback auf das vorherige Image.
 4. Backup + `wiederherstellung_testen.py` + echter Restore auf Staging
    (Wartungsmodus sichtbar, Rollback-Test mit absichtlichem Fehler).
-5. Stripe im Testmodus: Checkout, Webhook (Dashboard: `/api/webhook/stripe`),
+5. Zahlung: seit 14.09.2026 KEIN Zahlungsdienst mehr (Stripe entfernt) — Rechnung, Zahlungseingang, dann Freischaltung im Admin-Bereich. Entfaellt: Checkout, Webhook,
    Wiederholungs-Webhook, Betrieb-Seite ohne "Zahlung ohne Zugang".
 6. Rollen-/Mandantentests und Lasttest (Vergleiche + Beweisdokumente + PDFs gleichzeitig).
 

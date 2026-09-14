@@ -27,8 +27,9 @@ log = logging.getLogger("autohandel")
 # maxPoolSize: max. gleichzeitige Sockets pro Prozess; minPoolSize haelt
 # warme Verbindungen vor (kein Cold-Start unter Last). Timeouts verhindern,
 # dass ein langsamer DB-Call den Request unbegrenzt blockiert.
-_MONGO_MAX_POOL = int(os.environ.get("MONGO_MAX_POOL_SIZE", "100"))
-_MONGO_MIN_POOL = int(os.environ.get("MONGO_MIN_POOL_SIZE", "10"))
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+_MONGO_MAX_POOL = zahl_env("MONGO_MAX_POOL_SIZE", 100, unten=5)
+_MONGO_MIN_POOL = zahl_env("MONGO_MIN_POOL_SIZE", 10, unten=0)
 def _neuer_client() -> AsyncIOMotorClient:
     return AsyncIOMotorClient(
         os.environ["MONGO_URL"],

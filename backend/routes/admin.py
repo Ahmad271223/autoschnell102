@@ -737,6 +737,9 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     if "password_hash" in fields:
         await _konto_sperre_aufheben(target)
     if "plan_type" in body:
+      # Pruefung 14.09.2026 (G8): auch der alte Plan-Pfad laeuft unter der
+      # Abo-Sperre des Kontos (siehe _sperre / admin_sucher_abo).
+      async with _sperre(f"abo:{user_id}", _handelnder(admin)):
         u = await db.users.find_one({"id": user_id})
         if not u:
             raise HTTPException(404)
@@ -866,6 +869,12 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         raise HTTPException(400, "Du kannst dich nicht selbst löschen")
 
     if u.get("role") != "dealer":
+        # Pruefung 14.09.2026 (G14): ohne Hauptaccount blieben die Fahrzeuge
+        # sonst beim geloeschten Sucher haengen — vorher abbrechen.
+        if u.get("role") == "sucher" and u.get("dealer_id") and not await db.users.find_one(
+                {"dealer_id": u["dealer_id"], "role": "dealer"}, {"_id": 1}):
+            raise HTTPException(409, "Die Firma hat keinen Hauptaccount — erst einen Chef "
+                                     "bestimmen, dann den Sucher löschen")
         # Einzelner Mitarbeiter-/Kaeufer-Account: diesen entfernen — samt
         # seiner personenbezogenen Reste (DSGVO): Netzwerk-Mitgliedschaften,
         # Favoriten und Kaufanfragen. Vorher blieb all das nach der
@@ -1760,8 +1769,11 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
     if body.plan is None:
-        # Aufheben = NUR die kostenpflichtige Sucher-Funktion sperren
-        # (Login/Bestand bleiben). Auch Lifetime wird damit inaktiv.
+      # Aufheben = NUR die kostenpflichtige Sucher-Funktion sperren
+      # (Login/Bestand bleiben). Auch Lifetime wird damit inaktiv.
+      # Pruefung 14.09.2026 (G7): dieselbe Sperre wie beim Freischalten —
+      # sonst konnten sich Aufheben und Freischalten ueberholen.
+      async with _sperre(f"abo:{sucher_id}", _handelnder(admin)):
         await db.subscriptions.update_many(
             {"subject_user_id": sucher_id, "status": {"$in": ["active", "cancelled"]}},
             {"$set": {"status": "cancelled", "expires_at": now_iso(),
@@ -2662,13 +2674,11 @@ async def admin_alarm_quittieren(alarm_id: str, admin=Depends(current_super_admi
 @router.post("/admin/betrieb/nachholen")
 async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
     """Reparaturlaeufe sofort anstossen (sonst alle 10 Minuten automatisch)."""
-    from routes.payments import zahlungen_abgleichen
     # Runde 17: fehlende Unique-Indizes (Altdubletten beim Start) ohne
     # Neustart nachholen, sobald die Daten bereinigt sind.
     from indizes import (_termin_unique_index, _unique_index_sicher, _favoriten_unique_index,
                          _interesse_unique_index, _buyer_access_unique_index)
     return {"abo_vorgaenge": await abo_vorgaenge_nachholen(),
-            "zahlungen": await zahlungen_abgleichen(db),
             "termin_index": await _termin_unique_index(),
             "fahrzeug_index": await _unique_index_sicher(
                 db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False),

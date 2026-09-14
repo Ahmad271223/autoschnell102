@@ -167,27 +167,8 @@ export default function Marktplatz() {
     finally { setRequesting(false); }
   };
 
-  // Stripe-Checkout (20 €/Monat, 09/2026): zahlen -> Rueckkehr auf
-  // /markt/zahlung-erfolg -> Zugang ist automatisch aktiv.
-  const [paying, setPaying] = useState(false);
-  // Audit 09/2026 (Blocker 6): Online-Zahlung nur anbieten, wenn Stripe auf
-  // dem Server wirklich eingerichtet ist (sonst 503 -> nur Rechnung).
-  const [zahlung, setZahlung] = useState({ stripe_aktiv: false });
-  useEffect(() => {
-    buyerApi.get("/payments/config").then((r) => setZahlung(r.data || {})).catch(() => {});
-  }, []);
-  const payWithStripe = async () => {
-    setPaying(true);
-    try {
-      const { data } = await buyerApi.post("/payments/checkout", {
-        plan: "marktplatz", origin_url: window.location.origin,
-      });
-      window.location.href = data.url;
-    } catch (e) {
-      toast.error(errMsg(e, "Zahlung konnte nicht gestartet werden"));
-      setPaying(false);
-    }
-  };
+  // 14.09.2026 (Entscheidung Ahmad): keine Online-Zahlung mehr — der Betreiber
+  // stellt eine Rechnung und schaltet nach Zahlungseingang frei.
 
   const Header = () => (
     <div className="sticky top-0 z-10 px-4 sm:px-6 py-3 flex items-center justify-between"
@@ -249,22 +230,13 @@ export default function Marktplatz() {
                 {Number(access?.price ?? 20).toLocaleString("de-DE", { minimumFractionDigits: 2 })} €
                 <span className="text-base font-normal text-zinc-500"> / 30 Tage</span>
               </div>
-              {zahlung.stripe_aktiv && (
-                <button onClick={payWithStripe} disabled={paying} data-testid="markt-stripe-pay"
-                        className="mt-5 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"
-                        style={{ background: "var(--accent-red)" }}>
-                  {paying ? "Öffne Stripe…" : "Jetzt zahlen & sofort loslegen (Stripe)"}
-                </button>
-              )}
               <button onClick={requestAccess} disabled={requesting} data-testid="markt-access-request"
-                      className="mt-2 w-full rounded-xl py-2.5 text-sm text-zinc-300 hover:text-white disabled:opacity-50"
-                      style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}>
-                {requesting ? "Wird gesendet…" : "Lieber per Rechnung? Anfrage an den Betreiber"}
+                      className="mt-5 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"
+                      style={{ background: "var(--accent-red)" }}>
+                {requesting ? "Wird gesendet…" : "Zugang per Rechnung anfragen"}
               </button>
               <p className="mt-3 text-[11px] text-zinc-600">
-                {zahlung.stripe_aktiv
-                  ? "Stripe schaltet sofort für 30 Tage frei (20 € inkl. USt); per Rechnung schaltet der Betreiber nach Zahlungseingang frei."
-                  : "Der Zugang wird per Rechnung abgerechnet — der Betreiber schaltet nach Zahlungseingang für 30 Tage frei."}
+                Der Zugang wird per Rechnung abgerechnet — der Betreiber schaltet nach Zahlungseingang für 30 Tage frei.
               </p>
             </div>
           </div>

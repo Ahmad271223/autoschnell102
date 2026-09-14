@@ -39,11 +39,12 @@ for _h in (os.environ.get("BILD_PROXY_HOSTS") or "").split(","):
     if _h.strip():
         ERLAUBTE_HOSTS.add(_h.strip().lower())
 
-THUMB_KANTE = int(os.environ.get("BILD_PROXY_KANTE", "640"))
+from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+THUMB_KANTE = zahl_env("BILD_PROXY_KANTE", 640, unten=64, oben=4096)
 MAX_BYTES = 8 * 1024 * 1024
 ZEITLIMIT = 12.0
 STANDARD_TTL = 7 * 24 * 3600
-_CACHE_MAX = int(os.environ.get("BILD_PROXY_CACHE", "400"))
+_CACHE_MAX = zahl_env("BILD_PROXY_CACHE", 400, unten=10)
 _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _cache_lock = asyncio.Lock()
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
