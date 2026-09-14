@@ -34,6 +34,7 @@ from kontenanlage import (DRIVER_CODE_ALPHABET, ensure_unique_driver_code,  # no
 from snapshot_service import get_object as snapshot_get_object
 
 import logging
+import os
 log = logging.getLogger("autohandel")
 
 router = APIRouter()
@@ -161,6 +162,23 @@ async def current_driver(request: Request, auth: Optional[str] = None,
 # (PR-Review 09/2026): Status-Umschaltung und neue Berichtsversionen sind
 # gesperrt; eine Korrektur laeuft ueber den Haendler (Termin wieder oeffnen).
 _TERMIN_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
+# Wunsch Ahmad 14.09.2026: Sichtbarkeit abgeschlossener Fahrten in der Fahrer-App.
+FAHRER_SICHT_ABGEHOLT_TAGE = int(os.environ.get("FAHRER_SICHT_ABGEHOLT_TAGE", "14"))
+FAHRER_SICHT_GESCHLOSSEN_TAGE = int(os.environ.get("FAHRER_SICHT_GESCHLOSSEN_TAGE", "30"))
+
+
+def _abgeschlossen_seit_filter(status, tage: int) -> dict:
+    """Termine mit diesem Status, deren Abschluss hoechstens `tage` zurueckliegt.
+    Zeitpunkt: abgeschlossen_seit, sonst status_changed_at, sonst updated_at."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    grenze = (_dt.now(_tz.utc) - _td(days=tage)).isoformat()
+    leer = {"$in": [None, ""]}
+    st = {"$in": list(status)} if isinstance(status, (list, set, tuple)) else status
+    return {"status": st,
+            "$or": [{"abgeschlossen_seit": {"$gte": grenze}},
+                    {"abgeschlossen_seit": leer, "status_changed_at": {"$gte": grenze}},
+                    {"abgeschlossen_seit": leer, "status_changed_at": leer,
+                     "updated_at": {"$gte": grenze}}]}
 # Gegenstueck: in diesen Zustaenden darf der Fahrer noch vom Termin getrennt
 # werden, ohne dass eine historische Zuordnung verloren geht. Fehlender oder
 # leerer Status zaehlt als "offen" (wie ueberall: appt.get("status") or "offen").
@@ -701,8 +719,17 @@ async def driver_appointments(driver=Depends(current_driver),
     offen = offen[:grenze]
     rest = grenze - len(offen)
     # rest + 1 (nie to_list(0) — das liefert in Motor ALLE) erkennt den Abschnitt.
+    # Wunsch Ahmad 14.09.2026: Abgeholte Fahrten verschwinden 14 Tage nach
+    # dem Abschluss aus dem Fahrer-Dashboard, alle anderen abgeschlossenen
+    # (nicht abgeholt, storniert, erledigt) nach 30 Tagen. Der Termin selbst
+    # bleibt beim Haendler (Beweiskette, Vertragsfrist) — nur die Fahrer-App
+    # zeigt ihn nicht mehr.
     alt = await db.appointments.find(
-        {**basis, "status": {"$in": sorted(_TERMIN_ABGESCHLOSSEN)}}, {"_id": 0},
+        {**basis, "$or": [_abgeschlossen_seit_filter("abgeholt", FAHRER_SICHT_ABGEHOLT_TAGE),
+                          _abgeschlossen_seit_filter(
+                              sorted(_TERMIN_ABGESCHLOSSEN - {"abgeholt"}),
+                              FAHRER_SICHT_GESCHLOSSEN_TAGE)]},
+        {"_id": 0},
     ).sort("pickup_date", -1).to_list(rest + 1)
     if offen_gekappt or len(alt) > rest:
         log.warning("Fahrer %s: Terminliste auf %d gekappt (offen %d)",

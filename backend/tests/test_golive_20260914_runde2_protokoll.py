@@ -303,3 +303,26 @@ def test_f1_f2_geloeschter_termin_waehrend_abschicken_und_abschluss(welt, monkey
     assert code == 409 and "gelöscht" in text
     p = _doc(w, "pickup_protocols", t2.pid)
     assert p["status"] != "final" and "pdf_path" not in p
+
+
+# ============================================================ Fahrer-Dashboard: 14 / 30 Tage
+def test_fahrer_dashboard_blendet_alte_abgeschlossene_fahrten_aus(welt):
+    """Wunsch Ahmad 14.09.2026: abgeholt nach 14 Tagen weg, andere abgeschlossene
+    nach 30 Tagen; offene bleiben; der Termin selbst bleibt beim Haendler."""
+    w = welt
+    D = _m("routes.drivers")
+    faelle = {"jung_abgeholt": ("abgeholt", 5), "alt_abgeholt": ("abgeholt", 20),
+              "jung_storno": ("storniert", 20), "alt_storno": ("nicht abgeholt", 40),
+              "offen_alt": ("offen", 400)}
+    for name, (status, tage) in faelle.items():
+        t = _abholung(w, name=name, proto_status="entwurf")
+        seit = (datetime.now(timezone.utc) - timedelta(days=tage)).isoformat()
+        w.run(w.db.appointments.update_one(
+            {"id": t.aid}, {"$set": {"status": status, "abgeschlossen_seit": seit,
+                                     "status_changed_at": seit, "updated_at": seit}}))
+        faelle[name] = t.aid
+    ids = {a["id"] for a in w.run(D.driver_appointments(w.driver))}
+    assert faelle["jung_abgeholt"] in ids and faelle["jung_storno"] in ids and faelle["offen_alt"] in ids
+    assert faelle["alt_abgeholt"] not in ids and faelle["alt_storno"] not in ids
+    # Beim Haendler existieren alle weiter
+    assert w.run(w.db.appointments.count_documents({"id": {"$in": list(faelle.values())}})) == 5
