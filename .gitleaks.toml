@@ -61,4 +61,7 @@ regexes = [
   # Produktionswerte geprueft: keine Uebereinstimmung.
   '''Sicher\-Fahrt\-2026''',
   '''Admin123!''',
+  # Kontonummer (14.09.2026): Testwert in tests/test_kontonummer_http.py —
+  # prueft nur, dass die alte Chef-Route /dealer/sucher gesperrt ist.
+  '''Neu\-Passwort\-13x''',
 ]
