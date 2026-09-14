@@ -702,6 +702,7 @@ def prod_umgebung(monkeypatch, tmp_path):
         "FRONTEND_URL": "https://app.example.de", "CORS_ORIGINS": "https://app.example.de",
         "MONGO_URL": "mongodb://u:p@db:27017/autoschnell?authSource=admin&maxPoolSize=20",
         "MOCK_PROVIDER_FETCH": "false", "VERTRAG_AUFBEWAHRUNG_TAGE": "90",
+        "APIFY_TOKEN": "ci-test-apify-token",   # Pruefung 14.09.2026: Pflicht in Produktion
         "SNAPSHOT_RETENTION_DAYS": "60", "RESEND_API_KEY": "re_kn_test",
         "MAIL_FROM": "AutoSchnell <vertrag@example.de>", "WEB_CONCURRENCY": "1",
         "AUTO_DATEN_SCHAEDEN_FREITEXT": "false", "VERTRAG_LOESCHUNG_AKTIV": "false",

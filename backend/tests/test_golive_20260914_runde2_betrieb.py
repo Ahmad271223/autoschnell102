@@ -72,7 +72,7 @@ def aufraeumen():
 def _firma(dbx, name):
     dealer_id, chef_id, sucher_id = f"d_{name}_{SUF}", f"c_{name}_{SUF}", f"s_{name}_{SUF}"
     dbx.dealers.insert_one({"id": dealer_id, "user_id": chef_id, "company_name": name,
-                            "kunden_nr": 90000 + abs(hash(name)) % 1000, "created_at": "2026-09-01"})
+                            "kunden_nr": 1_000_000 + (int(SUF, 16) + abs(hash(name))) % 8_000_000, "created_at": "2026-09-01"})
     dbx.users.insert_many([
         {"id": chef_id, "dealer_id": dealer_id, "role": "dealer", "active": True,
          "kontonummer": f"r2{SUF}{name}c", "created_at": "2026-09-01T00:00:00+00:00"},
