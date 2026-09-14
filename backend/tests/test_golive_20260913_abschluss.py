@@ -263,18 +263,40 @@ def test_p1_langsamer_unbestrittener_abschluss_bleibt_ok(welt):
     assert _doc(w, "appointments", t.aid)["status"] == "abgeholt"
 
 
-def test_p1_gleichzeitig_genau_ein_abschluss(welt):
+def test_p1_gleichzeitig_genau_ein_abschluss(welt, monkeypatch):
     w = welt
     P = _m("routes.protocols")
     t = _abholung(w)
+
+    # Nachbesserung Zusammenfuehrung: Barriere nach dem Lesen des Protokolls.
+    # Ohne sie las der zweite Abschluss (neue Pool-Verbindung, langsamer) fast
+    # immer schon 'wird_abgeschlossen' und scheiterte an der N1-Vorpruefung —
+    # der atomare Claim wurde so nur zufaellig geprueft (Mutation "Claim-Filter
+    # nur {id}" in 2 von 8 Laeufen erkannt). Jetzt lesen BEIDE das freigegebene
+    # Protokoll, bestehen die Vorpruefung, und nur der Claim entscheidet.
+    echt_current = P._current
+    gelesen = {"n": 0}
+    beide_gelesen = asyncio.Event()
+
+    async def current_mit_barriere(*a, **k):
+        d = await echt_current(*a, **k)
+        gelesen["n"] += 1
+        if gelesen["n"] >= 2:
+            beide_gelesen.set()
+        try:
+            await asyncio.wait_for(beide_gelesen.wait(), 5)
+        except asyncio.TimeoutError:
+            pass
+        return d
+    monkeypatch.setattr(P, "_current", current_mit_barriere)
 
     async def beide():
         # Deterministisch: Der Abschluss, der zuerst im PDF-Speichern ist, haelt
         # dort, bis der andere zurueck ist. Ohne den Haken lief der andere je
         # nach Timing (volle Suite) erst NACH dem finalen Write los und landete —
         # fachlich richtig — in der Selbstheilung (ok, nachgezogen) statt im
-        # Konflikt. Erreichen beide das Speichern (der Fehlerfall), wartet der
-        # zweite nicht und die Pruefungen unten schlagen an.
+        # Konflikt. Erreichen beide das Speichern (der Fehlerfall: Claim nicht
+        # atomar), wartet der zweite nicht und die Pruefungen unten schlagen an.
         anderer_fertig = asyncio.Event()
 
         async def hook(key):
@@ -295,6 +317,10 @@ def test_p1_gleichzeitig_genau_ein_abschluss(welt):
     ok = [e for e in ergebnisse if isinstance(e, dict) and e.get("ok")]
     konflikt = [e for e in ergebnisse if isinstance(e, HTTPException) and e.status_code == 409]
     assert len(ok) == 1 and len(konflikt) == 1, ergebnisse
+    # Der Verlierer scheitert am atomaren Claim, NICHT an der N1-Vorpruefung
+    # (WIRD_ABGESCHLOSSEN) — sonst prueft der Test den Claim gar nicht.
+    assert konflikt[0].detail != P.WIRD_ABGESCHLOSSEN, konflikt[0].detail
+    assert "wird gerade abgeschlossen" in konflikt[0].detail, konflikt[0].detail
     assert len(w.pdfs) == 1 and _doc(w, "pickup_protocols", t.pid)["status"] == "final"
 
 
