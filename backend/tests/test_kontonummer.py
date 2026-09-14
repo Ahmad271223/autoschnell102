@@ -710,6 +710,9 @@ def prod_umgebung(monkeypatch, tmp_path):
     }
     for k, v in werte.items():
         monkeypatch.setenv(k, v)
+    # unabhaengig von der Testreihenfolge: kein Zahlen-Tippfehler aus anderen Tests
+    import konfig
+    monkeypatch.setattr(konfig, "FEHLERHAFT", {})
     for k in ("ADMIN_EMAIL", "ADMIN_PASSWORD", "SELF_SIGNUP", "S3_ENDPOINT", "S3_BUCKET",
               "S3_ACCESS_KEY", "S3_SECRET_KEY", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET",
               "DATEI_SIGNATUR_PFLICHT", "SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"):

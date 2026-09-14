@@ -149,15 +149,20 @@ def test_16_17_produktionspruefung(monkeypatch):
     assert "SUPER_ADMIN_USERNAME und SUPER_ADMIN_PASSWORD muessen in Produktion" in quelle
     assert "APIFY_TOKEN fehlt" in quelle and "BACKUP_S3_BUCKET fehlt" in quelle
     assert "BEWEIS_PRIVATDATEN=true ist in Produktion nicht erlaubt" in quelle
-    # Zahlen: Tippfehler wird gemeldet statt Absturz
-    monkeypatch.setenv("PROBE_TAGE", "14d")
-    assert konfig.zahl_env("PROBE_TAGE", 60) == 60
-    assert konfig.FEHLERHAFT.get("PROBE_TAGE") == "14d"
-    monkeypatch.setenv("PROBE_TAGE", "90")
-    assert konfig.zahl_env("PROBE_TAGE", 60, oben=60) == 60
-    assert konfig.zahl_pruefen("PROBE_TAGE") is None
-    monkeypatch.setenv("PROBE_TAGE", "x")
-    assert konfig.zahl_pruefen("PROBE_TAGE") == "x"
+    # Zahlen: Tippfehler wird gemeldet statt Absturz. FEHLERHAFT ist ein
+    # Modul-Register: der Probe-Eintrag muss danach wieder raus, sonst meldet
+    # production_check ihn in spaeteren Produktions-Tests als Fehler (CI 14.09.).
+    try:
+        monkeypatch.setenv("PROBE_TAGE", "14d")
+        assert konfig.zahl_env("PROBE_TAGE", 60) == 60
+        assert konfig.FEHLERHAFT.get("PROBE_TAGE") == "14d"
+        monkeypatch.setenv("PROBE_TAGE", "90")
+        assert konfig.zahl_env("PROBE_TAGE", 60, oben=60) == 60
+        assert konfig.zahl_pruefen("PROBE_TAGE") is None
+        monkeypatch.setenv("PROBE_TAGE", "x")
+        assert konfig.zahl_pruefen("PROBE_TAGE") == "x"
+    finally:
+        konfig.FEHLERHAFT.pop("PROBE_TAGE", None)
     # /ready: Super-Admin-Zaehlung und MFA-Pflicht sind im Code
     import server
     q = inspect.getsource(server.readiness_check)
