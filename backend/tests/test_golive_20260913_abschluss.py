@@ -59,11 +59,12 @@ def welt(monkeypatch):
     w.s = s = uuid.uuid4().hex[:10]
     w.dealer_id = f"d_glab_{s}"
     w.chef = {"id": f"chef_glab_{s}", "dealer_id": w.dealer_id, "role": "dealer"}
-    # E-Mail und Code eindeutig: driver_accounts traegt Unique-Indizes.
-    w.driver = {"id": f"f_glab_{s}", "display_name": "Fahrer GL", "active": True,
-                "email": f"fahrer-{s}@e2etest-mail.de", "driver_code": "GA" + s.upper()[:8]}
-    w.driver2 = {"id": f"f2_glab_{s}", "display_name": "Fahrer GL 2", "active": True,
-                 "email": f"fahrer2-{s}@e2etest-mail.de", "driver_code": "GB" + s.upper()[:8]}
+    # Kontonummer (13.09.2026): Fahrerkonten wie aus der Kontenanlage des
+    # Super-Admins — Kontonummer aus der gemeinsamen Reihe und FD-Code (beide
+    # eindeutig), KEINE E-Mail (nur Kontakt, optional). kontonummer und
+    # driver_code traegt anlegen() in diese Dicts nach.
+    w.driver = {"id": f"f_glab_{s}", "display_name": "Fahrer GL", "active": True}
+    w.driver2 = {"id": f"f2_glab_{s}", "display_name": "Fahrer GL 2", "active": True}
     w.loop = asyncio.new_event_loop()
     asyncio.set_event_loop(w.loop)
     w.client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
@@ -109,12 +110,16 @@ def welt(monkeypatch):
     monkeypatch.setattr(C, "regenerate_contract_for_pickup", _regen)
 
     async def anlegen():
-        await w.db.users.insert_one({**w.chef, "active": True, "email": f"chef{s}@t.invalid",
-                                     "created_at": _jetzt()})
+        # Chef ohne users.email (der Betreiber legt Chefs ohne Adresse an).
+        await w.db.users.insert_one({**w.chef, "active": True, "created_at": _jetzt()})
         await w.db.dealers.insert_one({"id": w.dealer_id, "user_id": w.chef["id"],
                                        "company_name": "GL Abschluss", "created_at": _jetzt()})
+        K = _m("kontenanlage")
         for d in (w.driver, w.driver2):
-            await w.db.driver_accounts.insert_one({**d, "created_at": _jetzt()})
+            erg = await K.fahrer_anlegen(w.db, {**d, "created_at": _jetzt()})
+            d.update(kontonummer=erg["kontonummer"], driver_code=erg["driver_code"])
+            konto = await w.db.driver_accounts.find_one({"id": d["id"]}, {"_id": 0})
+            assert konto["kontonummer"].isdigit() and "email" not in konto, konto
             await w.db.dealer_drivers.insert_one(
                 {"id": str(uuid.uuid4()), "dealer_id": w.dealer_id, "driver_account_id": d["id"],
                  "display_name": d["display_name"], "added_at": _jetzt()})
@@ -264,9 +269,28 @@ def test_p1_gleichzeitig_genau_ein_abschluss(welt):
     t = _abholung(w)
 
     async def beide():
-        return await asyncio.gather(P.finalize_protocol(t.aid, _fin(P), w.driver),
-                                    P.finalize_protocol(t.aid, _fin(P), w.driver),
-                                    return_exceptions=True)
+        # Deterministisch: Der Abschluss, der zuerst im PDF-Speichern ist, haelt
+        # dort, bis der andere zurueck ist. Ohne den Haken lief der andere je
+        # nach Timing (volle Suite) erst NACH dem finalen Write los und landete —
+        # fachlich richtig — in der Selbstheilung (ok, nachgezogen) statt im
+        # Konflikt. Erreichen beide das Speichern (der Fehlerfall), wartet der
+        # zweite nicht und die Pruefungen unten schlagen an.
+        anderer_fertig = asyncio.Event()
+
+        async def hook(key):
+            if len(w.pdfs) == 1:
+                try:
+                    await asyncio.wait_for(anderer_fertig.wait(), 10)
+                except asyncio.TimeoutError:
+                    pass
+        w.save_hook = hook
+
+        async def abschluss():
+            try:
+                return await P.finalize_protocol(t.aid, _fin(P), w.driver)
+            finally:
+                anderer_fertig.set()
+        return await asyncio.gather(abschluss(), abschluss(), return_exceptions=True)
     ergebnisse = w.run(beide())
     ok = [e for e in ergebnisse if isinstance(e, dict) and e.get("ok")]
     konflikt = [e for e in ergebnisse if isinstance(e, HTTPException) and e.status_code == 409]
