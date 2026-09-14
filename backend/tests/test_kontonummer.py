@@ -722,3 +722,47 @@ def test_production_check_super_admin_name_wie_kontonummer_ist_fehler(prod_umgeb
     log = _Protokoll()
     production_check.pruefe_produktion(log)
     assert any("SUPER_ADMIN_USERNAME" in t for t in log.texte("warning")), log.eintraege
+
+
+def test_paralleler_kollege_mit_hoeherer_nummer_reisst_keine_luecke(wegwerf, monkeypatch):
+    """CI 14.09.2026: Sechs parallele Sucher ergaben 1001-1 … -5, -7. Zieht ein
+    Aufruf den Zusatz 4 und fuegt ein paralleler Kollege seine 5 schneller ein,
+    verwarf der Aufrufer die freie 4 (nur 'groesser als der hoechste' galt).
+    Deterministisch nachgestellt: der Kollege kommt zwischen Ziehen und
+    Pruefen dazwischen. Der Restore-Fall (Zaehler hinterher) bleibt: dort wird
+    weiter geheilt und kein geloeschter Zusatz neu vergeben."""
+    import kontenanlage as KA
+    db = wegwerf.db
+    echt = KA._hoechster_zusatz
+    dazwischen = {"offen": True}
+
+    async def kollege_schneller(db_, kunden_nr):
+        if dazwischen["offen"]:
+            dazwischen["offen"] = False
+            # Kollege hat aus demselben Zaehler die 5 gezogen und schon eingefuegt.
+            await db_.dealers.update_one({"id": "dpar"}, {"$max": {"sucher_seq": 5}})
+            await db_.users.insert_one(_konto("kollege", kontonummer="1001-5",
+                                              kontonummer_basis=1001, dealer_id="dpar",
+                                              role="sucher"))
+        return await echt(db_, kunden_nr)
+    monkeypatch.setattr(KA, "_hoechster_zusatz", kollege_schneller)
+
+    async def lauf():
+        await db.dealers.insert_one({"id": "dpar", "user_id": "cpar", "company_name": "Par",
+                                     "kunden_nr": 1001, "sucher_seq": 3})
+        await db.users.insert_many([
+            _konto(f"v{i}", kontonummer=f"1001-{i}", kontonummer_basis=1001,
+                   dealer_id="dpar", role="sucher") for i in (1, 2, 3)])
+        eigener = await KA.sucher_anlegen(db, "dpar", _konto("ich"))
+        naechster = await KA.sucher_anlegen(db, "dpar", _konto("danach"))
+        # Restore: Zaehler hinter den vorhandenen Nummern, -2 geloescht
+        await db.users.delete_one({"id": "v2"})
+        await db.dealers.update_one({"id": "dpar"}, {"$set": {"sucher_seq": 1}})
+        nach_restore = await KA.sucher_anlegen(db, "dpar", _konto("restore"))
+        return eigener, naechster, nach_restore
+
+    eigener, naechster, nach_restore = wegwerf.run(lauf())
+    assert eigener["kontonummer"] == "1001-4", eigener
+    assert naechster["kontonummer"] == "1001-6", naechster
+    assert nach_restore["kontonummer"] == "1001-7", nach_restore
+

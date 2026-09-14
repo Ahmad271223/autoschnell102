@@ -125,6 +125,18 @@ async def naechster_sucher_zusatz(db, dealer_id: str, kunden_nr: int) -> int:
         hoechster = await _hoechster_zusatz(db, kunden_nr)
         if zusatz > hoechster:
             return zusatz
+        # Nachpruefung 14.09.2026 (CI): Liegt ein HOEHERER Zusatz schon vor,
+        # gibt es zwei Gruende. (a) Der Zaehler ist hinterher (Restore,
+        # Altbestand): heilen und neu ziehen — ein geloeschter Zusatz wird so
+        # nie wieder vergeben. (b) Ein PARALLELER Aufruf hat seine hoehere
+        # Nummer nur schneller eingefuegt: der Zaehler hat beide vergeben, die
+        # eigene Nummer ist frei — sie zu verwerfen riss eine Luecke in die
+        # Reihe (1001-1 … 1001-5, 1001-7).
+        stand = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "sucher_seq": 1})
+        zaehler_gesund = int((stand or {}).get("sucher_seq") or 0) >= hoechster
+        if zaehler_gesund and not await db.users.find_one(
+                {"kontonummer": sucher_nummer(kunden_nr, zusatz)}, {"_id": 1}):
+            return zusatz
         await db.dealers.update_one({"id": dealer_id},
                                     {"$max": {"sucher_seq": hoechster}})
     raise RuntimeError("Sucher-Zusatz: kein freier Wert gefunden")
