@@ -522,6 +522,55 @@ async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
         return None
 
 
+async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
+                                              neuer_preis, sondervereinbarung) -> bool:
+    """Wunsch Ahmad 14.09.2026: nach dem unterschriebenen Protokoll den Vertrag
+    mit neuem Preis und Sondervereinbarung neu erzeugen. Wirft nie."""
+    if not appt.get("contract_id") or (neuer_preis is None and not (sondervereinbarung or "").strip()):
+        return False
+    try:
+        from routes.contracts import regenerate_contract_for_pickup
+        ok = await regenerate_contract_for_pickup(
+            contract_id=appt["contract_id"], dealer_id=appt.get("dealer_id", ""),
+            user={"id": appt.get("created_by"), "dealer_id": appt.get("dealer_id", ""),
+                  "role": "dealer"},
+            neuer_preis=neuer_preis, sondervereinbarung=sondervereinbarung,
+            grund="abholung_abgeschlossen", protokoll_id=protokoll_id)
+        if ok:
+            await log_activity_sicher(appt.get("dealer_id", ""), appt.get("created_by") or "",
+                                      "vertrag.nach_abholung_aktualisiert",
+                                      ref=appt["contract_id"],
+                                      meta={"protokoll_id": protokoll_id, "neuer_preis": neuer_preis})
+        return bool(ok)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Vertrag %s nach Abholung nicht aktualisiert", appt.get("contract_id"))
+        await betrieb.alarm(db, "vertrag_nach_abholung_offen", ref=str(appt.get("contract_id")),
+                            protokoll_id=protokoll_id, fehler=str(exc)[:300])
+        return False
+
+
+async def entwurf_bei_terminaenderung_verwerfen(appt_id: str) -> bool:
+    """Pruefung 14.09.2026 (Liste 4, Nr. 1/2): Wechselt am Termin das Fahrzeug,
+    der Vertrag oder der Fahrer, waehrend das Protokoll noch ein Entwurf ist,
+    passen die bisherigen Angaben (Fahrzeugdaten, Schaeden, Zustand) nicht mehr
+    — der Entwurf wird verworfen. Ein Korrektur-Entwurf wird verworfen und die
+    korrigierte Version wieder aktuell (korrektur_verwerfen). Best effort."""
+    try:
+        doc = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "superseded": {"$ne": True}, "status": "entwurf"},
+            {"_id": 0, "id": 1, "corrects_version": 1})
+        if not doc:
+            return False
+        if "corrects_version" in doc:
+            return await korrektur_verwerfen(appt_id)
+        res = await db.pickup_protocols.delete_one({"id": doc["id"], "status": "entwurf"})
+        return bool(res.deleted_count)
+    except Exception:  # noqa: BLE001
+        log.exception("Protokoll-Entwurf zu Termin %s nach Terminaenderung nicht verworfen",
+                      appt_id)
+        return False
+
+
 async def freigaben_geschlossener_termine_zuruecknehmen(dbx=None) -> int:
     """Pruefung 14.09.2026 (C4/C19): Nachholer fuer den Aufraeum-Job. Findet
     Protokolle, die beim Chef liegen oder freigegeben sind, obwohl ihr Termin
@@ -779,11 +828,21 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         # Pruefung oben und dem Schreiben kann das Protokoll unterschrieben
         # und abgeschlossen worden sein — ein verspaetetes Autospeichern
         # haette dann Felder des FERTIGEN Protokolls ueberschrieben.
+        # Pruefung 14.09.2026 (Liste 4, Nr. 3/6): der Entwurf gehoert dem
+        # Fahrer, der ihn JETZT bearbeitet, und dem Fahrzeug, das JETZT am
+        # Termin haengt — beides wird bei jedem Speichern nachgezogen.
         res = await db.pickup_protocols.update_one(
-            _entwurf_filter(doc["id"]), _entwurf_update(payload))
+            _entwurf_filter(doc["id"]),
+            _entwurf_update({**payload, "driver_account_id": driver["id"],
+                             "driver_name": driver.get("display_name", ""),
+                             "vehicle_id": appt.get("vehicle_id")}))
         if res.matched_count == 0:
             await _speichern_abgelehnt(doc["id"])
         return await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0})
+    # Versionsnummer: hoechste vorhandene + 1 — nach einem verworfenen Entwurf
+    # (Fahrzeug-/Vertragswechsel) waere "1" eine Dublette im Index.
+    hoechste = await db.pickup_protocols.find_one(
+        {"appointment_id": appt_id}, {"_id": 0, "version": 1}, sort=[("version", -1)])
     new_doc = {
         "id": str(uuid.uuid4()),
         "appointment_id": appt_id,
@@ -791,7 +850,7 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         "dealer_id": appt.get("dealer_id"),
         "driver_account_id": driver["id"],
         "driver_name": driver.get("display_name", ""),
-        "version": 1,
+        "version": int((hoechste or {}).get("version") or 0) + 1,
         "status": "entwurf",
         "superseded": False,
         **payload,
@@ -1092,6 +1151,13 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     doc = await _current(appt_id)
     if not doc:
         raise HTTPException(400, "Bitte zuerst das Protokoll ausfüllen")
+    if doc.get("status") == "final" and (doc.get("pii_geloescht_at") or not doc.get("pdf_path")):
+        # Pruefung 14.09.2026 (Liste 4, Nr. 12): PDF und Unterschriften sind
+        # nach der Frist geloescht — dieses Protokoll ist kein Beleg mehr, der
+        # einen Termin wieder auf "abgeholt" ziehen darf.
+        raise HTTPException(409, "Das unterschriebene Protokoll wurde nach Ablauf der "
+                                 "Aufbewahrungsfrist bereinigt — bitte eine neue Version "
+                                 "erstellen, falls der Termin erneut abgeschlossen werden soll.")
     if doc.get("status") == "final":
         # SELBSTHEILUNG (PR-Review 09/2026): Der Abschluss besteht aus
         # mehreren Schritten (Protokoll final -> Termin abgeholt ->
@@ -1491,6 +1557,11 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
         await _nacharbeit_erledigt(appt_id, doc)
+        # Wunsch Ahmad 14.09.2026: Der Kaufvertrag wird abschliessend mit dem vor
+        # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
+        # Fassung, alte im Archiv). Best effort — das Protokoll ist der Beleg.
+        await vertrag_nach_abholung_aktualisieren(appt, doc["id"], _preis_final,
+                                                  filled.get("sondervereinbarung"))
     # Pruefung 14.09.2026 (C8): Protokoll und Termin sind fertig — kein 500 mehr
     # durch einen scheiternden Audit-Eintrag.
     await log_activity_sicher(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",
@@ -1892,11 +1963,23 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         raise HTTPException(409, "Der Fahrer hat das Protokoll noch nicht "
                                  "abgeschickt.")
     appt = await db.appointments.find_one(
-        {"id": doc.get("appointment_id"), "dealer_id": user["dealer_id"]},
-        {"_id": 0, "status": 1})
+        {"id": doc.get("appointment_id"), "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not appt or (appt.get("status") or "offen") in _ABGESCHLOSSEN:
         raise HTTPException(409, "Der Termin ist bereits abgeschlossen oder gelöscht — "
                                  "eine Freigabe ist nicht mehr möglich.")
+    if not body.zurueck:
+        # Pruefung 14.09.2026 (Liste 4, Nr. 7/8): Freigegeben wird nur ein
+        # vollstaendiges, gueltiges Protokoll — dieselbe Pruefung wie beim
+        # Abschicken. Ein beschaedigtes Protokoll (Ladefehler in der Liste)
+        # laesst sich so nicht freigeben; es geht zurueck an den Fahrer.
+        vehicle_fr, _contract_fr = await _fahrzeug_und_vertrag(appt)
+        try:
+            _pflichtfelder_pruefen(doc, appt, vollstaendig=True,
+                                   ausstattung=list((vehicle_fr.get("features") or [])[:20]))
+        except HTTPException as exc:
+            raise HTTPException(422, "Das Protokoll ist nicht vollständig oder enthält "
+                                     f"ungültige Werte ({exc.detail}) — bitte an den "
+                                     "Fahrer zurückschicken.")
     jetzt = now_iso()
     bedingung: Dict[str, Any] = {"id": protocol_id, "status": {"$in": _FREIGABE_STATI}}
     # Pruefung 14.09.2026 (C7): Der Stand ist PFLICHT — ohne ihn gewann bei

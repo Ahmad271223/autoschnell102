@@ -58,6 +58,11 @@ const todayLocalIso = () => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
+const neuerIdempotenzSchluessel = () =>
+  (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+
 export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
   const { dealer, refresh } = useAuth();
   const v = vehicle || {};
@@ -141,6 +146,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // Sucher tippt.
   const fehltInEinstellungen = fehlendeKaeuferfelder(kaeuferAusProfil(dealer));
   const kaeuferRef = useRef(null);
+  // Pruefung 14.09.2026: ein Idempotenz-Schluessel je geoeffnetem Dialog.
+  const idempotenz = useRef(neuerIdempotenzSchluessel());
+  useEffect(() => { if (open) idempotenz.current = neuerIdempotenzSchluessel(); }, [open]);
 
   // Runde 24 (11.09.2026, Gegenprüfung): useAuth().dealer wird nur beim
   // App-Start/Login geladen. Speichert der Sucher seine Käuferdaten über den
@@ -263,7 +271,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     }
     setLoading(true);
     try {
-      const { data } = await api.post("/contracts", buildPayload());
+      // Pruefung 14.09.2026: Idempotenz — Doppelklick oder Wiederholung nach
+      // Netzabbruch legt keinen zweiten Vertrag an (Schluessel je Dialog).
+      const { data } = await api.post("/contracts", { ...buildPayload(), idempotency_key: idempotenz.current });
       // Runde 15: der Vertrag ist gespeichert, auch wenn der automatische
       // Abholtermin nicht angelegt werden konnte — der Server sagt es.
       if (data?.termin_hinweis) toast.warning(data.termin_hinweis, { duration: 8000 });

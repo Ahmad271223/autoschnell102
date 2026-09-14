@@ -949,11 +949,13 @@ async def driver_snapshot(snap_id: str, kind: str,
     dealer_ids_aktiv = await _verknuepfte_dealer_ids(driver["id"])
     allowed = None
     if dealer_ids_aktiv:
+        # Pruefung 14.09.2026 (Liste 3, Nr. 13): nur ueber die Fahrzeug-ID —
+        # der Alt-Abgleich ueber die reine Anzeigen-ID traf bei gleicher ID
+        # aus verschiedenen Portalen das falsche Fahrzeug.
         allowed = await db.appointments.find_one(
             {"driver_id": driver["id"],
              "dealer_id": {"$in": dealer_ids_aktiv},
-             "$or": [{"vehicle_id": snap.get("vehicle_id")},
-                     {"mobile_ad_id": snap.get("mobile_ad_id")}]},
+             "vehicle_id": snap.get("vehicle_id")},
             {"_id": 0, "id": 1},
         )
     if not allowed:
@@ -1316,10 +1318,12 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
             try:
                 await db.pickup_reports.insert_one(doc)
                 break
-            except Exception:
+            except DuplicateKeyError:
                 # Unique-Index (appointment_id, version): ein paralleler
                 # Bericht hat dieselbe Version belegt -> frisch lesen, neue
                 # Versionsnummer nehmen und erneut versuchen.
+                # Pruefung 14.09.2026 (Liste 3, Nr. 11): NUR Dubletten — jeder
+                # andere DB-Fehler bleibt ein 500 mit Rollback, kein "parallel".
                 if versuch == 2:
                     raise HTTPException(409, "Bericht wurde gerade parallel "
                                              "gespeichert — bitte neu laden.")
@@ -1353,17 +1357,27 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     # Leser sortieren zusaetzlich nach version absteigend (driver_get_report,
     # abholbericht.massgeblicher_bericht), damit die Reihenfolge nie vom
     # gewaehlten Index abhaengt.
-    await db.pickup_reports.update_many(
-        {"appointment_id": appt_id, "id": {"$ne": report_id},
-         "version": {"$lt": version}, "superseded": {"$ne": True}},
-        {"$set": {"superseded": True}})
-    # Badge-Daten am Termin denormalisieren (schnelle Anzeige beim Händler).
-    await db.appointments.update_one(
-        {"id": appt_id},
-        {"$set": {"deviations_count": len(deviations),
-                  "has_pickup_report": True,
-                  "updated_at": now_iso()}},
-    )
+    # Pruefung 14.09.2026 (Liste 3, Nr. 10): Der Bericht ist gespeichert —
+    # Ersetzen der Vorversionen und Termin-Badge sind Beiwerk. Scheitern sie,
+    # gibt es keinen Fehler an den Fahrer (er wuerde doppelt einreichen);
+    # die Leser sortieren nach Version, ein Alarm meldet den Rest.
+    try:
+        await db.pickup_reports.update_many(
+            {"appointment_id": appt_id, "id": {"$ne": report_id},
+             "version": {"$lt": version}, "superseded": {"$ne": True}},
+            {"$set": {"superseded": True}})
+        # Badge-Daten am Termin denormalisieren (schnelle Anzeige beim Händler).
+        await db.appointments.update_one(
+            {"id": appt_id},
+            {"$set": {"deviations_count": len(deviations),
+                      "has_pickup_report": True,
+                      "updated_at": now_iso()}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Abholbericht %s: Nacharbeit nach dem Speichern fehlgeschlagen", report_id)
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "abholbericht_nacharbeit_offen", ref=appt_id,
+                             report_id=report_id, fehler=str(exc)[:300])
     await log_activity_sicher(
         appt.get("dealer_id"), driver["id"],
         "abholung.bericht" if version == 1 else "abholung.bericht.korrektur",

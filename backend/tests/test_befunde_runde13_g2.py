@@ -92,6 +92,8 @@ class _Protokoll:
 # Test variiert; so faellt ein Abbruch eindeutig auf B4 zurueck.
 _PROD_UMGEBUNG = {
     "APP_ENV": "production",
+    "TRUST_PROXY": "true",                # Pruefung 14.09.2026 (L4-74)
+    "STORAGE_LOKAL_ERLAUBT": "true",      # Pruefung 14.09.2026 (L3-31): Einzelserver
     "JWT_SECRET": uuid.uuid4().hex + uuid.uuid4().hex,       # 64 Hex-Zeichen
     "SUPER_ADMIN_PASSWORD": "",
     "FRONTEND_URL": "https://app.example.de",

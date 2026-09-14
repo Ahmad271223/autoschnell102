@@ -122,9 +122,13 @@ def zusage_zuruecksetzen_wenn_geaendert(existing: dict, neu: dict) -> Tuple[dict
     den Abholtermin), damit die Regel an genau EINER Stelle steht."""
     if existing.get("zuteilung") != "angenommen":
         return {}, {}
+    # Pruefung 14.09.2026 (Liste 4, Nr. 4/5): auch Fahrzeug, Vertrag und
+    # Verkaeufer — ein anderes Auto oder ein anderer Verkaeufer ist eine
+    # andere Fahrt, die der Fahrer neu bestaetigen muss.
     geaendert = any(
         f in neu and (neu.get(f) or "") != (existing.get(f) or "")
-        for f in ("pickup_date", "pickup_time", "pickup_address"))
+        for f in ("pickup_date", "pickup_time", "pickup_address", "vehicle_id",
+                  "contract_id", "seller_name", "seller_phone", "seller_email"))
     if not geaendert:
         return {}, {}
     return ({"zuteilung": "offen", "zuteilung_am": now_iso(),
@@ -710,6 +714,18 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             {"appointment_id": appt_id, "superseded": {"$ne": True},
              "status": {"$in": list(PROTOKOLL_LAEUFT)}}, limit=1):
         raise HTTPException(409, PROTOKOLL_LAEUFT_HINWEIS)
+    # Pruefung 14.09.2026 (Liste 4, Nr. 9/10): Der vor Ort vereinbarte Preis
+    # kommt aus dem freigegebenen/unterschriebenen Protokoll. Liegt eines vor
+    # (Freigabe, Abschluss oder final), ist final_price am Termin kein
+    # zweiter Preisweg mehr.
+    if update.get("final_price") is not None \
+            and update.get("final_price") != existing.get("final_price") \
+            and await db.pickup_protocols.count_documents(
+                {"appointment_id": appt_id, "superseded": {"$ne": True},
+                 "status": {"$in": [*PROTOKOLL_LAEUFT, "final"]}}, limit=1):
+        raise HTTPException(409, "Der Preis wird über das Abholprotokoll festgelegt "
+                                 "(Freigabe bzw. Unterschrift) — bitte dort ändern, "
+                                 "nicht am Termin.")
     if "driver_id" in update:
         await _fahrer_pruefen(user["dealer_id"], update.get("driver_id"))
         if update.get("driver_id") and update["driver_id"] != existing.get("driver_id"):
@@ -818,6 +834,11 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         await db.appointments.update_one({"id": appt_id}, aenderung)
     except DuplicateKeyError:
         raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
+    if vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel:
+        # Pruefung 14.09.2026 (Liste 4, Nr. 1/2/3/6): ein angefangener Entwurf
+        # gehoert zum alten Fahrzeug/Vertrag/Fahrer — verwerfen.
+        from routes.protocols import entwurf_bei_terminaenderung_verwerfen
+        await entwurf_bei_terminaenderung_verwerfen(appt_id)
     fahrer_entfernt = bool(update.get("driver_id")) and not await _fahrer_nachpruefen(
         appt_id, user["dealer_id"], update.get("driver_id"))
     # Nachpruefung Runde 14 (Nr. 113) / Runde 17 (Nr. 3): Vertragsverweise

@@ -230,6 +230,13 @@ def pruefe_produktion(log) -> None:
         fehler.append("S3 ist nur teilweise konfiguriert (" +
                       ", ".join(k for k, v in s3.items() if not v) +
                       " fehlt) — Storage wuerde still auf lokale Platte fallen.")
+    elif not any(s3.values()) and ist_prod             and os.environ.get("STORAGE_LOKAL_ERLAUBT", "").strip().lower() not in ("1", "true", "yes"):
+        # Pruefung 14.09.2026 (Liste 3, Nr. 31): Zwei-Server-Betrieb ohne
+        # gemeinsamen S3/R2-Speicher — Dateien von Server A fehlen auf Server B.
+        # Ein Einzelserver mit lokaler Platte setzt STORAGE_LOKAL_ERLAUBT=true.
+        fehler.append("Kein S3/R2-Speicher konfiguriert (S3_ENDPOINT, S3_BUCKET, "
+                      "S3_ACCESS_KEY, S3_SECRET_KEY) — in Produktion mit zwei Servern "
+                      "waeren Fotos, Protokolle und Vertraege nur auf einem Server.")
     elif all(s3.values()):
         # Pruefbericht 09/2026: bisher wurde nur geprueft, ob die vier
         # Angaben DA sind — nicht, ob sie funktionieren. Ein vertippter

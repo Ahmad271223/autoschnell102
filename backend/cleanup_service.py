@@ -494,6 +494,13 @@ async def vertrag_noch_in_gebrauch(db, contract_id: str, cutoff: str) -> bool:
             {"contract_id": contract_id,
              "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}}, limit=1):
         return True
+    # Pruefung 14.09.2026 (Liste 4, Nr. 11): ein noch OFFENER Kaufvorgang mit
+    # Bewegung innerhalb der Frist ist ein laufendes Geschaeft — die
+    # Datenschutzfrist darf ihn nicht stornieren.
+    if await db.kaufvorgaenge.count_documents(
+            {"contract_id": contract_id, "status": {"$in": list(_KV_OFFEN)},
+             "updated_at": {"$gt": cutoff}}, limit=1):
+        return True
     termin_ids = [a["id"] async for a in db.appointments.find(
         {"contract_id": contract_id}, {"_id": 0, "id": 1})]
     bedingung = {"status": "final", "finalized_at": {"$gt": cutoff}}
@@ -546,10 +553,15 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         # Nachpruefung Runde 14 (Nr. 23): der Ort steht im Protokoll unter
         # `place` (protocols.py), nicht `pickup_address` — der Docstring
         # versprach "Ort", geleert wurde ein Feld, das es nicht gibt.
+        # Pruefung 14.09.2026 (Liste 4, Nr. 13): keine toten Verweise auf den
+        # geloeschten Vertrag/Vorgang im Protokoll — der Beleg traegt den
+        # Vermerk vertrag_geloescht, die IDs bleiben nur in vertrag_geloescht_ref.
         upd = {"$set": {"seller_name": "", "place": "", "pickup_address": "",
-                        "pii_geloescht_at": jetzt, **offen}}
-        if unset:
-            upd["$unset"] = unset
+                        "pii_geloescht_at": jetzt, "vertrag_geloescht": True, **offen}}
+        unset = {**unset, "contract_id": "", "kaufvorgang_id": ""}
+        if contract_id:
+            upd["$set"]["vertrag_geloescht_ref"] = contract_id
+        upd["$unset"] = unset
         await db.pickup_protocols.update_one({"id": p["id"]}, upd)
 
 

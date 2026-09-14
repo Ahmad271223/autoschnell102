@@ -673,6 +673,11 @@ async def ensure_indexes():
         "appointment_id", unique=True,
         partialFilterExpression={"superseded": False},
         name="ein_aktuelles_protokoll_je_termin")
+    # Pruefung 14.09.2026 (Liste 3, Nr. 1): ein Vertrag je Idempotenz-Schluessel
+    await db.generated_pdfs.create_index(
+        [("dealer_id", 1), ("user_id", 1), ("idempotency_key", 1)], unique=True,
+        partialFilterExpression={"idempotency_key": {"$type": "string"}},
+        name="vertrag_idempotenz")
     await db.pickup_reports.create_index(
         [("appointment_id", 1), ("version", 1)], unique=True,
         name="berichtsversion_eindeutig")

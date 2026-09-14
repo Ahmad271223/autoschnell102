@@ -346,7 +346,7 @@ def test_265_vertrag_bleibt_wenn_fahrzeugstatus_scheitert(welt, monkeypatch):
     out_a, c_a, v_a, kv_a, out_b, c_b, v_b, kv_b, logs = welt.run(lauf())
     for out, c in ((out_a, c_a), (out_b, c_b)):
         assert out["nacharbeit_hinweis"].startswith("Vertrag gespeichert"), out.get("nacharbeit_hinweis")
-        assert out["pdf_b64"] and c and c["status"] == "erstellt", "Vertrag ist gespeichert"
+        assert "pdf_b64" not in out and c and c["status"] == "erstellt", "Vertrag ist gespeichert"
         assert c["kaufvorgang_id"] and c["purchase_price"] == 5000, "Vorgangs-ID steht im Vertrag"
     assert v_a.get("status") == "verglichen" and v_a.get("lifecycle") == "verglichen"
     assert kv_a is None and kv_b is None, "Vorgang nicht angelegt (Nacharbeit)"

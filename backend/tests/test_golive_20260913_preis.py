@@ -169,7 +169,10 @@ def test_p5_heilung_ueberschreibt_handpreis_nicht(welt, monkeypatch):
     _stirbt_einmal(monkeypatch, P, "_termin_abgeholt_setzen")
     with pytest.raises(RuntimeError):
         w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))
-    w.run(A.update_appointment(t.aid, A.AppointmentIn(final_price=9500), w.chef))
+    # Pruefung 14.09.2026 (L4-10): final_price am Termin ist bei finalem Protokoll
+    # gesperrt — der Handpreis liegt hier schon im Vorgang (Altbestand).
+    w.run(w.db.kaufvorgaenge.update_one(
+        {"id": t.ka}, {"$set": {"purchase_price": 9500.0, "preis_quelle": "vor_ort"}}))
     assert _doc(w, "kaufvorgaenge", t.ka)["purchase_price"] == 9500.0
 
     heil = w.run(P.finalize_protocol(t.aid, _fin(P), w.driver))

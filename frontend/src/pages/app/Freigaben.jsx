@@ -261,7 +261,9 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <button onClick={() => senden(e, {})} disabled={busy}
+        {/* Pruefung 14.09.2026 (Liste 4, Nr. 7): ein Protokoll mit Ladefehler wird nicht freigegeben */}
+        <button onClick={() => senden(e, {})} disabled={busy || !!e.ladefehler}
+                title={e.ladefehler ? "Protokoll fehlerhaft — bitte an den Fahrer zurückschicken" : undefined}
                 data-testid={`freigabe-ok-${e.protocol_id}`}
                 className="apple-btn apple-btn-primary !py-2 disabled:opacity-50">
           <Check size={14} /> {freigegeben ? "Preis aktualisieren" : "Freigeben"}

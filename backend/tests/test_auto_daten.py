@@ -306,6 +306,9 @@ def test_08_vertrag_nach_90_tagen_vollstaendig_geloescht(welt):
     # Pruefung 14.09.2026 (D1): ein Vertrag mit noch OFFENEM Termin wird
     # zurueckgestellt — die Abholung ist hier laengst vorbei.
     dbx.appointments.update_one({"id": welt["appt_id"]}, {"$set": {"status": "erledigt"}})
+    # Pruefung 14.09.2026 (L4-11): ein offener Kaufvorgang mit Bewegung innerhalb der
+    # Frist haelt den Vertrag — hier ist er laengst ohne Bewegung.
+    dbx.kaufvorgaenge.update_many({"contract_id": cid}, {"$set": {"updated_at": alt}})
     now = datetime.now(timezone.utc)
     n = _run(lambda mdb: vertraege_nach_frist_loeschen(mdb, now, aktiv=True))
     assert n >= 1

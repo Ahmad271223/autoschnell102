@@ -80,6 +80,20 @@ class DamageIn(BaseModel):
 
 
 class ContractIn(BaseModel):
+    # Pruefung 14.09.2026 (Liste 3, Nr. 1): Idempotenz je Anlage — ein Doppelklick
+    # oder eine verlorene Antwort mit Wiederholung legt keinen zweiten Vertrag an.
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=80,
+                                           pattern=r"^[A-Za-z0-9_\-]+$")
+
+    @field_validator("seller_name")
+    @classmethod
+    def _verkaeufer_pflicht(cls, v: str) -> str:
+        # Pruefung 14.09.2026 (Liste 3, Nr. 8): kein Vertrag ohne Verkaeufer.
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Bitte den Namen des Verkäufers angeben")
+        return v
+
     # Numbers from listings (e.g. mileage, power_kw, doors, seats) arrive
     # as JSON numbers from the frontend. Coerce them to strings instead
     # of failing the request with "Input should be a valid string".
@@ -97,7 +111,8 @@ class ContractIn(BaseModel):
     id_document: Optional[str] = ""
     # Runde 17 (Nr. 338): inf/nan sind kein Kaufpreis (auto_daten rechnet
     # Cent daraus, das PDF druckt ihn).
-    purchase_price: float = Field(ge=0, allow_inf_nan=False,
+    # Pruefung 14.09.2026 (Liste 3, Nr. 2): kein 0-Euro-Kaufvertrag.
+    purchase_price: float = Field(gt=0, allow_inf_nan=False,
                                   description="Kaufpreis darf nicht negativ sein")
     # Runde 22 (11.09.2026, Vorlage Ahmad): Das Formular bietet jetzt die
     # Auswahl Bar | Überweisung | Echtzeitüberweisung. Bewusst KEIN hartes
@@ -537,6 +552,14 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
 
 @router.post("/contracts")
 async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
+    # Pruefung 14.09.2026 (Liste 3, Nr. 1): derselbe Schluessel -> derselbe Vertrag.
+    if body.idempotency_key:
+        vorhanden = await db.generated_pdfs.find_one(
+            {"dealer_id": user["dealer_id"], "user_id": user["id"],
+             "idempotency_key": body.idempotency_key},
+            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+        if vorhanden:
+            return {**clean_doc(vorhanden), "bereits_vorhanden": True}
     # Umbau Kaufvorgaenge 09.09.2026: Inserat firmenweit gemeinsam — jeder
     # Sucher darf einen eigenen Vertrag (= eigenen Kaufvorgang) anlegen.
     v = await db.vehicles.find_one(
@@ -625,6 +648,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
+    if body.idempotency_key:
+        doc["idempotency_key"] = body.idempotency_key
     # Dauerhafte, anonyme Auto-Daten (siehe auto_daten.py): ZUERST der
     # Datensatz, dann der Vertrag mit dessen zufaelliger id. Scheitert der
     # Vertrags-Insert, wird der Datensatz sofort wieder entfernt — es gibt
@@ -634,6 +659,17 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     doc["admin_vehicle_data_id"] = auto_daten_id
     try:
         await db.generated_pdfs.insert_one(doc)
+    except DuplicateKeyError:
+        # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
+        # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.
+        await auto_daten.zurueckrollen(db, auto_daten_id)
+        vorhanden = await db.generated_pdfs.find_one(
+            {"dealer_id": user["dealer_id"], "user_id": user["id"],
+             "idempotency_key": body.idempotency_key},
+            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+        if vorhanden:
+            return {**clean_doc(vorhanden), "bereits_vorhanden": True}
+        raise
     except Exception:
         await auto_daten.zurueckrollen(db, auto_daten_id)
         raise
@@ -695,8 +731,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             doc["appointment_id"] = appt_id
             doc["status"] = "Termin erstellt"
 
-    out = {**clean_doc(doc), "pdf_b64": pdf_b64}
-    out.pop("pdf_digital_b64", None)  # nicht doppelt uebertragen; per GET ?variante=digital
+    # Pruefung 14.09.2026 (Liste 3, Nr. 3): kein Base64-PDF in der Antwort —
+    # es liegt gespeichert und kommt per GET /contracts/{id}/pdf.
+    out = clean_doc(doc)
+    out.pop("pdf_b64", None)
+    out.pop("pdf_digital_b64", None)
     if termin_hinweis:
         out["termin_hinweis"] = termin_hinweis
     if nacharbeit_hinweis:
@@ -897,6 +936,10 @@ async def list_contracts(
             {"model": {"$regex": q_safe, "$options": "i"}},
             {"seller_name": {"$regex": q_safe, "$options": "i"}},
         ]
+    if channel:
+        # Pruefung 14.09.2026 (Liste 3, Nr. 7): in der Abfrage filtern — vorher
+        # erst NACH dem 2000er-Schnitt, aeltere Treffer fehlten trotz Filter.
+        query["send_status.channel"] = channel
     items = await db.generated_pdfs.find(
         query, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
     ).sort("created_at", -1).to_list(CONTRACTS_LIST_MAX + 1)
@@ -909,11 +952,6 @@ async def list_contracts(
         if i.get("vehicle_image_urls"):
             i["vehicle_image_urls_thumbs"] = _thumbs(i["vehicle_image_urls"][:12])
     response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
-    if channel:
-        items = [
-            i for i in items
-            if any(s.get("channel") == channel for s in i.get("send_status", []))
-        ]
     # Alt-Vertraege ohne `vehicle_image_urls` (frueher lagen die Fotos beim
     # Fahrzeug unter `data.images`, nicht `image_urls`): die Fotos werden
     # NUR fuer die Anzeige aus dem Fahrzeug ergaenzt und als nachgetragen
@@ -1001,7 +1039,9 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+        # Pruefung 14.09.2026 (Liste 3, Nr. 4): Personendaten nie im Browser-Cache.
+        headers={"Content-Disposition": f'inline; filename="{fname}"',
+                 "Cache-Control": "no-store"},
     )
 
 
@@ -1513,6 +1553,8 @@ async def regenerate_contract_for_pickup(
     *, contract_id: str, dealer_id: str, user: dict,
     pickup_date: Optional[str] = None, pickup_time: Optional[str] = None,
     leeren_erlaubt: bool = False,
+    neuer_preis: Optional[float] = None, sondervereinbarung: Optional[str] = None,
+    grund: str = "abholtermin_geaendert", protokoll_id: Optional[str] = None,
 ) -> bool:
     """Erzeugt das Kaufvertrags-PDF mit GEAENDERTEM Abholtermin neu.
 
@@ -1527,7 +1569,11 @@ async def regenerate_contract_for_pickup(
     damit nachvollziehbar bleibt, was wann geaendert wurde.
     Rueckgabe: True, wenn das PDF neu erzeugt wurde.
     """
-    if not contract_id or (pickup_date is None and pickup_time is None):
+    # Wunsch Ahmad 14.09.2026: nach der Abholung wird der Vertrag mit dem vor
+    # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
+    # Fassung, die alte bleibt im Archiv) — der Kunde bekommt den aktuellen Stand.
+    preis_aenderung = neuer_preis is not None or bool((sondervereinbarung or "").strip())
+    if not contract_id or (pickup_date is None and pickup_time is None and not preis_aenderung):
         return False
     # Runde 10: derselbe Bereich wie beim Lesen — ein Sucher erzeugt kein
     # PDF fuer den Vertrag eines Kollegen, auch nicht ueber den Termin.
@@ -1552,12 +1598,24 @@ async def regenerate_contract_for_pickup(
 
     neu_datum = _neu(pickup_date, alt_datum)
     neu_zeit = _neu(pickup_time, alt_zeit)
-    if (neu_datum or "") == (alt_datum or "") and (neu_zeit or "") == (alt_zeit or ""):
-        return False
-
     contract_dict = dict(doc.get("contract_data") or {})
+    alt_preis = contract_dict.get("purchase_price")
+    sonder = (sondervereinbarung or "").strip()
+    preis_neu = neuer_preis is not None and (
+        alt_preis is None or abs(float(neuer_preis) - float(alt_preis or 0)) > 0.004)
+    sonder_neu = bool(sonder) and sonder not in (contract_dict.get("additional_terms") or "")
+    if (neu_datum or "") == (alt_datum or "") and (neu_zeit or "") == (alt_zeit or "") \
+            and not preis_neu and not sonder_neu:
+        return False
     contract_dict["pickup_date"] = neu_datum or ""
     contract_dict["pickup_time"] = neu_zeit or ""
+    if preis_neu:
+        contract_dict["purchase_price"] = float(neuer_preis)
+        contract_dict["preis_vor_abholung"] = alt_preis
+    if sonder_neu:
+        bisher = (contract_dict.get("additional_terms") or "").rstrip()
+        contract_dict["additional_terms"] = (bisher + "\n\n" if bisher else "") + \
+            "Sondervereinbarung bei der Abholung: " + sonder
     # Runde 22 (11.09.2026): Das Empfangsdatum (Uebergabe, "Datum und Ort")
     # folgt im Formular dem Abholdatum. Stand es noch auf dem alten
     # Abholtag, wandert es mit dem verschobenen Termin mit — ein von Hand
@@ -1623,7 +1681,7 @@ async def regenerate_contract_for_pickup(
         "filename": doc.get("filename"),
         "archived_at": now_iso(),
         "archived_by": user.get("id"),
-        "grund": "abholtermin_geaendert",
+        "grund": grund,
     })
 
     # Runde 17 (Nr. 373): Compare-and-Swap auf die GELESENE Version — zwei
@@ -1647,6 +1705,9 @@ async def regenerate_contract_for_pickup(
             "pickup_time": neu_zeit,
             "version": alte_version + 1,
             "updated_at": now_iso(),
+            **({"purchase_price": float(neuer_preis),
+                "nach_abholung_aktualisiert_am": now_iso(),
+                "nach_abholung_protokoll_id": protokoll_id} if preis_neu or sonder_neu else {}),
         },
          # Runde 17 (Nr. 321): Historie gedeckelt — die juengsten 100
          # Verschiebungen bleiben, das Dokument waechst nicht unbegrenzt.

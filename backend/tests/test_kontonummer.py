@@ -680,6 +680,7 @@ def prod_umgebung(monkeypatch, tmp_path):
         "SNAPSHOT_RETENTION_DAYS": "60", "RESEND_API_KEY": "re_kn_test",
         "MAIL_FROM": "AutoSchnell <vertrag@example.de>", "WEB_CONCURRENCY": "1",
         "AUTO_DATEN_SCHAEDEN_FREITEXT": "false", "VERTRAG_LOESCHUNG_AKTIV": "false",
+        "TRUST_PROXY": "true", "STORAGE_LOKAL_ERLAUBT": "true",   # Pruefung 14.09.2026
     }
     for k, v in werte.items():
         monkeypatch.setenv(k, v)
