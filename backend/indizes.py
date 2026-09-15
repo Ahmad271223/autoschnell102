@@ -180,6 +180,12 @@ async def konto_indizes(db) -> dict:
         # ab (kein Eintrag in FEHLENDE_UNIQUE), sie werden als Alarm gemeldet.
         await _unique_index_weich(coll, "zugangsanfrage_eindeutig", [("zugangsanfrage_id", 1)],
                                   {"zugangsanfrage_id": {"$type": "string"}})
+    # Runde 16 (15.09.2026): je Vertrag und Fassung genau EIN Archiveintrag —
+    # zwei parallele Neuerzeugungen hinterliessen sonst nach einem Absturz eine
+    # zweite alte Fassung (weich: Altdaten nur als Alarm).
+    await _unique_index_weich(db.generated_pdf_versions, "vertragsfassung_eindeutig",
+                              [("contract_id", 1), ("version", 1)],
+                              {"contract_id": {"$type": "string"}})
     # Runde 15 (15.09.2026): "genau ein Super-Admin" sichern der Seed (kein
     # zweites Betreiberkonto bei geaendertem SUPER_ADMIN_USERNAME) und /ready
     # (Fehler bei mehr als einem aktiven Konto); ein Unique-Index auf

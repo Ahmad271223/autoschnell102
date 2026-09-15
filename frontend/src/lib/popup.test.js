@@ -162,3 +162,41 @@ describe("filterOeffnen", () => {
     expect(opts2.action.label).toBe("AutoScout24 öffnen");
   });
 });
+
+// 15.09.2026 (Wunsch Ahmad): Filter-Fenster neben der App / zweiter Bildschirm
+describe("fensterPlatz", () => {
+  const app = { screenX: 0, screenY: 0, outerWidth: 1200, outerHeight: 1000 };
+  const screen = { availWidth: 2560, availHeight: 1400, availLeft: 0, availTop: 0 };
+
+  test("ohne Schalter: zentriert ueber der App (bisheriges Verhalten)", async () => {
+    const { fensterPlatz } = await import("./popup");
+    const p = fensterPlatz({ width: 1280, height: 1000, app, screen, daneben: false });
+    expect(p.left).toBe(0);                       // (1200-1280)/2 < 0 -> 0
+    expect(p.width).toBe(1280);
+  });
+
+  test("App links, rechts ist Platz: Fenster rechts daneben", async () => {
+    const { fensterPlatz } = await import("./popup");
+    const p = fensterPlatz({ width: 1280, height: 1000, app, screen, daneben: true });
+    expect(p.left).toBe(1200);
+    expect(p.width).toBe(1280);
+    expect(p.top).toBe(0);
+  });
+
+  test("App rechts: Fenster links daneben; kein Platz: wieder zentriert", async () => {
+    const { fensterPlatz } = await import("./popup");
+    const rechts = { screenX: 1400, screenY: 20, outerWidth: 1100, outerHeight: 900 };
+    const p = fensterPlatz({ width: 1280, height: 1000, app: rechts, screen, daneben: true });
+    expect(p.left).toBe(1400 - 1280);
+    const eng = fensterPlatz({ width: 1280, height: 1000,
+      app: { screenX: 0, screenY: 0, outerWidth: 2560, outerHeight: 1400 }, screen, daneben: true });
+    expect(eng.left).toBe(Math.floor((2560 - 1280) / 2));
+  });
+
+  test("zweiter Bildschirm: ganzer anderer Bildschirm", async () => {
+    const { fensterPlatz } = await import("./popup");
+    const anderer = { availLeft: 2560, availTop: 0, availWidth: 1920, availHeight: 1050 };
+    const p = fensterPlatz({ width: 1280, height: 1000, app, screen, anderer, daneben: true });
+    expect(p).toEqual({ left: 2560, top: 0, width: 1920, height: 1050 });
+  });
+});

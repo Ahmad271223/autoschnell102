@@ -103,7 +103,10 @@ def _kaestchen_rechtecke(pdf_bytes: bytes) -> int:
 # ---------------------------------------------------------------------------
 # PDF: beide Fassungen
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("digital", [False, True])
+# Wunsch Ahmad (15.09.2026): die Empfangsbestaetigung steht NUR noch in der
+# Druckfassung (Fahrer, Sucher, Chef) — die Kundenfassung (digital) hat sie
+# nicht mehr (siehe test_02 und test_golive_20260915_vertrag_kundenfassung).
+@pytest.mark.parametrize("digital", [False])
 def test_01_empfangsbestaetigung_in_beiden_fassungen(digital):
     f = _flach(_text(_pdf(dict(_BASIS, **_EMPFANG), digital=digital)))
     assert "bestätigt Empfang von" in f
@@ -128,9 +131,11 @@ def test_02_druckfassung_behaelt_linien_digital_ohne():
     assert "Mit ihrer Unterschrift" in druck
     assert "Ort, Datum" not in digital and "Mit ihrer Unterschrift" not in digital
     assert "Dieser Vertrag ist ohne Unterschrift gültig." in digital
-    # digital: Empfang steht VOR dem Gueltigkeitssatz
-    assert digital.index("bestätigt Empfang von") < digital.index(
-        "Dieser Vertrag ist ohne Unterschrift gültig.")
+    # Wunsch Ahmad (15.09.2026): die Kundenfassung traegt KEINE Empfangs-
+    # bestaetigung (Schluessel erhalten, Kaufpreis bestaetigt) und keinen
+    # Abschnitt "Unterschriften" — das gehoert nur in die Druckfassung.
+    assert "bestätigt Empfang von" not in digital and "Datum und Ort:" not in digital
+    assert "bestätigt Empfang von" in druck
 
 
 def test_03_zulassung_angemeldet_und_leer():
@@ -143,7 +148,7 @@ def test_03_zulassung_angemeldet_und_leer():
     assert "vielleicht" not in f
 
 
-@pytest.mark.parametrize("digital", [False, True])
+@pytest.mark.parametrize("digital", [False])
 def test_04_altvertrag_ohne_felder(digital):
     """Altvertrag: keine Felder -> PDF entsteht, leere Kaestchen, Linie."""
     alt = {"seller_name": "Alt V", "purchase_price": 500, "contract_no": "KV-ALT"}
@@ -182,7 +187,7 @@ def test_05_nur_datum_oder_nur_ort():
     assert "Datum und Ort: _" not in f and f"18.08.2026, {linie_ort}" not in f
 
 
-@pytest.mark.parametrize("digital", [False, True])
+@pytest.mark.parametrize("digital", [False])
 def test_06_angekreuzt_unterscheidet_sich_im_seiteninhalt(digital, monkeypatch):
     """Echte Kaestchen: drei Rechtecke je Fassung; jeder Haken sind genau zwei
     zusaetzliche Striche — sonst ist der Seiteninhalt identisch."""
@@ -221,7 +226,7 @@ def test_07_texte_alter_clients_fuer_kaestchen():
     assert _linien_ops(_pdf(dict(leer, empfang_kaufpreis="false"))) == basis_l
 
 
-@pytest.mark.parametrize("digital", [False, True])
+@pytest.mark.parametrize("digital", [False])
 def test_08_xml_im_ort_bricht_pdf_nicht(digital):
     boese = "<font color=red>x</font>"
     c = dict(_BASIS, **{**_EMPFANG, "empfang_ort_kaeufer": boese,
@@ -310,7 +315,7 @@ def test_23_contractin_bis_ins_pdf():
     ContractIn = _contract_in()
     d = ContractIn(**_KOPF, **_EMPFANG).model_dump()
     d["digital_vertragstext"] = DIGITAL_VERTRAGSTEXT_STANDARD
-    for digital in (False, True):
+    for digital in (False,):                 # 15.09.2026: Empfang nur in der Druckfassung
         f = _flach(_text(_pdf(d, digital=digital)))
         assert "Datum und Ort: 18.08.2026, Rensenheim" in f
         assert "KFZ mit 2 Schlüssel(n)" in f and "Abgemeldet" in f

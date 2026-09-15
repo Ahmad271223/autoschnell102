@@ -16,6 +16,7 @@ import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -86,6 +87,28 @@ export default function Vergleich() {
     setFilterAuto(v);
     schalterRef.current.auto = v;
     einstellungSchreiben(window.localStorage, "ah_filter_automatisch", kontoId, v);
+  };
+  // 15.09.2026 (Wunsch Ahmad): Filter-Fenster neben der App bzw. auf dem
+  // zweiten Bildschirm statt ueber der Seite. Die Bildschirm-Berechtigung
+  // fragt der Browser beim Einschalten (Klick) ab; ist sie schon erteilt,
+  // reicht das stille Nachfragen beim Laden.
+  const [fensterDaneben, setFensterDaneben] = useState(() => {
+    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+                            "ah_fenster_daneben", user?.id, false);
+  });
+  useEffect(() => {
+    fensterDanebenSetzen(fensterDaneben);
+    if (fensterDaneben) zweitenBildschirmAnfragen().catch(() => {});
+  }, [fensterDaneben]);
+  const toggleFensterDaneben = async (v) => {
+    setFensterDaneben(v);
+    einstellungSchreiben(window.localStorage, "ah_fenster_daneben", kontoId, v);
+    fensterDanebenSetzen(v);
+    if (!v) return;
+    const r = await zweitenBildschirmAnfragen();
+    if (r.ok && r.anzahl > 1) toast.success("Zweiter Bildschirm erkannt — die Filter öffnen dort.");
+    else if (r.ok) toast.info("Nur ein Bildschirm erkannt — die Filter öffnen neben der App, wenn Platz ist.");
+    else toast.info("Ohne Bildschirm-Berechtigung öffnen die Filter neben dem App-Fenster (gleicher Bildschirm).");
   };
 
   // Runde 22 (11.09.2026, Gegenpruefung): Seite verlassen -> ein noch
@@ -379,6 +402,20 @@ export default function Vergleich() {
               style={{ accentColor: "var(--accent-red)" }}
             />
             <span style={{ color: "var(--text-secondary)" }}>Filter nach dem Auslesen automatisch öffnen</span>
+          </label>
+          {/* 15.09.2026 (Wunsch Ahmad): daneben statt darueber — zweiter Bildschirm */}
+          <label
+            className="inline-flex items-center gap-1.5 sm:ml-3 cursor-pointer select-none"
+            title="Filter-Fenster neben der App öffnen — auf dem zweiten Bildschirm, wenn der Browser es erlaubt"
+          >
+            <input
+              type="checkbox"
+              data-testid="toggle-fenster-daneben"
+              checked={fensterDaneben}
+              onChange={(e) => toggleFensterDaneben(e.target.checked)}
+              style={{ accentColor: "var(--accent-red)" }}
+            />
+            <span style={{ color: "var(--text-secondary)" }}>Filter daneben öffnen (zweiter Bildschirm)</span>
           </label>
         </div>
       </form>

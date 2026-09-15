@@ -126,6 +126,67 @@ class ListingURLIn(BaseModel):
 RUECKFALL_TAGESLIMIT = int(os.environ.get("ABRUF_RUECKFALL_TAGESLIMIT", "25"))
 
 
+async def _rueckfall_zurueck(user: dict) -> None:
+    """Runde 16 (15.09.2026): ein gebuchter Rueckfall, dem KEIN erfolgreicher
+    Abruf folgte (Anbieterfehler, volle Warteschlange), wird zurueckgebucht —
+    vorher frassen technische Fehler das Tageskontingent."""
+    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    schluessel = f"{tag}:rueckfall:{user.get('id') or user.get('dealer_id') or 'ohne'}"
+    try:
+        await db.provider_budget.update_one({"_id": schluessel, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+    except Exception:  # noqa: BLE001
+        log.exception("Rueckfall %s nicht zurueckgebucht", schluessel)
+
+
+# Runde 16 (15.09.2026): direkte Anbieter-Abrufe (Cache-Miss in /mobile/compare
+# und /listings/resolve) liefen an der fairen Warteschlange vorbei — ein Konto
+# konnte alle Anbieter-Slots belegen. Jetzt je Konto: hoechstens
+# ABRUF_GLEICHZEITIG_JE_KONTO gleichzeitig und ABRUF_JE_KONTO_MINUTE je Minute
+# (Tag weiter unbegrenzt, Vorgabe Ahmad: keine Tageslimits fuer Sucher).
+ABRUF_JE_KONTO_MINUTE = int(os.environ.get("ABRUF_JE_KONTO_MINUTE", "60") or 60)
+ABRUF_GLEICHZEITIG_JE_KONTO = int(os.environ.get("ABRUF_GLEICHZEITIG_JE_KONTO", "8") or 8)
+_abruf_konto_limiter = SlidingWindowRateLimiter(
+    max_attempts=ABRUF_JE_KONTO_MINUTE, window_seconds=60, name="abruf-konto")
+
+
+class AbrufGebremst(ListingBusy):
+    """Konto-Bremse fuer direkte Abrufe (503 + Retry-After wie ListingBusy)."""
+
+
+class _AbrufSlot:
+    def __init__(self, user: dict):
+        self.uid = str(user.get("id") or user.get("dealer_id") or "ohne")
+        self.belegt = False
+
+    async def __aenter__(self):
+        if not await _abruf_konto_limiter.check(f"konto:{self.uid}"):
+            raise AbrufGebremst("Zu viele Abrufe in kurzer Zeit von diesem Konto — "
+                                "bitte kurz warten.")
+        alt = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        # Selbstheilung: ein Zaehler, den ein abgestuerzter Prozess nie
+        # zurueckgab, verfaellt nach 10 Minuten.
+        await db.abruf_slots.update_one({"_id": self.uid, "zuletzt": {"$lt": alt}},
+                                        {"$set": {"n": 0}})
+        doc = await db.abruf_slots.find_one_and_update(
+            {"_id": self.uid}, {"$inc": {"n": 1}, "$set": {"zuletzt": now_iso()}},
+            upsert=True, return_document=ReturnDocument.AFTER)
+        self.belegt = True
+        if int((doc or {}).get("n") or 0) > ABRUF_GLEICHZEITIG_JE_KONTO:
+            await self.__aexit__(None, None, None)
+            raise AbrufGebremst("Zu viele gleichzeitige Abrufe von diesem Konto — "
+                                "bitte kurz warten.")
+        return self
+
+    async def __aexit__(self, *_exc):
+        if self.belegt:
+            self.belegt = False
+            try:
+                await db.abruf_slots.update_one({"_id": self.uid, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+            except Exception:  # noqa: BLE001
+                log.exception("Abruf-Slot %s nicht freigegeben", self.uid)
+        return False
+
+
 async def _rueckfall_erlaubt(gewuenscht: bool, user: dict) -> bool:
     """True = der Server darf dieses eine Mal selbst abrufen."""
     if not gewuenscht:
@@ -385,6 +446,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # holen und per /listings/ingest zu schicken. Danach ruft das Frontend
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
     client_hit = None
+    rueckfall_gebucht = False
     if source == "kleinanzeigen" and _erweiterung_noetig():
         # Nachpruefung Runde 14 (Nr. 86): ERST den Cache pruefen, DANN den
         # Rueckfall zaehlen. Vorher zaehlte _rueckfall_erlaubt sofort ($inc),
@@ -394,19 +456,21 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         # fehlt). /listings/check macht es seit jeher in dieser Reihenfolge.
         client_hit = await peek_cached_listing(
             db, raw_url, dealer_id=user.get("dealer_id"))
-        if client_hit is None and not await _rueckfall_erlaubt(
-                body.ohne_erweiterung, user):
-            return {
-                "needs_client_fetch": True,
-                "url": raw_url,
-                "source": "kleinanzeigen",
-                "hint": "Bitte über die Browser-Erweiterung laden.",
-            }
+        if client_hit is None:
+            if not await _rueckfall_erlaubt(body.ohne_erweiterung, user):
+                return {
+                    "needs_client_fetch": True,
+                    "url": raw_url,
+                    "source": "kleinanzeigen",
+                    "hint": "Bitte über die Browser-Erweiterung laden.",
+                }
+            rueckfall_gebucht = bool(body.ohne_erweiterung)
 
     async def _fetcher(src: str, iid: str, url: str) -> dict:
-        """Wird nur bei Cache-MISS aufgerufen."""
-        return await fetch_listing(db, src, iid, url,
-                                   dealer_id=user.get("dealer_id") or "")
+        """Wird nur bei Cache-MISS aufgerufen — je Konto gebremst (Runde 16)."""
+        async with _AbrufSlot(user):
+            return await fetch_listing(db, src, iid, url,
+                                       dealer_id=user.get("dealer_id") or "")
 
     try:
         if client_hit is not None:
@@ -419,15 +483,27 @@ async def compare(body: CompareIn, background: BackgroundTasks,
                 db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
             )
     except ListingIdentityError as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(400, str(exc))
     except ListingGone as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(404, str(exc))
     except ListingBusy as exc:
         # 503 + Retry-After: das Frontend (und jeder Proxy) weiss, dass es
         # sich um vorübergehendes Warten handelt — kein Server-Fehler.
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
     except RuntimeError as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(502, str(exc))
+    except Exception:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
+        raise
     except Exception as exc:
         log.exception("compare fetch failed for %s", raw_url)
         if source == "kleinanzeigen":
@@ -660,11 +736,13 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         return {"status": "completed", "cached": True,
                 "source": source, "item_id": identity["item_id"]}
 
-    if (source == "kleinanzeigen" and _erweiterung_noetig()
-            and not await _rueckfall_erlaubt(body.ohne_erweiterung, user)):
-        return {"status": "needs_client_fetch", "url": raw_url,
-                "source": source,
-                "hint": "Bitte über die Browser-Erweiterung laden."}
+    rueckfall_gebucht = False
+    if source == "kleinanzeigen" and _erweiterung_noetig():
+        if not await _rueckfall_erlaubt(body.ohne_erweiterung, user):
+            return {"status": "needs_client_fetch", "url": raw_url,
+                    "source": source,
+                    "hint": "Bitte über die Browser-Erweiterung laden."}
+        rueckfall_gebucht = bool(body.ohne_erweiterung)
 
     from link_jobs import enqueue_job, process_one_now, WarteschlangeVoll
     try:
@@ -675,6 +753,8 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
                                 dealer_id=user.get("dealer_id") or "",
                                 user_id=user.get("id") or "")
     except WarteschlangeVoll as voll:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)     # Runde 16: Kontingent nicht verbrennen
         raise HTTPException(429, voll.text)
     if job.get("status") == "queued":
         # Sofort-Anstoss (begrenzt/dedupliziert, Audit 09/2026 Punkt 17)
@@ -752,7 +832,7 @@ LIVE_FENSTER_MIN = 10
 
 @router.get("/mobile/live-counter/{ad_id}")
 async def live_counter(ad_id: str, quelle: Optional[str] = None,
-                       user=Depends(current_firma)):
+                       user=Depends(require_active_sub)):   # Runde 16: Teil der Suche (Abo)
     """Wie oft wurde dieses INSERAT zuletzt verglichen (anonym)?
 
     Zwei Befunde vom 12.09.2026 sind hier behoben:
@@ -923,10 +1003,15 @@ async def get_vehicle_detail(vehicle_id: str, user=Depends(current_firma)):
 
 
 @router.get("/vehicles")
-async def list_vehicles(user=Depends(current_firma)):
+async def list_vehicles(user=Depends(current_firma), response: Response = None):
+    # Runde 16 (15.09.2026): Kuerzung melden statt still bei 500 abzuschneiden.
     items = await db.vehicles.find(
         fahrzeug_bereich(user), {"_id": 0},
-    ).sort("updated_at", -1).to_list(500)
+    ).sort("updated_at", -1).to_list(501)
+    if len(items) > 500:
+        items = items[:500]
+        if response is not None:
+            response.headers["X-Truncated"] = "1"
     # Runde 23 (11.09.2026, Befund A): Sucher sehen nur den eigenen Einkaufspreis.
     return await __import__("kaufvorgang").einkauf_fuer_sucher_maskieren(
         user, await besitzer_anreichern(user, items))
@@ -950,10 +1035,13 @@ async def listings_extract(body: ListingURLIn, _user=Depends(current_firma)):
 
 @router.post("/listings/resolve")
 async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub)):
-    """Cache-aware Resolver."""
+    """Cache-aware Resolver. Runde 16 (15.09.2026): derselbe Konto-Deckel wie
+    beim Vergleich und ein Audit-Eintrag — vorher lief der Abruf an Fairness
+    und Vergleichsprotokoll vorbei."""
     async def _fetcher(source: str, item_id: str, url: str) -> dict:
-        return await fetch_listing(db, source, item_id, url,
-                                   dealer_id=user.get("dealer_id") or "")
+        async with _AbrufSlot(user):
+            return await fetch_listing(db, source, item_id, url,
+                                       dealer_id=user.get("dealer_id") or "")
 
     # Eigene Quarantaene zuerst: sonst wuerde der Server eine Anzeige selbst
     # abrufen, die der Nutzer per Erweiterung bereits geliefert hat.
@@ -977,6 +1065,9 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
         raise HTTPException(502, str(exc))
 
     identity = get_listing_identity(body.url)
+    await log_activity_sicher(user.get("dealer_id") or "", user.get("id"), "inserat.aufgeloest",
+                              ref=identity["cache_key"],
+                              meta={"source": identity["source"], "cached": bool(was_cached)})
     return {
         "source": identity["source"],
         "item_id": identity["item_id"],

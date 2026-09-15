@@ -375,18 +375,32 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     # das vorherige hochgeladene Logo nach dem Wechsel weggeraeumt (vorher
     # bei JEDEM Logowechsel eine Waise), sofern es nirgends sonst haengt.
     try:
+        # Runde 16 (15.09.2026): das ERSETZTE Logo per Vergleichen-und-Setzen
+        # aus demselben Write kennen — zwei parallele Uploads lasen vorher
+        # beide dasselbe alte Logo, und das dazwischen gespeicherte blieb als
+        # Waise liegen. Filter auf den gelesenen Stand; geht der Write
+        # verloren (anderer Upload dazwischen), wird neu gelesen.
         if ist_sucher:
-            vorher = (user.get("settings_override") or {}).get("logo_url")
-            await db.users.update_one(
-                {"id": user["id"]},
-                {"$set": {"settings_override.logo_url": logo_url}})
+            coll, filt_id, feld = db.users, {"id": user["id"]}, "settings_override.logo_url"
+            update = {"$set": {"settings_override.logo_url": logo_url}}
         else:
-            alt = await db.dealers.find_one({"id": user["dealer_id"]},
-                                            {"_id": 0, "logo_url": 1})
-            vorher = (alt or {}).get("logo_url")
-            await db.dealers.update_one(
-                {"id": user["dealer_id"]},
-                {"$set": {"logo_url": logo_url, "updated_at": now_iso()}})
+            coll, filt_id, feld = db.dealers, {"id": user["dealer_id"]}, "logo_url"
+            update = {"$set": {"logo_url": logo_url, "updated_at": now_iso()}}
+        vorher = None
+        gesetzt = False
+        for _ in range(4):
+            doc = await coll.find_one(filt_id, {"_id": 0, feld.split(".")[0]: 1})
+            if doc is None:
+                raise RuntimeError("Konto nicht gefunden")
+            vorher = doc
+            for teil in feld.split("."):
+                vorher = vorher.get(teil) if isinstance(vorher, dict) else None
+            res = await coll.update_one({**filt_id, feld: vorher}, update)
+            if res is None or getattr(res, "matched_count", 1):
+                gesetzt = True
+                break
+        if not gesetzt:
+            raise RuntimeError("Logo-Wechsel kollidierte mehrfach mit einem parallelen Upload")
     except Exception as exc:  # noqa: BLE001
         await loeschen_oder_vormerken(db, key=key, grund="logo_upload_abbruch",
                                       dealer_id=user["dealer_id"])

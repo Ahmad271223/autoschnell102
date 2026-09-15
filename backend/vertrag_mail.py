@@ -62,11 +62,15 @@ def _fahrzeug_titel(vertrag: dict) -> str:
 
 def _zeilen(vertrag: dict) -> list:
     daten = vertrag.get("contract_data") or {}
+    # Runde 16 (15.09.2026): die im Vertrag bearbeiteten Werte heissen
+    # vehicle_* — die alten Namen bleiben als Rueckfall fuer Altvertraege.
     kandidaten = [
         ("Fahrzeug", _fahrzeug_titel(vertrag)),
-        ("Erstzulassung", daten.get("first_registration") or daten.get("erstzulassung") or ""),
-        ("Kilometerstand", _km(daten.get("mileage") or daten.get("kilometerstand"))),
-        ("Fahrgestellnummer", daten.get("vin") or ""),
+        ("Erstzulassung", daten.get("vehicle_first_registration") or daten.get("first_registration")
+         or daten.get("erstzulassung") or ""),
+        ("Kilometerstand", _km(daten.get("vehicle_mileage") or daten.get("mileage")
+                               or daten.get("kilometerstand"))),
+        ("Fahrgestellnummer", daten.get("vehicle_vin") or daten.get("vin") or ""),
         # Wunsch Ahmad (15.09.2026): nur das Datum — keine Uhrzeit im Vertragsversand.
         ("Abholung", _datum(vertrag.get("pickup_date")) or ""),
     ]

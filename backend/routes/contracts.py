@@ -11,7 +11,7 @@ from typing import Annotated, Any, Dict, List, Optional, Union
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 log = logging.getLogger("autohandel")
 
@@ -131,6 +131,14 @@ class ContractIn(BaseModel):
     def _pickup_date_pruefen(cls, v):
         return datum_iso_pruefen(v)
 
+    @field_validator("service_book")
+    @classmethod
+    def _service_book_pruefen(cls, v):
+        wert = (v or "").strip().lower()
+        if wert not in ("", "ja", "nein", "teilweise"):
+            raise ValueError("Scheckheftgepflegt: ja, nein oder teilweise")
+        return wert
+
     @field_validator("pickup_time")
     @classmethod
     def _pickup_time_pruefen(cls, v):
@@ -142,6 +150,10 @@ class ContractIn(BaseModel):
     tires: Optional[str] = ""              # "4-fach" | "8-fach" | "keine" | ""
     hu_valid: Optional[str] = ""           # "Ja" | "Nein" | ""
     hu_until: Optional[str] = ""           # MM/JJJJ frei
+    # Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl; bei
+    # "teilweise" der Monat/Jahr, bis zu dem das Scheckheft gefuehrt wurde.
+    service_book: Optional[str] = ""       # "" | "ja" | "nein" | "teilweise"
+    service_book_until: Optional[str] = ""  # MM/JJJJ, nur bei "teilweise"
     accident_free: Optional[str] = ""      # "Ja" | "Nein" | ""
     accident_location: Optional[str] = ""  # nur wenn accident_free == "Nein"
     eu_import: Optional[str] = ""          # "Ja" | "Nein" | ""
@@ -286,6 +298,30 @@ class SendIn(BaseModel):
             raise ValueError("methode muss 'link' oder 'teilen' sein")
         return v
 
+    @model_validator(mode="after")
+    def _kanal_und_methode(self):
+        # Runde 16 (15.09.2026): kein widerspruechlicher Versanddatensatz —
+        # `methode` gibt es nur fuer WhatsApp.
+        if self.channel not in ("whatsapp", "email"):
+            raise ValueError("channel muss 'whatsapp' oder 'email' sein")
+        if self.methode and self.channel != "whatsapp":
+            raise ValueError("methode gilt nur fuer den Kanal whatsapp")
+        return self
+
+
+def _versand_anfrage_hash(c: dict, body) -> str:
+    """Runde 16: der Versand-Schluessel gehoert zu GENAU diesem Inhalt —
+    Fassung, Kanal, Empfaenger, Betreff, Nachricht, Methode. Derselbe
+    Schluessel mit anderem Inhalt ist ein Fehler, nie eine Wiederaufnahme."""
+    import hashlib
+    roh = "|".join([str(c.get("version") or 1), body.channel, (body.recipient or "").strip(),
+                    body.subject or "", body.message or "", body.methode or ""])
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
+
+
+VERSAND_JE_KONTO_10MIN = int(os.environ.get("VERSAND_JE_KONTO_10MIN", "300") or 300)
+WA_ZIFFERN_MIN, WA_ZIFFERN_MAX = 7, 15
+
 
 # ---------- Helpers ----------
 def _pdfs_erzeugen(*, dealer: dict, vehicle: dict, contract: dict) -> tuple[bytes, bytes]:
@@ -306,7 +342,7 @@ def _pdfs_erzeugen(*, dealer: dict, vehicle: dict, contract: dict) -> tuple[byte
 # DIGITAL_NACHTRAEGLICH liegt seit 10.09.2026 in pdf_service (dort wird er erkannt).
 
 
-async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
+async def _digitales_pdf_bytes(c: dict, user: dict, cache: bool = True) -> Optional[bytes]:
     """Digitale Ausfertigung eines gespeicherten Vertrags (fuer Versand und
     Download). Fehlt sie (Altvertrag), wird sie aus den GESPEICHERTEN
     Vertragsdaten nacherzeugt: der bei der Erstellung festgehaltene digitale
@@ -335,13 +371,30 @@ async def _digitales_pdf_bytes(c: dict, user: dict) -> Optional[bytes]:
         pdf_bytes = await asyncio.to_thread(
             generate_contract_pdf, dealer=dealer, vehicle=vehicle,
             contract=contract_dict, digital=True)
+        if not cache:
+            # Archivfassung (Runde 16): nie in das Hauptdokument schreiben.
+            return pdf_bytes
         # Nur das PDF zwischenspeichern — contract_data bleibt unangetastet,
         # der historische Vertragsinhalt aendert sich nicht.
-        await db.generated_pdfs.update_one(
+        res = await db.generated_pdfs.update_one(
             {"id": c["id"], "version": c.get("version"),
              "pdf_digital_b64": {"$exists": False}},
             {"$set": {"pdf_digital_b64": base64.b64encode(pdf_bytes).decode(),
                       "pdf_digital_nachtraeglich": not gespeichert}})
+        if res.matched_count == 0:
+            # Runde 16 (15.09.2026): der Cache-CAS verlor — entweder hat ein
+            # paralleler Abruf dieselbe Fassung gerade abgelegt (dann die
+            # nehmen), oder der Vertrag wurde WAEHREND der Erzeugung neu
+            # erstellt: dann darf die eben erzeugte alte Fassung nicht raus.
+            frisch = await db.generated_pdfs.find_one(
+                {"id": c["id"]}, {"_id": 0, "version": 1, "pdf_digital_b64": 1})
+            if frisch and int(frisch.get("version") or 1) == int(c.get("version") or 1):
+                if frisch.get("pdf_digital_b64"):
+                    return base64.b64decode(frisch["pdf_digital_b64"])
+                return pdf_bytes
+            log.warning("Vertrag %s wurde waehrend der PDF-Erzeugung neu erstellt — "
+                        "alte Fassung verworfen", c.get("id"))
+            return None
         return pdf_bytes
     except Exception:
         log.exception("Digitale Ausfertigung von Vertrag %s konnte nicht erzeugt "
@@ -380,6 +433,10 @@ def wa_nummer(recipient: Optional[str]) -> str:
 VERTRAG_LINK_TAGE = max(1, min(int(os.environ.get("VERTRAG_LINK_TAGE") or 14), 365))
 _link_limiter = SlidingWindowRateLimiter(max_attempts=60, window_seconds=60,
                                          name="vertrag_link")
+# Runde 16 (15.09.2026): Versand je Konto gedeckelt (VERSAND_JE_KONTO_10MIN).
+_versand_limiter = SlidingWindowRateLimiter(
+    max_attempts=int(os.environ.get("VERSAND_JE_KONTO_10MIN", "300") or 300),
+    window_seconds=600, name="vertrag_versand")
 
 
 def _oeffentliche_basis() -> str:
@@ -410,35 +467,41 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
     (beide Antworten meldeten Erfolg). Jetzt gewinnt genau einer, der andere
     bekommt dessen Link. Ein noch gueltiger Link derselben Fassung wird
     wiederverwendet; eine bestehende Gueltigkeitszusage wird nie verkuerzt."""
-    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
-                                         {"_id": 0, "freigabe": 1, "version": 1})
-    if c is None:
-        raise HTTPException(404, "Vertrag nicht gefunden")
-    version = int(c.get("version") or 1)
-    f = c.get("freigabe") or {}
-    if _freigabe_gueltig(f, version):
-        return f"{_oeffentliche_basis()}/api/public/vertrag/{f['token']}", f["laeuft_ab"]
-    neu = {"token": secrets.token_urlsafe(32), "erstellt_am": now_iso(),
-           "laeuft_ab": (datetime.now(timezone.utc)
-                         + timedelta(days=VERTRAG_LINK_TAGE)).isoformat(),
-           "erstellt_von": user.get("id"), "version": version, "abrufe": 0}
-    # Nur schreiben, wenn die Freigabe noch genau so aussieht wie gelesen —
-    # sonst hat ein paralleler Aufruf bereits eine gesetzt.
-    # Pruefung 14.09.2026 (Liste 5, Nr. 2): nur, wenn die Fassung noch dieselbe
-    # ist — sonst zeigte ein frischer Link auf eine alte Version.
-    res = await db.generated_pdfs.update_one(
-        {"id": contract_id, **bereich, "version": c.get("version"),
-         **({"freigabe.token": f["token"]} if f.get("token")
-            else {"freigabe": {"$exists": False}})},
-        {"$set": {"freigabe": neu}})
-    if res.modified_count:
-        return f"{_oeffentliche_basis()}/api/public/vertrag/{neu['token']}", neu["laeuft_ab"]
-    aktuell = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
-                                               {"_id": 0, "freigabe": 1})
-    f2 = (aktuell or {}).get("freigabe") or {}
-    if not f2.get("token"):
-        raise HTTPException(404, "Vertrag nicht gefunden")
-    return f"{_oeffentliche_basis()}/api/public/vertrag/{f2['token']}", f2.get("laeuft_ab") or ""
+    # Runde 16 (15.09.2026): (a) verliert der CAS, wird komplett neu gelesen und
+    # die dann gespeicherte Freigabe gegen die AKTUELLE Fassung geprueft — sonst
+    # bekam ein neuer Versand nach einem Versions-Race den Link der alten
+    # Fassung; (b) ein noch laufender alter Link wandert in freigabe_alt und
+    # bleibt bis zu seinem Ablauf abrufbar (die Zusage im Chat wird nicht
+    # gebrochen).
+    for _ in range(4):
+        c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                             {"_id": 0, "freigabe": 1, "version": 1})
+        if c is None:
+            raise HTTPException(404, "Vertrag nicht gefunden")
+        version = int(c.get("version") or 1)
+        f = c.get("freigabe") or {}
+        if _freigabe_gueltig(f, version):
+            return f"{_oeffentliche_basis()}/api/public/vertrag/{f['token']}", f["laeuft_ab"]
+        neu = {"token": secrets.token_urlsafe(32), "erstellt_am": now_iso(),
+               "laeuft_ab": (datetime.now(timezone.utc)
+                             + timedelta(days=VERTRAG_LINK_TAGE)).isoformat(),
+               "erstellt_von": user.get("id"), "version": version, "abrufe": 0}
+        aenderung: dict = {"$set": {"freigabe": neu}}
+        if f.get("token") and (f.get("laeuft_ab") or "") > now_iso():
+            aenderung["$push"] = {"freigabe_alt": {"$each": [f], "$slice": -10}}
+        # Nur schreiben, wenn die Freigabe noch genau so aussieht wie gelesen —
+        # sonst hat ein paralleler Aufruf bereits eine gesetzt.
+        # Pruefung 14.09.2026 (Liste 5, Nr. 2): nur, wenn die Fassung noch dieselbe
+        # ist — sonst zeigte ein frischer Link auf eine alte Version.
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich, "version": c.get("version"),
+             **({"freigabe.token": f["token"]} if f.get("token")
+                else {"freigabe": {"$exists": False}})},
+            aenderung)
+        if res.modified_count:
+            return f"{_oeffentliche_basis()}/api/public/vertrag/{neu['token']}", neu["laeuft_ab"]
+    raise HTTPException(409, "Der Vertrag wurde gerade neu erstellt — bitte die Seite neu "
+                             "laden und erneut senden.")
 
 
 # Gegenpruefung 12.09.2026: Zuordnung und Einsetzen liegen in vertrag_felder
@@ -694,6 +757,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
              "idempotency_key": body.idempotency_key},
             {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
         if vorhanden:
+            # Runde 16 (15.09.2026): dieselbe Hash-Pruefung wie im Vorabpfad —
+            # sonst bekam Anfrage B still den Vertrag von Anfrage A.
+            if vorhanden.get("idempotency_hash") and vorhanden["idempotency_hash"] != anfrage_hash:
+                raise HTTPException(409, "Dieser Idempotenz-Schlüssel wurde schon für einen "
+                                         "anderen Vertrag verwendet — bitte neu laden")
             return {**clean_doc(vorhanden), "bereits_vorhanden": True}
         raise
     except Exception:
@@ -1136,13 +1204,18 @@ async def public_vertrag_pdf(token: str, request: Request):
     if not token or len(token) > 80 or not re.fullmatch(r"[A-Za-z0-9_\-]+", token):
         raise HTTPException(404, "Link ungültig")
     c = await db.generated_pdfs.find_one(
-        {"freigabe.token": token, "loeschung.status": {"$ne": "laeuft"}},
+        {"$or": [{"freigabe.token": token}, {"freigabe_alt.token": token}],
+         "loeschung.status": {"$ne": "laeuft"}},
         {"_id": 0, "id": 1, "pdf_b64": 1, "pdf_digital_b64": 1, "filename": 1,
          "contract_data": 1, "vehicle_id": 1, "dealer_id": 1, "user_id": 1,
-         "version": 1, "freigabe": 1})
+         "version": 1, "freigabe": 1, "freigabe_alt": 1})
     if not c:
         raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
     freigabe = c.get("freigabe") or {}
+    if freigabe.get("token") != token:
+        # Runde 16: ein aelterer, noch laufender Link — er liefert weiterhin
+        # die damals verschickte Fassung (Zusage im Chat bleibt gueltig).
+        freigabe = next((f for f in (c.get("freigabe_alt") or []) if f.get("token") == token), {})
     try:
         laeuft_ab = datetime.fromisoformat(freigabe.get("laeuft_ab") or "")
     except ValueError:
@@ -1170,7 +1243,7 @@ async def public_vertrag_pdf(token: str, request: Request):
             ersteller_alt = await db.users.find_one(
                 {"id": c.get("user_id")}, {"_id": 0}) \
                 or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
-            pdf_bytes = await _digitales_pdf_bytes({**c, **alt}, ersteller_alt)
+            pdf_bytes = await _digitales_pdf_bytes({**c, **alt}, ersteller_alt, cache=False)
         else:
             pdf_bytes = None
         if not pdf_bytes:
@@ -1245,11 +1318,22 @@ async def get_contract_version_pdf(contract_id: str, version: int,
     v = await db.generated_pdf_versions.find_one(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"],
          "version": version},
-        {"_id": 0, "pdf_b64": 1, "pdf_digital_b64": 1, "filename": 1})
+        {"_id": 0, "pdf_b64": 1, "pdf_digital_b64": 1, "filename": 1, "contract_data": 1})
     if not v or not v.get("pdf_b64"):
         raise HTTPException(404, "Vertragsfassung nicht gefunden")
     if variante == "digital" and v.get("pdf_digital_b64"):
         pdf_bytes = base64.b64decode(v["pdf_digital_b64"])
+    elif variante == "digital":
+        # Runde 16 (15.09.2026): wie beim oeffentlichen Link — die digitale
+        # Fassung aus den archivierten Vertragsdaten nacherzeugen statt still
+        # die Druckfassung zu liefern.
+        voll = await db.generated_pdfs.find_one(
+            {"id": contract_id, **_vertrag_bereich(user)},
+            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+        pdf_bytes = await _digitales_pdf_bytes(
+            {**(voll or {}), **v, "id": contract_id, "version": version}, user, cache=False)
+        if not pdf_bytes:
+            raise HTTPException(503, DIGITAL_FEHLER_HINWEIS)
     else:
         pdf_bytes = base64.b64decode(v["pdf_b64"])
     fname = _safe_filename(v.get("filename") or "",
@@ -1286,6 +1370,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    # Runde 16 (15.09.2026): Versand-Limit je Konto — kein Spam-/Kostenpfad
+    # ueber frei eingetragene Empfaenger (Resend/SMTP).
+    if not await _versand_limiter.check(f"konto:{user.get('id')}"):
+        raise HTTPException(429, f"Zu viele Versände in kurzer Zeit — höchstens "
+                                 f"{VERSAND_JE_KONTO_10MIN} je 10 Minuten. Bitte etwas warten.")
+    anfrage_hash = _versand_anfrage_hash(c, body)
     # Idempotenz RESERVIEREND (Review 09/2026): Der Schluessel wurde vorher
     # erst NACH dem Senden eingetragen — zwei gleichzeitige Anfragen mit
     # demselben Schluessel konnten beide zustellen. Jetzt wird der Eintrag
@@ -1318,6 +1408,10 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand laeuft
                 archiv = None
             if archiv:
+                if archiv.get("anfrage_hash") and archiv["anfrage_hash"] != anfrage_hash:
+                    raise HTTPException(409, "Dieser Versand-Schlüssel gehört zu einem anderen "
+                                             "Versand (Empfänger oder Text geändert) — bitte "
+                                             "die Seite neu laden und erneut senden.")
                 return {"channel": archiv.get("channel"), "status": "ok",
                         "sent_at": archiv.get("sent_at"), "zustellung": "archiv",
                         "bereits_gesendet": True}
@@ -1336,6 +1430,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             if haengend:
                 body.idempotency_key = haengend["idempotency_key"]
                 vorhanden = haengend
+        if vorhanden and vorhanden.get("anfrage_hash") and vorhanden["anfrage_hash"] != anfrage_hash:
+            # Runde 16: gleicher Schluessel, anderer Inhalt (Empfaenger/Text nach
+            # einem unklaren Versuch geaendert) -> nie wiederaufnehmen.
+            raise HTTPException(409, "Dieser Versand-Schlüssel gehört zu einem anderen Versand "
+                                     "(Empfänger oder Text geändert) — bitte die Seite neu laden "
+                                     "und erneut senden.")
         if (vorhanden and vorhanden.get("zustellung") in ("laeuft", "unklar")
                 and _zustellung_haengt(vorhanden)):
             # Zeitpunkt des ersten Versuchs behalten: die Kopie an den Sucher
@@ -1372,23 +1472,31 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                     "zustellung": vorhanden.get("zustellung", ""),
                     "wa_url": vorhanden.get("wa_url"), "bereits_gesendet": True}
     if body.idempotency_key and not wiederaufnahme:
+        # Runde 16 (15.09.2026): zwei Tabs mit VERSCHIEDENEN Schluesseln duerfen
+        # denselben Vertrag nicht gleichzeitig an denselben Empfaenger schicken —
+        # ein noch frischer, laufender Versand desselben Kanals/Empfaengers
+        # sperrt die Reservierung (haengende aeltere Eintraege nimmt der Pfad
+        # oben wieder auf).
+        # Nur fuer Kanaele, die der Server selbst zustellt (E-Mail): bei
+        # WhatsApp entsteht nur der Download-Link, und der ist je Vertrag
+        # ohnehin eindeutig (_freigabe_link) — zwei Tabs bekommen denselben.
+        frisch_ab = (datetime.now(timezone.utc)
+                     - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK)).isoformat()
+        sperre = {"send_status": {"$not": {"$elemMatch": {
+            "channel": body.channel, "recipient": body.recipient,
+            "zustellung": "laeuft",
+            "$or": [{"sent_at": {"$gt": frisch_ab}},
+                    {"wiederaufnahme_am": {"$gt": frisch_ab}}]}}}}             if body.channel == "email" else {}
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
-             "send_status.idempotency_key": {"$ne": body.idempotency_key}},
+             "send_status.idempotency_key": {"$ne": body.idempotency_key},
+             **sperre},
             {"$push": {"send_status": {"$each": [{
                 "idempotency_key": body.idempotency_key, "channel": body.channel,
                 "recipient": body.recipient, "subject": body.subject,
-                "sent_at": reserviert_am, "zustellung": "laeuft"}],
+                "sent_at": reserviert_am, "zustellung": "laeuft",
+                "anfrage_hash": anfrage_hash, "version": int(c.get("version") or 1)}],
                 "$slice": -SEND_STATUS_MAX}}})
-        if res.modified_count:
-            try:
-                await db.versand_schluessel.update_one(
-                    {"contract_id": contract_id, "key": body.idempotency_key},
-                    {"$setOnInsert": {"dealer_id": c.get("dealer_id"), "channel": body.channel,
-                                      "recipient": body.recipient, "sent_at": reserviert_am}},
-                    upsert=True)
-            except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand laeuft
-                log.exception("Versand-Schluessel %s nicht archiviert", contract_id)
         if res.modified_count == 0:
             return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
                     "zustellung": "laeuft", "bereits_gesendet": True}
@@ -1411,6 +1519,15 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 {"id": contract_id, **bereich},
                 {"$pull": {"send_status": {"idempotency_key": body.idempotency_key,
                                            "zustellung": "laeuft"}}})
+            # Runde 16: ein gescheiterter Versand hinterlaesst KEINEN
+            # Archiveintrag mehr — sonst hiess es beim naechsten Versuch
+            # "bereits gesendet", obwohl nie etwas rausging.
+            try:
+                await db.versand_schluessel.delete_one(
+                    {"contract_id": contract_id, "key": body.idempotency_key,
+                     "zustellung": {"$exists": False}})
+            except Exception:  # noqa: BLE001
+                log.exception("Versand-Schluessel %s nach Fehlschlag nicht entfernt", contract_id)
     # Runde 17 (Nr. 370): Zwischen dem Lesen oben und dem Versand kann die
     # Loeschung (Frist oder manuell) begonnen haben — der Grabstein nimmt
     # den Vertrag aus dem Bereich. Unmittelbar vor dem Versand noch einmal
@@ -1434,14 +1551,21 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # wird als "versand_vorbereitet" gefuehrt, nicht als versendet.
     out: dict = {"channel": body.channel, "status": "ok", "sent_at": now_iso()}
     if body.channel == "whatsapp":
-        digits = wa_nummer(body.recipient)
         from urllib.parse import quote_plus
         if body.methode == "teilen":
             # Handy: das PDF wurde ueber das Teilen-Menue an WhatsApp
-            # uebergeben (eigene Nummer des Suchers). Ob er im Chat wirklich
-            # auf Senden getippt hat, wissen wir nicht -> "vorbereitet".
+            # uebergeben (eigene Nummer des Suchers, keine Empfaengernummer
+            # noetig). Ob er im Chat wirklich auf Senden getippt hat, wissen
+            # wir nicht -> "vorbereitet".
             out["zustellung"] = "geteilt"
         else:
+            digits = wa_nummer(body.recipient)
+            if not (WA_ZIFFERN_MIN <= len(digits) <= WA_ZIFFERN_MAX):
+                # Runde 16 (15.09.2026): keine wa.me-Links und keine
+                # "vorbereitet"-Vermerke fuer unbrauchbare Nummern.
+                await _reservierung_zurueck()
+                raise HTTPException(422, "WhatsApp-Nummer ungültig — bitte mit Vorwahl "
+                                         "eingeben (7 bis 15 Ziffern, z. B. 0170 1234567).")
             try:
                 link, gueltig_bis = await _freigabe_link(contract_id, bereich, user)
             except HTTPException:
@@ -1462,7 +1586,9 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             out["wa_url"] = f"https://wa.me/{digits}?text={quote_plus(text)}"
             out["download_link"] = link
             out["link_gueltig_bis"] = gueltig_bis
-            out["zustellung"] = "chat_geoeffnet"
+            # Runde 16: "link_bereit" statt "chat_geoeffnet" — ob der Browser den
+            # Chat wirklich oeffnet, entscheidet sich erst NACH dieser Antwort.
+            out["zustellung"] = "link_bereit"
         neuer_status = "versand_vorbereitet"
     elif body.channel == "email":
         from provider_fetch import MOCK_PROVIDER_FETCH
@@ -1502,6 +1628,11 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # die auf dem angehaengten Vertrag steht.
             from deps import effective_dealer
             firma = await effective_dealer(user) or {}
+            # Runde 16 (15.09.2026): dieselbe Kaeufer-Identitaet wie im PDF — die
+            # im Vertrag eingefrorenen Kaeuferdaten (Firma, Anschrift, Telefon)
+            # gewinnen ueber den heutigen Stand von Firma/Filiale.
+            _, firma = _apply_contract_overrides(
+                contract=dict(c.get("contract_data") or {}), vehicle={}, dealer=dict(firma))
             betreff, text, html = vertrag_mail(
                 vertrag=c, firma=firma, sucher=user,
                 nachricht=body.message, betreff=body.subject)
@@ -1586,6 +1717,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         "channel": body.channel, "recipient": body.recipient,
         "subject": body.subject, "sent_at": out["sent_at"],
         "zustellung": out.get("zustellung", ""),
+        # Runde 16: welche FASSUNG rausging (Beleg nach mehreren Fassungen)
+        "version": int(c.get("version") or 1), "anfrage_hash": anfrage_hash,
     }
     if body.methode:
         send_entry["methode"] = body.methode
@@ -1617,6 +1750,19 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                                        "$slice": -SEND_STATUS_MAX}},
              "$set": {"status": neuer_status, "updated_at": now_iso()}},
         )
+    if reserviert and res.matched_count:
+        # Runde 16: Archiv-Eintrag ERST nach dem Erfolg (vorher bei der
+        # Reservierung — ein Fehlschlag blieb dauerhaft "bereits gesendet").
+        try:
+            await db.versand_schluessel.update_one(
+                {"contract_id": contract_id, "key": body.idempotency_key},
+                {"$set": {"dealer_id": c.get("dealer_id"), "channel": body.channel,
+                          "recipient": body.recipient, "sent_at": out["sent_at"],
+                          "zustellung": out.get("zustellung", ""),
+                          "version": int(c.get("version") or 1), "anfrage_hash": anfrage_hash}},
+                upsert=True)
+        except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand ist erfolgt
+            log.exception("Versand-Schluessel %s nicht archiviert", contract_id)
     if res.matched_count == 0:
         # Runde 17 (Nr. 372): Der Versand IST erfolgt, aber der Vertrag war
         # beim Vermerk nicht mehr im Bereich (Loeschung begonnen, Eintrag
@@ -1849,6 +1995,8 @@ async def regenerate_contract_for_pickup(
             "pickup_time": neu_zeit,
             "version": alte_version + 1,
             "updated_at": now_iso(),
+            # Runde 16 (15.09.2026): eine neue Fassung ist noch NICHT versendet.
+            **({"status": "neu erstellt"} if doc.get("status") in ("versendet", "versand_vorbereitet") else {}),
             **({"purchase_price": float(neuer_preis),
                 "nach_abholung_aktualisiert_am": now_iso(),
                 "nach_abholung_protokoll_id": protokoll_id} if preis_neu or sonder_neu else {}),

@@ -15,6 +15,15 @@ const YN_OPTIONS = [
   { value: "Nein", label: "Nein" },
 ];
 
+// Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl; bei "teilweise"
+// zusaetzlich Monat/Jahr, bis zu dem das Scheckheft gefuehrt wurde.
+const SCHECKHEFT_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "ja", label: "Ja, lückenlos" },
+  { value: "nein", label: "Nein" },
+  { value: "teilweise", label: "Teilweise (bis Monat/Jahr)" },
+];
+
 const TIRE_OPTIONS = [
   { value: "", label: "—" },
   { value: "4-fach", label: "4-fach (1 Satz)" },
@@ -64,7 +73,7 @@ const neuerIdempotenzSchluessel = () =>
     : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
 export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
-  const { dealer, refresh } = useAuth();
+  const { dealer, refresh, user } = useAuth();
   const v = vehicle || {};
   // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
   // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
@@ -87,6 +96,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     tires: "",
     hu_valid: "",
     hu_until: "",
+    service_book: "",
+    service_book_until: "",
     accident_free: "",
     accident_location: "",
     eu_import: "",
@@ -262,7 +273,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       return;
     }
     // Gegenpruefung 12.09.2026: ein halb getipptes "05/2" landete sonst im Vertrag.
-    for (const [feld, label] of [["vehicle_first_registration", "Erstzulassung"], ["hu_until", "HU gültig bis"]]) {
+    for (const [feld, label] of [["vehicle_first_registration", "Erstzulassung"], ["hu_until", "HU gültig bis"],
+                                 ["service_book_until", "Scheckheft gepflegt bis"]]) {
       const fehler = monatJahrFehler(form[feld]);
       if (fehler) {
         toast.error(`${label}: ${fehler}`);
@@ -444,6 +456,22 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <SelectField
+                label="Scheckheftgepflegt"
+                value={form.service_book}
+                onChange={(v) => set("service_book", v)}
+                options={SCHECKHEFT_OPTIONS}
+                testid="contract-service-book"
+              />
+              <div>
+                <label className="text-xs text-zinc-400">Scheckheft gepflegt bis (MM/JJJJ)</label>
+                <MonatJahrEingabe value={form.service_book_until} onChange={(v) => set("service_book_until", v)}
+                                  art="ez" testid="contract-service-book-until"
+                                  disabled={form.service_book !== "teilweise"}
+                                  className="input-base w-full mt-1 disabled:opacity-50" />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <SelectField
                 label="Unfallfrei"
                 value={form.accident_free}
                 onChange={(v) => set("accident_free", v)}
@@ -541,7 +569,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             </div>
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
                    helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar." />
-            <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes" />
+            {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim
+                Vertrag, sondern spaeter im Terminplaner am Termin. */}
+            {user?.role !== "sucher" && (
+              <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes" />
+            )}
           </Section>
 
           {/* Runde 22 (11.09.2026): Empfangsbestätigung wie auf der

@@ -33,6 +33,24 @@ export default function SendDialog({ open, contract, onClose }) {
   // PDF von der eigenen Nummer des Suchers an; sonst (PC) kommt ein
   // Download-Link in die Nachricht.
   const [pdf, setPdf] = useState(null);
+  // Runde 16 (15.09.2026): die vorab geladene Fassung wird beim Zurueckkehren
+  // in den Tab und alle 45 s erneuert — sonst teilt das Handy nach einer
+  // Terminverschiebung (Vertrag v1 -> v2) noch die alte Fassung. Ein Abruf
+  // direkt vor dem Teilen ginge nicht: Browser verlangen dafuer eine frische
+  // Nutzeraktion ohne Wartezeit.
+  const [pdfStand, setPdfStand] = useState(0);
+  useEffect(() => {
+    if (!open) return undefined;
+    const erneuern = () => { if (document.visibilityState === "visible") setPdfStand((n) => n + 1); };
+    const timer = window.setInterval(erneuern, 45000);
+    document.addEventListener("visibilitychange", erneuern);
+    window.addEventListener("focus", erneuern);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", erneuern);
+      window.removeEventListener("focus", erneuern);
+    };
+  }, [open]);
   const probe = useMemo(() => {
     try { return new File(["%PDF-1.4"], "probe.pdf", { type: "application/pdf" }); }
     catch { return null; }
@@ -50,7 +68,7 @@ export default function SendDialog({ open, contract, onClose }) {
       })
       .catch(() => { if (aktiv) setPdf(null); });
     return () => { aktiv = false; };
-  }, [open, contract?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, contract?.id, pdfStand]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Befund Ahmad 10.09.2026: "die Nummer des Verkaeufers wird nie geoeffnet".
   // window.open NACH dem Server-Aufruf gilt fuer den Browser nicht mehr als

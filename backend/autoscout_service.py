@@ -296,6 +296,13 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("powerfrom", str(mn)))
             params.append(("powerto", str(mx)))
             params.append(("powertype", "kw"))
+        elif mode == "min_ps":
+            # 15.09.2026 (Wunsch Ahmad): nur Untergrenze, nach oben offen.
+            v_ps = int(pwr_rule.get("value", 5))
+            cur_ps = vehicle.get("power_ps") or kw_to_ps(kw)
+            mn = ps_to_kw(max(1, int(cur_ps) - v_ps))
+            params.append(("powerfrom", str(mn)))
+            params.append(("powertype", "kw"))
 
     # Kraftstoff
     fuel_rule = (rules.get("fuel") or {}).get("mode")

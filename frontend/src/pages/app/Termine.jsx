@@ -22,10 +22,15 @@ import {
 } from "date-fns";
 import { de } from "date-fns/locale";
 
-const STATUSES = ["offen", "abgeholt", "nicht abgeholt", "verschoben", "erledigt"];
+// Runde 16 (15.09.2026): alle serverseitig gueltigen Zustaende sind filterbar.
+const STATUSES = ["offen", "bestätigt", "in Bearbeitung", "abgeholt", "nicht abgeholt",
+                  "verschoben", "erledigt", "storniert"];
 
 const STATUS_META = {
   "offen":           { dot: "#0a84ff", chipClass: "st-offen-bg",         text: "st-offen" },
+  "bestätigt":       { dot: "#5ac8fa", chipClass: "st-offen-bg",         text: "st-offen" },
+  "in Bearbeitung":  { dot: "#ffd60a", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
+  "storniert":       { dot: "#8e8e93", chipClass: "st-erledigt-bg",      text: "st-erledigt" },
   "abgeholt":        { dot: "#34c759", chipClass: "st-abgeholt-bg",      text: "st-abgeholt" },
   "nicht abgeholt":  { dot: "#ff3b30", chipClass: "st-nicht-abgeholt-bg",text: "st-nicht-abgeholt" },
   "verschoben":      { dot: "#ff9f0a", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
@@ -50,16 +55,28 @@ export default function Termine() {
   const [editing, setEditing] = useState(null);       // appt being edited
   const [creating, setCreating] = useState(false);
 
+  // Runde 16 (15.09.2026): Kuerzung (X-Truncated ab 2.000) und Ladefehler
+  // sichtbar machen — vorher sah beides wie "keine Termine" aus.
+  const [gekuerzt, setGekuerzt] = useState(false);
   const load = async () => {
-    const { data } = await api.get("/appointments", { params: filter ? { status: filter } : {} });
-    setItems(data);
+    try {
+      const r = await api.get("/appointments", { params: filter ? { status: filter } : {} });
+      setItems(Array.isArray(r.data) ? r.data : []);
+      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+    } catch (e) {
+      toast.error(errMsg(e, "Termine konnten nicht geladen werden"));
+    }
   };
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
-  useEffect(() => { api.get("/drivers").then((r) => setDrivers(r.data)); }, []);
+  useEffect(() => {
+    api.get("/drivers")
+      .then((r) => setDrivers(Array.isArray(r.data) ? r.data : []))
+      .catch((e) => toast.error(errMsg(e, "Fahrerliste konnte nicht geladen werden")));
+  }, []);
 
   const save = async (a) => {
     try {
@@ -134,6 +151,12 @@ export default function Termine() {
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="termine-page">
+      {gekuerzt && (
+        <div className="mb-3 rounded-sm border px-4 py-2 text-sm" data-testid="termine-gekuerzt"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
+          Die Liste zeigt nur die neuesten 2.000 Termine — bitte nach Status filtern, um ältere zu sehen.
+        </div>
+      )}
       {/* Runde 30: Abholprotokolle, die auf die Freigabe des Chefs warten.
           Runde 33: Sie haben eine eigene Seite — hier nur der Hinweis. */}
       <FreigabeHinweis />
@@ -395,6 +418,7 @@ function ListView({ items, onEdit }) {
       <div className="apple-surface-gloss p-12 text-center text-zinc-500">
         <CalIcon className="mx-auto mb-3 opacity-50" />
         Keine Termine. Erstelle einen Vertrag oder klicke „Neuer Termin“.
+        {gekuerzt && <div className="mt-2 text-xs">Hinweis: die Liste ist auf 2.000 Termine gekürzt.</div>}
       </div>
     );
   }

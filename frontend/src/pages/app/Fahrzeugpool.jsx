@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Copy, ExternalLink } from "lucide-react";
 
@@ -13,14 +13,21 @@ function inseratUrl(v) {
 
 export default function Fahrzeugpool() {
   const [items, setItems] = useState([]);
+  const [ladeFehler, setLadeFehler] = useState(false);
+  const [gekuerzt, setGekuerzt] = useState(false);
 
   useEffect(() => {
     // Array-Guard: liefert der Dev-Proxy in einem Grenzfall etwas anderes
     // als die Liste (z.B. eine Fehlerseite), soll die Seite leer bleiben
     // statt mit "items.map is not a function" abzustuerzen.
+    // Runde 16 (15.09.2026): Ladefehler und Kuerzung (X-Truncated ab 500)
+    // sichtbar machen statt "Noch keine Fahrzeuge".
     api.get("/vehicles")
-      .then((r) => setItems(Array.isArray(r.data) ? r.data : []))
-      .catch(() => setItems([]));
+      .then((r) => {
+        setItems(Array.isArray(r.data) ? r.data : []);
+        setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+      })
+      .catch((e) => { setItems([]); setLadeFehler(true); toast.error(errMsg(e, "Fahrzeuge konnten nicht geladen werden")); });
   }, []);
 
   const kopieren = async (url) => {
@@ -58,7 +65,14 @@ export default function Fahrzeugpool() {
           </thead>
           <tbody>
             {items.length === 0 && (
-              <tr><td colSpan={mitBearbeiter ? 9 : 8} className="px-4 py-10 text-center text-zinc-500">Noch keine Fahrzeuge im Pool. Starte einen Vergleich.</td></tr>
+              <tr><td colSpan={mitBearbeiter ? 9 : 8} className="px-4 py-10 text-center text-zinc-500" data-testid="pool-leer">
+                {ladeFehler ? "Fahrzeuge konnten nicht geladen werden — bitte neu laden." : "Noch keine Fahrzeuge im Pool. Starte einen Vergleich."}
+              </td></tr>
+            )}
+            {gekuerzt && (
+              <tr><td colSpan={mitBearbeiter ? 9 : 8} className="px-4 py-2 text-center text-xs text-zinc-500" data-testid="pool-gekuerzt">
+                Die Liste zeigt nur die neuesten 500 Fahrzeuge.
+              </td></tr>
             )}
             {items.map((v) => {
               const url = inseratUrl(v);

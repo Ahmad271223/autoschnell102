@@ -1507,3 +1507,26 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   zeigt den Stand (`{"marktplatz": false}`).
 - Tests und CI laufen mit `MARKTPLATZ_AKTIV=true`, damit die Marktplatz-Tests weiter greifen.
 
+### Versand, Kundenfassung und Abrufe seit Runde 16 (15.09.2026)
+
+- **Kundenfassung des Kaufvertrags** (E-Mail/WhatsApp): ohne Abschnitt „Unterschriften“ und ohne
+  Empfangsbestätigung (Schlüssel erhalten, Kaufpreis bestätigt) — beides nur in der Druckfassung
+  für Fahrer, Sucher und Chef. Kein Kennzeichen, keine Uhrzeit im Vertrag. Scheckheftgepflegt als
+  Auswahl (ja, lückenlos / nein / teilweise bis MM/JJJJ).
+- **Versand:** `VERSAND_JE_KONTO_10MIN` (Standard 300) deckelt die Vertragsversände je Konto.
+  Der Versand-Schlüssel ist an Fassung, Kanal, Empfänger, Betreff und Text gebunden (409 bei
+  Abweichung); bei E-Mail können zwei Tabs denselben Vertrag nicht gleichzeitig an denselben
+  Empfänger schicken (bei WhatsApp entsteht nur der Link, beide bekommen denselben); ein
+  gescheiterter Versand gilt nie als „bereits gesendet“. WhatsApp-Nummern brauchen
+  7–15 Ziffern. Der Versandvermerk trägt die Fassung; nach einer Neuerzeugung steht der Vertrag
+  wieder auf „neu erstellt“. Ein neuer WhatsApp-Link lässt einen noch laufenden alten Link gültig.
+- **Anbieter-Abrufe:** direkte Abrufe (Cache-Miss im Vergleich und beim Auflösen) sind je Konto
+  gebremst — `ABRUF_JE_KONTO_MINUTE` (Standard 60) und `ABRUF_GLEICHZEITIG_JE_KONTO` (Standard 8);
+  Tageslimits bleiben aus (Vorgabe: keine Tageslimits für Sucher). Ein gebuchter Kleinanzeigen-
+  Rückfall wird bei Anbieterfehler oder voller Warteschlange zurückgebucht.
+- Beweis-Routen prüfen den Firmenstatus (Löschung, Sperre) wie alle Firmenrouten; die Firmensperre
+  für Fahrer folgt jetzt ebenfalls dem eingetragenen Hauptaccount.
+- Vergleichsregel Leistung: neuer Modus „−X PS und aufwärts (nach oben offen)“. Vergleich: Schalter
+  „Filter daneben öffnen (zweiter Bildschirm)“ — braucht die Bildschirm-Berechtigung des Browsers
+  (Chrome/Edge), sonst öffnet das Fenster neben der App, wenn Platz ist.
+

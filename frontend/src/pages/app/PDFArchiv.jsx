@@ -22,14 +22,23 @@ export default function PDFArchiv() {
   const [loading, setLoading] = useState(true);
   const [gallery, setGallery] = useState(null); // {item, urls, index}
 
+  // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
+  // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
+  const [ladeFehler, setLadeFehler] = useState(false);
+  const [gekuerzt, setGekuerzt] = useState(false);
   const load = async () => {
     setLoading(true);
+    setLadeFehler(false);
     try {
       const params = {};
       if (q) params.q = q;
       if (days) params.days = days;
-      const { data } = await api.get("/contracts", { params });
-      setItems(Array.isArray(data) ? data : []);
+      const r = await api.get("/contracts", { params });
+      setItems(Array.isArray(r.data) ? r.data : []);
+      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+    } catch (e) {
+      setLadeFehler(true);
+      toast.error(errMsg(e, "Verträge konnten nicht geladen werden"));
     } finally { setLoading(false); }
   };
 
@@ -86,7 +95,19 @@ export default function PDFArchiv() {
           <div className="apple-surface p-12 text-center text-[15px]"
                style={{ color: "var(--text-muted)" }}>Lade…</div>
         )}
-        {!loading && items.length === 0 && (
+        {!loading && ladeFehler && (
+          <div className="apple-surface p-12 text-center text-[15px]" data-testid="pdfs-fehler"
+               style={{ color: "var(--text-muted)" }}>
+            Verträge konnten nicht geladen werden — bitte neu laden.
+          </div>
+        )}
+        {!loading && !ladeFehler && gekuerzt && (
+          <div className="mb-3 rounded-sm border px-4 py-2 text-sm" data-testid="pdfs-gekuerzt"
+               style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
+            Die Liste zeigt nur die neuesten 2.000 Verträge — Zeitraum oder Suche eingrenzen, um ältere zu sehen.
+          </div>
+        )}
+        {!loading && !ladeFehler && items.length === 0 && (
           <div className="apple-surface p-12 text-center text-[15px]"
                style={{ color: "var(--text-muted)" }}>Noch keine Verträge erstellt.</div>
         )}

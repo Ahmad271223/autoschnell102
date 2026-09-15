@@ -444,6 +444,20 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
     return _NumberedCanvas
 
 
+def _scheckheft_anzeige(contract: dict) -> str:
+    """Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl — "Ja,
+    lueckenlos" / "Nein" / "Teilweise, bis MM/JJJJ"."""
+    wert = str(contract.get("service_book") or "").strip().lower()
+    bis = str(contract.get("service_book_until") or "").strip()
+    if wert == "ja":
+        return "Ja, lückenlos"
+    if wert == "nein":
+        return "Nein"
+    if wert == "teilweise":
+        return f"Teilweise, bis {bis}" if bis else "Teilweise"
+    return "—"
+
+
 def _abholzeile(contract: dict) -> str:
     """Abholung als EINE Zeile: "Wird abgeholt am 19.11.2026,
     <Anschrift des Verkaeufers>". Leer, wenn kein Abholdatum im Vertrag steht.
@@ -615,6 +629,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
 
     zus_rows = [
         ("Bereifung", contract.get("tires") or "—"),
+        ("Scheckheftgepflegt", _scheckheft_anzeige(contract)),
         ("HU/AU", hu_value or "—"),
         ("Unfallfrei", accident_value),
         ("EU-Import", _yn(contract.get("eu_import"))),
@@ -817,11 +832,12 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
 
     # ---------- Digitale Ausfertigung: ein Satz statt Unterschriftslinien ----------
     if digital:
-        # Runde 22 (11.09.2026): Empfangsbestaetigung beider Parteien (ohne
-        # Unterschriftslinie) vor dem Satz zur Gueltigkeit.
-        block = [_section("Unterschriften", st), Spacer(1, 8),
-                 _empfang_paar(contract, st, unterschrift=False), Spacer(1, 8),
-                 Paragraph("Dieser Vertrag ist ohne Unterschrift gültig.", st["body"])]
+        # Wunsch Ahmad (15.09.2026): die Kundenfassung (E-Mail/WhatsApp) traegt
+        # weder den Abschnitt "Unterschriften" noch die Empfangsbestaetigung
+        # (Schluessel erhalten, Kaufpreis bestaetigt) — das gehoert nur in die
+        # Druckfassung, die Fahrer, Sucher und Chef oeffnen und ausdrucken.
+        # Nur der Satz zur Gueltigkeit bleibt.
+        block = [Paragraph("Dieser Vertrag ist ohne Unterschrift gültig.", st["body"])]
         if nachtraeglich:
             block.append(Spacer(1, 8))
             for para in avb.split("\n\n"):

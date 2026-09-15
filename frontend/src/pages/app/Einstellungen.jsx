@@ -100,11 +100,15 @@ export default function Einstellungen() {
   };
 
   const setActiveProfile = async (p) => {
+    const vorher = form.active_profile;
     setForm({ ...form, active_profile: p });
     try {
       await api.put("/dealer/active-profile", { active_profile: p });
       toast.success(p === "inland" ? "Inland-Profil aktiv" : "Export-Profil aktiv");
     } catch (err) {
+      // Runde 16 (15.09.2026): bei Fehler den alten Stand wieder anzeigen —
+      // sonst stand "Export aktiv" da, waehrend der Server Inland behielt.
+      setForm((f) => ({ ...f, active_profile: vorher }));
       toast.error(errMsg(err, "Wechsel fehlgeschlagen"));
     }
   };
@@ -297,8 +301,10 @@ export default function Einstellungen() {
                                { v: "exact", l: "1:1" },
                                { v: "tolerance_ps", l: "± X PS" },
                                { v: "tolerance_kw", l: "± X kW" },
+                               { v: "min_ps", l: "− X PS und aufwärts (nach oben offen)" },
                              ]} />
-                {(r.power?.mode === "tolerance_ps" || r.power?.mode === "tolerance_kw") && (
+                {(r.power?.mode === "tolerance_ps" || r.power?.mode === "tolerance_kw"
+                  || r.power?.mode === "min_ps") && (
                   <AppleNumber testid="rule-pwr-value" value={r.power?.value || 5}
                                onChange={(v) => setRule("power", { ...r.power, value: v })}
                                className="w-24" />

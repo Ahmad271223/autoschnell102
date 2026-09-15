@@ -68,7 +68,9 @@ _REGELN: Dict[str, Dict[str, Any]] = {
                            "zahlen": ("years", "from", "to")},
     "mileage": {"modi": {"ignore", "exact", "plus", "range", "custom"},
                 "zahlen": ("value", "min", "max")},
-    "power": {"modi": {"ignore", "exact", "tolerance_ps", "tolerance_kw"},
+    # min_ps (15.09.2026, Wunsch Ahmad): nur nach unten begrenzen — "-X PS
+    # und aufwaerts", nach oben keine Grenze.
+    "power": {"modi": {"ignore", "exact", "tolerance_ps", "tolerance_kw", "min_ps"},
               "zahlen": ("value",)},
     "fuel": {"modi": {"ignore", "exact"}, "zahlen": ()},
     "gearbox": {"modi": {"ignore", "exact"}, "zahlen": ()},

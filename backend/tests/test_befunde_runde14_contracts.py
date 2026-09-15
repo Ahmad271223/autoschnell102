@@ -243,10 +243,10 @@ def test_118_slice_behaelt_juengste_und_positionales_set_findet_den_neuen():
         res = db.generated_pdfs.update_one(
             {"id": cid, "send_status": {"$elemMatch": {"idempotency_key": f"k{SEND_STATUS_MAX + 9}"}}},
             {"$set": {"send_status.$": {"idempotency_key": f"k{SEND_STATUS_MAX + 9}",
-                                        "zustellung": "chat_geoeffnet"}}})
+                                        "zustellung": "link_bereit"}}})
         assert res.modified_count == 1
         st = db.generated_pdfs.find_one({"id": cid})["send_status"]
-        assert st[-1]["zustellung"] == "chat_geoeffnet"
+        assert st[-1]["zustellung"] == "link_bereit"
         # Doppelklick mit vorhandenem Schluessel: $ne-Filter greift weiter
         res = db.generated_pdfs.update_one(
             {"id": cid, "send_status.idempotency_key": {"$ne": "k50"}},
@@ -396,7 +396,7 @@ def test_http_118_send_status_bleibt_bei_200_eintraegen(welt):
     st = _db().generated_pdfs.find_one({"id": welt["cid"]})["send_status"]
     assert len(st) == SEND_STATUS_MAX, len(st)
     assert st[-1]["idempotency_key"] == keys[-1]
-    assert st[-1]["zustellung"] == "chat_geoeffnet"
+    assert st[-1]["zustellung"] == "link_bereit"
     assert all(e.get("zustellung") not in ("laeuft", "unklar") for e in st)
     # Doppelklick mit gleichem (noch vorhandenem) Schluessel: bereits_gesendet
     r = requests.post(f"{API}/contracts/{welt['cid']}/send", headers=welt["h"], json={
@@ -426,5 +426,5 @@ def test_http_118_wiederaufnahme_nach_slice_funktioniert(welt):
     treffer = [e for e in st if e.get("recipient") == "+491700000015"]
     assert len(treffer) == 1 and treffer[0]["idempotency_key"] == alt, treffer
     assert treffer[0].get("wiederaufgenommen") is True
-    assert treffer[0]["zustellung"] == "chat_geoeffnet"
+    assert treffer[0]["zustellung"] == "link_bereit"
     assert len(st) <= SEND_STATUS_MAX

@@ -149,7 +149,7 @@ def test_01_pc_weg_nachricht_enthaelt_download_link(welt):
     r = _senden(welt)
     assert r.status_code == 200, r.text[:300]
     d = r.json()
-    assert d["zustellung"] == "chat_geoeffnet"
+    assert d["zustellung"] == "link_bereit"   # Runde 16: Chat oeffnet erst danach
     assert d["wa_url"].startswith("https://wa.me/491701234567?text=")
     basis = (os.environ.get("FRONTEND_URL") or "http://localhost:3000").rstrip("/")
     assert d["download_link"].startswith("http") and "/api/public/vertrag/" in d["download_link"]

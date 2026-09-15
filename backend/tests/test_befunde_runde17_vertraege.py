@@ -550,7 +550,7 @@ def test_348_grabstein_vertrag_unsichtbar_loeschen_idempotent(welt, monkeypatch)
             ("pdf", C.get_contract_pdf(grab, w.chef)),
             ("versions", C.list_contract_versions(grab, Response(), w.chef)),
             ("version_pdf", C.get_contract_version_pdf(grab, 1, w.chef)),
-            ("send", C.send_contract(grab, C.SendIn(channel="whatsapp", recipient="+4917",
+            ("send", C.send_contract(grab, C.SendIn(channel="whatsapp", recipient="+4917012345",
                                                     message="x", idempotency_key="k1"), w.chef)),
             ("termin", A.create_appointment(A.AppointmentIn(contract_id=grab, vehicle_id=vid,
                                                             pickup_date="2099-01-01"), w.chef)),
@@ -706,7 +706,7 @@ def test_370_send_409_wenn_loeschung_zwischen_lesen_und_versand_beginnt(welt, mo
     async def lauf():
         await db.generated_pdfs.insert_one(w.vertrag(cid))
         with pytest.raises(HTTPException) as e:
-            await C.send_contract(cid, C.SendIn(channel="whatsapp", recipient="+491701",
+            await C.send_contract(cid, C.SendIn(channel="whatsapp", recipient="+491701234567",
                                                 message="Hallo", idempotency_key="k17"), w.chef)
         c = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0})
         return e.value, c, await _logs(db, w.dealer_id)
@@ -736,7 +736,7 @@ def test_372_send_meldet_fehlenden_status_vermerk(welt, monkeypatch):
 
     async def lauf():
         await db.generated_pdfs.insert_one(w.vertrag(cid))
-        out = await C.send_contract(cid, C.SendIn(channel="whatsapp", recipient="+491701",
+        out = await C.send_contract(cid, C.SendIn(channel="whatsapp", recipient="+491701234567",
                                                   message="Hallo", idempotency_key="k17"), w.chef)
         c = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0})
         return out, c, await _logs(db, w.dealer_id)
@@ -755,12 +755,12 @@ def test_372b_normaler_versand_ohne_vermerk_feld(welt):
 
     async def lauf():
         await db.generated_pdfs.insert_one(w.vertrag(cid))
-        out = await C.send_contract(cid, C.SendIn(channel="whatsapp", recipient="+491701",
+        out = await C.send_contract(cid, C.SendIn(channel="whatsapp", recipient="+491701234567",
                                                   message="Hallo", idempotency_key="k17"), w.chef)
         c = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0})
         return out, c, await _logs(db, w.dealer_id)
 
     out, c, logs = welt.run(lauf())
     assert "status_vermerk" not in out
-    assert c["status"] == "versand_vorbereitet" and c["send_status"][0]["zustellung"] == "chat_geoeffnet"
+    assert c["status"] == "versand_vorbereitet" and c["send_status"][0]["zustellung"] == "link_bereit"
     assert "pdf.gesendet.ohne_vermerk" not in logs and "pdf.gesendet.whatsapp" in logs

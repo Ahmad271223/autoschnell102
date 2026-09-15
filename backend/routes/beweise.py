@@ -50,6 +50,14 @@ async def _fahrzeug_erlaubt(user: dict, vehicle_id: str) -> bool:
         {"vehicle_id": vehicle_id, **await termin_bereich(user)}, limit=1) > 0
 
 
+async def _firmenstatus_pruefen(user: dict) -> None:
+    """Runde 16 (15.09.2026): die direkten Beweis-Routen haengen an current_user
+    — Chef und Sucher muessen trotzdem durch dieselbe Firmenpruefung wie alle
+    Firmenrouten (Loeschung laeuft -> 409, gesperrt -> 403)."""
+    if user.get("role") in ("dealer", "sucher"):
+        await current_firma(user)
+
+
 async def _darf_sehen(user: dict, doc: dict) -> bool:
     if user.get("role") == "admin":
         # Nur der Super-Admin (Runde 12: keine normalen Admins mehr).
@@ -137,6 +145,7 @@ async def beweis_zum_fahrzeug(vehicle_id: str, user=Depends(current_firma)):
 
 @router.get("/beweise/{beweis_id}")
 async def beweis_status(beweis_id: str, user=Depends(current_user)):
+    await _firmenstatus_pruefen(user)
     doc = await db.inserat_beweise.find_one({"id": beweis_id}, {"_id": 0})
     if not doc or not await _darf_sehen(user, doc):
         raise HTTPException(404, _NICHT_GEFUNDEN)
@@ -145,6 +154,7 @@ async def beweis_status(beweis_id: str, user=Depends(current_user)):
 
 @router.get("/beweise/{beweis_id}/pdf")
 async def beweis_pdf(beweis_id: str, user=Depends(current_user)):
+    await _firmenstatus_pruefen(user)
     """Nur mit Authorization-Header (kein ?auth= — Token gehoert nicht in
     Verlauf und Logs); das Frontend laedt per fetch und zeigt eine Blob-URL."""
     doc = await db.inserat_beweise.find_one({"id": beweis_id}, {"_id": 0})

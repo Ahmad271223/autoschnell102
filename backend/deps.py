@@ -252,13 +252,32 @@ async def gesperrte_firmen_ids() -> set:
     gesperrt ist, in EINER Abfrage — fuer die Listenfilter des Marktplatzes.
     Sperre = active explizit False (fehlendes Feld = aktiv, wie
     firma_gesperrt)."""
+    # Runde 16 (15.09.2026): dieselbe Regel wie firma_gesperrt — der eingetragene
+    # Hauptaccount (dealers.user_id) entscheidet; nur Firmen ohne Eintrag fallen
+    # auf das aelteste dealer-Konto zurueck. Vorher bewerteten Sucher (firma_
+    # gesperrt) und Fahrer (diese Liste) dieselbe Firma nach einem Chefwechsel
+    # unterschiedlich.
+    gesperrt: set = set()
+    mit_hauptkonto: set = set()
+    async for d in db.dealers.aggregate([
+            {"$match": {"user_id": {"$nin": [None, ""]}}},
+            {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id",
+                         "as": "chef"}},
+            {"$project": {"id": 1, "chef.active": 1}}]):
+        mit_hauptkonto.add(d["id"])
+        chefs = d.get("chef") or []
+        if chefs and chefs[0].get("active") is False:
+            gesperrt.add(d["id"])
     rows = db.users.aggregate([
         {"$match": {"role": "dealer", "dealer_id": {"$nin": [None, ""]}}},
         {"$sort": {"created_at": 1}},
         {"$group": {"_id": "$dealer_id", "active": {"$first": "$active"}}},
         {"$match": {"active": False}},
     ])
-    return {r["_id"] async for r in rows}
+    async for r in rows:
+        if r["_id"] not in mit_hauptkonto:
+            gesperrt.add(r["_id"])
+    return gesperrt
 
 
 # Kontonummer (13.09.2026), Schritt 5: die plattformweite E-Mail-Pruefung

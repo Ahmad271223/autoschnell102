@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { TrendingUp, UserPlus, Info } from "lucide-react";
+import { useFeatures } from "@/lib/features";
 
 /**
  * Mitarbeiter / Sucher-Übersicht + Weiterverkaufsplan.
@@ -23,20 +24,26 @@ export default function Team() {
   const [plan, setPlan] = useState(null);
   const [sucherPlans, setSucherPlans] = useState(null);
 
+  // Go-Live-Schalter (15.09.2026): der Weiterverkaufsplan gehoert zum
+  // Marktplatz — ausgeschaltet wird er weder geladen noch angezeigt (die
+  // Route antwortet dann mit 503 und haette die ganze Seite leer gelassen).
+  const features = useFeatures();
   const load = useCallback(async () => {
     try {
-      const [s, p, sp] = await Promise.all([
+      const [s, sp] = await Promise.all([
         api.get("/dealer/sucher"),
-        api.get("/dealer/sale-plan"),
         api.get("/dealer/sucher-plans"),
       ]);
       setSucher(s.data);
-      setPlan(p.data);
       setSucherPlans(sp.data.plans);
     } catch (e) {
       toast.error(errMsg(e, "Team konnte nicht geladen werden"));
     }
-  }, []);
+    if (features.marktplatz) {
+      try { const p = await api.get("/dealer/sale-plan"); setPlan(p.data); }
+      catch { setPlan(null); }
+    }
+  }, [features.marktplatz]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -91,6 +98,7 @@ export default function Team() {
       </div>
 
       {/* Weiterverkaufsplan */}
+      {features.marktplatz && (
       <div className="mt-6 tactical-card p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -146,6 +154,7 @@ export default function Team() {
             : "Paketwechsel erfolgt über den Betreiber — dein Klick sendet eine Anfrage. Gezählt werden nur neu veröffentlichte Fahrzeuge im Zeitraum; Entwürfe zählen nie."}
         </div>
       </div>
+      )}
 
       {/* Sucher-Liste (read-only) */}
       <div className="mt-6 tactical-card overflow-hidden">

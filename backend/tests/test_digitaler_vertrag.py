@@ -98,7 +98,10 @@ def test_02_digitale_fassung_text_statt_linien():
     t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
                                     contract=c, digital=True))
     assert "Mit ihrer Unterschrift" not in _flach(t)
-    assert "UNTERSCHRIFTEN" in t.upper()          # Kopf bleibt, Linien nicht
+    # Wunsch Ahmad (15.09.2026): die Kundenfassung hat keinen Abschnitt
+    # "Unterschriften" mehr (nur der Gueltigkeitssatz).
+    assert "UNTERSCHRIFTEN" not in t.upper()
+    assert "ohne Unterschrift gültig" in _flach(t)
     assert "digitale Ausfertigung" in t
     f = _flach(t)
     # Beschluss 10.09.2026: die vier Klauseln unter "Allgemeine
@@ -438,7 +441,9 @@ def test_25_termin_verschieben_archiviert_beide_fassungen(welt):
     assert "05.04.2099" in neu and "Mit ihrer Unterschrift" not in neu
     # Runde 22: das Empfangsdatum stand auf dem alten Abholtag und wandert mit
     assert doc["contract_data"]["empfang_datum"] == "2099-04-05"
-    assert "Datum und Ort: 05.04.2099, Hannover" in neu
+    # 15.09.2026: Empfangsbestaetigung nur in der Druckfassung
+    druck = _flach(_text(base64.b64decode(doc["pdf_b64"])))
+    assert "Datum und Ort: 05.04.2099, Hannover" in druck and "Datum und Ort" not in neu
     versionen = requests.get(f"{API}/contracts/{welt['contract_chef']}/versions",
                              headers=welt["H"], timeout=30).json()
     assert versionen and versionen[0]["version"] == 1
@@ -448,7 +453,7 @@ def test_25_termin_verschieben_archiviert_beide_fassungen(welt):
     assert r.status_code == 200
     alt = _flach(_text(r.content))
     assert "01.04.2099" in alt and "Mit ihrer Unterschrift" not in alt
-    assert "Datum und Ort: 01.04.2099, Hannover" in alt
+    assert "Datum und Ort" not in alt          # 15.09.2026: Empfang nur in der Druckfassung
     r = requests.get(f"{API}/contracts/{welt['contract_chef']}/versions/1/pdf",
                      headers=welt["H"], timeout=60)
     assert "Mit ihrer Unterschrift" in _flach(_text(r.content))

@@ -1033,6 +1033,13 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             mn = ps_to_kw(max(1, cur_ps - v_ps))
             mx = ps_to_kw(cur_ps + v_ps)
             params.append(("pw", f"{mn}:{mx}"))
+        elif mode == "min_ps":
+            # 15.09.2026 (Wunsch Ahmad): "-X PS und aufwaerts" — nur eine
+            # Untergrenze, nach oben offen (pw=MIN: wie fr=YYYY:).
+            v_ps = int(pwr_rule.get("value", 5))
+            cur_ps = vehicle.get("power_ps") or kw_to_ps(kw)
+            mn = ps_to_kw(max(1, int(cur_ps) - v_ps))
+            params.append(("pw", f"{mn}:"))
 
     # Kraftstoff / Getriebe / Tueren (compact). Runde 24 (11.09.2026): keine
     # Kategorie (c=…) mehr — der Filter ist fuer beide Portale entfallen,
