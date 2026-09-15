@@ -313,6 +313,9 @@ def test_36_loeschfehler_beim_rollback_wird_vorgemerkt(monkeypatch):
 # =====================================================================
 def test_37_nur_ersetzte_version_1_ergibt_version_2():
     async def lauf(db, D, t):
+        # Runde 8 (15.09.2026, L3-1): submit_report prueft nach dem Insert, ob das
+        # Fahrerkonto noch existiert — im Testbett muss es dafuer angelegt sein.
+        await db.driver_accounts.insert_one({"id": t.driver["id"], "active": True})
         a = f"a_{t.tag}"
         await db.dealer_drivers.insert_one(t.link())
         await db.appointments.insert_one(t.appt(a, "offen"))

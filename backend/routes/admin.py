@@ -801,6 +801,27 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
 # Loeschvorschau und vollstaendige Firmenloeschung. Bewusst NICHT dabei:
 # activity_logs (Plattform-Nachvollziehbarkeit) und payment_transactions
 # (Buchhaltungs-/Aufbewahrungspflicht).
+async def _audit_pseudonymisieren(user_id: str, pseudonym: str) -> int:
+    """Runde 8 (15.09.2026, Liste 3 Nr. 6): Spuren eines geloeschten Kontos im
+    Audit-Log wie beim Fahrer (fahrer_konto_anonymisieren): Handelnder und Bezug
+    (ref) auf das Pseudonym, personenbezogene Meta-Felder (E-Mail, Kontonummer,
+    Anzeigename, IP, Geraet) weg. Der Eintrag selbst bleibt (Nachvollziehbarkeit,
+    Frist LOG_AUFBEWAHRUNG_TAGE). Liefert die Zahl geaenderter Eintraege."""
+    felder = {"meta.email": "", "meta.kontonummer": "", "meta.display_name": "",
+              "meta.ip": "", "meta.geraet": "", "meta.driver_code": ""}
+    n = 0
+    for feld in ("user_id", "ref"):
+        r = await db.activity_logs.update_many(
+            {feld: user_id}, {"$set": {feld: pseudonym}, "$unset": felder})
+        n += r.modified_count
+    return n
+
+
+def _nutzer_pseudonym(user_id: str) -> str:
+    """Deterministisch (SHA-256 der Konto-ID, 8 Hex) wie bei zugang_grants."""
+    return "geloescht:" + hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:8]
+
+
 _COMPANY_COLLECTIONS = (
     "subscriptions", "vehicles", "appointments",
     "generated_pdfs", "generated_pdf_versions", "resale_listings",
@@ -810,6 +831,10 @@ _COMPANY_COLLECTIONS = (
     # Loeschvorschau faelschlich "0 Fahrer" zaehlen. Fahrer loescht der
     # Admin ueber DELETE /admin/drivers/{id}.
     "dealer_drivers", "dealer_invites",
+    # Runde 8 (15.09.2026, Liste 3 Nr. 4): Netzwerk-Mitgliedschaften
+    # (Kaeufer <-> Firma) blieben stehen — Kaeufer bekamen weiter die
+    # network_dealer_ids einer Firma, die es nicht mehr gab.
+    "network_members",
     "plan_requests", "vehicle_comparisons",
     # Runde 18: Kaufvorgaenge (Umbau 09.09.2026) tragen dealer_id, Sucher,
     # Vertrag, Fahrzeug und Kaufpreis — blieben bei der Firmenloeschung liegen.
@@ -949,11 +974,14 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # fahrer_konto_anonymisieren: mehrfach laufende Loeschung ergibt
         # denselben Wert, mehrere Grants desselben Kontos bleiben als
         # zusammengehoerig erkennbar, ohne Rueckschluss auf die Person.
-        pseudonym = "geloescht:" + hashlib.sha256(
-            user_id.encode("utf-8")).hexdigest()[:8]
+        pseudonym = _nutzer_pseudonym(user_id)
         await db.zugang_grants.update_many(
             {"user_id": user_id},
             {"$set": {"user_id": pseudonym, "pseudonymisiert_at": jetzt}})
+        # Runde 8 (15.09.2026, Liste 3 Nr. 6): Anmelde-Eintraege (E-Mail bzw.
+        # Kontonummer, IP, Geraet) und Admin-Aktionen mit diesem Konto als ref
+        # blieben bisher unveraendert im Audit-Log.
+        await _audit_pseudonymisieren(user_id, pseudonym)
         # Runde 13: B8 — Nutzerkennung in Beweis-Snapshots pseudonymisieren.
         from snapshot_service import snapshots_pseudonymisieren
         await snapshots_pseudonymisieren(db, user_id=user_id)
@@ -962,9 +990,9 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # keinen 500 mehr ausloesen, dessen Wiederholung auf 404 laeuft.
         await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                                   "admin.user.geloescht", ref=user_id,
-                                  # Kontonummer (13.09.2026): keine E-Mail im Audit
-                                  meta={"kontonummer": u.get("kontonummer", ""),
-                                        "rolle": u.get("role", ""),
+                                  # Kontonummer (13.09.2026): keine E-Mail im Audit;
+                                  # Runde 8: auch keine Kontonummer mehr
+                                  meta={"rolle": u.get("role", ""),
                                         "fahrzeuge_uebernommen": uebernommen,
                                         "wiederaufnahme": grab.get("status") == "laeuft"})
         return {"ok": True, "geloescht": "nur_nutzer"}
@@ -1077,6 +1105,10 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # dealers — erst jetzt verschwindet die Chef-ID, ueber die ein
         # erneuter Aufruf den Vorgang findet. (password_resets gibt es seit
         # Kontonummer 13.09.2026, Schritt 5 nicht mehr.)
+        # Runde 8 (15.09.2026, Liste 3 Nr. 6): Audit-Spuren aller Konten der
+        # Firma pseudonymisieren, bevor die Konten verschwinden.
+        async for konto in db.users.find({"dealer_id": dealer_id}, {"_id": 0, "id": 1}):
+            await _audit_pseudonymisieren(konto["id"], _nutzer_pseudonym(konto["id"]))
         res = await db.users.delete_many({"dealer_id": dealer_id})
         if res.deleted_count:
             geloescht["users"] = res.deleted_count
@@ -1088,8 +1120,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
     # keinen 500 mehr liefern (die Wiederholung liefe auf 404).
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                               "admin.firma.geloescht", ref=dealer_id or user_id,
-                              meta={"kontonummer": u.get("kontonummer", ""),
-                                    "geloescht": geloescht,
+                              meta={"geloescht": geloescht,
                                     "wiederaufnahme": wiederaufnahme})
     return {"ok": True, "geloescht": geloescht or "nur_nutzer"}
 
@@ -1702,7 +1733,19 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
             if n < 0:
                 raise HTTPException(400, "custom_quota darf nicht negativ sein")
             plan["custom_quota"] = n or None
-    await db.dealers.update_one({"id": dealer_id}, {"$set": {"sale_plan": plan}})
+    # Runde 8 (15.09.2026, Liste 4 Nr. 13): Stand-Pruefung — zwei parallele
+    # Admin-Aktionen (Verlaengerung, Wechsel, Kontingent) lasen denselben alten
+    # Ablauf und ueberschrieben sich gegenseitig; jetzt greift nur die erste,
+    # die zweite bekommt "bitte neu laden".
+    res = await db.dealers.update_one(
+        {"id": dealer_id,
+         "sale_plan.tier": old.get("tier"),
+         "sale_plan.valid_until": old.get("valid_until"),
+         "sale_plan.period_start": old.get("period_start")},
+        {"$set": {"sale_plan": plan}})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Das Verkaufspaket wurde gerade parallel geändert — "
+                                 "bitte neu laden und erneut speichern.")
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.verkaufsplan.gesetzt", ref=dealer_id,
                        meta={"tier": tier})

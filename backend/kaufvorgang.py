@@ -54,6 +54,45 @@ def bereich(user) -> Dict[str, Any]:
     return b
 
 
+async def _verweis_alarm(ref: str, **details) -> None:
+    """Phase 2 (2.3): Betriebsalarm bei einem Vorgangs-Verweis, der nicht zum
+    Vertrag/Termin passt (beschaedigter oder alter Zeiger). Best effort."""
+    try:
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "kaufvorgang_verweis_falsch", ref=ref, **details)
+    except Exception:  # noqa: BLE001
+        log.exception("Alarm kaufvorgang_verweis_falsch (%s) nicht abgesetzt", ref)
+
+
+def _passt(kv: dict, **erwartet) -> bool:
+    """Phase 2 (15.09.2026, 2.3 / G1 G2 G15): Ein Vorgang gehoert nur dann zum
+    Vertrag bzw. Termin, wenn Firma, Vertrag und Fahrzeug uebereinstimmen.
+    Leere Erwartungen (Termin ohne Fahrzeug/Vertrag) werden nicht geprueft."""
+    for feld, wert in erwartet.items():
+        if wert and (kv.get(feld) or None) != wert:
+            return False
+    return True
+
+
+async def _nacharbeit_merken(kv: dict, ziel: Optional[str]) -> None:
+    """Phase 2 (2.4 / E7 G4): Fahrzeug-Zusammenfassung gescheitert (None) ->
+    Merker nacharbeit_offen am Vorgang, den cleanup_service.
+    kaufvorgang_nacharbeit_nachholen abarbeitet; gelungen -> Merker weg.
+    Best effort — der Vorgangs-Write selbst bleibt gueltig."""
+    try:
+        if ziel is None:
+            await db.kaufvorgaenge.update_one({"id": kv["id"]},
+                                              {"$set": {"nacharbeit_offen": True}})
+            kv["nacharbeit_offen"] = True
+        elif kv.get("nacharbeit_offen"):
+            await db.kaufvorgaenge.update_one(
+                {"id": kv["id"]},
+                {"$unset": {"nacharbeit_offen": "", "nacharbeit_versuche": ""}})
+            kv.pop("nacharbeit_offen", None)
+    except Exception:  # noqa: BLE001
+        log.exception("Nacharbeitsmerker fuer Kaufvorgang %s nicht geschrieben", kv.get("id"))
+
+
 async def anlegen(*, dealer_id: str, user_id: str, vehicle_id: str, contract_id: str,
                   purchase_price=None, status: str = "vertrag_erstellt",
                   kaufvorgang_id: Optional[str] = None,
@@ -79,14 +118,31 @@ async def anlegen(*, dealer_id: str, user_id: str, vehicle_id: str, contract_id:
 async def fuer_vertrag(contract: dict) -> Optional[dict]:
     if not contract:
         return None
+    zeiger_falsch = False
     if contract.get("kaufvorgang_id"):
         kv = await db.kaufvorgaenge.find_one({"id": contract["kaufvorgang_id"]}, {"_id": 0})
-        if kv:
+        if kv and _passt(kv, contract_id=contract.get("id"), dealer_id=contract.get("dealer_id"),
+                         vehicle_id=contract.get("vehicle_id")):
             return kv
+        if kv:
+            # Phase 2 (2.3, G1): der Zeiger fuehrt zu einem fremden Vorgang —
+            # nicht folgen, melden, ueber den Vertrag selbst suchen.
+            zeiger_falsch = True
+            log.warning("Vertrag %s zeigt auf fremden Kaufvorgang %s",
+                        contract.get("id"), kv.get("id"))
+            await _verweis_alarm(f"vertrag:{contract.get('id')}", kaufvorgang_id=kv.get("id"))
     if contract.get("id"):
         kv = await db.kaufvorgaenge.find_one({"contract_id": contract["id"]}, {"_id": 0})
         if kv:
-            return kv
+            if _passt(kv, dealer_id=contract.get("dealer_id"), vehicle_id=contract.get("vehicle_id")):
+                return kv
+            # Phase 2 (2.3, G15): der Vorgang zum Vertrag gehoert einer anderen
+            # Firma / einem anderen Fahrzeug — nicht als gueltig uebernehmen.
+            log.error("Kaufvorgang %s passt nicht zu Vertrag %s (Firma/Fahrzeug)",
+                      kv.get("id"), contract["id"])
+            await _verweis_alarm(f"vertrag:{contract['id']}", kaufvorgang_id=kv.get("id"),
+                                 grund="firma_oder_fahrzeug")
+            return None
         # Selbstheilung: der Vertrag traegt eine kaufvorgang_id, der Vorgang
         # fehlt (Anlage nach dem Vertrags-Insert gescheitert) -> nachlegen.
         if contract.get("dealer_id") and contract.get("vehicle_id") and contract.get("user_id"):
@@ -94,7 +150,7 @@ async def fuer_vertrag(contract: dict) -> Optional[dict]:
                 dealer_id=contract["dealer_id"], user_id=contract["user_id"],
                 vehicle_id=contract["vehicle_id"], contract_id=contract["id"],
                 purchase_price=contract.get("purchase_price"),
-                kaufvorgang_id=contract.get("kaufvorgang_id") or None,
+                kaufvorgang_id=None if zeiger_falsch else (contract.get("kaufvorgang_id") or None),
                 appointment_id=contract.get("appointment_id"))
     return None
 
@@ -102,21 +158,54 @@ async def fuer_vertrag(contract: dict) -> Optional[dict]:
 async def fuer_termin(appt: dict) -> Optional[dict]:
     if not appt:
         return None
+    # Phase 2 (2.3): Aufrufer geben oft nur id/contract_id/kaufvorgang_id mit —
+    # Firma, Fahrzeug und Vertrag fuer die Gegenpruefung nachladen.
+    if appt.get("id") and not all(k in appt for k in ("dealer_id", "vehicle_id", "contract_id")):
+        voll = await db.appointments.find_one(
+            {"id": appt["id"]},
+            {"_id": 0, "dealer_id": 1, "vehicle_id": 1, "contract_id": 1, "kaufvorgang_id": 1})
+        if voll:
+            appt = {**voll, **{k: v for k, v in appt.items() if v is not None}}
+    erwartet = {"dealer_id": appt.get("dealer_id"), "vehicle_id": appt.get("vehicle_id"),
+                "contract_id": appt.get("contract_id")}
     if appt.get("kaufvorgang_id"):
         kv = await db.kaufvorgaenge.find_one({"id": appt["kaufvorgang_id"]}, {"_id": 0})
-        if kv:
+        if kv and _passt(kv, **erwartet):
             return kv
+        if kv:
+            # Phase 2 (2.3, G2/G15): Zeiger auf einen fremden Vorgang — melden,
+            # am Termin loesen und ueber den Vertrag neu ermitteln.
+            log.warning("Termin %s zeigt auf fremden Kaufvorgang %s", appt.get("id"), kv.get("id"))
+            await _verweis_alarm(f"termin:{appt.get('id')}", kaufvorgang_id=kv.get("id"))
+            if appt.get("id"):
+                await db.appointments.update_one(
+                    {"id": appt["id"], "kaufvorgang_id": kv["id"]},
+                    {"$unset": {"kaufvorgang_id": ""}})
     if appt.get("contract_id"):
         kv = await db.kaufvorgaenge.find_one({"contract_id": appt["contract_id"]}, {"_id": 0})
         if kv:
-            return kv
+            if _passt(kv, dealer_id=appt.get("dealer_id"), vehicle_id=appt.get("vehicle_id")):
+                if appt.get("id") and appt.get("kaufvorgang_id") != kv["id"]:
+                    # Zeiger am Termin nachziehen (fehlte oder war falsch)
+                    await db.appointments.update_one({"id": appt["id"]},
+                                                     {"$set": {"kaufvorgang_id": kv["id"]}})
+                return kv
+            log.error("Kaufvorgang %s passt nicht zu Termin %s (Firma/Fahrzeug)",
+                      kv.get("id"), appt.get("id"))
+            await _verweis_alarm(f"termin:{appt.get('id')}", kaufvorgang_id=kv.get("id"),
+                                 grund="firma_oder_fahrzeug")
+            return None
         # Runde 18: Der Termin zeigt auf einen Vertrag, dessen Vorgang fehlt
         # (Anlage nach dem Vertrags-Insert gescheitert; der Auto-Termin trug
         # trotzdem die kaufvorgang_id). Ueber den Vertrag nachlegen und den
         # Termin auf den echten Vorgang zeigen lassen — vorher fiel der
         # Aufrufer dauerhaft auf die direkte Fahrzeugstatus-Aenderung zurueck.
+        # Phase 2 (2.3, G3): den Vertrag nur innerhalb der Firma laden.
+        vertrag_filt: Dict[str, Any] = {"id": appt["contract_id"]}
+        if appt.get("dealer_id"):
+            vertrag_filt["dealer_id"] = appt["dealer_id"]
         contract = await db.generated_pdfs.find_one(
-            {"id": appt["contract_id"]},
+            vertrag_filt,
             {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "vehicle_id": 1,
              "purchase_price": 1, "kaufvorgang_id": 1, "appointment_id": 1})
         kv = await fuer_vertrag(contract) if contract else None
@@ -144,7 +233,11 @@ async def status_setzen(kaufvorgang_id: str, status: str, *, user: Optional[dict
         {"id": kaufvorgang_id}, {"$set": setzen},
         projection={"_id": 0}, return_document=ReturnDocument.AFTER)
     if doc:
-        await fahrzeug_status_aggregieren(doc["vehicle_id"], doc["dealer_id"], user=user)
+        # Phase 2 (2.4, E7/G4): Ergebnis der Zusammenfassung nicht mehr
+        # verwerfen — None heisst "Fahrzeug stimmt noch nicht", Merker setzen.
+        ziel = await fahrzeug_status_aggregieren(doc["vehicle_id"], doc["dealer_id"], user=user)
+        doc["fahrzeug_status"] = ziel
+        await _nacharbeit_merken(doc, ziel)
     return doc
 
 
@@ -154,19 +247,30 @@ async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
     nicht abgeholt, storniert; alles andere = Abholung geplant). Liefert
     False, wenn der Termin keinen Kaufvorgang hat (manueller Termin ohne
     Vertrag) — dann darf der Aufrufer wie frueher direkt am Fahrzeug
-    arbeiten."""
+    arbeiten. Phase 2: scheiterte die Fahrzeug-Zusammenfassung, traegt der
+    Vorgang danach nacharbeit_offen (Aufrufer lesen ihn per fuer_termin)."""
     kv = await fuer_termin(appt)
     if not kv:
         return False
     neu = _TERMIN_ZU_STATUS.get(termin_status, "abholung_geplant")
+    if kv.get("status") == "abgeholt" and neu == "abholung_geplant" and appt.get("id") \
+            and await db.pickup_protocols.count_documents(
+                {"appointment_id": appt["id"], "status": "final",
+                 "superseded": {"$ne": True}}, limit=1):
+        # Phase 2 (2.6, D15): Wieder-Oeffnen eines abgeholten Termins mit
+        # unterschriebenem Protokoll — die Abholung ist belegt, der Vorgang
+        # bleibt abgeholt (eine Korrektur-Version aendert Preis/Details,
+        # nicht den Kauf). Vorher fiel der Vorgang auf "Abholung geplant".
+        neu = "abgeholt"
     if kv.get("status") != neu:
         await status_setzen(kv["id"], neu, user=user)
-    else:
-        # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
-        # Zusammenfassung kann beim letzten Mal gescheitert sein (wird dort
-        # abgefangen). Beim Wiederholen trotzdem abgleichen — sonst blieb das
-        # Fahrzeug dauerhaft falsch.
-        await fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
+        return True
+    # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
+    # Zusammenfassung kann beim letzten Mal gescheitert sein (wird dort
+    # abgefangen). Beim Wiederholen trotzdem abgleichen — sonst blieb das
+    # Fahrzeug dauerhaft falsch.
+    ziel = await fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
+    await _nacharbeit_merken(kv, ziel)
     return True
 
 
@@ -215,6 +319,7 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
         # Lauf, der danach geschrieben hat, aendert Vorgang oder Preis am
         # Fahrzeug, und unser Write scheitert; wer vor unserem Lesen schrieb,
         # hat die Vorgaenge davor gelesen, wir sehen also mindestens deren Stand.
+        umkaempft = False
         for versuch in (1, 2):
             v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
                                            {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1,
@@ -227,7 +332,7 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             grund = {"vehicle_id": vehicle_id, "dealer_id": dealer_id}
             stati = set(await db.kaufvorgaenge.distinct("status", grund))
             if not stati:
-                return None
+                return ""          # nichts zu tun (kein Vorgang) — kein Fehler
             aktuell = (v or {}).get("lifecycle") or "verglichen"
             if v is None or "abgeholt" not in stati or aktuell in ABGESCHLOSSEN_FAHRZEUG:
                 break
@@ -273,6 +378,9 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             if res.matched_count:
                 break
             if versuch == 2:
+                # Phase 2 (2.4, G6): zweimal verloren -> kein Erfolg melden; der
+                # Merker am Vorgang laesst den Aufraeum-Job spaeter neu ansetzen.
+                umkaempft = True
                 log.warning("Massgeblicher Vorgang fuer %s nach Neulesen weiter "
                             "umkaempft — Fahrzeug bleibt beim festgehaltenen", vehicle_id)
         if "abgeholt" in stati:
@@ -283,8 +391,14 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             ziel = "gekauft"
         else:
             ziel = "nicht_abgeholt" if "nicht_abgeholt" in stati else "storniert"
+        schritt_fehlt = False
         for schritt in _schritte(aktuell, ziel):
-            await try_set_lifecycle(vehicle_id, dealer_id, schritt, user=user)
+            # Phase 2 (2.4, G5): ein uebersprungener Schritt (Stand-Pruefung
+            # verloren, Uebergang nicht erlaubt) ist KEIN Erfolg mehr.
+            if not await try_set_lifecycle(vehicle_id, dealer_id, schritt, user=user):
+                schritt_fehlt = True
+        if umkaempft or schritt_fehlt:
+            return None
         return ziel
     except Exception:
         log.exception("Fahrzeugstatus fuer %s konnte nicht zusammengefasst werden", vehicle_id)

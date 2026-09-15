@@ -556,41 +556,77 @@ async def remove_network_member(buyer_user_id: str,
     await db.dealer_invites.update_many(
         {"dealer_id": user["dealer_id"], "expires_at": {"$gt": now_iso()}},
         {"$addToSet": {"gesperrt_fuer": buyer_user_id}})
+    # Phase 2 (2.7, B10): Haelt der Kaeufer bei dieser Firma eine Reservierung,
+    # faellt sie mit dem Widerruf — sonst blieben Inserat und Fahrzeug fuer
+    # einen gesperrten Kaeufer reserviert.
+    freigegeben = []
+    async for l in db.resale_listings.find(
+            {"dealer_id": user["dealer_id"], "status": "reserviert",
+             "reserved_for": buyer_user_id}, {"_id": 0, "id": 1}):
+        await reservierung_zurueckgeben(l["id"], buyer_user_id)
+        freigegeben.append(l["id"])
     r = await db.network_members.delete_one(mitglied_filt)
     # Nur wer tatsaechlich geloescht hat, schreibt das Audit (Doppelklick auf
     # zwei Servern: ein Eintrag); ok auch, wenn ein paralleler Aufruf schneller war.
     if r.deleted_count:
         await log_activity_sicher(user["dealer_id"], user["id"],
-                                  "netzwerk.mitglied.entfernt", ref=buyer_user_id)
-    return {"ok": True}
+                                  "netzwerk.mitglied.entfernt", ref=buyer_user_id,
+                                  meta=({"reservierungen_freigegeben": freigegeben}
+                                        if freigegeben else {}))
+    return {"ok": True, **({"reservierungen_freigegeben": freigegeben} if freigegeben else {})}
+
+
+async def inserat_fahrzeug_nachziehen(listing_id: str, ziel: str) -> bool:
+    """Phase 2 (15.09.2026, 2.7 / A8 B9 B10): Fahrzeug-Lebenszyklus zum Inserat
+    nachziehen (reserviert bzw. veroeffentlicht). Gelingt es nicht, bleibt der
+    Merker lifecycle_nacharbeit am Inserat, den cleanup_service.
+    inserat_fahrzeug_nacharbeit_nachholen abarbeitet — vorher gab es nur einen
+    Alarm, und das Fahrzeug blieb falsch. Liefert True bei Erfolg."""
+    try:
+        l = await db.resale_listings.find_one(
+            {"id": listing_id}, {"_id": 0, "vehicle_id": 1, "dealer_id": 1})
+        if not l or not l.get("vehicle_id"):
+            return True
+        from lifecycle import LifecycleError, set_lifecycle
+        try:
+            await set_lifecycle(l["vehicle_id"], l.get("dealer_id"), ziel)
+        except LifecycleError as exc:
+            await db.resale_listings.update_one(
+                {"id": listing_id}, {"$set": {"lifecycle_nacharbeit": ziel}})
+            import betrieb as _betrieb
+            await _betrieb.alarm(db, "inserat_fahrzeug_desync", ref=listing_id,
+                                 vehicle_id=l["vehicle_id"], ziel=ziel, fehler=str(exc)[:300])
+            return False
+        await db.resale_listings.update_one(
+            {"id": listing_id, "lifecycle_nacharbeit": {"$exists": True}},
+            {"$unset": {"lifecycle_nacharbeit": "", "nacharbeit_versuche": ""}})
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("Fahrzeug zu Inserat %s nicht auf %s gesetzt", listing_id, ziel)
+        try:
+            await db.resale_listings.update_one(
+                {"id": listing_id}, {"$set": {"lifecycle_nacharbeit": ziel}})
+        except Exception:  # noqa: BLE001
+            log.exception("Merker lifecycle_nacharbeit fuer Inserat %s nicht gesetzt", listing_id)
+        return False
 
 
 async def reservierung_zurueckgeben(listing_id: str, buyer_user_id: str) -> None:
-    """Reservierung eines Inserats fuer diesen Kaeufer aufheben (idempotent)."""
-    await db.resale_listings.update_one(
+    """Reservierung eines Inserats fuer diesen Kaeufer aufheben (idempotent).
+    Phase 2 (2.7, B9): das Fahrzeug geht mit zurueck auf 'veroeffentlicht'."""
+    r = await db.resale_listings.update_one(
         {"id": listing_id, "status": "reserviert", "reserved_for": buyer_user_id},
         {"$set": {"status": "veroeffentlicht", "updated_at": now_iso()},
          "$unset": {"reserved_for": ""}})
+    if r.matched_count:
+        await inserat_fahrzeug_nachziehen(listing_id, "veroeffentlicht")
 
 
 async def fahrzeug_reserviert_markieren(listing_id: str) -> None:
     """Pruefung 14.09.2026 (Liste 1, Nr. 21): Der Verhandlungsweg setzte nur das
     Inserat auf 'reserviert', das Fahrzeug blieb 'veroeffentlicht'. Jetzt wird
-    der Fahrzeug-Lebenszyklus nachgezogen (best effort, Alarm bei Desync)."""
-    try:
-        l = await db.resale_listings.find_one({"id": listing_id},
-                                              {"_id": 0, "vehicle_id": 1, "dealer_id": 1})
-        if not l or not l.get("vehicle_id"):
-            return
-        from lifecycle import LifecycleError, set_lifecycle
-        try:
-            await set_lifecycle(l["vehicle_id"], l.get("dealer_id"), "reserviert")
-        except LifecycleError as exc:
-            import betrieb as _betrieb
-            await _betrieb.alarm(db, "inserat_fahrzeug_desync", ref=listing_id,
-                                 vehicle_id=l["vehicle_id"], fehler=str(exc)[:300])
-    except Exception:  # noqa: BLE001
-        log.exception("Fahrzeug zu Inserat %s nicht auf reserviert gesetzt", listing_id)
+    der Fahrzeug-Lebenszyklus nachgezogen (Phase 2: mit Merker statt Alarm)."""
+    await inserat_fahrzeug_nachziehen(listing_id, "reserviert")
 
 
 async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:

@@ -64,7 +64,10 @@ export default function Termine() {
   const save = async (a) => {
     try {
       if (a.id) {
-        const { data } = await api.put(`/appointments/${a.id}`, a);
+        // Phase 2 (2.8): geladener Stand mit — wer auf einem veralteten Stand
+        // speichert, bekommt 409 "bitte neu laden" statt den Kollegen zu überschreiben.
+        const { data } = await api.put(`/appointments/${a.id}`,
+          { ...a, ...(a.updated_at ? { stand: a.updated_at } : {}) });
         // Verschobenes Abholdatum uebernimmt der Server automatisch in den
         // bestehenden Kaufvertrag (gleiche Vertragsnummer, PDF wird neu
         // erzeugt). Frueher entstand hier per Rueckfrage ein ZWEITER
@@ -84,6 +87,8 @@ export default function Termine() {
       load();
     } catch (err) {
       toast.error(errMsg(err, "Fehler beim Speichern"));
+      // Veralteter Stand (409): Liste neu laden, damit der aktuelle Stand sichtbar ist.
+      if (err?.response?.status === 409) load();
     }
   };
 

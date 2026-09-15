@@ -152,16 +152,20 @@ async def set_lifecycle(
 
 
 async def try_set_lifecycle(vehicle_id: str, dealer_id: str, new_state: str, *,
-                            user: Optional[dict] = None) -> None:
+                            user: Optional[dict] = None) -> bool:
     """Best-effort-Variante für Hooks in bestehenden Flows: ein ungültiger
     Übergang (z.B. zweiter Vertrag für dasselbe Fahrzeug) darf den
-    Hauptvorgang niemals abbrechen."""
+    Hauptvorgang niemals abbrechen. Phase 2 (15.09.2026, G5): liefert True,
+    wenn der Status gesetzt wurde (oder schon stand), sonst False — die
+    Fahrzeug-Zusammenfassung meldet dann keinen falschen Erfolg mehr."""
     try:
         await set_lifecycle(vehicle_id, dealer_id, new_state, user=user)
+        return True
     except LifecycleError as exc:
         # Runde 17: nicht mehr stumm — im Log nachvollziehbar, warum ein
         # Fahrzeug nach Vertrag/Termin nicht mitgezogen wurde.
         log.info("Lifecycle uebersprungen %s -> %s: %s", vehicle_id, new_state, exc)
+        return False
 
 
 async def migrate_missing_lifecycles() -> int:

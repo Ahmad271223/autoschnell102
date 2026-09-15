@@ -287,6 +287,21 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
         raise HTTPException(404, "Kein Fahrer mit diesem Code gefunden")
     if not da.get("active", True):
         raise HTTPException(409, "Dieser Fahrer-Account ist deaktiviert")
+    # Runde 8 (15.09.2026, Liste 3 Nr. 2): Blieb beim Entfernen die Termin-
+    # bereinigung haengen (Alarm fahrer_bereinigung_fehlgeschlagen), traegt ein
+    # alter Termin noch driver_id — mit der neuen Verknuepfung haette der Fahrer
+    # wieder Zugriff auf Abholauftrag, Vertrag und Protokoll. Vor dem Wieder-
+    # Hinzufuegen nachholen: ohne Verknuepfung kann es keine gueltige Zuweisung
+    # geben (appointments._fahrer_pruefen), also ist jeder Treffer ein Rest.
+    if not await db.dealer_drivers.find_one(
+            {"dealer_id": user["dealer_id"], "driver_account_id": da["id"]}, {"_id": 1}):
+        try:
+            await _termine_vom_fahrer_trennen(user["dealer_id"], da["id"])
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Alt-Termine vor dem Wieder-Hinzufuegen von %s nicht bereinigt",
+                          da["id"])
+            raise HTTPException(503, "Alte Termine dieses Fahrers konnten nicht bereinigt "
+                                     f"werden — bitte erneut versuchen ({str(exc)[:80]})")
     # Runde 15 (Nr. 2): kein find_one+insert mehr — der Unique-Index
     # (dealer_id, driver_account_id) entscheidet atomar; vorher lieferten
     # zwei gleichzeitige Hinzufuegen-Klicks einen 500 statt 409.
@@ -326,6 +341,28 @@ async def list_drivers(user=Depends(current_firma)):
     return out
 
 
+async def _termine_vom_fahrer_trennen(dealer_id: str, driver_id: str) -> tuple:
+    """Termine einer Firma vom Fahrer trennen (delete_driver, add_driver_by_code):
+    offene verlieren die Zuweisung, abgeschlossene behalten sie nur noch in
+    driver_id_hist (Beweis fuer den Chef, kein Zugriff der Fahrer-App mehr).
+    Liefert (offen_getrennt, abgeschlossen_archiviert)."""
+    jetzt = now_iso()
+    offen = await db.appointments.update_many(
+        {"dealer_id": dealer_id, "driver_id": driver_id,
+         "status": {"$in": _OFFEN_WERTE}},
+        {"$unset": {"driver_id": ""},
+         "$set": {"zuteilung": None, "updated_at": jetzt}},
+    )
+    # Update-Pipeline: driver_id atomar nach driver_id_hist verschieben.
+    geschlossen = await db.appointments.update_many(
+        {"dealer_id": dealer_id, "driver_id": driver_id},
+        [{"$set": {"driver_id_hist": "$driver_id",
+                   "updated_at": {"$literal": jetzt}}},
+         {"$unset": "driver_id"}],
+    )
+    return offen.modified_count, geschlossen.modified_count
+
+
 @router.delete("/drivers/{driver_id}")
 async def delete_driver(driver_id: str, user=Depends(current_firma)):
     """Verknüpfung entfernen. Der Fahrer-Account selbst bleibt bestehen."""
@@ -355,25 +392,11 @@ async def delete_driver(driver_id: str, user=Depends(current_firma)):
     # Scheitert die Terminbereinigung danach, darf der Aufruf nicht mit 500
     # enden (der Fahrer IST entfernt, ein Wiederholen faende ihn nicht
     # mehr) — stattdessen Betriebsalarm und 200 mit Hinweis.
-    jetzt = now_iso()
     offen_n = geschlossen_n = 0
     bereinigung_fehler = None
     try:
-        offen = await db.appointments.update_many(
-            {"dealer_id": user["dealer_id"], "driver_id": driver_id,
-             "status": {"$in": _OFFEN_WERTE}},
-            {"$unset": {"driver_id": ""},
-             "$set": {"zuteilung": None, "updated_at": jetzt}},
-        )
-        offen_n = offen.modified_count
-        # Update-Pipeline: driver_id atomar nach driver_id_hist verschieben.
-        geschlossen = await db.appointments.update_many(
-            {"dealer_id": user["dealer_id"], "driver_id": driver_id},
-            [{"$set": {"driver_id_hist": "$driver_id",
-                       "updated_at": {"$literal": jetzt}}},
-             {"$unset": "driver_id"}],
-        )
-        geschlossen_n = geschlossen.modified_count
+        offen_n, geschlossen_n = await _termine_vom_fahrer_trennen(
+            user["dealer_id"], driver_id)
     except Exception as exc:  # noqa: BLE001
         bereinigung_fehler = str(exc)[:300]
         log.exception("Fahrer %s entfernt, Terminbereinigung fehlgeschlagen",
@@ -431,6 +454,13 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma
             "has_more": total > len(conflicts)}
 
 
+def fahrer_pseudonym(driver_id: str) -> str:
+    """Deterministisches Pseudonym eines geloeschten Fahrer-Kontos (SHA-256
+    der alten ID, 12 Hex) — dieselbe Formel in fahrer_konto_anonymisieren
+    und in der Nachpruefung von driver_submit_report."""
+    return "geloescht:" + hashlib.sha256(driver_id.encode("utf-8")).hexdigest()[:12]
+
+
 async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
     """Spuren eines GELOESCHTEN Fahrer-Kontos pseudonymisieren (DSGVO,
     Pruefbericht 09/2026). Wird von DELETE /admin/drivers/{id} aufgerufen;
@@ -451,8 +481,7 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
 
     Liefert die Anzahl geaenderter bzw. geloeschter Datensaetze je
     Collection (plus das verwendete Pseudonym)."""
-    pseudonym = "geloescht:" + hashlib.sha256(
-        driver_id.encode("utf-8")).hexdigest()[:12]
+    pseudonym = fahrer_pseudonym(driver_id)
     jetzt = now_iso()
     # 0) Haendler-Verknuepfungen ZUERST (Audit 13.09.2026, #59): Eine
     #    parallele Chef-Zuweisung landet damit entweder VOR der Termin-
@@ -494,6 +523,14 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
         {"$set": {"user_id": pseudonym},
          "$unset": {"meta.email": "", "meta.driver_code": "",
                     "meta.display_name": "", "meta.kontonummer": ""}})
+    # Runde 8 (15.09.2026, Liste 3 Nr. 3): Admin-Aktionen (Sperren, Passwort,
+    # Loeschung) fuehren den Fahrer als ref und seine Kontonummer in meta —
+    # die blieben nach der Loeschung mit der alten Kennung stehen.
+    r_ref = await db.activity_logs.update_many(
+        {"ref": driver_id},
+        {"$set": {"ref": pseudonym},
+         "$unset": {"meta.email": "", "meta.driver_code": "",
+                    "meta.display_name": "", "meta.kontonummer": ""}})
     # (Kontonummer 13.09.2026, Schritt 5: keine Reset-Tokens mehr —
     # Passwoerter setzt nur der Betreiber.)
     return {
@@ -502,7 +539,7 @@ async def fahrer_konto_anonymisieren(db, driver_id: str) -> dict:
                          + r_hist.modified_count),
         "pickup_reports": r_ber.modified_count,
         "pickup_protocols": r_prot.modified_count,
-        "activity_logs": r_log.modified_count,
+        "activity_logs": r_log.modified_count + r_ref.modified_count,
         "dealer_drivers": r_links.deleted_count,
     }
 
@@ -1378,6 +1415,20 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                 version, replaces_id = await _naechste_version()
                 doc["version"], doc["replaces_id"] = version, replaces_id
         erfolg = True
+        # Runde 8 (15.09.2026, Liste 3 Nr. 1): Lief die Konto-Loeschung des
+        # Fahrers genau zwischen der Nachpruefung oben und dem Insert, hat
+        # fahrer_konto_anonymisieren diesen Bericht verpasst — er truege Kennung
+        # und Klarnamen dauerhaft. Deshalb nach dem Insert nachpruefen.
+        try:
+            konto = await db.driver_accounts.find_one(
+                {"id": driver["id"]}, {"_id": 0, "loeschung": 1})
+            if konto is None or (konto.get("loeschung") or {}).get("status"):
+                await db.pickup_reports.update_one(
+                    {"id": report_id, "driver_account_id": driver["id"]},
+                    {"$set": {"driver_account_id": fahrer_pseudonym(driver["id"]),
+                              "driver_name": "Fahrer (gelöscht)"}})
+        except Exception:  # noqa: BLE001
+            log.exception("Nachpruefung Konto-Loeschung nach Bericht %s", report_id)
     finally:
         if not erfolg:
             # Rollback (Nr. 36/37/43): Reservierung loesen, Dateien

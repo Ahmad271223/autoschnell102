@@ -131,6 +131,10 @@ class ProtocolIn(BaseModel):
     # der Freigabe; gibt er ohne eigenen Preis frei, gilt der Vorschlag.
     preis_vorschlag: Optional[float] = Field(default=None, ge=0, le=10_000_000)
     sondervereinbarung: Optional[str] = Field(default=None, max_length=2000)
+    # Phase 2 (2.9, B26): Revisionsnummer des Entwurfs, wie die App ihn geladen
+    # bzw. zuletzt gespeichert hat — zwei Tabs desselben Fahrers ueberschreiben
+    # sich nicht mehr gegenseitig. Ohne Angabe wie bisher (aeltere App).
+    revision: Optional[int] = Field(default=None, ge=0)
 
     @field_validator("preis_vorschlag", mode="before")
     @classmethod
@@ -794,7 +798,19 @@ def _entwurf_filter(proto_id: str) -> dict:
 
 def _entwurf_update(payload: dict) -> dict:
     return {"$set": {**payload, "status": "entwurf", "updated_at": now_iso()},
-            "$unset": {"claim_bis": ""}}
+            "$unset": {"claim_bis": ""},
+            "$inc": {"revision": 1}}          # Phase 2 (2.9): jede Speicherung zaehlt hoch
+
+
+async def _entwurf_revision_pruefen(proto_id: str, revision: Optional[int]) -> None:
+    """Phase 2 (2.9, B26): Schreiben ging nicht durch — lag es an der
+    Revision (anderer Tab/anderes Geraet hat inzwischen gespeichert)?"""
+    if revision is None:
+        return
+    akt = await db.pickup_protocols.find_one({"id": proto_id}, {"_id": 0, "status": 1, "revision": 1})
+    if akt and akt.get("status") == "entwurf" and int(akt.get("revision") or 0) != int(revision):
+        raise HTTPException(409, "Der Entwurf wurde inzwischen in einem anderen Tab oder auf "
+                                 "einem anderen Gerät gespeichert — bitte neu laden.")
 
 
 async def _speichern_abgelehnt(proto_id: str):
@@ -836,6 +852,8 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         raise HTTPException(409, "Protokoll ist bereits abgeschlossen. Bitte eine "
                                  "Korrektur-Version starten.")
     payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    revision = payload.pop("revision", None)
+    revision_filt = {"revision": int(revision)} if revision is not None else {}
     if doc:
         # Runde 10: Bedingt auf den Entwurf-Status schreiben. Zwischen der
         # Pruefung oben und dem Schreiben kann das Protokoll unterschrieben
@@ -845,11 +863,12 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         # Fahrer, der ihn JETZT bearbeitet, und dem Fahrzeug, das JETZT am
         # Termin haengt — beides wird bei jedem Speichern nachgezogen.
         res = await db.pickup_protocols.update_one(
-            _entwurf_filter(doc["id"]),
+            {**_entwurf_filter(doc["id"]), **revision_filt},
             _entwurf_update({**payload, "driver_account_id": driver["id"],
                              "driver_name": driver.get("display_name", ""),
                              "vehicle_id": appt.get("vehicle_id")}))
         if res.matched_count == 0:
+            await _entwurf_revision_pruefen(doc["id"], revision)
             await _speichern_abgelehnt(doc["id"])
         return await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0})
     # Versionsnummer: hoechste vorhandene + 1 — nach einem verworfenen Entwurf
@@ -866,6 +885,7 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         "version": int((hoechste or {}).get("version") or 0) + 1,
         "status": "entwurf",
         "superseded": False,
+        "revision": 1,
         **payload,
         "created_at": now_iso(), "updated_at": now_iso(),
     }
@@ -882,11 +902,12 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         # wie im Normalweg — sonst lief der Entwurf nach einer Umbuchung mit
         # veralteten Metadaten weiter.
         res = await db.pickup_protocols.update_one(
-            _entwurf_filter(vorhandenes["id"]),
+            {**_entwurf_filter(vorhandenes["id"]), **revision_filt},
             _entwurf_update({**payload, "driver_account_id": driver["id"],
                              "driver_name": driver.get("display_name", ""),
                              "vehicle_id": appt.get("vehicle_id")}))
         if res.matched_count == 0:
+            await _entwurf_revision_pruefen(vorhandenes["id"], revision)
             await _speichern_abgelehnt(vorhandenes["id"])
         return await db.pickup_protocols.find_one(
             {"id": vorhandenes["id"]}, {"_id": 0})

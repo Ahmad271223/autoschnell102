@@ -388,9 +388,42 @@ async def aktuelle_version(db) -> int:
     return int((doc or {}).get("version") or 0)
 
 
+# Runde 8 (15.09.2026, Liste 3 Nr. 12/13): Die Sperre lief nach 600 s ab, ohne
+# dass eine laufende Migration sie verlaengerte; und ein wartender zweiter
+# Server gab nach 300 s auf. Jetzt haelt der Leader die Sperre per Heartbeat,
+# und Wartende bleiben dran, solange ein lebender Leader die Sperre haelt.
+_SPERRE_TTL_S = 600
+_HEARTBEAT_S = 30
+_WARTEN_MAX_S = 4 * 3600
+
+
 async def _sperre_holen(db) -> bool:
     from job_lock import acquire
-    return await acquire(db, _SPERRE, ttl_seconds=600)
+    return await acquire(db, _SPERRE, ttl_seconds=_SPERRE_TTL_S)
+
+
+async def _sperre_verlaengern(db) -> bool:
+    from job_lock import verlaengern
+    return await verlaengern(db, _SPERRE, ttl_seconds=_SPERRE_TTL_S)
+
+
+async def _sperre_gehalten(db) -> bool:
+    from job_lock import gehalten
+    return await gehalten(db, _SPERRE)
+
+
+async def _heartbeat(db, stop: "asyncio.Event") -> None:
+    """Verlaengert die Migrations-Sperre alle _HEARTBEAT_S Sekunden, bis stop
+    gesetzt ist. Geht die Sperre verloren, wird das laut protokolliert."""
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_HEARTBEAT_S)
+            return
+        except asyncio.TimeoutError:
+            pass
+        if not await _sperre_verlaengern(db):
+            log.error("Migrations-Sperre konnte nicht verlaengert werden — "
+                      "ein zweiter Prozess koennte parallel migrieren")
 
 
 async def _sperre_loesen(db) -> None:
@@ -431,6 +464,8 @@ async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int 
     """Genau ein Prozess migriert; die anderen warten auf die Zielversion.
     Rueckgabe: "leader" | "gewartet" | "timeout"."""
     if await _sperre_holen(db):
+        stop = asyncio.Event()
+        herz = asyncio.ensure_future(_heartbeat(db, stop))
         try:
             await ausfuehren(db, indexe=indexe, seeds=seeds)
             return "leader"
@@ -441,9 +476,19 @@ async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int 
                 raise SystemExit(78)
             return "fehler"
         finally:
+            stop.set()
+            try:
+                await herz
+            except Exception:  # noqa: BLE001
+                pass
             await _sperre_loesen(db)
-    # Kein Leader: warten, bis die Zielversion erreicht ist
-    for _ in range(max(1, warte_sekunden)):
+    # Kein Leader: warten, bis die Zielversion erreicht ist. warte_sekunden
+    # zaehlt nur, solange NIEMAND die Sperre haelt (Leader tot oder fertig,
+    # Version trotzdem nicht erreicht); ein lebender Leader darf laenger
+    # brauchen — bis zur harten Obergrenze _WARTEN_MAX_S.
+    ohne_leader = 0
+    gesamt = 0
+    while True:
         if await aktuelle_version(db) >= ZIEL_VERSION:
             # Indizes sind idempotent — zur Sicherheit auch hier anlegen
             # (z.B. wenn der Leader ein aelterer Prozess war).
@@ -453,7 +498,16 @@ async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int 
                 except Exception as exc:
                     log.warning("Index-Anlage im Wartenden fehlgeschlagen: %s", exc)
             return "gewartet"
+        if gesamt >= _WARTEN_MAX_S:
+            break
+        if await _sperre_gehalten(db):
+            ohne_leader = 0
+        else:
+            ohne_leader += 1
+            if ohne_leader >= max(1, warte_sekunden):
+                break
         await asyncio.sleep(1)
+        gesamt += 1
     log.error("Migration nicht innerhalb von %ds abgeschlossen", warte_sekunden)
     if _ist_prod():
         raise SystemExit(78)

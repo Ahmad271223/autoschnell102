@@ -440,6 +440,9 @@ async def _cleanup_once(db) -> dict:
     # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
     stats["termin_nacharbeit_nachgeholt"] = await termin_nacharbeit_nachholen(db, now)
     stats["vertrags_nacharbeit_nachgeholt"] = await vertrags_nacharbeit_nachholen(db)
+    stats["kaufvorgang_nacharbeit_nachgeholt"] = await kaufvorgang_nacharbeit_nachholen(db)
+    stats["termin_verweise_bereinigt"] = await termin_verweise_bereinigen(db, now)
+    stats["inserat_fahrzeug_nachgezogen"] = await inserat_fahrzeug_nacharbeit_nachholen(db)
     stats["protokoll_freigaben_zurueckgenommen"] = \
         await protokoll_freigaben_nachziehen(db)
     stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
@@ -653,7 +656,8 @@ async def vertrags_nacharbeit_nachholen(db) -> int:
     async for c in db.generated_pdfs.find(
             {"nacharbeit_offen": True, "loeschung.status": {"$ne": "laeuft"}},
             {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "vehicle_id": 1,
-             "purchase_price": 1, "kaufvorgang_id": 1}).limit(200):
+             "purchase_price": 1, "kaufvorgang_id": 1, "status": 1,
+             "nacharbeit_status": 1}).limit(200):
         try:
             import kaufvorgang as _kv
             if not await db.kaufvorgaenge.count_documents({"contract_id": c["id"]}, limit=1):
@@ -665,8 +669,19 @@ async def vertrags_nacharbeit_nachholen(db) -> int:
                 {"id": c.get("vehicle_id"), "dealer_id": c["dealer_id"],
                  "status": {"$in": [None, "", "verglichen", "Verglichen"]}},
                 {"$set": {"status": "Vertrag erstellt"}})
-            await _kv.fahrzeug_status_aggregieren(c.get("vehicle_id"), c["dealer_id"])
-            await db.generated_pdfs.update_one({"id": c["id"]}, {"$unset": {"nacharbeit_offen": ""}})
+            # Phase 2 (2.4, G10): nach erfolgreichem Versand "gesendet" nachziehen
+            kv = await db.kaufvorgaenge.find_one({"contract_id": c["id"]},
+                                                 {"_id": 0, "id": 1, "status": 1})
+            if kv and kv.get("status") == "vertrag_erstellt" and (
+                    c.get("nacharbeit_status") == "gesendet" or c.get("status") == "versendet"):
+                await _kv.status_setzen(kv["id"], "gesendet")
+            # Phase 2 (2.4, Liste 4 Nr. 3): Merker nur weg, wenn die Fahrzeug-
+            # Zusammenfassung wirklich gelang (None = gescheitert).
+            if await _kv.fahrzeug_status_aggregieren(c.get("vehicle_id"), c["dealer_id"]) is None:
+                log.warning("Vertrags-Nacharbeit %s: Fahrzeug-Zusammenfassung weiter offen", c["id"])
+                continue
+            await db.generated_pdfs.update_one(
+                {"id": c["id"]}, {"$unset": {"nacharbeit_offen": "", "nacharbeit_status": ""}})
             n += 1
         except Exception:  # noqa: BLE001
             log.exception("Vertrags-Nacharbeit zu %s nicht nachgeholt", c.get("id"))
@@ -691,7 +706,17 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
             from lifecycle import try_set_lifecycle
             status = appt.get("status") or "offen"
             await preis_nachholen(appt)
+            # Phase 2 (2.4, D4-D6): auch die Vertragszeiger gehoeren zur Nacharbeit
+            # (ein Folgeschritt nach dem Termin-Write ist gescheitert).
+            from routes.appointments import _vertragszeiger_abgleichen
+            await _vertragszeiger_abgleichen(appt.get("dealer_id", ""), appt["id"],
+                                             appt.get("contract_id"))
             hat_vorgang = await _kv.termin_status_uebernehmen(appt, status)
+            if hat_vorgang and ((await _kv.fuer_termin(appt)) or {}).get("nacharbeit_offen"):
+                # Phase 2 (2.4, Liste 4 Nr. 2): Fahrzeug-Zusammenfassung scheiterte
+                # (Merker am Vorgang) — Merker am Termin bleibt, naechster Lauf erneut.
+                log.warning("Termin-Nacharbeit %s: Fahrzeug-Zusammenfassung weiter offen", appt["id"])
+                continue
             if not hat_vorgang and appt.get("vehicle_id"):
                 ziel = {"abgeholt": "abgeholt", "nicht abgeholt": "nicht_abgeholt"}.get(
                     status, "abholung_geplant" if status not in _TERMIN_GESCHLOSSEN else None)
@@ -736,12 +761,18 @@ async def protokolle_ohne_aktuelle_version_reparieren(db) -> int:
     except Exception:  # noqa: BLE001
         return 0
     n = 0
-    termine = await db.pickup_protocols.distinct("appointment_id", {"superseded": True})
-    for appt_id in termine[:500]:
-        if await db.pickup_protocols.count_documents(
-                {"appointment_id": appt_id, "superseded": {"$ne": True}}, limit=1):
-            continue
-        if await ohne_aktuelle_version_reparieren(appt_id, db):
+    # Runde 8 (15.09.2026, Liste 4 Nr. 1): vorher distinct(superseded) und davon
+    # die ersten 500 — reparierte Termine behalten ihre abgeloesten Versionen und
+    # standen bei jedem Lauf wieder vorne, alles ab Nr. 501 kam nie dran. Jetzt
+    # liefert die Datenbank nur Termine OHNE aktuelle Version (je Lauf 500).
+    pipeline = [
+        {"$group": {"_id": "$appointment_id",
+                    "aktuell": {"$max": {"$cond": [{"$ne": ["$superseded", True]}, 1, 0]}}}},
+        {"$match": {"_id": {"$nin": [None, ""]}, "aktuell": 0}},
+        {"$limit": 500},
+    ]
+    async for zeile in db.pickup_protocols.aggregate(pipeline):
+        if await ohne_aktuelle_version_reparieren(zeile["_id"], db):
             n += 1
     return n
 
@@ -1466,7 +1497,7 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
     return repariert
 
 
-async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 90) -> int:
+async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0) -> int:
     """Runde 10: Wird ein Vertrag von Hand geloescht, kappt das den Verweis
     am Termin — die 90-Tage-Bereinigung fand diesen Termin danach nie mehr,
     Verkaeuferdaten und Protokoll-Dateien blieben ewig. Hier bekommen
@@ -1474,6 +1505,9 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 9
     Abholdatum, sonst Anlagedatum) -> Personendaten und Protokoll-Dateien weg."""
     if not vertrag_loeschung_aktiv():        # gleiche Lesart wie die Vertragsloeschung
         return 0
+    # Runde 8 (15.09.2026, Liste 3 Nr. 10): feste 90 Tage widersprachen der
+    # 60-Tage-Vorgabe (b7ad5b5) — jetzt dieselbe Frist wie die Vertraege.
+    frist_tage = frist_tage or VERTRAG_AUFBEWAHRUNG_TAGE
     grenze = (now - timedelta(days=frist_tage))
     grenze_iso = grenze.isoformat()
     n = 0
@@ -1554,7 +1588,10 @@ async def firmenreste_bereinigen(db) -> int:
                        # Runde 18: Kaufvorgaenge fehlten in der Loeschkaskade
                        # (jetzt ergaenzt) — Altbestand aus frueher geloeschten
                        # Firmen wird hier nachtraeglich entfernt.
-                       ("kaufvorgaenge", "dealer_id")):
+                       ("kaufvorgaenge", "dealer_id"),
+                       # Runde 8 (15.09.2026, Liste 3 Nr. 4): Netzwerk-
+                       # Mitgliedschaften frueher geloeschter Firmen.
+                       ("network_members", "dealer_id")):
         try:
             werte = await db[coll].distinct(feld)
         except Exception as exc:                        # noqa: BLE001
@@ -1579,6 +1616,8 @@ async def firmenreste_bereinigen(db) -> int:
     r = await db.listings_cache_client.delete_many({"dealer_id": {"$in": weg}})
     n += r.deleted_count
     r = await db.kaufvorgaenge.delete_many({"dealer_id": {"$in": weg}})
+    n += r.deleted_count
+    r = await db.network_members.delete_many({"dealer_id": {"$in": weg}})
     n += r.deleted_count
     r = await db.listings_cache.update_many(
         {"confirmed_by": {"$in": weg}}, {"$pull": {"confirmed_by": {"$in": weg}}})
@@ -1946,3 +1985,99 @@ async def _snapshot_reste_entfernen(db) -> int:
          "png_path": {"$in": [None, ""]}, "pdf_path": {"$in": [None, ""]},
          **alt})
     return r.deleted_count
+
+
+# =====================================================================
+# Phase 2 (15.09.2026): Nacharbeitsmerker an Vorgaengen und Inseraten,
+# Verweise auf geloeschte Termine
+# =====================================================================
+_NACHARBEIT_MAX_VERSUCHE = 10
+
+
+async def kaufvorgang_nacharbeit_nachholen(db) -> int:
+    """Phase 2 (2.4, E7/G4-G6): Vorgaenge, deren Fahrzeug-Zusammenfassung beim
+    Schreiben scheiterte (Merker nacharbeit_offen aus kaufvorgang.status_setzen).
+    Nach _NACHARBEIT_MAX_VERSUCHE Fehlversuchen Betriebsalarm. Liefert die Zahl
+    der erledigten Vorgaenge."""
+    import kaufvorgang as _kv
+    n = 0
+    async for kv in db.kaufvorgaenge.find(
+            {"nacharbeit_offen": True},
+            {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1, "nacharbeit_versuche": 1}
+    ).limit(200):
+        try:
+            ziel = await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"])
+            if ziel is None:
+                versuche = int(kv.get("nacharbeit_versuche") or 0) + 1
+                await db.kaufvorgaenge.update_one(
+                    {"id": kv["id"]}, {"$set": {"nacharbeit_versuche": versuche}})
+                if versuche >= _NACHARBEIT_MAX_VERSUCHE:
+                    await alarm(db, "kaufvorgang_nacharbeit_haengt", ref=kv["id"],
+                                vehicle_id=kv["vehicle_id"], versuche=versuche)
+                continue
+            await db.kaufvorgaenge.update_one(
+                {"id": kv["id"]},
+                {"$unset": {"nacharbeit_offen": "", "nacharbeit_versuche": ""}})
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Kaufvorgang-Nacharbeit %s nicht nachgeholt", kv.get("id"))
+    return n
+
+
+async def termin_verweise_bereinigen(db, now: datetime, mindestalter_min: int = 10) -> int:
+    """Phase 2 (2.4, D9/D10; Liste 3 Nr. 9): Vorgaenge und Vertraege, die auf
+    einen Termin zeigen, den es nicht mehr gibt (Loeschung brach nach dem
+    Loesen ab, oder der Merker liess sich nicht schreiben). Kein Merker noetig
+    — reiner Abgleich, nur Eintraege aelter als `mindestalter_min`."""
+    import kaufvorgang as _kv
+    grenze = (now - timedelta(minutes=mindestalter_min)).isoformat()
+    n = 0
+    ids = [a for a in await db.kaufvorgaenge.distinct(
+        "appointment_id", {"appointment_id": {"$type": "string", "$ne": ""}})]
+    ids += [a for a in await db.generated_pdfs.distinct(
+        "appointment_id", {"appointment_id": {"$type": "string", "$ne": ""}}) if a not in ids]
+    for i in range(0, len(ids), 500):
+        teil = ids[i:i + 500]
+        vorhanden = set(await db.appointments.distinct("id", {"id": {"$in": teil}}))
+        weg = [a for a in teil if a not in vorhanden]
+        if not weg:
+            continue
+        async for kv in db.kaufvorgaenge.find(
+                {"appointment_id": {"$in": weg}, "updated_at": {"$lt": grenze}},
+                {"_id": 0, "id": 1, "status": 1}):
+            neu = "vertrag_erstellt" if kv.get("status") == "abholung_geplant" else kv.get("status")
+            try:
+                await _kv.status_setzen(kv["id"], neu, appointment_id=None)
+                n += 1
+            except Exception:  # noqa: BLE001
+                log.exception("Verweis von Kaufvorgang %s auf geloeschten Termin nicht geloest",
+                              kv.get("id"))
+        r = await db.generated_pdfs.update_many(
+            {"appointment_id": {"$in": weg}, "updated_at": {"$lt": grenze}},
+            {"$set": {"appointment_id": None}})
+        n += r.modified_count
+    return n
+
+
+async def inserat_fahrzeug_nacharbeit_nachholen(db) -> int:
+    """Phase 2 (2.7, A8/B9/B10): Inserate mit Merker lifecycle_nacharbeit —
+    das Fahrzeug bekommt den Zielstatus (reserviert/veroeffentlicht) nachgezogen;
+    nach _NACHARBEIT_MAX_VERSUCHE Fehlversuchen Betriebsalarm."""
+    from routes.marketplace import inserat_fahrzeug_nachziehen
+    n = 0
+    async for l in db.resale_listings.find(
+            {"lifecycle_nacharbeit": {"$exists": True}},
+            {"_id": 0, "id": 1, "lifecycle_nacharbeit": 1, "nacharbeit_versuche": 1}).limit(200):
+        try:
+            if await inserat_fahrzeug_nachziehen(l["id"], l["lifecycle_nacharbeit"]):
+                n += 1
+                continue
+            versuche = int(l.get("nacharbeit_versuche") or 0) + 1
+            await db.resale_listings.update_one(
+                {"id": l["id"]}, {"$set": {"nacharbeit_versuche": versuche}})
+            if versuche >= _NACHARBEIT_MAX_VERSUCHE:
+                await alarm(db, "inserat_fahrzeug_nacharbeit_haengt", ref=l["id"],
+                            ziel=l["lifecycle_nacharbeit"], versuche=versuche)
+        except Exception:  # noqa: BLE001
+            log.exception("Inserat-Nacharbeit %s nicht nachgeholt", l.get("id"))
+    return n

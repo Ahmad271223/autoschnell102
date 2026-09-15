@@ -1203,6 +1203,13 @@ async def publish_listing(listing_id: str, body: PublishIn,
                                              "Upgrade auf ein größeres Paket oder "
                                              "Enterprise anfragen.")
 
+        # Runde 8 (15.09.2026, Liste 4 Nr. 14): Paket unmittelbar vor dem
+        # Live-Schalten erneut pruefen — der Betreiber kann es waehrend des
+        # Kontingent-Teils entzogen haben, oder es ist gerade abgelaufen.
+        if not (await get_sale_plan_status(user["dealer_id"])).get("active"):
+            await _kontingent_zurueckgeben()
+            raise HTTPException(402, "Das Verkaufspaket wurde gerade beendet — "
+                                     "das Inserat wurde nicht veröffentlicht.")
         # Nachpruefung Runde 14 (Nr. 81/89): bedingt auf den gelesenen Status
         # — ein paralleler Statuswechsel (verkauft/geloescht) darf nicht
         # durch "veroeffentlicht" ueberschrieben werden.

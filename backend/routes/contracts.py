@@ -1514,6 +1514,15 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                     await _kv.status_setzen(_vorgang["id"], "gesendet", user=user)
             except Exception:
                 log.exception("Kaufvorgang nach Versand von %s nicht aktualisiert", contract_id)
+                # Phase 2 (2.4, G10): Merker statt nur Log — cleanup_service.
+                # vertrags_nacharbeit_nachholen setzt "gesendet" nach.
+                try:
+                    await db.generated_pdfs.update_one(
+                        {"id": contract_id},
+                        {"$set": {"nacharbeit_offen": True, "nacharbeit_status": "gesendet"}})
+                except Exception:  # noqa: BLE001
+                    log.exception("Merker nacharbeit_offen (Versand) fuer Vertrag %s nicht gesetzt",
+                                  contract_id)
             # Kopie an den Sucher — als Beleg, mit demselben PDF. Schlaegt
             # sie fehl, bleibt der Hauptversand gueltig; das Ergebnis steht
             # in der Antwort ("kopie").

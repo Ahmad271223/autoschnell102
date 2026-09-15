@@ -66,6 +66,31 @@ async def acquire(db, name: str, ttl_seconds: int = 3600) -> bool:
         return False
 
 
+async def verlaengern(db, name: str, ttl_seconds: int = 3600) -> bool:
+    """Eigene Sperre verlaengern (Heartbeat eines laufenden Jobs). False, wenn
+    sie inzwischen abgelaufen und von einem anderen Prozess uebernommen wurde
+    (oder die Datenbank nicht antwortet) — dann darf der Lauf nicht weiter
+    davon ausgehen, allein zu sein."""
+    try:
+        r = await db.job_locks.update_one(
+            {"name": name, "owner": OWNER},
+            {"$set": {"expires_at": datetime.now(timezone.utc)
+                      + timedelta(seconds=ttl_seconds)}})
+        return bool(r.matched_count)
+    except Exception:
+        return False
+
+
+async def gehalten(db, name: str) -> bool:
+    """True, wenn irgendein Prozess die Sperre gerade gueltig haelt."""
+    try:
+        return bool(await db.job_locks.find_one(
+            {"name": name, "expires_at": {"$gt": datetime.now(timezone.utc)}},
+            {"_id": 1}))
+    except Exception:
+        return False
+
+
 async def release(db, name: str) -> None:
     """Sperre freigeben (nur die eigene)."""
     try:

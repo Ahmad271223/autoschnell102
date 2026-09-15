@@ -101,6 +101,9 @@ export default function Protokoll() {
   // waehrend er auf die Freigabe wartet — gespeichert werden sie erst beim
   // Abschluss. Das automatische Nachladen setzte sie alle 15 s zurueck.
   const ortGetippt = useRef(false);
+  // Phase 2 (2.9): Revision des Entwurfs (vom Server) — zwei Tabs desselben
+  // Fahrers überschreiben sich nicht mehr gegenseitig.
+  const revRef = useRef(null);
   const nameGetippt = useRef(false);
 
   const load = useCallback(async ({ still = false } = {}) => {
@@ -108,6 +111,7 @@ export default function Protokoll() {
       const r = await driverApi.get(`/driver/appointments/${id}/protocol`);
       setData(r.data);
       const p = r.data.protocol;
+      revRef.current = p?.revision ?? null;
       if (p) {
         setF((s) => ({
           ...s,
@@ -199,17 +203,33 @@ export default function Protokoll() {
   const fRef = useRef(f);
   useEffect(() => { fRef.current = f; });
 
+  const speichern = useCallback(async (s) => {
+    const nutz = { ...nutzlast(s),
+                   ...(revRef.current != null ? { revision: revRef.current } : {}) };
+    try {
+      const r = await driverApi.put(`/driver/appointments/${id}/protocol`, nutz);
+      if (r?.data?.revision != null) revRef.current = r.data.revision;
+      return r;
+    } catch (e) {
+      if (e?.response?.status === 409 && /anderen Tab|anderen Gerät/.test(errMsg(e))) {
+        toast.warning("Der Entwurf wurde in einem anderen Tab gespeichert — der aktuelle Stand wird geladen.");
+        load({ still: true });
+      }
+      throw e;
+    }
+  }, [id, load]);
+
   // Automatisch speichern (1,2 s nach der letzten Änderung)
   const queueSave = useCallback(() => {
     if (gesperrt) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await driverApi.put(`/driver/appointments/${id}/protocol`, nutzlast(fRef.current));
+        await speichern(fRef.current);
         setSavedAt(new Date());
       } catch (e) { /* stiller Retry beim nächsten Tippen */ }
     }, 1200);
-  }, [id, gesperrt]);
+  }, [gesperrt, speichern]);
 
   // patch darf ein Objekt ODER eine Funktion (voriger Stand -> Teilupdate)
   // sein — die Funktionsform verhindert, dass schnelle Klicks hintereinander
@@ -232,7 +252,7 @@ export default function Protokoll() {
   const saveNow = async () => {
     setBusy(true);
     try {
-      await driverApi.put(`/driver/appointments/${id}/protocol`, nutzlast(f));
+      await speichern(f);
       setSavedAt(new Date());
       toast.success("Zwischenstand gespeichert");
     } catch (e) { toast.error(errMsg(e)); }
@@ -260,7 +280,7 @@ export default function Protokoll() {
                         + "möglich.")) return;
     setBusy(true);
     try {
-      await driverApi.put(`/driver/appointments/${id}/protocol`, nutzlast(f));
+      await speichern(f);
       await driverApi.post(`/driver/appointments/${id}/protocol/submit`);
       toast.success("Abgeschickt — der Händler prüft jetzt");
       load();
