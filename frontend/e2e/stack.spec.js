@@ -69,7 +69,9 @@ test.describe("Produktions-Stack (nginx + Container + MongoDB mit Auth)", () => 
       // dass der Proxy den Authorization-Kopf durchreicht und die MongoDB
       // mit Passwort erreichbar ist.
       const antwort = await page.evaluate(async () => {
-        const t = localStorage.getItem("ah_token");
+        // Runde 15: das Betreiber-Token liegt nur noch im Tab (sessionStorage),
+        // nicht in localStorage.
+        const t = sessionStorage.getItem("ah_token") || localStorage.getItem("ah_token");
         const r = await fetch("/api/admin/stats", {
           headers: { Authorization: `Bearer ${t}` },
         });
