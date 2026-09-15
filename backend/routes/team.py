@@ -25,6 +25,8 @@ from deps import (current_firma, current_user, db, get_subscription_status,
 )
 from routes.bestand import current_haendler
 
+from deps import marktplatz_freigeschaltet  # Go-Live-Schalter 15.09.2026
+
 router = APIRouter()
 log = logging.getLogger("autohandel")
 
@@ -275,7 +277,7 @@ async def get_sale_plan_status(dealer_id: str) -> dict:
             "price": meta.get("price"), "plans": SALE_PLANS}
 
 
-@router.get("/dealer/sale-plan")
+@router.get("/dealer/sale-plan", dependencies=[Depends(marktplatz_freigeschaltet)])
 async def sale_plan_status(user=Depends(current_haendler)):
     return await get_sale_plan_status(user["dealer_id"])
 
@@ -317,7 +319,7 @@ async def _offene_anfrage_upsert(schluessel: dict, neu: dict,
     return doc, doc.get("id") == neu.get("id")
 
 
-@router.post("/dealer/sale-plan/upgrade-request")
+@router.post("/dealer/sale-plan/upgrade-request", dependencies=[Depends(marktplatz_freigeschaltet)])
 async def sale_plan_upgrade_request(body: UpgradeRequestIn,
                                     user=Depends(current_haendler)):
     """Upgrade-/Enterprise-Anfrage — landet beim Admin mit Händler-ID,

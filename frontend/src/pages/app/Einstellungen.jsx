@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
+import { useFeatures } from "@/lib/features";
 import { toast } from "sonner";
 import { wurdeZusammengefuehrt, zusammenfuehren } from "@/lib/vertragstext";
 import {
@@ -22,7 +23,8 @@ export default function Einstellungen() {
   const { dealer, refresh, user } = useAuth();
   // Sucher sehen keinen Marktplatz-Reiter (nur der Chef verwaltet den
   // Marktplatz; die Endpunkte antworten Suchern mit 403 -> ewig "Lädt…").
-  const sections = user?.role === "sucher"
+  const features = useFeatures();          // Go-Live-Schalter: Marktplatz-Reiter nur wenn frei
+  const sections = (user?.role === "sucher" || !features.marktplatz)
     ? SECTIONS.filter((s) => s.id !== "markt")
     : SECTIONS;
   const [form, setForm] = useState(null);

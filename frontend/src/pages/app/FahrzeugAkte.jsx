@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
+import { useFeatures } from "@/lib/features";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
 import BeweisCard from "@/components/BeweisCard";
@@ -32,6 +33,7 @@ const fmtEur = (n) => (n == null ? "—" : `${Number(n).toLocaleString("de-DE")}
 export default function FahrzeugAkte() {
   const { id } = useParams();
   const nav = useNavigate();
+  const features = useFeatures();          // Go-Live-Schalter (15.09.2026)
   const [akte, setAkte] = useState(null);
   const [selectedDevs, setSelectedDevs] = useState([]);
   const [bestandForm, setBestandForm] = useState(null);
@@ -214,18 +216,18 @@ export default function FahrzeugAkte() {
               </button>
             </>
           )}
-          {!sucher && v.lifecycle === "bestand" && (
+          {features.marktplatz && !sucher && v.lifecycle === "bestand" && (
             <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
               <Tag size={13} /> Weiterverkaufen
             </button>
           )}
           {/* Ab Vertragserstellung sofort inserierbar (Abholung läuft parallel) */}
-          {!sucher && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
+          {features.marktplatz && !sucher && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
             <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
               <Tag size={13} /> Jetzt inserieren
             </button>
           )}
-          {listing && ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"].includes(listing.status) && (
+          {features.marktplatz && listing && ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"].includes(listing.status) && (
             <Link to={`/app/inserat/${listing.id}`} data-testid="akte-inserat-link"
                   className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
               {listing.status === "veroeffentlicht" ? "Inserat öffnen (live · vom Marktplatz nehmen / löschen)" : `Inserat öffnen (${inseratText(listing.status)})`}

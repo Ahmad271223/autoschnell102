@@ -9,6 +9,7 @@ import {
   Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { useFeatures } from "@/lib/features";
 import ThemeToggle from "@/components/ThemeToggle";
 import InstallPWAButton from "@/components/InstallPWAButton";
 
@@ -41,13 +42,15 @@ export default function AppLayout({ children }) {
   const { pathname } = useLocation();
   const nav = useNavigate();
   const { user, subscription, logout } = useAuth();
+  const features = useFeatures();          // Go-Live-Schalter: Kaufanfragen nur mit Marktplatz
 
   // Sucher-Unteraccounts sehen keine Händler-Funktionen (Bestand, Team).
   // Strikte Rollentrennung: Admin-Konten verwalten nur — die Händler-/
   // Sucher-Funktionen würden im Backend ohnehin blockiert.
   const items = user?.role === "admin"
     ? [{ to: "/admin", label: "Admin", icon: ShieldCheck }]
-    : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher"));
+    : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher")
+                         && (it.to !== "/app/anfragen" || features.marktplatz));
 
   // Runde 33 (Wunsch Ahmad): Warten Fahrer beim Verkaeufer auf die Freigabe,
   // soll man das auf JEDER Seite merken — Zahl im Menue, im Tab-Titel und ein

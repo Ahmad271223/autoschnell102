@@ -7,6 +7,7 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import VerbindungsFehler from "@/components/VerbindungsFehler";
 import { startZiel } from "@/lib/appstart";
 import { letzteAnmeldung } from "@/lib/sitzung";
+import { useFeatures } from "@/lib/features";
 
 /** Hat api.js in diesem Tab eine beendete Sitzung vermerkt (Runde 19:
  *  Grund "neue Anmeldung am … von …")? Dann zeigt die Anmeldung ihn an. */
@@ -21,6 +22,8 @@ const WEGE = [
 ];
 
 function Auswahl() {
+  const features = useFeatures();          // Go-Live-Schalter: Marktplatz-Einstieg nur wenn frei
+  const wege = WEGE.filter((w) => w.testid !== "start-markt" || features.marktplatz);
   return (
     <div className="min-h-screen flex items-center justify-center p-6"
          style={{ background: "var(--bg-app)", color: "var(--text-primary)" }} data-testid="start-auswahl">
@@ -36,7 +39,7 @@ function Auswahl() {
           Nach der ersten Anmeldung startet die App direkt an der richtigen Stelle.
         </p>
         <div className="mt-6 space-y-2.5">
-          {WEGE.map(({ to, titel, text, icon: Icon, testid }) => (
+          {wege.map(({ to, titel, text, icon: Icon, testid }) => (
             <Link key={to} to={to} replace data-testid={testid}
                   className="flex items-center gap-3 rounded-xl border px-4 py-3.5 hover:bg-white/5"
                   style={{ borderColor: "var(--border-default)" }}>

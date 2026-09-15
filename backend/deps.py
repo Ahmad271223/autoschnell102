@@ -791,3 +791,20 @@ async def log_activity_sicher(dealer_id: str, user_id: str, action: str,
         logging.getLogger("autohandel").exception(
             "Audit-Eintrag %s (%s) konnte nicht gespeichert werden", action, ref)
         return False
+
+
+# ---------------------------------------------------------------------
+# Go-Live-Schalter (15.09.2026): Marktplatz und Inserieren abgeschaltet.
+# ---------------------------------------------------------------------
+MARKTPLATZ_GESPERRT = ("Demnächst verfügbar — der Marktplatz und das Inserieren sind "
+                       "noch nicht freigeschaltet.")
+
+
+async def marktplatz_freigeschaltet() -> None:
+    """Abhaengigkeit fuer alle Marktplatz-/Inserats-Routen: 503 mit klarem
+    Text, solange MARKTPLATZ_AKTIV nicht gesetzt ist (konfig.marktplatz_aktiv).
+    Direkte Funktionsaufrufe (Unit-Tests) bleiben unberuehrt."""
+    from konfig import marktplatz_aktiv
+    if not marktplatz_aktiv():
+        raise HTTPException(503, MARKTPLATZ_GESPERRT)
+

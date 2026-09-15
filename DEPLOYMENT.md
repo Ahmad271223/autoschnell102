@@ -1495,3 +1495,15 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   (`<Kundennummer>-<Zusatz>`); der alte Käufer-Code steht in `kontonummer_vorher`.
 - 422-Antworten spiegeln Passwörter und Codes nicht mehr zurück (`***`).
 
+### Go-Live-Schalter: Marktplatz und Inserieren (15.09.2026)
+
+- **Standard in Produktion: aus.** `MARKTPLATZ_AKTIV` (Compose-Default `false`) schaltet den
+  B2B-Marktplatz (Zwischenhändler-Anmeldung, Marktplatz-Seiten, Kaufanfragen, Einladungen,
+  Verkaufspaket) und das Inserieren („Jetzt inserieren“, „Weiterverkaufen“, Inserats-Editor) ab.
+  Die Routen antworten mit **503 „Demnächst verfügbar“**, die Oberfläche blendet Menüpunkte,
+  Buttons und Reiter aus und zeigt auf den Seiten „Demnächst verfügbar“. Der Code bleibt
+  vollständig erhalten.
+- Freischalten: `MARKTPLATZ_AKTIV=true` in die Server-`.env`, Rollout. `GET /api/features`
+  zeigt den Stand (`{"marktplatz": false}`).
+- Tests und CI laufen mit `MARKTPLATZ_AKTIV=true`, damit die Marktplatz-Tests weiter greifen.
+

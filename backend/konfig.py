@@ -66,3 +66,20 @@ def zahl_pruefen(name: str) -> Optional[str]:
         return None
     except ValueError:
         return roh
+
+
+def schalter_env(name: str, standard: bool = False) -> bool:
+    """Ja/Nein-Schalter aus der Umgebung (true/1/ja/yes/on)."""
+    wert = (os.environ.get(name) or "").strip().lower()
+    if not wert:
+        return standard
+    return wert in ("1", "true", "ja", "yes", "on")
+
+
+def marktplatz_aktiv() -> bool:
+    """Go-Live 15.09.2026 (Wunsch Ahmad): B2B-Marktplatz und das Inserieren
+    sind abgeschaltet ("Demnaechst verfuegbar") — Fokus Firmenchef, Sucher,
+    Fahrer. Freischalten mit MARKTPLATZ_AKTIV=true (Test/CI: gesetzt). Der
+    Code bleibt vollstaendig erhalten, nur der Schalter entscheidet."""
+    return schalter_env("MARKTPLATZ_AKTIV", False)
+

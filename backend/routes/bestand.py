@@ -21,6 +21,9 @@ from deps import (besitzer_anreichern, besitzer_namen, clean_doc, current_chef,
                   log_activity, log_activity_sicher, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
 
+from deps import MARKTPLATZ_GESPERRT  # Go-Live-Schalter 15.09.2026
+from konfig import marktplatz_aktiv
+
 router = APIRouter()
 
 BESTAND_RETENTION_DAYS = 50
@@ -179,6 +182,10 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
         return {"ok": True, "lifecycle": "geloescht",
                 "inserate_geloescht": geloeschte_inserate}
 
+    if body.decision == "verkaufsentwurf" and not marktplatz_aktiv():
+        # Go-Live-Schalter (15.09.2026): "Jetzt inserieren" / "Weiterverkaufen"
+        # gibt es erst, wenn der Marktplatz freigeschaltet ist.
+        raise HTTPException(503, MARKTPLATZ_GESPERRT)
     target = "bestand" if body.decision == "bestand" else "verkaufsentwurf"
     extra: Dict[str, Any] = {}
     if body.decision == "bestand":

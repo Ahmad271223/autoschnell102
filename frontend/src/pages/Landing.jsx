@@ -2,6 +2,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { ArrowRight, Bolt, Check, FileText, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
 import { api } from "../lib/api";
+import { useFeatures } from "../lib/features";
 
 const HERO_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png";
 const SECTION_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/dd3f3682a6a7806bf9c8c9664b184e0728edf5f897bc17bdf2836ddfb7e76644.png";
@@ -16,6 +17,7 @@ export default function Landing() {
   // obwohl der Betreiber den Zugang laengst kostenlos gestellt hat.
   // Vorbelegung = der Standard im Code (kostenlos).
   const [markt] = useState({ marktplatz_kostenlos: true, preis: 20 });
+  const features = useFeatures();          // Go-Live-Schalter (15.09.2026)
 
   // Schließt das Mobile-Menü, wenn der Browser gross wird oder Escape kommt
   useEffect(() => {
@@ -59,7 +61,7 @@ export default function Landing() {
           <div className="hidden md:flex items-center gap-2">
             <Link to="/markt/login" data-testid="nav-b2b"
                   className="px-3 py-1.5 text-sm text-zinc-300 hover:text-white">
-              B2B-Marktplatz
+              B2B-Marktplatz{!features.marktplatz && " (demnächst)"}
             </Link>
             <Link to="/fahrer/login" data-testid="nav-driver-login"
                   className="px-3 py-1.5 text-sm text-zinc-300 hover:text-white">
@@ -134,7 +136,7 @@ export default function Landing() {
           </a>
           <Link to="/markt/login" onClick={closeMenu} data-testid="nav-mobile-b2b"
                 className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
-            B2B-Marktplatz
+            B2B-Marktplatz{!features.marktplatz && " (demnächst)"}
           </Link>
           <Link to="/fahrer/login" onClick={closeMenu} data-testid="nav-mobile-driver"
                 className="px-3 py-3 rounded-sm text-[15px] text-zinc-200 hover:bg-white/[0.06] hover:text-white">
@@ -382,6 +384,13 @@ export default function Landing() {
                 {markt.marktplatz_kostenlos
                   ? " Zugang anfragen — wir schalten dich frei."
                   : " Zugang anfragen, online zahlen, loslegen."}</p>
+              {!features.marktplatz && (
+                <div className="mt-6 rounded-sm border px-4 py-3 text-sm text-zinc-300" data-testid="markt-demnaechst"
+                     style={{ borderColor: "var(--border-default)" }}>
+                  Demnächst verfügbar — der Marktplatz wird gerade fertiggestellt.
+                </div>
+              )}
+              {features.marktplatz && (
               <div className="mt-6 flex flex-col gap-2">
                 {/* Kontonummer (13.09.2026): Konten legt der Betreiber nach Anfrage an */}
                 <Link to="/anfrage?art=kaeufer" data-testid="cta-markt-anfrage"
@@ -394,6 +403,7 @@ export default function Landing() {
                   Anmelden
                 </Link>
               </div>
+              )}
               <ul className="mt-5 space-y-2 text-sm">
                 {["Alle veröffentlichten Fahrzeuge + Händlerseiten", "B2B- und Netzwerk-Preise", "Favoriten-Merkliste", "Freischaltung per Rechnung durch den Betreiber", "Monatlich, jederzeit beendbar"].map(t => (
                   <li key={t} className="flex items-start gap-2 text-zinc-300"><Check size={14} className="mt-1 shrink-0" style={{ color: "var(--accent-green)" }} /> {t}</li>

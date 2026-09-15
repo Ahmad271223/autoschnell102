@@ -30,7 +30,7 @@ if sys.platform == "win32":
 import traceback
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -303,6 +303,15 @@ app.add_middleware(WartungsmodusMiddleware)
 @api.get("/")
 async def api_root():
     return {"service": "autohandel", "status": "ok"}
+
+
+@api.get("/features")
+async def features():
+    """Oeffentlich, ohne Anmeldung: welche Bereiche freigeschaltet sind. Die
+    Oberflaeche blendet abgeschaltete Bereiche aus und zeigt dort
+    'Demnaechst verfuegbar' (Go-Live-Schalter 15.09.2026)."""
+    from konfig import marktplatz_aktiv
+    return {"marktplatz": marktplatz_aktiv()}
 
 
 @api.get("/health")
@@ -1397,6 +1406,9 @@ async def on_stop():
 # =========================================================
 #                       MOUNT
 # =========================================================
+# Go-Live-Schalter (15.09.2026): Marktplatz- und Inserats-Routen antworten mit
+# 503 "Demnaechst verfuegbar", solange MARKTPLATZ_AKTIV nicht gesetzt ist.
+from deps import marktplatz_freigeschaltet  # noqa: E402
 api.include_router(auth_routes.router)
 api.include_router(admin_routes.router)
 api.include_router(admin_auto_daten_routes.router)
@@ -1407,9 +1419,9 @@ api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)
 api.include_router(manual_search_routes.router)
 api.include_router(bestand_routes.router)
-api.include_router(resale_routes.router)
+api.include_router(resale_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(team_routes.router)
-api.include_router(marketplace_routes.router)
+api.include_router(marketplace_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(beweise_routes.router)
 api.include_router(protocols_routes.router)
 

@@ -102,6 +102,7 @@ import { BuyerAuthProvider } from "@/context/BuyerContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { startseite } from "@/lib/rollen";
 import AppLayout from "@/components/AppLayout";
+import FeatureGate from "@/components/FeatureGate";
 
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
@@ -224,17 +225,18 @@ export default function App() {
             {/* Runde 33 (Wunsch Ahmad): alle wartenden Abholprotokolle auf einer Seite */}
             <Route path="/app/freigaben" element={<WrapFree><Freigaben /></WrapFree>} />
             <Route path="/app/bestand" element={<WrapFree><Bestand /></WrapFree>} />
-            <Route path="/app/anfragen" element={<WrapFree><Anfragen /></WrapFree>} />
+            {/* Go-Live-Schalter (15.09.2026): Marktplatz + Inserieren zeigen "Demnaechst verfuegbar" */}
+            <Route path="/app/anfragen" element={<WrapFree><FeatureGate bereich="Der Bereich Kaufanfragen" zurueck="/app/bestand"><Anfragen /></FeatureGate></WrapFree>} />
             <Route path="/app/akte/:id" element={<WrapFree><FahrzeugAkte /></WrapFree>} />
-            <Route path="/app/inserat/:id" element={<WrapFree><Inserat /></WrapFree>} />
+            <Route path="/app/inserat/:id" element={<WrapFree><FeatureGate bereich="Das Inserieren" zurueck="/app/bestand"><Inserat /></FeatureGate></WrapFree>} />
             <Route path="/app/fahrer" element={<WrapFree><Fahrer /></WrapFree>} />
             <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
             <Route path="/app/einstellungen" element={<WrapFree><Einstellungen /></WrapFree>} />
 
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
-            <Route path="/markt/login" element={<BuyerLogin />} />
+            <Route path="/markt/login" element={<FeatureGate bereich="Der B2B-Marktplatz"><BuyerLogin /></FeatureGate>} />
             <Route path="/markt/registrieren" element={<WeiterleitungMitQuery nach="/markt/login" />} />
-            <Route path="/markt" element={<Marktplatz />} />
+            <Route path="/markt" element={<FeatureGate bereich="Der B2B-Marktplatz"><Marktplatz /></FeatureGate>} />
 
             {/* Fahrer-App (eigenständig) */}
             <Route path="/fahrer/login" element={<DriverLogin />} />

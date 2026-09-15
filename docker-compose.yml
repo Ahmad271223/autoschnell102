@@ -139,6 +139,8 @@ services:
       - MARKTPLATZ_KOSTENLOS=${MARKTPLATZ_KOSTENLOS:-true}
       # Entscheidung Ahmad 14.09.2026: Zwei-Faktor fuer den Super-Admin ist Pflicht
       - MFA_PFLICHT=${MFA_PFLICHT:-true}
+      # Go-Live-Schalter (15.09.2026): Marktplatz + Inserieren aus, bis true
+      - MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-false}
       - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-60}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}

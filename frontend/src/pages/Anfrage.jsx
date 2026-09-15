@@ -3,6 +3,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { API_BASE } from "@/lib/api";
 import { errMsg } from "@/lib/api";
+import { useFeatures } from "@/lib/features";
+import DemnaechstVerfuegbar from "@/components/DemnaechstVerfuegbar";
 import { toast } from "sonner";
 import { Bolt, Check, ArrowRight } from "lucide-react";
 
@@ -33,6 +35,10 @@ const feldStil = { borderColor: "var(--border-default)" };
 export default function Anfrage() {
   const [sp, setSp] = useSearchParams();
   const art = artAus(sp.get("art"));
+  // Go-Live-Schalter (15.09.2026): Zwischenhaendler-Zugang erst mit Marktplatz.
+  const features = useFeatures();
+  const arten = ARTEN.filter((a) => a.key !== "kaeufer" || features.marktplatz);
+  const marktGesperrt = art === "kaeufer" && features.geladen && !features.marktplatz;
   const [f, setF] = useState({
     company_name: "", contact_person: "", email: "", phone: "",
     sucher_anzahl: 1, message: "", ust_id: "",
@@ -100,10 +106,12 @@ export default function Anfrage() {
             </p>
             <Link to="/" className="inline-block mt-6 text-sm text-zinc-300 hover:text-white">Zur Startseite</Link>
           </div>
+        ) : marktGesperrt ? (
+          <DemnaechstVerfuegbar bereich="Der Zugang für Zwischenhändler" eingebettet />
         ) : (
           <form onSubmit={submit} className="tactical-card p-8" data-testid="anfrage-form">
             <div className="flex flex-wrap gap-1.5 mb-4" role="tablist" aria-label="Art des Zugangs">
-              {ARTEN.map((a) => (
+              {arten.map((a) => (
                 <button key={a.key} type="button" role="tab" aria-selected={art === a.key}
                         onClick={() => artWaehlen(a.key)} data-testid={`anfrage-art-${a.key}`}
                         className={`px-3 py-1.5 rounded-sm text-xs border ${art === a.key ? "bg-white/10 text-white font-semibold" : "text-zinc-400 hover:text-white"}`}

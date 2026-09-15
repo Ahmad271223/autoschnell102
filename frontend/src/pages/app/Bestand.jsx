@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
+import { useFeatures } from "@/lib/features";
 import { toast } from "sonner";
 import {
   Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X,
@@ -50,6 +51,7 @@ export default function Bestand() {
 
   useEffect(() => { load(); }, [load]);
 
+  const features = useFeatures();          // Go-Live-Schalter (15.09.2026)
   const decide = async (vehicleId, decision) => {
     if (busy) return;
     if (decision === "loeschen" &&
@@ -120,7 +122,7 @@ export default function Bestand() {
         </div>
       )}
 
-      {anfragenOffen > 0 && (
+      {anfragenOffen > 0 && features.marktplatz && (
         <Link to="/app/anfragen" data-testid="bestand-anfragen-banner"
               className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-sky-500/10 transition"
               style={{ borderColor: "#38bdf855", background: "#38bdf814", color: "#7dd3fc" }}>
@@ -130,7 +132,7 @@ export default function Bestand() {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
-        {FILTERS.map((f) => (
+        {FILTERS.filter((f) => f.key !== "veroeffentlicht" || features.marktplatz).map((f) => (
           <button key={f.key} onClick={() => setFilter(f.key)}
                   className={`px-3 py-1.5 rounded-lg text-[13px] border transition ${
                     filter === f.key ? "bg-white/10 font-semibold" : "text-zinc-400 hover:text-white"}`}
@@ -250,7 +252,7 @@ export default function Bestand() {
                       )}
                       {/* Ab Vertragserstellung sofort inserierbar — die Abholung
                           läuft parallel weiter (Bericht landet in der Akte). */}
-                      {["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
+                      {features.marktplatz && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
                                 className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
                                 style={{ background: "var(--accent-red)" }}>

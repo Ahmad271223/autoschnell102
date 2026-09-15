@@ -29,6 +29,9 @@ jobs:
       # Anbieter-Mock: E2E-, Job- und Mandantentests vergleichen echte
       # Ablaeufe, ohne Kleinanzeigen/mobile.de zu belasten.
       MOCK_PROVIDER_FETCH: "true"
+      # Go-Live-Schalter: Marktplatz/Inserieren in den Tests eingeschaltet
+      # (Produktions-Default: false, siehe docker-compose.yml)
+      MARKTPLATZ_AKTIV: "true"
       # Super-Admin-Seed fuer tests/test_admin_dashboard.py (nur CI-Testwerte —
       # Produktion setzt eigene in der .env). Kontonummer (13.09.2026): Konten
       # legt nur der Super-Admin an; es gibt keinen Admin per E-Mail mehr.
@@ -326,6 +329,9 @@ jobs:
       JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
       AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
       MOCK_PROVIDER_FETCH: "true"
+      # Go-Live-Schalter: Marktplatz/Inserieren in den Tests eingeschaltet
+      # (Produktions-Default: false, siehe docker-compose.yml)
+      MARKTPLATZ_AKTIV: "true"
       # Seed (nur CI-Testwerte, siehe Backend-Job) — die Suite meldet sich
       # als Super-Admin an und legt alle weiteren Testkonten selbst an.
       SUPER_ADMIN_USERNAME: ci-superadmin
