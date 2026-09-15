@@ -523,6 +523,26 @@ def collections_zuruecknehmen(client, ziel_name: str, tmp_name: str, alt_name: s
 
 
 # ------------------------------------------------------------ Wartungsmodus
+def schema_version_setzen(ziel_db, flags_dump) -> None:
+    """Phase 3 (3.5, E5): system_flags.schema aus dem Backup uebernehmen."""
+    from datetime import datetime, timezone
+    docs = (flags_dump or (None, None))[0] or []
+    schema = next((d for d in docs if isinstance(d, dict) and d.get("_id") == "schema"), None)
+    if schema is None:
+        ziel_db[FLAG_COLLECTION].delete_one({"_id": "schema"})
+        print("  Schema-Version: im Backup nicht vorhanden — Eintrag entfernt, die "
+              "Migrationen laufen beim naechsten Start von Anfang an")
+        return
+    version = int(schema.get("version") or 0)
+    ziel_db[FLAG_COLLECTION].update_one(
+        {"_id": "schema"},
+        {"$set": {"version": version, "updated_at": datetime.now(timezone.utc).isoformat(),
+                  "restore_hinweis": "aus Backup uebernommen"}},
+        upsert=True)
+    print(f"  Schema-Version {version} aus dem Backup uebernommen — fehlende Migrationen "
+          "laufen beim naechsten Start")
+
+
 def wartungsmodus(ziel_db, aktiv: bool, grund: str = "Restore") -> None:
     """system_flags.wartungsmodus setzen/aufheben — die API antwortet bei
     aktiv=True mit 503 (Middleware im Backend)."""
@@ -637,9 +657,11 @@ def wiederherstellen(args) -> int:
                   f"wiederherstellen.")
             print("Es wurde NICHTS veraendert.")
             return 1
+    flags_dump = None
     if FLAG_COLLECTION in dumps:
-        dumps.pop(FLAG_COLLECTION)
-        print(f"  Hinweis: {FLAG_COLLECTION} (Betriebs-Flags) wird nicht zurueckgespielt")
+        flags_dump = dumps.pop(FLAG_COLLECTION)
+        print(f"  Hinweis: {FLAG_COLLECTION} (Betriebs-Flags) wird nicht zurueckgespielt — "
+              "nur die Schema-Version daraus wird uebernommen")
     if args.dry_run:
         # Runde 21: "konsistent" nur sagen, wenn es stimmt.
         if grund_inkonsistent:
@@ -739,6 +761,20 @@ def wiederherstellen(args) -> int:
                          vorhandene, geschaltet, fehler)
 
     client.drop_database(tmp_name)
+    # Phase 3 (3.5, E5): Schema-Version des BACKUPS setzen — sonst bliebe die
+    # neuere Live-Version stehen und Migrationen zwischen Backup- und Live-
+    # Stand liefen beim naechsten Start nicht mehr.
+    schema_version_setzen(ziel, flags_dump)
+    if getattr(args, "exakt", False):
+        # Phase 3 (3.5, E6): Collections, die es live gibt, im Backup aber
+        # nicht, wandern in die Vorher-Datenbank — der Live-Stand entspricht
+        # danach exakt dem Backup.
+        for name in sorted(set(ziel.list_collection_names()) - set(dumps) - {FLAG_COLLECTION}):
+            try:
+                _rename_collection(client, f"{args.db}.{name}", f"{alt_name}.{name}")
+                print(f"  exakt: {name} nicht im Backup -> nach {alt_name} verschoben")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  exakt: {name} konnte nicht verschoben werden: {exc}")
     try:
         wartungsmodus(ziel, False)
     except Exception as exc:  # noqa: BLE001
@@ -746,6 +782,8 @@ def wiederherstellen(args) -> int:
               f"    {_wartungsmodus_befehl(args.db)}")
         return 1
     extra = sorted(vorhandene - set(dumps) - {FLAG_COLLECTION})
+    if extra and getattr(args, "exakt", False):
+        extra = []
     if extra:
         print(f"  Hinweis: nicht im Backup enthalten und daher unveraendert "
               f"belassen: {', '.join(extra)}")
@@ -863,6 +901,9 @@ def main(argv=None) -> int:
     ap.add_argument("--nur-datenbank", action="store_true",
                     help="nur die Datenbank; Datei-Speicher (uploads, "
                          "local_storage, S3) unangetastet lassen")
+    ap.add_argument("--exakt", action="store_true",
+                    help="Collections, die im Backup fehlen, in die Vorher-Datenbank "
+                         "verschieben — der Live-Stand entspricht danach exakt dem Backup")
     args = ap.parse_args(argv)
     return wiederherstellen(args)
 

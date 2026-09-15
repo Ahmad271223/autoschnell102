@@ -62,10 +62,13 @@ def test_03_terminloeschung_loest_erst_die_verweise():
     s = _quelle("backend", "routes", "appointments.py")
     block = s[s.index('@router.delete("/appointments/{appt_id}")'):]
     block = block[:block.index('@router.get("/appointments/{appt_id}/pickup-order.pdf")')]
-    loesen = block.index("_kv.termin_loesen(appt_id)")
+    # Phase 4 (15.09.2026, 4.1): Vorgang loesen, Vertragszeiger leeren und Termin
+    # loeschen laufen in _kern (Transaktion im Replica-Set) — in dieser Reihenfolge.
+    loesen = block.index("db.kaufvorgaenge.update_one(")
     zeiger = block.index('"appointment_id": None')
     loeschen = block.index("db.appointments.delete_one(")
     assert loesen < loeschen, "Kaufvorgang zuerst loesen, dann den Termin loeschen"
+    assert "await _transaktion(_kern)" in block
     assert zeiger < loeschen, "Vertragszeiger zuerst loesen, dann den Termin loeschen"
     # Abnahme 12.09.2026: Der Audit-Eintrag steht jetzt VOR dem Loeschen —
     # vorher konnte er selbst werfen, dann war der Termin weg und die Spur

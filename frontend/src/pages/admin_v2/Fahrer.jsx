@@ -29,12 +29,15 @@ export default function AdminFahrer() {
   const [deleteDriver, setDeleteDriver] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [anlegen, setAnlegen] = useState(false);
+  const [gekuerzt, setGekuerzt] = useState(false);   // Phase 4 (4.3): Liste vom Server gekuerzt
 
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get("/admin/drivers");
+      const r = await api.get("/admin/drivers");
+      const data = r.data;
       setRows(Array.isArray(data) ? data : []);
+      setGekuerzt(r.headers?.["x-truncated"] === "1");
     } catch (e) {
       toast.error(errMsg(e, "Fahrer konnten nicht geladen werden"));
     } finally {
@@ -92,7 +95,9 @@ export default function AdminFahrer() {
         subtitle="Alle Fahrer-Konten der Plattform — Verknüpfungen laufen über die Händler"
         action={
           <div className="flex items-center gap-3">
-            <span className="text-[12px] text-zinc-400">{rows.length} Konten</span>
+            <span className="text-[12px] text-zinc-400">
+              {rows.length} Konten{gekuerzt ? " (Liste gekürzt — es gibt weitere)" : ""}
+            </span>
             <Button size="sm" onClick={() => setAnlegen(true)} data-testid="fahrer-anlegen-btn">
               <UserPlus size={14} /> Fahrer anlegen
             </Button>

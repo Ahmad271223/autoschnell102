@@ -209,7 +209,8 @@ def oeffentlich(doc: Optional[dict]) -> Optional[dict]:
         return None
     felder = ("id", "quelle", "item_id", "url", "status", "erstellt_am",
               "fertig_am", "daten_abgerufen_am", "pdf_bytes", "pdf_sha256",
-              "fotos_eingebettet", "fotos_gesamt", "fehler")
+              "fotos_eingebettet", "fotos_gesamt", "fehler",
+              "daten_quelle", "ohne_fotos")
     aus = {}
     for k in felder:
         v = doc.get(k)
@@ -331,6 +332,13 @@ async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
             doc = await db.inserat_beweise.find_one({"cache_key": cache_key}, felder)
     except Exception as exc:  # noqa: BLE001 — Beweis darf den Abruf nie brechen
         log.warning("Beweisdokument fuer %s nicht vorgemerkt: %s", cache_key, exc)
+        # Phase 4 (4.5, B21): nicht nur ins Log — der Betrieb sieht den Alarm.
+        try:
+            import betrieb as _betrieb
+            await _betrieb.alarm(db, "beweis_vormerkung_fehlgeschlagen", ref=cache_key,
+                                 quelle=str(quelle), anlass=str(anlass), fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            pass
         return None
     if doc and doc.get("status") in ("fehlgeschlagen", "geloescht"):
         # Nach einer Stoerung (Speicher, Neustart) bekaeme das Inserat sonst
@@ -444,6 +452,7 @@ def neuer_speicher_key(doc: dict) -> str:
 async def beweis_erzeugen(db, doc: dict) -> bool:
     """Eine beanspruchte Zeile ausfuehren. True = fertig."""
     eingefroren = doc.get("quelle_daten")
+    daten_quelle = "eingefroren"
     if isinstance(eingefroren, dict) and eingefroren:
         # Runde 23 (11.09.2026): der beim Erstgebrauch eingefrorene Stand —
         # nie der (inzwischen evtl. neu abgerufene oder abgelaufene) Cache.
@@ -459,6 +468,20 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
         if not isinstance(daten, dict) or not daten:
             raise BeweisFehler("Inseratsdaten fehlen im Zwischenspeicher")
         abgerufen_am, cache_url = (cache or {}).get("fetched_at"), (cache or {}).get("url")
+        # Phase 4 (4.5, B22/A25): Rueckfall auf den Zwischenspeicher wird am
+        # Dokument gekennzeichnet, und der verwendete Stand wird als Vollkopie
+        # eingefroren — das Dokument bleibt nachvollziehbar, auch wenn der
+        # Zwischenspeicher rotiert.
+        daten_quelle = "cache"
+        try:
+            kopie = quelle_einfrieren(doc.get("quelle"), daten)
+            if kopie:
+                await db.inserat_beweise.update_one(
+                    {"id": doc["id"], "quelle_daten": {"$exists": False}},
+                    {"$set": {"quelle_daten": kopie,
+                              "quelle_abgerufen_am": abgerufen_am or _jetzt()}})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Beweisdokument %s: Cache-Stand nicht eingefroren: %s", doc.get("id"), exc)
     urls = foto_urls(daten)
     fotos = await _fotos_laden(urls[:BEWEIS_FOTOS_MAX])
     # Pruefung 14.09.2026 (B7): Inserat MIT Fotos, aber KEINES ladbar (Portal
@@ -492,6 +515,9 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
                   "daten_abgerufen_am": abgerufen_am,
                   "fotos_eingebettet": sum(1 for f in fotos if f),
                   "fotos_gesamt": len(urls), "fehler": None,
+                  # Phase 4 (4.5, B22/B23): Herkunft der Daten und "ohne Fotos"
+                  "daten_quelle": daten_quelle,
+                  "ohne_fotos": bool(urls) and not any(fotos),
                   "bearbeitung_bis": None, "naechster_versuch_ab": None}})
     # modified_count 0: ein anderer Worker hat uebernommen; die eigene Datei
     # steht in alle_keys und wird beim Verfall geloescht.
@@ -515,10 +541,34 @@ async def _herzschlag(db, doc: dict) -> None:
             continue
 
 
+# Phase 3 (3.3, B18/B19): nach dem Zeitlimit laeuft der PDF-Thread weiter —
+# so lange bleibt der Parallel-Slot belegt und der Eintrag wird nicht erneut
+# beansprucht; erst danach wird der Fehlschlag verbucht. Harte Obergrenze
+# fuer den Nachlauf, damit ein haengender Thread den Worker nicht ewig blockiert.
+NACHLAUF_MAX_SEKUNDEN = 15 * 60
+
+
 async def _bearbeiten(db, doc: dict) -> None:
     puls = asyncio.create_task(_herzschlag(db, doc))
     try:
-        await asyncio.wait_for(beweis_erzeugen(db, doc), timeout=ERZEUGUNG_MAX_SEKUNDEN)
+        lauf = asyncio.ensure_future(beweis_erzeugen(db, doc))
+        try:
+            await asyncio.wait_for(asyncio.shield(lauf), timeout=ERZEUGUNG_MAX_SEKUNDEN)
+        except asyncio.TimeoutError:
+            log.warning("Beweisdokument %s: Zeitlimit — warte auf das Ende des laufenden "
+                        "PDF-Threads, Slot bleibt belegt", doc.get("id"))
+            try:
+                await asyncio.wait_for(lauf, timeout=NACHLAUF_MAX_SEKUNDEN)
+            except asyncio.TimeoutError:
+                lauf.cancel()
+                log.error("Beweisdokument %s: PDF-Thread auch nach %ds nicht fertig",
+                          doc.get("id"), NACHLAUF_MAX_SEKUNDEN)
+            except Exception:  # noqa: BLE001
+                pass
+            if lauf.done() and not lauf.cancelled() and lauf.exception() is None \
+                    and lauf.result():
+                return          # doch noch fertig geworden (fertig gesetzt)
+            raise asyncio.TimeoutError()
     except Exception as exc:  # noqa: BLE001 — auch Zeitlimit (TimeoutError)
         versuche = doc.get("versuche") or 1
         endgueltig = versuche >= MAX_VERSUCHE
@@ -676,7 +726,7 @@ async def _gehalten(db, cache_key: str) -> bool:
 
 
 async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500,
-                            max_seiten: int = 20, altbestand_filter: Optional[dict] = None) -> int:
+                            max_seiten: int = 400, altbestand_filter: Optional[dict] = None) -> int:
     """Dateien nach Ablauf der Frist loeschen, sofern kein echter Vorgang
     das Dokument haelt. Die Zeile bleibt als Grabstein. Gehaltene Zeilen
     werden erst nach einem Tag erneut geprueft — sonst blockierten 500

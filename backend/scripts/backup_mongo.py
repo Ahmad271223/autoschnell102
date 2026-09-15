@@ -405,9 +405,14 @@ def backup_endpoint() -> str:
 
 
 def _backup_s3_client():
-    """S3-Client fuer die Offsite-Kopie (gleiche Zugangsdaten wie der
-    Datei-Speicher, ggf. eigene Adresse; in Tests austauschbar)."""
-    return s3_client(endpoint=backup_endpoint())
+    """S3-Client fuer die Offsite-Kopie. Phase 3 (3.5, E3): eigene Zugangs-
+    daten BACKUP_S3_ACCESS_KEY / BACKUP_S3_SECRET_KEY (und BACKUP_S3_REGION),
+    damit ein kompromittierter Datei-Speicher-Schluessel nicht auch an die
+    Sicherungen kommt; ohne diese Werte wie bisher die S3_*-Zugangsdaten."""
+    return s3_client(endpoint=backup_endpoint(),
+                     access_key=os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip() or None,
+                     secret_key=os.environ.get("BACKUP_S3_SECRET_KEY", "").strip() or None,
+                     region=os.environ.get("BACKUP_S3_REGION", "").strip() or None)
 
 
 def _object_lock_tage() -> int:

@@ -292,16 +292,64 @@ async def api_root():
 
 @api.get("/health")
 async def health_check(response: Response):
-    """Health-Check fuers Monitoring / automatischen Neustart.
+    """Health-Check fuers Monitoring / Load Balancer / automatischen Neustart.
     Prueft die DB-Verbindung real (ping) — meldet 503, wenn die
-    Datenbank haengt, damit ein Watchdog eingreifen kann."""
+    Datenbank haengt, damit ein Watchdog eingreifen kann.
+    Phase 3 (3.7, E4, Entscheidung Ahmad): auch bei fehlenden Kernindizes oder
+    ausstehenden Migrationen 503 — der Load Balancer nimmt die Instanz dann
+    aus der Rotation (S3-Ausfall bleibt eine Warnung in /ready)."""
     try:
         await db.command("ping")
-        return {"status": "healthy", "db": "up"}
     except Exception as exc:
         log.warning("health check DB ping failed: %s", exc)
         response.status_code = 503
         return {"status": "unhealthy", "db": "down"}
+    kern = await _kern_fehler()
+    if kern:
+        response.status_code = 503
+        return {"status": "unhealthy", "db": "up", "kern": kern}
+    return {"status": "healthy", "db": "up"}
+
+
+# Kritische eindeutige Indizes (gemeinsam fuer /health und /ready)
+KRITISCHE_INDIZES = {
+    "vehicles": ("dealer_id", "id"),
+    "kaufvorgaenge": ("contract_id",),
+}
+_KERN_CACHE: dict = {"bis": 0.0, "fehler": []}
+
+
+async def _kern_fehler() -> list:
+    """Kernzustand der Instanz, 60 s zwischengespeichert: Migrationsstand,
+    kritische eindeutige Indizes, beim Start gescheiterte Unique-Indizes."""
+    import time as _time
+    if _time.monotonic() < _KERN_CACHE["bis"]:
+        return list(_KERN_CACHE["fehler"])
+    fehler = []
+    try:
+        from migrationen import ZIEL_VERSION, aktuelle_version
+        v = await aktuelle_version(db)
+        if v < ZIEL_VERSION:
+            fehler.append(f"migration: Stand {v} < Ziel {ZIEL_VERSION}")
+    except Exception as exc:  # noqa: BLE001
+        fehler.append(f"migration: {exc}")
+    for sammlung, felder in KRITISCHE_INDIZES.items():
+        try:
+            vorhanden = await db[sammlung].index_information()
+            if not any(i.get("unique") and [f for f, _r in i["key"]] == list(felder)
+                       for i in vorhanden.values()):
+                fehler.append(f"unique-index {sammlung} ({', '.join(felder)}) fehlt")
+        except Exception as exc:  # noqa: BLE001
+            fehler.append(f"index {sammlung}: {exc}")
+    try:
+        import indizes as _indizes
+        if _indizes.FEHLENDE_UNIQUE:
+            fehler.append("unique-index fehlt: " + ", ".join(sorted(_indizes.FEHLENDE_UNIQUE)))
+    except Exception:  # noqa: BLE001
+        pass
+    _KERN_CACHE["bis"] = _time.monotonic() + 60
+    _KERN_CACHE["fehler"] = fehler
+    return list(fehler)
 
 
 _PROZESS_START = datetime.now(timezone.utc)
@@ -1089,6 +1137,18 @@ async def on_start():
     ergebnis = await ausfuehren_oder_warten(
         db, indexe=_alle_indexe, seeds=(seed_super_admin,))
     log.info("Migration/Indizes: %s", ergebnis)
+    # Phase 3 (3.6, A17/B20): in Produktion fail-closed — ohne die eindeutigen
+    # Indizes (Dubletten in Altdaten) startet die Instanz nicht.
+    try:
+        import indizes as _indizes
+        if _indizes.FEHLENDE_UNIQUE and os.environ.get("APP_ENV", "").strip().lower() == "production":
+            log.error("Start ABGEBROCHEN: eindeutige Indizes fehlen: %s — Dubletten bereinigen "
+                      "(python scripts/dubletten_pruefen.py)", sorted(_indizes.FEHLENDE_UNIQUE))
+            raise SystemExit(78)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Index-Register nicht pruefbar: %s", exc)
     # Object storage for listing snapshots (PDF + PNG proof archives).
     # Non-fatal if EMERGENT_LLM_KEY missing — snapshot endpoints will 503.
     try:

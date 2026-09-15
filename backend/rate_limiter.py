@@ -118,11 +118,16 @@ def _ist_vermittler(adresse: str) -> bool:
 
 
 def _ist_eigener_proxy(adresse: str) -> bool:
+    """Phase 3 (3.6, E8): In der Kette zaehlen dieselben Vermittler-Netze wie
+    bei der Nachbar-Pruefung — Liste PLUS private Netze (ausser mit
+    TRUSTED_PROXIES_NUR_LISTE). Vorher galt in der Kette nur die Liste: die
+    private 10.x-Adresse des Hetzner-Load-Balancers wurde zur Besucher-IP,
+    und alle Nutzer teilten sich einen Zaehler."""
     try:
         ip = ipaddress.ip_address(adresse)
     except ValueError:
         return False
-    return any(ip in netz for netz in _TRUSTED_PROXIES)
+    return any(ip in netz for netz in _VERMITTLER_NETZE)
 
 
 def client_ip(request) -> str:

@@ -8,6 +8,24 @@ import os
 from deps import db, log
 
 
+# Phase 3 (15.09.2026, 3.6 / A17 B20, Liste 4 Nr. 4-10): Register der
+# eindeutigen Indizes, die NICHT stehen. In Produktion bricht der Start damit
+# ab (server.on_start), /health meldet 503 (Instanz aus der Rotation).
+FEHLENDE_UNIQUE: set = set()
+
+
+async def _index_fehlt(db, typ: str, ref: str, **details) -> None:
+    FEHLENDE_UNIQUE.add(ref)
+    from betrieb import alarm
+    await alarm(db, typ, ref=ref, **details)
+
+
+async def _index_steht(db, typ: str, ref: str) -> None:
+    FEHLENDE_UNIQUE.discard(ref)
+    from betrieb import alarm_schliessen
+    await alarm_schliessen(db, typ, ref=ref)
+
+
 async def _unique_index_sicher(coll, feld, abbruch_in_produktion: bool = True) -> bool:
     """Unique-Index nur anlegen, wenn keine Dubletten existieren (Runde 5).
     Vorher scheiterte die Anlage still, und die Eindeutigkeit (z.B. eine
@@ -34,14 +52,14 @@ async def _unique_index_sicher(coll, feld, abbruch_in_produktion: bool = True) -
             raise SystemExit(78)
         log.error("ensure_indexes: %s", msg)
         from betrieb import alarm
-        await alarm(db, "unique_index_fehlt", ref=f"{coll.name}.{name}", beispiele=beispiele)
+        await _index_fehlt(db, "unique_index_fehlt", ref=f"{coll.name}.{name}", beispiele=beispiele)
         return False
     if len(felder) == 1:
         await coll.create_index(felder[0], unique=True)
     else:
         await coll.create_index([(f, 1) for f in felder], unique=True)
     from betrieb import alarm_schliessen
-    await alarm_schliessen(db, "unique_index_fehlt", ref=f"{coll.name}.{name}")
+    await _index_steht(db, "unique_index_fehlt", ref=f"{coll.name}.{name}")
     return True
 
 
@@ -125,7 +143,7 @@ async def _index_sicher_ersetzen(coll, schluessel, name: str, unique: bool = Fal
                     log.error("Start ABGEBROCHEN: %s", msg)
                     raise SystemExit(78)
                 log.error("ensure_indexes: %s", msg)
-                await alarm(datenbank, "unique_index_fehlt", ref=ref, beispiele=beispiele)
+                await _index_fehlt(datenbank, "unique_index_fehlt", ref=ref, beispiele=beispiele)
                 return False
         try:
             await coll.create_index(keys, **optionen)
@@ -136,7 +154,7 @@ async def _index_sicher_ersetzen(coll, schluessel, name: str, unique: bool = Fal
             if exc.code not in wiederholbar or versuch == 2:
                 raise
     if unique:
-        await alarm_schliessen(datenbank, "unique_index_fehlt", ref=ref)
+        await _index_steht(datenbank, "unique_index_fehlt", ref=ref)
     return True
 
 
@@ -230,6 +248,7 @@ async def _termin_unique_index() -> bool:
                   "Bitte doppelte offene Termine im Terminplaner schliessen "
                   "oder loeschen, dann Backend neu starten.", beispiele)
         # Runde 17: sichtbar im Admin-Bereich (/admin/betrieb), nicht nur im Log
+        FEHLENDE_UNIQUE.add("appointments.termin_offen_je_vertrag")
         await alarm(db, "termin_index_fehlt", ref="appointments", beispiele=beispiele)
         _in_produktion_abbrechen("termin_offen_je_vertrag: doppelte offene Termine")
         return False
@@ -242,10 +261,12 @@ async def _termin_unique_index() -> bool:
         await db.appointments.create_index(
             [("dealer_id", 1), ("contract_id", 1)], unique=True,
             name=name, partialFilterExpression=filter_)
+        FEHLENDE_UNIQUE.discard("appointments.termin_offen_je_vertrag")
         await alarm_schliessen(db, "termin_index_fehlt", ref="appointments")
         return True
     except Exception as exc:
         log.error("ensure_indexes: termin_offen_je_vertrag: %s", exc)
+        FEHLENDE_UNIQUE.add("appointments.termin_offen_je_vertrag")
         await alarm(db, "termin_index_fehlt", ref="appointments", fehler=str(exc)[:300])
         _in_produktion_abbrechen(f"termin_offen_je_vertrag: {exc}")
         return False
@@ -292,14 +313,14 @@ async def _unique_index_mit_bereinigung(coll, name: str, felder: list, filter_: 
                 await coll.drop_index(name)
             await coll.create_index([(f, 1) for f in felder], unique=True, name=name,
                                     partialFilterExpression=filter_)
-            await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+            await _index_steht(db, "unique_index_fehlt", ref=ref)
             return True
         except Exception as exc:
             fehler = exc
             log.warning("ensure_indexes: %s: Versuch %d gescheitert: %s", ref, versuch, exc)
     log.error("ensure_indexes: %s: Unique-Index NICHT angelegt (%s) — die Route "
               "arbeitet mit ihrer Vorabpruefung weiter", ref, fehler)
-    await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(fehler)[:300])
+    await _index_fehlt(db, "unique_index_fehlt", ref=ref, fehler=str(fehler)[:300])
     return False
 
 
@@ -402,9 +423,9 @@ async def listings_cache_unique_index(db) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.error("ensure_indexes: listings_cache.cache_key: %s — "
                   "Single-Flight-Sperre fehlt (Doppelabrufe moeglich)", exc)
-        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        await _index_fehlt(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
         return False
-    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    await _index_steht(db, "unique_index_fehlt", ref=ref)
     return True
 
 
@@ -421,9 +442,9 @@ async def listings_cache_indizes(db) -> bool:
         await listing_identity.ensure_cache_indexes(db)
     except Exception as exc:  # noqa: BLE001
         log.error("listings_cache index setup failed: %s", exc)
-        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        await _index_fehlt(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
         return False
-    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    await _index_steht(db, "unique_index_fehlt", ref=ref)
     return True
 
 
@@ -444,7 +465,7 @@ async def abo_unique_index(db) -> bool:
             partialFilterExpression=filter_, name=name)
     except Exception as exc:  # noqa: BLE001
         log.error("Index %s nicht anlegbar: %s", name, exc)
-        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        await _index_fehlt(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
         try:
             doppelte = await db.subscriptions.aggregate([
                 {"$match": filter_},
@@ -462,7 +483,7 @@ async def abo_unique_index(db) -> bool:
             await alarm_schliessen(db, "mehrfache_aktive_abos", ref="subscriptions")
         return False
     await alarm_schliessen(db, "mehrfache_aktive_abos", ref="subscriptions")
-    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    await _index_steht(db, "unique_index_fehlt", ref=ref)
     return True
 
 
@@ -495,12 +516,12 @@ async def plan_requests_unique_indizes(db) -> None:
                       "mehrfach offene Anfragen fuer %s: %s (aeltere auf "
                       "erledigt/abgelehnt setzen, dann greift der Index)",
                       name, exc, felder, beispiele)
-            await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300],
+            await _index_fehlt(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300],
                         beispiele=beispiele,
                         hinweis="Aeltere offene Anfragen auf erledigt/abgelehnt "
                                 "setzen, beim naechsten Start greift der Index.")
             continue
-        await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+        await _index_steht(db, "unique_index_fehlt", ref=ref)
 
 
 async def storage_retry_unique_index(db) -> None:
@@ -559,10 +580,10 @@ async def storage_retry_unique_index(db) -> None:
             name="retry_je_ziel")
     except Exception as exc:  # noqa: BLE001
         log.error("ensure_indexes: storage_delete_retry.retry_je_ziel: %s", exc)
-        await alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
+        await _index_fehlt(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300])
         _in_produktion_abbrechen(f"{ref}: {exc}")
         return
-    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    await _index_steht(db, "unique_index_fehlt", ref=ref)
 
 
 async def ttl_index_sicher(db, sammlung: str, feld: str = "expires_at_dt") -> bool:

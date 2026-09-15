@@ -272,10 +272,16 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
     mo_make_id, mo_make_entry = _mo_resolve_make(vehicle)
     mo_model_id = _mo_resolve_model(mo_make_entry, vehicle) if (mo_make_id and body.model) else None
     hinweise = []
+    # Phase 4 (4.4, A6/E9; Entscheidung Ahmad): kennt mobile.de Marke oder
+    # Modell nicht, gibt es KEINEN mobile.de-Link — vorher lief die Suche ohne
+    # Markenfilter bzw. ueber die ganze Marke, und fremde Modelle landeten in
+    # der Trefferbasis des Preisvergleichs.
     if not mo_make_id:
-        hinweise.append("mobile.de kennt diese Marke nicht — die mobile.de-Suche laeuft OHNE Markenfilter.")
+        hinweise.append("mobile.de kennt diese Marke nicht — kein mobile.de-Link "
+                        "(keine Breitensuche ueber alle Marken).")
     elif body.model and not mo_model_id:
-        hinweise.append("mobile.de kennt dieses Modell nicht — die mobile.de-Suche zeigt die ganze Marke.")
+        hinweise.append("mobile.de kennt dieses Modell nicht — kein mobile.de-Link "
+                        "(keine Suche ueber die ganze Marke).")
     if body.kw and body.ps:
         hinweise.append("kW und PS beide angegeben — fuer die Suche gilt der kW-Wert.")
     if body.fuel and not _as_fuel(vehicle["fuel_label"]):
@@ -297,7 +303,8 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
     # Pruefung 14.09.2026 (Liste 4, Nr. 80): kennt mobile.de die Marke nicht,
     # gibt es keinen mobile.de-Link (vorher eine Suche OHNE Markenfilter —
     # der Sucher bekam beliebige Fahrzeuge).
-    mobile_url = build_mobile_url(vehicle, rules) if mo_make_id else None
+    mobile_url = (build_mobile_url(vehicle, rules)
+                  if mo_make_id and (not body.model or mo_model_id) else None)
     autoscout_url = build_autoscout_url(vehicle, rules)
     # Runde 11: Was der AutoScout-Link von den Firmenregeln NICHT umsetzt
     # (z.B. Land CH), sagt der Server — vorher sah der Link nur "erfolgreich" aus.

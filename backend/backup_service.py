@@ -158,7 +158,7 @@ async def _alarm(db, typ: str, ref: str, **details) -> None:
     await alarm(db, typ, ref=ref, **details)
 
 
-async def _run_backup(db=None) -> None:
+async def _run_backup(db=None) -> bool:
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-X", "utf8", str(_SCRIPT), "--dir", str(BACKUP_DIR),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
@@ -175,7 +175,7 @@ async def _run_backup(db=None) -> None:
         await _alarm(db, "backup_fehlgeschlagen", "zeitlimit",
                      ausgabe="Zeitlimit (3 h) ueberschritten, Prozess beendet")
         await stand_speichern(db)
-        return
+        return False
     zeilen = (out or b"").decode("utf-8", "replace").strip().splitlines()
     tail = zeilen[-1] if zeilen else ""
     ausgabe = "\n".join(zeilen[-8:])
@@ -189,6 +189,7 @@ async def _run_backup(db=None) -> None:
     m = _manifest(ordner) if ordner_da else None
     fehlend, grund = mangel(m)
     rc = proc.returncode
+    ok = False
     if rc in (0, 2, 3):
         inkonsistent = rc == 3 or bool(grund)
         unvoll = rc == 2 or bool(fehlend) or (rc == 3 and "UNVOLLSTAENDIG" in ausgabe)
@@ -209,11 +210,13 @@ async def _run_backup(db=None) -> None:
                          code=rc, grund="manifest.json fehlt oder unlesbar")
         elif not inkonsistent and not unvoll:
             log.info("[backup] %s", tail)
+            ok = True
     else:
         log.error("[backup] FEHLGESCHLAGEN (Code %s): %s", rc, tail)
         await _alarm(db, "backup_fehlgeschlagen", ref or f"code-{rc}",
                      ausgabe=ausgabe, code=rc)
     await stand_speichern(db)
+    return ok
 
 
 # ---- Zwei Server (06.09.2026) ----
@@ -338,7 +341,7 @@ async def run_backup_forever(db=None) -> None:
     sorgt eine Sperre in MongoDB dafuer, dass pro Tag nur EIN Worker das
     Backup zieht — sonst gaebe es acht identische Backups gleichzeitig."""
 
-    async def _may_run(tag: str) -> bool:
+    async def _may_run(tag: str):
         if db is None:
             return True  # Einzelprozess (lokal) — keine Sperre noetig
         from job_lock import acquire
@@ -346,19 +349,39 @@ async def run_backup_forever(db=None) -> None:
         # Gewinner aus, uebernimmt nach Ablauf ein anderer Worker.
         return await acquire(db, f"backup-{tag}", ttl_seconds=20 * 3600)
 
+    async def _lauf_mit_sperre() -> bool:
+        """True = ok oder nichts zu tun (anderer Worker); False = Fehlschlag."""
+        tag = datetime.now().strftime("%Y-%m-%d")
+        token = await _may_run(tag)
+        if not token:
+            return True
+        ok = await _run_backup(db)
+        if not ok and db is not None and isinstance(token, str):
+            # Phase 3 (3.5, F3): Tagessperre nach einem Fehlschlag freigeben —
+            # vorher gab es an diesem Tag keinen zweiten Versuch mehr.
+            from job_lock import release
+            await release(db, f"backup-{tag}", token=token)
+        return ok
+
     # Nachholen: wenn das letzte VOLLSTAENDIGE Backup >24h alt ist, sofort
     # eins ziehen (PC koennte zur geplanten Zeit ausgeschaltet gewesen sein).
     await asyncio.sleep(30)  # Backend erst in Ruhe hochfahren lassen
     # Runde 10: fuer das Nachholen zaehlt nur eine VOLLSTAENDIGE Sicherung.
     alter = await letztes_vollstaendiges_alter_global(db)
-    if alter > 24 and await _may_run(
-            datetime.now().strftime("%Y-%m-%d")):
+    fehlversuche = 0
+    if alter > 24:
         log.info("[backup] Letztes vollstaendiges Backup >24h alt — hole nach …")
-        await _run_backup(db)
+        if not await _lauf_mit_sperre():
+            fehlversuche = 1
     while True:
         wait = _seconds_until_next_run()
+        if fehlversuche:
+            # Phase 3 (F3): nach einem Fehlschlag in einer Stunde erneut (bis 3x)
+            wait = min(wait, 3600)
         log.info("[backup] Naechstes Backup in %.1f h (%02d:00 Uhr)",
                  wait / 3600, BACKUP_HOUR)
         await asyncio.sleep(wait)
-        if await _may_run(datetime.now().strftime("%Y-%m-%d")):
-            await _run_backup(db)
+        if await _lauf_mit_sperre():
+            fehlversuche = 0
+        else:
+            fehlversuche = fehlversuche + 1 if fehlversuche < 3 else 0

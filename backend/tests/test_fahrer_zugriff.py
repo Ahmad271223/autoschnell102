@@ -16,6 +16,7 @@ import hashlib
 import os
 import sys
 import uuid
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 from pathlib import Path
 
 import pytest
@@ -123,7 +124,10 @@ def test_entfernter_fahrer_verliert_zugriff_auf_abgeschlossene_termine():
         foto_key = f"pickup/{t.dealer_id}/{uuid.uuid4().hex}.jpg"
         await db.appointments.insert_one(
             t.appt(appt_id, "abgeholt", contract_id=contract_id,
-                   vehicle_id=vehicle_id, status_changed_at="2026-09-01T10:00:00+00:00"))
+                   vehicle_id=vehicle_id,
+                   # Runde 10 (15.09.2026): relativ statt fest — das feste Datum fiel
+                   # nach FAHRER_SICHT_ABGEHOLT_TAGE aus der Fahrer-Sicht (Zeitbombe).
+                   status_changed_at=(_dt.now(_tz.utc) - _td(days=3)).isoformat()))
         await db.pickup_reports.insert_one({
             "id": f"r_{t.tag}", "appointment_id": appt_id, "dealer_id": t.dealer_id,
             "driver_account_id": t.driver_id, "driver_name": "x", "version": 1,

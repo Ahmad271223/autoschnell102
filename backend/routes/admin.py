@@ -106,13 +106,15 @@ async def admin_trigger_cleanup(user=Depends(current_super_admin)):
     Regulär läuft der Loop 1× pro Stunde automatisch."""
     # Pruefung 14.09.2026 (Liste 1, Nr. 30): dieselbe Sperre wie der stuendliche
     # Lauf — kein zweiter Lauf parallel (auch nicht durch zwei Admin-Klicks).
-    from job_lock import acquire, release
-    if not await acquire(db, "cleanup-cycle", ttl_seconds=3300):
+    from job_lock import acquire, heartbeat, release
+    token = await acquire(db, "cleanup-cycle", ttl_seconds=3300)
+    if not token:
         raise HTTPException(409, "Ein Aufräumlauf läuft gerade — bitte später erneut.")
     try:
-        stats = await _cleanup_once(db)
+        async with heartbeat(db, "cleanup-cycle", token, 3300):
+            stats = await _cleanup_once(db)
     finally:
-        await release(db, "cleanup-cycle")
+        await release(db, "cleanup-cycle", token=token)
     return stats
 
 
@@ -1112,6 +1114,14 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         res = await db.users.delete_many({"dealer_id": dealer_id})
         if res.deleted_count:
             geloescht["users"] = res.deleted_count
+        # Phase 3 (3.4, Liste 4 Nr. 15): Grabstein — der Aufraeumjob entfernt
+        # Reste, die eine noch laufende Anfrage nach der Loeschung schrieb.
+        try:
+            await db.firmen_geloescht.update_one(
+                {"id": dealer_id}, {"$set": {"id": dealer_id, "geloescht_am": now_iso()}},
+                upsert=True)
+        except Exception:  # noqa: BLE001
+            log.exception("Grabstein fuer Firma %s nicht gesetzt", dealer_id)
     else:
         wiederaufnahme = False
         await db.users.delete_one({"id": user_id})
@@ -1220,10 +1230,14 @@ async def admin_user_set_password(
 # Fahrer-Konten sind firmenneutral (kein dealer_id) — die Liste ist
 # plattformweit; Firmenzugehoerigkeit ergibt sich aus dealer_drivers.
 @router.get("/admin/drivers")
-async def admin_list_drivers(_=Depends(current_admin)):
+async def admin_list_drivers(response: Response, limit: int = 2000, seite: int = 1,
+                             _=Depends(current_admin)):
+    limit = max(1, min(int(limit), 5000))
+    seite = max(1, int(seite))
     fahrer = await db.driver_accounts.find(
         {}, {"_id": 0, "password_hash": 0, "current_session_id": 0},
-    ).sort("created_at", -1).to_list(2000)
+    ).sort("created_at", -1).skip((seite - 1) * limit).to_list(limit + 1)
+    fahrer = _seite_kopf(response, fahrer, limit)
     links: Dict[str, dict] = {}
     async for row in db.dealer_drivers.aggregate([
         {"$group": {"_id": "$driver_account_id", "n": {"$sum": 1},
@@ -1752,9 +1766,19 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
     return {"ok": True, "sale_plan": plan}
 
 
+def _seite_kopf(response: Response, items: list, limit: int) -> list:
+    """Phase 4 (4.3): eine Zeile mehr lesen als angezeigt — ist sie da, wird
+    die Liste gekuerzt und der Kopf X-Truncated gesetzt (wie bei Terminen)."""
+    if len(items) > limit:
+        response.headers["X-Truncated"] = "1"
+        return items[:limit]
+    return items
+
+
 @router.get("/admin/plan-requests")
-async def admin_plan_requests(status: Optional[str] = None,
+async def admin_plan_requests(response: Response, status: Optional[str] = None,
                               type: Optional[str] = None,
+                              limit: int = 200, seite: int = 1,
                               _=Depends(current_super_admin)):
     # Runde 12: Freischaltungen sind Super-Admin-Sache (Oberflaeche:
     # superOnly). Firmenname, Ansprechpartner, E-Mail, Telefon und
@@ -1764,8 +1788,11 @@ async def admin_plan_requests(status: Optional[str] = None,
         query["status"] = status
     if type:
         query["type"] = type
-    return await db.plan_requests.find(query, {"_id": 0}) \
-        .sort("created_at", -1).to_list(200)
+    limit = max(1, min(int(limit), 1000))
+    seite = max(1, int(seite))
+    items = await db.plan_requests.find(query, {"_id": 0}) \
+        .sort("created_at", -1).skip((seite - 1) * limit).to_list(limit + 1)
+    return _seite_kopf(response, items, limit)
 
 
 # ---------- Sucher-Abo freischalten (manuell) ----------
@@ -2295,15 +2322,19 @@ async def admin_create_driver(body: AdminFahrerIn, admin=Depends(current_super_a
 
 
 @router.get("/admin/dealers/{dealer_id}/sucher")
-async def admin_list_dealer_sucher(dealer_id: str, _=Depends(current_admin)):
+async def admin_list_dealer_sucher(dealer_id: str, response: Response, limit: int = 200,
+                                   seite: int = 1, _=Depends(current_admin)):
     """Alle Sucher einer Firma inkl. Abo-Status, letzter Zahlung und
     nächster Fälligkeit (= Abo-Ablauf) — für die Freischaltungs-Ansicht."""
     # Chef ZUERST (Wunsch 09/2026: "Firmen-Chef Freischaltung Sucher-
     # Funktion ja/nein" auf derselben Karte), danach die Sucher.
+    limit = max(1, min(int(limit), 2000))
+    seite = max(1, int(seite))
     items = await db.users.find(
         {"dealer_id": dealer_id, "role": {"$in": ["dealer", "sucher"]}},
         {"_id": 0, "password_hash": 0},
-    ).sort("created_at", 1).to_list(200)
+    ).sort("created_at", 1).skip((seite - 1) * limit).to_list(limit + 1)
+    items = _seite_kopf(response, items, limit)
     items.sort(key=lambda x: 0 if x.get("role") == "dealer" else 1)
     out = []
     for s in items:
@@ -2366,12 +2397,16 @@ async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
 
 # ---------- Zwischenhändler-Zugang freischalten (manuell) ----------
 @router.get("/admin/buyers")
-async def admin_list_buyers(_=Depends(current_admin)):
+async def admin_list_buyers(response: Response, limit: int = 1000, seite: int = 1,
+                            _=Depends(current_admin)):
     """Alle Zwischenhändler mit Zugangsstatus (für die Freischaltung)."""
     from routes.marketplace import _access_status
+    limit = max(1, min(int(limit), 5000))
+    seite = max(1, int(seite))
     users = await db.users.find(
         {"role": "b2b_buyer"}, {"_id": 0, "password_hash": 0},
-    ).sort("created_at", -1).to_list(1000)
+    ).sort("created_at", -1).skip((seite - 1) * limit).to_list(limit + 1)
+    users = _seite_kopf(response, users, limit)
     return [{**u, "access": _access_status(u)} for u in users]
 
 

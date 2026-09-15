@@ -45,7 +45,10 @@ def main():
     endpoint = (os.environ.get("BACKUP_S3_ENDPOINT", "").strip()
                 or os.environ.get("S3_ENDPOINT", "").strip())
     print(f"Adresse: {endpoint or '(Standard von AWS)'}")
-    s3 = s3_client(endpoint=endpoint)
+    s3 = s3_client(endpoint=endpoint,
+                   access_key=os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip() or None,
+                   secret_key=os.environ.get("BACKUP_S3_SECRET_KEY", "").strip() or None,
+                   region=os.environ.get("BACKUP_S3_REGION", "").strip() or None)
     fehler = 0
     # 1) Erreichbarkeit
     try:

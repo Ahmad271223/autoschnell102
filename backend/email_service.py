@@ -322,6 +322,8 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
             if stand == "gesendet":
                 log.info("email_service: '%s' an %s war ueber SMTP bereits abgegeben", subject, to)
                 return True, "smtp:bereits"
+            if stand == "db_fehler":
+                return False, ""
             if stand == "unklar":
                 log.error("email_service: SMTP-Abgabe an %s unter %s ist unklar (frueherer "
                           "Versuch ohne Ergebnis) — NICHT erneut gesendet", to, idempotency_key)
@@ -370,8 +372,10 @@ async def _smtp_idempotenz_beanspruchen(key: str, to: str) -> str:
             return "unklar"
         return "unklar"
     except Exception as exc:  # noqa: BLE001
-        log.warning("email_service: SMTP-Idempotenz nicht pruefbar (%s) — sende", exc)
-        return "neu"
+        # Phase 3 (3.6, A22): fail-closed — ohne Datenbank ist nicht pruefbar, ob
+        # dieselbe Mail schon abging; lieber nicht senden als doppelt.
+        log.error("email_service: SMTP-Idempotenz nicht pruefbar (%s) — NICHT gesendet", exc)
+        return "db_fehler"
 
 
 async def _smtp_idempotenz_abschliessen(key: str) -> None:

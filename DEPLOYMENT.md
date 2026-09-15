@@ -330,6 +330,7 @@ vermerkt das im Manifest unter `offsite` (`bucket`, `key`, `uploaded_at`,
 | `BACKUP_S3_PREFIX` | Schlüssel-Präfix, Standard `autoschnell-backups/` |
 | `BACKUP_S3_OBJECT_LOCK_DAYS` | `> 0`: Objekt wird mit `ObjectLockMode=COMPLIANCE` für N Tage unlöschbar (Schutz vor Ransomware/Admin-Fehler). Der Bucket muss **beim Anlegen mit Object Lock (Versionierung) erstellt** worden sein, sonst schlägt der Upload fehl. |
 | `BACKUP_S3_KEEP` | Offsite-Aufbewahrung in Archiven, Standard 14 (Rotation best effort; gesperrte Objekte bleiben bis zum Ablauf). |
+| `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY`, `BACKUP_S3_REGION` | Eigene Zugangsdaten NUR für den Sicherungs-Bucket (Phase 3, 15.09.2026): ein Schlüssel, der nur schreiben darf. Leer = die `S3_*`-Zugangsdaten (dann meldet die Produktionsprüfung einen Hinweis). |
 
 Ohne S3-Offsite das Volume regelmäßig auf einen ANDEREN Ort kopieren
 (z. B. Hetzner Storage Box), damit ein Server-Ausfall nicht auch die Backups
@@ -379,6 +380,7 @@ oder vollständig auf Backup-Stand**, nie gemischt.
 | `--notfall-unvollstaendig-akzeptieren` | ein als UNVOLLSTAENDIG markiertes Backup **trotzdem** einspielen — nur im Notfall; die fehlenden Teile werden laut aufgelistet und fehlen danach |
 | `--ohne-s3` | S3-Objekte im Backup bewusst nicht zurückspielen (sonst Abbruch, wenn S3 hier nicht konfiguriert ist) |
 | `--nur-datenbank` | Datei-Speicher (uploads, local_storage, S3) unangetastet lassen — für die Restore-Probe in eine Testdatenbank |
+| `--exakt` | Collections, die es live gibt, im Backup aber nicht, wandern in die Vorher-Datenbank — der Live-Stand entspricht danach exakt dem Backup (Phase 3, 15.09.2026). Ohne die Option bleiben sie unverändert. Die Schema-Version wird in jedem Fall aus dem Backup übernommen, fehlende Migrationen laufen beim nächsten Start. |
 
 **Wartungsmodus:** Vor dem Umschalten schreibt der Restore in der
 Zieldatenbank `system_flags` → `{_id: "wartungsmodus", aktiv: true, grund:
@@ -1415,3 +1417,23 @@ Die Zugangsdaten entstehen in Cloudflare unter **R2 → Manage API Tokens → Cr
 Für die Sicherungen einen **zweiten** Bucket anlegen und `BACKUP_S3_BUCKET` setzen. Getrennte Buckets, damit ein Fehler in der Anwendung die Sicherungen nicht mitreißt.
 
 Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern: `S3_SSE=auto|aes256|aus` und `S3_PRUEFSUMMEN=auto|immer|nur_noetig`.
+
+## Betrieb seit Phase 3 (15.09.2026)
+
+- `/api/health` antwortet **503** (Load Balancer nimmt die Instanz aus der Rotation), sobald
+  Migrationen ausstehen, ein kritischer eindeutiger Index fehlt (`vehicles(dealer_id,id)`,
+  `kaufvorgaenge(contract_id)`) oder beim Start ein eindeutiger Index nicht angelegt werden
+  konnte. Ein S3-Ausfall bleibt eine Warnung in `/api/ready`.
+- In Produktion **startet das Backend nicht**, wenn ein eindeutiger Index wegen Dubletten
+  nicht angelegt werden kann (Log: „Start ABGEBROCHEN: eindeutige Indizes fehlen“).
+  Bereinigen mit `python scripts/dubletten_pruefen.py`, danach erneut starten.
+- Vermittler-Netze: in der Kopfzeilen-Kette zählen die `TRUSTED_PROXIES` **plus** die privaten
+  Netze (10.x, 172.16.x, 192.168.x) als eigene Vermittler; der Compose-Standard enthält
+  `10.0.0.0/8` für den Hetzner-Load-Balancer. Mit `TRUSTED_PROXIES_NUR_LISTE=true` muss ein
+  10.x-Netz in der Liste stehen, sonst bricht die Produktionsprüfung ab.
+- Hintergrund-Sperren tragen ein Besitzer-Token und werden per Heartbeat verlängert; ein
+  fehlgeschlagenes Backup gibt seine Tagessperre frei und wird nach einer Stunde erneut
+  versucht (bis dreimal).
+- Gelöschte Firmen bekommen einen Grabstein (`firmen_geloescht`); der Aufräumjob entfernt
+  30 Tage lang Reste aus allen Firmen-Sammlungen.
+

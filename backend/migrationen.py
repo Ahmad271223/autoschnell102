@@ -397,14 +397,19 @@ _HEARTBEAT_S = 30
 _WARTEN_MAX_S = 4 * 3600
 
 
+_TOKEN = None      # Besitzer-Token der Migrations-Sperre (Phase 3, 3.1)
+
+
 async def _sperre_holen(db) -> bool:
+    global _TOKEN
     from job_lock import acquire
-    return await acquire(db, _SPERRE, ttl_seconds=_SPERRE_TTL_S)
+    _TOKEN = await acquire(db, _SPERRE, ttl_seconds=_SPERRE_TTL_S)
+    return bool(_TOKEN)
 
 
 async def _sperre_verlaengern(db) -> bool:
     from job_lock import verlaengern
-    return await verlaengern(db, _SPERRE, ttl_seconds=_SPERRE_TTL_S)
+    return await verlaengern(db, _SPERRE, ttl_seconds=_SPERRE_TTL_S, token=_TOKEN)
 
 
 async def _sperre_gehalten(db) -> bool:
@@ -428,7 +433,7 @@ async def _heartbeat(db, stop: "asyncio.Event") -> None:
 
 async def _sperre_loesen(db) -> None:
     from job_lock import release
-    await release(db, _SPERRE)
+    await release(db, _SPERRE, token=_TOKEN)
 
 
 async def ausfuehren(db, indexe=None, seeds=()) -> dict:

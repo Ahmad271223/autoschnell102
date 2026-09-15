@@ -24,6 +24,7 @@ export default function AdminFreischaltungen() {
   const [kaeuferDialog, setKaeuferDialog] = useState(null);   // { request } (request null = frei)
   const [fahrerReq, setFahrerReq] = useState(null);   // Zugangs-Anfrage art=fahrer -> Dialog
   const [pwBuyer, setPwBuyer] = useState(null);
+  const [gekuerzt, setGekuerzt] = useState(false);   // Phase 4 (4.3): Liste vom Server gekuerzt
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -34,6 +35,7 @@ export default function AdminFreischaltungen() {
       ]);
       setRequests(r.data);
       setBuyers(b.data);
+      setGekuerzt(r.headers?.["x-truncated"] === "1" || b.headers?.["x-truncated"] === "1");
     } catch (e) {
       console.warn("Freischaltungen laden:", e?.response?.status || e);
     } finally {
@@ -119,6 +121,13 @@ export default function AdminFreischaltungen() {
             <div className="text-[13px] font-semibold text-zinc-300 mb-3 uppercase tracking-wide">
               Offene Anfragen {requests?.length ? `(${requests.length})` : ""}
             </div>
+            {gekuerzt && (
+              <div className="mb-3 rounded-xl border px-4 py-3 text-sm" data-testid="freischaltungen-gekuerzt"
+                   style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+                Die Liste ist gekürzt — es gibt mehr Einträge, als hier angezeigt werden. Bitte zuerst die
+                sichtbaren bearbeiten, danach neu laden.
+              </div>
+            )}
             {!requests?.length ? (
               <EmptyState title="Keine offenen Anfragen" hint="Neue Sucher-Abo- und Zugangsanfragen erscheinen hier." />
             ) : (

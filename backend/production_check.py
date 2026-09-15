@@ -165,6 +165,28 @@ def pruefe_produktion(log) -> None:
     if ist_prod and os.environ.get("TRUST_PROXY", "").strip().lower() not in ("1", "true", "yes"):
         fehler.append("TRUST_PROXY=true fehlt — hinter nginx/Load Balancer sieht das Backend "
                       "sonst nur die Proxy-Adresse (Rate-Limiter, Anmeldesperren, Audit).")
+    # Phase 3 (3.6, E8): Der Hetzner-Load-Balancer steht mit seiner privaten
+    # 10.x-Adresse in der Kette. Mit TRUSTED_PROXIES_NUR_LISTE=true zaehlen
+    # NUR die gelisteten Netze — dann muss das 10.x-Netz drinstehen.
+    nur_liste = os.environ.get("TRUSTED_PROXIES_NUR_LISTE", "").strip().lower() in ("1", "true", "yes")
+    if ist_prod and nur_liste:
+        import ipaddress
+        netze = []
+        for roh in os.environ.get("TRUSTED_PROXIES", "").split(","):
+            try:
+                netze.append(ipaddress.ip_network(roh.strip(), strict=False))
+            except ValueError:
+                continue
+        privat = ipaddress.ip_network("10.0.0.0/8")
+        if not any(n.version == 4 and n.overlaps(privat) for n in netze):
+            fehler.append("TRUSTED_PROXIES_NUR_LISTE=true, aber TRUSTED_PROXIES enthaelt kein "
+                          "10.x-Netz — der Load Balancer (privates Hetzner-Netz) wuerde als "
+                          "Besucher gezaehlt und alle Nutzer teilten sich einen Zaehler.")
+    if ist_prod and os.environ.get("BACKUP_S3_BUCKET", "").strip() \
+            and not os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip():
+        warnungen.append("BACKUP_S3_ACCESS_KEY/SECRET_KEY nicht gesetzt — die Offsite-Kopie nutzt "
+                         "die Zugangsdaten des Datei-Speichers (Empfehlung: eigener, nur "
+                         "schreibender Schluessel fuer den Sicherungs-Bucket).")
 
     cors = os.environ.get("CORS_ORIGINS", "").strip()
     if not cors or "localhost" in cors or cors == "*":

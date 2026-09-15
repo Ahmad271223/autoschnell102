@@ -268,6 +268,45 @@ TERMIN_VERALTET_HINWEIS = ("Der Termin wurde inzwischen von jemand anderem geän
                            "bitte neu laden und erneut speichern.")
 
 
+_REPLICA_SET: Dict[str, Any] = {"bis": 0.0, "ist": False}
+
+
+async def _ist_replica_set() -> bool:
+    """Phase 4 (4.1): Transaktionen gibt es nur im Replica-Set; Ergebnis 10 min
+    zwischengespeichert (Einzelserver in Tests, Replica-Set in Produktion)."""
+    import time as _time
+    if _time.monotonic() < _REPLICA_SET["bis"]:
+        return _REPLICA_SET["ist"]
+    ist = False
+    try:
+        h = await db.command("hello")
+        ist = bool(h.get("setName"))
+    except Exception:  # noqa: BLE001
+        ist = False
+    _REPLICA_SET.update(bis=_time.monotonic() + 600, ist=ist)
+    return ist
+
+
+async def _transaktion(fn):
+    """fn(session) in einer Transaktion ausfuehren, wenn moeglich; sonst ohne.
+    Bricht die Transaktion technisch ab (PyMongoError), laeuft fn einmal ohne
+    Transaktion — die Schritte sind idempotent."""
+    if await _ist_replica_set():
+        try:
+            from deps import client as _client
+            async with await _client.start_session() as s:
+                async with s.start_transaction():
+                    return await fn(s)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            from pymongo.errors import PyMongoError
+            if not isinstance(exc, PyMongoError):
+                raise
+            log.warning("Transaktion nicht moeglich (%s) — Schritte laufen einzeln", exc)
+    return await fn(None)
+
+
 async def _doppelbuchung_hinweis(appt_id: str, driver_id, datum, zeit) -> Optional[str]:
     """Phase 2 (2.10, D1/D2; Entscheidung Ahmad: nur warnen, der Fahrer nimmt
     Fahrten selbst an oder lehnt ab): gleicher Fahrer, gleiches Datum, gleiche
@@ -1121,9 +1160,12 @@ async def get_pickup_report(appt_id: str, versions: int = 0,
     from cleanup_service import FAHRERFOTO_TAGE
     out["fahrerfoto_tage"] = FAHRERFOTO_TAGE
     if versions:
-        out["versions"] = await db.pickup_reports.find(
+        # Phase 4 (4.3): 21 lesen, 20 zeigen — die Kuerzung wird gemeldet.
+        alle = await db.pickup_reports.find(
             {"appointment_id": appt_id}, {"_id": 0},
-        ).sort("version", -1).to_list(20)
+        ).sort("version", -1).to_list(21)
+        out["versions"] = alle[:20]
+        out["versions_gekuerzt"] = len(alle) > 20
     return out
 
 
@@ -1180,12 +1222,32 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     # Umbau Kaufvorgaenge: der Vorgang verliert den Termin (zurueck auf
     # "Vertrag erstellt"), Vertragsverweis wird geloest.
     import kaufvorgang as _kv
-    await _kv.termin_loesen(appt_id)
-    await db.generated_pdfs.update_many(
-        {"dealer_id": user["dealer_id"], "appointment_id": appt_id},
-        {"$set": {"appointment_id": None}})
-    res = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]})
-    if not res.deleted_count:
+    # Phase 4 (4.1, A4/D9): Vorgang loesen, Vertragsverweis leeren und Termin
+    # loeschen in EINER Transaktion, wenn die Datenbank ein Replica-Set ist
+    # (Produktion); sonst nacheinander wie bisher. Die Fahrzeug-Zusammenfassung
+    # laeuft danach mit Merker (Phase 2).
+    betroffene = [kv async for kv in db.kaufvorgaenge.find(
+        {"appointment_id": appt_id},
+        {"_id": 0, "id": 1, "status": 1, "vehicle_id": 1, "dealer_id": 1})]
+
+    async def _kern(session=None) -> int:
+        ses = {"session": session} if session is not None else {}
+        for kv in betroffene:
+            neu = "vertrag_erstellt" if kv.get("status") == "abholung_geplant" else kv.get("status")
+            await db.kaufvorgaenge.update_one(
+                {"id": kv["id"], "appointment_id": appt_id},
+                {"$set": {"status": neu, "appointment_id": None, "updated_at": now_iso()}}, **ses)
+        await db.generated_pdfs.update_many(
+            {"dealer_id": user["dealer_id"], "appointment_id": appt_id},
+            {"$set": {"appointment_id": None}}, **ses)
+        r = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]}, **ses)
+        return r.deleted_count
+
+    geloescht = await _transaktion(_kern)
+    for kv in betroffene:
+        ziel = await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
+        await _kv._nacharbeit_merken(kv, ziel)
+    if not geloescht:
         # Jemand anderes war schneller — dessen Lauf hat dieselben Verweise
         # geloest, es bleibt nichts Halbes zurueck.
         raise HTTPException(404, "Termin nicht gefunden")

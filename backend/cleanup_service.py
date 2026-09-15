@@ -216,9 +216,10 @@ async def berichte_nach_frist_loeschen(db, now: datetime, stats: dict) -> int:
     mit vorgemerkt). Hoechstens 500 je Lauf."""
     cutoff = (now - timedelta(days=BERICHT_AUFBEWAHRUNG_TAGE)).isoformat()
     n = 0
+    # Phase 3 (3.4, B24): kein 500er-Deckel mehr — Cursor in Haeppchen.
     async for rep in db.pickup_reports.find(
             {"created_at": {"$lte": cutoff}},
-            {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).limit(500):
+            {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).batch_size(200):
         await _fotos_eines_berichts_loeschen(db, rep, now, stats, rep.get("dealer_id") or "")
         offen = any((d or {}).get("photo_key") for d in (rep.get("deviations") or []))
         if offen:
@@ -280,7 +281,7 @@ async def berichtsfotos_nach_frist_loeschen(db, now: datetime, stats: dict) -> i
         {"created_at": {"$lte": cutoff},
          "deviations": {"$elemMatch": {"photo_key": {"$type": "string"},
                                        "photo_loeschung_offen": {"$ne": True}}}},
-        {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).limit(500)
+        {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).batch_size(200)
     async for rep in cursor:
         if await _fotos_eines_berichts_loeschen(db, rep, now, stats,
                                                 rep.get("dealer_id") or ""):
@@ -1164,9 +1165,10 @@ async def inserate_geloeschter_fahrzeuge_schliessen(db) -> int:
     und der Alarm inserat_zu_geloeschtem_fahrzeug_offen geschlossen."""
     n = 0
     jetzt = now_iso()
+    # Phase 3 (3.4, A10): kein 2000er-Deckel — alle aktiven Inserate je Lauf.
     async for l in db.resale_listings.find(
             {"status": {"$nin": ["verkauft", "geloescht"]}},
-            {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1}).limit(2000):
+            {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1}).batch_size(500):
         v = await db.vehicles.find_one({"id": l.get("vehicle_id"), "dealer_id": l.get("dealer_id")},
                                        {"_id": 0, "lifecycle": 1})
         if not v or v.get("lifecycle") != "geloescht":
@@ -1257,13 +1259,13 @@ async def marktplatz_rotieren(db, now: datetime) -> dict:
     stats["interessen_geloescht"] = r.deleted_count
 
     cutoff = (now - timedelta(days=INSERATE_GELOESCHT_AUFBEWAHRUNG_TAGE)).isoformat()
-    alte = await db.resale_listings.find(
-        {"status": "geloescht", "loeschung_offen": {"$ne": True},
-         "$or": [{"deleted_at": {"$lt": cutoff}},
-                 {"deleted_at": {"$in": [None, ""]},
-                  "updated_at": {"$lt": cutoff}}]},
-        {"_id": 0, "id": 1, "dealer_id": 1, "photos": 1}).to_list(None)
-    for l in alte:
+    # Phase 3 (3.4, A12): Cursor statt kompletter Liste im Speicher.
+    async for l in db.resale_listings.find(
+            {"status": "geloescht", "loeschung_offen": {"$ne": True},
+             "$or": [{"deleted_at": {"$lt": cutoff}},
+                     {"deleted_at": {"$in": [None, ""]},
+                      "updated_at": {"$lt": cutoff}}]},
+            {"_id": 0, "id": 1, "dealer_id": 1, "photos": 1}).batch_size(200):
         if await _inserat_mit_fotos_loeschen(
                 db, l, grund="inserat_geloescht_frist",
                 dealer_id=l.get("dealer_id") or ""):
@@ -1391,6 +1393,9 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
         versuche = int(e.get("versuche", 0)) + 1
         upd = {"letzter_fehler": fehler[:300], "versuche": versuche,
                "updated_at": now_iso(), "claim_bis": None, **(zusatz or {})}
+        # Phase 3 (3.2, B16): nur schreiben, wenn dieser Lauf den Eintrag
+        # noch besitzt (Claim-Token) — sonst hat ein zweiter Worker uebernommen.
+        filt = {"id": e["id"], "claim_token": e.get("claim_token")}
         if versuche >= STORAGE_RETRY_MAX_VERSUCHE:
             upd["aufgegeben"] = True
             upd["aufgegeben_am"] = now_iso()
@@ -1399,18 +1404,21 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
                         dealer_id=e.get("dealer_id") or "", art=art,
                         grund=e.get("grund") or "", versuche=versuche,
                         fehler=fehler[:300])
-        await db.storage_delete_retry.update_one({"id": e["id"]}, {"$set": upd})
+        await db.storage_delete_retry.update_one(filt, {"$set": upd})
 
     for e in eintraege:
         # Pruefung 14.09.2026 (Liste 5, Nr. 6): den Eintrag ATOMAR beanspruchen —
         # zwei Server (zwei Aufraeum-Laeufe) nahmen sonst denselben Eintrag und
         # zaehlten die Versuche doppelt.
+        claim_token = uuid.uuid4().hex
         claim = await db.storage_delete_retry.update_one(
             {"id": e["id"], "$or": [{"claim_bis": {"$exists": False}}, {"claim_bis": None},
                                     {"claim_bis": {"$lt": jetzt_dt.isoformat()}}]},
-            {"$set": {"claim_bis": (jetzt_dt + timedelta(minutes=10)).isoformat()}})
+            {"$set": {"claim_bis": (jetzt_dt + timedelta(minutes=10)).isoformat(),
+                      "claim_token": claim_token}})
         if not claim.modified_count:
             continue
+        e["claim_token"] = claim_token
         art = e.get("art") or "prefix"
         # Runde 29: Ist die Datei bereits weg (frueherer Lauf), nur noch die
         # Referenz bereinigen — ein zweites Loeschen koennte fehlschlagen.
@@ -1432,7 +1440,12 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
             # naechsten Lauf nur noch die Referenz versuchen.
             await _fehlschlag(e, art, fehler, {"storage_deleted": True})
             continue
-        await db.storage_delete_retry.delete_one({"id": e["id"]})
+        r_del = await db.storage_delete_retry.delete_one(
+            {"id": e["id"], "claim_token": claim_token})
+        if not r_del.deleted_count:
+            log.warning("storage_delete_retry %s: Claim inzwischen von einem anderen "
+                        "Worker uebernommen — Eintrag bleibt", e["id"])
+            continue
         erledigt += 1
     return erledigt
 
@@ -1531,7 +1544,7 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
              "$or": [{"seller_name": {"$nin": [None, ""]}}, {"place": {"$nin": [None, ""]}},
                      {"pdf_path": {"$type": "string"}},
                      {"signature_seller_key": {"$type": "string"}}]},
-            {"_id": 0, "appointment_id": 1}).limit(2000):
+            {"_id": 0, "appointment_id": 1}).batch_size(500):
         aid = p.get("appointment_id")
         if not aid or aid in gesehen:
             continue
@@ -1569,6 +1582,57 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
     return n
 
 
+async def firmengrabsteine_bereinigen(db) -> int:
+    """Phase 3 (3.4, Liste 4 Nr. 15): Die Firmenloeschung sperrt Anfragen erst
+    beim Eintritt — eine Anfrage, die vor der Sperre begann, kann nach dem
+    delete_many noch Firmendokumente schreiben. Fuer jede geloeschte Firma
+    (Grabstein firmen_geloescht, 30 Tage) werden Reste in allen Firmen-
+    Sammlungen entfernt. Kein Merker noetig, reiner Abgleich."""
+    try:
+        from routes.admin import _COMPANY_COLLECTIONS
+    except Exception:  # noqa: BLE001
+        return 0
+    grenze = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    n = 0
+    async for grab in db.firmen_geloescht.find(
+            {"geloescht_am": {"$gte": grenze}}, {"_id": 0, "id": 1}):
+        for coll in (*_COMPANY_COLLECTIONS, "users", "network_members"):
+            try:
+                r = await db[coll].delete_many({"dealer_id": grab["id"]})
+                n += r.deleted_count
+            except Exception as exc:  # noqa: BLE001
+                log.warning("firmengrabsteine: %s fuer %s nicht bereinigt: %s",
+                            coll, grab["id"], exc)
+    if n:
+        log.info("firmengrabsteine_bereinigen: %d Reste geloeschter Firmen entfernt", n)
+    return n
+
+
+async def archivzeilen_verwaist_bereinigen(db) -> int:
+    """Phase 3 (3.4, B25): Vertragsversionen, deren Archivzeile vor der Stand-
+    Pruefung eingefuegt wurde und deren Stand dann verloren ging (Zeile mit
+    version >= aktueller Vertragsversion), sowie Archivzeilen ohne Vertrag."""
+    n = 0
+    ids = [c for c in await db.generated_pdf_versions.distinct("contract_id") if c]
+    for i in range(0, len(ids), 500):
+        teil = ids[i:i + 500]
+        stand = {}
+        async for c in db.generated_pdfs.find({"id": {"$in": teil}},
+                                              {"_id": 0, "id": 1, "version": 1}):
+            stand[c["id"]] = int(c.get("version") or 1)
+        weg = [c for c in teil if c not in stand]
+        if weg:
+            r = await db.generated_pdf_versions.delete_many({"contract_id": {"$in": weg}})
+            n += r.deleted_count
+        for cid, v in stand.items():
+            r = await db.generated_pdf_versions.delete_many(
+                {"contract_id": cid, "version": {"$gte": v}})
+            n += r.deleted_count
+    if n:
+        log.info("archivzeilen_verwaist_bereinigen: %d verwaiste Archivzeilen entfernt", n)
+    return n
+
+
 async def firmenreste_bereinigen(db) -> int:
     """Nachpruefung Runde 14 (Nr. 15/13/14): Die Firmenloeschung (admin.py)
     raeumt nur die dealer_id-gebundenen _COMPANY_COLLECTIONS. Uebrig blieben
@@ -1579,6 +1643,11 @@ async def firmenreste_bereinigen(db) -> int:
     Karenz, Audit 13.09.2026 #35). Hier laeuft je Zyklus ein
     Nachlauf fuer alle Firmen-IDs, die nicht mehr in dealers existieren.
     Liefert die Zahl der bereinigten Dokumente."""
+    n = await firmengrabsteine_bereinigen(db)
+    try:
+        n += await archivzeilen_verwaist_bereinigen(db)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("archivzeilen_verwaist_bereinigen: %s", exc)
     kandidaten: set = set()
     for coll, feld in (("link_jobs", "dealer_ids"),
                        ("link_jobs", "requested_by_dealer"),
@@ -1599,12 +1668,11 @@ async def firmenreste_bereinigen(db) -> int:
             continue
         kandidaten.update(v for v in werte if isinstance(v, str) and v)
     if not kandidaten:
-        return 0
+        return n
     vorhanden = set(await db.dealers.distinct("id", {"id": {"$in": list(kandidaten)}}))
     weg = sorted(kandidaten - vorhanden)
     if not weg:
-        return 0
-    n = 0
+        return n
     r = await db.link_jobs.update_many(
         {"dealer_ids": {"$in": weg}}, {"$pull": {"dealer_ids": {"$in": weg}}})
     n += r.modified_count
@@ -1812,31 +1880,36 @@ async def run_cleanup_forever(db):
     """Endlosschleife; wird beim FastAPI-Startup als Task gestartet."""
     # kurze Verzögerung beim Start, damit andere Init-Jobs fertig werden
     await asyncio.sleep(30)
-    from job_lock import acquire
+    from job_lock import acquire, heartbeat
     while True:
         # Bei mehreren Worker-Prozessen raeumt nur EINER pro Zyklus auf —
         # sonst loeschen acht Prozesse gleichzeitig dieselben Dateien.
-        if not await acquire(db, "cleanup-cycle",
-                             ttl_seconds=CLEANUP_INTERVAL_SECONDS - 60):
+        # Phase 3 (3.1, A11/B14/B15): Besitzer-Token und Heartbeat — ein
+        # langer Lauf verlaengert seine Sperre, ein alter Lauf kann die neue
+        # Sperre desselben Prozesses nicht mehr freigeben.
+        token = await acquire(db, "cleanup-cycle",
+                              ttl_seconds=CLEANUP_INTERVAL_SECONDS - 60)
+        if not token:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
             continue
-        try:
-            await _cleanup_once(db)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("cleanup loop error: %s", exc)
-        try:
-            await _reap_stuck_snapshots(db)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("snapshot reaper error: %s", exc)
-        try:
-            await _expire_old_snapshots(db)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("snapshot expiry error: %s", exc)
-        try:
-            from beweis_service import beweise_verfallen
-            await beweise_verfallen(db)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("beweis expiry error: %s", exc)
+        async with heartbeat(db, "cleanup-cycle", token, CLEANUP_INTERVAL_SECONDS - 60):
+            try:
+                await _cleanup_once(db)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("cleanup loop error: %s", exc)
+            try:
+                await _reap_stuck_snapshots(db)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("snapshot reaper error: %s", exc)
+            try:
+                await _expire_old_snapshots(db)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("snapshot expiry error: %s", exc)
+            try:
+                from beweis_service import beweise_verfallen
+                await beweise_verfallen(db)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("beweis expiry error: %s", exc)
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
