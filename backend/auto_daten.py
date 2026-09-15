@@ -186,6 +186,15 @@ def daten_extrahieren(contract_dict: Dict[str, Any],
     preis_cents = None
     if isinstance(preis, (int, float)) and preis >= 0:
         preis_cents = int(round(float(preis) * 100))
+    # Wunsch Ahmad 15.09.2026: der Einkaufspreis, fuer den man zum Auto
+    # gefahren ist, bleibt stehen. Wurde vor Ort nachverhandelt (die
+    # Neuerzeugung des Vertrags traegt preis_vor_abholung), steht der neue
+    # Preis in der eigenen Spalte preis_vor_ort_cents.
+    vor_ort_cents = None
+    alt = c.get("preis_vor_abholung")
+    if isinstance(alt, (int, float)) and alt >= 0 and preis_cents is not None:
+        vor_ort_cents = preis_cents
+        preis_cents = int(round(float(alt) * 100))
 
     schaeden_roh: List[Any] = []
     if SCHAEDEN_FREITEXT:
@@ -214,6 +223,8 @@ def daten_extrahieren(contract_dict: Dict[str, Any],
     tag = kaufdatum(gekauft_am)
     if tag:
         daten["purchase_date"] = tag
+    if vor_ort_cents is not None:
+        daten["preis_vor_ort_cents"] = vor_ort_cents
     return daten
 
 
@@ -328,3 +339,28 @@ async def entfernen(db, datensatz_id: str) -> bool:
         {"admin_vehicle_data_id": datensatz_id},
         {"$set": {"auto_daten_entfernt_am": datetime.now(timezone.utc).isoformat()}})
     return True
+
+
+async def vor_ort_nachtragen(db, contract_id: str, dealer_id: str,
+                             preis=None, maengel: Optional[List[Any]] = None) -> bool:
+    """Wunsch Ahmad 15.09.2026: das Ergebnis der Abholung in den Auto-Datensatz —
+    der vor Ort nachverhandelte Preis (eigene Spalte, der urspruengliche
+    Einkaufspreis bleibt) und die vom Fahrer vor Ort festgehaltenen Maengel
+    (gefiltert wie die Vertragsschaeden). Liefert True, wenn geschrieben."""
+    if not contract_id:
+        return False
+    c = await db.generated_pdfs.find_one(
+        {"id": contract_id, "dealer_id": dealer_id,
+         "auto_daten_entfernt_am": {"$exists": False}},
+        {"_id": 0, "admin_vehicle_data_id": 1})
+    if not c or not c.get("admin_vehicle_data_id"):
+        return False
+    werte: Dict[str, Any] = {}
+    if isinstance(preis, (int, float)) and not isinstance(preis, bool) and preis >= 0:
+        werte["preis_vor_ort_cents"] = int(round(float(preis) * 100))
+    if maengel is not None:
+        werte["maengel_vor_ort"] = schaeden_bereinigen(list(maengel))
+    if not werte:
+        return False
+    res = await db[COLLECTION].update_one({"id": c["admin_vehicle_data_id"]}, {"$set": werte})
+    return bool(res.matched_count)

@@ -97,6 +97,17 @@ function Schaeden({ damages, id, offen, setOffen }) {
   );
 }
 
+/* ---------- Preis vor Ort (Wunsch Ahmad 15.09.2026): der Einkaufspreis bleibt,
+   der bei der Abholung nachverhandelte Preis steht daneben ---------- */
+function PreisVorOrt({ cents, cur }) {
+  if (cents == null) return <span className="text-zinc-500">–</span>;
+  return (
+    <span className="font-semibold" style={{ color: "var(--accent-green)" }} title="Bei der Abholung nachverhandelt">
+      {fmtPreis(cents, cur)}
+    </span>
+  );
+}
+
 /* ---------- Löschen (Wunsch Ahmad 15.09.2026): zweistufig in der Zeile ---------- */
 function LoeschKnopf({ id, loeschId, setLoeschId, run, laeuft }) {
   if (!id) return null;
@@ -141,6 +152,8 @@ function AutoTabelle({ autos, prefix, offen, setOffen, loeschen }) {
             <th className="px-3 py-2 text-right">Kaufpreis</th>
             <th className="px-3 py-2">Kaufdatum</th>
             <th className="px-3 py-2">Schäden</th>
+            <th className="px-3 py-2 text-right">Preis vor Ort</th>
+            <th className="px-3 py-2">Mängel vor Ort</th>
             <th className="px-3 py-2"><span className="sr-only">Aktion</span></th>
           </tr>
         </thead>
@@ -159,6 +172,12 @@ function AutoTabelle({ autos, prefix, offen, setOffen, loeschen }) {
                 <td className="px-3 py-2 text-zinc-300 whitespace-nowrap">{fmtDatum(it.purchase_date)}</td>
                 <td className="px-3 py-2 min-w-[140px] max-w-[340px]">
                   <Schaeden damages={it.damages} id={key} offen={offen} setOffen={setOffen} />
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
+                  <PreisVorOrt cents={it.preis_vor_ort_cents} cur={it.currency} />
+                </td>
+                <td className="px-3 py-2 min-w-[140px] max-w-[340px]">
+                  <Schaeden damages={it.maengel_vor_ort} id={`${key}-vo`} offen={offen} setOffen={setOffen} />
                 </td>
                 <td className="px-3 py-2 text-right"><LoeschKnopf id={it.id} {...loeschen} /></td>
               </tr>
@@ -504,6 +523,8 @@ export default function AdminAutoDaten() {
                   <th className="px-4 py-3 text-right">Kaufpreis</th>
                   <th className="px-4 py-3">Kaufdatum</th>
                   <th className="px-4 py-3">Schäden</th>
+                  <th className="px-4 py-3 text-right">Preis vor Ort</th>
+                  <th className="px-4 py-3">Mängel vor Ort</th>
                   <th className="px-4 py-3"><span className="sr-only">Aktion</span></th>
                 </tr>
               </thead>
@@ -527,6 +548,12 @@ export default function AdminAutoDaten() {
                       <td className="px-4 py-3 text-zinc-300 whitespace-nowrap">{fmtDatum(it.purchase_date)}</td>
                       <td className="px-4 py-3 min-w-[160px] max-w-[360px]">
                         <Schaeden damages={it.damages} id={key} offen={offen} setOffen={setOffen} />
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                        <PreisVorOrt cents={it.preis_vor_ort_cents} cur={it.currency} />
+                      </td>
+                      <td className="px-4 py-3 min-w-[160px] max-w-[360px]">
+                        <Schaeden damages={it.maengel_vor_ort} id={`${key}-vo`} offen={offen} setOffen={setOffen} />
                       </td>
                       <td className="px-4 py-3 text-right"><LoeschKnopf id={it.id} {...loeschen} /></td>
                     </tr>

@@ -43,7 +43,8 @@ KA_URL = f"https://www.kleinanzeigen.de/s-anzeige/autodaten/{KA_ID}-216-1"
 WHITELIST = {"id", "brand", "model", "first_registration", "mileage_km",
              "fuel_type", "power_ps", "power_kw", "purchase_price_cents",
              "currency", "damages", "schema_version", "purchase_date"}
-API_FELDER = set(WHITELIST)   # inkl. id (nur fuer die Super-Admin-Bereinigung)
+# inkl. id (nur fuer die Super-Admin-Bereinigung) und die Abhol-Spalten (15.09.2026)
+API_FELDER = set(WHITELIST) | {"preis_vor_ort_cents", "maengel_vor_ort"}
 
 SELLER = {"seller_name": f"Verkaeufer Autodaten {SUF}",
           "seller_address": "Geheimweg 7", "seller_zip": "30159",

@@ -96,7 +96,9 @@ def test_bestehender_datensatz_wird_gefunden(wegwerf):
     assert run(auto_daten.bestehenden_datensatz(db, "d1", "v1")) == "avd1"
 
 
-def test_neuer_preis_aendert_den_datensatz(wegwerf):
+def test_nachverhandlung_eigene_spalte_einkaufspreis_bleibt(wegwerf):
+    """Nachfrage Ahmad 15.09.2026: der Preis, fuer den man zum Auto gefahren ist,
+    bleibt stehen; der vor Ort nachverhandelte Preis steht in der eigenen Spalte."""
     db, run = wegwerf.db, wegwerf.run
     run(db.dealers.insert_one({"id": "d1", "company_name": "Firma", "created_at": _jetzt()}))
     run(db.admin_vehicle_data.insert_one(_datensatz("avd1", 500000)))
@@ -106,11 +108,51 @@ def test_neuer_preis_aendert_den_datensatz(wegwerf):
         grund="abholung_abgeschlossen", protokoll_id="p1"))
     assert ok is True
     d = run(db.admin_vehicle_data.find_one({"id": "avd1"}))
-    assert d["purchase_price_cents"] == 450000
-    assert d["purchase_date"] == "2026-09-01"        # Kaufdatum bleibt (Korrektur)
+    assert d["purchase_price_cents"] == 500000          # Einkaufspreis des Vertrags bleibt
+    assert d["preis_vor_ort_cents"] == 450000           # eigene Spalte
+    assert d["purchase_date"] == "2026-09-01"           # Kaufdatum bleibt (Korrektur)
     assert run(db.admin_vehicle_data.count_documents({})) == 1
     c = run(db.generated_pdfs.find_one({"id": "c1"}))
     assert c["contract_data"]["purchase_price"] == 4500.0 and int(c["version"]) == 2
+    assert c["contract_data"]["preis_vor_abholung"] == 5000.0
+    # Terminverschiebung danach: die Spalten bleiben, wie sie sind
+    ok = run(C.regenerate_contract_for_pickup(
+        contract_id="c1", dealer_id="d1", user=CHEF, pickup_date="2099-02-02"))
+    assert ok is True
+    d = run(db.admin_vehicle_data.find_one({"id": "avd1"}))
+    assert d["purchase_price_cents"] == 500000 and d["preis_vor_ort_cents"] == 450000
+
+
+def test_vor_ort_nachtragen_preis_und_maengel(wegwerf):
+    """Nachfrage Ahmad 15.09.2026: die vom Fahrer vor Ort festgehaltenen Maengel und
+    der nachverhandelte Preis landen im Datensatz — gefiltert wie die Vertragsschaeden."""
+    import inspect
+    import routes.protocols as P
+    db, run = wegwerf.db, wegwerf.run
+    run(db.admin_vehicle_data.insert_one(_datensatz("avd1", 500000)))
+    run(db.generated_pdfs.insert_one(_vertrag("c1", "avd1")))
+    ok = run(auto_daten.vor_ort_nachtragen(
+        db, "c1", "d1", preis=4200.0,
+        maengel=[{"type_label": "Kratzer", "zone": "Tür vorne links"},
+                 "Delle Heckklappe", "Rueckruf unter 0176 12345678"]))
+    assert ok is True
+    d = run(db.admin_vehicle_data.find_one({"id": "avd1"}))
+    assert d["purchase_price_cents"] == 500000 and d["preis_vor_ort_cents"] == 420000
+    assert d["maengel_vor_ort"] == ["Kratzer: Tür vorne links", "Delle Heckklappe"]
+    # ohne Preis nur die Maengel; nichts -> nichts geschrieben
+    assert run(auto_daten.vor_ort_nachtragen(db, "c1", "d1", maengel=[])) is True
+    d = run(db.admin_vehicle_data.find_one({"id": "avd1"}))
+    assert d["maengel_vor_ort"] == [] and d["preis_vor_ort_cents"] == 420000
+    assert run(auto_daten.vor_ort_nachtragen(db, "c1", "d1")) is False
+    assert run(auto_daten.vor_ort_nachtragen(db, "c9", "d1", preis=1.0)) is False
+    assert run(auto_daten.vor_ort_nachtragen(db, "c1", "d2", preis=1.0)) is False   # andere Firma
+    # vom Betreiber entfernter Datensatz: nichts mehr nachtragen
+    assert run(auto_daten.entfernen(db, "avd1")) is True
+    assert run(auto_daten.vor_ort_nachtragen(db, "c1", "d1", preis=1.0)) is False
+    # Abschluss und Selbstheilung des Abholprotokolls rufen den Helfer auf
+    q = inspect.getsource(P)
+    assert "auto_daten_vor_ort_nachtragen(appt, filled, _preis_final)" in q
+    assert 'auto_daten_vor_ort_nachtragen(appt, doc, doc.get("neuer_preis"))' in q
 
 
 def test_fristloeschung_und_reparatur_respektieren_den_vermerk(wegwerf):

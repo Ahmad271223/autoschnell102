@@ -576,6 +576,24 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
         return False
 
 
+async def auto_daten_vor_ort_nachtragen(appt: dict, protokoll: dict, neuer_preis) -> bool:
+    """Wunsch Ahmad 15.09.2026: nach dem Abschluss der Abholung den vor Ort
+    nachverhandelten Preis und die vom Fahrer festgehaltenen Maengel in den
+    anonymen Auto-Datensatz schreiben (eigene Spalten; der urspruengliche
+    Einkaufspreis bleibt stehen). Best effort, wirft nie."""
+    if not appt.get("contract_id"):
+        return False
+    try:
+        import auto_daten
+        return await auto_daten.vor_ort_nachtragen(
+            db, appt["contract_id"], appt.get("dealer_id", ""),
+            preis=neuer_preis, maengel=protokoll.get("new_damages") or [])
+    except Exception:  # noqa: BLE001
+        log.exception("Auto-Daten vor Ort fuer Vertrag %s nicht nachgetragen",
+                      appt.get("contract_id"))
+        return False
+
+
 async def entwurf_bei_terminaenderung_verwerfen(appt_id: str) -> bool:
     """Pruefung 14.09.2026 (Liste 4, Nr. 1/2): Wechselt am Termin das Fahrzeug,
     der Vertrag oder der Fahrer, waehrend das Protokoll noch ein Entwurf ist,
@@ -1295,6 +1313,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
             await try_set_lifecycle(appt["vehicle_id"],
                                     appt.get("dealer_id", ""), "abgeholt")
         await _nacharbeit_erledigt(appt_id, doc)
+        await auto_daten_vor_ort_nachtragen(appt, doc, doc.get("neuer_preis"))
         return heil_out
 
     # Gegenpruefung 12.09.2026: Starb ein frueherer Abschluss mittendrin
@@ -1645,6 +1664,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # Fassung, alte im Archiv). Best effort — das Protokoll ist der Beleg.
         await vertrag_nach_abholung_aktualisieren(appt, doc["id"], _preis_final,
                                                   filled.get("sondervereinbarung"))
+        # Wunsch Ahmad 15.09.2026: Preis vor Ort und Maengel des Fahrers in die
+        # Auto-Daten (eigene Spalten, der Einkaufspreis des Vertrags bleibt).
+        await auto_daten_vor_ort_nachtragen(appt, filled, _preis_final)
     # Pruefung 14.09.2026 (C8): Protokoll und Termin sind fertig — kein 500 mehr
     # durch einen scheiternden Audit-Eintrag.
     await log_activity_sicher(dealer_id, driver["id"], "abholprotokoll.abgeschlossen",

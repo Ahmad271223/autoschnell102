@@ -1516,8 +1516,12 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   `admin.auto_daten.geloescht`.
 - **Ein Auto, ein Datensatz:** ein neuer Kaufvertrag zu demselben Fahrzeug (gleiche Firma,
   gleiches Fahrzeug bzw. gleiche Anzeigen-ID) führt den vorhandenen Datensatz nach (Preis,
-  Kaufdatum, Zusicherungen) statt ein zweites Auto anzulegen. Eine Nachverhandlung bei der
-  Abholung erzeugt den Vertrag neu und schreibt den neuen Preis ebenfalls in den Datensatz.
+  Kaufdatum, Zusicherungen) statt ein zweites Auto anzulegen. Der Einkaufspreis des Vertrags
+  (für den man zum Auto gefahren ist) bleibt stehen: eine Nachverhandlung bei der Abholung füllt
+  die eigenen Spalten „Preis vor Ort“ (`preis_vor_ort_cents`) und „Mängel vor Ort“
+  (`maengel_vor_ort`, die vom Fahrer im Abholprotokoll festgehaltenen neuen Schäden, gefiltert wie
+  die Vertragsschäden). Beide werden beim Abschluss des Protokolls und in der Selbstheilung
+  nachgetragen; „Schäden entfernen“ leert auch die Mängel vor Ort.
 - **Helle Ansicht komplett:** Sucher-App, Betreiber-Bereich (jetzt mit Design-Schalter in der
   Seitenleiste) und Fahrer-App folgen dem Schalter. Dunkle Utility-Klassen werden in
   `index.css` zentral umgelenkt; bewusst dunkle Bereiche (Abhol-Check des Fahrers) tragen

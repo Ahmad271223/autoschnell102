@@ -22,7 +22,9 @@ router = APIRouter()
 
 FELDER = ("id", "brand", "model", "first_registration", "mileage_km", "fuel_type",
           "power_ps", "power_kw", "purchase_price_cents", "currency",
-          "damages", "schema_version", "purchase_date")
+          "damages", "schema_version", "purchase_date",
+          # Wunsch Ahmad 15.09.2026: Ergebnis der Abholung in eigenen Spalten
+          "preis_vor_ort_cents", "maengel_vor_ort")
 
 
 class AutoDatenEintrag(BaseModel):
@@ -42,6 +44,8 @@ class AutoDatenEintrag(BaseModel):
     damages: List[str] = []
     schema_version: int = 1
     purchase_date: Optional[str] = None      # JJJJ-MM-TT (nur der Tag)
+    preis_vor_ort_cents: Optional[int] = None   # vor Ort nachverhandelt (Einkaufspreis bleibt)
+    maengel_vor_ort: List[str] = []             # vom Fahrer bei der Abholung festgehalten
 
 
 class AutoDatenSeite(BaseModel):
@@ -251,7 +255,7 @@ async def auto_daten_schaeden_entfernen(
 ):
     r = await db[COLLECTION].update_one(
         {"id": datensatz_id},
-        {"$set": {"damages": [], "damages_redacted": True}})
+        {"$set": {"damages": [], "maengel_vor_ort": [], "damages_redacted": True}})
     if not r.matched_count:
         raise HTTPException(404, "Datensatz nicht gefunden")
     return {"ok": True, "id": datensatz_id, "damages": []}
