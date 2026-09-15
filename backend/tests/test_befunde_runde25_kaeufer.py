@@ -102,7 +102,9 @@ def test_04_abholzeile_steht_unter_den_kaeuferangaben():
          "payment_method": "Bar"}
     f = _text(generate_contract_pdf(dealer=dict(FIRMA), vehicle={"make_label": "BMW"},
                                     contract=c))
-    i_ab = f.find("Wird abgeholt am 13.09.2026 um 10:00 Uhr, ul. Osiecka 1")
+    # Wunsch Ahmad (15.09.2026): ohne Uhrzeit, ohne Kennzeichen im Vertrag
+    i_ab = f.find("Wird abgeholt am 13.09.2026, ul. Osiecka 1")
+    assert "10:00 Uhr" not in f and "Kennzeichen" not in f
     i_eins, i_drei = f.find("1 "), f.find("3 ")
     assert i_ab > 0, f
     assert i_ab < f.index("Fahrzeugdaten"), "Abholung steht VOR den Fahrzeugdaten"
@@ -116,7 +118,7 @@ def test_05_ohne_abholdatum_keine_zeile():
     assert _abholzeile({}) == ""
     assert _abholzeile({"pickup_date": "2026-09-13"}) == "Wird abgeholt am 13.09.2026"
     assert _abholzeile({"pickup_date": "kaputt", "pickup_time": "09:00"}) == \
-        "Wird abgeholt am kaputt um 09:00 Uhr"
+        "Wird abgeholt am kaputt"                   # Uhrzeit nie im Vertrag (15.09.2026)
 
 
 # ---------------------------------------------------------------- Wegwerf-DB

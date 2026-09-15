@@ -67,8 +67,8 @@ def _zeilen(vertrag: dict) -> list:
         ("Erstzulassung", daten.get("first_registration") or daten.get("erstzulassung") or ""),
         ("Kilometerstand", _km(daten.get("mileage") or daten.get("kilometerstand"))),
         ("Fahrgestellnummer", daten.get("vin") or ""),
-        ("Abholung", " ".join(x for x in [_datum(vertrag.get("pickup_date")),
-                                          (vertrag.get("pickup_time") or "").strip()] if x)),
+        # Wunsch Ahmad (15.09.2026): nur das Datum — keine Uhrzeit im Vertragsversand.
+        ("Abholung", _datum(vertrag.get("pickup_date")) or ""),
     ]
     return [(k, str(v).strip()) for k, v in kandidaten if str(v).strip()]
 

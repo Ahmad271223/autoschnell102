@@ -445,11 +445,13 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
 
 
 def _abholzeile(contract: dict) -> str:
-    """Abholung als EINE Zeile: "Wird abgeholt am 19.11.2026 um 10:00 Uhr,
+    """Abholung als EINE Zeile: "Wird abgeholt am 19.11.2026,
     <Anschrift des Verkaeufers>". Leer, wenn kein Abholdatum im Vertrag steht.
 
     Wunsch Ahmad (12.09.2026): Die Zeile steht jetzt unter den Halter- und
     Kaeuferangaben statt im Kaufpreis-Kasten.
+    Wunsch Ahmad (15.09.2026): OHNE Uhrzeit — die Uhrzeit gehoert nur in den
+    Terminplaner und die Fahrer-App, nicht in den Vertrag.
     """
     if not contract.get("pickup_date"):
         return ""
@@ -460,8 +462,6 @@ def _abholzeile(contract: dict) -> str:
     except (ValueError, TypeError):
         pass
     abhol = f"Wird abgeholt am {datum}"
-    if str(contract.get("pickup_time") or "").strip():
-        abhol += f" um {contract['pickup_time']} Uhr"
     adresse = ", ".join(x for x in [
         (contract.get("seller_address") or "").strip(),
         " ".join(y for y in [
@@ -596,7 +596,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("Türen", vehicle.get("doors", "")),
         ("Sitze", vehicle.get("seats", "")),
         ("FIN", vehicle.get("vin", "")),
-        ("Kennzeichen", vehicle.get("license_plate", "")),
+        # Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag.
         ("Vorhalter", contract.get("previous_owners") or vehicle.get("previous_owners", "")),
     ]
     story.append(_section("1 · Fahrzeugdaten", st))

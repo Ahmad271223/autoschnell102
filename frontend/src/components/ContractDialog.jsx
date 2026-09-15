@@ -127,7 +127,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     vehicle_doors: v.door_count || v.doors || "",
     vehicle_seats: v.seat_count || v.seats || "",
     vehicle_vin: v.vin || v.fin || "",
-    vehicle_license_plate: v.license_plate || v.kennzeichen || "",
+    // Wunsch Ahmad (15.09.2026): kein Kennzeichen mehr im Vertrag (Feld entfernt).
     vehicle_damage_note: v.damage_unrepaired ? "Motorschaden / Unfallschaden vorhanden"
                        : (v.accident_damaged ? "Unfallschaden" : ""),
 
@@ -412,8 +412,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag */}
               <Field label="FIN" value={form.vehicle_vin} onChange={(v) => set("vehicle_vin", v)} testid="contract-veh-fin" />
-              <Field label="Kennzeichen" value={form.vehicle_license_plate} onChange={(v) => set("vehicle_license_plate", v)} testid="contract-veh-plate" />
             </div>
             <Field label="Sonstige Schäden / Hinweis (erscheint im Vertrag)" value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)} testid="contract-veh-damage" placeholder="z.B. Motorschaden, Hagelschaden" />
           </Section>
@@ -536,7 +536,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             </label>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date" />
-              <Field label="Abholuhrzeit" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time" />
+              <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
+                     helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
             </div>
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
                    helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar." />
