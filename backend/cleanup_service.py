@@ -458,6 +458,11 @@ async def _cleanup_once(db) -> dict:
     # Audit 13.09.2026 (#35/#42): abgelaufene Inserats-Zwischenspeicher
     stats["inseratscache_rotiert"] = await inseratscache_rotieren(db, now)
     stats.update(await marktplatz_rotieren(db, now))
+    # Runde 12 (15.09.2026): Nachholjobs fuer Abholbericht-Nacharbeit (Nr. 22),
+    # Vertrag nach Abholung (Nr. 25) und Frischabgleich ohne Merker (Nr. 29).
+    stats["abholberichte_nachgeholt"] = await abholberichte_nacharbeit_nachholen(db)
+    stats["vertraege_nach_abholung_nachgeholt"] = await vertrag_nach_abholung_nachholen(db)
+    stats["termine_frisch_abgeglichen"] = await termine_frisch_abgleichen(db, now)
 
     if any(stats.values()):
         log.info("cleanup run: %s", stats)
@@ -2153,4 +2158,98 @@ async def inserat_fahrzeug_nacharbeit_nachholen(db) -> int:
                             ziel=l["lifecycle_nacharbeit"], versuche=versuche)
         except Exception:  # noqa: BLE001
             log.exception("Inserat-Nacharbeit %s nicht nachgeholt", l.get("id"))
+    return n
+
+
+# =====================================================================
+# Runde 12 (15.09.2026): Nachholjobs zu Betriebsalarmen und Frischabgleich
+# =====================================================================
+async def abholberichte_nacharbeit_nachholen(db) -> int:
+    """Nr. 22: Nach dem Speichern eines Abholberichts scheiterte das Abloesen
+    aelterer Berichte / das Termin-Badge (Alarm abholbericht_nacharbeit_offen).
+    Hier nachgeholt: hoechste Version bleibt aktuell, aeltere werden abgeloest,
+    der Termin bekommt Kennzeichen und Zaehler; Alarm wird geschlossen."""
+    n = 0
+    async for a in db.betriebsalarme.find(
+            {"typ": "abholbericht_nacharbeit_offen", "offen": True}, {"_id": 0, "ref": 1}).limit(200):
+        appt_id = a.get("ref")
+        if not appt_id:
+            continue
+        try:
+            aktuell = await db.pickup_reports.find_one(
+                {"appointment_id": appt_id}, {"_id": 0, "id": 1, "version": 1, "deviations": 1},
+                sort=[("version", -1)])
+            if aktuell:
+                await db.pickup_reports.update_many(
+                    {"appointment_id": appt_id, "id": {"$ne": aktuell["id"]},
+                     "version": {"$lt": int(aktuell.get("version") or 1)}, "superseded": {"$ne": True}},
+                    {"$set": {"superseded": True}})
+                await db.appointments.update_one(
+                    {"id": appt_id},
+                    {"$set": {"deviations_count": len(aktuell.get("deviations") or []),
+                              "has_pickup_report": True}})
+            await alarm_schliessen(db, "abholbericht_nacharbeit_offen", ref=appt_id)
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Abholbericht-Nacharbeit zu Termin %s nicht nachgeholt", appt_id)
+    return n
+
+
+async def vertrag_nach_abholung_nachholen(db) -> int:
+    """Nr. 25: Nach dem finalen Protokoll konnte der Vertrag nicht mit Preis /
+    Sondervereinbarung neu erzeugt werden (Alarm vertrag_nach_abholung_offen).
+    Hier erneut versucht; bei Erfolg wird der Alarm geschlossen."""
+    n = 0
+    try:
+        from routes.protocols import vertrag_nach_abholung_aktualisieren
+    except Exception:  # noqa: BLE001
+        return 0
+    async for a in db.betriebsalarme.find(
+            {"typ": "vertrag_nach_abholung_offen", "offen": True},
+            {"_id": 0, "ref": 1, "details": 1}).limit(100):
+        contract_id = a.get("ref")
+        protokoll_id = (a.get("details") or {}).get("protokoll_id")
+        if not contract_id or not protokoll_id:
+            continue
+        try:
+            p = await db.pickup_protocols.find_one(
+                {"id": protokoll_id}, {"_id": 0, "appointment_id": 1, "neuer_preis": 1,
+                                       "sondervereinbarung": 1, "status": 1})
+            appt = await db.appointments.find_one({"id": (p or {}).get("appointment_id")}, {"_id": 0}) \
+                if p else None
+            if not p or not appt or p.get("status") != "final" \
+                    or appt.get("contract_id") != contract_id:
+                await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
+                continue
+            if await vertrag_nach_abholung_aktualisieren(
+                    appt, protokoll_id, p.get("neuer_preis"), p.get("sondervereinbarung")):
+                await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
+                n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Vertrag %s nach Abholung nicht nachgezogen", contract_id)
+    return n
+
+
+async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: int = 300) -> int:
+    """Nr. 29: Der Merker nacharbeit_offen ist selbst nur Best-Effort. Deshalb
+    werden Termine, die in den letzten `stunden` geaendert wurden, ohne Merker
+    abgeglichen: Vertragszeiger und Kaufvorgangsstatus (Fahrzeug-Zusammenfassung
+    mit Merker am Vorgang). Best effort je Termin."""
+    grenze = (now - timedelta(hours=stunden)).isoformat()
+    n = 0
+    try:
+        from routes.appointments import _vertragszeiger_abgleichen
+        import kaufvorgang as _kv
+    except Exception:  # noqa: BLE001
+        return 0
+    async for appt in db.appointments.find(
+            {"updated_at": {"$gte": grenze}, "dealer_id": {"$type": "string"}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "contract_id": 1, "status": 1,
+             "vehicle_id": 1, "kaufvorgang_id": 1}).limit(limit):
+        try:
+            await _vertragszeiger_abgleichen(appt["dealer_id"], appt["id"], appt.get("contract_id"))
+            await _kv.termin_status_uebernehmen(appt, appt.get("status") or "offen")
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Frischabgleich Termin %s fehlgeschlagen", appt.get("id"))
     return n

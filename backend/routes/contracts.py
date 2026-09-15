@@ -1506,6 +1506,23 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                                          "als versendet markiert.")
             out["zustellung"] = "versendet"
             neuer_status = "versendet"
+            # Runde 12 (15.09.2026, Nr. 26): Pruefung und Zustellung sind nicht
+            # atomar — wurde der Vertrag GENAU dazwischen neu erzeugt, ging die
+            # alte Fassung raus. Das wird gemeldet (Hinweis + Betriebsalarm),
+            # der Sucher schickt die neue Fassung nach.
+            try:
+                danach = await db.generated_pdfs.find_one({"id": contract_id}, {"_id": 0, "version": 1})
+                if danach is not None and int(danach.get("version") or 1) != int(c.get("version") or 1):
+                    out["hinweis"] = ("Achtung: Der Vertrag wurde während des Versands neu erstellt — "
+                                      "die E-Mail enthält noch die vorherige Fassung. Bitte die neue "
+                                      "Fassung erneut senden.")
+                    import betrieb as _betrieb
+                    await _betrieb.alarm(db, "versand_alte_fassung", ref=contract_id,
+                                         dealer_id=user.get("dealer_id", ""),
+                                         gesendet=int(c.get("version") or 1),
+                                         aktuell=int(danach.get("version") or 1))
+            except Exception:  # noqa: BLE001
+                log.exception("Fassungspruefung nach Versand von %s fehlgeschlagen", contract_id)
             # Umbau Kaufvorgaenge: der Vorgang ist jetzt "gesendet" (best effort)
             try:
                 import kaufvorgang as _kv

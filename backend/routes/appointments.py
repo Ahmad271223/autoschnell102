@@ -237,6 +237,13 @@ async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
         raise HTTPException(400, "Dieser Fahrer ist nicht (mehr) mit deiner "
                                  "Firma verknüpft — bitte zuerst unter "
                                  "'Fahrer' per Code hinzufügen.")
+    # Runde 12 (15.09.2026, Nr. 7): ein vom Betreiber deaktiviertes oder in
+    # Loeschung befindliches Fahrer-Konto bekommt keine neuen Fahrten.
+    konto = await db.driver_accounts.find_one({"id": driver_id}, {"_id": 0, "active": 1, "loeschung": 1})
+    if konto is not None and (konto.get("active") is False
+                              or (konto.get("loeschung") or {}).get("status") == "laeuft"):
+        raise HTTPException(400, "Dieser Fahrer ist deaktiviert oder wird gelöscht — "
+                                 "er kann keine Fahrten mehr annehmen.")
 
 
 async def _fahrer_nachpruefen(appt_id: str, dealer_id: str,
@@ -268,43 +275,15 @@ TERMIN_VERALTET_HINWEIS = ("Der Termin wurde inzwischen von jemand anderem geän
                            "bitte neu laden und erneut speichern.")
 
 
-_REPLICA_SET: Dict[str, Any] = {"bis": 0.0, "ist": False}
-
-
 async def _ist_replica_set() -> bool:
-    """Phase 4 (4.1): Transaktionen gibt es nur im Replica-Set; Ergebnis 10 min
-    zwischengespeichert (Einzelserver in Tests, Replica-Set in Produktion)."""
-    import time as _time
-    if _time.monotonic() < _REPLICA_SET["bis"]:
-        return _REPLICA_SET["ist"]
-    ist = False
-    try:
-        h = await db.command("hello")
-        ist = bool(h.get("setName"))
-    except Exception:  # noqa: BLE001
-        ist = False
-    _REPLICA_SET.update(bis=_time.monotonic() + 600, ist=ist)
-    return ist
+    from deps import ist_replica_set
+    return await ist_replica_set()
 
 
 async def _transaktion(fn):
-    """fn(session) in einer Transaktion ausfuehren, wenn moeglich; sonst ohne.
-    Bricht die Transaktion technisch ab (PyMongoError), laeuft fn einmal ohne
-    Transaktion — die Schritte sind idempotent."""
-    if await _ist_replica_set():
-        try:
-            from deps import client as _client
-            async with await _client.start_session() as s:
-                async with s.start_transaction():
-                    return await fn(s)
-        except HTTPException:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            from pymongo.errors import PyMongoError
-            if not isinstance(exc, PyMongoError):
-                raise
-            log.warning("Transaktion nicht moeglich (%s) — Schritte laufen einzeln", exc)
-    return await fn(None)
+    """Phase 4 (4.1) / Runde 12: gemeinsamer Helfer in deps.transaktion."""
+    from deps import transaktion
+    return await transaktion(fn)
 
 
 async def _doppelbuchung_hinweis(appt_id: str, driver_id, datum, zeit) -> Optional[str]:
@@ -743,8 +722,10 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # zaehlt nur, was sich tatsaechlich aendert. Status/Notizen bleiben frei.
     status_neu = update.get("status", existing.get("status"))
     if existing.get("status") in ABGESCHLOSSEN and user.get("role") != "dealer":
+        # Runde 12 (15.09.2026, Nr. 11): auch Datum und Uhrzeit sind Beweisdaten.
         geschuetzt = ("driver_id", "vehicle_id", "contract_id", "seller_name",
-                      "seller_phone", "seller_email", "pickup_address")
+                      "seller_phone", "seller_email", "pickup_address",
+                      "pickup_date", "pickup_time")
         # Runde 17 (Nr. 2): das Loesen von Vertrag/Fahrzeug ist ebenfalls
         # eine Aenderung an Beweisdaten.
         loesen_aendert = ((contract_loesen and existing.get("contract_id"))
@@ -758,6 +739,15 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         if status_neu not in ABGESCHLOSSEN:
             raise HTTPException(403, "Abgeschlossene Termine öffnet nur der "
                                      "Händler-Hauptaccount wieder")
+        # Runde 12 (15.09.2026, Nr. 12): auch der Wechsel zwischen Endzustaenden
+        # (abgeholt -> storniert / nicht abgeholt) ist Chefsache.
+        if status_neu != existing.get("status") and (
+                existing.get("status") == "abgeholt"
+                or await db.pickup_protocols.count_documents(
+                    {"appointment_id": appt_id, "superseded": {"$ne": True}, "status": "final"},
+                    limit=1)):
+            raise HTTPException(403, "Den Ausgang einer abgeschlossenen Abholung ändert "
+                                     "nur der Händler-Hauptaccount")
     # Go-Live 13.09.2026 (P3, P6-Zusatz-Umhaengen): Liegt das Protokoll beim
     # Chef, ist es freigegeben oder wird gerade unterschrieben, darf der Termin
     # nicht an einen anderen Vertrag/ein anderes Fahrzeug gehaengt werden —
@@ -789,6 +779,24 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
             {"appointment_id": appt_id, "superseded": {"$ne": True},
              "status": {"$in": list(PROTOKOLL_LAEUFT)}}, limit=1):
         raise HTTPException(409, PROTOKOLL_LAEUFT_HINWEIS)
+    # Runde 12 (15.09.2026, Nr. 13/14): Ein abgeschlossener Termin mit
+    # unterschriebenem Protokoll ist ein Beweisstueck — Fahrer, Fahrzeug,
+    # Vertrag, Verkaeufer, Anschrift und Zeitpunkt aendert auch der Chef nur
+    # ueber Wiederoeffnen und eine Korrektur-Version. Einem geschlossenen
+    # Termin wird ausserdem kein anderer Fahrer mehr zugeteilt (er saehe eine
+    # Abholung samt Verkaeuferdaten, die er nie gefahren ist).
+    if existing.get("status") in ABGESCHLOSSEN and status_neu in ABGESCHLOSSEN:
+        if (vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel or termindaten_wechsel) \
+                and await db.pickup_protocols.count_documents(
+                {"appointment_id": appt_id, "superseded": {"$ne": True}, "status": "final"},
+                limit=1):
+            raise HTTPException(409, "Der Termin ist mit unterschriebenem Protokoll "
+                                     "abgeschlossen — Fahrer, Fahrzeug, Vertrag, Verkäufer, "
+                                     "Anschrift und Zeitpunkt ändert man nur über Wiederöffnen "
+                                     "und eine Korrektur-Version des Protokolls.")
+        if fahrer_wechsel and update.get("driver_id"):
+            raise HTTPException(409, "Einem abgeschlossenen Termin wird kein anderer Fahrer "
+                                     "zugeteilt — bitte den Termin zuerst wieder öffnen.")
     # Pruefung 14.09.2026 (Liste 4, Nr. 9/10): Der vor Ort vereinbarte Preis
     # kommt aus dem freigegebenen/unterschriebenen Protokoll. Liegt eines vor
     # (Freigabe, Abschluss oder final), ist final_price am Termin kein
@@ -854,6 +862,10 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         # dem Update gilt — Fahrer + "abgeholt" in einem Aufruf umging die
         # Protokollpflicht.
         fahrer_effektiv = update.get("driver_id") if "driver_id" in update else existing.get("driver_id")
+        # Runde 12 (15.09.2026, Nr. 15): "Fahrer entfernen + abgeholt" im selben
+        # Aufruf umging die Protokollpflicht — sie gilt, sobald VOR oder NACH
+        # dem Update ein Fahrer am Termin haengt.
+        fahrer_effektiv = fahrer_effektiv or existing.get("driver_id")
         # Phase 2 (2.5, A7/D7): "erledigt" setzt den Kaufvorgang wie "abgeholt"
         # — dieselbe Protokollpflicht, sobald ein Fahrer eingeteilt ist.
         if update["status"] in ("abgeholt", "erledigt") and fahrer_effektiv:
@@ -912,11 +924,23 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     write_filt: Dict[str, Any] = {"id": appt_id, "dealer_id": user["dealer_id"]}
     if stand:
         write_filt["updated_at"] = stand
+    # Runde 12 (15.09.2026, Nr. 19/30): aendern sich Beweisdaten (Fahrer,
+    # Fahrzeug, Vertrag, Verkaeufer, Anschrift, Datum, Uhrzeit), gilt der beim
+    # Lesen gesehene Stand auch OHNE Client-Angabe — ein Protokoll-Abschicken
+    # (bumpt updated_at) oder ein Kollege dazwischen fuehrt zu 409.
+    beweisdaten_wechsel = bool(vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel
+                               or termindaten_wechsel)
+    if beweisdaten_wechsel and not stand and existing.get("updated_at"):
+        write_filt["updated_at"] = existing["updated_at"]
     try:
         res_write = await db.appointments.update_one(write_filt, aenderung)
     except DuplicateKeyError:
         raise HTTPException(409, TERMIN_DOPPELT_HINWEIS)
     if res_write.matched_count == 0:
+        if beweisdaten_wechsel and await db.pickup_protocols.count_documents(
+                {"appointment_id": appt_id, "superseded": {"$ne": True},
+                 "status": {"$in": list(PROTOKOLL_LAEUFT)}}, limit=1):
+            raise HTTPException(409, PROTOKOLL_LAEUFT_HINWEIS)
         raise HTTPException(409, TERMIN_VERALTET_HINWEIS)
     # Phase 2 (2.4, D4-D6): Der Termin ist geschrieben — scheitert danach ein
     # Folgeschritt (Entwurf verwerfen, Vertragszeiger, Vorgang/Fahrzeugstatus,
@@ -1178,7 +1202,8 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
     appt = await db.appointments.find_one(
         {"id": appt_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "created_by": 1, "status": 1, "contract_id": 1, "kaufvorgang_id": 1,
-         "vehicle_id": 1, "driver_id": 1, "pickup_date": 1, "pickup_time": 1})
+         "vehicle_id": 1, "driver_id": 1, "pickup_date": 1, "pickup_time": 1,
+         "zuteilung": 1})
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
     if user.get("role") == "sucher":
@@ -1189,6 +1214,12 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         if (appt.get("status") or "offen") not in ("offen", "verschoben"):
             raise HTTPException(409, "Abgeschlossene oder stornierte Termine "
                                      "löscht nur der Händler-Hauptaccount")
+    # Runde 12 (15.09.2026, Nr. 16): eine vom Fahrer angenommene Fahrt
+    # verschwindet nicht einfach — erst stornieren (der Fahrer erfaehrt es),
+    # dann loeschen.
+    if appt.get("zuteilung") == "angenommen" and (appt.get("status") or "offen") in TERMIN_OFFEN_WERTE:
+        raise HTTPException(409, "Der Fahrer hat diese Fahrt angenommen — bitte den Termin "
+                                 "zuerst stornieren (Status 'storniert'), dann löschen.")
     # Pruefung 14.09.2026 (C15): Ein Termin mit unterschriebenem Protokoll
     # (Beweiskette: Unterschriften, PDF) oder mit laufender Freigabe/laufendem
     # Abschluss wird nicht geloescht — das Protokoll bliebe verwaist bzw. der
@@ -1232,6 +1263,12 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
 
     async def _kern(session=None) -> int:
         ses = {"session": session} if session is not None else {}
+        # Runde 12 (15.09.2026, Nr. 18): Protokollzustand unmittelbar vor dem
+        # Loeschen erneut pruefen (im Replica-Set innerhalb der Transaktion).
+        if await db.pickup_protocols.count_documents(
+                {"appointment_id": appt_id,
+                 "status": {"$in": [*PROTOKOLL_LAEUFT, "final"]}}, limit=1, **ses):
+            raise HTTPException(409, TERMIN_MIT_PROTOKOLL_HINWEIS)
         for kv in betroffene:
             neu = "vertrag_erstellt" if kv.get("status") == "abholung_geplant" else kv.get("status")
             await db.kaufvorgaenge.update_one(
@@ -1240,13 +1277,26 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         await db.generated_pdfs.update_many(
             {"dealer_id": user["dealer_id"], "appointment_id": appt_id},
             {"$set": {"appointment_id": None}}, **ses)
-        r = await db.appointments.delete_one({"id": appt_id, "dealer_id": user["dealer_id"]}, **ses)
+        # Runde 12 (15.09.2026, Nr. 17): nur den Stand loeschen, der geprueft
+        # wurde — setzt der Fahrer dazwischen "nicht abgeholt", greift das nicht.
+        r = await db.appointments.delete_one(
+            {"id": appt_id, "dealer_id": user["dealer_id"],
+             "status": appt.get("status"), "zuteilung": appt.get("zuteilung")}, **ses)
         return r.deleted_count
 
     geloescht = await _transaktion(_kern)
     for kv in betroffene:
         ziel = await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
         await _kv._nacharbeit_merken(kv, ziel)
+    if not geloescht and await db.appointments.find_one(
+            {"id": appt_id, "dealer_id": user["dealer_id"]}, {"_id": 1}):
+        raise HTTPException(409, "Der Termin wurde inzwischen geändert (Status oder Fahrer) — "
+                                 "bitte neu laden.")
+    if geloescht and await db.pickup_protocols.count_documents(
+            {"appointment_id": appt_id, "status": {"$in": [*PROTOKOLL_LAEUFT, "final"]}}, limit=1):
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "termin_geloescht_mit_protokoll", ref=appt_id,
+                             dealer_id=user["dealer_id"])
     if not geloescht:
         # Jemand anderes war schneller — dessen Lauf hat dieselben Verweise
         # geloest, es bleibt nichts Halbes zurueck.

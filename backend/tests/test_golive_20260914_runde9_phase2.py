@@ -291,9 +291,15 @@ def test_25_erledigt_nur_mit_protokoll():
     aid = r.json()["id"]
     r = requests.put(f"{API}/appointments/{aid}", json={"status": "erledigt"}, headers=w.C, timeout=60)
     assert r.status_code == 409 and "Erledigt" in r.text, r.text[:300]
-    # ohne Fahrer bleibt "erledigt" von Hand moeglich (Haendler holt selbst ab)
+    # Runde 12 (Nr. 15): "Fahrer entfernen + erledigt" im selben Aufruf umgeht die
+    # Protokollpflicht nicht mehr -> 409; in zwei Schritten (erst Fahrer weg,
+    # dann erledigt) bleibt der manuelle Abschluss ohne Fahrer moeglich.
     r = requests.put(f"{API}/appointments/{aid}", json={"driver_id": None, "status": "erledigt"},
                      headers=w.C, timeout=60)
+    assert r.status_code == 409, r.text[:300]
+    r = requests.put(f"{API}/appointments/{aid}", json={"driver_id": None}, headers=w.C, timeout=60)
+    assert r.status_code == 200, r.text[:300]
+    r = requests.put(f"{API}/appointments/{aid}", json={"status": "erledigt"}, headers=w.C, timeout=60)
     assert r.status_code == 200, r.text[:300]
     K._db().appointments.delete_one({"id": aid})
 

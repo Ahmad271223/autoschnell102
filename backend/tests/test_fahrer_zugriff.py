@@ -333,10 +333,12 @@ def test_konfliktsuche_ignoriert_abgeschlossene_fahrten():
             dict(t.appt(f"a_fremd_zu_{t.tag}", "abgeholt"), dealer_id=t.dealer2_id),
         ])
         r = await D.driver_conflicts(t.driver_id, datum, t.user)
-        ids = sorted(c["id"] for c in r["conflicts"])
-        assert ids == sorted([f"a_offen_{t.tag}", f"a_versch_{t.tag}", f"a_fremd_{t.tag}"]), ids
-        assert r["count"] == 3
-        fremd = next(c for c in r["conflicts"] if c["id"] == f"a_fremd_{t.tag}")
+        # Runde 12 (15.09.2026, Nr. 35): fremde Firmen liefern keine Termin-ID mehr.
+        ids = sorted(c["id"] for c in r["conflicts"] if c["id"])
+        assert ids == sorted([f"a_offen_{t.tag}", f"a_versch_{t.tag}"]), ids
+        assert r["count"] == 3 and len(r["conflicts"]) == 3
+        fremd = next(c for c in r["conflicts"] if not c["is_own"])
+        assert fremd["id"] is None
         assert fremd["is_own"] is False and fremd["title"] == "Andere Fahrt"
         assert "pickup_address" not in fremd and "dealer_id" not in fremd
         # Fahrer nicht in der Liste -> 404

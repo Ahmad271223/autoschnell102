@@ -113,6 +113,45 @@ db = _DbProxy(client, os.environ["DB_NAME"])
 bearer = HTTPBearer(auto_error=False)
 
 
+_REPLICA_SET_STAND: dict = {"bis": 0.0, "ist": False}
+
+
+async def ist_replica_set() -> bool:
+    """Transaktionen gibt es nur im Replica-Set (Produktion); Ergebnis 10 min
+    zwischengespeichert (Einzelserver in Tests)."""
+    import time as _time
+    if _time.monotonic() < _REPLICA_SET_STAND["bis"]:
+        return _REPLICA_SET_STAND["ist"]
+    ist = False
+    try:
+        h = await db.command("hello")
+        ist = bool(h.get("setName"))
+    except Exception:  # noqa: BLE001
+        ist = False
+    _REPLICA_SET_STAND.update(bis=_time.monotonic() + 600, ist=ist)
+    return ist
+
+
+async def transaktion(fn):
+    """fn(session) in einer Transaktion ausfuehren, wenn moeglich; sonst ohne.
+    Bricht die Transaktion technisch ab (PyMongoError), laeuft fn einmal ohne
+    Transaktion — die Schritte muessen idempotent sein. HTTPException geht
+    unveraendert durch."""
+    if await ist_replica_set():
+        try:
+            async with await client.start_session() as s:
+                async with s.start_transaction():
+                    return await fn(s)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            from pymongo.errors import PyMongoError
+            if not isinstance(exc, PyMongoError):
+                raise
+            log.warning("Transaktion nicht moeglich (%s) — Schritte laufen einzeln", exc)
+    return await fn(None)
+
+
 # ---------- Helpers ----------
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -195,6 +234,13 @@ async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
     Firma (Runde 11); fehlendes active-Feld gilt wie bisher als aktiv."""
     if not dealer_id:
         return False
+    # Runde 12 (15.09.2026, Nr. 4): der eingetragene Hauptaccount (dealers.user_id)
+    # ist massgeblich; nur ohne Zeiger (Altbestand) das aelteste dealer-Konto.
+    firma = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "user_id": 1})
+    if firma and firma.get("user_id"):
+        chef = await db.users.find_one({"id": firma["user_id"]}, {"_id": 0, "active": 1})
+        if chef is not None:
+            return not chef.get("active", True)
     chef = await db.users.find_one(
         {"dealer_id": dealer_id, "role": "dealer"},
         {"_id": 0, "active": 1}, sort=[("created_at", 1)])
@@ -236,9 +282,15 @@ async def current_firma(user=Depends(current_user)):
     # lieferte effective_dealer {} und Termine/Vertraege/Versand liefen mit
     # leerer Firmenidentitaet und Default-Regeln weiter. Eine indexierte
     # find_one je Firmen-Request.
-    if not await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 1}):
+    firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "id": 1, "loeschung": 1})
+    if firma is None:
         raise HTTPException(403, "Kein Händlerprofil — bitte den "
                                  "Administrator kontaktieren")
+    # Runde 12 (15.09.2026, Nr. 6): waehrend der Firmenloeschung (Grabstein am
+    # Firmen-Dokument) keine Chef-/Sucher-Schreibvorgaenge mehr — sonst
+    # konkurrieren sie mit der Loeschkaskade und legen Daten neu an.
+    if (firma.get("loeschung") or {}).get("status") == "laeuft":
+        raise HTTPException(409, "Diese Firma wird gerade gelöscht — keine Änderungen mehr möglich")
     return user
 
 
@@ -249,6 +301,30 @@ async def current_chef(user=Depends(current_firma)):
     Sucher arbeiten in ihrem eigenen Bereich."""
     if user.get("role") != "dealer":
         raise HTTPException(403, "Nur der Händler-Hauptaccount darf das")
+    # Runde 12 (15.09.2026, Nr. 1): Chef ist NUR der in dealers.user_id
+    # eingetragene Hauptaccount — ein zweites oder liegengebliebenes
+    # dealer-Konto derselben Firma bekommt keine Chef-Rechte. Ohne Zeiger
+    # (Altbestand vor dem 15.09.) gilt das aelteste dealer-Konto, und der
+    # Zeiger wird dabei nachgezogen.
+    firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "user_id": 1})
+    haupt = (firma or {}).get("user_id")
+    if haupt and haupt != user["id"]:
+        raise HTTPException(403, "Nur der Händler-Hauptaccount darf das — dieses Konto ist "
+                                 "nicht der eingetragene Chef der Firma")
+    if not haupt:
+        aeltester = await db.users.find_one(
+            {"dealer_id": user["dealer_id"], "role": "dealer"},
+            {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+        if aeltester and aeltester["id"] != user["id"]:
+            raise HTTPException(403, "Nur der Händler-Hauptaccount darf das — dieses Konto ist "
+                                     "nicht der eingetragene Chef der Firma")
+        try:
+            await db.dealers.update_one(
+                {"id": user["dealer_id"],
+                 "$or": [{"user_id": {"$exists": False}}, {"user_id": None}, {"user_id": ""}]},
+                {"$set": {"user_id": user["id"]}})
+        except Exception:  # noqa: BLE001
+            pass
     return user
 
 

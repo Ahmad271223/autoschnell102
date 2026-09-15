@@ -200,6 +200,10 @@ async def firma_mit_chef_anlegen(db, firma: dict, chef: dict) -> dict:
         chef_doc.setdefault("current_session_id", None)
         try:
             await db.users.insert_one(chef_doc)
+            # Runde 12 (15.09.2026, Nr. 1): der Hauptaccount steht ab jetzt im
+            # Firmen-Dokument (dealers.user_id) — current_chef prueft dagegen.
+            await db.dealers.update_one({"id": firma_doc["id"]},
+                                        {"$set": {"user_id": chef_doc["id"]}})
         except DuplicateKeyError as e:
             await _firma_aufraeumen(db, firma_doc["id"])
             if ist_kontonummer_dublette(e) and versuch < _VERSUCHE - 1:

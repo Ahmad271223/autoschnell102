@@ -229,9 +229,16 @@ async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_fi
         {"_id": 0, "id": 1, "owner_user_id": 1, "mitbearbeiter_ids": 1})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    # Runde 12 (15.09.2026, Nr. 36): auch Termine, die der Chef zu einem Vertrag
+    # dieses Suchers angelegt hat, zaehlen als laufender eigener Vorgang.
+    eigene_vertraege = [c["id"] async for c in db.generated_pdfs.find(
+        {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id, "user_id": user["id"]},
+        {"_id": 0, "id": 1})]
     offen = await db.appointments.count_documents(
         {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
-         "created_by": user["id"], "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}},
+         "status": {"$nin": list(_TERMIN_GESCHLOSSEN)},
+         "$or": [{"created_by": user["id"]},
+                 {"contract_id": {"$in": eigene_vertraege}} if eigene_vertraege else {"_id": None}]},
         limit=1)
     if offen:
         raise HTTPException(409, "Zu diesem Fahrzeug läuft noch ein Termin von dir — "

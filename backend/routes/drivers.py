@@ -73,6 +73,8 @@ class DriverLinkIn(BaseModel):
 class DriverStatusIn(BaseModel):
     """Fahrer-App: Termin als abgeholt / nicht abgeholt markieren."""
     status: Literal["abgeholt", "nicht abgeholt"]
+    # Runde 12 (15.09.2026, Nr. 10): Stand (updated_at), den die App gesehen hat.
+    stand: Optional[str] = None
     # Pruefung 14.09.2026 (A4): vorher unbegrenzt (Megabytes in einem Termin).
     notes: Optional[str] = Field(default=None, max_length=2000)
 
@@ -81,6 +83,9 @@ class DriverZuteilungIn(BaseModel):
     """Fahrer-App: zugeteilte Fahrt annehmen oder ablehnen (09/2026)."""
     action: Literal["annehmen", "ablehnen"]
     grund: Optional[str] = None
+    # Runde 12 (15.09.2026, Nr. 9): Stand (updated_at) der angezeigten Fahrt —
+    # die Zusage gilt fuer genau diese Daten.
+    stand: Optional[str] = None
 
 
 class DeviationIn(BaseModel):
@@ -315,6 +320,15 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
         })
     except DuplicateKeyError:
         raise HTTPException(409, "Fahrer ist bereits in deiner Liste")
+    # Runde 12 (15.09.2026, Nr. 8): Konto-Loeschung loescht ERST die Links, dann
+    # das Konto — dazwischen darf kein neuer Link entstehen. Nach dem Insert
+    # nachpruefen; sonst Link zuruecknehmen.
+    konto = await db.driver_accounts.find_one({"id": da["id"]}, {"_id": 0, "active": 1, "loeschung": 1})
+    if konto is None or konto.get("active") is False \
+            or (konto.get("loeschung") or {}).get("status") == "laeuft":
+        await db.dealer_drivers.delete_one(
+            {"dealer_id": user["dealer_id"], "driver_account_id": da["id"]})
+        raise HTTPException(409, "Dieses Fahrer-Konto wurde gerade deaktiviert oder gelöscht")
     # Runde 17 (Nr. 6): Audit-Spur (nur die Konto-ID, kein Name/Code).
     # Nach dem dauerhaften Insert — darf den Vorgang nicht mehr abbrechen.
     await log_activity_sicher(user["dealer_id"], user["id"], "fahrer.hinzugefuegt",
@@ -323,10 +337,15 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
 
 
 @router.get("/drivers")
-async def list_drivers(user=Depends(current_firma)):
+async def list_drivers(user=Depends(current_firma), response: Response = None):
     links = await db.dealer_drivers.find(
         {"dealer_id": user["dealer_id"]}, {"_id": 0},
-    ).to_list(500)
+    ).to_list(501)
+    if len(links) > 500:
+        # Runde 12 (15.09.2026, Nr. 33): Kuerzung melden statt still kappen.
+        links = links[:500]
+        if response is not None:
+            response.headers["X-Truncated"] = "1"
     # Runde 15 (Nr. 4): Konten in EINER Abfrage statt 2 je Fahrer (bei 500
     # Fahrern 1001 Abfragen je Listenaufruf, auch fuer Sucher erreichbar).
     konten: Dict[str, dict] = {}
@@ -447,8 +466,11 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma
     for c in conflicts:
         c["is_own"] = c.get("dealer_id") == user["dealer_id"]
         if not c["is_own"]:
+            # Runde 12 (15.09.2026, Nr. 35): von fremden Firmen nur "belegt um":
+            # keine Termin-ID, keine Anschrift, kein Titel.
             c.pop("pickup_address", None)
             c["title"] = "Andere Fahrt"
+            c["id"] = None
         c.pop("dealer_id", None)
     return {"conflicts": conflicts, "count": total,
             "has_more": total > len(conflicts)}
@@ -1033,15 +1055,22 @@ async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
     if body.action == "annehmen":
         # Audit 09/2026: Compare-and-set auf "offen" — gleichzeitiges
         # Annehmen und Ablehnen darf nicht beides erfolgreich melden.
+        annahme_filt: Dict[str, Any] = {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"}
+        if getattr(body, "stand", None):
+            annahme_filt["updated_at"] = body.stand
         r = await db.appointments.update_one(
-            {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"},
+            annahme_filt,
             {"$set": {"zuteilung": "angenommen",
                       "zuteilung_beantwortet_am": now_iso(),
                       "updated_at": now_iso()},
              "$unset": {"zuteilung_neu_wegen_aenderung": ""}})
         if r.modified_count == 0:
             jetzt = await db.appointments.find_one(
-                {"id": appt_id}, {"_id": 0, "zuteilung": 1}) or {}
+                {"id": appt_id}, {"_id": 0, "zuteilung": 1, "updated_at": 1}) or {}
+            if getattr(body, "stand", None) and jetzt.get("zuteilung") == "offen"                     and jetzt.get("updated_at") != body.stand:
+                # Runde 12 (Nr. 9): die Fahrt wurde geaendert, seit die App sie las.
+                raise HTTPException(409, "Die Fahrt wurde inzwischen geändert (Datum, Uhrzeit "
+                                         "oder Adresse) — bitte neu laden und erneut annehmen.")
             return {"ok": True, "zuteilung": jetzt.get("zuteilung") or "abgelehnt",
                     "unveraendert": True}
         await log_activity_sicher(appt.get("dealer_id"), driver["id"],
@@ -1120,12 +1149,18 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     # zwischen Lesen und Schreiben kann der Termin storniert oder einem
     # anderen Fahrer zugeteilt worden sein; vorher setzte der alte Aufruf
     # den Status trotzdem.
-    res = await db.appointments.update_one(
-        {"id": appt_id, "driver_id": driver["id"], "status": appt.get("status")},
-        [{"$set": update}])
+    # Runde 12 (15.09.2026, Nr. 10): nur eine angenommene, seitdem unveraenderte
+    # Fahrt — setzt der Chef Datum/Adresse neu (zuteilung wieder "offen"),
+    # greift der alte Fahrer-Request nicht mehr; mit `stand` zusaetzlich exakt
+    # der angezeigte Stand.
+    status_filt: Dict[str, Any] = {"id": appt_id, "driver_id": driver["id"],
+                                   "status": appt.get("status"), "zuteilung": {"$ne": "offen"}}
+    if getattr(body, "stand", None):
+        status_filt["updated_at"] = body.stand
+    res = await db.appointments.update_one(status_filt, [{"$set": update}])
     if res.matched_count == 0:
         raise HTTPException(409, "Der Termin wurde zwischenzeitlich geändert "
-                                 "(storniert oder anderem Fahrer zugeteilt) — "
+                                 "(storniert, neu zugeteilt oder Datum/Adresse geändert) — "
                                  "bitte die Termine neu laden.")
     # Pruefung 14.09.2026 (Liste 1, Nr. 25 / Liste 2, Nr. 9): Der Termin ist
     # ab hier abgeschlossen. Scheitert ein Folgeschritt, bleibt der Merker
@@ -1373,11 +1408,22 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         # inzwischen kann der Termin geloescht, storniert oder einem anderen
         # Fahrer zugeteilt worden sein. Vor dem Speichern erneut pruefen.
         frisch = await db.appointments.find_one(
-            {"id": appt_id, "driver_id": driver["id"]}, {"_id": 0, "status": 1})
+            {"id": appt_id, "driver_id": driver["id"]},
+            {"_id": 0, "status": 1, "vehicle_id": 1, "dealer_id": 1})
         if not frisch or ((frisch.get("status") or "offen") in _TERMIN_ABGESCHLOSSEN
                           and frisch.get("status") != "abgeholt"):
             raise HTTPException(409, "Der Termin wurde inzwischen geändert oder gelöscht — "
                                      "der Bericht wurde nicht gespeichert.")
+        # Runde 12 (15.09.2026, Nr. 20/21): auch die Firmenverknuepfung erneut
+        # pruefen (der Chef kann den Fahrer waehrend des Uploads entfernt haben)
+        # und Fahrzeug/Firma vom FRISCHEN Termin uebernehmen.
+        if not await db.dealer_drivers.find_one(
+                {"dealer_id": frisch.get("dealer_id") or appt.get("dealer_id"),
+                 "driver_account_id": driver["id"]}, {"_id": 1}):
+            raise HTTPException(409, "Du bist nicht mehr mit dieser Firma verknüpft — "
+                                     "der Bericht wurde nicht gespeichert.")
+        appt = {**appt, "vehicle_id": frisch.get("vehicle_id", appt.get("vehicle_id")),
+                "dealer_id": frisch.get("dealer_id", appt.get("dealer_id"))}
         version, replaces_id = await _naechste_version()
         report_id = str(uuid.uuid4())
         doc = {

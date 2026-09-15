@@ -562,6 +562,11 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(404, "Nutzer nicht gefunden")
+    # Runde 12 (15.09.2026, Nr. 5): ein Konto in laufender Loeschung wird nicht
+    # mehr veraendert (Rolle, Aktivstatus) — sonst laeuft die Loeschkaskade
+    # gegen ein wiederbelebtes Konto.
+    if (target.get("loeschung") or {}).get("status") == "laeuft":
+        raise HTTPException(409, "Dieses Konto wird gerade gelöscht — keine Änderungen mehr möglich")
     fields = {}
     for k in ("active", "role"):
         if k in body:
@@ -626,17 +631,35 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                     # Profil auf den Nachfolger und er bekommt die Rolle, dann
                     # wird der bisherige Chef Sucher (seine Sitzung endet). Ein
                     # Wiederholen desselben Aufrufs fuehrt den Rest zu Ende.
-                    await db.dealers.update_one(
-                        {"id": target["dealer_id"]},
-                        {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
-                    await db.users.update_one(
-                        {"id": target["id"]},
-                        {"$set": {"role": "dealer", "current_session_id": None,
-                                  "updated_at": now_iso()}})
-                    await db.users.update_one(
-                        {"id": chef["id"], "role": "dealer"},
-                        {"$set": {"role": "sucher", "current_session_id": None,
-                                  "updated_at": now_iso()}})
+                    # Runde 12 (15.09.2026, Nr. 2/3): Chefwechsel unter einer
+                    # firmenweiten Sperre (auch ueber zwei Server), danach
+                    # Konsistenz: GENAU ein dealer-Konto je Firma. Da current_chef
+                    # dealers.user_id prueft, ist ab dem ersten Schritt nur noch
+                    # der neue Chef handlungsfaehig.
+                    from job_lock import acquire, release
+                    sperre = await acquire(db, f"chefwechsel-{target['dealer_id']}", ttl_seconds=30)
+                    if not sperre:
+                        raise HTTPException(409, "Ein Chefwechsel dieser Firma läuft gerade — "
+                                                 "bitte gleich erneut versuchen")
+                    try:
+                        await db.dealers.update_one(
+                            {"id": target["dealer_id"]},
+                            {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
+                        await db.users.update_one(
+                            {"id": target["id"]},
+                            {"$set": {"role": "dealer", "current_session_id": None,
+                                      "updated_at": now_iso()}})
+                        await db.users.update_one(
+                            {"id": chef["id"], "role": "dealer"},
+                            {"$set": {"role": "sucher", "current_session_id": None,
+                                      "updated_at": now_iso()}})
+                        await db.users.update_many(
+                            {"dealer_id": target["dealer_id"], "role": "dealer",
+                             "id": {"$ne": target["id"]}},
+                            {"$set": {"role": "sucher", "current_session_id": None,
+                                      "updated_at": now_iso()}})
+                    finally:
+                        await release(db, f"chefwechsel-{target['dealer_id']}", token=sperre)
                     await log_activity_sicher(
                         admin.get("dealer_id", ""), admin["id"], "admin.firma.chefwechsel",
                         ref=target["dealer_id"],

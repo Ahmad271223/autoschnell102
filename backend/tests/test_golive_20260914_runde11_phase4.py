@@ -68,7 +68,7 @@ def wegwerf(monkeypatch):
 # ============================================================ 4.1
 def test_41_terminloeschung_kernschritte(wegwerf, monkeypatch):
     db, run = wegwerf.db, wegwerf.run
-    monkeypatch.setattr(A, "_REPLICA_SET", {"bis": 0.0, "ist": False})
+    monkeypatch.setattr(deps, "_REPLICA_SET_STAND", {"bis": 0.0, "ist": False})
     run(db.vehicles.insert_one({"id": "v1", "dealer_id": "d1", "lifecycle": "abholung_geplant"}))
     run(db.generated_pdfs.insert_one({"id": "c1", "dealer_id": "d1", "vehicle_id": "v1",
                                       "user_id": "chef", "appointment_id": "t1"}))
@@ -88,7 +88,7 @@ def test_41_terminloeschung_kernschritte(wegwerf, monkeypatch):
     assert "nacharbeit_offen" not in k1
     # Replica-Set-Erkennung ist zwischengespeichert; ohne Replica-Set laeuft fn(None)
     assert run(A._ist_replica_set()) is False
-    q = inspect.getsource(A._transaktion)
+    q = inspect.getsource(deps.transaktion)          # Runde 12: gemeinsamer Helfer in deps
     assert "start_transaction" in q and "PyMongoError" in q
     # Loeschung eines fremden Termins bleibt 404 (nichts geschrieben)
     with pytest.raises(Exception) as e:

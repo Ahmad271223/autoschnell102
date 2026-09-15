@@ -63,7 +63,10 @@ export default function DriverDashboard() {
     }
     setBusy(id);
     try {
-      await driverApi.put(`/driver/appointments/${id}/zuteilung`, { action, grund });
+      // Runde 12: Stand der angezeigten Fahrt mitschicken — die Zusage gilt genau dafür.
+      const stand = items.find((a) => a.id === id)?.updated_at;
+      await driverApi.put(`/driver/appointments/${id}/zuteilung`,
+        { action, grund, ...(stand ? { stand } : {}) });
       toast.success(action === "annehmen" ? "Fahrt angenommen" : "Fahrt abgelehnt — der Händler wurde informiert");
     } catch (e) {
       toast.error(errMsg(e, "Antwort fehlgeschlagen"));
@@ -87,7 +90,9 @@ export default function DriverDashboard() {
     if (!window.confirm(confirmMsg)) return;
     setBusy(id);
     try {
-      await driverApi.put(`/driver/appointments/${id}/status`, { status });
+      const stand = items.find((a) => a.id === id)?.updated_at;
+      await driverApi.put(`/driver/appointments/${id}/status`,
+        { status, ...(stand ? { stand } : {}) });
       toast.success(status === "abgeholt" ? "Als abgeholt markiert" : "Als nicht abgeholt markiert");
     } catch (e) {
       toast.error(errMsg(e, "Statuswechsel fehlgeschlagen"));

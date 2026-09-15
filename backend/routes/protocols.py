@@ -457,16 +457,25 @@ async def korrektur_verwerfen(appt_id: str) -> bool:
         if not entwurf:
             return False
         jetzt = now_iso()
-        res = await db.pickup_protocols.update_one(
-            {"id": entwurf["id"], "status": {"$in": OFFENE_KORREKTUR}},
-            {"$set": {"superseded": True, "verworfen_am": jetzt, "updated_at": jetzt}})
-        if res.matched_count == 0:
-            return False
-        await db.pickup_protocols.update_one(
-            {"appointment_id": appt_id, "version": entwurf["corrects_version"]},
-            {"$set": {"superseded": False, "updated_at": jetzt},
-             "$unset": {"superseded_at": ""}})
-        return True
+
+        # Runde 12 (15.09.2026, Nr. 24): beide Schritte in EINER Transaktion,
+        # wenn die Datenbank ein Replica-Set ist — kein Fenster ohne aktuelles
+        # Protokoll mehr; sonst nacheinander (Reparatur: ohne_aktuelle_version_reparieren).
+        async def _beide(session=None) -> bool:
+            ses = {"session": session} if session is not None else {}
+            res = await db.pickup_protocols.update_one(
+                {"id": entwurf["id"], "status": {"$in": OFFENE_KORREKTUR}},
+                {"$set": {"superseded": True, "verworfen_am": jetzt, "updated_at": jetzt}}, **ses)
+            if res.matched_count == 0:
+                return False
+            await db.pickup_protocols.update_one(
+                {"appointment_id": appt_id, "version": entwurf["corrects_version"]},
+                {"$set": {"superseded": False, "updated_at": jetzt},
+                 "$unset": {"superseded_at": ""}}, **ses)
+            return True
+
+        from deps import transaktion
+        return await transaktion(_beide)
     except Exception:  # noqa: BLE001
         log.exception("Protokoll-Korrektur zu Termin %s konnte nicht verworfen "
                       "werden", appt_id)
@@ -1056,6 +1065,13 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     # oben bzw. unten, waehrend der Chef gerade daran arbeitet.
     if not doc.get("erstmals_abgeschickt_am"):
         setzen["erstmals_abgeschickt_am"] = jetzt
+    # Runde 12 (15.09.2026, Nr. 19): den Termin-Stand VOR dem Abschicken
+    # anfassen — ein Termin-Update mit Beweisdaten-Aenderung, das den alten
+    # Stand gelesen hat, scheitert danach an seiner Stand-Pruefung.
+    try:
+        await db.appointments.update_one({"id": appt_id}, {"$set": {"updated_at": jetzt}})
+    except Exception:  # noqa: BLE001
+        log.exception("Termin-Stand vor Abschicken von %s nicht angefasst", appt_id)
     res = await db.pickup_protocols.update_one(
         {"id": doc["id"], "status": "entwurf"},
         {"$set": setzen,
