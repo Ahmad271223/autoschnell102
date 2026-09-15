@@ -108,7 +108,7 @@ export default function AdminFahrer() {
       <KontoPruefen />
 
       <Card padded={false}>
-        <div className="px-4 py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <div className="relative max-w-sm">
             <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
             <input
@@ -116,7 +116,7 @@ export default function AdminFahrer() {
               placeholder="Kontonummer, Name, E-Mail, Fahrer-Code oder Firma"
               data-testid="fahrer-suche"
               className="h-10 pl-9 pr-3 rounded-xl text-[14px] w-full outline-none focus:ring-2 focus:ring-red-500/40"
-              style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }}
+              style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" }}
             />
           </div>
         </div>
@@ -131,7 +131,7 @@ export default function AdminFahrer() {
             {filtered.map((r) => (
               <li key={r.id} className="px-4 py-3 flex items-center gap-3" data-testid={`fahrer-row-${r.id}`}>
                 <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-zinc-300"
-                     style={{ background: "rgba(255,255,255,0.06)" }}>
+                     style={{ background: "var(--wa-06)" }}>
                   <Truck size={16} />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -179,7 +179,7 @@ export default function AdminFahrer() {
       {resetDriver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
              onClick={() => setResetDriver(null)}>
-          <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
+          <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
                onClick={(e) => e.stopPropagation()}>
             <div className="text-[15px] font-semibold text-white">Passwort setzen</div>
             <div className="text-[12.5px] text-zinc-500 mt-1">
@@ -189,7 +189,7 @@ export default function AdminFahrer() {
               <PasswortFeld value={newPw} onChange={setNewPw} testid="fahrer-pw-input" autoFocus
                             placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
                             className="h-10 px-3 rounded-xl text-[14px] w-full outline-none"
-                            style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }} />
+                            style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" }} />
             </div>
             <div className="mt-4 flex gap-2 justify-end">
               <Button variant="ghost" onClick={() => setResetDriver(null)}>Abbrechen</Button>
@@ -202,7 +202,7 @@ export default function AdminFahrer() {
       {deleteDriver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
              onClick={() => !deleting && setDeleteDriver(null)}>
-          <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: "#141416", border: "1px solid rgba(239,68,68,0.4)" }}
+          <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: "var(--bg-elevated)", border: "1px solid rgba(239,68,68,0.4)" }}
                onClick={(e) => e.stopPropagation()}>
             <div className="text-[15px] font-semibold text-white">Fahrer löschen?</div>
             <div className="text-[12.5px] text-zinc-400 mt-2 leading-relaxed">

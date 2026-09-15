@@ -99,7 +99,7 @@ export default function AdminBetrieb() {
       </Card>
 
       <Card padded={false}>
-        <div className="flex items-center gap-2 px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <div className="flex items-center gap-2 px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <AlertTriangle size={16} className="text-zinc-500" />
           <span className="text-[15px] font-semibold text-white">Offene Betriebsalarme</span>
           <Badge>{alarme.length}</Badge>
@@ -107,7 +107,7 @@ export default function AdminBetrieb() {
         {alarme.length === 0 ? (
           <EmptyState title="Keine offenen Alarme" hint="Bezahlt-ohne-Zugang, nicht löschbare Dateien, Verträge ohne Datensatz und Backup-Probleme erscheinen hier." />
         ) : (
-          <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
             {alarme.map((a) => (
               <li key={a.id} className="px-5 py-3 flex items-start gap-3" data-testid={`alarm-${a.id}`}>
                 <Badge tone="red">{a.typ}</Badge>

@@ -10,7 +10,7 @@ export default function DemnaechstVerfuegbar({ bereich = "Dieser Bereich", einge
   const inhalt = (
     <div className="tactical-card p-8 text-center" data-testid="demnaechst-verfuegbar">
       <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full"
-           style={{ background: "rgba(255,255,255,0.06)" }}>
+           style={{ background: "var(--wa-06)" }}>
         <Clock size={22} />
       </div>
       <h1 className="font-display font-black text-2xl">Demnächst verfügbar</h1>

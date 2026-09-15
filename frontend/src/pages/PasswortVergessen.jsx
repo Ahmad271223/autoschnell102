@@ -9,7 +9,7 @@ import { Bolt, KeyRound, Phone, Mail } from "lucide-react";
  */
 export default function PasswortVergessen() {
   return (
-    <div className="min-h-screen flex items-center justify-center p-6" style={{ background: "#0a0a0a" }}>
+    <div className="min-h-screen flex items-center justify-center p-6" style={{ background: "var(--bg-deep)" }}>
       <div className="w-full max-w-sm" data-testid="passwort-vergessen-hinweis">
         <Link to="/" className="flex items-center gap-2 mb-10">
           <span className="w-7 h-7 rounded-sm flex items-center justify-center"

@@ -334,7 +334,7 @@ export default function Inserat() {
                 <label className="text-[11px] text-zinc-500">Unfallfrei</label>
                 <select value={l.data?.accident_free ?? ""} disabled={l.status === "verkauft"}
                         onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, accident_free: e.target.value } }))}
-                        className={inputCls + " bg-[#141416]"} style={st}>
+                        className={inputCls + " bg-[var(--bg-elevated)]"} style={st}>
                   <option value="">— bitte angeben —</option>
                   <option value="Ja">Ja</option>
                   <option value="Nein">Nein</option>

@@ -19,7 +19,7 @@ import DamageSelector from "@/components/DamageSelector";
  * React baut dann alle Eingabefelder neu auf und der Fokus/Eingaben
  * gehen beim Tippen verloren. */
 const Section = ({ n, title, children, hint }) => (
-  <div className="mt-4 rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+  <div className="mt-4 rounded-2xl p-4" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
     <div className="flex items-center gap-2">
       <span className="w-6 h-6 rounded-md flex items-center justify-center text-[11px] font-bold text-white"
             style={{ background: "var(--accent-red)" }}>{n}</span>
@@ -454,7 +454,7 @@ export default function Protokoll() {
             const abweichend = entry.status === "weicht ab";
             const art = (tpl.vehicle_check_art || {})[fld.key] || "text";
             return (
-              <div key={fld.key} className="pb-2 border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+              <div key={fld.key} className="pb-2 border-b" style={{ borderColor: "var(--wa-06)" }}>
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="text-[11px] text-zinc-500">{fld.label}</span>
                   <span className="text-sm text-right">
@@ -725,8 +725,8 @@ export default function Protokoll() {
           oberhalb der Tabs, damit beide bedienbar bleiben. */}
       <div className="fixed left-0 right-0 px-3 py-3 flex gap-2 z-50"
            data-testid="protokoll-aktionen"
-           style={{ background: "rgba(10,10,10,0.95)",
-                    borderTop: "1px solid rgba(255,255,255,0.08)",
+           style={{ background: "var(--bg-elevated)",
+                    borderTop: "1px solid var(--wa-08)",
                     bottom: "calc(var(--fahrer-tabs, 3.75rem) + env(safe-area-inset-bottom, 0px))" }}>
         {isFinal ? (
           <>

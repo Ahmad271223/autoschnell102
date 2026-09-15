@@ -4,7 +4,7 @@ import { Bolt, AlertTriangle } from "lucide-react";
 /** Gemeinsames Layout für Impressum/Datenschutz. */
 export default function LegalLayout({ title, children, draft = false }) {
   return (
-    <div className="min-h-screen" style={{ background: "#0a0a0a", color: "#e4e4e7" }}>
+    <div className="min-h-screen" style={{ background: "var(--bg-deep)", color: "var(--text-strong)" }}>
       <div className="max-w-3xl mx-auto px-6 py-10">
         <Link to="/" className="inline-flex items-center gap-2 mb-10">
           <span className="w-7 h-7 rounded-sm flex items-center justify-center"
@@ -35,7 +35,7 @@ export default function LegalLayout({ title, children, draft = false }) {
         </div>
 
         <div className="mt-14 pt-6 border-t text-sm text-zinc-500 flex gap-5"
-             style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+             style={{ borderColor: "var(--wa-08)" }}>
           <Link to="/" className="hover:text-white">Startseite</Link>
           <Link to="/impressum" className="hover:text-white">Impressum</Link>
           <Link to="/datenschutz" className="hover:text-white">Datenschutz</Link>

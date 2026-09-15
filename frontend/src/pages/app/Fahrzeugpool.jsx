@@ -51,7 +51,7 @@ export default function Fahrzeugpool() {
       <div className="mt-6 tactical-card overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left overline" style={{ background: "rgba(255,255,255,0.02)" }}>
+            <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Mobile-ID</th>
               <th className="px-4 py-3">Marke / Modell</th>
               <th className="px-4 py-3">EZ</th>

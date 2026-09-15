@@ -139,7 +139,7 @@ export default function FahrzeugAkte() {
   );
 
   const KV = ({ k, val }) => (
-    <div className="flex justify-between gap-4 py-1 border-b text-sm" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+    <div className="flex justify-between gap-4 py-1 border-b text-sm" style={{ borderColor: "var(--wa-04)" }}>
       {/* Die Beschriftung bricht um, nicht der Wert ("20.000 €" bleibt ganz). */}
       <span className="min-w-0 text-zinc-500">{k}</span>
       <span className="text-right break-words">{val == null || val === "" ? "—" : val}</span>
@@ -345,7 +345,7 @@ export default function FahrzeugAkte() {
           <Section title="Kaufvorgänge">
             {akte.kaufvorgaenge.map((k) => (
               <div key={k.id} className="py-2 border-b last:border-b-0 text-sm"
-                   style={{ borderColor: "rgba(255,255,255,0.04)" }} data-testid={`kaufvorgang-${k.id}`}>
+                   style={{ borderColor: "var(--wa-04)" }} data-testid={`kaufvorgang-${k.id}`}>
                 <div className="flex items-center justify-between gap-3">
                   <span className="min-w-0 truncate font-medium" style={{ color: "var(--text-primary)" }}>
                     {k.user_name || k.user_id}
@@ -484,7 +484,7 @@ export default function FahrzeugAkte() {
       <Section title="Historie">
         <div className="space-y-1 max-h-64 overflow-y-auto">
           {akte.history.map((h) => (
-            <div key={h.id} className="flex justify-between gap-4 text-xs py-1 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+            <div key={h.id} className="flex justify-between gap-4 text-xs py-1 border-b" style={{ borderColor: "var(--wa-04)" }}>
               <span style={{ color: "var(--text-primary)" }}>{aktionText(h.action)}</span>
               <span className="text-zinc-600 whitespace-nowrap">{fmtDate(h.created_at)}</span>
             </div>

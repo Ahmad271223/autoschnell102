@@ -29,7 +29,7 @@ export default function PasswortFeld({ value, onChange, placeholder, testid, cla
                 title={sichtbar ? "Passwort verbergen" : "Passwort anzeigen"}
                 data-testid={testid ? `${testid}-anzeigen` : undefined}
                 className="shrink-0 w-10 rounded-lg inline-flex items-center justify-center text-zinc-300 hover:text-white"
-                style={{ background: "#18181b", border: "1px solid rgba(255,255,255,0.12)" }}>
+                style={{ background: "var(--bg-input-solid)", border: "1px solid var(--wa-12)" }}>
           {sichtbar ? <EyeOff size={15} /> : <Eye size={15} />}
         </button>
       </div>

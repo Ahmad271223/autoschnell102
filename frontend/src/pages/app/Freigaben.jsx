@@ -46,7 +46,7 @@ function VergleichZeile({ z }) {
   const hinweis = ohneVertrag && z.hinweis === NICHT_IM_VERTRAG ? "" : z.hinweis;
   return (
     <div className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3 gap-y-0.5 py-1.5 border-b last:border-b-0"
-         style={{ borderColor: "rgba(255,255,255,0.06)" }}
+         style={{ borderColor: "var(--wa-06)" }}
          data-testid={`vergleich-${z.schluessel}`}>
       <div className="text-[11px] text-zinc-500 pt-0.5">{z.label}</div>
       <div className="text-[13px] min-w-0">
@@ -57,14 +57,14 @@ function VergleichZeile({ z }) {
         {(rot || (z.vor_ort_text && z.vor_ort_text !== z.vertrag_text)) && (
           <>
             <span className="mx-1.5 text-zinc-500">→</span>
-            <b style={{ color: rot ? "#ff9f0a" : "#e4e4e7" }}
+            <b style={{ color: rot ? "#ff9f0a" : "var(--text-strong)" }}
                data-testid={`vergleich-${z.schluessel}-vor-ort`}>
               {z.vor_ort_text || "—"}
             </b>
           </>
         )}
         {hinweis && (
-          <span className="ml-2 text-[11px]" style={{ color: rot ? "#ff9f0a" : "#a1a1aa" }}>
+          <span className="ml-2 text-[11px]" style={{ color: rot ? "#ff9f0a" : "var(--text-dim)" }}>
             {hinweis}
           </span>
         )}
@@ -108,8 +108,8 @@ function Vergleich({ eintrag }) {
       )}
       {sichtbar.length > 0 && (
         <div className="rounded-lg px-3 py-1"
-             style={{ background: wichtig.some((z) => z.abweichend) ? "#ff9f0a10" : "rgba(255,255,255,0.03)",
-                      border: `1px solid ${wichtig.some((z) => z.abweichend) ? "#ff9f0a44" : "rgba(255,255,255,0.06)"}` }}>
+             style={{ background: wichtig.some((z) => z.abweichend) ? "#ff9f0a10" : "var(--wa-03)",
+                      border: `1px solid ${wichtig.some((z) => z.abweichend) ? "#ff9f0a44" : "var(--wa-06)"}` }}>
           <div className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-zinc-500">
             <span />
             <span>laut Vertrag → vor Ort</span>
@@ -172,7 +172,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           ["Bekannte Schäden bestätigt", e.schaeden_bestaetigt === true ? "ja" : e.schaeden_bestaetigt === false ? "nein" : "—"],
           ["Schlüssel", e.schluessel ? `${e.schluessel}${e.schluessel_vereinbart ? ` (vereinbart ${e.schluessel_vereinbart})` : ""}` : "—"],
         ].map(([k, v]) => (
-          <div key={k} className="rounded-lg p-2" style={{ background: "rgba(255,255,255,0.03)" }}>
+          <div key={k} className="rounded-lg p-2" style={{ background: "var(--wa-03)" }}>
             <div className="text-[11px] text-zinc-500">{k}</div>
             <div className="text-sm">{v}</div>
           </div>
@@ -202,7 +202,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         </div>
       )}
 
-      <div className="mt-3 rounded-lg p-3" style={{ background: "rgba(255,255,255,0.03)" }}>
+      <div className="mt-3 rounded-lg p-3" style={{ background: "var(--wa-03)" }}>
         <div className="flex flex-wrap items-end gap-3">
           <div className="text-[11px]">
             <div className="text-zinc-500">Preis laut Vertrag</div>
@@ -244,7 +244,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           </div>
         )}
         {e.neuer_preis != null && (
-          <div className="mt-2 text-[12px] flex flex-wrap items-center gap-2" style={{ color: freigegeben ? "#34c759" : "#a1a1aa" }}>
+          <div className="mt-2 text-[12px] flex flex-wrap items-center gap-2" style={{ color: freigegeben ? "#34c759" : "var(--text-dim)" }}>
             <span data-testid={`freigabe-aktueller-preis-${e.protocol_id}`}>
               {freigegeben ? "Freigegeben mit" : "Verhandelter Preis"} {eur(e.neuer_preis)}
               {e.preis_notiz ? ` · ${e.preis_notiz}` : ""}

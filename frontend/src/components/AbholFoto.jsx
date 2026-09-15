@@ -53,7 +53,7 @@ export default function AbholFoto({ photoKey, label = "", size = 64 }) {
   return (
     <button type="button" onClick={gross} title={label ? `${label} — groß öffnen` : "Foto groß öffnen"}
             className="inline-block rounded-md overflow-hidden border hover:opacity-90 align-middle"
-            style={{ ...box, borderColor: "var(--border-default)", background: "rgba(255,255,255,0.04)" }}
+            style={{ ...box, borderColor: "var(--border-default)", background: "var(--wa-04)" }}
             data-testid="abholfoto">
       {url
         ? <img src={url} alt={label} className="w-full h-full object-cover" draggable={false} />

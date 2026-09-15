@@ -142,7 +142,7 @@ export default function Einstellungen() {
                       data-testid={`settings-tab-${s.id}`}
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all mb-1 ${
                         isActive
-                          ? "bg-white/[0.08] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
+                          ? "bg-white/[0.08] text-white shadow-[inset_0_0_0_1px_var(--wa-06)]"
                           : "text-zinc-400 hover:text-white hover:bg-white/[0.04]"
                       }`}>
                 <Icon size={15} className={isActive ? "text-[var(--accent-red)]" : ""} />
@@ -159,7 +159,7 @@ export default function Einstellungen() {
               {/* Firmenlogo */}
               <div className="flex items-center gap-4 mb-4">
                 <div className="w-20 h-20 rounded-2xl overflow-hidden flex items-center justify-center shrink-0"
-                     style={{ background: "rgba(255,255,255,0.05)", border: "1px solid var(--divider)" }}>
+                     style={{ background: "var(--wa-05)", border: "1px solid var(--divider)" }}>
                   {form.profile.logo_url
                     ? <img src={form.profile.logo_url.startsWith("http") ? form.profile.logo_url : `${process.env.REACT_APP_BACKEND_URL}${form.profile.logo_url}`}
                            alt="Logo" className="w-full h-full object-contain" />
@@ -211,7 +211,7 @@ export default function Einstellungen() {
               <div className="apple-card p-3 mb-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
                    style={{ background: "var(--hover-bg)" }}>
                 <div className="flex items-center gap-1 p-1 rounded-xl"
-                     style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--divider)" }}>
+                     style={{ background: "var(--wa-04)", border: "1px solid var(--divider)" }}>
                   {[
                     { v: "inland", l: "🇩🇪 Inland" },
                     { v: "export", l: "🌍 Export" },
@@ -521,7 +521,7 @@ const STATUS_BADGE = {
   active:    { label: "Aktiv",     bg: "rgba(52,199,89,0.15)",  fg: "var(--accent-green)", border: "rgba(52,199,89,0.35)" },
   cancelled: { label: "Gekündigt", bg: "rgba(255,159,10,0.18)", fg: "#ff9f0a",             border: "rgba(255,159,10,0.4)" },
   expired:   { label: "Abgelaufen",bg: "rgba(255,69,58,0.18)",  fg: "#ff453a",             border: "rgba(255,69,58,0.4)" },
-  none:      { label: "Kein Abo",  bg: "rgba(255,255,255,0.08)",fg: "#a1a1aa",             border: "rgba(255,255,255,0.10)" },
+  none:      { label: "Kein Abo",  bg: "var(--wa-08)",fg: "var(--text-dim)",             border: "var(--wa-10)" },
 };
 
 function fmtGermanDate(iso) {

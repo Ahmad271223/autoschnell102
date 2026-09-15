@@ -173,7 +173,7 @@ export default function AdminUserDetail() {
         </Card>
 
         <Card className="lg:col-span-2" padded={false}>
-          <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+          <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
             <div className="flex items-center gap-2">
               <FileText size={16} className="text-zinc-500" />
               <span className="text-[15px] font-semibold text-white">Verträge</span>
@@ -184,7 +184,7 @@ export default function AdminUserDetail() {
           {contracts.length === 0 ? (
             <EmptyState title="Noch keine Verträge" hint="Dieser Nutzer hat bisher keine Verträge erzeugt." />
           ) : (
-            <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
               {contracts.map((c) => (
                 <li key={c.id} className="px-5 py-3 flex items-center gap-3">
                   <div className="flex-1 min-w-0">
@@ -217,7 +217,7 @@ export default function AdminUserDetail() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
           {/* Sucher der Firma */}
           <Card className="lg:col-span-2" padded={false}>
-            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
               <div className="flex items-center gap-2">
                 <span className="text-[15px] font-semibold text-white">Chef & Sucher — Freischaltung</span>
                 <Badge>{fmtNum((sucher || []).length)}</Badge>
@@ -283,8 +283,8 @@ export default function AdminUserDetail() {
                                      ? "Neues Ablaufdatum — Speichern ändert NUR das Datum (keine neue Zahlung)"
                                      : "Optional: gilt beim Freischalten als Ablaufdatum"}
                                    className="h-8 px-2 rounded-lg text-[12px] outline-none"
-                                   style={{ background: "#18181b", color: "#fff",
-                                            border: "1px solid rgba(255,255,255,0.12)", colorScheme: "dark" }} />
+                                   style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)",
+                                            border: "1px solid var(--wa-12)", colorScheme: "var(--scheme)" }} />
                             {s.subscription?.active && (
                               <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)} disabled={busy === s.id || !superAdmin}
                                       data-testid={`gueltig-bis-speichern-${s.id}`}
@@ -331,7 +331,7 @@ export default function AdminUserDetail() {
 
           {/* Zahlungen */}
           <Card className="lg:col-span-1" padded={false}>
-            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
               <div className="flex items-center gap-2">
                 <Euro size={15} className="text-zinc-500" />
                 <span className="text-[15px] font-semibold text-white">Zahlungen</span>
@@ -341,7 +341,7 @@ export default function AdminUserDetail() {
             {!zahlungen?.length ? (
               <EmptyState title="Noch keine Zahlungen" hint="Beim Freischalten eines Abos wird die Zahlung automatisch erfasst." />
             ) : (
-              <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+              <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
                 {zahlungen.slice(0, 20).map((z) => (
                   <li key={z.id} className="px-5 py-3">
                     <div className="flex items-center justify-between gap-2">
@@ -399,11 +399,11 @@ function AddSucherDialog({ dealerId, onClose, onAngelegt }) {
   // in dieser App nicht (keine "dark"-Klasse am Dokument), der Dialog war
   // weiss mit unsichtbarer weisser Schrift.
   const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
-  const inputStyle = { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" };
+  const inputStyle = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
       <div className="w-full max-w-md rounded-2xl p-5"
-           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
            data-testid="sucher-anlegen-dialog">
         <div className="flex items-center justify-between mb-3">
           <div className="text-lg font-bold text-white">Sucher anlegen</div>

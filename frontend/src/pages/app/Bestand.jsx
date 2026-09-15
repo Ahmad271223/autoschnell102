@@ -325,7 +325,7 @@ function ManualVehicleDialog({ onClose, onDone }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>
       <div className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl p-5"
-           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}>
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
         <div className="flex items-center justify-between mb-3">
           <div>
             <div className="text-lg font-bold">Fahrzeug manuell hinzufügen</div>

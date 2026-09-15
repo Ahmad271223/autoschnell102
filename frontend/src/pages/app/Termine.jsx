@@ -745,7 +745,7 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-white/[0.08] flex items-center justify-between gap-2 sticky bottom-0 bg-[rgba(20,20,22,0.98)] rounded-b-[18px]">
+        <div className="px-6 py-4 border-t border-white/[0.08] flex items-center justify-between gap-2 sticky bottom-0 bg-[var(--bg-elevated)] rounded-b-[18px]">
           <div>
             {onDelete && (
               <button onClick={onDelete} className="apple-btn apple-btn-danger" data-testid="delete-appt-btn">

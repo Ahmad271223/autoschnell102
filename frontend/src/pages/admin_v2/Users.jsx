@@ -170,7 +170,7 @@ export default function AdminUsers() {
       {superAdmin && <KontoPruefen />}
 
       <Card padded={false}>
-        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <Search size={16} className="text-zinc-500" />
           <input
             data-testid="admin-users-search"
@@ -186,7 +186,7 @@ export default function AdminUsers() {
         ) : filtered.length === 0 ? (
           <EmptyState title="Keine Nutzer gefunden" hint="Versuche es mit einer anderen Suche." />
         ) : (
-          <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
             {filtered.map((u) => (
               <li key={u.id} data-testid={`user-row-${u.id}`} className="px-4 py-3 hover:bg-white/5 transition-colors">
                 <div className="flex items-center gap-3">
@@ -278,7 +278,7 @@ export default function AdminUsers() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setResetUser(null)}>
           <div
             className="rounded-2xl shadow-2xl w-full max-w-md p-6"
-            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.10)" }}
+            style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-[18px] font-semibold tracking-tight text-white">Passwort neu setzen</div>
@@ -289,7 +289,7 @@ export default function AdminUsers() {
               <PasswortFeld value={newPw} onChange={setNewPw} testid="admin-pw-reset-input" autoFocus
                             placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
                             className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
-                            style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }} />
+                            style={{ background: "var(--wa-05)", border: "1px solid var(--wa-10)" }} />
             </div>
             <div className="flex gap-2 mt-5 justify-end">
               <Button data-testid="admin-pw-reset-cancel" variant="ghost" onClick={() => { setResetUser(null); setNewPw(""); }}>Abbrechen</Button>
@@ -314,7 +314,7 @@ export default function AdminUsers() {
         >
           <div
             className="rounded-2xl shadow-2xl w-full max-w-md p-6"
-            style={{ background: "#141416", border: "1px solid rgba(255,69,58,0.30)" }}
+            style={{ background: "var(--bg-elevated)", border: "1px solid rgba(255,69,58,0.30)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
@@ -411,7 +411,7 @@ function CreateUserModal({ onClose, onCreated }) {
     >
       <div
         className="rounded-2xl shadow-2xl w-full max-w-md p-6"
-        style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.10)" }}
+        style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
         onClick={(e) => e.stopPropagation()}
       >
         {ergebnis ? (
@@ -446,7 +446,7 @@ function CreateUserModal({ onClose, onCreated }) {
             <PasswortFeld value={password} onChange={setPassword} testid="create-user-password"
                           placeholder="Start-Passwort"
                           className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
-                          style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }} />
+                          style={{ background: "var(--wa-05)", border: "1px solid var(--wa-10)" }} />
           </div>
 
           <div>
@@ -469,8 +469,8 @@ function CreateUserModal({ onClose, onCreated }) {
                       : "text-zinc-400 hover:text-white"
                   }`}
                   style={planType !== p.v ? {
-                    background: "rgba(255,255,255,0.03)",
-                    border: "1px solid rgba(255,255,255,0.08)",
+                    background: "var(--wa-03)",
+                    border: "1px solid var(--wa-08)",
                   } : {}}
                 >
                   {p.l}
@@ -506,8 +506,8 @@ function Field({ label, value, onChange, placeholder, type = "text", testid }) {
         placeholder={placeholder}
         className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
         style={{
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.10)",
+          background: "var(--wa-05)",
+          border: "1px solid var(--wa-10)",
         }}
       />
     </div>

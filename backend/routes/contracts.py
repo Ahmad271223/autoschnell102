@@ -739,19 +739,32 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
 
     # Pruefung 14.09.2026 (Liste 6, Nr. 1): zwischen Vorpruefung und Speichern
     # kann das Fahrzeug verkauft/archiviert/geloescht worden sein.
+    # 15.09.2026: die Projektion liefert {} fuer ein Fahrzeug OHNE lifecycle-Feld
+    # — "not v_jetzt" hielt das faelschlich fuer "weg" (409). Nur None ist weg.
     v_jetzt = await db.vehicles.find_one(
         {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
-    if not v_jetzt or (v_jetzt.get("lifecycle") or "") in VERTRAG_GESPERRT:
+    if v_jetzt is None or (v_jetzt.get("lifecycle") or "") in VERTRAG_GESPERRT:
         raise HTTPException(409, "Fahrzeug ist inzwischen verkauft/gelöscht/archiviert "
                                  "— kein neuer Kaufvertrag möglich")
-    auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+    # Wunsch Ahmad 15.09.2026: ein neuer Vertrag zu demselben Fahrzeug (neuer
+    # Preis, Nachverhandlung) fuehrt den vorhandenen Auto-Datensatz nach — in
+    # den Auto-Daten steht das Auto einmal, mit dem aktuellen Preis und Kaufdatum.
+    auto_daten_id = await auto_daten.bestehenden_datensatz(
+        db, user["dealer_id"], body.vehicle_id, v.get("mobile_ad_id"))
+    auto_daten_neu = auto_daten_id is None
+    if auto_daten_neu:
+        auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+    else:
+        await auto_daten.aktualisieren(db, auto_daten_id, contract_dict, vehicle,
+                                       gekauft_am=now_iso())
     doc["admin_vehicle_data_id"] = auto_daten_id
     try:
         await db.generated_pdfs.insert_one(doc)
     except DuplicateKeyError:
         # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
         # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.
-        await auto_daten.zurueckrollen(db, auto_daten_id)
+        if auto_daten_neu:
+            await auto_daten.zurueckrollen(db, auto_daten_id)
         vorhanden = await db.generated_pdfs.find_one(
             {"dealer_id": user["dealer_id"], "user_id": user["id"],
              "idempotency_key": body.idempotency_key},
@@ -765,7 +778,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             return {**clean_doc(vorhanden), "bereits_vorhanden": True}
         raise
     except Exception:
-        await auto_daten.zurueckrollen(db, auto_daten_id)
+        if auto_daten_neu:
+            await auto_daten.zurueckrollen(db, auto_daten_id)
         raise
     # Runde 17 (Nr. 265): Ab hier ist der Vertrag dauerhaft. Scheitert das
     # Nachziehen von Fahrzeugstatus/Lebenszyklus (DB-Aussetzer), endete der

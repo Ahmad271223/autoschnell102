@@ -105,7 +105,7 @@ export default function PhotoGallery({ photos = [], label = "Fotos" }) {
 
           <div className="absolute bottom-6 left-0 right-0 flex justify-center">
             <div className="px-3 py-1.5 rounded-full text-xs font-mono text-white/90"
-                 style={{ background: "rgba(255,255,255,0.08)", backdropFilter: "blur(8px)" }}>
+                 style={{ background: "var(--wa-08)", backdropFilter: "blur(8px)" }}>
               {index + 1} / {photos.length}
             </div>
           </div>

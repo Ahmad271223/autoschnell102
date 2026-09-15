@@ -92,14 +92,14 @@ function UrlBars({ data }) {
         return (
           <div key={s.key} className="flex items-center gap-3">
             <div className="w-32 text-[13px] text-zinc-300 truncate">{s.label}</div>
-            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: "var(--wa-08)" }}>
               <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: s.color }} />
             </div>
             <div className="w-14 text-right tabular-nums text-[13px] font-semibold text-white">{v}</div>
           </div>
         );
       })}
-      <div className="pt-2 flex items-center justify-between text-[13px]" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+      <div className="pt-2 flex items-center justify-between text-[13px]" style={{ borderTop: "1px solid var(--wa-06)" }}>
         <span className="text-zinc-400">Gesamt</span>
         <span className="font-semibold tabular-nums text-white">{data?.total || 0}</span>
       </div>

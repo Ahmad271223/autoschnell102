@@ -43,11 +43,11 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
   };
 
   const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
-  const inputStyle = { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" };
+  const inputStyle = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
       <div className="w-full max-w-md rounded-2xl p-5"
-           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
            data-testid="fahrer-anlegen-dialog">
         <div className="flex items-center justify-between mb-1">
           <div className="text-lg font-bold text-white">Fahrer anlegen</div>

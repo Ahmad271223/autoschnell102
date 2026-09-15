@@ -67,7 +67,7 @@ export default function DriverLayout() {
       {/* Bottom Tab Bar */}
       <nav className="fixed bottom-0 inset-x-0 border-t z-40"
            data-testid="fahrer-tableiste"
-           style={{ borderColor: "var(--border-default)", background: "rgba(10,10,10,0.92)",
+           style={{ borderColor: "var(--border-default)", background: "var(--bg-elevated)",
                     backdropFilter: "blur(12px)",
                     // Gegenpruefung 12.09.2026: ohne safe-area lag die Leiste
                     // auf dem iPhone unter dem Home-Balken.

@@ -314,7 +314,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           </button>
         </div>
 
-        <form onSubmit={submit} className="p-6 space-y-6">
+        <form onSubmit={submit} className="p-6 space-y-6 vertrag-formular">
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
             <Section title="Verkäufer / Halter">

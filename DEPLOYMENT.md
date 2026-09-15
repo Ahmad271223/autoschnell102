@@ -1507,6 +1507,23 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   zeigt den Stand (`{"marktplatz": false}`).
 - Tests und CI laufen mit `MARKTPLATZ_AKTIV=true`, damit die Marktplatz-Tests weiter greifen.
 
+### Auto-Daten, Preis-Nachführung und helle Ansicht (15.09.2026, Wunsch Ahmad)
+
+- **Auto-Daten löschen:** der Super-Admin entfernt einen Datensatz endgültig
+  (`DELETE /api/admin/vehicle-data/{id}`, Knopf „Löschen“ je Zeile mit Rückfrage). Verträge,
+  die den Datensatz tragen, bekommen den Vermerk `auto_daten_entfernt_am`: die 90-Tage-Löschung
+  verlangt dann keinen Datensatz mehr, die Reparatur legt keinen neuen an. Audit
+  `admin.auto_daten.geloescht`.
+- **Ein Auto, ein Datensatz:** ein neuer Kaufvertrag zu demselben Fahrzeug (gleiche Firma,
+  gleiches Fahrzeug bzw. gleiche Anzeigen-ID) führt den vorhandenen Datensatz nach (Preis,
+  Kaufdatum, Zusicherungen) statt ein zweites Auto anzulegen. Eine Nachverhandlung bei der
+  Abholung erzeugt den Vertrag neu und schreibt den neuen Preis ebenfalls in den Datensatz.
+- **Helle Ansicht komplett:** Sucher-App, Betreiber-Bereich (jetzt mit Design-Schalter in der
+  Seitenleiste) und Fahrer-App folgen dem Schalter. Dunkle Utility-Klassen werden in
+  `index.css` zentral umgelenkt; bewusst dunkle Bereiche (Abhol-Check des Fahrers) tragen
+  `.bleibt-dunkel`. Die Startseite bleibt als Marketing-Seite dunkel.
+- Vertragsformular des Suchers: Schrift eine Stufe kräftiger (`.vertrag-formular`).
+
 ### Versand, Kundenfassung und Abrufe seit Runde 16 (15.09.2026)
 
 - **Kundenfassung des Kaufvertrags** (E-Mail/WhatsApp): ohne Abschnitt „Unterschriften“ und ohne

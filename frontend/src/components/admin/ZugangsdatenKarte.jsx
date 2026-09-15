@@ -44,7 +44,7 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
       {name && <div className="mt-1 text-[14px] text-white font-medium">{name}</div>}
 
       <div className="mt-4 rounded-xl p-4"
-           style={{ background: "#18181b", border: "1px solid rgba(255,255,255,0.12)" }}>
+           style={{ background: "var(--bg-input-solid)", border: "1px solid var(--wa-12)" }}>
         <div className="text-[11px] uppercase tracking-wide text-zinc-500">Kontonummer</div>
         <div className="mt-1 flex items-center justify-between gap-3">
           <span className="font-mono font-black text-[32px] leading-none tracking-wide text-white tabular-nums"
@@ -53,7 +53,7 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
           </span>
           <button type="button" onClick={() => kopieren("Kontonummer", kontonummer)} data-testid="zugangsdaten-kopieren"
                   className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-[12.5px] text-white"
-                  style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)" }}>
+                  style={{ background: "var(--wa-08)", border: "1px solid var(--wa-12)" }}>
             {kopiert === "Kontonummer" ? <Check size={14} /> : <Copy size={14} />} Kopieren
           </button>
         </div>
@@ -66,7 +66,7 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
               </span>
               <button type="button" onClick={() => kopieren("Passwort", passwort)} data-testid="zugangsdaten-passwort-kopieren"
                       className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-[12.5px] text-white shrink-0"
-                      style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)" }}>
+                      style={{ background: "var(--wa-08)", border: "1px solid var(--wa-12)" }}>
                 {kopiert === "Passwort" ? <Check size={14} /> : <Copy size={14} />} Kopieren
               </button>
             </div>

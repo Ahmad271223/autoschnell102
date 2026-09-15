@@ -3,7 +3,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import {
   Car, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, ShieldAlert,
-  Layers, List as ListIcon,
+  Layers, List as ListIcon, Trash2,
 } from "lucide-react";
 import { PageHeader, Card, Spinner, EmptyState, Button, Badge } from "./_ui";
 
@@ -50,10 +50,10 @@ const LEER = { search: "", fuel_type: "", ez_von: "", ez_bis: "", preis_min: "",
 const inputCls =
   "h-10 px-3 rounded-xl text-[14px] w-full outline-none focus:ring-2 focus:ring-red-500/40";
 const inputStyle = {
-  background: "#18181b",
-  color: "#ffffff",
-  border: "1px solid rgba(255,255,255,0.12)",
-  colorScheme: "dark",
+  background: "var(--bg-input-solid)",
+  color: "var(--text-primary)",
+  border: "1px solid var(--wa-12)",
+  colorScheme: "var(--scheme)",
 };
 
 function filterParams(f) {
@@ -97,8 +97,39 @@ function Schaeden({ damages, id, offen, setOffen }) {
   );
 }
 
+/* ---------- Löschen (Wunsch Ahmad 15.09.2026): zweistufig in der Zeile ---------- */
+function LoeschKnopf({ id, loeschId, setLoeschId, run, laeuft }) {
+  if (!id) return null;
+  if (loeschId === id) {
+    return (
+      <div className="flex flex-col items-end gap-1 whitespace-nowrap" data-testid={`auto-loeschen-frage-${id}`}>
+        <span className="text-[12px] text-amber-400">Endgültig löschen?</span>
+        <div className="flex items-center gap-1">
+          <Button size="sm" variant="danger" onClick={() => run(id)} disabled={laeuft} data-testid="auto-loeschen-ja">
+            Ja, löschen
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setLoeschId(null)} disabled={laeuft} title="Abbrechen">
+            Nein
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => setLoeschId(id)}
+      title="Dieses Auto endgültig aus den Auto-Daten löschen"
+      className="inline-flex items-center gap-1 text-[12px] text-zinc-500 hover:text-red-400 whitespace-nowrap"
+      data-testid={`auto-loeschen-${id}`}
+    >
+      <Trash2 size={13} /> Löschen
+    </button>
+  );
+}
+
 /* ---------- Auto-Zeilen (Blatt der Gruppierung) ---------- */
-function AutoTabelle({ autos, prefix, offen, setOffen }) {
+function AutoTabelle({ autos, prefix, offen, setOffen, loeschen }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-[13px]">
@@ -110,13 +141,14 @@ function AutoTabelle({ autos, prefix, offen, setOffen }) {
             <th className="px-3 py-2 text-right">Kaufpreis</th>
             <th className="px-3 py-2">Kaufdatum</th>
             <th className="px-3 py-2">Schäden</th>
+            <th className="px-3 py-2"><span className="sr-only">Aktion</span></th>
           </tr>
         </thead>
         <tbody>
           {autos.map((it, i) => {
             const key = `${prefix}-${i}`;
             return (
-              <tr key={key} className="align-top hover:bg-white/[0.03]" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <tr key={key} className="align-top hover:bg-white/[0.03]" style={{ borderTop: "1px solid var(--wa-06)" }}>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-200 whitespace-nowrap">
                   {fmtPs(it.power_ps)}
                   <div className="text-[11px] text-zinc-500">{fmtKw(it.power_kw)}</div>
@@ -128,6 +160,7 @@ function AutoTabelle({ autos, prefix, offen, setOffen }) {
                 <td className="px-3 py-2 min-w-[140px] max-w-[340px]">
                   <Schaeden damages={it.damages} id={key} offen={offen} setOffen={setOffen} />
                 </td>
+                <td className="px-3 py-2 text-right"><LoeschKnopf id={it.id} {...loeschen} /></td>
               </tr>
             );
           })}
@@ -174,6 +207,9 @@ export default function AdminAutoDaten() {
   const [stapel, setStapel] = useState([]);
   const [offen, setOffen] = useState(null);
   const [zu, setZu] = useState(new Set());
+  const [loeschId, setLoeschId] = useState(null);
+  const [loeschLauf, setLoeschLauf] = useState(false);
+  const [loeschFehler, setLoeschFehler] = useState(null);
   const reqId = useRef(0);
 
   const laden = useCallback(async (f, cur, view, srt) => {
@@ -231,6 +267,25 @@ export default function AdminAutoDaten() {
     setStapel(s);
     setCursor(prev || null);
   };
+  // Wunsch Ahmad 15.09.2026: ein Auto endgültig aus den Auto-Daten entfernen.
+  const datensatzLoeschen = async (id) => {
+    setLoeschLauf(true);
+    setLoeschFehler(null);
+    try {
+      await api.delete(`/admin/vehicle-data/${id}`);
+      setLoeschId(null);
+      await laden(angewandt, cursor, ansicht, sort);
+    } catch (e) {
+      const st = e?.response?.status;
+      setLoeschFehler(st === 404
+        ? "Der Datensatz war schon gelöscht — Ansicht wird neu geladen."
+        : "Löschen fehlgeschlagen — bitte erneut versuchen.");
+      if (st === 404) { setLoeschId(null); laden(angewandt, cursor, ansicht, sort); }
+    } finally {
+      setLoeschLauf(false);
+    }
+  };
+  const loeschen = { loeschId, setLoeschId, run: datensatzLoeschen, laeuft: loeschLauf };
   const toggle = (id) => setZu((alt) => {
     const n = new Set(alt);
     if (n.has(id)) n.delete(id); else n.add(id);
@@ -338,7 +393,7 @@ export default function AdminAutoDaten() {
           </div>
         </form>
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <div className="inline-flex rounded-xl overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.12)" }}>
+          <div className="inline-flex rounded-xl overflow-hidden" style={{ border: "1px solid var(--wa-12)" }}>
             <button
               type="button"
               onClick={() => setAnsicht("gruppiert")}
@@ -387,6 +442,11 @@ export default function AdminAutoDaten() {
           <div className="text-[13px] text-red-400">{error}</div>
         </Card>
       )}
+      {loeschFehler && (
+        <Card className="mb-4">
+          <div className="text-[13px] text-red-400" data-testid="auto-loeschen-fehler">{loeschFehler}</div>
+        </Card>
+      )}
 
       <Card padded={false}>
         {loading ? (
@@ -415,7 +475,7 @@ export default function AdminAutoDaten() {
                                 return (
                                   <Gruppe key={kk} id={kk} ebene={3} titel={k.name} anzahl={k.anzahl} zu={zu} toggle={toggle}>
                                     <div className="pl-6 pb-2">
-                                      <AutoTabelle autos={k.autos} prefix={kk} offen={offen} setOffen={setOffen} />
+                                      <AutoTabelle autos={k.autos} prefix={kk} offen={offen} setOffen={setOffen} loeschen={loeschen} />
                                     </div>
                                   </Gruppe>
                                 );
@@ -434,7 +494,7 @@ export default function AdminAutoDaten() {
           <div className="overflow-x-auto">
             <table className="w-full text-[13.5px]">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-zinc-500" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+                <tr className="text-left text-[11px] uppercase tracking-wide text-zinc-500" style={{ borderBottom: "1px solid var(--wa-08)" }}>
                   <th className="px-4 py-3">Marke</th>
                   <th className="px-4 py-3">Modell</th>
                   <th className="px-4 py-3">EZ</th>
@@ -444,13 +504,14 @@ export default function AdminAutoDaten() {
                   <th className="px-4 py-3 text-right">Kaufpreis</th>
                   <th className="px-4 py-3">Kaufdatum</th>
                   <th className="px-4 py-3">Schäden</th>
+                  <th className="px-4 py-3"><span className="sr-only">Aktion</span></th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((it, i) => {
                   const key = `${cursor || "p0"}-${i}`;
                   return (
-                    <tr key={key} className="align-top hover:bg-white/[0.03]" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                    <tr key={key} className="align-top hover:bg-white/[0.03]" style={{ borderBottom: "1px solid var(--wa-06)" }}>
                       <td className="px-4 py-3 font-medium text-white whitespace-nowrap">
                         <span className="inline-flex items-center gap-2"><Car size={14} className="text-zinc-500" />{txt(it.brand)}</span>
                       </td>
@@ -467,6 +528,7 @@ export default function AdminAutoDaten() {
                       <td className="px-4 py-3 min-w-[160px] max-w-[360px]">
                         <Schaeden damages={it.damages} id={key} offen={offen} setOffen={setOffen} />
                       </td>
+                      <td className="px-4 py-3 text-right"><LoeschKnopf id={it.id} {...loeschen} /></td>
                     </tr>
                   );
                 })}
@@ -475,7 +537,7 @@ export default function AdminAutoDaten() {
           </div>
         )}
         {!loading && ansicht === "liste" && (items.length > 0 || stapel.length > 0) && (
-          <div className="flex items-center justify-between px-4 py-3 text-[12px] text-zinc-400" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+          <div className="flex items-center justify-between px-4 py-3 text-[12px] text-zinc-400" style={{ borderTop: "1px solid var(--wa-08)" }}>
             <span>Seite {seite}{data ? ` · ${items.length} von ${Number(data.total).toLocaleString("de-DE")}` : ""}</span>
             <div className="flex gap-2">
               <Button size="sm" variant="secondary" onClick={zurueck} disabled={!stapel.length}>

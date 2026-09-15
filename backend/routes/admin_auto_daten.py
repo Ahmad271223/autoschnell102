@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Super-Admin-Einsicht in die dauerhaften, anonymen Auto-Daten.
 
-NUR lesend, NUR fuer den Super-Admin (deps.current_super_admin — ein
-normaler Admin bekommt 403). Ausgeliefert werden ausschliesslich die
+NUR fuer den Super-Admin (deps.current_super_admin — ein normaler Admin
+bekommt 403). Lesend; schreibend nur die Bereinigung der Schaeden und das
+Loeschen eines Datensatzes (Wunsch Ahmad 15.09.2026). Ausgeliefert werden ausschliesslich die
 Whitelist-Felder aus auto_daten.py; jede Filter-/Sucheingabe wird typisiert
 und als Literal behandelt (kein Regex, kein Mongo-Operator aus dem Client).
 """
@@ -13,8 +14,9 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel
 
+import auto_daten
 from auto_daten import COLLECTION
-from deps import current_super_admin, db
+from deps import current_super_admin, db, log_activity_sicher
 
 router = APIRouter()
 
@@ -253,3 +255,21 @@ async def auto_daten_schaeden_entfernen(
     if not r.matched_count:
         raise HTTPException(404, "Datensatz nicht gefunden")
     return {"ok": True, "id": datensatz_id, "damages": []}
+
+
+# ---------- Loeschen (Wunsch Ahmad 15.09.2026) ----------
+@router.delete("/admin/vehicle-data/{datensatz_id}")
+async def auto_daten_loeschen(
+    datensatz_id: str = Path(pattern=r"^[0-9a-f-]{36}$"),
+    admin=Depends(current_super_admin),
+):
+    """Der Betreiber entfernt ein Auto endgueltig aus den Auto-Daten. Der
+    Datensatz ist anonym, es gibt keine Rueckfrage bei einer Firma. Vertraege,
+    die ihn tragen, bekommen den Vermerk auto_daten_entfernt_am
+    (auto_daten.entfernen): Fristloeschung und Reparatur verlangen bzw.
+    erzeugen ihn dann nicht wieder."""
+    if not await auto_daten.entfernen(db, datensatz_id):
+        raise HTTPException(404, "Datensatz nicht gefunden")
+    await log_activity_sicher(admin.get("dealer_id") or "", admin["id"],
+                              "admin.auto_daten.geloescht", ref=datensatz_id)
+    return {"ok": True, "id": datensatz_id}

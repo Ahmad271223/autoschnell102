@@ -311,7 +311,7 @@ function VehicleThumb({ item, onOpen }) {
     return (
       <div
         className="h-24 w-full sm:w-36 shrink-0 rounded-xl flex items-center justify-center"
-        style={{ background: "rgba(255,255,255,0.03)",
+        style={{ background: "var(--wa-03)",
                  border: "1px solid var(--border-default)",
                  color: "var(--text-muted)" }}
         title="Keine Fotos zum Inserat gespeichert"

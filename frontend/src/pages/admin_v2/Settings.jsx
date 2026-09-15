@@ -58,7 +58,7 @@ function MfaKarte() {
         <Button size="sm" onClick={einrichten} disabled={busy} data-testid="mfa-einrichten">Einrichten</Button>
       )}
       {setup && (
-        <div className="rounded-lg p-3 mb-3" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+        <div className="rounded-lg p-3 mb-3" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
           <div className="text-[12px] text-zinc-400 mb-1">1. In der App „Konto hinzufügen“ und diesen Schlüssel eingeben (oder den Link öffnen):</div>
           <div className="font-mono text-[13px] text-white break-all select-all" data-testid="mfa-secret">{setup.secret}</div>
           <a href={setup.otpauth_uri} className="text-[12px] text-sky-400 underline break-all">{setup.otpauth_uri}</a>
@@ -166,8 +166,8 @@ function Field({ label, type = "text", value, onChange, required, autoComplete }
         autoComplete={autoComplete}
         className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
         style={{
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.10)",
+          background: "var(--wa-05)",
+          border: "1px solid var(--wa-10)",
         }}
       />
     </div>

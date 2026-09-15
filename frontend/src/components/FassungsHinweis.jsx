@@ -38,9 +38,9 @@ export default function FassungsHinweis() {
          style={{
            top: "calc(env(safe-area-inset-top, 0px) + 4.25rem)",
            maxWidth: "calc(100vw - 1.5rem)",
-           background: "rgba(20,20,20,0.96)",
-           border: "1px solid rgba(255,255,255,0.12)",
-           color: "#f4f4f5",
+           background: "var(--bg-elevated)",
+           border: "1px solid var(--wa-12)",
+           color: "var(--text-strong)",
          }}>
       <RefreshCw size={14} className="shrink-0" style={{ color: "var(--accent-red)" }} />
       <span className="whitespace-nowrap">Neue Version verfügbar</span>

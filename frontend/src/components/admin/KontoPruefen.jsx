@@ -42,7 +42,7 @@ export default function KontoPruefen() {
 
   return (
     <div className="rounded-2xl p-4 mb-5" data-testid="konto-pruefen"
-         style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.10)" }}>
+         style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
       <div className="text-[13px] font-semibold text-white">Konto prüfen</div>
       <div className="text-[12px] text-zinc-500 mt-0.5">
         Kontonummer (z. B. 10023, 10023-2), Käufer-Code (z. B. 6FE7K2M) oder Fahrer-ID (z. B. FD-7K2M9QX4) eingeben — zeigt Kontoart,
@@ -53,7 +53,7 @@ export default function KontoPruefen() {
                placeholder="Kontonummer, Käufer-Code oder Fahrer-ID" data-testid="konto-pruefen-kennung"
                autoCapitalize="characters" spellCheck={false}
                className="h-10 px-3 rounded-xl text-[14px] flex-1 outline-none focus:ring-2 focus:ring-red-500/40"
-               style={{ background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }} />
+               style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" }} />
         <button type="submit" disabled={busy || !kennung.trim()} data-testid="konto-pruefen-submit"
                 className="h-10 px-4 rounded-xl text-[13px] font-medium text-white inline-flex items-center gap-1.5 disabled:opacity-50"
                 style={{ background: "var(--accent-red)" }}>
@@ -63,7 +63,7 @@ export default function KontoPruefen() {
 
       {erg && (
         <div className="mt-4 rounded-xl p-3" data-testid="konto-pruefen-ergebnis"
-             style={{ background: "#18181b", border: "1px solid rgba(255,255,255,0.10)" }}>
+             style={{ background: "var(--bg-input-solid)", border: "1px solid var(--wa-10)" }}>
           {!erg.gefunden ? (
             <div className="flex items-start gap-2 text-[13px] text-amber-300">
               <ShieldAlert size={16} className="mt-0.5 shrink-0" />
@@ -80,7 +80,7 @@ export default function KontoPruefen() {
           ) : (
             <>
               <div className="flex items-center gap-2 text-[13px] font-semibold"
-                   style={{ color: ART_TON[erg.art] || "#e4e4e7" }}>
+                   style={{ color: ART_TON[erg.art] || "var(--text-strong)" }}>
                 {erg.aktiv && erg.passwort_gesetzt && !erg.anmeldesperre
                   ? <ShieldCheck size={16} /> : <ShieldAlert size={16} />}
                 <span data-testid="konto-pruefen-art">{erg.art_text}</span>

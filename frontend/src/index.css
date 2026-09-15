@@ -251,6 +251,22 @@ a[href*="emergent.sh"],
   --input-bg: rgba(255,255,255,0.05);
   --hover-bg: rgba(255,255,255,0.07);
   --divider: rgba(255,255,255,0.09);
+  /* Helle Ansicht (15.09.2026): Overlays und Flaechen, die im hellen Design
+     kippen — statt rgba(255,255,255,x) / #141416 / #18181b / #0a0a0a inline. */
+  --wa-02: rgba(255,255,255,0.02);
+  --wa-03: rgba(255,255,255,0.03);
+  --wa-04: rgba(255,255,255,0.04);
+  --wa-05: rgba(255,255,255,0.05);
+  --wa-06: rgba(255,255,255,0.06);
+  --wa-08: rgba(255,255,255,0.08);
+  --wa-10: rgba(255,255,255,0.10);
+  --wa-12: rgba(255,255,255,0.12);
+  --bg-elevated: #141416;
+  --bg-deep: #0a0a0a;
+  --bg-input-solid: #18181b;
+  --text-strong: #e4e4e7;
+  --text-dim: #a1a1aa;
+  --scheme: dark;
 }
 
 /* ─────── LIGHT THEME (Apple-Style) ─────── */
@@ -293,6 +309,20 @@ a[href*="emergent.sh"],
   --input-bg: #f5f5f7;
   --hover-bg: #f0f0f2;
   --divider: rgba(0,0,0,0.09);
+  --wa-02: rgba(0,0,0,0.02);
+  --wa-03: rgba(0,0,0,0.03);
+  --wa-04: rgba(0,0,0,0.04);
+  --wa-05: rgba(0,0,0,0.05);
+  --wa-06: rgba(0,0,0,0.06);
+  --wa-08: rgba(0,0,0,0.08);
+  --wa-10: rgba(0,0,0,0.10);
+  --wa-12: rgba(0,0,0,0.12);
+  --bg-elevated: #ffffff;
+  --bg-deep: #f5f5f7;
+  --bg-input-solid: #ffffff;
+  --text-strong: #1d1d1f;
+  --text-dim: #6e6e73;
+  --scheme: light;
 }
 
 * {
@@ -380,6 +410,19 @@ html, body, #root {
 }
 .input-base::placeholder {
   color: var(--text-muted);
+}
+
+/* Wunsch Ahmad 15.09.2026: das Vertragsformular des Suchers etwas kraeftiger
+   lesbar (Beschriftungen, Eingaben, Hinweise eine Stufe dicker). */
+.vertrag-formular,
+.vertrag-formular label,
+.vertrag-formular input,
+.vertrag-formular select,
+.vertrag-formular textarea {
+  font-weight: 500;
+}
+.vertrag-formular .overline {
+  font-weight: 700;
 }
 
 .live-dot {
@@ -762,4 +805,79 @@ select option {
 @layer base {
   * { @apply border-border; }
   body { @apply bg-background text-foreground; }
+}
+
+/* ─────── HELLE ANSICHT komplett (Wunsch Ahmad 15.09.2026) ───────
+   Die Oberflaeche nutzt an vielen Stellen dunkle Utility-Klassen (text-white,
+   text-zinc-*, bg-white/5, border-white/10). Im hellen Design werden sie hier
+   zentral umgelenkt; Elemente mit farbigem Hintergrund (bg-red-*, bg-blue-*,
+   Primaer-Knoepfe) behalten ihre weisse Schrift. Bewusst dunkle Bereiche
+   (Fahrer-Abholcheck) tragen .bleibt-dunkel und sind ausgenommen. */
+[data-theme="light"] .text-white:not([class*="bg-red"]):not([class*="bg-blue"]):not([class*="bg-green"]):not([class*="bg-emerald"]):not([class*="bg-amber"]):not([class*="bg-orange"]):not([class*="bg-sky"]):not([class*="bg-indigo"]):not([class*="bg-black"]):not([class*="bg-[var(--accent"]):not([class*="bg-gradient"]):not([class*="apple-btn-primary"]):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-white:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .text-zinc-100:not(.bleibt-dunkel *),
+[data-theme="light"] .text-zinc-200:not(.bleibt-dunkel *),
+[data-theme="light"] .text-zinc-300:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-zinc-200:hover:not(.bleibt-dunkel *) { color: var(--text-primary); }
+[data-theme="light"] .text-white\/90:not(.bleibt-dunkel *) { color: rgba(29,29,31,0.9); }
+[data-theme="light"] .text-white\/80:not(.bleibt-dunkel *) { color: rgba(29,29,31,0.8); }
+[data-theme="light"] .text-zinc-400:not(.bleibt-dunkel *) { color: var(--text-secondary); }
+[data-theme="light"] .text-zinc-500:not(.bleibt-dunkel *) { color: var(--text-muted); }
+[data-theme="light"] .bg-white\/5:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.03\]:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.04); }
+[data-theme="light"] .bg-white\/10:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.08\]:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.06); }
+[data-theme="light"] .bg-white\/15:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.09); }
+[data-theme="light"] .hover\:bg-white\/5:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.02\]:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.03\]:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.04\]:hover:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.04); }
+[data-theme="light"] .hover\:bg-white\/10:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.06\]:hover:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.07); }
+[data-theme="light"] .hover\:bg-white\/15:hover:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.10); }
+[data-theme="light"] .bg-zinc-900:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-zinc-950:not(.bleibt-dunkel *) { background-color: var(--bg-surface); }
+[data-theme="light"] .bg-zinc-800:not(.bleibt-dunkel *) { background-color: #ececee; }
+[data-theme="light"] .border-white\/5:not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/\[0\.06\]:not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/\[0\.08\]:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .border-white\/10:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.10); }
+[data-theme="light"] .border-white\/15:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.14); }
+[data-theme="light"] .border-white\/40:not(.bleibt-dunkel *),
+[data-theme="light"] .focus\:border-white\/40:focus:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.35); }
+[data-theme="light"] .divide-white\/5 > :not([hidden]) ~ :not([hidden]):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .bg-\[rgba\(20\,20\,22\,0\.98\)\]:not(.bleibt-dunkel *) { background-color: rgba(255,255,255,0.98); }
+
+/* Helle Ansicht (15.09.2026): die Gloss-Flaechen (Terminplaner, Karten) hatten
+   fest eingebaute dunkle Verlaeufe — hier die helle Fassung. */
+[data-theme="light"] .tactical-card:hover { border-color: rgba(0,0,0,0.18); }
+[data-theme="light"] .apple-surface-gloss {
+  background:
+    radial-gradient(1200px 400px at 20% -10%, rgba(0,0,0,0.03), transparent 55%),
+    radial-gradient(900px 300px at 100% 110%, rgba(10,132,255,0.06), transparent 60%),
+    linear-gradient(180deg, #ffffff 0%, #f7f7f9 55%, #f2f2f5 100%);
+  border: 1px solid rgba(0,0,0,0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.9),
+    inset 0 -1px 0 rgba(0,0,0,0.04),
+    0 24px 60px -18px rgba(0,0,0,0.18),
+    0 1px 0 rgba(0,0,0,0.02);
+}
+[data-theme="light"] .apple-surface-gloss::before {
+  background: linear-gradient(180deg, rgba(255,255,255,0.6) 0%, transparent 100%);
+}
+[data-theme="light"] .apple-card-gloss {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.7) 0%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0) 100%),
+    linear-gradient(180deg, #ffffff 0%, #f4f4f6 100%);
+  border: 1px solid rgba(0,0,0,0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.9),
+    0 8px 24px -12px rgba(0,0,0,0.18);
+}
+[data-theme="light"] .apple-card-gloss:hover {
+  border-color: rgba(0,0,0,0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.9),
+    0 14px 30px -14px rgba(0,0,0,0.25);
 }

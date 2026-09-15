@@ -281,3 +281,50 @@ async def nachtragen(db, contract_doc: Dict[str, Any]) -> Optional[str]:
         await zurueckrollen(db, datensatz_id)   # jemand war schneller
         return None
     return datensatz_id
+
+
+async def bestehenden_datensatz(db, dealer_id: str, vehicle_id: Optional[str],
+                                mobile_ad_id: Optional[str] = None) -> Optional[str]:
+    """Wunsch Ahmad 15.09.2026: ein neuer Kaufvertrag zu DEMSELBEN Fahrzeug
+    (Nachverhandlung, neuer Preis) fuehrt den vorhandenen Auto-Datensatz nach,
+    statt ein zweites Auto in den Auto-Daten anzulegen. Liefert die id des
+    Datensatzes des juengsten, nicht geloeschten Vertrags dieser Firma zu
+    diesem Fahrzeug — oder None (kein Vertrag, Datensatz vom Betreiber
+    entfernt, Datensatz fehlt)."""
+    if not dealer_id or not (vehicle_id or mobile_ad_id):
+        return None
+    oder: List[Dict[str, Any]] = []
+    if vehicle_id:
+        oder.append({"vehicle_id": vehicle_id})
+    if mobile_ad_id:
+        oder.append({"mobile_ad_id": mobile_ad_id})
+    c = await db.generated_pdfs.find_one(
+        {"dealer_id": dealer_id, "$or": oder,
+         "admin_vehicle_data_id": {"$type": "string"},
+         "auto_daten_entfernt_am": {"$exists": False},
+         "loeschung.status": {"$ne": "laeuft"}},
+        {"_id": 0, "admin_vehicle_data_id": 1}, sort=[("created_at", -1)])
+    if not c:
+        return None
+    datensatz_id = c["admin_vehicle_data_id"]
+    if not await db[COLLECTION].count_documents({"id": datensatz_id}, limit=1):
+        return None
+    return datensatz_id
+
+
+async def entfernen(db, datensatz_id: str) -> bool:
+    """Wunsch Ahmad 15.09.2026: der Betreiber loescht einen Auto-Datensatz
+    endgueltig. Vertraege, die ihn noch tragen, bekommen den Vermerk
+    auto_daten_entfernt_am: die Fristloeschung verlangt dann keinen Datensatz
+    mehr, die Reparatur legt keinen neuen an, und ein weiterer Vertrag zu dem
+    Fahrzeug beginnt mit einem frischen Datensatz."""
+    if not datensatz_id:
+        return False
+    res = await db[COLLECTION].delete_one({"id": datensatz_id})
+    if not res.deleted_count:
+        return False
+    from datetime import datetime, timezone
+    await db.generated_pdfs.update_many(
+        {"admin_vehicle_data_id": datensatz_id},
+        {"$set": {"auto_daten_entfernt_am": datetime.now(timezone.utc).isoformat()}})
+    return True

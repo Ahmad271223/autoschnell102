@@ -84,7 +84,7 @@ export default function Fahrer() {
       <div className="mt-6 tactical-card overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left overline" style={{ background: "rgba(255,255,255,0.02)" }}>
+            <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Fahrer-ID</th>
               <th className="px-4 py-3">E-Mail</th>
@@ -120,7 +120,7 @@ export default function Fahrer() {
                 </td>
                 <td className="px-4 py-3">
                   <span className="text-xs px-2 py-0.5 rounded-sm"
-                    style={{ background: d.active ? "rgba(52,199,89,0.12)" : "rgba(255,255,255,0.04)",
+                    style={{ background: d.active ? "rgba(52,199,89,0.12)" : "var(--wa-04)",
                              color: d.active ? "var(--accent-green)" : "var(--text-muted)" }}>
                     {d.active ? "aktiv" : "inaktiv"}
                   </span>

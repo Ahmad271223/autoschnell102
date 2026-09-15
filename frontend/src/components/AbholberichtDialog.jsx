@@ -47,7 +47,7 @@ export default function AbholberichtDialog({ appt, onClose }) {
          onClick={(e) => { e.stopPropagation(); onClose(); }}
          data-testid="abholbericht-dialog">
       <div className="w-full max-w-lg max-h-[88vh] overflow-y-auto rounded-2xl p-5"
-           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)", color: "#fff" }}
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)", color: "var(--text-primary)" }}
            onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -82,12 +82,12 @@ export default function AbholberichtDialog({ appt, onClose }) {
               <ul className="mt-4 space-y-3">
                 {devs.map((d, i) => (
                   <li key={d.id || i} className="flex gap-3 items-start rounded-xl p-3"
-                      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
+                      style={{ background: "var(--wa-03)", border: "1px solid var(--wa-06)" }}>
                     {d.photo_key
                       ? <AbholFoto photoKey={d.photo_key} label={d.label} size={72} />
                       : (
                         <span className="inline-flex items-center justify-center rounded-md text-zinc-600 text-[10px] text-center leading-tight"
-                              style={{ width: 72, height: 72, border: "1px dashed rgba(255,255,255,0.12)" }}>
+                              style={{ width: 72, height: 72, border: "1px dashed var(--wa-12)" }}>
                           {d.photo_deleted_at ? "Foto nach Frist gelöscht" : "kein Foto"}
                         </span>
                       )}

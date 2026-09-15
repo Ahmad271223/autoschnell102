@@ -285,6 +285,11 @@ def test_07_schaeden_bereinigt_html_pii_laenge_anzahl(welt):
     d2 = _db().admin_vehicle_data.find_one({"id": c2["admin_vehicle_data_id"]})
     welt["auto_ids"].append(d2["id"])
     welt["contract2_id"] = c2["id"]
+    # Wunsch Ahmad 15.09.2026: derselbe Wagen bleibt EIN Auto-Datensatz — der
+    # neue Vertrag fuehrt Preis und Kaufdatum nach, statt ein zweites Auto anzulegen.
+    assert c2["admin_vehicle_data_id"] == welt["auto_ids"][0]
+    assert d2["purchase_price_cents"] == 100000
+    assert d2["purchase_date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
     blob = json.dumps(d2["damages"])
     assert "<" not in blob and "script" not in blob.lower(), d2["damages"]
     assert "Lack zerkratzt" in d2["damages"]
@@ -347,12 +352,15 @@ def test_10_datensatz_ueberlebt_unveraendert(welt):
     d = _db().admin_vehicle_data.find_one({"id": welt["auto_ids"][0]})
     assert d is not None, "Auto-Datensatz wurde mit dem Vertrag geloescht!"
     assert {k: v for k, v in d.items() if k != "_id"} == welt["snapshot"]
-    # Nach der Loeschung verweist NICHTS mehr auf die Datensatz-id.
+    # Nach der Loeschung verweist NICHTS mehr auf die Datensatz-id — bis auf den
+    # juengeren zweiten Vertrag zu demselben Wagen, der den Datensatz teilt
+    # (Wunsch Ahmad 15.09.2026) und selbst noch keine 90 Tage alt ist.
     dbx = _db()
     for coll in dbx.list_collection_names():
         if coll == "admin_vehicle_data":
             continue
-        assert dbx[coll].count_documents({"admin_vehicle_data_id": d["id"]}) == 0, coll
+        assert dbx[coll].count_documents(
+            {"admin_vehicle_data_id": d["id"], "id": {"$ne": welt["contract2_id"]}}) == 0, coll
 
 
 def test_11_reparatur_unvollstaendiger_schreibvorgang(welt):
@@ -589,3 +597,54 @@ def test_20_lifecycle_loeschung_ueberlebt_datensatz_zweiter_vertrag(welt):
     assert r.status_code == 200, r.text[:200]
     assert _db().generated_pdfs.find_one({"id": welt["contract2_id"]}) is None
     assert _db().admin_vehicle_data.find_one({"id": did}) is not None
+
+
+def test_21_betreiber_loescht_auto_datensatz(welt):
+    """Wunsch Ahmad 15.09.2026: der Super-Admin entfernt ein Auto endgueltig aus
+    den Auto-Daten. Vertraege mit diesem Datensatz tragen einen Vermerk; die
+    Reparatur legt nichts nach, die Fristloeschung verlangt keinen Datensatz,
+    ein weiterer Vertrag zu dem Wagen beginnt mit einem frischen Datensatz."""
+    from cleanup_service import auto_daten_reparieren, vertraege_nach_frist_loeschen
+    dbx = _db()
+    dbx.vehicles.update_one({"id": welt["vehicle_id"]}, {"$unset": {"lifecycle": ""}})
+    # Vertrag 3 zum selben Fahrzeug: die frueheren Vertraege sind geloescht -> frischer Datensatz
+    r = requests.post(f"{API}/contracts", headers=welt["H"], json={
+        "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 2000}, timeout=90)
+    assert r.status_code == 200, r.text[:300]
+    cid3 = r.json()["id"]
+    did = dbx.generated_pdfs.find_one({"id": cid3})["admin_vehicle_data_id"]
+    assert did and did not in welt["auto_ids"]
+    welt["auto_ids"].append(did)
+    url = f"{API}/admin/vehicle-data/{did}"
+    assert requests.delete(url, headers=welt["A"], timeout=30).status_code == 403
+    assert requests.delete(url, headers=welt["H"], timeout=30).status_code == 403
+    assert requests.delete(url, timeout=30).status_code == 401
+    assert requests.delete(f"{API}/admin/vehicle-data/{uuid.uuid4()}",
+                           headers=welt["SA"], timeout=30).status_code == 404
+    r = requests.delete(url, headers=welt["SA"], timeout=30)
+    assert r.status_code == 200 and r.json()["id"] == did, r.text[:200]
+    assert dbx.admin_vehicle_data.find_one({"id": did}) is None
+    c3 = dbx.generated_pdfs.find_one({"id": cid3})
+    assert c3["admin_vehicle_data_id"] == did and c3.get("auto_daten_entfernt_am")
+    assert dbx.activity_logs.find_one({"action": "admin.auto_daten.geloescht", "ref": did})
+    # Reparatur legt fuer den bewusst entfernten Datensatz nichts Neues an
+    _run(lambda mdb: auto_daten_reparieren(mdb))
+    assert dbx.admin_vehicle_data.find_one({"id": did}) is None
+    assert dbx.generated_pdfs.find_one({"id": cid3})["admin_vehicle_data_id"] == did
+    # Ein weiterer Vertrag zu dem Wagen beginnt mit einem frischen Datensatz
+    r = requests.post(f"{API}/contracts", headers=welt["H"], json={
+        "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 2100}, timeout=90)
+    assert r.status_code == 200, r.text[:300]
+    cid4 = r.json()["id"]
+    did4 = dbx.generated_pdfs.find_one({"id": cid4})["admin_vehicle_data_id"]
+    assert did4 and did4 != did
+    welt["auto_ids"].append(did4)
+    assert dbx.admin_vehicle_data.find_one({"id": did4})["purchase_price_cents"] == 210000
+    # Fristloeschung: der Vertrag ohne (bewusst entfernten) Datensatz wird geloescht
+    alt = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
+    dbx.generated_pdfs.update_one({"id": cid3}, {"$set": {"created_at": alt}})
+    dbx.kaufvorgaenge.update_many({"contract_id": cid3}, {"$set": {"updated_at": alt}})
+    _run(lambda mdb: vertraege_nach_frist_loeschen(mdb, datetime.now(timezone.utc), aktiv=True))
+    assert dbx.generated_pdfs.find_one({"id": cid3}) is None
+    assert dbx.generated_pdfs.find_one({"id": cid4}) is not None
+    assert dbx.betriebsalarme.count_documents({"ref": cid3}) == 0

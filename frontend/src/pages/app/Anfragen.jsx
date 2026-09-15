@@ -28,7 +28,7 @@ const STATUS_META = {
   gegenangebot: { label: "Gegenangebot", fg: "#60a5fa", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
   gegenangebot_kaeufer: { label: "Gegenangebot Käufer", fg: "#93c5fd", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
   akzeptiert:   { label: "Akzeptiert",   fg: "#34c759", bg: "rgba(52,199,89,0.12)",  bd: "rgba(52,199,89,0.35)" },
-  abgelehnt:    { label: "Abgelehnt",    fg: "#a1a1aa", bg: "rgba(255,255,255,0.05)", bd: "rgba(255,255,255,0.12)" },
+  abgelehnt:    { label: "Abgelehnt",    fg: "var(--text-dim)", bg: "var(--wa-05)", bd: "var(--wa-12)" },
 };
 
 const FILTERS = [
@@ -220,7 +220,7 @@ export default function Anfragen() {
 
               {counterFor === it.id && ["offen", "gegenangebot", "gegenangebot_kaeufer"].includes(it.status) && (
                 <div className="mt-3 rounded-xl p-3 flex flex-wrap items-end gap-2"
-                     style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-default)" }}>
+                     style={{ background: "var(--wa-03)", border: "1px solid var(--border-default)" }}>
                   <div>
                     <label className="block text-[10px] uppercase tracking-wide mb-1" style={{ color: "var(--text-muted)" }}>
                       Gegenangebot (€)

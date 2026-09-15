@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
+import ThemeToggle from "@/components/ThemeToggle";
 import SeiteLaedt from "@/components/SeiteLaedt";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
@@ -45,11 +46,10 @@ export default function AdminLayout() {
 
   return (
     <div
-      data-theme="dark"
       className="admin-shell min-h-screen w-full"
       style={{
-        background: "#0a0a0a",
-        color: "#ffffff",
+        background: "var(--bg-deep)",
+        color: "var(--text-primary)",
       }}
     >
       <div className="flex min-h-screen">
@@ -57,8 +57,8 @@ export default function AdminLayout() {
         <aside
           className="hidden md:flex md:w-64 lg:w-72 flex-col sticky top-0 h-screen"
           style={{
-            background: "#0f0f10",
-            borderRight: "1px solid rgba(255,255,255,0.08)",
+            background: "var(--bg-elevated)",
+            borderRight: "1px solid var(--wa-08)",
           }}
         >
           <div className="px-6 pt-7 pb-4">
@@ -96,8 +96,12 @@ export default function AdminLayout() {
           </nav>
           <div
             className="px-3 pb-5 pt-4 mt-2"
-            style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}
+            style={{ borderTop: "1px solid var(--wa-08)" }}
           >
+            <div className="px-3 mb-3 flex items-center justify-between gap-2">
+              <span className="text-[12px] text-zinc-500">Design</span>
+              <ThemeToggle />
+            </div>
             <div className="px-3 mb-3">
               <div className="text-[12px] text-zinc-500">Angemeldet als</div>
               <div className="text-[13px] font-medium text-white truncate">
@@ -120,9 +124,9 @@ export default function AdminLayout() {
           <div
             className="md:hidden sticky top-0 z-10 px-4 py-3 flex items-center justify-between"
             style={{
-              background: "rgba(15,15,16,0.92)",
+              background: "var(--bg-elevated)",
               backdropFilter: "blur(12px)",
-              borderBottom: "1px solid rgba(255,255,255,0.08)",
+              borderBottom: "1px solid var(--wa-08)",
             }}
           >
             <div className="flex items-center gap-2">
@@ -142,8 +146,8 @@ export default function AdminLayout() {
           <div
             className="md:hidden overflow-x-auto"
             style={{
-              background: "rgba(15,15,16,0.85)",
-              borderBottom: "1px solid rgba(255,255,255,0.08)",
+              background: "var(--bg-elevated)",
+              borderBottom: "1px solid var(--wa-08)",
             }}
           >
             <div className="flex gap-1 px-2 py-1.5 whitespace-nowrap">

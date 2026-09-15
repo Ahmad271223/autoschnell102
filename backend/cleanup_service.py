@@ -525,7 +525,7 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
     kandidaten = [c async for c in db.generated_pdfs.find(
         {"created_at": {"$lte": cutoff}},
         {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1,
-         "admin_vehicle_data_id": 1})]
+         "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1})]
     if not aktiv:
         ids = [c["id"] for c in kandidaten]
         log.info("Vertragsloeschung INAKTIV (VERTRAG_LOESCHUNG_AKTIV=false) — "
@@ -556,8 +556,11 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
     zurueckgestellt = 0
     for c in kandidaten:
         avd_id = c.get("admin_vehicle_data_id")
-        if not avd_id or not await db[auto_daten.COLLECTION].count_documents(
-                {"id": avd_id}, limit=1):
+        # Wunsch Ahmad 15.09.2026: hat der Betreiber den Datensatz bewusst
+        # entfernt (auto_daten.entfernen), haelt das den Vertrag nicht fest.
+        if not c.get("auto_daten_entfernt_am") and (
+                not avd_id or not await db[auto_daten.COLLECTION].count_documents(
+                    {"id": avd_id}, limit=1)):
             uebersprungen += 1
             await alarm(db, "vertrag_ohne_auto_daten", ref=c["id"],
                         dealer_id=c.get("dealer_id") or "",

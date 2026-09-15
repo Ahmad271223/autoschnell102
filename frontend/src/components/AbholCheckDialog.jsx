@@ -131,7 +131,7 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
          style={{ background: "rgba(0,0,0,0.7)" }}>
-      <div className="w-full sm:max-w-xl max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5"
+      <div className="bleibt-dunkel w-full sm:max-w-xl max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5"
            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)",
                     color: "#ffffff" /* Dialog ist bewusst dunkel — Schrift
                     auch im hellen Theme explizit hell, sonst dunkel-auf-dunkel */ }}>

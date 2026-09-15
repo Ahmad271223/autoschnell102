@@ -137,7 +137,7 @@ export default function AdminErrors() {
                   )}
                   {expanded && it.traceback && (
                     <pre className="mt-2 p-3 rounded-lg text-[11px] leading-relaxed text-zinc-300 overflow-x-auto whitespace-pre-wrap break-all"
-                         style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.06)" }}>
+                         style={{ background: "rgba(0,0,0,0.4)", border: "1px solid var(--wa-06)" }}>
                       {it.traceback}
                     </pre>
                   )}

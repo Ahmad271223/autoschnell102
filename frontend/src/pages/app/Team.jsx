@@ -82,7 +82,7 @@ export default function Team() {
 
       {/* Hinweis: Verwaltung durch den Betreiber */}
       <div className="mt-6 rounded-xl border px-4 py-3 flex items-start gap-3 text-sm"
-           style={{ borderColor: "var(--border-default)", background: "rgba(255,255,255,0.02)" }}
+           style={{ borderColor: "var(--border-default)", background: "var(--wa-02)" }}
            data-testid="team-betreiber-hinweis">
         <Info size={16} className="mt-0.5 shrink-0" style={{ color: "var(--accent-red)" }} />
         <div className="text-zinc-300">
@@ -134,7 +134,7 @@ export default function Team() {
           ) : null}
         </div>
         {plan?.active && plan.quota ? (
-          <div className="mt-3 h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+          <div className="mt-3 h-2 rounded-full overflow-hidden" style={{ background: "var(--wa-08)" }}>
             <div className="h-full rounded-full" style={{ width: `${pct}%`, background: pct >= 100 ? "#ff3b30" : "var(--accent-red)" }} />
           </div>
         ) : null}
@@ -161,7 +161,7 @@ export default function Team() {
         <div className="overflow-x-auto">
         <table className="w-full text-sm min-w-[640px]">
           <thead>
-            <tr className="text-left overline" style={{ background: "rgba(255,255,255,0.02)" }}>
+            <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Kontonummer</th>
               <th className="px-4 py-3">Sucher-Abo</th>

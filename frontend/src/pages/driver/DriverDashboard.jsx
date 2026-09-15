@@ -182,7 +182,7 @@ export default function DriverDashboard() {
                           )}
                           {a.status && (
                             <span className="ml-auto text-[10px] px-2 py-0.5 rounded-sm"
-                                  style={{ background: "rgba(255,255,255,0.05)" }}>
+                                  style={{ background: "var(--wa-05)" }}>
                               {a.status}
                             </span>
                           )}
@@ -288,7 +288,7 @@ export default function DriverDashboard() {
 
                         {a.notes && (
                           <div className="text-xs text-zinc-400 p-3 rounded-sm"
-                               style={{ background: "rgba(255,255,255,0.02)" }}>
+                               style={{ background: "var(--wa-02)" }}>
                             <div className="overline mb-1">Notizen</div>
                             {a.notes}
                           </div>
@@ -350,7 +350,7 @@ export default function DriverDashboard() {
                         )}
                         {(a.status === "abgeholt" || a.status === "nicht abgeholt") && (
                           <div className="text-xs text-zinc-500 p-3 rounded-sm text-center"
-                               style={{ background: "rgba(255,255,255,0.02)" }}>
+                               style={{ background: "var(--wa-02)" }}>
                             {a.status === "abgeholt" ? "✓ Als abgeholt markiert" : "✕ Als nicht abgeholt markiert"}
                             {" · "}Fotos & Beweis-Archiv werden automatisch gelöscht
                           </div>

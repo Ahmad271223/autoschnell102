@@ -148,7 +148,7 @@ export default function DriverSettings() {
           {(driver.dealers || []).map((d) => (
             <div key={d.id} data-testid={`dealer-${d.id}`}
                  className="flex items-center justify-between py-2 px-3 rounded-sm"
-                 style={{ background: "rgba(255,255,255,0.02)" }}>
+                 style={{ background: "var(--wa-02)" }}>
               <div>
                 <div className="font-semibold text-sm">{d.name}</div>
                 {d.phone && <div className="text-xs text-zinc-500">{d.phone}</div>}
