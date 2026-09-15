@@ -29,9 +29,24 @@ STELLEN = 6
 AUSSTELLER = os.environ.get("MFA_AUSSTELLER", "AutoSchnell")
 
 
+def _fernet_fuer(geheim: str) -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(geheim.encode("utf-8")).digest()))
+
+
+def _schluessel() -> list:
+    """Runde 15 (15.09.2026): eigener Schluessel DATEN_SCHLUESSEL fuer die
+    Ablage der Zwei-Faktor-Geheimnisse — eine JWT_SECRET-Rotation (Sitzungen
+    sollen sterben) macht die MFA-Daten nicht mehr unlesbar. Ohne
+    DATEN_SCHLUESSEL wie bisher JWT_SECRET; beim Lesen werden beide probiert,
+    damit vorhandene Geheimnisse nach dem Setzen des Zweitschluessels weiter
+    gelten (neu verschluesselt wird nur mit dem ersten)."""
+    daten = (os.environ.get("DATEN_SCHLUESSEL") or "").strip()
+    jwt = os.environ.get("JWT_SECRET") or "dev-secret"
+    return [daten, jwt] if daten and daten != jwt else [jwt]
+
+
 def _fernet() -> Fernet:
-    geheim = (os.environ.get("JWT_SECRET") or "dev-secret").encode("utf-8")
-    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(geheim).digest()))
+    return _fernet_fuer(_schluessel()[0])
 
 
 def verschluesseln(klartext: str) -> str:
@@ -39,10 +54,12 @@ def verschluesseln(klartext: str) -> str:
 
 
 def entschluesseln(chiffrat: str) -> Optional[str]:
-    try:
-        return _fernet().decrypt(chiffrat.encode("ascii")).decode("utf-8")
-    except (InvalidToken, ValueError, TypeError):
-        return None
+    for geheim in _schluessel():
+        try:
+            return _fernet_fuer(geheim).decrypt(chiffrat.encode("ascii")).decode("utf-8")
+        except (InvalidToken, ValueError, TypeError):
+            continue
+    return None
 
 
 def secret_erzeugen() -> str:

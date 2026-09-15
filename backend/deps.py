@@ -427,7 +427,11 @@ async def get_subscription_status(dealer_id: str,
         # Abo-Historie bleibt erhalten (Audit 09/2026): ersetzte Zeilen
         # (status "ersetzt") zaehlen nicht, das juengste andere gilt.
         sub = await db.subscriptions.find_one(
-            {"subject_user_id": subject_user_id, "status": {"$ne": "ersetzt"}},
+            # Runde 13 (Liste 4 Nr. 3): das persoenliche Abo gehoert zur Firma —
+            # Altbestand ohne dealer_id bleibt gueltig.
+            {"subject_user_id": subject_user_id, "status": {"$ne": "ersetzt"},
+             "$or": [{"dealer_id": dealer_id}, {"dealer_id": {"$exists": False}},
+                     {"dealer_id": None}]},
             sort=[("created_at", -1)])
     else:
         sub = await db.subscriptions.find_one(
@@ -535,11 +539,13 @@ async def kunden_nummern_nachziehen() -> int:
     """Bestandsfirmen ohne Kundennummer nummerieren (aelteste zuerst).
     Idempotent je Firma ($exists-Guard): parallele Worker erzeugen
     hoechstens Luecken, nie Dubletten. Liefert die Zahl neuer Nummern."""
+    from kontenanlage import KUNDEN_NR_FEHLT
     n = 0
-    async for d in db.dealers.find({"kunden_nr": {"$exists": False}},
+    # Runde 15: auch null / falscher Typ (Restore, Altbestand), nicht nur fehlend.
+    async for d in db.dealers.find({**KUNDEN_NR_FEHLT, "kunden_nr": {"$not": {"$type": "double"}}},
                                    {"_id": 0, "id": 1}).sort("created_at", 1):
         r = await db.dealers.update_one(
-            {"id": d["id"], "kunden_nr": {"$exists": False}},
+            {"id": d["id"], **KUNDEN_NR_FEHLT},
             {"$set": {"kunden_nr": await naechste_kunden_nr()}})
         n += r.modified_count
     return n
@@ -646,14 +652,14 @@ def uhrzeit_hhmm_pruefen(v):
     return s
 
 
-# Runde 17 (Uebergabe-Regel): Das FAHRZEUG ist der Anker. Haengt ein Termin
-# (ebenso Bericht, Protokoll, Snapshot) an einem Fahrzeug, sieht ihn der
-# Sucher genau dann, wenn ihm das Fahrzeug gehoert — nach einer Uebergabe
-# durch den Chef (PUT /vehicles/{id}/besitzer) verliert der bisherige
-# Bearbeiter den Zugriff vollstaendig, auch auf Termine, die er selbst
-# angelegt hat oder deren Vertrag ihm gehoert. Nur Termine OHNE Fahrzeug
-# haengen weiter am Ersteller bzw. am eigenen Vertrag. Vertraege selbst
-# bleiben beim Ersteller (_vertrag_bereich, Produktregel).
+# Uebergabe-Regel (Runde 13, 15.09.2026): Der Bereich eines Suchers sind
+# seine Kaufvorgaenge, Vertraege und Termine (siehe termin_bereich). Eine
+# Uebergabe durch den Chef (PUT /vehicles/{id}/besitzer) oder die Loeschung
+# eines Suchers uebertraegt genau diese Objekte zum Fahrzeug mit
+# (routes.bestand.vorgang_uebergeben) — der bisherige Bearbeiter verliert
+# damit den Zugriff auf Termine, Berichte und Protokolle, der neue bekommt
+# den ganzen Vorgang. Das Fahrzeug allein gibt keinen Terminzugriff (mehrere
+# Sucher duerfen dasselbe Inserat unabhaengig kaufen).
 _OHNE_FAHRZEUG = {"$in": [None, ""]}
 
 

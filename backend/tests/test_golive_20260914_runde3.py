@@ -121,7 +121,8 @@ def test_l4_entwurf_und_zusage_bei_terminaenderung(welt):
     # Fahrer 2 speichert -> der Entwurf gehoert jetzt ihm (Fahrerwechsel im Entwurf
     # verwirft ihn sogar; hier direkt per Speichern)
     w.run(w.db.appointments.update_one({"id": t.aid}, {"$set": {"driver_id": w.driver2["id"]}}))
-    d = w.run(P.save_protocol(t.aid, P.ProtocolIn(notes="von 2"), w.driver2))
+    # Runde 13: ein Entwurf mit Revision braucht beim Speichern den geladenen Stand
+    d = w.run(P.save_protocol(t.aid, P.ProtocolIn(notes="von 2", revision=neu["revision"]), w.driver2))
     assert d["driver_account_id"] == w.driver2["id"] and d["driver_name"] == "Fahrer GL 2"
     # Verkaeuferwechsel: Zusage erlischt ebenfalls
     w.run(w.db.appointments.update_one({"id": t.aid}, {"$set": {"zuteilung": "angenommen"}}))

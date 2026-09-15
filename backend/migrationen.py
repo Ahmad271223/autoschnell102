@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 7
+ZIEL_VERSION = 8
 _SPERRE = "migration"
 
 
@@ -369,6 +369,18 @@ async def m7_kaeuferdaten_einfrieren(db) -> dict:
     return stats
 
 
+async def m8_konten_aktiv_feld(db) -> dict:
+    """Nachpruefung 15.09.2026 (Anmeldung, Legacy-active): ein Konto OHNE das
+    Feld `active` galt bei users als gesperrt (Login: `if not active`) und bei
+    driver_accounts als aktiv (`get("active", True)`). Beide Bedeutungen werden
+    festgeschrieben — danach traegt jedes Konto das Feld ausdruecklich, und
+    Restore/Import erzeugen keine stillen Sonderfaelle mehr."""
+    u = await db.users.update_many({"active": {"$exists": False}}, {"$set": {"active": False}})
+    d = await db.driver_accounts.update_many({"active": {"$exists": False}},
+                                             {"$set": {"active": True}})
+    return {"users_gesperrt": u.modified_count, "fahrer_aktiv": d.modified_count}
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -377,6 +389,7 @@ MIGRATIONEN = [
     (5, "kaufvorgaenge", m5_kaufvorgaenge),
     (6, "besitzer_nachbessern", m6_besitzer_nachbessern),
     (7, "kaeuferdaten_einfrieren", m7_kaeuferdaten_einfrieren),
+    (8, "konten_aktiv_feld", m8_konten_aktiv_feld),
 ]
 
 

@@ -463,6 +463,12 @@ async def _cleanup_once(db) -> dict:
     stats["abholberichte_nachgeholt"] = await abholberichte_nacharbeit_nachholen(db)
     stats["vertraege_nach_abholung_nachgeholt"] = await vertrag_nach_abholung_nachholen(db)
     stats["termine_frisch_abgeglichen"] = await termine_frisch_abgleichen(db, now)
+    stats["fahrer_trennungen_nachgeholt"] = await fahrer_trennung_nachholen(db)
+    stats["fahrer_verknuepfungen_abgeglichen"] = await fahrer_verknuepfung_abgleichen(db)
+    # Runde 14 (15.09.2026): Fahrer-Pseudonym in Berichten nachholen (Nr. 9/10),
+    # Termine ohne Vertrag loesen (Nr. 3/4).
+    stats["abholberichte_pseudonymisiert"] = await abholberichte_pseudonym_nachholen(db, now)
+    stats["termin_vertragsverweise_bereinigt"] = await termin_vertragsverweise_bereinigen(db, now)
 
     if any(stats.values()):
         log.info("cleanup run: %s", stats)
@@ -2164,6 +2170,74 @@ async def inserat_fahrzeug_nacharbeit_nachholen(db) -> int:
 # =====================================================================
 # Runde 12 (15.09.2026): Nachholjobs zu Betriebsalarmen und Frischabgleich
 # =====================================================================
+async def abholberichte_pseudonym_nachholen(db, now: datetime) -> int:
+    """Nachpruefung 15.09.2026 (Fahrer Nr. 9/10): Berichte, deren Fahrer-Konto
+    geloescht ist oder geloescht wird, tragen keinen Klarnamen mehr — ueber den
+    Alarm-Marker aus driver_submit_report UND als Abgleich der Berichte der
+    letzten 48 h (die Kontoloeschung lief genau waehrend des Foto-Uploads, und
+    die Nachpruefung danach scheiterte an der Datenbank)."""
+    from routes.drivers import fahrer_pseudonym
+    kandidaten: dict = {}
+    async for a in db.betriebsalarme.find(
+            {"typ": "abholbericht_pseudonym_offen", "offen": True}, {"_id": 0, "ref": 1}).limit(200):
+        if a.get("ref"):
+            kandidaten[a["ref"]] = True
+    grenze = (now - timedelta(hours=48)).isoformat()
+    async for r in db.pickup_reports.find(
+            {"created_at": {"$gte": grenze},
+             "driver_account_id": {"$type": "string", "$not": {"$regex": "^geloescht:"}}},
+            {"_id": 0, "id": 1}).limit(2000):
+        kandidaten.setdefault(r["id"], False)
+    n = 0
+    for report_id, per_alarm in kandidaten.items():
+        try:
+            r = await db.pickup_reports.find_one({"id": report_id}, {"_id": 0, "driver_account_id": 1})
+            did = (r or {}).get("driver_account_id")
+            if not did or str(did).startswith("geloescht:"):
+                if per_alarm:
+                    await alarm_schliessen(db, "abholbericht_pseudonym_offen", ref=report_id)
+                continue
+            konto = await db.driver_accounts.find_one({"id": did}, {"_id": 0, "loeschung": 1})
+            if konto is not None and not (konto.get("loeschung") or {}).get("status"):
+                if per_alarm:          # Konto lebt: der Marker war ein Fehlalarm
+                    await alarm_schliessen(db, "abholbericht_pseudonym_offen", ref=report_id)
+                continue
+            await db.pickup_reports.update_one(
+                {"id": report_id, "driver_account_id": did},
+                {"$set": {"driver_account_id": fahrer_pseudonym(did),
+                          "driver_name": "Fahrer (gelöscht)"}})
+            await alarm_schliessen(db, "abholbericht_pseudonym_offen", ref=report_id)
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Fahrer-Pseudonym fuer Bericht %s nicht nachgeholt", report_id)
+    return n
+
+
+async def termin_vertragsverweise_bereinigen(db, now: datetime, mindestalter_min: int = 10) -> int:
+    """Nachpruefung 15.09.2026 (Fahrer Nr. 3/4): Termine, die auf einen nicht
+    mehr vorhandenen Vertrag zeigen (Auto-Termin nach dem Termin-Bereinigen
+    der Vertragsloeschung eingefuegt): Zeiger loesen und Verkaeuferdaten
+    entfernen — wie es die Loeschung selbst getan haette. Nur Termine aelter
+    als `mindestalter_min` (laufende Anlagen nicht stoeren)."""
+    grenze = (now - timedelta(minutes=mindestalter_min)).isoformat()
+    ids = [c for c in await db.appointments.distinct(
+        "contract_id", {"contract_id": {"$type": "string", "$ne": ""}})]
+    n = 0
+    for i in range(0, len(ids), 500):
+        teil = ids[i:i + 500]
+        vorhanden = set(await db.generated_pdfs.distinct("id", {"id": {"$in": teil}}))
+        weg = [c for c in teil if c not in vorhanden]
+        if not weg:
+            continue
+        r = await db.appointments.update_many(
+            {"contract_id": {"$in": weg}, "created_at": {"$lt": grenze}},
+            {"$set": {"contract_id": None, "seller_name": "", "seller_phone": "",
+                      "seller_email": "", "vertrag_verweis_bereinigt_am": now.isoformat(),
+                      "updated_at": now.isoformat()}})
+        n += r.modified_count
+    return n
+
+
 async def abholberichte_nacharbeit_nachholen(db) -> int:
     """Nr. 22: Nach dem Speichern eines Abholberichts scheiterte das Abloesen
     aelterer Berichte / das Termin-Badge (Alarm abholbericht_nacharbeit_offen).
@@ -2252,4 +2326,85 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
             n += 1
         except Exception:  # noqa: BLE001
             log.exception("Frischabgleich Termin %s fehlgeschlagen", appt.get("id"))
+    # Runde 13 (Liste 3 Nr. 15): Vorgaenge der letzten Stunden — Fahrzeug-
+    # Zusammenfassung erneut, auch wenn Marker UND Aggregation scheiterten.
+    gesehen: set = set()
+    async for kv in db.kaufvorgaenge.find(
+            {"updated_at": {"$gte": grenze}},
+            {"_id": 0, "vehicle_id": 1, "dealer_id": 1}).limit(limit):
+        schluessel = (kv.get("vehicle_id"), kv.get("dealer_id"))
+        if not all(schluessel) or schluessel in gesehen:
+            continue
+        gesehen.add(schluessel)
+        try:
+            await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"])
+        except Exception:  # noqa: BLE001
+            log.exception("Frischabgleich Fahrzeug %s fehlgeschlagen", kv.get("vehicle_id"))
+    return n
+
+
+async def fahrer_trennung_nachholen(db) -> int:
+    """Runde 13 (Liste 4 Nr. 9): Scheiterte beim Entfernen eines Fahrers die
+    Terminbereinigung (Alarm fahrer_bereinigung_fehlgeschlagen), wird sie hier
+    nachgeholt — solange keine neue Verknuepfung besteht."""
+    n = 0
+    try:
+        from routes.drivers import _termine_vom_fahrer_trennen
+    except Exception:  # noqa: BLE001
+        return 0
+    async for a in db.betriebsalarme.find(
+            {"typ": "fahrer_bereinigung_fehlgeschlagen", "offen": True},
+            {"_id": 0, "ref": 1, "details": 1}).limit(200):
+        driver_id = a.get("ref")
+        dealer_id = (a.get("details") or {}).get("dealer_id")
+        if not driver_id or not dealer_id:
+            continue
+        try:
+            if await db.dealer_drivers.find_one(
+                    {"dealer_id": dealer_id, "driver_account_id": driver_id}, {"_id": 1}):
+                await alarm_schliessen(db, "fahrer_bereinigung_fehlgeschlagen", ref=driver_id)
+                continue
+            await _termine_vom_fahrer_trennen(dealer_id, driver_id)
+            await alarm_schliessen(db, "fahrer_bereinigung_fehlgeschlagen", ref=driver_id)
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Fahrer-Trennung %s/%s nicht nachgeholt", dealer_id, driver_id)
+    return n
+
+
+async def fahrer_verknuepfung_abgleichen(db, limit: int = 500) -> int:
+    """Runde 13 (Liste 4 Nr. 10/13): Invariante 'driver_id nur mit aktueller
+    Firmenverknuepfung' — offene Termine, deren Fahrer nicht (mehr) mit der
+    Firma verknuepft ist, verlieren die Zuweisung (wie beim Entfernen);
+    fehlt die Zuteilung, wird sie auf 'offen' gesetzt."""
+    from deps import TERMIN_OFFEN_WERTE
+    n = 0
+    paare: set = set()
+    async for appt in db.appointments.find(
+            {"driver_id": {"$type": "string", "$ne": ""},
+             "status": {"$in": TERMIN_OFFEN_WERTE}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "driver_id": 1, "zuteilung": 1}).limit(limit):
+        schluessel = (appt.get("dealer_id"), appt["driver_id"])
+        if schluessel in paare:
+            continue
+        paare.add(schluessel)
+        try:
+            if not await db.dealer_drivers.find_one(
+                    {"dealer_id": appt.get("dealer_id"), "driver_account_id": appt["driver_id"]},
+                    {"_id": 1}):
+                r = await db.appointments.update_many(
+                    {"dealer_id": appt.get("dealer_id"), "driver_id": appt["driver_id"],
+                     "status": {"$in": TERMIN_OFFEN_WERTE}},
+                    {"$unset": {"driver_id": ""}, "$set": {"zuteilung": None, "updated_at": now_iso()}})
+                n += r.modified_count
+                await alarm(db, "fahrer_ohne_verknuepfung_getrennt", ref=appt["driver_id"],
+                            dealer_id=appt.get("dealer_id") or "", termine=r.modified_count)
+        except Exception:  # noqa: BLE001
+            log.exception("Fahrer-Verknuepfung %s/%s nicht abgeglichen", appt.get("dealer_id"),
+                          appt["driver_id"])
+    r = await db.appointments.update_many(
+        {"driver_id": {"$type": "string", "$ne": ""}, "status": {"$in": TERMIN_OFFEN_WERTE},
+         "$or": [{"zuteilung": {"$exists": False}}, {"zuteilung": None}]},
+        {"$set": {"zuteilung": "offen", "zuteilung_am": now_iso()}})
+    n += r.modified_count
     return n

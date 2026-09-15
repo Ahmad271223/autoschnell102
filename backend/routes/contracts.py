@@ -807,6 +807,12 @@ async def _termin_gehoert_mir(user: dict, appt: dict) -> bool:
         {"id": cid, "user_id": user["id"]}, limit=1) > 0
 
 
+async def _termin_einfuegen(doc: dict) -> None:
+    """Insert des Auto-Termins (eigene Funktion, damit Tests das Zeitfenster
+    'Vertragsloeschung zwischen Vorpruefung und Insert' nachstellen koennen)."""
+    await db.appointments.insert_one(doc)
+
+
 async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str,
                                     kaufvorgang_id: Optional[str] = None):
     """Umbau Kaufvorgaenge 09.09.2026: EIN offener Abholtermin je VERTRAG
@@ -830,6 +836,7 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
         vertrag = await db.generated_pdfs.find_one({"id": pdf_id}, {"_id": 0, "kaufvorgang_id": 1})
         kaufvorgang_id = (vertrag or {}).get("kaufvorgang_id")
     aktion = "termin.auto-erstellt"
+    neu_angelegt = False
     for versuch in (1, 2):
         offen = await db.appointments.find_one(
             {"dealer_id": dealer_id, "contract_id": pdf_id,
@@ -848,7 +855,7 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
                 {"id": pdf_id, "loeschung.status": {"$ne": "laeuft"}}, limit=1):
             return None, ("Der Vertrag wird gerade gelöscht — kein Abholtermin angelegt.")
         try:
-            await db.appointments.insert_one({
+            await _termin_einfuegen({
                 "id": appt_id, "dealer_id": dealer_id,
                 "created_by": user["id"],     # Runde 10: sonst kann der Sucher ihn nie loeschen
                 "title": title, "vehicle_id": body.vehicle_id, "contract_id": pdf_id,
@@ -856,11 +863,24 @@ async def _abholtermin_fuer_vertrag(user: dict, body, vehicle: dict, pdf_id: str
                 **felder, "status": "offen",
                 "created_at": now_iso(), "updated_at": now_iso(),
             })
+            neu_angelegt = True
             break
         except DuplicateKeyError:
             if versuch == 2:
                 raise
             continue                        # paralleler Termin desselben Vertrags gewann
+    if neu_angelegt and not await db.generated_pdfs.count_documents(
+            {"id": pdf_id, "loeschung.status": {"$ne": "laeuft"}}, limit=1):
+        # Nachpruefung 15.09.2026 (Fahrer Nr. 3/4): die Vertragsloeschung lief
+        # genau zwischen Vorpruefung und Insert — ihr Termin-Bereinigen hat den
+        # frischen Termin nicht mehr gesehen. Der Termin ist unbenutzt (offen,
+        # ohne Fahrer): weg damit, statt dauerhaft auf einen geloeschten
+        # Vertrag zu zeigen. Rest faengt cleanup_service.termin_vertragsverweise_
+        # bereinigen (nach 10 Minuten).
+        await db.appointments.delete_one(
+            {"id": appt_id, "contract_id": pdf_id, "status": "offen",
+             "driver_id": {"$in": [None, ""]}})
+        return None, ("Der Vertrag wird gerade gelöscht — kein Abholtermin angelegt.")
     # Pruefung 14.09.2026 (Liste 6, Nr. 3): Der Termin STEHT ab hier. Scheitert
     # das Nachziehen, meldete der Aufrufer "Termin konnte nicht angelegt werden"
     # — obwohl er existierte (zweiter Termin -> 409). Jetzt: Termin melden,
@@ -1528,7 +1548,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 import kaufvorgang as _kv
                 _vorgang = await _kv.fuer_vertrag(c)
                 if _vorgang and _vorgang.get("status") == "vertrag_erstellt":
-                    await _kv.status_setzen(_vorgang["id"], "gesendet", user=user)
+                    await _kv.status_setzen(_vorgang["id"], "gesendet", user=user,
+                                            von="vertrag_erstellt")
             except Exception:
                 log.exception("Kaufvorgang nach Versand von %s nicht aktualisiert", contract_id)
                 # Phase 2 (2.4, G10): Merker statt nur Log — cleanup_service.

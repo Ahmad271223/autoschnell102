@@ -36,7 +36,7 @@ API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 SUF = uuid.uuid4().hex[:8]
-PW = "RollenTest123!"
+PW = "Kq4Lm9Xw2-Sicher-Rn!"
 KA_ID = f"98{uuid.uuid4().int % 10**8:08d}"
 KA_URL = f"https://www.kleinanzeigen.de/s-anzeige/rollen/{KA_ID}-216-1"
 

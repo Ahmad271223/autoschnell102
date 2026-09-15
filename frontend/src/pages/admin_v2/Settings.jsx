@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
+import { tokenSetzen, TOKEN_APP } from "@/lib/sitzung";
 import { PageHeader, Card, Button } from "./_ui";
 import { KeyRound, Crown, ShieldCheck } from "lucide-react";
 import { useEffect } from "react";
@@ -27,6 +28,9 @@ function MfaKarte() {
     setBusy(true);
     try {
       const r = await api.post("/admin/me/mfa/aktivieren", { code });
+      // Runde 15: die Aktivierung beendet die alte Sitzung ohne zweiten Faktor —
+      // dieser Tab bekommt sein neues Token gleich mit.
+      if (r.data.token) tokenSetzen(TOKEN_APP, r.data.token, { nurSitzung: true });
       setCodes(r.data.wiederherstellungscodes || []); setSetup(null); setCode("");
       toast.success("Zwei-Faktor-Anmeldung ist aktiv"); load();
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }

@@ -346,7 +346,10 @@ def test_29_protokoll_entwurf_revision():
     assert r.status_code == 409 and "anderen Tab" in r.text, r.text[:300]
     dbx = K._db()
     assert dbx.pickup_protocols.find_one({"appointment_id": aid})["notes"] == "b"
-    r = requests.put(pfad, json={"notes": "d"}, headers=w.F, timeout=60)     # aeltere App ohne Revision
+    # Runde 13 (Liste 3 Nr. 9): ohne Revision wird ein Entwurf mit Revision nicht mehr ueberschrieben
+    r = requests.put(pfad, json={"notes": "d"}, headers=w.F, timeout=60)
+    assert r.status_code == 409 and "Revision" in r.text, r.text[:300]
+    r = requests.put(pfad, json={"notes": "d", "revision": 2}, headers=w.F, timeout=60)
     assert r.status_code == 200 and r.json()["revision"] == 3
     dbx.pickup_protocols.delete_many({"appointment_id": aid})
     dbx.appointments.delete_one({"id": aid})

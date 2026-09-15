@@ -1,3 +1,4 @@
+import { mitAbweichung } from "@/lib/anfrageAbweichung";
 import { useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
@@ -30,11 +31,11 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
     if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
-      const { data } = await api.post("/admin/drivers", {
+      const { data } = await mitAbweichung((extra) => api.post("/admin/drivers", {
         display_name: f.display_name.trim(), password: f.password,
         email: f.email.trim(), phone: f.phone.trim(),
-        ...(request?.id ? { anfrage_id: request.id } : {}),
-      });
+        ...(request?.id ? { anfrage_id: request.id } : {}), ...extra,
+      }));
       setErgebnis({ ...data, name: f.display_name.trim(), passwort: f.password });
       onAngelegt?.(data);
     } catch (e) { toast.error(errMsg(e, "Fahrer anlegen fehlgeschlagen")); }

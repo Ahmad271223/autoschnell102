@@ -26,7 +26,7 @@ MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 SUF = uuid.uuid4().hex[:8]
 NUM = int(SUF[:6], 16) % 900000            # eindeutiger Zahlenblock fuer Inserat-IDs
-PW = "Paket123!x"
+PW = "Kq4Lm9Xw2-Sicher-Ps!"
 MAIL = "e2etest-mail.de"
 
 

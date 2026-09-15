@@ -86,12 +86,12 @@ def dealer_a():
     """Independent dealer account A."""
     email = f"{_unique('dealerA')}@example.com"
     r = konten.registrieren(json={
-        "email": email, "password": "Test12345!x", "company_name": "Autohaus A",
+        "email": email, "password": "Kq4Lm9Xw2-Sicher!", "company_name": "Autohaus A",
         "contact_person": "Anna A", "phone": "+491110000",
     }, timeout=30)
     assert r.status_code == 200, r.text
     data = r.json()
-    return {"email": email, "password": "Test12345!x", "token": data["token"],
+    return {"email": email, "password": "Kq4Lm9Xw2-Sicher!", "token": data["token"],
             "user": data["user"]}
 
 
@@ -107,13 +107,13 @@ def dealer_a_token(dealer_a):
 def dealer_b():
     email = f"{_unique('dealerB')}@example.com"
     r = konten.registrieren(json={
-        "email": email, "password": "Test12345!x", "company_name": "Autohaus B",
+        "email": email, "password": "Kq4Lm9Xw2-Sicher!", "company_name": "Autohaus B",
         "phone": "+492220000",
     }, timeout=30)
     assert r.status_code == 200
     data = r.json()
     # Activate lifetime so dealer can hit protected endpoints if needed
-    return {"email": email, "password": "Test12345!x", "token": data["token"],
+    return {"email": email, "password": "Kq4Lm9Xw2-Sicher!", "token": data["token"],
             "user": data["user"]}
 
 

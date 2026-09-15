@@ -128,9 +128,24 @@ async def _validierungsfehler(request: Request, exc: RequestValidationError):
         if "ctx" in e:
             e["ctx"] = _json_sicher({k: (str(v) if isinstance(v, Exception) else v)
                                      for k, v in e["ctx"].items()})
-        e["input"] = _json_sicher(e.get("input"))
+        e["input"] = _geheim_redigieren(e.get("loc") or (), _json_sicher(e.get("input")))
         fehler.append(e)
     return JSONResponse(status_code=422, content={"detail": fehler})
+
+
+# Runde 15 (15.09.2026): Passwoerter und Codes tauchen in keiner 422-Antwort
+# auf (vorher spiegelte `input` den Klartext zurueck — DevTools, Client-Logs,
+# Support-Screenshots).
+_GEHEIME_FELDER = {"password", "new_password", "current_password", "code", "mfa_token",
+                   "token", "secret", "password_hash"}
+
+
+def _geheim_redigieren(loc, eingabe):
+    if any(str(teil) in _GEHEIME_FELDER for teil in loc):
+        return "***"
+    if isinstance(eingabe, dict):
+        return {k: ("***" if str(k) in _GEHEIME_FELDER else v) for k, v in eingabe.items()}
+    return eingabe
 # Runde 29 (12.09.2026, Pruefbefund): Zustand der kritischen Startteile.
 # True = steht, False = fehlgeschlagen, gar nicht gesetzt = noch nicht
 # versucht (z.B. Tests, die ensure_indexes nicht aufrufen). /ready macht
@@ -482,6 +497,11 @@ async def readiness_check(response: Response):
         if aktive_sa == 0:
             (fehler if _ist_prod else warnungen).append(
                 "kein aktives Super-Admin-Konto (SUPER_ADMIN_USERNAME/PASSWORD pruefen)")
+        elif aktive_sa > 1:
+            # Runde 15: es gibt GENAU einen Betreiber (Nur-ein-Super-Admin-Regel).
+            (fehler if _ist_prod else warnungen).append(
+                f"{aktive_sa} aktive Super-Admin-Konten — es darf nur eines geben "
+                "(SUPER_ADMIN_USERNAME geaendert? altes Konto loeschen/sperren)")
         _ = alt
     except Exception as exc:
         warnungen.append(f"queue: {exc}")
@@ -1035,7 +1055,43 @@ async def seed_super_admin():
     # Kontonummer (13.09.2026), Schritt 5: keine Platzhalter-E-Mail mehr fuer
     # neue Seeds (die E-Mail ist nur Kontaktadresse); ein vorhandenes Konto
     # bleibt unberuehrt.
+    ist_prod = os.environ.get("APP_ENV", "").strip().lower() == "production"
     existing = await db.users.find_one({"username": username})
+    if existing and not (existing.get("role") == "admin" and existing.get("is_super_admin")):
+        # Runde 15 (15.09.2026): ein FREMDES Konto mit diesem Benutzernamen
+        # (Restore, Altbestand, manueller Eintrag) wird nicht zum Betreiber
+        # hochgestuft — in Produktion bricht der Start ab.
+        log.error("seed_super_admin: Konto %s traegt den Benutzernamen %r, ist aber kein "
+                  "Super-Admin (Rolle %r) — NICHT hochgestuft. Benutzername in .env aendern "
+                  "oder das Konto pruefen.", existing.get("id"), username, existing.get("role"))
+        try:
+            from betrieb import alarm
+            await alarm(db, "super_admin_seed_konflikt", ref=str(existing.get("id")),
+                        username=username, rolle=str(existing.get("role")))
+        except Exception:  # noqa: BLE001
+            pass
+        if ist_prod:
+            raise SystemExit(78)
+        return
+    anderer = await db.users.find_one(
+        {"is_super_admin": True, "username": {"$ne": username}},
+        {"_id": 0, "id": 1, "username": 1, "active": 1})
+    if anderer and not existing:
+        # Runde 15: SUPER_ADMIN_USERNAME geaendert -> es entstuende ein ZWEITER
+        # Betreiber. Es gibt genau einen: das bestehende Konto umbenennen
+        # (scripts/mfa_pruefen.py zeigt es; DB: users.username) oder loeschen.
+        log.error("seed_super_admin: es gibt bereits den Super-Admin %r (id %s) — KEIN zweites "
+                  "Betreiberkonto %r. Bestehendes Konto umbenennen oder .env zuruecksetzen.",
+                  anderer.get("username"), anderer.get("id"), username)
+        try:
+            from betrieb import alarm
+            await alarm(db, "super_admin_doppelt", ref=str(anderer.get("id")),
+                        vorhanden=str(anderer.get("username")), neu=username)
+        except Exception:  # noqa: BLE001
+            pass
+        if ist_prod:
+            raise SystemExit(78)
+        return
     if existing:
         # Idempotent: Rolle/aktiv-Status sicherstellen, Passwort NICHT überschreiben.
         await db.users.update_one(
@@ -1048,6 +1104,21 @@ async def seed_super_admin():
                 "username": username,
             }},
         )
+        # Runde 15: SUPER_ADMIN_PASSWORD in der .env rotiert das Passwort
+        # bewusst NICHT — aber ein abweichender Wert wird gemeldet, damit
+        # niemand glaubt, das Passwort sei gewechselt.
+        try:
+            from auth import verify_password as _vp
+            from betrieb import alarm as _alarm, alarm_schliessen as _alarm_zu
+            if existing.get("password_hash") and not _vp(password, existing["password_hash"]):
+                log.warning("seed_super_admin: SUPER_ADMIN_PASSWORD in .env weicht vom "
+                            "gespeicherten Passwort ab — es gilt weiter das gespeicherte "
+                            "(Wechsel nur ueber Einstellungen -> Passwort).")
+                await _alarm(db, "super_admin_passwort_env_abweichend", ref=str(existing["id"]))
+            else:
+                await _alarm_zu(db, "super_admin_passwort_env_abweichend", ref=str(existing["id"]))
+        except Exception:  # noqa: BLE001
+            log.exception("seed_super_admin: Passwortabgleich nicht moeglich")
         # Pruefung 14.09.2026 (Liste 1, Nr. 13): brach der erste Seed nach dem
         # Konto ab, fehlten Firmenprofil und Abo fuer immer — hier nachziehen.
         d_id = existing.get("dealer_id")
@@ -1068,6 +1139,17 @@ async def seed_super_admin():
                 "expires_at": None, "created_at": now_iso(),
             })
             log.warning("seed_super_admin: fehlendes Abo nachgezogen")
+        return
+    # Runde 15: dieselbe Passwortregel wie fuer jedes andere Konto — das
+    # wichtigste Konto darf nicht schwaecher sein als ein Sucher.
+    try:
+        from passwoerter import pruefe_passwort
+        pruefe_passwort(password)
+    except ValueError as exc:
+        log.error("seed_super_admin: SUPER_ADMIN_PASSWORD verletzt die Passwortregel (%s) — "
+                  "Super-Admin wird NICHT angelegt.", exc)
+        if ist_prod:
+            raise SystemExit(78)
         return
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())

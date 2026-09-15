@@ -29,7 +29,7 @@ API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 SUF = uuid.uuid4().hex[:8]
-PW = "NachTest123!"
+PW = "Kq4Lm9Xw2-Sicher!"   # Runde 14: kein Firmenname ("Nach") im Passwort
 JETZT = datetime.now(timezone.utc)
 
 
@@ -89,12 +89,13 @@ def test_protokoll_nach_prozessabbruch_wieder_speicherbar(fahrer):
         pytest.skip("Fahrer-Route nicht erreichbar (Backend-Stand?)")
     assert r.status_code == 200 and r.json()["status"] == "entwurf", r.text[:200]
     pid = r.json()["id"]
+    rev = r.json().get("revision")        # Runde 13: die App schickt die geladene Revision mit
     dbx = _db()
     # abgelaufener Claim -> Speichern geht durch und setzt Entwurf zurueck
     dbx.pickup_protocols.update_one({"id": pid}, {"$set": {
         "status": "wird_abgeschlossen",
         "claim_bis": (JETZT - timedelta(minutes=10)).isoformat()}})
-    r = requests.put(url, headers=fahrer["h"], json={"notes": "b"}, timeout=30)
+    r = requests.put(url, headers=fahrer["h"], json={"notes": "b", "revision": rev}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     doc = dbx.pickup_protocols.find_one({"id": pid}, {"_id": 0})
     assert doc["status"] == "entwurf" and doc["notes"] == "b" and "claim_bis" not in doc
@@ -104,7 +105,7 @@ def test_protokoll_nach_prozessabbruch_wieder_speicherbar(fahrer):
     dbx.pickup_protocols.update_one({"id": pid}, {"$set": {
         "status": "wird_abgeschlossen",
         "claim_bis": (datetime.now(timezone.utc) + timedelta(minutes=3)).isoformat()}})
-    r = requests.put(url, headers=fahrer["h"], json={"notes": "c"}, timeout=30)
+    r = requests.put(url, headers=fahrer["h"], json={"notes": "c", "revision": rev}, timeout=30)
     assert r.status_code == 409 and "gerade abgeschlossen" in r.text, r.text[:200]
     doc = dbx.pickup_protocols.find_one({"id": pid}, {"_id": 0})
     assert doc["status"] == "wird_abgeschlossen" and doc["notes"] == "b"

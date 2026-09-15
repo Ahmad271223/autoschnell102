@@ -90,6 +90,8 @@ test.describe("Abholprotokoll: Freigabe und Knopfleiste", () => {
     const zustand = Object.fromEntries(tpl.template.condition_fields.map((f) =>
       [f.key, f.key === "mileage" ? "75200" : (f.options ? f.options[0] : "5/5/4/4")]));
     await h.put(`/driver/appointments/${appt.id}/protocol`, {
+      // Runde 13: ein bestehender Entwurf braucht beim Speichern seine Revision.
+      revision: tpl.protocol?.revision,
       vehicle_check: Object.fromEntries(felder.map((f) => [f.key, { status: f.options[0] }])),
       documents: Object.fromEntries(tpl.template.documents.map((d) => [d, true])),
       features: Object.fromEntries((tpl.template.features || []).map((d) => [d, true])),

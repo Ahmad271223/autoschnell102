@@ -179,8 +179,10 @@ def test_02_passwort_neu_setzen_alle_wege(welt):
     r = K.anmelden(welt["chef_nr"], PW["e"], "auth")
     assert r.status_code == 200, r.text[:200]
     welt["C"] = _kopf(r.json()["token"])
-    # Chef: PUT /admin/users/{id} mit password
+    # Runde 14: PUT setzt keine Passwoerter mehr — zweiter Wechsel ebenfalls per POST
     r = _put(f"/admin/users/{welt['chef_id']}", {"password": PW["f"]}, S)
+    assert r.status_code == 400, r.text[:200]
+    r = _post(f"/admin/users/{welt['chef_id']}/password", {"new_password": PW["f"]}, S)
     assert r.status_code == 200, r.text[:200]
     assert K.anmelden(welt["chef_nr"], PW["e"], "auth").status_code == 401
     r = K.anmelden(welt["chef_nr"], PW["f"], "auth")
@@ -190,7 +192,7 @@ def test_02_passwort_neu_setzen_alle_wege(welt):
     r = _post(f"/admin/users/{welt['sucher_id']}/password", {"new_password": PW["e"]}, S)
     assert r.status_code == 200, r.text[:200]
     assert K.anmelden(welt["sucher_nr"], PW["e"], "auth").status_code == 200
-    r = _put(f"/admin/users/{welt['sucher_id']}", {"password": PW["f"]}, S)
+    r = _post(f"/admin/users/{welt['sucher_id']}/password", {"new_password": PW["f"]}, S)
     assert r.status_code == 200, r.text[:200]
     assert K.anmelden(welt["sucher_nr"], PW["e"], "auth").status_code == 401
     assert K.anmelden(f"{welt['sucher_nr'].replace('-', ' ')}", PW["f"], "auth").status_code == 200
@@ -233,9 +235,11 @@ def test_03_passwortregeln_ueberall_klar(welt):
         ("POST", "/admin/drivers", {"display_name": f"R6 Regel F {SUF}", "email": "", "phone": ""},
          "password"),
         ("POST", f"/admin/users/{welt['chef_id']}/password", {}, "new_password"),
-        ("PUT", f"/admin/users/{welt['chef_id']}", {}, "password"),
         ("POST", f"/admin/drivers/{welt['fahrer_id']}/password", {}, "new_password"),
     )
+    # Runde 14: PUT /admin/users/{id} setzt keine Passwoerter mehr (400, eigener Endpunkt)
+    r = _put(f"/admin/users/{welt['chef_id']}", {"password": PW["a"]}, S)
+    assert r.status_code == 400 and "/admin/me/password" in r.text, r.text[:200]
     for methode, pfad, basis, feld in ziele:
         for pw in schlecht:
             body = {**basis, feld: pw}

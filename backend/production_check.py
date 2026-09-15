@@ -120,6 +120,14 @@ def pruefe_produktion(log) -> None:
     super_pw = os.environ.get("SUPER_ADMIN_PASSWORD", "").strip()
     if super_pw and (super_pw in _VERBOTENE_PASSWOERTER or len(super_pw) < 12):
         fehler.append("SUPER_ADMIN_PASSWORD ist gesetzt, aber unsicher.")
+    elif super_pw:
+        # Runde 15: dieselbe Regel wie fuer jedes Konto (Buchstabe + Ziffer/
+        # Sonderzeichen, keine Allerweltswoerter, kein Benutzername darin).
+        try:
+            from passwoerter import pruefe_passwort
+            pruefe_passwort(super_pw)
+        except ValueError as exc:
+            fehler.append(f"SUPER_ADMIN_PASSWORD ist gesetzt, aber unsicher: {exc}")
     # Ein Benutzername im Kontonummer-Muster (z.B. '10023') wuerde vom
     # Nummern-Zweig der Anmeldung verdeckt; seed_super_admin legt ihn dann
     # gar nicht an — der Betreiber waere ausgesperrt.

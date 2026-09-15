@@ -826,13 +826,49 @@ class BesitzerIn(BaseModel):
     owner_user_id: str = Field(min_length=1, max_length=100)
 
 
+_PROTOKOLL_LAEUFT = ("zur_freigabe", "freigegeben", "wird_abgeschlossen")
+
+
+async def vorgang_uebergeben(dealer_id: str, vehicle_id, von, an: str) -> dict:
+    """Runde 13 (15.09.2026, Liste 3 Nr. 1-8/20 und Liste 4 Nr. 1/2): Eine
+    Uebergabe ist der GANZE Vorgang, nicht nur das Fahrzeug — Kaufvorgaenge,
+    Vertraege und Termine des bisherigen Bearbeiters zu diesem Fahrzeug
+    (vehicle_id None: zu allen Fahrzeugen, Sucher-Loeschung) gehen an das
+    neue Konto. Sonst sah der alte Sucher weiter Termine mit Verkaeuferdaten,
+    und der neue bekam das Fahrzeug ohne den laufenden Abholprozess.
+    Der Herkunftsvermerk (uebergeben_von) bleibt fuer die Historie."""
+    if not von or von == an:
+        return {}
+    jetzt = now_iso()
+    basis: Dict[str, Any] = {"dealer_id": dealer_id}
+    if vehicle_id:
+        basis["vehicle_id"] = vehicle_id
+    z: Dict[str, int] = {}
+    r = await db.kaufvorgaenge.update_many(
+        {**basis, "user_id": von},
+        {"$set": {"user_id": an, "uebergeben_von": von, "uebergeben_am": jetzt,
+                  "updated_at": jetzt}})
+    z["kaufvorgaenge"] = r.modified_count
+    r = await db.generated_pdfs.update_many(
+        {**basis, "user_id": von},
+        {"$set": {"user_id": an, "uebergeben_von": von, "uebergeben_am": jetzt}})
+    z["vertraege"] = r.modified_count
+    r = await db.appointments.update_many(
+        {**basis, "created_by": von},
+        {"$set": {"created_by": an, "uebergeben_von": von, "uebergeben_am": jetzt}})
+    z["termine"] = r.modified_count
+    return z
+
+
 @router.put("/vehicles/{vehicle_id}/besitzer")
 async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
                             user=Depends(current_haendler)):
     """Runde 16: der Chef haengt ein Fahrzeug einem anderen Konto der Firma
     um (Sucher-Wechsel, Krankheit, Kollege hat es zuerst verglichen).
-    Termine, Snapshots, Berichte und Protokolle folgen dem Fahrzeug
-    automatisch; Vertraege bleiben bei dem Konto, das sie erstellt hat."""
+    Runde 13 (15.09.2026): mit dem Fahrzeug gehen Kaufvorgaenge, Vertraege
+    und Termine des bisherigen Bearbeiters zu diesem Fahrzeug an das neue
+    Konto (vorgang_uebergeben) — Termine, Berichte, Protokolle und Snapshots
+    folgen damit wirklich; der bisherige Bearbeiter verliert den Zugriff."""
     # Audit 13.09.2026 (#9): "id" mitprojizieren — ohne owner_user_id kam
     # sonst {} zurueck, galt als "nicht gefunden" (404), und Altbestand ohne
     # Besitzer liess sich nie zuweisen.
@@ -843,7 +879,8 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     ziel = await db.users.find_one(
         {"id": body.owner_user_id, "dealer_id": user["dealer_id"],
-         "role": {"$in": ["dealer", "sucher"]}},
+         "role": {"$in": ["dealer", "sucher"]},
+         "loeschung.status": {"$ne": "laeuft"}},      # Runde 13 (Nr. 17)
         {"_id": 0, "id": 1, "active": 1})
     if not ziel or ziel.get("active") is False:
         raise HTTPException(404, "Konto nicht gefunden oder nicht in deiner Firma")
@@ -860,6 +897,15 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     # Abgeschlossene Fahrzeuge bleiben bewusst umhaengbar (Sucher-Wechsel,
     # Loeschen eines Suchers durch den Betreiber) — Einfrieren waere eine
     # Produktentscheidung.
+    # Runde 13 (Nr. 19): waehrend ein Fahrerprotokoll zu diesem Fahrzeug beim
+    # Chef liegt, freigegeben ist oder gerade abgeschlossen wird, keine
+    # Uebergabe — sonst wechseln Rechte mitten im Abschluss.
+    if await db.pickup_protocols.count_documents(
+            {"vehicle_id": vehicle_id, "superseded": {"$ne": True},
+             "status": {"$in": list(_PROTOKOLL_LAEUFT)}}, limit=1):
+        raise HTTPException(409, "Zu diesem Fahrzeug liegt gerade ein Abholprotokoll zur "
+                                 "Freigabe bzw. im Abschluss — bitte erst abschließen, "
+                                 "dann übergeben.")
     res = await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": alt},
         {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()},
@@ -867,9 +913,12 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     if res.matched_count == 0:
         raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehaengt — "
                                  "bitte neu laden")
+    uebergabe = await vorgang_uebergeben(user["dealer_id"], vehicle_id, alt, ziel["id"])
     await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
-                              ref=vehicle_id, meta={"von": alt, "nach": ziel["id"]})
-    return {"ok": True, "owner_user_id": ziel["id"], "owner_name": namen.get(ziel["id"])}
+                              ref=vehicle_id, meta={"von": alt, "nach": ziel["id"],
+                                                    **({"uebergabe": uebergabe} if uebergabe else {})})
+    return {"ok": True, "owner_user_id": ziel["id"], "owner_name": namen.get(ziel["id"]),
+            "uebergabe": uebergabe}
 
 
 @router.put("/vehicles/manual/{vehicle_id}")

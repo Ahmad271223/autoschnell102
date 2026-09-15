@@ -7,6 +7,7 @@ import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
 import PasswortFeld from "@/components/admin/PasswortFeld";
 import { passwortProblem } from "@/lib/passwort";
 import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
+import { mitAbweichung } from "@/lib/anfrageAbweichung";
 
 /**
  * Freischaltungen (Betreiber-Modell 09/2026):
@@ -360,11 +361,11 @@ function FirmaAnlegenDialog({ request, onClose }) {
     if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
-      const { data } = await api.post("/admin/users", {
+      const { data } = await mitAbweichung((extra) => api.post("/admin/users", {
         email: f.email.trim(), password: f.password,
         company_name: f.company_name.trim(), contact_person: f.contact_person.trim(),
-        phone: f.phone.trim(), plan_type: "none", anfrage_id: request.id,
-      });
+        phone: f.phone.trim(), plan_type: "none", anfrage_id: request.id, ...extra,
+      }));
       setErgebnis({ ...data, name: f.company_name.trim(), passwort: f.password });
     } catch (e) { toast.error(errMsg(e)); }
     finally { setBusy(false); }
@@ -434,12 +435,12 @@ function KaeuferAnlegenDialog({ request, onClose }) {
     }
     setBusy(true);
     try {
-      const { data } = await api.post("/admin/buyers", {
+      const { data } = await mitAbweichung((extra) => api.post("/admin/buyers", {
         company_name: f.company_name.trim(), contact_name: f.contact_name.trim(),
         phone: f.phone.trim(), email: f.email.trim(), ust_id: f.ust_id.trim(),
         password: f.password, b2b_nachweis: nachweis,
-        ...(request?.id ? { anfrage_id: request.id } : {}),
-      });
+        ...(request?.id ? { anfrage_id: request.id } : {}), ...extra,
+      }));
       setErgebnis({ ...data, name: f.company_name.trim(), passwort: f.password });
     } catch (e) { toast.error(errMsg(e, "Käufer anlegen fehlgeschlagen")); }
     finally { setBusy(false); }

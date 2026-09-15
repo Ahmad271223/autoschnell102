@@ -217,6 +217,7 @@ def test_07_abholprotokoll_und_pdfs(welt):
         "damages_confirmed": True,
         "notes": "E2E-Testlauf"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    rev = r.json().get("revision")        # Runde 13: die App schickt die geladene Revision mit
     r = requests.post(f"{API}/driver/appointments/{welt['appt_id']}/protocol/submit",
                       headers=welt["D"], timeout=30)
     assert r.status_code == 422 and "Abschnitt" in r.text, r.text[:200]
@@ -228,6 +229,7 @@ def test_07_abholprotokoll_und_pdfs(welt):
                      headers=welt["D"], json={
         "vehicle_check": {k: {"status": antworten[k]} for k in felder},
         "documents": {d: True for d in tpl["template"]["documents"]},
+        "revision": rev,
         "features": {ft: True for ft in tpl["template"].get("features") or []},
         "keys_count": "2", "keys_expected": "2",
         "condition": zustand, "place": "Hannover", "seller_name": "E2E Verkaeufer",

@@ -104,11 +104,14 @@ export default function Fahrer() {
                   data-testid={`driver-row-${d.id}`}>
                 <td className="px-4 py-3 font-semibold">{d.name}</td>
                 <td className="px-4 py-3">
-                  <button onClick={() => copy(d.driver_code)}
-                    className="inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded-sm bg-white/5 hover:bg-white/10"
-                    title="Kopieren">
-                    {d.driver_code} <Copy size={10} />
-                  </button>
+                  {/* Sucher sehen keine Fahrer-ID und keine E-Mail (Nachpruefung 15.09.2026) */}
+                  {d.driver_code ? (
+                    <button onClick={() => copy(d.driver_code)}
+                      className="inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded-sm bg-white/5 hover:bg-white/10"
+                      title="Kopieren">
+                      {d.driver_code} <Copy size={10} />
+                    </button>
+                  ) : <span className="text-xs text-zinc-500">—</span>}
                 </td>
                 <td className="px-4 py-3 text-zinc-400 text-xs">
                   <span className="inline-flex items-center gap-1">

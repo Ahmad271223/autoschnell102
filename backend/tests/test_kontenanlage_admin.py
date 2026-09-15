@@ -53,7 +53,7 @@ API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 SUF = uuid.uuid4().hex[:8]
-PW = "KontoAnlage13!x"
+PW = "Kq4Lm9Xw2-Sicher13!x"   # Runde 14: kein Kontakt-Name ("Anlage") im Passwort
 MAIL = "e2etest-mail.de"
 
 
@@ -461,8 +461,9 @@ def test_08_anfrage_abschluss_firma_mit_und_ohne_abo_und_fahrer(welt):
     # (a) Firma plan_type none und Firma mit Abo (trial)
     for plan in ("none", "trial"):
         aid = _anfrage_einfuegen(dbx, welt, "firma", f"firma_{plan}")
+        # Runde 14: der Firmenname weicht bewusst von der Anfrage ab -> daten_geaendert
         r = _post("/admin/users", {"password": PW, "company_name": f"KA AnfrageFirma {plan} {SUF}",
-                                   "plan_type": plan, "anfrage_id": aid}, S)
+                                   "plan_type": plan, "anfrage_id": aid, "daten_geaendert": True}, S)
         assert r.status_code == 200, (plan, r.text[:300])
         d = r.json()
         welt["user_ids"].append(d["user_id"])
@@ -471,8 +472,9 @@ def test_08_anfrage_abschluss_firma_mit_und_ohne_abo_und_fahrer(welt):
         abos = dbx.subscriptions.count_documents({"dealer_id": d["dealer_id"]})
         assert abos == (0 if plan == "none" else 1), (plan, abos)
         # zweiter Aufruf mit derselben Anfrage: 409, keine zweite Firma
+        # Runde 14: der Firmenname weicht bewusst von der Anfrage ab -> daten_geaendert
         r = _post("/admin/users", {"password": PW, "company_name": f"KA AnfrageFirma {plan} {SUF}",
-                                   "plan_type": plan, "anfrage_id": aid}, S)
+                                   "plan_type": plan, "anfrage_id": aid, "daten_geaendert": True}, S)
         assert r.status_code == 409, r.text[:200]
         assert dbx.dealers.count_documents(
             {"company_name": f"KA AnfrageFirma {plan} {SUF}"}) == 1
@@ -661,7 +663,9 @@ def test_passwort_setzen_hebt_konto_sperre_auf(wegwerf_limiter):
         z["vor"] = [await RL.konto_gesperrt(nr, andere, None) for nr in nummern]
         await ADMIN.admin_user_set_password(
             "ku", ADMIN.AdminUserPasswordIn(new_password=PW), admin=sa)
-        await ADMIN.admin_update_user("ks", body={"password": PW}, admin=sa)
+        # Runde 14: Passwoerter nur noch ueber den eigenen Endpunkt (PUT lehnt ab)
+        await ADMIN.admin_user_set_password(
+            "ks", ADMIN.AdminUserPasswordIn(new_password=PW), admin=sa)
         await ADMIN.admin_driver_set_password(
             "kf", ADMIN.AdminUserPasswordIn(new_password=PW), admin=sa)
         z["nach"] = [await RL.konto_gesperrt(nr, andere, None) for nr in nummern]

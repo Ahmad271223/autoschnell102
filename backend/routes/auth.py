@@ -3,8 +3,11 @@
 Kontonummer (13.09.2026), Schritt 5: Selbst-Registrierung und Passwort-Reset
 per E-Mail gibt es nicht mehr — die Routen antworten 410 mit Hinweis, damit
 gecachte alte Oberflaechen keine 404/422 zeigen."""
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
+
+from pymongo.errors import DuplicateKeyError
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -15,7 +18,7 @@ from auth import (
     new_session_id, verify_password_async, _DUMMY_HASH,
 )
 from deps import (
-    current_user, db, get_subscription_status, now_iso,
+    current_user, db, firma_gesperrt, get_subscription_status, now_iso,
     log_activity, log_activity_sicher,
 )
 from rate_limiter import (client_ip, SlidingWindowRateLimiter, bekannte_ip_merken,
@@ -26,7 +29,8 @@ from kontonummer import (anmeldekennung, kaeufer_normalisieren, kennung_normalis
                          normalisieren, nummer_bedingung)
 
 # Zweiter Anmeldeschritt (Authenticator-Code) mit eigenem Zaehler.
-login_mfa_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login-mfa")
+login_mfa_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login-mfa",
+                                             fail_closed=True)
 
 router = APIRouter()
 
@@ -42,7 +46,8 @@ class LoginIn(BaseModel):
     E-Mail-Adresse (Schritt 5)."""
     kontonummer: Optional[str] = Field(default=None, max_length=80)
     email: Optional[str] = Field(default=None, max_length=254)
-    password: str
+    # Nachpruefung 15.09.2026: Schema-Deckel (bcrypt liest ohnehin nur 72 Bytes).
+    password: str = Field(max_length=200)
 
 
 _NUMMERN_ROLLEN = ["dealer", "sucher", "b2b_buyer"]
@@ -129,6 +134,17 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
     if not await register_limiter.check(ip):
         raise HTTPException(429, "Zu viele Anfragen von dieser IP – bitte "
                                  "später erneut versuchen.")
+    email_norm = body.email.strip().lower()
+    # Nachpruefung 15.09.2026 (Konten Nr. 6): dieselbe Adresse hat je Kontoart
+    # hoechstens EINE offene Anfrage — sonst landete derselbe Betrieb mehrfach
+    # in der Freigabeliste und konnte als zwei Konten angelegt werden. Die
+    # Antwort bleibt dieselbe (keine Auskunft, ob eine Anfrage vorliegt).
+    if await db.plan_requests.find_one({"type": "zugang", "status": "offen", "art": body.art,
+                                        "contact_email": email_norm}, {"_id": 1}):
+        await log_activity_sicher("", "", "zugang.anfrage.dublette",
+                                  meta={"firma": body.company_name, "art": body.art,
+                                        "email": email_norm, "ip": ip})
+        return {"ok": True, "hinweis": ANFRAGE_EINGEGANGEN}
     req_id = str(uuid.uuid4())
     sucher = body.sucher_anzahl if body.art == "firma" else 0
     doc = {
@@ -151,12 +167,56 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
     # nur fuer Zwischenhaendler.
     if body.gewerblich_bestaetigt:
         doc["gewerblich_bestaetigt_am"] = now_iso()
-    await db.plan_requests.insert_one(doc)
+    try:
+        await db.plan_requests.insert_one(doc)
+    except DuplicateKeyError:
+        # Teil-Unique-Index uniq_offene_zugang_anfrage: parallel eingegangene
+        # Dublette — dieselbe Antwort wie oben.
+        await log_activity_sicher("", "", "zugang.anfrage.dublette",
+                                  meta={"firma": body.company_name, "art": body.art,
+                                        "email": email_norm, "ip": ip})
+        return {"ok": True, "hinweis": ANFRAGE_EINGEGANGEN}
     await log_activity_sicher("", "", "zugang.anfrage",
                        ref=req_id, meta={"firma": body.company_name, "art": body.art,
                                          "email": body.email, "ip": ip})
-    return {"ok": True, "hinweis": "Anfrage ist eingegangen — wir melden uns "
-                                   "und schalten dein Firmen-Konto frei."}
+    return {"ok": True, "hinweis": ANFRAGE_EINGEGANGEN}
+
+
+ANFRAGE_EINGEGANGEN = ("Anfrage ist eingegangen — wir melden uns "
+                       "und schalten dein Firmen-Konto frei.")
+
+
+def mfa_pflicht_aktiv() -> bool:
+    """Nachpruefung 15.09.2026 (Anmeldung, MFA-Pflicht): dieselbe Regel wie in
+    /ready — in Produktion ist der zweite Faktor fuer den Super-Admin Pflicht
+    (MFA_PFLICHT=false nur fuer Testumgebungen). Vorher stand die Pflicht nur
+    in der Bereitschaftspruefung; die Anmeldung selbst liess ein Betreiber-
+    konto ohne MFA mit Passwort allein herein."""
+    ist_prod = os.environ.get("APP_ENV", "").strip().lower() == "production"
+    pflicht = os.environ.get("MFA_PFLICHT", "true").strip().lower() not in (
+        "0", "false", "nein", "no")
+    return ist_prod and pflicht
+
+
+def sitzungs_bedingung(user: dict) -> dict:
+    """Filter fuer das Schreiben der Sitzung: das Konto muss noch GENAU so
+    dastehen wie geprueft — gleiches Passwort, gleicher Zwei-Faktor-Zustand,
+    aktiv, nicht in Loeschung (Nachpruefung 15.09.2026, Anmeldung Nr. 1-5 und
+    MFA-Race). Ein Passwort-Reset, eine Sperre oder ein MFA-Reset zwischen
+    Pruefung und Sitzungs-Schreiben laesst keinen Token mehr entstehen."""
+    m = user.get("mfa") or {}
+    bed = {"active": True, "password_hash": user.get("password_hash"),
+           "loeschung.status": {"$ne": "laeuft"}}
+    if m.get("aktiv"):
+        bed["mfa.aktiv"] = True
+        bed["mfa.secret"] = m.get("secret")
+    else:
+        bed["mfa.aktiv"] = {"$ne": True}
+    return bed
+
+
+SITZUNG_UNGUELTIG = ("Das Konto wurde gerade geändert (Passwort, Sperre oder Zwei-Faktor) — "
+                     "bitte erneut anmelden.")
 
 
 # ---------- Endpoints ----------
@@ -217,9 +277,16 @@ async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
     festgehalten, damit ein verdraengtes Geraet erfaehrt, WER es verdraengt
     hat (deps.sitzung_beendet_grund)."""
     sid = new_session_id()
-    await db.users.update_one({"id": user["id"]}, {"$set": {
-        "current_session_id": sid, "current_session_seit": now_iso(),
-        "current_session_geraet": geraet[:60], "current_session_ip": ip}})
+    # Nachpruefung 15.09.2026: Compare-and-set auf den geprueften Kontozustand
+    # (sitzungs_bedingung) — 0 Treffer heisst: Passwort, Sperre, Loeschung oder
+    # Zwei-Faktor haben sich seit der Pruefung geaendert -> keine Sitzung.
+    r = await db.users.update_one(
+        {"id": user["id"], **sitzungs_bedingung(user)},
+        {"$set": {
+            "current_session_id": sid, "current_session_seit": now_iso(),
+            "current_session_geraet": geraet[:60], "current_session_ip": ip}})
+    if r.matched_count == 0:
+        raise HTTPException(401, SITZUNG_UNGUELTIG)
     # Kontonummer (13.09.2026): Anmeldung ist vollstaendig (beim Super-Admin
     # nach der 2FA) — diese IP gilt fuer den Konto-Limiter ab jetzt als bekannt.
     await bekannte_ip_merken(db, "users", user["id"], ip)
@@ -280,8 +347,11 @@ async def login_mfa(body: MfaLoginIn, request: Request):
         # mit demselben Code sahen vorher beide den alten Zaehler und kamen
         # beide durch. Jetzt gewinnt genau eine: nur wer den Zaehler
         # wirklich hochsetzt, bekommt eine Sitzung.
+        # Runde 15: der Verbrauch gilt nur fuer GENAU das geprueft Geheimnis —
+        # ein MFA-Reset dazwischen liesse sonst ein Teil-Objekt `mfa` neu
+        # entstehen und den Login weiterlaufen.
         res = await db.users.update_one(
-            {"id": user["id"],
+            {"id": user["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret"),
              "$or": [{"mfa.letzter_zaehler": {"$lt": zaehler}},
                      {"mfa.letzter_zaehler": {"$exists": False}}]},
             {"$set": {"mfa.letzter_zaehler": zaehler, "mfa.fehlversuche": 0}})
@@ -297,7 +367,8 @@ async def login_mfa(body: MfaLoginIn, request: Request):
         # Bedingung): der Code kann nur EINMAL durchgehen, auch bei zwei
         # gleichzeitigen Anfragen.
         res = await db.users.update_one(
-            {"id": user["id"], "mfa.wiederherstellung": h},
+            {"id": user["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret"),
+             "mfa.wiederherstellung": h},
             {"$pull": {"mfa.wiederherstellung": h}, "$set": {"mfa.fehlversuche": 0}})
         if res.modified_count == 1:
             uebrig = len([x for x in (m.get("wiederherstellung") or []) if x != h])
@@ -322,6 +393,10 @@ async def login_mfa(body: MfaLoginIn, request: Request):
                               "mfa.fehlversuche": 0}})
             await log_activity_sicher("", user["id"], "auth.login.mfa.fehlgeschlagen", meta={"ip": ip})
             raise HTTPException(401, "Code ungültig")
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 7): der Passwort-Zaehler wird erst
+    # hier, nach dem vollstaendigen zweiten Schritt, geleert.
+    await login_limiter.reset(login_schluessel(
+        ip, user.get("kontonummer") or user.get("username") or user.get("email") or ""))
     return await _sitzung_ausstellen(user, ip, geraet_kurz(request))
 
 
@@ -360,9 +435,29 @@ async def login(body: LoginIn, request: Request):
         raise HTTPException(401, LOGIN_FALSCH)
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
+    if user.get("role") == "sucher" and user.get("dealer_id") \
+            and await firma_gesperrt(user["dealer_id"]):
+        # Runde 15: gesperrter Chef = gesperrte Firma — schon HIER, nicht erst
+        # beim naechsten Request (vorher: Token + "auth.login"-Audit, dann 403).
+        raise HTTPException(403, "Die Firma ist gesperrt — bitte den Administrator kontaktieren.")
+    mfa_aktiv = bool((user.get("mfa") or {}).get("aktiv"))
+    # Gnadenfrist nach dem Notfall-Abschalten (scripts/mfa_pruefen.py --abschalten):
+    # 30 Minuten, um sich anzumelden und den zweiten Faktor neu einzurichten.
+    gnadenfrist = str((user.get("mfa") or {}).get("pflicht_ausgesetzt_bis") or "") > now_iso()
+    if user.get("is_super_admin") and not mfa_aktiv and mfa_pflicht_aktiv() and not gnadenfrist:
+        # Nachpruefung 15.09.2026 (Anmeldung, MFA-Pflicht): in Produktion kein
+        # Betreiber-Login ohne zweiten Faktor — /ready meldet den Zustand nur.
+        await log_activity_sicher("", user["id"], "auth.login.mfa_fehlt", meta={"ip": ip})
+        raise HTTPException(403, "Für den Betreiber ist die Zwei-Faktor-Anmeldung Pflicht — "
+                                 "bitte zuerst über die Konsole einrichten "
+                                 "(python scripts/mfa_pruefen.py).")
     # Passwort stimmte: Zaehler dieses Kontos leeren, damit fruehere
     # Fehlversuche eine richtige Anmeldung spaeter nicht blockieren.
-    await login_limiter.reset(schluessel)
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 7): bei Zwei-Faktor erst nach
+    # dem vollstaendigen zweiten Schritt (login_mfa) — ein bekanntes Passwort
+    # allein bringt keine unbegrenzten Zwischen-Token.
+    if not mfa_aktiv:
+        await login_limiter.reset(schluessel)
     # Kontonummer (13.09.2026): den Konto-Zaehler (login_konto_limiter) bei
     # Erfolg bewusst NICHT leeren — sonst bekaeme ein Angreifer, der die
     # Nummer ueber viele IPs probiert, mit jeder Anmeldung des echten Nutzers
@@ -380,7 +475,11 @@ async def login(body: LoginIn, request: Request):
 
 @router.post("/auth/logout")
 async def logout(user=Depends(current_user)):
-    await db.users.update_one({"id": user["id"]}, {"$set": {"current_session_id": None}})
+    # Nachpruefung 15.09.2026 (Anmeldung, Logout-Race): nur die EIGENE Sitzung
+    # beenden — eine inzwischen neuere Anmeldung (anderes Geraet) bleibt.
+    await db.users.update_one(
+        {"id": user["id"], "current_session_id": user.get("current_session_id")},
+        {"$set": {"current_session_id": None}})
     await log_activity_sicher(user.get("dealer_id", ""), user["id"], "auth.logout",
                        meta={"email": user.get("email", "")})
     return {"ok": True}

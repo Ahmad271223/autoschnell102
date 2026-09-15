@@ -26,7 +26,7 @@ API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 SUF = uuid.uuid4().hex[:8]
-PW = "SucheTest123!"
+PW = "Kq4Lm9Xw2-Sicher!"   # Runde 14: kein Firmenname ("Suche") im Passwort
 
 
 def _db():

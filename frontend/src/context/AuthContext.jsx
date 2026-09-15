@@ -95,13 +95,13 @@ export const AuthProvider = ({ children }) => {
       // Login-Seite fragt jetzt den Code aus der Authenticator-App ab.
       return { mfa_erforderlich: true, mfa_token: data.mfa_token };
     }
-    tokenSetzen(TOKEN_APP, data.token);
+    tokenSetzen(TOKEN_APP, data.token, { nurSitzung: !!data.user?.is_super_admin });
     await refresh();
     return data.user;
   };
   const loginMfa = async (mfaToken, code) => {
     const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code });
-    tokenSetzen(TOKEN_APP, data.token);
+    tokenSetzen(TOKEN_APP, data.token, { nurSitzung: !!data.user?.is_super_admin });
     await refresh();
     return data.user;
   };

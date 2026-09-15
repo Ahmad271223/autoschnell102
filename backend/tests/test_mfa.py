@@ -107,6 +107,14 @@ def test_01_einrichten_und_aktivieren(welt):
     assert requests.post(f"{API}/admin/me/mfa/aktivieren", headers=S, json={"code": "000000"}, timeout=30).status_code == 400
     r = requests.post(f"{API}/admin/me/mfa/aktivieren", headers=S, json={"code": mfa.totp(secret)}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    # Runde 15: die Aktivierung beendet die alte Sitzung ohne zweiten Faktor —
+    # dieser Aufruf bekommt ein neues Token, das alte ist wertlos.
+    alt = dict(S)
+    assert r.json().get("token"), "neues Token nach der Aktivierung"
+    S = welt["S"] = _hdr(r.json()["token"])
+    assert requests.get(f"{API}/auth/me", headers=alt, timeout=30).status_code == 401
+    # aktive MFA wird nicht aus der Sitzung heraus ersetzt
+    assert requests.post(f"{API}/admin/me/mfa/einrichten", headers=S, timeout=30).status_code == 409
     codes = r.json()["wiederherstellungscodes"]
     assert len(codes) == 8 and all("-" in c for c in codes)
     welt["codes"] = codes
@@ -257,7 +265,13 @@ def test_06_einrichten_mehrfach_liefert_dasselbe_geheimnis():
         r = requests.post(f"{API}/admin/me/mfa/aktivieren", headers=H,
                           json={"code": _frischer_code(erstes, uid)}, timeout=30)
         assert r.status_code == 200, r.text[:200]
-        # Nach der Aktivierung wird ein NEUES Geheimnis erzeugt (Neueinrichtung)
+        H = _hdr(r.json()["token"])             # Runde 15: neue Sitzung nach der Aktivierung
+        # Runde 15: eine aktive MFA wird nicht aus der Sitzung heraus ersetzt —
+        # erst mit dem aktuellen Code abschalten, dann entsteht ein NEUES Geheimnis.
+        assert requests.post(f"{API}/admin/me/mfa/einrichten", headers=H, timeout=30).status_code == 409
+        r = requests.post(f"{API}/admin/me/mfa/deaktivieren", headers=H,
+                          json={"code": _frischer_code(erstes, uid)}, timeout=30)
+        assert r.status_code == 200, r.text[:200]
         drittes = requests.post(f"{API}/admin/me/mfa/einrichten", headers=H, timeout=30).json()["secret"]
         assert drittes != erstes
     finally:

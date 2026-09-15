@@ -84,19 +84,34 @@ async def kunden_nr_sicherstellen(db, dealer_id: str) -> dict:
     for _ in range(_VERSUCHE):
         if isinstance(firma.get("kunden_nr"), int):
             return firma
-        try:
-            await db.dealers.update_one(
-                {"id": dealer_id, "kunden_nr": {"$exists": False}},
-                {"$set": {"kunden_nr": await naechste_nummer(db)}})
-        except DuplicateKeyError as exc:
-            if "kunden_nr" not in str(exc):
-                raise
+        wert = firma.get("kunden_nr")
+        if isinstance(wert, float) and wert.is_integer():
+            # Restore/Import als Gleitkommazahl (1005.0): nur der Typ ist falsch.
+            await db.dealers.update_one({"id": dealer_id, "kunden_nr": wert},
+                                        {"$set": {"kunden_nr": int(wert)}})
+        else:
+            try:
+                # Runde 15: auch null oder ein falscher Typ ("1005") wird
+                # repariert — vorher griff nur $exists:false, und ein neuer
+                # Sucher scheiterte an "Kundennummer konnte nicht vergeben werden".
+                await db.dealers.update_one(
+                    {"id": dealer_id, **KUNDEN_NR_FEHLT},
+                    {"$set": {"kunden_nr": await naechste_nummer(db)}})
+            except DuplicateKeyError as exc:
+                if "kunden_nr" not in str(exc):
+                    raise
         firma = await db.dealers.find_one({"id": dealer_id}, proj) or {}
         if not firma:
             raise HTTPException(404, "Firma nicht gefunden")
     if isinstance(firma.get("kunden_nr"), int):
         return firma
     raise HTTPException(409, "Kundennummer der Firma konnte nicht vergeben werden")
+
+
+# Firma ohne brauchbare Kundennummer: Feld fehlt, null oder kein Integer
+# (Runde 15 — vorher nur $exists:false).
+KUNDEN_NR_FEHLT = {"$or": [{"kunden_nr": {"$exists": False}},
+                           {"kunden_nr": {"$not": {"$type": ["int", "long"]}}}]}
 
 
 async def _hoechster_zusatz(db, kunden_nr: int) -> int:
@@ -165,6 +180,22 @@ async def firma_einfuegen(db, doc: dict, nummer_ziehen=None) -> int:
     raise RuntimeError("Firma: keine freie Kundennummer")  # pragma: no cover
 
 
+async def _chef_aufraeumen(db, user_id: str) -> None:
+    """Runde 15 (15.09.2026): Chef-Konto nach einem Fehler NACH dem User-Insert
+    entfernen — vorher blieb ein aktiver Chef ohne Firma zurueck (anmeldbar,
+    ein Retry legte eine zweite Firma an)."""
+    try:
+        await db.users.delete_one({"id": user_id, "role": "dealer"})
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Chef-Konto %s nach gescheiterter Anlage nicht entfernt", user_id)
+        try:
+            from betrieb import alarm
+            await alarm(db, "firmenanlage_rollback_offen", ref=user_id,
+                        sammlung="users", fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _firma_aufraeumen(db, dealer_id: str) -> None:
     """Pruefung 14.09.2026 (M8): Firmen-Dokument nach einem gescheiterten
     Chef-Insert entfernen; scheitert auch das, Betriebsalarm statt stiller
@@ -198,19 +229,29 @@ async def firma_mit_chef_anlegen(db, firma: dict, chef: dict) -> dict:
                          "dealer_id": firma_doc["id"]})
         chef_doc.setdefault("role", "dealer")
         chef_doc.setdefault("current_session_id", None)
+        chef_geschrieben = False
         try:
             await db.users.insert_one(chef_doc)
+            chef_geschrieben = True
             # Runde 12 (15.09.2026, Nr. 1): der Hauptaccount steht ab jetzt im
             # Firmen-Dokument (dealers.user_id) — current_chef prueft dagegen.
-            await db.dealers.update_one({"id": firma_doc["id"]},
-                                        {"$set": {"user_id": chef_doc["id"]}})
+            # Runde 15: der Write MUSS die Firma treffen — verschwand sie
+            # dazwischen, bleibt kein Chef ohne Firma zurueck.
+            r = await db.dealers.update_one({"id": firma_doc["id"]},
+                                            {"$set": {"user_id": chef_doc["id"]}})
+            if r.matched_count == 0:
+                raise RuntimeError("Firma waehrend der Anlage verschwunden")
         except DuplicateKeyError as e:
             await _firma_aufraeumen(db, firma_doc["id"])
+            if chef_geschrieben:
+                await _chef_aufraeumen(db, chef_doc["id"])
             if ist_kontonummer_dublette(e) and versuch < _VERSUCHE - 1:
                 continue
             raise
         except Exception:
             await _firma_aufraeumen(db, firma_doc["id"])
+            if chef_geschrieben:
+                await _chef_aufraeumen(db, chef_doc["id"])
             raise
         return {"user_id": chef_doc["id"], "dealer_id": firma_doc["id"],
                 "kunden_nr": nr, "kontonummer": str(nr)}

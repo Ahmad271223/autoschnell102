@@ -94,9 +94,17 @@ def main() -> int:
         # Geheimnis, Wiederherstellungscodes und Sperre komplett entfernen;
         # laufende Sitzung beenden (das Zwischen-Token der Anmeldung passt
         # danach ohnehin nicht mehr zum Kontozustand).
+        # Runde 14 (15.09.2026): in Produktion laesst /auth/login den Super-Admin
+        # ohne Zwei-Faktor nicht mehr herein — nach dem Notfall-Abschalten gilt
+        # 30 Minuten Gnadenfrist (mfa.pflicht_ausgesetzt_bis), um sich mit
+        # Passwort anzumelden und den zweiten Faktor neu einzurichten.
+        from datetime import datetime, timedelta, timezone
+        frist = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         res = db.users.update_one({"id": nutzer["id"]},
-                                  {"$unset": {"mfa": ""},
-                                   "$set": {"current_session_id": None}})
+                                  {"$set": {"mfa": {"aktiv": False, "pflicht_ausgesetzt_bis": frist},
+                                            "current_session_id": None}})
+        print(f"Gnadenfrist ohne Zwei-Faktor bis {frist[:16].replace('T', ' ')} UTC — "
+              "jetzt anmelden und den zweiten Faktor neu einrichten.")
         db.activity_logs.insert_one({
             "id": __import__("uuid").uuid4().hex, "dealer_id": "", "user_id": nutzer["id"],
             "action": "auth.mfa.abgeschaltet.betreiber",

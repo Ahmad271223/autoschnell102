@@ -26,7 +26,7 @@ from routes.auth import geraet_kurz  # noqa: E402
 BASE = (os.environ.get("TEST_BASE_URL") or "http://localhost:8001").rstrip("/")
 API = f"{BASE}/api"
 SUF = uuid.uuid4().hex[:8]
-PW = "SitzungTest123!x"
+PW = "Kq4Lm9Xw2-Sicher-Sm!"
 
 
 class _Req:

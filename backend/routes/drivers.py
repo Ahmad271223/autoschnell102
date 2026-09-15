@@ -1,6 +1,7 @@
 """Driver endpoints: dealer-driver linking + standalone driver-app accounts."""
 import base64
 import hashlib
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -47,7 +48,8 @@ class DriverAccountLogin(BaseModel):
     als alter Feldname (keine Suche per E-Mail-Adresse mehr, Schritt 5)."""
     kontonummer: Optional[str] = Field(default=None, max_length=80)
     email: Optional[str] = Field(default=None, max_length=254)
-    password: str
+    # Nachpruefung 15.09.2026: Schema-Deckel (bcrypt liest ohnehin nur 72 Bytes).
+    password: str = Field(max_length=200)
 
 
 class DriverProfileUpdate(BaseModel):
@@ -82,7 +84,8 @@ class DriverStatusIn(BaseModel):
 class DriverZuteilungIn(BaseModel):
     """Fahrer-App: zugeteilte Fahrt annehmen oder ablehnen (09/2026)."""
     action: Literal["annehmen", "ablehnen"]
-    grund: Optional[str] = None
+    # Nachpruefung 15.09.2026 (Fahrer Nr. 13): Deckel schon im Schema.
+    grund: Optional[str] = Field(default=None, max_length=500)
     # Runde 12 (15.09.2026, Nr. 9): Stand (updated_at) der angezeigten Fahrt —
     # die Zusage gilt fuer genau diese Daten.
     stand: Optional[str] = None
@@ -106,6 +109,21 @@ class PickupReportIn(BaseModel):
     fuel_level: Optional[Literal["leer", "1/4", "1/2", "3/4", "voll"]] = None
     deviations: list[DeviationIn] = Field(default_factory=list, max_length=30)
     notes: str = Field(default="", max_length=5000)
+
+    @field_validator("deviations")
+    @classmethod
+    def _fotos_gesamt(cls, v):
+        # Nachpruefung 15.09.2026 (Fahrer Nr. 11/12): 30 x 8 Mio. Zeichen waren
+        # ein legitimer 240-MB-Request. Die App verkleinert auf 2000 px
+        # (~1 Mio. Zeichen je Foto); gesamt hoechstens ~30 MB Base64.
+        gesamt = sum(len(d.photo_b64 or "") for d in v)
+        if gesamt > FOTOS_GESAMT_MAX:
+            raise ValueError("Fotos insgesamt zu groß (max. 30 MB) — bitte weniger "
+                             "oder kleinere Fotos anhängen")
+        return v
+
+
+FOTOS_GESAMT_MAX = 40_000_000
 
 
 # ---------- Driver code generation & auth ----------
@@ -245,13 +263,34 @@ async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
 #   DEALER → FAHRER  (Händler verwaltet seine Fahrer-Liste
 #   über die öffentlichen Fahrer-Codes der Fahrer-Accounts)
 # =========================================================
-def _fahrer_eintrag(da: dict, link: dict) -> dict:
-    """Fahrer-Account + Firmen-Verknuepfung zu EINEM Listeneintrag."""
+_PLZ_ORT = re.compile(r"\b(\d{5})\s+([^\d,]{2,60}?)\s*(?:,|$)")
+
+
+def ort_ohne_strasse(adresse) -> str:
+    """Nachpruefung 15.09.2026 (Fahrer Nr. 1/2): Adresse vor der Annahme auf
+    'PLZ Ort' kuerzen. Ohne PLZ: nur ein reiner Ortsname (keine Ziffern)
+    bleibt, sonst der letzte Kommateil; im Zweifel nichts."""
+    s = " ".join(str(adresse or "").split())
+    if not s:
+        return ""
+    m = _PLZ_ORT.search(s)
+    if m:
+        return f"{m.group(1)} {m.group(2).strip()}"
+    if not any(c.isdigit() for c in s):
+        return s
+    teile = [t.strip() for t in s.split(",") if t.strip()]
+    return teile[-1] if len(teile) > 1 and not any(c.isdigit() for c in teile[-1]) else ""
+
+
+def _fahrer_eintrag(da: dict, link: dict, voll: bool = True) -> dict:
+    """Fahrer-Account + Firmen-Verknuepfung zu EINEM Listeneintrag.
+    voll=False (Sucher, Nachpruefung 15.09.2026 Fahrer Nr. 14): ohne E-Mail und
+    Fahrer-ID — zum Zuteilen reichen Name und Status."""
     return {
         "id": da["id"],
-        "driver_code": da.get("driver_code"),
+        "driver_code": da.get("driver_code") if voll else None,
         "name": link.get("display_name") or da.get("display_name"),
-        "email": da.get("email"),
+        "email": da.get("email") if voll else None,
         "active": da.get("active", True),
         "added_at": link.get("added_at"),
     }
@@ -354,7 +393,8 @@ async def list_drivers(user=Depends(current_firma), response: Response = None):
         async for da in db.driver_accounts.find(
                 {"id": {"$in": ids}}, {"_id": 0, "password_hash": 0}):
             konten[da["id"]] = da
-    out = [_fahrer_eintrag(konten[l["driver_account_id"]], l)
+    voll = user.get("role") == "dealer"
+    out = [_fahrer_eintrag(konten[l["driver_account_id"]], l, voll=voll)
            for l in links if l.get("driver_account_id") in konten]
     out.sort(key=lambda d: (d.get("name") or "").lower())
     return out
@@ -618,11 +658,25 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     # ohnehin frei; der Zaehler laeuft mit dem Fenster ab, vorher hebt nur der
     # Betreiber die Sperre auf (Passwort setzen, anmeldesperre_aufheben.py).
     # Rotate session ID on every login to invalidate previous tokens.
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 2/5): Compare-and-set auf den
+    # geprueften Zustand — nach Passwort-Reset, Sperre oder Loeschung zwischen
+    # Pruefung und Schreiben entsteht keine Sitzung mehr.
     sid = str(uuid.uuid4())
-    await db.driver_accounts.update_one(
-        {"id": da["id"]}, {"$set": {"current_session_id": sid}},
+    r = await db.driver_accounts.update_one(
+        {"id": da["id"], "password_hash": da.get("password_hash"),
+         "active": {"$ne": False}, "loeschung.status": {"$ne": "laeuft"}},
+        {"$set": {"current_session_id": sid}},
     )
+    if r.matched_count == 0:
+        from routes.auth import SITZUNG_UNGUELTIG
+        raise HTTPException(401, SITZUNG_UNGUELTIG)
     await bekannte_ip_merken(db, "driver_accounts", da["id"], ip)
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 14): einheitliches Login-Audit.
+    from routes.auth import geraet_kurz
+    await log_activity_sicher("", da["id"], "auth.login",
+                              meta={"kontonummer": da.get("kontonummer") or "",
+                                    "art": "fahrer", "ip": ip,
+                                    "geraet": geraet_kurz(request)[:60]})
     token = create_driver_token(da["id"], sid)
     return {
         "token": token,
@@ -639,8 +693,10 @@ async def driver_login(body: DriverAccountLogin, request: Request):
 async def driver_logout(driver=Depends(current_driver)):
     """Sitzung serverseitig beenden (Runde 5): vorher loeschte die App nur
     den lokalen Token — ein kopierter Token blieb bis zum Ablauf gueltig."""
+    # Nachpruefung 15.09.2026 (Logout-Race): nur die EIGENE Sitzung beenden.
     await db.driver_accounts.update_one(
-        {"id": driver["id"]}, {"$set": {"current_session_id": None}})
+        {"id": driver["id"], "current_session_id": driver.get("current_session_id")},
+        {"$set": {"current_session_id": None}})
     return {"ok": True}
 
 
@@ -734,12 +790,27 @@ async def driver_change_password(body: DriverPasswordIn,
         raise HTTPException(400, "Aktuelles Passwort ist falsch")
     if body.current_password == body.new_password:
         raise HTTPException(400, "Das neue Passwort muss sich vom alten unterscheiden")
-    await db.driver_accounts.update_one(
-        {"id": driver["id"]},
+    from passwoerter import persoenliche_werte, pruefe_passwort
+    try:
+        pruefe_passwort(body.new_password, persoenlich=persoenliche_werte(driver))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 12): kein Passwort fuer ein Konto
+    # in laufender Loeschung; CAS auf den geprueften Hash.
+    r = await db.driver_accounts.update_one(
+        {"id": driver["id"], "password_hash": konto.get("password_hash"),
+         "loeschung.status": {"$ne": "laeuft"}},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   "current_session_id": None, "updated_at": now_iso()}})
+    if r.matched_count == 0:
+        raise HTTPException(409, "Das Passwort wurde gerade anderweitig geändert oder das "
+                                 "Konto wird gelöscht — bitte neu anmelden.")
     await log_activity_sicher("", driver["id"], "fahrer.passwort.geaendert")
-    return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden."}
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 13): angesammelte Fehlversuche
+    # blockieren die naechste Anmeldung mit dem neuen Passwort nicht.
+    from routes.admin import _konto_sperre_aufheben
+    sperre = await _konto_sperre_aufheben(driver)
+    return {"ok": True, "hinweis": "Passwort geändert – bitte neu anmelden.", **sperre}
 
 
 def _termin_offen_oder_409(appt: dict) -> None:
@@ -751,7 +822,11 @@ def _termin_offen_oder_409(appt: dict) -> None:
 @router.get("/driver/appointments")
 async def driver_appointments(driver=Depends(current_driver),
                               response: Response = None):
-    """Alle Termine (aller Händler), die diesem Fahrer-Account zugewiesen sind."""
+    """Alle Termine (aller Händler), die diesem Fahrer-Account zugewiesen sind.
+    Nachpruefung 15.09.2026 (Fahrer Nr. 1/2): VOR der Annahme nur PLZ und Ort —
+    Strasse, Name und Telefon des Verkaeufers gibt es erst nach dem Annehmen
+    (dieselbe Regel wie Abholauftrag-PDF und Protokoll)."""
+    from routes.protocols import ZUTEILUNG_OHNE_ZUGRIFF
     # Nur Firmen, in deren Fahrerliste der Fahrer AKTUELL steht: nach dem
     # Entfernen durch den Haendler verschwinden dessen Termine aus der App
     # (Pruefbericht 09/2026, siehe _zugriff_pruefen).
@@ -868,17 +943,24 @@ async def driver_appointments(driver=Depends(current_driver),
         photos = [str(p) for p in photos if p][:20]
 
         d_info = dealers.get(a.get("dealer_id")) or {}
+        # Alt-Termine ohne Feld gelten als angenommen (Rueckwaertskompatibel).
+        # Runde 13 (Liste 4 Nr. 7): fehlende Zuteilung entsteht nur durch
+        # direkte Datenbankeingriffe — cleanup_service.fahrer_verknuepfung_
+        # abgleichen setzt sie binnen einer Stunde auf "offen".
+        zut = a.get("zuteilung") or "angenommen"
+        vor_annahme = zut in ZUTEILUNG_OHNE_ZUGRIFF
         out.append({
             "id": a.get("id"),
             "title": a.get("title"),
             "pickup_date": a.get("pickup_date"),
             "pickup_time": a.get("pickup_time"),
-            "pickup_address": a.get("pickup_address"),
-            "seller_name": a.get("seller_name"),
-            "seller_phone": a.get("seller_phone"),
+            "pickup_address": (ort_ohne_strasse(a.get("pickup_address")) if vor_annahme
+                               else a.get("pickup_address")),
+            "seller_name": None if vor_annahme else a.get("seller_name"),
+            "seller_phone": None if vor_annahme else a.get("seller_phone"),
+            "kontakt_nach_annahme": vor_annahme,
             "status": a.get("status", "offen"),
-            # Alt-Termine ohne Feld gelten als angenommen (Rueckwaertskompatibel)
-            "zuteilung": a.get("zuteilung") or "angenommen",
+            "zuteilung": zut,
             "notes": a.get("notes"),
             "contract_id": a.get("contract_id"),
             "vehicle_id": vid,
@@ -902,6 +984,23 @@ async def driver_appointments(driver=Depends(current_driver),
             "beweis_id": beweis_map.get(schluessel),
         })
     return out
+
+
+ERSTBERICHT_RESERVIERUNG_MIN = 10
+
+
+async def _erstbericht_reservieren(appt_id: str, driver_id: str):
+    """Atomare Reservierung des Erstberichts. Nachpruefung 15.09.2026 (Fahrer
+    Nr. 5/6): die Reservierung ist ein Lease — stirbt der Prozess nach der
+    Reservierung (kein finally), verfaellt sie nach ERSTBERICHT_RESERVIERUNG_MIN
+    Minuten; vorher blieb der Fahrer dauerhaft bei 409."""
+    frist = (datetime.now(timezone.utc)
+             - timedelta(minutes=ERSTBERICHT_RESERVIERUNG_MIN)).isoformat()
+    return await db.appointments.find_one_and_update(
+        {"id": appt_id, "driver_id": driver_id,
+         "$or": [{"erstbericht_reserviert_at": {"$exists": False}},
+                 {"erstbericht_reserviert_at": {"$lt": frist}}]},
+        {"$set": {"erstbericht_reserviert_at": now_iso()}})
 
 
 @router.get("/driver/appointments/{appt_id}/pickup-order.pdf")
@@ -1120,7 +1219,10 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         return {"ok": True, "status": body.status, "unveraendert": True,
                 "auto_cleanup_days": 7 if body.status == "abgeholt" else 14}
     _termin_offen_oder_409(appt)
-    if appt.get("zuteilung") == "offen":
+    # Runde 13 (Liste 4 Nr. 8): eine offene oder abgelehnte Zuteilung laesst
+    # sich nicht abschliessen; fehlende Zuteilung (nur per Datenbankeingriff)
+    # setzt der Aufraeumlauf binnen einer Stunde auf "offen".
+    if (appt.get("zuteilung") or "angenommen") != "angenommen":
         raise HTTPException(409, "Bitte zuerst die Fahrt annehmen (oder ablehnen).")
     # Vereinheitlichter Abschluss: "abgeholt" gibt es NUR mit unterschriebenem
     # Abholprotokoll (Beweiskette: Zustand + beide Unterschriften). Der alte
@@ -1154,7 +1256,8 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     # greift der alte Fahrer-Request nicht mehr; mit `stand` zusaetzlich exakt
     # der angezeigte Stand.
     status_filt: Dict[str, Any] = {"id": appt_id, "driver_id": driver["id"],
-                                   "status": appt.get("status"), "zuteilung": {"$ne": "offen"}}
+                                   "status": appt.get("status"),
+                                   "zuteilung": {"$nin": ["offen", "abgelehnt"]}}
     if getattr(body, "stand", None):
         status_filt["updated_at"] = body.stand
     res = await db.appointments.update_one(status_filt, [{"$set": update}])
@@ -1326,10 +1429,7 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         # ATOMARE Reservierung des Erstberichts (Runde 5): zwei parallele
         # Erstanfragen bestanden vorher beide die Vorpruefung, die zweite
         # wurde als "Korrekturversion" gespeichert. Genau EINE gewinnt.
-        res = await db.appointments.find_one_and_update(
-            {"id": appt_id, "driver_id": driver["id"],
-             "erstbericht_reserviert_at": {"$exists": False}},
-            {"$set": {"erstbericht_reserviert_at": now_iso()}})
+        res = await _erstbericht_reservieren(appt_id, driver["id"])
         vorhanden = await db.pickup_reports.count_documents(
             {"appointment_id": appt_id})
         if res is None or vorhanden or not frisch:
@@ -1475,6 +1575,14 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                               "driver_name": "Fahrer (gelöscht)"}})
         except Exception:  # noqa: BLE001
             log.exception("Nachpruefung Konto-Loeschung nach Bericht %s", report_id)
+            # Nachpruefung 15.09.2026 (Fahrer Nr. 9/10): Marker statt Fail-open —
+            # cleanup_service.abholberichte_pseudonym_nachholen holt es nach.
+            try:
+                await betrieb.alarm(db, "abholbericht_pseudonym_offen", ref=report_id,
+                                    driver_id=driver["id"])
+            except Exception:  # noqa: BLE001
+                log.exception("Alarm abholbericht_pseudonym_offen fuer %s nicht gesetzt",
+                              report_id)
     finally:
         if not erfolg:
             # Rollback (Nr. 36/37/43): Reservierung loesen, Dateien

@@ -52,6 +52,8 @@ export function passwortProblem(pw) {
   if (!/[0-9]/.test(s) && !/[^A-Za-z0-9]/.test(s)) {
     return "Passwort braucht mindestens eine Ziffer oder ein Sonderzeichen";
   }
+  // Nachpruefung 15.09.2026: nur Ziffern (5837294615) reichen nicht.
+  if (!/\p{L}/u.test(s)) return "Passwort braucht mindestens einen Buchstaben";
   if (new Set(s).size < 3) return "Passwort ist zu einfach (immer dasselbe Zeichen)";
   return "";
 }
@@ -64,7 +66,9 @@ export function passwortProblem(pw) {
 export function sperreHinweis(daten) {
   const d = daten || {};
   if (d.sperre_aufgehoben) return " Die Anmeldesperre wurde aufgehoben.";
-  if (d.unklar) return " (Stand der Anmeldesperre konnte nicht gelesen werden.)";
+  if (d.unklar) {
+    return ` ${d.hinweis || "Stand der Anmeldesperre konnte nicht gelesen werden."}`;
+  }
   if (Number(d.fehlversuche) > 0) {
     return ` ${d.fehlversuche} Fehlversuch(e) gelöscht — eine Sperre bestand nicht.`;
   }

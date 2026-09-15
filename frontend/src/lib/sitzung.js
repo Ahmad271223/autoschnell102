@@ -80,10 +80,17 @@ export function anmeldeartVormerken(key) {
 }
 
 /** Nach einer Anmeldung: dieser Tab UND "letzte Anmeldung". */
-export function tokenSetzen(key, wert) {
+export function tokenSetzen(key, wert, { nurSitzung = false } = {}) {
   sicher(() => window.sessionStorage.removeItem(abgemeldetKey(key)));
   sicher(() => window.sessionStorage.setItem(key, wert));
-  sicher(() => window.localStorage.setItem(key, wert));
+  // Runde 15 (15.09.2026): das Betreiber-Token (Super-Admin) bleibt nur in
+  // diesem Tab (sessionStorage) — es ueberlebt keinen Browser-Neustart und
+  // liegt nicht dauerhaft fuer jedes Skript derselben Origin bereit.
+  if (nurSitzung) {
+    sicher(() => window.localStorage.removeItem(key));
+  } else {
+    sicher(() => window.localStorage.setItem(key, wert));
+  }
   sicher(() => window.localStorage.setItem(LETZTE_ANMELDUNG, key));
 }
 

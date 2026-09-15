@@ -243,7 +243,8 @@ def test_04_chef_haengt_fahrzeug_um_sucher_nicht(welt):
 
     r, v, log, status_fremd, r2 = welt.run(lauf())
     assert r["ok"] and r["owner_name"] == "Ben B" and v["owner_user_id"] == w.b["id"]
-    assert log["ref"] == vid and log["meta"] == {"von": w.a["id"], "nach": w.b["id"]}
+    assert log["ref"] == vid and log["meta"]["von"] == w.a["id"] and log["meta"]["nach"] == w.b["id"]
+    assert "uebergabe" in log["meta"]          # Runde 13: Umfang der Uebergabe im Audit
     assert status_fremd == 404
     assert r2.get("unveraendert") is True
     # Route ist Chefsache (current_haendler)

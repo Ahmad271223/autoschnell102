@@ -221,17 +221,27 @@ async def fuer_termin(appt: dict) -> Optional[dict]:
 
 
 async def status_setzen(kaufvorgang_id: str, status: str, *, user: Optional[dict] = None,
-                        appointment_id=..., extra: Optional[dict] = None) -> Optional[dict]:
+                        appointment_id=..., extra: Optional[dict] = None,
+                        von: Optional[str] = None) -> Optional[dict]:
     """Status des Vorgangs setzen und den Fahrzeugstatus neu zusammenfassen.
-    `appointment_id` nur mitgeben, wenn er sich aendert (auch None)."""
+    `appointment_id` nur mitgeben, wenn er sich aendert (auch None).
+    Runde 13 (Liste 3 Nr. 14): mit `von` nur, wenn der Vorgang noch diesen
+    Ausgangsstatus hat (Compare-and-Set) — sonst None, der zweite Folgeschritt
+    ueberschreibt den ersten nicht mehr still."""
     if status not in STATUS:
         raise ValueError(f"unbekannter Kaufvorgang-Status {status!r}")
     setzen: Dict[str, Any] = {"status": status, "updated_at": now_iso(), **(extra or {})}
     if appointment_id is not ...:
         setzen["appointment_id"] = appointment_id
+    filt: Dict[str, Any] = {"id": kaufvorgang_id}
+    if von is not None:
+        filt["status"] = von
     doc = await db.kaufvorgaenge.find_one_and_update(
-        {"id": kaufvorgang_id}, {"$set": setzen},
+        filt, {"$set": setzen},
         projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    if doc is None and von is not None:
+        log.warning("Kaufvorgang %s: Status %s -> %s nicht gesetzt (Ausgangsstatus inzwischen anders)",
+                    kaufvorgang_id, von, status)
     if doc:
         # Phase 2 (2.4, E7/G4): Ergebnis der Zusammenfassung nicht mehr
         # verwerfen — None heisst "Fahrzeug stimmt noch nicht", Merker setzen.
@@ -263,7 +273,7 @@ async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
         # nicht den Kauf). Vorher fiel der Vorgang auf "Abholung geplant".
         neu = "abgeholt"
     if kv.get("status") != neu:
-        await status_setzen(kv["id"], neu, user=user)
+        await status_setzen(kv["id"], neu, user=user, von=kv.get("status"))
         return True
     # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
     # Zusammenfassung kann beim letzten Mal gescheitert sein (wird dort

@@ -1070,7 +1070,7 @@ Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`).
 - App verloren: ein anderer Super-Admin setzt unter **Nutzer → 2FA zurücksetzen** die Zwei-Faktor-Anmeldung zurück (Sitzung wird beendet).
 - **Ausgesperrt („Code ungültig“, obwohl er vorher passte):** erst mit einem **Wiederherstellungscode** im Code-Feld anmelden. Sonst auf dem Server prüfen, ob die Uhr der App oder ein fremdes Geheimnis schuld ist:
   `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --code 123456`
-  (nur lesend). Notfall ohne Wiederherstellungscode — Zwei-Faktor abschalten, dann mit Benutzername + Passwort anmelden und neu einrichten:
+  (nur lesend). Notfall ohne Wiederherstellungscode — Zwei-Faktor abschalten, dann **innerhalb von 30 Minuten** mit Benutzername + Passwort anmelden und neu einrichten (danach verlangt die Anmeldung in Produktion wieder den zweiten Faktor, Runde 14):
   `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --abschalten --ja`
 - `/api/ready` und der Bereich **Betrieb** zeigen, welche Super-Admin-Konten noch ohne Zwei-Faktor sind — vor dem Go-Live alle einrichten.
 - Sucher/Fahrer/Zwischenhändler sind nicht betroffen (nur Admin-Rollen).
@@ -1436,4 +1436,62 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   versucht (bis dreimal).
 - Gelöschte Firmen bekommen einen Grabstein (`firmen_geloescht`); der Aufräumjob entfernt
   30 Tage lang Reste aus allen Firmen-Sammlungen.
+
+### Anmeldung und Konten seit Runde 14 (15.09.2026)
+
+- **Super-Admin ohne Zwei-Faktor kommt in Produktion nicht mehr herein** (`MFA_PFLICHT`, Standard
+  `true` — dieselbe Regel wie `/api/ready`). Vor dem Rollout prüfen: Zwei-Faktor ist eingerichtet
+  (Bereich **Betrieb** bzw. `/api/ready` zeigt „Super-Admin-Konto ohne Zwei-Faktor“). Nach dem
+  Notfall-Abschalten mit `scripts/mfa_pruefen.py --abschalten --ja` gilt eine **Gnadenfrist von
+  30 Minuten**, um sich mit Passwort anzumelden und den zweiten Faktor neu einzurichten.
+- Eine Sitzung entsteht nur, wenn das Konto beim Schreiben noch genau so dasteht wie geprüft
+  (Passwort, Zwei-Faktor, aktiv, keine Löschung); Logout beendet nur die eigene Sitzung;
+  Entsperren verwirft eine während der Sperre entstandene Sitzung.
+- Passwörter: mindestens ein Buchstabe **und** eine Ziffer oder ein Sonderzeichen (rein
+  numerische Passwörter sind ungültig), keine eigenen Kontodaten (Kontonummer, Name, E-Mail,
+  Firma, Fahrer-ID). Gesetzt werden sie nur über `POST /admin/users/{id}/password`,
+  `POST /admin/drivers/{id}/password` (fremde Konten) und `/admin/me/password` (eigenes Konto,
+  mit aktuellem Passwort); `PUT /admin/users/{id}` nimmt kein Passwort mehr an.
+  Bleibt die Anmeldesperre nach „Passwort setzen“ unklar, zeigt die Antwort einen Hinweis und
+  der Alarm `konto_sperre_nicht_aufgehoben` bleibt offen (`scripts/anmeldesperre_aufheben.py`).
+- Zugangs-Anfragen: je E-Mail und Kontoart höchstens eine offene Anfrage. Beim Anlegen aus einer
+  Anfrage müssen E-Mail und Firma zur Anfrage passen, sonst 409 — bewusst abweichen mit
+  `daten_geaendert=true` (die Oberfläche fragt nach). Neue Teil-Unique-Indizes
+  (`zugangsanfrage_eindeutig`, `uniq_offene_zugang_anfrage`) werden „weich“ angelegt: Dubletten
+  in Altdaten brechen den Start nicht ab, sondern erzeugen den Alarm `unique_index_fehlt_weich`.
+- Migration 8 (`konten_aktiv_feld`) schreibt das Feld `active` in jedes Konto (users ohne Feld →
+  gesperrt, Fahrer ohne Feld → aktiv — die bisherige Bedeutung, nur ausdrücklich).
+- Fahrer-App: vor der Annahme einer Fahrt nur PLZ und Ort, keine Verkäuferdaten; Sucher sehen in
+  der Fahrerliste keine Fahrer-ID und keine E-Mail. Erstbericht-Reservierungen verfallen nach
+  10 Minuten (Prozessabsturz); Aufräumjob holt Fahrer-Pseudonyme in Berichten nach und löst
+  Termine, deren Vertrag gelöscht wurde.
+
+### Zwei-Faktor, Betreiberkonto und Anmeldesperren seit Runde 15 (15.09.2026)
+
+- **Zwei-Faktor wird nicht aus einer laufenden Sitzung ersetzt.** Gerätewechsel: unter
+  Einstellungen mit dem aktuellen Code **abschalten**, dann neu einrichten. Eine begonnene
+  Einrichtung verfällt nach einer Stunde. Die Aktivierung beendet die bisherige Sitzung ohne
+  zweiten Faktor (andere Geräte müssen sich neu anmelden, jetzt mit Code); der Tab, der aktiviert
+  hat, läuft mit neuem Token weiter.
+- **`DATEN_SCHLUESSEL`** (optional, `openssl rand -hex 32`): eigener Schlüssel für die Ablage der
+  Zwei-Faktor-Geheimnisse und der bekannten Anmelde-IPs. Ohne ihn gilt wie bisher `JWT_SECRET`;
+  nach dem Setzen bleiben vorhandene Geheimnisse lesbar (beide Schlüssel werden probiert), und
+  eine spätere `JWT_SECRET`-Rotation macht MFA-Daten nicht mehr unlesbar. Auf **beiden** Servern
+  gleich setzen.
+- **Betreiberkonto (Seed):** `SUPER_ADMIN_PASSWORD` muss die allgemeine Passwortregel erfüllen
+  (Produktionsprüfung und Seed). Ein vorhandenes Konto mit demselben Benutzernamen, das kein
+  Super-Admin ist, wird **nicht** hochgestuft (Alarm `super_admin_seed_konflikt`, Produktion
+  startet nicht). Ein geänderter `SUPER_ADMIN_USERNAME` legt **kein zweites** Betreiberkonto an
+  (Alarm `super_admin_doppelt`, Produktion startet nicht) — das bestehende Konto umbenennen oder
+  die `.env` zurücksetzen. `/api/ready` meldet mehr als ein aktives Super-Admin-Konto als Fehler.
+  Ein von der Datenbank abweichendes `SUPER_ADMIN_PASSWORD` in der `.env` ändert das Passwort
+  **nicht** (Alarm `super_admin_passwort_env_abweichend`): Passwort nur über Einstellungen ändern.
+- **Anmeldesperren:** die Kontosperre (30 Fehlversuche je 15 Minuten) zählt gleitend über das
+  aktuelle und das vorige Fenster; die Anmelde-Limiter sind fail-closed — ist der gemeinsame
+  Zähler in MongoDB nicht erreichbar, gilt „gesperrt“ statt eines Zählers je Prozess.
+- Das Betreiber-Token liegt nur noch im Tab (sessionStorage), nicht in localStorage: nach einem
+  Browser-Neustart meldet sich der Betreiber neu an (mit zweitem Faktor).
+- Zwischenhändler, der zurück zum Sucher wird, bekommt eine Sucher-Nummer seiner Firma
+  (`<Kundennummer>-<Zusatz>`); der alte Käufer-Code steht in `kontonummer_vorher`.
+- 422-Antworten spiegeln Passwörter und Codes nicht mehr zurück (`***`).
 

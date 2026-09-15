@@ -307,8 +307,10 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
     seinem Fahrzeug einen Vertrag, einen eigenen Termin (mit Bericht und
     Protokoll) und einen Snapshot. Der Chef weist das Fahrzeug B zu.
 
-    Danach behaelt A seine eigenen Termine, Berichte, Protokolle und
-    Snapshots — sie gehoeren zu SEINEM Vertrag/Termin (gewollt, kein Leck).
+    Runde 13 (15.09.2026, Reviewer-Liste "Uebergabe"): die Uebergabe nimmt den
+    ganzen Vorgang mit — Vertrag, Termin, Bericht und Protokoll zu diesem
+    Fahrzeug gehen an B; A behaelt nur, was nicht an diesem Fahrzeug haengt.
+    (Vorher: A behielt seine eigenen Termine — das liess Waisenvorgaenge zurueck.)
     A verliert nur die Fahrzeug-Sichtbarkeit (weder Besitzer noch
     Mitbearbeiter; der Vertrag wurde hier direkt eingefuegt, nicht ueber
     create_contract, das den Sucher zum Mitbearbeiter macht). B sieht das
@@ -357,11 +359,12 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
         await B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id=b["id"]), welt.chef)
         nachher_a = {t["id"] for t in await A_.list_appointments(Response(), a)}
         nachher_b = {t["id"] for t in await A_.list_appointments(Response(), b)}
-        darf_a = await A_._sucher_darf(a, {"created_by": a["id"], "contract_id": cid, "vehicle_id": vid})
-        darf_b = await A_._sucher_darf(b, {"created_by": a["id"], "contract_id": cid, "vehicle_id": vid})
-        rep_a = await A_.get_pickup_report(aid, 0, a)
+        t_neu = await welt.db.appointments.find_one({"id": aid}, {"_id": 0})
+        darf_a = await A_._sucher_darf(a, t_neu)
+        darf_b = await A_._sucher_darf(b, t_neu)
+        rep_b = await A_.get_pickup_report(aid, 0, b)
         with pytest.raises(HTTPException) as e_rep:
-            await A_.get_pickup_report(aid, 0, b)
+            await A_.get_pickup_report(aid, 0, a)
         snaps_a = {s["id"] for s in await L.list_snapshots(None, a)}
         snaps_b = {s["id"] for s in await L.list_snapshots(None, b)}
         snap_a = (await L._load_snapshot_or_404(sid, a))["id"]
@@ -375,22 +378,24 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
         await welt.db.users.delete_many({"id": {"$in": [a["id"], b["id"]]}})
         for c in ("appointments", "generated_pdfs", "listing_snapshots", "pickup_reports", "pickup_protocols"):
             await welt.db[c].delete_many({"dealer_id": welt.dealer_id})
-        return (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_a, e_rep.value.status_code,
+        return (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_b, e_rep.value.status_code,
                 snaps_a, snaps_b, snap_a, snap_b, proto_a, proto_b, vertrag_a, e_fzg.value.status_code, fzg_b)
 
     try:
-        (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_a, s_rep, snaps_a, snaps_b,
+        (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_b, s_rep, snaps_a, snaps_b,
          snap_a, snap_b, proto_a, proto_b, vertrag_a, s_fzg, fzg_b) = welt.run(lauf())
     finally:
         for m, d in alt:
             m.db = d
     assert vorher == {aid, f"{aid}_ohne"} and fzg_a_vorher == vid
-    assert nachher_a == {aid, f"{aid}_ohne"}, "eigene Termine bleiben beim bisherigen Bearbeiter (eigener Vertrag)"
-    assert nachher_b == set(), "der neue Besitzer sieht den Termin des Kollegen nicht"
-    assert darf_a is True and darf_b is False
-    assert rep_a["report"]["id"] == f"r_{welt.s}" and s_rep == 404
+    # Runde 13 (15.09.2026, Uebergabe = ganzer Vorgang): Termin, Vertrag und
+    # Bericht zu diesem Fahrzeug gehen an B; A behaelt nur den Termin ohne Fahrzeug.
+    assert nachher_a == {f"{aid}_ohne"}, "A behaelt nur Termine ohne dieses Fahrzeug"
+    assert nachher_b == {aid}, "B bekommt den Termin des uebergebenen Vorgangs"
+    assert darf_a is False and darf_b is True
+    assert rep_b["report"]["id"] == f"r_{welt.s}" and s_rep == 404
     assert snaps_a == {sid} and snaps_b == {sid}, "Snapshot: A ueber Ersteller/Vertrag, B ueber das Fahrzeug"
     assert snap_a == sid and snap_b == sid
-    assert proto_a is True and proto_b is False
-    assert vertrag_a == 1, "der Vertrag bleibt beim Ersteller (Produktregel)"
+    assert proto_a is False and proto_b is True
+    assert vertrag_a == 0, "der Vertrag geht mit dem Vorgang an B (Runde 13)"
     assert s_fzg == 404 and fzg_b == vid, "A verliert nur die Fahrzeug-Sichtbarkeit"

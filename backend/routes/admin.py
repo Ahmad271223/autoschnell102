@@ -24,7 +24,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from auth import (hash_password, hash_password_async,
+from auth import (create_token, hash_password, hash_password_async, new_session_id,
                   verify_password, verify_password_async)
 from cleanup_service import _cleanup_once
 from deps import (
@@ -32,7 +32,7 @@ from deps import (
     log_activity_sicher, now_iso, sub_status_from_doc, subscription_for,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
-from passwoerter import pruefe_passwort
+from passwoerter import persoenliche_werte, pruefe_passwort
 
 router = APIRouter()
 
@@ -69,6 +69,8 @@ class AdminUserIn(BaseModel):
     active: Optional[bool] = True
     # Zugangs-Anfrage (type zugang, art firma), die mit der Anlage erledigt ist
     anfrage_id: Optional[str] = Field(default=None, max_length=100)
+    # Nachpruefung 15.09.2026: Eingaben weichen bewusst von der Anfrage ab.
+    daten_geaendert: bool = False
 
     @field_validator("email", mode="before")
     @classmethod
@@ -95,8 +97,8 @@ class AdminUserPasswordIn(BaseModel):
 
 
 class AdminSelfPasswordIn(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(max_length=200)
+    new_password: str = Field(max_length=200)
 
 
 # ---------- Cleanup trigger ----------
@@ -177,10 +179,14 @@ async def kaeufer_reservierungen_freigeben(user_id: str, grund: str) -> int:
 
 
 # ---------- Zugangs-Anfrage beim Anlegen schliessen (Kontonummer, 13.09.2026) ----------
-ANFRAGE_RESERVIERUNG_S = 120
+# Nachpruefung 15.09.2026 (Konten Nr. 4/5): 300 s statt 120 s; die harte
+# Grenze "eine Anfrage = ein Konto" sichert der Teil-Unique-Index
+# zugangsanfrage_eindeutig (indizes.konto_indizes), nicht die Frist.
+ANFRAGE_RESERVIERUNG_S = 300
 
 
-async def _anfrage_reservieren(anfrage_id: Optional[str], art: str) -> Optional[dict]:
+async def _anfrage_reservieren(anfrage_id: Optional[str], art: str,
+                               eingaben: Optional[dict] = None) -> Optional[dict]:
     """Offene Zugangs-Anfrage (type zugang) fuer die Kontenanlage reservieren —
     VOR dem Ziehen einer Nummer, damit ein Doppelklick nicht zwei Konten zu
     derselben Anfrage anlegt. Alt-Anfragen ohne `art` gelten als 'firma'.
@@ -215,6 +221,25 @@ async def _anfrage_reservieren(anfrage_id: Optional[str], art: str) -> Optional[
                  "$unset": {"anlage_marke": "", "anlage_seit": ""}})
             raise HTTPException(409, "Zu dieser Zugangs-Anfrage wurde bereits ein Konto "
                                      f"angelegt (Kontonummer {konto.get('kontonummer') or '—'}).")
+    # Nachpruefung 15.09.2026 (Konten, Freigabe-Bindung): die Freigabe gilt
+    # GENAU dem Antrag — weichen E-Mail oder Firma der Eingabe von der
+    # Anfrage ab, muss der Betreiber das mit daten_geaendert=true bestaetigen
+    # (sonst: Anfrage A erledigt, Konto von Firma B angelegt).
+    if eingaben and not eingaben.get("daten_geaendert"):
+        abweichungen = []
+        e_mail = (eingaben.get("email") or "").strip().lower()
+        a_mail = (anfrage.get("contact_email") or "").strip().lower()
+        if e_mail and a_mail and e_mail != a_mail:
+            abweichungen.append(f"E-Mail (Anfrage: {a_mail}, Eingabe: {e_mail})")
+        e_firma = " ".join((eingaben.get("company_name") or "").split()).lower()
+        a_firma = " ".join((anfrage.get("company_name") or "").split()).lower()
+        if e_firma and a_firma and e_firma != a_firma:
+            abweichungen.append(f"Firma (Anfrage: {anfrage.get('company_name')}, "
+                                f"Eingabe: {eingaben.get('company_name')})")
+        if abweichungen:
+            raise HTTPException(409, "Die Eingaben weichen von der Zugangs-Anfrage ab: "
+                                     + "; ".join(abweichungen)
+                                     + ". Bewusst abweichen: daten_geaendert=true mitschicken.")
     marke = str(uuid.uuid4())
     jetzt = datetime.now(timezone.utc)
     frist = (jetzt - timedelta(seconds=ANFRAGE_RESERVIERUNG_S)).isoformat()
@@ -248,12 +273,23 @@ async def _anfrage_abschliessen(anfrage: Optional[dict], konto_id: str,
     if not anfrage:
         return
     try:
-        await db.plan_requests.update_one(
-            {"id": anfrage["id"], "anlage_marke": anfrage["anlage_marke"]},
+        # Nachpruefung 15.09.2026 (Konten, Freigabe-Fingerabdruck): geschlossen
+        # wird genau der Antrag mit dem Datenstand der Reservierung — Firma,
+        # E-Mail und Art im Filter.
+        r = await db.plan_requests.update_one(
+            {"id": anfrage["id"], "anlage_marke": anfrage["anlage_marke"],
+             "company_name": anfrage.get("company_name"),
+             "contact_email": anfrage.get("contact_email"),
+             "art": anfrage.get("art")},
             {"$set": {"status": "erledigt", "erledigt_durch": "kontenanlage",
                       "angelegt_konto_id": konto_id, "kontonummer": kontonummer,
                       "erledigt_von": _handelnder(admin), "updated_at": now_iso()},
              "$unset": {"anlage_marke": "", "anlage_seit": ""}})
+        if r.matched_count == 0:
+            log.error("Anfrage %s: Datenstand seit der Reservierung veraendert — "
+                      "nicht als erledigt markiert (Konto %s)", anfrage.get("id"), konto_id)
+            await betrieb.alarm(db, "zugangsanfrage_nicht_geschlossen", ref=anfrage.get("id") or "",
+                                konto_id=konto_id, kontonummer=kontonummer)
     except Exception:
         log.exception("Anfrage %s nach Kontenanlage nicht geschlossen", anfrage.get("id"))
 
@@ -286,7 +322,28 @@ async def _konto_sperre_aufheben(konto: dict) -> dict:
                 "fehlversuche": stand}
     except Exception:
         log.exception("Konto-Sperre fuer %s nicht aufgehoben", nr)
-        return {"sperre_aufgehoben": False, "fehlversuche": 0, "unklar": True}
+        # Nachpruefung 15.09.2026 (Konten Nr. 3): nicht still "Passwort gesetzt"
+        # melden — der Betreiber sieht den Hinweis, der Alarm bleibt offen.
+        try:
+            await betrieb.alarm(db, "konto_sperre_nicht_aufgehoben", ref=str(nr))
+        except Exception:  # noqa: BLE001
+            log.exception("Alarm konto_sperre_nicht_aufgehoben fuer %s nicht gesetzt", nr)
+        return {"sperre_aufgehoben": False, "fehlversuche": 0, "unklar": True,
+                "hinweis": SPERRE_UNKLAR_HINWEIS}
+
+
+SPERRE_UNKLAR_HINWEIS = ("Die Anmeldesperre konnte nicht geprüft werden — scheitert die "
+                         "Anmeldung weiter: python scripts/anmeldesperre_aufheben.py "
+                         "<Kontonummer> auf dem Server ausführen.")
+
+
+def _pw_persoenlich_400(pw: str, werte) -> None:
+    """Nachpruefung 15.09.2026 (Anmeldung Nr. 9): kein Passwort aus eigenen
+    Kontodaten (Kontonummer, Name, E-Mail, Firma, Fahrer-ID) — 400 mit Text."""
+    try:
+        pruefe_passwort(pw or "", persoenlich=[w for w in (werte or []) if w])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 _KONTOART = {"dealer": ("firma", "/login", "Firmen-Hauptaccount (Chef)"),
@@ -345,7 +402,10 @@ async def admin_konto_pruefen(kennung: str = Query(..., min_length=1, max_length
         firma = (f or {}).get("company_name")
         if not name:
             name = firma or ""       # Chef: der Firmenname steht am Haendlerprofil
-    aktiv = doc.get("active", True) is not False
+    # Runde 15: dieselbe Bedeutung wie die Anmeldung — bei users heisst ein
+    # fehlendes active-Feld "gesperrt" (Login: `if not active`), bei Fahrern
+    # "aktiv"; Migration 8 schreibt das Feld ohnehin in jedes Konto.
+    aktiv = doc.get("active", fahrer is not None) is not False
     hinweise = [f"{art_text}: Anmeldung unter {seite}."]
     if art == "fahrer":
         hinweise.append("Nicht unter /login (Firmen) und nicht im B2B-Marktplatz — dort gibt "
@@ -391,7 +451,11 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     # pruefen — ein 400 hier laesst weder Konto noch Firmenprofil zurueck.
     # Kontonummer (13.09.2026): Reihenfolge Ablauf -> Anfrage -> Nummer.
     ablauf_eingabe = _ablaufdatum_pruefen_400(body.expires_at)
-    anfrage = await _anfrage_reservieren(body.anfrage_id, "firma")
+    _pw_persoenlich_400(body.password, [body.company_name, body.contact_person, email])
+    anfrage = await _anfrage_reservieren(
+        body.anfrage_id, "firma",
+        eingaben={"email": email, "company_name": body.company_name,
+                  "daten_geaendert": body.daten_geaendert})
     user_id = str(uuid.uuid4())
     dealer_id = str(uuid.uuid4())
     chef_doc = {
@@ -605,6 +669,23 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                          "Händler oder Sucher würde ein Konto erzeugen, das "
                          "sich nirgends anmelden kann. Bitte stattdessen eine "
                          "Firma anlegen und den Zugang dort einrichten.")
+            from kontonummer import KAEUFER_MUSTER
+            if neue_rolle == "sucher" and alte_rolle == "b2b_buyer" \
+                    and KAEUFER_MUSTER.match(str(target.get("kontonummer") or "")):
+                # Runde 15 (15.09.2026): ein Zwischenhaendler behielt beim
+                # Rueckwechsel seinen Kaeufer-Code — die Anmeldung sucht
+                # Kaeufer-Codes aber nur bei role=b2b_buyer: ein korrekt
+                # aktiver Sucher mit Firma bekam dauerhaft 401. Jetzt bekommt
+                # er eine Sucher-Nummer seiner Firma (<kunden_nr>-<zusatz>).
+                from kontenanlage import kunden_nr_sicherstellen, naechster_sucher_zusatz
+                from kontonummer import sucher_nummer
+                firma_doc = await kunden_nr_sicherstellen(db, target["dealer_id"])
+                kunden_nr = int(firma_doc["kunden_nr"])
+                zusatz = await naechster_sucher_zusatz(db, target["dealer_id"], kunden_nr)
+                fields["kontonummer"] = sucher_nummer(kunden_nr, zusatz)
+                fields["kontonummer_basis"] = kunden_nr
+                fields["kontonummer_art"] = "sucher"
+                fields["kontonummer_vorher"] = target.get("kontonummer")
             if neue_rolle == "dealer" and target.get("dealer_id"):
                 # Runde 11: GENAU EIN Hauptaccount je Firma. current_chef()
                 # erkennt den Chef an der Rolle — ein zweites dealer-Konto
@@ -720,22 +801,18 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
             raise HTTPException(400, "Super-Admin-Rolle kann nicht geändert werden")
         if "active" in fields and not fields["active"]:
             raise HTTPException(400, "Super-Admin kann nicht gesperrt werden")
-        if "password" in body and target.get("id") != admin.get("id"):
-            raise HTTPException(403, "Das Super-Admin-Passwort ändert nur der "
-                                     "Super-Admin selbst")
     # Selbst-Sperre verhindern
     if target.get("id") == admin.get("id") and "active" in fields and not fields["active"]:
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
-    if "password" in body and body["password"]:
-        pw = str(body["password"])
-        try:
-            pruefe_passwort(pw)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        fields["password_hash"] = await hash_password_async(pw)
-        # Passwortwechsel beendet alle Sitzungen des Kontos — ein
-        # gestohlener Token ueberlebt die Aenderung nicht (PR-Review).
-        fields["current_session_id"] = None
+    if "password" in body:
+        # Nachpruefung 15.09.2026 (Anmeldung Nr. 1/2/10): Passwoerter werden
+        # nur noch ueber die eigenen Endpunkte gesetzt — fremde Konten per
+        # POST /admin/users/{id}/password, das eigene per /admin/me/password
+        # (mit aktuellem Passwort). Rolle, Sperre und Passwort in EINEM
+        # untypisierten Aufruf gibt es nicht mehr.
+        raise HTTPException(400, "Passwörter werden hier nicht gesetzt — bitte "
+                                 "POST /admin/users/{id}/password (fremdes Konto) bzw. "
+                                 "/admin/me/password (eigenes Konto) verwenden.")
     # Nachpruefung Runde 14 (Befund 18): Sperren ueber PUT muss dasselbe
     # tun wie POST /active — vorher blieb current_session_id stehen, das
     # alte Token war nach dem Entsperren wieder gueltig (auch ein
@@ -759,8 +836,6 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     if fields:
         await db.users.update_one({"id": user_id},
                                   {"$set": {**fields, "updated_at": now_iso()}})
-    if "password_hash" in fields:
-        await _konto_sperre_aufheben(target)
     if "plan_type" in body:
       # Pruefung 14.09.2026 (G8): auch der alte Plan-Pfad laeuft unter der
       # Abo-Sperre des Kontos (siehe _sperre / admin_sucher_abo).
@@ -963,14 +1038,29 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             # Abo-Anfragen bleiben nicht verwaist stehen. Wiederholbar: nach dem
             # Grabstein, ein zweiter Lauf findet nichts mehr.
             firma = {"dealer_id": u["dealer_id"]}
-            chef = await db.users.find_one(
-                {"dealer_id": u["dealer_id"], "role": "dealer"}, {"_id": 0, "id": 1},
-                sort=[("created_at", 1)])
+            # Runde 12/13: der eingetragene Hauptaccount (dealers.user_id), sonst
+            # das aelteste dealer-Konto.
+            firma_doc = await db.dealers.find_one({"id": u["dealer_id"]}, {"_id": 0, "user_id": 1})
+            chef = None
+            if (firma_doc or {}).get("user_id") and firma_doc["user_id"] != user_id:
+                chef = await db.users.find_one({"id": firma_doc["user_id"]}, {"_id": 0, "id": 1})
+            if not chef:
+                chef = await db.users.find_one(
+                    {"dealer_id": u["dealer_id"], "role": "dealer", "id": {"$ne": user_id}},
+                    {"_id": 0, "id": 1}, sort=[("created_at", 1)])
             if chef:
                 uebernommen = (await db.vehicles.update_many(
                     {**firma, "owner_user_id": user_id},
                     {"$set": {"owner_user_id": chef["id"], "uebernommen_von": user_id,
                               "updated_at": jetzt}})).modified_count
+                # Runde 13 (Liste 4 Nr. 1/2): auch Kaufvorgaenge, Vertraege und
+                # Termine des Suchers gehen an den Chef — kein Waisenvorgang, den
+                # spaeter kein Sucher uebernehmen kann.
+                from routes.bestand import vorgang_uebergeben
+                uebergabe = await vorgang_uebergeben(u["dealer_id"], None, user_id, chef["id"])
+                if any(uebergabe.values()):
+                    log.info("Sucher %s geloescht: Vorgang an Chef %s uebergeben: %s",
+                             user_id, chef["id"], uebergabe)
             else:
                 log.warning("Sucher %s geloescht: Firma %s ohne Hauptaccount — "
                             "Fahrzeuge bleiben beim alten Besitzer", user_id,
@@ -1181,7 +1271,10 @@ async def admin_user_set_active(
     if u.get("id") == admin.get("id") and not body.active:
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
     patch = {"active": bool(body.active), "updated_at": now_iso()}
-    if not body.active:
+    if not body.active or not u.get("active", True):
+        # Sperren beendet die Sitzung; Entsperren verwirft eine WAEHREND der
+        # Sperre entstandene Sitzung (Nachpruefung 15.09.2026, Anmeldung
+        # Nr. 3/4: ein Login, der die Sperre ueberholte, lebte sonst wieder auf).
         patch["current_session_id"] = None
     await db.users.update_one({"id": user_id}, {"$set": patch})
     if not body.active and u.get("role") == "b2b_buyer":
@@ -1227,20 +1320,27 @@ async def admin_user_set_password(
     # Dieselben Regeln wie bei der PUT-Route (Pruefbericht Runde 4: hier
     # fehlte der Schutz — ein normaler Admin konnte das Super-Admin-Passwort
     # setzen und die Plattform uebernehmen).
-    if u.get("is_super_admin") and u.get("id") != admin.get("id"):
-        raise HTTPException(403, "Das Super-Admin-Passwort ändert nur der "
-                                 "Super-Admin selbst")
+    if u.get("is_super_admin"):
+        # Nachpruefung 15.09.2026 (Anmeldung Nr. 1/10): GENAU EIN Weg fuer das
+        # Betreiber-Passwort — /admin/me/password mit aktuellem Passwort.
+        raise HTTPException(400, "Das Super-Admin-Passwort wird nur über /admin/me/password "
+                                 "mit dem aktuellen Passwort geändert.")
     if u.get("role") == "admin" and u.get("id") != admin.get("id") \
             and not admin.get("is_super_admin"):
         raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
-    await db.users.update_one(
-        {"id": user_id},
+    _pw_persoenlich_400(body.new_password, persoenliche_werte(u))
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 11): kein Passwort fuer ein Konto
+    # in laufender Loeschung — Bedingung im Filter (CAS).
+    r = await db.users.update_one(
+        {"id": user_id, "loeschung.status": {"$ne": "laeuft"}},
         {"$set": {
             "password_hash": await hash_password_async(body.new_password),
             "current_session_id": None,
             "updated_at": now_iso(),
         }},
     )
+    if r.matched_count == 0:
+        raise HTTPException(409, "Dieses Konto wird gerade gelöscht — kein Passwort mehr setzen")
     sperre = await _konto_sperre_aufheben(u)
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.passwort.zurueckgesetzt",
@@ -1309,8 +1409,10 @@ async def admin_driver_set_active(driver_id: str, body: AdminActiveIn,
                                  "ausführen, um sie abzuschließen")
     jetzt = now_iso()
     fields = {"active": body.active, "updated_at": jetzt}
-    if not body.active:
-        # Sperren beendet die laufende Sitzung sofort (Single-Session strikt).
+    if not body.active or not d.get("active", True):
+        # Sperren beendet die laufende Sitzung sofort (Single-Session strikt);
+        # Entsperren verwirft eine waehrend der Sperre entstandene Sitzung
+        # (Nachpruefung 15.09.2026, Anmeldung Nr. 5).
         fields["current_session_id"] = None
     filt_konto = {"id": driver_id}
     if body.active:
@@ -1373,10 +1475,15 @@ async def admin_driver_set_password(driver_id: str, body: AdminUserPasswordIn,
         _check_password_strength(body.new_password or "")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    await db.driver_accounts.update_one(
-        {"id": driver_id},
+    _pw_persoenlich_400(body.new_password, persoenliche_werte(d))
+    # Nachpruefung 15.09.2026 (Anmeldung Nr. 12): kein Passwort fuer ein Konto
+    # in laufender Loeschung — Bedingung im Filter (CAS wie beim Entsperren).
+    r = await db.driver_accounts.update_one(
+        {"id": driver_id, "loeschung.status": {"$ne": "laeuft"}},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
                   "current_session_id": None, "updated_at": now_iso()}})
+    if r.matched_count == 0:
+        raise HTTPException(409, "Löschung läuft — kein Passwort mehr setzen")
     sperre = await _konto_sperre_aufheben(d)
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.passwort.zurueckgesetzt",
@@ -2175,6 +2282,7 @@ async def admin_create_sucher(dealer_id: str, body: AdminSucherIn,
     # Kontonummer (13.09.2026), Schritt 5: E-Mail nur Kontaktadresse — die
     # Plattformregel B5 (Audit #11) entfaellt, gleiche Adresse ist erlaubt.
     email = (body.email or "").strip().lower() or None
+    _pw_persoenlich_400(body.password, [body.first_name, body.last_name, email])
     sucher_id = str(uuid.uuid4())
     konto = {
         "id": sucher_id,
@@ -2223,6 +2331,8 @@ class AdminKaeuferIn(BaseModel):
     # AGB §1: der Betreiber bestaetigt, dass der B2B-Nachweis vorliegt
     b2b_nachweis: bool = False
     anfrage_id: Optional[str] = Field(default=None, max_length=100)
+    # Nachpruefung 15.09.2026: Eingaben weichen bewusst von der Anfrage ab.
+    daten_geaendert: bool = False
 
     @field_validator("email", mode="before")
     @classmethod
@@ -2250,7 +2360,11 @@ async def admin_create_buyer(body: AdminKaeuferIn, admin=Depends(current_super_a
         raise HTTPException(400, "Bitte bestätigen, dass der Nachweis der "
                                  "gewerblichen Tätigkeit (B2B) vorliegt")
     email = (body.email or "").strip().lower() or None
-    anfrage = await _anfrage_reservieren(body.anfrage_id, "kaeufer")
+    _pw_persoenlich_400(body.password, [body.company_name, body.contact_name, email])
+    anfrage = await _anfrage_reservieren(
+        body.anfrage_id, "kaeufer",
+        eingaben={"email": email, "company_name": body.company_name,
+                  "daten_geaendert": body.daten_geaendert})
     try:
         bestaetigt_am = (anfrage or {}).get("gewerblich_bestaetigt_am")
         konto = {
@@ -2294,6 +2408,8 @@ class AdminFahrerIn(BaseModel):
     email: Optional[EmailStr] = None
     phone: str = Field(default="", max_length=50)
     anfrage_id: Optional[str] = Field(default=None, max_length=100)
+    # Nachpruefung 15.09.2026: Eingaben weichen bewusst von der Anfrage ab.
+    daten_geaendert: bool = False
 
     @field_validator("email", mode="before")
     @classmethod
@@ -2310,7 +2426,10 @@ class AdminFahrerIn(BaseModel):
 async def admin_create_driver(body: AdminFahrerIn, admin=Depends(current_super_admin)):
     """Fahrer mit Kontonummer (gemeinsame Reihe) und FD-Code, ohne Token."""
     email = (body.email or "").strip().lower() or None
-    anfrage = await _anfrage_reservieren(body.anfrage_id, "fahrer")
+    _pw_persoenlich_400(body.password, [body.display_name, email])
+    anfrage = await _anfrage_reservieren(
+        body.anfrage_id, "fahrer",
+        eingaben={"email": email, "daten_geaendert": body.daten_geaendert})
     try:
         konto = {
             "id": str(uuid.uuid4()),
@@ -2681,11 +2800,16 @@ async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_a
     user = await db.users.find_one({"id": admin["id"]})
     if not user or not await verify_password_async(body.current_password, user["password_hash"]):
         raise HTTPException(401, "Aktuelles Passwort ist nicht korrekt")
-    await db.users.update_one(
-        {"id": admin["id"]},
+    _pw_persoenlich_400(body.new_password, persoenliche_werte(user))
+    # Nachpruefung 15.09.2026: CAS auf den soeben geprueften Hash.
+    r = await db.users.update_one(
+        {"id": admin["id"], "password_hash": user["password_hash"]},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
           "current_session_id": None}},
     )
+    if r.matched_count == 0:
+        raise HTTPException(409, "Das Passwort wurde gerade anderweitig geändert — bitte neu anmelden")
+    await log_activity_sicher("", admin["id"], "admin.passwort.geaendert")
     return {"ok": True}
 
 
@@ -2809,6 +2933,9 @@ async def admin_mfa_status(admin=Depends(current_admin)):
             "einrichtung_offen": bool(m.get("pending_secret"))}
 
 
+MFA_EINRICHTUNG_MAX_S = 3600
+
+
 @router.post("/admin/me/mfa/einrichten")
 async def admin_mfa_einrichten(admin=Depends(current_admin)):
     """Neues Geheimnis erzeugen (noch NICHT aktiv) — Anzeige als otpauth-Link
@@ -2820,6 +2947,13 @@ async def admin_mfa_einrichten(admin=Depends(current_admin)):
     # die Meldung "Code ungueltig" fuehrt in die Irre.
     voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
     vorhanden = (voll or {}).get("mfa") or {}
+    if vorhanden.get("aktiv"):
+        # Runde 15 (15.09.2026): eine aktive Zwei-Faktor-Anmeldung wird NICHT
+        # aus einer laufenden Sitzung heraus ersetzt — sonst stellt ein
+        # gestohlenes Token MFA auf das eigene Geraet um. Geraetewechsel:
+        # mit dem aktuellen Code abschalten, dann neu einrichten.
+        raise HTTPException(409, "Zwei-Faktor ist bereits aktiv. Zum Wechsel des Geräts zuerst "
+                                 "mit dem aktuellen Code abschalten, dann neu einrichten.")
     secret = None
     if vorhanden.get("pending_secret") and not vorhanden.get("aktiv"):
         try:
@@ -2833,11 +2967,13 @@ async def admin_mfa_einrichten(admin=Depends(current_admin)):
     neu_erzeugt = secret is None
     if neu_erzeugt:
         secret = _mfa.secret_erzeugen()
-    await db.users.update_one(
-        {"id": admin["id"]},
+    r = await db.users.update_one(
+        {"id": admin["id"], "mfa.aktiv": {"$ne": True}},
         {"$set": {"mfa.pending_secret": _mfa.verschluesseln(secret),
                   "mfa.pending_seit": now_iso() if neu_erzeugt
                   else vorhanden.get("pending_seit", now_iso())}})
+    if r.matched_count == 0:
+        raise HTTPException(409, "Zwei-Faktor wurde gerade aktiviert — bitte Seite neu laden.")
     # Kontonummer (13.09.2026): Label in der Authenticator-App = Benutzername
     return {"secret": secret, "otpauth_uri": _mfa.provisioning_uri(secret, admin.get("username") or admin.get("email") or admin["id"]),
             "hinweis": "Code aus der App eingeben, um die Zwei-Faktor-Anmeldung zu aktivieren."}
@@ -2848,9 +2984,21 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
     import mfa as _mfa
     voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
     m = (voll or {}).get("mfa") or {}
+    if m.get("aktiv"):
+        raise HTTPException(409, "Zwei-Faktor ist bereits aktiv.")
     secret = _mfa.entschluesseln(m.get("pending_secret", "")) if m.get("pending_secret") else None
     if not secret:
         raise HTTPException(400, "Zuerst einrichten (Geheimnis erzeugen)")
+    # Runde 15: ein nie abgeschlossenes Geheimnis verfaellt nach einer Stunde
+    # (vorher pruefte nur /einrichten das Alter, /aktivieren nie).
+    try:
+        alter = (datetime.now(timezone.utc)
+                 - datetime.fromisoformat(m.get("pending_seit", ""))).total_seconds()
+    except (TypeError, ValueError):
+        alter = 10 ** 9
+    if alter > MFA_EINRICHTUNG_MAX_S:
+        raise HTTPException(410, "Die Einrichtung ist abgelaufen — bitte neu einrichten und den "
+                                 "neuen Schlüssel in die App übernehmen.")
     zaehler = _mfa.code_pruefen(secret, body.code)
     if zaehler is None:
         raise HTTPException(
@@ -2860,14 +3008,27 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
                  "Eintrag dort löschen und den hier angezeigten Schlüssel neu "
                  "übernehmen.")
     codes, hashes = _mfa.wiederherstellungscodes()
-    await db.users.update_one(
-        {"id": admin["id"]},
+    # Runde 15: (a) Compare-and-set auf GENAU das geprueft Pending-Geheimnis —
+    # zwei parallele Aktivierungen erzeugten sonst zwei Code-Saetze, von denen
+    # der angezeigte nie galt; (b) die bisherige, OHNE zweiten Faktor
+    # ausgestellte Sitzung endet: dieser Aufruf bekommt eine neue Sitzung
+    # (Token in der Antwort), jedes andere Geraet muss sich neu anmelden.
+    sid = new_session_id()
+    r = await db.users.update_one(
+        {"id": admin["id"], "mfa.pending_secret": m.get("pending_secret"),
+         "mfa.aktiv": {"$ne": True}},
         {"$set": {"mfa": {"aktiv": True, "secret": _mfa.verschluesseln(secret),
                           "letzter_zaehler": zaehler, "fehlversuche": 0,
-                          "wiederherstellung": hashes, "aktiviert_am": now_iso()}}})
+                          "wiederherstellung": hashes, "aktiviert_am": now_iso()},
+                  "current_session_id": sid, "current_session_seit": now_iso()}})
+    if r.matched_count == 0:
+        raise HTTPException(409, "Die Einrichtung wurde gerade anderweitig abgeschlossen oder "
+                                 "geändert — bitte Seite neu laden.")
     await log_activity_sicher("", admin["id"], "admin.mfa.aktiviert")
     return {"ok": True, "aktiv": True, "wiederherstellungscodes": codes,
-            "hinweis": "Diese Codes jetzt sicher aufbewahren — sie werden nur einmal angezeigt."}
+            "token": create_token(admin["id"], sid),
+            "hinweis": "Diese Codes jetzt sicher aufbewahren — sie werden nur einmal angezeigt. "
+                       "Andere Geräte müssen sich neu anmelden (jetzt mit zweitem Faktor)."}
 
 
 @router.post("/admin/me/mfa/deaktivieren")
@@ -2880,7 +3041,14 @@ async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
     secret = _mfa.entschluesseln(m.get("secret", "")) or ""
     if _mfa.code_pruefen(secret, body.code, int(m.get("letzter_zaehler", -1))) is None:
         raise HTTPException(401, "Code ungültig")
-    await db.users.update_one({"id": admin["id"]}, {"$unset": {"mfa": ""}})
+    # Runde 15: nur GENAU das geprueft Geheimnis abschalten — ein alter
+    # Abschalt-Aufruf loeschte sonst eine inzwischen neu eingerichtete MFA.
+    r = await db.users.update_one(
+        {"id": admin["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret")},
+        {"$unset": {"mfa": ""}})
+    if r.matched_count == 0:
+        raise HTTPException(409, "Die Zwei-Faktor-Anmeldung wurde inzwischen geändert — "
+                                 "bitte Seite neu laden.")
     await log_activity_sicher("", admin["id"], "admin.mfa.deaktiviert")
     return {"ok": True, "aktiv": False}
 

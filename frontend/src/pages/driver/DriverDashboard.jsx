@@ -192,7 +192,10 @@ export default function DriverDashboard() {
                         </div>
                         <div className="text-xs text-zinc-500 flex items-center gap-1 mt-0.5">
                           <MapPin size={11} className="flex-shrink-0" />
-                          <span className="truncate">{a.pickup_address || a.seller_name || "—"}</span>
+                          <span className="truncate">
+                            {a.pickup_address || a.seller_name || "—"}
+                            {a.kontakt_nach_annahme && " · Adresse und Kontakt nach Annahme"}
+                          </span>
                         </div>
                       </div>
                       {isOpen

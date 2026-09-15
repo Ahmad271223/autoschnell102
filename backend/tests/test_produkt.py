@@ -22,7 +22,7 @@ API = f"{BASE}/api"
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 SUF = uuid.uuid4().hex[:8]
-PW = "Produkt123!x"
+PW = "Kq4Lm9Xw2-Sicher-Pr!"
 
 
 def _db():

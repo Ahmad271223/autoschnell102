@@ -174,7 +174,42 @@ async def konto_indizes(db) -> dict:
             partial={"kontonummer": {"$type": "string"}})
         await _index_sicher_ersetzen(coll, "kontonummer_basis", "kontonummer_basis",
                                      sparse=True)
+        # Nachpruefung 15.09.2026 (Konten Nr. 5): EINE Zugangs-Anfrage = hoechstens
+        # EIN Konto — als Teil-Unique-Index je Sammlung (die Kontoart der Anfrage
+        # bestimmt die Sammlung). Dubletten aus Altdaten brechen den Start NICHT
+        # ab (kein Eintrag in FEHLENDE_UNIQUE), sie werden als Alarm gemeldet.
+        await _unique_index_weich(coll, "zugangsanfrage_eindeutig", [("zugangsanfrage_id", 1)],
+                                  {"zugangsanfrage_id": {"$type": "string"}})
+    # Runde 15 (15.09.2026): "genau ein Super-Admin" sichern der Seed (kein
+    # zweites Betreiberkonto bei geaendertem SUPER_ADMIN_USERNAME) und /ready
+    # (Fehler bei mehr als einem aktiven Konto); ein Unique-Index auf
+    # is_super_admin ist mit den Testwelten (mehrere Betreiber je Datenbank)
+    # nicht vereinbar.
     return ergebnis
+
+
+async def _unique_index_weich(coll, name: str, schluessel: list, partial: dict) -> bool:
+    """Unique-Index anlegen; scheitert er an Dubletten, nur Alarm + Log (kein
+    Produktions-Abbruch). Fuer neue Regeln auf Altdaten (Runde 14)."""
+    ref = f"{coll.name}.{name}"
+    try:
+        await coll.create_index(schluessel, unique=True, name=name,
+                                partialFilterExpression=partial)
+    except Exception as exc:  # noqa: BLE001
+        log.error("ensure_indexes: %s nicht anlegbar: %s — Dubletten bereinigen "
+                  "(python scripts/dubletten_pruefen.py)", ref, exc)
+        try:
+            from betrieb import alarm
+            await alarm(db, "unique_index_fehlt_weich", ref=ref, fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            log.exception("Alarm unique_index_fehlt_weich fuer %s nicht gesetzt", ref)
+        return False
+    try:
+        from betrieb import alarm_schliessen
+        await alarm_schliessen(db, "unique_index_fehlt_weich", ref=ref)
+    except Exception:  # noqa: BLE001
+        pass
+    return True
 
 
 EMAIL_INDEX_NAMEN = ("email_alt_eindeutig", "email_1")
@@ -522,6 +557,11 @@ async def plan_requests_unique_indizes(db) -> None:
                                 "setzen, beim naechsten Start greift der Index.")
             continue
         await _index_steht(db, "unique_index_fehlt", ref=ref)
+    # Nachpruefung 15.09.2026 (Konten Nr. 6): je E-Mail und Kontoart hoechstens
+    # EINE offene Zugangs-Anfrage (weich: Altdaten-Dubletten nur als Alarm).
+    await _unique_index_weich(db.plan_requests, "uniq_offene_zugang_anfrage",
+                              [("type", 1), ("art", 1), ("contact_email", 1)],
+                              {"type": "zugang", "status": "offen"})
 
 
 async def storage_retry_unique_index(db) -> None:

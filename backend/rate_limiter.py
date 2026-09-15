@@ -189,7 +189,11 @@ class SlidingWindowRateLimiter:
     _index_ok = False
 
     def __init__(self, max_attempts: int = 10, window_seconds: int = 60,
-                 name: str = ""):
+                 name: str = "", fail_closed: bool = False):
+        # Runde 15 (15.09.2026): Anmelde-Limiter sind fail-closed — faellt
+        # der gemeinsame Mongo-Zaehler aus, gilt "gesperrt" statt eines
+        # Zaehlers je Prozess (aus 10/min wuerden sonst 10 je Worker).
+        self.fail_closed = fail_closed
         # Stabiler Name = gemeinsamer Schluessel ueber ALLE Worker-Prozesse
         # (id(self) o.ae. waere je Prozess anders und wuerde die Zaehler
         # wieder trennen).
@@ -220,6 +224,10 @@ class SlidingWindowRateLimiter:
         try:
             return await self._check_mongo(key)
         except Exception:
+            if self.fail_closed:
+                logging.getLogger("rate_limiter").exception(
+                    "Limiter %s: gemeinsamer Zaehler nicht erreichbar — fail-closed", self.name)
+                return False
             return self._check_lokal(key)
 
     async def _check_mongo(self, key: str) -> bool:
@@ -278,17 +286,33 @@ class SlidingWindowRateLimiter:
                 return len(fresh)
 
     async def stand(self, key: str) -> int:
-        """Kontonummer (13.09.2026): Zaehlung des aktuellen Fensters LESEN,
-        ohne zu zaehlen. Mongo, Rueckfall auf den lokalen Zaehler."""
+        """Kontonummer (13.09.2026): Zaehlung LESEN, ohne zu zaehlen.
+        Runde 15 (15.09.2026): wie check() ueber das aktuelle UND das vorige
+        Fenster (anteilig) — vorher zaehlte nur das aktuelle feste Fenster,
+        und kurz vor/nach dem Fensterwechsel gingen fast doppelt so viele
+        Fehlversuche durch, wie die Sperre "30 je 15 Minuten" verspricht.
+        Mongo; Rueckfall auf den lokalen Zaehler (fail_closed: gesperrt)."""
         if not _RATE_LIMIT_ENABLED:
             return 0
         try:
             from deps import db
-            fenster = int(time.time() // self.window_seconds)
+            jetzt = time.time()
+            fenster = int(jetzt // self.window_seconds)
             doc = await db.rate_limits.find_one(
                 {"_id": f"{self.name}:{key}:{fenster}"}, {"n": 1})
-            return int((doc or {}).get("n", 0))
+            n_jetzt = int((doc or {}).get("n", 0))
+            vorher = await db.rate_limits.find_one(
+                {"_id": f"{self.name}:{key}:{fenster - 1}"}, {"n": 1})
+            n_vorher = int((vorher or {}).get("n", 0))
+            if not n_vorher:
+                return n_jetzt
+            anteil = 1.0 - (jetzt % self.window_seconds) / self.window_seconds
+            return int(n_jetzt + n_vorher * anteil + 0.999999)
         except Exception:
+            if self.fail_closed:
+                logging.getLogger("rate_limiter").exception(
+                    "Limiter %s: Stand nicht lesbar — fail-closed", self.name)
+                return self.max_attempts
             cutoff = time.monotonic() - self.window_seconds
             with self._lock:
                 return len([t for t in self._buckets.get(key, []) if t > cutoff])
@@ -350,7 +374,7 @@ class SlidingWindowRateLimiter:
 
 # Shared instances — imported directly by route modules.
 # 10 attempts / 60 s per IP for the dealer/admin login.
-login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login")
+login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, name="login", fail_closed=True)
 
 # Runde 26 (12.09.2026, Vorgabe Ahmad: kein Sucher bremst einen anderen aus):
 # Der Login-Zaehler haengt am KONTO (IP + Kennung), nicht mehr allein an der
@@ -360,7 +384,7 @@ login_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=60, nam
 # gebremst werden (Standard 120/min, per LOGIN_IP_LIMIT einstellbar).
 login_ip_limiter = SlidingWindowRateLimiter(
     max_attempts=int(os.environ.get("LOGIN_IP_LIMIT", "120") or 120),
-    window_seconds=60, name="login-ip")
+    window_seconds=60, name="login-ip", fail_closed=True)
 
 
 def login_schluessel(ip: str, kennung: str) -> str:
@@ -405,7 +429,9 @@ _KONTO_ALARM_SCHWELLE = _LOGIN_KONTO_LIMIT or 30
 
 login_konto_limiter = SlidingWindowRateLimiter(
     max_attempts=_KONTO_ALARM_SCHWELLE, window_seconds=_LOGIN_KONTO_FENSTER,
-    name="login-konto")
+    name="login-konto", fail_closed=True)
+# Bekannte IP: Sperre erst beim Dreifachen der Schwelle (Nachpruefung 15.09.2026).
+_BEKANNTE_IP_FAKTOR = 3
 
 
 def konto_gesperrt_text() -> str:
@@ -419,7 +445,10 @@ def ip_merkwert(ip: str) -> str:
     import hashlib
     import hmac
     from auth import JWT_SECRET
-    return hmac.new(str(JWT_SECRET).encode(), (ip or "").encode(),
+    # Runde 15: mit DATEN_SCHLUESSEL (falls gesetzt) statt JWT_SECRET — eine
+    # JWT-Rotation loescht dann nicht alle bekannten IPs.
+    geheim = (os.environ.get("DATEN_SCHLUESSEL") or "").strip() or str(JWT_SECRET)
+    return hmac.new(geheim.encode(), (ip or "").encode(),
                     hashlib.sha256).hexdigest()[:16]
 
 
@@ -433,9 +462,13 @@ async def konto_gesperrt(kennung: str, ip: str, konto=None) -> bool:
     k = anmeldekennung(kennung or "")
     if not k:
         return False
+    stand = await login_konto_limiter.stand(k)
     if konto and ip and ip_merkwert(ip) in (konto.get("login_ips_bekannt") or []):
-        return False
-    return await login_konto_limiter.stand(k) >= _LOGIN_KONTO_LIMIT
+        # Nachpruefung 15.09.2026 (Anmeldung Nr. 6): eine bekannte IP (Firmen-
+        # NAT) entschaerft die Kontosperre, hebt sie aber nicht auf — ab dem
+        # Dreifachen der Schwelle ist auch das eigene Netz gesperrt.
+        return stand >= _LOGIN_KONTO_LIMIT * _BEKANNTE_IP_FAKTOR
+    return stand >= _LOGIN_KONTO_LIMIT
 
 
 async def konto_fehlversuch(kennung: str, ip: str) -> None:
@@ -476,9 +509,10 @@ async def bekannte_ip_merken(db, sammlung: str, konto_id: str, ip: str) -> None:
 
 # Slightly more lenient for the driver app (mobile clients can have flaky
 # connectivity and may retry quickly), but still bounded.
-driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60, name="fahrer-login")
+driver_login_limiter = SlidingWindowRateLimiter(max_attempts=15, window_seconds=60,
+                                                name="fahrer-login", fail_closed=True)
 
 # Zugangs-Anfragen (/zugang-anfrage): 5 je IP und Stunde.
 # Kontonummer (13.09.2026), Schritt 5: die Selbst-Registrierung und damit der
 # eigene Zaehler der Fahrer-Registrierung (Runde 29) gibt es nicht mehr.
-register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung")
+register_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=3600, name="registrierung", fail_closed=True)

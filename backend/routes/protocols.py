@@ -267,7 +267,8 @@ ZUTEILUNG_OHNE_ZUGRIFF = ("offen", "abgelehnt")
 
 def zuteilung_offen_oder_409(appt: dict) -> None:
     """Pruefung 14.09.2026 (C22): Nur eine ANGENOMMENE Fahrt gibt Zugriff auf
-    Protokoll und Dokumente. `zuteilung` fehlt bei Altterminen (= angenommen)."""
+    Protokoll und Dokumente. Fehlende Zuteilung (nur per Datenbankeingriff)
+    setzt der Aufraeumlauf auf "offen" (Runde 13); bis dahin wie Altbestand."""
     if (appt.get("zuteilung") or "angenommen") in ZUTEILUNG_OHNE_ZUGRIFF:
         raise HTTPException(409, "Bitte zuerst die Fahrt annehmen — erst dann sind "
                                  "Protokoll und Dokumente zugänglich.")
@@ -607,14 +608,19 @@ async def freigaben_geschlossener_termine_zuruecknehmen(dbx=None) -> int:
     Liefert die Zahl der bereinigten Protokolle."""
     dbx = dbx if dbx is not None else db
     n = 0
-    async for p in dbx.pickup_protocols.find(
-            {"status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}, "superseded": {"$ne": True}},
-            {"_id": 0, "id": 1, "appointment_id": 1, "corrects_version": 1}).limit(500):
-        appt = await dbx.appointments.find_one({"id": p.get("appointment_id")},
-                                               {"_id": 0, "status": 1})
-        if not appt or (appt.get("status") or "offen") not in _ABGESCHLOSSEN \
-                or appt.get("status") == "abgeholt":
-            continue
+    # Nachpruefung 15.09.2026 (Fahrer Nr. 7/8): die Kandidaten kommen per
+    # $lookup direkt MIT geschlossenem Termin — vorher fuellten 500 legitime
+    # offene Freigaben die Grenze, und die kaputten dahinter kamen nie dran.
+    geschlossen = sorted(s for s in _ABGESCHLOSSEN if s != "abgeholt")
+    kandidaten = await dbx.pickup_protocols.aggregate([
+        {"$match": {"status": {"$in": [ZUR_FREIGABE, FREIGEGEBEN]}, "superseded": {"$ne": True}}},
+        {"$lookup": {"from": "appointments", "localField": "appointment_id",
+                     "foreignField": "id", "as": "termin"}},
+        {"$match": {"termin.status": {"$in": geschlossen}}},
+        {"$project": {"_id": 0, "id": 1, "appointment_id": 1, "corrects_version": 1}},
+        {"$limit": 500},
+    ]).to_list(500)
+    for p in kandidaten:
         if "corrects_version" in p:
             jetzt = now_iso()
             res = await dbx.pickup_protocols.update_one(
@@ -863,6 +869,12 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
     payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     revision = payload.pop("revision", None)
     revision_filt = {"revision": int(revision)} if revision is not None else {}
+    # Runde 13 (Liste 3 Nr. 9): traegt der Entwurf eine Revision (alle seit
+    # Phase 2), ist sie beim Speichern Pflicht — ein alter Tab ohne Stand
+    # ueberschreibt nichts mehr.
+    if doc and doc.get("revision") is not None and revision is None:
+        raise HTTPException(409, "Bitte die App neu laden — der Entwurf braucht den "
+                                 "aktuellen Stand (Revision).")
     if doc:
         # Runde 10: Bedingt auf den Entwurf-Status schreiben. Zwischen der
         # Pruefung oben und dem Schreiben kann das Protokoll unterschrieben
@@ -875,7 +887,8 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
             {**_entwurf_filter(doc["id"]), **revision_filt},
             _entwurf_update({**payload, "driver_account_id": driver["id"],
                              "driver_name": driver.get("display_name", ""),
-                             "vehicle_id": appt.get("vehicle_id")}))
+                             "vehicle_id": appt.get("vehicle_id"),
+                             "contract_id": appt.get("contract_id")}))
         if res.matched_count == 0:
             await _entwurf_revision_pruefen(doc["id"], revision)
             await _speichern_abgelehnt(doc["id"])
@@ -888,6 +901,7 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         "id": str(uuid.uuid4()),
         "appointment_id": appt_id,
         "vehicle_id": appt.get("vehicle_id"),
+        "contract_id": appt.get("contract_id"),     # Runde 13 (Nr. 18): Vertragsanker
         "dealer_id": appt.get("dealer_id"),
         "driver_account_id": driver["id"],
         "driver_name": driver.get("display_name", ""),
@@ -900,10 +914,12 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
     }
     try:
         await db.pickup_protocols.insert_one(new_doc)
-    except Exception:
+    except DuplicateKeyError:
         # Unique-Index (genau EIN aktuelles Protokoll je Termin): ein
         # GLEICHZEITIGER Request hat den Entwurf gerade angelegt — dann
         # dessen Dokument aktualisieren statt ein zweites zu erzeugen.
+        # Runde 13 (Liste 3 Nr. 13): NUR Dubletten — ein DB-/Netzfehler
+        # bleibt ein 500, statt als Parallel-Insert behandelt zu werden.
         vorhandenes = await _current(appt_id)
         if not vorhandenes:
             raise
@@ -914,7 +930,8 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
             {**_entwurf_filter(vorhandenes["id"]), **revision_filt},
             _entwurf_update({**payload, "driver_account_id": driver["id"],
                              "driver_name": driver.get("display_name", ""),
-                             "vehicle_id": appt.get("vehicle_id")}))
+                             "vehicle_id": appt.get("vehicle_id"),
+                             "contract_id": appt.get("contract_id")}))
         if res.matched_count == 0:
             await _entwurf_revision_pruefen(vorhandenes["id"], revision)
             await _speichern_abgelehnt(vorhandenes["id"])
@@ -1072,14 +1089,24 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
         await db.appointments.update_one({"id": appt_id}, {"$set": {"updated_at": jetzt}})
     except Exception:  # noqa: BLE001
         log.exception("Termin-Stand vor Abschicken von %s nicht angefasst", appt_id)
+    # Runde 13 (Liste 3 Nr. 10-12): genau der geprueften Stand (Revision)
+    # wechselt zur Freigabe — ein anderer Tab, der dazwischen speicherte,
+    # bekommt 409 statt dass ungepruefte Daten beim Chef landen.
+    submit_filt: Dict[str, Any] = {"id": doc["id"], "status": "entwurf"}
+    if doc.get("revision") is not None:
+        submit_filt["revision"] = doc["revision"]
     res = await db.pickup_protocols.update_one(
-        {"id": doc["id"], "status": "entwurf"},
+        submit_filt,
         {"$set": setzen,
          "$unset": {"rueckfrage": "", "rueckfrage_am": ""}})
     if not res.matched_count:
         # Zwischen Lesen und Schreiben hat sich der Stand geaendert.
         akt = await db.pickup_protocols.find_one({"id": doc["id"]},
-                                                 {"_id": 0, "status": 1})
+                                                 {"_id": 0, "status": 1, "revision": 1})
+        if akt and akt.get("status") == "entwurf" and doc.get("revision") is not None \
+                and akt.get("revision") != doc.get("revision"):
+            raise HTTPException(409, "Der Entwurf wurde inzwischen in einem anderen Tab "
+                                     "geändert — bitte neu laden, prüfen und erneut abschicken.")
         return {"ok": True, "status": (akt or {}).get("status", "unbekannt"),
                 "protocol_id": doc["id"], "bereits": True}
     # Go-Live 13.09.2026 (P6): Schloss der Haendler den Termin genau zwischen

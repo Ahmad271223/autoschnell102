@@ -437,6 +437,15 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
            "created_at": now_iso(), "updated_at": now_iso()}
     if "status" not in doc:
         doc["status"] = "offen"
+    # Runde 13 (Liste 4 Nr. 4-6): ein Vertrag hat EINEN Termin. Der Unique-
+    # Index deckt nur offene Termine — ein weiterer, gleich geschlossen
+    # angelegter Termin (storniert, erledigt, ...) wuerde den Vertrags- und
+    # Vorgangszeiger auf sich ziehen und den echten Abholprozess verwaisen.
+    if body.contract_id and doc["status"] in ABGESCHLOSSEN \
+            and await db.appointments.count_documents(
+                {"dealer_id": user["dealer_id"], "contract_id": body.contract_id}, limit=1):
+        raise HTTPException(409, "Zu diesem Vertrag gibt es bereits einen Termin — ein weiterer "
+                                 "abgeschlossener Termin ist nicht möglich.")
     if vertrag_doc and vertrag_doc.get("kaufvorgang_id"):
         doc["kaufvorgang_id"] = vertrag_doc["kaufvorgang_id"]
     if vertrag_doc:
@@ -473,7 +482,7 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     nacharbeit_offen = False
     merker_gesetzt = False
     try:
-        if body.contract_id:
+        if body.contract_id and doc.get("status") not in ABGESCHLOSSEN:
             await db.generated_pdfs.update_one(
                 {"id": body.contract_id, "dealer_id": user["dealer_id"]},
                 {"$set": {"appointment_id": appt_id, "status": "Termin erstellt"}},
@@ -565,6 +574,9 @@ async def list_appointments(response: Response, user=Depends(current_firma),
         response.headers["X-Truncated"] = "1"
     # Enrich with vehicle + driver (driver = globaler Fahrer-Account)
     drivers_map = {}
+    # Nachpruefung 15.09.2026 (Fahrer Nr. 15): Sucher sehen Name und Status des
+    # Fahrers, aber keine Fahrer-ID und keine E-Mail (nur der Chef).
+    chef_sicht = user.get("role") == "dealer"
     link_ids = [
         link["driver_account_id"] async for link in
         db.dealer_drivers.find({"dealer_id": user["dealer_id"]}, {"_id": 0, "driver_account_id": 1})
@@ -576,7 +588,8 @@ async def list_appointments(response: Response, user=Depends(current_firma),
         ):
             drivers_map[d["id"]] = {
                 "id": d["id"], "name": d.get("display_name"),
-                "driver_code": d.get("driver_code"), "email": d.get("email"),
+                "driver_code": d.get("driver_code") if chef_sicht else None,
+                "email": d.get("email") if chef_sicht else None,
             }
     # Runde 15 (Nr. 3): nur die Fahrzeuge der gelisteten Termine und nur
     # die Felder, die Termine.jsx liest (vehicle.data) — vorher wurde der
@@ -633,9 +646,11 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
             {"_id": 0, "id": 1, "display_name": 1, "driver_code": 1, "email": 1},
         )
         if d:
+            chef_sicht = user.get("role") == "dealer"     # Nachpruefung 15.09.2026 (Fahrer Nr. 15)
             a["driver"] = {
                 "id": d["id"], "name": d.get("display_name"),
-                "driver_code": d.get("driver_code"), "email": d.get("email"),
+                "driver_code": d.get("driver_code") if chef_sicht else None,
+                "email": d.get("email") if chef_sicht else None,
             }
     return a
 
