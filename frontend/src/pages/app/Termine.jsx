@@ -4,24 +4,33 @@ import { toast } from "sonner";
 import {
   Calendar as CalIcon, FileText, Edit3, X, ChevronLeft, ChevronRight,
   Plus, MapPin, Phone, User as UserIcon, Trash2, Clock, Printer,
-  ClipboardCheck, Download,
+  ClipboardCheck, Download, Camera,
 } from "lucide-react";
 import {
   openContractPdf, printContractPdf,
   openPickupOrderPdf, printPickupOrderPdf, downloadPickupOrderPdf,
 } from "@/lib/pdf";
-import SnapshotCard from "@/components/SnapshotCard";
+import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
+import AbholberichtDialog from "@/components/AbholberichtDialog";
+import { Link } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
+import { useFreigabeZaehler } from "@/lib/freigaben";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
-  format, isSameMonth, isSameDay, addMonths, parseISO, isValid as isValidDate,
+  format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
 } from "date-fns";
 import { de } from "date-fns/locale";
 
-const STATUSES = ["offen", "abgeholt", "nicht abgeholt", "verschoben", "erledigt"];
+// Runde 16 (15.09.2026): alle serverseitig gueltigen Zustaende sind filterbar.
+const STATUSES = ["offen", "bestätigt", "in Bearbeitung", "abgeholt", "nicht abgeholt",
+                  "verschoben", "erledigt", "storniert"];
 
 const STATUS_META = {
   "offen":           { dot: "#0a84ff", chipClass: "st-offen-bg",         text: "st-offen" },
+  "bestätigt":       { dot: "#5ac8fa", chipClass: "st-offen-bg",         text: "st-offen" },
+  "in Bearbeitung":  { dot: "#ffd60a", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
+  "storniert":       { dot: "#8e8e93", chipClass: "st-erledigt-bg",      text: "st-erledigt" },
   "abgeholt":        { dot: "#34c759", chipClass: "st-abgeholt-bg",      text: "st-abgeholt" },
   "nicht abgeholt":  { dot: "#ff3b30", chipClass: "st-nicht-abgeholt-bg",text: "st-nicht-abgeholt" },
   "verschoben":      { dot: "#ff9f0a", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
@@ -46,51 +55,57 @@ export default function Termine() {
   const [editing, setEditing] = useState(null);       // appt being edited
   const [creating, setCreating] = useState(false);
 
+  // Runde 16 (15.09.2026): Kuerzung (X-Truncated ab 2.000) und Ladefehler
+  // sichtbar machen — vorher sah beides wie "keine Termine" aus.
+  const [gekuerzt, setGekuerzt] = useState(false);
   const load = async () => {
-    const { data } = await api.get("/appointments", { params: filter ? { status: filter } : {} });
-    setItems(data);
+    try {
+      const r = await api.get("/appointments", { params: filter ? { status: filter } : {} });
+      setItems(Array.isArray(r.data) ? r.data : []);
+      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+    } catch (e) {
+      toast.error(errMsg(e, "Termine konnten nicht geladen werden"));
+    }
   };
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
-  useEffect(() => { api.get("/drivers").then((r) => setDrivers(r.data)); }, []);
+  useEffect(() => {
+    api.get("/drivers")
+      .then((r) => setDrivers(Array.isArray(r.data) ? r.data : []))
+      .catch((e) => toast.error(errMsg(e, "Fahrerliste konnte nicht geladen werden")));
+  }, []);
 
   const save = async (a) => {
     try {
       if (a.id) {
-        const { data } = await api.put(`/appointments/${a.id}`, a);
-        toast.success("Termin gespeichert");
-        if (data.pickup_date_changed && a.contract_id) {
-          if (window.confirm("Abholdatum wurde geändert. Neue PDF mit aktualisiertem Abholdatum erstellen?")) {
-            const c = await api.get(`/contracts/${a.contract_id}`);
-            const newC = {
-              ...c.data.contract_data,
-              vehicle_id: c.data.vehicle_id,
-              pickup_date: a.pickup_date,
-              pickup_time: a.pickup_time,
-            };
-            // Backend creates a new contract AND auto-creates a fresh
-            // appointment for it (see server.py auto-create block).
-            // Therefore we must NOT manually POST another appointment
-            // here, and we delete the original appointment we just
-            // updated — otherwise the rescheduled date would show the
-            // termin three times (old updated + auto-created + manual).
-            await api.post("/contracts", newC);
-            await api.delete(`/appointments/${a.id}`);
-            toast.success("Neue PDF erstellt & verknüpft");
-          }
-        }
+        // Phase 2 (2.8): geladener Stand mit — wer auf einem veralteten Stand
+        // speichert, bekommt 409 "bitte neu laden" statt den Kollegen zu überschreiben.
+        const { data } = await api.put(`/appointments/${a.id}`,
+          { ...a, ...(a.updated_at ? { stand: a.updated_at } : {}) });
+        // Verschobenes Abholdatum uebernimmt der Server automatisch in den
+        // bestehenden Kaufvertrag (gleiche Vertragsnummer, PDF wird neu
+        // erzeugt). Frueher entstand hier per Rueckfrage ein ZWEITER
+        // Vertrag — der alte blieb mit falschem Datum liegen.
+        toast.success(data.contract_updated
+          ? "Termin gespeichert — Kaufvertrag trägt jetzt das neue Abholdatum"
+          : "Termin gespeichert");
+        // Runde 15: Fahrer wurde waehrend des Speicherns aus der Firma entfernt
+        if (data?.hinweis) toast.warning(data.hinweis, { duration: 8000 });
       } else {
-        await api.post(`/appointments`, a);
+        const { data } = await api.post(`/appointments`, a);
         toast.success("Termin angelegt");
+        if (data?.hinweis) toast.warning(data.hinweis, { duration: 8000 });
       }
       setEditing(null);
       setCreating(false);
       load();
     } catch (err) {
       toast.error(errMsg(err, "Fehler beim Speichern"));
+      // Veralteter Stand (409): Liste neu laden, damit der aktuelle Stand sichtbar ist.
+      if (err?.response?.status === 409) load();
     }
   };
 
@@ -136,6 +151,15 @@ export default function Termine() {
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="termine-page">
+      {gekuerzt && (
+        <div className="mb-3 rounded-sm border px-4 py-2 text-sm" data-testid="termine-gekuerzt"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
+          Die Liste zeigt nur die neuesten 2.000 Termine — bitte nach Status filtern, um ältere zu sehen.
+        </div>
+      )}
+      {/* Runde 30: Abholprotokolle, die auf die Freigabe des Chefs warten.
+          Runde 33: Sie haben eine eigene Seite — hier nur der Hinweis. */}
+      <FreigabeHinweis />
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
         <div>
@@ -316,6 +340,8 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
 
 function DayApptItem({ a, onEdit, compact }) {
   const meta = STATUS_META[a.status] || STATUS_META.offen;
+  // Runde 21: Abholbericht samt Fahrerfotos direkt am Termin (auch fuer Sucher).
+  const [bericht, setBericht] = useState(false);
   const v = a.vehicle?.data;
   const date = safeParse(a.pickup_date);
   return (
@@ -344,8 +370,24 @@ function DayApptItem({ a, onEdit, compact }) {
             {a.status}
           </span>
           {a.driver?.name && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+            <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400" data-testid={`fahrer-${a.id}`}>
               <UserIcon size={10} /> {a.driver.name}
+              {a.zuteilung === "offen" && <span className="text-amber-300"> · wartet auf Annahme</span>}
+              {a.zuteilung === "angenommen" && <span className="text-emerald-300"> · angenommen</span>}
+            </span>
+          )}
+          {!a.driver?.name && a.zuteilung === "abgelehnt" && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-red-300" title={a.zuteilung_abgelehnt_grund || ""}>
+              <UserIcon size={10} /> vom Fahrer abgelehnt{a.zuteilung_abgelehnt_von ? ` (${a.zuteilung_abgelehnt_von})` : ""} — bitte neu zuteilen
+            </span>
+          )}
+          {a.has_pickup_report && (
+            <span role="button" tabIndex={0} data-testid={`bericht-${a.id}`}
+                  onClick={(e) => { e.stopPropagation(); setBericht(true); }}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setBericht(true); } }}
+                  className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline cursor-pointer">
+              <Camera size={10} /> Abholbericht
+              {a.deviations_count ? ` · ${a.deviations_count} Abweichung${a.deviations_count === 1 ? "" : "en"}` : ""}
             </span>
           )}
           {a.contract_id && (
@@ -356,15 +398,19 @@ function DayApptItem({ a, onEdit, compact }) {
         </div>
         {a.vehicle_id && !compact && (
           <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-            <SnapshotCard vehicleId={a.vehicle_id} compact />
+            <BeweisCard vehicleId={a.vehicle_id} compact />
           </div>
         )}
       </div>
+      {bericht && <AbholberichtDialog appt={a} onClose={() => setBericht(false)} />}
     </button>
   );
 }
 
 /* ───────────────────────── List View ───────────────────────── */
+
+// Abgeschlossene Zustaende — wandern in der Liste automatisch nach unten
+const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storniert"]);
 
 function ListView({ items, onEdit }) {
   if (!items.length) {
@@ -372,38 +418,75 @@ function ListView({ items, onEdit }) {
       <div className="apple-surface-gloss p-12 text-center text-zinc-500">
         <CalIcon className="mx-auto mb-3 opacity-50" />
         Keine Termine. Erstelle einen Vertrag oder klicke „Neuer Termin“.
+        {gekuerzt && <div className="mt-2 text-xs">Hinweis: die Liste ist auf 2.000 Termine gekürzt.</div>}
       </div>
     );
   }
-  // group by date
-  const groups = items.reduce((acc, a) => {
-    const k = a.pickup_date || "ohne Datum";
-    if (!acc[k]) acc[k] = [];
-    acc[k].push(a);
-    return acc;
-  }, {});
-  const keys = Object.keys(groups).sort();
+  // Wunsch 09/2026: der naechste Termin steht ganz oben (Heute / Morgen /
+  // Diese Woche / Spaeter), abgeschlossene und vergangene Termine darunter,
+  // neueste zuerst.
+  const jetzt = new Date();
+  const heute = format(jetzt, "yyyy-MM-dd");
+  const morgen = format(addDays(jetzt, 1), "yyyy-MM-dd");
+  const wocheEnde = format(endOfWeek(jetzt, { weekStartsOn: 1 }), "yyyy-MM-dd");
+  const byTime = (x, y) => (x.pickup_time || "").localeCompare(y.pickup_time || "");
+  const kommend = items
+    .filter((a) => a.pickup_date && a.pickup_date >= heute && !ABGESCHLOSSEN.has(a.status))
+    .sort((x, y) => x.pickup_date.localeCompare(y.pickup_date) || byTime(x, y));
+  const ohneDatum = items.filter((a) => !a.pickup_date && !ABGESCHLOSSEN.has(a.status));
+  const kommendIds = new Set([...kommend, ...ohneDatum].map((a) => a.id));
+  const vergangen = items
+    .filter((a) => !kommendIds.has(a.id))
+    .sort((x, y) => (y.pickup_date || "").localeCompare(x.pickup_date || "") || byTime(y, x));
+  const label = (d) => (d === heute ? "Heute" : d === morgen ? "Morgen" : d <= wocheEnde ? "Diese Woche" : "Später");
+  const gruppen = (list) => {
+    const out = [];
+    for (const a of list) {
+      const k = a.pickup_date || "ohne Datum";
+      if (!out.length || out[out.length - 1].k !== k) out.push({ k, items: [] });
+      out[out.length - 1].items.push(a);
+    }
+    return out;
+  };
+  const Gruppe = ({ k, list, prefix }) => {
+    const date = safeParse(k);
+    return (
+      <div>
+        <div className="flex items-center gap-3 mb-2">
+          {prefix && <span className="text-[11px] uppercase tracking-wide px-2 py-0.5 rounded-md bg-white/[0.08] text-zinc-300">{prefix}</span>}
+          <div className="font-display font-bold text-base">
+            {date ? format(date, "EEEE, d. LLLL yyyy", { locale: de }) : "ohne Datum"}
+          </div>
+          <div className="flex-1 h-px bg-white/[0.06]" />
+          <div className="text-xs text-zinc-500">{list.length} Termin{list.length !== 1 ? "e" : ""}</div>
+        </div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {list.map((a) => <DayApptItem key={a.id} a={a} onEdit={onEdit} />)}
+        </div>
+      </div>
+    );
+  };
+  const Abschnitt = ({ titel, anzahl, tone }) => (
+    <div className="flex items-center gap-3 pt-2" data-testid={`termine-abschnitt-${tone}`}>
+      <div className={`text-sm font-semibold ${tone === "kommend" ? "text-white" : "text-zinc-400"}`}>{titel}</div>
+      <div className="text-xs text-zinc-500">{anzahl}</div>
+      <div className="flex-1 h-px bg-white/[0.10]" />
+    </div>
+  );
   return (
     <div className="space-y-5">
-      {keys.map((k) => {
-        const date = safeParse(k);
-        return (
-          <div key={k}>
-            <div className="flex items-center gap-3 mb-2">
-              <div className="font-display font-bold text-base">
-                {date ? format(date, "EEEE, d. LLLL yyyy", { locale: de }) : "ohne Datum"}
-              </div>
-              <div className="flex-1 h-px bg-white/[0.06]" />
-              <div className="text-xs text-zinc-500">{groups[k].length} Termin{groups[k].length !== 1 ? "e" : ""}</div>
-            </div>
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {groups[k].sort((x, y) => (x.pickup_time || "").localeCompare(y.pickup_time || "")).map((a) => (
-                <DayApptItem key={a.id} a={a} onEdit={onEdit} />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      <Abschnitt titel="Kommende Termine" anzahl={kommend.length + ohneDatum.length} tone="kommend" />
+      {kommend.length === 0 && ohneDatum.length === 0 && (
+        <div className="text-sm text-zinc-500">Keine offenen Termine.</div>
+      )}
+      {gruppen(kommend).map((g) => <Gruppe key={`k-${g.k}`} k={g.k} list={g.items} prefix={label(g.k)} />)}
+      {ohneDatum.length > 0 && <Gruppe k="ohne Datum" list={ohneDatum} prefix="Ohne Datum" />}
+      {vergangen.length > 0 && (
+        <>
+          <Abschnitt titel="Abgeschlossen & vergangen" anzahl={vergangen.length} tone="vergangen" />
+          {gruppen(vergangen).map((g) => <Gruppe key={`v-${g.k}`} k={g.k} list={g.items} />)}
+        </>
+      )}
     </div>
   );
 }
@@ -550,14 +633,9 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
             </div>
           </div>
 
-          {/* Pricing */}
+          {/* 14.09.2026 (Entscheidung Ahmad): kein Endpreis-Feld mehr — der Preis
+              kommt ueber Abholprotokoll und Freigabe in den Kaufvertrag. */}
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Endpreis (€)</label>
-              <input data-testid="edit-final-price" type="number" value={a.final_price || ""}
-                     onChange={(e) => set("final_price", Number(e.target.value) || null)}
-                     className="apple-input" />
-            </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sonstige Kosten (€)</label>
               <input data-testid="edit-extra-costs" type="number" value={a.extra_costs || ""}
@@ -644,7 +722,7 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
 
           {a.vehicle_id && (
             <div className="mt-4">
-              <SnapshotCard vehicleId={a.vehicle_id} />
+              <BeweisCard vehicleId={a.vehicle_id} />
             </div>
           )}
 
@@ -667,7 +745,7 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-white/[0.08] flex items-center justify-between gap-2 sticky bottom-0 bg-[rgba(20,20,22,0.98)] rounded-b-[18px]">
+        <div className="px-6 py-4 border-t border-white/[0.08] flex items-center justify-between gap-2 sticky bottom-0 bg-[var(--bg-elevated)] rounded-b-[18px]">
           <div>
             {onDelete && (
               <button onClick={onDelete} className="apple-btn apple-btn-danger" data-testid="delete-appt-btn">
@@ -684,5 +762,24 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Runde 33 (Wunsch Ahmad): Mehrere Fahrer koennen gleichzeitig warten — die
+// Freigaben liegen deshalb auf einer eigenen Seite (/app/freigaben).
+function FreigabeHinweis() {
+  // 14.09.2026: Freigaben sind Chefsache — Sucher sehen den Hinweis nicht.
+  const { user } = useAuth();
+  const { wartet, freigegeben } = useFreigabeZaehler(user?.role === "dealer");
+  if (!wartet && !freigegeben) return null;
+  const text = wartet > 0
+    ? `${wartet} Abholprotokoll${wartet === 1 ? " wartet" : "e warten"} auf deine Freigabe`
+    : `${freigegeben} freigegeben — vor Ort wird unterschrieben`;
+  return (
+    <Link to="/app/freigaben" data-testid="termine-freigaben-hinweis"
+          className="mb-5 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-white/5 transition"
+          style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "#ffb340" }}>
+      {text} — zu den Freigaben ›
+    </Link>
   );
 }

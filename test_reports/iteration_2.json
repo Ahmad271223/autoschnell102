@@ -34,7 +34,7 @@
     "/app/memory/test_credentials.md"
   ],
   "success_rate": {"backend": "100% (14/14)", "frontend": "100% smoke + integration"},
-  "test_credentials": "Admin: admin@autohandel.app / Admin123! (lifetime). Driver test accounts are auto-created per pytest run with prefix test_*@example.com / Drv1234!. Last live test run created e.g. driver code FD-WZKWT44M (display_name 'Neuer Name').",
+  "test_credentials": "Admin: <ADMIN_EMAIL> / <ADMIN_PASSWORD> (lifetime). Driver test accounts are auto-created per pytest run with prefix test_*@example.com / Drv1234!. Last live test run created e.g. driver code FD-WZKWT44M (display_name 'Neuer Name').",
   "seed_data_creation": "pytest creates ~10 throwaway driver accounts and ~2 dealer accounts per run, plus 1 contract + 1 appointment in the appointments-flow test. No teardown; mongo will accumulate test data if run repeatedly.",
   "retest_needed": false,
   "main_agent_can_self_test": true,

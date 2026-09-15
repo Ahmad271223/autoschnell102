@@ -22,8 +22,8 @@ export function Card({ children, className = "", padded = true }) {
     <div
       className={`rounded-2xl ${padded ? "p-5" : ""} ${className}`}
       style={{
-        background: "rgba(255,255,255,0.03)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        background: "var(--wa-03)",
+        border: "1px solid var(--wa-08)",
         boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
       }}
     >

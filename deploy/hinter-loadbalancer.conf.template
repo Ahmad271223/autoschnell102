@@ -1,0 +1,322 @@
+# Betriebsart "hinter dem Load Balancer".
+#
+# Der Hetzner Load Balancer beendet die Verschluesselung und spricht mit den
+# Servern ueber das private Netz per HTTP. Deshalb:
+#   * nginx hoert NUR auf Port 80 (kein eigenes Zertifikat noetig)
+#   * KEINE Umleitung auf https — die wuerde eine Endlosschleife erzeugen,
+#     weil der Load Balancer die naechste Anfrage wieder als HTTP zustellt
+#   * die echte Besucher-Adresse kommt aus X-Forwarded-For, aber NUR wenn
+#     die Anfrage aus dem privaten Netz stammt (set_real_ip_from)
+#
+# Gewaehlt wird diese Datei ueber PROXY_TEMPLATE in der .env:
+#   PROXY_TEMPLATE=hinter-loadbalancer.conf.template
+# Ohne Load Balancer bleibt default.conf.template (nginx macht dann TLS).
+
+# ---- Unbekannte Hosts: Verbindung wortlos schliessen ----
+# Ausnahme: die Gesundheitspruefung. Der Load Balancer fragt je nach
+# Einstellung mit der SERVER-IP als Host an, nicht mit der Domain — ohne
+# diese Ausnahme bekaeme er 444 und wuerde den Server dauerhaft als
+# "unhealthy" fuehren. Die Antwort kommt vom Backend, nicht fest von nginx:
+# so bedeutet "healthy" auch wirklich, dass die Anwendung laeuft.
+# Runde 9: Hinter dem Load Balancer darf NIEMAND direkt an Port 80 —
+# sonst liesse sich mit einer selbst gesetzten Kopfzeile X-Forwarded-Proto
+# die HTTPS-Umleitung umgehen. Die Firewall muss das ohnehin sperren;
+# nginx sperrt es zusaetzlich (Verteidigung in der Tiefe).
+# Direktzugriff am Load Balancer vorbei erkennen. WICHTIG: nicht mit
+# allow/deny — die pruefen $remote_addr, und das ist nach real_ip schon
+# die Besucheradresse (05.09.2026: jeder Besucher bekam 403). Geprueft
+# wird die URSPRUENGLICHE Adresse des direkten Nachbarn: nur der Load
+# Balancer aus dem privaten Netz darf hereinkommen.
+geo $realip_remote_addr $direktzugriff {
+  default 1;
+  ${PRIVATES_NETZ} 0;
+  127.0.0.1 0;
+}
+
+server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
+  listen 80 default_server;
+  server_name _;
+  if ($direktzugriff) { return 444; }
+
+  location = /api/health {
+    # Drain-Marker (deploy/rollout.sh): meldet dem Load Balancer "nicht
+    # gesund", BEVOR der Server neu gebaut wird — sonst schickt der LB
+    # waehrend des Neubaus des Oberflaechen-Containers weiter Besucher
+    # hierher und die bekommen 502 (Vorfall 07.09.2026, 15:04 UTC).
+    # Zwei Orte: die Datei auf dem Host (deploy/drain/aktiv, per Volume
+    # eingehaengt — ueberlebt einen Neustart des Proxy-Containers) und
+    # /tmp/drain im Container (Uebergang fuer Proxys ohne das Volume).
+    if (-f /etc/nginx/drain/aktiv) { return 503; }
+    if (-f /tmp/drain) { return 503; }
+    # Gesund heisst: Backend UND Oberflaeche antworten. Ist der web-Container
+    # weg (Neubau, Absturz), scheitert die Unteranfrage und der Load
+    # Balancer nimmt den Server aus der Rotation (500 statt 200).
+    auth_request /_oberflaeche_ok;
+    proxy_pass $backend_up;
+    access_log off;
+  }
+  location = /_oberflaeche_ok {
+    internal;
+    proxy_pass $web_up/;
+    proxy_method HEAD;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 3s;
+    access_log off;
+  }
+  # Runde 8, Befund 5: Der Load Balancer darf WAHLWEISE /api/ready als
+  # Gesundheitspruefung nehmen. Entscheidung fuer den Standard: /api/health.
+  # Grund: /api/ready meldet 503 auch bei Migrationsstand oder vollem
+  # Speicher — dann wuerde der LB ALLE Server rausnehmen und die Seite
+  # waere komplett weg, obwohl sie Vertraege weiterhin ausliefern koennte.
+  # Ein Ausfall von R2 ist in /api/ready nur eine Warnung (200) und loest
+  # einen Betriebsalarm aus. Wer strenger fahren will, stellt den LB-Check
+  # auf /api/ready um; der Pfad ist hier dafuer freigegeben.
+  location = /api/ready {
+    proxy_pass $backend_up;
+    access_log off;
+  }
+
+  location / { return 444; }
+}
+
+# ---- Die eigene Domain ----
+server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
+  listen 80;
+  server_name ${PUBLIC_HOST};
+  if ($direktzugriff) { return 444; }
+
+  # Echte Besucher-Adresse: Der Load Balancer traegt sie in X-Forwarded-For
+  # ein. Vertraut wird dieser Angabe nur aus dem privaten Netz — eine von
+  # aussen mitgeschickte Kette bleibt wirkungslos.
+  set_real_ip_from ${PRIVATES_NETZ};
+  # Cloudflare davor (Zertifikat am LB ist ein Cloudflare-Origin-Zertifikat,
+  # Besucher kommen ueber Cloudflare): Cloudflare haengt die Besucher-
+  # adresse an X-Forwarded-For, der Load Balancer haengt Cloudflares
+  # Adresse an. Beide Vermittler werden von rechts uebersprungen, uebrig
+  # bleibt der Besucher. Wer den LB direkt anspricht und eine Adresse
+  # faelscht, wird an seiner eigenen (nicht vertrauten) Adresse erkannt.
+  # Cloudflare-Netze, Stand 2026: https://www.cloudflare.com/ips/
+  set_real_ip_from 173.245.48.0/20;
+  set_real_ip_from 103.21.244.0/22;
+  set_real_ip_from 103.22.200.0/22;
+  set_real_ip_from 103.31.4.0/22;
+  set_real_ip_from 141.101.64.0/18;
+  set_real_ip_from 108.162.192.0/18;
+  set_real_ip_from 190.93.240.0/20;
+  set_real_ip_from 188.114.96.0/20;
+  set_real_ip_from 197.234.240.0/22;
+  set_real_ip_from 198.41.128.0/17;
+  set_real_ip_from 162.158.0.0/15;
+  set_real_ip_from 104.16.0.0/13;
+  set_real_ip_from 104.24.0.0/14;
+  set_real_ip_from 172.64.0.0/13;
+  set_real_ip_from 131.0.72.0/22;
+  set_real_ip_from 2400:cb00::/32;
+  set_real_ip_from 2606:4700::/32;
+  set_real_ip_from 2803:f800::/32;
+  set_real_ip_from 2405:b500::/32;
+  set_real_ip_from 2405:8100::/32;
+  set_real_ip_from 2a06:98c0::/29;
+  set_real_ip_from 2c0f:f248::/32;
+  real_ip_header X-Forwarded-For;
+  real_ip_recursive on;
+
+  # Sicherheits-Header fuer ALLE Antworten (API und Oberflaeche) — "always",
+  # damit sie auch bei Fehlerseiten gesetzt werden. HSTS ist richtig, weil
+  # der Besucher die Seite ueber HTTPS erreicht (der Load Balancer terminiert).
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(self)" always;
+  add_header Content-Security-Policy "frame-ancestors 'none'" always;
+
+  # Gesundheitspruefung des Load Balancers — ohne Umweg ans Backend.
+  location = /api/health {
+    # Drain-Marker (deploy/rollout.sh): meldet dem Load Balancer "nicht
+    # gesund", BEVOR der Server neu gebaut wird — sonst schickt der LB
+    # waehrend des Neubaus des Oberflaechen-Containers weiter Besucher
+    # hierher und die bekommen 502 (Vorfall 07.09.2026, 15:04 UTC).
+    # Zwei Orte: die Datei auf dem Host (deploy/drain/aktiv, per Volume
+    # eingehaengt — ueberlebt einen Neustart des Proxy-Containers) und
+    # /tmp/drain im Container (Uebergang fuer Proxys ohne das Volume).
+    if (-f /etc/nginx/drain/aktiv) { return 503; }
+    if (-f /tmp/drain) { return 503; }
+    # Gesund heisst: Backend UND Oberflaeche antworten. Ist der web-Container
+    # weg (Neubau, Absturz), scheitert die Unteranfrage und der Load
+    # Balancer nimmt den Server aus der Rotation (500 statt 200).
+    auth_request /_oberflaeche_ok;
+    proxy_pass $backend_up;
+    access_log off;
+  }
+  location = /_oberflaeche_ok {
+    internal;
+    proxy_pass $web_up/;
+    proxy_method HEAD;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 3s;
+    access_log off;
+  }
+
+  # API ans Backend.
+  location /api/ {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
+    proxy_pass $backend_up;
+    proxy_read_timeout 300s;   # Snapshots/PDF + synchrone Apify-Abrufe (bis 180 s)
+    # Runde 26 (12.09.2026, Pruefbefund): Besucher-Adresse ausdruecklich an das
+    # Backend weitergeben. nginx reicht fremde Kopfzeilen sonst durch — ein
+    # Besucher koennte X-Forwarded-For selbst setzen und damit die
+    # IP-Sperren beeinflussen. $proxy_add_x_forwarded_for haengt die ECHTE
+    # Adresse des direkten Nachbarn hinten an; rate_limiter.client_ip nimmt
+    # genau den letzten fremden Eintrag.
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+
+  # Statische Build-Dateien mit Hash im Namen: lange cachen.
+  location /static/ {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
+    proxy_pass $web_up;
+    # KEIN "always": sonst traegt auch eine 502-Antwort (web-Container kurz
+    # weg) "ein Jahr cachen", und Cloudflare liefert den Fehler danach aus
+    # dem Cache weiter — schwarzer Bildschirm, obwohl die Server laengst
+    # gesund sind (Vorfall 07.09.2026, 15:31-16:08 UTC). Ohne "always"
+    # setzt nginx die Kopfzeile nur bei 200/206/301/302/303/304/307/308.
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    # Rollout Server fuer Server (08.09.2026): Startseite vom NEUEN Server,
+    # Bundle-Anfrage landet ueber den Load Balancer auf dem ALTEN Server ->
+    # 404, das Cloudflare standardmaessig 3 Minuten zwischenspeichert
+    # (schwarzer Bildschirm). Fehlende Bundle-Dateien deshalb ausdruecklich
+    # als "no-store" ausliefern (nur die 404, die 200 bleibt ein Jahr cachebar).
+    proxy_intercept_errors on;
+    # Runde 31 (12.09.2026, Vorfall Fahrer-App/Super-Admin): Die 404 oben kam
+    # nicht nur kurz vor — prod2 lief 12:20:35 UTC mit dem neuen Stand,
+    # prod1 erst 12:33:58 UTC. 13 Minuten lang konnte JEDER Besucher auf
+    # eine tote Seite laufen (DriverLayout.*.chunk.js -> 404). no-store
+    # verhinderte nur, dass Cloudflare den Fehler festhielt. Jetzt fragt
+    # der Server, dem die Datei fehlt, erst beide Server im privaten Netz
+    # (Port 8081, Block ganz unten) — der neue kennt das neue Bundle, der
+    # alte (ueber assets-alt) das alte. Erst wenn keiner sie hat: 404.
+    recursive_error_pages on;
+    error_page 404 = @static_nachbar1;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+
+  # Beide Server nacheinander fragen (einer davon ist dieser Server selbst —
+  # das kostet nur bei fehlenden Dateien eine kurze Anfrage und erspart eine
+  # eigene Einstellung je Server: PROD1_IP/PROD2_IP stehen ohnehin in der
+  # .env, docker-compose setzt ohne sie 127.0.0.1). Kurze Zeitlimits: ist
+  # der Nachbar weg (Neubau, Drain), wartet der Besucher hoechstens ~1 s.
+  location @static_nachbar1 {
+    set $nachbar1 http://${PROD1_IP}:8081;
+    proxy_pass $nachbar1;
+    proxy_connect_timeout 1s;
+    proxy_read_timeout 5s;
+    proxy_intercept_errors on;
+    recursive_error_pages on;
+    error_page 403 404 500 502 503 504 = @static_nachbar2;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+  location @static_nachbar2 {
+    set $nachbar2 http://${PROD2_IP}:8081;
+    proxy_pass $nachbar2;
+    proxy_connect_timeout 1s;
+    proxy_read_timeout 5s;
+    proxy_intercept_errors on;
+    recursive_error_pages on;
+    error_page 403 404 500 502 503 504 = @static_fehlt;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+
+  location @static_fehlt {
+    add_header Cache-Control "no-store" always;
+    return 404;
+  }
+
+  # Alles andere ans Frontend (SPA).
+  location / {
+    # Unverschluesselt hereingekommen? Auf HTTPS umleiten. Der Load Balancer
+    # bietet auch Port 80 an (fuer die Zertifikatsausstellung) — ohne diese
+    # Umleitung waere die Anmeldung im Klartext erreichbar. Geprueft wird die
+    # Angabe des Load Balancers, nicht das Protokoll zu nginx selbst.
+    if ($http_x_forwarded_proto = "http") {
+      return 301 https://$host$request_uri;
+    }
+    proxy_pass $web_up;
+  }
+}
+
+# ---- Bundle-Dateien fuer den anderen Server (Runde 31) ----
+# Nur /static/, nur fuer die beiden eigenen Server. Veroeffentlicht wird der
+# Port ausschliesslich auf der PRIVATEN Adresse (deploy/docker-compose.
+# replica.yml) — aus dem Internet ist er nicht erreichbar. allow/deny wirkt
+# hier auf die echte Adresse: dieser Block kennt kein real_ip.
+# Dieser Block fragt NIE weiter — damit koennen sich die beiden Server nicht
+# gegenseitig im Kreis schicken.
+server {
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $web_up http://web:80;
+  listen 8081;
+  server_name _;
+  allow 127.0.0.1;
+  allow ${PROD1_IP};
+  allow ${PROD2_IP};
+  deny all;
+  access_log off;
+
+  location /static/ {
+    proxy_pass $web_up;
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 5s;
+    proxy_intercept_errors on;
+    error_page 404 500 502 503 504 = @nicht_hier;
+  }
+  location @nicht_hier { return 404; }
+  location / { return 404; }
+}

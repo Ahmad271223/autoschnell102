@@ -1,0 +1,500 @@
+{
+  "szenario": "T4",
+  "wiederholung": 1,
+  "zeitstempel": "20260829T110507Z",
+  "konfiguration": {
+    "nutzer": 100,
+    "dauer_s": 300,
+    "warmup_s": 30,
+    "firmen": 10,
+    "ziel": "http://localhost:8001",
+    "workers_hinweis": "s. Start"
+  },
+  "anfragen_gesamt": 11713,
+  "endpunkte": {
+    "abo_status": {
+      "ok": 465,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 51,
+      "p95_ms": 370,
+      "p99_ms": 461,
+      "fehler_nach_status": {}
+    },
+    "fahrer_termine": {
+      "ok": 489,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 98,
+      "p95_ms": 401,
+      "p99_ms": 487,
+      "fehler_nach_status": {}
+    },
+    "foto_loeschen": {
+      "ok": 753,
+      "fehler": 7,
+      "fehlerrate_prozent": 0.92,
+      "p50_ms": 34,
+      "p95_ms": 295,
+      "p99_ms": 432,
+      "fehler_nach_status": {
+        "404": 7
+      }
+    },
+    "foto_oeffnen": {
+      "ok": 394,
+      "fehler": 4,
+      "fehlerrate_prozent": 1.01,
+      "p50_ms": 78,
+      "p95_ms": 415,
+      "p99_ms": 611,
+      "fehler_nach_status": {
+        "404": 3,
+        "599": 1
+      }
+    },
+    "foto_upload_gross": {
+      "ok": 100,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 476,
+      "p95_ms": 962,
+      "p99_ms": 1264,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_klein": {
+      "ok": 487,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 61,
+      "p95_ms": 399,
+      "p99_ms": 517,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_normal": {
+      "ok": 420,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 308,
+      "p95_ms": 706,
+      "p99_ms": 819,
+      "fehler_nach_status": {}
+    },
+    "link_bekannt": {
+      "ok": 806,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 207,
+      "p95_ms": 529,
+      "p99_ms": 714,
+      "fehler_nach_status": {}
+    },
+    "link_job_ende": {
+      "ok": 807,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 2309,
+      "p95_ms": 2657,
+      "p99_ms": 4609,
+      "fehler_nach_status": {}
+    },
+    "link_neu_check": {
+      "ok": 810,
+      "fehler": 2,
+      "fehlerrate_prozent": 0.25,
+      "p50_ms": 116,
+      "p95_ms": 429,
+      "p99_ms": 583,
+      "fehler_nach_status": {
+        "599": 2
+      }
+    },
+    "link_neu_vergleich": {
+      "ok": 807,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 66,
+      "p95_ms": 368,
+      "p99_ms": 490,
+      "fehler_nach_status": {}
+    },
+    "markt_favorit": {
+      "ok": 234,
+      "fehler": 1,
+      "fehlerrate_prozent": 0.43,
+      "p50_ms": 39,
+      "p95_ms": 326,
+      "p99_ms": 469,
+      "fehler_nach_status": {
+        "599": 1
+      }
+    },
+    "markt_haendler": {
+      "ok": 250,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 57,
+      "p95_ms": 350,
+      "p99_ms": 477,
+      "fehler_nach_status": {}
+    },
+    "markt_suche": {
+      "ok": 516,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 116,
+      "p95_ms": 424,
+      "p99_ms": 580,
+      "fehler_nach_status": {}
+    },
+    "pdf_download_protokoll": {
+      "ok": 323,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 105,
+      "p95_ms": 397,
+      "p99_ms": 535,
+      "fehler_nach_status": {}
+    },
+    "pdf_download_vertrag": {
+      "ok": 354,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 40,
+      "p95_ms": 368,
+      "p99_ms": 452,
+      "fehler_nach_status": {}
+    },
+    "pdf_vertrag_neu": {
+      "ok": 641,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 266,
+      "p95_ms": 568,
+      "p99_ms": 752,
+      "fehler_nach_status": {}
+    },
+    "protokoll_abschluss": {
+      "ok": 3032,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 812,
+      "p95_ms": 1313,
+      "p99_ms": 1545,
+      "fehler_nach_status": {}
+    },
+    "protokoll": {
+      "ok": 0,
+      "fehler": 10,
+      "fehlerrate_prozent": 100.0,
+      "fehler_nach_status": {
+        "599": 10
+      }
+    },
+    "link_mix": {
+      "ok": 0,
+      "fehler": 1,
+      "fehlerrate_prozent": 100.0,
+      "fehler_nach_status": {
+        "599": 1
+      }
+    }
+  },
+  "jobs": {
+    "annahme_p50_ms": 117,
+    "annahme_p95_ms": 430,
+    "warte_p50_ms": 2309,
+    "warte_p95_ms": 2657,
+    "warte_p99_ms": 4609,
+    "queue_max": 7,
+    "queue_schnitt": 2.0,
+    "drain_sekunden": 0,
+    "offene_jobs_nach_drain": 0,
+    "haengende_jobs": 0
+  },
+  "klassen": {
+    "technisch_unerwartet": 3,
+    "fachlich_erwartet": 0,
+    "sicherheitstest_ok": 0,
+    "race_ux_befund": 7,
+    "verbindungsabbruch_client": 15,
+    "erfolgreich": 11688
+  },
+  "klassen_details": {
+    "foto_loeschen": {
+      "404": "7x Race/UX-Befund"
+    },
+    "foto_oeffnen": {
+      "404": "3x UNERWARTET"
+    }
+  },
+  "reset_forensik": [
+    {
+      "zeit": "2026-08-29T11:15:20.221444+00:00",
+      "endpunkt": "foto_oeffnen",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.223070+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.223203+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.223306+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.223385+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.224196+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.224323+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.224679+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.224769+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.224882+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.225058+00:00",
+      "endpunkt": "link_mix",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.225163+00:00",
+      "endpunkt": "protokoll",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.225341+00:00",
+      "endpunkt": "link_neu_check",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.225444+00:00",
+      "endpunkt": "markt_favorit",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    },
+    {
+      "zeit": "2026-08-29T11:15:20.225509+00:00",
+      "endpunkt": "link_neu_check",
+      "system_tick": {
+        "zeit": "2026-08-29T11:11:22.069172+00:00",
+        "cpu": 50.2,
+        "ram": 49.4,
+        "disk_mb": 34726,
+        "net_mb": 253
+      },
+      "backend_log": []
+    }
+  ],
+  "server_abschluss_nachweis": {
+    "pdf_vertraege_db_delta": 705,
+    "pdf_vertraege_client_ok": 641,
+    "ohne_client_antwort_abgeschlossen": 64
+  },
+  "speicher": {
+    "vorher": {
+      "resale": {
+        "dateien": 4688,
+        "mb": 9853.3
+      },
+      "protocol": {
+        "dateien": 18594,
+        "mb": 1976.8
+      },
+      "pickup": {
+        "dateien": 0,
+        "mb": 0.0
+      },
+      "disk_frei_gb": 539.1
+    },
+    "nachher": {
+      "resale": {
+        "dateien": 5021,
+        "mb": 10703.3
+      },
+      "protocol": {
+        "dateien": 28665,
+        "mb": 3033.4
+      },
+      "pickup": {
+        "dateien": 0,
+        "mb": 0.0
+      },
+      "disk_frei_gb": 537.2
+    }
+  },
+  "pdf_beweis": {
+    "vertraege_gesamt": 715,
+    "speicher_mb_in_db": 4.2,
+    "stichprobe_geprueft": 15,
+    "eindeutige_dateien_in_stichprobe": 15,
+    "befunde": [
+      "02866547-b542-4760-8b6e-eb92de5f441b: verdaechtig klein (5840 B)",
+      "796de2ef-7a95-43ac-8552-954f2ce4b4fa: verdaechtig klein (5838 B)",
+      "59b0fad5-d3b1-46e4-8802-e6384b8c814c: verdaechtig klein (5841 B)",
+      "fd0d4c22-0c32-49d9-a12a-05e5e7340799: verdaechtig klein (5839 B)",
+      "e491a36f-5bb3-4dce-a8d1-bb8536712ad6: verdaechtig klein (5837 B)",
+      "49afa755-4c12-408d-818a-80beae9a6de6: verdaechtig klein (5838 B)",
+      "1f245d2d-985a-4989-b6fb-04d1f5793242: verdaechtig klein (5838 B)",
+      "2c6906bb-2927-4e3f-96c7-bf12d84f1d4b: verdaechtig klein (5839 B)",
+      "9bafb666-58cb-4ed0-847d-6a42f6e31235: verdaechtig klein (5840 B)",
+      "95f46da0-064a-40a5-8ee0-e6636a228ee0: verdaechtig klein (5838 B)",
+      "5527aa2d-0fb1-4dae-9636-533700d48503: verdaechtig klein (5838 B)",
+      "e0323343-6fac-4bed-a8f8-89fcd5396749: verdaechtig klein (5839 B)",
+      "64d2d26b-5a3b-4d01-87fb-ca5abce71c13: verdaechtig klein (5834 B)",
+      "25d9defa-5450-4238-8047-972f553610a6: verdaechtig klein (5843 B)",
+      "ee86e7d8-a5b1-4e86-8ad2-e267dc3a0597: verdaechtig klein (5841 B)"
+    ]
+  },
+  "foto_audit": {
+    "dateien_ohne_db": 11,
+    "db_ohne_datei": 15
+  },
+  "integritaet": {
+    "doppelte_anbieter_abrufe": 0,
+    "versand_gesendet": 0,
+    "versand_eintraege_delta": 0,
+    "doppel_versand": 0,
+    "jobs_nicht_fertig_im_messfenster": 2
+  },
+  "system": {
+    "cpu_median": 52,
+    "cpu_spitze": 71,
+    "ram_median": 49,
+    "ram_spitze": 50,
+    "ram_nach_drain": 49.4,
+    "mongo_verbindungen": 106,
+    "db_ops_pro_anfrage": 14.1,
+    "disk_write_mb_delta": 4025,
+    "net_mb_delta": 21
+  },
+  "cleanup_beweis": {
+    "db_reste": 0,
+    "datei_reste": 0,
+    "disk_frei_gb_nach_cleanup": 539.1
+  }
+}

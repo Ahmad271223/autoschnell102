@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import PortalSheet from "@/components/PortalSheet";
+import { FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { hinweiseZeigen } from "@/lib/hinweise";
+import { useAuth } from "@/context/AuthContext";
 import {
   Search, Car, Calendar, Gauge, Zap, Fuel, Cog, Eye, ExternalLink,
   ChevronDown, X,
@@ -14,6 +18,11 @@ const FUELS = [
 const GEARBOXES = ["Automatik", "Manuell"];
 
 export default function ManuelleSuche() {
+  const { dealer } = useAuth();
+  // Runde 11: Das aktive Regelprofil (Inland/Export) bestimmt Land,
+  // Unfallwagen, Anbieter usw. der Suche — vorher stand es nirgends auf
+  // dieser Seite, zwei gleiche Eingaben konnten voellig verschieden suchen.
+  const aktivesProfil = dealer?.active_profile === "export" ? "Export" : "Inland";
   const [makes, setMakes] = useState([]);
   const [makeId, setMakeId] = useState(null);
   const [modelId, setModelId] = useState(null);
@@ -31,12 +40,12 @@ export default function ManuelleSuche() {
   const [fuel, setFuel] = useState("");
   const [gearbox, setGearbox] = useState("");
   const [busy, setBusy] = useState(false);
-  const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout }
+  const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout, aufgeloest, profil }
 
-  // Marken laden — einmal beim Mount
+  // Marken laden — einmal je Sitzung (Modul-Cache, Nachpruefung Runde 10)
   useEffect(() => {
-    api.get("/manual/makes")
-      .then(({ data }) => setMakes(data))
+    ladeMakes(api)
+      .then((data) => setMakes(data))
       .catch((e) => toast.error(errMsg(e, "Marken konnten nicht geladen werden")));
   }, []);
 
@@ -76,11 +85,18 @@ export default function ManuelleSuche() {
     } else if (!v) setKw("");
   };
 
+  // Runde 24 (11.09.2026): ids der gezeigten Server-Hinweise — eine weitere
+  // Suche ersetzt denselben Text, statt ihn zu stapeln (siehe lib/hinweise).
+  const hinweisIdsRef = useRef([]);
+
   const submit = async () => {
     if (!selectedMake) {
       toast.error("Bitte zuerst eine Marke auswählen");
       return;
     }
+    // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
+    // der vorherigen Suche wuerde deren Link in den Filter-Tab laden.
+    toast.dismiss(FILTER_TOAST_ID);
     setBusy(true);
     try {
       const { data } = await api.post("/manual/search", {
@@ -96,7 +112,16 @@ export default function ManuelleSuche() {
         gearbox: gearbox || null,
       });
       // Dialog anzeigen — User wählt welches Portal er öffnen will
-      setPortalUrls({ mobile: data.mobile_url, autoscout: data.autoscout_url });
+      setPortalUrls({
+        mobile: data.mobile_url,
+        autoscout: data.autoscout_url,
+        aufgeloest: data.aufgeloest || null,
+        profil: data.profil,
+      });
+      // Runde 10: Der Server sagt, wenn ein Portal Marke oder Modell nicht
+      // kennt — vorher lief die Suche dann still ueber die ganze Marke.
+      // Runde 24 (11.09.2026): feste id je Text — derselbe Hinweis steht nie doppelt.
+      hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
     } catch (e) {
       toast.error(errMsg(e, "Suche fehlgeschlagen"));
     } finally {
@@ -108,6 +133,11 @@ export default function ManuelleSuche() {
     setMakeId(null); setModelId(null); setMakeSearch(""); setModelSearch("");
     setEzFrom(""); setEzTo(""); setKmMin(""); setKmMax("");
     setKw(""); setPs(""); setFuel(""); setGearbox("");
+    // Runde 11: Links der VORHERIGEN Suche gehoeren nicht zu leeren Feldern.
+    setPortalUrls(null);
+    toast.dismiss(FILTER_TOAST_ID);   // Runde 22: dito fuer den Blockade-Hinweis
+    // Runde 24 (11.09.2026): dito fuer die Server-Hinweise der vorigen Suche.
+    hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
   };
 
   const years = useMemo(() => {
@@ -118,7 +148,10 @@ export default function ManuelleSuche() {
   }, []);
 
   return (
-    <div className="space-y-6">
+    // Befund Ahmad (12.09.2026): Die Seite hatte weder Rand noch Breiten-
+    // begrenzung — alles klebte am Bildschirmrand. Jetzt derselbe Rahmen wie
+    // im Vergleich, mehr Abstand und zweispaltige Filter ab Tablet-Breite.
+    <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto space-y-8" data-testid="suche-page">
       <div>
         <div className="overline">MANUELLE SUCHE · MOBILE.DE & AUTOSCOUT24</div>
         <h1 className="font-display font-black text-4xl tracking-tighter leading-none mt-2">
@@ -127,12 +160,16 @@ export default function ManuelleSuche() {
         </h1>
         <p className="text-sm mt-2 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
           Wähle Marke, Modell und Filter aus — wir öffnen mobile.de und AutoScout24
-          gleichzeitig in zwei Tabs mit fertigem Filter.
+          mit fertigem Filter (beide auf einmal, sobald Pop-ups für AutoSchnell erlaubt sind).
+        </p>
+        <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }} data-testid="suche-profil">
+          Aktives Regelprofil: <strong>{aktivesProfil}</strong> — Land, Unfallwagen und Anbieter
+          kommen aus diesem Profil (Einstellungen).
         </p>
       </div>
 
       {/* Marke + Modell */}
-      <div className="grid md:grid-cols-2 gap-4">
+      <div className="grid md:grid-cols-2 gap-5">
         <PickerCard
           icon={<Car size={14} />}
           label="MARKE"
@@ -168,14 +205,16 @@ export default function ManuelleSuche() {
       </div>
 
       {/* Filter-Block */}
-      <div className="apple-card p-6">
-        <div className="overline mb-4 flex items-center gap-2">
+      <div className="apple-card p-5 sm:p-7">
+        <div className="overline mb-5 flex items-center gap-2">
           <Search size={11} /> FILTER
         </div>
 
+        <div className="grid gap-x-10 gap-y-1 sm:grid-cols-2">
+
         {/* Erstzulassung */}
         <FieldGroup icon={<Calendar size={14} />} label="Erstzulassung">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <YearSelect testid="manual-ez-from" value={ezFrom} onChange={setEzFrom} years={years} placeholder="von" />
             <YearSelect testid="manual-ez-to"   value={ezTo}   onChange={setEzTo}   years={years} placeholder="bis" />
           </div>
@@ -183,7 +222,7 @@ export default function ManuelleSuche() {
 
         {/* KM */}
         <FieldGroup icon={<Gauge size={14} />} label="Kilometerstand">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <NumInput testid="manual-km-min" value={kmMin} onChange={setKmMin} placeholder="von km" suffix="km" />
             <NumInput testid="manual-km-max" value={kmMax} onChange={setKmMax} placeholder="bis km" suffix="km" />
           </div>
@@ -191,7 +230,7 @@ export default function ManuelleSuche() {
 
         {/* Leistung */}
         <FieldGroup icon={<Zap size={14} />} label="Leistung">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <NumInput testid="manual-kw" value={kw} onChange={onKwChange} placeholder="kW" suffix="kW" />
             <NumInput testid="manual-ps" value={ps} onChange={onPsChange} placeholder="PS" suffix="PS" />
           </div>
@@ -200,15 +239,18 @@ export default function ManuelleSuche() {
           </p>
         </FieldGroup>
 
-        {/* Kraftstoff */}
-        <FieldGroup icon={<Fuel size={14} />} label="Kraftstoff">
-          <ChipRow value={fuel} onChange={setFuel} options={FUELS} testidPrefix="manual-fuel" />
-        </FieldGroup>
-
-        {/* Getriebe */}
-        <FieldGroup icon={<Cog size={14} />} label="Getriebe">
-          <ChipRow value={gearbox} onChange={setGearbox} options={GEARBOXES} testidPrefix="manual-gear" />
-        </FieldGroup>
+        {/* Kraftstoff und Getriebe brauchen die volle Breite */}
+        <div className="sm:col-span-2">
+          <FieldGroup icon={<Fuel size={14} />} label="Kraftstoff">
+            <ChipRow value={fuel} onChange={setFuel} options={FUELS} testidPrefix="manual-fuel" />
+          </FieldGroup>
+        </div>
+        <div className="sm:col-span-2">
+          <FieldGroup icon={<Cog size={14} />} label="Getriebe">
+            <ChipRow value={gearbox} onChange={setGearbox} options={GEARBOXES} testidPrefix="manual-gear" />
+          </FieldGroup>
+        </div>
+        </div>
 
         {/* CTA */}
         {/* Portal-Auswahl-Dialog */}
@@ -216,10 +258,11 @@ export default function ManuelleSuche() {
           <PortalSheet
             mobileUrl={portalUrls.mobile}
             autoscoutUrl={portalUrls.autoscout}
+            aufgeloest={portalUrls.aufgeloest}
             onClose={() => setPortalUrls(null)}
           />
         )}
-        <div className="flex flex-wrap items-center gap-3 pt-4 mt-2"
+        <div className="flex flex-wrap items-center gap-3 pt-5 mt-5"
              style={{ borderTop: "1px solid var(--hairline)" }}>
           <button
             data-testid="manual-submit"
@@ -307,7 +350,10 @@ function YearSelect({ value, onChange, years, placeholder, testid }) {
         onChange={(e) => onChange(e.target.value)}
         className="w-full h-11 px-4 pr-9 rounded-xl outline-none text-[14px] appearance-none"
         style={{
-          background: "var(--input-bg)",
+          // Deckend statt var(--input-bg) (rgba 5%): Chromium nutzt diese
+          // Farbe auch fuer den Rahmen der aufgeklappten Options-Liste —
+          // halbtransparent ergab dort einen weisslichen Kasten.
+          background: "var(--bg-surface)",
           border: "1px solid var(--divider)",
           color: value ? "var(--text-primary)" : "var(--text-muted)",
         }}

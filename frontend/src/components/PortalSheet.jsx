@@ -2,29 +2,35 @@
  * PortalSheet – modales Fenster zur Portal-Auswahl.
  *
  * Erscheint nach Vergleich oder manueller Suche.
- * Jeder Button ist ein direkter User-Klick → kein Popup-Blocker.
+ * Jeder Button ist ein direkter User-Klick — Chrome/Edge lassen damit aber
+ * nur EIN neues Fenster je Klick zu (Runde 22, 11.09.2026). "Beide öffnen"
+ * laeuft deshalb ueber filterOeffnen: das zweite Portal kommt per Hinweis-
+ * Knopf (neue Geste) nach, oder sofort, wenn Pop-ups erlaubt sind.
  */
 import { ExternalLink, X } from "lucide-react";
-import { openInPopup, openMultiple } from "@/lib/popup";
+import { filterOeffnen } from "@/lib/filterOeffnen";
 import PortalBadge from "@/components/PortalBadge";
 
-export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
+const MOBILE = { name: "mobileFilterWindow", label: "mobile.de" };
+const AUTOSCOUT = { name: "autoscoutFilterWindow", label: "AutoScout24" };
+
+export default function PortalSheet({ mobileUrl, autoscoutUrl, aufgeloest, onClose }) {
   if (!mobileUrl && !autoscoutUrl) return null;
 
   const openMobile = () => {
-    openInPopup(mobileUrl, "mobileFilterWindow");
+    filterOeffnen([{ ...MOBILE, url: mobileUrl }]);
     onClose();
   };
 
   const openAutoscout = () => {
-    openInPopup(autoscoutUrl, "autoscoutFilterWindow");
+    filterOeffnen([{ ...AUTOSCOUT, url: autoscoutUrl }]);
     onClose();
   };
 
   const openBoth = () => {
-    openMultiple([
-      { url: mobileUrl,     name: "mobileFilterWindow" },
-      { url: autoscoutUrl,  name: "autoscoutFilterWindow" },
+    filterOeffnen([
+      { ...MOBILE,    url: mobileUrl },
+      { ...AUTOSCOUT, url: autoscoutUrl },
     ].filter((u) => u.url));
     onClose();
   };
@@ -113,6 +119,34 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
             </button>
           )}
         </div>
+
+        {/* Aufloesung (manuelle Suche): bleibt sichtbar, anders als der Toast */}
+        {aufgeloest && (
+          <div className="px-5 pb-3" data-testid="portal-aufloesung">
+            <p className="overline mb-1.5">So wurde die Auswahl aufgelöst</p>
+            <div className="text-[12px] space-y-1" style={{ color: "var(--text-secondary)" }}>
+              <div className="flex items-center gap-2">
+                <PortalBadge kind="autoscout" size="sm" />
+                <span>
+                  {aufgeloest.autoscout?.make}
+                  {aufgeloest.autoscout?.model ? ` · ${aufgeloest.autoscout.model}` : " · alle Modelle"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <PortalBadge kind="mobile" size="sm" />
+                <span style={{ color: aufgeloest.mobile?.make ? "inherit" : "var(--accent-red)" }}>
+                  {!aufgeloest.mobile?.make
+                    ? "Marke unbekannt — Suche ohne Markenfilter"
+                    : aufgeloest.mobile?.model === false
+                      ? "Modell unbekannt — Suche zeigt die ganze Marke"
+                      : aufgeloest.mobile?.model === null
+                        ? "Marke erkannt · alle Modelle"
+                        : "Marke und Modell erkannt"}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="px-5 pb-4">

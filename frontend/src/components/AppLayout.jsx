@@ -1,21 +1,37 @@
+import { Suspense, useEffect, useRef } from "react";
+import { toast } from "sonner";
+import { neuHinzugekommen, neueWartende, titelMitZahl, useFreigabeZaehler } from "@/lib/freigaben";
+import NachladeFehler from "@/components/NachladeFehler";
+import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search,
+  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { useFeatures } from "@/lib/features";
 import ThemeToggle from "@/components/ThemeToggle";
-import CookieConsent from "@/components/CookieConsent";
+import InstallPWAButton from "@/components/InstallPWAButton";
 
 const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
   { to: "/app/suche", label: "Manuelle Suche", icon: Search },
   { to: "/app/vertraege", label: "Verträge / PDFs", icon: FileText },
   { to: "/app/termine", label: "Terminplaner", icon: Calendar },
+  // Runde 33: Abholprotokolle, die auf die Freigabe warten — mit Zaehler.
+  // 14.09.2026 (Wunsch Ahmad): nur der Chef kommuniziert mit dem Fahrer vor Ort.
+  { to: "/app/freigaben", label: "Freigaben", icon: ClipboardCheck, zaehler: true, haendlerOnly: true },
   { to: "/app/fahrzeuge", label: "Fahrzeugpool", icon: Car },
+  { to: "/app/bestand", label: "Bestand & Verkauf", icon: Warehouse, haendlerOnly: true },
+  { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true },
+  { to: "/app/team", label: "Mitarbeiter / Sucher", icon: Users, haendlerOnly: true },
   { to: "/app/fahrer", label: "Fahrer", icon: Users },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon },
 ];
+
+// Letzter Stand der wartenden Protokolle je Konto — ueberlebt den Wechsel
+// zwischen Seiten mit eigenem Layout (sonst fiel der Hinweis dazwischen aus).
+const GESEHEN = {};
 
 /**
  * Icon-Only Rail — konstant 64px breit auf allen Bildschirmgrößen.
@@ -26,9 +42,44 @@ export default function AppLayout({ children }) {
   const { pathname } = useLocation();
   const nav = useNavigate();
   const { user, subscription, logout } = useAuth();
+  const features = useFeatures();          // Go-Live-Schalter: Kaufanfragen nur mit Marktplatz
 
-  const items = [...NAV];
-  if (user?.role === "admin") items.push({ to: "/admin", label: "Admin", icon: ShieldCheck });
+  // Sucher-Unteraccounts sehen keine Händler-Funktionen (Bestand, Team).
+  // Strikte Rollentrennung: Admin-Konten verwalten nur — die Händler-/
+  // Sucher-Funktionen würden im Backend ohnehin blockiert.
+  const items = user?.role === "admin"
+    ? [{ to: "/admin", label: "Admin", icon: ShieldCheck }]
+    : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher")
+                         && (it.to !== "/app/anfragen" || features.marktplatz));
+
+  // Runde 33 (Wunsch Ahmad): Warten Fahrer beim Verkaeufer auf die Freigabe,
+  // soll man das auf JEDER Seite merken — Zahl im Menue, im Tab-Titel und ein
+  // Hinweis, sobald ein neues Protokoll dazukommt.
+  // 14.09.2026: Freigaben sind Chefsache — Sucher fragen den Zaehler nicht ab
+  // (das Backend antwortet ihnen mit 403).
+  const freigabe = useFreigabeZaehler(Boolean(user) && user.role === "dealer");
+  const vorherWartend = useRef(null);
+  useEffect(() => {
+    if (!freigabe.geladen) {
+      document.title = titelMitZahl(document.title, 0);
+      return;
+    }
+    document.title = titelMitZahl(document.title, freigabe.wartet);
+    // Neu ist eine neue Protokoll-ID — auch wenn die Zahl gleich bleibt.
+    const neu = Array.isArray(freigabe.ids)
+      ? neueWartende(GESEHEN, user?.id, freigabe.ids).length
+      : neuHinzugekommen(vorherWartend.current, freigabe.wartet);
+    vorherWartend.current = freigabe.wartet;
+    if (neu > 0 && !pathname.startsWith("/app/freigaben")) {
+      toast.message(neu === 1 ? "Ein Fahrer wartet auf deine Freigabe"
+        : `${neu} Fahrer warten auf deine Freigabe`, {
+        action: { label: "Öffnen", onClick: () => nav("/app/freigaben") },
+        duration: 15000,
+      });
+    }
+  }, [freigabe, pathname, nav, user?.id]);
+  // Beim Abmelden keine Zahl eines anderen Kontos im Tab-Titel stehen lassen.
+  useEffect(() => () => { document.title = titelMitZahl(document.title, 0); }, []);
 
   return (
     <div className="min-h-screen flex" style={{ background: "var(--bg-app)", color: "var(--text-primary)" }}>
@@ -62,6 +113,13 @@ export default function AppLayout({ children }) {
                 }`}
               >
                 <Icon size={20} className={Active ? "text-[var(--accent-red)]" : ""} />
+                {it.zaehler && freigabe.wartet > 0 && (
+                  <span data-testid="nav-freigaben-zaehler"
+                        className="absolute top-1 right-1.5 min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center text-white"
+                        style={{ background: "var(--accent-red)" }}>
+                    {freigabe.wartet > 9 ? "9+" : freigabe.wartet}
+                  </span>
+                )}
                 {Active && (
                   <span className="absolute right-0.5 top-1/2 -translate-y-1/2 w-1 h-5 rounded-full"
                         style={{ background: "var(--accent-red)" }} />
@@ -73,6 +131,7 @@ export default function AppLayout({ children }) {
 
         <div className="flex flex-col items-center gap-2 pb-2 border-t pt-2"
              style={{ borderColor: "var(--border-default)" }}>
+          <InstallPWAButton variante="symbol" />
           <ThemeToggle />
           <span
             className="w-2 h-2 rounded-full"
@@ -96,11 +155,13 @@ export default function AppLayout({ children }) {
       </aside>
 
       <main className="flex-1 overflow-x-hidden min-w-0">
-        {children}
+        <NachladeFehler>
+          <Suspense fallback={<SeiteLaedt />}>
+            {children}
+          </Suspense>
+        </NachladeFehler>
       </main>
 
-      {/* DSGVO cookie-consent banner — deferred PostHog init */}
-      <CookieConsent />
     </div>
   );
 }

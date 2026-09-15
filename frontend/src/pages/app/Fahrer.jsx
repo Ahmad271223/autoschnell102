@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { errMsg } from "@/lib/api";
 import { Plus, Trash2, Copy, User, Mail, KeyRound } from "lucide-react";
 
 export default function Fahrer() {
+  const { user } = useAuth();
+  // Fahrer hinzufuegen/entfernen ist Chefsache (Backend erzwingt 403);
+  // Sucher sehen die Liste nur, um Termine zuweisen zu koennen.
+  const chef = user?.role === "dealer";
   const [items, setItems] = useState([]);
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
@@ -47,11 +52,18 @@ export default function Fahrer() {
         Fahrer-Verwaltung
       </h1>
       <p className="text-sm text-zinc-400 mt-2 max-w-2xl">
-        Jeder Fahrer hat einen eigenen Account in der Fahrer-App und bekommt dort
-        eine Fahrer-ID (z.B. <code className="px-1 rounded-sm bg-white/5">FD-A7K3M9X2</code>).
-        Gib dir diese ID vom Fahrer geben – und füge ihn hier hinzu.
+        Fahrer legt der Betreiber an – jeder Fahrer hat ein eigenes Konto in der
+        Fahrer-App und eine Fahrer-ID (z.B. <code className="px-1 rounded-sm bg-white/5">FD-A7K3M9X2</code>).
+        Die Fahrer-ID bekommst du vom Fahrer oder Betreiber – damit fügst du ihn hier hinzu.
       </p>
 
+      {!chef && (
+        <div className="tactical-card p-4 mt-6 text-sm text-zinc-400" data-testid="drivers-readonly-hint">
+          Fahrer hinzufügen oder entfernen kann nur der Händler-Hauptaccount. Du kannst
+          die Fahrer hier einsehen und ihnen im Terminplaner Abholungen zuweisen.
+        </div>
+      )}
+      {chef && (
       <form onSubmit={add} className="tactical-card p-5 mt-6 flex flex-col sm:flex-row gap-3 items-end">
         <div className="flex-1 w-full">
           <label className="text-xs text-zinc-400 flex items-center gap-2">
@@ -67,11 +79,12 @@ export default function Fahrer() {
           <Plus size={15} /> Hinzufügen
         </button>
       </form>
+      )}
 
       <div className="mt-6 tactical-card overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left overline" style={{ background: "rgba(255,255,255,0.02)" }}>
+            <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Fahrer-ID</th>
               <th className="px-4 py-3">E-Mail</th>
@@ -91,11 +104,14 @@ export default function Fahrer() {
                   data-testid={`driver-row-${d.id}`}>
                 <td className="px-4 py-3 font-semibold">{d.name}</td>
                 <td className="px-4 py-3">
-                  <button onClick={() => copy(d.driver_code)}
-                    className="inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded-sm bg-white/5 hover:bg-white/10"
-                    title="Kopieren">
-                    {d.driver_code} <Copy size={10} />
-                  </button>
+                  {/* Sucher sehen keine Fahrer-ID und keine E-Mail (Nachpruefung 15.09.2026) */}
+                  {d.driver_code ? (
+                    <button onClick={() => copy(d.driver_code)}
+                      className="inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded-sm bg-white/5 hover:bg-white/10"
+                      title="Kopieren">
+                      {d.driver_code} <Copy size={10} />
+                    </button>
+                  ) : <span className="text-xs text-zinc-500">—</span>}
                 </td>
                 <td className="px-4 py-3 text-zinc-400 text-xs">
                   <span className="inline-flex items-center gap-1">
@@ -104,16 +120,20 @@ export default function Fahrer() {
                 </td>
                 <td className="px-4 py-3">
                   <span className="text-xs px-2 py-0.5 rounded-sm"
-                    style={{ background: d.active ? "rgba(52,199,89,0.12)" : "rgba(255,255,255,0.04)",
+                    style={{ background: d.active ? "rgba(52,199,89,0.12)" : "var(--wa-04)",
                              color: d.active ? "var(--accent-green)" : "var(--text-muted)" }}>
                     {d.active ? "aktiv" : "inaktiv"}
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <button onClick={() => remove(d.id)} data-testid={`del-driver-${d.id}`}
-                    className="p-2 hover:bg-white/5 rounded-sm">
-                    <Trash2 size={14} />
-                  </button>
+                  {chef ? (
+                    <button onClick={() => remove(d.id)} data-testid={`del-driver-${d.id}`}
+                      className="p-2 hover:bg-white/5 rounded-sm">
+                      <Trash2 size={14} />
+                    </button>
+                  ) : (
+                    <span className="text-xs text-zinc-600">—</span>
+                  )}
                 </td>
               </tr>
             ))}

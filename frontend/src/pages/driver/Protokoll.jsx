@@ -1,0 +1,795 @@
+import MonatJahrEingabe from "@/components/MonatJahrEingabe";
+import { monatJahrFehler } from "@/lib/monatJahr";
+import { useUngespeichert } from "@/lib/ungespeichert";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { driverApi, openDriverPdf } from "@/context/DriverContext";
+import { errMsg } from "@/lib/api";
+import { preisText } from "@/lib/preis";
+import { protokollZustand } from "@/lib/protokollZustand";
+import { toast } from "sonner";
+import {
+  ArrowLeft, Save, CheckCircle2, FileText, AlertTriangle, Pencil,
+} from "lucide-react";
+import SignaturePad from "@/components/SignaturePad";
+import DamageSelector from "@/components/DamageSelector";
+
+/* Section/Check sind bewusst AUSSERHALB der Seite definiert: innerhalb
+ * definierte Komponenten bekommen bei jedem Render eine neue Identität —
+ * React baut dann alle Eingabefelder neu auf und der Fokus/Eingaben
+ * gehen beim Tippen verloren. */
+const Section = ({ n, title, children, hint }) => (
+  <div className="mt-4 rounded-2xl p-4" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
+    <div className="flex items-center gap-2">
+      <span className="w-6 h-6 rounded-md flex items-center justify-center text-[11px] font-bold text-white"
+            style={{ background: "var(--accent-red)" }}>{n}</span>
+      <div className="text-sm font-bold">{title}</div>
+    </div>
+    {hint && <div className="text-[11px] text-zinc-500 mt-1">{hint}</div>}
+    <div className="mt-3">{children}</div>
+  </div>
+);
+
+
+// Wunsch Ahmad 14.09.2026: jede Zeile muss beantwortet werden — Ja ODER Nein
+// (vorher ein Haken, bei dem "nicht angeklickt" und "fehlt" dasselbe waren).
+// Wunsch Ahmad 14.09.2026: Preisvorschlag als Zahl schicken (0 = kein Vorschlag —
+// der Server kann ein fehlendes Feld nicht von "unveraendert" unterscheiden).
+const nutzlast = (s) => ({
+  ...s,
+  preis_vorschlag: s.preis_vorschlag === "" || s.preis_vorschlag == null
+    ? 0 : (Number(String(s.preis_vorschlag).replace(",", ".")) || 0),
+});
+
+const Check = ({ on, onClick, disabled, children }) => (
+  <button type="button" onClick={onClick} disabled={disabled}
+          className="w-full flex items-center gap-2.5 py-2 text-left text-sm disabled:opacity-60">
+    <span className="w-5 h-5 rounded-md border flex items-center justify-center shrink-0"
+          style={{ borderColor: on ? "#34c759" : "var(--border-default)",
+                   background: on ? "#34c759" : "transparent" }}>
+      {on && <CheckCircle2 size={13} className="text-black" />}
+    </span>
+    <span className={on ? "text-white" : "text-zinc-400"}>{children}</span>
+  </button>
+);
+
+const JaNein = ({ wert, onChange, disabled, children, testId }) => {
+  const knopf = (label, ziel, farbe) => (
+    <button type="button" disabled={disabled} onClick={() => onChange(ziel)}
+            data-testid={testId ? `${testId}-${label.toLowerCase()}` : undefined}
+            className={`px-3 py-1 rounded-lg text-xs border disabled:opacity-60 ${
+              wert === ziel ? "font-semibold text-white" : "text-zinc-400"}`}
+            style={{ borderColor: wert === ziel ? farbe : "var(--border-default)",
+                     background: wert === ziel ? `${farbe}33` : "transparent" }}>
+      {label}
+    </button>
+  );
+  return (
+    <div className="w-full flex items-center justify-between gap-3 py-2 text-sm">
+      <span className={typeof wert === "boolean" ? "text-white" : "text-zinc-400"}>{children}</span>
+      <span className="flex gap-1.5 shrink-0">
+        {knopf("Ja", true, "#34c759")}
+        {knopf("Nein", false, "#ff453a")}
+      </span>
+    </div>
+  );
+};
+
+/**
+ * Digitales Abhol-Protokoll — dieselben Abschnitte wie das PDF, nur
+ * ausfüllbar: abhaken, eintippen, unterschreiben. Zwischenstände werden
+ * automatisch gespeichert; beim Abschließen entsteht das fertige PDF und
+ * das Fahrzeug gilt als abgeholt.
+ */
+export default function Protokoll() {
+  const { id } = useParams();          // appointment id
+  const nav = useNavigate();
+  const [data, setData] = useState(null);
+  const [f, setF] = useState({
+    documents: {}, features: {}, condition: {}, keys_count: "", keys_expected: "",
+    notes: "", place: "", damages_confirmed: false, new_damages: [],
+    vehicle_check: {}, preis_vorschlag: "", sondervereinbarung: "",
+  });
+  const [sigDriver, setSigDriver] = useState(null);
+  const [sigSeller, setSigSeller] = useState(null);
+  const [sellerName, setSellerName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const saveTimer = useRef(null);
+
+  // Gegenpruefung 12.09.2026: Ort und Verkaeufername tippt der Fahrer oft,
+  // waehrend er auf die Freigabe wartet — gespeichert werden sie erst beim
+  // Abschluss. Das automatische Nachladen setzte sie alle 15 s zurueck.
+  const ortGetippt = useRef(false);
+  // Phase 2 (2.9): Revision des Entwurfs (vom Server) — zwei Tabs desselben
+  // Fahrers überschreiben sich nicht mehr gegenseitig.
+  const revRef = useRef(null);
+  const nameGetippt = useRef(false);
+
+  const load = useCallback(async ({ still = false } = {}) => {
+    try {
+      const r = await driverApi.get(`/driver/appointments/${id}/protocol`);
+      setData(r.data);
+      const p = r.data.protocol;
+      revRef.current = p?.revision ?? null;
+      if (p) {
+        setF((s) => ({
+          ...s,
+          documents: p.documents || {}, features: p.features || {},
+          preis_vorschlag: p.preis_vorschlag ? String(p.preis_vorschlag) : "",
+          sondervereinbarung: p.sondervereinbarung || "",
+          condition: p.condition || {}, keys_count: p.keys_count || "",
+          keys_expected: p.keys_expected || "", notes: p.notes || "",
+          place: ortGetippt.current ? s.place : (p.place || ""),
+          damages_confirmed: !!p.damages_confirmed,
+          new_damages: p.new_damages || [],
+          vehicle_check: p.vehicle_check || {},
+        }));
+      }
+      if (!nameGetippt.current) setSellerName(r.data.appointment?.seller_name || "");
+    } catch (e) {
+      // Beim automatischen Nachladen kein roter Hinweis alle 15 s im Funkloch.
+      if (!still) toast.error(errMsg(e, "Protokoll konnte nicht geladen werden"));
+    }
+  }, [id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Runde 30 (12.09.2026, Wunsch Ahmad): Der Fahrer schickt das ausgefuellte
+  // Protokoll erst zur Freigabe an den Chef. Der prueft die Abweichungen,
+  // verhandelt ggf. nach und gibt mit dem neuen Preis frei — DANN wird
+  // unterschrieben. Solange etwas beim Chef liegt, sind alle Eingaben
+  // gesperrt: er soll genau das sehen, was am Ende unterschrieben wird.
+  // Go-Live 13.09.2026 (N1): auch "wird_abgeschlossen" sperrt (protokollZustand).
+  const {
+    isFinal, wartetAufFreigabe, freigegeben, wirdAbgeschlossen, gesperrt, nachladen, unterschriften,
+  } = protokollZustand(data?.protocol?.status);
+  const neuerPreis = data?.protocol?.neuer_preis ?? null;
+  const rueckfrage = data?.protocol?.rueckfrage || "";
+  // Runde 31: Die Unterschriften liegen bis zum Abschluss NUR im Speicher —
+  // der Auto-Save schickt sie nicht mit. Ein Neuladen haette sie ersatzlos
+  // geloescht, und der Verkaeufer steht oft schon am Auto.
+  useUngespeichert(Boolean((sigDriver || sigSeller) && !isFinal));
+  // Runde 33: Waehrend das Protokoll beim Chef liegt, selbst nachsehen —
+  // vorher merkte der Fahrer die Freigabe erst, wenn er auf Aktualisieren
+  // tippte. Eingaben sind in dieser Zeit ohnehin gesperrt.
+  // Gegenpruefung 12.09.2026: auch NACH der Freigabe — der Chef kann Preis
+  // oder Vermerk noch aendern. Ort und Verkaeufername bleiben unangetastet.
+  // Go-Live 13.09.2026 (N1): ebenso waehrend "wird_abgeschlossen".
+  useEffect(() => {
+    if (!nachladen) return undefined;
+    const takt = setInterval(() => {
+      if (document.visibilityState === "visible") load({ still: true });
+    }, 15000);
+    return () => clearInterval(takt);
+  }, [nachladen, load]);
+
+  // Aendert der Chef nach der Freigabe Preis oder Vermerk, gelten Unterschriften,
+  // die schon auf dem Handy stehen, nicht mehr: loeschen und deutlich sagen.
+  // Go-Live 13.09.2026: die Kennung bleibt auch waehrend des Abschlusses stehen —
+  // sonst fiele eine Aenderung nach einem gescheiterten Abschluss nicht auf.
+  const freigabeKennung = unterschriften
+    ? [data?.protocol?.freigabe_stand || "", neuerPreis ?? "", data?.protocol?.preis_notiz || ""].join("|")
+    : null;
+  const [sigRunde, setSigRunde] = useState(0);
+  const vorigeKennung = useRef(null);
+  // Go-Live 13.09.2026 (P4): Stehen gerade Unterschriften im Speicher? (Effekt VOR
+  // dem Kennungs-Effekt, damit er beim Wechsel noch den alten Stand liest.)
+  const hatUnterschriften = useRef(false);
+  useEffect(() => { hatUnterschriften.current = Boolean(sigDriver || sigSeller); });
+  useEffect(() => {
+    // Go-Live 13.09.2026 (P4): Bei null (Rueckfrage -> Entwurf, erneut zur Freigabe)
+    // die letzte Kennung NICHT vergessen. Sonst loeschte der Wechsel null -> neuer
+    // Stand nichts, und die unter dem ALTEN Preis geleisteten Unterschriften gingen
+    // mit dem neuen Preis ab. Rueckfrage und jede Freigabe erzeugen einen neuen
+    // Stand; ein gescheiterter Abschluss (gleicher Stand) behaelt die Unterschriften.
+    if (freigabeKennung === null) return;
+    if (vorigeKennung.current !== null && vorigeKennung.current !== freigabeKennung) {
+      const warenDa = hatUnterschriften.current;
+      setSigDriver(null);
+      setSigSeller(null);
+      setSigRunde((n) => n + 1);
+      // Hinweis nur, wenn wirklich Unterschriften verworfen wurden.
+      if (warenDa) {
+        toast.warning("Der Händler hat Preis oder Vermerk geändert — bitte dem Verkäufer den neuen Stand "
+                      + "zeigen und neu unterschreiben lassen.", { duration: 15000 });
+      }
+    }
+    vorigeKennung.current = freigabeKennung;
+  }, [freigabeKennung]);
+
+  // Immer den AKTUELLEN Stand speichern (nie einen veralteten Klick-Zustand):
+  // fRef spiegelt f nach jedem Render, der Auto-Save liest daraus.
+  const fRef = useRef(f);
+  useEffect(() => { fRef.current = f; });
+
+  const speichern = useCallback(async (s) => {
+    const nutz = { ...nutzlast(s),
+                   ...(revRef.current != null ? { revision: revRef.current } : {}) };
+    try {
+      const r = await driverApi.put(`/driver/appointments/${id}/protocol`, nutz);
+      if (r?.data?.revision != null) revRef.current = r.data.revision;
+      return r;
+    } catch (e) {
+      if (e?.response?.status === 409 && /anderen Tab|anderen Gerät/.test(errMsg(e))) {
+        toast.warning("Der Entwurf wurde in einem anderen Tab gespeichert — der aktuelle Stand wird geladen.");
+        load({ still: true });
+      }
+      throw e;
+    }
+  }, [id, load]);
+
+  // Automatisch speichern (1,2 s nach der letzten Änderung)
+  const queueSave = useCallback(() => {
+    if (gesperrt) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await speichern(fRef.current);
+        setSavedAt(new Date());
+      } catch (e) { /* stiller Retry beim nächsten Tippen */ }
+    }, 1200);
+  }, [gesperrt, speichern]);
+
+  // patch darf ein Objekt ODER eine Funktion (voriger Stand -> Teilupdate)
+  // sein — die Funktionsform verhindert, dass schnelle Klicks hintereinander
+  // sich gegenseitig überschreiben (stale state).
+  const upd = (patch) => {
+    setF((s) => ({ ...s, ...(typeof patch === "function" ? patch(s) : patch) }));
+    queueSave();
+  };
+  const setDoc = (name, wert) =>
+    upd((s) => ({ documents: { ...s.documents, [name]: wert } }));
+  const setFeat = (name, wert) =>
+    upd((s) => ({ features: { ...s.features, [name]: wert } }));
+  const setCond = (k, v) =>
+    upd((s) => ({ condition: { ...s.condition, [k]: v } }));
+  // Abschnitt 1: pro Zeile Status (stimmt/weicht ab) bzw. Korrekturwert
+  const setVCheck = (key, feld, wert) =>
+    upd((s) => ({ vehicle_check: { ...s.vehicle_check,
+      [key]: { ...(s.vehicle_check?.[key] || {}), [feld]: wert } } }));
+
+  const saveNow = async () => {
+    setBusy(true);
+    try {
+      await speichern(f);
+      setSavedAt(new Date());
+      toast.success("Zwischenstand gespeichert");
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+
+  // Runde 30: Schritt 1 — ausgefülltes Protokoll an den Händler schicken.
+  // Er prüft die Abweichungen, ruft ggf. den Verkäufer an und gibt frei.
+  const zurFreigabe = async () => {
+    // Gegenpruefung 12.09.2026: halb getippte Daten ("06/20") nicht abschicken —
+    // sie wurden sonst als 06/2020 gelesen oder unvollstaendig gedruckt.
+    const vorlage = data?.template || {};
+    const halb = (vorlage.vehicle_check_fields || []).filter((fld) => {
+      const art = (vorlage.vehicle_check_art || {})[fld.key];
+      const e = f.vehicle_check?.[fld.key] || {};
+      return (art === "monat_jahr" || art === "hu") && e.status === "weicht ab" && monatJahrFehler(e.value);
+    });
+    if (halb.length) {
+      toast.error(`Bitte vollständig eingeben (MM/JJJJ): ${halb.map((x) => x.label).join(", ")}`);
+      return;
+    }
+    if (!window.confirm("Protokoll an den Händler schicken?\n\nEr prüft die "
+                        + "Abweichungen und gibt frei — danach unterschreibt "
+                        + "ihr vor Ort. Bis dahin sind keine Änderungen mehr "
+                        + "möglich.")) return;
+    setBusy(true);
+    try {
+      await speichern(f);
+      await driverApi.post(`/driver/appointments/${id}/protocol/submit`);
+      toast.success("Abgeschickt — der Händler prüft jetzt");
+      load();
+    } catch (e) { toast.error(errMsg(e, "Abschicken fehlgeschlagen")); }
+    finally { setBusy(false); }
+  };
+
+  const finalize = async () => {
+    if (!sigDriver || !sigSeller) {
+      toast.error("Bitte beide Unterschriften erfassen"); return;
+    }
+    if (!window.confirm("Protokoll abschließen?\n\nDas Fahrzeug gilt danach als "
+                        + "abgeholt und das PDF wird erstellt.")) return;
+    setBusy(true);
+    try {
+      const fin = await driverApi.post(`/driver/appointments/${id}/protocol/finalize`, {
+        signature_driver_b64: sigDriver,
+        signature_seller_b64: sigSeller,
+        seller_name: sellerName,
+        place: f.place,
+        // Gegenprüfung 12.09.2026: Der Händler kann den Preis ändern,
+        // während vor Ort unterschrieben wird. Wir schicken den Preis mit,
+        // den DIESE Ansicht gezeigt hat — weicht er ab, lehnt der Server ab,
+        // statt einen anderen Betrag über die Unterschriften zu drucken.
+        neuer_preis_gesehen: neuerPreis,
+        // Gegenpruefung 12.09.2026: auch Vermerk und Freigabe-Stand, nicht nur den Preis.
+        freigabe_stand_gesehen: data?.protocol?.freigabe_stand ?? "",
+      });
+      // Runde 17: der Termin kann inzwischen vom Haendler geschlossen sein —
+      // das Protokoll bleibt als Beweis final, der Server sagt es.
+      if (fin?.data?.hinweis) toast.warning(fin.data.hinweis, { duration: 9000 });
+      else toast.success("Protokoll abgeschlossen — Fahrzeug ist abgeholt");
+      load();
+    } catch (e) {
+      toast.error(errMsg(e, "Abschließen fehlgeschlagen"));
+      // Stand geaendert (Preis, Vermerk, zurueckgezogen): neu laden, damit
+      // die App zeigt, was jetzt gilt.
+      if (e?.response?.status === 409) load({ still: true });
+    }
+    finally { setBusy(false); }
+  };
+
+  const startCorrection = async () => {
+    if (!window.confirm("Korrektur starten?\n\nDas bisherige Protokoll bleibt als "
+                        + "Nachweis erhalten, du erstellst Version "
+                        + ((data?.protocol?.version || 1) + 1) + ".")) return;
+    try {
+      await driverApi.post(`/driver/appointments/${id}/protocol/correction`);
+      setSigDriver(null); setSigSeller(null);
+      toast.success("Korrektur-Version gestartet");
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
+  if (!data) return <div className="p-8 text-zinc-500 text-sm">lade…</div>;
+
+  const oeffnePdf = (path) =>
+    openDriverPdf(path).catch((e) => toast.error(errMsg(e)));
+
+  const tpl = data.template || {};
+  const veh = data.vehicle || {};
+  const appt = data.appointment || {};
+  const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
+  const st = { borderColor: "var(--border-default)" };
+
+  return (
+    <div className="p-4 max-w-2xl mx-auto" data-testid="protokoll-page"
+         style={{ paddingBottom: "calc(var(--fahrer-tabs, 3.75rem) + 7.5rem + env(safe-area-inset-bottom, 0px))" }}>
+      <button onClick={() => nav("/fahrer")} className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
+        <ArrowLeft size={14} /> Zurück zu den Fahrten
+      </button>
+
+      <div className="mt-2 flex items-start justify-between gap-3">
+        <div>
+          <div className="overline">Abhol-Protokoll{data.protocol?.version > 1 ? ` · Version ${data.protocol.version}` : ""}</div>
+          <h1 className="font-display font-black text-2xl tracking-tighter mt-1">
+            {veh.make_label} {veh.model_label}
+          </h1>
+          <div className="text-xs text-zinc-500 mt-0.5">
+            {appt.pickup_date} {appt.pickup_time} · {appt.pickup_address}
+          </div>
+        </div>
+        <button onClick={() => oeffnePdf(`/driver/appointments/${id}/pickup-order.pdf`)}
+                className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs border"
+                style={st}>
+          <FileText size={13} /> Papier-PDF
+        </button>
+      </div>
+
+      {/* Runde 30: Wo steht das Protokoll gerade? */}
+      {wartetAufFreigabe && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-wartet"
+             style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "#ff9f0a" }}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Beim Händler zur Freigabe — er prüft die Abweichungen und meldet sich.
+            <div className="mt-2">
+              <button onClick={() => load()}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border"
+                      style={{ borderColor: "#ff9f0a55" }}>
+                Aktualisieren
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {freigegeben && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-freigegeben"
+             style={{ borderColor: "#34c75955", background: "#34c75914", color: "#34c759" }}>
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Freigegeben{neuerPreis != null ? ` — neuer Preis ${preisText(neuerPreis)}` : ""}.
+            Jetzt unterschreiben lassen (Abschnitt 8).
+            {data?.protocol?.preis_notiz && (
+              <div className="mt-1 text-[11px] opacity-80">{data.protocol.preis_notiz}</div>
+            )}
+          </div>
+        </div>
+      )}
+      {wirdAbgeschlossen && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-wird-abgeschlossen"
+             style={{ borderColor: "#0a84ff55", background: "#0a84ff14", color: "#64a8ff" }}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Wird gerade abgeschlossen — bitte einen Moment warten. Die Ansicht
+            aktualisiert sich von selbst.
+          </div>
+        </div>
+      )}
+      {!!rueckfrage && !gesperrt && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             data-testid="protokoll-rueckfrage"
+             style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "#ff3b30" }}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">Der Händler bittet um eine Ergänzung: {rueckfrage}</div>
+        </div>
+      )}
+      {isFinal && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
+             style={{ borderColor: "#34c75955", background: "#34c75914", color: "#34c759" }}>
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            Protokoll abgeschlossen — Fahrzeug gilt als abgeholt.
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                      style={{ background: "var(--accent-red)" }}>
+                <FileText size={13} /> Ausgefülltes PDF öffnen
+              </button>
+              <button onClick={startCorrection}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
+                      style={st}>
+                <Pencil size={13} /> Korrektur starten
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 1 Fahrzeugdaten — alle 12 Zeilen wie im PDF, einzeln ankreuzbar */}
+      <Section n="1" title="Fahrzeugdaten"
+               hint="Jede Zeile mit dem Vertrag abgleichen: stimmt oder weicht ab. Bei Abweichung den richtigen Wert eintippen.">
+        <div className="space-y-3">
+          {(tpl.vehicle_check_fields || []).map((fld) => {
+            const istWert = (tpl.vehicle_check_values || {})[fld.key];
+            const entry = f.vehicle_check?.[fld.key] || {};
+            // Runde 33: Korrekturfeld nur bei "weicht ab" — nicht bei Ja/Nein.
+            const abweichend = entry.status === "weicht ab";
+            const art = (tpl.vehicle_check_art || {})[fld.key] || "text";
+            return (
+              <div key={fld.key} className="pb-2 border-b" style={{ borderColor: "var(--wa-06)" }}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[11px] text-zinc-500">{fld.label}</span>
+                  <span className="text-sm text-right">
+                    <span className="text-[10px] text-zinc-500 mr-1">laut Vertrag</span>{istWert || "—"}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {fld.options.map((o) => (
+                    <button key={o} type="button" disabled={gesperrt}
+                            data-testid={`vc-${fld.key}-${o}`}
+                            onClick={() => {
+                              setVCheck(fld.key, "status", o);
+                              // Runde 33: Zurueck auf "stimmt" — der alte Korrekturwert
+                              // landete sonst trotzdem im unterschriebenen PDF.
+                              if (o !== "weicht ab" && entry.value) setVCheck(fld.key, "value", "");
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs border disabled:opacity-60 ${
+                              entry.status === o ? "bg-white/15 font-semibold text-white" : "text-zinc-400"}`}
+                            style={st}>
+                      {o}
+                    </button>
+                  ))}
+                </div>
+                {abweichend && (art === "monat_jahr" || art === "hu" ? (
+                  // Wunsch Ahmad: nur Ziffern, der "/" kommt von selbst (MM/JJJJ).
+                  <div className="mt-1.5">
+                    <MonatJahrEingabe value={entry.value || ""} disabled={gesperrt}
+                                      art={art === "hu" ? "hu" : "ez"}
+                                      onChange={(v) => setVCheck(fld.key, "value", v)}
+                                      className={inputCls} style={st}
+                                      testid={`vc-${fld.key}-wert`} />
+                    {art === "hu" && (
+                      // Gegenpruefung: "keine HU" vor Ort liess sich mit Ziffern nicht erfassen.
+                      <button type="button" disabled={gesperrt}
+                              data-testid={`vc-${fld.key}-keine`}
+                              onClick={() => setVCheck(fld.key, "value", "keine HU")}
+                              className={`mt-1.5 px-3 py-1.5 rounded-lg text-xs border disabled:opacity-60 ${
+                                entry.value === "keine HU" ? "bg-white/15 font-semibold text-white" : "text-zinc-400"}`}
+                              style={st}>
+                        keine HU
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <input value={entry.value || ""} disabled={gesperrt}
+                         inputMode={art === "km" || art === "anzahl" ? "numeric" : undefined}
+                         data-testid={`vc-${fld.key}-wert`}
+                         onChange={(e) => setVCheck(fld.key, "value",
+                           art === "km" || art === "anzahl" ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)}
+                         className={`${inputCls} mt-1.5`} style={st}
+                         placeholder={art === "km" ? "Kilometerstand vor Ort, z. B. 86000"
+                           : art === "anzahl" ? "Anzahl laut Schein" : "Richtiger Wert vor Ort …"} />
+                ))}
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+          {[["Modellbezeichnung", veh.model_description],
+            ["Getriebe", veh.gearbox_label]].map(([k, v]) => (
+            <div key={k}>
+              <div className="text-[11px] text-zinc-500">{k}</div>
+              <div>{v || "—"}</div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* 2 Dokumente */}
+      <Section n="2" title="Dokumente & Zubehör" hint="Vor Ort einsammeln — bei jedem Punkt Ja oder Nein.">
+        {(tpl.documents || []).map((doc) => (
+          <JaNein key={doc} disabled={gesperrt} wert={f.documents[doc]}
+                  onChange={(w) => setDoc(doc, w)}>{doc}</JaNein>
+        ))}
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-[11px] text-zinc-500">Schlüssel erhalten</label>
+            <input type="number" inputMode="numeric" value={f.keys_count} disabled={gesperrt}
+                   onChange={(e) => upd({ keys_count: e.target.value })}
+                   className={inputCls} style={st} placeholder="z.B. 2" />
+          </div>
+          <div>
+            <label className="text-[11px] text-zinc-500">davon vereinbart</label>
+            <input type="number" inputMode="numeric" value={f.keys_expected} disabled={gesperrt}
+                   onChange={(e) => upd({ keys_expected: e.target.value })}
+                   className={inputCls} style={st} placeholder="z.B. 2" />
+          </div>
+        </div>
+      </Section>
+
+      {/* 3 Ausstattung */}
+      {(tpl.features || []).length > 0 && (
+        <Section n="3" title="Ausstattung laut Inserat" hint="Vorhanden? Bei jedem Punkt Ja oder Nein.">
+          {tpl.features.map((ft) => (
+            <JaNein key={ft} disabled={gesperrt} wert={f.features[ft]}
+                    onChange={(w) => setFeat(ft, w)}>{ft}</JaNein>
+          ))}
+        </Section>
+      )}
+
+      {/* 4 Technischer Zustand */}
+      <Section n="4" title="Technischer Zustand">
+        <div className="space-y-3">
+          {(tpl.condition_fields || []).map((fld) => (
+            <div key={fld.key}>
+              <label className="text-[11px] text-zinc-500">{fld.label}</label>
+              {fld.options ? (
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {fld.options.map((o) => (
+                    <button key={o} type="button" disabled={gesperrt}
+                            onClick={() => setCond(fld.key, o)}
+                            className={`px-3 py-1.5 rounded-lg text-xs border disabled:opacity-60 ${
+                              f.condition[fld.key] === o ? "bg-white/15 font-semibold text-white" : "text-zinc-400"}`}
+                            style={st}>
+                      {o}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <input value={f.condition[fld.key] || ""} disabled={gesperrt}
+                       inputMode={fld.key === "mileage" ? "numeric" : undefined}
+                       onChange={(e) => setCond(fld.key, fld.key === "mileage"
+                         ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)}
+                       className={inputCls} style={st}
+                       placeholder={fld.key === "mileage" ? "z.B. 85120" : ""} />
+              )}
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* 5 Vorbestehende Schäden */}
+      <Section n="5" title="Vorbestehende Schäden" hint="Laut Kaufvertrag dokumentiert.">
+        {(data.damages || []).length === 0 ? (
+          <div className="text-sm text-zinc-500">Keine Schäden im Vertrag vermerkt.</div>
+        ) : (
+          <div className="space-y-1 text-sm">
+            {data.damages.map((d, i) => (
+              <div key={i} className="text-amber-400">
+                • {[d.type_label || d.label || d.type, d.zone].filter(Boolean).join(" — ") || "Schaden"}
+              </div>
+            ))}
+          </div>
+        )}
+        <Check disabled={gesperrt} on={!!f.damages_confirmed} onClick={() => upd((s) => ({ damages_confirmed: !s.damages_confirmed }))}>
+          Zustand entspricht der Dokumentation
+        </Check>
+      </Section>
+
+      {/* 6 Vor-Ort-Aufnahme: neue Schäden per Tipp auf die Skizze markieren —
+          dieselbe Skizze wie im Kaufvertrag. Landet im PDF (Abschnitt 6). */}
+      <Section n="6" title="Vor-Ort-Aufnahme"
+               hint="Neue Schäden? Art wählen und auf die Fahrzeug-Skizze tippen — genau wie im Kaufvertrag.">
+        {/* Gegenprüfung 12.09.2026: Abschnitt 6 war in den gesperrten
+            Zuständen weiter bedienbar — Tipps auf die Skizze wurden nie
+            gespeichert und gingen still verloren. Jetzt nur noch Anzeige. */}
+        {gesperrt ? (
+          (f.new_damages || []).length === 0 ? (
+            <div className="text-sm text-zinc-500">Keine neuen Schäden erfasst.</div>
+          ) : (
+            <div className="space-y-1 text-sm">
+              {f.new_damages.map((d, i) => (
+                <div key={d.id || i} className="text-red-400">
+                  • {[d.type_label, d.zone].filter(Boolean).join(" — ")}
+                </div>
+              ))}
+            </div>
+          )
+        ) : (
+          <DamageSelector
+            damages={f.new_damages || []}
+            onChange={(list) => upd({ new_damages: list })}
+          />
+        )}
+        <div className="text-xs text-zinc-500 mt-3">
+          Fotos zu Abweichungen machst du zusätzlich im Abhol-Check —
+          sie erscheinen automatisch in der Fahrzeugakte des Händlers.
+        </div>
+      </Section>
+
+      {/* 7 Bemerkungen */}
+      <Section n="7" title="Bemerkungen">
+        <textarea value={f.notes} disabled={gesperrt} rows={4}
+                  onChange={(e) => upd({ notes: e.target.value })}
+                  className={inputCls} style={st}
+                  placeholder="Auffälligkeiten, Absprachen, Zustand …" />
+      </Section>
+
+      {/* 8 Kaufpreis & Übergabe */}
+      <Section n="8" title="Kaufpreis & Übergabe-Bestätigung"
+               hint="Erst nach der Freigabe des Händlers unterschreiben — dann gilt der freigegebene Preis.">
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="rounded-lg border px-3 py-2" style={st}>
+            <div className="text-[11px] text-zinc-500">Preis laut Vertrag</div>
+            <div className="text-sm">{preisText(data?.preis_vertrag)}</div>
+          </div>
+          <div className="rounded-lg border px-3 py-2"
+               style={{ borderColor: neuerPreis != null ? "#34c75988" : "var(--border-default)" }}>
+            <div className="text-[11px] text-zinc-500">Neuer Preis (nach Verhandlung)</div>
+            <div className="text-sm" data-testid="protokoll-neuer-preis"
+                 style={{ color: neuerPreis != null ? "#34c759" : undefined }}>
+              {neuerPreis != null ? preisText(neuerPreis) : "unverändert"}
+            </div>
+          </div>
+        </div>
+        {data?.protocol?.preis_notiz && (
+          <div className="text-[11px] text-zinc-400 mb-3">
+            Vermerk des Händlers: {data.protocol.preis_notiz}
+          </div>
+        )}
+        {/* Wunsch Ahmad 14.09.2026: Preis und Sondervereinbarung auch vom Fahrer vor Ort.
+            Der Händler sieht beides bei der Freigabe; gibt er ohne eigenen Preis frei,
+            gilt der hier eingetragene. */}
+        <div className="grid grid-cols-1 gap-3 mb-3">
+          <div>
+            <label className="text-[11px] text-zinc-500">Vor Ort vereinbarter Preis (optional, Vorschlag an den Händler)</label>
+            <input type="text" inputMode="decimal" disabled={gesperrt}
+                   data-testid="protokoll-preis-vorschlag"
+                   value={f.preis_vorschlag ?? ""}
+                   onChange={(e) => upd({ preis_vorschlag: e.target.value.replace(/[^0-9.,]/g, "") })}
+                   className={inputCls} style={st} placeholder="z. B. 15000" />
+          </div>
+          <div>
+            <label className="text-[11px] text-zinc-500">Sondervereinbarung vor Ort (erscheint im Protokoll)</label>
+            <textarea value={f.sondervereinbarung || ""} disabled={gesperrt} rows={2}
+                      data-testid="protokoll-sondervereinbarung"
+                      onChange={(e) => upd({ sondervereinbarung: e.target.value })}
+                      className={inputCls} style={st}
+                      placeholder="z. B. Verkäufer liefert Winterreifen nach" />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-[11px] text-zinc-500">Ort</label>
+            <input value={f.place} disabled={isFinal || wirdAbgeschlossen}
+                   onChange={(e) => { ortGetippt.current = true; upd({ place: e.target.value }); }}
+                   className={inputCls} style={st} placeholder="z.B. Hannover" />
+          </div>
+          <div>
+            <label className="text-[11px] text-zinc-500">Name Verkäufer</label>
+            <input value={sellerName} disabled={isFinal || wirdAbgeschlossen}
+                   onChange={(e) => { nameGetippt.current = true; setSellerName(e.target.value); }}
+                   className={inputCls} style={st} />
+          </div>
+        </div>
+        {unterschriften && (
+          // Go-Live 13.09.2026 (N1): waehrend des Abschlusses sichtbar, aber gesperrt.
+          <div className={`mt-4 space-y-4 ${wirdAbgeschlossen ? "pointer-events-none opacity-50" : ""}`}
+               aria-disabled={wirdAbgeschlossen || undefined}>
+            <SignaturePad key={`v${sigRunde}`} label="Unterschrift Verkäufer" onChange={setSigSeller} />
+            <SignaturePad key={`f${sigRunde}`} label="Unterschrift Fahrer" onChange={setSigDriver} />
+          </div>
+        )}
+        {!isFinal && !unterschriften && (
+          <div className="mt-4 text-[11px] text-zinc-500">
+            Die Unterschriftsfelder erscheinen, sobald der Händler freigegeben hat.
+          </div>
+        )}
+      </Section>
+
+      {/* Fixe Aktionsleiste — Runde 30: in JEDEM Zustand sichtbar.
+          Vorher verschwand sie beim fertigen Protokoll ganz, und auf dem
+          Handy lag sie unter der Systemleiste (fehlendes safe-area).
+          Die Knoepfe richten sich nach dem Stand des Protokolls. */}
+      {/* Gegenpruefung 12.09.2026: Die Leiste hatte KEINEN z-index und lag
+          damit unter der Fahrer-Tableiste (z-40) — genau der gemeldete
+          Fehler 'die Knoepfe unten sind nicht sichtbar'. Jetzt z-50 UND
+          oberhalb der Tabs, damit beide bedienbar bleiben. */}
+      <div className="fixed left-0 right-0 px-3 py-3 flex gap-2 z-50"
+           data-testid="protokoll-aktionen"
+           style={{ background: "var(--bg-elevated)",
+                    borderTop: "1px solid var(--wa-08)",
+                    bottom: "calc(var(--fahrer-tabs, 3.75rem) + env(safe-area-inset-bottom, 0px))" }}>
+        {isFinal ? (
+          <>
+            <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
+                    data-testid="protokoll-pdf-unten"
+                    className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2"
+                    style={{ background: "var(--accent-red)" }}>
+              <FileText size={15} /> PDF öffnen
+            </button>
+            <button onClick={startCorrection}
+                    className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2"
+                    style={st}>
+              <Pencil size={15} /> Korrektur
+            </button>
+          </>
+        ) : wartetAufFreigabe ? (
+          <button onClick={load} disabled={busy}
+                  data-testid="protokoll-warten-aktualisieren"
+                  className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                  style={{ ...st, color: "#ff9f0a" }}>
+            <AlertTriangle size={15} /> Wartet auf Freigabe · aktualisieren
+          </button>
+        ) : wirdAbgeschlossen ? (
+          <button onClick={() => load()} disabled={busy}
+                  data-testid="protokoll-abschluss-aktualisieren"
+                  className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                  style={{ ...st, color: "#64a8ff" }}>
+            <AlertTriangle size={15} /> Wird abgeschlossen · aktualisieren
+          </button>
+        ) : freigegeben ? (
+          <button onClick={finalize} disabled={busy}
+                  data-testid="protokoll-abschliessen"
+                  className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                  style={{ background: "var(--accent-red)" }}>
+            <CheckCircle2 size={16} /> Unterschrieben — abschließen
+          </button>
+        ) : (
+          <>
+            <button onClick={saveNow} disabled={busy}
+                    className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                    style={st}>
+              <Save size={15} /> Speichern
+            </button>
+            <button onClick={zurFreigabe} disabled={busy}
+                    data-testid="protokoll-zur-freigabe"
+                    className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                    style={{ background: "var(--accent-red)" }}>
+              <CheckCircle2 size={16} /> Zur Freigabe senden
+            </button>
+          </>
+        )}
+      </div>
+      {savedAt && !gesperrt && (
+        <div className="fixed right-4 text-[10px] text-zinc-600 z-50"
+             style={{ bottom: "calc(var(--fahrer-tabs, 3.75rem) + 4.6rem + env(safe-area-inset-bottom, 0px))" }}>
+          gespeichert {savedAt.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
+        </div>
+      )}
+      {freigegeben && (!sigDriver || !sigSeller) && (
+        <div className="mt-3 text-[11px] text-amber-400/80 inline-flex items-center gap-1.5">
+          <AlertTriangle size={12} /> Zum Abschließen werden beide Unterschriften benötigt.
+        </div>
+      )}
+    </div>
+  );
+}
