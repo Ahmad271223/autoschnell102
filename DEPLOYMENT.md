@@ -1507,6 +1507,32 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   zeigt den Stand (`{"marktplatz": false}`).
 - Tests und CI laufen mit `MARKTPLATZ_AKTIV=true`, damit die Marktplatz-Tests weiter greifen.
 
+### Lasttest „180 Sucher, 30 neue Links gleichzeitig“ (16.09.2026)
+
+`backend/scripts/lasttest_links_gleichzeitig.py [links.txt]` legt 180 Wegwerf-Sucher in sechs Firmen
+an, lässt 30 verschiedene neue Links je von einem Erst-Abrufer und fünf Mitwartenden derselben Firma
+einfügen (einmal exakt gleichzeitig, einmal je 10 ms versetzt) und prüft: Wartezeit je Konto, Fehler,
+genau ein Anbieter-Abruf je Link, 1 Besitzer + 5 Mitbearbeiter je Fahrzeug. Ergebnis lokal
+(ein Prozess, Attrappen-Abruf 0,4 s):
+
+| Lauf | Fehler | Job fertig (Median / max) | bis Vergleich fertig (Median / max) |
+|---|---|---|---|
+| gleichzeitig, 4 Job-Arbeiter | 0 von 180 | 5,1 s / 9,2 s | 7,1 s / 9,4 s |
+| 10 ms versetzt, 4 Job-Arbeiter | 0 von 180 | 3,9 s / 6,9 s | 5,4 s / 7,2 s |
+| gleichzeitig, 10 Job-Arbeiter | 0 von 180 | 3,9 s / 7,0 s | 6,9 s / 8,5 s |
+| ein Konto allein, bekannter Link | – | – | 0,08 s |
+
+Jeder Link wurde genau einmal abgerufen, Mitwartende hängen sich an den laufenden Abruf, keine
+429/503. Die Wartezeit bestimmen zwei Größen: `LINK_JOB_CONCURRENCY` (Job-Arbeiter je
+API-Prozess; Produktion: `WEB_CONCURRENCY` Prozesse je Server) und die Anbieter-Slots
+`MAX_CONCURRENT_MOBILE` / `MAX_CONCURRENT_AUTOSCOUT` / `MAX_CONCURRENT_KLEINANZEIGEN` (global über
+alle Prozesse, in der Datenbank). Mit den Beispielwerten der `.env.example` (je 2) und echten
+Abrufzeiten von 10–20 s je Inserat warten bei 30 gleichzeitig neuen Links die letzten mobile.de-Links
+1,5–3 Minuten und die letzten AutoScout-Links 40–80 Sekunden. Für Bürobetrieb mit vielen Suchern:
+`MAX_CONCURRENT_MOBILE=10`, `MAX_CONCURRENT_AUTOSCOUT=5` (Apify-Plan beachten),
+`LINK_JOB_CONCURRENCY=4`. Der echte Wert lässt sich mit `deploy/lasttest-auf-prod2.sh` messen;
+dort kosten die Abrufe Geld.
+
 ### Runde 19 (16.09.2026): Sucher-Termine, Übergabe, Abruf-Lease, Auto-Daten
 
 - **Termine:** Termin-Antworten an Sucher tragen keine Konto-Kennungen mehr (`created_by`,
