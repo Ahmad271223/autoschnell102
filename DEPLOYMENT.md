@@ -1531,6 +1531,29 @@ entstehen, weil ein einzelner Testprozess 150 Vergleiche hintereinander abarbeit
 Vergleich, Datenbank-Rundläufe). Mit 4 Prozessen je Server auf zwei Servern entspricht das etwa
 0,5 s.
 
+**180 verschiedene neue Links gleichzeitig** (`backend/scripts/lasttest_neue_links.py`, je 60
+Kleinanzeigen / mobile.de / AutoScout, Anbieterzeit nachgestellt mit `MOCK_PROVIDER_DELAY_MS_<QUELLE>`:
+Kleinanzeigen 1,5 s, mobile.de und AutoScout 8 s): Der Dauer-Worker holte wartende Jobs einzeln (zwei
+Aggregationen je Job, ~10 je Sekunde) — das Einsammeln allein dauerte 15 s. Seit 16.09.2026 holt er
+freie Plätze paketweise (`_claim_many`), Standard `LINK_JOB_CONCURRENCY=32` je Prozess und vier
+Sofort-Anstöße. Ergebnis auf EINEM Prozess mit 200 Jobs/Slots (entspricht 8 Prozessen × 32):
+
+| Quelle | Attrappe | Abruf fertig (Median / max) | bis Vergleich (Median / max) |
+|---|---|---|---|
+| Kleinanzeigen (60) | 1,5 s | 7,0 s / 8,9 s | 7,8 s / 9,5 s |
+| mobile.de (60) | 8 s | 13,0 s / 15,4 s | 13,7 s / 15,7 s |
+| AutoScout (60) | 8 s | 13,1 s / 15,3 s | 13,8 s / 15,7 s |
+
+Der Rest über der Anbieterzeit (≈ 5 s) ist der Anlauf eines einzelnen Prozesses: 180 Anfragen
+annehmen (≈ 36 je Sekunde: Anmeldung, Cache-Prüfung, Einreihen) und die Jobs beanspruchen. Mit acht
+Prozessen in Produktion schrumpft das auf etwa eine Sekunde. **Zielwerte von Ahmad** (bekannte Links
+< 1 s; 180 neue Links: Kleinanzeigen < 2 s, mobile.de/AutoScout < 10 s, spätestens 15 s) sind damit
+erreichbar, wenn (1) die Anbieter-Slots die gleichzeitigen Abrufe zulassen (`MAX_CONCURRENT_MOBILE`,
+`MAX_CONCURRENT_AUTOSCOUT`, `MAX_CONCURRENT_KLEINANZEIGEN_API` ≥ Zahl der gleichzeitig neuen Links je
+Quelle, also für den Fall oben 60) und (2) Apify mobile.de/AutoScout in ≤ 8 s liefert und der Apify-Plan
+so viele gleichzeitige Actor-Läufe erlaubt. Kleinanzeigen < 2 s ist knapp: API-Antwort 1–2 s plus
+≈ 1 s eigener Anteil.
+
 Jeder Link wurde genau einmal abgerufen, Mitwartende hängen sich an den laufenden Abruf, keine
 429/503. Die Wartezeit bestimmen zwei Größen: `LINK_JOB_CONCURRENCY` (Job-Arbeiter je
 API-Prozess; Produktion: `WEB_CONCURRENCY` Prozesse je Server) und die Anbieter-Slots

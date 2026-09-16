@@ -38,7 +38,9 @@ from deps import log
 # Wie viele Jobs EIN Worker-Prozess gleichzeitig bearbeitet. Die Zahl der
 # echten Anbieter-Abrufe deckelt ohnehin provider_limiter.
 from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
-JOB_CONCURRENCY = zahl_env("LINK_JOB_CONCURRENCY", 4, unten=1)
+# Lasttest 16.09.2026: Standard 32 je Prozess — die echte Grenze setzen die
+# Anbieter-Slots (provider_limiter, global); ein wartender Job kostet nichts.
+JOB_CONCURRENCY = zahl_env("LINK_JOB_CONCURRENCY", 32, unten=1)
 # Nach so vielen Sekunden gilt ein 'processing'-Job als verwaist.
 PROCESSING_TTL_SECONDS = zahl_env("LINK_JOB_PROCESSING_TTL", 240, unten=30)
 # Audit 13.09.2026 (#32): Solange ein Job WIRKLICH laeuft, verlaengert ein
@@ -357,7 +359,7 @@ async def get_job(db, job_id: str) -> Optional[dict]:
 # Audit 09/2026 (Punkt 17): Sofort-Anstoesse sind je Prozess begrenzt und
 # dedupliziert — viele parallele Link-Einreichungen erzeugen keine
 # unbegrenzten Tasks mehr; der Dauer-Worker holt den Rest im 0,3-s-Takt.
-SOFORT_MAX = int(os.environ.get("LINK_JOB_SOFORT_MAX", "2") or 2)
+SOFORT_MAX = int(os.environ.get("LINK_JOB_SOFORT_MAX", "4") or 4)
 _sofort_laufend: set = set()
 
 
@@ -503,6 +505,60 @@ async def _claim_one(db) -> Optional[dict]:
     return await _beanspruchen(db, {})
 
 
+async def _claim_many(db, n: int) -> list:
+    """Bis zu n wartende Jobs auf einmal beanspruchen — reihum je Konto wie
+    _claim_one, aber mit EINER Kandidatenrunde je Aufruf statt zwei
+    Aggregationen je Job.
+
+    Lasttest 16.09.2026 (180 neue Links gleichzeitig): der Dauer-Worker holte
+    die Jobs einzeln, ~10 je Sekunde — allein das Einsammeln dauerte 15 s,
+    obwohl 64 Arbeiter frei waren. Jetzt: Belegung je Konto und Kandidaten
+    (aeltester Job je Konto) einmal lesen, dann der Reihe nach beanspruchen;
+    reicht eine Runde nicht, folgt eine weitere Kandidatenrunde (Fairness
+    bleibt: je Runde hoechstens ein Job je Konto)."""
+    jobs: list = []
+    if n <= 0:
+        return jobs
+    je_konto = [{"$unwind": {"path": "$user_ids", "preserveNullAndEmptyArrays": True}}]
+    konto = {"$ifNull": ["$user_ids", "$requested_by_user"]}
+    laufend: dict = {}
+    async for reihe in db.link_jobs.aggregate([
+        {"$match": {"status": "processing"}},
+        *je_konto,
+        {"$group": {"_id": konto, "n": {"$sum": 1}}},
+    ]):
+        laufend[reihe["_id"] or ""] = reihe["n"]
+    for _runde in range(4):
+        kandidaten = [reihe async for reihe in db.link_jobs.aggregate([
+            {"$match": {"status": "queued", "active": True}},
+            *je_konto,
+            {"$sort": {"created_at": 1}},
+            {"$group": {"_id": konto,
+                        "job_id": {"$first": "$id"},
+                        "created_at": {"$first": "$created_at"}}},
+            {"$sort": {"created_at": 1}},
+            {"$limit": KANDIDATEN_FENSTER},
+        ])]
+        if not kandidaten:
+            break
+        kandidaten.sort(key=lambda k: (laufend.get(k["_id"] or "", 0), k["created_at"]))
+        gesehen: set = set()
+        vorher = len(jobs)
+        for k in kandidaten:
+            if len(jobs) >= n:
+                return jobs
+            if k["job_id"] in gesehen:
+                continue
+            gesehen.add(k["job_id"])
+            job = await _beanspruchen(db, {"id": k["job_id"]})
+            if job:
+                jobs.append(job)
+                laufend[k["_id"] or ""] = laufend.get(k["_id"] or "", 0) + 1
+        if len(jobs) == vorher:
+            break                     # nichts mehr zu holen (anderer Worker war schneller)
+    return jobs
+
+
 async def _process(db, job: dict) -> None:
     """Einen beanspruchten Job ausfuehren: das Inserat in den Cache holen.
     Lease, Single-Flight und Provider-Begrenzung stecken bereits in
@@ -601,11 +657,12 @@ async def run_job_worker_forever(db) -> None:
         try:
             laufend = {t for t in laufend if not t.done()}
             await _requeue_stale(db)
-            while len(laufend) < JOB_CONCURRENCY:
-                job = await _claim_one(db)
-                if not job:
-                    break
-                laufend.add(asyncio.create_task(_process(db, job)))
+            # Lasttest 16.09.2026: freie Plaetze in EINEM Paket fuellen (statt
+            # einzeln mit zwei Aggregationen je Job).
+            frei = JOB_CONCURRENCY - len(laufend)
+            if frei > 0:
+                for job in await _claim_many(db, frei):
+                    laufend.add(asyncio.create_task(_process(db, job)))
         except Exception as exc:  # noqa: BLE001
             log.warning("link job loop error: %s", exc)
         await asyncio.sleep(0.3)

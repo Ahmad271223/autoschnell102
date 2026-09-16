@@ -113,7 +113,14 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
     """Holt ein Inserat bei der Quelle — oder liefert im Lasttest-Modus
     synthetische Daten mit realistischer Verzoegerung."""
     if MOCK_PROVIDER_FETCH:
-        await asyncio.sleep(0.4)
+        # Lasttest 16.09.2026: Verzoegerung je Quelle einstellbar, damit sich
+        # realistische Anbieterzeiten nachstellen lassen (Standard 400 ms).
+        ms = os.environ.get(f"MOCK_PROVIDER_DELAY_MS_{source.upper()}") \
+            or os.environ.get("MOCK_PROVIDER_DELAY_MS") or "400"
+        try:
+            await asyncio.sleep(max(0, int(ms)) / 1000)
+        except ValueError:
+            await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
     belastet = await _budget_pruefen(db, source, dealer_id)
     try:
