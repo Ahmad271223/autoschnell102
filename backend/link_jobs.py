@@ -569,7 +569,7 @@ async def _process(db, job: dict) -> None:
     try:
         from listing_identity import ListingBusy, get_or_fetch_listing
         from kleinanzeigen_service import ListingGone
-        from provider_fetch import fetch_listing
+        from provider_fetch import TageslimitErreicht, fetch_listing
         from routes.listings import LISTING_CACHE_TTL_HOURS
     except Exception as exc:  # noqa: BLE001
         await db.link_jobs.update_one(
@@ -587,7 +587,8 @@ async def _process(db, job: dict) -> None:
                  "dealer_id": job.get("requested_by_dealer", "")}
         async with _AbrufSlot(konto):
             return await fetch_listing(db, src, iid, url,
-                                       dealer_id=job.get("requested_by_dealer", ""))
+                                       dealer_id=job.get("requested_by_dealer", ""),
+                                       user_id=job.get("requested_by_user") or "")
 
     # Audit 13.09.2026 (#32): Herzschlag fuer die Job-Frist, und die
     # Rueckstellung trifft nur den EIGENEN Claim — ein ueberholter Task
@@ -611,6 +612,15 @@ async def _process(db, job: dict) -> None:
                 {"$set": {"status": "queued", "updated_at": _now()},
                  "$unset": {"claim_id": ""},
                  "$inc": {"attempts": -1}})
+            return
+        except TageslimitErreicht as exc:
+            # Tageslimit je Konto/Firma (16.09.2026): sofort endgueltig, kein
+            # weiterer Versuch — jeder Versuch wuerde nur erneut abgelehnt.
+            await db.link_jobs.update_one(
+                eigener_claim,
+                {"$set": {"status": "failed", "active": False,
+                          "error": str(exc), "finished_at": _now(),
+                          "updated_at": _now()}})
             return
         except ListingGone as exc:
             # Runde 19 (Nr. 31): nur den EIGENEN Claim abschliessen

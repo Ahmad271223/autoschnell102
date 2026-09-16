@@ -153,6 +153,7 @@ def pruefe_produktion(log) -> None:
                  "WEB_CONCURRENCY", "MIN_FREI_MB", "BEWEIS_FOTOS_MAX", "BEWEIS_AUFBEWAHRUNG_TAGE",
                  "BEWEIS_PARALLEL", "FAHRERFOTO_TAGE", "BERICHT_AUFBEWAHRUNG_TAGE",
                  "ANBIETER_TAGESLIMIT_JE_FIRMA", "ANBIETER_TAGESLIMIT_GESAMT",
+                 "ANBIETER_TAGESLIMIT_JE_KONTO",
                  "ANBIETER_TAGESWARNUNG", "ABRUF_RUECKFALL_TAGESLIMIT", "BILD_PROXY_LIMIT"):
         if name not in FEHLERHAFT:
             roh = zahl_pruefen(name)

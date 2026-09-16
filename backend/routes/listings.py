@@ -45,7 +45,7 @@ from kleinanzeigen_service import (
     ListingGone, fetch_kleinanzeigen_vehicle,
     parse_kleinanzeigen_html, looks_like_kleinanzeigen_listing,
 )
-from provider_fetch import fetch_listing
+from provider_fetch import TageslimitErreicht, fetch_listing
 from rate_limiter import SlidingWindowRateLimiter
 from listing_identity import (
     ListingBusy, ListingIdentityError, get_listing_identity,
@@ -497,7 +497,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         """Wird nur bei Cache-MISS aufgerufen — je Konto gebremst (Runde 16)."""
         async with _AbrufSlot(user):
             return await fetch_listing(db, src, iid, url,
-                                       dealer_id=user.get("dealer_id") or "")
+                                       dealer_id=user.get("dealer_id") or "",
+                                       user_id=user.get("id") or "")
 
     try:
         if client_hit is not None:
@@ -523,6 +524,12 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)
         raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
+    except TageslimitErreicht as exc:
+        # 429: Tageslimit je Konto/Firma erreicht — kein Server-Fehler,
+        # der Text geht 1:1 an den Nutzer.
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
+        raise HTTPException(429, str(exc))
     except RuntimeError as exc:
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)
@@ -1075,7 +1082,8 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
     async def _fetcher(source: str, item_id: str, url: str) -> dict:
         async with _AbrufSlot(user):
             return await fetch_listing(db, source, item_id, url,
-                                       dealer_id=user.get("dealer_id") or "")
+                                       dealer_id=user.get("dealer_id") or "",
+                                       user_id=user.get("id") or "")
 
     # Eigene Quarantaene zuerst: sonst wuerde der Server eine Anzeige selbst
     # abrufen, die der Nutzer per Erweiterung bereits geliefert hat.
@@ -1095,6 +1103,8 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
         raise HTTPException(400, str(exc))
     except ListingBusy as exc:
         raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
+    except TageslimitErreicht as exc:
+        raise HTTPException(429, str(exc))
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
 

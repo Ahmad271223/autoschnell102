@@ -1569,9 +1569,11 @@ Vorgaben in Compose, Code und `.env.example` einheitlich 20/20/20 Slots und 32 J
 grep -E "^(MAX_CONCURRENT|LINK_JOB_CONCURRENCY|WEB_CONCURRENCY)" /opt/autoschnell/.env
 ```
 
-Empfehlung: `MAX_CONCURRENT_MOBILE=20`, `MAX_CONCURRENT_AUTOSCOUT=20`,
-`MAX_CONCURRENT_KLEINANZEIGEN_API=20`, `LINK_JOB_CONCURRENCY=32` eintragen (oder die Zeilen
-streichen, dann gelten die Compose-Vorgaben), danach `docker compose up -d`. Voraussetzung: der
+Empfehlung: Summe aus `MAX_CONCURRENT_MOBILE` und `MAX_CONCURRENT_AUTOSCOUT` höchstens so groß wie
+die gleichzeitigen Actor-Läufe des Apify-Plans (Starter 32 → 16/16, Scale 128 → 60/60; Stand
+16.09.2026: Starter), dazu `MAX_CONCURRENT_KLEINANZEIGEN_API=20`, `LINK_JOB_CONCURRENCY=32`; setzen
+mit `deploy/env_setzen.sh` (Abschnitt „Tageslimit je Konto“), danach `docker compose up -d`.
+Voraussetzung: der
 Apify-Plan erlaubt so viele gleichzeitige Actor-Läufe (Apify-Konsole → Settings → Limits); sonst
 stellt Apify die Läufe in seine eigene Warteschlange, die Abrufe dauern länger, und nach 180 s
 bricht ein Abruf ab und der Job versucht es erneut. Die Anbieterzeit selbst (Kleinanzeigen-API
@@ -1648,6 +1650,30 @@ Kosten); die echte Anbieterzeit misst nur ein Abruf mit echten Links.
   `index.css` zentral umgelenkt; bewusst dunkle Bereiche (Abhol-Check des Fahrers) tragen
   `.bleibt-dunkel`. Die Startseite bleibt als Marketing-Seite dunkel.
 - Vertragsformular des Suchers: Schrift eine Stufe kräftiger (`.vertrag-formular`).
+
+### Tageslimit je Konto und Werte in der .env setzen (16.09.2026)
+
+Entscheidung Ahmad (16.09.2026): **höchstens 400 neue Anbieter-Abrufe je Konto und Tag**, über
+alle Quellen (mobile.de, AutoScout, Kleinanzeigen): `ANBIETER_TAGESLIMIT_JE_KONTO` (Compose-Vorgabe
+400; 0 = aus). Gezählt wird nur ein echter Abruf: bekannte Links aus dem Speicher (90 Tage),
+Mitwarten an einem laufenden Abruf und technisch gescheiterte Abrufe (Rückbuchung) kosten nichts.
+Der 401. Abruf bekommt 429 mit klarer Meldung („Tageslimit für neue Links erreicht … morgen
+erneut“), ein Link-Job scheitert sofort ohne weitere Versuche. Firmen- und Gesamtlimit bleiben aus
+(0), die Tageswarnung `ANBIETER_TAGESWARNUNG` bleibt ein Hinweis. Tageswechsel um 0 Uhr UTC
+(Zähler `provider_budget`, Schlüssel `<Tag>:konto:<user_id>`). Erwartete Menge (Ahmad, 16.09.):
+30 Sucher × 150 Vergleiche × 30 Tage, davon 10 % bekannt, 70 % mobile.de, 10 % AutoScout, 20 %
+Kleinanzeigen — rund 4.500 Vergleiche am Tag; Apify-Plan „Starter“ (32 gleichzeitige Läufe) reicht,
+das eigene Apify-Kostenlimit muss über den erwarteten ~90 $/Monat liegen.
+
+Werte ohne Editor setzen (ersetzt vorhandene Zeilen an Ort und Stelle, hängt fehlende an, legt
+`.env.bak-<Datum>` an):
+
+```bash
+cd /opt/autoschnell && sh deploy/env_setzen.sh MAX_CONCURRENT_MOBILE=16 MAX_CONCURRENT_AUTOSCOUT=16 MAX_CONCURRENT_KLEINANZEIGEN_API=20 LINK_JOB_CONCURRENCY=32 ANBIETER_TAGESLIMIT_JE_KONTO=400
+```
+
+Danach `sh deploy/rollout.sh` (neuer Stand) oder `docker compose up -d` (nur Werte geändert);
+prüfen mit `docker compose exec backend env | grep -E "MAX_CONCURRENT|LINK_JOB|TAGESLIMIT"`.
 
 ### Versand, Kundenfassung und Abrufe seit Runde 16 (15.09.2026)
 

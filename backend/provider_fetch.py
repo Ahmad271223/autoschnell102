@@ -39,6 +39,16 @@ def mock_vehicle(item_id: str) -> Dict[str, Any]:
 # wird trotzdem weiter — davon leben die Auswertung und die Warnung.
 TAGESLIMIT_JE_FIRMA = int(os.environ.get("ANBIETER_TAGESLIMIT_JE_FIRMA", "0"))
 TAGESLIMIT_GESAMT = int(os.environ.get("ANBIETER_TAGESLIMIT_GESAMT", "0"))
+# Entscheidung Ahmad 16.09.2026: hoechstens 400 NEUE Abrufe je Konto und Tag
+# (alle Quellen, auch Kleinanzeigen). Bekannte Links aus dem Speicher und
+# Mitwarten an einem laufenden Abruf kosten nichts. Im Code 0 = aus (Tests,
+# lokale Entwicklung); docker-compose.yml und .env.example setzen 400.
+TAGESLIMIT_JE_KONTO = int(os.environ.get("ANBIETER_TAGESLIMIT_JE_KONTO", "0"))
+
+
+class TageslimitErreicht(RuntimeError):
+    """Tageslimit (Konto, Firma oder gesamt) erreicht — die Routen antworten
+    429, ein Link-Job scheitert sofort ohne weitere Versuche."""
 # Ab dieser Zahl Abrufe an einem Tag gibt es EINEN Betriebsalarm — ein
 # Hinweis, kein Riegel. So faellt ein Ausreisser auf, bevor die Rechnung
 # kommt. 0 schaltet auch die Warnung ab.
@@ -73,43 +83,60 @@ async def _budget_zurueck(db, belastet) -> None:
             pass
 
 
-async def _budget_pruefen(db, source: str, dealer_id: str) -> list:
-    if source not in ("mobile", "autoscout24"):
-        return []
+async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "") -> list:
     from datetime import datetime, timedelta, timezone
     from pymongo import ReturnDocument
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     ablauf = datetime.now(timezone.utc) + timedelta(days=2)
-    # Reihenfolge (Runde 5): ZUERST das Firmenlimit, DANN das Gesamtbudget —
-    # und bei Ablehnung die Zaehlung zuruecknehmen. Vorher verbrauchte eine
-    # Firma, die ihr eigenes Limit laengst ueberschritten hatte, mit jedem
-    # abgelehnten Versuch weiter das GESAMTBUDGET aller anderen Firmen.
     belastet = []
-    gesamt_stand = 0
-    for schluessel, limit in ((f"{tag}:firma:{dealer_id or 'ohne'}",
-                               TAGESLIMIT_JE_FIRMA),
-                              (f"{tag}:gesamt", TAGESLIMIT_GESAMT)):
+
+    async def _zaehlen(schluessel: str) -> int:
         doc = await db.provider_budget.find_one_and_update(
             {"_id": schluessel},
             {"$inc": {"n": 1}, "$setOnInsert": {"ablauf": ablauf}},
             upsert=True, return_document=ReturnDocument.AFTER)
         belastet.append(schluessel)
+        return doc["n"]
+
+    async def _ablehnen(limit: int, wer: str) -> None:
+        # Bei Ablehnung die Zaehlung zuruecknehmen — der abgelehnte Versuch
+        # zaehlt weder fuer das Konto noch fuer Firma oder Gesamtbudget.
+        for s in belastet:
+            await db.provider_budget.update_one({"_id": s}, {"$inc": {"n": -1}})
+        raise TageslimitErreicht(
+            f"Tageslimit für neue Links erreicht ({limit}/Tag {wer}). "
+            "Bekannte Links kommen weiter aus dem Speicher; neue Links "
+            "bitte morgen erneut. Betreiber: Limit in der .env "
+            "(ANBIETER_TAGESLIMIT_*).")
+
+    # Konto-Limit (Entscheidung Ahmad 16.09.2026): zaehlt JEDEN echten
+    # Anbieter-Abruf dieses Kontos, auch Kleinanzeigen. Gezaehlt wird immer
+    # (Auswertung), gebremst nur bei TAGESLIMIT_JE_KONTO > 0.
+    if user_id:
+        stand = await _zaehlen(f"{tag}:konto:{user_id}")
+        if TAGESLIMIT_JE_KONTO > 0 and stand > TAGESLIMIT_JE_KONTO:
+            await _ablehnen(TAGESLIMIT_JE_KONTO, "je Konto")
+    if source not in ("mobile", "autoscout24"):
+        return belastet
+    # Reihenfolge (Runde 5): ZUERST das Firmenlimit, DANN das Gesamtbudget —
+    # und bei Ablehnung die Zaehlung zuruecknehmen. Vorher verbrauchte eine
+    # Firma, die ihr eigenes Limit laengst ueberschritten hatte, mit jedem
+    # abgelehnten Versuch weiter das GESAMTBUDGET aller anderen Firmen.
+    gesamt_stand = 0
+    for schluessel, limit, wer in ((f"{tag}:firma:{dealer_id or 'ohne'}",
+                                    TAGESLIMIT_JE_FIRMA, "je Firma"),
+                                   (f"{tag}:gesamt", TAGESLIMIT_GESAMT, "gesamt")):
+        stand = await _zaehlen(schluessel)
         if schluessel.endswith(":gesamt"):
-            gesamt_stand = doc["n"]
-        if limit > 0 and doc["n"] > limit:
-            for s in belastet:
-                await db.provider_budget.update_one({"_id": s}, {"$inc": {"n": -1}})
-            raise RuntimeError(
-                "Tageslimit für kostenpflichtige Anbieter-Abrufe erreicht "
-                f"({limit}/Tag). Bekannte Links kommen weiter aus dem "
-                "Speicher; neue Links bitte morgen erneut — oder das Limit "
-                "in der .env erhöhen (ANBIETER_TAGESLIMIT_*).")
+            gesamt_stand = stand
+        if limit > 0 and stand > limit:
+            await _ablehnen(limit, wer)
     await _warnen_wenn_viel(db, tag, gesamt_stand)
     return belastet
 
 
 async def fetch_listing(db, source: str, item_id: str, url: str,
-                        dealer_id: str = "") -> Dict[str, Any]:
+                        dealer_id: str = "", user_id: str = "") -> Dict[str, Any]:
     """Holt ein Inserat bei der Quelle — oder liefert im Lasttest-Modus
     synthetische Daten mit realistischer Verzoegerung."""
     if MOCK_PROVIDER_FETCH:
@@ -122,7 +149,7 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
         except ValueError:
             await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
-    belastet = await _budget_pruefen(db, source, dealer_id)
+    belastet = await _budget_pruefen(db, source, dealer_id, user_id)
     try:
         return await _abrufen(db, source, item_id, url)
     except AnbieterFehler as exc:

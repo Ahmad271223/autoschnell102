@@ -109,6 +109,9 @@ services:
       # 0 = kein Limit (Betreiber-Entscheidung 09/2026)
       - ANBIETER_TAGESLIMIT_JE_FIRMA=${ANBIETER_TAGESLIMIT_JE_FIRMA:-0}
       - ANBIETER_TAGESLIMIT_GESAMT=${ANBIETER_TAGESLIMIT_GESAMT:-0}
+      # Entscheidung Ahmad 16.09.2026: 400 neue Abrufe je Konto und Tag (alle
+      # Quellen). Bekannte Links aus dem Speicher und Mitwarten kosten nichts.
+      - ANBIETER_TAGESLIMIT_JE_KONTO=${ANBIETER_TAGESLIMIT_JE_KONTO:-400}
       - ANBIETER_TAGESWARNUNG=${ANBIETER_TAGESWARNUNG:-500}
       - ABRUF_RUECKFALL_TAGESLIMIT=${ABRUF_RUECKFALL_TAGESLIMIT:-25}
       - LOGIN_IP_LIMIT=${LOGIN_IP_LIMIT:-120}

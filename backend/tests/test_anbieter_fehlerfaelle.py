@@ -274,3 +274,52 @@ def test_antwort_ohne_inhalt_heisst_inserat_weg(apify):
     _FakeClient.antwort = _Antwort(200, "[{}]", daten=[{"url": "https://www.autoscout24.de/x"}])
     assert asyncio.run(autoscout_service.fetch_autoscout_vehicle(
         "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123")) is None
+
+
+def test_tageslimit_je_konto_zaehlt_alle_quellen(monkeypatch):
+    """Entscheidung Ahmad 16.09.2026: hoechstens N neue Abrufe je Konto und Tag,
+    alle Quellen (auch Kleinanzeigen). Ein anderes Konto derselben Firma bleibt
+    frei; abgelehnte und technisch gescheiterte Versuche werden zurueckgebucht;
+    0 = kein Konto-Limit (gezaehlt wird trotzdem); ohne Konto kein Zaehler."""
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_KONTO", 2)
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_FIRMA", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_GESAMT", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESWARNUNG", 0)
+    dealer = f"firma-{uuid.uuid4().hex[:8]}"
+    u1, u2 = f"u1-{uuid.uuid4().hex[:6]}", f"u2-{uuid.uuid4().hex[:6]}"
+
+    async def _lauf(db):
+        from datetime import datetime, timezone
+        tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        k1, k2, kf = f"{tag}:konto:{u1}", f"{tag}:konto:{u2}", f"{tag}:firma:{dealer}"
+        try:
+            b = await provider_fetch._budget_pruefen(db, "kleinanzeigen", dealer, user_id=u1)  # 1
+            assert b == [k1], b
+            await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u1)            # 2
+            with pytest.raises(provider_fetch.TageslimitErreicht) as e:
+                await provider_fetch._budget_pruefen(db, "autoscout24", dealer, user_id=u1)   # 3 -> Limit
+            assert "Tageslimit" in str(e.value) and "2/Tag" in str(e.value)
+            assert isinstance(e.value, RuntimeError)          # Routen: 429 vor dem 502-Fang
+            doc = await db.provider_budget.find_one({"_id": k1})
+            assert doc and doc["n"] == 2, doc                 # abgelehnter Versuch zurueckgebucht
+            firma = await db.provider_budget.find_one({"_id": kf})
+            assert firma and firma["n"] == 1, firma           # der abgelehnte Abruf zaehlt nicht fuer die Firma
+            # anderes Konto derselben Firma: frei
+            await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u2)
+            # technischer Fehlschlag: Rueckbuchung auch fuer den Konto-Zaehler
+            belastet = await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u2)
+            assert belastet == [k2, kf, f"{tag}:gesamt"], belastet
+            await provider_fetch._budget_zurueck(db, belastet)
+            doc2 = await db.provider_budget.find_one({"_id": k2})
+            assert doc2 and doc2["n"] == 1, doc2
+            # 0 = kein Konto-Limit, gezaehlt wird trotzdem
+            monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_KONTO", 0)
+            await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u1)
+            doc = await db.provider_budget.find_one({"_id": k1})
+            assert doc and doc["n"] == 3, doc
+            # ohne Konto (Probe-Skript): kein Konto-Zaehler, Kleinanzeigen frei
+            assert await provider_fetch._budget_pruefen(db, "kleinanzeigen", dealer) == []
+        finally:
+            await db.provider_budget.delete_many({"_id": {"$in": [k1, k2, kf]}})
+            await db.provider_budget.update_one({"_id": f"{tag}:gesamt"}, {"$inc": {"n": -3}})
+    _mit_db(_lauf)
