@@ -217,9 +217,21 @@ async def berichte_nach_frist_loeschen(db, now: datetime, stats: dict) -> int:
     cutoff = (now - timedelta(days=BERICHT_AUFBEWAHRUNG_TAGE)).isoformat()
     n = 0
     # Phase 3 (3.4, B24): kein 500er-Deckel mehr — Cursor in Haeppchen.
+    # Befund 110 (16.09.2026): Berichte OFFENER (auch wiedergeoeffneter)
+    # Termine bleiben; bei geschlossenen laeuft die Frist ab dem Abschluss
+    # (updated_at des Termins), nicht ab dem Erstellen des Berichts. Berichte
+    # ohne Termin raeumt der Zweig unten (verwaist) auf.
     async for rep in db.pickup_reports.find(
             {"created_at": {"$lte": cutoff}},
-            {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1}).batch_size(200):
+            {"_id": 0, "id": 1, "dealer_id": 1, "deviations": 1,
+             "appointment_id": 1}).batch_size(200):
+        termin = await db.appointments.find_one(
+            {"id": rep.get("appointment_id")}, {"_id": 0, "status": 1, "updated_at": 1})
+        if termin is not None:
+            if (termin.get("status") or "offen") not in _TERMIN_GESCHLOSSEN:
+                continue                       # Vorgang laeuft noch
+            if (termin.get("updated_at") or "") > cutoff:
+                continue                       # Abschluss juenger als die Frist
         await _fotos_eines_berichts_loeschen(db, rep, now, stats, rep.get("dealer_id") or "")
         offen = any((d or {}).get("photo_key") for d in (rep.get("deviations") or []))
         if offen:
@@ -681,12 +693,18 @@ async def vertrags_nacharbeit_nachholen(db) -> int:
     das Nachziehen (Fahrzeugstatus, Kaufvorgang) — bisher nur ein Hinweis in
     der Antwort. Jetzt Merker nacharbeit_offen am Vertrag, hier nachgeholt."""
     n = 0
+    # Befund 100 (16.09.2026): Reihum statt immer dieselben 200 vorne —
+    # nie versuchte zuerst, dann die am laengsten nicht versuchten
+    # (nacharbeit_versuch_am); so verhungert kein Datensatz hinter 200
+    # dauerhaft kaputten.
     async for c in db.generated_pdfs.find(
             {"nacharbeit_offen": True, "loeschung.status": {"$ne": "laeuft"}},
             {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "vehicle_id": 1,
              "purchase_price": 1, "kaufvorgang_id": 1, "status": 1,
-             "nacharbeit_status": 1}).limit(200):
+             "nacharbeit_status": 1}).sort("nacharbeit_versuch_am", 1).limit(200):
         try:
+            await db.generated_pdfs.update_one(
+                {"id": c["id"]}, {"$set": {"nacharbeit_versuch_am": now_iso()}})
             import kaufvorgang as _kv
             if not await db.kaufvorgaenge.count_documents({"contract_id": c["id"]}, limit=1):
                 await _kv.anlegen(dealer_id=c["dealer_id"], user_id=c.get("user_id"),
@@ -709,7 +727,8 @@ async def vertrags_nacharbeit_nachholen(db) -> int:
                 log.warning("Vertrags-Nacharbeit %s: Fahrzeug-Zusammenfassung weiter offen", c["id"])
                 continue
             await db.generated_pdfs.update_one(
-                {"id": c["id"]}, {"$unset": {"nacharbeit_offen": "", "nacharbeit_status": ""}})
+                {"id": c["id"]}, {"$unset": {"nacharbeit_offen": "", "nacharbeit_status": "",
+                                             "nacharbeit_versuch_am": ""}})
             n += 1
         except Exception:  # noqa: BLE001
             log.exception("Vertrags-Nacharbeit zu %s nicht nachgeholt", c.get("id"))
@@ -724,11 +743,16 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
     sobald der Merker aelter als `mindestalter_min` ist. Liefert die Anzahl."""
     grenze = (now - timedelta(minutes=mindestalter_min)).isoformat()
     n = 0
-    async for appt in db.appointments.find({"nacharbeit_offen": True}, {"_id": 0}).limit(200):
+    # Befund 100 (16.09.2026): reihum — nie versuchte zuerst, dann die am
+    # laengsten nicht versuchten (nacharbeit_versuch_am).
+    async for appt in db.appointments.find({"nacharbeit_offen": True}, {"_id": 0}) \
+            .sort("nacharbeit_versuch_am", 1).limit(200):
         stempel = appt.get("updated_at") or appt.get("created_at") or ""
         if stempel > grenze:
             continue
         try:
+            await db.appointments.update_one(
+                {"id": appt["id"]}, {"$set": {"nacharbeit_versuch_am": now_iso()}})
             from routes.protocols import preis_nachholen
             import kaufvorgang as _kv
             from lifecycle import try_set_lifecycle
@@ -752,7 +776,8 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
                     await try_set_lifecycle(appt["vehicle_id"], appt.get("dealer_id", ""), ziel)
             await db.appointments.update_one(
                 {"id": appt["id"]},
-                {"$unset": {"nacharbeit_offen": "", "nacharbeit_protokoll_id": ""}})
+                {"$unset": {"nacharbeit_offen": "", "nacharbeit_protokoll_id": "",
+                            "nacharbeit_versuch_am": ""}})
             n += 1
         except Exception:  # noqa: BLE001
             log.exception("Nacharbeit zu Termin %s konnte nicht nachgeholt werden",
@@ -1242,8 +1267,11 @@ async def konten_ohne_firma_sperren(db) -> int:
     vorhanden = set(await db.dealers.distinct("id", {"id": {"$in": dealer_ids}}))
     fehlt = [d for d in dealer_ids if d not in vorhanden]
     for d in fehlt:
+        # Befund 111 (16.09.2026): nur eine LAUFENDE Loeschung nimmt das Konto
+        # aus — ein verwaistes Konto mit abgebrochener/alter Loeschung wurde
+        # vorher nicht gesperrt.
         r = await db.users.update_many(
-            {"dealer_id": d, "active": {"$ne": False}, "loeschung": {"$exists": False}},
+            {"dealer_id": d, "active": {"$ne": False}, "loeschung.status": {"$ne": "laeuft"}},
             {"$set": {"active": False, "current_session_id": None, "firma_fehlt": True,
                       "updated_at": now_iso()}})
         if r.modified_count:
@@ -2127,11 +2155,15 @@ async def kaufvorgang_nacharbeit_nachholen(db) -> int:
     der erledigten Vorgaenge."""
     import kaufvorgang as _kv
     n = 0
+    # Befund 100 (16.09.2026): reihum — nie versuchte zuerst, dann die am
+    # laengsten nicht versuchten (nacharbeit_versuch_am).
     async for kv in db.kaufvorgaenge.find(
             {"nacharbeit_offen": True},
             {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1, "nacharbeit_versuche": 1}
-    ).limit(200):
+    ).sort("nacharbeit_versuch_am", 1).limit(200):
         try:
+            await db.kaufvorgaenge.update_one(
+                {"id": kv["id"]}, {"$set": {"nacharbeit_versuch_am": now_iso()}})
             ziel = await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"])
             if ziel is None:
                 versuche = int(kv.get("nacharbeit_versuche") or 0) + 1
@@ -2143,7 +2175,8 @@ async def kaufvorgang_nacharbeit_nachholen(db) -> int:
                 continue
             await db.kaufvorgaenge.update_one(
                 {"id": kv["id"]},
-                {"$unset": {"nacharbeit_offen": "", "nacharbeit_versuche": ""}})
+                {"$unset": {"nacharbeit_offen": "", "nacharbeit_versuche": "",
+                            "nacharbeit_versuch_am": ""}})
             n += 1
         except Exception:  # noqa: BLE001
             log.exception("Kaufvorgang-Nacharbeit %s nicht nachgeholt", kv.get("id"))

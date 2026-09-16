@@ -124,8 +124,12 @@ async def list_sucher(response: Response, user=Depends(current_haendler)):
     from deps import sub_status_from_doc
     subs = {}
     async for row in db.subscriptions.aggregate([
+        # Befund 62 (16.09.2026): ersetzte Abos zaehlen nicht — wie die
+        # Zugriffspruefung; sonst zeigte der Chef einen anderen Abo-Stand als
+        # der Sucher tatsaechlich hat.
         {"$match": {"dealer_id": user["dealer_id"],
-                    "subject_user_id": {"$in": ids}}},
+                    "subject_user_id": {"$in": ids},
+                    "status": {"$ne": "ersetzt"}}},
         {"$sort": {"created_at": -1}},
         {"$group": {"_id": "$subject_user_id", "sub": {"$first": "$$ROOT"}}},
     ]):
@@ -372,7 +376,9 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
     Idempotent: eine bereits offene Anfrage wird zurueckgegeben, nicht
     verdoppelt."""
     plan = body.get("plan", "monthly")
-    if plan not in SUCHER_PLANS:
+    # Befund 92 (16.09.2026): {"plan": []} oder {"plan": {}} ist nicht hashbar —
+    # der Mitgliedstest endete mit TypeError (500) statt mit 400.
+    if not isinstance(plan, str) or plan not in SUCHER_PLANS:
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     ist_sucher = user.get("role") == "sucher"

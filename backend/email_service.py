@@ -128,6 +128,15 @@ RESEND_PARALLEL = max(1, int(os.environ.get("RESEND_PARALLEL", "3") or 3))
 RESEND_VERSUCHE = max(1, int(os.environ.get("RESEND_VERSUCHE", "6") or 6))
 RESEND_WARTEN_MAX = float(os.environ.get("RESEND_WARTEN_MAX", "20") or 20)
 _RESEND_VORUEBERGEHEND = {429, 500, 502, 503, 504}
+# Befund 106 (16.09.2026): nach diesen Antworten ist UNKLAR, ob Resend die
+# Mail angenommen hat (429 = sicher abgelehnt, 5xx = vielleicht angenommen).
+_RESEND_UNKLAR = {500, 502, 503, 504}
+
+
+class ResendUnklar(RuntimeError):
+    """Resend antwortete zuletzt mit 5xx — Zustellung moeglich, Ausgang unklar.
+    Der Aufrufer darf dann NICHT auf SMTP zurueckfallen (doppelte Zustellung:
+    die SMTP-Idempotenz kennt Resends Schluessel nicht)."""
 _resend_sperre: Optional[asyncio.Semaphore] = None
 _resend_sperre_loop = None
 
@@ -216,6 +225,12 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
                 gewartet += warte
                 continue
         break
+    if r is not None and r.status_code in _RESEND_UNKLAR:
+        # Befund 106 (16.09.2026): nach 5xx ist unklar, ob die Mail angenommen
+        # wurde — kein Rueckfall auf SMTP (doppelte Zustellung).
+        log.error("email_service: Resend antwortet zuletzt mit HTTP %s — Ausgang unklar, "
+                  "kein SMTP-Rueckfall", r.status_code)
+        raise ResendUnklar(f"Resend HTTP {r.status_code} nach Wiederholungen")
     # Resend meldet Fehler klar (unverifizierte Domain, falscher Schlüssel …)
     log.error("email_service: Resend lehnt ab (HTTP %s): %s",
               r.status_code if r is not None else "-", (r.text[:300] if r is not None else ""))
@@ -304,7 +319,14 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
                      absender_name=absender_name)
     try:
         if resend_aktiv():
-            beleg = await _send_resend(**argumente, idempotency_key=idempotency_key)
+            try:
+                beleg = await _send_resend(**argumente, idempotency_key=idempotency_key)
+            except ResendUnklar as exc:
+                # Befund 106: Ausgang bei Resend unklar — NICHT ueber SMTP
+                # wiederholen; der Versandstatus zeigt "nicht gesendet".
+                log.error("email_service: '%s' an %s — %s; nicht ueber SMTP wiederholt",
+                          subject, to, exc)
+                return False, ""
             if beleg:
                 log.info("email_service: '%s' an %s über Resend gesendet (%s)",
                          subject, to, beleg)

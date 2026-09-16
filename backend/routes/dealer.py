@@ -448,8 +448,14 @@ async def _altes_logo_wegraeumen(alte_url: Optional[str], dealer_id: str) -> Non
 # hoechstens ein nicht ersetztes). Sucher: immer nur das persoenliche.
 async def massgebliches_abo(user: dict) -> Optional[dict]:
     from deps import sub_status_from_doc
+    # Befund 61 (16.09.2026): dieselbe Firmenbindung wie die Zugriffspruefung
+    # (deps.get_subscription_status) — ein persoenliches Abo aus einer
+    # frueheren Firma wurde sonst als "aktiv bis ..." angezeigt, waehrend der
+    # Vergleich 402 lieferte. Altbestand ohne dealer_id bleibt gueltig.
     persoenlich = await db.subscriptions.find_one(
-        {"subject_user_id": user["id"], "status": {"$ne": "ersetzt"}},
+        {"subject_user_id": user["id"], "status": {"$ne": "ersetzt"},
+         "$or": [{"dealer_id": user.get("dealer_id")}, {"dealer_id": {"$exists": False}},
+                 {"dealer_id": None}]},
         {"_id": 0}, sort=[("created_at", -1)])
     if user.get("role") == "sucher" or sub_status_from_doc(persoenlich)["active"]:
         return persoenlich
@@ -493,12 +499,13 @@ async def dealer_subscription(user=Depends(current_firma)):
     days_remaining = None
     expires_at = sub_doc.get("expires_at") if sub_doc else None
     if expires_at and status.get("plan") != "lifetime":
-        try:
-            ea = datetime.fromisoformat(expires_at)
-            delta = ea - datetime.now(timezone.utc)
-            days_remaining = max(0, delta.days)
-        except Exception:
-            days_remaining = None
+        # Befund 93 (16.09.2026): derselbe Datumsparser wie die Zugriffspruefung
+        # (naive Werte gelten als UTC) — vorher blieb days_remaining bei einem
+        # naiven Altwert still None, obwohl dasselbe Abo als aktiv galt.
+        from deps import _ablauf_parsen
+        ea = _ablauf_parsen(expires_at)
+        if ea is not None:
+            days_remaining = max(0, (ea - datetime.now(timezone.utc)).days)
 
     is_lifetime = status.get("plan") == "lifetime"
     raw_status = (sub_doc or {}).get("status", "active") if sub_doc else "none"

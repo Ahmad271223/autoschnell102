@@ -126,8 +126,12 @@ def test_l2_berichte_frist_pii_und_vorgemerkte_fotos(welt, monkeypatch):
     r = _doc(w, "pickup_reports", f"rep_{w.s}")
     assert r["notes"] == "" and r["deviations"][0]["note"] == "" and r["pii_geloescht_at"]
     assert not r["deviations"][0].get("photo_key")
-    # L2-4: Frist -> Bericht weg
+    # L2-4: Frist -> Bericht weg. Befund 110 (16.09.2026): erst, wenn der Termin
+    # geschlossen ist und der Abschluss selbst hinter der Frist liegt.
     w.run(w.db.pickup_reports.update_one({"id": f"rep_{w.s}"}, {"$set": {"created_at": alt}}))
+    w.run(CS.berichte_nach_frist_loeschen(w.db, datetime.now(timezone.utc), {}))
+    assert _doc(w, "pickup_reports", f"rep_{w.s}") is not None, "offener Termin: Bericht bleibt"
+    w.run(w.db.appointments.update_one({"id": t.aid}, {"$set": {"status": "abgeholt", "updated_at": alt}}))
     assert w.run(CS.berichte_nach_frist_loeschen(w.db, datetime.now(timezone.utc), {})) >= 1
     assert _doc(w, "pickup_reports", f"rep_{w.s}") is None
     # L2-3: verwaister Bericht (Termin weg) -> weg

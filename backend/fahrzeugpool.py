@@ -123,8 +123,15 @@ async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
         # _fahrzeug_uebernehmen updated_at neu — es ist dann nicht mehr das
         # aelteste und darf weder geloescht noch uebergeben werden. None
         # trifft auch Altdokumente ohne das Feld.
+        # Befund 112 (16.09.2026): auch der Schutzstempel gehoert in den CAS —
+        # setzt eine beginnende Vertrags-/Terminanlage (kurz_schuetzen) den
+        # Stempel zwischen Lesen und Loeschen, trifft weder Loeschen noch
+        # Uebergabe (updated_at aendert der Stempel bewusst nicht).
         stand = {"id": v["id"], "dealer_id": dealer_id, "lifecycle": "verglichen",
-                 "owner_user_id": besitzer, "updated_at": v.get("updated_at")}
+                 "owner_user_id": besitzer, "updated_at": v.get("updated_at"),
+                 "$or": [{"geschuetzt_bis": {"$exists": False}},
+                         {"geschuetzt_bis": None},
+                         {"geschuetzt_bis": {"$lt": datetime.now(timezone.utc).isoformat()}}]}
         if not mitbearbeiter:
             # Ohne Mitbearbeiter: loeschen wie bisher — nur, solange (noch)
             # keiner dazugekommen ist ($addToSet in routes/listings.py).

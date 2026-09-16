@@ -84,9 +84,16 @@ def test_02_dauerhafte_ablehnung_wird_nicht_wiederholt(monkeypatch, ohne_warten)
 def test_03_gibt_nach_hoechstzahl_auf(monkeypatch, ohne_warten):
     aufrufe = []
     _fake_httpx(monkeypatch, [_Antwort(503)] * E.RESEND_VERSUCHE, aufrufe)
-    assert _senden(idempotency_key="k3") == ""
+    # Befund 106 (16.09.2026): nach 5xx ist der Ausgang unklar — kein "" (das
+    # hiesse: sicher abgelehnt, SMTP darf nachsenden), sondern ResendUnklar.
+    with pytest.raises(E.ResendUnklar):
+        _senden(idempotency_key="k3")
     assert len(aufrufe) == E.RESEND_VERSUCHE
     assert sum(ohne_warten) <= E.RESEND_WARTEN_MAX
+    # 429 bis zum Schluss = sicher abgelehnt: "" wie bisher
+    aufrufe2 = []
+    _fake_httpx(monkeypatch, [_Antwort(429)] * E.RESEND_VERSUCHE, aufrufe2)
+    assert _senden(idempotency_key="k3b") == ""
 
 
 def test_04_netzfehler_nur_mit_idempotency_key_wiederholen(monkeypatch, ohne_warten):
