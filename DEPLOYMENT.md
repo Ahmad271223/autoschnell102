@@ -1630,6 +1630,74 @@ Kosten); die echte Anbieterzeit misst nur ein Abruf mit echten Links.
   nach Abschluss sortiert. Die Oberfläche blendet Chef-Funktionen (Bestandsdaten, Abweichungen
   übernehmen, manuelles Anlegen, Verkaufsentscheidungen) für Sucher aus.
 
+### Nachprüfung Nr. 46–143 (16.09.2026): Verträge, Protokolle, Abrufe, Abos
+
+98 Reviewer-Punkte gegen `8d16a95` geprüft; 70 echte in vier Commits mit je eigener Vollprüfung
+behoben (A `d051d02`, B `3fdc655`, C `729a7c1`, D `8ab1d50`). Neue Regeln, die nicht wieder gebrochen werden dürfen:
+
+- **Verträge/Auto-Daten (A):** `preis_vor_abholung` wird nur beim ERSTEN Preiswechsel gesetzt
+  (Einkaufspreis = Preis des ersten Vertrags). `freigabe_alt` hält bis zu 50 alte Freigabe-Links,
+  abgelaufene werden vorher entfernt; auch alte Token zählen `abrufe`. `auto_daten.aktualisieren`
+  überschreibt bekannte Werte nie mit `None`; „ohne Auto-Daten“ heißt `OHNE_AUTO_DATEN` (fehlt,
+  `null`, `""`, falscher Typ); Ersatzdaten aus dem Fahrzeug tragen `ersatzquelle_fahrzeug`.
+  `vertrag_sperre` liefert `{schluessel, claim}`, wird nur mit eigenem Claim freigegeben (immer im
+  `finally`) und ist fail-closed (`SperreBelegt` -> 503 mit Retry-After 3). Nach dem Insert wird der
+  Lebenszyklus nachkontrolliert (sonst Vertrag zurück, 409) und das CAS-Ergebnis geprüft (sonst
+  `zurueckrollen`). Die Sucher-Löschsperre findet Protokolle auch über `contract_id`. Der Grabstein
+  der Fristlöschung wird per CAS gesetzt (`loeschung.status != laeuft`), sonst Wiederaufnahme.
+- **Protokolle/Termine/Fahrer (B):** zweiter Erstspeicher (DuplicateKey) ohne Revision -> 409
+  „App neu laden“; kein Entwurf/keine Korrektur zu einem Vertrag mit Grabstein
+  (`_vertrag_nicht_in_loeschung`). `preis_quelle = "chef"` bei Chef-Preis (fällt beim Zurücksetzen
+  weg). Wiederöffnen eines Termins nimmt die Freigabe in derselben Transaktion zurück
+  (`freigabe_beim_schliessen_zuruecknehmen(..., session)`); `korrektur_verwerfen` prüft die
+  Reaktivierung der Vorversion (Transaktion bricht ab bzw. Verwerfen wird zurückgenommen, Alarm
+  `protokoll_korrektur_ohne_vorversion`). `final_price` am Termin ruft `vor_ort_nachtragen`. Jeder
+  Statuswechsel ohne Client-Stand läuft gegen `existing.updated_at`; Termin-Stand wird erst nach dem
+  gelungenen Protokoll-CAS angefasst (Alarm `termin_stand_nicht_angefasst`). „Termin erstellt“ nur,
+  wenn der Vertrag noch `erstellt`/`neu erstellt` ist. `termin_status_uebernehmen` wiederholt einen
+  verlorenen CAS bis 3x, sonst `nacharbeit_offen` + Alarm `kaufvorgang_status_konflikt`. Löschen liest
+  die betroffenen Vorgänge in der Transaktion; Audit `termin.geloescht` erst nach dem erfolgreichen
+  Löschen (Alarm `audit_fehlt`). Nach dem Termin-Insert: Vertrag ohne Grabstein und Fahrzeug nicht
+  gelöscht, sonst Termin zurück + 409. `POST /appointments` und Abholberichte sind für Sucher
+  maskiert (`termin_fuer_sucher`, `bericht_fuer_sucher`). Ablehnen einer Fahrt prüft `stand`.
+  Protokollliste je Fahrzeug: eigener Termin genügt (ohne Fahrzeug-Bereich-Vorfilter).
+- **Vergleich/Abrufe/Link-Jobs/Beweise (C):** `/mobile/compare` prüft erst die Adresse, dann das
+  Tempolimit, und schreibt den `vehicle_comparisons`-Eintrag erst NACH `_fahrzeug_uebernehmen`.
+  `get_or_fetch_listing` stempelt `fetched_at/expires_at/last_used_at` mit dem Abruf-Ende; bei
+  verlorener Lease (`matched_count == 0`) wird KEIN Beweis vorgemerkt. Alte Snapshots: existiert das
+  Fahrzeug in der Firma, ist es der Anker (Bereich oder eigener Vertrag), der Ersteller zählt nur
+  ohne Fahrzeug; Routen laufen durch `_snapshot_nutzer` (Firmensperre), Download mit
+  `Cache-Control: no-store`, Sucher sehen keine Kollegen-`user_id`. Live-Zähler ohne `?quelle`
+  zählt `mobile:<id>`. `_gehalten` läuft ohne 500er-Deckel (Cursor), Weiterverkaufsinserate mit
+  Status `geloescht` halten nicht. Beweis-Worker: `bearbeitung_claim` je Beanspruchung
+  (`_eigene_bearbeitung`), `_aufraeumen` nur gegen das gelesene `bearbeitung_bis`; in Produktion ohne
+  Unique-Index keine Vormerkung (`_produktion()`, Alarm `unique_index_fehlt`). Link-Jobs:
+  `_requeue_stale` nur gegen gelesenes `processing_until` + `claim_id`; Import-Fehlerpfad mit
+  `eigener_claim`; nach außen nur `fehlertext(exc)` (`FEHLER_TECHNISCH`), roher Text in
+  `error_intern`; ein geteilter Job bucht das Tageslimit beim ersten wartenden Konto mit Kontingent.
+  `fetch_listing`: `ListingGone` wird NICHT zurückgebucht (Anbieter kontaktiert), technische Fehler
+  weiter. `release_slot` stempelt `freigegeben_am`; `_heal_stale` räumt Freigaben nach
+  `FREIGABE_NACHLAUF_SEKUNDEN` (60). Produktionsprüfung warnt, wenn `ANBIETER_TAGESLIMIT_JE_KONTO`
+  fehlt oder 0 ist.
+- **Abos/Mail/Aufräumen/Pool/Konten (D):** `massgebliches_abo` bindet das persönliche Abo an die
+  aktuelle `dealer_id` (Altbestand ohne Feld gilt); `/dealer/sucher` ignoriert `status = ersetzt`;
+  `plan` in `/dealer/abo-anfrage-selbst` muss ein String sein (400); `days_remaining` nutzt
+  `_ablauf_parsen` (naiv = UTC). Nacharbeit (Verträge, Termine, Kaufvorgänge) rotiert über
+  `nacharbeit_versuch_am` (nie versuchte zuerst). `email_service`: 5xx nach allen Wiederholungen ->
+  `ResendUnklar`, KEIN SMTP-Rückfall (429/4xx wie bisher). `berichte_nach_frist_loeschen` lässt
+  Berichte offener Termine stehen und rechnet die Frist ab `updated_at` des geschlossenen Termins.
+  `konten_ohne_firma_sperren` sperrt alle Konten ohne laufende Löschung. `fahrzeugpool_trimmen`
+  trägt `geschuetzt_bis` im CAS von Löschen und Übergabe.
+- **Bewusst so / nicht echt:** 52, 60, 63/64, 70, 71, 76–78, 80/81, 86, 89, 91, 96, 99, 101, 102,
+  107, 128, 136, 140, 142, 143 (Begründung je Punkt im Commit-Text). Schon behoben: 97, 98, 121.
+  Offen: Nr. 68 (Entscheidung Ahmad: Sucher schließt Termin ohne Fahrer), Nr. 59 (später:
+  Stand-Prüfung für Einstellungen).
+- **Test-Fallstricke:** Quelltext-Tests für den Audit-Eintrag beim Termin-Löschen erwarten jetzt
+  „nach dem Löschen“ (runde29/runde30); `POST /appointments` liefert Suchern kein `created_by` /
+  `kaufvorgang_id` (aus der DB lesen); Snapshot-Test in runde17 erwartet 404 für den Ersteller nach
+  der Übergabe; Resend-Test 503 erwartet `ResendUnklar`; Abholbericht-Test schließt den Termin vor
+  der Fristlöschung.
+
 ### Auto-Daten, Preis-Nachführung und helle Ansicht (15.09.2026, Wunsch Ahmad)
 
 - **Auto-Daten löschen:** der Super-Admin entfernt einen Datensatz endgültig
