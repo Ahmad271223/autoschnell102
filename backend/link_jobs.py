@@ -398,10 +398,18 @@ async def _requeue_stale(db) -> None:
     cutoff = _now()
     async for j in db.link_jobs.find(
             {"status": "processing", "processing_until": {"$lt": cutoff}},
-            {"_id": 0, "id": 1, "attempts": 1}):
+            {"_id": 0, "id": 1, "attempts": 1, "processing_until": 1, "claim_id": 1}):
+        # Befund 119 (16.09.2026): nur den GELESENEN Stand zurueckstellen —
+        # hat der Herzschlag die Frist inzwischen verlaengert oder ein anderer
+        # Worker den Job neu beansprucht (neue claim_id, neue Frist), trifft
+        # der Filter nicht mehr. Vorher konnte eine alte Rueckstellung den
+        # frischen Claim wieder auf 'queued' setzen.
+        stand = {"id": j["id"], "status": "processing",
+                 "processing_until": j.get("processing_until"),
+                 "claim_id": j["claim_id"] if j.get("claim_id") else {"$exists": False}}
         if j.get("attempts", 0) >= MAX_ATTEMPTS:
             await db.link_jobs.update_one(
-                {"id": j["id"], "status": "processing"},
+                stand,
                 {"$set": {"status": "failed", "active": False,
                           "error": "Abgebrochen: Bearbeiter mehrfach "
                                    "ausgefallen", "finished_at": _now(),
@@ -413,7 +421,7 @@ async def _requeue_stale(db) -> None:
             # Schuetzt nur gegen Rueckstellungen der neuen Fassung: der
             # _requeue_stale der alten Fassung laesst claim_id stehen.
             await db.link_jobs.update_one(
-                {"id": j["id"], "status": "processing"},
+                stand,
                 {"$set": {"status": "queued", "updated_at": _now()},
                  "$unset": {"claim_id": ""}})
 
@@ -559,10 +567,45 @@ async def _claim_many(db, n: int) -> list:
     return jobs
 
 
+FEHLER_TECHNISCH = ("Technischer Fehler beim Abruf des Inserats — bitte "
+                    "später erneut versuchen.")
+
+
+def fehlertext(exc: BaseException) -> str:
+    """Befund 122 (16.09.2026): Fehlertext fuer die Statusantwort
+    (/listings/check). Nur EIGENE Sachtexte gehen an den Nutzer (Anbieter-
+    fehler, Inserat weg, Tageslimit, ungueltige Adresse, Anbieter voll);
+    alles andere wird zu einem festen Satz — der rohe Text steht im Log."""
+    eigene: tuple = ()
+    try:
+        from anbieter_fehler import AnbieterFehler
+        from kleinanzeigen_service import ListingGone
+        from listing_identity import ListingBusy, ListingIdentityError
+        from provider_fetch import TageslimitErreicht
+        eigene = (AnbieterFehler, ListingGone, ListingBusy, ListingIdentityError,
+                  TageslimitErreicht)
+    except Exception:  # noqa: BLE001 — dann gilt jeder Text als fremd
+        eigene = ()
+    if eigene and isinstance(exc, eigene) and str(exc).strip():
+        return str(exc)[:300]
+    return FEHLER_TECHNISCH
+
+
 async def _process(db, job: dict) -> None:
     """Einen beanspruchten Job ausfuehren: das Inserat in den Cache holen.
     Lease, Single-Flight und Provider-Begrenzung stecken bereits in
     get_or_fetch_listing — hier faellt nur der Job-Status."""
+    # Audit 13.09.2026 (#32): Herzschlag fuer die Job-Frist, und die
+    # Rueckstellung trifft nur den EIGENEN Claim — ein ueberholter Task
+    # ueberschrieb vorher den Claim seines Nachfolgers mit 'queued'.
+    # Claims ohne claim_id (alte Fassung beim Rollout): Verhalten wie bisher.
+    # Befund 120 (16.09.2026): der Claim-Filter steht VOR den Imports — auch
+    # der Import-Fehlerpfad trifft nur den eigenen Claim.
+    claim_id = job.get("claim_id")
+    eigener_claim = {"id": job["id"], "status": "processing"}
+    if claim_id:
+        eigener_claim["claim_id"] = claim_id
+
     # Imports in einem EIGENEN Schutzblock: schluege das Laden fehl,
     # wuerde ein "except ListingBusy" darunter selbst crashen (Name
     # unbekannt) und der Job bis zum Fristablauf in 'processing' haengen.
@@ -572,33 +615,47 @@ async def _process(db, job: dict) -> None:
         from provider_fetch import TageslimitErreicht, fetch_listing
         from routes.listings import LISTING_CACHE_TTL_HOURS
     except Exception as exc:  # noqa: BLE001
+        log.error("link_jobs: Import fuer Job %s fehlgeschlagen: %s", job["id"], exc)
         await db.link_jobs.update_one(
-            {"id": job["id"]},
+            eigener_claim,
             {"$set": {"status": "failed", "active": False,
-                      "error": f"Interner Fehler: {exc}"[:300],
+                      "error": FEHLER_TECHNISCH,
+                      "error_intern": f"Import: {exc}"[:300],
                       "finished_at": _now(), "updated_at": _now()}})
         return
 
     async def _fetcher(src, iid, url):
         # Runde 19 (Nr. 28): dieselbe Konto-Bremse wie /mobile/compare und
         # /listings/resolve — der Job kennt das Konto, das ihn erzeugt hat.
+        # Befund 129 (16.09.2026): ein GETEILTER Job gehoert allen wartenden
+        # Konten — steht der erste Einreicher am Tageslimit, bucht das
+        # naechste wartende Konto mit Kontingent (die Ablehnung faellt vor
+        # dem Abruf, es wird also nie doppelt geholt).
         from routes.listings import _AbrufSlot
-        konto = {"id": job.get("requested_by_user") or job.get("requested_by_dealer") or "",
-                 "dealer_id": job.get("requested_by_dealer", "")}
-        async with _AbrufSlot(konto):
-            return await fetch_listing(db, src, iid, url,
-                                       dealer_id=job.get("requested_by_dealer", ""),
-                                       user_id=job.get("requested_by_user") or "")
+        konten: list = []
+        for uid in [job.get("requested_by_user") or ""] + list(job.get("user_ids") or []):
+            if uid and uid not in konten:
+                konten.append(uid)
+        if not konten:
+            konten = [""]
+        letzte = None
+        for uid in konten:
+            firma = job.get("requested_by_dealer", "")
+            if uid and uid != (job.get("requested_by_user") or ""):
+                u = await db.users.find_one({"id": uid}, {"_id": 0, "dealer_id": 1})
+                firma = (u or {}).get("dealer_id") or firma
+            konto = {"id": uid or firma or "", "dealer_id": firma}
+            try:
+                async with _AbrufSlot(konto):
+                    return await fetch_listing(db, src, iid, url,
+                                               dealer_id=firma, user_id=uid)
+            except TageslimitErreicht as exc:
+                letzte = exc
+                continue
+        raise letzte
 
-    # Audit 13.09.2026 (#32): Herzschlag fuer die Job-Frist, und die
-    # Rueckstellung trifft nur den EIGENEN Claim — ein ueberholter Task
-    # ueberschrieb vorher den Claim seines Nachfolgers mit 'queued'.
-    # Claims ohne claim_id (alte Fassung beim Rollout): Verhalten wie bisher.
-    claim_id = job.get("claim_id")
-    eigener_claim = {"id": job["id"], "status": "processing"}
     herz = None
     if claim_id:
-        eigener_claim["claim_id"] = claim_id
         herz = asyncio.create_task(_frist_verlaengern(db, job["id"], claim_id))
     try:
         try:
@@ -632,17 +689,23 @@ async def _process(db, job: dict) -> None:
             return
         except Exception as exc:  # noqa: BLE001
             endgueltig = job.get("attempts", 1) >= MAX_ATTEMPTS
+            # Befund 122 (16.09.2026): nach aussen nur eigene Sachtexte — der
+            # rohe Ausnahmetext (Hostnamen, Anbieterantworten, Treibermeldungen)
+            # bleibt im Log und in error_intern (nicht Teil der Statusantwort).
+            log.warning("link_jobs: Job %s Versuch %s fehlgeschlagen: %s",
+                        job["id"], job.get("attempts", 1), str(exc)[:300])
             if endgueltig:
                 await db.link_jobs.update_one(
                     eigener_claim,
                     {"$set": {"status": "failed", "active": False,
-                              "error": str(exc)[:300], "finished_at": _now(),
-                              "updated_at": _now()}})
+                              "error": fehlertext(exc), "error_intern": str(exc)[:300],
+                              "finished_at": _now(), "updated_at": _now()}})
             else:
                 await db.link_jobs.update_one(
                     eigener_claim,
                     {"$set": {"status": "queued",
-                              "error": str(exc)[:300], "updated_at": _now()},
+                              "error": fehlertext(exc), "error_intern": str(exc)[:300],
+                              "updated_at": _now()},
                      "$unset": {"claim_id": ""}})
             return
         r = await db.link_jobs.update_one(

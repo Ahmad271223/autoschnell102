@@ -367,7 +367,11 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
             await A_.get_pickup_report(aid, 0, a)
         snaps_a = {s["id"] for s in await L.list_snapshots(None, a)}
         snaps_b = {s["id"] for s in await L.list_snapshots(None, b)}
-        snap_a = (await L._load_snapshot_or_404(sid, a))["id"]
+        # Befund 82 (16.09.2026): nach der Uebergabe haengt der alte Snapshot
+        # am Fahrzeug — A (Ersteller) verliert ihn wie Termin, Bericht und Vertrag.
+        with pytest.raises(HTTPException) as e_snap:
+            await L._load_snapshot_or_404(sid, a)
+        snap_a = e_snap.value.status_code
         snap_b = (await L._load_snapshot_or_404(sid, b))["id"]
         proto_a = await P._protokoll_im_bereich(a, {"vehicle_id": vid, "appointment_id": aid})
         proto_b = await P._protokoll_im_bereich(b, {"vehicle_id": vid, "appointment_id": aid})
@@ -394,8 +398,8 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
     assert nachher_b == {aid}, "B bekommt den Termin des uebergebenen Vorgangs"
     assert darf_a is False and darf_b is True
     assert rep_b["report"]["id"] == f"r_{welt.s}" and s_rep == 404
-    assert snaps_a == {sid} and snaps_b == {sid}, "Snapshot: A ueber Ersteller/Vertrag, B ueber das Fahrzeug"
-    assert snap_a == sid and snap_b == sid
+    assert snaps_a == set() and snaps_b == {sid}, "Snapshot: nach der Uebergabe nur noch B (Fahrzeug)"
+    assert snap_a == 404 and snap_b == sid
     assert proto_a is False and proto_b is True
     assert vertrag_a == 0, "der Vertrag geht mit dem Vorgang an B (Runde 13)"
     assert s_fzg == 404 and fzg_b == vid, "A verliert nur die Fahrzeug-Sichtbarkeit"

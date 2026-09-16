@@ -150,8 +150,15 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
             await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
     belastet = await _budget_pruefen(db, source, dealer_id, user_id)
+    from kleinanzeigen_service import ListingGone
     try:
         return await _abrufen(db, source, item_id, url)
+    except ListingGone:
+        # Befund 130 (16.09.2026): der Anbieter WURDE kontaktiert (Inserat weg/
+        # 404) — dieser Abruf zaehlt fuer das Tageslimit. Zurueckgebucht werden
+        # nur technische Fehler (Zeitueberschreitung, Token, Guthaben), sonst
+        # liessen sich mit toten Links beliebig viele echte Abrufe erzeugen.
+        raise
     except AnbieterFehler as exc:
         # Token/Guthaben -> Betriebsalarm (gedrosselt), Text geht 1:1 an
         # den Nutzer (Route: RuntimeError -> 502).

@@ -137,6 +137,10 @@ INDEX_NEUVERSUCH_SEKUNDEN = 300
 _index_versuch: Dict[str, float] = {}
 
 
+def _produktion() -> bool:
+    return os.environ.get("APP_ENV", "").strip().lower() == "production"
+
+
 async def beweis_indizes_sichern(db) -> bool:
     """Audit 13.09.2026 (#37): Wie ensure_beweis_indexes, aber wirft nie und
     trennt den Unique-Index (die Garantie "EIN Dokument je Inserat") von den
@@ -305,6 +309,15 @@ async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
                 _index_versuch.pop(marke, None)
             else:
                 _index_versuch[marke] = time.monotonic()
+    if marke not in _index_sicher and _produktion():
+        # Befund 123 (16.09.2026): ohne den Unique-Index koennten parallele
+        # Erstnutzungen mehrere "erste" Dokumente desselben Inserats anlegen —
+        # fuer eine Beweiskette nicht tragbar. In Produktion wird deshalb
+        # NICHT vorgemerkt (der Betriebsalarm unique_index_fehlt steht, der
+        # Abruf selbst laeuft weiter); ausserhalb bleibt es beim Alarm.
+        log.error("Beweisdokument %s: Unique-Index fehlt — Vormerkung in Produktion "
+                  "abgelehnt (fail-closed)", cache_key)
+        return None
     felder = {"_id": 0, "id": 1, "status": 1, "quelle": 1, "item_id": 1, "url": 1,
               "erstellt_am": 1, "fertig_am": 1, "pdf_bytes": 1, "fehler": 1,
               "fotos_eingebettet": 1, "fotos_gesamt": 1, "daten_abgerufen_am": 1,
@@ -383,17 +396,21 @@ async def _aufraeumen(db) -> None:
     """Verwaiste Bearbeitungen (Worker abgestuerzt/neu gestartet) freigeben."""
     async for d in db.inserat_beweise.find(
             {"status": "in_arbeit", "bearbeitung_bis": {"$lt": _jetzt()}},
-            {"_id": 0, "id": 1, "versuche": 1}):
+            {"_id": 0, "id": 1, "versuche": 1, "bearbeitung_bis": 1}):
+        # Befund 118 (16.09.2026): nur den GELESENEN (abgelaufenen) Stand
+        # freigeben — hat der Herzschlag die Frist inzwischen verlaengert oder
+        # ein anderer Worker neu beansprucht, trifft der Filter nicht mehr.
+        stand = {"id": d["id"], "status": "in_arbeit",
+                 "bearbeitung_bis": d.get("bearbeitung_bis")}
         if (d.get("versuche") or 0) >= MAX_VERSUCHE:
             await db.inserat_beweise.update_one(
-                {"id": d["id"], "status": "in_arbeit"},
+                stand,
                 {"$set": {"status": "fehlgeschlagen", "bearbeitung_bis": None,
                           "fehlgeschlagen_am": _jetzt(),
                           "fehler": "Erstellung mehrfach abgebrochen"}})
         else:
             await db.inserat_beweise.update_one(
-                {"id": d["id"], "status": "in_arbeit"},
-                {"$set": {"status": "offen", "bearbeitung_bis": None}})
+                stand, {"$set": {"status": "offen", "bearbeitung_bis": None}})
 
 
 async def _beanspruchen(db) -> Optional[dict]:
@@ -404,10 +421,24 @@ async def _beanspruchen(db) -> Optional[dict]:
                  {"naechster_versuch_ab": None},
                  {"naechster_versuch_ab": {"$lte": jetzt}}]},
         {"$set": {"status": "in_arbeit", "bearbeiter": _WORKER,
+                  # Befund 117 (16.09.2026): Kennung DIESER Beanspruchung —
+                  # ein ueberholter Versuch desselben Prozesses passt sonst
+                  # weiter auf "bearbeiter" und finalisiert den neuen Versuch.
+                  "bearbeitung_claim": uuid.uuid4().hex,
                   "bearbeitung_bis": jetzt + timedelta(seconds=BEARBEITUNG_SEKUNDEN)},
          "$inc": {"versuche": 1}},
         sort=[("erstellt_am", 1)], projection={"_id": 0},
         return_document=ReturnDocument.AFTER)
+
+
+def _eigene_bearbeitung(doc: dict) -> dict:
+    """Filter auf die EIGENE Beanspruchung (Befund 117): Zeile, in Arbeit,
+    dieser Worker — und, sofern beim Claim vergeben, dessen Kennung. Zeilen
+    ohne Kennung (Altbestand, Tests) laufen wie bisher ueber bearbeiter."""
+    f = {"id": doc["id"], "status": "in_arbeit", "bearbeiter": doc.get("bearbeiter")}
+    if doc.get("bearbeitung_claim"):
+        f["bearbeitung_claim"] = doc["bearbeitung_claim"]
+    return f
 
 
 def foto_urls(daten: Dict[str, Any]) -> List[str]:
@@ -508,7 +539,7 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
     from storage_service import save_async
     await save_async(key, pdf)
     r = await db.inserat_beweise.update_one(
-        {"id": doc["id"], "status": "in_arbeit", "bearbeiter": doc.get("bearbeiter")},
+        _eigene_bearbeitung(doc),
         {"$set": {"status": "fertig", "pdf_key": key, "pdf_bytes": len(pdf),
                   "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
                   "fertig_am": erstellt,
@@ -531,7 +562,7 @@ async def _herzschlag(db, doc: dict) -> None:
         await asyncio.sleep(HERZSCHLAG_SEKUNDEN)
         try:
             r = await db.inserat_beweise.update_one(
-                {"id": doc["id"], "status": "in_arbeit", "bearbeiter": doc.get("bearbeiter")},
+                _eigene_bearbeitung(doc),
                 {"$set": {"bearbeitung_bis": _jetzt() + timedelta(seconds=BEARBEITUNG_SEKUNDEN)}})
             if r.matched_count == 0:
                 return
@@ -591,9 +622,7 @@ async def _bearbeiten(db, doc: dict) -> None:
                   else _jetzt() + timedelta(seconds=60 * versuche)}
         if endgueltig:
             setzen["fehlgeschlagen_am"] = _jetzt()
-        await db.inserat_beweise.update_one(
-            {"id": doc["id"], "status": "in_arbeit", "bearbeiter": doc.get("bearbeiter")},
-            {"$set": setzen})
+        await db.inserat_beweise.update_one(_eigene_bearbeitung(doc), {"$set": setzen})
         if endgueltig:
             try:
                 import betrieb
@@ -701,28 +730,47 @@ class BeweisFehler(RuntimeError):
     darf (im Gegensatz zu fremden Ausnahmetexten)."""
 
 
-async def _gehalten(db, cache_key: str) -> bool:
-    """Haelt ein echter Vorgang das Dokument? Bestand/Kauf/Abholung/Verkauf
-    oder ein Vertrag, Termin bzw. Inserat zum Fahrzeug der jeweiligen Firma.
-    Bloss verglichene, stornierte oder archivierte Fahrzeuge halten nicht."""
-    fz = await db.vehicles.find(
-        {"inserat_schluessel": cache_key},
-        {"_id": 0, "id": 1, "dealer_id": 1, "lifecycle": 1}).to_list(500)
-    if not fz:
-        return False
-    if any((v.get("lifecycle") or "verglichen") not in OHNE_GESCHAEFT for v in fz):
+async def _paare_halten(db, paare: list) -> bool:
+    """Haelt ein Vertrag, ein nicht geloeschtes Inserat oder ein offener Termin
+    eines dieser (Fahrzeug, Firma)-Paare das Dokument?"""
+    if await db.generated_pdfs.count_documents({"$or": paare}, limit=1):
         return True
-    paare = [{"vehicle_id": v["id"], "dealer_id": v.get("dealer_id")} for v in fz]
-    for coll in ("generated_pdfs", "resale_listings"):
-        if await db[coll].count_documents({"$or": paare}, limit=1):
-            return True
+    # Befund 95 (16.09.2026): ein geloeschtes Weiterverkaufsinserat (Grabstein
+    # bis zur Bereinigung) haelt nicht mehr.
+    if await db.resale_listings.count_documents(
+            {"$or": paare, "status": {"$ne": "geloescht"}}, limit=1):
+        return True
     # Pruefung 14.09.2026 (B9): Ein stornierter oder "nicht abgeholt"
     # geschlossener Termin hielt das Dokument fuer immer — nur OFFENE Termine
     # halten; ein abgeholtes Fahrzeug haelt ueber seinen Lebenszyklus.
-    if await db.appointments.count_documents(
-            {"$or": paare, "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}}, limit=1):
-        return True
-    return False
+    return await db.appointments.count_documents(
+        {"$or": paare, "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}}, limit=1) > 0
+
+
+async def _gehalten(db, cache_key: str) -> bool:
+    """Haelt ein echter Vorgang das Dokument? Bestand/Kauf/Abholung/Verkauf
+    oder ein Vertrag, Termin bzw. Inserat zum Fahrzeug der jeweiligen Firma.
+    Bloss verglichene, stornierte oder archivierte Fahrzeuge halten nicht.
+
+    Befund 90 (16.09.2026): kein 500er-Deckel mehr — bei einem stark geteilten
+    Inserat konnte der echte Vorgang in Fahrzeug Nr. 501+ liegen und das
+    Dokument wurde trotzdem geloescht. Jetzt Cursor in Haeppchen."""
+    gefunden = False
+    paare: list = []
+    async for v in db.vehicles.find(
+            {"inserat_schluessel": cache_key},
+            {"_id": 0, "id": 1, "dealer_id": 1, "lifecycle": 1}).batch_size(200):
+        gefunden = True
+        if (v.get("lifecycle") or "verglichen") not in OHNE_GESCHAEFT:
+            return True
+        paare.append({"vehicle_id": v["id"], "dealer_id": v.get("dealer_id")})
+        if len(paare) >= 200:
+            if await _paare_halten(db, paare):
+                return True
+            paare = []
+    if not gefunden:
+        return False
+    return bool(paare) and await _paare_halten(db, paare)
 
 
 async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500,

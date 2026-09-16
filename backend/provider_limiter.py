@@ -169,6 +169,11 @@ async def _indizes_sicherstellen(db) -> None:
             raise RuntimeError("Anbieter-Begrenzung ohne eindeutigen Index — Abruf abgelehnt")
 
 
+# Befund 132: so lange darf eine begonnene Freigabe (freigegeben=True) stehen,
+# bevor die Selbstheilung sie als haengengeblieben wegraeumt.
+FREIGABE_NACHLAUF_SEKUNDEN = 60
+
+
 async def _heal_stale(db, provider: str) -> None:
     """Zaehler mit der Zahl der tatsaechlich frischen Slots abgleichen —
     repariert Slots von abgestuerzten Prozessen.
@@ -190,6 +195,15 @@ async def _heal_stale(db, provider: str) -> None:
     if not darf:
         return
     stale_active = darf.get("active", 0)
+    # Befund 132 (16.09.2026): eine Freigabe, die nach "freigegeben=True"
+    # abbrach (Mongo weg, bevor der Zaehler sank), liess den Slot stehen und
+    # den Zaehler zu hoch — bis TTL plus Heal. Solche haengenden Freigaben
+    # werden nach FREIGABE_NACHLAUF_SEKUNDEN weggeraeumt; der Abgleich unten
+    # zaehlt sie dann nicht mehr als belegt.
+    await db.provider_slots.delete_many(
+        {"provider": provider, "freigegeben": True,
+         "$or": [{"freigegeben_am": {"$lt": now - timedelta(seconds=FREIGABE_NACHLAUF_SEKUNDEN)}},
+                 {"freigegeben_am": {"$exists": False}, "expires_at": {"$lt": now}}]})
     # Slots, deren Freigabe gerade laeuft (freigegeben, Zaehler noch nicht
     # heruntergezaehlt), NICHT wegraeumen — sonst zaehlte die Freigabe
     # anschliessend noch einmal ab.
@@ -267,7 +281,8 @@ async def release_slot(db, slot_id: Optional[str],
     try:
         doc = await db.provider_slots.find_one_and_update(
             {"id": slot_id, "freigegeben": {"$ne": True}},
-            {"$set": {"freigegeben": True}})
+            {"$set": {"freigegeben": True,
+                      "freigegeben_am": datetime.now(timezone.utc)}})
         if not doc:
             return
         name = doc.get("provider") or provider

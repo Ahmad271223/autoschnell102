@@ -652,7 +652,11 @@ async def get_or_fetch_listing(
             f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
         )
 
-    expires_at = now + timedelta(hours=ttl_hours)
+    # Befund 79 (16.09.2026): fetched_at/expires_at/last_used_at stempeln den
+    # ERFOLGREICHEN Abruf — nicht den Start vor Lease- und Slot-Wartezeit
+    # (sonst war der Eintrag bis zu einer Minute "aelter" und lief frueher ab).
+    abruf_ende = datetime.now(timezone.utc)
+    expires_at = abruf_ende + timedelta(hours=ttl_hours)
     # Runde 19: das Ergebnis nur unter der EIGENEN Lease speichern — ist sie
     # inzwischen an einen Nachfolger gegangen, schreibt der (kein Upsert mehr,
     # sonst entstuende ein zweites Dokument).
@@ -665,9 +669,9 @@ async def get_or_fetch_listing(
                 "item_id": item_id,
                 "url": url,
                 "data": data,
-                "fetched_at": now,
+                "fetched_at": abruf_ende,
                 "expires_at": expires_at,
-                "last_used_at": now,
+                "last_used_at": abruf_ende,
                 # Beim Re-Fetch (TTL abgelaufen) muss ein alter Snapshot
                 # als ungültig gelten — der Caller erzeugt direkt einen
                 # neuen. Vorher löschen verhindert, dass nach dem
@@ -689,6 +693,10 @@ async def get_or_fetch_listing(
     if res.matched_count == 0:
         _log.warning("listings_cache %s: Lease waehrend des Abrufs verloren — "
                      "Ergebnis nicht gespeichert (Nachfolger schreibt)", cache_key)
+        # Befund 116 (16.09.2026): der verlorene Abruf darf auch KEINEN
+        # Beweisstand einfrieren — sonst dokumentierte das Dokument einen
+        # Stand, der nie Cache-Stand wurde. Der Nachfolger merkt vor.
+        return data, False, None
     # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
     # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
     # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).
@@ -700,7 +708,7 @@ async def get_or_fetch_listing(
         # veraenderlichen Cache (neuerer Stand nach Wiederholung/Neuabruf).
         await beweis_vormerken(db, cache_key=cache_key, quelle=source,
                                item_id=item_id, url=url, anlass="abruf",
-                               daten=data, abgerufen_am=now)
+                               daten=data, abgerufen_am=abruf_ende)
     except Exception as exc:  # noqa: BLE001
         import logging as _logging
         _logging.getLogger("autohandel").warning(

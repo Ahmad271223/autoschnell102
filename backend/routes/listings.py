@@ -431,9 +431,6 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
 async def compare(body: CompareIn, background: BackgroundTasks,
                   user=Depends(require_active_sub)):
     raw_url = (body.url or "").strip()
-    if not await _vergleich_limiter.check(f"vergleich:{user.get('id') or user.get('dealer_id')}"):
-        raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit von diesem Konto — "
-                                 "bitte kurz warten.")
 
     # Unified cache key = f"{source}:{item_id}". Dadurch werden
     # Kleinanzeigen-/mobile.de-/AutoScout-URLs innerhalb der TTL nur EINMAL
@@ -466,6 +463,12 @@ async def compare(body: CompareIn, background: BackgroundTasks,
             "mobile.de-Links sind noch nicht freigeschaltet (kein Zugang "
             "hinterlegt). Bitte aktuell einen kleinanzeigen.de-Link verwenden.",
         )
+    # Befund 133 (16.09.2026): ERST die Adresse pruefen, DANN das Tempolimit —
+    # ein Tippfehler oder ein nicht freigeschalteter Link verbrauchte vorher
+    # einen der Vergleiche je Minute, obwohl kein Vergleich startete.
+    if not await _vergleich_limiter.check(f"vergleich:{user.get('id') or user.get('dealer_id')}"):
+        raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit von diesem Konto — "
+                                 "bitte kurz warten.")
 
     # CLIENT-SEITIGES ABRUFEN (nur Kleinanzeigen): Ist der Modus an und der
     # Link weder global noch in der EIGENEN Quarantaene vorhanden, holt
@@ -564,6 +567,21 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     search_url = build_search_url(vehicle, rules)
     autoscout_url = build_autoscout_url(vehicle, rules)
 
+    # Persist vehicle for re-use (PDF, Termine). Runde 17 (Nr. 382): ID je
+    # Quelle eindeutig (Legacy-Rueckfall in _fahrzeug_id); die tatsaechlich
+    # verwendete ID geht in Antwort und Snapshot.
+    # Befund 74/75 (16.09.2026): ZUERST das Fahrzeug uebernehmen, DANN den
+    # Vergleich verbuchen — vorher blieb bei einem gescheiterten Fahrzeug-
+    # Write ein Vergleichseintrag stehen, der Zugriff auf das Beweisdokument
+    # gewaehrte (_darf_sehen), obwohl der Vergleich fehlschlug.
+    vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
+    frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
+    # Beweisdokument: das Fahrzeug kennt sein Inserat (bei AutoScout24 weicht
+    # die Anzeigen-ID von der ID in der Adresse ab — deshalb der cache_key).
+    # Lasttest 16.09.2026: wandert mit demselben Write ans Fahrzeug.
+    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source,
+                                          schluessel=identity["cache_key"])
+
     # Track comparison (anonym)
     expires_at = datetime.now(timezone.utc) + timedelta(days=14)
     # Runde 27 (Pruefbefund 12.09.2026): Ein technischer Neulauf ist keine
@@ -589,17 +607,6 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "created_at": now_iso(),
         "expires_at_dt": expires_at,
     })
-
-    # Persist vehicle for re-use (PDF, Termine). Runde 17 (Nr. 382): ID je
-    # Quelle eindeutig (Legacy-Rueckfall in _fahrzeug_id); die tatsaechlich
-    # verwendete ID geht in Antwort und Snapshot.
-    vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
-    frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
-    # Beweisdokument: das Fahrzeug kennt sein Inserat (bei AutoScout24 weicht
-    # die Anzeigen-ID von der ID in der Adresse ab — deshalb der cache_key).
-    # Lasttest 16.09.2026: wandert mit demselben Write ans Fahrzeug.
-    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source,
-                                          schluessel=identity["cache_key"])
     await log_activity_sicher(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
                        meta={"kollege": kollege["user_id"]} if kollege else None)
 
@@ -890,8 +897,10 @@ async def live_counter(ad_id: str, quelle: Optional[str] = None,
             - timedelta(minutes=LIVE_FENSTER_MIN)).isoformat()
     heute = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0).isoformat()
-    basis = ({"cache_key": f"{quelle}:{ad_id}"} if quelle
-             else {"mobile_ad_id": ad_id})
+    # Befund 88 (16.09.2026): ohne ?quelle galt bisher nur die nackte Nummer —
+    # ein mobile.de-Inserat und eine Kleinanzeige mit derselben Nummer wurden
+    # zusammengezaehlt. Die Route heisst /mobile/…: ohne Quelle zaehlt mobile.
+    basis = {"cache_key": f"{quelle or 'mobile'}:{ad_id}"}
     # Wiederholungen desselben Kontos zaehlen nicht als neue Nachfrage.
     basis["wiederholung"] = {"$ne": True}
     aktuell = await db.vehicle_comparisons.count_documents({
@@ -926,13 +935,21 @@ async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> di
             # Umbau Kaufvorgaenge: der Kleinanzeigen-Snapshot gehoert zum
             # INSERAT — wer es verglichen hat (Bereich) oder einen eigenen
             # Vertrag dazu besitzt, darf ihn sehen.
+            # Befund 82 (16.09.2026): der Ersteller-Zweig griff IMMER — nach
+            # einer Uebergabe behielt der bisherige Bearbeiter den Snapshot.
+            # Jetzt: existiert das Fahrzeug in der Firma, ist es der Anker
+            # (Bereich oder eigener Vertrag); nur ohne Fahrzeug zaehlt der
+            # Ersteller.
             vid = snap.get("vehicle_id")
-            erlaubt = snap.get("user_id") == user["id"] or (
-                bool(vid) and (
-                    await fahrzeug_im_bereich(user, vid)
-                    or await db.generated_pdfs.count_documents(
-                        {"vehicle_id": vid, "dealer_id": dealer_id,
-                         "user_id": user["id"]}, limit=1) > 0))
+            eigener_vertrag = bool(vid) and await db.generated_pdfs.count_documents(
+                {"vehicle_id": vid, "dealer_id": dealer_id,
+                 "user_id": user["id"]}, limit=1) > 0
+            fahrzeug_da = bool(vid) and await db.vehicles.count_documents(
+                {"id": vid, "dealer_id": dealer_id}, limit=1) > 0
+            if fahrzeug_da:
+                erlaubt = eigener_vertrag or await fahrzeug_im_bereich(user, vid)
+            else:
+                erlaubt = eigener_vertrag or snap.get("user_id") == user["id"]
         else:
             erlaubt = bool(dealer_id) and (
                 snap.get("dealer_id") == dealer_id
@@ -945,8 +962,17 @@ async def _load_snapshot_or_404(snap_id: str, user: Optional[dict] = None) -> di
     return snap
 
 
+async def _snapshot_nutzer(user=Depends(current_user)):
+    """Befund 83 (16.09.2026): Firmen-Konten laufen durch dieselbe Sperre wie
+    current_firma (Firmen-Dokument fehlt, Loeschung laeuft -> 403/409);
+    Admins wie bisher ueber current_user."""
+    if user.get("role") in ("dealer", "sucher"):
+        return await current_firma(user)
+    return user
+
+
 @router.get("/snapshots/{snap_id}")
-async def snapshot_status(snap_id: str, user=Depends(current_user)):
+async def snapshot_status(snap_id: str, user=Depends(_snapshot_nutzer)):
     snap = await _load_snapshot_or_404(snap_id, user)
     snap.pop("png_path", None)
     snap.pop("pdf_path", None)
@@ -956,7 +982,11 @@ async def snapshot_status(snap_id: str, user=Depends(current_user)):
     # (dealer_id/user_id) den Snapshot erzeugt hat. Deshalb fuer fremde
     # Firmen nur die Sachfelder (BeweisCard, Alt-Anzeige, braucht status/error/
     # completed_at); die eigene Firma und Admins sehen wie bisher alles.
-    if user.get("role") != "admin" and snap.get("dealer_id") != user.get("dealer_id"):
+    # Befund 85 (16.09.2026): auch ein Sucher sieht beim Snapshot eines
+    # KOLLEGEN derselben Firma nicht, wer ihn erzeugt hat (Regel Runde 29).
+    if user.get("role") != "admin" and (
+            snap.get("dealer_id") != user.get("dealer_id")
+            or (ist_sucher(user) and snap.get("user_id") != user.get("id"))):
         felder = ("id", "vehicle_id", "mobile_ad_id", "source_url", "status",
                   "art", "error", "created_at", "completed_at",
                   "png_bytes", "pdf_bytes")
@@ -966,7 +996,7 @@ async def snapshot_status(snap_id: str, user=Depends(current_user)):
 
 @router.get("/snapshots/{snap_id}/{kind}")
 async def snapshot_download(snap_id: str, kind: str,
-                            user=Depends(current_user)):
+                            user=Depends(_snapshot_nutzer)):
     """Stream the captured PDF or PNG.
 
     Nur `Authorization: Bearer …` — ?auth=<token> wird seit 08/2026 nicht
@@ -990,7 +1020,10 @@ async def snapshot_download(snap_id: str, kind: str,
     except Exception as exc:
         log.exception("snapshot fetch failed")
         raise HTTPException(502, "Snapshot-Storage nicht erreichbar.")
-    return Response(content=data, media_type=ctype)
+    # Befund 84 (16.09.2026): personenbezogene Belege nie im Browser-/Proxy-
+    # Cache — wie Beweis- und Protokoll-PDFs.
+    return Response(content=data, media_type=ctype,
+                    headers={"Cache-Control": "no-store"})
 
 
 @router.get("/snapshots")
@@ -1014,7 +1047,13 @@ async def list_snapshots(vehicle_id: Optional[str] = None,
         vids = set(await eigene_fahrzeug_ids(user) or [])
         vids |= set(await db.generated_pdfs.distinct(
             "vehicle_id", {"dealer_id": user["dealer_id"], "user_id": user["id"]}))
-        q["$or"] = [{"vehicle_id": {"$in": list(vids)}}, {"user_id": user["id"]}]
+        # Befund 82 (16.09.2026): selbst erzeugte Snapshots zaehlen nur, wenn
+        # das Fahrzeug nicht (mehr) in der Firma ist — nach einer Uebergabe
+        # gehoert der Snapshot zum Fahrzeug des Nachfolgers.
+        andere = [v for v in await db.vehicles.distinct("id", {"dealer_id": user["dealer_id"]})
+                  if v not in vids]
+        q["$or"] = [{"vehicle_id": {"$in": list(vids)}},
+                    {"user_id": user["id"], "vehicle_id": {"$nin": andere}}]
     if vehicle_id:
         q["vehicle_id"] = vehicle_id
     if before:
@@ -1026,6 +1065,11 @@ async def list_snapshots(vehicle_id: Optional[str] = None,
         if response is not None:
             response.headers["X-Truncated"] = "1"
             response.headers["X-Next-Before"] = str(items[-1].get("created_at") or "")
+    if ist_sucher(user):
+        # Befund 85 (16.09.2026): Konto-IDs der Kollegen bleiben beim Sucher weg.
+        for it in items:
+            if it.get("user_id") != user["id"]:
+                it.pop("user_id", None)
     return items
 
 
@@ -1091,6 +1135,12 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
                                       dealer_id=user.get("dealer_id"))
     if eigen is not None:
         ident = get_listing_identity(body.url)
+        # Befund 87 (16.09.2026): auch der Treffer aus Quarantaene/Cache steht
+        # im Vergleichsprotokoll — vorher nur der frische externe Abruf.
+        await log_activity_sicher(user.get("dealer_id") or "", user.get("id"), "inserat.aufgeloest",
+                                  ref=ident["cache_key"],
+                                  meta={"source": ident["source"], "cached": True,
+                                        "quarantaene": True})
         return {"source": ident["source"], "item_id": ident["item_id"],
                 "cache_key": ident["cache_key"], "cached": True,
                 "vehicle": eigen[0], "snapshot_id": eigen[1]}

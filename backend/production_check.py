@@ -161,6 +161,22 @@ def pruefe_produktion(log) -> None:
                 (fehler if ist_prod else warnungen).append(
                     f"{name}='{roh}' ist keine ganze Zahl — bitte korrigieren.")
 
+    # Befund 131 (16.09.2026): Entscheidung Ahmad 16.09.2026 — 400 neue Abrufe
+    # je Konto und Tag. Im Code heisst 0/fehlend "aus"; docker-compose setzt
+    # 400 vor. Wer ausserhalb des Compose startet oder 0 eintraegt, sieht das
+    # hier als Warnung (kein Abbruch: Warnen statt Bremsen, Regel Ahmad).
+    konto_limit = os.environ.get("ANBIETER_TAGESLIMIT_JE_KONTO", "").strip()
+    if ist_prod and "ANBIETER_TAGESLIMIT_JE_KONTO" not in FEHLERHAFT:
+        try:
+            konto_limit_zahl = int(konto_limit) if konto_limit else 0
+        except ValueError:
+            konto_limit_zahl = 0
+        if konto_limit_zahl <= 0:
+            warnungen.append(
+                "ANBIETER_TAGESLIMIT_JE_KONTO fehlt oder ist 0 — kein Tageslimit je "
+                "Konto (Entscheidung 16.09.2026: 400). docker-compose setzt 400 vor; "
+                "in der .env pruefen.")
+
     frontend = os.environ.get("FRONTEND_URL", "").strip()
     if not frontend.startswith("https://") or "localhost" in frontend:
         fehler.append(
