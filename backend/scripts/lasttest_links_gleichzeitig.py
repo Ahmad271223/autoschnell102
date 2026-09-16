@@ -230,6 +230,16 @@ def szenario(name, konten, versatz):
     for e in ok:
         stati[e.get("check_status")] = stati.get(e.get("check_status"), 0) + 1
     print(f"  Antworten auf 'Link pruefen': {stati}")
+    # Unterschied je Quelle (Kleinanzeigen / mobile.de / AutoScout)
+    quellen = {}
+    for e in ok:
+        quellen.setdefault(LINKS[e["link"]][1]["source"], []).append(e["t_gesamt"])
+    for q, zs in sorted(quellen.items()):
+        zs.sort()
+        n_links = sum(1 for _, i in LINKS if i["source"] == q)
+        print(f"  Quelle {q:13s} ({n_links:2d} Links, {len(zs):3d} Konten): gesamt median "
+              f"{statistics.median(zs):.2f}s, p90 {zs[min(len(zs) - 1, int(len(zs) * 0.9))]:.2f}s, "
+              f"max {zs[-1]:.2f}s")
     # Einmal-Abruf je Link
     mehrfach = []
     for url, ident in LINKS:
@@ -259,6 +269,47 @@ def szenario(name, konten, versatz):
     return ergebnisse
 
 
+def neuladen(name, konten, link_idx, anzahl=150):
+    """Viele Sucher laden denselben, bereits bekannten Link gleichzeitig neu
+    (Cache-Treffer: Link pruefen -> Vergleich, kein Anbieter-Abruf)."""
+    url, ident = LINKS[link_idx]
+    calls_vorher = sum(d.get("calls", 0) for d in db.provider_stats.find({}))
+    fc_vorher = (db.listings_cache.find_one({"cache_key": ident["cache_key"]},
+                                            {"fetch_count": 1}) or {}).get("fetch_count")
+    auswahl = []
+    for k in range(FIRMEN):
+        auswahl.extend([x for x in konten if x[0] == k][-25:])
+    auswahl = auswahl[:anzahl]
+    ergebnisse = [dict(rolle="neu", link=link_idx, firma=x[0], user=x[2]) for x in auswahl]
+    start = time.perf_counter() + 2.0
+    with ThreadPoolExecutor(max_workers=len(auswahl)) as pool:
+        futs = [pool.submit(sucher_ablauf, x[3], url, start, ergebnisse[n])
+                for n, x in enumerate(auswahl)]
+        for f in futs:
+            f.result()
+    gesamt = time.perf_counter() - start
+    time.sleep(1.0)
+    calls_nachher = sum(d.get("calls", 0) for d in db.provider_stats.find({}))
+    fc_nachher = (db.listings_cache.find_one({"cache_key": ident["cache_key"]},
+                                             {"fetch_count": 1}) or {}).get("fetch_count")
+    fehler = [e for e in ergebnisse if e.get("fehler")]
+    ok = [e for e in ergebnisse if not e.get("fehler")]
+    zs = sorted(e["t_gesamt"] for e in ok)
+    stati = {}
+    for e in ok:
+        stati[e.get("check_status")] = stati.get(e.get("check_status"), 0) + 1
+    print(f"\n=== Szenario {name}: {len(auswahl)} Konten laden denselben bekannten Link "
+          f"({ident['source']}) gleichzeitig neu ===")
+    print(f"erfolgreich: {len(ok)}  Fehler: {len(fehler)}  Gesamtdauer: {gesamt:.2f} s")
+    if zs:
+        print(f"  je Konto: median {statistics.median(zs):.2f}s, "
+              f"p90 {zs[min(len(zs) - 1, int(len(zs) * 0.9))]:.2f}s, max {zs[-1]:.2f}s")
+    print(f"  Antworten auf 'Link pruefen': {stati}; neue Anbieter-Abrufe: "
+          f"{calls_nachher - calls_vorher}; fetch_count {fc_vorher} -> {fc_nachher}")
+    for e in fehler[:5]:
+        print(f"   FEHLER Konto {e['user']}: {e['fehler']}")
+
+
 if __name__ == "__main__":
     print(f"Backend: {API}  Lauf {SUF}")
     r = requests.get(f"{API}/health", timeout=10)
@@ -269,6 +320,11 @@ if __name__ == "__main__":
         szenario("A — alle gleichzeitig", konten, 0.0)
         if not os.environ.get("LASTTEST_NUR_A"):
             szenario("B — je 0,01 s versetzt", konten, 0.01)
+        # Neuladen: je Quelle ein bereits bekannter Link, 150 Konten gleichzeitig
+        for quelle in ("mobile", "autoscout24", "kleinanzeigen"):
+            idx = next((i for i, (_, ident) in enumerate(LINKS) if ident["source"] == quelle), None)
+            if idx is not None:
+                neuladen(f"C — Neuladen {quelle}", konten, idx)
         # Vergleichswert: EIN Konto allein, bekannter Link (Cache-Treffer)
         H = {"Authorization": f"Bearer {konten[0][3]}"}
         url = LINKS[0][0]

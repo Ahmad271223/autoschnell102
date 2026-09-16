@@ -1521,6 +1521,15 @@ genau ein Anbieter-Abruf je Link, 1 Besitzer + 5 Mitbearbeiter je Fahrzeug. Erge
 | 10 ms versetzt, 4 Job-Arbeiter | 0 von 180 | 3,9 s / 6,9 s | 5,4 s / 7,2 s |
 | gleichzeitig, 10 Job-Arbeiter | 0 von 180 | 3,9 s / 7,0 s | 6,9 s / 8,5 s |
 | ein Konto allein, bekannter Link | – | – | 0,08 s |
+| 150 Konten laden denselben bekannten Link gleichzeitig neu | 0 von 150 | – (kein Abruf) | 3,6 s / 4,5 s |
+
+Nach Quelle (alle gleichzeitig, Attrappe): Kleinanzeigen Median 6,0 s, mobile.de 6,9 s, AutoScout
+7,2 s — der Unterschied kommt allein von den Anbieter-Slots (AutoScout und Kleinanzeigen 3, mobile.de 10);
+mit echten Anbietern zählt vor allem die Abrufdauer (Kleinanzeigen-API 1–3 s, mobile.de/AutoScout über
+Apify 10–20 s). Beim Neuladen eines bekannten Links gibt es keinen neuen Anbieter-Abruf; die 3,6 s
+entstehen, weil ein einzelner Testprozess 150 Vergleiche hintereinander abarbeitet (≈ 25 ms je
+Vergleich, Datenbank-Rundläufe). Mit 4 Prozessen je Server auf zwei Servern entspricht das etwa
+0,5 s.
 
 Jeder Link wurde genau einmal abgerufen, Mitwartende hängen sich an den laufenden Abruf, keine
 429/503. Die Wartezeit bestimmen zwei Größen: `LINK_JOB_CONCURRENCY` (Job-Arbeiter je
