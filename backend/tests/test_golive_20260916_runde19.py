@@ -474,3 +474,77 @@ def test_vor_ort_maengel_fehlend_ist_kein_leeren():
     import routes.protocols as P
     q = inspect.getsource(P.auto_daten_vor_ort_nachtragen)
     assert 'maengel=protokoll.get("new_damages"))' in q and 'or []' not in q.split("maengel=")[1]
+
+
+# ===================================================================== Block B (16.09.2026, #47-#139)
+def test_block_b_quelltext_protokolle_und_termine():
+    """Befunde 47, 48, 51, 54-56, 58, 69, 72/73, 94, 103, 104, 105, 108, 109,
+    125/126, 135, 137, 138, 139 — die Stellen sind im Quelltext eindeutig."""
+    import routes.protocols as P
+    import routes.drivers as D
+    import kaufvorgang as KV
+    q = inspect.getsource(P.save_protocol)
+    assert "Befund 47" in q and 'vorhandenes.get("revision") is not None and revision is None' in q
+    assert "_vertrag_nicht_in_loeschung(appt)" in q                                  # Befund 48
+    assert "_vertrag_nicht_in_loeschung(appt)" in inspect.getsource(P.start_correction)
+    q = inspect.getsource(P.protokoll_freigeben)
+    assert 'setzen["preis_quelle"] = "chef"' in q and '"preis_quelle": ""' in q      # Befund 51
+    assert 'bedingung["updated_at"] = doc.get("updated_at")' in q                    # Befund 58
+    q = inspect.getsource(P.korrektur_verwerfen)
+    assert "Befund 55" in q and "r2.matched_count == 0" in q
+    assert "Befund 56" in inspect.getsource(P.freigaben_geschlossener_termine_zuruecknehmen)
+    q = inspect.getsource(P.submit_protocol)
+    assert q.index("submit_filt") < q.index('{"$set": {"updated_at": jetzt}}')       # Befund 72
+    assert "termin_stand_nicht_angefasst" in q                                        # Befund 73
+    assert "fahrzeug_im_bereich" not in inspect.getsource(P.dealer_list_protocols)   # Befund 94
+    q = inspect.getsource(A.create_appointment)
+    assert 'in TERMIN_OFFEN_WERTE' in q.split('"abholung_geplant"')[0][-500:]         # Befund 69
+    assert "Befund 125" in q and "termin_fuer_sucher(user, clean_doc(doc))" in q     # 125/126/135
+    q = inspect.getsource(A.update_appointment)
+    assert "vor_ort_nachtragen" in q and "Befund 103" in q and "Befund 54" in q      # 57/103/54
+    assert "await _transaktion(_schreiben)" in q and "session=session" in q
+    q = inspect.getsource(A._vertragszeiger_abgleichen)
+    assert '"status": {"$in": ["erstellt", "neu erstellt", None]}' in q              # Befund 104
+    q = inspect.getsource(A.delete_appointment)
+    assert q.index("async def _kern") < q.index("betroffene[:] = [kv async for kv")  # Befund 108
+    assert q.index("geloescht = await _transaktion(_kern)") < q.index('"termin.geloescht"')  # 109
+    q = inspect.getsource(KV.termin_status_uebernehmen)
+    assert "Befund 105" in q and "for _versuch in range(3)" in q
+    q = inspect.getsource(D.driver_zuteilung)
+    assert 'ablehn_filt["updated_at"] = body.stand' in q                             # Befund 138
+    assert 'driver.get("display_name") or driver.get("name")' in q                    # Befund 139
+    assert "bericht_fuer_sucher" in inspect.getsource(A.get_pickup_report)            # Befund 137
+
+
+def test_bericht_fuer_sucher_ohne_verwaltungsfelder():
+    rep = {"id": "r1", "driver_account_id": "f1", "dealer_id": "d1", "replaces_id": "r0",
+           "driver_name": "Ali", "deviations": [{"label": "Kratzer", "photo_key": "k1",
+                                                 "photo_loeschung_offen": True}]}
+    s = A.bericht_fuer_sucher(dict(SUCHER), dict(rep))
+    assert "driver_account_id" not in s and "dealer_id" not in s and "replaces_id" not in s
+    assert s["driver_name"] == "Ali" and s["deviations"][0] == {"label": "Kratzer", "photo_key": "k1"}
+    assert A.bericht_fuer_sucher(dict(CHEF), dict(rep)) == rep
+    assert A.bericht_fuer_sucher(dict(SUCHER), None) is None
+
+
+def test_termin_status_uebernehmen_meldet_verlorenen_cas(wegwerf, monkeypatch):
+    """Befund 105: verliert der Status-CAS dreimal, bekommt der Vorgang den Merker
+    nacharbeit_offen und einen Betriebsalarm — statt stillem "Erfolg"."""
+    import kaufvorgang as KV
+    db, run = wegwerf.db, wegwerf.run
+    monkeypatch.setattr(KV, "db", db)
+    run(db.kaufvorgaenge.insert_one({"id": "kv1", "dealer_id": "d1", "vehicle_id": "v1",
+                                     "contract_id": "c1", "status": "abholung_geplant",
+                                     "appointment_id": "t1"}))
+    aufrufe = []
+
+    async def _verloren(*a, **k):
+        aufrufe.append(k.get("von"))
+        return None
+    monkeypatch.setattr(KV, "status_setzen", _verloren)
+    appt = {"id": "t1", "dealer_id": "d1", "contract_id": "c1", "kaufvorgang_id": "kv1"}
+    assert run(KV.termin_status_uebernehmen(appt, "storniert")) is True
+    assert aufrufe == ["abholung_geplant"] * 3
+    kv = run(db.kaufvorgaenge.find_one({"id": "kv1"}))
+    assert kv["nacharbeit_offen"] is True and kv["status"] == "abholung_geplant"
+    assert run(db.betriebsalarme.count_documents({"typ": "kaufvorgang_status_konflikt"})) == 1

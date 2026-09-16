@@ -1180,18 +1180,29 @@ async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
     # Pruefung 14.09.2026 (P6): Notiz ATOMAR anhaengen (Aggregations-Update)
     # statt gelesenen Text + Zusatz zurueckzuschreiben — eine parallel vom
     # Chef geschriebene Notiz ging sonst verloren.
+    # Befund 138 (16.09.2026): Ablehnen mit demselben Stand-CAS wie Annehmen —
+    # ein Fahrer mit altem Bildschirm lehnt sonst die inzwischen geaenderte
+    # Fahrt ab. Befund 139: Fahrerkonten heissen display_name (kein UUID im Termin).
+    ablehn_filt: Dict[str, Any] = {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"}
+    if getattr(body, "stand", None):
+        ablehn_filt["updated_at"] = body.stand
     r = await db.appointments.update_one(
-        {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"},
+        ablehn_filt,
         [{"$set": {"zuteilung": "abgelehnt",
                    "zuteilung_beantwortet_am": now_iso(),
-                   "zuteilung_abgelehnt_von": driver.get("name") or driver["id"],
+                   "zuteilung_abgelehnt_von": (driver.get("display_name") or driver.get("name")
+                                               or "Fahrer"),
                    "zuteilung_abgelehnt_grund": grund,
                    "updated_at": now_iso(),
                    "notes": notiz_anhaengen_ausdruck(notiz)}},
          {"$unset": ["driver_id", "zuteilung_neu_wegen_aenderung"]}])
     if r.modified_count == 0:
         jetzt = await db.appointments.find_one(
-            {"id": appt_id}, {"_id": 0, "zuteilung": 1}) or {}
+            {"id": appt_id}, {"_id": 0, "zuteilung": 1, "updated_at": 1}) or {}
+        if getattr(body, "stand", None) and jetzt.get("zuteilung") == "offen" \
+                and jetzt.get("updated_at") != body.stand:
+            raise HTTPException(409, "Die Fahrt wurde inzwischen geändert (Datum, Uhrzeit "
+                                     "oder Adresse) — bitte neu laden und erneut entscheiden.")
         return {"ok": True, "zuteilung": jetzt.get("zuteilung") or "angenommen",
                 "unveraendert": True}
     await log_activity_sicher(appt.get("dealer_id"), driver["id"],

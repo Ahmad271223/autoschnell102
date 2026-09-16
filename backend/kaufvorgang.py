@@ -259,28 +259,48 @@ async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
     Vertrag) — dann darf der Aufrufer wie frueher direkt am Fahrzeug
     arbeiten. Phase 2: scheiterte die Fahrzeug-Zusammenfassung, traegt der
     Vorgang danach nacharbeit_offen (Aufrufer lesen ihn per fuer_termin)."""
-    kv = await fuer_termin(appt)
-    if not kv:
-        return False
+    kv = None
     neu = _TERMIN_ZU_STATUS.get(termin_status, "abholung_geplant")
-    if kv.get("status") == "abgeholt" and neu == "abholung_geplant" and appt.get("id") \
-            and await db.pickup_protocols.count_documents(
-                {"appointment_id": appt["id"], "status": "final",
-                 "superseded": {"$ne": True}}, limit=1):
-        # Phase 2 (2.6, D15): Wieder-Oeffnen eines abgeholten Termins mit
-        # unterschriebenem Protokoll — die Abholung ist belegt, der Vorgang
-        # bleibt abgeholt (eine Korrektur-Version aendert Preis/Details,
-        # nicht den Kauf). Vorher fiel der Vorgang auf "Abholung geplant".
-        neu = "abgeholt"
-    if kv.get("status") != neu:
-        await status_setzen(kv["id"], neu, user=user, von=kv.get("status"))
-        return True
-    # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
-    # Zusammenfassung kann beim letzten Mal gescheitert sein (wird dort
-    # abgefangen). Beim Wiederholen trotzdem abgleichen — sonst blieb das
-    # Fahrzeug dauerhaft falsch.
-    ziel = await fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
-    await _nacharbeit_merken(kv, ziel)
+    # Befund 105 (16.09.2026): verliert der Status-CAS (paralleler Termin-/
+    # Fahrerabschluss), wird der Vorgang neu gelesen und der Wechsel erneut
+    # versucht (bis 3x) — vorher meldete die Funktion trotzdem Erfolg.
+    for _versuch in range(3):
+        kv = await fuer_termin(appt)
+        if not kv:
+            return False
+        neu = _TERMIN_ZU_STATUS.get(termin_status, "abholung_geplant")
+        if kv.get("status") == "abgeholt" and neu == "abholung_geplant" and appt.get("id") \
+                and await db.pickup_protocols.count_documents(
+                    {"appointment_id": appt["id"], "status": "final",
+                     "superseded": {"$ne": True}}, limit=1):
+            # Phase 2 (2.6, D15): Wieder-Oeffnen eines abgeholten Termins mit
+            # unterschriebenem Protokoll — die Abholung ist belegt, der Vorgang
+            # bleibt abgeholt (eine Korrektur-Version aendert Preis/Details,
+            # nicht den Kauf). Vorher fiel der Vorgang auf "Abholung geplant".
+            neu = "abgeholt"
+        if kv.get("status") == neu:
+            # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
+            # Zusammenfassung kann beim letzten Mal gescheitert sein (wird dort
+            # abgefangen). Beim Wiederholen trotzdem abgleichen — sonst blieb das
+            # Fahrzeug dauerhaft falsch.
+            ziel = await fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"], user=user)
+            await _nacharbeit_merken(kv, ziel)
+            return True
+        if await status_setzen(kv["id"], neu, user=user, von=kv.get("status")) is not None:
+            return True
+    # Dreimal verloren: Merker am Vorgang (der Nachholer greift), Betriebsalarm —
+    # der Aufrufer bekommt True (der Termin HAT einen Vorgang), aber nichts
+    # wird still als erledigt gemeldet.
+    log.error("Kaufvorgang %s: Terminstatus %s -> %s nach 3 Versuchen nicht uebernommen",
+              kv["id"], termin_status, neu)
+    await db.kaufvorgaenge.update_one({"id": kv["id"]},
+                                      {"$set": {"nacharbeit_offen": True, "updated_at": now_iso()}})
+    try:
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "kaufvorgang_status_konflikt", ref=kv["id"],
+                             termin=str(appt.get("id") or ""), ziel=neu)
+    except Exception:  # noqa: BLE001
+        pass
     return True
 
 

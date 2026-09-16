@@ -188,15 +188,18 @@ def test_04_unerwartete_api_antwort_faellt_zurueck(monkeypatch):
 
 def test_05_terminloeschung_protokolliert_vor_dem_loeschen():
     """Befund: Der Audit-Eintrag stand NACH dem Hard-Delete und konnte
-    selbst werfen — dann war der Termin weg und die Spur fehlte."""
+    selbst werfen — dann war der Termin weg und die Spur fehlte.
+    Befund 109 (16.09.2026): der Eintrag entsteht wieder nach dem — jetzt
+    erfolgreichen — Loeschen, aber ueber log_activity_sicher (wirft nie) und
+    mit Betriebsalarm audit_fehlt, falls er nicht geschrieben werden kann;
+    ein abgelehntes Loeschen (409) hinterlaesst keine falsche Spur mehr."""
     quelle = (WURZEL / "routes" / "appointments.py").read_text(encoding="utf-8")
     block = quelle[quelle.index('@router.delete("/appointments/{appt_id}")'):]
     block = block[:block.index('@router.get("/appointments/{appt_id}/pickup-order.pdf")')]
-    assert block.index('"termin.geloescht"') < block.index("db.appointments.delete_one("), \
-        "erst protokollieren, dann loeschen"
-    # ... und ein Fehler dabei darf das Loeschen nicht stoppen.
-    audit = block[block.index('"termin.geloescht"') - 200:block.index('"termin.geloescht"') + 700]
-    assert "except Exception" in audit, audit[-200:]
+    assert block.index('"termin.geloescht"') > block.index("db.appointments.delete_one("), \
+        "erst erfolgreich loeschen, dann protokollieren"
+    audit = block[block.index('"termin.geloescht"') - 200:block.index('"termin.geloescht"') + 1400]
+    assert "log_activity_sicher(" in audit and '"audit_fehlt"' in audit, audit[-200:]
 
 
 def test_06_whatsapp_link_liefert_die_digitale_fassung():

@@ -215,7 +215,9 @@ def test_19_stand_pruefung_ohne_client_stand(wegwerf):
     _orig = db.appointments.find_one
     src = inspect.getsource(A.update_appointment)
     assert 'write_filt["updated_at"] = existing["updated_at"]' in src
-    assert "beweisdaten_wechsel and not stand" in src
+    # Befund 103 (16.09.2026): auch ein Statuswechsel ohne Client-Stand laeuft
+    # gegen den gelesenen Stand.
+    assert "(beweisdaten_wechsel or status_gewechselt_cas) and not stand" in src
     # Protokoll-Abschicken fasst den Termin-Stand an
     assert 'db.appointments.update_one({"id": appt_id}, {"$set": {"updated_at": jetzt}})' \
         in inspect.getsource(P.submit_protocol)
@@ -235,7 +237,11 @@ def test_16_bis_18_loeschung(wegwerf, monkeypatch):
     src = inspect.getsource(A.delete_appointment)
     assert '"status": appt.get("status"), "zuteilung": appt.get("zuteilung"),' in src
     assert '"updated_at": appt.get("updated_at")}' in src        # Runde 19 (Nr. 35)
-    assert 'TERMIN_MIT_PROTOKOLL_HINWEIS)\n        for kv in betroffene' in src
+    # Befund 108 (16.09.2026): betroffene Vorgaenge werden INNERHALB der
+    # Transaktion gelesen — nach der Protokollpruefung, vor dem Loesen.
+    assert (src.index("TERMIN_MIT_PROTOKOLL_HINWEIS)")
+            < src.index("betroffene[:] = [kv async for kv in db.kaufvorgaenge.find(")
+            < src.index("for kv in betroffene:"))
     assert run(A.delete_appointment("t1", chef)) == {"ok": True}
 
 

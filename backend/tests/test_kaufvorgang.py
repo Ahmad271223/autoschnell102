@@ -290,6 +290,11 @@ def test_05_termin_nur_mit_eigenem_vertrag_je_vertrag_ein_offener(welt):
             # B: eigener Termin zum selben FAHRZEUG (ohne Vertrag) ist erlaubt
             t2 = await A_.create_appointment(A_.AppointmentIn(vehicle_id=vid, pickup_date="2099-01-03"), w.b)
             kv = await w.db.kaufvorgaenge.find_one({"id": kv_a}, {"_id": 0})
+            # Befund 135 (16.09.2026): die POST-Antwort ist fuer Sucher maskiert
+            # (kein kaufvorgang_id) — der Vorgangszeiger steht in der Datenbank.
+            assert "kaufvorgang_id" not in t1 and "kaufvorgang_id" not in t2
+            t1 = await w.db.appointments.find_one({"id": t1["id"]}, {"_id": 0})
+            t2 = await w.db.appointments.find_one({"id": t2["id"]}, {"_id": 0})
             return e1.value.status_code, t1, e2.value.status_code, t2, kv
 
     s1, t1, s2, t2, kv = w.run(lauf())

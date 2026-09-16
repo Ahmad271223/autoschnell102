@@ -70,10 +70,13 @@ def test_03_terminloeschung_loest_erst_die_verweise():
     assert loesen < loeschen, "Kaufvorgang zuerst loesen, dann den Termin loeschen"
     assert "await _transaktion(_kern)" in block
     assert zeiger < loeschen, "Vertragszeiger zuerst loesen, dann den Termin loeschen"
-    # Abnahme 12.09.2026: Der Audit-Eintrag steht jetzt VOR dem Loeschen —
-    # vorher konnte er selbst werfen, dann war der Termin weg und die Spur
-    # fehlte. Ein Fehler dabei stoppt das Loeschen nicht mehr.
-    assert block.index('"termin.geloescht"') < loeschen
+    # Abnahme 12.09.2026: der Audit-Eintrag durfte nie selbst werfen und die
+    # Spur nicht verlieren. Befund 109 (16.09.2026): er entsteht erst NACH dem
+    # erfolgreichen Loeschen (ein 409 hinterlaesst keine "geloescht"-Spur mehr);
+    # log_activity_sicher wirft nie, ein Fehlschlag loest den Alarm audit_fehlt.
+    assert block.index('"termin.geloescht"') > loeschen
+    assert 'log_activity_sicher(user["dealer_id"], user["id"], "termin.geloescht"' in block
+    assert '"audit_fehlt"' in block
     assert "except Exception" in block
 
 

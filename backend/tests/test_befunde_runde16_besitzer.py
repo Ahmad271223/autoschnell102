@@ -345,6 +345,10 @@ def test_06_sucher_darf_folgt_vertrag_und_vorgang_nicht_dem_fahrzeug(welt):
         # Einen eigenen Termin OHNE fremdes Fahrzeug darf er selbstverstaendlich
         r_b = await A.create_appointment(
             A.AppointmentIn(pickup_date="2099-01-01"), w.b)
+        # Befund 135 (16.09.2026): die POST-Antwort ist fuer Sucher maskiert wie
+        # die Liste (kein created_by) — der Ersteller steht in der Datenbank.
+        assert "created_by" not in r_b
+        r_b = await db.appointments.find_one({"id": r_b["id"]}, {"_id": 0})
         sicht_a = {t["id"] for t in await A.list_appointments(Response(), w.a)}
         sicht_b = {t["id"] for t in await A.list_appointments(Response(), w.b)}
         with pytest.raises(HTTPException) as e2:
@@ -413,8 +417,9 @@ def test_08_protokolle_und_fotos_nur_zu_eigenen_terminen(welt):
     """Umbau Kaufvorgaenge 09.09.2026: das Protokoll gehoert zum TERMIN (und
     damit zum Kaufvorgang eines Suchers). Das gemeinsame Fahrzeug gibt keinen
     Zugriff mehr — ein Mitbearbeiter sieht die Protokolle des Kollegen nicht
-    (Verkaeufer, Unterschrift). Die Fahrzeugliste bleibt an den Bereich des
-    Fahrzeugs gebunden (404 fuer Fremde), enthaelt aber nur eigene Termine."""
+    (Verkaeufer, Unterschrift). Befund 94 (16.09.2026): die Fahrzeugliste
+    haengt nicht mehr am Fahrzeug-Bereich — ein eigener Termin zum Fahrzeug
+    genuegt; ohne eigenen Termin ist die Liste leer (kein 404 mehr)."""
     P = _module("routes.protocols")
     w, db = welt.w, welt.db
 
@@ -431,8 +436,7 @@ def test_08_protokolle_und_fotos_nur_zu_eigenen_terminen(welt):
              "appointment_id": f"t_b{w.s}", "version": 1, "pdf_path": "y.pdf", "created_at": _jetzt()}])
         eigene = await P.dealer_list_protocols(f"v_a{w.s}", w.a)
         mitbearbeiter = await P.dealer_list_protocols(f"v_a{w.s}", w.b)
-        with pytest.raises(HTTPException) as e:
-            await P.dealer_list_protocols(f"v_b{w.s}", w.a)
+        fremd = await P.dealer_list_protocols(f"v_b{w.s}", w.a)
         chef = await P.dealer_list_protocols(f"v_b{w.s}", w.chef)
         bereich = {
             "eigener_termin": await P._protokoll_im_bereich(w.a, {"vehicle_id": f"v_a{w.s}", "appointment_id": f"t_a{w.s}"}),
@@ -441,12 +445,13 @@ def test_08_protokolle_und_fotos_nur_zu_eigenen_terminen(welt):
             "ohne_termin": await P._protokoll_im_bereich(w.a, {"vehicle_id": f"v_a{w.s}", "appointment_id": "keiner"}),
             "chef": await P._protokoll_im_bereich(w.chef, {"vehicle_id": f"v_a{w.s}", "appointment_id": f"t_a{w.s}"}),
         }
-        return eigene, mitbearbeiter, e.value.status_code, chef, bereich
+        return eigene, mitbearbeiter, fremd, chef, bereich
 
-    eigene, mitbearbeiter, status, chef, bereich = welt.run(lauf())
+    eigene, mitbearbeiter, fremd, chef, bereich = welt.run(lauf())
     assert [p["id"] for p in eigene] == [f"p_a{w.s}"] and "appointment_id" not in eigene[0]
     assert mitbearbeiter == [], "Mitbearbeiter sieht das Protokoll des Kollegen nicht"
-    assert status == 404 and [p["id"] for p in chef] == [f"p_b{w.s}"]
+    assert fremd == [], "fremdes Fahrzeug ohne eigenen Termin: leere Liste"
+    assert [p["id"] for p in chef] == [f"p_b{w.s}"]
     assert bereich == {"eigener_termin": True, "nur_fahrzeug": False, "fremd": False,
                        "ohne_termin": False, "chef": True}
 
