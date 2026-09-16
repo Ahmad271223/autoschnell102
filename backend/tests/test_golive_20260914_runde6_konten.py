@@ -32,7 +32,7 @@ import konten as K  # noqa: E402
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
 http = pytest.mark.skipif(not HTTP, reason="RUNDE14_HTTP=1 nicht gesetzt")
 API = K.API
-SUF = uuid.uuid4().hex[:8]
+SUF = "f" + uuid.uuid4().hex[:7]   # nie nur Ziffern: SUF steckt im Passwort, ein reiner Zahlen-Suffix als Nachname/Firma haette es abgelehnt (CI 17.09.2026)
 MAIL = "e2etest-mail.de"
 PW = {k: f"{p}{SUF}Kq4Lm9Xw2"[:20] for k, p in
       (("a", "Aa7"), ("b", "Bb8"), ("c", "Cc9"), ("d", "Dd6"), ("e", "Ee5"), ("f", "Ff4"))}
