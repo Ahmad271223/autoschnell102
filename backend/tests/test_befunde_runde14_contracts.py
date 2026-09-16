@@ -197,7 +197,9 @@ def test_69_send_contract_nutzt_effective_dealer_fuer_die_mail(monkeypatch):
     assert kopie["absender_name"] == "Filiale Sued"
     assert "Filiale Sued" in haupt["html"] and "Chef GmbH" not in haupt["html"]
     assert "0711 555" in haupt["html"] and "030 1" not in haupt["html"]
-    assert "https://x/logo.png" in haupt["html"] and "chef.png" not in haupt["html"]
+    # Entscheidung Ahmad 16.09.2026: das Logo ist kein Sucher-Feld mehr — die
+    # Mail traegt das Firmenlogo des Chefs, auch wenn ein alter Override steht.
+    assert "chef.png" in haupt["html"] and "https://x/logo.png" not in haupt["html"]
     assert "Filiale Sued" in kopie["html"] and "Chef GmbH" not in kopie["html"]
     assert haupt["reply_to"] == "sucher@e2etest-mail.de"
 

@@ -246,3 +246,86 @@ def test_08_manuelle_suche_mit_altregeln_ohne_filter_und_hinweise(welt, profil):
     assert "body" not in qa, d["autoscout_url"]
     text = " ".join(d["hinweise"])
     assert "Kategorie" not in text and "Navi" not in text and "Klima" not in text, d["hinweise"]
+
+
+def test_09_leere_zahlenfelder_fallen_auf_den_standard_statt_500():
+    """16.09.2026 (Pruefung 'Speichern'-Knopf): ein geleertes Zahlenfeld
+    (null/"" per Schnittstelle) wurde als None gespeichert, und beide
+    Portal-Bauer rechneten int(None) — jeder Vergleich brach mit 500 ab.
+    Jetzt faellt der Schluessel weg und der Standard des Bauers gilt;
+    offene Bereichsgrenzen (from/to/min/max) bleiben None."""
+    import regeln as R
+    import mobile_service as MS
+    import autoscout_service as AS
+    fz = {"make": "VW", "make_label": "Volkswagen", "model": "Passat", "model_label": "Passat",
+          "first_registration": "05/2019", "mileage": 90000, "power_kw": 110, "power_ps": 150,
+          "fuel": "DIESEL", "gearbox": "AUTOMATIC_GEAR", "doors": "FOUR_OR_FIVE", "displacement": 1968}
+    gespeichert = R.regeln_validieren({
+        "power": {"mode": "tolerance_ps", "value": None},
+        "mileage": {"mode": "plus", "value": ""},
+        "first_registration": {"mode": "year_range", "from": "", "to": None},
+        "displacement": {"mode": "tolerance", "value": None},
+    })
+    assert gespeichert["power"] == {"mode": "tolerance_ps"}
+    assert gespeichert["mileage"] == {"mode": "plus"}
+    assert gespeichert["displacement"] == {"mode": "tolerance"}
+    assert gespeichert["first_registration"] == {"mode": "year_range", "from": None, "to": None}
+    gelesen = R.regeln_lesen(gespeichert, MS.DEFAULT_RULES)
+    q = parse_qs(urlparse(MS.build_search_url(dict(fz), gelesen)).query)
+    assert q["pw"] == [f"{MS.ps_to_kw(145)}:{MS.ps_to_kw(155)}"]      # Standard 5 PS
+    assert q["ml"] == [":120000"]                                     # Standard +30.000 km
+    qa = parse_qs(urlparse(AS.build_search_url(dict(fz), gelesen)).query)
+    assert qa["powerfrom"] == [str(AS.ps_to_kw(145))]
+    # Altbestand mit None heilt der Lesepfad genauso
+    alt = R.regeln_lesen({"power": {"mode": "min_ps", "value": None}}, MS.DEFAULT_RULES)
+    assert alt["power"] == {"mode": "min_ps", "value": 5}       # fehlender Wert aus dem Standard
+    assert parse_qs(urlparse(MS.build_search_url(dict(fz), alt)).query)["pw"] == [f"{MS.ps_to_kw(145)}:"]
+    # nur ein Feld gespeichert (z.B. Wert ohne Modus): Modus kommt aus dem Standard
+    teil = R.regeln_lesen({"mileage": {"value": 300001}}, MS.DEFAULT_RULES)
+    assert teil["mileage"] == {"mode": "plus", "value": 300001}
+    teil_export = R.regeln_lesen({"mileage": {"value": 300001}}, MS.DEFAULT_EXPORT_RULES)
+    assert teil_export["mileage"]["mode"] == "ignore"           # Export-Standard: kein km-Limit
+    # 0 bleibt 0 (bewusst "exakt"), kein Standard
+    assert R.regeln_validieren({"power": {"mode": "tolerance_ps", "value": 0}})["power"]["value"] == 0
+
+
+def test_10_regelpakete_immer_vollstaendig_und_override_nur_bei_echter_abweichung(welt):
+    """16.09.2026 (Pruefung 'Speichern'-Knopf): Firma OHNE gespeichertes
+    Export-Paket. Die Oberflaeche bekommt trotzdem vollstaendige Pakete
+    (Export-Standard: kein km-Limit, ±10 PS) — vorher zeigte sie Inland-
+    Platzhalter (+30.000 km) und speicherte einen geaenderten Wert ohne Modus.
+    Ein Sucher, der die vollstaendigen Pakete unveraendert zurueckschickt,
+    bekommt keinen Override; ein nur teilweise gespeichertes Paket liest sich
+    mit dem Standard aufgefuellt."""
+    import routes.dealer as d
+    from deps import effective_dealer
+    from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
+    w = welt
+    did = f"{w.dealer_id}_ohne"
+    chef = {**w.chef, "id": f"{w.chef['id']}_ohne", "dealer_id": did}
+    sucher = {**w.sucher, "id": f"{w.sucher['id']}_ohne", "dealer_id": did}
+    w.run(w.db.dealers.insert_one({"id": did, "user_id": chef["id"], "company_name": "Ohne Export",
+                                   "comparison_rules": {"power": {"mode": "min_ps", "value": 7}},
+                                   "active_profile": "inland", "created_at": "2026-09-01T10:00:00+00:00"}))
+    w.run(w.db.users.insert_many([dict(chef), dict(sucher)]))
+    for konto in (chef, sucher):
+        eff = w.run(effective_dealer(dict(konto)))
+        assert eff["export_rules"] == DEFAULT_EXPORT_RULES, eff["export_rules"]
+        assert eff["comparison_rules"]["power"] == {"mode": "min_ps", "value": 7}
+        assert eff["comparison_rules"]["mileage"] == DEFAULT_RULES["mileage"]
+    # Datenbank unveraendert (nur Lesepfad)
+    roh = w.run(w.db.dealers.find_one({"id": did}, {"_id": 0}))
+    assert "export_rules" not in roh and roh["comparison_rules"] == {"power": {"mode": "min_ps", "value": 7}}
+    # Sucher schickt die vollstaendigen Pakete unveraendert zurueck -> kein Override
+    eff = w.run(effective_dealer(dict(sucher)))
+    body = d.DealerSettingsIn(comparison_rules=copy.deepcopy(eff["comparison_rules"]),
+                              export_rules=copy.deepcopy(eff["export_rules"]))
+    w.run(d.update_settings(body, user=dict(sucher)))
+    u = w.run(w.db.users.find_one({"id": sucher["id"]}, {"_id": 0}))
+    assert not (u.get("settings_override") or {}), u.get("settings_override")
+    # Chef speichert nur ein Feld ohne Modus -> wirksam mit Standard-Modus (Inland: plus)
+    w.run(d.update_settings(d.DealerSettingsIn(comparison_rules={"mileage": {"value": 300001}}),
+                            user=dict(chef)))
+    eff = w.run(effective_dealer(dict(chef)))
+    assert eff["comparison_rules"]["mileage"] == {"mode": "plus", "value": 300001}
+    assert eff["comparison_rules"]["power"] == DEFAULT_RULES["power"]     # ganzes Paket ersetzt: Rest Standard

@@ -132,8 +132,14 @@ def regeln_validieren(rohe: Any) -> Dict[str, Any]:
                     if v < 0 or v > 10_000_000:
                         raise RegelFehler(f"{regel}.{feld}: ausserhalb des Bereichs")
                     neu[feld] = v
-                else:
+                elif feld in ("from", "to", "min", "max"):
+                    # Offene Grenze (Bereich ohne Unter- oder Obergrenze).
                     neu[feld] = None
+                # 16.09.2026: ein leeres "value"/"years" (Feld im Formular
+                # geleert, null per Schnittstelle) wird NICHT als None
+                # gespeichert — die Portal-Bauer rechnen int(None) und jeder
+                # Vergleich brach mit 500 ab. Ohne den Schluessel gilt der
+                # Standardwert des Bauers (z.B. 5 PS, 30.000 km, 1 Jahr).
         if regel == "country" and "codes" in eintrag:
             codes = eintrag.get("codes") or []
             if not isinstance(codes, list):
@@ -206,7 +212,15 @@ def regeln_lesen(rohe: Any, standard: Dict[str, Any]) -> Dict[str, Any]:
         except RegelFehler:
             teil = {}
         if k in teil:
-            sauber[k] = teil[k]
+            basis = standard.get(k)
+            if isinstance(basis, dict) and isinstance(teil[k], dict):
+                # 16.09.2026: fehlende Teile einer Regel (z.B. "mode" oder
+                # "value", wenn nur ein Feld gespeichert wurde) kommen aus dem
+                # Standard — vorher blieb eine Regel ohne Modus wirkungslos,
+                # obwohl das Formular einen Modus anzeigte.
+                sauber[k] = {**basis, **teil[k]}
+            else:
+                sauber[k] = teil[k]
         elif k in standard:
             sauber[k] = standard[k]
     for k, v in standard.items():

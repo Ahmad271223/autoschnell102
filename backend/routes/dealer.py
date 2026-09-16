@@ -285,12 +285,16 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
             # die regeln_validieren jetzt still verwirft — ohne Normalisierung
             # waere jedes unveraenderte Speichern eines Suchers eine
             # "Abweichung" und fror das Chef-Paket als Override ein.
-            if k in ("comparison_rules", "export_rules") and isinstance(chef_wert, dict):
-                from regeln import RegelFehler, regeln_validieren
-                try:
-                    chef_wert = regeln_validieren(chef_wert)
-                except RegelFehler:
-                    pass
+            if k in ("comparison_rules", "export_rules"):
+                # 16.09.2026: beide Seiten VOLLSTAENDIG vergleichen (Lesepfad
+                # mit Standard) — die Oberflaeche schickt seit heute komplette
+                # Pakete; ein unvollstaendiges Chef-Paket (z.B. nie gespeichertes
+                # Export-Profil) galt sonst als Abweichung und fror den
+                # Chef-Stand als persoenlichen Override ein.
+                from regeln import regeln_lesen
+                standard = DEFAULT_EXPORT_RULES if k == "export_rules" else DEFAULT_RULES
+                chef_wert = regeln_lesen(chef_wert, standard)
+                v = regeln_lesen(v, standard)
             if v == chef_wert:
                 if k in aktuell:
                     loeschen[f"settings_override.{k}"] = ""
@@ -337,8 +341,11 @@ class LogoUploadIn(BaseModel):
 @router.post("/dealer/logo")
 async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     """Firmenlogo hochladen (max. 2 MB). Speichert im Storage und setzt
-    logo_url auf den ausgelieferten /api/files/<key>-Pfad. Sucher setzen
-    damit nur IHR persönliches Logo (Override), nicht das des Chefs."""
+    logo_url auf den ausgelieferten /api/files/<key>-Pfad. Entscheidung Ahmad
+    16.09.2026: nur der Chef — Sucher bekommen 403 (vorher setzten sie ein
+    persoenliches Logo als Override)."""
+    if user.get("role") == "sucher":
+        raise HTTPException(403, "Das Firmenlogo ändert nur der Chef.")
     import base64
     from storage_service import make_key, storage, StorageError, loeschen_oder_vormerken
     try:
@@ -367,7 +374,6 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     except StorageError as exc:
         raise HTTPException(400, f"Logo konnte nicht gespeichert werden: {exc}")
     logo_url = f"/api/files/{key}"
-    ist_sucher = user.get("role") == "sucher"
     # Nachpruefung Runde 14 (Nr. 96): Datei lag bereits im Storage, wenn die
     # Datenbank hier scheiterte — die Referenz fehlte, die Datei blieb als
     # Waise liegen. Jetzt derselbe Weg wie beim Inserat-Upload: loeschen oder
@@ -380,12 +386,8 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
         # beide dasselbe alte Logo, und das dazwischen gespeicherte blieb als
         # Waise liegen. Filter auf den gelesenen Stand; geht der Write
         # verloren (anderer Upload dazwischen), wird neu gelesen.
-        if ist_sucher:
-            coll, filt_id, feld = db.users, {"id": user["id"]}, "settings_override.logo_url"
-            update = {"$set": {"settings_override.logo_url": logo_url}}
-        else:
-            coll, filt_id, feld = db.dealers, {"id": user["dealer_id"]}, "logo_url"
-            update = {"$set": {"logo_url": logo_url, "updated_at": now_iso()}}
+        coll, filt_id, feld = db.dealers, {"id": user["dealer_id"]}, "logo_url"
+        update = {"$set": {"logo_url": logo_url, "updated_at": now_iso()}}
         vorher = None
         gesetzt = False
         for _ in range(4):
@@ -411,15 +413,15 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     from deps import log_activity_sicher
     await log_activity_sicher(user["dealer_id"], user["id"], "einstellungen.logo.geaendert",
                               meta={"vorher": vorher, "nachher": logo_url,
-                                    "persoenlich": ist_sucher})
+                                    "persoenlich": False})
     await _altes_logo_wegraeumen(vorher, user["dealer_id"])
     return {"ok": True, "logo_url": logo_url}
 
 
 async def _altes_logo_wegraeumen(alte_url: Optional[str], dealer_id: str) -> None:
     """Vorheriges hochgeladenes Logo (logo/<firma>/...) loeschen, wenn kein
-    anderes Dokument (Firma oder Sucher-Override) es mehr referenziert —
-    ein Sucher kann per Einstellungen die Chef-URL uebernommen haben."""
+    anderes Dokument es mehr referenziert — auch alte Sucher-Overrides (vor
+    dem 16.09.2026 konnten Sucher ein eigenes Logo setzen) halten die Datei."""
     if not alte_url or not alte_url.startswith(f"/api/files/logo/{dealer_id}/"):
         return
     alte_url = alte_url.split("?")[0].split("#")[0]

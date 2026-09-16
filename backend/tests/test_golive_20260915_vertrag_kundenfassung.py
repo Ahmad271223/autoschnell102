@@ -96,13 +96,15 @@ def test_ps_regel_nur_nach_unten():
 
 
 def test_leere_felder_erscheinen_nicht_im_vertrag():
-    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. Ansprechpartner,
-    E-Mail, Bereifung) stehen gar nicht im Vertrag — statt einer Zeile mit Strich."""
+    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. E-Mail,
+    Bereifung) stehen gar nicht im Vertrag — statt einer Zeile mit Strich.
+    Der Ansprechpartner steht seit 16.09.2026 NIE im Vertrag, auch ausgefuellt."""
     mit = _text(generate_contract_pdf(
         dealer={**FIRMA, "contact_person": "Anna Chef", "email": "chef@example.com"},
         vehicle={"make_label": "VW", "model_label": "Golf"},
         contract={**BASIS, "seller_email": "v@example.com", "tires": "Sommer"}))
-    assert "Ansprechpartner" in mit and "Anna Chef" in mit and "Bereifung" in mit
+    assert "Ansprechpartner" not in mit and "Anna Chef" not in mit
+    assert "chef@example.com" in mit and "Bereifung" in mit
     ohne = _text(generate_contract_pdf(
         dealer={**FIRMA, "contact_person": "", "email": ""},
         vehicle={"make_label": "VW", "model_label": "Golf"},

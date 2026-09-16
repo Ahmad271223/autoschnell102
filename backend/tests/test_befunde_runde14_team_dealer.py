@@ -457,7 +457,11 @@ def test_96_altes_logo_bleibt_wenn_ein_sucher_es_noch_nutzt(monkeypatch, storage
     assert storage_attrappe["geloescht"] == []
 
 
-def test_96_sucher_upload_setzt_nur_override(monkeypatch, storage_attrappe):
+def test_96_sucher_darf_kein_logo_setzen(monkeypatch, storage_attrappe):
+    """Entscheidung Ahmad 16.09.2026: das Firmenlogo aendert nur der Chef.
+    Vorher setzte ein Sucher ein persoenliches Logo als Override."""
+    import pytest as _pt
+    from fastapi import HTTPException
     import routes.dealer as dealer
     alt = "/api/files/logo/dX/sucher-alt.png"
     sucher = {"id": "u-s", "dealer_id": "dX", "role": "sucher",
@@ -465,11 +469,14 @@ def test_96_sucher_upload_setzt_nur_override(monkeypatch, storage_attrappe):
     monkeypatch.setattr(dealer, "db", _Db(
         dealers=[{"id": "dX", "logo_url": "/api/files/logo/dX/chef.png"}],
         users=[{"id": "u-s", "settings_override": {"logo_url": alt}}]))
-    erg = _lauf(dealer.upload_logo(_logo_body(), sucher))
-    assert dealer.db.users.updates and "settings_override.logo_url" in dealer.db.users.updates[0][1]["$set"]
-    assert dealer.db.dealers.updates == []
-    assert storage_attrappe["geloescht"] == [("logo/dX/sucher-alt.png", "logo_ersetzt")]
-    assert erg["logo_url"] != alt
+    with _pt.raises(HTTPException) as e:
+        _lauf(dealer.upload_logo(_logo_body(), sucher))
+    assert e.value.status_code == 403 and "Chef" in e.value.detail
+    assert dealer.db.users.updates == [] and dealer.db.dealers.updates == []
+    assert storage_attrappe["geloescht"] == []
+    # ein alter persoenlicher Logo-Override wirkt nicht mehr
+    import deps
+    assert "logo_url" not in deps.SUCHER_SETTINGS_FIELDS
 
 
 # =====================================================================

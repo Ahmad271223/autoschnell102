@@ -1685,6 +1685,15 @@ prüfen mit `docker compose exec backend env | grep -E "MAX_CONCURRENT|LINK_JOB|
   (z. B. Ansprechpartner, E-Mail, Bereifung), steht nicht als Zeile mit Strich im Vertrag, sondern
   entfällt ganz — in den Kästen Verkäufer/Käufer, bei den Fahrzeugdaten und bei den
   Zusicherungen; ein leerer Zusicherungs-Block entfällt samt Überschrift (`pdf_service._ohne_leere`).
+  Seit dem 16.09.2026 (abends) steht der **Ansprechpartner gar nicht mehr im Kaufvertrag**, auch
+  ausgefüllt nicht (Wunsch Ahmad); das Feld bleibt für Versand und Marktplatz.
+- **Firmenlogo nur durch den Chef** (16.09.2026): `POST /dealer/logo` antwortet Suchern mit 403, die
+  Einstellungen zeigen Suchern das Logo nur an; `logo_url` ist kein persönliches Sucher-Feld mehr,
+  alte persönliche Logo-Overrides sind wirkungslos.
+- **Vergleichsregeln speichern** (16.09.2026): das Formular bekommt immer vollständige Regelpakete
+  beider Profile (`deps.regelpakete_vervollstaendigen`), ein geleertes Zahlenfeld speichert den
+  Standard statt 0, der Editor bleibt nach dem Speichern auf dem bearbeiteten Profil, und ein
+  Sucher-Override entsteht nur bei echter Abweichung (Vergleich vollständiger Pakete).
 - **Versand:** `VERSAND_JE_KONTO_10MIN` (Standard 300) deckelt die Vertragsversände je Konto.
   Der Versand-Schlüssel ist an Fassung, Kanal, Empfänger, Betreff und Text gebunden (409 bei
   Abweichung); bei E-Mail können zwei Tabs denselben Vertrag nicht gleichzeitig an denselben

@@ -490,9 +490,11 @@ async def subscription_for(user: dict) -> dict:
 # SICH überschreiben (users.settings_override). Wirksam = Händler-Werte,
 # überlagert von den eigenen. Chef-Werte bleiben unangetastet.
 SUCHER_SETTINGS_FIELDS = {
-    # Profil (erscheint auf den Verträgen des Suchers)
+    # Profil (erscheint auf den Verträgen des Suchers). Entscheidung Ahmad
+    # 16.09.2026: das Firmenlogo aendert nur der Chef — "logo_url" ist kein
+    # Sucher-Feld mehr; alte persoenliche Logo-Overrides bleiben wirkungslos.
     "company_name", "contact_person", "phone", "whatsapp_number", "email",
-    "address", "zip_code", "city", "logo_url", "opening_hours",
+    "address", "zip_code", "city", "opening_hours",
     # Vergleich
     "comparison_rules", "export_rules", "active_profile",
     # Versand
@@ -508,13 +510,32 @@ async def effective_dealer(user: dict) -> dict:
     dealer = await db.dealers.find_one({"id": user.get("dealer_id")},
                                        {"_id": 0}) or {}
     if user.get("role") != "sucher":
-        return dealer
+        return regelpakete_vervollstaendigen(dealer)
     override = user.get("settings_override") or {}
     merged = dict(dealer)
     for k, v in override.items():
         if k in SUCHER_SETTINGS_FIELDS and v is not None:
             merged[k] = v
-    return merged
+    return regelpakete_vervollstaendigen(merged)
+
+
+def regelpakete_vervollstaendigen(dealer: dict) -> dict:
+    """16.09.2026 (Pruefung 'Speichern' der Vergleichsregeln): die Oberflaeche
+    bekommt IMMER vollstaendige Regelpakete — fehlende Regeln und fehlende
+    Teile (z.B. ein Export-Paket, das nie gespeichert wurde) kommen aus dem
+    Standard des jeweiligen Profils. Vorher zeigte das Formular fuer fehlende
+    Teile Inland-Platzhalter (+30.000 km), waehrend der Vergleich den Export-
+    Standard (kein Kilometer-Limit) anwandte, und ein geaenderter Wert wurde
+    ohne Modus gespeichert. Aendert nichts in der Datenbank."""
+    if not isinstance(dealer, dict) or not dealer:
+        # Kein Haendlerdokument (verwaistes Konto): leer zurueckgeben, damit
+        # die Aufrufer-Pruefung "if not dealer -> 403" weiter greift.
+        return dealer
+    from mobile_service import DEFAULT_EXPORT_RULES, DEFAULT_RULES
+    from regeln import regeln_lesen
+    dealer["comparison_rules"] = regeln_lesen(dealer.get("comparison_rules"), DEFAULT_RULES)
+    dealer["export_rules"] = regeln_lesen(dealer.get("export_rules"), DEFAULT_EXPORT_RULES)
+    return dealer
 
 
 async def require_active_sub(user=Depends(current_user)):

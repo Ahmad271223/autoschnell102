@@ -577,24 +577,29 @@ def test_377_logo_wechsel_schreibt_audit_fuer_chef_und_sucher(welt, storage_attr
         log_chef = await db.activity_logs.find_one(
             {"dealer_id": w.dealer_id, "user_id": w.chef["id"],
              "action": "einstellungen.logo.geaendert"}, {"_id": 0})
+        # Entscheidung Ahmad 16.09.2026: Sucher aendern kein Logo (403, keine
+        # Spur, kein Override) — vorher ein persoenliches Logo mit Audit.
+        from fastapi import HTTPException
         sucher = {**w.sucher, "settings_override": {}}
-        r_sucher = await Dl.upload_logo(body, sucher)
+        try:
+            await Dl.upload_logo(body, sucher)
+            sucher_status = 200
+        except HTTPException as exc:
+            sucher_status = exc.status_code
         log_sucher = await db.activity_logs.find_one(
             {"dealer_id": w.dealer_id, "user_id": w.sucher["id"],
              "action": "einstellungen.logo.geaendert"}, {"_id": 0})
         firma = await db.dealers.find_one({"id": w.dealer_id}, {"_id": 0, "logo_url": 1})
         konto = await db.users.find_one({"id": w.sucher["id"]}, {"_id": 0, "settings_override": 1})
-        return r_chef, log_chef, r_sucher, log_sucher, firma, konto
+        return r_chef, log_chef, sucher_status, log_sucher, firma, konto
 
-    r_chef, log_chef, r_sucher, log_sucher, firma, konto = welt.run(lauf())
+    r_chef, log_chef, sucher_status, log_sucher, firma, konto = welt.run(lauf())
     assert r_chef["ok"] and r_chef["logo_url"].startswith(f"/api/files/logo/{w.dealer_id}/")
     assert log_chef and log_chef["meta"] == {"vorher": alt_url, "nachher": r_chef["logo_url"],
                                              "persoenlich": False}
     assert firma["logo_url"] == r_chef["logo_url"]
-    assert log_sucher and log_sucher["meta"] == {"vorher": None, "nachher": r_sucher["logo_url"],
-                                                 "persoenlich": True}
-    assert konto["settings_override"]["logo_url"] == r_sucher["logo_url"]
-    assert r_sucher["logo_url"] != r_chef["logo_url"]
+    assert sucher_status == 403 and log_sucher is None
+    assert "logo_url" not in ((konto or {}).get("settings_override") or {})
     # Verhalten von Runde 14 (Nr. 96) unveraendert: altes Logo weggeraeumt
     assert storage_attrappe["geloescht"] == [(alt_url[len("/api/files/"):], "logo_ersetzt")]
 

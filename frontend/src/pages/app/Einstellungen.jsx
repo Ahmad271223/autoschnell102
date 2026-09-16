@@ -32,7 +32,11 @@ export default function Einstellungen() {
   const [savedFlash, setSavedFlash] = useState(false);
 
   useEffect(() => {
-    if (dealer) setForm({
+    // 16.09.2026: nach "Speichern" (refresh) bleibt der Regel-Editor auf dem
+    // Profil, das gerade bearbeitet wurde — vorher sprang er auf Inland
+    // zurueck und die eben gespeicherten Export-Regeln schienen verschwunden.
+    if (dealer) setForm((alt) => ({
+      _edit_profile: alt?._edit_profile || "inland",
       profile: {
         company_name: dealer.company_name || "", contact_person: dealer.contact_person || "",
         phone: dealer.phone || "", whatsapp_number: dealer.whatsapp_number || dealer.phone || "",
@@ -52,7 +56,7 @@ export default function Einstellungen() {
       default_special_agreements: dealer.default_special_agreements || "",
       digital_vertragstext: zusammenfuehren(dealer.default_terms, dealer.digital_vertragstext),
       _agb_zusammengefuehrt: wurdeZusammengefuehrt(dealer.default_terms, dealer.digital_vertragstext),
-    });
+    }));
   }, [dealer]);
 
   if (!form) return <div className="p-10 text-zinc-500">Lade…</div>;
@@ -165,6 +169,13 @@ export default function Einstellungen() {
                            alt="Logo" className="w-full h-full object-contain" />
                     : <Building2 size={26} className="text-zinc-600" />}
                 </div>
+                {user?.role === "sucher" ? (
+                  // Entscheidung Ahmad 16.09.2026: das Firmenlogo pflegt nur der
+                  // Chef — Sucher sehen es, aendern es aber nicht (Server: 403).
+                  <div className="text-[12px] text-zinc-500" data-testid="logo-nur-chef">
+                    Das Firmenlogo pflegt der Chef. Es erscheint auf deinen Verträgen.
+                  </div>
+                ) : (
                 <div>
                   <label className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white cursor-pointer"
                          style={{ background: "var(--accent-red)" }} data-testid="set-logo">
@@ -178,6 +189,7 @@ export default function Einstellungen() {
                             className="text-[11px] text-zinc-500 hover:text-red-400 mt-1">Logo entfernen</button>
                   )}
                 </div>
+                )}
               </div>
 
               <div className="grid md:grid-cols-2 gap-3">
@@ -269,7 +281,7 @@ export default function Einstellungen() {
                 {r.first_registration?.mode === "older_exact" && (
                   <>
                     <AppleNumber testid="rule-fr-years" min={1} max={10}
-                                 value={r.first_registration?.years || 1}
+                                 value={r.first_registration?.years ?? 1}
                                  onChange={(v) => setRule("first_registration", { ...r.first_registration, years: v })}
                                  className="w-24" />
                     <span className="text-xs text-zinc-500">Jahr(e) älter</span>
@@ -287,7 +299,7 @@ export default function Einstellungen() {
                                { v: "range", l: "± X km" },
                              ]} />
                 {r.mileage?.mode !== "ignore" && r.mileage?.mode !== "exact" && (
-                  <AppleNumber testid="rule-km-value" value={r.mileage?.value || 30000}
+                  <AppleNumber testid="rule-km-value" value={r.mileage?.value ?? 30000}
                                onChange={(v) => setRule("mileage", { ...r.mileage, value: v })}
                                className="w-32" />
                 )}
@@ -305,7 +317,7 @@ export default function Einstellungen() {
                              ]} />
                 {(r.power?.mode === "tolerance_ps" || r.power?.mode === "tolerance_kw"
                   || r.power?.mode === "min_ps") && (
-                  <AppleNumber testid="rule-pwr-value" value={r.power?.value || 5}
+                  <AppleNumber testid="rule-pwr-value" value={r.power?.value ?? 5}
                                onChange={(v) => setRule("power", { ...r.power, value: v })}
                                className="w-24" />
                 )}
@@ -474,9 +486,17 @@ function AppleSelect({ value, onChange, options, testid }) {
 }
 
 function AppleNumber({ value, onChange, min, max, className = "", testid }) {
+  // 16.09.2026: ein geleertes Feld ergab Number("") = 0 — gespeichert wurde
+  // "0 PS Toleranz", angezeigt blieb der Standard (0 || 5). Leer oder
+  // unlesbar heisst jetzt "kein Wert" (undefined): das Feld zeigt sofort den
+  // Standard, und genau der wird gespeichert und angewendet.
   return (
-    <input data-testid={testid} type="number" min={min} max={max} value={value}
-           onChange={(e) => onChange(Number(e.target.value))}
+    <input data-testid={testid} type="number" min={min} max={max} value={value ?? ""}
+           onChange={(e) => {
+             const s = e.target.value;
+             const n = Number(s);
+             onChange(s === "" || Number.isNaN(n) ? undefined : n);
+           }}
            className={`apple-input ${className}`} />
   );
 }

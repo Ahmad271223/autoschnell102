@@ -233,7 +233,7 @@ def _two_col_kv(rows, st):
 
 
 def _ohne_leere(rows):
-    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. Ansprechpartner)
+    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. E-Mail, Bereifung)
     erscheinen im Vertrag gar nicht — statt einer Zeile mit Strich."""
     out = []
     for label, value in rows:
@@ -569,7 +569,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     ]
     buyer_rows = [
         ("Firma", dealer.get("company_name", "")),
-        ("Ansprechpartner", dealer.get("contact_person", "")),
+        # Wunsch Ahmad (16.09.2026): kein Ansprechpartner im Kaufvertrag.
         ("Anschrift", f"{dealer.get('address','')}".strip()),
         ("PLZ / Ort", f"{dealer.get('zip_code','')} {dealer.get('city','')}".strip()),
         ("Telefon", dealer.get("phone", "")),
