@@ -326,7 +326,10 @@ def test_09_doppelte_uebernahme_bei_parallelen_anfragen_verhindert(welt):
     ergebnisse = welt.run(beide())
     ok = [e for e in ergebnisse if isinstance(e, dict)]
     fehler = [e for e in ergebnisse if isinstance(e, HTTPException)]
-    assert len(ok) == 1 and len(fehler) == 1 and fehler[0].status_code == 409, ergebnisse
+    # Unter CI-Last laeuft der zweite Aufruf manchmal erst NACH dem ersten:
+    # dann ist 400 ("keine neuen Fotos") die richtige Antwort — geschuetzt ist
+    # beides, entscheidend ist genau EINE Uebernahme (siehe unten).
+    assert len(ok) == 1 and len(fehler) == 1 and fehler[0].status_code in (400, 409), ergebnisse
     l = welt.run(welt.db.resale_listings.find_one({"id": lid}))
     assert len(l["photos"]["uploaded_keys"]) == 2, "jedes Fahrerfoto genau einmal im Inserat"
     welt.keys.extend(l["photos"]["uploaded_keys"])
