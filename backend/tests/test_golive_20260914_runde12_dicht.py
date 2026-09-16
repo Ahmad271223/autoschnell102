@@ -54,7 +54,7 @@ HTTP = os.environ.get("RUNDE14_HTTP") == "1"
 http = pytest.mark.skipif(not HTTP, reason="RUNDE14_HTTP=1 nicht gesetzt")
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 API = K.API
-SUF = uuid.uuid4().hex[:8]
+SUF = "f" + uuid.uuid4().hex[:7]   # nie nur Ziffern: SUF steckt im Passwort, ein reiner Zahlen-Suffix als Nachname/Kontodaten haette es abgelehnt (CI 16.09.2026)
 PW = f"Rz12{SUF}Kq4Lm9Xw2"
 
 

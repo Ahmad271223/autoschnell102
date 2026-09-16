@@ -35,7 +35,7 @@ import routes.admin as ADMIN  # noqa: E402  (nur am Modulanfang importieren)
 HTTP = os.environ.get("RUNDE14_HTTP") == "1"
 http = pytest.mark.skipif(not HTTP, reason="RUNDE14_HTTP=1 nicht gesetzt")
 API = K.API
-SUF = uuid.uuid4().hex[:8]
+SUF = "f" + uuid.uuid4().hex[:7]   # nie nur Ziffern: SUF steckt im Passwort, ein reiner Zahlen-Suffix als Nachname/Kontodaten haette es abgelehnt (CI 16.09.2026)
 PW20 = f"Rz7{SUF}Kq4Lm9Xw2"          # genau 20 Zeichen, Ziffern enthalten
 PW20B = f"Vb3{SUF}Tn8Hd5Yc6"
 assert len(PW20) == 20 and len(PW20B) == 20
