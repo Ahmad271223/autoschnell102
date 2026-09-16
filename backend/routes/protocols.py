@@ -585,9 +585,12 @@ async def auto_daten_vor_ort_nachtragen(appt: dict, protokoll: dict, neuer_preis
         return False
     try:
         import auto_daten
+        # Befund 53 (16.09.2026): "keine Angabe" (Feld fehlt) ist etwas anderes
+        # als "bewusst keine Maengel" (leere Liste) — nur eine vorhandene Liste
+        # ueberschreibt die Maengel vor Ort im dauerhaften Datensatz.
         return await auto_daten.vor_ort_nachtragen(
             db, appt["contract_id"], appt.get("dealer_id", ""),
-            preis=neuer_preis, maengel=protokoll.get("new_damages") or [])
+            preis=neuer_preis, maengel=protokoll.get("new_damages"))
     except Exception:  # noqa: BLE001
         log.exception("Auto-Daten vor Ort fuer Vertrag %s nicht nachgetragen",
                       appt.get("contract_id"))

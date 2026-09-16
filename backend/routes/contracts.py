@@ -459,6 +459,26 @@ def _freigabe_gueltig(f: dict, version: int) -> bool:
         return False
 
 
+# Befund 49 (16.09.2026): so viele noch laufende Alt-Links bleiben abrufbar.
+FREIGABE_ALT_MAX = 50
+
+
+async def _abruf_zaehlen(contract_id: str, token: str, aktuell: bool) -> None:
+    """Befund 50 (16.09.2026): Abrufe auch fuer einen ALTEN Link (freigabe_alt)
+    zaehlen — vorher traf der Zaehler nur den aktuellen Token, die Statistik
+    im Vertrag blieb fuer historisierte Links auf 0."""
+    if aktuell:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, "freigabe.token": token},
+            {"$inc": {"freigabe.abrufe": 1},
+             "$set": {"freigabe.zuletzt_abgerufen": now_iso()}})
+    else:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, "freigabe_alt.token": token},
+            {"$inc": {"freigabe_alt.$.abrufe": 1},
+             "$set": {"freigabe_alt.$.zuletzt_abgerufen": now_iso()}})
+
+
 async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[str, str]:
     """Liefert (Link, gueltig_bis) fuer die AKTUELLE Vertragsfassung.
 
@@ -488,7 +508,13 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
                "erstellt_von": user.get("id"), "version": version, "abrufe": 0}
         aenderung: dict = {"$set": {"freigabe": neu}}
         if f.get("token") and (f.get("laeuft_ab") or "") > now_iso():
-            aenderung["$push"] = {"freigabe_alt": {"$each": [f], "$slice": -10}}
+            # Befund 49 (16.09.2026): abgelaufene Alt-Links vorher entfernen und
+            # die Liste auf 50 statt 10 begrenzen — die 14-Tage-Zusage eines
+            # noch laufenden Links fiel sonst nach zehn Neuerzeugungen weg.
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich},
+                {"$pull": {"freigabe_alt": {"laeuft_ab": {"$lt": now_iso()}}}})
+            aenderung["$push"] = {"freigabe_alt": {"$each": [f], "$slice": -FREIGABE_ALT_MAX}}
         # Nur schreiben, wenn die Freigabe noch genau so aussieht wie gelesen —
         # sonst hat ein paralleler Aufruf bereits eine gesetzt.
         # Pruefung 14.09.2026 (Liste 5, Nr. 2): nur, wenn die Fassung noch dieselbe
@@ -754,59 +780,88 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Autos nicht zwei Datensaetze anlegen.
     from fahrzeugpool import kurz_schuetzen
     await kurz_schuetzen(db, user["dealer_id"], body.vehicle_id)
-    sperre = await auto_daten.vertrag_sperre(db, user["dealer_id"], body.vehicle_id)
-    auto_daten_id = await auto_daten.bestehenden_datensatz(
-        db, user["dealer_id"], body.vehicle_id)
-    auto_daten_neu = auto_daten_id is None
-    if auto_daten_neu:
-        auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
-    doc["admin_vehicle_data_id"] = auto_daten_id
+    # Befund 113 (16.09.2026): ohne Sperre geht es NICHT weiter — der Sucher
+    # bekommt ein kurzes "gleich erneut" statt eines moeglichen Doppel-Datensatzes.
     try:
-        await db.generated_pdfs.insert_one(doc)
-    except DuplicateKeyError:
-        await auto_daten.sperre_freigeben(db, sperre)
-        # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
-        # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.
+        sperre = await auto_daten.vertrag_sperre(db, user["dealer_id"], body.vehicle_id)
+    except auto_daten.SperreBelegt:
+        raise HTTPException(503, "Für dieses Fahrzeug wird gerade ein Kaufvertrag angelegt — "
+                                 "bitte in ein paar Sekunden erneut versuchen.",
+                            headers={"Retry-After": "3"})
+    auto_daten_neu = False
+    auto_daten_id = None
+    # Befund 134 (16.09.2026): die Sperre wird in JEDEM Fall wieder freigegeben
+    # (auch wenn bestehenden_datensatz/anlegen selbst scheitern) — vorher hielt
+    # ein DB-Fehler davor die Sperre bis zum Ablauf.
+    try:
+        auto_daten_id = await auto_daten.bestehenden_datensatz(
+            db, user["dealer_id"], body.vehicle_id)
+        auto_daten_neu = auto_daten_id is None
         if auto_daten_neu:
-            await auto_daten.zurueckrollen(db, auto_daten_id)
-        vorhanden = await db.generated_pdfs.find_one(
-            {"dealer_id": user["dealer_id"], "user_id": user["id"],
-             "idempotency_key": body.idempotency_key},
-            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
-        if vorhanden:
-            # Runde 16 (15.09.2026): dieselbe Hash-Pruefung wie im Vorabpfad —
-            # sonst bekam Anfrage B still den Vertrag von Anfrage A.
-            if vorhanden.get("idempotency_hash") and vorhanden["idempotency_hash"] != anfrage_hash:
-                raise HTTPException(409, "Dieser Idempotenz-Schlüssel wurde schon für einen "
-                                         "anderen Vertrag verwendet — bitte neu laden")
-            return {**clean_doc(vorhanden), "bereits_vorhanden": True}
-        raise
-    except Exception:
-        await auto_daten.sperre_freigeben(db, sperre)
-        if auto_daten_neu:
-            await auto_daten.zurueckrollen(db, auto_daten_id)
-        raise
-    if not auto_daten_neu:
-        # Runde 19 (Nr. 36/40): den bestehenden Datensatz erst NACH dem
-        # dauerhaften Vertrag nachfuehren (ein gescheiterter Vertrag aendert
-        # nichts); ist er inzwischen vom Betreiber geloescht, bekommt der
-        # Vertrag einen frischen — kein Verweis ins Leere.
+            auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+        doc["admin_vehicle_data_id"] = auto_daten_id
         try:
-            if not await auto_daten.aktualisieren(db, auto_daten_id, contract_dict, vehicle,
-                                                  gekauft_am=now_iso()):
-                neu_id = await auto_daten.anlegen(db, contract_dict, vehicle)
-                await db.generated_pdfs.update_one(
-                    {"id": pdf_id, "admin_vehicle_data_id": auto_daten_id},
-                    {"$set": {"admin_vehicle_data_id": neu_id}})
-                auto_daten_id = neu_id
-        except Exception:  # noqa: BLE001
-            log.exception("Auto-Daten zu Vertrag %s nicht nachgefuehrt — Merker fuer den Aufraeumjob", pdf_id)
+            await db.generated_pdfs.insert_one(doc)
+        except DuplicateKeyError:
+            # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
+            # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.
+            if auto_daten_neu:
+                await auto_daten.zurueckrollen(db, auto_daten_id)
+            vorhanden = await db.generated_pdfs.find_one(
+                {"dealer_id": user["dealer_id"], "user_id": user["id"],
+                 "idempotency_key": body.idempotency_key},
+                {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+            if vorhanden:
+                # Runde 16 (15.09.2026): dieselbe Hash-Pruefung wie im Vorabpfad —
+                # sonst bekam Anfrage B still den Vertrag von Anfrage A.
+                if vorhanden.get("idempotency_hash") and vorhanden["idempotency_hash"] != anfrage_hash:
+                    raise HTTPException(409, "Dieser Idempotenz-Schlüssel wurde schon für einen "
+                                             "anderen Vertrag verwendet — bitte neu laden")
+                return {**clean_doc(vorhanden), "bereits_vorhanden": True}
+            raise
+        except Exception:
+            if auto_daten_neu:
+                await auto_daten.zurueckrollen(db, auto_daten_id)
+            raise
+        # Befund 127 (16.09.2026): Nachkontrolle des Lebenszyklus NACH dem
+        # Insert — hat der Chef das Fahrzeug genau dazwischen verkauft,
+        # archiviert oder geloescht, wird der eben angelegte Vertrag wieder
+        # entfernt (Fahrzeug und Vertrag liegen nicht in einer Transaktion).
+        v_nach = await db.vehicles.find_one(
+            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
+        if v_nach is None or (v_nach.get("lifecycle") or "") in VERTRAG_GESPERRT:
+            await db.generated_pdfs.delete_one({"id": pdf_id})
+            if auto_daten_neu:
+                await auto_daten.zurueckrollen(db, auto_daten_id)
+            raise HTTPException(409, "Fahrzeug ist inzwischen verkauft/gelöscht/archiviert "
+                                     "— kein neuer Kaufvertrag möglich")
+        if not auto_daten_neu:
+            # Runde 19 (Nr. 36/40): den bestehenden Datensatz erst NACH dem
+            # dauerhaften Vertrag nachfuehren (ein gescheiterter Vertrag aendert
+            # nichts); ist er inzwischen vom Betreiber geloescht, bekommt der
+            # Vertrag einen frischen — kein Verweis ins Leere.
             try:
-                await db.generated_pdfs.update_one({"id": pdf_id},
-                                                   {"$set": {"auto_daten_nachfuehrung_offen": True}})
+                if not await auto_daten.aktualisieren(db, auto_daten_id, contract_dict, vehicle,
+                                                      gekauft_am=now_iso()):
+                    neu_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+                    r_neu = await db.generated_pdfs.update_one(
+                        {"id": pdf_id, "admin_vehicle_data_id": auto_daten_id},
+                        {"$set": {"admin_vehicle_data_id": neu_id}})
+                    # Befund 115 (16.09.2026): traf der Wechsel nicht (Verweis
+                    # inzwischen anders), bliebe der neue Datensatz verwaist.
+                    if r_neu.matched_count:
+                        auto_daten_id = neu_id
+                    else:
+                        await auto_daten.zurueckrollen(db, neu_id)
             except Exception:  # noqa: BLE001
-                pass
-    await auto_daten.sperre_freigeben(db, sperre)
+                log.exception("Auto-Daten zu Vertrag %s nicht nachgefuehrt — Merker fuer den Aufraeumjob", pdf_id)
+                try:
+                    await db.generated_pdfs.update_one({"id": pdf_id},
+                                                       {"$set": {"auto_daten_nachfuehrung_offen": True}})
+                except Exception:  # noqa: BLE001
+                    pass
+    finally:
+        await auto_daten.sperre_freigeben(db, sperre)
     # Runde 17 (Nr. 265): Ab hier ist der Vertrag dauerhaft. Scheitert das
     # Nachziehen von Fahrzeugstatus/Lebenszyklus (DB-Aussetzer), endete der
     # Request bisher mit 500 — der Client wiederholte und legte einen
@@ -1304,10 +1359,7 @@ async def public_vertrag_pdf(token: str, request: Request):
     if not await db.generated_pdfs.count_documents(
             {"id": c["id"], "loeschung.status": {"$ne": "laeuft"}}, limit=1):
         raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
-    await db.generated_pdfs.update_one(
-        {"id": c["id"], "freigabe.token": token},
-        {"$inc": {"freigabe.abrufe": 1},
-         "$set": {"freigabe.zuletzt_abgerufen": now_iso()}})
+    await _abruf_zaehlen(c["id"], token, aktuell=(c.get("freigabe") or {}).get("token") == token)
     # Anonymer Abruf: KEINEM Konto zurechenbar (weder Ersteller noch
     # Empfaenger) — der Audit-Eintrag sagt genau das.
     from deps import log_activity_sicher
@@ -1841,8 +1893,14 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Vertrag (und ein Scrub koennte mit dem Abschluss um Personendaten ringen).
     termin_ids = [a["id"] async for a in db.appointments.find(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})]
-    if termin_ids and await db.pickup_protocols.count_documents(
-            {"appointment_id": {"$in": termin_ids}, "superseded": {"$ne": True},
+    # Befund 124 (16.09.2026): dieselbe Protokollmenge wie die Loeschkaskade —
+    # auch Protokolle, die nur noch ueber ihr eigenes contract_id am Vertrag
+    # haengen (Termin inzwischen umgehaengt oder geloest).
+    protokolle_zum_vertrag = {"$or": [{"appointment_id": {"$in": termin_ids}},
+                                      {"contract_id": contract_id}],
+                              "superseded": {"$ne": True}}
+    if await db.pickup_protocols.count_documents(
+            {**protokolle_zum_vertrag,
              # Pruefung 14.09.2026 (B28): auch ein begonnener Entwurf zaehlt
              "status": {"$in": ["entwurf", "zur_freigabe", "freigegeben",
                                 "wird_abgeschlossen"]}}, limit=1):
@@ -1860,9 +1918,8 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Runde 19 (16.09.2026, Vertraege Nr. 1): ein unterschriebenes Abholprotokoll
     # macht den Vertrag zum Beleg — der Sucher loescht ihn nicht mehr, nur der
     # Chef (mit Blick auf die Aufbewahrungspflicht).
-    if user.get("role") == "sucher" and termin_ids and await db.pickup_protocols.count_documents(
-            {"appointment_id": {"$in": termin_ids}, "superseded": {"$ne": True},
-             "status": "final"}, limit=1):
+    if user.get("role") == "sucher" and await db.pickup_protocols.count_documents(
+            {**protokolle_zum_vertrag, "status": "final"}, limit=1):
         raise HTTPException(409, "Zu diesem Vertrag gibt es ein unterschriebenes Abhol-"
                                  "protokoll — der Beleg bleibt. Löschen kann ihn nur der "
                                  "Händler-Hauptaccount.")
@@ -1950,7 +2007,12 @@ async def regenerate_contract_for_pickup(
     contract_dict["pickup_time"] = neu_zeit or ""
     if preis_neu:
         contract_dict["purchase_price"] = float(neuer_preis)
-        contract_dict["preis_vor_abholung"] = alt_preis
+        # Befund 46 (16.09.2026): der Preis, fuer den man zum Auto gefahren
+        # ist, bleibt der ERSTE — eine zweite Nachverhandlung (18.000 -> 17.000)
+        # ueberschrieb ihn vorher mit dem Zwischenstand, und die Auto-Daten
+        # hielten 18.000 fuer den urspruenglichen Einkaufspreis.
+        if contract_dict.get("preis_vor_abholung") is None:
+            contract_dict["preis_vor_abholung"] = alt_preis
     if sonder_neu:
         bisher = (contract_dict.get("additional_terms") or "").rstrip()
         contract_dict["additional_terms"] = (bisher + "\n\n" if bisher else "") + \

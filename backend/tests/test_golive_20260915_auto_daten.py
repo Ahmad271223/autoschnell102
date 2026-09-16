@@ -115,12 +115,24 @@ def test_nachverhandlung_eigene_spalte_einkaufspreis_bleibt(wegwerf):
     c = run(db.generated_pdfs.find_one({"id": "c1"}))
     assert c["contract_data"]["purchase_price"] == 4500.0 and int(c["version"]) == 2
     assert c["contract_data"]["preis_vor_abholung"] == 5000.0
+    # Befund 46 (16.09.2026): eine ZWEITE Nachverhandlung (4500 -> 4300) behaelt
+    # den ersten Einkaufspreis — vorher wurde preis_vor_abholung mit 4500
+    # ueberschrieben und die Auto-Daten hielten 4500 fuer den Einkaufspreis.
+    ok = run(C.regenerate_contract_for_pickup(
+        contract_id="c1", dealer_id="d1", user=CHEF, neuer_preis=4300.0,
+        grund="abholung_abgeschlossen", protokoll_id="p2"))
+    assert ok is True
+    c = run(db.generated_pdfs.find_one({"id": "c1"}))
+    assert c["contract_data"]["purchase_price"] == 4300.0 and int(c["version"]) == 3
+    assert c["contract_data"]["preis_vor_abholung"] == 5000.0
+    d = run(db.admin_vehicle_data.find_one({"id": "avd1"}))
+    assert d["purchase_price_cents"] == 500000 and d["preis_vor_ort_cents"] == 430000
     # Terminverschiebung danach: die Spalten bleiben, wie sie sind
     ok = run(C.regenerate_contract_for_pickup(
         contract_id="c1", dealer_id="d1", user=CHEF, pickup_date="2099-02-02"))
     assert ok is True
     d = run(db.admin_vehicle_data.find_one({"id": "avd1"}))
-    assert d["purchase_price_cents"] == 500000 and d["preis_vor_ort_cents"] == 450000
+    assert d["purchase_price_cents"] == 500000 and d["preis_vor_ort_cents"] == 430000
 
 
 def test_vor_ort_nachtragen_preis_und_maengel(wegwerf):

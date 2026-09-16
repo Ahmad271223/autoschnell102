@@ -230,14 +230,18 @@ def daten_extrahieren(contract_dict: Dict[str, Any],
 
 async def anlegen(db, contract_dict: Dict[str, Any],
                   vehicle: Dict[str, Any],
-                  gekauft_am: Optional[str] = None) -> str:
+                  gekauft_am: Optional[str] = None,
+                  zusatz: Optional[Dict[str, Any]] = None) -> str:
     """Neuen Auto-Datensatz anlegen; liefert dessen zufaellige UUID.
-    Idempotenter Upsert auf die frisch erzeugte id."""
+    Idempotenter Upsert auf die frisch erzeugte id. `zusatz`: Kennzeichnungen
+    wie ersatzquelle_fahrzeug (Befund 66)."""
     from datetime import datetime, timezone
     datensatz_id = str(uuid.uuid4())
     daten = daten_extrahieren(
         contract_dict, vehicle,
         gekauft_am or datetime.now(timezone.utc).isoformat())
+    if zusatz:
+        daten.update(zusatz)
     await db[COLLECTION].update_one(
         {"id": datensatz_id},
         {"$set": daten, "$setOnInsert": {"id": datensatz_id}},
@@ -255,16 +259,66 @@ async def zurueckrollen(db, datensatz_id: str) -> None:
 async def aktualisieren(db, datensatz_id: str,
                         contract_dict: Dict[str, Any],
                         vehicle: Dict[str, Any],
-                        gekauft_am: Optional[str] = None) -> bool:
+                        gekauft_am: Optional[str] = None,
+                        zusatz: Optional[Dict[str, Any]] = None) -> bool:
     """Zulaessige Vertragskorrektur innerhalb der 90 Tage: den
     BESTEHENDEN Datensatz aktualisieren (kein Duplikat). Das Kaufdatum
-    wird nur gesetzt, wenn es mitgegeben wird (Korrektur aendert es nicht)."""
+    wird nur gesetzt, wenn es mitgegeben wird (Korrektur aendert es nicht).
+
+    Befund 67 (16.09.2026): ein Wert, den die aktuelle Quelle nicht kennt
+    (None — z.B. Kilometer fehlen in der Vertragsfassung), ueberschreibt
+    einen bekannten Wert des dauerhaften Datensatzes NICHT mehr. Der
+    Datensatz ist ein historischer Beleg; "Quelle liefert gerade nichts"
+    ist kein Loeschen."""
     if not datensatz_id:
         return False
-    daten = daten_extrahieren(contract_dict, vehicle, gekauft_am)
+    daten = {k: v for k, v in daten_extrahieren(contract_dict, vehicle, gekauft_am).items()
+             if v is not None}
+    if zusatz:
+        daten.update(zusatz)
     res = await db[COLLECTION].update_one({"id": datensatz_id}, {"$set": daten})
     # Runde 19 (Nr. 40): der Aufrufer muss wissen, ob der Datensatz noch da war.
     return bool(res.matched_count)
+
+
+# Befund 65 (16.09.2026): Vertrag OHNE brauchbaren Auto-Datensatz-Verweis —
+# fehlend, null, leer oder kein String. Dieselbe Bedingung fuer Reparaturjob
+# (cleanup_service.auto_daten_reparieren) und den Guard in nachtragen.
+OHNE_AUTO_DATEN: Dict[str, Any] = {
+    "$or": [{"admin_vehicle_data_id": {"$exists": False}},
+            {"admin_vehicle_data_id": {"$in": [None, ""]}},
+            {"admin_vehicle_data_id": {"$not": {"$type": "string"}}}],
+}
+
+# Whitelist-Felder, die der Vertrag selbst tragen kann (vehicle_*). Fehlen sie,
+# liefert das Fahrzeugdokument den Ersatz (Befund 66: gekennzeichnet).
+_VERTRAGS_FAHRZEUGFELDER = ("vehicle_first_registration", "vehicle_mileage",
+                            "vehicle_fuel", "vehicle_power_ps", "vehicle_power_kw")
+
+
+async def _fahrzeug_ersatzquelle(db, contract_doc: Dict[str, Any],
+                                 cd: Dict[str, Any]) -> tuple:
+    """Fahrzeugdaten fuer die Extraktion: Marke/Modell aus dem Vertrag; km, EZ,
+    Kraftstoff, PS nur als ERSATZ aus dem (aktuellen) Fahrzeugdokument, wenn
+    die Vertragsfassung sie nicht traegt. Liefert (vehicle, zusatz).
+
+    Befund 66 (16.09.2026): das Fahrzeugdokument kann seit dem Kauf durch
+    einen neuen Vergleich aktualisiert worden sein — ein heutiger Wert wuerde
+    als damaliger Kaufwert gespeichert. Die Vertragsfelder haben Vorrang;
+    kommt trotzdem etwas aus dem Fahrzeug, traegt der Datensatz
+    ersatzquelle_fahrzeug: true (in der Auswertung erkennbar)."""
+    vehicle: Dict[str, Any] = {"make_label": contract_doc.get("make"),
+                               "model_label": contract_doc.get("model")}
+    zusatz = None
+    if contract_doc.get("vehicle_id"):
+        v = await db.vehicles.find_one(
+            {"id": contract_doc["vehicle_id"],
+             "dealer_id": contract_doc.get("dealer_id")}, {"_id": 0, "data": 1})
+        if v and isinstance(v.get("data"), dict):
+            vehicle = {**v["data"], **{k: w for k, w in vehicle.items() if w}}
+            if any(cd.get(f) in (None, "") for f in _VERTRAGS_FAHRZEUGFELDER):
+                zusatz = {"ersatzquelle_fahrzeug": True}
+    return vehicle, zusatz
 
 
 async def nachtragen(db, contract_doc: Dict[str, Any]) -> Optional[str]:
@@ -273,22 +327,16 @@ async def nachtragen(db, contract_doc: Dict[str, Any]) -> Optional[str]:
     Datensatz nachgezogen. Atomarer $exists-Guard verhindert, dass zwei
     parallele Nachtraege zwei Datensaetze erzeugen."""
     cd = contract_doc.get("contract_data") or {}
-    vehicle = {"make_label": contract_doc.get("make"),
-               "model_label": contract_doc.get("model")}
-    # Solange der Vertrag existiert, liefert das Fahrzeugdokument km/EZ/
-    # Kraftstoff/PS als Fallback (im Vertrag stehen nur die vom Haendler
-    # ueberschriebenen Werte). Gespeichert wird trotzdem nur die Whitelist.
-    if contract_doc.get("vehicle_id"):
-        v = await db.vehicles.find_one(
-            {"id": contract_doc["vehicle_id"],
-             "dealer_id": contract_doc.get("dealer_id")}, {"_id": 0, "data": 1})
-        if v and isinstance(v.get("data"), dict):
-            vehicle = {**v["data"], **{k: w for k, w in vehicle.items() if w}}
+    vehicle, zusatz = await _fahrzeug_ersatzquelle(db, contract_doc, cd)
     datensatz_id = await anlegen(db, cd, vehicle,
-                                 gekauft_am=contract_doc.get("created_at"))
+                                 gekauft_am=contract_doc.get("created_at"),
+                                 zusatz=zusatz)
+    # Befund 65 (16.09.2026): auch null, "" oder ein falscher Typ gelten als
+    # "kein Datensatz" — vorher traf der $exists-Guard einen Altvertrag mit
+    # admin_vehicle_data_id: null nicht, der frische Datensatz wurde jedes Mal
+    # zurueckgerollt und der Vertrag blieb dauerhaft ohne Auto-Daten.
     res = await db.generated_pdfs.update_one(
-        {"id": contract_doc["id"],
-         "admin_vehicle_data_id": {"$exists": False}},
+        {"id": contract_doc["id"], **OHNE_AUTO_DATEN},
         {"$set": {"admin_vehicle_data_id": datensatz_id}})
     if not res.modified_count:
         await zurueckrollen(db, datensatz_id)   # jemand war schneller
@@ -356,19 +404,13 @@ async def nachfuehren(db, contract_doc: Dict[str, Any]) -> bool:
     auto_daten_nachfuehrung_offen. Liefert True, wenn der Vertrag danach einen
     passenden Datensatz hat."""
     cd = contract_doc.get("contract_data") or {}
-    vehicle = {"make_label": contract_doc.get("make"),
-               "model_label": contract_doc.get("model")}
-    if contract_doc.get("vehicle_id"):
-        v = await db.vehicles.find_one(
-            {"id": contract_doc["vehicle_id"],
-             "dealer_id": contract_doc.get("dealer_id")}, {"_id": 0, "data": 1})
-        if v and isinstance(v.get("data"), dict):
-            vehicle = {**v["data"], **{k: w for k, w in vehicle.items() if w}}
+    vehicle, zusatz = await _fahrzeug_ersatzquelle(db, contract_doc, cd)
     ok = False
     if contract_doc.get("auto_daten_entfernt_am"):
         ok = True                                   # bewusst ohne Datensatz
     elif contract_doc.get("admin_vehicle_data_id"):
-        ok = await aktualisieren(db, contract_doc["admin_vehicle_data_id"], cd, vehicle)
+        ok = await aktualisieren(db, contract_doc["admin_vehicle_data_id"], cd, vehicle,
+                                 zusatz=zusatz)
         if not ok:
             await db.generated_pdfs.update_one(
                 {"id": contract_doc["id"],
@@ -386,34 +428,54 @@ async def nachfuehren(db, contract_doc: Dict[str, Any]) -> bool:
 SPERRE_SEKUNDEN = 15
 
 
-async def vertrag_sperre(db, dealer_id: str, vehicle_id, sekunden: int = SPERRE_SEKUNDEN) -> Optional[str]:
+class SperreBelegt(RuntimeError):
+    """Befund 113 (16.09.2026): die Vertragsanlage bekommt die Sperre je
+    Firma+Fahrzeug nicht — der Aufrufer antwortet 503 mit Retry-After statt
+    ohne Sperre weiterzulaufen (zwei ERSTE Vertraege haetten sonst unter
+    Last doch zwei Datensaetze angelegt)."""
+
+
+async def vertrag_sperre(db, dealer_id: str, vehicle_id,
+                         sekunden: int = SPERRE_SEKUNDEN) -> Optional[Dict[str, str]]:
     """Runde 19 (Nr. 38): kurze Sperre je Firma+Fahrzeug fuer die Vertragsanlage,
     damit zwei gleichzeitige ERSTE Vertraege desselben Autos nicht zwei
-    Datensaetze anlegen. Wartet bis ~6 s; danach geht es ohne Sperre weiter
-    (kein Blocker fuer die Sucher). Liefert den Schluessel oder None."""
+    Datensaetze anlegen. Wartet bis ~6 s.
+
+    Befund 113/114 (16.09.2026): danach NICHT mehr ohne Sperre weiter, sondern
+    SperreBelegt. Die Sperre traegt einen Claim — sperre_freigeben loescht nur
+    die eigene (ein Aufruf, der laenger als die Sperrzeit brauchte, nahm sonst
+    die inzwischen uebernommene Sperre des Nachfolgers mit).
+    Liefert {"schluessel", "claim"} oder None (ohne Firma/Fahrzeug nichts zu sperren)."""
     if not dealer_id or not vehicle_id:
         return None
     import asyncio
     from datetime import datetime, timedelta, timezone
     from pymongo.errors import DuplicateKeyError
     schluessel = f"auto_daten:{dealer_id}:{vehicle_id}"
+    claim = uuid.uuid4().hex
     for _ in range(12):
         jetzt = datetime.now(timezone.utc)
         try:
             await db.sperren.update_one(
                 {"_id": schluessel, "$or": [{"bis": None}, {"bis": {"$lt": jetzt}}]},
-                {"$set": {"bis": jetzt + timedelta(seconds=sekunden)}}, upsert=True)
-            return schluessel
+                {"$set": {"bis": jetzt + timedelta(seconds=sekunden), "claim": claim}},
+                upsert=True)
+            return {"schluessel": schluessel, "claim": claim}
         except DuplicateKeyError:
             await asyncio.sleep(0.5)
-    return None
+    raise SperreBelegt(f"Sperre {schluessel} ist belegt")
 
 
-async def sperre_freigeben(db, schluessel: Optional[str]) -> None:
-    if not schluessel:
+async def sperre_freigeben(db, sperre) -> None:
+    """Nur die EIGENE Sperre (Claim) freigeben; ohne Sperre nichts tun."""
+    if not sperre:
         return
     try:
-        await db.sperren.delete_one({"_id": schluessel})
+        if isinstance(sperre, dict):
+            await db.sperren.delete_one({"_id": sperre.get("schluessel"),
+                                         "claim": sperre.get("claim")})
+        else:
+            await db.sperren.delete_one({"_id": sperre, "claim": {"$exists": False}})
     except Exception:  # noqa: BLE001 — laeuft sonst nach 15 s ab
         pass
 

@@ -876,10 +876,24 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
             {"$set": {"loeschung.gestartet": jetzt},
              "$inc": {"loeschung.wiederaufnahmen": 1}})
     else:
-        await db.generated_pdfs.update_one(
-            {"id": contract_id},
+        # Befund 141 (16.09.2026): Grabstein nur setzen, wenn noch keiner laeuft
+        # (Compare-and-Set). Zwei parallele Loeschungen (manuell + Frist) hielten
+        # sich sonst beide fuer den Erstloescher und liefen mit verschiedenen
+        # Gruenden durch die Kaskade; jetzt laeuft der Zweite als Wiederaufnahme
+        # mit Grund und Umfang des Ersten weiter (die Schritte sind idempotent).
+        r = await db.generated_pdfs.update_one(
+            {"id": contract_id, "loeschung.status": {"$ne": "laeuft"}},
             {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
                                     "grund": grund, "scrub_pii": scrub_pii}}})
+        if not r.matched_count:
+            c2 = await db.generated_pdfs.find_one({"id": contract_id},
+                                                  {"_id": 0, "loeschung": 1})
+            if not c2:
+                return False
+            grab = c2.get("loeschung") or {}
+            wiederaufnahme = True
+            grund = grab.get("grund") or grund
+            scrub_pii = bool(grab.get("scrub_pii", scrub_pii))
     # 1) Vorversionen
     await db.generated_pdf_versions.delete_many({"contract_id": contract_id})
     await db.versand_schluessel.delete_many({"contract_id": contract_id})
@@ -1497,8 +1511,10 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
                   "vehicle_id": 1, "dealer_id": 1, "created_at": 1}
     letzte_ids: set = set()
     for _ in range(AUTO_DATEN_REPARATUR_MAX_DURCHLAEUFE):
+        # Befund 65 (16.09.2026): auch null/""/falscher Typ = ohne Datensatz
+        # (dieselbe Bedingung wie der Guard in auto_daten.nachtragen).
         paket = await db.generated_pdfs.find(
-            {"admin_vehicle_data_id": {"$exists": False}}, projektion
+            dict(auto_daten.OHNE_AUTO_DATEN), projektion
         ).limit(limit).to_list(limit)
         if not paket:
             break
