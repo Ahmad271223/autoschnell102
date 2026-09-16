@@ -125,11 +125,17 @@ services:
       - KLEINANZEIGEN_API_KEY=${KLEINANZEIGEN_API_KEY:-}
       - KLEINANZEIGEN_API_URL=${KLEINANZEIGEN_API_URL:-https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen}
       - KLEINANZEIGEN_API_TIMEOUT=${KLEINANZEIGEN_API_TIMEOUT:-12}
-      - MAX_CONCURRENT_KLEINANZEIGEN_API=${MAX_CONCURRENT_KLEINANZEIGEN_API:-8}
+      # Gleichzeitige Abrufe je Anbieter (global ueber beide Server) und
+      # Job-Arbeiter je Prozess. Lasttest 16.09.2026: dieselben Vorgaben wie
+      # in .env.example und im Code — vorher 2/2/8 und 2 Jobs, damit warteten
+      # 60 gleichzeitig neue mobile.de-Links bis zu 5 Minuten. Hoehere
+      # Anbieter-Werte nur, wenn der Apify-Plan so viele gleichzeitige
+      # Actor-Laeufe erlaubt.
+      - MAX_CONCURRENT_KLEINANZEIGEN_API=${MAX_CONCURRENT_KLEINANZEIGEN_API:-20}
       - MAX_CONCURRENT_KLEINANZEIGEN=${MAX_CONCURRENT_KLEINANZEIGEN:-2}
-      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-2}
-      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-2}
-      - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-2}
+      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-20}
+      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-20}
+      - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-32}
       # Eigenheiten S3-kompatibler Speicher (Cloudflare R2)
       - S3_SSE=${S3_SSE:-auto}
       - S3_PRUEFSUMMEN=${S3_PRUEFSUMMEN:-auto}

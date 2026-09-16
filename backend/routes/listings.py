@@ -283,7 +283,8 @@ async def _altbestand_uebernehmen(user: dict, filt: dict) -> Optional[dict]:
 
 async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                                 frisch: dict,
-                                quelle: Optional[str] = None) -> Optional[dict]:
+                                quelle: Optional[str] = None,
+                                schluessel: Optional[str] = None) -> Optional[dict]:
     """Fahrzeug in den Pool des Kontos uebernehmen (Runde 16).
 
     Liefert {"user_id", "name", "seit"}, wenn das Fahrzeug bereits einem
@@ -324,6 +325,10 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
     # Runde 17 (Nr. 383): Quelle am Fahrzeug festhalten (auch am Altbestand
     # beim naechsten Vergleich) — Grundlage fuer den Legacy-Rueckfall.
     quelle_set = {"quelle": quelle} if quelle else {}
+    if schluessel:
+        # Lasttest 16.09.2026: der Cache-Schluessel wandert mit demselben Write
+        # ans Fahrzeug (vorher ein eigener update_one je Vergleich).
+        quelle_set["inserat_schluessel"] = schluessel
     kollege = None
     # Runde 27 (Gegenpruefung): DREI Versuche — der Fall 'Upsert traf ein
     # vorhandenes Dokument' schickt uns noch einmal durch den Zweig
@@ -583,12 +588,11 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # verwendete ID geht in Antwort und Snapshot.
     vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
     frisch = {k: v for k, v in vehicle.items() if not k.startswith("_")}
-    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source)
     # Beweisdokument: das Fahrzeug kennt sein Inserat (bei AutoScout24 weicht
     # die Anzeigen-ID von der ID in der Adresse ab — deshalb der cache_key).
-    await db.vehicles.update_one(
-        {"id": vid, "dealer_id": user["dealer_id"]},
-        {"$set": {"inserat_schluessel": identity["cache_key"]}})
+    # Lasttest 16.09.2026: wandert mit demselben Write ans Fahrzeug.
+    kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source,
+                                          schluessel=identity["cache_key"])
     await log_activity_sicher(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
                        meta={"kollege": kollege["user_id"]} if kollege else None)
 

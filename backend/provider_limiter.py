@@ -36,9 +36,14 @@ PROVIDER_MAX_CONCURRENT = {
     # API selbst erlaubt 600 Anfragen je Minute (gemessen), 8 gleichzeitige
     # Anfragen beantwortet sie in 0,56 s. Der eigene Abruf bleibt streng
     # begrenzt, damit wir Kleinanzeigen nicht belasten.
-    "kleinanzeigen_api": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN_API", "8")),
-    "mobile": int(os.environ.get("MAX_CONCURRENT_MOBILE", "10")),
-    "autoscout24": int(os.environ.get("MAX_CONCURRENT_AUTOSCOUT", "3")),
+    # Lasttest 16.09.2026: dieselben Vorgaben wie docker-compose.yml und
+    # .env.example (vorher 8/10/3 hier, 8/2/2 in Compose, je 2 in alten
+    # .env-Kopien — damit warteten 60 gleichzeitig neue mobile.de-Links bis
+    # zu 5 Minuten). Hoehere Werte nur, wenn der Apify-Plan so viele
+    # gleichzeitige Actor-Laeufe erlaubt.
+    "kleinanzeigen_api": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN_API", "20")),
+    "mobile": int(os.environ.get("MAX_CONCURRENT_MOBILE", "20")),
+    "autoscout24": int(os.environ.get("MAX_CONCURRENT_AUTOSCOUT", "20")),
 }
 # Nach so vielen Sekunden gilt ein Slot als verwaist (Prozess abgestuerzt).
 SLOT_TTL_SECONDS = int(os.environ.get("PROVIDER_SLOT_TTL", "120"))

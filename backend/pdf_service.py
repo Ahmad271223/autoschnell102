@@ -152,6 +152,11 @@ def _section(title, st):
 
 def _kv_compact(rows, st, label_w, value_w):
     """Compact key-value table with thin dividers, used inside a column."""
+    if not rows:
+        # Seit 16.09.2026 fallen leere Punkte weg (_ohne_leere) — ohne eine
+        # einzige Zeile wuerde reportlab an der leeren Tabelle scheitern
+        # (emptyTableAction='error'). Dann bleibt die Spalte einfach leer.
+        return Paragraph("", st["value"])
     data = []
     for label, value in rows:
         data.append([
@@ -225,6 +230,20 @@ def _two_col_kv(rows, st):
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
     return t
+
+
+def _ohne_leere(rows):
+    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. Ansprechpartner)
+    erscheinen im Vertrag gar nicht — statt einer Zeile mit Strich."""
+    out = []
+    for label, value in rows:
+        if value is None:
+            continue
+        s = str(value).strip()
+        if not s or s in ("—", "-", "–"):
+            continue
+        out.append((label, value))
+    return out
 
 
 def _yn(value):
@@ -557,8 +576,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("E-Mail", dealer.get("email", "")),
     ]
     story.append(_two_boxes(
-        "Verkäufer (Halter)", seller_rows,
-        "Käufer (Händler)", buyer_rows,
+        "Verkäufer (Halter)", _ohne_leere(seller_rows),
+        "Käufer (Händler)", _ohne_leere(buyer_rows),
         st,
     ))
     story.append(Spacer(1, 12))
@@ -615,14 +634,20 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     ]
     story.append(_section("1 · Fahrzeugdaten", st))
     story.append(Spacer(1, 6))
-    story.append(_two_col_kv(veh_rows, st))
+    veh_rows = _ohne_leere(veh_rows)
+    if veh_rows:
+        story.append(_two_col_kv(veh_rows, st))
     story.append(Spacer(1, 12))
 
     # ---------- Zusicherungen & Zustand — manual fields entered by dealer ----------
-    hu_value = (
-        f"{_yn(contract.get('hu_valid'))}"
-        + (f", gültig bis {contract['hu_until']}" if contract.get("hu_until") else "")
-    )
+    # Seit 16.09.2026: ohne Angabe kein "—, gültig bis …" — nur die Teile,
+    # die ausgefuellt sind (leer -> die Zeile faellt unten weg).
+    hu_teile = []
+    if _yn(contract.get("hu_valid")) != "—":
+        hu_teile.append(_yn(contract.get("hu_valid")))
+    if contract.get("hu_until"):
+        hu_teile.append(f"gültig bis {contract['hu_until']}")
+    hu_value = ", ".join(hu_teile)
     accident_value = _yn(contract.get("accident_free"))
     if contract.get("accident_free", "").strip().lower() == "nein" and contract.get("accident_location"):
         accident_value = f"Nein (Schaden: {contract['accident_location']})"
@@ -640,10 +665,12 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("Unfallschaden (Inserat)", "Nein" if not vehicle.get("accident_damaged") else "Ja"),
         ("Fahrbereit (Inserat)", "Ja" if vehicle.get("roadworthy", True) else "Nein"),
     ]
-    story.append(_section("2 · Zusicherungen & Zustand", st))
-    story.append(Spacer(1, 6))
-    story.append(_two_col_kv(zus_rows, st))
-    story.append(Spacer(1, 12))
+    zus_rows = _ohne_leere(zus_rows)
+    if zus_rows:
+        story.append(_section("2 · Zusicherungen & Zustand", st))
+        story.append(Spacer(1, 6))
+        story.append(_two_col_kv(zus_rows, st))
+        story.append(Spacer(1, 12))
 
     # ---------- Schäden / Beschädigungen — aus interaktiver Skizze ----------
     damages_text = (contract.get("damages_text") or "").strip()
@@ -742,7 +769,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ],
         [
             Paragraph(preis_label, st["price_label"]),
-            Paragraph(pay_sub or "—", st["price_sub"]),
+            # Seit 16.09.2026 kein Strich, wenn keine Zahlungsart angegeben ist.
+            Paragraph(pay_sub, st["price_sub"]),
         ],
     ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])
     price_box.setStyle(TableStyle([

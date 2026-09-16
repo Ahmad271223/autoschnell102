@@ -1001,7 +1001,7 @@ gegenseitig ausbremsen:
   Abruf der Webseite bleibt die **Notlösung** und springt bei jedem
   API-Problem automatisch ein — ohne Schlüssel läuft alles wie bisher.
   Deshalb gilt für den API-Weg eine eigene, höhere Obergrenze
-  (`MAX_CONCURRENT_KLEINANZEIGEN_API`, 8) als für den Selbst-Abruf
+  (`MAX_CONCURRENT_KLEINANZEIGEN_API`, seit 16.09.2026 Vorgabe 20) als für den Selbst-Abruf
   (`MAX_CONCURRENT_KLEINANZEIGEN`, 2). Wird der Schlüssel abgelehnt,
   steht das als Fehler im Protokoll — sonst liefe still der langsame Weg.
   **Bekannte Einschränkung:** In Großstädten außerhalb von Berlin/Hamburg
@@ -1554,16 +1554,43 @@ Quelle, also für den Fall oben 60) und (2) Apify mobile.de/AutoScout in ≤ 8 s
 so viele gleichzeitige Actor-Läufe erlaubt. Kleinanzeigen < 2 s ist knapp: API-Antwort 1–2 s plus
 ≈ 1 s eigener Anteil.
 
+**Noch schneller?** Der eigene Anteil je Vergleich ist bereits klein (Datenbank-Rundläufe, keine
+Rechenarbeit); seit 16.09.2026 schreibt der Vergleich den Cache-Schlüssel des Inserats mit demselben
+Write ans Fahrzeug wie die Übernahme (vorher ein eigener `update_one`). Der größte Hebel liegt in
+der Server-Konfiguration: `docker-compose.yml` reichte bis einschließlich Stand `0a84eb9` als
+Vorgabe nur 2 Slots für mobile.de und AutoScout, 8 für die Kleinanzeigen-API und 2 Jobs je Prozess
+durch, sobald die `.env` die Werte nicht setzt — und ältere Kopien der Vorlage trugen ebenfalls je 2.
+Damit warten 60 gleichzeitig neue mobile.de-Links bis zu 5 Minuten, und die Oberfläche meldet nach
+2 Minuten „dauert ungewöhnlich lange, dein Link ist vorgemerkt“. Seit dem Folgestand lauten die
+Vorgaben in Compose, Code und `.env.example` einheitlich 20/20/20 Slots und 32 Jobs je Prozess.
+**Auf beiden Servern prüfen**, was die `.env` trägt:
+
+```bash
+grep -E "^(MAX_CONCURRENT|LINK_JOB_CONCURRENCY|WEB_CONCURRENCY)" /opt/autoschnell/.env
+```
+
+Empfehlung: `MAX_CONCURRENT_MOBILE=20`, `MAX_CONCURRENT_AUTOSCOUT=20`,
+`MAX_CONCURRENT_KLEINANZEIGEN_API=20`, `LINK_JOB_CONCURRENCY=32` eintragen (oder die Zeilen
+streichen, dann gelten die Compose-Vorgaben), danach `docker compose up -d`. Voraussetzung: der
+Apify-Plan erlaubt so viele gleichzeitige Actor-Läufe (Apify-Konsole → Settings → Limits); sonst
+stellt Apify die Läufe in seine eigene Warteschlange, die Abrufe dauern länger, und nach 180 s
+bricht ein Abruf ab und der Job versucht es erneut. Die Anbieterzeit selbst (Kleinanzeigen-API
+1–2 s, Apify 8–20 s) lässt sich von uns nicht verkürzen — bekannte Links sind deshalb der schnelle
+Weg (kein Abruf, < 1 s). `WEB_CONCURRENCY` bleibt bei der Kernzahl (CCX23: 4); die Annahme der
+Anfragen ist nicht der Engpass.
+
 Jeder Link wurde genau einmal abgerufen, Mitwartende hängen sich an den laufenden Abruf, keine
 429/503. Die Wartezeit bestimmen zwei Größen: `LINK_JOB_CONCURRENCY` (Job-Arbeiter je
 API-Prozess; Produktion: `WEB_CONCURRENCY` Prozesse je Server) und die Anbieter-Slots
 `MAX_CONCURRENT_MOBILE` / `MAX_CONCURRENT_AUTOSCOUT` / `MAX_CONCURRENT_KLEINANZEIGEN` (global über
-alle Prozesse, in der Datenbank). Mit den Beispielwerten der `.env.example` (je 2) und echten
-Abrufzeiten von 10–20 s je Inserat warten bei 30 gleichzeitig neuen Links die letzten mobile.de-Links
-1,5–3 Minuten und die letzten AutoScout-Links 40–80 Sekunden. Für Bürobetrieb mit vielen Suchern:
-`MAX_CONCURRENT_MOBILE=10`, `MAX_CONCURRENT_AUTOSCOUT=5` (Apify-Plan beachten),
-`LINK_JOB_CONCURRENCY=4`. Der echte Wert lässt sich mit `deploy/lasttest-auf-prod2.sh` messen;
-dort kosten die Abrufe Geld.
+alle Prozesse, in der Datenbank). Faustregel: der letzte einer Welle wartet etwa
+(neue Links je Quelle ÷ Slots) × Abrufdauer. Mit nur 2 Slots (alte Vorgabe) und 15 s je Apify-Abruf
+sind das bei 10 gleichzeitig neuen mobile.de-Links rund 75 s, bei 60 Links rund 7,5 Minuten; mit
+20 Slots bleibt es bei 15 s bzw. 45 s. Ein Job, der 30 s lang keinen Slot bekommt, geht ohne
+Fehlversuch zurück in die Schlange — er scheitert nicht, er wartet; die Oberfläche fragt bis zu
+2 Minuten nach und bittet danach um einen neuen Versuch (der Link bleibt vorgemerkt). Die Kapazität
+der eigenen Server lässt sich mit `deploy/lasttest-auf-prod2.sh` messen (Anbieter-Attrappe, ohne
+Kosten); die echte Anbieterzeit misst nur ein Abruf mit echten Links.
 
 ### Runde 19 (16.09.2026): Sucher-Termine, Übergabe, Abruf-Lease, Auto-Daten
 
@@ -1628,6 +1655,10 @@ dort kosten die Abrufe Geld.
   Empfangsbestätigung (Schlüssel erhalten, Kaufpreis bestätigt) — beides nur in der Druckfassung
   für Fahrer, Sucher und Chef. Kein Kennzeichen, keine Uhrzeit im Vertrag. Scheckheftgepflegt als
   Auswahl (ja, lückenlos / nein / teilweise bis MM/JJJJ).
+- **Leere Punkte fehlen im Vertrag** (16.09.2026, Wunsch Ahmad): Was der Sucher nicht ausfüllt
+  (z. B. Ansprechpartner, E-Mail, Bereifung), steht nicht als Zeile mit Strich im Vertrag, sondern
+  entfällt ganz — in den Kästen Verkäufer/Käufer, bei den Fahrzeugdaten und bei den
+  Zusicherungen; ein leerer Zusicherungs-Block entfällt samt Überschrift (`pdf_service._ohne_leere`).
 - **Versand:** `VERSAND_JE_KONTO_10MIN` (Standard 300) deckelt die Vertragsversände je Konto.
   Der Versand-Schlüssel ist an Fassung, Kanal, Empfänger, Betreff und Text gebunden (409 bei
   Abweichung); bei E-Mail können zwei Tabs denselben Vertrag nicht gleichzeitig an denselben

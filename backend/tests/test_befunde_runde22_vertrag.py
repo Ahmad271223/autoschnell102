@@ -204,7 +204,9 @@ def test_06_angekreuzt_unterscheidet_sich_im_seiteninhalt(digital, monkeypatch):
     assert _kaestchen_rechtecke(alle) == 3
     # Runde 22 (Gegenpruefung): die drei Kaestchen werden auch dann
     # gezeichnet, wenn nichts angekreuzt ist — gezaehlt, nicht nur verglichen.
-    ohne = dict(_BASIS)
+    # 16.09.2026: leere Punkte (z. B. Zulassung) stehen nicht mehr im Vertrag —
+    # deshalb hier dieselben Sachfelder, nur ohne die Kaestchen-Schluessel.
+    ohne = dict(_BASIS, **{k: v for k, v in _EMPFANG.items() if k not in _KAESTCHEN})
     for vertrag in (leer, ohne):
         pdf = _pdf(vertrag, digital=digital)
         assert _kaestchen_rechtecke(pdf) == 3

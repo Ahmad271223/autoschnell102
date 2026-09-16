@@ -93,3 +93,21 @@ def test_ps_regel_nur_nach_unten():
     # bisherige Toleranz unveraendert (beide Grenzen)
     qt = _q(MS.build_search_url(dict(FZ), {"power": {"mode": "tolerance_ps", "value": 5}}))
     assert qt["pw"] == [f"{MS.ps_to_kw(145)}:{MS.ps_to_kw(155)}"]
+
+
+def test_leere_felder_erscheinen_nicht_im_vertrag():
+    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. Ansprechpartner,
+    E-Mail, Bereifung) stehen gar nicht im Vertrag — statt einer Zeile mit Strich."""
+    mit = _text(generate_contract_pdf(
+        dealer={**FIRMA, "contact_person": "Anna Chef", "email": "chef@example.com"},
+        vehicle={"make_label": "VW", "model_label": "Golf"},
+        contract={**BASIS, "seller_email": "v@example.com", "tires": "Sommer"}))
+    assert "Ansprechpartner" in mit and "Anna Chef" in mit and "Bereifung" in mit
+    ohne = _text(generate_contract_pdf(
+        dealer={**FIRMA, "contact_person": "", "email": ""},
+        vehicle={"make_label": "VW", "model_label": "Golf"},
+        contract={**BASIS, "seller_email": "", "tires": ""}))
+    assert "Ansprechpartner" not in ohne and "Bereifung" not in ohne
+    assert "chef@example.com" not in ohne and "v@example.com" not in ohne
+    assert "Marke" in ohne and "VW" in ohne          # gefuellte Felder bleiben
+
