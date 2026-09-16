@@ -95,8 +95,14 @@ export async function checkLink(client, url, opts = {}) {
       ({ data } = await client.get(`/listings/check/${jobId}`));
     } catch (err) {
       if (err?.response?.status === 404) {
-        // Job bereits weggeräumt — Ergebnis liegt dann im Cache.
-        return { status: "completed", job_id: jobId };
+        // Runde 19: Job bereits weggeräumt — nicht raten, sondern einmal neu
+        // prüfen: ein Cache-Treffer kommt als "completed", sonst ein frischer Job.
+        if (!opts.nochmalNach404) {
+          return checkLink(client, url, {
+            ...opts, nochmalNach404: true, maxWaitMs: Math.max(1, deadline - Date.now()),
+          });
+        }
+        throw new Error("Der Link konnte nicht geprüft werden — bitte erneut versuchen.");
       }
       throw err;
     }

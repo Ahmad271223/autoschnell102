@@ -72,7 +72,7 @@ def test_bestehender_datensatz_wird_gefunden(wegwerf):
     run(db.admin_vehicle_data.insert_one(_datensatz("avd1", 500000)))
     run(db.generated_pdfs.insert_one(_vertrag("c1", "avd1", created_at=_jetzt(-100))))
     assert run(auto_daten.bestehenden_datensatz(db, "d1", "v1")) == "avd1"
-    assert run(auto_daten.bestehenden_datensatz(db, "d1", None, "m1")) == "avd1"
+    assert run(auto_daten.bestehenden_datensatz(db, "d1", None, "m1")) is None   # Runde 19 (Nr. 39): nur die quellenspezifische Fahrzeug-ID zaehlt
     assert run(auto_daten.bestehenden_datensatz(db, "d2", "v1")) is None      # andere Firma
     assert run(auto_daten.bestehenden_datensatz(db, "d1", "v9")) is None      # anderes Auto
     assert run(auto_daten.bestehenden_datensatz(db, "d1", None, None)) is None
@@ -161,15 +161,20 @@ def test_fristloeschung_und_reparatur_respektieren_den_vermerk(wegwerf):
     run(db.admin_vehicle_data.insert_one(_datensatz("avd1", 500000)))
     run(db.generated_pdfs.insert_many([
         _vertrag("c_entfernt", "avd1", created_at=alt),
-        _vertrag("c_fehlt", "avd_weg", created_at=alt),
+        # Verweis ins Leere OHNE Vertragsdaten: nicht reparierbar -> Alarm, bleibt
+        {**_vertrag("c_fehlt", "avd_weg", created_at=alt), "contract_data": {}},
+        # Verweis ins Leere MIT Vertragsdaten: Runde 19 (Nr. 41) repariert an Ort und Stelle
+        _vertrag("c_repariert", "avd_weg2", created_at=alt),
     ]))
     assert run(auto_daten.entfernen(db, "avd1")) is True
     # Reparatur legt fuer den bewusst entfernten Datensatz nichts Neues an
     assert run(CS.auto_daten_reparieren(db)) == 0
     assert run(db.admin_vehicle_data.count_documents({})) == 0
     n = run(CS.vertraege_nach_frist_loeschen(db, datetime.now(timezone.utc), aktiv=True))
-    assert n == 1
+    assert n == 2
     assert run(db.generated_pdfs.find_one({"id": "c_entfernt"})) is None
-    assert run(db.generated_pdfs.find_one({"id": "c_fehlt"})) is not None   # ohne Vermerk: Alarm, bleibt
+    assert run(db.generated_pdfs.find_one({"id": "c_repariert"})) is None
+    assert run(db.admin_vehicle_data.count_documents({"purchase_price_cents": 500000})) == 1
+    assert run(db.generated_pdfs.find_one({"id": "c_fehlt"})) is not None   # ohne Daten: Alarm, bleibt
     assert run(db.betriebsalarme.count_documents({"ref": "c_fehlt"})) == 1
-    assert run(db.betriebsalarme.count_documents({"ref": "c_entfernt"})) == 0
+    assert run(db.betriebsalarme.count_documents({"ref": {"$in": ["c_entfernt", "c_repariert"]}})) == 0

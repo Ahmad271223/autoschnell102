@@ -254,6 +254,12 @@ async def _aktivem_job_beitreten(db, cache_key: str, dealer_id: str,
         projection={"_id": 0}, return_document=ReturnDocument.AFTER)
 
 
+class JobRace(WarteschlangeVoll):
+    """Runde 19 (Nr. 32): dreimal hintereinander verschwand der aktive Job
+    zwischen Einfuegen und Beitritt, und im Cache liegt nichts — der Client
+    soll kurz spaeter neu einreihen (503 statt geratenem 'completed')."""
+
+
 async def enqueue_job(db, url: str, dealer_id: str = "",
                       user_id: str = "") -> dict:
     """Job fuer diesen Link anlegen — oder den bereits AKTIVEN Job dieses
@@ -329,9 +335,19 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
     # Dreimal hintereinander verschwand der aktive Job zwischen Einfuegen und
     # Beitritt — praktisch ausgeschlossen. Dann wie bisher: das Ergebnis
     # liegt (wahrscheinlich) im Cache.
+    # Runde 19 (Nr. 32): nicht raten — liegt das Ergebnis wirklich im Cache,
+    # ist der Job fertig; sonst soll der Client kurz spaeter neu einreihen.
     log.warning("link_jobs: %s nach drei Einfuegeversuchen ohne aktiven Job",
                 identity["cache_key"])
-    return {**job, "status": "completed", "active": False}
+    try:
+        from listing_identity import peek_cached_listing
+        treffer = await peek_cached_listing(db, url, dealer_id=dealer_id or None)
+    except Exception:  # noqa: BLE001
+        treffer = None
+    if treffer is not None:
+        return {**job, "status": "completed", "active": False}
+    raise JobRace("Der Link wird gerade eingereiht — bitte in ein paar Sekunden erneut "
+                  "versuchen.", 0, 0)
 
 
 async def get_job(db, job_id: str) -> Optional[dict]:
@@ -508,8 +524,14 @@ async def _process(db, job: dict) -> None:
         return
 
     async def _fetcher(src, iid, url):
-        return await fetch_listing(db, src, iid, url,
-                                   dealer_id=job.get("requested_by_dealer", ""))
+        # Runde 19 (Nr. 28): dieselbe Konto-Bremse wie /mobile/compare und
+        # /listings/resolve — der Job kennt das Konto, das ihn erzeugt hat.
+        from routes.listings import _AbrufSlot
+        konto = {"id": job.get("requested_by_user") or job.get("requested_by_dealer") or "",
+                 "dealer_id": job.get("requested_by_dealer", "")}
+        async with _AbrufSlot(konto):
+            return await fetch_listing(db, src, iid, url,
+                                       dealer_id=job.get("requested_by_dealer", ""))
 
     # Audit 13.09.2026 (#32): Herzschlag fuer die Job-Frist, und die
     # Rueckstellung trifft nur den EIGENEN Claim — ein ueberholter Task
@@ -535,8 +557,9 @@ async def _process(db, job: dict) -> None:
                  "$inc": {"attempts": -1}})
             return
         except ListingGone as exc:
+            # Runde 19 (Nr. 31): nur den EIGENEN Claim abschliessen
             await db.link_jobs.update_one(
-                {"id": job["id"]},
+                eigener_claim,
                 {"$set": {"status": "failed", "active": False,
                           "error": str(exc), "finished_at": _now(),
                           "updated_at": _now()}})
@@ -545,7 +568,7 @@ async def _process(db, job: dict) -> None:
             endgueltig = job.get("attempts", 1) >= MAX_ATTEMPTS
             if endgueltig:
                 await db.link_jobs.update_one(
-                    {"id": job["id"]},
+                    eigener_claim,
                     {"$set": {"status": "failed", "active": False,
                               "error": str(exc)[:300], "finished_at": _now(),
                               "updated_at": _now()}})
@@ -556,10 +579,13 @@ async def _process(db, job: dict) -> None:
                               "error": str(exc)[:300], "updated_at": _now()},
                      "$unset": {"claim_id": ""}})
             return
-        await db.link_jobs.update_one(
-            {"id": job["id"]},
+        r = await db.link_jobs.update_one(
+            eigener_claim,
             {"$set": {"status": "completed", "active": False, "error": None,
                       "finished_at": _now(), "updated_at": _now()}})
+        if r.matched_count == 0:
+            log.warning("link_jobs: Job %s wurde waehrend des Abrufs neu vergeben — "
+                        "Abschluss des ueberholten Claims verworfen", job["id"])
     finally:
         if herz is not None:
             herz.cancel()

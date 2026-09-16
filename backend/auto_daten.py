@@ -255,14 +255,16 @@ async def zurueckrollen(db, datensatz_id: str) -> None:
 async def aktualisieren(db, datensatz_id: str,
                         contract_dict: Dict[str, Any],
                         vehicle: Dict[str, Any],
-                        gekauft_am: Optional[str] = None) -> None:
+                        gekauft_am: Optional[str] = None) -> bool:
     """Zulaessige Vertragskorrektur innerhalb der 90 Tage: den
     BESTEHENDEN Datensatz aktualisieren (kein Duplikat). Das Kaufdatum
     wird nur gesetzt, wenn es mitgegeben wird (Korrektur aendert es nicht)."""
     if not datensatz_id:
-        return
+        return False
     daten = daten_extrahieren(contract_dict, vehicle, gekauft_am)
-    await db[COLLECTION].update_one({"id": datensatz_id}, {"$set": daten})
+    res = await db[COLLECTION].update_one({"id": datensatz_id}, {"$set": daten})
+    # Runde 19 (Nr. 40): der Aufrufer muss wissen, ob der Datensatz noch da war.
+    return bool(res.matched_count)
 
 
 async def nachtragen(db, contract_doc: Dict[str, Any]) -> Optional[str]:
@@ -302,15 +304,14 @@ async def bestehenden_datensatz(db, dealer_id: str, vehicle_id: Optional[str],
     Datensatzes des juengsten, nicht geloeschten Vertrags dieser Firma zu
     diesem Fahrzeug — oder None (kein Vertrag, Datensatz vom Betreiber
     entfernt, Datensatz fehlt)."""
-    if not dealer_id or not (vehicle_id or mobile_ad_id):
+    # Runde 19 (Nr. 39): NUR ueber die quellenspezifische Fahrzeug-ID —
+    # mobile_ad_id allein kann auf zwei Portalen dasselbe Zahlenkuerzel tragen
+    # (Kleinanzeige 123456 vs. mobile.de 123456) und haette zwei verschiedene
+    # Autos zu einem Datensatz verschmolzen. mobile_ad_id wird ignoriert.
+    if not dealer_id or not vehicle_id:
         return None
-    oder: List[Dict[str, Any]] = []
-    if vehicle_id:
-        oder.append({"vehicle_id": vehicle_id})
-    if mobile_ad_id:
-        oder.append({"mobile_ad_id": mobile_ad_id})
     c = await db.generated_pdfs.find_one(
-        {"dealer_id": dealer_id, "$or": oder,
+        {"dealer_id": dealer_id, "vehicle_id": vehicle_id,
          "admin_vehicle_data_id": {"$type": "string"},
          "auto_daten_entfernt_am": {"$exists": False},
          "loeschung.status": {"$ne": "laeuft"}},
@@ -331,14 +332,90 @@ async def entfernen(db, datensatz_id: str) -> bool:
     Fahrzeug beginnt mit einem frischen Datensatz."""
     if not datensatz_id:
         return False
-    res = await db[COLLECTION].delete_one({"id": datensatz_id})
-    if not res.deleted_count:
-        return False
     from datetime import datetime, timezone
+    if not await db[COLLECTION].count_documents({"id": datensatz_id}, limit=1):
+        return False
+    # Runde 19 (Nr. 42): ZUERST die Vertraege markieren, DANN loeschen — bricht
+    # es dazwischen ab, steht der Datensatz noch (harmlos), statt dass ein
+    # Vertrag ohne Vermerk auf einen fehlenden Datensatz zeigt.
     await db.generated_pdfs.update_many(
         {"admin_vehicle_data_id": datensatz_id},
         {"$set": {"auto_daten_entfernt_am": datetime.now(timezone.utc).isoformat()}})
+    res = await db[COLLECTION].delete_one({"id": datensatz_id})
+    if not res.deleted_count:
+        await db.generated_pdfs.update_many({"admin_vehicle_data_id": datensatz_id},
+                                            {"$unset": {"auto_daten_entfernt_am": ""}})
+        return False
     return True
+
+
+async def nachfuehren(db, contract_doc: Dict[str, Any]) -> bool:
+    """Runde 19 (Nr. 45): den Datensatz eines bestehenden Vertrags aus dessen
+    aktueller Fassung nachfuehren (Neuerzeugung, Korrektur). Fehlt der Datensatz
+    (ohne Vermerk), wird er neu angelegt. Entfernt den Merker
+    auto_daten_nachfuehrung_offen. Liefert True, wenn der Vertrag danach einen
+    passenden Datensatz hat."""
+    cd = contract_doc.get("contract_data") or {}
+    vehicle = {"make_label": contract_doc.get("make"),
+               "model_label": contract_doc.get("model")}
+    if contract_doc.get("vehicle_id"):
+        v = await db.vehicles.find_one(
+            {"id": contract_doc["vehicle_id"],
+             "dealer_id": contract_doc.get("dealer_id")}, {"_id": 0, "data": 1})
+        if v and isinstance(v.get("data"), dict):
+            vehicle = {**v["data"], **{k: w for k, w in vehicle.items() if w}}
+    ok = False
+    if contract_doc.get("auto_daten_entfernt_am"):
+        ok = True                                   # bewusst ohne Datensatz
+    elif contract_doc.get("admin_vehicle_data_id"):
+        ok = await aktualisieren(db, contract_doc["admin_vehicle_data_id"], cd, vehicle)
+        if not ok:
+            await db.generated_pdfs.update_one(
+                {"id": contract_doc["id"],
+                 "admin_vehicle_data_id": contract_doc["admin_vehicle_data_id"]},
+                {"$unset": {"admin_vehicle_data_id": ""}})
+            ok = bool(await nachtragen(db, {**contract_doc, "admin_vehicle_data_id": None}))
+    else:
+        ok = bool(await nachtragen(db, contract_doc))
+    if ok:
+        await db.generated_pdfs.update_one({"id": contract_doc["id"]},
+                                           {"$unset": {"auto_daten_nachfuehrung_offen": ""}})
+    return ok
+
+
+SPERRE_SEKUNDEN = 15
+
+
+async def vertrag_sperre(db, dealer_id: str, vehicle_id, sekunden: int = SPERRE_SEKUNDEN) -> Optional[str]:
+    """Runde 19 (Nr. 38): kurze Sperre je Firma+Fahrzeug fuer die Vertragsanlage,
+    damit zwei gleichzeitige ERSTE Vertraege desselben Autos nicht zwei
+    Datensaetze anlegen. Wartet bis ~6 s; danach geht es ohne Sperre weiter
+    (kein Blocker fuer die Sucher). Liefert den Schluessel oder None."""
+    if not dealer_id or not vehicle_id:
+        return None
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from pymongo.errors import DuplicateKeyError
+    schluessel = f"auto_daten:{dealer_id}:{vehicle_id}"
+    for _ in range(12):
+        jetzt = datetime.now(timezone.utc)
+        try:
+            await db.sperren.update_one(
+                {"_id": schluessel, "$or": [{"bis": None}, {"bis": {"$lt": jetzt}}]},
+                {"$set": {"bis": jetzt + timedelta(seconds=sekunden)}}, upsert=True)
+            return schluessel
+        except DuplicateKeyError:
+            await asyncio.sleep(0.5)
+    return None
+
+
+async def sperre_freigeben(db, schluessel: Optional[str]) -> None:
+    if not schluessel:
+        return
+    try:
+        await db.sperren.delete_one({"_id": schluessel})
+    except Exception:  # noqa: BLE001 — laeuft sonst nach 15 s ab
+        pass
 
 
 async def vor_ort_nachtragen(db, contract_id: str, dealer_id: str,

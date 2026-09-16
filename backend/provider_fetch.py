@@ -64,9 +64,18 @@ async def _warnen_wenn_viel(db, tag: str, stand: int) -> None:
         pass                                # Warnung darf nie bremsen
 
 
-async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
+async def _budget_zurueck(db, belastet) -> None:
+    """Runde 19 (Nr. 7): ein technisch gescheiterter Abruf zaehlt nicht."""
+    for s in belastet or []:
+        try:
+            await db.provider_budget.update_one({"_id": s, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _budget_pruefen(db, source: str, dealer_id: str) -> list:
     if source not in ("mobile", "autoscout24"):
-        return
+        return []
     from datetime import datetime, timedelta, timezone
     from pymongo import ReturnDocument
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -96,6 +105,7 @@ async def _budget_pruefen(db, source: str, dealer_id: str) -> None:
                 "Speicher; neue Links bitte morgen erneut — oder das Limit "
                 "in der .env erhöhen (ANBIETER_TAGESLIMIT_*).")
     await _warnen_wenn_viel(db, tag, gesamt_stand)
+    return belastet
 
 
 async def fetch_listing(db, source: str, item_id: str, url: str,
@@ -105,13 +115,17 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
     if MOCK_PROVIDER_FETCH:
         await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
-    await _budget_pruefen(db, source, dealer_id)
+    belastet = await _budget_pruefen(db, source, dealer_id)
     try:
         return await _abrufen(db, source, item_id, url)
     except AnbieterFehler as exc:
         # Token/Guthaben -> Betriebsalarm (gedrosselt), Text geht 1:1 an
         # den Nutzer (Route: RuntimeError -> 502).
+        await _budget_zurueck(db, belastet)          # Runde 19 (Nr. 7)
         await melden(db, exc)
+        raise
+    except Exception:
+        await _budget_zurueck(db, belastet)
         raise
 
 

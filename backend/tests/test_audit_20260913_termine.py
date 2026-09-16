@@ -299,7 +299,8 @@ def test_06_terminliste_behaelt_kommende_termine_bei_ueberlauf(welt):
 
     ids2 = [a["id"] for a in abgeholt]
     # genau 2000 Treffer = Grenze erreicht -> Kopf (wie bisher ">= 2000")
-    assert len(ids2) == 2000 and antwort2.headers.get("X-Truncated") == "1"
+    # Runde 19 (Nr. 14): genau 2000 Treffer sind KEIN Abschnitt (kein 2001. Termin)
+    assert len(ids2) == 2000 and antwort2.headers.get("X-Truncated") is None
     daten2 = [a.get("pickup_date") or "" for a in abgeholt]
     assert daten2 == sorted(daten2) and ids2[-1] == f"alt1999_{w.s}"
 

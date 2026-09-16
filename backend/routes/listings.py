@@ -153,6 +153,14 @@ class AbrufGebremst(ListingBusy):
     """Konto-Bremse fuer direkte Abrufe (503 + Retry-After wie ListingBusy)."""
 
 
+# Runde 19 (Nr. 24): auch bekannte Links (Cache-Treffer) legen je Aufruf einen
+# Vergleichseintrag und einen Audit-Eintrag an — ein Skript soll die Datenbank
+# damit nicht fluten. Grosszuegig (Standard 120/min), weit ueber Handbetrieb.
+VERGLEICH_JE_KONTO_MINUTE = int(os.environ.get("VERGLEICH_JE_KONTO_MINUTE", "120") or 120)
+_vergleich_limiter = SlidingWindowRateLimiter(
+    max_attempts=VERGLEICH_JE_KONTO_MINUTE, window_seconds=60, name="vergleich")
+
+
 class _AbrufSlot:
     def __init__(self, user: dict):
         self.uid = str(user.get("id") or user.get("dealer_id") or "ohne")
@@ -258,6 +266,21 @@ async def _als_mitbearbeiter_eintragen(user: dict, filt: dict, besitzer: str,
             "mitbearbeiter": True}
 
 
+async def _altbestand_uebernehmen(user: dict, filt: dict) -> Optional[dict]:
+    """Runde 19 (16.09.2026, Nr. 33): Altbestand ohne Besitzer — wer den CAS
+    gewinnt, wird Hauptbearbeiter; der Verlierer wird Mitbearbeiter. Vorher
+    fiel er durch (Vergleich ok, Fahrzeug fehlte in seinem Bereich)."""
+    r = await db.vehicles.update_one({**filt, "owner_user_id": None},
+                                     {"$set": {"owner_user_id": user["id"]}})
+    if r.matched_count:
+        return None
+    jetzt = await db.vehicles.find_one(filt, {"_id": 0, "owner_user_id": 1, "updated_at": 1})
+    besitzer = (jetzt or {}).get("owner_user_id")
+    if besitzer and besitzer != user["id"] and ist_sucher(user):
+        return await _als_mitbearbeiter_eintragen(user, filt, besitzer, (jetzt or {}).get("updated_at"))
+    return None
+
+
 async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                                 frisch: dict,
                                 quelle: Optional[str] = None) -> Optional[dict]:
@@ -339,9 +362,7 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                         continue
                     break
             if not besitzer:
-                await db.vehicles.update_one(
-                    {**filt, "owner_user_id": None},
-                    {"$set": {"owner_user_id": user["id"]}})
+                kollege = await _altbestand_uebernehmen(user, filt)
             break
         # Erstvergleich: atomar anlegen oder — wenn ein Kollege gleichzeitig
         # schneller war — dessen Dokument aktualisieren (Befund 1).
@@ -384,9 +405,7 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                           "updated_at": now_iso(), **quelle_set}})
             besitzer = vorher.get("owner_user_id")
             if not besitzer:
-                await db.vehicles.update_one(
-                    {**filt, "owner_user_id": None},
-                    {"$set": {"owner_user_id": user["id"]}})
+                kollege = await _altbestand_uebernehmen(user, filt)
             elif ist_sucher(user) and besitzer != user["id"]:
                 kollege = await _als_mitbearbeiter_eintragen(
                     user, filt, besitzer, vorher.get("updated_at"))
@@ -407,6 +426,9 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
 async def compare(body: CompareIn, background: BackgroundTasks,
                   user=Depends(require_active_sub)):
     raw_url = (body.url or "").strip()
+    if not await _vergleich_limiter.check(f"vergleich:{user.get('id') or user.get('dealer_id')}"):
+        raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit von diesem Konto — "
+                                 "bitte kurz warten.")
 
     # Unified cache key = f"{source}:{item_id}". Dadurch werden
     # Kleinanzeigen-/mobile.de-/AutoScout-URLs innerhalb der TTL nur EINMAL
@@ -500,11 +522,15 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)
         raise HTTPException(502, str(exc))
-    except Exception:
+    except HTTPException:
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)
         raise
-    except Exception as exc:
+    except Exception:
+        # Runde 19 (Nr. 25): der zweite "except Exception" darunter war nie
+        # erreichbar — Log und klare Meldung liefen deshalb nie.
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         log.exception("compare fetch failed for %s", raw_url)
         if source == "kleinanzeigen":
             raise HTTPException(500, "Fahrzeugdaten konnten nicht geladen werden (Kleinanzeigen).")
@@ -744,7 +770,7 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
                     "hint": "Bitte über die Browser-Erweiterung laden."}
         rueckfall_gebucht = bool(body.ohne_erweiterung)
 
-    from link_jobs import enqueue_job, process_one_now, WarteschlangeVoll
+    from link_jobs import enqueue_job, process_one_now, WarteschlangeVoll, JobRace
     try:
         # Runde 28: Der Job gehoert auch dem KONTO — dadurch bedient der
         # Worker die Sucher reihum, und ein einzelnes Konto kann die
@@ -752,6 +778,10 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         job = await enqueue_job(db, raw_url,
                                 dealer_id=user.get("dealer_id") or "",
                                 user_id=user.get("id") or "")
+    except JobRace as race:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
+        raise HTTPException(503, race.text, headers={"Retry-After": "2"})
     except WarteschlangeVoll as voll:
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)     # Runde 16: Kontingent nicht verbrennen

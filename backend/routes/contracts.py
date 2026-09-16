@@ -749,18 +749,22 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Wunsch Ahmad 15.09.2026: ein neuer Vertrag zu demselben Fahrzeug (neuer
     # Preis, Nachverhandlung) fuehrt den vorhandenen Auto-Datensatz nach — in
     # den Auto-Daten steht das Auto einmal, mit dem aktuellen Preis und Kaufdatum.
+    # Runde 19 (Nr. 37/38): Fahrzeug kurz vor dem Pool-Trimmen schuetzen und
+    # eine kurze Sperre je Firma+Fahrzeug, damit zwei ERSTE Vertraege desselben
+    # Autos nicht zwei Datensaetze anlegen.
+    from fahrzeugpool import kurz_schuetzen
+    await kurz_schuetzen(db, user["dealer_id"], body.vehicle_id)
+    sperre = await auto_daten.vertrag_sperre(db, user["dealer_id"], body.vehicle_id)
     auto_daten_id = await auto_daten.bestehenden_datensatz(
-        db, user["dealer_id"], body.vehicle_id, v.get("mobile_ad_id"))
+        db, user["dealer_id"], body.vehicle_id)
     auto_daten_neu = auto_daten_id is None
     if auto_daten_neu:
         auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
-    else:
-        await auto_daten.aktualisieren(db, auto_daten_id, contract_dict, vehicle,
-                                       gekauft_am=now_iso())
     doc["admin_vehicle_data_id"] = auto_daten_id
     try:
         await db.generated_pdfs.insert_one(doc)
     except DuplicateKeyError:
+        await auto_daten.sperre_freigeben(db, sperre)
         # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
         # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.
         if auto_daten_neu:
@@ -778,9 +782,31 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             return {**clean_doc(vorhanden), "bereits_vorhanden": True}
         raise
     except Exception:
+        await auto_daten.sperre_freigeben(db, sperre)
         if auto_daten_neu:
             await auto_daten.zurueckrollen(db, auto_daten_id)
         raise
+    if not auto_daten_neu:
+        # Runde 19 (Nr. 36/40): den bestehenden Datensatz erst NACH dem
+        # dauerhaften Vertrag nachfuehren (ein gescheiterter Vertrag aendert
+        # nichts); ist er inzwischen vom Betreiber geloescht, bekommt der
+        # Vertrag einen frischen — kein Verweis ins Leere.
+        try:
+            if not await auto_daten.aktualisieren(db, auto_daten_id, contract_dict, vehicle,
+                                                  gekauft_am=now_iso()):
+                neu_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+                await db.generated_pdfs.update_one(
+                    {"id": pdf_id, "admin_vehicle_data_id": auto_daten_id},
+                    {"$set": {"admin_vehicle_data_id": neu_id}})
+                auto_daten_id = neu_id
+        except Exception:  # noqa: BLE001
+            log.exception("Auto-Daten zu Vertrag %s nicht nachgefuehrt — Merker fuer den Aufraeumjob", pdf_id)
+            try:
+                await db.generated_pdfs.update_one({"id": pdf_id},
+                                                   {"$set": {"auto_daten_nachfuehrung_offen": True}})
+            except Exception:  # noqa: BLE001
+                pass
+    await auto_daten.sperre_freigeben(db, sperre)
     # Runde 17 (Nr. 265): Ab hier ist der Vertrag dauerhaft. Scheitert das
     # Nachziehen von Fahrzeugstatus/Lebenszyklus (DB-Aussetzer), endete der
     # Request bisher mit 500 — der Client wiederholte und legte einen
@@ -1831,6 +1857,15 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Pruefung 14.09.2026 (Liste 6, Nr. 5): auch die manuelle Loeschung
     # entfernt Verkaeuferdaten aus Termin, Protokoll und Bericht — ein
     # geloeschter Vertrag hinterlaesst keine Personendaten.
+    # Runde 19 (16.09.2026, Vertraege Nr. 1): ein unterschriebenes Abholprotokoll
+    # macht den Vertrag zum Beleg — der Sucher loescht ihn nicht mehr, nur der
+    # Chef (mit Blick auf die Aufbewahrungspflicht).
+    if user.get("role") == "sucher" and termin_ids and await db.pickup_protocols.count_documents(
+            {"appointment_id": {"$in": termin_ids}, "superseded": {"$ne": True},
+             "status": "final"}, limit=1):
+        raise HTTPException(409, "Zu diesem Vertrag gibt es ein unterschriebenes Abhol-"
+                                 "protokoll — der Beleg bleibt. Löschen kann ihn nur der "
+                                 "Händler-Hauptaccount.")
     ok = await vertrag_endgueltig_loeschen(
         db, contract_id, scrub_pii=True, grund="manuell", audit=False)
     if not ok:
@@ -2008,6 +2043,9 @@ async def regenerate_contract_for_pickup(
             "pickup_date": neu_datum,
             "pickup_time": neu_zeit,
             "version": alte_version + 1,
+            # Runde 19 (Nr. 45): Merker — scheitert die Nachfuehrung der Auto-Daten
+            # unten, holt auto_daten_reparieren sie nach (vorher nur ein Log).
+            "auto_daten_nachfuehrung_offen": True,
             "updated_at": now_iso(),
             # Runde 16 (15.09.2026): eine neue Fassung ist noch NICHT versendet.
             **({"status": "neu erstellt"} if doc.get("status") in ("versendet", "versand_vorbereitet") else {}),
@@ -2040,14 +2078,10 @@ async def regenerate_contract_for_pickup(
     # gespeichert waren. Fehlende Auto-Datensaetze traegt auto_daten_reparieren
     # nach; das Abholdatum steht nicht in den Auto-Daten.
     try:
-        if doc.get("admin_vehicle_data_id"):
-            await auto_daten.aktualisieren(db, doc["admin_vehicle_data_id"],
-                                           contract_dict, vehicle)
-        else:
-            await auto_daten.nachtragen(db, {**doc, "contract_data": contract_dict})
+        await auto_daten.nachfuehren(db, {**doc, "contract_data": contract_dict})
     except Exception:  # noqa: BLE001
         log.exception("Auto-Daten nach Neuerzeugung von %s nicht nachgefuehrt — "
-                      "Aufraeumjob holt fehlende Datensaetze nach", contract_id)
+                      "der Aufraeumjob holt es ueber den Merker nach", contract_id)
     await log_activity_sicher(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
                               ref=contract_id,
                               meta={"von": alt_datum, "auf": neu_datum})

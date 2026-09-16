@@ -324,7 +324,8 @@ def test_35_akte_filtert_abgeloeste_protokolle():
     import inspect
     import routes.bestand as rb
     quelle = inspect.getsource(rb.vehicle_akte)
-    kopf = quelle[quelle.index("db.pickup_protocols.find("):]
+    # Runde 19: der Filter steht vor dem find (auch fuer den Gesamtzaehler)
+    kopf = quelle[quelle.index("protokoll_filter = {"):]
     kopf = kopf[:kopf.index(".to_list(")]
     assert '"superseded": {"$ne": True}' in kopf
     assert '"superseded": 1' in kopf

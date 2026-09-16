@@ -186,9 +186,6 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
     uebrigen Regeln (Land, Unfallwagen, Preisrahmen …) aus dem aktiven
     Regelpaket des Haendlers.
     """
-    if not await suche_limiter.check(f"suche:{user['id']}"):
-        raise HTTPException(429, "Zu viele Suchen in kurzer Zeit — bitte eine Minute warten.")
-
     # ---- Marke/Modell gegen den Katalog: unbekannt ist ein Fehler, keine Breitensuche ----
     as_make = _as_find_make(body.make)
     if not as_make:
@@ -199,6 +196,10 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
         if not as_model:
             raise HTTPException(400, f"Modell unbekannt fuer {as_make.get('makeName', body.make)}: "
                                      f"{body.model!r}. Bitte aus der Liste waehlen.")
+    # Runde 19 (Nr. 26): das Kontingent erst NACH der Eingabepruefung verbrauchen —
+    # Tipp- oder Zuordnungsfehler (400) zaehlten vorher als Suchen.
+    if not await suche_limiter.check(f"suche:{user['id']}"):
+        raise HTTPException(429, "Zu viele Suchen in kurzer Zeit — bitte eine Minute warten.")
 
     from deps import effective_dealer
     dealer = await effective_dealer(user)

@@ -305,11 +305,14 @@ export default function FahrzeugAkte() {
                   ))}
                 </tbody>
               </table>
-              <button onClick={applyDeviations}
-                      className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-white"
-                      style={{ background: "var(--accent-red)" }}>
-                Änderungen übernehmen ({selectedDevs.length})
-              </button>
+              {/* Runde 19: Uebernahme ist Chefsache (Backend current_haendler) */}
+              {!sucher && (
+                <button onClick={applyDeviations}
+                        className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-white"
+                        style={{ background: "var(--accent-red)" }}>
+                  Änderungen übernehmen ({selectedDevs.length})
+                </button>
+              )}
               {v.deviations_applied_at && (
                 <span className="ml-3 text-[11px] text-zinc-500">zuletzt übernommen: {fmtDate(v.deviations_applied_at)}</span>
               )}
@@ -408,7 +411,11 @@ export default function FahrzeugAkte() {
             </div>
           )}
           {akte.comparisons.length > 0 && (
-            <div className="mt-2 text-xs text-zinc-500">{akte.comparisons.length} Vergleich(e) durchgeführt</div>
+            <div className="mt-2 text-xs text-zinc-500" data-testid="akte-vergleiche">
+              {akte.comparisons_gesamt ?? akte.comparisons.length} Vergleich(e) durchgeführt
+              {(akte.comparisons_gesamt || 0) > akte.comparisons.length
+                ? ` — die ${akte.comparisons.length} neuesten angezeigt` : ""}
+            </div>
           )}
         </Section>
 
@@ -431,12 +438,19 @@ export default function FahrzeugAkte() {
             <div className="mt-1.5 text-[11px] text-zinc-500">
               Unterschriften von Fahrer und Verkäufer/Kunde · beim Antippen als PDF öffnen
             </div>
+            {(akte.protocols_gesamt || 0) > akte.protocols.length && (
+              <div className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}
+                   data-testid="akte-protokolle-gekuerzt">
+                {akte.protocols.length} von {akte.protocols_gesamt} Protokollen angezeigt — die neuesten zuerst.
+              </div>
+            )}
           </Section>
         )}
       </div>
 
       {/* Bestand */}
-      {bestandForm && ["bestand", "verkaufsentwurf", "verkaufsbereit", "abgeholt", "reserviert"].includes(v.lifecycle) && (
+      {/* Runde 19: Standort, Kosten und Notizen bearbeitet nur der Chef (Backend chef-only) */}
+      {!sucher && bestandForm && ["bestand", "verkaufsentwurf", "verkaufsbereit", "abgeholt", "reserviert"].includes(v.lifecycle) && (
         <Section title="Bestand · Standort & Kosten">
           <div className="grid sm:grid-cols-2 gap-3">
             <div>

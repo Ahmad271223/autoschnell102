@@ -40,8 +40,27 @@ async def _aktive_konten(db, dealer_id: str, ids) -> set:
     return aktiv
 
 
+SCHUTZ_SEKUNDEN = 300
+
+
+async def kurz_schuetzen(db, dealer_id: str, vehicle_id, sekunden: int = SCHUTZ_SEKUNDEN) -> None:
+    """Runde 19 (16.09.2026, Nr. 37): waehrend ein Vertrag oder Termin zu
+    einem Fahrzeug entsteht, darf das Pool-Trimmen es nicht loeschen. Der
+    Schutzscan (Vertraege/Termine/Inserate) sieht den neuen Datensatz erst
+    nach dem Insert — dazwischen schuetzt dieser kurze Stempel."""
+    if not dealer_id or not vehicle_id:
+        return
+    from datetime import datetime, timedelta, timezone
+    bis = (datetime.now(timezone.utc) + timedelta(seconds=sekunden)).isoformat()
+    try:
+        await db.vehicles.update_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                     {"$set": {"geschuetzt_bis": bis}})
+    except Exception:  # noqa: BLE001 — Schutz ist Zusatz, der Vorgang laeuft
+        log.exception("Fahrzeug %s nicht kurz geschuetzt", vehicle_id)
+
+
 async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
-                               owner_user_id=None) -> int:
+                               owner_user_id=None, _tiefe: int = 0) -> int:
     """Runde 16: mit owner_user_id gilt das Limit JE KONTO — die Vergleiche
     eines Suchers verdraengen nicht mehr die eines Kollegen (vorher 30 je
     Firma). Ohne owner_user_id wie bisher firmenweit (Altaufrufer).
@@ -51,7 +70,13 @@ async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
     limit = POOL_MAX if limit is None else int(limit)
     if limit <= 0 or not dealer_id:
         return 0
-    filter_ = {"dealer_id": dealer_id, "lifecycle": "verglichen"}
+    from datetime import datetime, timezone
+    filter_ = {"dealer_id": dealer_id, "lifecycle": "verglichen",
+               # Runde 19 (Nr. 37): frisch geschuetzte Fahrzeuge (Vertrag/Termin
+               # entsteht gerade) bleiben aussen vor.
+               "$or": [{"geschuetzt_bis": {"$exists": False}},
+                       {"geschuetzt_bis": None},
+                       {"geschuetzt_bis": {"$lt": datetime.now(timezone.utc).isoformat()}}]}
     if owner_user_id:
         filter_["owner_user_id"] = owner_user_id
     cur = db.vehicles.find(
@@ -88,6 +113,7 @@ async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
                           if m and m != v.get("owner_user_id")}
     aktiv = await _aktive_konten(db, dealer_id, alle_mitbearbeiter)
     geloescht = 0
+    nachfolger_konten: set = set()
     for v in offen:
         besitzer = v.get("owner_user_id")
         mitbearbeiter = v.get("mitbearbeiter_ids") or []
@@ -119,10 +145,20 @@ async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
             if r.modified_count:
                 log.info("Fahrzeugpool %s: %s von %s an Mitbearbeiter %s uebergeben",
                          dealer_id, v["id"], besitzer, nachfolger)
+                nachfolger_konten.add(nachfolger)
             continue
         # Nur deaktivierte/fremde Mitbearbeiter: niemand Aktives braucht das
         # Fahrzeug — loeschen wie bisher, aber nur mit UNVERAENDERTER
         # Mitbearbeiterliste (kommt parallel ein Kollege dazu, bleibt es).
         r = await db.vehicles.delete_one({**stand, "mitbearbeiter_ids": mitbearbeiter})
         geloescht += r.deleted_count
+    # Runde 19 (Nr. 10): der Pool des Nachfolgers darf durch die Uebergabe
+    # nicht ueber die Grenze wachsen — einmal nachtrimmen (begrenzte Tiefe).
+    if owner_user_id and nachfolger_konten and _tiefe < 2:
+        for konto in sorted(nachfolger_konten):
+            try:
+                geloescht += await fahrzeugpool_trimmen(db, dealer_id, limit,
+                                                        owner_user_id=konto, _tiefe=_tiefe + 1)
+            except Exception:  # noqa: BLE001
+                log.exception("Fahrzeugpool %s: Nachtrimmen fuer %s fehlgeschlagen", dealer_id, konto)
     return geloescht

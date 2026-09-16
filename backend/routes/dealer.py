@@ -440,8 +440,10 @@ async def _altes_logo_wegraeumen(alte_url: Optional[str], dealer_id: str) -> Non
 # Abo-Dokument unterschiedlich (Anzeige: juengstes persoenliches, auch
 # abgelaufen; Kuendigung: nur Firmenabo) und die Anzeige mischte Felder aus
 # zwei Dokumenten. Jetzt EINE Auswahl fuer beide, deckungsgleich mit der
-# Zugriffspruefung (deps.subscription_for): zuerst ein AKTIVES persoenliches
-# Abo, sonst das Firmenabo. Sucher: immer nur das persoenliche.
+# Zugriffspruefung (deps.subscription_for): das JUENGSTE nicht ersetzte
+# persoenliche Abo, wenn es aktiv ist, sonst das Firmenabo (ein aelteres,
+# noch aktives persoenliches Abo zaehlt bewusst nicht — es gibt je Konto
+# hoechstens ein nicht ersetztes). Sucher: immer nur das persoenliche.
 async def massgebliches_abo(user: dict) -> Optional[dict]:
     from deps import sub_status_from_doc
     persoenlich = await db.subscriptions.find_one(

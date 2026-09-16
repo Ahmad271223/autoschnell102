@@ -251,13 +251,16 @@ async def auto_daten_gruppiert(
 @router.delete("/admin/vehicle-data/{datensatz_id}/damages")
 async def auto_daten_schaeden_entfernen(
     datensatz_id: str = Path(pattern=r"^[0-9a-f-]{36}$"),
-    _admin=Depends(current_super_admin),
+    admin=Depends(current_super_admin),
 ):
     r = await db[COLLECTION].update_one(
         {"id": datensatz_id},
         {"$set": {"damages": [], "maengel_vor_ort": [], "damages_redacted": True}})
     if not r.matched_count:
         raise HTTPException(404, "Datensatz nicht gefunden")
+    # Runde 19 (Nr. 44): das unwiderrufliche Entfernen der Schaeden steht im Audit.
+    await log_activity_sicher(admin.get("dealer_id") or "", admin["id"],
+                              "admin.auto_daten.schaeden_entfernt", ref=datensatz_id)
     return {"ok": True, "id": datensatz_id, "damages": []}
 
 

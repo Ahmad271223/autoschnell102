@@ -91,6 +91,9 @@ export default function Bestand() {
 
   const counts = data.counts || {};
   const pending = (counts["abgeholt"] || 0);
+  // Runde 19: Entscheidungen und manuelles Anlegen sind Chefsache (Backend:
+  // current_haendler) — Sucher sehen die Knoepfe nicht mehr (vorher 403 erst beim Klick).
+  const chef = user?.role === "dealer";
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-7xl mx-auto" data-testid="bestand-page">
@@ -107,11 +110,13 @@ export default function Bestand() {
             Fahrzeuge mit gespeichertem oder verschicktem Kaufvertrag und von Hand hinzugefügte.
           </div>
         </div>
-        <button onClick={() => setShowManual(true)}
-                className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
-                style={{ background: "var(--accent-red)" }}>
-          <Plus size={16} /> Fahrzeug manuell hinzufügen
-        </button>
+        {chef && (
+          <button onClick={() => setShowManual(true)}
+                  className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
+                  style={{ background: "var(--accent-red)" }}>
+            <Plus size={16} /> Fahrzeug manuell hinzufügen
+          </button>
+        )}
       </div>
 
       {pending > 0 && (
@@ -219,6 +224,7 @@ export default function Bestand() {
                 <div className="mt-3 pt-3 border-t flex flex-wrap gap-2" style={{ borderColor: "var(--border-default)" }}>
                   {lc === "abgeholt" ? (
                     <>
+                      {chef && (<>
                       <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
                               className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
                               style={{ background: "var(--accent-red)" }}>
@@ -233,6 +239,7 @@ export default function Bestand() {
                               className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400">
                         <Trash2 size={13} /> Löschen
                       </button>
+                      </>)}
                       {/* Runde 21: gerade frisch abgeholte Fahrzeuge brauchen den Weg
                           zum Abholbericht mit den Fahrerfotos — vorher fehlte er hier. */}
                       <Link to={`/app/akte/${v.id}`} data-testid={`akte-link-${v.id}`}
@@ -243,7 +250,7 @@ export default function Bestand() {
                     </>
                   ) : (
                     <>
-                      {(lc === "bestand") && (
+                      {chef && (lc === "bestand") && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
                                 className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
                                 style={{ background: "var(--accent-red)" }}>
@@ -252,7 +259,7 @@ export default function Bestand() {
                       )}
                       {/* Ab Vertragserstellung sofort inserierbar — die Abholung
                           läuft parallel weiter (Bericht landet in der Akte). */}
-                      {features.marktplatz && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
+                      {chef && features.marktplatz && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
                                 className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
                                 style={{ background: "var(--accent-red)" }}>

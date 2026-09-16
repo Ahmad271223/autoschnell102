@@ -510,8 +510,10 @@ def test_m6_akte_ohne_verkaufsdaten_und_fremde_historie(welt, sucher2):
     assert r.status_code == 200, r.text[:200]
     d = r.json()
     assert d["listings"] == [], "Verkaufsdaten sind Chefsache"
-    assert all(h.get("user_id") == sucher2["id"] for h in d["history"]), \
-        [h.get("action") for h in d["history"]]
+    # Runde 19 (Nr. 6/13): Sucher bekommen nur Aktion, Bezug und Zeit — keine
+    # Konto-Kennungen und keine Rohdaten (meta) anderer Akteure.
+    assert d["history"] and all(set(h) <= {"id", "action", "ref", "created_at"} for h in d["history"]), \
+        [sorted(h) for h in d["history"]]
     r = requests.get(f"{API}/vehicles/{vid}/akte", headers=welt["C"], timeout=30)
     assert r.status_code == 200 and len(r.json()["listings"]) == 1
     assert any(h.get("user_id") == welt["chef"]["id"] for h in r.json()["history"])

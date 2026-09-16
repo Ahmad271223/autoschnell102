@@ -33,11 +33,15 @@ Bonus (am Ende der Datei):
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
+
+_log = logging.getLogger("autohandel")
 
 # -----------------------------------------------------------------------------
 # 1. Regex-Patterns
@@ -377,12 +381,16 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
     identity = get_listing_identity(url)
     cache_key = identity["cache_key"]
     now = datetime.now(timezone.utc)
+    # Runde 19 (Nr. 22): first-wins ATOMAR — die Daten stehen nur im
+    # $setOnInsert. Zwei gleichzeitige erste Einreichungen liessen sonst die
+    # spaetere gewinnen (Vorpruefung und Upsert waren zwei Schritte).
     await db.listings_cache_client.update_one(
         {"cache_key": cache_key, "dealer_id": dealer_id},
-        {"$set": {"source": identity["source"], "item_id": identity["item_id"],
-                  "url": url, "data": data,
-                  "expires_at": now + timedelta(hours=ttl_hours)},
+        {"$set": {"zuletzt_gesehen": now},
          "$setOnInsert": {"cache_key": cache_key, "dealer_id": dealer_id,
+                          "source": identity["source"], "item_id": identity["item_id"],
+                          "url": url, "data": data,
+                          "expires_at": now + timedelta(hours=ttl_hours),
                           "created_at": now}},
         upsert=True)
     # Globale Freigabe ("Promotion") ist standardmaessig AUS (Pruefbericht
@@ -433,6 +441,16 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
                 upsert=True)
             return "promoted"
     return "quarantined"
+
+
+async def _lease_freigeben(db, cache_key: str, claim: str) -> None:
+    """Runde 19 (16.09.2026, Abrufe Nr. 30/31): nur die EIGENE Lease freigeben
+    (Claim-Token). Vorher gab ein ueberholter Prozess (langer DB-Aussetzer)
+    die Lease seines Nachfolgers frei — der Weg zu einem zweiten und dritten
+    Abruf desselben Links."""
+    await db.listings_cache.update_one(
+        {"cache_key": cache_key, "fetching_claim": claim},
+        {"$set": {"fetching_until": None}, "$unset": {"fetching_claim": ""}})
 
 
 async def get_or_fetch_listing(
@@ -497,6 +515,7 @@ async def get_or_fetch_listing(
                 return c
         return None
 
+    claim = uuid.uuid4().hex                   # Runde 19: Besitzer-Token der Lease
     got_lease = False
     for _wait in range(20):                    # max. ~30 s warten, dann klare Meldung
         lease_now = datetime.now(timezone.utc)
@@ -506,7 +525,8 @@ async def get_or_fetch_listing(
                  "$or": [{"fetching_until": {"$exists": False}},
                          {"fetching_until": None},
                          {"fetching_until": {"$lt": lease_now}}]},
-                {"$set": {"fetching_until": lease_now + timedelta(seconds=90)},
+                {"$set": {"fetching_until": lease_now + timedelta(seconds=90),
+                          "fetching_claim": claim},
                  # WICHTIG: source/item_id MUESSEN schon beim Lease gesetzt
                  # werden. Ohne sie legt der Upsert ein Dokument mit
                  # source=null/item_id=null an — und der Unique-Index
@@ -544,8 +564,8 @@ async def get_or_fetch_listing(
         await db.listings_cache.update_one(
             {"cache_key": cache_key},
             {"$inc": {"use_count": 1},
-             "$set": {"last_used_at": datetime.now(timezone.utc),
-                      "fetching_until": None}})
+             "$set": {"last_used_at": datetime.now(timezone.utc)}})
+        await _lease_freigeben(db, cache_key, claim)
         return frisch["data"], True, frisch.get("snapshot_id")
 
     # ZENTRALE PROVIDER-BEGRENZUNG: bevor wirklich extern abgerufen wird,
@@ -579,12 +599,10 @@ async def get_or_fetch_listing(
             await _aio.sleep(0.3)
     except Exception:
         # Lease nicht haengen lassen, sonst warten alle anderen 90 s.
-        await db.listings_cache.update_one(
-            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        await _lease_freigeben(db, cache_key, claim)
         raise
     if not slot_id:
-        await db.listings_cache.update_one(
-            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        await _lease_freigeben(db, cache_key, claim)
         raise ListingBusy(
             "Gerade werden viele Inserate gleichzeitig geladen - "
             "bitte in ein paar Sekunden erneut versuchen.")
@@ -598,8 +616,9 @@ async def get_or_fetch_listing(
         while True:
             try:
                 await _aio.sleep(30)
+                # Runde 19: nur die eigene Lease verlaengern (Claim-Token)
                 await db.listings_cache.update_one(
-                    {"cache_key": cache_key},
+                    {"cache_key": cache_key, "fetching_claim": claim},
                     {"$set": {"fetching_until":
                               datetime.now(timezone.utc) + timedelta(seconds=90)}})
                 await extend_slot(db, slot_id)
@@ -622,22 +641,23 @@ async def get_or_fetch_listing(
         data = await fetcher(source, item_id, url)
     except Exception:
         # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
-        await db.listings_cache.update_one(
-            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        await _lease_freigeben(db, cache_key, claim)
         raise
     finally:
         _heartbeat.cancel()
         await release_slot(db, slot_id)
     if not isinstance(data, dict):
-        await db.listings_cache.update_one(
-            {"cache_key": cache_key}, {"$set": {"fetching_until": None}})
+        await _lease_freigeben(db, cache_key, claim)
         raise RuntimeError(
             f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
         )
 
     expires_at = now + timedelta(hours=ttl_hours)
-    await db.listings_cache.update_one(
-        {"cache_key": cache_key},
+    # Runde 19: das Ergebnis nur unter der EIGENEN Lease speichern — ist sie
+    # inzwischen an einen Nachfolger gegangen, schreibt der (kein Upsert mehr,
+    # sonst entstuende ein zweites Dokument).
+    res = await db.listings_cache.update_one(
+        {"cache_key": cache_key, "fetching_claim": claim},
         {
             "$set": {
                 "cache_key": cache_key,
@@ -663,10 +683,12 @@ async def get_or_fetch_listing(
             # "$inc"-Schluessel im selben Dict wuerde den ersten still
             # verdraengen (Python behaelt nur den letzten).
             "$inc": {"use_count": 1, "fetch_count": 1},
-            "$setOnInsert": {"created_at": now},
+            "$unset": {"fetching_claim": ""},
         },
-        upsert=True,
     )
+    if res.matched_count == 0:
+        _log.warning("listings_cache %s: Lease waehrend des Abrufs verloren — "
+                     "Ergebnis nicht gespeichert (Nachfolger schreibt)", cache_key)
     # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
     # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
     # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).

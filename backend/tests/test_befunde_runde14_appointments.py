@@ -181,7 +181,8 @@ def test_101_leer_und_gueltig_bleiben_erlaubt():
 def test_74_listenlimit_2000_und_antwort_bleibt_liste():
     import routes.appointments as A
     src = inspect.getsource(A.list_appointments)
-    assert ".to_list(2000)" in src and ".to_list(500)" not in src
+    # Runde 19 (Nr. 14): einen mehr lesen (grenze + 1), damit "gekuerzt" ehrlich ist
+    assert ".to_list(grenze + 1)" in src and ".to_list(500)" not in src
     assert "return items" in src, "Antwortform (Liste) darf sich nicht aendern"
 
 

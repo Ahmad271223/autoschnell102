@@ -463,6 +463,11 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         # sie in seiner App an oder lehnt sie ab.
         doc["zuteilung"] = "offen"
         doc["zuteilung_am"] = now_iso()
+    # Runde 19 (Nr. 37): das Fahrzeug fuer ein paar Minuten vor dem Pool-
+    # Trimmen schuetzen — der Schutzscan des Trimmens laeuft sonst genau
+    # zwischen "noch frei" und dem neuen Termin.
+    from fahrzeugpool import kurz_schuetzen
+    await kurz_schuetzen(db, user["dealer_id"], doc.get("vehicle_id"))
     try:
         await db.appointments.insert_one(doc)
     except DuplicateKeyError:
@@ -525,6 +530,20 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
     return out
 
 
+# Runde 19 (16.09.2026, Termine Nr. 5/12): Termin-Antworten an Sucher tragen
+# keine Konto-Kennungen und internen Verweise mehr (wer angelegt/uebergeben
+# hat, Kaufvorgang) — dieselbe Regel wie konten_maskieren bei Fahrzeugen.
+_TERMIN_INTERN = ("created_by", "uebergeben_von", "uebergeben_am",
+                  "kaufvorgang_id", "driver_id_hist")
+
+
+def termin_fuer_sucher(user: dict, a: dict) -> dict:
+    if user.get("role") == "sucher" and isinstance(a, dict):
+        for feld in _TERMIN_INTERN:
+            a.pop(feld, None)
+    return a
+
+
 @router.get("/appointments")
 async def list_appointments(response: Response, user=Depends(current_firma),
                             status: Optional[str] = None):
@@ -542,9 +561,12 @@ async def list_appointments(response: Response, user=Depends(current_firma),
     # juengsten. Die Antwort bleibt aufsteigend (Termine.jsx "Kommend").
     grenze = 2000
     if status:
+        # Runde 19 (Nr. 14): einen mehr lesen — bei genau 2000 Terminen hiess es
+        # sonst faelschlich "gekuerzt".
         items = await db.appointments.find(
-            {**query, "status": status}, {"_id": 0}).sort("pickup_date", -1).to_list(2000)
-        abgeschnitten = len(items) >= grenze
+            {**query, "status": status}, {"_id": 0}).sort("pickup_date", -1).to_list(grenze + 1)
+        abgeschnitten = len(items) > grenze
+        items = items[:grenze]
     else:
         # Nachbesserung: auch die offenen selbst koennen die Grenze sprengen
         # (nie abgeschlossene Alttermine). Aufsteigend gekappt fielen dann
@@ -552,9 +574,11 @@ async def list_appointments(response: Response, user=Depends(current_firma),
         # unter "Kommend") zuerst, dann die JUENGSTEN mit Datum; es fallen die
         # aeltesten offenen weg. grenze + 1 erkennt den Abschnitt genau.
         offen_q = {**query, "status": {"$nin": sorted(ABGESCHLOSSEN)}}
+        # Runde 19 (Nr. 15): datumslose Termine deterministisch (juengste zuerst)
+        # statt in natuerlicher Reihenfolge der Datenbank.
         items = await db.appointments.find(
             {**offen_q, "pickup_date": {"$in": ["", None]}}, {"_id": 0},
-        ).to_list(grenze + 1)
+        ).sort("created_at", -1).to_list(grenze + 1)
         items += await db.appointments.find(
             {**offen_q, "pickup_date": {"$nin": ["", None]}}, {"_id": 0},
         ).sort("pickup_date", -1).to_list(max(1, grenze + 1 - len(items)))
@@ -622,6 +646,7 @@ async def list_appointments(response: Response, user=Depends(current_firma),
                                     else (hist_map.get(h) or "ehemaliger Fahrer"))}
         if a.get("vehicle_id") and a["vehicle_id"] in vehicles_map:
             a["vehicle"] = vehicles_map[a["vehicle_id"]]
+        termin_fuer_sucher(user, a)
     return items
 
 
@@ -631,14 +656,22 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
     if not a:
         raise HTTPException(404, "Termin nicht gefunden")
     if a.get("vehicle_id"):
+        # Runde 19 (16.09.2026, Termine Nr. 1/2): dieselbe Projektion wie die
+        # Terminliste (kein rohes Fahrzeugdokument mit Bestandsnotizen, Kosten,
+        # Inseratskopie) und dieselbe Konto-Maskierung wie ueberall sonst.
         v = await db.vehicles.find_one(
-            {"id": a["vehicle_id"], "dealer_id": user["dealer_id"]}, {"_id": 0},
+            {"id": a["vehicle_id"], "dealer_id": user["dealer_id"]},
+            {"_id": 0, "id": 1, "data": 1, "status": 1, "lifecycle": 1,
+             "source": 1, "mobile_ad_id": 1, "purchase_price": 1,
+             "abgeholt_kaufvorgang_id": 1, "owner_user_id": 1, "mitbearbeiter_ids": 1},
         )
         if v:
             # Runde 23 (11.09.2026, Gegenpruefung): Sucher sehen nur ihren
             # eigenen Einkaufspreis — auch hier nicht den des Kollegen aus dem
             # gemeinsamen Fahrzeug-Dokument (Chef unveraendert).
             await __import__("kaufvorgang").einkauf_fuer_sucher_maskieren(user, v)
+            from deps import konten_maskieren
+            konten_maskieren(user, v)
             a["vehicle"] = v
     if a.get("driver_id"):
         d = await db.driver_accounts.find_one(
@@ -652,7 +685,7 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
                 "driver_code": d.get("driver_code") if chef_sicht else None,
                 "email": d.get("email") if chef_sicht else None,
             }
-    return a
+    return termin_fuer_sucher(user, a)
 
 
 async def _sucher_darf(user: dict, appt: dict) -> bool:
@@ -1218,7 +1251,7 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
         {"id": appt_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "created_by": 1, "status": 1, "contract_id": 1, "kaufvorgang_id": 1,
          "vehicle_id": 1, "driver_id": 1, "pickup_date": 1, "pickup_time": 1,
-         "zuteilung": 1})
+         "zuteilung": 1, "updated_at": 1})
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
     if user.get("role") == "sucher":
@@ -1294,9 +1327,13 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma)):
             {"$set": {"appointment_id": None}}, **ses)
         # Runde 12 (15.09.2026, Nr. 17): nur den Stand loeschen, der geprueft
         # wurde — setzt der Fahrer dazwischen "nicht abgeholt", greift das nicht.
+        # Runde 19 (Nr. 35): auch updated_at gehoert zum geprueften Stand —
+        # aendert ein paralleler Tab Vertrag, Fahrzeug oder Abholort, trifft
+        # der alte Loeschaufruf nicht mehr (409 "erneut laden").
         r = await db.appointments.delete_one(
             {"id": appt_id, "dealer_id": user["dealer_id"],
-             "status": appt.get("status"), "zuteilung": appt.get("zuteilung")}, **ses)
+             "status": appt.get("status"), "zuteilung": appt.get("zuteilung"),
+             "updated_at": appt.get("updated_at")}, **ses)
         return r.deleted_count
 
     geloescht = await _transaktion(_kern)

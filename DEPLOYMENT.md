@@ -1507,6 +1507,42 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   zeigt den Stand (`{"marktplatz": false}`).
 - Tests und CI laufen mit `MARKTPLATZ_AKTIV=true`, damit die Marktplatz-Tests weiter greifen.
 
+### Runde 19 (16.09.2026): Sucher-Termine, Übergabe, Abruf-Lease, Auto-Daten
+
+- **Termine:** Termin-Antworten an Sucher tragen keine Konto-Kennungen mehr (`created_by`,
+  `uebergeben_von`, `kaufvorgang_id`); das Termin-Detail liefert das Fahrzeug mit derselben
+  Projektion wie die Liste (keine Bestandsnotizen, Kosten, Inseratskopie) und maskiert Konto-IDs.
+  Löschen prüft auch `updated_at` (409 bei paralleler Änderung).
+- **„Aus meiner Liste entfernen“** übergibt den ganzen Vorgang an den Chef (Kaufvorgänge,
+  Verträge, Termine), wie der Besitzerwechsel. Der Besitzerwechsel schreibt den Merker
+  `vehicles.uebergabe_offen`; eine Wiederholung oder der Stundenlauf (`uebergaben_nachholen`)
+  bringt eine abgebrochene Übergabe zu Ende. Die Protokollsperre gilt je Firma und wird nach dem
+  Write nochmals geprüft.
+- **Fahrzeugpool:** Übergabe an einen Mitbearbeiter trimmt anschließend dessen Pool; während ein
+  Vertrag oder Termin entsteht, ist das Fahrzeug fünf Minuten geschützt (`geschuetzt_bis`).
+  Altbestand ohne Besitzer: der Verlierer des Wettrennens wird Mitbearbeiter.
+- **Abrufe:** die Cache-Lease trägt ein Besitzer-Token (`fetching_claim`); Herzschlag, Freigabe und
+  Ergebnis wirken nur unter der eigenen Lease. Link-Jobs schließen nur den eigenen Claim ab; der
+  Hintergrund-Abruf läuft durch dieselbe Konto-Bremse wie der Vergleich. Nach drei Job-Rennen wird
+  der Cache geprüft statt „completed“ geraten (sonst 503, Client reiht neu ein). Ein technisch
+  gescheiterter mobile.de/AutoScout-Abruf wird im Tagesbudget zurückgebucht. Der Vergleich ist je
+  Konto auf `VERGLEICH_JE_KONTO_MINUTE` (Standard 120) gedeckelt — gegen Skripte, nicht gegen Sucher.
+  Browser-Einreichungen gewinnen atomar (first-wins), die manuelle Suche verbraucht ihr Kontingent
+  erst nach der Eingabeprüfung.
+- **Verträge:** ein Sucher löscht keinen Vertrag mehr, zu dem ein unterschriebenes Abholprotokoll
+  existiert (nur der Chef). Bei der Vertragsanlage wird ein bestehender Auto-Datensatz erst NACH
+  dem gespeicherten Vertrag nachgeführt; eine kurze Sperre je Firma+Fahrzeug (`sperren`) verhindert
+  zwei Datensätze bei zwei gleichzeitigen ersten Verträgen; der Datensatz wird nur über die
+  quellenspezifische Fahrzeug-ID gefunden. Nach einer Neuerzeugung steht der Merker
+  `auto_daten_nachfuehrung_offen`, bis die Auto-Daten nachgeführt sind (Aufräumjob holt nach).
+- **Auto-Daten:** Löschen markiert zuerst die Verträge, dann fällt der Datensatz; ein Vertrag mit
+  Verweis ins Leere wird bei der Fristlöschung an Ort und Stelle repariert (Datensatz aus der
+  Vertragsfassung), sonst Alarm. „Schäden entfernen“ steht im Audit.
+- **Fahrzeugakte:** Sucher bekommen keine Bestandskosten/-notizen und eine reduzierte Historie
+  (Aktion, Bezug, Zeit); Vergleiche, Protokolle und Berichte nennen die Gesamtzahl; Protokolle sind
+  nach Abschluss sortiert. Die Oberfläche blendet Chef-Funktionen (Bestandsdaten, Abweichungen
+  übernehmen, manuelles Anlegen, Verkaufsentscheidungen) für Sucher aus.
+
 ### Auto-Daten, Preis-Nachführung und helle Ansicht (15.09.2026, Wunsch Ahmad)
 
 - **Auto-Daten löschen:** der Super-Admin entfernt einen Datensatz endgültig

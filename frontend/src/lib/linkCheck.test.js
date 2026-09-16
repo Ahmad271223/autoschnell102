@@ -112,14 +112,29 @@ describe("checkLink (Hintergrundjob-Ablauf)", () => {
     ).rejects.toMatchObject({ code: "timeout" });
   });
 
-  test("weggeräumter Job (404) gilt als completed — Ergebnis liegt im Cache", async () => {
+  test("weggeräumter Job (404) wird einmal neu geprüft — Cache-Treffer ist completed", async () => {
     const notFound = new Error("gone");
     notFound.response = { status: 404 };
+    let posts = 0;
     const client = {
-      post: vi.fn(async () => ({ data: { status: "queued", job_id: "j4" } })),
+      post: vi.fn(async () => {
+        posts += 1;
+        return { data: posts === 1 ? { status: "queued", job_id: "j4" } : { status: "completed", cached: true } };
+      }),
       get: vi.fn(async () => { throw notFound; }),
     };
     const res = await checkLink(client, "u", { pollMs: 5, maxWaitMs: 5000 });
     expect(res.status).toBe("completed");
+    expect(posts).toBe(2);
+  });
+
+  test("weggeräumter Job (404) ohne Cache-Treffer wird nicht als completed geraten", async () => {
+    const notFound = new Error("gone");
+    notFound.response = { status: 404 };
+    const client = {
+      post: vi.fn(async () => ({ data: { status: "queued", job_id: "j5" } })),
+      get: vi.fn(async () => { throw notFound; }),
+    };
+    await expect(checkLink(client, "u", { pollMs: 5, maxWaitMs: 5000 })).rejects.toThrow(/erneut/);
   });
 });

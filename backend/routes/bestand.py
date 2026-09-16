@@ -255,11 +255,16 @@ async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_fi
     upd: Dict[str, Any] = {"$pull": {"mitbearbeiter_ids": user["id"]},
                            "$set": {"updated_at": now_iso()}}
     neuer_besitzer = v.get("owner_user_id")
+    # Runde 19 (16.09.2026, Termine Nr. 3/4): Entfernen ist eine Uebergabe
+    # des GANZEN Vorgangs an den Chef — auch die eigenen Vertraege, Kauf-
+    # vorgaenge und (abgeschlossenen) Termine zu diesem Fahrzeug. Vorher
+    # blieben sie beim Sucher; oeffnete der Chef einen Termin zur Korrektur
+    # wieder, sah der Sucher ihn samt Verkaeuferdaten erneut.
+    firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "user_id": 1})
+    chef_id = (firma or {}).get("user_id")
+    if not chef_id:
+        raise HTTPException(409, "Firma ohne Hauptaccount — bitte den Betreiber informieren")
     if war_besitzer:
-        firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "user_id": 1})
-        chef_id = (firma or {}).get("user_id")
-        if not chef_id:
-            raise HTTPException(409, "Firma ohne Hauptaccount — bitte den Betreiber informieren")
         filt["owner_user_id"] = user["id"]          # CAS wie bei /besitzer
         upd["$set"].update({"owner_user_id": chef_id, "entfernt_von_sucher": user["id"],
                             "entfernt_von_sucher_am": now_iso()})
@@ -267,11 +272,13 @@ async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_fi
     res = await db.vehicles.update_one(filt, upd)
     if res.matched_count == 0:
         raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehängt — bitte neu laden")
+    uebergabe = await vorgang_uebergeben(user["dealer_id"], vehicle_id, user["id"], chef_id)
     await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.sucher.entfernt",
                               ref=vehicle_id, meta={"an_chef": war_besitzer,
-                                                    "owner_user_id": neuer_besitzer})
+                                                    "owner_user_id": neuer_besitzer,
+                                                    **({"uebergabe": uebergabe} if uebergabe else {})})
     return {"ok": True, "entfernt": True, "an_chef": war_besitzer,
-            "owner_user_id": neuer_besitzer}
+            "owner_user_id": neuer_besitzer, "uebergabe": uebergabe}
 
 
 async def _inserate_zum_fahrzeug_schliessen(vehicle_id: str, user: Dict[str, Any]) -> List[str]:
@@ -556,6 +563,8 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
          "created_at": 1, "superseded": 1, "mileage_at_pickup": 1,
          "driver_name": 1},
     ).sort("created_at", -1).to_list(20)
+    pickup_reports_gesamt = await db.pickup_reports.count_documents(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"], **nur_eigene})
     for r in pickup_reports:
         r["massgeblich"] = bool(report) and r.get("id") == report.get("id")
 
@@ -571,6 +580,9 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         vergleich_filter,
         {"_id": 0, "created_at": 1, "source": 1},
     ).sort("created_at", -1).to_list(20) if v.get("mobile_ad_id") else []
+    # Runde 19 (Nr. 16): die Akte zeigt 20 Vergleiche, nennt aber die Gesamtzahl.
+    comparisons_gesamt = (await db.vehicle_comparisons.count_documents(vergleich_filter)
+                          if v.get("mobile_ad_id") else 0)
 
     ist_sucher = user.get("role") == "sucher"
     # Runde 12: Weiterverkauf ist Chefsache (/resale: current_haendler).
@@ -588,12 +600,16 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # und das Feld superseded mitliefern — die ersetzte v1 stand sonst
     # gleichwertig neben v2 (der Schwester-Endpunkt in protocols.py liefert
     # superseded bereits).
+    # Runde 19 (Nr. 17/18): Versionen zaehlen je Termin — sortiert wird nach
+    # dem Abschluss (wie der Protokoll-Endpunkt), und die Gesamtzahl steht dabei.
+    protokoll_filter = {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+                        "status": "final", "superseded": {"$ne": True}, **nur_eigene}
     protocols = await db.pickup_protocols.find(
-        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
-         "status": "final", "superseded": {"$ne": True}, **nur_eigene},
+        protokoll_filter,
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
          "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1},
-    ).sort("version", -1).to_list(20)
+    ).sort([("finalized_at", -1), ("version", -1)]).to_list(20)
+    protocols_gesamt = await db.pickup_protocols.count_documents(protokoll_filter)
 
     # Runde 12: Sucher sehen nur ihre eigenen Aktionen zum Fahrzeug —
     # nicht, was Chef oder Kollegen damit gemacht haben.
@@ -615,6 +631,11 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     history_gekuerzt = len(history) > HISTORIE_MAX
     if history_gekuerzt:
         history = history[:HISTORIE_MAX]
+    if ist_sucher:
+        # Runde 19 (Nr. 6/13): Sucher bekommen nur Aktion, Bezug und Zeitpunkt —
+        # keine Konto-Kennungen und keine Rohdaten (meta) anderer Akteure.
+        history = [{"id": h.get("id"), "action": h.get("action"), "ref": h.get("ref"),
+                    "created_at": h.get("created_at")} for h in history]
         # info statt warning: kommt bei jedem Aufruf derselben Akte wieder
         logging.getLogger("autohandel").info(
             "Akte %s/%s: Historie auf %d Eintraege gekuerzt",
@@ -682,6 +703,15 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # Runde 30 (Abnahme): auch die Konto-Kennungen der Kollegen raus —
     # die Akte liefert das rohe Fahrzeugdokument.
     konten_maskieren(user, v)
+    if ist_sucher:
+        # Runde 19 (Nr. 2): Kosten und interne Notizen sind Chefsache (der
+        # Editor ist chef-only) — Sucher bekommen sie nicht mehr geliefert.
+        if isinstance(v.get("bestand"), dict):
+            for feld in ("costs", "notes"):
+                v["bestand"].pop(feld, None)
+        from routes.appointments import termin_fuer_sucher
+        for a in appointments:
+            termin_fuer_sucher(user, a)
     return {
         "vehicle": v,
         "einkaufspreis": einkaufspreis,
@@ -703,9 +733,12 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "appointments_gesamt": appointments_gesamt,
         "pickup_report": report,
         "pickup_reports": pickup_reports,
+        "pickup_reports_gesamt": pickup_reports_gesamt,
         "comparisons": comparisons,
+        "comparisons_gesamt": comparisons_gesamt,
         "listings": listings,
         "protocols": protocols,
+        "protocols_gesamt": protocols_gesamt,
         "history": history,
         "history_gekuerzt": history_gekuerzt,
     }
@@ -867,6 +900,19 @@ async def vorgang_uebergeben(dealer_id: str, vehicle_id, von, an: str) -> dict:
     return z
 
 
+async def uebergabe_nachholen(dealer_id: str, vehicle_id: str, merker) -> dict:
+    """Runde 19 (Nr. 6/7): einen nach dem Fahrzeug-Write abgebrochenen
+    Besitzerwechsel zu Ende bringen (Kaufvorgaenge, Vertraege, Termine) und
+    den Merker entfernen. Idempotent; liefert die Zaehler oder {}."""
+    if not isinstance(merker, dict) or not merker.get("von") or not merker.get("an"):
+        return {}
+    z = await vorgang_uebergeben(dealer_id, vehicle_id, merker["von"], merker["an"])
+    await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": dealer_id, "uebergabe_offen.seit": merker.get("seit")},
+        {"$unset": {"uebergabe_offen": ""}})
+    return z
+
+
 @router.put("/vehicles/{vehicle_id}/besitzer")
 async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
                             user=Depends(current_haendler)):
@@ -881,7 +927,7 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     # Besitzer liess sich nie zuweisen.
     v = await db.vehicles.find_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "id": 1, "owner_user_id": 1})
+        {"_id": 0, "id": 1, "owner_user_id": 1, "uebergabe_offen": 1})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
     ziel = await db.users.find_one(
@@ -894,8 +940,13 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     alt = v.get("owner_user_id")
     namen = await besitzer_namen(user["dealer_id"], [ziel["id"]])
     if alt == ziel["id"]:
+        # Runde 19 (Nr. 6/7): brach eine fruehere Uebergabe nach dem Fahrzeug-
+        # Write ab (Merker uebergabe_offen), holt die Wiederholung den Rest
+        # nach, statt "unveraendert" zu melden.
+        uebergabe = await uebergabe_nachholen(user["dealer_id"], vehicle_id, v.get("uebergabe_offen"))
         return {"ok": True, "owner_user_id": ziel["id"],
-                "owner_name": namen.get(ziel["id"]), "unveraendert": True}
+                "owner_name": namen.get(ziel["id"]), "unveraendert": True,
+                **({"uebergabe": uebergabe} if uebergabe else {})}
     # Der neue Hauptbearbeiter ist nicht zugleich Mitbearbeiter; andere
     # Mitbearbeiter (haben das Inserat selbst verglichen) bleiben.
     # Audit 13.09.2026 (#9): CAS auf den gelesenen Besitzer — bei zwei
@@ -907,20 +958,39 @@ async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
     # Runde 13 (Nr. 19): waehrend ein Fahrerprotokoll zu diesem Fahrzeug beim
     # Chef liegt, freigegeben ist oder gerade abgeschlossen wird, keine
     # Uebergabe — sonst wechseln Rechte mitten im Abschluss.
-    if await db.pickup_protocols.count_documents(
-            {"vehicle_id": vehicle_id, "superseded": {"$ne": True},
-             "status": {"$in": list(_PROTOKOLL_LAEUFT)}}, limit=1):
+    # Runde 19 (Nr. 8): die Protokollsperre gilt je Firma — Fahrzeug-IDs sind
+    # firmenuebergreifend gleich (v_<Anzeige>).
+    protokoll_filter = {"vehicle_id": vehicle_id,
+                        "$or": [{"dealer_id": user["dealer_id"]}, {"dealer_id": {"$exists": False}}],
+                        "superseded": {"$ne": True},
+                        "status": {"$in": list(_PROTOKOLL_LAEUFT)}}
+    if await db.pickup_protocols.count_documents(protokoll_filter, limit=1):
         raise HTTPException(409, "Zu diesem Fahrzeug liegt gerade ein Abholprotokoll zur "
                                  "Freigabe bzw. im Abschluss — bitte erst abschließen, "
                                  "dann übergeben.")
+    merker = {"von": alt, "an": ziel["id"], "seit": now_iso()}
     res = await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": alt},
-        {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso()},
+        {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso(),
+                  "uebergabe_offen": merker},
          "$pull": {"mitbearbeiter_ids": ziel["id"]}})
     if res.matched_count == 0:
         raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehaengt — "
                                  "bitte neu laden")
+    # Runde 19 (Nr. 9): zwischen Pruefung und Write kann ein Fahrer ein Protokoll
+    # zur Freigabe geschickt haben — dann den Wechsel zuruecknehmen.
+    if await db.pickup_protocols.count_documents(protokoll_filter, limit=1):
+        await db.vehicles.update_one(
+            {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": ziel["id"],
+             "uebergabe_offen.seit": merker["seit"]},
+            {"$set": {"owner_user_id": alt, "updated_at": now_iso()},
+             "$unset": {"uebergabe_offen": ""}})
+        raise HTTPException(409, "Zu diesem Fahrzeug ist gerade ein Abholprotokoll zur "
+                                 "Freigabe eingegangen — bitte erst abschließen, dann übergeben.")
     uebergabe = await vorgang_uebergeben(user["dealer_id"], vehicle_id, alt, ziel["id"])
+    await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"], "uebergabe_offen.seit": merker["seit"]},
+        {"$unset": {"uebergabe_offen": ""}})
     await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
                               ref=vehicle_id, meta={"von": alt, "nach": ziel["id"],
                                                     **({"uebergabe": uebergabe} if uebergabe else {})})

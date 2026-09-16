@@ -233,7 +233,8 @@ def test_16_bis_18_loeschung(wegwerf, monkeypatch):
     assert e.value.status_code == 409 and "angenommen" in e.value.detail
     run(db.appointments.update_one({"id": "t1"}, {"$set": {"zuteilung": "abgelehnt"}}))
     src = inspect.getsource(A.delete_appointment)
-    assert '"status": appt.get("status"), "zuteilung": appt.get("zuteilung")}' in src
+    assert '"status": appt.get("status"), "zuteilung": appt.get("zuteilung"),' in src
+    assert '"updated_at": appt.get("updated_at")}' in src        # Runde 19 (Nr. 35)
     assert 'TERMIN_MIT_PROTOKOLL_HINWEIS)\n        for kv in betroffene' in src
     assert run(A.delete_appointment("t1", chef)) == {"ok": True}
 

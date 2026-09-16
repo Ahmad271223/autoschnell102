@@ -465,6 +465,8 @@ async def _cleanup_once(db) -> dict:
     stats["termine_frisch_abgeglichen"] = await termine_frisch_abgleichen(db, now)
     stats["fahrer_trennungen_nachgeholt"] = await fahrer_trennung_nachholen(db)
     stats["fahrer_verknuepfungen_abgeglichen"] = await fahrer_verknuepfung_abgleichen(db)
+    # Runde 19 (Nr. 6/7): abgebrochene Besitzerwechsel zu Ende bringen
+    stats["uebergaben_nachgeholt"] = await uebergaben_nachholen(db, now)
     # Runde 14 (15.09.2026): Fahrer-Pseudonym in Berichten nachholen (Nr. 9/10),
     # Termine ohne Vertrag loesen (Nr. 3/4).
     stats["abholberichte_pseudonymisiert"] = await abholberichte_pseudonym_nachholen(db, now)
@@ -525,7 +527,8 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
     kandidaten = [c async for c in db.generated_pdfs.find(
         {"created_at": {"$lte": cutoff}},
         {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1,
-         "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1})]
+         "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1,
+         "contract_data": 1, "make": 1, "model": 1, "vehicle_id": 1, "created_at": 1})]
     if not aktiv:
         ids = [c["id"] for c in kandidaten]
         log.info("Vertragsloeschung INAKTIV (VERTRAG_LOESCHUNG_AKTIV=false) — "
@@ -561,12 +564,22 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
         if not c.get("auto_daten_entfernt_am") and (
                 not avd_id or not await db[auto_daten.COLLECTION].count_documents(
                     {"id": avd_id}, limit=1)):
-            uebersprungen += 1
-            await alarm(db, "vertrag_ohne_auto_daten", ref=c["id"],
-                        dealer_id=c.get("dealer_id") or "",
-                        contract_no=c.get("contract_no") or "",
-                        admin_vehicle_data_id=avd_id or "")
-            continue
+            # Runde 19 (Nr. 41): einen Vertrag mit Verweis ins Leere an Ort und
+            # Stelle reparieren (Datensatz aus der Vertragsfassung neu anlegen)
+            # statt ihn ueber die Frist hinaus festzuhalten.
+            repariert = False
+            if c.get("contract_data"):          # ohne Vertragsdaten gibt es nichts zu retten
+                try:
+                    repariert = await auto_daten.nachfuehren(db, c)
+                except Exception:  # noqa: BLE001
+                    log.exception("Vertrag %s: Auto-Datensatz nicht reparierbar", c["id"])
+            if not repariert:
+                uebersprungen += 1
+                await alarm(db, "vertrag_ohne_auto_daten", ref=c["id"],
+                            dealer_id=c.get("dealer_id") or "",
+                            contract_no=c.get("contract_no") or "",
+                            admin_vehicle_data_id=avd_id or "")
+                continue
         # Pruefung 14.09.2026 (D1): Die Frist lief bisher ab dem ANLEGEN des
         # Vertrags — ein Vertrag mit noch offenem Abholtermin oder einem
         # frisch unterschriebenen Protokoll wurde mitsamt Unterschriften und
@@ -1507,6 +1520,16 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
     # solange der Vertrag noch existiert (danach ist es nicht mehr
     # rekonstruierbar — bewusst, denn genau das ist die Anonymisierung).
     # Ebenfalls paketweise ueber ALLE Datensaetze ohne purchase_date.
+    # Runde 19 (Nr. 45): Vertraege, deren Nachfuehrung nach einer Neuerzeugung
+    # oder Anlage scheiterte (Merker), aus ihrer aktuellen Fassung nachfuehren.
+    async for c in db.generated_pdfs.find(
+            {"auto_daten_nachfuehrung_offen": True},
+            {**projektion, "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1}).limit(limit):
+        try:
+            if await auto_daten.nachfuehren(db, c):
+                repariert += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Nachfuehrung der Auto-Daten fuer Vertrag %s fehlgeschlagen", c.get("id"))
     ohne_datum = [d["id"] async for d in db[auto_daten.COLLECTION].find(
         {"purchase_date": {"$exists": False}}, {"_id": 0, "id": 1})]
     for i in range(0, len(ohne_datum), limit):
@@ -2307,6 +2330,28 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
     return n
 
 
+async def uebergaben_nachholen(db, now: datetime, mindestalter_s: int = 120, limit: int = 200) -> int:
+    """Runde 19 (16.09.2026, Nr. 6/7): ein Besitzerwechsel schreibt zuerst das
+    Fahrzeug (mit Merker uebergabe_offen) und uebertraegt dann Kaufvorgaenge,
+    Vertraege und Termine. Bleibt der zweite Schritt liegen (Ausfall), holt
+    ihn dieser Lauf nach — der Merker traegt von/an."""
+    grenze = (now - timedelta(seconds=mindestalter_s)).isoformat()
+    n = 0
+    try:
+        from routes.bestand import uebergabe_nachholen
+    except Exception:  # noqa: BLE001
+        return 0
+    async for v in db.vehicles.find(
+            {"uebergabe_offen.seit": {"$lt": grenze}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "uebergabe_offen": 1}).limit(limit):
+        try:
+            await uebergabe_nachholen(v.get("dealer_id") or "", v["id"], v.get("uebergabe_offen"))
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Uebergabe fuer Fahrzeug %s nicht nachgeholt", v.get("id"))
+    return n
+
+
 async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: int = 300) -> int:
     """Nr. 29: Der Merker nacharbeit_offen ist selbst nur Best-Effort. Deshalb
     werden Termine, die in den letzten `stunden` geaendert wurden, ohne Merker
@@ -2319,30 +2364,47 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
         import kaufvorgang as _kv
     except Exception:  # noqa: BLE001
         return 0
-    async for appt in db.appointments.find(
-            {"updated_at": {"$gte": grenze}, "dealer_id": {"$type": "string"}},
+    # Runde 19 (Nr. 43): paketweise ueber updated_at statt eines einzigen
+    # Pakets — bei mehr als `limit` Aenderungen im Fenster fielen die
+    # spaeteren sonst nie in den Abgleich und alterten heraus.
+    ab, op = grenze, "$gte"
+    for _ in range(20):
+        paket = await db.appointments.find(
+            {"updated_at": {op: ab}, "dealer_id": {"$type": "string"}},
             {"_id": 0, "id": 1, "dealer_id": 1, "contract_id": 1, "status": 1,
-             "vehicle_id": 1, "kaufvorgang_id": 1}).limit(limit):
-        try:
-            await _vertragszeiger_abgleichen(appt["dealer_id"], appt["id"], appt.get("contract_id"))
-            await _kv.termin_status_uebernehmen(appt, appt.get("status") or "offen")
-            n += 1
-        except Exception:  # noqa: BLE001
-            log.exception("Frischabgleich Termin %s fehlgeschlagen", appt.get("id"))
+             "vehicle_id": 1, "kaufvorgang_id": 1, "updated_at": 1},
+        ).sort("updated_at", 1).to_list(limit)
+        for appt in paket:
+            try:
+                await _vertragszeiger_abgleichen(appt["dealer_id"], appt["id"], appt.get("contract_id"))
+                await _kv.termin_status_uebernehmen(appt, appt.get("status") or "offen")
+                n += 1
+            except Exception:  # noqa: BLE001
+                log.exception("Frischabgleich Termin %s fehlgeschlagen", appt.get("id"))
+        if len(paket) < limit or not paket[-1].get("updated_at") or paket[-1]["updated_at"] == ab:
+            break
+        ab, op = paket[-1]["updated_at"], "$gt"
     # Runde 13 (Liste 3 Nr. 15): Vorgaenge der letzten Stunden — Fahrzeug-
     # Zusammenfassung erneut, auch wenn Marker UND Aggregation scheiterten.
     gesehen: set = set()
-    async for kv in db.kaufvorgaenge.find(
-            {"updated_at": {"$gte": grenze}},
-            {"_id": 0, "vehicle_id": 1, "dealer_id": 1}).limit(limit):
-        schluessel = (kv.get("vehicle_id"), kv.get("dealer_id"))
-        if not all(schluessel) or schluessel in gesehen:
-            continue
-        gesehen.add(schluessel)
-        try:
-            await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"])
-        except Exception:  # noqa: BLE001
-            log.exception("Frischabgleich Fahrzeug %s fehlgeschlagen", kv.get("vehicle_id"))
+    ab, op = grenze, "$gte"
+    for _ in range(20):
+        paket = await db.kaufvorgaenge.find(
+            {"updated_at": {op: ab}},
+            {"_id": 0, "vehicle_id": 1, "dealer_id": 1, "updated_at": 1},
+        ).sort("updated_at", 1).to_list(limit)
+        for kv in paket:
+            schluessel = (kv.get("vehicle_id"), kv.get("dealer_id"))
+            if not all(schluessel) or schluessel in gesehen:
+                continue
+            gesehen.add(schluessel)
+            try:
+                await _kv.fahrzeug_status_aggregieren(kv["vehicle_id"], kv["dealer_id"])
+            except Exception:  # noqa: BLE001
+                log.exception("Frischabgleich Fahrzeug %s fehlgeschlagen", kv.get("vehicle_id"))
+        if len(paket) < limit or not paket[-1].get("updated_at") or paket[-1]["updated_at"] == ab:
+            break
+        ab, op = paket[-1]["updated_at"], "$gt"
     return n
 
 
