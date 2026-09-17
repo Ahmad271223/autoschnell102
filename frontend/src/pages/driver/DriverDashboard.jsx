@@ -314,7 +314,7 @@ export default function DriverDashboard() {
                               <button onClick={() => zuteilung(a.id, "ablehnen")} disabled={busy === a.id}
                                       data-testid={`zuteilung-ablehnen-${a.id}`}
                                       className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold disabled:opacity-50"
-                                      style={{ background: "rgba(255,59,48,0.1)", color: "#ff6b5f", border: "1px solid rgba(255,59,48,0.25)" }}>
+                                      style={{ background: "rgba(255,59,48,0.1)", color: "var(--tx-rot)", border: "1px solid rgba(255,59,48,0.25)" }}>
                                 <XCircle size={15} /> Ablehnen
                               </button>
                             </div>
@@ -341,7 +341,7 @@ export default function DriverDashboard() {
                               data-testid={`mark-notpickedup-${a.id}`}
                               className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold disabled:opacity-50"
                               style={{ background: "rgba(255,59,48,0.1)",
-                                       color: "#ff6b5f",
+                                       color: "var(--tx-rot)",
                                        border: "1px solid rgba(255,59,48,0.25)" }}
                             >
                               <XCircle size={15} /> Nicht abgeholt

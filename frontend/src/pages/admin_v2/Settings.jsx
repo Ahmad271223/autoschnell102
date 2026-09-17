@@ -65,7 +65,7 @@ function MfaKarte() {
           <div className="text-[12px] text-zinc-400 mt-3 mb-1">2. Den angezeigten 6-stelligen Code eingeben:</div>
           <div className="flex gap-2">
             <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" placeholder="123456" data-testid="mfa-aktivieren-code"
-                   className="h-9 px-3 rounded-lg bg-transparent border text-sm outline-none w-40" style={{ borderColor: "rgba(255,255,255,0.15)" }} />
+                   className="h-9 px-3 rounded-lg bg-transparent border text-sm outline-none w-40" style={{ borderColor: "var(--border-default)" }} />
             <Button size="sm" onClick={aktivieren} disabled={busy || code.length < 6} data-testid="mfa-aktivieren">Aktivieren</Button>
             <Button size="sm" variant="ghost" onClick={() => setSetup(null)}>Abbrechen</Button>
           </div>

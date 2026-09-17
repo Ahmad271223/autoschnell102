@@ -231,7 +231,7 @@ export default function Inserat() {
                         if (p !== null) setStatus("verkauft", parseFloat(p || 0) || null);
                       }}
                       className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white"
-                      style={{ background: "#34c759" }}>
+                      style={{ background: "var(--st-gruen)" }}>
                 <Tag size={13} /> Verkauft
               </button>
               <button onClick={() => setStatus("entwurf")} className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1"><Undo2 size={13} /> Zurück zu Entwurf</button>
@@ -240,7 +240,7 @@ export default function Inserat() {
           {l.status === "veroeffentlicht" && (
             <>
               <span className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold"
-                    style={{ background: "#34c75920", color: "#34c759", border: "1px solid #34c75955" }}>
+                    style={{ background: "#34c75920", color: "var(--st-gruen)", border: "1px solid #34c75955" }}>
                 <Globe size={14} /> Live auf dem Marktplatz
               </span>
               <button onClick={() => setStatus("reserviert")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservieren</button>
@@ -249,7 +249,7 @@ export default function Inserat() {
                         if (p !== null) setStatus("verkauft", parseFloat(p || 0) || null);
                       }}
                       className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white"
-                      style={{ background: "#34c759" }}>
+                      style={{ background: "var(--st-gruen)" }}>
                 <Tag size={13} /> Verkauft
               </button>
               <button onClick={() => setStatus("zurueckgezogen")} className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1">
@@ -273,7 +273,7 @@ export default function Inserat() {
                         const p = window.prompt("Verkaufspreis (€):", l.prices?.public || "");
                         if (p !== null) setStatus("verkauft", parseFloat(p || 0) || null);
                       }}
-                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white" style={{ background: "#34c759" }}>
+                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white" style={{ background: "var(--st-gruen)" }}>
                 Als verkauft markieren
               </button>
               <button onClick={() => setStatus("verkaufsbereit")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservierung aufheben</button>
@@ -284,7 +284,7 @@ export default function Inserat() {
 
       {(l.auto_notes || []).length > 0 && (
         <div className="mt-3 rounded-xl border px-4 py-3 text-xs space-y-0.5"
-             style={{ borderColor: "#0ea5e955", background: "#0ea5e914", color: "#7dd3fc" }}>
+             style={{ borderColor: "#0ea5e955", background: "#0ea5e914", color: "var(--tx-cyan)" }}>
           {l.auto_notes.map((n, i) => <div key={i}>ℹ {n}</div>)}
         </div>
       )}
@@ -449,7 +449,7 @@ export default function Inserat() {
               <div className="flex justify-between border-t pt-1" style={st}><span className="text-zinc-500">Gesamtkosten</span><span>{fmtEur(margin.total_cost)}</span></div>
               <div className="flex justify-between text-base font-bold pt-1">
                 <span>Erwartete Marge</span>
-                <span style={{ color: (margin.expected_margin ?? 0) >= 0 ? "#34c759" : "#ff3b30" }}>
+                <span style={{ color: (margin.expected_margin ?? 0) >= 0 ? "var(--st-gruen)" : "var(--st-rot)" }}>
                   {l.status === "verkauft" && l.sold_price != null
                     ? fmtEur(l.sold_price - (margin.total_cost || 0))
                     : fmtEur(margin.expected_margin)}

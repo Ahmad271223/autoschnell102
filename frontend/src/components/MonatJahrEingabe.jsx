@@ -103,7 +103,7 @@ export default function MonatJahrEingabe({
         style={style}
       />
       {hinweis && (
-        <span className="block text-[11px] mt-1" style={{ color: "#fbbf24" }}
+        <span className="block text-[11px] mt-1" style={{ color: "var(--tx-amber)" }}
               data-testid={testid ? `${testid}-hinweis` : undefined}>
           {hinweis}
         </span>

@@ -267,6 +267,26 @@ a[href*="emergent.sh"],
   --text-strong: #e4e4e7;
   --text-dim: #a1a1aa;
   --scheme: dark;
+  /* Statusfarben (18.09.2026): im dunklen Design wie bisher. Im hellen
+     Design waren Gruen/Gelb/Amber/Rot auf Weiss kaum zu lesen (Kontrast
+     unter 2:1) — dort stehen kraeftigere Werte in [data-theme="light"]. */
+  --st-blau: #0a84ff;
+  --st-himmel: #5ac8fa;
+  --st-cyan: #0ea5e9;
+  --st-gruen: #34c759;
+  --st-gelb: #ffd60a;
+  --st-amber: #ff9f0a;
+  --st-rot: #ff453a;
+  --st-grau: #8e8e93;
+  --st-lila: #a855f7;
+  /* Helle Schrift auf getoenten Hinweisflaechen (Banner, Chips). Im dunklen
+     Design wie bisher, im hellen kraeftig genug fuer weissen Grund. */
+  --tx-blau: #64a8ff;
+  --tx-cyan: #7dd3fc;
+  --tx-gruen: #34d399;
+  --tx-amber: #ffb340;
+  --tx-rot: #ff8a80;
+  --tx-lila: #a78bfa;
 }
 
 /* ─────── LIGHT THEME (Apple-Style) ─────── */
@@ -276,12 +296,15 @@ a[href*="emergent.sh"],
   --bg-surface: #ffffff;
   --bg-input: #ffffff;
   --text-primary: #1d1d1f;
-  --text-secondary: #6e6e73;
-  --text-muted: #86868b;
+  /* 18.09.2026: Apples Grautoene (#6e6e73/#86868b) kommen auf hellem Grund nur
+     auf 3,3:1 — Nebentexte, Wochentage und Platzhalter waren kaum zu lesen.
+     Jetzt dunkler (>4,5:1), Reihenfolge primary > secondary > muted bleibt. */
+  --text-secondary: #55555a;
+  --text-muted: #646469;
   --accent-red: #ff3b30;
   --accent-red-hover: #e6352b;
   --accent-blue: #0071e3;
-  --accent-green: #1f9d55;
+  --accent-green: #167a45;
   --border-default: rgba(0, 0, 0, 0.10);
   --border-focus: rgba(0, 113, 227, 0.55);
 
@@ -295,7 +318,7 @@ a[href*="emergent.sh"],
   --apple-input-bg-focus: #ffffff;
   --apple-input-border: rgba(0,0,0,0.14);
   --apple-input-text: #1d1d1f;
-  --apple-input-placeholder: rgba(0,0,0,0.40);
+  --apple-input-placeholder: rgba(0,0,0,0.55);
   --apple-btn-secondary-bg: rgba(0,0,0,0.05);
   --apple-btn-secondary-bg-hover: rgba(0,0,0,0.09);
   --apple-btn-secondary-border: rgba(0,0,0,0.10);
@@ -321,8 +344,23 @@ a[href*="emergent.sh"],
   --bg-deep: #f5f5f7;
   --bg-input-solid: #ffffff;
   --text-strong: #1d1d1f;
-  --text-dim: #6e6e73;
+  --text-dim: #5a5a5f;
   --scheme: light;
+  --st-blau: #0062cc;
+  --st-himmel: #0b6e8f;
+  --st-cyan: #0369a1;
+  --st-gruen: #167a45;
+  --st-gelb: #7a6000;
+  --st-amber: #9c5400;
+  --st-rot: #d70015;
+  --st-grau: #5a5a5f;
+  --st-lila: #7e22ce;
+  --tx-blau: #0058b8;
+  --tx-cyan: #0369a1;
+  --tx-gruen: #0d6b45;
+  --tx-amber: #8f4d00;
+  --tx-rot: #c00011;
+  --tx-lila: #6d28d9;
 }
 
 * {
@@ -637,6 +675,7 @@ select option {
   border-color: rgba(255,59,48,0.25);
 }
 .apple-btn-danger:hover { background: rgba(255,59,48,0.20); }
+[data-theme="light"] .apple-btn-danger { color: var(--st-rot); border-color: rgba(215,0,21,0.30); }
 
 .apple-segment {
   display: inline-flex;
@@ -736,17 +775,27 @@ select option {
   display: inline-block;
 }
 
-/* status colours (used for events + dots) */
-.st-offen   { color: #0a84ff; }
-.st-offen-bg   { background: rgba(10,132,255,0.18); border-color: #0a84ff; }
-.st-abgeholt { color: #34c759; }
-.st-abgeholt-bg { background: rgba(52,199,89,0.18); border-color: #34c759; }
-.st-nicht-abgeholt { color: #ff3b30; }
-.st-nicht-abgeholt-bg { background: rgba(255,59,48,0.18); border-color: #ff3b30; }
-.st-verschoben { color: #ff9f0a; }
-.st-verschoben-bg { background: rgba(255,159,10,0.18); border-color: #ff9f0a; }
-.st-erledigt { color: #8e8e93; }
-.st-erledigt-bg { background: rgba(142,142,147,0.18); border-color: #8e8e93; }
+/* status colours (used for events + dots) — 18.09.2026 ueber Token, damit
+   die Schrift im hellen Design nicht auf Weiss verblasst. */
+.st-offen   { color: var(--st-blau); }
+.st-offen-bg   { background: rgba(10,132,255,0.18); border-color: var(--st-blau); }
+.st-abgeholt { color: var(--st-gruen); }
+.st-abgeholt-bg { background: rgba(52,199,89,0.18); border-color: var(--st-gruen); }
+.st-nicht-abgeholt { color: var(--st-rot); }
+.st-nicht-abgeholt-bg { background: rgba(255,59,48,0.18); border-color: var(--st-rot); }
+.st-verschoben { color: var(--st-amber); }
+.st-verschoben-bg { background: rgba(255,159,10,0.18); border-color: var(--st-amber); }
+.st-erledigt { color: var(--st-grau); }
+.st-erledigt-bg { background: rgba(142,142,147,0.18); border-color: var(--st-grau); }
+
+/* Statusschild (Bestand, Fahrzeugakte): Farbe kommt als --st vom Bauteil. */
+.status-schild { color: var(--st); border-color: var(--st); background: transparent; }
+@supports (color: color-mix(in srgb, red 10%, transparent)) {
+  .status-schild {
+    border-color: color-mix(in srgb, var(--st) 40%, transparent);
+    background: color-mix(in srgb, var(--st) 12%, transparent);
+  }
+}
 
 /* iOS-style modal */
 .apple-modal-backdrop {
@@ -881,3 +930,117 @@ select option {
     inset 0 1px 0 rgba(255,255,255,0.9),
     0 14px 30px -14px rgba(0,0,0,0.25);
 }
+
+
+/* ─────── Nachtrag 18.09.2026: Pruefung der hellen Ansicht ───────
+   Weitere helle Utility-Klassen, die im Light-Theme unsichtbar waren
+   (weisse Schrift/Flaeche/Rahmen auf weissem Grund). Ausnahmen wie oben:
+   farbige Flaechen und .bleibt-dunkel bleiben unberuehrt. */
+[data-theme="light"] .text-white\/70:not(.bleibt-dunkel *) { color: rgba(29,29,31,0.75); }
+[data-theme="light"] .text-white\/60:not(.bleibt-dunkel *) { color: rgba(29,29,31,0.68); }
+[data-theme="light"] .text-white\/50:not(.bleibt-dunkel *) { color: rgba(29,29,31,0.62); }
+[data-theme="light"] .hover\:text-zinc-100:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-zinc-300:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-zinc-400:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .group:hover .group-hover\:text-white:not(.bleibt-dunkel *) { color: var(--text-primary); }
+[data-theme="light"] .bg-white\/\[0\.02\]:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.04\]:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.05\]:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.06\]:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.04); }
+[data-theme="light"] .bg-white\/\[0\.10\]:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/20:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .hover\:bg-white\/20:hover:not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.11); }
+[data-theme="light"] .border-white\/\[0\.05\]:not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/\[0\.10\]:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.10); }
+[data-theme="light"] .border-white\/20:not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/25:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.18); }
+[data-theme="light"] .hover\:border-white\/20:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:border-white\/25:hover:not(.bleibt-dunkel *),
+[data-theme="light"] .focus\:border-white\/25:focus:not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.24); }
+[data-theme="light"] .divide-white\/10 > :not([hidden]) ~ :not([hidden]):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.10); }
+/* Ausgewaehltes Vorschaubild (Vertragsarchiv): weisser Rahmen war unsichtbar. */
+[data-theme="light"] .border-white:not([class*="bg-"]):not(.bleibt-dunkel *) { border-color: var(--text-primary); }
+
+/* shadcn-Token (Dialoge wie "Als App installieren", Popover, Trenner):
+   die Vorlage liefert nur dunkle Werte — im hellen Design stand sonst ein
+   schwarzer Kasten auf heller Seite (18.09.2026). */
+[data-theme="light"] {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 11%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 11%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 0 0% 94%;
+  --accent-foreground: 0 0% 11%;
+  --destructive: 0 84% 45%;
+  --border: 0 0% 87%;
+  --input: 0 0% 90%;
+}
+
+/* Bunte Tailwind-Schriftfarben (18.09.2026): Die hellen Stufen 200-500 sind
+   fuer dunkle Flaechen gemacht und verschwanden im hellen Design fast auf dem
+   weissen Grund (z. B. text-emerald-400 nur 2,0:1). Im hellen Design zeigen
+   sie auf dieselben Token wie die uebrigen Statusfarben. Farbige Flaechen und
+   .bleibt-dunkel bleiben unberuehrt. */
+[data-theme="light"] .text-red-200:not(.bleibt-dunkel *),
+[data-theme="light"] .text-red-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-red-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-red-500:not(.bleibt-dunkel *),
+[data-theme="light"] .text-rose-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-rose-400:not(.bleibt-dunkel *) { color: var(--tx-rot); }
+[data-theme="light"] .text-amber-200:not(.bleibt-dunkel *),
+[data-theme="light"] .text-amber-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-amber-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-amber-500:not(.bleibt-dunkel *),
+[data-theme="light"] .text-yellow-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-yellow-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-orange-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-orange-400:not(.bleibt-dunkel *) { color: var(--tx-amber); }
+[data-theme="light"] .text-emerald-200:not(.bleibt-dunkel *),
+[data-theme="light"] .text-emerald-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-emerald-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-emerald-500:not(.bleibt-dunkel *),
+[data-theme="light"] .text-green-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-green-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-lime-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-lime-400:not(.bleibt-dunkel *) { color: var(--tx-gruen); }
+[data-theme="light"] .text-sky-200:not(.bleibt-dunkel *),
+[data-theme="light"] .text-sky-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-sky-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-sky-500:not(.bleibt-dunkel *),
+[data-theme="light"] .text-cyan-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-cyan-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-teal-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-teal-400:not(.bleibt-dunkel *) { color: var(--tx-cyan); }
+[data-theme="light"] .text-blue-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-blue-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-blue-500:not(.bleibt-dunkel *) { color: var(--tx-blau); }
+[data-theme="light"] .text-purple-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-purple-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-violet-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-violet-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-indigo-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-indigo-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-fuchsia-400:not(.bleibt-dunkel *),
+[data-theme="light"] .text-pink-300:not(.bleibt-dunkel *),
+[data-theme="light"] .text-pink-400:not(.bleibt-dunkel *) { color: var(--tx-lila); }
+
+/* Farbige Schildchen (Betreiber-Bereich): die 15-%-Tonung ist fuer dunklen
+   Grund gedacht. Auf Weiss wurde die Schrift damit knapp (3,9:1) — im hellen
+   Design faellt die Tonung leichter aus, die Schriftfarbe bleibt kraeftig. */
+[data-theme="light"] .bg-red-500\/15:not(.bleibt-dunkel *),
+[data-theme="light"] .bg-red-500\/20:not(.bleibt-dunkel *) { background-color: rgba(239,68,68,0.10); }
+[data-theme="light"] .bg-emerald-500\/15:not(.bleibt-dunkel *) { background-color: rgba(16,185,129,0.13); }
+[data-theme="light"] .bg-amber-500\/15:not(.bleibt-dunkel *) { background-color: rgba(245,158,11,0.13); }
+[data-theme="light"] .bg-blue-500\/15:not(.bleibt-dunkel *) { background-color: rgba(59,130,246,0.10); }
+[data-theme="light"] .bg-purple-500\/15:not(.bleibt-dunkel *) { background-color: rgba(168,85,247,0.10); }
+[data-theme="light"] .bg-orange-500\/15:not(.bleibt-dunkel *) { background-color: rgba(249,115,22,0.11); }
+
+/* Haken im gefuellten Kaestchen (Fahrer-Protokoll): die Fuellung ist im
+   hellen Design dunkelgruen, dort muss der Haken weiss sein. */
+[data-theme="light"] .haken-gefuellt { color: #ffffff; }

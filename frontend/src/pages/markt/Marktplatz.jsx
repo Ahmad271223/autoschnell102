@@ -171,9 +171,7 @@ export default function Marktplatz() {
   // stellt eine Rechnung und schaltet nach Zahlungseingang frei.
 
   const Header = () => (
-    <div className="sticky top-0 z-10 px-4 sm:px-6 py-3 flex items-center justify-between"
-         style={{ background: "rgba(10,10,10,0.9)", backdropFilter: "blur(12px)",
-                  borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+    <div className="glass-nav sticky top-0 z-10 px-4 sm:px-6 py-3 flex items-center justify-between">
       <div className="flex items-center gap-2">
         <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white"
              style={{ background: "var(--accent-red)" }}><Store size={16} /></div>
@@ -202,14 +200,15 @@ export default function Marktplatz() {
   );
 
   if (!ready || (buyer && access === null)) {
-    return <div className="min-h-screen flex items-center justify-center text-zinc-500" style={{ background: "#0a0a0a" }}>Lädt…</div>;
+    return <div className="min-h-screen flex items-center justify-center text-zinc-500" style={{ background: "var(--bg-app)" }}>Lädt…</div>;
   }
   // Ohne Anmeldung sichtbar (09/2026): oeffentlich veroeffentlichte
   // Fahrzeuge. Merken, Anfragen und Netzwerk-Bestand bleiben angemeldeten
   // Zwischenhaendlern vorbehalten.
 
   return (
-    <div className="min-h-screen" style={{ background: "#0a0a0a", color: "#fff" }} data-theme="dark" data-testid="markt-page">
+    <div className="min-h-screen" style={{ background: "var(--bg-app)", color: "var(--text-primary)" }}
+         data-testid="markt-page">
       <Header />
       <div className="px-4 sm:px-6 lg:px-10 py-6 max-w-7xl mx-auto">
         {/* Paywall */}
@@ -225,7 +224,7 @@ export default function Marktplatz() {
               aktiven Marktplatz-Zugang.
             </p>
             <div className="mt-6 rounded-2xl p-6 inline-block"
-                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                 style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
               <div className="text-4xl font-black tabular-nums">
                 {Number(access?.price ?? 20).toLocaleString("de-DE", { minimumFractionDigits: 2 })} €
                 <span className="text-base font-normal text-zinc-500"> / 30 Tage</span>
@@ -254,7 +253,7 @@ export default function Marktplatz() {
                   <div className="flex flex-wrap items-start gap-4">
                     {dealerView.logo_url ? (
                       <div className="w-16 h-16 rounded-2xl overflow-hidden flex items-center justify-center shrink-0"
-                           style={{ background: "rgba(255,255,255,0.06)" }}>
+                           style={{ background: "var(--wa-06)" }}>
                         <img src={photoUrl(dealerView.logo_url)} alt="" className="w-full h-full object-contain" />
                       </div>
                     ) : (
@@ -315,7 +314,7 @@ export default function Marktplatz() {
                 </button>
                 <select value={sort}
                         onChange={(e) => { setSort(e.target.value); apply(); }}
-                        className="h-10 px-3 rounded-xl border bg-[#141416] text-sm outline-none focus:border-white/40 shrink-0"
+                        className="h-10 px-3 rounded-xl border bg-[color:var(--bg-input-solid)] text-sm outline-none focus:border-white/40 shrink-0"
                         style={{ borderColor: "var(--border-default)" }}>
                   <option value="">Neueste zuerst</option>
                   <option value="preis_auf">Günstigste zuerst</option>
@@ -343,11 +342,11 @@ export default function Marktplatz() {
             {/* Filterleiste */}
             <div className={`${filterOffen ? "flex" : "hidden"} sm:flex mt-4 sm:mt-5 rounded-2xl p-3 flex-wrap items-end gap-2`}
                  data-testid="markt-filter"
-                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                 style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
               <FField label="Marke">
                 <select value={filters.make}
                         onChange={(e) => { setFilters((s) => ({ ...s, make: e.target.value, model: "" })); apply(); }}
-                        className={fInput + " bg-[#141416] w-full sm:w-40"} style={fStyle}>
+                        className={fInput + " bg-[color:var(--bg-input-solid)] w-full sm:w-40"} style={fStyle}>
                   <option value="">Alle Marken</option>
                   {makes.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}
                 </select>
@@ -355,7 +354,7 @@ export default function Marktplatz() {
               <FField label="Modell">
                 <select value={filters.model} disabled={!filters.make}
                         onChange={(e) => { setFilters((s) => ({ ...s, model: e.target.value })); apply(); }}
-                        className={fInput + " bg-[#141416] w-full sm:w-40 disabled:opacity-40"} style={fStyle}>
+                        className={fInput + " bg-[color:var(--bg-input-solid)] w-full sm:w-40 disabled:opacity-40"} style={fStyle}>
                   <option value="">{filters.make ? "Alle Modelle" : "erst Marke wählen"}</option>
                   {models.map((mm) => <option key={mm.id} value={mm.name}>{mm.name}</option>)}
                 </select>
@@ -363,7 +362,7 @@ export default function Marktplatz() {
               <FField label="Kraftstoff">
                 <select value={filters.fuel}
                         onChange={(e) => { setFilters((s) => ({ ...s, fuel: e.target.value })); apply(); }}
-                        className={fInput + " bg-[#141416] w-full sm:w-auto"} style={fStyle}>
+                        className={fInput + " bg-[color:var(--bg-input-solid)] w-full sm:w-auto"} style={fStyle}>
                   <option value="">Alle</option>
                   <option value="Benzin">Benzin</option>
                   <option value="Diesel">Diesel</option>
@@ -513,7 +512,7 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
          style={{ background: "rgba(0,0,0,0.75)" }} onClick={onClose}>
       <div className="w-full sm:max-w-2xl max-h-[94vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl"
-           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)" }}
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
            onClick={(e) => e.stopPropagation()}>
         <div className="relative">
           {photos[0] ? (
@@ -590,11 +589,11 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
           )}
 
           {/* Händler-Kontakt */}
-          <div className="mt-5 rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+          <div className="mt-5 rounded-2xl p-4" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
             <div className="flex items-center gap-3">
               {v.dealer?.logo_url && (
                 <div className="w-11 h-11 rounded-xl overflow-hidden flex items-center justify-center shrink-0"
-                     style={{ background: "rgba(255,255,255,0.06)" }}>
+                     style={{ background: "var(--wa-06)" }}>
                   <img src={photoUrl(v.dealer.logo_url)} alt="" className="w-full h-full object-contain" />
                 </div>
               )}
@@ -718,7 +717,7 @@ function InteresseForm({ v }) {
     );
   }
   return (
-    <div className="mt-3 rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+    <div className="mt-3 rounded-2xl p-4" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
       {!offen ? (
         <button onClick={() => setOffen(true)} data-testid={`interesse-btn-${v.id}`}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold border text-white hover:bg-white/5"
@@ -783,13 +782,15 @@ function MeineAnfragen({ onClose }) {
   };
 
   const STATUS_FARBE = {
-    offen: "#fbbf24", gegenangebot: "#60a5fa", gegenangebot_kaeufer: "#3b82f6", akzeptiert: "#34c759", abgelehnt: "#a1a1aa",
+    offen: "var(--tx-amber)", gegenangebot: "var(--tx-blau)",
+    gegenangebot_kaeufer: "var(--st-blau)", akzeptiert: "var(--st-gruen)",
+    abgelehnt: "var(--text-dim)",
   };
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
          style={{ background: "rgba(0,0,0,0.7)" }} onClick={onClose}>
       <div className="w-full sm:max-w-2xl max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5"
-           style={{ background: "#141416", color: "#fff" }} onClick={(e) => e.stopPropagation()}
+           style={{ background: "var(--bg-elevated)", color: "var(--text-primary)" }} onClick={(e) => e.stopPropagation()}
            data-testid="meine-anfragen-modal">
         <div className="flex items-center justify-between mb-4">
           <div>
@@ -810,7 +811,7 @@ function MeineAnfragen({ onClose }) {
           <div className="space-y-3">
             {items.map((it) => (
               <div key={it.id} className="rounded-2xl p-4" data-testid={`meine-anfrage-${it.id}`}
-                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                   style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-semibold truncate">{it.listing_title || "Inserat"}</div>
@@ -820,9 +821,10 @@ function MeineAnfragen({ onClose }) {
                     </div>
                   </div>
                   <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full shrink-0"
-                        style={{ color: STATUS_FARBE[it.status] || "#a1a1aa",
-                                 border: `1px solid ${STATUS_FARBE[it.status] || "#a1a1aa"}55`,
-                                 background: `${STATUS_FARBE[it.status] || "#a1a1aa"}14` }}>
+                        style={{ "--st": STATUS_FARBE[it.status] || "var(--text-dim)",
+                                 color: "var(--st)",
+                                 border: "1px solid color-mix(in srgb, var(--st) 40%, transparent)",
+                                 background: "color-mix(in srgb, var(--st) 12%, transparent)" }}>
                     {it.status}
                   </span>
                 </div>
@@ -842,7 +844,7 @@ function MeineAnfragen({ onClose }) {
                       <button onClick={() => antwort(it, "annehmen")} disabled={busyId === it.id}
                               data-testid={`gegenangebot-annehmen-${it.id}`}
                               className="flex-1 rounded-lg py-2 text-sm font-semibold text-white disabled:opacity-50"
-                              style={{ background: "#34c759" }}>
+                              style={{ background: "var(--st-gruen)" }}>
                         Annehmen
                       </button>
                       <button onClick={() => antwort(it, "ablehnen")} disabled={busyId === it.id}

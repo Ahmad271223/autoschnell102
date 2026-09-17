@@ -18,7 +18,7 @@ export default function LegalLayout({ title, children, draft = false }) {
 
         {draft && (
           <div className="mb-8 rounded-xl border px-4 py-3 flex items-start gap-2 text-sm"
-               style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+               style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
             <AlertTriangle size={16} className="mt-0.5 shrink-0" />
             <span>
               <b>Entwurf:</b> Die Angaben in [eckigen Klammern] müssen vor dem

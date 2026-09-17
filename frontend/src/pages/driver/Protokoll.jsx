@@ -45,9 +45,11 @@ const Check = ({ on, onClick, disabled, children }) => (
   <button type="button" onClick={onClick} disabled={disabled}
           className="w-full flex items-center gap-2.5 py-2 text-left text-sm disabled:opacity-60">
     <span className="w-5 h-5 rounded-md border flex items-center justify-center shrink-0"
-          style={{ borderColor: on ? "#34c759" : "var(--border-default)",
-                   background: on ? "#34c759" : "transparent" }}>
-      {on && <CheckCircle2 size={13} className="text-black" />}
+          style={{ borderColor: on ? "var(--st-gruen)" : "var(--border-default)",
+                   background: on ? "var(--st-gruen)" : "transparent" }}>
+      {/* 18.09.2026: Im hellen Design ist die Fuellung dunkelgruen —
+          der Haken wird dort weiss (Regel in index.css). */}
+      {on && <CheckCircle2 size={13} className="text-black haken-gefuellt" />}
     </span>
     <span className={on ? "text-white" : "text-zinc-400"}>{children}</span>
   </button>
@@ -58,9 +60,11 @@ const JaNein = ({ wert, onChange, disabled, children, testId }) => {
     <button type="button" disabled={disabled} onClick={() => onChange(ziel)}
             data-testid={testId ? `${testId}-${label.toLowerCase()}` : undefined}
             className={`px-3 py-1 rounded-lg text-xs border disabled:opacity-60 ${
-              wert === ziel ? "font-semibold text-white" : "text-zinc-400"}`}
+              wert === ziel ? "font-semibold" : "text-zinc-400"}`}
             style={{ borderColor: wert === ziel ? farbe : "var(--border-default)",
-                     background: wert === ziel ? `${farbe}33` : "transparent" }}>
+                     color: wert === ziel ? farbe : undefined,
+                     background: wert === ziel
+                       ? `color-mix(in srgb, ${farbe} 18%, transparent)` : "transparent" }}>
       {label}
     </button>
   );
@@ -68,8 +72,8 @@ const JaNein = ({ wert, onChange, disabled, children, testId }) => {
     <div className="w-full flex items-center justify-between gap-3 py-2 text-sm">
       <span className={typeof wert === "boolean" ? "text-white" : "text-zinc-400"}>{children}</span>
       <span className="flex gap-1.5 shrink-0">
-        {knopf("Ja", true, "#34c759")}
-        {knopf("Nein", false, "#ff453a")}
+        {knopf("Ja", true, "var(--st-gruen)")}
+        {knopf("Nein", false, "var(--st-rot)")}
       </span>
     </div>
   );
@@ -374,7 +378,7 @@ export default function Protokoll() {
       {wartetAufFreigabe && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
              data-testid="protokoll-wartet"
-             style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "#ff9f0a" }}>
+             style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "var(--st-amber)" }}>
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
           <div className="flex-1">
             Beim Händler zur Freigabe — er prüft die Abweichungen und meldet sich.
@@ -391,7 +395,7 @@ export default function Protokoll() {
       {freigegeben && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
              data-testid="protokoll-freigegeben"
-             style={{ borderColor: "#34c75955", background: "#34c75914", color: "#34c759" }}>
+             style={{ borderColor: "#34c75955", background: "#34c75914", color: "var(--st-gruen)" }}>
           <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
           <div className="flex-1">
             Freigegeben{neuerPreis != null ? ` — neuer Preis ${preisText(neuerPreis)}` : ""}.
@@ -405,7 +409,7 @@ export default function Protokoll() {
       {wirdAbgeschlossen && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
              data-testid="protokoll-wird-abgeschlossen"
-             style={{ borderColor: "#0a84ff55", background: "#0a84ff14", color: "#64a8ff" }}>
+             style={{ borderColor: "#0a84ff55", background: "#0a84ff14", color: "var(--tx-blau)" }}>
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
           <div className="flex-1">
             Wird gerade abgeschlossen — bitte einen Moment warten. Die Ansicht
@@ -416,14 +420,14 @@ export default function Protokoll() {
       {!!rueckfrage && !gesperrt && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
              data-testid="protokoll-rueckfrage"
-             style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "#ff3b30" }}>
+             style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "var(--st-rot)" }}>
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
           <div className="flex-1">Der Händler bittet um eine Ergänzung: {rueckfrage}</div>
         </div>
       )}
       {isFinal && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
-             style={{ borderColor: "#34c75955", background: "#34c75914", color: "#34c759" }}>
+             style={{ borderColor: "#34c75955", background: "#34c75914", color: "var(--st-gruen)" }}>
           <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
           <div className="flex-1">
             Protokoll abgeschlossen — Fahrzeug gilt als abgeholt.
@@ -655,7 +659,7 @@ export default function Protokoll() {
                style={{ borderColor: neuerPreis != null ? "#34c75988" : "var(--border-default)" }}>
             <div className="text-[11px] text-zinc-500">Neuer Preis (nach Verhandlung)</div>
             <div className="text-sm" data-testid="protokoll-neuer-preis"
-                 style={{ color: neuerPreis != null ? "#34c759" : undefined }}>
+                 style={{ color: neuerPreis != null ? "var(--st-gruen)" : undefined }}>
               {neuerPreis != null ? preisText(neuerPreis) : "unverändert"}
             </div>
           </div>
@@ -746,14 +750,14 @@ export default function Protokoll() {
           <button onClick={load} disabled={busy}
                   data-testid="protokoll-warten-aktualisieren"
                   className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
-                  style={{ ...st, color: "#ff9f0a" }}>
+                  style={{ ...st, color: "var(--st-amber)" }}>
             <AlertTriangle size={15} /> Wartet auf Freigabe · aktualisieren
           </button>
         ) : wirdAbgeschlossen ? (
           <button onClick={() => load()} disabled={busy}
                   data-testid="protokoll-abschluss-aktualisieren"
                   className="flex-1 rounded-xl py-3 text-sm border inline-flex items-center justify-center gap-2 disabled:opacity-50"
-                  style={{ ...st, color: "#64a8ff" }}>
+                  style={{ ...st, color: "var(--tx-blau)" }}>
             <AlertTriangle size={15} /> Wird abgeschlossen · aktualisieren
           </button>
         ) : freigegeben ? (

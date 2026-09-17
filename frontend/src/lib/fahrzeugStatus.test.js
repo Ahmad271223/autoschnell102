@@ -46,9 +46,11 @@ describe("Status-Texte", () => {
   });
 
   it("hat fuer jeden Status eine Farbe", () => {
-    expect(statusFarbe("abholung_geplant")).toBe("#0a84ff");
-    expect(statusFarbe("unbekannt")).toBe("#71717a");
-    expect(statusFarbe(undefined)).toBe("#71717a");
+    // 18.09.2026: Token statt Hex, damit helle und dunkle Ansicht je einen
+    // lesbaren Wert bekommen (definiert in index.css).
+    expect(statusFarbe("abholung_geplant")).toBe("var(--st-blau)");
+    expect(statusFarbe("unbekannt")).toBe("var(--st-grau)");
+    expect(statusFarbe(undefined)).toBe("var(--st-grau)");
   });
 });
 

@@ -78,7 +78,10 @@ export default function DriverSettings() {
           <code data-testid="driver-code-display"
                 className="flex-1 px-4 py-3 rounded-sm font-mono text-lg tracking-[0.15em] font-bold text-center"
                 style={{ background: "rgba(255,59,48,0.08)", border: "1px solid rgba(255,59,48,0.25)",
-                         color: "var(--accent-red)" }}>
+                         /* 18.09.2026: Signalrot als Schrift war auf dem hellen
+                            Grund zu blass (3,2:1) — Token ist im hellen Design
+                            dunkler, im dunklen wie bisher. */
+                         color: "var(--st-rot)" }}>
             {driver.driver_code}
           </code>
           <button onClick={copy} data-testid="copy-code-btn"

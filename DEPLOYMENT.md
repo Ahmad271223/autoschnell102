@@ -1800,3 +1800,41 @@ prüfen mit `docker compose exec backend env | grep -E "MAX_CONCURRENT|LINK_JOB|
   „Filter daneben öffnen (zweiter Bildschirm)“ — braucht die Bildschirm-Berechtigung des Browsers
   (Chrome/Edge), sonst öffnet das Fenster neben der App, wenn Platz ist.
 
+
+### Helle Ansicht nachgeschärft (18.09.2026, Wunsch Ahmad „mach die helle Variante auch perfekt“)
+
+Geprüft wurde die ganze Oberfläche im hellen Design — jede Seite, jeder Dialog, jedes Dropdown —
+mit einer im Browser gemessenen Kontrastprüfung (Schrift gegen die tatsächlich darunter liegende
+Fläche). Gefunden und behoben:
+
+- **Statusfarben sind jetzt Token** (`--st-blau/-himmel/-cyan/-gruen/-gelb/-amber/-rot/-grau/-lila`)
+  und **Schrift auf getönten Flächen** eigene Token (`--tx-blau/-cyan/-gruen/-amber/-rot/-lila`).
+  Im dunklen Design stehen dort die bisherigen Werte, im hellen kräftigere. Vorher standen feste
+  Hex-Farben in den Seiten (Termine, Bestand, Freigaben, Inserat, Anfragen, Einstellungen,
+  Fahrer-App, Beweiskarte, Fahrzeugpool-Status): Grün, Gelb, Amber und Rot kamen auf Weiß nur auf
+  2–3,5:1 und waren praktisch unlesbar.
+- **Statusschild** (`StatusSchild.jsx`) bekommt die Farbe als Variable `--st`; Rahmen und Fläche
+  mischt die Klasse `.status-schild` per `color-mix`. Vorher wurde „66“/„1a“ an den Hex-Wert
+  gehängt — mit Token geht das nicht mehr.
+- **Marktplatz folgt dem Schalter:** `data-theme="dark"`, `#0a0a0a`, `#141416`, `#fff` und
+  `rgba(255,255,255,x)` sind raus, die Kopfzeile nutzt `.glass-nav`. Käufer-Login und Startseite
+  bleiben bewusst dunkel (Marketing/Anmeldung).
+- **Meldungen und Dialoge:** `<Toaster>` (sonner) folgt dem Schalter über den neuen Haken
+  `useTheme()`; die shadcn-Token (`--background`, `--popover`, …) haben helle Gegenstücke — der
+  Dialog „Als App installieren“ war sonst ein schwarzer Kasten auf heller Seite. Der Schalter
+  setzt zusätzlich `<meta name="theme-color">`, damit die Browserleiste auf dem Handy mitzieht.
+- **Graue Schrift im hellen Design dunkler:** `--text-secondary` #55555a, `--text-muted` #646469,
+  `--text-dim` #5a5a5f (Apples #6e6e73/#86868b lagen bei 3,3:1).
+- **Weitere Umlenkungen in `index.css`:** `bg/border-white/[0.02…0.25]`, `hover:`- und `focus:`-
+  Varianten, `divide-white/10`, `text-white/50|60|70`, solides `border-white` sowie die hellen
+  bunten Tailwind-Stufen (`text-emerald-400`, `text-red-400`, `text-amber-300`, `text-sky-400`, …)
+  und die 15-%-Tönung der Betreiber-Schildchen.
+
+Regel für neue Oberflächen: **keine festen Farben in JSX** — Flächen und Schrift über die Token,
+Statusfarben über `--st-*`, Schrift auf getönten Hinweisflächen über `--tx-*`; bewusst dunkle
+Bereiche tragen `.bleibt-dunkel`. Wächter: `backend/tests/test_helle_ansicht_20260918.py`.
+
+Offen (bewusst nicht geändert): das Signalrot `#ff3b30` der Marke bleibt in beiden Designs —
+weiße Schrift darauf kommt auf 3,55:1 (Apple macht es genauso). Im **dunklen** Design ist
+`text-zinc-600` an manchen Stellen zu dunkel (2,4:1, u. a. Fahrzeugpool und Team) — das ist eine
+Altlast der dunklen Ansicht und wartet auf Ahmads Entscheidung.

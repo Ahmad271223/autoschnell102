@@ -141,7 +141,7 @@ export default function PDFArchiv() {
                               title={`${it.version}. Fassung — ältere Fassungen unten abrufbar`}
                               style={{ background: "rgba(10,132,255,0.12)",
                                        border: "1px solid rgba(10,132,255,0.3)",
-                                       color: "#0a84ff" }}>
+                                       color: "var(--st-blau)" }}>
                           v{it.version}
                         </span>
                       )}

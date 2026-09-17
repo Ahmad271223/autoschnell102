@@ -248,7 +248,7 @@ export default function FahrzeugAkte() {
         <Section
           title="Abholung"
           warn={deviations.length > 0 && (
-            <span className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md" style={{ background: "#f59e0b1c", color: "#fbbf24" }}>
+            <span className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md" style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
               <AlertTriangle size={12} /> {deviations.length} Abweichung(en)
             </span>
           )}

@@ -11,7 +11,8 @@ import { Search, ShieldAlert, ShieldCheck } from "lucide-react";
  * Anmeldesperre laeuft. Die Anmeldemasken selbst sagen bewusst nur
  * "Kontonummer oder Passwort falsch".
  */
-const ART_TON = { fahrer: "#60a5fa", firma: "#34d399", sucher: "#a78bfa", kaeufer: "#fbbf24" };
+const ART_TON = { fahrer: "var(--tx-blau)", firma: "var(--tx-gruen)",
+                  sucher: "var(--tx-lila)", kaeufer: "var(--tx-amber)" };
 
 export default function KontoPruefen() {
   const [kennung, setKennung] = useState("");

@@ -135,7 +135,7 @@ export default function Team() {
         </div>
         {plan?.active && plan.quota ? (
           <div className="mt-3 h-2 rounded-full overflow-hidden" style={{ background: "var(--wa-08)" }}>
-            <div className="h-full rounded-full" style={{ width: `${pct}%`, background: pct >= 100 ? "#ff3b30" : "var(--accent-red)" }} />
+            <div className="h-full rounded-full" style={{ width: `${pct}%`, background: pct >= 100 ? "var(--st-rot)" : "var(--accent-red)" }} />
           </div>
         ) : null}
         <div className="mt-3 flex flex-wrap gap-2">

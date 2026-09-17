@@ -622,7 +622,7 @@ export default function Vergleich() {
               <div className="overline mb-3">Aktionen</div>
               {result.kollege && (
                 <div className="text-sm rounded-xl p-3 mb-3" data-testid="kollege-hinweis"
-                     style={{ background: "#f59e0b1c", color: "#fbbf24" }}>
+                     style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
                   Dieses Fahrzeug vergleicht auch <b>{result.kollege.name}</b>.
                   Ihr arbeitet unabhängig voneinander: Jeder kann einen eigenen
                   Kaufvertrag mit eigenem Abholtermin anlegen.

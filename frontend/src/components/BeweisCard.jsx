@@ -183,7 +183,7 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, compact
           ) : null}
         </>
       ) : status === "fehlgeschlagen" ? (
-        <div className="text-xs leading-relaxed" style={{ color: "#ff6b6b" }}>
+        <div className="text-xs leading-relaxed" style={{ color: "var(--tx-rot)" }}>
           Das Beweisdokument konnte nicht erstellt werden. Beim nächsten Vergleich
           dieses Inserats wird es automatisch erneut versucht.
           {beweis?.fehler && (
@@ -251,8 +251,8 @@ function StatusBadge({ status, zeitUeber }) {
     return (
       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20"
             data-testid="beweis-status-fertig">
-        <CheckCircle2 size={9} style={{ color: "#34c759" }} />
-        <span className="text-[9px] uppercase font-bold tracking-wider" style={{ color: "#34c759" }}>fertig</span>
+        <CheckCircle2 size={9} style={{ color: "var(--st-gruen)" }} />
+        <span className="text-[9px] uppercase font-bold tracking-wider" style={{ color: "var(--st-gruen)" }}>fertig</span>
       </span>
     );
   }
@@ -260,8 +260,8 @@ function StatusBadge({ status, zeitUeber }) {
     return (
       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-red-500/10 border border-red-500/20"
             data-testid={`beweis-status-${status}`}>
-        <AlertTriangle size={9} style={{ color: "#ff6b6b" }} />
-        <span className="text-[9px] uppercase font-bold tracking-wider" style={{ color: "#ff6b6b" }}>
+        <AlertTriangle size={9} style={{ color: "var(--tx-rot)" }} />
+        <span className="text-[9px] uppercase font-bold tracking-wider" style={{ color: "var(--tx-rot)" }}>
           {status === "geloescht" ? "gelöscht" : "Fehler"}
         </span>
       </span>
@@ -270,8 +270,8 @@ function StatusBadge({ status, zeitUeber }) {
   return (
     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20"
           data-testid="beweis-status-laeuft">
-      <Loader2 size={9} className={zeitUeber ? "" : "animate-spin"} style={{ color: "#f5a524" }} />
-      <span className="text-[9px] uppercase font-bold tracking-wider" style={{ color: "#f5a524" }}>
+      <Loader2 size={9} className={zeitUeber ? "" : "animate-spin"} style={{ color: "var(--tx-amber)" }} />
+      <span className="text-[9px] uppercase font-bold tracking-wider" style={{ color: "var(--tx-amber)" }}>
         {zeitUeber ? "dauert länger" : "wird erstellt"}
       </span>
     </span>

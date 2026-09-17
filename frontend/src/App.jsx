@@ -95,6 +95,7 @@ function Vorladen() {
 }
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
+import { useTheme } from "@/components/ThemeToggle";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { DriverAuthProvider } from "@/context/DriverContext";
@@ -181,13 +182,16 @@ function WeiterleitungMitQuery({ nach }) {
 }
 
 export default function App() {
+  // 18.09.2026: Die Meldungen waren fest dunkel und standen im hellen
+  // Design als schwarzer Kasten auf der hellen Seite.
+  const design = useTheme();
   return (
     <AuthProvider>
       <DriverAuthProvider>
        <BuyerAuthProvider>
         <BrowserRouter>
           <Vorladen />
-          <Toaster theme="dark" position="top-right" richColors closeButton />
+          <Toaster theme={design} position="top-right" richColors closeButton />
           <FassungsHinweis />
           <NachladeFehler>
           <Suspense fallback={<SeiteLaedt ganzeSeite />}>

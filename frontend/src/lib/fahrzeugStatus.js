@@ -34,13 +34,15 @@ export const INSERAT_LABELS = {
   verkauft: "Verkauft", zurueckgezogen: "Zurückgezogen",
 };
 
+// 18.09.2026: Token statt fester Farben — im hellen Design waren Gruen,
+// Gelb und Amber auf weissem Grund kaum zu lesen (Werte in index.css).
 const FARBEN = {
-  abholung_geplant: "#0a84ff", nicht_abgeholt: "#ff3b30",
-  abgeholt: "#f59e0b", bestand: "#0ea5e9", verkaufsentwurf: "#a855f7",
-  verkaufsbereit: "#34c759", veroeffentlicht: "#34c759",
-  reserviert: "#eab308", verkauft: "#71717a", archiviert: "#52525b",
+  abholung_geplant: "var(--st-blau)", nicht_abgeholt: "var(--st-rot)",
+  abgeholt: "var(--st-amber)", bestand: "var(--st-cyan)", verkaufsentwurf: "var(--st-lila)",
+  verkaufsbereit: "var(--st-gruen)", veroeffentlicht: "var(--st-gruen)",
+  reserviert: "var(--st-gelb)", verkauft: "var(--st-grau)", archiviert: "var(--text-muted)",
 };
-const FARBE_STANDARD = "#71717a";
+const FARBE_STANDARD = "var(--st-grau)";
 
 /** Kennung lesbar machen: "nicht_abgeholt" -> "Nicht abgeholt". */
 export function lesbar(wert) {

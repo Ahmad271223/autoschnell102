@@ -253,7 +253,7 @@ export default function Einstellungen() {
                     style={{
                       background: form.active_profile === "inland"
                         ? "rgba(52,199,89,0.14)" : "rgba(10,132,255,0.14)",
-                      color: form.active_profile === "inland" ? "var(--accent-green)" : "#0a84ff",
+                      color: form.active_profile === "inland" ? "var(--accent-green)" : "var(--st-blau)",
                       border: `1px solid ${form.active_profile === "inland" ? "rgba(52,199,89,0.35)" : "rgba(10,132,255,0.4)"}`,
                     }}
                     title="Klick wechselt das aktive Profil"
@@ -389,7 +389,7 @@ export default function Einstellungen() {
               {form._agb_zusammengefuehrt && (
                 <div className="rounded-xl border p-3 text-[12.5px] leading-relaxed"
                      data-testid="agb-zusammengefuehrt"
-                     style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+                     style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
                   Aus zwei Textfeldern ist eins geworden: Deine bisherigen AGB stehen jetzt
                   unten im Feld „Vertragsbedingungen“. Bitte einmal durchlesen und speichern.
                 </div>
@@ -539,8 +539,8 @@ const PLAN_LABEL = {
 
 const STATUS_BADGE = {
   active:    { label: "Aktiv",     bg: "rgba(52,199,89,0.15)",  fg: "var(--accent-green)", border: "rgba(52,199,89,0.35)" },
-  cancelled: { label: "Gekündigt", bg: "rgba(255,159,10,0.18)", fg: "#ff9f0a",             border: "rgba(255,159,10,0.4)" },
-  expired:   { label: "Abgelaufen",bg: "rgba(255,69,58,0.18)",  fg: "#ff453a",             border: "rgba(255,69,58,0.4)" },
+  cancelled: { label: "Gekündigt", bg: "rgba(255,159,10,0.18)", fg: "var(--st-amber)",             border: "rgba(255,159,10,0.4)" },
+  expired:   { label: "Abgelaufen",bg: "rgba(255,69,58,0.18)",  fg: "var(--st-rot)",             border: "rgba(255,69,58,0.4)" },
   none:      { label: "Kein Abo",  bg: "var(--wa-08)",fg: "var(--text-dim)",             border: "var(--wa-10)" },
 };
 
@@ -903,7 +903,7 @@ function SubscriptionPanel() {
 
         {isCancelled && (
           <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
-               style={{ background: "rgba(255,159,10,0.10)", border: "1px solid rgba(255,159,10,0.25)", color: "#ffd9a3" }}
+               style={{ background: "rgba(255,159,10,0.10)", border: "1px solid rgba(255,159,10,0.25)", color: "var(--tx-amber)" }}
                data-testid="abo-cancelled-info">
             <X size={14} className="mt-0.5 shrink-0" />
             <span>
@@ -914,14 +914,14 @@ function SubscriptionPanel() {
         )}
         {isExpired && (
           <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
-               style={{ background: "rgba(255,69,58,0.10)", border: "1px solid rgba(255,69,58,0.25)", color: "#ffb3a8" }}>
+               style={{ background: "rgba(255,69,58,0.10)", border: "1px solid rgba(255,69,58,0.25)", color: "var(--tx-rot)" }}>
             <X size={14} className="mt-0.5 shrink-0" />
             <span>Kein aktives Abo. Bitte unten eine Verlängerung beim Betreiber anfragen — nach Freigabe geht es sofort weiter.</span>
           </div>
         )}
         {data.anfrage_offen && (
           <div className="mt-4 px-3 py-2.5 rounded-lg text-xs flex items-start gap-2"
-               style={{ background: "rgba(10,132,255,0.10)", border: "1px solid rgba(10,132,255,0.25)", color: "#bcd9ff" }}
+               style={{ background: "rgba(10,132,255,0.10)", border: "1px solid rgba(10,132,255,0.25)", color: "var(--tx-blau)" }}
                data-testid="abo-anfrage-offen">
             <Check size={14} className="mt-0.5 shrink-0" />
             <span>
@@ -989,7 +989,7 @@ function SubscriptionPanel() {
                       onClick={cancel}
                       disabled={busy === "cancel"}
                       className="apple-btn"
-                      style={{ background: "#ff453a", color: "white" }}
+                      style={{ background: "var(--st-rot)", color: "white" }}
                       data-testid="abo-cancel-confirm-btn"
                     >
                       {busy === "cancel" ? "Lade…" : "Ja, kündigen"}

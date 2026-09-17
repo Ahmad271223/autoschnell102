@@ -57,14 +57,14 @@ function VergleichZeile({ z }) {
         {(rot || (z.vor_ort_text && z.vor_ort_text !== z.vertrag_text)) && (
           <>
             <span className="mx-1.5 text-zinc-500">→</span>
-            <b style={{ color: rot ? "#ff9f0a" : "var(--text-strong)" }}
+            <b style={{ color: rot ? "var(--st-amber)" : "var(--text-strong)" }}
                data-testid={`vergleich-${z.schluessel}-vor-ort`}>
               {z.vor_ort_text || "—"}
             </b>
           </>
         )}
         {hinweis && (
-          <span className="ml-2 text-[11px]" style={{ color: rot ? "#ff9f0a" : "var(--text-dim)" }}>
+          <span className="ml-2 text-[11px]" style={{ color: rot ? "var(--st-amber)" : "var(--text-dim)" }}>
             {hinweis}
           </span>
         )}
@@ -101,7 +101,7 @@ function Vergleich({ eintrag }) {
         ohneVertragsdaten ? (
           <div className="text-[12px] text-zinc-500">Keine Fahrzeugdaten im Vertrag zum Abgleichen.</div>
         ) : (
-          <div className="text-[12px] inline-flex items-center gap-1.5" style={{ color: "#34c759" }}>
+          <div className="text-[12px] inline-flex items-center gap-1.5" style={{ color: "var(--st-gruen)" }}>
             <Check size={13} /> Alle Fahrzeugdaten stimmen mit dem Vertrag überein
           </div>
         )
@@ -146,12 +146,12 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         </div>
         <div className="flex flex-col items-end gap-1">
           {freigegeben ? (
-            <span className="text-[11px] rounded-full px-2 py-0.5" style={{ background: "#34c75922", color: "#34c759" }}>
+            <span className="text-[11px] rounded-full px-2 py-0.5" style={{ background: "#34c75922", color: "var(--st-gruen)" }}>
               freigegeben — wartet auf Unterschriften
             </span>
           ) : (
             <span className="text-[11px] rounded-full px-2 py-0.5 inline-flex items-center gap-1"
-                  style={{ background: "#ff9f0a22", color: "#ff9f0a" }}>
+                  style={{ background: "#ff9f0a22", color: "var(--st-amber)" }}>
               <Clock size={11} /> wartet {wartetSeit(e.erstmals_abgeschickt_am || e.abgeschickt_am)}
             </span>
           )}
@@ -162,7 +162,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
       </div>
 
       {e.ladefehler && (
-        <div className="mt-3 rounded-lg px-3 py-2 text-[12px]" style={{ background: "#ff3b3014", color: "#ff8a80" }}>
+        <div className="mt-3 rounded-lg px-3 py-2 text-[12px]" style={{ background: "#ff3b3014", color: "var(--tx-rot)" }}>
           {e.ladefehler}
         </div>
       )}
@@ -183,7 +183,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
 
       {neueSchaeden.length > 0 && (
         <div className="mt-3 rounded-lg p-2.5" style={{ background: "#ff3b3014", border: "1px solid #ff3b3044" }}>
-          <div className="text-[12px] font-semibold mb-1 inline-flex items-center gap-1" style={{ color: "#ff3b30" }}>
+          <div className="text-[12px] font-semibold mb-1 inline-flex items-center gap-1" style={{ color: "var(--st-rot)" }}>
             <AlertTriangle size={12} /> Neue Schäden vor Ort: {neueSchaeden.length}
           </div>
           <ul className="text-[12px] space-y-0.5">
@@ -244,7 +244,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           </div>
         )}
         {e.neuer_preis != null && (
-          <div className="mt-2 text-[12px] flex flex-wrap items-center gap-2" style={{ color: freigegeben ? "#34c759" : "var(--text-dim)" }}>
+          <div className="mt-2 text-[12px] flex flex-wrap items-center gap-2" style={{ color: freigegeben ? "var(--st-gruen)" : "var(--text-dim)" }}>
             <span data-testid={`freigabe-aktueller-preis-${e.protocol_id}`}>
               {freigegeben ? "Freigegeben mit" : "Verhandelter Preis"} {eur(e.neuer_preis)}
               {e.preis_notiz ? ` · ${e.preis_notiz}` : ""}
@@ -391,7 +391,7 @@ export default function Freigaben() {
       </div>
 
       {ladeFehler && (
-        <div className="mt-4 rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "#ff8a80" }}>
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "var(--tx-rot)" }}>
           {ladeFehler} — es wird automatisch erneut versucht.
         </div>
       )}

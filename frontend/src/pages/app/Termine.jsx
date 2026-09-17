@@ -27,14 +27,14 @@ const STATUSES = ["offen", "bestätigt", "in Bearbeitung", "abgeholt", "nicht ab
                   "verschoben", "erledigt", "storniert"];
 
 const STATUS_META = {
-  "offen":           { dot: "#0a84ff", chipClass: "st-offen-bg",         text: "st-offen" },
-  "bestätigt":       { dot: "#5ac8fa", chipClass: "st-offen-bg",         text: "st-offen" },
-  "in Bearbeitung":  { dot: "#ffd60a", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
-  "storniert":       { dot: "#8e8e93", chipClass: "st-erledigt-bg",      text: "st-erledigt" },
-  "abgeholt":        { dot: "#34c759", chipClass: "st-abgeholt-bg",      text: "st-abgeholt" },
-  "nicht abgeholt":  { dot: "#ff3b30", chipClass: "st-nicht-abgeholt-bg",text: "st-nicht-abgeholt" },
-  "verschoben":      { dot: "#ff9f0a", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
-  "erledigt":        { dot: "#8e8e93", chipClass: "st-erledigt-bg",      text: "st-erledigt" },
+  "offen":           { dot: "var(--st-blau)", chipClass: "st-offen-bg",         text: "st-offen" },
+  "bestätigt":       { dot: "var(--st-himmel)", chipClass: "st-offen-bg",         text: "st-offen" },
+  "in Bearbeitung":  { dot: "var(--st-gelb)", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
+  "storniert":       { dot: "var(--st-grau)", chipClass: "st-erledigt-bg",      text: "st-erledigt" },
+  "abgeholt":        { dot: "var(--st-gruen)", chipClass: "st-abgeholt-bg",      text: "st-abgeholt" },
+  "nicht abgeholt":  { dot: "var(--st-rot)", chipClass: "st-nicht-abgeholt-bg",text: "st-nicht-abgeholt" },
+  "verschoben":      { dot: "var(--st-amber)", chipClass: "st-verschoben-bg",    text: "st-verschoben" },
+  "erledigt":        { dot: "var(--st-grau)", chipClass: "st-erledigt-bg",      text: "st-erledigt" },
 };
 
 const safeParse = (s) => {
@@ -275,7 +275,7 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
                 <div className="flex items-center justify-between">
                   <span className="cal-daynum">{format(d, "d")}</span>
                   {dayAppts.length > 0 && !visible.length && (
-                    <span className="cal-dot" style={{ background: STATUS_META[dayAppts[0].status]?.dot || "#0a84ff" }} />
+                    <span className="cal-dot" style={{ background: STATUS_META[dayAppts[0].status]?.dot || "var(--st-blau)" }} />
                   )}
                 </div>
                 <div className="flex flex-col gap-[3px] overflow-hidden">
@@ -391,7 +391,7 @@ function DayApptItem({ a, onEdit, compact }) {
             </span>
           )}
           {a.contract_id && (
-            <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "#34c759" }}>
+            <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "var(--st-gruen)" }}>
               <FileText size={10} /> PDF
             </span>
           )}
@@ -597,7 +597,7 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
                      className="mt-2 p-2.5 rounded-sm text-xs leading-relaxed"
                      style={{ background: "rgba(255,149,0,0.12)",
                               border: "1px solid rgba(255,149,0,0.35)",
-                              color: "#FFB020" }}>
+                              color: "var(--tx-amber)" }}>
                   ⚠️ Fahrer ist am {a.pickup_date} bereits einer Fahrt zugeordnet
                   ({conflict.length}×). Du kannst trotzdem zuweisen.
                 </div>
@@ -778,7 +778,7 @@ function FreigabeHinweis() {
   return (
     <Link to="/app/freigaben" data-testid="termine-freigaben-hinweis"
           className="mb-5 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-white/5 transition"
-          style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "#ffb340" }}>
+          style={{ borderColor: "#ff9f0a55", background: "#ff9f0a14", color: "var(--tx-amber)" }}>
       {text} — zu den Freigaben ›
     </Link>
   );

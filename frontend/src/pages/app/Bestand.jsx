@@ -121,7 +121,7 @@ export default function Bestand() {
 
       {pending > 0 && (
         <div className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm"
-             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
           <AlertTriangle size={16} />
           {pending} abgeholte(s) Fahrzeug(e) warten auf deine Entscheidung.
         </div>
@@ -130,7 +130,7 @@ export default function Bestand() {
       {anfragenOffen > 0 && features.marktplatz && (
         <Link to="/app/anfragen" data-testid="bestand-anfragen-banner"
               className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-sky-500/10 transition"
-              style={{ borderColor: "#38bdf855", background: "#38bdf814", color: "#7dd3fc" }}>
+              style={{ borderColor: "#38bdf855", background: "#38bdf814", color: "var(--tx-cyan)" }}>
           <AlertTriangle size={16} />
           {anfragenOffen} offene Kaufanfrage(n) vom Marktplatz — jetzt beantworten ›
         </Link>
@@ -161,7 +161,7 @@ export default function Bestand() {
       {data.gekuerzt && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm"
              data-testid="bestand-gekuerzt"
-             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "#fbbf24" }}>
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
           Es werden {data.items.length} von {data.gesamt} Fahrzeugen angezeigt.
           Nutze die Filter oben, um ältere Fahrzeuge zu finden.
         </div>

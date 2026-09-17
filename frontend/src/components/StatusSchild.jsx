@@ -7,9 +7,12 @@ import { statusFarbe } from "@/lib/fahrzeugStatus";
  */
 export default function StatusSchild({ status, text, className = "", ...rest }) {
   const farbe = statusFarbe(status);
+  // 18.09.2026: Farbe als Variable — Rahmen und Flaeche mischt die CSS-Klasse
+  // (.status-schild), damit beide Designs stimmen. Vorher wurde an den Hex-Wert
+  // "66"/"1a" angehaengt, was mit Token nicht mehr geht.
   return (
-    <span className={`shrink-0 whitespace-nowrap text-[11px] leading-5 px-2 rounded-md border font-medium ${className}`}
-          style={{ borderColor: `${farbe}66`, color: farbe, background: `${farbe}1a` }}
+    <span className={`status-schild shrink-0 whitespace-nowrap text-[11px] leading-5 px-2 rounded-md border font-medium ${className}`}
+          style={{ "--st": farbe }}
           {...rest}>
       {text}
     </span>

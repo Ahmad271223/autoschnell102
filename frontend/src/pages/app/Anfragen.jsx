@@ -24,10 +24,10 @@ const fmtZeit = (iso) => {
 };
 
 const STATUS_META = {
-  offen:        { label: "Offen",        fg: "#fbbf24", bg: "rgba(245,158,11,0.12)", bd: "rgba(245,158,11,0.35)" },
-  gegenangebot: { label: "Gegenangebot", fg: "#60a5fa", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
-  gegenangebot_kaeufer: { label: "Gegenangebot Käufer", fg: "#93c5fd", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
-  akzeptiert:   { label: "Akzeptiert",   fg: "#34c759", bg: "rgba(52,199,89,0.12)",  bd: "rgba(52,199,89,0.35)" },
+  offen:        { label: "Offen",        fg: "var(--tx-amber)", bg: "rgba(245,158,11,0.12)", bd: "rgba(245,158,11,0.35)" },
+  gegenangebot: { label: "Gegenangebot", fg: "var(--tx-blau)", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
+  gegenangebot_kaeufer: { label: "Gegenangebot Käufer", fg: "var(--tx-cyan)", bg: "rgba(59,130,246,0.12)", bd: "rgba(59,130,246,0.35)" },
+  akzeptiert:   { label: "Akzeptiert",   fg: "var(--st-gruen)", bg: "rgba(52,199,89,0.12)",  bd: "rgba(52,199,89,0.35)" },
   abgelehnt:    { label: "Abgelehnt",    fg: "var(--text-dim)", bg: "var(--wa-05)", bd: "var(--wa-12)" },
 };
 
@@ -194,7 +194,7 @@ export default function Anfragen() {
                     <button onClick={() => antworten(it, "akzeptieren")} disabled={busyId === it.id}
                             data-testid={`anfrage-akzeptieren-${it.id}`}
                             className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                            style={{ background: "#34c759" }}>
+                            style={{ background: "var(--st-gruen)" }}>
                       <Check size={15} /> Akzeptieren & reservieren
                     </button>
                   )}
