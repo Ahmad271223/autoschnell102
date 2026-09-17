@@ -5,8 +5,7 @@ export default function AGB() {
   return (
     <LegalLayout title="Allgemeine Geschäftsbedingungen (AGB)">
       <p className="text-zinc-500">
-        AutoSchnell — Inhaber Ahmad Fakih, Baldurstraße 5, 30657 Hannover
-        (nachfolgend „Anbieter"). Stand: September 2026.
+        AutoSchnell (nachfolgend „Anbieter"). Stand: September 2026.
       </p>
 
       <H2>1. Geltungsbereich</H2>
@@ -99,8 +98,8 @@ export default function AGB() {
         des laufenden Abrechnungsmonats kündbar. Jahres-Abos verlängern sich
         um ein weiteres Jahr, wenn sie nicht spätestens vier Wochen vor
         Laufzeitende gekündigt werden. Kostenlose Accounts können jederzeit
-        gelöscht werden. Die Kündigung ist formlos per E-Mail an
-        info@autoschnell.de möglich. Das Recht zur außerordentlichen
+        gelöscht werden. Die Kündigung ist formlos in Textform (z. B. per
+        E-Mail) möglich. Das Recht zur außerordentlichen
         Kündigung aus wichtigem Grund bleibt unberührt.
       </p>
 

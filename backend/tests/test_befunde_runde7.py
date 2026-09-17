@@ -215,11 +215,17 @@ def test_10b_alle_lesewege_nutzen_denselben_bereich():
         assert "_vertrag_bereich" in rumpf, f"{name} filtert nicht nach Ersteller"
 
 
-def test_10c_impressum_nennt_die_betriebene_domain():
-    """Die Pflichtangabe im Impressum muss auf der Domain liegen, die auch
-    wirklich betrieben wird — sonst kommt dort nie eine Mail an."""
-    datei = (Path(__file__).resolve().parents[2] / "frontend" / "src" /
-             "pages" / "legal" / "Impressum.jsx")
-    text = datei.read_text(encoding="utf-8")
-    assert "info@auto-schnellkauf.de" in text
-    assert "info@autoschnell.de" not in text
+def test_10c_impressum_ohne_alte_domain_und_vorerst_ohne_anbieterdaten():
+    """Die Kontaktadresse im Impressum durfte nie auf der nicht betriebenen
+    Domain liegen. Wunsch Ahmad 17.09.2026: Inhaber, Anschrift, Telefon und
+    E-Mail sind vorerst aus Impressum, Datenschutz, AGB, "Passwort vergessen"
+    und der Abo-Seite entfernt — beim Wiedereinsetzen diesen Test anpassen."""
+    seiten = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages"
+    dateien = [seiten / "legal" / "Impressum.jsx", seiten / "legal" / "Datenschutz.jsx",
+               seiten / "legal" / "AGB.jsx", seiten / "PasswortVergessen.jsx",
+               seiten / "Subscription.jsx"]
+    for datei in dateien:
+        text = datei.read_text(encoding="utf-8")
+        assert "info@autoschnell.de" not in text, datei.name
+        for angabe in ("Fakih", "Baldurstraße", "30657", "3563025", "info@auto-schnellkauf.de"):
+            assert angabe not in text, f"{angabe} steht noch in {datei.name}"

@@ -107,11 +107,8 @@ export default function Subscription() {
             </div>
           </div>
 
-          <a href="mailto:info@autoschnell.de?subject=Sucher-Zugang%20freischalten"
-             data-testid="abo-kontakt"
-             className="kinetic-button w-full mt-8 py-3 rounded-sm flex items-center justify-center gap-2">
-            Betreiber kontaktieren
-          </a>
+          {/* Wunsch Ahmad 17.09.2026: Knopf "Betreiber kontaktieren" (E-Mail des
+              Inhabers) vorerst entfernt — die Hinweise oben nennen den Weg. */}
         </div>
 
         <div className="mt-8 text-center text-xs text-zinc-500 flex items-center justify-center gap-2">

@@ -3,25 +3,15 @@ import LegalLayout, { H2 } from "./LegalLayout";
 export default function Impressum() {
   return (
     <LegalLayout title="Impressum">
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Wunsch Ahmad 17.09.2026 —
+          Inhaber, Anschrift, Telefon, E-Mail und "Verantwortlich nach § 18
+          Abs. 2 MStV" vorerst entfernt. Ein Impressum mit diesen Angaben ist
+          fuer geschaeftliche Webseiten Pflicht (§ 5 DDG) — vor dem
+          Wiedereinsetzen hier und in Datenschutz.jsx/AGB.jsx ergaenzen. */}
       <H2>Angaben gemäß § 5 DDG</H2>
       <p>
         AutoSchnell<br />
-        Inhaber: Ahmad Fakih<br />
-        Baldurstraße 5<br />
-        30657 Hannover<br />
-        Deutschland
-      </p>
-
-      <H2>Kontakt</H2>
-      <p>
-        Telefon: 0178 3563025<br />
-        E-Mail: info@auto-schnellkauf.de
-      </p>
-
-      <H2>Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</H2>
-      <p>
-        Ahmad Fakih<br />
-        Baldurstraße 5, 30657 Hannover
+        Die Angaben zum Anbieter werden derzeit aktualisiert.
       </p>
 
       <H2>Verbraucherstreitbeilegung / Universalschlichtungsstelle</H2>

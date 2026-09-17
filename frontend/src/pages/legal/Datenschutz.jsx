@@ -4,11 +4,13 @@ export default function Datenschutz() {
   return (
     <LegalLayout title="Datenschutzerklärung">
       <H2>1. Verantwortlicher</H2>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Wunsch Ahmad 17.09.2026 —
+          Name, Anschrift und Kontaktdaten des Verantwortlichen vorerst entfernt
+          (Art. 13 DSGVO verlangt sie; vor dem Wiedereinsetzen ergaenzen). */}
       <p>
         Verantwortlicher im Sinne der DSGVO:<br />
-        AutoSchnell — Inhaber Ahmad Fakih<br />
-        Baldurstraße 5, 30657 Hannover<br />
-        E-Mail: info@autoschnell.de · Telefon: 0178 3563025
+        AutoSchnell<br />
+        Die Kontaktdaten des Verantwortlichen werden derzeit aktualisiert.
       </p>
 
       <H2>2. Welche Daten wir verarbeiten</H2>
