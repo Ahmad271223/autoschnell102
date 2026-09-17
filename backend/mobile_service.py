@@ -77,6 +77,8 @@ GEAR_LABELS = {
     "MANUAL_GEAR": "Schaltgetriebe", "AUTOMATIC_GEAR": "Automatik",
     "SEMIAUTOMATIC_GEAR": "Halbautomatik",
 }
+# 17.09.2026: EINE Zuordnung fuer Getriebe und Kraftstoff (alle Quellen, beide Portale)
+from fahrzeug_codes import getriebe_code, kraftstoff_code  # noqa: E402
 CATEGORY_LABELS = {
     "Cabrio": "Cabrio / Roadster", "EstateCar": "Kombi", "Limousine": "Limousine",
     "OffRoad": "SUV / Geländewagen", "OtherCar": "Sonstiges", "SmallCar": "Kleinwagen",
@@ -483,10 +485,13 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
             cat_raw, _APIFY_CATEGORY_DE.get(cat_raw.lower(), cat_raw)),
         "first_registration": _apify_attr(item, "firstRegistration"),
         "mileage": _apify_zahl(_apify_attr(item, "mileage")),
-        "fuel": fuel_raw.upper(),
+        # 17.09.2026: mobile.de-Codes speichern (vorher "AUTOMATIC",
+        # "MANUAL GEARBOX", "ELECTRIC" — die kennt der mobile.de-Link nicht).
+        "fuel": kraftstoff_code(fuel_raw) or fuel_raw.upper(),
         "fuel_label": _APIFY_FUEL_DE.get(fuel_raw.lower(), fuel_raw),
-        "gearbox": gear_raw.upper(),
-        "gearbox_label": _APIFY_GEAR_DE.get(gear_raw.lower(), gear_raw),
+        "gearbox": getriebe_code(gear_raw) or gear_raw.upper(),
+        "gearbox_label": _APIFY_GEAR_DE.get(
+            gear_raw.lower(), GEAR_LABELS.get(getriebe_code(gear_raw) or "", gear_raw)),
         "power_kw": kw,
         "power_ps": ps,
         "displacement": _apify_zahl(_apify_attr(item, "cubicCapacity")),
@@ -1044,10 +1049,18 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     # Kraftstoff / Getriebe / Tueren (compact). Runde 24 (11.09.2026): keine
     # Kategorie (c=…) mehr — der Filter ist fuer beide Portale entfallen,
     # auch wenn gespeicherte Alt-Regeln noch "category" enthalten.
-    if (rules.get("fuel") or {}).get("mode") == "exact" and vehicle.get("fuel"):
-        params.append(("ft", vehicle["fuel"]))
-    if (rules.get("gearbox") or {}).get("mode") == "exact" and vehicle.get("gearbox"):
-        params.append(("tr", vehicle["gearbox"]))
+    # 17.09.2026 (Ahmad: "ab und zu klappt Getriebe 1:1 nicht"): nie den
+    # Rohwert setzen — mobile.de kennt nur seine Codes (AUTOMATIC_GEAR, PETROL
+    # ...). Vorher kamen "AUTOMATIC", "SCHALTGETRIEBE" oder "BENZIN" in den
+    # Link, und mobile.de filterte still ohne Getriebe bzw. Kraftstoff.
+    if (rules.get("fuel") or {}).get("mode") == "exact":
+        ft = kraftstoff_code(vehicle.get("fuel"), vehicle.get("fuel_label"))
+        if ft:
+            params.append(("ft", ft))
+    if (rules.get("gearbox") or {}).get("mode") == "exact":
+        tr = getriebe_code(vehicle.get("gearbox"), vehicle.get("gearbox_label"))
+        if tr:
+            params.append(("tr", tr))
     if (rules.get("doors") or {}).get("mode") == "exact" and vehicle.get("doors"):
         params.append(("doors", str(vehicle["doors"])))
 

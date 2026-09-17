@@ -1630,6 +1630,27 @@ Kosten); die echte Anbieterzeit misst nur ein Abruf mit echten Links.
   nach Abschluss sortiert. Die Oberfläche blendet Chef-Funktionen (Bestandsdaten, Abweichungen
   übernehmen, manuelles Anlegen, Verkaufsentscheidungen) für Sucher aus.
 
+### Getriebe und Kraftstoff in den Vergleichs-Links (17.09.2026)
+
+Meldung Ahmad: „ab und zu klappt Getriebe 1:1 nicht“. Ursache: `tr=`/`ft=` im mobile.de-Link
+bekamen den gespeicherten Rohwert. Nur Kleinanzeigen speicherte mobile.de-Codes; mobile.de-Inserate
+über Apify („Automatic“ → `AUTOMATIC`) und AutoScout24-Inserate („Schaltgetriebe“, „Benzin“) ergaben
+Werte, die mobile.de nicht kennt — gefiltert wurde still ohne Getriebe bzw. Kraftstoff. Halbautomatik
+lief in beiden Links als Automatik.
+
+- **Eine Zuordnung:** `backend/fahrzeug_codes.py` (`getriebe_code`, `kraftstoff_code`,
+  `autoscout_getriebe`, `autoscout_kraftstoff`, `filter_hinweise`). Neue Quellen oder Werte dort
+  ergänzen, nie wieder Rohwerte in einen Link schreiben.
+- **Beim Link-Bauen:** `mobile_service.build_search_url` und `autoscout_service.build_search_url`
+  leiten den Code aus Code ODER Beschriftung ab. Das gilt auch für Fahrzeuge und Zwischenspeicher mit
+  alten Rohwerten — kein Neuabruf nötig.
+- **Beim Speichern:** die Apify-Parser (mobile.de, AutoScout24) und der Kleinanzeigen-Parser speichern
+  die mobile.de-Codes (`SEMIAUTOMATIC_GEAR` für Halbautomatik, `HYBRID_DIESEL` für Diesel-Hybrid).
+- **Hinweis statt stillem Link:** fehlt Getriebe oder Kraftstoff im Inserat oder ist der Wert
+  unbekannt, meldet der Vergleich das (`regeln_nicht_abgebildet`).
+- **Tests:** `tests/test_getriebe_kraftstoff_filter.py` gegen die echten Actor-Datensätze in
+  `tests/fixtures`.
+
 ### Nachprüfung Nr. 46–143 (16.09.2026): Verträge, Protokolle, Abrufe, Abos
 
 98 Reviewer-Punkte gegen `8d16a95` geprüft; 70 echte in vier Commits mit je eigener Vollprüfung

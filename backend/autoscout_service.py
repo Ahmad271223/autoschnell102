@@ -307,15 +307,16 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     # Kraftstoff
     fuel_rule = (rules.get("fuel") or {}).get("mode")
     if fuel_rule == "exact":
-        fuel = vehicle.get("fuel_label") or vehicle.get("fuel")
-        if fuel:
-            params.append(("fuel", _autoscout_fuel(fuel)))
+        # 17.09.2026: Code UND Beschriftung pruefen; unbekannt -> kein leerer
+        # fuel=-Parameter mehr, sondern ein Hinweis (regeln_nicht_abgebildet).
+        fuel_code = _autoscout_fuel(vehicle.get("fuel"), vehicle.get("fuel_label"))
+        if fuel_code:
+            params.append(("fuel", fuel_code))
 
     # Getriebe
     gear_rule = (rules.get("gearbox") or {}).get("mode")
     if gear_rule == "exact":
-        gb = vehicle.get("gearbox_label") or vehicle.get("gearbox")
-        gb_code = _autoscout_gearbox(gb)
+        gb_code = _autoscout_gearbox(vehicle.get("gearbox"), vehicle.get("gearbox_label"))
         if gb_code:
             params.append(("gear", gb_code))
 
@@ -405,13 +406,23 @@ def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
     cc_mode = (rules.get("displacement") or {}).get("mode")
     if cc_mode in ("exact", "tolerance") and vehicle.get("displacement"):
         hinweise.append("Hubraum filtert nur mobile.de — der AutoScout-Link zeigt alle Hubraeume.")
+    # 17.09.2026: Getriebe/Kraftstoff "1:1", aber im Inserat fehlt die Angabe
+    # oder sie ist unbekannt -> sagen statt still ohne Filter zu suchen.
+    from fahrzeug_codes import filter_hinweise
+    hinweise += filter_hinweise(vehicle, rules)
     return hinweise
 
 
 # ---------- Fuel/Gearbox-Mappings ----------
-def _autoscout_fuel(s: str) -> str:
-    """Mappt unsere Kraftstoff-Labels auf Autoscout-Codes."""
-    n = _norm(s)
+def _autoscout_fuel(*werte) -> str:
+    """Mappt Kraftstoff-Codes und -Labels auf AutoScout-Codes.
+    17.09.2026: ueber die zentrale Zuordnung (fahrzeug_codes) — vorher fielen
+    "Elektro/Benzin", "Autogas (LPG)" oder "Hybrid (Benzin/Elektro)" durch."""
+    from fahrzeug_codes import autoscout_kraftstoff
+    code = autoscout_kraftstoff(*werte)
+    if code:
+        return code
+    n = _norm(werte[0] if werte else "")
     if not n:
         return ""
     mapping = {
@@ -439,17 +450,12 @@ def _autoscout_fuel(s: str) -> str:
     return mapping.get(n, "")
 
 
-def _autoscout_gearbox(s: str) -> str:
-    n = _norm(s)
-    if not n:
-        return ""
-    if "auto" in n:
-        return "A"
-    if "manuell" in n or "manual" in n or "schalt" in n:
-        return "M"
-    if "halbauto" in n or "semi" in n:
-        return "S"
-    return ""
+def _autoscout_gearbox(*werte) -> str:
+    """AutoScout-Getriebecode (A/M/S). 17.09.2026: ueber die zentrale
+    Zuordnung — vorher wurde Halbautomatik als Automatik gefiltert, weil
+    "auto" zuerst geprueft wurde."""
+    from fahrzeug_codes import autoscout_getriebe
+    return autoscout_getriebe(*werte)
 
 
 # ---------- Public: Resolver (für ggf. Debug / Tests) ----------
@@ -494,6 +500,9 @@ def detail_looks_like_autoscout_listing(url: str) -> bool:
     eine Suchseiten-URL (/lst/...) wuerde hunderte Ergebnisse abrufen
     und unnoetig Geld kosten."""
     return bool(url) and "autoscout24." in url and "/angebote/" in url
+
+
+from fahrzeug_codes import getriebe_code, kraftstoff_code  # noqa: E402
 
 
 def parse_autoscout_item(item: dict, item_id: str,
@@ -554,9 +563,11 @@ def parse_autoscout_item(item: dict, item_id: str,
         "category_label": item.get("bodyType") or "",
         "first_registration": item.get("firstRegistration") or None,
         "mileage": _apify_zahl(item.get("milage") or item.get("mileage")),
-        "fuel": (item.get("fuelType") or "").upper(),
+        # 17.09.2026: mobile.de-Codes speichern (vorher "BENZIN", "SCHALTGETRIEBE" —
+        # damit filterte der mobile.de-Link still ohne Kraftstoff und Getriebe).
+        "fuel": kraftstoff_code(item.get("fuelType")) or (item.get("fuelType") or "").upper(),
         "fuel_label": item.get("fuelType") or "",
-        "gearbox": (item.get("gearbox") or "").upper(),
+        "gearbox": getriebe_code(item.get("gearbox")) or (item.get("gearbox") or "").upper(),
         "gearbox_label": item.get("gearbox") or "",
         "power_kw": kw,
         "power_ps": ps,

@@ -267,29 +267,24 @@ def _parse_fuel(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """Return (mobile.de fuel key, label)."""
     if not value:
         return None, None
-    n = value.upper()
-    mapping = [
-        ("DIESEL", "DIESEL"),
-        ("HYBRID", "HYBRID"),
-        ("ELEKTRO", "ELECTRICITY"), ("STROM", "ELECTRICITY"),
-        ("BENZIN", "PETROL"), ("PETROL", "PETROL"),
-        ("LPG", "LPG"), ("AUTOGAS", "LPG"),
-        ("CNG", "CNG"), ("ERDGAS", "CNG"),
-    ]
-    for needle, key in mapping:
-        if needle in n:
-            return key, FUEL_LABELS.get(key, value)
+    # 17.09.2026: zentrale Zuordnung (fahrzeug_codes) — vorher wurde z. B.
+    # "Hybrid (Diesel/Elektro)" wegen "DIESEL" zuerst als Diesel erkannt.
+    from fahrzeug_codes import kraftstoff_code
+    key = kraftstoff_code(value)
+    if key:
+        return key, FUEL_LABELS.get(key, value)
     return None, value
 
 
 def _parse_gearbox(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     if not value:
         return None, None
-    n = value.upper()
-    if "AUTOMATIK" in n or "AUTOMATIC" in n:
-        return "AUTOMATIC_GEAR", GEAR_LABELS["AUTOMATIC_GEAR"]
-    if "SCHALT" in n or "MANUAL" in n or "MANUELL" in n:
-        return "MANUAL_GEAR", GEAR_LABELS["MANUAL_GEAR"]
+    # 17.09.2026: zentrale Zuordnung — "Halbautomatik" war vorher
+    # AUTOMATIC_GEAR (enthaelt "AUTOMATIK").
+    from fahrzeug_codes import getriebe_code
+    key = getriebe_code(value)
+    if key:
+        return key, GEAR_LABELS.get(key, value)
     return None, value
 
 
