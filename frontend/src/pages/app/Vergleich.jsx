@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc } from "@/lib/bilder";
 import { checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
+import { istInseratsLink, zwischenablageLesen } from "@/lib/inseratsLink";
 import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
@@ -159,6 +160,25 @@ export default function Vergleich() {
     setLoading(false);
     setWaitMsg(null);
     toast.info("Abgebrochen — du kannst sofort einen neuen Link einfügen.");
+  };
+
+  // Wunsch Ahmad 18.09.2026: "nur reinklicken, dann ist der kopierte Link
+  // automatisch drin" — kein Rechtsklick, kein Strg+V. Nur wenn das Feld leer
+  // ist, nur bei echten Inserats-Links, und nur solange der Browser die
+  // Zwischenablage hergibt (sonst nie wieder fragen). Gestartet wird NICHT
+  // automatisch: ein alter Link in der Zwischenablage soll keinen Abruf
+  // ausloesen, nur weil man ins Feld klickt.
+  const zwischenablageRef = useRef({ zuletzt: "", moeglich: true });
+
+  const ausZwischenablage = async () => {
+    if (loading || url.trim() || !zwischenablageRef.current.moeglich) return;
+    const { text, moeglich } = await zwischenablageLesen();
+    zwischenablageRef.current.moeglich = moeglich;
+    if (!text || text === zwischenablageRef.current.zuletzt) return;
+    if (!istInseratsLink(text)) return;
+    zwischenablageRef.current.zuletzt = text;
+    setUrl(text);
+    toast.success("Link aus der Zwischenablage eingefügt — jetzt „Auslesen“.");
   };
 
   const startCompare = async (e, direktUrl) => {
@@ -322,23 +342,21 @@ export default function Vergleich() {
               required
               value={url}
               onChange={(e) => setUrl(e.target.value)}
+              onClick={ausZwischenablage}
               onPaste={(e) => {
                 // Einfuegen genuegt: erkennt der Text einen gueltigen
                 // Inserats-Link (Kleinanzeigen ODER mobile.de), startet das
                 // Auslesen sofort — der Knopf bleibt fuers manuelle
                 // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
                 const text = (e.clipboardData?.getData("text") || "").trim();
-                const istInserat =
-                  /kleinanzeigen\.de\/s-anzeige\//i.test(text) ||
-                  /mobile\.de\/(?:[^\s]*\bauto-inserat\/|fahrzeuge\/details\.html\?)/i.test(text) ||
-                  /autoscout24\.[a-z.]{2,6}\/(?:angebote|offers)\//i.test(text);
+                const istInserat = istInseratsLink(text);
                 if (istInserat && !loading) {
                   e.preventDefault();
                   setUrl(text);
                   startCompare(null, text);
                 }
               }}
-              placeholder="Inserats-Link einfügen (Kleinanzeigen, mobile.de, AutoScout24) – Auslesen startet automatisch…"
+              placeholder="Ins Feld klicken — kopierter Link wird eingefügt (Kleinanzeigen, mobile.de, AutoScout24)"
               className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
               style={{ color: "var(--text-primary)" }}
               autoFocus

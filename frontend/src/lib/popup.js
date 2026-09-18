@@ -179,8 +179,17 @@ export function openMultiple(urls) {
   const valid = (urls || []).filter((u) => u?.url);
   if (valid.length === 0) return [];
   if (valid.length === 1) {
-    // Einzeln → Popup mit Namen (Wiederverwendung bei erneutem Klick)
-    return openInPopup(valid[0].url, valid[0].name || "filterWindow") ? [] : [valid[0]];
+    // Wunsch Ahmad 18.09.2026: als TAB im vorhandenen Browserfenster, nicht
+    // als eigenes Fenster ("nicht komplett neues Fenster"). Ist gar kein
+    // Fenster offen, macht der Browser von sich aus eines auf. Benannt, damit
+    // der naechste Vergleich denselben Tab wiederverwendet. Nur wenn "Filter
+    // daneben" (zweiter Bildschirm) an ist, braucht es ein platzierbares
+    // Fenster — dann bleibt es beim Popup.
+    const eintrag = valid[0];
+    const name = eintrag.name || "filterWindow";
+    const auf = danebenAktiv ? openInPopup(eintrag.url, name)
+                             : tabOeffnen(eintrag.url, name);
+    return auf ? [] : [eintrag];
   }
   const anderer = danebenAktiv ? andererBildschirm() : null;
   if (anderer) {

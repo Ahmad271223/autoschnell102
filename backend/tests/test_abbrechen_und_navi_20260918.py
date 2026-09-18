@@ -84,8 +84,12 @@ def test_04_unbekannter_job_ist_kein_fehler(welt):
                                       f"u_{welt.s}"))["status"] == "weg"
 
 
-def test_05_route_nur_fuer_den_eigenen_auftrag(welt):
+def test_05_route_nur_fuer_den_eigenen_auftrag(welt, monkeypatch):
     import routes.listings as L
+    # Test-Isolation (13.09.2026): Das Routenmodul haelt seine eigene
+    # db-Referenz aus dem Import — ohne Umbiegen auf die Welt-Datenbank
+    # arbeitet die Route auf einem anderen (geschlossenen) Event-Loop.
+    monkeypatch.setattr(L, "db", welt.db)
     job = _job(welt)
     fremd = {"id": f"u_fremd_{welt.s}", "dealer_id": welt.anderer, "role": "dealer"}
     with pytest.raises(HTTPException) as e:

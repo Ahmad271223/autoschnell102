@@ -1935,3 +1935,26 @@ Inserats-Sperre jetzt frei (`except BaseException` + `asyncio.shield`) — vorhe
 bis zu 90 Sekunden mit „wird gerade abgerufen" blockiert, weil `CancelledError` keine `Exception` ist.
 
 Wächter: `backend/tests/test_abbrechen_und_navi_20260918.py`, `src/lib/linkCheck.test.js`.
+
+### Link einfügen per Klick, Filter als Tab (18.09.2026, Wunsch Ahmad)
+
+**Klick ins Link-Feld fügt den kopierten Link ein.** Kein Rechtsklick → Einfügen, kein Strg+V:
+Ein Klick ins leere Feld liest die Zwischenablage (`navigator.clipboard.readText`) und trägt den Text
+ein, **wenn** er ein echter Inserats-Link ist (`lib/inseratsLink.js`: Kleinanzeigen-Anzeige,
+mobile.de-Detailseite, AutoScout24-Angebot — keine Suchseiten). Bewusst **ohne** automatischen Start:
+ein alter Link in der Zwischenablage soll keinen Abruf auslösen, nur weil man ins Feld klickt
+(Strg+V startet weiterhin sofort, das bleibt wie es war).
+
+- Chrome/Edge fragen beim ersten Mal „Text aus der Zwischenablage zulassen?" — erlaubt der Nutzer
+  das nicht (oder der Browser kann es nicht, z. B. Firefox), passiert einfach nichts; normales
+  Einfügen funktioniert unverändert. Es wird dann auch nicht bei jedem Klick erneut gefragt.
+- Derselbe Text wird nicht zweimal eingefügt (wer das Feld leert, bekommt ihn nicht sofort zurück).
+
+**Filter öffnen sich als Tab.** Ein einzelnes Portal ging bisher als eigenes **Fenster** auf
+(`openInPopup` mit Größenangaben). Jetzt öffnet auch der Einzelfall einen **benannten Tab**
+(`window.open(url, name)` ohne Features) — der nächste Vergleich benutzt denselben Tab wieder, statt
+Tabs zu stapeln. Ist kein Browserfenster offen, macht der Browser von sich aus eines auf. Nur mit
+„Filter daneben öffnen (zweiter Bildschirm)" bleibt es beim platzierbaren Fenster — genau dafür ist
+der Schalter da.
+
+Wächter: `src/lib/inseratsLink.test.js`, `src/lib/popup.test.js` („benannter Tab statt eigenem Fenster").

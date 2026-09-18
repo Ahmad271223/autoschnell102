@@ -96,10 +96,23 @@ describe("openMultiple", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  test("ein Eintrag: Popup; blockiert -> Eintrag zurueck", () => {
+  test("ein Eintrag: blockiert -> Eintrag zurueck", () => {
     vi.spyOn(window, "open").mockReturnValue(null);
     const e = { url: "https://a/1", name: "a" };
     expect(openMultiple([e])).toEqual([e]);
+  });
+
+  // Wunsch Ahmad 18.09.2026: "nicht komplett neues Fenster" — ein einzelnes
+  // Portal geht als benannter TAB auf (window.open OHNE Groessenangaben).
+  test("ein Eintrag: benannter Tab statt eigenem Fenster", () => {
+    const tab = fensterAttrappe();
+    const open = vi.spyOn(window, "open").mockReturnValue(tab);
+    expect(openMultiple([{ url: "https://suchen.mobile.de/x", name: "mobileFilterWindow" }])).toEqual([]);
+    expect(open).toHaveBeenCalledTimes(1);
+    // Zwei Argumente = Tab; ein drittes (features) waere ein Popup-Fenster.
+    expect(open.mock.calls[0]).toEqual(["", "mobileFilterWindow"]);
+    expect(tab.opener).toBeNull();
+    expect(tab.location.href).toBe("https://suchen.mobile.de/x");
   });
 });
 
