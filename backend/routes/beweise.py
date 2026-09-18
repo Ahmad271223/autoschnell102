@@ -15,13 +15,14 @@ Das Dokument enthaelt keine Angaben zur Firma, die es ausgeloest hat.
 """
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel
 
 import beweis_service as BS
 from deps import (current_firma, current_user, db, fahrzeug_im_bereich,
-                  ist_sucher, termin_bereich)
+                  ist_sucher, log_activity_sicher, termin_bereich)
 
 log = logging.getLogger("autohandel")
 router = APIRouter()
@@ -141,6 +142,76 @@ async def beweis_zum_fahrzeug(vehicle_id: str, user=Depends(current_firma)):
             {"id": vehicle_id, "dealer_id": user["dealer_id"]},
             {"$set": {"inserat_schluessel": ck}})
     return {"beweis": BS.oeffentlich(await BS.beweis_fuer_schluessel(db, ck))}
+
+
+class AnforderungIn(BaseModel):
+    vehicle_id: Optional[str] = None
+    cache_key: Optional[str] = None
+
+
+@router.post("/beweise/anfordern")
+async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
+    """Beweisdokument auf Knopfdruck erzeugen lassen (Wunsch Ahmad 18.09.2026).
+
+    Frueher entstand zu JEDEM abgerufenen Inserat automatisch eines. Jetzt
+    fragt die App nach dem Versand ("Beweisdokument erstellen lassen?") und
+    in der Akte steht der Knopf — hier wird das Dokument vorgemerkt, erzeugt
+    wird es wie bisher vom Hintergrund-Worker.
+
+    Idempotent: Gibt es zum Inserat schon ein Dokument (auch ein laufendes),
+    kommt genau dieses zurueck — nie ein zweites "erstes" Dokument."""
+    schluessel = (body.cache_key or "").strip()
+    fahrzeug = None
+    if body.vehicle_id:
+        if not await _fahrzeug_erlaubt(user, body.vehicle_id):
+            raise HTTPException(404, "Fahrzeug nicht gefunden")
+        fahrzeug = await db.vehicles.find_one(
+            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
+            {"_id": 0, "id": 1, "inserat_schluessel": 1, "quelle": 1,
+             "mobile_ad_id": 1, "data": 1})
+        schluessel = BS.inserat_schluessel(fahrzeug) or schluessel
+        if schluessel and fahrzeug is not None and not fahrzeug.get("inserat_schluessel"):
+            await db.vehicles.update_one(
+                {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
+                {"$set": {"inserat_schluessel": schluessel}})
+    elif not schluessel:
+        raise HTTPException(400, "Bitte ein Fahrzeug oder ein Inserat angeben.")
+    if not schluessel:
+        raise HTTPException(400, "Zu diesem Fahrzeug ist kein Inserats-Link hinterlegt — "
+                                 "ein Beweisdokument gibt es nur zu einem Inserat.")
+    if not fahrzeug and not await _darf_sehen(user, {"cache_key": schluessel}):
+        # Ohne Fahrzeug nur, wer das Inserat selbst verglichen hat.
+        raise HTTPException(404, _NICHT_GEFUNDEN)
+
+    vorhanden = await BS.beweis_fuer_schluessel(db, schluessel)
+    if vorhanden and vorhanden.get("status") in ("offen", "in_arbeit", "fertig"):
+        return {"beweis": BS.oeffentlich(vorhanden)}
+
+    # Datenstand einfrieren: was der Sucher gesehen hat. Erst der
+    # Inseratsspeicher (frischester gepruefter Stand), sonst die beim
+    # Vergleich am Fahrzeug gespeicherten Daten (Speicher laeuft nach 90
+    # Tagen ab). Die Fotos holt der Worker beim Erzeugen vom Portal.
+    eintrag = await db.listings_cache.find_one(
+        {"cache_key": schluessel},
+        {"_id": 0, "source": 1, "item_id": 1, "url": 1, "data": 1, "fetched_at": 1})
+    daten = (eintrag or {}).get("data") or (fahrzeug or {}).get("data") or None
+    if not eintrag and not daten:
+        raise HTTPException(404, "Zu diesem Inserat liegen keine Daten mehr vor — "
+                                 "bitte den Link noch einmal vergleichen.")
+    quelle = ((eintrag or {}).get("source") or (fahrzeug or {}).get("quelle")
+              or schluessel.split(":")[0])
+    item_id = ((eintrag or {}).get("item_id") or (fahrzeug or {}).get("mobile_ad_id") or "")
+    url = ((eintrag or {}).get("url") or (daten or {}).get("detail_url")
+           or (daten or {}).get("kleinanzeigen_url") or "")
+    doc = await BS.beweis_vormerken(
+        db, cache_key=schluessel, quelle=quelle, item_id=item_id, url=url,
+        anlass="angefordert", daten=daten, abgerufen_am=(eintrag or {}).get("fetched_at"))
+    if not doc:
+        raise HTTPException(503, "Das Beweisdokument konnte gerade nicht angefordert "
+                                 "werden — bitte in ein paar Minuten noch einmal.")
+    await log_activity_sicher(user["dealer_id"], user["id"], "beweis.angefordert",
+                              ref=str(item_id or schluessel))
+    return {"beweis": BS.oeffentlich(doc)}
 
 
 @router.get("/beweise/{beweis_id}")

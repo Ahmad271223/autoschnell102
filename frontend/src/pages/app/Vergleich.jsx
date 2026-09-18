@@ -649,8 +649,12 @@ export default function Vergleich() {
               )}
             </div>
 
-            {result.beweis?.id && (
-              <BeweisCard key={result.beweis.id} beweis={result.beweis} />
+            {/* 18.09.2026: Gibt es zum Inserat noch kein Dokument, steht hier
+                der Knopf "Beweisdokument erstellen" (frueher entstand es
+                automatisch bei jedem Vergleich). */}
+            {(result.beweis?.id || result.cache_key) && (
+              <BeweisCard key={result.beweis?.id || result.cache_key}
+                          beweis={result.beweis} cacheKey={result.cache_key} />
             )}
 
             <div className="text-[11px] leading-relaxed px-1" style={{ color: "var(--text-muted)" }}>

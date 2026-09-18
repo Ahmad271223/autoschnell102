@@ -330,6 +330,11 @@ def test_gehalten_ohne_deckel_und_geloeschtes_inserat(wegwerf):
 
 # ------------------------------------------------------------- 79 / 116
 def test_abrufzeit_nach_dem_abruf_und_verlorene_lease_ohne_vormerkung(wegwerf, monkeypatch):
+    # Der verlorene Abruf darf nichts vormerken, der gewonnene schon. Geprueft
+    # mit dem alten Verhalten (BEWEIS_AUTOMATISCH=true) — seit 18.09.2026
+    # (Wunsch Ahmad) merkt der Abruf sonst gar nichts mehr vor, dann pruefte
+    # dieser Test nichts.
+    monkeypatch.setenv("BEWEIS_AUTOMATISCH", "true")
     db, run = wegwerf.db, wegwerf.run
     vorgemerkt = []
 

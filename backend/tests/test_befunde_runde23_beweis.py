@@ -367,7 +367,13 @@ def test_07_pdf_aus_eingefrorenen_daten_gleicht_dem_aus_rohdaten(fall, quelle, d
 
 
 # ------------------------------------------------------ Aufruf beim Abruf --
-def test_08_erster_portalabruf_uebergibt_daten_und_abrufzeit(welt):
+def test_08_erster_portalabruf_uebergibt_daten_und_abrufzeit(welt, monkeypatch):
+    """Einfrieren des Datenstands beim Abruf — geprueft mit dem alten
+    Verhalten (BEWEIS_AUTOMATISCH=true). Seit 18.09.2026 (Wunsch Ahmad)
+    entsteht das Dokument normalerweise erst auf Knopfdruck; der Schalter
+    holt die automatische Vormerkung zurueck, und genau die friert hier
+    den Stand des ERSTEN Abrufs ein."""
+    monkeypatch.setenv("BEWEIS_AUTOMATISCH", "true")
     from listing_identity import ensure_cache_indexes, get_or_fetch_listing
     welt.run(ensure_cache_indexes(welt.db))
     nr = random.randint(7_100_000_000, 7_199_999_999)

@@ -1838,3 +1838,34 @@ Offen (bewusst nicht geändert): das Signalrot `#ff3b30` der Marke bleibt in bei
 weiße Schrift darauf kommt auf 3,55:1 (Apple macht es genauso). Im **dunklen** Design ist
 `text-zinc-600` an manchen Stellen zu dunkel (2,4:1, u. a. Fahrzeugpool und Team) — das ist eine
 Altlast der dunklen Ansicht und wartet auf Ahmads Entscheidung.
+
+### Beweisdokument nur noch auf Knopfdruck (18.09.2026, Wunsch Ahmad)
+
+Bis hierher entstand zu **jedem** abgerufenen Inserat automatisch ein Beweis-PDF. Gemessen sind das
+rund 0,85 MB je Inserat (echte Inserate haben im Median 20 Fotos, Deckel `BEWEIS_FOTOS_MAX=20`) —
+bei 30 Suchern × 150 Vergleichen am Tag also ~3,5 GB täglich, von denen fast nichts gebraucht wird.
+
+Neu:
+
+- **Automatisch entsteht nichts mehr.** Weder der Abruf (`listing_identity.get_or_fetch_listing`)
+  noch der Vergleich (`routes/listings.compare`) merken etwas vor. Der Vergleich zeigt ein bereits
+  vorhandenes Dokument weiterhin an.
+- **`POST /api/beweise/anfordern`** (`{vehicle_id}` **oder** `{cache_key}`) legt es an — idempotent:
+  gibt es zum Inserat schon eines (auch ein laufendes), kommt genau dieses zurück, nie ein zweites
+  „erstes" Dokument. Erlaubt ist es für Fahrzeuge im eigenen Bereich; ohne Fahrzeug nur für den,
+  der das Inserat selbst verglichen hat. Audit: `beweis.angefordert`.
+- **Oberfläche:** Die Beweis-Karte (Fahrzeugakte, Termine, Vertragsarchiv, Vergleich) zeigt jetzt
+  den Knopf „Beweisdokument erstellen", wenn es noch keines gibt, und „Noch einmal versuchen",
+  wenn die Erzeugung gescheitert ist. Nach dem Vertragsversand (WhatsApp **oder** E-Mail) fragt der
+  Versand-Dialog einmal: „Beweisdokument erstellen lassen?" → *Ja, erstellen* / *Nein, danke*.
+- **Datenstand:** Angefordert wird mit dem Stand aus dem Inseratsspeicher (`listings_cache`,
+  90 Tage) — ersatzweise mit den beim Vergleich am Fahrzeug gespeicherten Daten. Die Fotos holt der
+  Worker beim Erzeugen vom Portal; ist das Inserat dann schon offline, entsteht das Dokument ohne
+  Fotos (die Fotoadressen stehen weiter im Anhang). Wer das Dokument sicher mit Fotos will, fordert
+  es am selben Tag an.
+- **Zurückschalten ohne Code-Änderung:** `BEWEIS_AUTOMATISCH=true` in der Server-`.env` stellt das
+  alte Verhalten wieder her (jedes abgerufene Inserat bekommt wieder automatisch eines).
+
+Erwartete Größe danach: statt ~3,5 GB/Tag nur noch für die Inserate, die wirklich zum Vertrag
+führen — bei 5 % Vertragsquote ~0,2 GB/Tag, Dauerstand rund 12 GB statt 215 GB.
+Wächter: `backend/tests/test_beweis_auf_knopfdruck_20260918.py`.

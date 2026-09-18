@@ -71,6 +71,19 @@ _FOTO_KANTE = _zahl_env("BEWEIS_FOTO_KANTE", 640, 300, 2000)
 _FOTO_QUALITAET_ERSTE = _zahl_env("BEWEIS_FOTO_QUALITAET_ERSTE", 68, 40, 95)
 _FOTO_QUALITAET = _zahl_env("BEWEIS_FOTO_QUALITAET", 62, 40, 95)
 BEWEIS_AUFBEWAHRUNG_TAGE = _zahl_env("BEWEIS_AUFBEWAHRUNG_TAGE", 60, 1, 3650)
+
+
+def automatisch_aktiv() -> bool:
+    """Entsteht zu jedem abgerufenen Inserat automatisch ein Beweisdokument?
+
+    Wunsch Ahmad 18.09.2026: NEIN — das Dokument entsteht nur noch, wenn
+    jemand es verlangt (Knopf in der Akte/im Vergleich, Rueckfrage nach dem
+    Versand). Vorher bekam JEDES angesehene Inserat eines; bei 30 Suchern x
+    150 Vergleichen waeren das rund 3,5 GB am Tag gewesen, von denen fast
+    nichts gebraucht wird. `BEWEIS_AUTOMATISCH=true` stellt das alte
+    Verhalten ohne Code-Aenderung wieder her."""
+    return (os.environ.get("BEWEIS_AUTOMATISCH", "") or "").strip().lower() \
+        in ("1", "true", "ja", "yes")
 # Name/Anschrift/Telefon auch privater Anbieter drucken (Standard: nein).
 BEWEIS_PRIVATDATEN = (os.environ.get("BEWEIS_PRIVATDATEN", "") or "").strip().lower() \
     in ("1", "true", "ja", "yes")

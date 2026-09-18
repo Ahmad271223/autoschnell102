@@ -615,12 +615,19 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # der Abruf-Zweig es schon vorgemerkt; hier idempotent nachziehen (auch
     # fuer Cache-Eintraege von vor der Umstellung). Nicht aus ungepruefter
     # Browser-Lieferung (Kleinanzeigen-Erweiterung, Quarantaene).
+    # Wunsch Ahmad 18.09.2026: nicht mehr automatisch. Der Vergleich liefert
+    # das Dokument nur noch, wenn es zu diesem Inserat schon eines gibt; sonst
+    # bietet die Oberflaeche den Knopf "Beweisdokument erstellen" an.
     beweis = None
     if client_hit is None:
+        from beweis_service import automatisch_aktiv, beweis_fuer_schluessel, oeffentlich
         from beweis_service import beweis_vormerken
-        beweis = await beweis_vormerken(
-            db, cache_key=identity["cache_key"], quelle=source,
-            item_id=identity["item_id"], url=raw_url, anlass="vergleich")
+        if automatisch_aktiv():
+            beweis = await beweis_vormerken(
+                db, cache_key=identity["cache_key"], quelle=source,
+                item_id=identity["item_id"], url=raw_url, anlass="vergleich")
+        else:
+            beweis = oeffentlich(await beweis_fuer_schluessel(db, identity["cache_key"]))
 
     hinweise = regeln_nicht_abgebildet(vehicle, rules)
     # Runde 29 (12.09.2026, Regel Ahmad): Ein Sucher erfaehrt NICHT, welcher

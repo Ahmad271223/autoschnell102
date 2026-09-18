@@ -1,10 +1,15 @@
 // Beweisdokument zum Inserat (ersetzt die Snapshots, 10.09.2026).
 //
-// Beim ersten Gebrauch eines Inserats-Links (egal von wem) entsteht EIN
-// PDF mit allen ausgelesenen Daten, den Inseratsfotos, Anzeigen-ID und
-// Inserats-Adresse. Alle Firmen, die das Inserat verwenden, teilen es.
+// Es entsteht EIN PDF je Inserat mit allen ausgelesenen Daten, den
+// Inseratsfotos, Anzeigen-ID und Inserats-Adresse. Alle Firmen, die das
+// Inserat verwenden, teilen es.
 //
-//   <BeweisCard beweis={result.beweis} />       — nach dem Vergleich (wartet, bis fertig)
+// Wunsch Ahmad 18.09.2026: Das Dokument entsteht NUR auf Knopfdruck —
+// vorher bekam jedes angesehene Inserat automatisch eines. Gibt es noch
+// keines, zeigt diese Karte den Knopf "Beweisdokument erstellen"; nach dem
+// Vertragsversand fragt der Versand-Dialog danach.
+//
+//   <BeweisCard beweis={result.beweis} cacheKey={result.cache_key} />  — nach dem Vergleich
 //   <BeweisCard vehicleId="..." compact />      — Termine, PDF-Archiv (kleine Zeile)
 //   <BeweisCard vehicleId="..." />              — Fahrzeugakte, Termindetails
 //
@@ -12,7 +17,7 @@
 // der wird angezeigt, solange er existiert (er verfaellt nach 60 Tagen bzw.
 // mit dem Kaufvertrag).
 import { useEffect, useState } from "react";
-import { api, openAuthedFile } from "@/lib/api";
+import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { printBlobUrl } from "@/lib/pdf";
 import { AlertTriangle, CheckCircle2, ExternalLink, FileText, Loader2, Printer, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
@@ -47,12 +52,35 @@ async function pdfDrucken(id) {
   }
 }
 
-export default function BeweisCard({ beweis: start, beweisId, vehicleId, compact = false }) {
+export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKey,
+                                    compact = false }) {
   const [beweis, setBeweis] = useState(start || null);
   const [altSnapshot, setAltSnapshot] = useState(null);
   const [geladen, setGeladen] = useState(!vehicleId);
   const [zeitUeber, setZeitUeber] = useState(false);
+  const [holt, setHolt] = useState(false);
   const id = beweis?.id || start?.id || beweisId;
+  // Ohne Fahrzeug oder Inseratsschluessel kann man nichts anfordern (z. B.
+  // wenn die Karte nur ueber eine Beweis-ID eingebunden ist).
+  const kannAnfordern = Boolean(vehicleId || cacheKey);
+
+  // Wunsch Ahmad 18.09.2026: erst auf Knopfdruck erzeugen. Der Server merkt
+  // vor (idempotent je Inserat), der Hintergrund-Worker baut das PDF; die
+  // Abfrage-Schleife unten zeigt den Fortschritt wie bisher.
+  const anfordern = async () => {
+    setHolt(true);
+    try {
+      const { data } = await api.post("/beweise/anfordern",
+        vehicleId ? { vehicle_id: vehicleId } : { cache_key: cacheKey });
+      setBeweis(data?.beweis || null);
+      setZeitUeber(false);
+      toast.success("Beweisdokument wird erstellt — das dauert meist ein paar Sekunden.");
+    } catch (err) {
+      toast.error(errMsg(err, "Beweisdokument konnte nicht angefordert werden"));
+    } finally {
+      setHolt(false);
+    }
+  };
 
   // Fahrzeug-Modus: Beweisdokument zum Inserat des Fahrzeugs suchen, sonst
   // einen alten Snapshot (Altbestand) anzeigen.
@@ -108,7 +136,47 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, compact
 
   if (!geladen) return null;
   if (!id) {
-    return altSnapshot ? <AltSnapshot snap={altSnapshot} compact={compact} /> : null;
+    if (!kannAnfordern) {
+      return altSnapshot ? <AltSnapshot snap={altSnapshot} compact={compact} /> : null;
+    }
+    const knopf = (
+      <button type="button" onClick={anfordern} disabled={holt}
+              data-testid="beweis-erstellen-btn"
+              className={compact
+                ? "apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full disabled:opacity-50"
+                : "apple-btn apple-btn-secondary !py-2.5 !text-[12px] w-full disabled:opacity-50"}>
+        {holt ? <Loader2 size={compact ? 11 : 13} className="animate-spin" />
+              : <ShieldCheck size={compact ? 11 : 13} />}
+        {holt ? "wird angefordert …" : "Beweisdokument erstellen"}
+      </button>
+    );
+    return (
+      <div className={compact ? "flex flex-col gap-1.5" : "space-y-3"}>
+        {compact ? (
+          <div className="flex items-center gap-2 flex-wrap" data-testid="beweis-inline">
+            <div className="inline-flex items-center gap-1 text-[10px] uppercase font-bold tracking-wider"
+                 style={{ color: "var(--text-muted)" }}>
+              <ShieldCheck size={10} className="text-[var(--accent-red)]" /> Beweis
+            </div>
+            {knopf}
+          </div>
+        ) : (
+          <div className="apple-surface p-5" data-testid="beweis-card">
+            <div className="flex items-center gap-1.5 mb-2">
+              <ShieldCheck size={12} className="text-[var(--accent-red)]" />
+              <span className="overline">Beweisdokument</span>
+            </div>
+            <div className="text-xs mb-3 leading-relaxed" style={{ color: "var(--text-muted)" }}>
+              Hält alle Inseratsdaten, die Fotos, die Anzeigen-ID und die Inserats-Adresse
+              als PDF fest — für den Fall, dass der Verkäufer später etwas anderes sagt.
+              Es entsteht nur, wenn du es hier verlangst.
+            </div>
+            {knopf}
+          </div>
+        )}
+        {altSnapshot ? <AltSnapshot snap={altSnapshot} compact={compact} /> : null}
+      </div>
+    );
   }
   const alt = altSnapshot ? <AltSnapshot snap={altSnapshot} compact={compact} /> : null;
 
@@ -184,8 +252,15 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, compact
         </>
       ) : status === "fehlgeschlagen" ? (
         <div className="text-xs leading-relaxed" style={{ color: "var(--tx-rot)" }}>
-          Das Beweisdokument konnte nicht erstellt werden. Beim nächsten Vergleich
-          dieses Inserats wird es automatisch erneut versucht.
+          Das Beweisdokument konnte nicht erstellt werden.
+          {kannAnfordern ? (
+            <button type="button" onClick={anfordern} disabled={holt}
+                    data-testid="beweis-nochmal-btn"
+                    className="apple-btn apple-btn-secondary !py-2 !text-[12px] w-full mt-2 disabled:opacity-50">
+              {holt ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+              Noch einmal versuchen
+            </button>
+          ) : null}
           {beweis?.fehler && (
             <div className="text-[10px] font-mono leading-snug p-2 mt-2 rounded-lg max-h-24 overflow-auto"
                  style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-muted)" }}>

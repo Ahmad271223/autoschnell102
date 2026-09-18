@@ -3,7 +3,7 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
-import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon, FileText } from "lucide-react";
+import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon, FileText, ShieldCheck } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { dateiTeilen, kannDateiTeilen, pdfDatei } from "@/lib/teilen";
 
@@ -17,6 +17,12 @@ export default function SendDialog({ open, contract, onClose }) {
   const [waMsg, setWaMsg] = useState((dealer?.whatsapp_template || "").replaceAll("{händler_name}", dealer?.company_name || ""));
   const [emailMsg, setEmailMsg] = useState((dealer?.email_template || "").replaceAll("{händler_name}", dealer?.company_name || ""));
   const [busy, setBusy] = useState(false);
+  // Wunsch Ahmad 18.09.2026: Das Beweisdokument entsteht nicht mehr
+  // automatisch bei jedem Vergleich. Nach dem Versand fragen wir einmal
+  // nach — "Ja" merkt es beim Server vor, der Worker baut das PDF.
+  const [beweisFrage, setBeweisFrage] = useState(false);
+  const [beweisBusy, setBeweisBusy] = useState(false);
+  const [beweisFertig, setBeweisFertig] = useState(false);
   // Nachpruefung Runde 10: EIN Schluessel je geoeffnetem Dialog. Ein erneuter
   // Klick nach Fehler oder Timeout traegt denselben Schluessel und laeuft
   // serverseitig in die Wiederaufnahme statt in eine zweite Zustellung.
@@ -113,6 +119,10 @@ export default function SendDialog({ open, contract, onClose }) {
         } else {
           toast.warning("Dein Browser hat das WhatsApp-Fenster blockiert — bitte unten auf „WhatsApp jetzt öffnen“ tippen.");
         }
+        // Der Server hat den Versand vermerkt — auch wenn der Browser das
+        // WhatsApp-Fenster blockiert hat und der Nutzer es gleich per Knopf
+        // oeffnet. Deshalb hier fragen, nicht nur im geoeffnet-Fall.
+        if (contract.vehicle_id && !beweisFertig) setBeweisFrage(true);
       } else {
         if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
         const z = data?.zustellung;
@@ -137,6 +147,12 @@ export default function SendDialog({ open, contract, onClose }) {
         }
         else if (z === "mock") toast.success("Testmodus: Versand nur protokolliert, keine E-Mail");
         else toast.success("Versand registriert");
+        // Nur nach einem echten Versand fragen — nicht, wenn er noch laeuft
+        // oder ohne Ergebnis blieb (dann klickt der Nutzer gleich erneut).
+        if (contract.vehicle_id && !beweisFertig && z !== "unklar"
+            && !(data?.bereits_gesendet && z === "laeuft")) {
+          setBeweisFrage(true);
+        }
       }
     } catch (err) {
       if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
@@ -165,6 +181,7 @@ export default function SendDialog({ open, contract, onClose }) {
           toast.warning(errMsg(err, "Der Versand konnte nicht im Archiv vermerkt werden"));
         }
         toast.success("An WhatsApp übergeben · Chat des Verkäufers wählen und senden");
+        if (contract.vehicle_id && !beweisFertig) setBeweisFrage(true);
       } else if (ergebnis === "abgebrochen") {
         toast.info("Teilen abgebrochen");
       } else {
@@ -173,6 +190,20 @@ export default function SendDialog({ open, contract, onClose }) {
       }
     } finally {
       setBusy(false);
+    }
+  };
+
+  const beweisAnfordern = async () => {
+    setBeweisBusy(true);
+    try {
+      await api.post("/beweise/anfordern", { vehicle_id: contract.vehicle_id });
+      setBeweisFertig(true);
+      setBeweisFrage(false);
+      toast.success("Beweisdokument wird erstellt — es liegt gleich in der Fahrzeugakte.");
+    } catch (err) {
+      toast.error(errMsg(err, "Beweisdokument konnte nicht angefordert werden"));
+    } finally {
+      setBeweisBusy(false);
     }
   };
 
@@ -304,6 +335,35 @@ export default function SendDialog({ open, contract, onClose }) {
                 <Send size={15} /> E-Mail senden
               </button>
             </>
+          )}
+
+          {beweisFrage && contract.vehicle_id && (
+            <div className="rounded-xl border p-4" data-testid="beweis-frage"
+                 style={{ borderColor: "var(--border-default)", background: "var(--wa-03)" }}>
+              <div className="flex items-center gap-2">
+                <ShieldCheck size={15} className="text-[var(--accent-red)]" />
+                <span className="text-sm font-semibold">Beweisdokument erstellen lassen?</span>
+              </div>
+              <div className="text-[11.5px] leading-relaxed mt-1.5" style={{ color: "var(--text-muted)" }}>
+                Hält alle Inseratsdaten, die Fotos, die Anzeigen-ID und die Inserats-Adresse
+                als PDF fest — für den Fall, dass der Verkäufer später etwas anderes sagt.
+                Du findest es danach in der Fahrzeugakte.
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button type="button" onClick={beweisAnfordern} disabled={beweisBusy}
+                        data-testid="beweis-ja-btn"
+                        className="flex-1 px-4 py-2.5 rounded-sm font-semibold text-white disabled:opacity-50"
+                        style={{ background: "var(--st-gruen)" }}>
+                  {beweisBusy ? "Wird angefordert …" : "Ja, erstellen"}
+                </button>
+                <button type="button" onClick={() => setBeweisFrage(false)} disabled={beweisBusy}
+                        data-testid="beweis-nein-btn"
+                        className="flex-1 px-4 py-2.5 rounded-sm border disabled:opacity-50"
+                        style={{ borderColor: "var(--border-default)" }}>
+                  Nein, danke
+                </button>
+              </div>
+            </div>
           )}
 
           <div className="border-t pt-4 flex gap-3" style={{ borderColor: "var(--border-default)" }}>

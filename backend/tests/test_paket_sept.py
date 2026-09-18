@@ -110,18 +110,34 @@ def test_00_aufbau(welt):
 
 # ---------- Beweisdokument fuer jedes Portal (ersetzt die Snapshots, 10.09.2026) ----------
 def test_01_beweisdokument_fuer_jedes_portal_statt_snapshot(welt):
+    """Beweisdokument statt Snapshot — seit 18.09.2026 (Wunsch Ahmad) aber erst
+    auf Knopfdruck: Der Vergleich liefert keines mehr, "anfordern" legt es an,
+    und es bleibt bei genau EINEM Dokument je Inserat."""
     r = _compare(welt["S"], _ka_url(1))
     assert r.status_code == 200, r.text[:300]
     j = r.json()
     assert "snapshot_id" not in j, "Snapshots gibt es nicht mehr"
-    assert (j.get("beweis") or {}).get("id"), "Kleinanzeigen: Beweisdokument erwartet"
+    assert not (j.get("beweis") or {}).get("id"), "Vergleich darf nichts mehr anlegen"
+
+    def anfordern(schluessel):
+        return requests.post(f"{API}/beweise/anfordern", headers=welt["S"],
+                             json={"cache_key": schluessel}, timeout=30)
+
+    a = anfordern(j["cache_key"])
+    assert a.status_code == 200, a.text[:300]
+    beweis_id = a.json()["beweis"]["id"]
+    assert beweis_id, "Kleinanzeigen: Beweisdokument erwartet"
+    assert anfordern(j["cache_key"]).json()["beweis"]["id"] == beweis_id,         "je Inserat genau EIN Dokument"
+    # Ein spaeterer Vergleich zeigt das vorhandene Dokument wieder mit an.
     zweit = _compare(welt["S"], _ka_url(1))
-    assert zweit.json()["beweis"]["id"] == j["beweis"]["id"], "je Inserat genau EIN Dokument"
+    assert (zweit.json().get("beweis") or {}).get("id") == beweis_id
+
     r = _compare(welt["S"], f"https://suchen.mobile.de/fahrzeuge/details.html?id=3{NUM:06d}1")
     if r.status_code == 400 and "freigeschaltet" in r.text:
         pytest.skip("mobile.de in dieser Umgebung nicht verfuegbar")
     assert r.status_code == 200, r.text[:300]
-    assert (r.json().get("beweis") or {}).get("id"), "mobile.de: Beweisdokument erwartet"
+    m = anfordern(r.json()["cache_key"])
+    assert m.status_code == 200 and m.json()["beweis"]["id"], "mobile.de: Beweisdokument erwartet"
     assert _db().listing_snapshots.count_documents({"dealer_id": welt["dealer_id"]}) == 0
 
 
