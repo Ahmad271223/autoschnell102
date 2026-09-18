@@ -30,6 +30,23 @@ const DEFAULTS = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Wunsch Ahmad 18.09.2026: Der Nutzer bricht das Warten mit "X" ab. Ein
+// AbortSignal geht durch alle Schritte; wer abbricht, bekommt einen Fehler
+// mit code "abgebrochen" — die Oberflaeche zeigt dafuer keine Fehlermeldung.
+export const ABBRUCH = "abgebrochen";
+
+function abbruchFehler() {
+  const e = new Error("Abgebrochen");
+  e.code = ABBRUCH;
+  return e;
+}
+
+/** true, wenn der Fehler vom Abbrechen kommt (axios meldet ERR_CANCELED). */
+export function istAbbruch(err) {
+  return err?.code === ABBRUCH || err?.code === "ERR_CANCELED"
+    || err?.name === "CanceledError" || err?.name === "AbortError";
+}
+
 function retryAfterMs(err, fallbackMs) {
   const h = err?.response?.headers?.["retry-after"];
   const s = parseInt(h, 10);
@@ -42,12 +59,14 @@ function retryAfterMs(err, fallbackMs) {
  * Ablauf von maxWaitMs einen Error mit `code: "timeout"`.
  */
 export async function postWithRetry503(client, path, body, opts = {}) {
-  const { maxWaitMs, retry503Ms } = { ...DEFAULTS, ...opts };
+  const { maxWaitMs, retry503Ms, signal } = { ...DEFAULTS, ...opts };
   const deadline = Date.now() + maxWaitMs;
   for (;;) {
+    if (signal?.aborted) throw abbruchFehler();
     try {
-      return await client.post(path, body);
+      return await client.post(path, body, signal ? { signal } : undefined);
     } catch (err) {
+      if (istAbbruch(err)) throw abbruchFehler();
       if (err?.response?.status !== 503) throw err;
       opts.onWait?.(WAIT_MESSAGE);
       const wait = retryAfterMs(err, retry503Ms);
@@ -67,8 +86,9 @@ export async function postWithRetry503(client, path, body, opts = {}) {
  * failed → Error mit Backend-Meldung; Zeitüberschreitung → Error code "timeout".
  */
 export async function checkLink(client, url, opts = {}) {
-  const { maxWaitMs, pollMs } = { ...DEFAULTS, ...opts };
+  const { maxWaitMs, pollMs, signal } = { ...DEFAULTS, ...opts };
   const deadline = Date.now() + maxWaitMs;
+  if (signal?.aborted) throw abbruchFehler();
 
   const { data: first } = await postWithRetry503(
     client, "/listings/check",
@@ -79,8 +99,12 @@ export async function checkLink(client, url, opts = {}) {
 
   opts.onWait?.(WAIT_MESSAGE);
   const jobId = first.job_id;
+  // Die Job-Nummer nach draussen geben: nur damit kann das "X" dem Server
+  // sagen, dass hier niemand mehr wartet.
+  opts.onJob?.(jobId);
   let ersteAbfrage = true;
   for (;;) {
+    if (signal?.aborted) throw abbruchFehler();
     if (Date.now() >= deadline) {
       const e = new Error(TIMEOUT_MESSAGE);
       e.code = "timeout";
@@ -92,8 +116,10 @@ export async function checkLink(client, url, opts = {}) {
     ersteAbfrage = false;
     let data;
     try {
-      ({ data } = await client.get(`/listings/check/${jobId}`));
+      ({ data } = await client.get(`/listings/check/${jobId}`,
+                                   signal ? { signal } : undefined));
     } catch (err) {
+      if (istAbbruch(err)) throw abbruchFehler();
       if (err?.response?.status === 404) {
         // Runde 19: Job bereits weggeräumt — nicht raten, sondern einmal neu
         // prüfen: ein Cache-Treffer kommt als "completed", sonst ein frischer Job.

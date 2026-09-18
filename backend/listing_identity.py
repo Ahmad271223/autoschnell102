@@ -639,13 +639,18 @@ async def get_or_fetch_listing(
         pass
     try:
         data = await fetcher(source, item_id, url)
-    except Exception:
+    except BaseException:
         # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
-        await _lease_freigeben(db, cache_key, claim)
+        # BaseException (statt Exception) wegen CancelledError: Wunsch Ahmad
+        # 18.09.2026 — bricht der Nutzer ab ("X") oder legt der Browser auf,
+        # wird dieser Task abgebrochen. Ohne Freigabe blieb derselbe Link bis
+        # zu 90 Sekunden gesperrt ("wird gerade abgerufen"). shield(): die
+        # Aufraeumung laeuft zu Ende, auch wenn der Task schon abgebrochen ist.
+        await _aio.shield(_lease_freigeben(db, cache_key, claim))
         raise
     finally:
         _heartbeat.cancel()
-        await release_slot(db, slot_id)
+        await _aio.shield(release_slot(db, slot_id))
     if not isinstance(data, dict):
         await _lease_freigeben(db, cache_key, claim)
         raise RuntimeError(

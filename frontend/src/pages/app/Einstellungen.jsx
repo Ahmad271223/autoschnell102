@@ -335,6 +335,18 @@ export default function Einstellungen() {
                              options={[{ v: "ignore", l: "Nicht übernehmen" }, { v: "exact", l: "1:1 übernehmen" }]} />
               </RuleRow>
 
+              {/* Wunsch Ahmad 18.09.2026: Navi im Vergleich mitfiltern —
+                  aber nur, wenn das Inserat eines nennt. Wer das nicht will,
+                  stellt hier "Nicht filtern" ein. */}
+              <RuleRow label="Navigationssystem">
+                <AppleSelect testid="rule-navi-mode" value={r.navi?.mode || "wenn_vorhanden"}
+                             onChange={(v) => setRule("navi", { mode: v })}
+                             options={[
+                               { v: "wenn_vorhanden", l: "Mitfiltern, wenn im Inserat vorhanden" },
+                               { v: "ignore", l: "Nicht filtern" },
+                             ]} />
+              </RuleRow>
+
               <RuleRow label="Schadensfilter">
                 <AppleSelect testid="rule-damage-mode" value={r.damage?.mode || "no_accident"}
                              onChange={(v) => setRule("damage", { mode: v })}

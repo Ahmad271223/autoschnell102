@@ -879,6 +879,31 @@ async def listings_check_status(job_id: str, user=Depends(require_active_sub)):
     return out
 
 
+@router.post("/listings/check/{job_id}/abbrechen")
+async def linkpruefung_abbrechen(job_id: str, user=Depends(current_firma)):
+    """Wunsch Ahmad 18.09.2026: Der Nutzer bricht das Warten ab ("X").
+
+    Er steigt aus der Warteliste aus; wartet niemand mehr und hat noch kein
+    Worker angefangen, faellt der Abruf ganz weg. Ein bereits laufender Abruf
+    laeuft zu Ende — sein Ergebnis liegt dann im Zwischenspeicher.
+    Sichtbar ist der Job nur fuer den, der ihn eingereicht hat (wie beim
+    Status: sonst 404)."""
+    from link_jobs import get_job, warten_beenden
+    job = await get_job(db, job_id)
+    if not job:
+        return {"status": "weg"}
+    eigene = user.get("dealer_id")
+    if eigene not in (job.get("dealer_ids") or []) \
+            and job.get("requested_by_dealer") != eigene:
+        raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+    konten = job.get("user_ids") or []
+    if (ist_sucher(user) and konten and user.get("id") not in konten
+            and job.get("requested_by_user") != user.get("id")):
+        raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+    return await warten_beenden(db, job_id, dealer_id=eigene or "",
+                                user_id=user.get("id") or "")
+
+
 # Runde 27 (12.09.2026, Beschluss Ahmad): Der LIVE-Zaehler ist ein rein
 # ANONYMES Nachfrage-Signal zum Inserat. Er gehoert weder zu einem Konto
 # noch zu einer Firma — jeder Sucher jeder Firma sieht dieselbe Zahl.

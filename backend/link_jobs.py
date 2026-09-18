@@ -356,6 +356,45 @@ async def get_job(db, job_id: str) -> Optional[dict]:
     return await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
 
 
+async def warten_beenden(db, job_id: str, dealer_id: str = "",
+                         user_id: str = "") -> dict:
+    """Ein Wartender steigt aus (Wunsch Ahmad 18.09.2026: Knopf "X" im
+    Vergleich — "dann soll es gestoppt werden ... man soll direkt einen neuen
+    Link eingeben koennen").
+
+    EIN Job gehoert allen, die auf dasselbe Inserat warten. Deshalb:
+      * Der Aussteiger wird aus der Warteliste genommen — seine Grenze
+        (Links je Konto) ist damit sofort wieder frei.
+      * Wartet NIEMAND mehr und hat noch kein Worker den Job beansprucht
+        (status "queued"), wird er geloescht: der Anbieter-Abruf findet gar
+        nicht erst statt (spart Apify-Lauf und Tageskontingent).
+      * Laeuft der Abruf schon ("processing"), bleibt er stehen. Er ist
+        ohnehin unterwegs, sein Ergebnis landet im Zwischenspeicher — der
+        naechste, der den Link einfuegt, hat es sofort.
+
+    Rueckgabe: {"status": "abgebrochen" | "laeuft_weiter" | "weg"}.
+    """
+    if user_id:
+        job = await db.link_jobs.find_one_and_update(
+            {"id": job_id, "status": {"$in": list(OFFEN)}},
+            {"$pull": {"user_ids": user_id}},
+            projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    else:
+        job = await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        return {"status": "weg"}
+    if job.get("status") == "queued" and not (job.get("user_ids") or []):
+        # Nur solange er wirklich noch wartet: beansprucht ihn in derselben
+        # Sekunde ein Worker (status -> processing), greift der Filter nicht.
+        entfernt = await db.link_jobs.delete_one(
+            {"id": job_id, "status": "queued", "user_ids": []})
+        if entfernt.deleted_count == 1:
+            log.info("link_jobs: Job %s vom Nutzer abgebrochen (niemand wartet mehr)",
+                     job_id)
+            return {"status": "abgebrochen"}
+    return {"status": "laeuft_weiter", "job_status": job.get("status")}
+
+
 # Audit 09/2026 (Punkt 17): Sofort-Anstoesse sind je Prozess begrenzt und
 # dedupliziert — viele parallele Link-Einreichungen erzeugen keine
 # unbegrenzten Tasks mehr; der Dauer-Worker holt den Rest im 0,3-s-Takt.

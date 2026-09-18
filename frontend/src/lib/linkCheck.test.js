@@ -4,7 +4,7 @@
  * Läuft ohne Browser/axios — der Client wird gemockt.
  */
 import {
-  checkLink, postWithRetry503, TIMEOUT_MESSAGE, WAIT_MESSAGE,
+  checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE, WAIT_MESSAGE,
 } from "./linkCheck";
 
 const err503 = (retryAfter) => {
@@ -136,5 +136,42 @@ describe("checkLink (Hintergrundjob-Ablauf)", () => {
       get: vi.fn(async () => { throw notFound; }),
     };
     await expect(checkLink(client, "u", { pollMs: 5, maxWaitMs: 5000 })).rejects.toThrow(/erneut/);
+  });
+});
+
+
+// Wunsch Ahmad 18.09.2026: "X" waehrend des Abrufs — sofort raus aus dem
+// Warten, ohne Fehlermeldung, und der Server erfaehrt die Job-Nummer.
+describe("Abbrechen", () => {
+  test("abgebrochenes Signal bricht sofort ab, ohne die Anfrage zu senden", async () => {
+    const client = { post: vi.fn(), get: vi.fn() };
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(checkLink(client, "https://x/1", { signal: ctrl.signal }))
+      .rejects.toSatisfy((e) => istAbbruch(e));
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  test("Abbruch waehrend des Wartens beendet die Schleife und meldet die Job-Nummer", async () => {
+    const ctrl = new AbortController();
+    const client = {
+      post: vi.fn(async () => ({ data: { status: "queued", job_id: "job-42" } })),
+      get: vi.fn(async () => {
+        ctrl.abort();                       // der Nutzer drueckt "X"
+        return { data: { status: "queued" } };
+      }),
+    };
+    const jobs = [];
+    await expect(checkLink(client, "https://x/2",
+      { signal: ctrl.signal, onJob: (id) => jobs.push(id), pollMs: 1 }))
+      .rejects.toSatisfy((e) => istAbbruch(e));
+    expect(jobs).toEqual(["job-42"]);       // ohne die Nummer kein Stopp am Server
+  });
+
+  test("ein abgebrochener axios-Fehler wird als Abbruch erkannt", () => {
+    const e = new Error("canceled");
+    e.code = "ERR_CANCELED";
+    expect(istAbbruch(e)).toBe(true);
+    expect(istAbbruch(new Error("anderes"))).toBe(false);
   });
 });

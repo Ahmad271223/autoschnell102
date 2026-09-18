@@ -1905,3 +1905,33 @@ geprüfter Link mit gesetztem Ausstattungsfilter.
 
 Wächter: `test_helle_ansicht_20260918.py` (Regel 6), `test_vertragsbedingungen_20260918.py`,
 `test_getriebe_kraftstoff_filter.py` (Navi-Block).
+
+### Navi-Regel und „Abbrechen" beim Vergleich (18.09.2026, Wunsch Ahmad)
+
+**Navi als Regel.** In den Vergleichsregeln (beide Profile) steht jetzt „Navigationssystem":
+`wenn_vorhanden` (Standard) hängt `fe=NAVIGATION_SYSTEM` an, sobald das Inserat ein Navi nennt;
+`ignore` filtert nie danach. Gespeicherte Altpakete ohne den Schlüssel verhalten sich wie
+`wenn_vorhanden`. Erkennung: `fahrzeug_codes.hat_navigation` (Ausstattung, Titel, Beschreibung;
+„ohne Navi", „kein Navigationssystem", „Navi-Vorbereitung" zählen nicht).
+
+**Abbrechen.** Dauert ein Abruf zu lange, steht neben „Lade…" ein **„✕ Abbrechen"**. Der Klick
+- bricht die laufende Anfrage im Browser ab (AbortController, durchgereicht bis in die
+  Job-Abfrage in `lib/linkCheck.js`; `istAbbruch()` unterscheidet Abbruch von Fehler — es
+  erscheint keine Fehlermeldung, sondern „Abgebrochen — du kannst sofort einen neuen Link
+  einfügen."),
+- meldet dem Server über `POST /api/listings/check/{job_id}/abbrechen`, dass hier niemand mehr
+  wartet (`link_jobs.warten_beenden`).
+
+Serverseitig gilt: Ein Job gehört **allen**, die auf dasselbe Inserat warten. Steigt der letzte
+Wartende aus und hat noch kein Worker angefangen (`queued`), wird der Job gelöscht — der
+Anbieter-Abruf findet gar nicht erst statt (spart Apify-Lauf und Tageskontingent). Läuft er schon
+(`processing`), läuft er zu Ende; sein Ergebnis landet im Zwischenspeicher, der nächste Versuch mit
+demselben Link ist dann sofort da. **Einen bereits gestarteten Apify-Lauf können wir nicht abbrechen**
+(der Sync-Endpunkt liefert keine Run-ID) — dafür müsste der Abruf auf die asynchrone Apify-API
+umgestellt werden.
+
+Zusätzlich: Bricht der Browser mitten im Abruf ab, gibt `listing_identity.get_or_fetch_listing` die
+Inserats-Sperre jetzt frei (`except BaseException` + `asyncio.shield`) — vorher blieb derselbe Link
+bis zu 90 Sekunden mit „wird gerade abgerufen" blockiert, weil `CancelledError` keine `Exception` ist.
+
+Wächter: `backend/tests/test_abbrechen_und_navi_20260918.py`, `src/lib/linkCheck.test.js`.

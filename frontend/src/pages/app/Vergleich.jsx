@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc } from "@/lib/bilder";
-import { checkLink, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
+import { checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
 import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
@@ -141,12 +141,35 @@ export default function Vergleich() {
     } catch { /* quota/private mode — silent */ }
   }, [url, result, counter, contract, kontoId]);
 
+  // Wunsch Ahmad 18.09.2026: Dauert ein Abruf zu lange, bricht das "X" ihn
+  // ab — die Seite ist sofort wieder eingabebereit (derselbe oder ein neuer
+  // Link). Der Server erfaehrt es ueber die Job-Nummer: wartet dann niemand
+  // mehr und hat der Abruf noch nicht begonnen, faellt er ganz weg.
+  const abbruchRef = useRef(null);
+  const jobRef = useRef(null);
+
+  const abbrechen = () => {
+    const job = jobRef.current;
+    try { abbruchRef.current?.abort(); } catch { /* egal */ }
+    if (job) {
+      api.post(`/listings/check/${job}/abbrechen`).catch(() => { /* egal */ });
+      jobRef.current = null;
+    }
+    laeuftRef.current = false;
+    setLoading(false);
+    setWaitMsg(null);
+    toast.info("Abgebrochen — du kannst sofort einen neuen Link einfügen.");
+  };
+
   const startCompare = async (e, direktUrl) => {
     e?.preventDefault?.();
     const ziel = (direktUrl ?? url).trim();
     if (!ziel) return;
     if (loading || laeuftRef.current) return;   // Mehrfachklicks abfangen
     laeuftRef.current = true;          // Runde 24: sofort, nicht erst nach dem Render
+    const steuerung = new AbortController();
+    abbruchRef.current = steuerung;
+    jobRef.current = null;
     setLoading(true);
     setWaitMsg(null);
     setResult(null);
@@ -161,7 +184,8 @@ export default function Vergleich() {
       // Schritt 1: Vorab-Check. Bekannte Inserate sind sofort da; neue
       // laufen als Hintergrundjob — wir zeigen die Wartemeldung und
       // fragen den Status ab, statt die Anfrage minutenlang zu halten.
-      const check = await checkLink(api, ziel, { onWait: setWaitMsg });
+      const zusatz = { signal: steuerung.signal, onJob: (id) => { jobRef.current = id; } };
+      const check = await checkLink(api, ziel, { onWait: setWaitMsg, ...zusatz });
       let data;
       if (check.status === "needs_client_fetch") {
         data = { needs_client_fetch: true, url: check.url };
@@ -171,7 +195,7 @@ export default function Vergleich() {
         // sieht nur die Wartemeldung, keine technische Fehlermeldung.
         ({ data } = await postWithRetry503(api, "/mobile/compare",
                                            { url: ziel },
-                                           { onWait: setWaitMsg }));
+                                           { onWait: setWaitMsg, ...zusatz }));
       }
 
       // Client-seitiges Abrufen (nur Kleinanzeigen, wenn serverseitig aktiv):
@@ -183,20 +207,21 @@ export default function Vergleich() {
         if (!ready) {
           // Rueckfall (09/2026): ohne Abruf-Helfer holt der Server das
           // Inserat selbst — vorher blockierte hier "Erweiterung installieren".
-          const check2 = await checkLink(api, ziel, { onWait: setWaitMsg, ohneErweiterung: true });
+          const check2 = await checkLink(api, ziel,
+                                         { onWait: setWaitMsg, ohneErweiterung: true, ...zusatz });
           if (check2.status === "needs_client_fetch") {
             throw new Error("Abruf ohne Erweiterung nicht möglich — bitte später erneut versuchen.");
           }
           ({ data } = await postWithRetry503(api, "/mobile/compare",
                                              { url: ziel, ohne_erweiterung: true },
-                                             { onWait: setWaitMsg }));
+                                             { onWait: setWaitMsg, ...zusatz }));
         } else {
         try {
           const html = await fetchViaExtension(data.url || ziel);
           await api.post("/listings/ingest", { url: data.url || ziel, html });
           ({ data } = await postWithRetry503(api, "/mobile/compare",
                                              { url: ziel },
-                                             { onWait: setWaitMsg }));
+                                             { onWait: setWaitMsg, ...zusatz }));
         } catch (fe) {
           toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
           setLoading(false);
@@ -232,13 +257,17 @@ export default function Vergleich() {
     } catch (err) {
       // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
       hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
-      if (err?.code === "timeout") {
+      if (istAbbruch(err)) {
+        // Abgebrochen (X): die Meldung kam schon beim Klick.
+      } else if (err?.code === "timeout") {
         toast.info(TIMEOUT_MESSAGE);
       } else {
         toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
       }
     } finally {
       laeuftRef.current = false;
+      abbruchRef.current = null;
+      jobRef.current = null;
       setLoading(false);
       setWaitMsg(null);
     }
@@ -340,6 +369,20 @@ export default function Vergleich() {
             {loading ? <Loader2 size={15} className="animate-spin" /> : <ArrowRight size={15} />}
             <span>{loading ? "Lade…" : "Auslesen"}</span>
           </button>
+
+          {/* Wunsch Ahmad 18.09.2026: Abbrechen, wenn es zu lange dauert. */}
+          {loading && (
+            <button
+              type="button"
+              onClick={abbrechen}
+              data-testid="vergleich-abbrechen-btn"
+              title="Abruf abbrechen"
+              className="apple-btn apple-btn-secondary !px-3 !py-2.5 shrink-0"
+            >
+              <XIcon size={15} />
+              <span className="hidden sm:inline">Abbrechen</span>
+            </button>
+          )}
 
           {/* Trennlinie */}
           <div className="w-px self-stretch my-1" style={{ background: "var(--divider)" }} />

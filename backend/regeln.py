@@ -74,6 +74,13 @@ _REGELN: Dict[str, Dict[str, Any]] = {
               "zahlen": ("value",)},
     "fuel": {"modi": {"ignore", "exact"}, "zahlen": ()},
     "gearbox": {"modi": {"ignore", "exact"}, "zahlen": ()},
+    # Navi (18.09.2026, Wunsch Ahmad): "wenn_vorhanden" haengt den
+    # mobile.de-Filter fe=NAVIGATION_SYSTEM an, sobald das Inserat ein Navi
+    # nennt; "ignore" filtert nie danach. Fehlt der Schluessel in einem
+    # gespeicherten Regelpaket, gilt "wenn_vorhanden" (so wie seit heute
+    # gebaut). NICHT zu verwechseln mit dem alten features.navigation aus
+    # Runde 24 — das setzte ein wirkungsloses f= und ist entfallen.
+    "navi": {"modi": {"ignore", "wenn_vorhanden"}, "zahlen": ()},
     "doors": {"modi": {"ignore", "exact"}, "zahlen": ()},
     "displacement": {"modi": {"ignore", "exact", "tolerance"}, "zahlen": ("value",)},
     "damage": {"modi": {"ignore", "any", "no_accident", "include"}, "zahlen": ()},

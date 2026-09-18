@@ -1064,8 +1064,10 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("tr", tr))
     # Wunsch Ahmad 18.09.2026: Navi aus dem Inserat mitvergleichen. Der
     # Parameter kommt aus einem echten, von Ahmad geprueften Suchlink
-    # (fe=NAVIGATION_SYSTEM). Ohne Navi im Inserat bleibt der Filter weg.
-    if hat_navigation(vehicle):
+    # (fe=NAVIGATION_SYSTEM). Ohne Navi im Inserat bleibt der Filter weg;
+    # wer gar nicht danach filtern will, stellt die Regel auf "ignore".
+    if (rules.get("navi") or {}).get("mode", "wenn_vorhanden") != "ignore" \
+            and hat_navigation(vehicle):
         params.append(("fe", NAVI_CODE))
     if (rules.get("doors") or {}).get("mode") == "exact" and vehicle.get("doors"):
         params.append(("doors", str(vehicle["doors"])))
@@ -1141,6 +1143,7 @@ DEFAULT_RULES = {
     "power": {"mode": "tolerance_ps", "value": 5},
     "fuel": {"mode": "exact"},
     "gearbox": {"mode": "exact"},
+    "navi": {"mode": "wenn_vorhanden"},
     "doors": {"mode": "ignore"},
     "displacement": {"mode": "ignore"},
     "damage": {"mode": "no_accident"},
@@ -1159,6 +1162,7 @@ DEFAULT_EXPORT_RULES = {
     "power": {"mode": "tolerance_ps", "value": 10},
     "fuel": {"mode": "exact"},
     "gearbox": {"mode": "exact"},
+    "navi": {"mode": "wenn_vorhanden"},
     "doors": {"mode": "ignore"},
     "displacement": {"mode": "ignore"},
     "damage": {"mode": "ignore"},
