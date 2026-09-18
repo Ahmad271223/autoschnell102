@@ -91,6 +91,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     pickup_time: "",
     additional_terms: dealer?.default_special_agreements || "",
     agb_text: dealer?.default_terms || "",
+    // Wunsch Ahmad 18.09.2026: Der Text, der wirklich im Vertrag landet
+    // ("Allgemeine Vertragsbedingungen"), steht jetzt sichtbar im Dialog.
+    // Leer gespeichert heisst Standardtext — den zeigen wir genauso an.
+    digital_vertragstext: (dealer?.digital_vertragstext || "").trim()
+      || dealer?.digital_vertragstext_standard || "",
     notes: "",
     id_document: "",
     tires: "",
@@ -180,6 +185,31 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     return () => { aktiv = false; };
   }, [open, refresh]);
 
+  // Wunsch Ahmad 18.09.2026: Kommen die Einstellungen erst nach dem Oeffnen
+  // (frisch geladene Seite), werden die Textfelder nachgetragen — aber nur,
+  // solange sie noch leer und unberuehrt sind.
+  const beruehrt = useRef({});
+  useEffect(() => {
+    if (!dealer) return;
+    const vorgaben = {
+      digital_vertragstext: (dealer.digital_vertragstext || "").trim()
+        || dealer.digital_vertragstext_standard || "",
+      additional_terms: dealer.default_special_agreements || "",
+      agb_text: dealer.default_terms || "",
+    };
+    setForm((f) => {
+      const neu = { ...f };
+      let geaendert = false;
+      for (const [feld, wert] of Object.entries(vorgaben)) {
+        if (wert && !beruehrt.current[feld] && !(f[feld] || "").trim()) {
+          neu[feld] = wert;
+          geaendert = true;
+        }
+      }
+      return geaendert ? neu : f;
+    });
+  }, [dealer]);
+
   if (!open) return null;
 
   // Runde 22 (11.09.2026): funktional updaten — sonst überschreiben sich
@@ -193,7 +223,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   //    Tage vorher angelegt). Ohne Abholdatum gilt wieder "heute".
   //  - Ort (Verkäufer) folgt "Verkäufer / Halter → Ort", Ort (Käufer)
   //    folgt "Käufer → Ort" (z.B. Ort im Inserat fehlte und wird nachgetragen).
+
   const set = (k, v) => setForm((f) => {
+    beruehrt.current[k] = true;
     const next = { ...f, [k]: v };
     if (k === "pickup_date" && f.empfang_datum === (f.pickup_date || heute)) {
       next.empfang_datum = v || heute;
@@ -654,16 +686,30 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             />
           </Section>
 
-          <Section title="Allgemeine Geschäftsbedingungen (AGB)">
+          {/* Wunsch Ahmad 18.09.2026: Die Bedingungen aus den Einstellungen
+              standen bisher nur im PDF — jetzt stehen sie hier, und wer will,
+              ueberarbeitet sie fuer genau diesen Vertrag. */}
+          <Section title="Vertragsbedingungen & AGB">
             <Field
-              label="AGB-Text"
-              value={form.agb_text}
-              onChange={(v) => set("agb_text", v)}
+              label="Vertragsbedingungen & AGB (stehen in diesem Kaufvertrag)"
+              value={form.digital_vertragstext}
+              onChange={(v) => set("digital_vertragstext", v)}
               multiline
-              rows={8}
-              testid="contract-agb-text"
-              helper="Aus deinen Einstellungen geladen. Änderungen hier gelten nur für diesen einen Vertrag."
+              rows={12}
+              testid="contract-vertragsbedingungen"
+              helper="Aus deinen Einstellungen geladen. Änderungen hier gelten nur für diesen einen Vertrag; leerst du das Feld, gilt wieder der Text aus den Einstellungen."
             />
+            {(form.agb_text || "").trim() ? (
+              <Field
+                label="Zusätzlicher AGB-Abschnitt (aus älteren Einstellungen)"
+                value={form.agb_text}
+                onChange={(v) => set("agb_text", v)}
+                multiline
+                rows={6}
+                testid="contract-agb-text"
+                helper="Steht im PDF als eigener Abschnitt „Allgemeine Geschäftsbedingungen“ vor den Vertragsbedingungen."
+              />
+            ) : null}
           </Section>
 
           <div className="flex flex-wrap items-center justify-end gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-6 px-6 border-t"

@@ -25,6 +25,20 @@ import re
 import unicodedata
 from typing import Iterable, List, Optional
 
+# Ausstattung "Navigationssystem" (Suchparameter fe=). Wunsch Ahmad
+# 18.09.2026: Steht im Inserat ein Navi, wird im Vergleich auch danach
+# gefiltert — der Parameter stammt aus einem von Ahmad geprueften Link
+# (fe=NAVIGATION_SYSTEM; das frueher benutzte f=… filterte nicht).
+NAVI_CODE = "NAVIGATION_SYSTEM"
+
+# "Navi", "Navigation", "Navigationssystem", "Navigationsgeraet" ...
+_NAVI = re.compile(r"\bnavi", re.I)
+# ... aber NICHT "ohne Navi", "kein Navi" und keine blosse Vorbereitung.
+_NAVI_NEIN = re.compile(
+    r"(?:ohne|kein\w*|nicht)\s+(?:\w+\s+){0,2}navi"
+    r"|navi\w*[\s-]*(?:vorbereit\w*|vorruest\w*|vorgeruestet|ready)",
+    re.I)
+
 # mobile.de-Codes (Suchparameter tr= / ft=)
 GETRIEBE_CODES = ("MANUAL_GEAR", "AUTOMATIC_GEAR", "SEMIAUTOMATIC_GEAR")
 KRAFTSTOFF_CODES = ("PETROL", "DIESEL", "ELECTRICITY", "HYBRID", "HYBRID_DIESEL",
@@ -134,6 +148,42 @@ def _erster_text(werte: Iterable) -> str:
         if w not in (None, "") and str(w).strip():
             return str(w).strip()
     return ""
+
+
+def _text(wert) -> str:
+    """Kleinbuchstaben ohne Akzente — Leerzeichen und Satzzeichen bleiben
+    stehen (anders als _norm), damit "ohne Navi" als Wortfolge erkennbar ist."""
+    s = unicodedata.normalize("NFD", str(wert or ""))
+    return "".join(c for c in s if unicodedata.category(c) != "Mn").lower()
+
+
+def hat_navigation(vehicle: Optional[dict]) -> bool:
+    """Steht im Inserat ein Navigationssystem?
+
+    Geprueft wird zuerst die Ausstattungsliste des Portals (verlaesslich),
+    danach Titel und Beschreibung — dort aber mit Gegenprobe, damit "ohne
+    Navi" oder "Navigationsvorbereitung" NICHT als Navi zaehlen.
+    """
+    if not vehicle:
+        return False
+    for feld in ("features", "equipment", "ausstattung"):
+        werte = vehicle.get(feld)
+        if isinstance(werte, str):
+            werte = [werte]
+        for w in werte or []:
+            text = _text(str(w))
+            if _NAVI.search(text) and not _NAVI_NEIN.search(text):
+                return True
+    for feld in ("description", "beschreibung", "title", "titel", "name"):
+        text = _text(str(vehicle.get(feld) or ""))
+        if not text:
+            continue
+        # Satzweise pruefen: "Klima, Navi. Ohne Anhaengerkupplung" soll
+        # zaehlen, "ohne Navi" im selben Satz nicht.
+        for satz in re.split(r"[.;\n|/·•]+", text):
+            if _NAVI.search(satz) and not _NAVI_NEIN.search(satz):
+                return True
+    return False
 
 
 def filter_hinweise(vehicle: dict, rules: dict) -> List[str]:

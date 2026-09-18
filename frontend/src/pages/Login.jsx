@@ -62,7 +62,10 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex">
-      <div className="hidden lg:block lg:w-1/2 relative" style={{ background: "#0c0c0c" }}>
+      {/* Linke Haelfte: dunkles Foto mit hellem Text — bleibt in beiden
+          Designs dunkel (18.09.2026; vorher war die Schrift dort unlesbar). */}
+      <div className="bleibt-dunkel hidden lg:block lg:w-1/2 relative" data-theme="dark"
+           style={{ background: "#0c0c0c" }}>
         <div className="absolute inset-0 opacity-30 bg-cover bg-center"
              style={{ backgroundImage: "url(https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png)" }} />
         <div className="absolute inset-0 flex items-end p-12">

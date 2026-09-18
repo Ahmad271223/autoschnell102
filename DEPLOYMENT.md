@@ -1871,3 +1871,37 @@ Erwartete Größe danach: statt ~3,5 GB/Tag nur noch für die Inserate, die wirk
 führen — bei 5 % Vertragsquote ~0,2 GB/Tag, Dauerstand rund 6 GB (30 Tage Aufbewahrung)
 statt 215 GB.
 Wächter: `backend/tests/test_beweis_auf_knopfdruck_20260918.py`.
+
+### Drei Wünsche vom 18.09.2026 (Ansichten, Vertragsbedingungen, Navi)
+
+**1. Werbeseiten bleiben in beiden Designs dunkel.** Startseite und die linke Hälfte der Anmeldung
+liegen auf dunklen Fotos; im hellen Design zog vorher nur die Schrift ins Helle um und stand
+dunkelgrau auf dunklem Grund. Beide tragen jetzt `class="bleibt-dunkel"` **und** `data-theme="dark"`.
+Dafür gilt seit heute: die dunklen Token stehen unter `:root, [data-theme="dark"]` (ein einzelner
+Bereich kann also dunkel bleiben), `[data-theme="dark"]` setzt zusätzlich `color: var(--text-primary)`
+(sonst erbt der Bereich die dunkle Schrift des hellen Seitenkörpers), und die Utility-Umlenkungen
+lassen mit `:not(.bleibt-dunkel):not(.bleibt-dunkel *)` den markierten Bereich **und** seinen Inhalt aus.
+
+**2. Vertragsbedingungen/AGB und Besondere Vereinbarungen stehen im Vertragsdialog.** Seit Runde 26
+liegt der AGB-Text in EINEM Feld der Einstellungen (`digital_vertragstext`); der Dialog zeigte aber
+weiter nur das seitdem leere `default_terms` — der Text landete still im PDF, war aber nirgends zu
+sehen. Jetzt:
+- Der Dialog füllt „Vertragsbedingungen & AGB" aus den Einstellungen vor (leer gespeichert =
+  Standardtext, den `/auth/me` als `digital_vertragstext_standard` mitliefert) und trägt ihn nach,
+  falls die Einstellungen erst nach dem Öffnen geladen sind (unberührte, leere Felder).
+- `ContractIn.digital_vertragstext` (max. 20.000 Zeichen) ist ein **Übersteuern für genau diesen
+  Vertrag**; leer = weiterhin der Text aus den Einstellungen. Gilt für `/contracts` und
+  `/contracts/preview` gleichermaßen.
+- Ein noch vorhandener alter `default_terms`-Text erscheint als zusätzliches Feld („Zusätzlicher
+  AGB-Abschnitt"); ist er leer, bleibt das Feld weg.
+- „Besondere Vereinbarungen" wird wie bisher aus `default_special_agreements` vorbelegt.
+
+**3. Navi wird mitverglichen.** Steht im Inserat ein Navigationssystem (Ausstattungsliste, Titel oder
+Beschreibung), hängt der mobile.de-Link `fe=NAVIGATION_SYSTEM` an — der Parameter stammt aus einem von
+Ahmad geprüften Suchlink (das früher benutzte `f=…` filterte nicht und wurde in Runde 24 entfernt).
+Erkennung zentral in `backend/fahrzeug_codes.py::hat_navigation`: „ohne Navi", „kein Navigationssystem"
+und bloße „Navi-Vorbereitung" zählen **nicht**. AutoScout24 bleibt unverändert — dafür fehlt ein
+geprüfter Link mit gesetztem Ausstattungsfilter.
+
+Wächter: `test_helle_ansicht_20260918.py` (Regel 6), `test_vertragsbedingungen_20260918.py`,
+`test_getriebe_kraftstoff_filter.py` (Navi-Block).

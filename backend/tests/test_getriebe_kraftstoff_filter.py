@@ -23,7 +23,8 @@ import autoscout_service as AS
 import kleinanzeigen_service as KS
 import mobile_service as M
 from fahrzeug_codes import (
-    autoscout_getriebe, autoscout_kraftstoff, filter_hinweise, getriebe_code, kraftstoff_code,
+    autoscout_getriebe, autoscout_kraftstoff, filter_hinweise, getriebe_code,
+    hat_navigation, kraftstoff_code,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -202,3 +203,45 @@ def test_quelltext_kein_rohwert_mehr_im_link():
     assert "getriebe_code(" in q and "kraftstoff_code(" in q
     import routes.drivers as D
     assert '"fuel": v.get("fuel_label") or v.get("fuel")' in inspect.getsource(D)
+
+
+# ------------------------------------------------ Navi (Wunsch Ahmad 18.09.2026)
+@pytest.mark.parametrize("fahrzeug, erwartet, fall", [
+    ({"features": ["Klimaanlage", "Navigationssystem", "Bluetooth"]}, True, "Ausstattungsliste"),
+    ({"features": ["Navi"]}, True, "Kurzform in der Liste"),
+    ({"equipment": "Navigationsgerät, Sitzheizung"}, True, "equipment als Text"),
+    ({"features": ["Klimaanlage", "Tempomat"]}, False, "kein Navi"),
+    ({"description": "Sehr gepflegt, Navi, Sitzheizung"}, True, "Navi im Fliesstext"),
+    ({"title": "VW Golf Navi Business"}, True, "im Titel"),
+    ({"description": "Fahrzeug ohne Navi, dafür Sitzheizung"}, False, "ohne Navi"),
+    ({"description": "Kein Navigationssystem verbaut"}, False, "kein Navigationssystem"),
+    ({"description": "Navi-Vorbereitung ab Werk"}, False, "nur vorbereitet"),
+    ({"description": "Navigationsvorbereitung vorhanden"}, False, "Vorbereitung ausgeschrieben"),
+    ({"description": "Klima, Navi. Ohne Anhängerkupplung."}, True, "anderes 'ohne' im Text"),
+    ({}, False, "nichts angegeben"),
+    (None, False, "kein Fahrzeug"),
+])
+def test_navi_erkennung(fahrzeug, erwartet, fall):
+    assert hat_navigation(fahrzeug) is erwartet, fall
+
+
+def _fe(vehicle, regeln=REGELN):
+    q = dict(parse_qsl(urlparse(M.build_search_url(vehicle, regeln)).query))
+    return q.get("fe")
+
+
+def test_navi_landet_im_mobile_link():
+    """Wunsch Ahmad 18.09.2026: Steht im Inserat ein Navi, filtert der
+    Vergleich auch danach — mit dem Parameter aus seinem geprueften Link."""
+    mit = _fahrzeug(gearbox="AUTOMATIC_GEAR", fuel="PETROL",
+                    features=["Klimaanlage", "Navigationssystem"])
+    assert _fe(mit) == "NAVIGATION_SYSTEM"
+    # Reihenfolge wie im echten Link: ... ft= tr= fe= dam= ...
+    link = M.build_search_url(mit, REGELN)
+    assert link.index("tr=AUTOMATIC_GEAR") < link.index("fe=NAVIGATION_SYSTEM") < link.index("dam=")
+    ohne = _fahrzeug(gearbox="AUTOMATIC_GEAR", fuel="PETROL", features=["Klimaanlage"])
+    assert _fe(ohne) is None
+    # "ohne Navi" im Text darf den Filter NICHT setzen.
+    verneint = _fahrzeug(gearbox="AUTOMATIC_GEAR", fuel="PETROL",
+                         description="Guter Zustand, leider ohne Navi")
+    assert _fe(verneint) is None

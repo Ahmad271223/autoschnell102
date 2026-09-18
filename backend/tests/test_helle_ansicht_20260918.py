@@ -40,7 +40,10 @@ def _block(start: str) -> str:
 def test_01_statusfarben_gibt_es_in_beiden_designs(token):
     """Ein Token, das nur im dunklen Block steht, erbt im hellen Design den
     dunklen Wert — genau so entstanden die unlesbaren Stellen."""
-    dunkel = _block("\n:root {")
+    # Seit 18.09.2026 gelten die dunklen Werte auch fuer einzelne Bereiche, die
+    # immer dunkel bleiben (Startseite, linke Haelfte der Anmeldung) — deshalb
+    # heisst der Block jetzt ":root, [data-theme="dark"]".
+    dunkel = _block('\n:root, [data-theme="dark"] {')
     hell = _block('\n[data-theme="light"] {')
     assert f"{token}:" in dunkel, f"{token} fehlt im dunklen Design"
     assert f"{token}:" in hell, f"{token} fehlt im hellen Design"
@@ -130,3 +133,21 @@ def test_05b_graue_schrift_im_hellen_design_ist_dunkel_genug():
                             ("--text-muted", "#86868b")):
         wert = re.search(rf"{token}:\s*([^;]+);", hell).group(1).strip()
         assert wert != verboten, f"{token} ist wieder zu hell ({wert})"
+
+
+# ---------------------------------------------------------------- Regel 6
+def test_06_werbeseiten_bleiben_in_beiden_designs_dunkel():
+    """Startseite und die linke Haelfte der Anmeldung liegen auf dunklen
+    Fotos. Ohne Markierung zog im hellen Design NUR die Schrift ins Helle um
+    und stand dunkelgrau auf dunklem Grund (Screenshots Ahmad 18.09.2026)."""
+    for datei, marker in (
+            (SRC / "pages" / "Landing.jsx", 'className="bleibt-dunkel min-h-screen'),
+            (SRC / "pages" / "Login.jsx", 'className="bleibt-dunkel hidden lg:block')):
+        q = datei.read_text(encoding="utf-8")
+        assert marker in q, f"{datei.name}: Bereich nicht als dauerhaft dunkel markiert"
+        assert 'data-theme="dark"' in q, f"{datei.name}: dunkle Token fehlen"
+    # Die Ausnahme gilt fuer den markierten Bereich UND alles darin ...
+    assert ":not(.bleibt-dunkel):not(.bleibt-dunkel *)" in CSS
+    # ... und ein solcher Bereich bringt seine helle Schrift selbst mit,
+    # sonst erbt er die dunkle Schrift des hellen Seitenkoerpers.
+    assert '[data-theme="dark"] {\n  color: var(--text-primary);\n}' in CSS

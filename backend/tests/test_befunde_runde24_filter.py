@@ -75,7 +75,14 @@ def test_01_standard_regeln_ohne_entfallene_filter():
 
 
 @pytest.mark.parametrize("nav_klima", ["always", "exact"])
-def test_02_mobile_link_ohne_kategorie_navi_klima_auch_bei_altregeln(nav_klima):
+def test_02_mobile_link_ohne_kategorie_und_klima_auch_bei_altregeln(nav_klima):
+    """Alte gespeicherte Regeln (Kategorie, features.navigation, climatisation)
+    steuern den Link NICHT mehr — Runde 24.
+
+    Wunsch Ahmad 18.09.2026: Das Navi kommt seitdem aus dem INSERAT, nicht aus
+    einer Regel: hat das Inserat eines, haengt `fe=NAVIGATION_SYSTEM` an (der
+    Parameter aus seinem geprueften Suchlink; das alte einbuchstabige `f=`
+    filterte nie). Der Regel-Modus daneben aendert daran nichts."""
     from mobile_service import DEFAULT_RULES, build_search_url
     alt = _alt(DEFAULT_RULES)
     alt["features"]["navigation"]["mode"] = nav_klima
@@ -84,7 +91,12 @@ def test_02_mobile_link_ohne_kategorie_navi_klima_auch_bei_altregeln(nav_klima):
     q = _q(url)
     assert "c" not in q, url
     assert "climatisation" not in q and "CLIMATISATION" not in url, url
-    assert "f" not in q and "NAVIGATION_SYSTEM" not in url, url
+    assert "f" not in q, url                      # das alte, wirkungslose f=
+    # FZ hat "Navigationssystem" in der Ausstattung -> Navi-Filter ist gesetzt
+    assert q.get("fe") == ["NAVIGATION_SYSTEM"], url
+    # ... und ohne Navi im Inserat bleibt er weg, egal welcher Regel-Modus.
+    ohne = {**FZ, "features": ["Klimaautomatik", "Tempomat"]}
+    assert "fe" not in _q(build_search_url(ohne, alt)), "Navi ohne Navi im Inserat"
     # die uebrigen Regeln greifen weiter
     assert q.get("ft") == ["DIESEL"] and q.get("tr") == ["AUTOMATIC_GEAR"], q
     assert q.get("cn") == ["DE"] and q.get("dam") == ["0"], q

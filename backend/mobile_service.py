@@ -78,7 +78,8 @@ GEAR_LABELS = {
     "SEMIAUTOMATIC_GEAR": "Halbautomatik",
 }
 # 17.09.2026: EINE Zuordnung fuer Getriebe und Kraftstoff (alle Quellen, beide Portale)
-from fahrzeug_codes import getriebe_code, kraftstoff_code  # noqa: E402
+from fahrzeug_codes import (NAVI_CODE, getriebe_code, hat_navigation,  # noqa: E402
+                            kraftstoff_code)
 CATEGORY_LABELS = {
     "Cabrio": "Cabrio / Roadster", "EstateCar": "Kombi", "Limousine": "Limousine",
     "OffRoad": "SUV / Geländewagen", "OtherCar": "Sonstiges", "SmallCar": "Kleinwagen",
@@ -1061,6 +1062,11 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         tr = getriebe_code(vehicle.get("gearbox"), vehicle.get("gearbox_label"))
         if tr:
             params.append(("tr", tr))
+    # Wunsch Ahmad 18.09.2026: Navi aus dem Inserat mitvergleichen. Der
+    # Parameter kommt aus einem echten, von Ahmad geprueften Suchlink
+    # (fe=NAVIGATION_SYSTEM). Ohne Navi im Inserat bleibt der Filter weg.
+    if hat_navigation(vehicle):
+        params.append(("fe", NAVI_CODE))
     if (rules.get("doors") or {}).get("mode") == "exact" and vehicle.get("doors"):
         params.append(("doors", str(vehicle["doors"])))
 

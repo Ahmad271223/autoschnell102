@@ -204,6 +204,12 @@ class ContractIn(BaseModel):
     # Optional override for the dealer's default AGB block. If empty,
     # the dealer's saved AGB are used (current behaviour).
     agb_text: Optional[str] = ""
+    # Wunsch Ahmad 18.09.2026: Die Vertragsbedingungen ("Allgemeine
+    # Vertragsbedingungen" im PDF) standen bisher nur in den Einstellungen und
+    # wurden still uebernommen. Jetzt stehen sie sichtbar im Vertragsdialog
+    # und lassen sich fuer DIESEN Vertrag aendern. Leer/fehlend = weiterhin
+    # der Text aus den Einstellungen (bzw. der Standardtext).
+    digital_vertragstext: Optional[str] = None
     # Schäden / Beschädigungen aus der interaktiven Skizze
     damages_text: Optional[str] = ""
     # Nachpruefung Runde 14: geprueftes Schema statt roher Liste — siehe
@@ -266,7 +272,7 @@ class ContractIn(BaseModel):
         if isinstance(v, str):
             long_fields = {
                 "additional_terms", "notes", "agb_text",
-                "vehicle_description", "damages_text",
+                "vehicle_description", "damages_text", "digital_vertragstext",
             }
             limit = 20000 if info.field_name in long_fields else 500
             if len(v) > limit:
@@ -610,7 +616,10 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     # AGB: only fall back to dealer default if no override was provided.
     if not (contract_dict.get("agb_text") or "").strip():
         contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
-    contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
+    # Wunsch Ahmad 18.09.2026: Ein im Dialog ueberarbeiteter Text gilt fuer
+    # diesen Vertrag; leer = Text aus den Einstellungen (bzw. Standard).
+    eigener_text = (contract_dict.get("digital_vertragstext") or "").strip()
+    contract_dict["digital_vertragstext"] = eigener_text or digitaler_vertragstext(dealer)
     # Vehicle description: pre-fill from the scraped listing if the user
     # didn't paste/override anything. Lets the description appear in the
     # PDF without an extra step.
@@ -696,8 +705,10 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     if not (contract_dict.get("vehicle_description") or "").strip():
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
     # Text der digitalen Ausfertigung zum Zeitpunkt der Erstellung
-    # festhalten (Beweis: so wurde der Vertrag verschickt).
-    contract_dict["digital_vertragstext"] = digitaler_vertragstext(dealer)
+    # festhalten (Beweis: so wurde der Vertrag verschickt). Ein im Dialog
+    # ueberarbeiteter Text gilt fuer diesen Vertrag (Wunsch Ahmad 18.09.2026).
+    eigener_text = (contract_dict.get("digital_vertragstext") or "").strip()
+    contract_dict["digital_vertragstext"] = eigener_text or digitaler_vertragstext(dealer)
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )

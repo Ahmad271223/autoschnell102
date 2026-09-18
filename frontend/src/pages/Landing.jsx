@@ -35,7 +35,11 @@ export default function Landing() {
   const closeMenu = () => setMenuOpen(false);
 
   return (
-    <div className="min-h-screen text-white" style={{ background: "var(--bg-app)" }}>
+    /* Wunsch Ahmad 18.09.2026: Die Startseite ist eine Werbeseite mit dunklen
+       Fotos — sie bleibt in BEIDEN Designs dunkel. Vorher zog nur die Schrift
+       ins Helle um und stand dunkelgrau auf dunklem Bild. */
+    <div className="bleibt-dunkel min-h-screen text-white" data-theme="dark"
+         style={{ background: "var(--bg-app)" }}>
       {/* NAV */}
       <header className="glass-nav fixed top-0 inset-x-0 z-50">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
