@@ -106,7 +106,7 @@ def main() -> int:
         "# ---- Betrieb ----",
         "APP_ENV=production",
         "WEB_CONCURRENCY=4",
-        "BEWEIS_AUFBEWAHRUNG_TAGE=90",
+        "BEWEIS_AUFBEWAHRUNG_TAGE=30",
         "ENABLE_DOCS=false",
         "MOCK_PROVIDER_FETCH=false",
         "MOBILE_SANDBOX_MODE=false",

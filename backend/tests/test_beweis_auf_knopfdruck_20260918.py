@@ -161,3 +161,23 @@ def test_05_vergleich_und_oberflaeche_fragen_nach(welt):
     assert "/beweise/anfordern" in karte and "beweis-erstellen-btn" in karte
     vergleich = (SRC / "pages" / "app" / "Vergleich.jsx").read_text(encoding="utf-8")
     assert "cacheKey={result.cache_key}" in vergleich
+
+
+# ------------------------------------------------------------------ 6
+def test_06_aufbewahrung_dreissig_tage_und_ueberall_dieselbe_zahl():
+    """Entscheidung Ahmad 18.09.2026: 30 Tage aufbewahren.
+
+    Die Zahl stand vorher an fuenf Stellen verschieden (Code 60, Compose 60,
+    .env.example 60, erzeugte Server-.env 90, Anleitung 90) — wer nur eine
+    aendert, merkt es nie. Deshalb haengen sie hier zusammen."""
+    wurzel = Path(__file__).resolve().parents[2]
+    dienst = (wurzel / "backend" / "beweis_service.py").read_text(encoding="utf-8")
+    assert '_zahl_env("BEWEIS_AUFBEWAHRUNG_TAGE", 30,' in dienst
+    compose = (wurzel / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "BEWEIS_AUFBEWAHRUNG_TAGE=${BEWEIS_AUFBEWAHRUNG_TAGE:-30}" in compose
+    beispiel = (wurzel / ".env.example").read_text(encoding="utf-8")
+    assert "BEWEIS_AUFBEWAHRUNG_TAGE=30" in beispiel
+    erzeugt = (wurzel / "backend" / "scripts" / "env_erzeugen.py").read_text(encoding="utf-8")
+    assert '"BEWEIS_AUFBEWAHRUNG_TAGE=30"' in erzeugt
+    pruefung = (wurzel / "backend" / "production_check.py").read_text(encoding="utf-8")
+    assert '("BEWEIS_AUFBEWAHRUNG_TAGE", "30")' in pruefung

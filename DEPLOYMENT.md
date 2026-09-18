@@ -881,7 +881,8 @@ unter `beweise/<portal>/` in R2) — der Vergleich wartet nie darauf.
   ablegen und neu ausrollen (`backend/assets/logos/LIESMICH.txt`).
 - Private Anbieter: nur PLZ/Ort, kein Name/Telefon (`BEWEIS_PRIVATDATEN=1`
   ändert das — vorher Datenschutzerklärung anpassen).
-- Aufbewahrung: `BEWEIS_AUFBEWAHRUNG_TAGE` (90) ab Erstellung, länger,
+- Aufbewahrung: `BEWEIS_AUFBEWAHRUNG_TAGE` (30 Tage, Entscheidung Ahmad
+  18.09.2026 — vorher 60 im Code und 90 in der erzeugten `.env`) ab Erstellung, länger,
   solange bei einer Firma zu dem Inserat ein Kaufvertrag, Abholtermin,
   Verkaufsinserat oder Bestandsfahrzeug besteht (bloß verglichene
   Fahrzeuge halten es nicht). Danach wird die
@@ -1867,5 +1868,6 @@ Neu:
   alte Verhalten wieder her (jedes abgerufene Inserat bekommt wieder automatisch eines).
 
 Erwartete Größe danach: statt ~3,5 GB/Tag nur noch für die Inserate, die wirklich zum Vertrag
-führen — bei 5 % Vertragsquote ~0,2 GB/Tag, Dauerstand rund 12 GB statt 215 GB.
+führen — bei 5 % Vertragsquote ~0,2 GB/Tag, Dauerstand rund 6 GB (30 Tage Aufbewahrung)
+statt 215 GB.
 Wächter: `backend/tests/test_beweis_auf_knopfdruck_20260918.py`.

@@ -269,7 +269,7 @@ def pruefe_produktion(log) -> None:
 
     for var, default in (("VERTRAG_AUFBEWAHRUNG_TAGE", "90"),
                          ("SNAPSHOT_RETENTION_DAYS", "60"),
-                         ("BEWEIS_AUFBEWAHRUNG_TAGE", "90")):
+                         ("BEWEIS_AUFBEWAHRUNG_TAGE", "30")):
         if _int_env(var, default) <= 0:
             fehler.append(f"{var} muss eine positive Zahl (Tage) sein — "
                           "0 oder negativ wuerde SOFORT loeschen.")

@@ -21,7 +21,7 @@ Ablauf
      bild_proxy.laden_fuer_pdf (Allowliste, Groessenlimit), PDF ueber
      beweis_pdf.beweis_pdf (ohne Browser), Ablage im Datei-Speicher unter
      beweise/<quelle>/<id>.pdf (firmenneutral).
-  5. Aufbewahrung: BEWEIS_AUFBEWAHRUNG_TAGE (Standard 60) ab Erstellung;
+  5. Aufbewahrung: BEWEIS_AUFBEWAHRUNG_TAGE (Standard 30) ab Erstellung;
      laenger, solange irgendeine Firma ein Fahrzeug zu diesem Inserat
      fuehrt (Vertrag, Bestand ...). Danach wird die Datei geloescht und die
      Zeile bleibt als Grabstein (status geloescht) — so entsteht fuer
@@ -70,7 +70,10 @@ _FOTO_KANTE_ERSTE = _zahl_env("BEWEIS_FOTO_KANTE_ERSTE", 1000, 400, 2000)
 _FOTO_KANTE = _zahl_env("BEWEIS_FOTO_KANTE", 640, 300, 2000)
 _FOTO_QUALITAET_ERSTE = _zahl_env("BEWEIS_FOTO_QUALITAET_ERSTE", 68, 40, 95)
 _FOTO_QUALITAET = _zahl_env("BEWEIS_FOTO_QUALITAET", 62, 40, 95)
-BEWEIS_AUFBEWAHRUNG_TAGE = _zahl_env("BEWEIS_AUFBEWAHRUNG_TAGE", 60, 1, 3650)
+# Wunsch Ahmad 18.09.2026: 30 Tage statt 60. Laenger bleibt ein Dokument
+# trotzdem, solange eine Firma damit arbeitet (Vertrag, Termin, Bestand) —
+# siehe _gehalten(). Betroffen sind also vor allem Dokumente ohne Geschaeft.
+BEWEIS_AUFBEWAHRUNG_TAGE = _zahl_env("BEWEIS_AUFBEWAHRUNG_TAGE", 30, 1, 3650)
 
 
 def automatisch_aktiv() -> bool:
