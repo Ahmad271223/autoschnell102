@@ -7,8 +7,9 @@ import { Check, Bolt, ShieldCheck, Mail, Clock } from "lucide-react";
  * /abo — seit 09/2026 KEIN Stripe-Checkout mehr für Firmen/Sucher:
  * Der Betreiber schaltet Sucher-Zugänge nach Rechnungsstellung manuell
  * frei (150 € / 30 Tage oder 1.500 € / 365 Tage je Nutzer, zzgl. USt).
- * Das Abo schaltet NUR Suche & Vergleich frei — Kaufverträge, Versand,
- * Terminplaner, Bestand und Inserate bleiben für die Firma kostenlos.
+ * Das Abo schaltet Suche, Vergleich und Kaufverträge (samt Versand) frei —
+ * Terminplaner, Freigaben, Bestand und Inserate bleiben für die Firma kostenlos.
+ * (19.09.2026: Text an den Server angeglichen — Verträge verlangen das Abo.)
  * Diese Seite erklärt das und zeigt den eigenen Abo-Stand.
  */
 export default function Subscription() {
@@ -32,7 +33,7 @@ export default function Subscription() {
                   style={{ background: "var(--accent-red)" }}>
               <Bolt size={16} />
             </span>
-            <span className="font-display font-black text-lg">AUTOHANDEL<span style={{color:"var(--accent-red)"}}>.</span></span>
+            <span className="font-display font-black text-lg">AutoSchnell<span style={{color:"var(--accent-red)"}}>.</span></span>
           </div>
           <div className="flex items-center gap-3 text-sm">
             {/* Kontonummer (13.09.2026): Anmeldekennung statt E-Mail */}
@@ -51,10 +52,10 @@ export default function Subscription() {
             Freischaltung läuft über uns.
           </h1>
           <p className="text-zinc-400 mt-3 max-w-xl mx-auto">
-            Suche &amp; Vergleich brauchen einen freigeschalteten
-            Sucher-Zugang. Kaufverträge, Versand, Terminplaner, Bestand und
-            Inserate bleiben für die Firma kostenlos. Die Abrechnung läuft
-            per Rechnung — es gibt hier nichts online zu bezahlen.
+            Suche, Vergleich und Kaufverträge brauchen einen freigeschalteten
+            Sucher-Zugang. Terminplaner, Freigaben, Bestand und Inserate
+            bleiben für die Firma kostenlos. Die Abrechnung läuft per
+            Rechnung — es gibt hier nichts online zu bezahlen.
           </p>
         </div>
 
@@ -99,8 +100,8 @@ export default function Subscription() {
             <div className="flex items-start gap-3">
               <Check size={16} className="mt-0.5 shrink-0" style={{ color: "var(--accent-green)" }} />
               <div>
-                Das Sucher-Abo schaltet ausschließlich Suche &amp; Vergleich
-                frei. Kaufverträge, Versand, Terminplaner, Bestand und
+                Das Sucher-Abo schaltet Suche, Vergleich und Kaufverträge
+                (samt Versand) frei. Terminplaner, Freigaben, Bestand und
                 Inserate bleiben für die Firma kostenlos — dafür ist keine
                 Freischaltung nötig.
               </div>

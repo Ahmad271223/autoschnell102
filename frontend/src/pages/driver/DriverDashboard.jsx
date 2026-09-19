@@ -77,6 +77,13 @@ export default function DriverDashboard() {
     setBusy(null);
   };
 
+  // Erster Abhol-Bericht: der Server nimmt ihn bis 24 h nach "abgeholt" an
+  // (routes/drivers.driver_submit_report) — dieselbe Frist wie dort.
+  const abholCheckNoch = (a) => {
+    const t = Date.parse(a.status_changed_at || "");
+    return Number.isFinite(t) && Date.now() - t <= 24 * 60 * 60 * 1000;
+  };
+
   const setStatus = async (id, status) => {
     if (busy) return;
     // "abgeholt" läuft über den Abhol-Check-Dialog (mit Abweichungsbericht).
@@ -354,6 +361,19 @@ export default function DriverDashboard() {
                             {a.status === "abgeholt" ? "✓ Als abgeholt markiert" : "✕ Als nicht abgeholt markiert"}
                             {" · "}Fotos & Beweis-Archiv werden automatisch gelöscht
                           </div>
+                        )}
+                        {/* 19.09.2026 (sichtbarer Mangel 4): Nach dem unterschriebenen
+                            Protokoll steht die Fahrt auf "abgeholt" — der Abhol-Check
+                            (km, Schluessel, Tank, Fotos) war dann nicht mehr erreichbar,
+                            obwohl der Server den ERSTEN Bericht 24 h lang annimmt. */}
+                        {a.status === "abgeholt" && !a.bericht_vorhanden && abholCheckNoch(a) && (
+                          <button onClick={() => setCheckAppt(a)} disabled={busy === a.id}
+                                  data-testid={`abholcheck-nachtragen-${a.id}`}
+                                  className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-semibold disabled:opacity-50"
+                                  style={{ background: "rgba(52,199,89,0.14)", color: "var(--accent-green)",
+                                           border: "1px solid rgba(52,199,89,0.3)" }}>
+                            <CheckCircle2 size={15} /> Abhol-Check nachtragen (km, Schlüssel, Tank, Fotos)
+                          </button>
                         )}
                       </div>
                     )}

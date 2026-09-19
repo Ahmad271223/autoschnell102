@@ -56,7 +56,23 @@ Umgebung:
   BACKUP_SNAPSHOT_PAUSE_S     Pause vor Versuch n: n-1 mal so viele Sekunden (5)
   BACKUP_SNAPSHOT_PFLICHT     true: Snapshot ist Pflicht (siehe oben)
   S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION
-      Datei-Speicher der App — wird IN das Backup gespiegelt.
+      Datei-Speicher der App.
+  BACKUP_DATEIEN              Wie der Datei-Speicher gesichert wird (19.09.2026):
+      bucket   (Standard, sobald ein Sicherungs-Bucket bekannt ist) — jede
+               Datei wird Speicher-zu-Speicher in den Sicherungs-Bucket
+               kopiert, OHNE Umweg ueber die Platte. Nur neue/geaenderte
+               Dateien werden uebertragen; im Datei-Speicher geloeschte
+               bleiben BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE (30) als Papierkorb
+               erhalten und verschwinden dann auch dort.
+      spiegel  (Standard ohne Sicherungs-Bucket) — wie frueher: der ganze
+               Bucket wird in jedes lokale Backup heruntergeladen. Bei
+               grossen Datei-Speichern fuellt das die Platte (14 Staende x
+               Bucket-Groesse) — deshalb nur fuer kleine Installationen.
+      aus      Dateien werden nicht gesichert (nur mit Versionierung am
+               Datei-Speicher vertretbar); steht so im Manifest.
+  BACKUP_DATEIEN_BUCKET       Ziel der Dateikopie; leer = BACKUP_S3_BUCKET.
+  BACKUP_DATEIEN_PREFIX       Schluessel-Praefix dort, Standard "dateien/".
+  BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE  Papierkorb-Frist geloeschter Dateien (30).
   BACKUP_S3_BUCKET            Offsite-Ziel (EIGENER Bucket, nicht S3_BUCKET);
                               Client mit denselben S3_*-Zugangsdaten.
   BACKUP_S3_PREFIX            Schlüssel-Präfix, Standard "autoschnell-backups/"
@@ -384,6 +400,151 @@ def spiegle_s3(ziel: Path, logfile: Path) -> int:
     return n
 
 
+# ------------------------------------------------ Dateien: Speicher zu Speicher
+# 19.09.2026 (Entscheidung Ahmad): Der Datei-Speicher wird nicht mehr auf
+# die Serverplatte gespiegelt. Bei 36 Nutzern x 150 Inseraten am Tag liegen
+# dauerhaft ~20 GB Dateien im Bucket — 14 Staende plus Archiv waeren 300 GB
+# auf einer 160-GB-Platte. Stattdessen wandert jede Datei einmal in den
+# Sicherungs-Bucket (Papierkorb-Frist fuer Geloeschtes), die Platte traegt
+# nur noch die Datenbank-Sicherung.
+DATEIEN_MODI = ("bucket", "spiegel", "aus")
+DATEIEN_PREFIX_DEFAULT = "dateien/"
+DATEIEN_AUFBEWAHRUNG_DEFAULT = 30
+_GELOESCHT_AM = "geloescht-am"
+
+
+def dateien_modus() -> str:
+    """bucket | spiegel | aus — Standard: bucket, sobald ein Sicherungs-
+    Bucket bekannt ist, sonst der alte Spiegel."""
+    wahl = os.environ.get("BACKUP_DATEIEN", "").strip().lower()
+    if wahl in DATEIEN_MODI:
+        return wahl
+    ziel = (os.environ.get("BACKUP_DATEIEN_BUCKET", "").strip()
+            or os.environ.get("BACKUP_S3_BUCKET", "").strip())
+    return "bucket" if ziel else "spiegel"
+
+
+def dateien_ziel() -> tuple:
+    """(Bucket, Praefix) der Dateikopie."""
+    bucket = (os.environ.get("BACKUP_DATEIEN_BUCKET", "").strip()
+              or os.environ.get("BACKUP_S3_BUCKET", "").strip())
+    praefix = os.environ.get("BACKUP_DATEIEN_PREFIX", "").strip() or DATEIEN_PREFIX_DEFAULT
+    if praefix and not praefix.endswith("/"):
+        praefix += "/"
+    return bucket, praefix
+
+
+def dateien_aufbewahrung_tage() -> int:
+    raw = os.environ.get("BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE", "").strip()
+    try:
+        return max(1, int(raw)) if raw else DATEIEN_AUFBEWAHRUNG_DEFAULT
+    except ValueError:
+        return DATEIEN_AUFBEWAHRUNG_DEFAULT
+
+
+def _objekte_auflisten(client, bucket: str, praefix: str = "") -> dict:
+    """Schluessel -> (Groesse, LastModified) unter einem Praefix."""
+    aus = {}
+    for seite in client.get_paginator("list_objects_v2").paginate(
+            Bucket=bucket, Prefix=praefix):
+        for obj in seite.get("Contents") or []:
+            aus[obj["Key"]] = (int(obj.get("Size") or 0), obj.get("LastModified"))
+    return aus
+
+
+def dateien_in_bucket_sichern(logfile: Path) -> dict:
+    """Datei-Speicher in den Sicherungs-Bucket kopieren — ohne Platte.
+
+    Gelesen wird mit den S3_*-Zugangsdaten (Datei-Speicher), geschrieben mit
+    den BACKUP_S3_*-Zugangsdaten (Sicherungs-Bucket); die Daten fliessen
+    durch den Arbeitsspeicher, nie auf die Platte. So funktioniert es auch
+    mit einem Sicherungs-Schluessel, der den Datei-Speicher nicht lesen darf.
+
+    Liefert die Angaben fuers Manifest. Einzelne Fehler brechen den Lauf
+    nicht ab, zaehlen aber als 'fehler' — das Backup gilt dann als
+    UNVOLLSTAENDIG (Exit 2), wie bei jedem anderen fehlenden Teil."""
+    quelle_bucket = os.environ["S3_BUCKET"].strip()
+    ziel_bucket, praefix = dateien_ziel()
+    if not ziel_bucket:
+        raise RuntimeError("BACKUP_DATEIEN=bucket, aber kein Sicherungs-Bucket "
+                           "(BACKUP_DATEIEN_BUCKET oder BACKUP_S3_BUCKET) gesetzt")
+    if ziel_bucket == quelle_bucket:
+        raise RuntimeError("Der Sicherungs-Bucket darf nicht der Datei-Speicher "
+                           f"selbst sein ({quelle_bucket})")
+    lesen = _s3_client()
+    schreiben = _backup_s3_client()
+    jetzt = datetime.now(timezone.utc)
+    frist = timedelta(days=dateien_aufbewahrung_tage())
+    sse = sse_optionen(backup_endpoint())
+
+    quelle = _objekte_auflisten(lesen, quelle_bucket)
+    # Liegt die Offsite-Kopie (entgegen der Empfehlung) im Datei-Speicher,
+    # die Archive nicht mitkopieren (wie spiegle_s3).
+    if os.environ.get("BACKUP_S3_BUCKET", "").strip() == quelle_bucket:
+        op = offsite_prefix()
+        quelle = {k: v for k, v in quelle.items() if not k.startswith(op)}
+    ziel = _objekte_auflisten(schreiben, ziel_bucket, praefix)
+
+    stand = {"modus": "bucket", "bucket": ziel_bucket, "prefix": praefix,
+             "geprueft": len(quelle), "kopiert": 0, "unveraendert": 0,
+             "bytes_kopiert": 0, "vorgemerkt": 0, "entfernt": 0, "fehler": 0,
+             "aufbewahrung_tage": dateien_aufbewahrung_tage()}
+    fehler_beispiel = ""
+
+    for key, (groesse, geaendert) in quelle.items():
+        ziel_key = praefix + key
+        dort = ziel.get(ziel_key)
+        if dort is not None and dort[0] == groesse and (
+                geaendert is None or dort[1] is None or dort[1] >= geaendert):
+            stand["unveraendert"] += 1
+            continue
+        try:
+            body = lesen.get_object(Bucket=quelle_bucket, Key=key)["Body"]
+            schreiben.upload_fileobj(body, ziel_bucket, ziel_key, ExtraArgs=dict(sse))
+            stand["kopiert"] += 1
+            stand["bytes_kopiert"] += groesse
+        except Exception as exc:  # noqa: BLE001
+            stand["fehler"] += 1
+            fehler_beispiel = fehler_beispiel or f"{key}: {exc}"
+            log(f"  WARNUNG: Datei nicht kopiert — {key}: {exc}", logfile)
+
+    # Papierkorb: im Datei-Speicher geloeschte Dateien bleiben die Frist lang
+    # erhalten (Schutz vor Versehen), danach verschwinden sie auch hier.
+    for ziel_key in ziel:
+        key = ziel_key[len(praefix):]
+        if key in quelle:
+            continue
+        try:
+            kopf = schreiben.head_object(Bucket=ziel_bucket, Key=ziel_key)
+            meta = dict(kopf.get("Metadata") or {})
+            markiert = meta.get(_GELOESCHT_AM)
+            if not markiert:
+                meta[_GELOESCHT_AM] = jetzt.isoformat()
+                schreiben.copy_object(
+                    Bucket=ziel_bucket, Key=ziel_key,
+                    CopySource={"Bucket": ziel_bucket, "Key": ziel_key},
+                    Metadata=meta, MetadataDirective="REPLACE", **sse)
+                stand["vorgemerkt"] += 1
+                continue
+            seit = datetime.fromisoformat(markiert)
+            if seit.tzinfo is None:
+                seit = seit.replace(tzinfo=timezone.utc)
+            if jetzt - seit >= frist:
+                schreiben.delete_object(Bucket=ziel_bucket, Key=ziel_key)
+                stand["entfernt"] += 1
+        except Exception as exc:  # noqa: BLE001
+            # Nie loeschen, was sich nicht sicher einordnen laesst.
+            log(f"  Hinweis: Papierkorb-Eintrag {ziel_key} nicht bearbeitet — {exc}",
+                logfile)
+
+    log(f"  Dateien -> s3://{ziel_bucket}/{praefix}: {stand['kopiert']} kopiert "
+        f"({stand['bytes_kopiert'] / 1e6:.1f} MB), {stand['unveraendert']} unveraendert, "
+        f"{stand['vorgemerkt']} in den Papierkorb, {stand['entfernt']} endgueltig entfernt"
+        + (f", {stand['fehler']} FEHLER (z. B. {fehler_beispiel})" if stand["fehler"] else ""),
+        logfile)
+    return stand
+
+
 # ------------------------------------------------------------- Offsite-Kopie
 def offsite_konfiguriert() -> bool:
     return bool(os.environ.get("BACKUP_S3_BUCKET", "").strip())
@@ -612,12 +773,29 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         log(f"  {name}: {k} Dateien gesichert", logfile)
     s3_aktiv = all(os.environ.get(v, "").strip() for v in
                    ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"))
-    if s3_aktiv:
+    dateien_kopie = None
+    modus = dateien_modus() if s3_aktiv else None
+    if s3_aktiv and modus == "spiegel":
         try:
             n_files += spiegle_s3(tmp_dir / "s3", logfile)
         except Exception as exc:  # noqa: BLE001
             unvollstaendig.append(f"s3: {exc}")
             log(f"  WARNUNG: S3-Bucket NICHT gesichert — {exc}", logfile)
+    elif s3_aktiv and modus == "bucket":
+        # 19.09.2026: Speicher zu Speicher, nichts davon landet auf der Platte.
+        try:
+            dateien_kopie = dateien_in_bucket_sichern(logfile)
+            if dateien_kopie.get("fehler"):
+                unvollstaendig.append(
+                    f"dateien: {dateien_kopie['fehler']} Objekte nicht in den "
+                    f"Sicherungs-Bucket kopiert")
+        except Exception as exc:  # noqa: BLE001
+            unvollstaendig.append(f"dateien: {exc}")
+            log(f"  WARNUNG: Dateien NICHT in den Sicherungs-Bucket kopiert — {exc}",
+                logfile)
+    elif s3_aktiv:
+        dateien_kopie = {"modus": "aus"}
+        log("  Hinweis: Datei-Speicher wird nicht gesichert (BACKUP_DATEIEN=aus)", logfile)
     if os.environ.get("EMERGENT_LLM_KEY", "").strip():
         # Externer Snapshot-Speicher ohne Listing-API: nicht sicherbar.
         unvollstaendig.append("snapshots: externer Snapshot-Speicher (EMERGENT) "
@@ -641,6 +819,10 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         "collections": counts, "files": dateien,
         "unvollstaendig": unvollstaendig,
     }
+    if dateien_kopie is not None:
+        # 19.09.2026: wo die Dateien liegen (Sicherungs-Bucket) bzw. dass sie
+        # bewusst nicht gesichert werden — der Restore liest das mit.
+        manifest["dateien_kopie"] = dateien_kopie
     schreibe_manifest(tmp_dir, manifest)
     size_mb = sum(v["bytes"] for v in dateien.values()) / 1e6
     tmp_dir.rename(final_dir)          # atomarer Abschluss des lokalen Backups

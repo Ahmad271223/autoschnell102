@@ -14,8 +14,32 @@ export default function SendDialog({ open, contract, onClose }) {
   const [phone, setPhone] = useState(contract.seller_phone || "");
   const [email, setEmail] = useState(contract.seller_email || "");
   const [subject, setSubject] = useState(dealer?.email_subject || "Kaufvertrag für Ihr Fahrzeug");
-  const [waMsg, setWaMsg] = useState((dealer?.whatsapp_template || "").replaceAll("{händler_name}", dealer?.company_name || ""));
-  const [emailMsg, setEmailMsg] = useState((dealer?.email_template || "").replaceAll("{händler_name}", dealer?.company_name || ""));
+  // 19.09.2026 (sichtbarer Mangel 3): Die Einstellungen bewerben acht
+  // Platzhalter, ersetzt wurde nur {händler_name} — {kunde_name}, {fahrzeug},
+  // {abholdatum} usw. gingen WOERTLICH an den Verkaeufer. Jetzt werden alle
+  // beworbenen Platzhalter aus Vertrag und Firmendaten gefuellt.
+  const platzhalter = (text) => {
+    const cd = contract?.contract_data || {};
+    const datum = String(contract?.pickup_date || cd.pickup_date || "");
+    const [j, m, t] = datum.split("-");
+    const datumDe = (j && m && t) ? `${t}.${m}.${j}` : datum;
+    const abhol = [datumDe, contract?.pickup_time || cd.pickup_time].filter(Boolean).join(" ");
+    const marke = contract?.make || cd.make || "";
+    const modell = contract?.model || cd.model || "";
+    const werte = {
+      "{händler_name}": dealer?.company_name || cd.dealer_company || "",
+      "{kunde_name}": contract?.seller_name || cd.seller_name || "",
+      "{fahrzeug}": [marke, modell].filter(Boolean).join(" "),
+      "{marke}": marke,
+      "{modell}": modell,
+      "{abholdatum}": abhol,
+      "{telefon}": cd.dealer_phone || dealer?.phone || "",
+      "{email}": cd.dealer_email || dealer?.email || dealer?.contact_email || "",
+    };
+    return Object.entries(werte).reduce((s, [k, v]) => s.replaceAll(k, String(v)), text || "");
+  };
+  const [waMsg, setWaMsg] = useState(platzhalter(dealer?.whatsapp_template));
+  const [emailMsg, setEmailMsg] = useState(platzhalter(dealer?.email_template));
   const [busy, setBusy] = useState(false);
   // Wunsch Ahmad 18.09.2026: Das Beweisdokument entsteht nicht mehr
   // automatisch bei jedem Vergleich. Nach dem Versand fragen wir einmal

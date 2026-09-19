@@ -18,7 +18,7 @@ export default function PasswortVergessen() {
             <Bolt size={16} />
           </span>
           <span className="font-display font-black text-lg text-white">
-            AUTOHANDEL<span style={{ color: "var(--accent-red)" }}>.</span>
+            AutoSchnell<span style={{ color: "var(--accent-red)" }}>.</span>
           </span>
         </Link>
 

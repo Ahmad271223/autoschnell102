@@ -977,6 +977,18 @@ async def driver_appointments(driver=Depends(current_driver),
         ):
             dealers[d["id"]] = d
 
+    # 19.09.2026 (sichtbarer Mangel 4): Nach dem unterschriebenen Protokoll
+    # steht die Fahrt auf "abgeholt" — der Abhol-Check (km, Schluessel, Tank,
+    # Fotos) war dann in der App nicht mehr erreichbar, obwohl der Server den
+    # ersten Bericht 24 h lang annimmt. Die App braucht dafuer: gibt es schon
+    # einen Bericht, und seit wann ist die Fahrt abgeholt.
+    mit_bericht = set()
+    if appts:
+        async for r in db.pickup_reports.find(
+                {"appointment_id": {"$in": [a.get("id") for a in appts]},
+                 "driver_account_id": driver["id"], "superseded": {"$ne": True}},
+                {"_id": 0, "appointment_id": 1}):
+            mit_bericht.add(r.get("appointment_id"))
     out = []
     for a in appts:
         vid = a.get("vehicle_id")
@@ -1031,6 +1043,8 @@ async def driver_appointments(driver=Depends(current_driver),
             } if v else None,
             "snapshot_id": snap_map.get(schluessel),
             "beweis_id": beweis_map.get(schluessel),
+            "bericht_vorhanden": a.get("id") in mit_bericht,
+            "status_changed_at": a.get("status_changed_at"),
         })
     return out
 

@@ -49,7 +49,7 @@ export default function Landing() {
               <Bolt size={16} className="text-white" />
             </span>
             <span className="font-display font-black text-lg tracking-tighter">
-              AUTOHANDEL<span style={{ color: "var(--accent-red)" }}>.</span>
+              AutoSchnell<span style={{ color: "var(--accent-red)" }}>.</span>
             </span>
           </Link>
 
@@ -448,7 +448,7 @@ export default function Landing() {
       {/* CONTACT FOOTER */}
       <footer id="contact" className="py-12 border-t" style={{ borderColor: "var(--border-default)" }}>
         <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="text-zinc-500 text-sm">© {new Date().getFullYear()} Autohandel SaaS · Alle Rechte vorbehalten.</div>
+          <div className="text-zinc-500 text-sm">© {new Date().getFullYear()} AutoSchnell · Alle Rechte vorbehalten.</div>
           <div className="flex gap-6 text-sm text-zinc-400">
             <Link to="/datenschutz" className="hover:text-white">Datenschutz</Link>
             <Link to="/impressum" className="hover:text-white">Impressum</Link>

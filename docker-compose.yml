@@ -179,6 +179,13 @@ services:
       - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
       - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
       - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}
+      # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-
+      # Bucket statt Spiegel auf die Platte (leer = bucket, sobald
+      # BACKUP_S3_BUCKET gesetzt ist).
+      - BACKUP_DATEIEN=${BACKUP_DATEIEN:-}
+      - BACKUP_DATEIEN_BUCKET=${BACKUP_DATEIEN_BUCKET:-}
+      - BACKUP_DATEIEN_PREFIX=${BACKUP_DATEIEN_PREFIX:-dateien/}
+      - BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE=${BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE:-30}
       # Anbieter-Abrufe (mobile.de + AutoScout24 via Apify; optional
       # offizielle mobile.de-API; optional Rotations-Proxy fuer
       # Kleinanzeigen-Server-Abrufe)

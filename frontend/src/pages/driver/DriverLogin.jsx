@@ -50,7 +50,7 @@ export default function DriverLogin() {
           <div>
             <div className="overline">Fahrer-App</div>
             <div className="font-display font-black text-2xl tracking-tighter">
-              AUTOHANDEL<span style={{ color: "var(--accent-red)" }}>.</span>
+              AutoSchnell<span style={{ color: "var(--accent-red)" }}>.</span>
             </div>
           </div>
         </Link>

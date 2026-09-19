@@ -298,11 +298,39 @@ steht in der `.env` — sonst jeden Aufruf ausdrücklich mit
     löscht sie von Hand.
 
 ## Backups
-Das Backend sichert **täglich um 03:00** MongoDB + alle Dateien nach
-`/backups` (im Volume `backups_data`, 14 Tage Aufbewahrung). Ein Backup
+Das Backend sichert **täglich um 03:00** MongoDB nach `/backups` (im Volume
+`backups_data`, 14 Tage Aufbewahrung) und den Datei-Speicher **Speicher-zu-
+Speicher in den Sicherungs-Bucket** (seit 19.09.2026, s. u.). Ein Backup
 meldet `BACKUP OK` (Exit 0) nur, wenn Datenbank, alle Datei-Speicher
 (uploads, local_storage, ggf. S3) **und** — falls konfiguriert — die
-Offsite-Kopie gesichert wurden. Sonst `BACKUP UNVOLLSTAENDIG` (Exit 2) mit
+Offsite-Kopie gesichert wurden.
+
+**Datei-Speicher seit 19.09.2026 (Entscheidung Ahmad): kein Spiegel mehr auf
+der Platte.** Vorher lud jeder nächtliche Lauf den *ganzen* S3-Bucket auf die
+Serverplatte (14 Stände + gepacktes Archiv = 15 × Bucket-Größe). Bei den
+erwarteten ~20 GB Dateien (36 Nutzer × 150 Inserate am Tag) wären das 300 GB
+auf einer 160-GB-Platte. Jetzt (`BACKUP_DATEIEN=bucket`, Standard sobald
+`BACKUP_S3_BUCKET` gesetzt ist):
+
+- Jede Datei wird **einmal** in den Sicherungs-Bucket kopiert (Präfix
+  `dateien/`), danach nur noch neue oder geänderte — die Daten fließen durch
+  den Arbeitsspeicher, nie auf die Platte. Gelesen wird mit den `S3_*`-,
+  geschrieben mit den `BACKUP_S3_*`-Zugangsdaten (ein reiner Schreib-Schlüssel
+  für die Sicherung reicht).
+- Im Datei-Speicher gelöschte Dateien bleiben im Sicherungs-Bucket
+  **30 Tage als Papierkorb** (Metadatum `geloescht-am`), dann verschwinden sie
+  auch dort (`BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE`).
+- Das Manifest trägt `dateien_kopie` (Bucket, Präfix, kopiert/unverändert/
+  Papierkorb/entfernt). Scheitert eine Datei, ist das Backup UNVOLLSTAENDIG.
+- Zurückholen: `python -X utf8 scripts/dateien_zurueckkopieren.py --dry-run`
+  zählt, `--yes` kopiert fehlende Dateien zurück in den Datei-Speicher
+  (`--praefix protocol/` nur einen Ordner, `--auch-geloeschte` auch aus dem
+  Papierkorb). Der DB-Restore (unten) bleibt unverändert.
+- **Zusätzlich empfohlen:** im Cloudflare-Dashboard beim Datei-Bucket
+  (`S3_BUCKET`) die **Versionierung** einschalten — dann lässt sich auch ohne
+  Sicherung jede versehentlich gelöschte Datei sofort zurückholen.
+- `BACKUP_DATEIEN=spiegel` schaltet den alten Weg wieder ein (nur für kleine
+  Installationen), `aus` sichert keine Dateien. Sonst `BACKUP UNVOLLSTAENDIG` (Exit 2) mit
 Begründung in `manifest.json` → `unvollstaendig` und Betriebsalarm
 `backup_unvollstaendig`; Exit 1 (Datenbank nicht gesichert) →
 `backup_fehlgeschlagen`. **Nur vollständige Backups zählen** für die
@@ -2065,3 +2093,32 @@ waeren ueber ihre Frist hinaus gespeichert geblieben. Der Lauf arbeitet deshalb 
 vollstaendig, aber in Stapeln (`batch_size`) — der irrefuehrende Satz im Code ist jetzt weg.
 
 Wächter: `backend/tests/test_befunde_144_165_20260919.py`.
+
+### Live-faehig (19.09.2026, Entscheidung Ahmad): Sicherung ohne Platten-Spiegel + sichtbare Maengel
+
+**Sicherung:** Der Datei-Speicher wird nicht mehr in jedes lokale Backup gespiegelt, sondern
+Speicher-zu-Speicher in den Sicherungs-Bucket kopiert (`BACKUP_DATEIEN=bucket`, Standard sobald
+`BACKUP_S3_BUCKET` gesetzt ist) — Details und Rueckweg im Abschnitt "Backups". Nach dem Rollout
+faellt die naechtliche Kopie auf die Platte damit automatisch weg; die 14 lokalen Staende
+enthalten nur noch die Datenbank. Zusaetzlich im Cloudflare-Dashboard beim Datei-Bucket die
+Versionierung einschalten (manuell, Ahmad).
+
+**Sichtbare Maengel aus der Video-Pruefung vom 17.09.2026:**
+
+1. Marke: "AUTOHANDEL." hiess auf Startseite, Login, Anfrage, Abo-Seite, Fahrer-Login,
+   Passwort-Seite und Rechtstexten jetzt **AutoSchnell.**, Fusszeile "© AutoSchnell".
+2. Kontaktadresse `support@autohandel.app` (Fusszeile, Team-Seite) — **bleibt offen**, bis Ahmad
+   ein echtes Postfach nennt (nicht erfunden).
+3. Versand-Vorlagen: alle acht beworbenen Platzhalter werden gefuellt (`{kunde_name}`,
+   `{fahrzeug}`, `{marke}`, `{modell}`, `{abholdatum}` als TT.MM.JJJJ mit Uhrzeit,
+   `{händler_name}`, `{telefon}`, `{email}`) — vorher ging alles ausser dem Haendlernamen woertlich
+   an den Verkaeufer.
+4. Fahrer-App: Nach dem unterschriebenen Protokoll (Fahrt = abgeholt) gibt es den Knopf
+   "Abhol-Check nachtragen (km, Schluessel, Tank, Fotos)" — 24 h lang, solange noch kein Bericht
+   da ist (dieselbe Frist wie `driver_submit_report`). Die Terminliste liefert dafuer
+   `bericht_vorhanden` und `status_changed_at`.
+5. Abo-Seite: sagt jetzt, dass Kaufvertraege (samt Versand) das Sucher-Abo brauchen — so
+   verlangt es der Server (`require_active_sub`); Terminplaner, Freigaben, Bestand und Inserate
+   bleiben kostenlos.
+
+Wächter: `backend/tests/test_live_faehig_20260919.py`.

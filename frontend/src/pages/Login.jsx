@@ -88,7 +88,7 @@ export default function Login() {
                   style={{ background: "var(--accent-red)" }}>
               <Bolt size={16} />
             </span>
-            <span className="font-display font-black text-lg">AUTOHANDEL<span style={{color:"var(--accent-red)"}}>.</span></span>
+            <span className="font-display font-black text-lg">AutoSchnell<span style={{color:"var(--accent-red)"}}>.</span></span>
           </Link>
 
           <h1 className="font-display font-black text-3xl tracking-tight">Anmelden</h1>
