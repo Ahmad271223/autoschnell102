@@ -78,20 +78,34 @@ CONDITION_FIELDS = [
 ]
 
 
+# Wunsch Ahmad 19.09.2026: ALLE Ausstattungen aus dem Inserat zeigen.
+# Der Deckel von 20 schnitt bei gut ausgestatteten Wagen die Haelfte ab
+# (echte Inserate haben 30-60 Zeilen). 80 ist nur noch die Grenze
+# gegen Ausreisser — die Antwort des Fahrers darf ebenso viele Zeilen
+# tragen (FELD_MAX unten).
+AUSSTATTUNG_MAX = 80
+# Felder je Abschnitt in der Antwort des Fahrers (Ausstattung + Reserve).
+FELD_MAX = AUSSTATTUNG_MAX + 20
+
+
 class ProtocolIn(BaseModel):
     """Alle Felder optional — der Fahrer speichert laufend Zwischenstände."""
     vehicle_check: Optional[Dict[str, Any]] = None      # Abschnitt 1 (Korrekturen)
 
-    # Runde 17 (Nr. 9): auch documents/features deckeln (vorher unbegrenzt).
+        # Runde 17 (Nr. 9): auch documents/features deckeln (vorher unbegrenzt).
     @field_validator("vehicle_check", "condition", "documents", "features", mode="before")
     @classmethod
     def _dict_deckeln(cls, v):
-        """Review 09/2026: freie Dicts hatten keine Groessengrenze — max. 60
-        Schluessel, Werte als Text bis 500 Zeichen (Zahlen/Bool/None ok)."""
+        """Review 09/2026: freie Dicts hatten keine Groessengrenze — Werte
+        als Text bis 500 Zeichen (Zahlen/Bool/None ok).
+
+        19.09.2026: Die Grenze lag bei 60 Schluesseln. Seit alle
+        Ausstattungen des Inserats angezeigt werden (AUSSTATTUNG_MAX),
+        kann allein Abschnitt 3 mehr Zeilen haben — deshalb FELD_MAX."""
         if v is None:
             return v
-        if not isinstance(v, dict) or len(v) > 60:
-            raise ValueError("zu viele oder ungueltige Felder (max. 60)")
+        if not isinstance(v, dict) or len(v) > FELD_MAX:
+            raise ValueError(f"zu viele oder ungueltige Felder (max. {FELD_MAX})")
         def _wert(k, w, tiefe=0):
             if isinstance(w, str):
                 return w[:500]
@@ -571,11 +585,35 @@ async def freigabe_beim_schliessen_zuruecknehmen(appt_id: str,
         return None
 
 
+async def protokoll_korrekturen(appt: dict, protokoll: dict) -> tuple:
+    """Was der Fahrer vor Ort anders vorgefunden hat (19.09.2026).
+
+    Liefert (Vertragsfelder, neue Schaeden) fuer die neue Vertragsfassung —
+    Wunsch Ahmad: "alle Daten, die jetzt neu sind, anstelle der alten
+    falschen Daten". Wirft nie; im Zweifel bleibt der Vertrag wie er ist."""
+    try:
+        vehicle, contract = await _fahrzeug_und_vertrag(appt)
+        zeilen = PV.vergleich(VEHICLE_CHECK_FIELDS, protokoll.get("vehicle_check"),
+                              protokoll.get("condition"),
+                              PV.vertragswerte(vehicle, contract))
+        korrekturen = PV.vertrags_korrekturen(zeilen)
+        schaeden = [d for d in (protokoll.get("new_damages") or []) if d]
+        return korrekturen, schaeden
+    except Exception:  # noqa: BLE001
+        log.exception("Protokoll-Korrekturen zu Termin %s nicht ermittelt", appt.get("id"))
+        return {}, []
+
+
 async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
-                                              neuer_preis, sondervereinbarung) -> bool:
+                                              neuer_preis, sondervereinbarung,
+                                              korrekturen=None, neue_schaeden=None) -> bool:
     """Wunsch Ahmad 14.09.2026: nach dem unterschriebenen Protokoll den Vertrag
-    mit neuem Preis und Sondervereinbarung neu erzeugen. Wirft nie."""
-    if not appt.get("contract_id") or (neuer_preis is None and not (sondervereinbarung or "").strip()):
+    mit neuem Preis und Sondervereinbarung neu erzeugen. 19.09.2026: dazu die
+    vor Ort korrigierten Fahrzeugdaten und die neu aufgenommenen Schaeden.
+    Wirft nie."""
+    if not appt.get("contract_id") or (neuer_preis is None
+                                       and not (sondervereinbarung or "").strip()
+                                       and not korrekturen and not neue_schaeden):
         return False
     try:
         from routes.contracts import regenerate_contract_for_pickup
@@ -584,6 +622,7 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
             user={"id": appt.get("created_by"), "dealer_id": appt.get("dealer_id", ""),
                   "role": "dealer"},
             neuer_preis=neuer_preis, sondervereinbarung=sondervereinbarung,
+            korrekturen=korrekturen, neue_schaeden=neue_schaeden,
             grund="abholung_abgeschlossen", protokoll_id=protokoll_id)
         if ok:
             await log_activity_sicher(appt.get("dealer_id", ""), appt.get("created_by") or "",
@@ -832,7 +871,7 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
             # mit Zifferntastatur, Kilometer und Halter nur Ziffern.
             "vehicle_check_art": dict(PV.ARTEN),
             "documents": DOCUMENT_ITEMS,
-            "features": (vehicle.get("features") or [])[:20],
+            "features": (vehicle.get("features") or [])[:AUSSTATTUNG_MAX],
             "condition_fields": [
                 {"key": k, "label": lb, "options": opts if isinstance(opts, list) else None}
                 for k, lb, opts in CONDITION_FIELDS
@@ -1145,7 +1184,7 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     # dazu Ort und Verkaeufername (P2) — der Chef sieht das ganze Protokoll.
     vehicle, contract = await _fahrzeug_und_vertrag(appt)
     _pflichtfelder_pruefen(doc, appt, vollstaendig=True,
-                           ausstattung=list((vehicle.get("features") or [])[:20]))
+                           ausstattung=list((vehicle.get("features") or [])[:AUSSTATTUNG_MAX]))
     jetzt = now_iso()
     setzen: Dict[str, Any] = {"status": ZUR_FREIGABE, "abgeschickt_am": jetzt,
                               "abgeschickt_von": driver["id"], "updated_at": jetzt,
@@ -1742,8 +1781,13 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # Wunsch Ahmad 14.09.2026: Der Kaufvertrag wird abschliessend mit dem vor
         # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
         # Fassung, alte im Archiv). Best effort — das Protokoll ist der Beleg.
-        await vertrag_nach_abholung_aktualisieren(appt, doc["id"], _preis_final,
-                                                  filled.get("sondervereinbarung"))
+        # 19.09.2026: dazu die vor Ort korrigierten Fahrzeugdaten und die neu
+        # aufgenommenen Schaeden. Gab es NICHTS davon, bleibt die alte Fassung
+        # unveraendert (kein neuer Vertrag ohne Anlass).
+        korrekturen, neue_schaeden = await protokoll_korrekturen(appt, filled)
+        await vertrag_nach_abholung_aktualisieren(
+            appt, doc["id"], _preis_final, filled.get("sondervereinbarung"),
+            korrekturen=korrekturen, neue_schaeden=neue_schaeden)
         # Wunsch Ahmad 15.09.2026: Preis vor Ort und Maengel des Fahrers in die
         # Auto-Daten (eigene Spalten, der Einkaufspreis des Vertrags bleibt).
         await auto_daten_vor_ort_nachtragen(appt, filled, _preis_final)
@@ -2167,7 +2211,7 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         vehicle_fr, _contract_fr = await _fahrzeug_und_vertrag(appt)
         try:
             _pflichtfelder_pruefen(doc, appt, vollstaendig=True,
-                                   ausstattung=list((vehicle_fr.get("features") or [])[:20]))
+                                   ausstattung=list((vehicle_fr.get("features") or [])[:AUSSTATTUNG_MAX]))
         except HTTPException as exc:
             raise HTTPException(422, "Das Protokoll ist nicht vollständig oder enthält "
                                      f"ungültige Werte ({exc.detail}) — bitte an den "

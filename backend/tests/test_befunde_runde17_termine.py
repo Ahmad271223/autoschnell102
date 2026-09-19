@@ -684,8 +684,12 @@ def test_08_signatur_b64_gedeckelt_und_einmal_dekodiert():
 @pytest.mark.parametrize("feld", ["documents", "features", "vehicle_check", "condition"])
 def test_09_dict_felder_gedeckelt(feld):
     P = _module("routes.protocols")
+    # 19.09.2026: Die Grenze liegt bei FELD_MAX (vorher fest 60) — seit
+    # alle Ausstattungen des Inserats angezeigt werden, braucht Abschnitt 3
+    # mehr Zeilen. Geprueft bleibt, DASS gedeckelt wird.
     with pytest.raises(ValidationError):
-        P.ProtocolIn(**{feld: {f"k{i}": True for i in range(61)}})
+        P.ProtocolIn(**{feld: {f"k{i}": True for i in range(P.FELD_MAX + 1)}})
+    assert P.ProtocolIn(**{feld: {f"k{i}": True for i in range(P.FELD_MAX)}})
     with pytest.raises(ValidationError):
         P.ProtocolIn(**{feld: {"x" * 81: True}})
     with pytest.raises(ValidationError):

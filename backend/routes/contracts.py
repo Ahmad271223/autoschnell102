@@ -1867,14 +1867,18 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                  "idempotency_key": body.idempotency_key,
                  **({"wiederaufnahme_am": claim_am} if wiederaufnahme else {})}}},
             {"$set": {"send_status.$": send_entry,
-                      "status": neuer_status, "updated_at": now_iso()}},
+                      "status": neuer_status, "updated_at": now_iso()},
+             # 19.09.2026: Die Rueckfrage "neuen Vertrag senden?" ist damit
+             # beantwortet — der Hinweis verschwindet aus der Liste.
+             "$unset": {"nach_abholung_versand_offen": ""}},
         )
     else:
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich},
             {"$push": {"send_status": {"$each": [send_entry],
                                        "$slice": -SEND_STATUS_MAX}},
-             "$set": {"status": neuer_status, "updated_at": now_iso()}},
+             "$set": {"status": neuer_status, "updated_at": now_iso()},
+             "$unset": {"nach_abholung_versand_offen": ""}},
         )
     if reserviert and res.matched_count:
         # Runde 16: Archiv-Eintrag ERST nach dem Erfolg (vorher bei der
@@ -1984,6 +1988,8 @@ async def regenerate_contract_for_pickup(
     pickup_date: Optional[str] = None, pickup_time: Optional[str] = None,
     leeren_erlaubt: bool = False,
     neuer_preis: Optional[float] = None, sondervereinbarung: Optional[str] = None,
+    korrekturen: Optional[Dict[str, Any]] = None,
+    neue_schaeden: Optional[list] = None,
     grund: str = "abholtermin_geaendert", protokoll_id: Optional[str] = None,
 ) -> bool:
     """Erzeugt das Kaufvertrags-PDF mit GEAENDERTEM Abholtermin neu.
@@ -2003,7 +2009,13 @@ async def regenerate_contract_for_pickup(
     # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
     # Fassung, die alte bleibt im Archiv) — der Kunde bekommt den aktuellen Stand.
     preis_aenderung = neuer_preis is not None or bool((sondervereinbarung or "").strip())
-    if not contract_id or (pickup_date is None and pickup_time is None and not preis_aenderung):
+    # 19.09.2026 (Wunsch Ahmad): auch die vor Ort korrigierten Fahrzeugdaten
+    # und neu aufgenommene Schaeden loesen eine neue Fassung aus.
+    korrekturen = {k: w for k, w in (korrekturen or {}).items() if w not in (None, "")}
+    neue_schaeden = [d for d in (neue_schaeden or []) if d]
+    if not contract_id or (pickup_date is None and pickup_time is None
+                           and not preis_aenderung and not korrekturen
+                           and not neue_schaeden):
         return False
     # Runde 10: derselbe Bereich wie beim Lesen — ein Sucher erzeugt kein
     # PDF fuer den Vertrag eines Kollegen, auch nicht ueber den Termin.
@@ -2034,9 +2046,22 @@ async def regenerate_contract_for_pickup(
     preis_neu = neuer_preis is not None and (
         alt_preis is None or abs(float(neuer_preis) - float(alt_preis or 0)) > 0.004)
     sonder_neu = bool(sonder) and sonder not in (contract_dict.get("additional_terms") or "")
+    # Was der Fahrer vor Ort anders vorgefunden hat, ersetzt die alten Angaben
+    # im Vertrag (Marke, Modell, EZ, FIN, Farbe, Kraftstoff, HU, KM, Halter,
+    # gewerblich, unfallfrei). Gleiche Werte aendern nichts.
+    korrigiert = {k: w for k, w in korrekturen.items()
+                  if str(contract_dict.get(k) or "").strip() != str(w).strip()}
+    schaeden_alt = list(contract_dict.get("damages") or [])
+    schaeden_neu = [d for d in neue_schaeden if d not in schaeden_alt]
     if (neu_datum or "") == (alt_datum or "") and (neu_zeit or "") == (alt_zeit or "") \
-            and not preis_neu and not sonder_neu:
+            and not preis_neu and not sonder_neu and not korrigiert and not schaeden_neu:
         return False
+    if korrigiert:
+        contract_dict.update(korrigiert)
+    if schaeden_neu:
+        # Die vor Ort aufgenommenen Schaeden kommen zu den im Vertrag
+        # dokumentierten dazu — die alten waren bekannt und bleiben stehen.
+        contract_dict["damages"] = schaeden_alt + schaeden_neu
     contract_dict["pickup_date"] = neu_datum or ""
     contract_dict["pickup_time"] = neu_zeit or ""
     if preis_neu:
@@ -2145,9 +2170,20 @@ async def regenerate_contract_for_pickup(
             "updated_at": now_iso(),
             # Runde 16 (15.09.2026): eine neue Fassung ist noch NICHT versendet.
             **({"status": "neu erstellt"} if doc.get("status") in ("versendet", "versand_vorbereitet") else {}),
-            **({"purchase_price": float(neuer_preis),
-                "nach_abholung_aktualisiert_am": now_iso(),
-                "nach_abholung_protokoll_id": protokoll_id} if preis_neu or sonder_neu else {}),
+            **({"purchase_price": float(neuer_preis)} if preis_neu else {}),
+            # 19.09.2026: Woran erkennt die Oberflaeche, dass sie den neuen
+            # Vertrag zum Senden anbieten soll — und was sich geaendert hat?
+            **({"nach_abholung_aktualisiert_am": now_iso(),
+                "nach_abholung_protokoll_id": protokoll_id,
+                "nach_abholung_aenderungen": {
+                    "preis": float(neuer_preis) if preis_neu else None,
+                    "preis_vorher": alt_preis if preis_neu else None,
+                    "sondervereinbarung": bool(sonder_neu),
+                    "felder": sorted(korrigiert.keys()),
+                    "neue_schaeden": len(schaeden_neu)},
+                "nach_abholung_versand_offen": True}
+               if grund == "abholung_abgeschlossen"
+               and (preis_neu or sonder_neu or korrigiert or schaeden_neu) else {}),
         },
          # Runde 17 (Nr. 321): Historie gedeckelt — die juengsten 100
          # Verschiebungen bleiben, das Dokument waechst nicht unbegrenzt.

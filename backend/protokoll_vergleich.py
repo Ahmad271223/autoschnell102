@@ -343,6 +343,62 @@ def vergleich(felder: Iterable[Tuple[str, str, List[str]]], vehicle_check: Optio
     return zeilen
 
 
+# Welches Vertragsfeld traegt den vor Ort festgestellten Wert? (19.09.2026)
+# Gegenstueck zu vertragswerte(): dort Vertrag -> Protokoll, hier zurueck.
+# Nur Felder, die der Vertrags-Dialog ohnehin kennt (vertrag_felder.veh_map)
+# bzw. die eigenen Vertragsfelder (Halter, HU, gewerblich, unfallfrei).
+KORREKTUR_FELDER: Dict[str, str] = {
+    "make": "vehicle_make",
+    "model": "vehicle_model",
+    "first_registration": "vehicle_first_registration",
+    "vin": "vehicle_vin",
+    "previous_owners": "previous_owners",
+    "color": "vehicle_color",
+    "fuel": "vehicle_fuel",
+    "hu": "hu_until",
+    "mileage_contract": "vehicle_mileage",
+    "commercial": "commercial_since_ez",
+    "accident_free": "accident_free",
+}
+
+
+def vertrags_korrekturen(zeilen: List[dict]) -> Dict[str, Any]:
+    """Wunsch Ahmad 19.09.2026: "alle Daten, die jetzt neu sind, anstelle der
+    alten falschen Daten" — was der Fahrer vor Ort korrigiert hat, als
+    Vertragsfelder fuer die neue Vertragsfassung.
+
+    Genommen wird nur, was wirklich abweicht UND einen lesbaren Wert hat:
+    ein "weicht ab" ohne Eingabe oder eine unlesbare Zahl aendert nichts
+    (der Chef sieht die Zeile trotzdem im Freigabe-Kasten). "Leistung"
+    bleibt bewusst aussen vor — kW und PS stehen in zwei Feldern, die der
+    Fahrer nicht getrennt eintippt.
+    """
+    raus: Dict[str, Any] = {}
+    for z in zeilen:
+        feld = KORREKTUR_FELDER.get(z.get("schluessel") or "")
+        if not feld or not z.get("abweichend"):
+            continue
+        art = z.get("art")
+        if art == "ja_nein":
+            if z.get("status") in ("Ja", "Nein"):
+                raus[feld] = z["status"]
+            continue
+        if z.get("hinweis") in ("kein Wert eingetragen", "unvollständig",
+                                "keine lesbare Zahl"):
+            continue
+        text = (z.get("vor_ort_text") or "").strip()
+        if not text:
+            continue
+        if art in ("km", "anzahl"):
+            n = zahl(z.get("wert_roh") or text)
+            if n is None:
+                continue
+            raus[feld] = n
+        else:
+            raus[feld] = text
+    return raus
+
+
 def abweichungen(zeilen: List[dict]) -> List[dict]:
     """Nur die Zeilen, ueber die sich verhandeln laesst — mit den bisherigen
     Schluesseln (feld/status/wert, Runde 30) plus Vertrag/vor Ort."""

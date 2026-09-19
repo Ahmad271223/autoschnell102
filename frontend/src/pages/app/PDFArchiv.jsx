@@ -2,10 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
+import SendDialog from "@/components/SendDialog";
 
 const DAY_FILTERS = [
   { v: 0, l: "Alle" },
@@ -21,6 +22,10 @@ export default function PDFArchiv() {
   const [days, setDays] = useState(0);
   const [loading, setLoading] = useState(true);
   const [gallery, setGallery] = useState(null); // {item, urls, index}
+  // Wunsch Ahmad 19.09.2026: Wurde der Vertrag nach der Abholung mit neuem
+  // Preis/neuen Daten neu erstellt, fragt die App, ob er an den Verkaeufer
+  // geht (WhatsApp oder E-Mail) — derselbe Dialog wie beim ersten Versand.
+  const [senden, setSenden] = useState(null);
 
   // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
@@ -161,6 +166,7 @@ export default function PDFArchiv() {
                       </span>
                     </div>
                     <AbholZeile item={it} />
+                    <NachAbholungHinweis item={it} onSenden={() => setSenden(it)} />
                     <div className="mt-3">
                       {it.vehicle_id ? (
                         <BeweisCard vehicleId={it.vehicle_id} compact />
@@ -208,6 +214,11 @@ export default function PDFArchiv() {
         ))}
       </div>
 
+      {senden && (
+        <SendDialog open contract={senden}
+                    onClose={() => { setSenden(null); load(); }} />
+      )}
+
       {/* Foto-Galerie: großes Bild, blättern mit Pfeilen / Tastatur / Wischen */}
       {gallery && (
         <GalleryViewer
@@ -222,6 +233,47 @@ export default function PDFArchiv() {
 }
 
 /* ------------------------------ Sub-components ----------------------------- */
+
+const FELD_NAMEN = {
+  vehicle_make: "Marke", vehicle_model: "Modell",
+  vehicle_first_registration: "Erstzulassung", vehicle_vin: "FIN",
+  vehicle_color: "Farbe", vehicle_fuel: "Kraftstoff", vehicle_mileage: "Kilometer",
+  previous_owners: "Halter", hu_until: "HU", commercial_since_ez: "gewerblich",
+  accident_free: "unfallfrei",
+};
+
+function NachAbholungHinweis({ item, onSenden }) {
+  // Wunsch Ahmad 19.09.2026: Nach dem unterschriebenen Abholprotokoll wird der
+  // Vertrag mit den vor Ort festgestellten Daten neu erstellt. Die alte Fassung
+  // bleibt als Beweis (unten "Frühere Fassungen"), hier steht die GÜLTIGE — und
+  // die Frage, ob der Verkäufer sie bekommen soll.
+  const ae = item.nach_abholung_aenderungen;
+  if (!item.nach_abholung_versand_offen || !ae) return null;
+  const teile = [];
+  if (ae.preis != null) {
+    const alt = ae.preis_vorher != null
+      ? `${Number(ae.preis_vorher).toLocaleString("de-DE")} € → ` : "";
+    teile.push(`neuer Preis ${alt}${Number(ae.preis).toLocaleString("de-DE")} €`);
+  }
+  (ae.felder || []).forEach((f) => teile.push(FELD_NAMEN[f] || f));
+  if (ae.neue_schaeden) teile.push(`${ae.neue_schaeden} neue(r) Schaden/Schäden`);
+  if (ae.sondervereinbarung) teile.push("Sondervereinbarung");
+  return (
+    <div className="mt-3 rounded-xl border px-3 py-2.5 flex flex-wrap items-center gap-2 text-[13px]"
+         data-testid={`nach-abholung-${item.id}`}
+         style={{ borderColor: "rgba(255,159,10,0.35)", background: "rgba(255,159,10,0.10)" }}>
+      <span style={{ color: "var(--text-primary)" }}>
+        <b>Nach der Abholung neu erstellt</b>{teile.length ? ` — ${teile.join(", ")}.` : "."}
+        {" "}Die vorherige Fassung bleibt als Nachweis erhalten.
+      </span>
+      <button onClick={onSenden} data-testid={`nach-abholung-senden-${item.id}`}
+              className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+              style={{ background: "var(--accent-red)" }}>
+        <Send size={13} /> Neuen Vertrag senden
+      </button>
+    </div>
+  );
+}
 
 function SpecsZeile({ cd }) {
   // km / PS / EZ aus den beim Vertrag gespeicherten Fahrzeugdaten.

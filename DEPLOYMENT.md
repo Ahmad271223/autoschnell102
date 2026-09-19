@@ -2148,3 +2148,36 @@ damit ein spaeter angefordertes Beweisdokument noch etwas zu dokumentieren hat. 
   und `INSERATSCACHE_MAX_TAGE` mitziehen.
 
 Wächter: `backend/tests/test_inseratsspeicher_14_tage_20260919.py`.
+
+### Nach der Abholung: neuer Kaufvertrag mit den Daten von vor Ort (19.09.2026, Wunsch Ahmad)
+
+Der Ablauf selbst stand schon und bleibt: Fahrer schickt das Protokoll ab → der Chef sieht es (mit
+Zähler im Menü) → Fahrer (`preis_vorschlag`) oder Chef trägt den neuen Preis ein → der Chef gibt
+frei → **erst dann** darf vor Ort unterschrieben werden (Abschluss prüft Preis **und** Freigabe-
+Stand). Neu ist, was danach passiert:
+
+- **Alle Ausstattungen im Online-Protokoll.** Der Deckel lag bei 20 Zeilen (`[:20]`) — gut
+  ausgestattete Wagen haben 30–60, der Rest fiel weg. Jetzt `AUSSTATTUNG_MAX = 80` im
+  Online-Protokoll und in beiden PDF-Wegen; die Antwort des Fahrers darf ebenso viele Zeilen
+  tragen (`FELD_MAX`, vorher 60 je Abschnitt). Live geprüft: 45 Ausstattungen → 45 Zeilen.
+- **Korrigierte Daten wandern in den neuen Vertrag.** `protokoll_vergleich.vertrags_korrekturen()`
+  macht aus den Abweichungen Vertragsfelder (Marke, Modell, EZ, FIN, Farbe, Kraftstoff, HU, KM,
+  Halter, gewerblich, unfallfrei). Halb getippte Daten, unlesbare Zahlen und leere Eingaben ändern
+  **nichts** (im Freigabe-Kasten sieht der Chef sie trotzdem); „Leistung" bleibt außen vor, weil kW
+  und PS zwei Felder sind, die der Fahrer nicht getrennt einträgt.
+- **Neu aufgenommene Schäden** (`new_damages`) kommen zu den im Vertrag dokumentierten dazu — die
+  alten bleiben stehen, sie waren ja bekannt.
+- **Alte Fassung = Nachweis, neue = gültig.** Wie bisher wird die bisherige Fassung nach
+  `generated_pdf_versions` archiviert und die Versionsnummer erhöht; die Liste zeigt die gültige
+  Fassung mit `v2`-Marke und darunter „Frühere Fassungen".
+- **Die App fragt nach dem Versand.** Der Vertrag trägt `nach_abholung_versand_offen` und
+  `nach_abholung_aenderungen` (Preis alt/neu, geänderte Felder, Zahl neuer Schäden). Das
+  Vertragsarchiv zeigt daraufhin „Nach der Abholung neu erstellt — … Die vorherige Fassung bleibt
+  als Nachweis erhalten." mit dem Knopf **„Neuen Vertrag senden"** (derselbe Dialog wie beim ersten
+  Versand, WhatsApp oder E-Mail). Nach dem Senden verschwindet der Hinweis.
+- **Ohne Änderung passiert nichts:** kein neuer Vertrag, kein Archiv-Eintrag, keine Rückfrage.
+- Der Merker wird nur bei `grund="abholung_abgeschlossen"` gesetzt — eine bloße Terminverschiebung
+  erzeugt weiterhin still eine neue Fassung, ohne nach dem Versand zu fragen.
+
+Wächter: `backend/tests/test_abholung_neuer_vertrag_20260919.py`; Live-Probe (17 Prüfungen) in
+`scratchpad/abholung_probe.py`.
