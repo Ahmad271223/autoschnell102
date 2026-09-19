@@ -701,7 +701,24 @@ async def get_or_fetch_listing(
         # Befund 116 (16.09.2026): der verlorene Abruf darf auch KEINEN
         # Beweisstand einfrieren — sonst dokumentierte das Dokument einen
         # Stand, der nie Cache-Stand wurde. Der Nachfolger merkt vor.
-        return data, False, None
+        #
+        # Befund 153 (19.09.2026): Er darf seine verworfenen Daten auch nicht
+        # mehr ZURUECKGEBEN. Sonst stand im gemeinsamen Speicher der Stand des
+        # Gewinners und im Fahrzeug dieses Suchers ein anderer — zwei Kollegen
+        # sahen dasselbe Inserat mit verschiedenen Zahlen. Stattdessen kurz auf
+        # den Gewinner warten und DESSEN Stand liefern.
+        for _versuch in range(4):
+            gewinner = await _fresh_cached()
+            if gewinner:
+                await db.listings_cache.update_one(
+                    {"cache_key": cache_key},
+                    {"$inc": {"use_count": 1},
+                     "$set": {"last_used_at": datetime.now(timezone.utc)}})
+                return gewinner["data"], True, gewinner.get("snapshot_id")
+            await _aio.sleep(0.5)
+        raise ListingBusy(
+            "Das Inserat wurde gerade von einer anderen Anfrage aktualisiert - "
+            "bitte in ein paar Sekunden erneut versuchen.")
     # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
     # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
     # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).

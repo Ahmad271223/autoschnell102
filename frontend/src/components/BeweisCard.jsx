@@ -75,6 +75,10 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
       setBeweis(data?.beweis || null);
       setZeitUeber(false);
       toast.success("Beweisdokument wird erstellt — das dauert meist ein paar Sekunden.");
+      // Befund 154 (19.09.2026): Wurde das Inserat nach dem Vergleich noch
+      // einmal abgerufen, haelt das Dokument DIESEN neueren Stand fest —
+      // das muss dastehen, sonst haelt man es fuer seinen Vergleichsstand.
+      if (data?.hinweis) toast.warning(data.hinweis, { duration: 12000 });
     } catch (err) {
       toast.error(errMsg(err, "Beweisdokument konnte nicht angefordert werden"));
     } finally {

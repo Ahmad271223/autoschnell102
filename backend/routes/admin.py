@@ -1164,6 +1164,19 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.users.update_many(
             {"dealer_id": dealer_id},
             {"$set": {"active": False, "current_session_id": None, "updated_at": jetzt}})
+        # Befund 148/165 (19.09.2026): Offene Link-Auftraege tragen kein
+        # dealer_id-Feld (sondern dealer_ids/requested_by_dealer) und blieben
+        # deshalb in der Schlange stehen — der Worker haette sie mitten in der
+        # Loeschkaskade noch extern abgerufen, und abbrechen konnte sie
+        # niemand mehr (die Firma ist gesperrt).
+        try:
+            from link_jobs import firma_austragen
+            n_jobs = await firma_austragen(db, dealer_id)
+            if n_jobs:
+                geloescht["link_jobs"] = n_jobs
+        except Exception as exc:  # noqa: BLE001 — Loeschung nie daran scheitern
+            log.warning("Firmenloeschung %s: Link-Auftraege nicht bereinigt: %s",
+                        dealer_id, exc)
         for coll in _COMPANY_COLLECTIONS:
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:

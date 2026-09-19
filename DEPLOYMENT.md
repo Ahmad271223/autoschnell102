@@ -2008,3 +2008,60 @@ Nebenwirkung in den Tests: Sechs Dateien benutzten als Unterschrift eine **erfun
 eine echte 1x1-PNG.
 
 Wächter: `backend/tests/test_unterschrift_lesbar_20260919.py`.
+
+### Nachpruefung Nr. 144-165 (19.09.2026): Berechtigungen gelten jetzt bis zuletzt
+
+22 Befunde, ein gemeinsames Muster: Eine Berechtigung wurde **einmal** geprueft — beim Einreihen,
+beim Anmelden, beim Anzeigen — und danach nie wieder, obwohl zwischen Pruefung und Wirkung Minuten
+(Warteschlange) oder Monate (Dokument-Adressen) liegen koennen.
+
+**A. Zugang (144, 145, 164).** `require_active_sub` haengt jetzt an `current_firma` statt an
+`current_user`. Damit gelten Firmendokument und Loeschsperre automatisch fuer Vergleich,
+Linkpruefung, resolve, ingest, Live-Zaehler, manuelle Suche und die Vertragswege. Vorher konnte ein
+Sucher **waehrend der laufenden Firmenloeschung** weiter vergleichen und Links einreihen (die
+Loeschkaskade raeumte also gegen laufende Neuanlagen an), und ein Konto mit geloeschter Firma
+arbeitete mit einer `dealer_id` weiter, zu der es keine Firma mehr gab.
+
+**B. Warteschlange (146-152, 165).** Der Worker ruft Minuten spaeter extern ab. Vor jedem Abruf
+prueft er jetzt je wartendem Konto (`link_jobs.wartender_darf_abrufen`): Konto aktiv, Abo aktiv,
+Firma vorhanden und nicht in Loeschung, und die Firma muss die sein, unter der der Auftrag
+eingereiht wurde. Ist niemand mehr berechtigt, endet der Auftrag ohne Abruf.
+
+- Gesperrtes Konto, abgelaufenes Abo, geloeschte Firma stoppen den Abruf (146-148).
+- Wechselt ein Wartender zwischendurch die Firma, wird der Abruf **nicht** der neuen Firma
+  angelastet — sie hat ihn nie eingereiht (149).
+- "Abbrechen" raeumt jetzt vollstaendig auf: Der Aussteiger ist nicht mehr `requested_by_user`
+  (sonst wurde ausgerechnet er wieder zuerst fuer den Abruf verwendet und mit seinem Tageskontingent
+  belastet) und seine Firma faellt aus `dealer_ids`, wenn von dort niemand mehr wartet (150, 151).
+- Die Bremse "60/min bzw. 8 gleichzeitig" gilt je Konto: Sie fuehrt jetzt zum naechsten Wartenden,
+  statt den gemeinsamen Auftrag komplett zurueckzustellen (152).
+- Die Firmenloeschung raeumt die Warteschlange selbst (`link_jobs.firma_austragen`) — der Sucher
+  kann waehrend der Loeschung nicht mehr abbrechen, also darf auch nichts mehr laufen (165).
+
+**C. Zwischenspeicher und Beweisdokument (153-155).**
+
+- Verliert eine Anfrage das Single-Flight-Rennen, gibt sie ihre verworfenen Daten **nicht mehr
+  zurueck**, sondern wartet kurz auf den Gewinner-Stand (sonst stand im gemeinsamen Speicher ein
+  anderer Stand als im Fahrzeug dieses Suchers) (153).
+- `/beweise/anfordern` friert nur noch den **rohen Inseratsstand** ein. Der frühere Rueckfall auf
+  `fahrzeug.data` konnte haendlerlokale Korrekturen zum gemeinsamen Beweis aller Firmen machen
+  (155). Wurde das Inserat nach dem Vergleich neu abgerufen, sagt die Antwort das jetzt
+  ausdruecklich (`hinweis`) — das Fahrzeug merkt sich dafuer `inserat_stand_am` (154).
+
+**D. Fahrer-Unterlagen (156-163).** Eine Regel fuer alle Wege
+(`routes/drivers.unterlagen_zugriff_oder_404`): storniert = nie, abgeschlossen = nur solange die
+Fahrt auch in der App steht (14 Tage nach "abgeholt", sonst 30). Das gilt jetzt fuer Abholauftrag,
+Kaufvertrag, Beweisdokument, Snapshot und Abholbericht — vorher kannte nur die Liste diese Fristen,
+und der Abholauftrag mit Verkaeufername, Anschrift und Telefon war sogar bei stornierten Fahrten
+weiter abrufbar (156, 157). Snapshot und Bericht verlangen jetzt eine **angenommene** Fahrt (158,
+159), "angenommen" ist praezise gefasst (unbekannte Alt-Werte kommen nicht mehr durch, 160), der
+Deckel von 50 Fahrzeugen im Beweiszugriff ist weg (er sperrte echte Termine aus, 161), datumslose
+Fahrten werden sortiert gekappt (162).
+
+**Nr. 163 bewusst anders geloest.** Der Befund las im Fotocleanup "hoechstens 500 je Lauf" und
+vermisste die Obergrenze im Code. Dieser Deckel wurde am 14.09.2026 (Runde 10, 3.4) aber
+ABSICHTLICH entfernt: Mit ihm blieb bei grossem Rueckstand jeden Lauf ein Rest liegen, und Fotos
+waeren ueber ihre Frist hinaus gespeichert geblieben. Der Lauf arbeitet deshalb weiter
+vollstaendig, aber in Stapeln (`batch_size`) — der irrefuehrende Satz im Code ist jetzt weg.
+
+Wächter: `backend/tests/test_befunde_144_165_20260919.py`.

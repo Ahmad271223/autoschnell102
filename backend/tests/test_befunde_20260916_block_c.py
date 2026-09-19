@@ -130,8 +130,12 @@ def test_quelltext_block_c():
     # 79/116: Zeitstempel nach dem Abruf; verlorene Lease ohne Vormerkung
     g = inspect.getsource(LI.get_or_fetch_listing)
     assert '"fetched_at": abruf_ende' in g and "abgerufen_am=abruf_ende" in g
-    assert (g.index("res.matched_count == 0") < g.index("return data, False, None")
-            < g.index("from beweis_service import beweis_vormerken"))
+    # Befund 153 (19.09.2026): Der Verlierer gibt seine verworfenen Daten gar
+    # nicht mehr zurueck (er wartet auf den Gewinner-Stand oder meldet
+    # ListingBusy) — erst recht merkt er nichts vor.
+    verlierer = g.split("res.matched_count == 0")[1].split("# Beweisdokument")[0]
+    assert "return data, False, None" not in verlierer
+    assert "beweis_vormerken" not in verlierer
     # 119/120/122: Link-Jobs
     assert '"processing_until": j.get("processing_until")' in inspect.getsource(LJ._requeue_stale)
     p = inspect.getsource(LJ._process)
@@ -199,9 +203,25 @@ def test_geteilter_job_bucht_beim_konto_mit_kontingent(wegwerf, monkeypatch):
         return {"mobile_ad_id": iid}
     monkeypatch.setattr(PF, "fetch_listing", fetch)
 
+    # Befunde 146-148 (19.09.2026): Der Worker prueft vor jedem Abruf Konto,
+    # Abo und Firma. Also braucht dieser Test echte Konten und Firmen — das
+    # Abo selbst ist hier nicht das Thema und wird gesetzt.
+    import deps as DEPS
+
+    async def _abo(_u):
+        return {"active": True}
+    monkeypatch.setattr(DEPS, "subscription_for", _abo)
+
     async def lauf():
-        await db.users.insert_one({"id": "uB", "dealer_id": "d2", "role": "sucher"})
-        geteilt = _job(uid="uA", did="d1", user_ids=["uA", "uB"])
+        await db.users.insert_many([
+            {"id": "uA", "dealer_id": "d1", "role": "sucher", "active": True},
+            {"id": "uB", "dealer_id": "d2", "role": "sucher", "active": True},
+            {"id": "uC", "dealer_id": "d1", "role": "sucher", "active": True}])
+        await db.dealers.insert_many([{"id": "d1"}, {"id": "d2"}])
+        # Der Beitritt traegt die Firma des Wartenden ein (Befund 149: ohne
+        # sie waere es nicht mehr derselbe Auftrag).
+        geteilt = _job(uid="uA", did="d1", user_ids=["uA", "uB"],
+                       dealer_ids=["d1", "d2"])
         await db.link_jobs.insert_one(geteilt)
         job = await LJ._claim_one(db)
         await LJ._process(db, job)
@@ -358,15 +378,22 @@ def test_abrufzeit_nach_dem_abruf_und_verlorene_lease_ohne_vormerkung(wegwerf, m
         start = _jetzt()
         await LI.get_or_fetch_listing(db, url1, langsam, ttl_hours=6)
         c = await db.listings_cache.find_one({"cache_key": "mobile:79001"}, {"_id": 0})
-        daten, cached, _ = await LI.get_or_fetch_listing(db, url2, stiehlt, ttl_hours=6)
-        return start, c, daten, cached
+        # Befund 153 (19.09.2026): Wer die Lease verliert, bekommt seine
+        # verworfenen Daten NICHT mehr zurueck. Liegt (wie hier) auch kein
+        # Gewinner-Stand vor, meldet der Server "gerade aktualisiert".
+        fehler = None
+        try:
+            await LI.get_or_fetch_listing(db, url2, stiehlt, ttl_hours=6)
+        except LI.ListingBusy as exc:
+            fehler = exc
+        return start, c, fehler
 
-    start, c, daten, cached = run(lauf())
+    start, c, fehler = run(lauf())
     fetched = c["fetched_at"].replace(tzinfo=timezone.utc)
     assert fetched >= start + timedelta(seconds=1), "fetched_at stempelt das Abruf-Ende"
     assert (c["expires_at"].replace(tzinfo=timezone.utc) - fetched) >= timedelta(hours=5, minutes=59)
     assert vorgemerkt == ["mobile:79001"], vorgemerkt
-    assert daten == {"mobile_ad_id": "11601"} and cached is False
+    assert fehler is not None, "verworfener Stand wurde trotzdem ausgeliefert"
 
 
 # ------------------------------------------------------------- 130

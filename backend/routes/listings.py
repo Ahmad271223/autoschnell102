@@ -325,6 +325,11 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
     # Runde 17 (Nr. 383): Quelle am Fahrzeug festhalten (auch am Altbestand
     # beim naechsten Vergleich) — Grundlage fuer den Legacy-Rueckfall.
     quelle_set = {"quelle": quelle} if quelle else {}
+    # Befund 154 (19.09.2026): Wann hat dieses Fahrzeug zuletzt einen
+    # Inseratsstand bekommen? Ohne diesen Zeitpunkt liess sich spaeter nicht
+    # mehr sagen, ob das Beweisdokument den Stand einfriert, den der Sucher
+    # gesehen hat, oder einen neueren.
+    quelle_set["inserat_stand_am"] = now_iso()
     if schluessel:
         # Lasttest 16.09.2026: der Cache-Schluessel wandert mit demselben Write
         # ans Fahrzeug (vorher ein eigener update_one je Vergleich).

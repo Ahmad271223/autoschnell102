@@ -256,6 +256,52 @@ async def _aktivem_job_beitreten(db, cache_key: str, dealer_id: str,
         projection={"_id": 0}, return_document=ReturnDocument.AFTER)
 
 
+class KeinBerechtigterWartender(RuntimeError):
+    """Befunde 146-149 (19.09.2026): Zwischen Einreihen und Abruf koennen
+    Minuten liegen. Ist in dieser Zeit das Konto gesperrt, das Abo abgelaufen
+    oder die Firma in Loeschung gegangen, darf der Abruf NICHT mehr laufen —
+    sonst holt der Worker extern nach, was der Nutzer selbst nicht mehr
+    duerfte (und verbraucht dabei fremdes Anbieter-Kontingent)."""
+
+
+async def wartender_darf_abrufen(db, user_id: str, job: dict) -> Optional[str]:
+    """Darf dieses wartende Konto den Anbieter-Abruf ausloesen?
+
+    Liefert die Firma, auf die der Abruf gebucht wird ("" = interner Abruf
+    ohne Konto), oder None, wenn das Konto nicht mehr in Frage kommt.
+    """
+    erlaubte_firmen = set(job.get("dealer_ids") or [])
+    if job.get("requested_by_dealer"):
+        erlaubte_firmen.add(job["requested_by_dealer"])
+    firma = job.get("requested_by_dealer") or ""
+    if user_id:
+        u = await db.users.find_one(
+            {"id": user_id}, {"_id": 0, "id": 1, "role": 1, "dealer_id": 1, "active": 1})
+        if not u or u.get("active") is False:          # Befund 146: gesperrt
+            return None
+        if u.get("role") not in ("dealer", "sucher"):
+            return None
+        firma = u.get("dealer_id") or ""
+        # Befund 149: Der Job wurde unter EINER Firma eingereiht. Wechselt ein
+        # Wartender inzwischen die Firma, darf sein Abruf nicht der neuen
+        # Firma angelastet werden — sie hat ihn nie eingereiht.
+        if erlaubte_firmen and firma not in erlaubte_firmen:
+            return None
+        from deps import subscription_for
+        try:
+            if not (await subscription_for(u)).get("active"):
+                return None                            # Befund 147: Abo vorbei
+        except Exception:  # noqa: BLE001 — im Zweifel nicht abrufen
+            log.warning("link_jobs: Abo von %s nicht pruefbar", user_id)
+            return None
+    if firma:
+        d = await db.dealers.find_one({"id": firma}, {"_id": 0, "id": 1, "loeschung": 1})
+        # Befund 148: Firma geloescht oder mitten in der Loeschkaskade
+        if not d or (d.get("loeschung") or {}).get("status") == "laeuft":
+            return None
+    return firma
+
+
 class JobRace(WarteschlangeVoll):
     """Runde 19 (Nr. 32): dreimal hintereinander verschwand der aktive Job
     zwischen Einfuegen und Beitritt, und im Cache liegt nichts — der Client
@@ -356,6 +402,89 @@ async def get_job(db, job_id: str) -> Optional[dict]:
     return await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
 
 
+async def _aussteiger_aufraeumen(db, job: dict, dealer_id: str, user_id: str) -> dict:
+    """Nach dem Aussteigen aufraeumen, was sonst stehen bleibt.
+
+    Befund 150 (19.09.2026): `requested_by_user` blieb der Aussteiger — und
+    genau dieses Konto probiert der Worker beim Abruf ZUERST. Wer abbricht,
+    waehrend ein Kollege weiterwartet, wurde also trotzdem mit dem
+    Anbieter-Abruf und seinem Tageskontingent belastet.
+    Befund 151: `dealer_ids` blieb ebenfalls stehen — der Job zaehlte weiter
+    gegen die Warteschlangen-Grenze der Firma, und ihr Chef sah ihn weiter
+    als eigenen Auftrag, obwohl dort niemand mehr wartet.
+    """
+    rest = list(job.get("user_ids") or [])
+    firmen_rest = set()
+    if rest:
+        async for u in db.users.find({"id": {"$in": rest}}, {"_id": 0, "dealer_id": 1}):
+            if u.get("dealer_id"):
+                firmen_rest.add(u["dealer_id"])
+    setzen: dict = {}
+    if (job.get("requested_by_user") or "") == user_id:
+        nachfolger = rest[0] if rest else ""
+        setzen["requested_by_user"] = nachfolger
+        if nachfolger:
+            u = await db.users.find_one({"id": nachfolger}, {"_id": 0, "dealer_id": 1})
+            setzen["requested_by_dealer"] = (u or {}).get("dealer_id") or ""
+        else:
+            setzen["requested_by_dealer"] = ""
+    aenderung: dict = {}
+    if setzen:
+        aenderung["$set"] = {**setzen, "updated_at": _now()}
+    if dealer_id and dealer_id not in firmen_rest:
+        aenderung["$pull"] = {"dealer_ids": dealer_id}
+    if not aenderung:
+        return job
+    neu = await db.link_jobs.find_one_and_update(
+        {"id": job["id"], "status": {"$in": list(OFFEN)}}, aenderung,
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    return neu or job
+
+
+async def firma_austragen(db, dealer_id: str) -> int:
+    """Alle offenen Link-Auftraege einer Firma beenden (Befund 148/165).
+
+    Wird die Firma geloescht, darf kein Worker ihre Auftraege spaeter noch
+    extern abrufen — und der Sucher kann sie selbst nicht mehr abbrechen
+    (die Firma ist ja gesperrt). Auftraege, auf die nur diese Firma wartet,
+    verschwinden; geteilte Auftraege verlieren nur ihre Wartenden.
+    Liefert die Zahl der beendeten Auftraege.
+    """
+    if not dealer_id:
+        return 0
+    eigene = [u["id"] async for u in db.users.find(
+        {"dealer_id": dealer_id}, {"_id": 0, "id": 1})]
+    weg = 0
+    async for job in db.link_jobs.find(
+            {"status": {"$in": list(OFFEN)}, "dealer_ids": dealer_id}, {"_id": 0}):
+        rest = [u for u in (job.get("user_ids") or []) if u not in eigene]
+        if rest:
+            await db.link_jobs.update_one(
+                {"id": job["id"], "status": {"$in": list(OFFEN)}},
+                {"$pull": {"dealer_ids": dealer_id, "user_ids": {"$in": eigene}},
+                 "$set": {"updated_at": _now()}})
+            if (job.get("requested_by_user") or "") in eigene:
+                u = await db.users.find_one({"id": rest[0]}, {"_id": 0, "dealer_id": 1})
+                await db.link_jobs.update_one(
+                    {"id": job["id"]},
+                    {"$set": {"requested_by_user": rest[0],
+                              "requested_by_dealer": (u or {}).get("dealer_id") or ""}})
+            continue
+        entfernt = await db.link_jobs.delete_one({"id": job["id"], "status": "queued"})
+        if entfernt.deleted_count:
+            weg += 1
+        else:
+            # Schon beim Worker: als beendet markieren, damit er nach dem
+            # Abruf nichts mehr nachtraegt und niemand mehr wartet.
+            await db.link_jobs.update_one(
+                {"id": job["id"], "status": {"$in": list(OFFEN)}},
+                {"$set": {"user_ids": [], "dealer_ids": [], "updated_at": _now()}})
+    if weg:
+        log.info("link_jobs: %d offene Auftraege der geloeschten Firma %s entfernt",
+                 weg, dealer_id)
+    return weg
+
+
 async def warten_beenden(db, job_id: str, dealer_id: str = "",
                          user_id: str = "") -> dict:
     """Ein Wartender steigt aus (Wunsch Ahmad 18.09.2026: Knopf "X" im
@@ -379,6 +508,8 @@ async def warten_beenden(db, job_id: str, dealer_id: str = "",
             {"id": job_id, "status": {"$in": list(OFFEN)}},
             {"$pull": {"user_ids": user_id}},
             projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+        if job:
+            job = await _aussteiger_aufraeumen(db, job, dealer_id, user_id)
     else:
         job = await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
@@ -670,19 +801,26 @@ async def _process(db, job: dict) -> None:
         # Konten — steht der erste Einreicher am Tageslimit, bucht das
         # naechste wartende Konto mit Kontingent (die Ablehnung faellt vor
         # dem Abruf, es wird also nie doppelt geholt).
-        from routes.listings import _AbrufSlot
+        from routes.listings import AbrufGebremst, _AbrufSlot
         konten: list = []
-        for uid in [job.get("requested_by_user") or ""] + list(job.get("user_ids") or []):
+        # Befund 150 (19.09.2026): Der urspruengliche Einreicher zaehlt nur,
+        # solange er noch wartet. Bricht er ab ("X") und ein Kollege wartet
+        # weiter, darf der Abruf nicht mehr auf sein Tageskontingent gehen.
+        wartende = list(job.get("user_ids") or [])
+        zuerst = job.get("requested_by_user") or ""
+        for uid in ([zuerst] if zuerst in wartende else []) + wartende:
             if uid and uid not in konten:
                 konten.append(uid)
         if not konten:
-            konten = [""]
+            konten = [""] if not wartende else []
         letzte = None
+        gebremst = None
+        erlaubte = 0
         for uid in konten:
-            firma = job.get("requested_by_dealer", "")
-            if uid and uid != (job.get("requested_by_user") or ""):
-                u = await db.users.find_one({"id": uid}, {"_id": 0, "dealer_id": 1})
-                firma = (u or {}).get("dealer_id") or firma
+            firma = await wartender_darf_abrufen(db, uid, job)
+            if firma is None:
+                continue
+            erlaubte += 1
             konto = {"id": uid or firma or "", "dealer_id": firma}
             try:
                 async with _AbrufSlot(konto):
@@ -691,7 +829,18 @@ async def _process(db, job: dict) -> None:
             except TageslimitErreicht as exc:
                 letzte = exc
                 continue
-        raise letzte
+            except AbrufGebremst as exc:
+                # Befund 152: 60/min bzw. 8 gleichzeitig sind eine Bremse
+                # DIESES Kontos — der naechste Wartende hat womoeglich sofort
+                # Kapazitaet. Erst wenn alle gebremst sind, geht der ganze
+                # Job zurueck in die Schlange.
+                gebremst = exc
+                continue
+        if erlaubte == 0:
+            raise KeinBerechtigterWartender(
+                "Der Abruf wurde nicht ausgeführt: kein wartendes Konto ist "
+                "noch berechtigt (gesperrt, Abo abgelaufen oder Firma gelöscht).")
+        raise letzte or gebremst
 
     herz = None
     if claim_id:
@@ -708,6 +857,16 @@ async def _process(db, job: dict) -> None:
                 {"$set": {"status": "queued", "updated_at": _now()},
                  "$unset": {"claim_id": ""},
                  "$inc": {"attempts": -1}})
+            return
+        except KeinBerechtigterWartender as exc:
+            # Befunde 146-149: niemand darf diesen Abruf (noch) ausloesen.
+            # Endgueltig: ein Wiederholungsversuch aendert daran nichts.
+            log.info("link_jobs: Job %s ohne berechtigtes Konto beendet", job["id"])
+            await db.link_jobs.update_one(
+                eigener_claim,
+                {"$set": {"status": "failed", "active": False,
+                          "error": str(exc), "finished_at": _now(),
+                          "updated_at": _now()}})
             return
         except TageslimitErreicht as exc:
             # Tageslimit je Konto/Firma (16.09.2026): sofort endgueltig, kein

@@ -203,6 +203,51 @@ def _abgeschlossen_seit_filter(status, tage: int) -> dict:
                     {"abgeschlossen_seit": leer, "status_changed_at": {"$gte": grenze}},
                     {"abgeschlossen_seit": leer, "status_changed_at": leer,
                      "updated_at": {"$gte": grenze}}]}
+def unterlagen_zugriff_oder_404(appt: dict) -> None:
+    """Darf der Fahrer die Unterlagen dieser Fahrt noch oeffnen?
+
+    Befund 156/157/158/159 (19.09.2026): Die Fahrer-App blendet abgeholte
+    Fahrten nach 14 und andere abgeschlossene nach 30 Tagen aus — die
+    Dokument-Adressen kannten diese Fristen aber nicht. Wer sich eine URL
+    gemerkt hatte, kam Monate spaeter noch an Kaufvertrag, Abholauftrag,
+    Bericht oder Beweisdokument mit Verkaeufername, Anschrift und Telefon.
+    Und ein stornierter Termin sperrte zwar den Kaufvertrag, nicht aber den
+    Abholauftrag mit denselben Daten.
+
+    Regel jetzt ueberall gleich: storniert = nie, abgeschlossen = nur
+    innerhalb der Frist, in der die Fahrt auch in der App steht.
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    status = (appt.get("status") or "offen")
+    if status == "storniert":
+        raise HTTPException(404, "Diese Fahrt wurde storniert.")
+    if status not in _TERMIN_ABGESCHLOSSEN:
+        return
+    tage = (FAHRER_SICHT_ABGEHOLT_TAGE if status == "abgeholt"
+            else FAHRER_SICHT_GESCHLOSSEN_TAGE)
+    seit = (appt.get("abgeschlossen_seit") or appt.get("status_changed_at")
+            or appt.get("updated_at") or "")
+    if not seit:
+        return                                  # ohne Zeitpunkt nicht sperren
+    try:
+        zeit = _dt.fromisoformat(str(seit))
+    except (TypeError, ValueError):
+        return
+    if zeit.tzinfo is None:
+        zeit = zeit.replace(tzinfo=_tz.utc)
+    if zeit < _dt.now(_tz.utc) - _td(days=tage):
+        raise HTTPException(404, "Diese Fahrt ist abgeschlossen — die Unterlagen "
+                                 "stehen in der App nicht mehr zur Verfügung.")
+
+
+# Zugriffsfilter fuer Termin-Abfragen des Fahrers (Befund 160): angenommen
+# ODER Altbestand ohne Feld — unbekannte Werte ("zurueckgezogen" o.ae.) und
+# stornierte Fahrten fallen damit heraus. `$nin` liess sie vorher durch.
+ZUTEILUNG_ANGENOMMEN = {"$or": [{"zuteilung": "angenommen"},
+                                {"zuteilung": {"$in": [None, ""]}},
+                                {"zuteilung": {"$exists": False}}]}
+
+
 # Gegenstueck: in diesen Zustaenden darf der Fahrer noch vom Termin getrennt
 # werden, ohne dass eine historische Zuordnung verloren geht. Fehlender oder
 # leerer Status zaehlt als "offen" (wie ueberall: appt.get("status") or "offen").
@@ -846,9 +891,12 @@ async def driver_appointments(driver=Depends(current_driver),
     # die JUENGSTEN mit Datum — es fallen die aeltesten offenen weg.
     # grenze + 1 erkennt den Abschnitt genau; max(1, ...) — nie to_list(0).
     offen_q = {**basis, "status": {"$nin": sorted(_TERMIN_ABGESCHLOSSEN)}}
+    # Befund 162 (19.09.2026): ohne Sortierung entschied die Speicher-
+    # reihenfolge, WELCHE datumslosen Fahrten der Fahrer ab der Grenze sieht.
+    # Jetzt die zuletzt geaenderten zuerst — wie bei den Fahrten mit Datum.
     offen = await db.appointments.find(
         {**offen_q, "pickup_date": {"$in": ["", None]}}, {"_id": 0},
-    ).to_list(grenze + 1)
+    ).sort("updated_at", -1).to_list(grenze + 1)
     offen += await db.appointments.find(
         {**offen_q, "pickup_date": {"$nin": ["", None]}}, {"_id": 0},
     ).sort("pickup_date", -1).to_list(max(1, grenze + 1 - len(offen)))
@@ -1017,6 +1065,9 @@ async def driver_pickup_order_pdf(appt_id: str, download: int = 0,
     # Annehmen der Fahrt.
     from routes.protocols import zuteilung_offen_oder_409
     zuteilung_offen_oder_409(appt)
+    # Befund 157: storniert oder laengst abgeschlossen -> keine Unterlagen
+    # mehr (der Kaufvertrag war hier schon strenger als der Abholauftrag).
+    unterlagen_zugriff_oder_404(appt)
     vehicle: Dict[str, Any] = {}
     if appt.get("vehicle_id"):
         v_doc = await db.vehicles.find_one(
@@ -1071,13 +1122,14 @@ async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
     # zu laden.
     appt = await db.appointments.find_one(
         {"driver_id": driver["id"], "contract_id": contract_id,
-         "status": {"$ne": "storniert"},
-         "zuteilung": {"$nin": ["offen", "abgelehnt"]}},
-        {"_id": 0, "id": 1, "dealer_id": 1},
+         "status": {"$ne": "storniert"}, **ZUTEILUNG_ANGENOMMEN},
+        {"_id": 0, "id": 1, "dealer_id": 1, "status": 1, "abgeschlossen_seit": 1,
+         "status_changed_at": 1, "updated_at": 1},
     )
     if not appt:
         raise HTTPException(404, "Kein Zugriff auf diesen Vertrag")
     await _zugriff_pruefen(appt, driver)
+    unterlagen_zugriff_oder_404(appt)           # Befund 156: Frist wie in der App
     doc = await db.generated_pdfs.find_one(
         {"id": contract_id, "dealer_id": appt.get("dealer_id")},
         {"_id": 0, "pdf_b64": 1},
@@ -1114,14 +1166,20 @@ async def driver_snapshot(snap_id: str, kind: str,
         # Pruefung 14.09.2026 (Liste 3, Nr. 13): nur ueber die Fahrzeug-ID —
         # der Alt-Abgleich ueber die reine Anzeigen-ID traf bei gleicher ID
         # aus verschiedenen Portalen das falsche Fahrzeug.
+        # Befund 158 (19.09.2026): Frueher genuegte IRGENDEIN Termin — auch
+        # ein nie angenommener oder stornierter. Jetzt dieselbe Regel wie
+        # beim Kaufvertrag: angenommene, nicht stornierte Fahrt in der Frist.
         allowed = await db.appointments.find_one(
             {"driver_id": driver["id"],
              "dealer_id": {"$in": dealer_ids_aktiv},
-             "vehicle_id": snap.get("vehicle_id")},
-            {"_id": 0, "id": 1},
+             "vehicle_id": snap.get("vehicle_id"),
+             "status": {"$ne": "storniert"}, **ZUTEILUNG_ANGENOMMEN},
+            {"_id": 0, "id": 1, "status": 1, "abgeschlossen_seit": 1,
+             "status_changed_at": 1, "updated_at": 1},
         )
     if not allowed:
         raise HTTPException(404, "Kein Zugriff auf diesen Snapshot")
+    unterlagen_zugriff_oder_404(allowed)
     path = snap.get("pdf_path") if kind == "pdf" else snap.get("png_path")
     if not path:
         raise HTTPException(404, "Datei fehlt im Objectstore")
@@ -1656,11 +1714,17 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
 async def driver_get_report(appt_id: str, driver=Depends(current_driver)):
     appt = await db.appointments.find_one(
         {"id": appt_id, "driver_id": driver["id"]},
-        {"_id": 0, "id": 1, "dealer_id": 1},
+        {"_id": 0, "id": 1, "dealer_id": 1, "status": 1, "zuteilung": 1,
+         "abgeschlossen_seit": 1, "status_changed_at": 1, "updated_at": 1},
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
     await _zugriff_pruefen(appt, driver)
+    # Befund 159: dieselbe Regel wie fuer Protokoll und Dokumente — ohne
+    # angenommene Fahrt und nach Ablauf der Frist kein Bericht mehr.
+    from routes.protocols import zuteilung_offen_oder_409
+    zuteilung_offen_oder_409(appt)
+    unterlagen_zugriff_oder_404(appt)
     # Nachpruefung Runde 14, Nr. 38: hoechste Version explizit — die
     # Reihenfolge ohne sort hing vom Index ab, den der Planer waehlte.
     # Runde 21: nur der EIGENE Bericht. Nach einer Neuzuteilung sah der neue

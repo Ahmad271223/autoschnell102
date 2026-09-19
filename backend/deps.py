@@ -538,14 +538,18 @@ def regelpakete_vervollstaendigen(dealer: dict) -> dict:
     return dealer
 
 
-async def require_active_sub(user=Depends(current_user)):
-    # Strikte Rollentrennung: nur Händler-Hauptaccount und Sucher nutzen die
-    # Sucher-Funktionen (Vergleich/Suche). Admin verwaltet nur; b2b_buyer
-    # gehört auf den Marktplatz. Explizit per ROLLE sperren — nicht darauf
-    # verlassen, dass diese Konten "zufällig" kein Abo haben.
-    if user.get("role") not in ("dealer", "sucher"):
-        raise HTTPException(403, "Diese Funktion ist Händler-/Sucher-Accounts "
-                                 "vorbehalten.")
+async def require_active_sub(user=Depends(current_firma)):
+    """Sucher-Funktionen (Vergleich, Suche, Linkpruefung, Vertraege).
+
+    Befund 144/145/164 (19.09.2026): Diese Sperre hing frueher direkt an
+    `current_user` und prueft damit NUR Rolle und Abo. Firmenexistenz und
+    Loeschsperre steckten allein in `current_firma` — also konnte ein Sucher
+    waehrend der laufenden Firmenloeschung (oder mit einer Firma, die es gar
+    nicht mehr gibt) weiter vergleichen, Links einreihen und damit neue
+    Fahrzeug-/Cache-Daten erzeugen, die mitten in die Loeschkaskade fielen.
+    Jetzt baut sie auf `current_firma` auf: Rolle, Firmendokument und
+    Loeschsperre gelten automatisch ueberall, wo das Abo verlangt wird.
+    """
     sub = await subscription_for(user)
     if not sub["active"]:
         raise HTTPException(402, "Kein aktives Abo")

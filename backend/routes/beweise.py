@@ -30,6 +30,25 @@ router = APIRouter()
 _NICHT_GEFUNDEN = "Beweisdokument nicht gefunden"
 
 
+def _ist_neuer(abgerufen_am, stand_am) -> bool:
+    """Wurde das Inserat NACH dem Vergleich dieses Fahrzeugs neu abgerufen?
+    (Befund 154, 19.09.2026 — beide Zeitangaben duerfen fehlen.)"""
+    from datetime import datetime, timezone
+    if not abgerufen_am or not stand_am:
+        return False
+    try:
+        if isinstance(abgerufen_am, str):
+            abgerufen_am = datetime.fromisoformat(abgerufen_am)
+        stand = datetime.fromisoformat(str(stand_am))
+    except (TypeError, ValueError):
+        return False
+    if abgerufen_am.tzinfo is None:
+        abgerufen_am = abgerufen_am.replace(tzinfo=timezone.utc)
+    if stand.tzinfo is None:
+        stand = stand.replace(tzinfo=timezone.utc)
+    return abgerufen_am > stand
+
+
 async def _fahrzeug_erlaubt(user: dict, vehicle_id: str) -> bool:
     """Fahrzeug der eigenen Firma, fuer Sucher zusaetzlich im eigenen
     Bereich (Fahrzeug, eigener Vertrag oder eigener Termin dazu)."""
@@ -168,7 +187,7 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         fahrzeug = await db.vehicles.find_one(
             {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
             {"_id": 0, "id": 1, "inserat_schluessel": 1, "quelle": 1,
-             "mobile_ad_id": 1, "data": 1})
+             "mobile_ad_id": 1, "data": 1, "inserat_stand_am": 1})
         schluessel = BS.inserat_schluessel(fahrzeug) or schluessel
         if schluessel and fahrzeug is not None and not fahrzeug.get("inserat_schluessel"):
             await db.vehicles.update_one(
@@ -187,17 +206,27 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
     if vorhanden and vorhanden.get("status") in ("offen", "in_arbeit", "fertig"):
         return {"beweis": BS.oeffentlich(vorhanden)}
 
-    # Datenstand einfrieren: was der Sucher gesehen hat. Erst der
-    # Inseratsspeicher (frischester gepruefter Stand), sonst die beim
-    # Vergleich am Fahrzeug gespeicherten Daten (Speicher laeuft nach 90
-    # Tagen ab). Die Fotos holt der Worker beim Erzeugen vom Portal.
+    # Datenstand einfrieren: NUR der rohe Inseratsstand aus dem
+    # Inseratsspeicher.
+    #
+    # Befund 155 (19.09.2026): Frueher war "fahrzeug.data" der Rueckfall.
+    # Diese Daten darf der Haendler in der Fahrzeugakte korrigieren — und da
+    # es je Inserat genau EIN gemeinsames Beweisdokument gibt, haette die
+    # erste anfordernde Firma ihre eigenen Korrekturen zum Beweis fuer alle
+    # anderen gemacht. Ein Beweis zeigt, was im Inserat stand, nichts sonst.
     eintrag = await db.listings_cache.find_one(
         {"cache_key": schluessel},
         {"_id": 0, "source": 1, "item_id": 1, "url": 1, "data": 1, "fetched_at": 1})
-    daten = (eintrag or {}).get("data") or (fahrzeug or {}).get("data") or None
-    if not eintrag and not daten:
-        raise HTTPException(404, "Zu diesem Inserat liegen keine Daten mehr vor — "
-                                 "bitte den Link noch einmal vergleichen.")
+    daten = (eintrag or {}).get("data") or None
+    if not daten:
+        raise HTTPException(404, "Zu diesem Inserat liegen keine Inseratsdaten mehr "
+                                 "vor — bitte den Link noch einmal vergleichen.")
+    # Befund 154: Wurde das Inserat seit dem Vergleich neu abgerufen, friert
+    # das Dokument den NEUEREN Stand ein. Das ist richtig (es dokumentiert
+    # immer einen echten Abruf mit Zeitstempel), aber der Nutzer muss es
+    # wissen — sonst haelt er das Dokument fuer seinen Vergleichsstand.
+    stand_neuer = _ist_neuer((eintrag or {}).get("fetched_at"),
+                             (fahrzeug or {}).get("inserat_stand_am"))
     quelle = ((eintrag or {}).get("source") or (fahrzeug or {}).get("quelle")
               or schluessel.split(":")[0])
     item_id = ((eintrag or {}).get("item_id") or (fahrzeug or {}).get("mobile_ad_id") or "")
@@ -211,7 +240,11 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
                                  "werden — bitte in ein paar Minuten noch einmal.")
     await log_activity_sicher(user["dealer_id"], user["id"], "beweis.angefordert",
                               ref=str(item_id or schluessel))
-    return {"beweis": BS.oeffentlich(doc)}
+    antwort = {"beweis": BS.oeffentlich(doc)}
+    if stand_neuer:
+        antwort["hinweis"] = ("Das Inserat wurde nach deinem Vergleich noch einmal "
+                              "abgerufen — das Dokument hält diesen neueren Stand fest.")
+    return antwort
 
 
 @router.get("/beweise/{beweis_id}")
@@ -247,15 +280,26 @@ async def driver_beweis_pdf(beweis_id: str, driver=Depends(current_driver)):
     firmen = await _verknuepfte_dealer_ids(driver["id"])
     paare = []
     if firmen:
+        # Befund 161 (19.09.2026): Der Deckel von 50 Fahrzeugen konnte den
+        # EIGENEN Termin aus der Liste draengen (404 trotz Berechtigung). Je
+        # Firma gibt es zu einem Inserat hoechstens ein Fahrzeug — die Menge
+        # ist also ohnehin so gross wie die Zahl der verbundenen Firmen.
         async for v in db.vehicles.find(
                 {"dealer_id": {"$in": firmen}, "inserat_schluessel": doc.get("cache_key")},
-                {"_id": 0, "id": 1, "dealer_id": 1}).limit(50):
+                {"_id": 0, "id": 1, "dealer_id": 1}):
             paare.append({"vehicle_id": v["id"], "dealer_id": v["dealer_id"]})
     # Pruefung 14.09.2026 (C22/C23): nur ueber einen ANGENOMMENEN, nicht
-    # stornierten Termin.
-    if not paare or not await db.appointments.count_documents(
-            {"driver_id": driver["id"], "$or": paare,
-             "status": {"$ne": "storniert"},
-             "zuteilung": {"$nin": ["offen", "abgelehnt"]}}, limit=1):
+    # stornierten Termin. Befund 160: "angenommen ODER Altbestand ohne Feld"
+    # statt "$nin offen/abgelehnt" — unbekannte Altwerte kamen sonst durch.
+    from routes.drivers import ZUTEILUNG_ANGENOMMEN, unterlagen_zugriff_oder_404
+    treffer = None
+    if paare:
+        treffer = await db.appointments.find_one(
+            {"driver_id": driver["id"], "status": {"$ne": "storniert"},
+             "$and": [{"$or": paare}, ZUTEILUNG_ANGENOMMEN]},
+            {"_id": 0, "id": 1, "status": 1, "abgeschlossen_seit": 1,
+             "status_changed_at": 1, "updated_at": 1})
+    if not treffer:
         raise HTTPException(404, _NICHT_GEFUNDEN)
+    unterlagen_zugriff_oder_404(treffer)        # Befund 156: Frist wie in der App
     return await _pdf_antwort(doc)

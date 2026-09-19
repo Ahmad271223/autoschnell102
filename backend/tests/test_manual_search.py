@@ -257,7 +257,10 @@ def test_verwaister_dealer_403_statt_500(chef):
     assert doc, "Haendlerdokument der Fixture fehlt"
     try:
         r = _suche(chef, make="BMW")
-        assert r.status_code == 403 and "Haendlerprofil" in r.text, r.text[:200]
+        # Befund 164 (19.09.2026): Die Absage kommt jetzt aus current_firma
+        # (eine Stelle fuer alle Sucher-Funktionen) — darum "Händlerprofil"
+        # mit Umlaut statt der frueheren eigenen Meldung der Suche.
+        assert r.status_code == 403 and "ndlerprofil" in r.text, r.text[:200]
     finally:
         dealers.insert_one(doc)
 

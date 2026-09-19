@@ -196,10 +196,12 @@ export default function SendDialog({ open, contract, onClose }) {
   const beweisAnfordern = async () => {
     setBeweisBusy(true);
     try {
-      await api.post("/beweise/anfordern", { vehicle_id: contract.vehicle_id });
+      const { data } = await api.post("/beweise/anfordern",
+        { vehicle_id: contract.vehicle_id });
       setBeweisFertig(true);
       setBeweisFrage(false);
       toast.success("Beweisdokument wird erstellt — es liegt gleich in der Fahrzeugakte.");
+      if (data?.hinweis) toast.warning(data.hinweis, { duration: 12000 });
     } catch (err) {
       toast.error(errMsg(err, "Beweisdokument konnte nicht angefordert werden"));
     } finally {

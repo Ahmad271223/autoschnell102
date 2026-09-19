@@ -214,7 +214,9 @@ def test_link_jobs_claim_und_race(wegwerf):
     # Befund 120 (16.09.2026): auch der Import-Fehlerpfad trifft nur den eigenen Claim
     assert '{"id": job["id"]}' not in q
     assert q.count("eigener_claim,") >= 5
-    assert "from routes.listings import _AbrufSlot" in q
+    # Befund 152 (19.09.2026): zusaetzlich AbrufGebremst — eine Bremse des
+    # ersten Kontos soll den naechsten Wartenden probieren.
+    assert "from routes.listings import AbrufGebremst, _AbrufSlot" in q
     q = inspect.getsource(LJ.enqueue_job)
     assert "peek_cached_listing" in q and "raise JobRace(" in q
     assert issubclass(LJ.JobRace, LJ.WarteschlangeVoll)

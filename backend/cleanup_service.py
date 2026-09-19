@@ -286,7 +286,15 @@ async def berichte_pii_entfernen(db, termin_ids: list, jetzt: str) -> int:
 async def berichtsfotos_nach_frist_loeschen(db, now: datetime, stats: dict) -> int:
     """Fotos aller Berichte loeschen, die vor mehr als FAHRERFOTO_TAGE
     hochgeladen wurden (created_at des Berichts). Liefert die Zahl der
-    bearbeiteten Berichte; hoechstens 500 je Lauf, der Rest folgt stuendlich."""
+    bearbeiteten Berichte.
+
+    Befund 163 (19.09.2026) las hier "hoechstens 500 je Lauf" und vermisste
+    die Obergrenze im Code. Der Deckel wurde am 14.09.2026 (Runde 10, 3.4)
+    aber BEWUSST entfernt: Mit Deckel blieb bei grossem Rueckstand jeden Lauf
+    ein Rest liegen, der nie abgearbeitet wurde — Fotos waeren ueber die Frist
+    hinaus liegen geblieben. Stattdessen laeuft der Lauf vollstaendig durch,
+    aber in Stapeln (batch_size), damit er den Speicher nicht flutet.
+    Der irrefuehrende Satz ist jetzt weg; der Code bleibt wie er ist."""
     cutoff = (now - timedelta(days=FAHRERFOTO_TAGE)).isoformat()
     n = 0
     cursor = db.pickup_reports.find(
