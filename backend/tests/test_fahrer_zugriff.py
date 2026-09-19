@@ -28,9 +28,10 @@ import routes.admin as ADMIN  # noqa: E402  Kontonummer (13.09.2026): am Modulan
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 
-# 1x1-PNG (nur der Magic-Header wird geprueft) fuer Unterschriften.
-_PNG_B64 = base64.b64encode(
-    b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
+# Echte 1x1-PNG: seit dem Befund "kaputte Unterschrift" (19.09.2026) liest der
+# Server das Bild wirklich — ein Magic-Header allein genuegt nicht mehr.
+_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAC"
+            "hwGA60e6kgAAAABJRU5ErkJggg==")
 
 
 class _Daten:

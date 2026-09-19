@@ -437,7 +437,12 @@ def _bildgroesse(bts: bytes) -> Optional[Tuple[int, int]]:
     try:
         from PIL import Image as PILImage
         with PILImage.open(io.BytesIO(bts)) as im:
-            return im.size
+            groesse = im.size
+            # Rollentest 19.09.2026: Die Groesse steht im Kopf der Datei —
+            # eine abgeschnittene Datei kam damit durch und liess erst das
+            # Zeichnen abstuerzen. Einmal wirklich lesen; sonst kein Bild.
+            im.load()
+            return groesse
     except Exception:  # noqa: BLE001
         return None
 

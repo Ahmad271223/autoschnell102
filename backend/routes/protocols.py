@@ -1549,10 +1549,17 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         werden fuer das PDF weiterverwendet statt ein zweites Mal dekodiert."""
         try:
             raw = base64.b64decode(b64.split(",")[-1], validate=False)
-            from storage_service import validate_image_bytes
+            from storage_service import bild_lesbar_pruefen, validate_image_bytes
             validate_image_bytes(raw, wo=f"Unterschrift ({who})")
+            # Rollentest 19.09.2026: Eine abgeschnittene Unterschrift kam bis
+            # hierher durch (die ersten Bytes stimmen ja) und liess erst das
+            # PDF abstuerzen — der Fahrer stand beim Verkaeufer vor einem
+            # "Internen Serverfehler". Jetzt sagt der Server sofort, was zu
+            # tun ist: noch einmal unterschreiben.
+            bild_lesbar_pruefen(raw, wo=f"Unterschrift ({who})")
         except (ValueError, TypeError):
-            raise HTTPException(400, f"Unterschrift ({who}) konnte nicht gelesen werden")
+            raise HTTPException(400, f"Unterschrift ({who}) konnte nicht gelesen "
+                                     "werden — bitte noch einmal unterschreiben")
         if not raw or len(raw) > 2 * 1024 * 1024:
             raise HTTPException(400, f"Unterschrift ({who}) ungültig oder zu groß")
         try:

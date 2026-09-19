@@ -30,7 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from protokoll_daten import vollstaendig  # noqa: E402
 
 MONGO_URL = "mongodb://127.0.0.1:27017"
-_PNG_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
+# Echte 1x1-PNG: seit dem Befund "kaputte Unterschrift" (19.09.2026) liest der
+# Server das Bild wirklich — ein Magic-Header allein genuegt nicht mehr.
+_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAC"
+            "hwGA60e6kgAAAABJRU5ErkJggg==")
 
 
 def _jetzt():

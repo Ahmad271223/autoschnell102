@@ -940,6 +940,12 @@ def build_pickup_pdf(
         if not raw:
             return Spacer(1, 22)
         try:
+            # Rollentest 19.09.2026: Das Bild wird hier NUR am Kopf gelesen —
+            # eine abgeschnittene Datei fiel erst beim Zeichnen auf und riss
+            # den ganzen Abschluss mit (500, mitten beim Unterschreiben).
+            # Einmal wirklich lesen; geht das nicht, bleibt die Zeile leer.
+            from storage_service import bild_lesbar_pruefen
+            bild_lesbar_pruefen(raw, wo="Unterschrift")
             img = Image(io.BytesIO(raw))
             ratio = (img.imageHeight or 1) / (img.imageWidth or 1)
             img.drawWidth = min(sig_col_w - 20, 6.5 * cm)

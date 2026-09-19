@@ -323,6 +323,16 @@ export default function Protokoll() {
       // Stand geaendert (Preis, Vermerk, zurueckgezogen): neu laden, damit
       // die App zeigt, was jetzt gilt.
       if (e?.response?.status === 409) load({ still: true });
+      // Rollentest 19.09.2026: Kam die Unterschrift beschaedigt beim Server an
+      // (abgebrochene Uebertragung), half ein zweiter Versuch mit demselben
+      // Bild nicht — die Felder werden geleert, damit sofort neu
+      // unterschrieben werden kann.
+      if (e?.response?.status === 400
+          && /Unterschrift/i.test(errMsg(e, ""))) {
+        setSigDriver(null);
+        setSigSeller(null);
+        setSigRunde((n) => n + 1);
+      }
     }
     finally { setBusy(false); }
   };

@@ -39,8 +39,11 @@ KAEUFER_VERTRAG = {"dealer_company": "Käufer aus Vertrag GmbH",
                    "dealer_contact": "Erika Käufer", "dealer_address": "Vertragsweg 5",
                    "dealer_zip": "10115", "dealer_city": "Berlin",
                    "dealer_phone": "030 555", "dealer_email": "kaeufer@r24.test"}
-# Minimal-PNG (nur der Magic-Header wird geprueft) fuer die Unterschriften.
-_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+# Echte 1x1-PNG: seit dem Befund "kaputte Unterschrift" (19.09.2026) liest der
+# Server das Bild wirklich — ein Magic-Header allein genuegt nicht mehr.
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAC"
+    "hwGA60e6kgAAAABJRU5ErkJggg==")
 _PNG_B64 = base64.b64encode(_PNG).decode()
 
 

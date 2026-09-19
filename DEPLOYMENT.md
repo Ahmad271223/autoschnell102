@@ -1978,3 +1978,33 @@ erst und leitet still auf die eigene Startseite (`/app/vergleich`). „Freigaben
 länger mit einem Hinweistext — beide Wege bleiben wie sie sind.
 
 Wächter: `backend/tests/test_rollen_sichtbarkeit_20260918.py`, `src/lib/inseratsLink.test.js`.
+
+### Kaputte Unterschrift bringt den Abschluss nicht mehr zum Absturz (19.09.2026)
+
+Gefunden im kompletten Rollentest (Sucher, Chef mit Sucher-Funktion, Fahrer-App): Beim Abschluss des
+Abholprotokolls wurde die Unterschrift nur auf ihr **Dateiformat** geprueft (erste Bytes). Eine
+abgeschnittene Datei — so kommt sie an, wenn die Uebertragung abbricht — kam damit durch und fiel
+erst beim Bauen des PDF auf: **500 "Interner Serverfehler"**, und zwar genau in dem Moment, in dem
+der Fahrer beim Verkaeufer unterschreiben laesst. Der Vorgang selbst blieb sauber (Rollback gibt
+Claim und Dateien frei), aber der Fahrer stand vor einer Fehlernummer statt vor einer Ansage.
+
+Jetzt wird jedes Bild, das in ein PDF wandert, einmal wirklich gelesen
+(`storage_service.bild_lesbar_pruefen`):
+
+- **Unterschrift**: laesst sie sich nicht lesen, kommt sofort *"Unterschrift (fahrer) konnte nicht
+  gelesen werden — bitte noch einmal unterschreiben"* (400) statt eines Absturzes. Sie darf nicht
+  still fehlen — ohne Unterschrift ist das Protokoll wertlos.
+- **PDFs**: Abholprotokoll und Beweisdokument lesen jedes eingebettete Bild einmal wirklich und
+  lassen bei einem unlesbaren Bild einfach Platz, statt den ganzen Vorgang abstuerzen zu lassen.
+  Fotos duerfen beim Hochladen weiterhin nie scheitern (bewusste Regel in `bild_verkleinern`) —
+  jetzt faellt hoechstens das Bild aus, nie der Abschluss.
+
+In der Fahrer-App werden die Unterschriften bei genau dieser Meldung geleert — mit demselben
+kaputten Bild waere jeder weitere Versuch gescheitert. Ein gescheiterter Abschluss aus anderem
+Grund (409 Preis/Stand) behaelt die Unterschriften wie bisher.
+
+Nebenwirkung in den Tests: Sechs Dateien benutzten als Unterschrift eine **erfundene** PNG-Datei
+(nur der Magic-Header plus Nullbytes) — die gab es so nie auf einem Handy. Sie bekommen jetzt
+eine echte 1x1-PNG.
+
+Wächter: `backend/tests/test_unterschrift_lesbar_20260919.py`.

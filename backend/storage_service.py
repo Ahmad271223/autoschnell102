@@ -119,6 +119,34 @@ def _roh_hat_metadaten(raw: bytes) -> bool:
     return b"Exif\x00\x00" in kopf or b"http://ns.adobe.com/xap/1.0/" in kopf
 
 
+def bild_lesbar_pruefen(raw: bytes, wo: str = "Bild") -> None:
+    """Laesst sich das Bild bis zum letzten Bildpunkt lesen?
+
+    Befund Rollentest 19.09.2026: `validate_image_bytes` schaut nur auf die
+    ersten Bytes (Dateiformat). Eine abgeschnittene Datei kommt damit durch
+    und faellt erst viel spaeter auf — beim Bauen des PDF, also mitten im
+    Unterschreiben vor Ort. Der Fahrer sah dort einen "Internen
+    Serverfehler" statt einer Ansage, was zu tun ist.
+
+    Ohne Pillow wird nicht geprueft (dann gibt es auch kein PDF-Bild).
+    """
+    try:
+        from PIL import Image
+    except ImportError:                     # pragma: no cover - Pillow fehlt
+        return
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            breite, hoehe = im.size
+            if breite * hoehe > MAX_BILD_PIXEL:
+                raise StorageError(
+                    f"{wo}: Bild hat zu viele Bildpunkte ({breite}x{hoehe}).")
+            im.load()                       # erst hier faellt "abgeschnitten" auf
+    except StorageError:
+        raise
+    except Exception as exc:                # noqa: BLE001
+        raise StorageError(f"{wo}: Bild ist beschädigt oder unvollständig") from exc
+
+
 def bild_verkleinern(raw: bytes, wo: str = "Foto",
                      ziel_format: str = "JPEG") -> bytes:
     """Verkleinert ein Foto auf MAX_BILD_KANTE und liefert die neuen Bytes.
@@ -181,6 +209,10 @@ def bild_verkleinern(raw: bytes, wo: str = "Foto",
         if hat_metadaten or _roh_hat_metadaten(raw):
             raise StorageError(f"{wo}: Foto ist beschaedigt und kann nicht sicher "
                                "verarbeitet werden — bitte neu aufnehmen.")
+        # Ein Foto darf nie daran scheitern, dass die Verkleinerung nicht
+        # klappt (Regel oben) — dafuer sind die PDF-Bauer seit 19.09.2026
+        # unempfindlich: ein unlesbares Bild laesst dort einfach Platz,
+        # statt den ganzen Abschluss abstuerzen zu lassen.
         log.warning("%s: Verkleinern nicht moeglich, Original wird gespeichert", wo)
         return raw
     if not klein:
