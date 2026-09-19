@@ -1,14 +1,37 @@
 import { useState } from "react";
 import { useDriver, driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
+import { passwortProblem } from "@/lib/passwort";
 import { toast } from "sonner";
 import { Copy, Check, Building2, User, KeyRound } from "lucide-react";
 
 export default function DriverSettings() {
-  const { driver, refresh } = useDriver();
+  const { driver, refresh, logout } = useDriver();
   const [name, setName] = useState(driver?.display_name || "");
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [pw, setPw] = useState({ current: "", next: "", repeat: "" });
+  const [pwBusy, setPwBusy] = useState(false);
+
+  const changePassword = async (e) => {
+    e.preventDefault();
+    // Dieselbe Regel wie das Backend (passwoerter.py): mind. 10 Zeichen, Ziffer/Sonderzeichen.
+    const problem = passwortProblem(pw.next);
+    if (problem) return toast.error(problem);
+    if (pw.next !== pw.repeat) return toast.error("Die Wiederholung stimmt nicht überein");
+    setPwBusy(true);
+    try {
+      await driverApi.put("/driver/password", { current_password: pw.current, new_password: pw.next });
+      toast.success("Passwort geändert – bitte neu anmelden");
+      // Der Server hat alle Sitzungen beendet (Single-Session): sauber abmelden.
+      logout?.();
+      window.location.href = "/fahrer/login";
+    } catch (err) {
+      toast.error(errMsg(err, "Passwort konnte nicht geändert werden"));
+    } finally {
+      setPwBusy(false);
+    }
+  };
 
   const save = async (e) => {
     e.preventDefault();
@@ -55,7 +78,10 @@ export default function DriverSettings() {
           <code data-testid="driver-code-display"
                 className="flex-1 px-4 py-3 rounded-sm font-mono text-lg tracking-[0.15em] font-bold text-center"
                 style={{ background: "rgba(255,59,48,0.08)", border: "1px solid rgba(255,59,48,0.25)",
-                         color: "var(--accent-red)" }}>
+                         /* 18.09.2026: Signalrot als Schrift war auf dem hellen
+                            Grund zu blass (3,2:1) — Token ist im hellen Design
+                            dunkler, im dunklen wie bisher. */
+                         color: "var(--st-rot)" }}>
             {driver.driver_code}
           </code>
           <button onClick={copy} data-testid="copy-code-btn"
@@ -87,6 +113,30 @@ export default function DriverSettings() {
         </button>
       </form>
 
+      {/* Passwort ändern */}
+      <form onSubmit={changePassword} className="tactical-card p-5 mt-4" data-testid="driver-password-form">
+        <label className="flex items-center gap-2 text-zinc-400 text-xs">
+          <KeyRound size={12} /> PASSWORT ÄNDERN
+        </label>
+        <input type="password" autoComplete="current-password" placeholder="Aktuelles Passwort"
+          value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })}
+          className="input-base w-full mt-2" required data-testid="driver-pw-current" />
+        <input type="password" autoComplete="new-password" placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
+          value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })}
+          className="input-base w-full mt-2" minLength={10} required data-testid="driver-pw-next" />
+        <input type="password" autoComplete="new-password" placeholder="Neues Passwort wiederholen"
+          value={pw.repeat} onChange={(e) => setPw({ ...pw, repeat: e.target.value })}
+          className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-repeat" />
+        <p className="text-xs text-zinc-500 mt-2">
+          Nach der Änderung wirst du auf allen Geräten abgemeldet. Passwort vergessen?
+          Ein neues Passwort setzt der Betreiber – bitte dort melden.
+        </p>
+        <button type="submit" disabled={pwBusy} data-testid="driver-pw-submit"
+          className="kinetic-button mt-4 px-5 py-2.5 rounded-sm text-sm font-bold disabled:opacity-40">
+          {pwBusy ? "Ändere …" : "Passwort ändern"}
+        </button>
+      </form>
+
       {/* Verknüpfte Händler */}
       <div className="tactical-card p-5 mt-4">
         <div className="flex items-center gap-2 text-zinc-400 text-xs">
@@ -101,7 +151,7 @@ export default function DriverSettings() {
           {(driver.dealers || []).map((d) => (
             <div key={d.id} data-testid={`dealer-${d.id}`}
                  className="flex items-center justify-between py-2 px-3 rounded-sm"
-                 style={{ background: "rgba(255,255,255,0.02)" }}>
+                 style={{ background: "var(--wa-02)" }}>
               <div>
                 <div className="font-semibold text-sm">{d.name}</div>
                 {d.phone && <div className="text-xs text-zinc-500">{d.phone}</div>}
@@ -118,7 +168,8 @@ export default function DriverSettings() {
       </div>
 
       <div className="mt-5 text-xs text-zinc-600 text-center">
-        Eingeloggt als {driver.email}
+        {/* Kontonummer (13.09.2026): Anmeldekennung statt E-Mail */}
+        Eingeloggt als <span data-testid="driver-kontonummer">{driver.kontonummer || driver.email || "—"}</span>
       </div>
     </div>
   );

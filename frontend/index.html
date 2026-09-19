@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="de">
+    <head>
+        <meta charset="utf-8" />
+        <style>#emergent-badge, [id*="emergent"], [class*="emergent-badge"] { display: none !important; visibility: hidden !important; }</style>
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <meta name="theme-color" content="#0A0A0A" />
+        <meta name="description" content="AutoSchnell – Ankauf, Verträge, Termine und Abholung für Autohändler" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="AutoSchnell" />
+        <!--
+          Content-Security-Policy (defense-in-depth for XSS / localStorage token theft).
+          script-src ist auf 'self' beschraenkt (kein unsafe-inline, keine Dritt-
+          Skripte): Analyse-Tracking wurde entfernt (Pruefbericht Runde 5, DSGVO).
+          Vite (seit 09/2026) bindet in Produktion nur externe Modul-Skripte ein.
+          Die beiden CSP-Platzhalter (script-src, connect-src) fuellt vite.config.mjs:
+          in Produktion leer, im Entwicklungsserver eval/inline und localhost:8001.
+          Schriften (IBM Plex, Cabinet Grotesk) liegen seit 09/2026 lokal unter
+          public/fonts/ -> style-src/font-src ohne Google/Fontshare-Origins, keine
+          preconnect-Hints mehr (Datenschutz: kein Drittland-Transfer der Besucher-IP).
+          Note: frame-ancestors is intentionally omitted here — it is ignored in
+          <meta> tags (browser spec). It is enforced via the HTTP header set by
+          SecurityHeadersMiddleware in server.py.
+        -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' %REACT_APP_CSP_SCRIPT%; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self' %REACT_APP_CSP_CONNECT% https://api.stripe.com; object-src 'none'; base-uri 'self';" />
+        <!-- Installierbare App (09/2026): Manifest + Symbole, siehe public/manifest.json -->
+        <link rel="manifest" href="/manifest.json" />
+        <link rel="icon" href="/favicon.ico" sizes="48x48" />
+        <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <title>AutoSchnell</title>
+    </head>
+    <body>
+        <noscript>Bitte JavaScript aktivieren, um AutoSchnell zu nutzen.</noscript>
+        <div id="root"></div>
+        <!-- Runde 5: keine Inline-Skripte (CSP script-src 'self') -> boot.js -->
+        <script src="/boot.js"></script>
+        <script type="module" src="/src/index.jsx"></script>
+    </body>
+</html>

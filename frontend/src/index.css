@@ -1,5 +1,197 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
-@import url("https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@400,500,700,800,900&display=swap");
+/* ── Schriften: lokal gehostet ───────────────────────────────────────────
+   Bis 09/2026 kamen IBM Plex (Google Fonts) und Cabinet Grotesk (Fontshare)
+   per @import von fremden Servern — dabei ging die IP-Adresse jedes
+   Besuchers an Google bzw. Fontshare (Drittland-Transfer, in der
+   Datenschutzerklaerung nicht abgedeckt; Pruefbericht 09/2026). Die
+   woff2-Dateien liegen jetzt unter public/fonts/ (Quellen + Lizenzen:
+   public/fonts/LIZENZ.md). Google-Subsets latin + latin-ext mit den
+   Original-unicode-ranges, damit der Browser nur laedt, was er braucht.
+   "webpackIgnore": /fonts/... liegt im public/-Ordner und darf von
+   webpack/css-loader NICHT als Modul aufgeloest werden. */
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-300-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-300-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-500-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-600-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-700-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-sans-700-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-mono-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-mono-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-mono-500-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-mono-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-mono-600-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/ibm-plex-mono-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Cabinet Grotesk";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/cabinet-grotesk-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Cabinet Grotesk";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/cabinet-grotesk-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Cabinet Grotesk";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/cabinet-grotesk-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Cabinet Grotesk";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/cabinet-grotesk-800.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Cabinet Grotesk";
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  /* webpackIgnore: true */
+  src: url("/fonts/cabinet-grotesk-900.woff2") format("woff2");
+}
 
 @tailwind base;
 @tailwind components;
@@ -16,7 +208,12 @@ a[href*="emergent.sh"],
   pointer-events: none !important;
 }
 
-:root {
+/* :root = die ganze Seite (dunkel als Standard). [data-theme="dark"] macht
+   dieselben Werte fuer einen EINZELNEN Bereich verfuegbar, der immer dunkel
+   bleibt (Startseite, linke Haelfte der Anmeldung) — auch wenn die App gerade
+   hell laeuft. Solche Bereiche tragen zusaetzlich .bleibt-dunkel, damit auch
+   die Utility-Umlenkungen unten sie auslassen (18.09.2026). */
+:root, [data-theme="dark"] {
   /* Wichtig: signalisiert dem Browser, native UI-Elemente (Scrollbars,
      <select>-Dropdowns, autofill-Hintergrund) im Dark-Schema zu rendern.
      Ohne dies werden Optionen einer <select> mit weiss/schwarz vom OS
@@ -59,6 +256,49 @@ a[href*="emergent.sh"],
   --input-bg: rgba(255,255,255,0.05);
   --hover-bg: rgba(255,255,255,0.07);
   --divider: rgba(255,255,255,0.09);
+  /* Helle Ansicht (15.09.2026): Overlays und Flaechen, die im hellen Design
+     kippen — statt rgba(255,255,255,x) / #141416 / #18181b / #0a0a0a inline. */
+  --wa-02: rgba(255,255,255,0.02);
+  --wa-03: rgba(255,255,255,0.03);
+  --wa-04: rgba(255,255,255,0.04);
+  --wa-05: rgba(255,255,255,0.05);
+  --wa-06: rgba(255,255,255,0.06);
+  --wa-08: rgba(255,255,255,0.08);
+  --wa-10: rgba(255,255,255,0.10);
+  --wa-12: rgba(255,255,255,0.12);
+  --bg-elevated: #141416;
+  --bg-deep: #0a0a0a;
+  --bg-input-solid: #18181b;
+  --text-strong: #e4e4e7;
+  --text-dim: #a1a1aa;
+  --scheme: dark;
+  /* Statusfarben (18.09.2026): im dunklen Design wie bisher. Im hellen
+     Design waren Gruen/Gelb/Amber/Rot auf Weiss kaum zu lesen (Kontrast
+     unter 2:1) — dort stehen kraeftigere Werte in [data-theme="light"]. */
+  --st-blau: #0a84ff;
+  --st-himmel: #5ac8fa;
+  --st-cyan: #0ea5e9;
+  --st-gruen: #34c759;
+  --st-gelb: #ffd60a;
+  --st-amber: #ff9f0a;
+  --st-rot: #ff453a;
+  --st-grau: #8e8e93;
+  --st-lila: #a855f7;
+  /* Helle Schrift auf getoenten Hinweisflaechen (Banner, Chips). Im dunklen
+     Design wie bisher, im hellen kraeftig genug fuer weissen Grund. */
+  --tx-blau: #64a8ff;
+  --tx-cyan: #7dd3fc;
+  --tx-gruen: #34d399;
+  --tx-amber: #ffb340;
+  --tx-rot: #ff8a80;
+  --tx-lila: #a78bfa;
+}
+
+/* Ein Bereich mit data-theme="dark" traegt seine Schriftfarbe selbst: ohne
+   das erbt er die dunkle Schrift des hellen Seitenkoerpers und steht dann
+   dunkelgrau auf dunklem Grund (18.09.2026, Startseite/Anmeldung). */
+[data-theme="dark"] {
+  color: var(--text-primary);
 }
 
 /* ─────── LIGHT THEME (Apple-Style) ─────── */
@@ -68,12 +308,15 @@ a[href*="emergent.sh"],
   --bg-surface: #ffffff;
   --bg-input: #ffffff;
   --text-primary: #1d1d1f;
-  --text-secondary: #6e6e73;
-  --text-muted: #86868b;
+  /* 18.09.2026: Apples Grautoene (#6e6e73/#86868b) kommen auf hellem Grund nur
+     auf 3,3:1 — Nebentexte, Wochentage und Platzhalter waren kaum zu lesen.
+     Jetzt dunkler (>4,5:1), Reihenfolge primary > secondary > muted bleibt. */
+  --text-secondary: #55555a;
+  --text-muted: #646469;
   --accent-red: #ff3b30;
   --accent-red-hover: #e6352b;
   --accent-blue: #0071e3;
-  --accent-green: #1f9d55;
+  --accent-green: #167a45;
   --border-default: rgba(0, 0, 0, 0.10);
   --border-focus: rgba(0, 113, 227, 0.55);
 
@@ -87,7 +330,7 @@ a[href*="emergent.sh"],
   --apple-input-bg-focus: #ffffff;
   --apple-input-border: rgba(0,0,0,0.14);
   --apple-input-text: #1d1d1f;
-  --apple-input-placeholder: rgba(0,0,0,0.40);
+  --apple-input-placeholder: rgba(0,0,0,0.55);
   --apple-btn-secondary-bg: rgba(0,0,0,0.05);
   --apple-btn-secondary-bg-hover: rgba(0,0,0,0.09);
   --apple-btn-secondary-border: rgba(0,0,0,0.10);
@@ -101,6 +344,35 @@ a[href*="emergent.sh"],
   --input-bg: #f5f5f7;
   --hover-bg: #f0f0f2;
   --divider: rgba(0,0,0,0.09);
+  --wa-02: rgba(0,0,0,0.02);
+  --wa-03: rgba(0,0,0,0.03);
+  --wa-04: rgba(0,0,0,0.04);
+  --wa-05: rgba(0,0,0,0.05);
+  --wa-06: rgba(0,0,0,0.06);
+  --wa-08: rgba(0,0,0,0.08);
+  --wa-10: rgba(0,0,0,0.10);
+  --wa-12: rgba(0,0,0,0.12);
+  --bg-elevated: #ffffff;
+  --bg-deep: #f5f5f7;
+  --bg-input-solid: #ffffff;
+  --text-strong: #1d1d1f;
+  --text-dim: #5a5a5f;
+  --scheme: light;
+  --st-blau: #0062cc;
+  --st-himmel: #0b6e8f;
+  --st-cyan: #0369a1;
+  --st-gruen: #167a45;
+  --st-gelb: #7a6000;
+  --st-amber: #9c5400;
+  --st-rot: #d70015;
+  --st-grau: #5a5a5f;
+  --st-lila: #7e22ce;
+  --tx-blau: #0058b8;
+  --tx-cyan: #0369a1;
+  --tx-gruen: #0d6b45;
+  --tx-amber: #8f4d00;
+  --tx-rot: #c00011;
+  --tx-lila: #6d28d9;
 }
 
 * {
@@ -188,6 +460,19 @@ html, body, #root {
 }
 .input-base::placeholder {
   color: var(--text-muted);
+}
+
+/* Wunsch Ahmad 15.09.2026: das Vertragsformular des Suchers etwas kraeftiger
+   lesbar (Beschriftungen, Eingaben, Hinweise eine Stufe dicker). */
+.vertrag-formular,
+.vertrag-formular label,
+.vertrag-formular input,
+.vertrag-formular select,
+.vertrag-formular textarea {
+  font-weight: 500;
+}
+.vertrag-formular .overline {
+  font-weight: 700;
 }
 
 .live-dot {
@@ -334,6 +619,35 @@ html, body, #root {
 }
 .apple-input::placeholder { color: var(--apple-input-placeholder); }
 
+/* <select>: Die aufgeklappte Options-Liste uebernimmt in Chromium die
+   background-color des Elements. Mit dem halbtransparenten Standard
+   (rgba weiss 5%) malt der Browser die Liste weiss-auf-weiss — man sah
+   beim Aufklappen nichts. Deshalb: deckende dunkle Flaeche fuer select
+   UND options (Light-Theme bekommt sein deckendes Weiss). */
+select.apple-input {
+  background: #1c1c1e;
+}
+/* Selects mit bg-transparent (Marktplatz-Filter, Inserat): die Utility
+   gewinnt sonst gegen das nachgestellte bg-[#141416] — der Popup-Rahmen
+   wuerde durchsichtig/weisslich. Element+Klasse schlaegt die Utility. */
+select.bg-transparent {
+  background-color: #141416;
+}
+[data-theme="light"] select.bg-transparent {
+  background-color: #ffffff;
+}
+select option {
+  background-color: #1c1c1e;
+  color: #ffffff;
+}
+[data-theme="light"] select.apple-input {
+  background: #ffffff;
+}
+[data-theme="light"] select option {
+  background-color: #ffffff;
+  color: #1d1d1f;
+}
+
 .apple-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   border-radius: 10px;
@@ -373,6 +687,7 @@ html, body, #root {
   border-color: rgba(255,59,48,0.25);
 }
 .apple-btn-danger:hover { background: rgba(255,59,48,0.20); }
+[data-theme="light"] .apple-btn-danger { color: var(--st-rot); border-color: rgba(215,0,21,0.30); }
 
 .apple-segment {
   display: inline-flex;
@@ -472,17 +787,27 @@ html, body, #root {
   display: inline-block;
 }
 
-/* status colours (used for events + dots) */
-.st-offen   { color: #0a84ff; }
-.st-offen-bg   { background: rgba(10,132,255,0.18); border-color: #0a84ff; }
-.st-abgeholt { color: #34c759; }
-.st-abgeholt-bg { background: rgba(52,199,89,0.18); border-color: #34c759; }
-.st-nicht-abgeholt { color: #ff3b30; }
-.st-nicht-abgeholt-bg { background: rgba(255,59,48,0.18); border-color: #ff3b30; }
-.st-verschoben { color: #ff9f0a; }
-.st-verschoben-bg { background: rgba(255,159,10,0.18); border-color: #ff9f0a; }
-.st-erledigt { color: #8e8e93; }
-.st-erledigt-bg { background: rgba(142,142,147,0.18); border-color: #8e8e93; }
+/* status colours (used for events + dots) — 18.09.2026 ueber Token, damit
+   die Schrift im hellen Design nicht auf Weiss verblasst. */
+.st-offen   { color: var(--st-blau); }
+.st-offen-bg   { background: rgba(10,132,255,0.18); border-color: var(--st-blau); }
+.st-abgeholt { color: var(--st-gruen); }
+.st-abgeholt-bg { background: rgba(52,199,89,0.18); border-color: var(--st-gruen); }
+.st-nicht-abgeholt { color: var(--st-rot); }
+.st-nicht-abgeholt-bg { background: rgba(255,59,48,0.18); border-color: var(--st-rot); }
+.st-verschoben { color: var(--st-amber); }
+.st-verschoben-bg { background: rgba(255,159,10,0.18); border-color: var(--st-amber); }
+.st-erledigt { color: var(--st-grau); }
+.st-erledigt-bg { background: rgba(142,142,147,0.18); border-color: var(--st-grau); }
+
+/* Statusschild (Bestand, Fahrzeugakte): Farbe kommt als --st vom Bauteil. */
+.status-schild { color: var(--st); border-color: var(--st); background: transparent; }
+@supports (color: color-mix(in srgb, red 10%, transparent)) {
+  .status-schild {
+    border-color: color-mix(in srgb, var(--st) 40%, transparent);
+    background: color-mix(in srgb, var(--st) 12%, transparent);
+  }
+}
 
 /* iOS-style modal */
 .apple-modal-backdrop {
@@ -542,3 +867,192 @@ html, body, #root {
   * { @apply border-border; }
   body { @apply bg-background text-foreground; }
 }
+
+/* ─────── HELLE ANSICHT komplett (Wunsch Ahmad 15.09.2026) ───────
+   Die Oberflaeche nutzt an vielen Stellen dunkle Utility-Klassen (text-white,
+   text-zinc-*, bg-white/5, border-white/10). Im hellen Design werden sie hier
+   zentral umgelenkt; Elemente mit farbigem Hintergrund (bg-red-*, bg-blue-*,
+   Primaer-Knoepfe) behalten ihre weisse Schrift. Bewusst dunkle Bereiche
+   (Fahrer-Abholcheck) tragen .bleibt-dunkel und sind ausgenommen. */
+[data-theme="light"] .text-white:not([class*="bg-red"]):not([class*="bg-blue"]):not([class*="bg-green"]):not([class*="bg-emerald"]):not([class*="bg-amber"]):not([class*="bg-orange"]):not([class*="bg-sky"]):not([class*="bg-indigo"]):not([class*="bg-black"]):not([class*="bg-[var(--accent"]):not([class*="bg-gradient"]):not([class*="apple-btn-primary"]):not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-white:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-zinc-100:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-zinc-200:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-zinc-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-zinc-200:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--text-primary); }
+[data-theme="light"] .text-white\/90:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: rgba(29,29,31,0.9); }
+[data-theme="light"] .text-white\/80:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: rgba(29,29,31,0.8); }
+[data-theme="light"] .text-zinc-400:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--text-secondary); }
+[data-theme="light"] .text-zinc-500:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--text-muted); }
+[data-theme="light"] .bg-white\/5:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.03\]:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.04); }
+[data-theme="light"] .bg-white\/10:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.08\]:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.06); }
+[data-theme="light"] .bg-white\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.09); }
+[data-theme="light"] .hover\:bg-white\/5:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.02\]:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.03\]:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.04\]:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.04); }
+[data-theme="light"] .hover\:bg-white\/10:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:bg-white\/\[0\.06\]:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.07); }
+[data-theme="light"] .hover\:bg-white\/15:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.10); }
+[data-theme="light"] .bg-zinc-900:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-zinc-950:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: var(--bg-surface); }
+[data-theme="light"] .bg-zinc-800:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: #ececee; }
+[data-theme="light"] .border-white\/5:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/\[0\.06\]:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/\[0\.08\]:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .border-white\/10:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.10); }
+[data-theme="light"] .border-white\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.14); }
+[data-theme="light"] .border-white\/40:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .focus\:border-white\/40:focus:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.35); }
+[data-theme="light"] .divide-white\/5 > :not([hidden]) ~ :not([hidden]):not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .bg-\[rgba\(20\,20\,22\,0\.98\)\]:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(255,255,255,0.98); }
+
+/* Helle Ansicht (15.09.2026): die Gloss-Flaechen (Terminplaner, Karten) hatten
+   fest eingebaute dunkle Verlaeufe — hier die helle Fassung. */
+[data-theme="light"] .tactical-card:hover { border-color: rgba(0,0,0,0.18); }
+[data-theme="light"] .apple-surface-gloss {
+  background:
+    radial-gradient(1200px 400px at 20% -10%, rgba(0,0,0,0.03), transparent 55%),
+    radial-gradient(900px 300px at 100% 110%, rgba(10,132,255,0.06), transparent 60%),
+    linear-gradient(180deg, #ffffff 0%, #f7f7f9 55%, #f2f2f5 100%);
+  border: 1px solid rgba(0,0,0,0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.9),
+    inset 0 -1px 0 rgba(0,0,0,0.04),
+    0 24px 60px -18px rgba(0,0,0,0.18),
+    0 1px 0 rgba(0,0,0,0.02);
+}
+[data-theme="light"] .apple-surface-gloss::before {
+  background: linear-gradient(180deg, rgba(255,255,255,0.6) 0%, transparent 100%);
+}
+[data-theme="light"] .apple-card-gloss {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.7) 0%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0) 100%),
+    linear-gradient(180deg, #ffffff 0%, #f4f4f6 100%);
+  border: 1px solid rgba(0,0,0,0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.9),
+    0 8px 24px -12px rgba(0,0,0,0.18);
+}
+[data-theme="light"] .apple-card-gloss:hover {
+  border-color: rgba(0,0,0,0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.9),
+    0 14px 30px -14px rgba(0,0,0,0.25);
+}
+
+
+/* ─────── Nachtrag 18.09.2026: Pruefung der hellen Ansicht ───────
+   Weitere helle Utility-Klassen, die im Light-Theme unsichtbar waren
+   (weisse Schrift/Flaeche/Rahmen auf weissem Grund). Ausnahmen wie oben:
+   farbige Flaechen und .bleibt-dunkel bleiben unberuehrt. */
+[data-theme="light"] .text-white\/70:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: rgba(29,29,31,0.75); }
+[data-theme="light"] .text-white\/60:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: rgba(29,29,31,0.68); }
+[data-theme="light"] .text-white\/50:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: rgba(29,29,31,0.62); }
+[data-theme="light"] .hover\:text-zinc-100:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-zinc-300:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:text-zinc-400:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .group:hover .group-hover\:text-white:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--text-primary); }
+[data-theme="light"] .bg-white\/\[0\.02\]:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.04\]:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.05\]:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/\[0\.06\]:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.04); }
+[data-theme="light"] .bg-white\/\[0\.10\]:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-white\/20:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .hover\:bg-white\/20:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(0,0,0,0.11); }
+[data-theme="light"] .border-white\/\[0\.05\]:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/\[0\.10\]:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.10); }
+[data-theme="light"] .border-white\/20:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .border-white\/25:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.18); }
+[data-theme="light"] .hover\:border-white\/20:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .hover\:border-white\/25:hover:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .focus\:border-white\/25:focus:not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.24); }
+[data-theme="light"] .divide-white\/10 > :not([hidden]) ~ :not([hidden]):not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: rgba(0,0,0,0.10); }
+/* Ausgewaehltes Vorschaubild (Vertragsarchiv): weisser Rahmen war unsichtbar. */
+[data-theme="light"] .border-white:not([class*="bg-"]):not(.bleibt-dunkel):not(.bleibt-dunkel *) { border-color: var(--text-primary); }
+
+/* shadcn-Token (Dialoge wie "Als App installieren", Popover, Trenner):
+   die Vorlage liefert nur dunkle Werte — im hellen Design stand sonst ein
+   schwarzer Kasten auf heller Seite (18.09.2026). */
+[data-theme="light"] {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 11%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 11%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 0 0% 94%;
+  --accent-foreground: 0 0% 11%;
+  --destructive: 0 84% 45%;
+  --border: 0 0% 87%;
+  --input: 0 0% 90%;
+}
+
+/* Bunte Tailwind-Schriftfarben (18.09.2026): Die hellen Stufen 200-500 sind
+   fuer dunkle Flaechen gemacht und verschwanden im hellen Design fast auf dem
+   weissen Grund (z. B. text-emerald-400 nur 2,0:1). Im hellen Design zeigen
+   sie auf dieselben Token wie die uebrigen Statusfarben. Farbige Flaechen und
+   .bleibt-dunkel bleiben unberuehrt. */
+[data-theme="light"] .text-red-200:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-red-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-red-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-red-500:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-rose-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-rose-400:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--tx-rot); }
+[data-theme="light"] .text-amber-200:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-amber-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-amber-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-amber-500:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-yellow-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-yellow-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-orange-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-orange-400:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--tx-amber); }
+[data-theme="light"] .text-emerald-200:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-emerald-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-emerald-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-emerald-500:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-green-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-green-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-lime-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-lime-400:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--tx-gruen); }
+[data-theme="light"] .text-sky-200:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-sky-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-sky-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-sky-500:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-cyan-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-cyan-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-teal-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-teal-400:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--tx-cyan); }
+[data-theme="light"] .text-blue-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-blue-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-blue-500:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--tx-blau); }
+[data-theme="light"] .text-purple-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-purple-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-violet-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-violet-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-indigo-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-indigo-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-fuchsia-400:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-pink-300:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .text-pink-400:not(.bleibt-dunkel):not(.bleibt-dunkel *) { color: var(--tx-lila); }
+
+/* Farbige Schildchen (Betreiber-Bereich): die 15-%-Tonung ist fuer dunklen
+   Grund gedacht. Auf Weiss wurde die Schrift damit knapp (3,9:1) — im hellen
+   Design faellt die Tonung leichter aus, die Schriftfarbe bleibt kraeftig. */
+[data-theme="light"] .bg-red-500\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *),
+[data-theme="light"] .bg-red-500\/20:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(239,68,68,0.10); }
+[data-theme="light"] .bg-emerald-500\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(16,185,129,0.13); }
+[data-theme="light"] .bg-amber-500\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(245,158,11,0.13); }
+[data-theme="light"] .bg-blue-500\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(59,130,246,0.10); }
+[data-theme="light"] .bg-purple-500\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(168,85,247,0.10); }
+[data-theme="light"] .bg-orange-500\/15:not(.bleibt-dunkel):not(.bleibt-dunkel *) { background-color: rgba(249,115,22,0.11); }
+
+/* Haken im gefuellten Kaestchen (Fahrer-Protokoll): die Fuellung ist im
+   hellen Design dunkelgruen, dort muss der Haken weiss sein. */
+[data-theme="light"] .haken-gefuellt { color: #ffffff; }

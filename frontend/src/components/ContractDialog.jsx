@@ -1,14 +1,27 @@
-import { useState } from "react";
+import MonatJahrEingabe from "@/components/MonatJahrEingabe";
+import { monatJahrFehler } from "@/lib/monatJahr";
+import { useUngespeichert } from "@/lib/ungespeichert";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
-import { X, Eye, FileText, Loader2 } from "lucide-react";
-import DamageSelector, { damagesToText } from "./DamageSelector";
+import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
+import DamageSelector from "./DamageSelector";
+import { fehlendeKaeuferfelder, kaeuferAusProfil, kaeuferLueckenFuellen } from "@/lib/kaeuferdaten";
 
 const YN_OPTIONS = [
   { value: "", label: "—" },
   { value: "Ja", label: "Ja" },
   { value: "Nein", label: "Nein" },
+];
+
+// Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl; bei "teilweise"
+// zusaetzlich Monat/Jahr, bis zu dem das Scheckheft gefuehrt wurde.
+const SCHECKHEFT_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "ja", label: "Ja, lückenlos" },
+  { value: "nein", label: "Nein" },
+  { value: "teilweise", label: "Teilweise (bis Monat/Jahr)" },
 ];
 
 const TIRE_OPTIONS = [
@@ -18,17 +31,26 @@ const TIRE_OPTIONS = [
   { value: "keine", label: "Keine / nicht enthalten" },
 ];
 
-// HU-Datum Auto-Formatter: nur Ziffern, automatisch "/" nach 2 Ziffern.
-// Akzeptiert MM/JJ (5 Zeichen) oder MM/JJJJ (7 Zeichen).
-//   "0626"   -> "06/26"
-//   "062026" -> "06/2026"
-//   "06"     -> "06"   (Slash kommt erst beim 3. Zeichen)
-const formatHuDate = (raw) => {
-  if (raw === undefined || raw === null) return "";
-  const digits = String(raw).replace(/\D/g, "").slice(0, 6);
-  if (digits.length <= 2) return digits;
-  return digits.slice(0, 2) + "/" + digits.slice(2);
-};
+// Runde 22 (11.09.2026): Zulassungsstatus wie auf Ahmads Vertragsvorlage.
+const ZULASSUNG_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "angemeldet", label: "Angemeldet" },
+  { value: "abgemeldet", label: "Abgemeldet" },
+];
+
+// Runde 22 (11.09.2026): Zahlungsart als Auswahl statt Freitext
+// "Bar / Überweisung" — leer = noch nicht gewählt (Pflicht beim Erstellen).
+const PAYMENT_OPTIONS = [
+  { value: "", label: "— bitte wählen —" },
+  { value: "Bar", label: "Bar" },
+  { value: "Überweisung", label: "Überweisung" },
+  { value: "Echtzeitüberweisung", label: "Echtzeitüberweisung" },
+];
+
+// Runde 33 (Wunsch Ahmad): HU und Erstzulassung ueber MonatJahrEingabe —
+// MM/JJJJ, nur Ziffern, "/" automatisch. Der fruehere formatHuDate liess den
+// Monat ungeprueft, machte aus eingefuegtem "2026-06" "20/2606" und liess sich
+// am "/" nicht loeschen (Analyse 12.09.2026).
 
 // Numerische Helper für Vorhalter (nur ganze Zahlen, max 2 Stellen).
 const cleanIntStr = (raw, max = 2) => {
@@ -36,9 +58,26 @@ const cleanIntStr = (raw, max = 2) => {
   return String(raw).replace(/\D/g, "").slice(0, max);
 };
 
+// Runde 22 (11.09.2026): heutiges LOKALES Datum als JJJJ-MM-TT für die
+// Empfangsbestätigung. Bewusst nicht toISOString() — das rechnet in UTC
+// und liefert nachts (vor 02:00 deutscher Zeit) noch den Vortag.
+const todayLocalIso = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+const neuerIdempotenzSchluessel = () =>
+  (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+
 export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
-  const { dealer } = useAuth();
+  const { dealer, refresh, user } = useAuth();
   const v = vehicle || {};
+  // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
+  // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
+  const [heute] = useState(todayLocalIso);
   const [form, setForm] = useState({
     seller_name: v.seller_name || "",
     seller_address: v.seller_address || "",
@@ -47,16 +86,23 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     seller_phone: v.seller_phone || "",
     seller_email: v.seller_email || "",
     purchase_price: "",
-    payment_method: "Bar / Überweisung",
+    payment_method: "",
     pickup_date: "",
     pickup_time: "",
     additional_terms: dealer?.default_special_agreements || "",
     agb_text: dealer?.default_terms || "",
+    // Wunsch Ahmad 18.09.2026: Der Text, der wirklich im Vertrag landet
+    // ("Allgemeine Vertragsbedingungen"), steht jetzt sichtbar im Dialog.
+    // Leer gespeichert heisst Standardtext — den zeigen wir genauso an.
+    digital_vertragstext: (dealer?.digital_vertragstext || "").trim()
+      || dealer?.digital_vertragstext_standard || "",
     notes: "",
     id_document: "",
     tires: "",
     hu_valid: "",
     hu_until: "",
+    service_book: "",
+    service_book_until: "",
     accident_free: "",
     accident_location: "",
     eu_import: "",
@@ -66,6 +112,20 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     vehicle_description: v.description || "",
     damages: [],
     damages_text: "",
+    show_vat: false,
+
+    // Runde 22 (11.09.2026): Zulassungsstatus + Empfangsbestätigung wie auf
+    // der Papiervorlage ("Käufer bestätigt Empfang von … / Verkäufer
+    // bestätigt Empfang von …", jeweils Datum und Ort). Nicht angehakte
+    // Kästchen erscheinen im PDF leer zum Ankreuzen von Hand.
+    zulassung: "",
+    empfang_zulassungsbescheinigung: false,
+    empfang_schluessel: false,
+    schluessel_anzahl: "",
+    empfang_kaufpreis: false,
+    empfang_datum: heute,
+    empfang_ort_kaeufer: dealer?.city || "",
+    empfang_ort_verkaeufer: v.seller_city || "",
 
     // Fahrzeugdaten — vom Inserat vorbefüllt, vor Vertrags-Erstellung
     // editierbar (z.B. wenn Verkäufer abweichende Angaben macht).
@@ -83,27 +143,113 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     vehicle_doors: v.door_count || v.doors || "",
     vehicle_seats: v.seat_count || v.seats || "",
     vehicle_vin: v.vin || v.fin || "",
-    vehicle_license_plate: v.license_plate || v.kennzeichen || "",
+    // Wunsch Ahmad (15.09.2026): kein Kennzeichen mehr im Vertrag (Feld entfernt).
     vehicle_damage_note: v.damage_unrepaired ? "Motorschaden / Unfallschaden vorhanden"
                        : (v.accident_damaged ? "Unfallschaden" : ""),
 
     // Händler-Profil — pre-filled, kann pro Vertrag überschrieben werden
     // (z.B. abweichende Telefonnummer im Vertretungsfall).
-    dealer_company: dealer?.company_name || "",
-    dealer_contact: dealer?.contact_person || "",
-    dealer_phone: dealer?.phone || "",
-    dealer_whatsapp: dealer?.whatsapp_number || dealer?.phone || "",
-    dealer_email: dealer?.email || "",
-    dealer_address: dealer?.address || "",
-    dealer_zip: dealer?.zip_code || "",
-    dealer_city: dealer?.city || "",
+    ...kaeuferAusProfil(dealer),
   });
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  // Runde 31: rund 60 Felder ohne Zwischenspeicher — solange der Dialog offen
+  // ist, fragt der Browser vor dem Neuladen oder Schliessen nach.
+  useUngespeichert(Boolean(open));
+  // Runde 24 (11.09.2026): Käuferdaten sind Pflicht (Wunsch Ahmad). Der
+  // Hinweis sagt, was die EINSTELLUNGEN offen lassen — daher aus dem Profil
+  // abgeleitet, nicht aus dem Formular: er bleibt stehen, während der
+  // Sucher tippt.
+  const fehltInEinstellungen = fehlendeKaeuferfelder(kaeuferAusProfil(dealer));
+  const kaeuferRef = useRef(null);
+  // Pruefung 14.09.2026: ein Idempotenz-Schluessel je geoeffnetem Dialog.
+  const idempotenz = useRef(neuerIdempotenzSchluessel());
+  useEffect(() => { if (open) idempotenz.current = neuerIdempotenzSchluessel(); }, [open]);
+
+  // Runde 24 (11.09.2026, Gegenprüfung): useAuth().dealer wird nur beim
+  // App-Start/Login geladen. Speichert der Sucher seine Käuferdaten über den
+  // Link im Hinweis in einem ANDEREN Tab (oder ergänzt der Chef die
+  // Firmenadresse), wäre das Profil hier veraltet: der Hinweis stünde
+  // wieder da und die Pflicht blockierte "PDF erstellen", obwohl die Daten
+  // gespeichert sind. Deshalb beim Öffnen frisch laden und nur LEERE
+  // Käuferfelder nachfüllen (Getipptes bleibt). refresh() behält bei
+  // Netzfehlern den geladenen Stand und hängt die Seite nicht aus.
+  useEffect(() => {
+    if (!open || !refresh) return undefined;
+    let aktiv = true;
+    Promise.resolve(refresh())
+      .then((data) => {
+        if (aktiv && data?.dealer) setForm((f) => kaeuferLueckenFuellen(f, data.dealer));
+      })
+      .catch(() => {});
+    return () => { aktiv = false; };
+  }, [open, refresh]);
+
+  // Wunsch Ahmad 18.09.2026: Kommen die Einstellungen erst nach dem Oeffnen
+  // (frisch geladene Seite), werden die Textfelder nachgetragen — aber nur,
+  // solange sie noch leer und unberuehrt sind.
+  const beruehrt = useRef({});
+  useEffect(() => {
+    if (!dealer) return;
+    const vorgaben = {
+      digital_vertragstext: (dealer.digital_vertragstext || "").trim()
+        || dealer.digital_vertragstext_standard || "",
+      additional_terms: dealer.default_special_agreements || "",
+      agb_text: dealer.default_terms || "",
+    };
+    setForm((f) => {
+      const neu = { ...f };
+      let geaendert = false;
+      for (const [feld, wert] of Object.entries(vorgaben)) {
+        if (wert && !beruehrt.current[feld] && !(f[feld] || "").trim()) {
+          neu[feld] = wert;
+          geaendert = true;
+        }
+      }
+      return geaendert ? neu : f;
+    });
+  }, [dealer]);
 
   if (!open) return null;
 
-  const set = (k, v) => setForm({ ...form, [k]: v });
+  // Runde 22 (11.09.2026): funktional updaten — sonst überschreiben sich
+  // schnell aufeinanderfolgende Änderungen (Checkbox + abhängiges Feld)
+  // mit einem veralteten form-Stand.
+  //
+  // Runde 22 (11.09.2026, Nachprüfung): Die Vorgaben der Empfangsbestätigung
+  // folgen ihrer Quelle, solange der Sucher sie nicht von Hand abweichend
+  // geändert hat:
+  //  - Datum folgt dem Abholdatum (= Übergabetag; der Vertrag wird meist
+  //    Tage vorher angelegt). Ohne Abholdatum gilt wieder "heute".
+  //  - Ort (Verkäufer) folgt "Verkäufer / Halter → Ort", Ort (Käufer)
+  //    folgt "Käufer → Ort" (z.B. Ort im Inserat fehlte und wird nachgetragen).
+
+  const set = (k, v) => setForm((f) => {
+    beruehrt.current[k] = true;
+    const next = { ...f, [k]: v };
+    if (k === "pickup_date" && f.empfang_datum === (f.pickup_date || heute)) {
+      next.empfang_datum = v || heute;
+    }
+    if (k === "seller_city" && f.empfang_ort_verkaeufer === f.seller_city) {
+      next.empfang_ort_verkaeufer = v;
+    }
+    if (k === "dealer_city" && f.empfang_ort_kaeufer === f.dealer_city) {
+      next.empfang_ort_kaeufer = v;
+    }
+    return next;
+  });
+
+  // Eintippen einer Schlüsselanzahl hakt "KFZ mit __ Schlüssel(n)" gleich an.
+  // Nachprüfung: führende Nullen fallen weg — "0" ist keine Anzahl und darf
+  // nicht "KFZ mit 0 Schlüssel(n)" angekreuzt ins PDF bringen.
+  const setSchluesselAnzahl = (raw) => {
+    const n = cleanIntStr(raw).replace(/^0+/, "");
+    setForm((f) => ({
+      ...f,
+      schluessel_anzahl: n,
+      empfang_schluessel: n ? true : f.empfang_schluessel,
+    }));
+  };
 
   const buildPayload = () => ({
     vehicle_id: vehicleId,
@@ -135,13 +281,46 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
   const submit = async (e) => {
     e.preventDefault();
+    // Runde 24 (11.09.2026): Käuferdaten Pflicht beim Erstellen (die Vorschau
+    // geht weiterhin ohne). Leere Felder hält schon required auf; hier
+    // zusätzlich nur-Leerzeichen — mit Feldnamen und Sprung zum Abschnitt.
+    const fehlend = fehlendeKaeuferfelder(form);
+    if (fehlend.length > 0) {
+      toast.error(`Bitte Käuferdaten ergänzen: ${fehlend.map((f) => f.label).join(", ")}`);
+      const abschnitt = kaeuferRef.current;
+      abschnitt?.scrollIntoView({ behavior: "smooth", block: "start" });
+      abschnitt
+        ?.querySelector(`[data-testid="contract-${fehlend[0].key.replace("_", "-")}"]`)
+        ?.focus({ preventScroll: true });
+      return;
+    }
     if (!form.purchase_price || Number(form.purchase_price) <= 0) {
       toast.error("Bitte Kaufpreis manuell eingeben");
       return;
     }
+    // Runde 22 (11.09.2026): Zahlungsart ist Pflicht beim Erstellen
+    // (die Vorschau geht weiterhin ohne).
+    if (!form.payment_method) {
+      toast.error("Bitte Zahlungsart wählen");
+      return;
+    }
+    // Gegenpruefung 12.09.2026: ein halb getipptes "05/2" landete sonst im Vertrag.
+    for (const [feld, label] of [["vehicle_first_registration", "Erstzulassung"], ["hu_until", "HU gültig bis"],
+                                 ["service_book_until", "Scheckheft gepflegt bis"]]) {
+      const fehler = monatJahrFehler(form[feld]);
+      if (fehler) {
+        toast.error(`${label}: ${fehler}`);
+        return;
+      }
+    }
     setLoading(true);
     try {
-      const { data } = await api.post("/contracts", buildPayload());
+      // Pruefung 14.09.2026: Idempotenz — Doppelklick oder Wiederholung nach
+      // Netzabbruch legt keinen zweiten Vertrag an (Schluessel je Dialog).
+      const { data } = await api.post("/contracts", { ...buildPayload(), idempotency_key: idempotenz.current });
+      // Runde 15: der Vertrag ist gespeichert, auch wenn der automatische
+      // Abholtermin nicht angelegt werden konnte — der Server sagt es.
+      if (data?.termin_hinweis) toast.warning(data.termin_hinweis, { duration: 8000 });
       onCreated?.(data);
     } catch (err) {
       toast.error(errMsg(err, "PDF konnte nicht erstellt werden"));
@@ -167,7 +346,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           </button>
         </div>
 
-        <form onSubmit={submit} className="p-6 space-y-6">
+        <form onSubmit={submit} className="p-6 space-y-6 vertrag-formular">
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
             <Section title="Verkäufer / Halter">
@@ -184,8 +363,38 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               </div>
             </Section>
 
+            {/* Runde 24 (11.09.2026): Firma/Adresse/PLZ/Ort sind Pflicht —
+                Käufer im Kaufvertrag, Auftraggeber im Abholprotokoll. */}
+            <div ref={kaeuferRef} style={{ scrollMarginTop: "5rem" }} data-testid="contract-kaeufer">
             <Section title="Käufer (Händler — du)">
-              <Field label="Firma" value={form.dealer_company} onChange={(v) => set("dealer_company", v)} testid="contract-dealer-company" />
+              {fehltInEinstellungen.length > 0 && (
+                <div role="alert" data-testid="contract-kaeufer-fehlt"
+                     className="flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm leading-snug"
+                     style={{
+                       borderColor: "var(--accent-red)",
+                       background: "color-mix(in srgb, var(--accent-red) 12%, transparent)",
+                       color: "var(--text-primary)",
+                     }}>
+                  <AlertTriangle size={16} className="shrink-0 mt-0.5" style={{ color: "var(--accent-red)" }} />
+                  <div>
+                    <div className="font-semibold">Käuferdaten fehlen in deinen Einstellungen</div>
+                    <div className="text-[12px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                      Fehlt: {fehltInEinstellungen.map((f) => f.label).join(", ")}. Bitte hier eintragen —
+                      ohne diese Angaben wird kein Kaufvertrag erstellt.
+                    </div>
+                    <a href="/app/einstellungen" target="_blank" rel="noopener noreferrer"
+                       data-testid="contract-kaeufer-einstellungen"
+                       className="inline-flex items-center gap-1 mt-1.5 text-[12px] font-semibold underline"
+                       style={{ color: "var(--accent-blue)" }}>
+                      Dauerhaft in den Einstellungen speichern <ExternalLink size={12} />
+                    </a>
+                    <span className="text-[11px] ml-1" style={{ color: "var(--text-secondary)" }}>
+                      (neuer Tab — deine Eingaben hier bleiben erhalten)
+                    </span>
+                  </div>
+                </div>
+              )}
+              <Field label="Firma *" required value={form.dealer_company} onChange={(v) => set("dealer_company", v)} testid="contract-dealer-company" />
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Ansprechpartner" value={form.dealer_contact} onChange={(v) => set("dealer_contact", v)} testid="contract-dealer-contact" />
                 <Field label="Telefon" value={form.dealer_phone} onChange={(v) => set("dealer_phone", v)} testid="contract-dealer-phone" />
@@ -194,16 +403,17 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 <Field label="WhatsApp" value={form.dealer_whatsapp} onChange={(v) => set("dealer_whatsapp", v)} testid="contract-dealer-wa" />
                 <Field label="E-Mail" type="email" value={form.dealer_email} onChange={(v) => set("dealer_email", v)} testid="contract-dealer-email" />
               </div>
-              <Field label="Adresse" value={form.dealer_address} onChange={(v) => set("dealer_address", v)} testid="contract-dealer-address" />
+              <Field label="Adresse *" required value={form.dealer_address} onChange={(v) => set("dealer_address", v)} testid="contract-dealer-address" />
               <div className="grid grid-cols-2 gap-3">
-                <Field label="PLZ" value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
-                <Field label="Ort" value={form.dealer_city} onChange={(v) => set("dealer_city", v)} testid="contract-dealer-city" />
+                <Field label="PLZ *" required value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
+                <Field label="Ort *" required value={form.dealer_city} onChange={(v) => set("dealer_city", v)} testid="contract-dealer-city" />
               </div>
               <div className="text-[11px] text-zinc-500 leading-relaxed">
-                Aus deinem Profil vorbefüllt — Änderungen hier gelten nur für diesen Vertrag.
-                Dauerhaft anpassen unter <strong>Einstellungen</strong>.
+                Erscheint als Käufer im Kaufvertrag und als Auftraggeber im Abholprotokoll.
+                Aus deinen Einstellungen vorbefüllt — fehlt etwas, hier eintragen (dauerhaft unter Einstellungen).
               </div>
             </Section>
+            </div>
           </div>
 
           {/* Fahrzeugdaten — direkt aus dem Inserat übernommen, vor
@@ -215,7 +425,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="Kategorie" value={form.vehicle_category} onChange={(v) => set("vehicle_category", v)} testid="contract-veh-cat" />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Erstzulassung (MM/JJJJ)" value={form.vehicle_first_registration} onChange={(v) => set("vehicle_first_registration", v)} testid="contract-veh-ez" />
+              <div>
+                <label className="text-xs text-zinc-400">Erstzulassung (MM/JJJJ)</label>
+                <MonatJahrEingabe value={form.vehicle_first_registration}
+                                  onChange={(v) => set("vehicle_first_registration", v)}
+                                  art="ez" testid="contract-veh-ez" className="input-base w-full mt-1" />
+              </div>
               <Field label="Kilometerstand" value={form.vehicle_mileage} onChange={(v) => set("vehicle_mileage", v)} testid="contract-veh-km" />
               <Field label="Hubraum (ccm)" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
             </div>
@@ -241,10 +456,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag */}
               <Field label="FIN" value={form.vehicle_vin} onChange={(v) => set("vehicle_vin", v)} testid="contract-veh-fin" />
-              <Field label="Kennzeichen" value={form.vehicle_license_plate} onChange={(v) => set("vehicle_license_plate", v)} testid="contract-veh-plate" />
             </div>
-            <Field label="Bekannter Schaden / Hinweis" value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)} testid="contract-veh-damage" placeholder="z.B. Motorschaden, Hagelschaden" />
+            <Field label="Sonstige Schäden / Hinweis (erscheint im Vertrag)" value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)} testid="contract-veh-damage" placeholder="z.B. Motorschaden, Hagelschaden" />
           </Section>
 
           {/* Zusicherungen & Zustand */}
@@ -264,16 +479,28 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 options={YN_OPTIONS}
                 testid="contract-hu-valid"
               />
-              <Field
-                label="HU gültig bis (z.B. 06/26)"
-                value={form.hu_until}
-                onChange={(v) => set("hu_until", formatHuDate(v))}
-                testid="contract-hu-until"
-                placeholder="MM/JJ"
-                disabled={form.hu_valid !== "Ja"}
-                inputMode="numeric"
-                maxLength={7}
+              <div>
+                <label className="text-xs text-zinc-400">HU gültig bis (MM/JJJJ)</label>
+                <MonatJahrEingabe value={form.hu_until} onChange={(v) => set("hu_until", v)}
+                                  art="hu" testid="contract-hu-until" disabled={form.hu_valid !== "Ja"}
+                                  className="input-base w-full mt-1 disabled:opacity-50" />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <SelectField
+                label="Scheckheftgepflegt"
+                value={form.service_book}
+                onChange={(v) => set("service_book", v)}
+                options={SCHECKHEFT_OPTIONS}
+                testid="contract-service-book"
               />
+              <div>
+                <label className="text-xs text-zinc-400">Scheckheft gepflegt bis (MM/JJJJ)</label>
+                <MonatJahrEingabe value={form.service_book_until} onChange={(v) => set("service_book_until", v)}
+                                  art="ez" testid="contract-service-book-until"
+                                  disabled={form.service_book !== "teilweise"}
+                                  className="input-base w-full mt-1 disabled:opacity-50" />
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <SelectField
@@ -299,7 +526,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 testid="contract-eu-import"
               />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <SelectField
                 label="Fahrtauglich"
                 value={form.drivable}
@@ -313,6 +540,13 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 onChange={(v) => set("commercial_since_ez", v)}
                 options={YN_OPTIONS}
                 testid="contract-commercial"
+              />
+              <SelectField
+                label="Zulassung"
+                value={form.zulassung}
+                onChange={(v) => set("zulassung", v)}
+                options={ZULASSUNG_OPTIONS}
+                testid="contract-zulassung"
               />
             </div>
           </Section>
@@ -333,15 +567,111 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 value={form.purchase_price} onChange={(v) => set("purchase_price", v)}
                 testid="contract-price" placeholder="z.B. 8900"
               />
-              <Field label="Zahlungsart" value={form.payment_method} onChange={(v) => set("payment_method", v)} testid="contract-payment" />
+              <SelectField
+                label="Zahlungsart *"
+                required
+                value={form.payment_method}
+                onChange={(v) => set("payment_method", v)}
+                options={PAYMENT_OPTIONS}
+                testid="contract-payment"
+              />
             </div>
+            <label className="flex items-start gap-2 rounded-lg border px-3 py-2.5 cursor-pointer"
+                   style={{ borderColor: "var(--border-default)" }}
+                   data-testid="contract-show-vat">
+              <input type="checkbox" checked={!!form.show_vat}
+                     onChange={(e) => set("show_vat", e.target.checked)}
+                     className="mt-0.5 accent-red-500" />
+              <span className="text-sm">
+                <span className="font-semibold">MwSt (19 %) im Vertrag ausweisen</span>
+                <span className="block text-[11px] text-zinc-500">
+                  Für gewerbliche Verkäufe (Regelbesteuerung): der Kaufpreis gilt
+                  als Brutto, der Vertrag zeigt Netto und Steuer.
+                  {form.show_vat && form.purchase_price > 0 && (
+                    <> {" "}Netto {(form.purchase_price / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} € ·
+                    MwSt {(form.purchase_price - form.purchase_price / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</>
+                  )}
+                </span>
+              </span>
+            </label>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date" />
-              <Field label="Abholuhrzeit" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time" />
+              <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
+                     helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
             </div>
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
                    helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar." />
-            <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes" />
+            {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim
+                Vertrag, sondern spaeter im Terminplaner am Termin. */}
+            {user?.role !== "sucher" && (
+              <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes" />
+            )}
+          </Section>
+
+          {/* Runde 22 (11.09.2026): Empfangsbestätigung wie auf der
+              Papiervorlage — landet im Vertrag unter "Unterschriften". */}
+          <Section
+            title="Übergabe & Empfangsbestätigung"
+            subtitle="Wie im Vertrag unter „Unterschriften“. Leere Kästchen erscheinen im PDF zum Ankreuzen von Hand."
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="rounded-lg border px-3 py-3 space-y-2"
+                   style={{ borderColor: "var(--border-default)" }}
+                   data-testid="contract-empfang-kaeufer">
+                <div className="text-sm font-semibold">Käufer (du) bestätigt Empfang von:</div>
+                <CheckRow
+                  checked={form.empfang_zulassungsbescheinigung}
+                  onChange={(c) => set("empfang_zulassungsbescheinigung", c)}
+                  testid="contract-empfang-zb"
+                >
+                  Zulassungsbescheinigung Teil I &amp; II
+                </CheckRow>
+                <CheckRow
+                  checked={form.empfang_schluessel}
+                  onChange={(c) => set("empfang_schluessel", c)}
+                  testid="contract-empfang-schluessel"
+                >
+                  <span>KFZ mit</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={2}
+                    value={form.schluessel_anzahl}
+                    onChange={(e) => setSchluesselAnzahl(e.target.value)}
+                    placeholder="__"
+                    aria-label="Anzahl Schlüssel"
+                    data-testid="contract-schluessel-anzahl"
+                    className="input-base w-14 text-center"
+                    style={{ padding: "0.25rem 0.5rem" }}
+                  />
+                  <span>Schlüssel(n)</span>
+                </CheckRow>
+                <Field label="Ort (Käufer)" value={form.empfang_ort_kaeufer} onChange={(v) => set("empfang_ort_kaeufer", v)} testid="contract-empfang-ort-kaeufer" />
+              </div>
+              <div className="rounded-lg border px-3 py-3 space-y-2"
+                   style={{ borderColor: "var(--border-default)" }}
+                   data-testid="contract-empfang-verkaeufer">
+                <div className="text-sm font-semibold">Verkäufer bestätigt Empfang von:</div>
+                <CheckRow
+                  checked={form.empfang_kaufpreis}
+                  onChange={(c) => set("empfang_kaufpreis", c)}
+                  testid="contract-empfang-kaufpreis"
+                >
+                  Kaufpreis
+                </CheckRow>
+                <Field label="Ort (Verkäufer)" value={form.empfang_ort_verkaeufer} onChange={(v) => set("empfang_ort_verkaeufer", v)} testid="contract-empfang-ort-verkaeufer" />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field
+                label="Datum"
+                type="date"
+                value={form.empfang_datum}
+                onChange={(v) => set("empfang_datum", v)}
+                testid="contract-empfang-datum"
+                helper="Gilt für beide Empfangsbestätigungen. Folgt dem Abholdatum, bis du es hier änderst."
+              />
+            </div>
           </Section>
 
           <Section title="Fahrzeugbeschreibung (vom Inserat)">
@@ -356,16 +686,30 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             />
           </Section>
 
-          <Section title="Allgemeine Geschäftsbedingungen (AGB)">
+          {/* Wunsch Ahmad 18.09.2026: Die Bedingungen aus den Einstellungen
+              standen bisher nur im PDF — jetzt stehen sie hier, und wer will,
+              ueberarbeitet sie fuer genau diesen Vertrag. */}
+          <Section title="Vertragsbedingungen & AGB">
             <Field
-              label="AGB-Text"
-              value={form.agb_text}
-              onChange={(v) => set("agb_text", v)}
+              label="Vertragsbedingungen & AGB (stehen in diesem Kaufvertrag)"
+              value={form.digital_vertragstext}
+              onChange={(v) => set("digital_vertragstext", v)}
               multiline
-              rows={8}
-              testid="contract-agb-text"
-              helper="Aus deinen Einstellungen geladen. Änderungen hier gelten nur für diesen einen Vertrag."
+              rows={12}
+              testid="contract-vertragsbedingungen"
+              helper="Aus deinen Einstellungen geladen. Änderungen hier gelten nur für diesen einen Vertrag; leerst du das Feld, gilt wieder der Text aus den Einstellungen."
             />
+            {(form.agb_text || "").trim() ? (
+              <Field
+                label="Zusätzlicher AGB-Abschnitt (aus älteren Einstellungen)"
+                value={form.agb_text}
+                onChange={(v) => set("agb_text", v)}
+                multiline
+                rows={6}
+                testid="contract-agb-text"
+                helper="Steht im PDF als eigener Abschnitt „Allgemeine Geschäftsbedingungen“ vor den Vertragsbedingungen."
+              />
+            ) : null}
           </Section>
 
           <div className="flex flex-wrap items-center justify-end gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-6 px-6 border-t"
@@ -416,14 +760,31 @@ const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, req
   </div>
 );
 
-const SelectField = ({ label, value, onChange, options, testid }) => (
+// Runde 22 (11.09.2026): optionales required (Zahlungsart ist Pflicht).
+const SelectField = ({ label, value, onChange, options, testid, required }) => (
   <div>
     <label className="text-xs text-zinc-400">{label}</label>
     <select data-testid={testid} value={value} onChange={(e) => onChange(e.target.value)}
+            required={required}
             className="input-base w-full mt-1 appearance-none">
       {options.map((o) => (
         <option key={o.value} value={o.value} className="bg-zinc-900">{o.label}</option>
       ))}
     </select>
   </div>
+);
+
+// Runde 22 (11.09.2026): Kästchen der Empfangsbestätigung — gestaltet wie
+// der MwSt-Kasten, die ganze Zeile ist klickbar. Ein Zahlenfeld innerhalb
+// der Zeile (Schlüsselanzahl) schaltet das Kästchen beim Hineinklicken
+// nicht um (Browser-Regel für interaktive Elemente in einem label).
+const CheckRow = ({ checked, onChange, testid, children }) => (
+  <label className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2.5 cursor-pointer text-sm"
+         style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
+    <input type="checkbox" checked={!!checked}
+           onChange={(e) => onChange(e.target.checked)}
+           data-testid={testid}
+           className="h-4 w-4 shrink-0 accent-red-500 cursor-pointer" />
+    {children}
+  </label>
 );

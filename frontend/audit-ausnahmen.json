@@ -1,0 +1,4 @@
+{
+  "hinweis": "Zeitlich befristete, begruendete Ausnahmen fuer audit-pruefen.js (Audit 09/2026, Blocker 1). Abgelaufene Ausnahmen blockieren wieder. Format: {modul oder id, grund, bis JJJJ-MM-TT}.",
+  "ausnahmen": []
+}

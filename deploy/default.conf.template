@@ -1,0 +1,116 @@
+# Server-Bloecke — ${PUBLIC_HOST} wird von nginx (envsubst) beim Start
+# eingesetzt (docker-compose: proxy.environment.PUBLIC_HOST, z.B. app.autoschnell.de).
+# Audit 09/2026: nur die echte Domain wird bedient; alles andere -> 444.
+
+# ---- Unbekannte Hosts verwerfen (Default-Server, HTTP + HTTPS) ----
+server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
+  listen 80 default_server;
+  listen 443 ssl default_server;
+  http2 on;
+  server_name _;
+  ssl_certificate     /etc/nginx/certs/fullchain.pem;
+  ssl_certificate_key /etc/nginx/certs/privkey.pem;
+  # Let's-Encrypt-Challenge muss auch hier durch (vor dem ersten Zertifikat).
+  location /.well-known/acme-challenge/ { root /var/www/certbot; }
+  location / { return 444; }
+}
+
+# ---- HTTP -> HTTPS auf die FESTE Domain (kein $host) ----
+server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
+  listen 80;
+  server_name ${PUBLIC_HOST};
+  location /.well-known/acme-challenge/ { root /var/www/certbot; }
+  location / { return 301 https://${PUBLIC_HOST}$request_uri; }
+}
+
+# ---- HTTPS ----
+server {
+  # Docker-DNS statt fester Adresse (Vorfall 07.09.2026, 15:36 UTC): nginx
+  # loest "web"/"backend" sonst nur beim Start auf. Wird der web-Container
+  # neu erzeugt (Rollout) und bekommt eine andere Adresse, lieferte der
+  # Proxy dauerhaft 502, bis er selbst neu gestartet wurde. Mit Variable
+  # und resolver fragt nginx alle 10 s neu nach.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $backend_up http://backend:8001;
+  set $web_up http://web:80;
+  listen 443 ssl;
+  http2 on;
+  server_name ${PUBLIC_HOST};
+
+  ssl_certificate     /etc/nginx/certs/fullchain.pem;
+  ssl_certificate_key /etc/nginx/certs/privkey.pem;
+
+  # Sicherheits-Header fuer ALLE Antworten (API und Oberflaeche) — "always",
+  # damit sie auch bei Fehlerseiten gesetzt werden.
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(self)" always;
+  # frame-ancestors laesst sich nur per Header setzen (nicht per <meta>).
+  add_header Content-Security-Policy "frame-ancestors 'none'" always;
+
+  # API ans Backend.
+  location /api/ {
+    proxy_pass $backend_up;
+    proxy_read_timeout 300s;   # Snapshots/PDF + synchrone Apify-Abrufe (bis 180 s)
+    # Runde 26 (12.09.2026, Pruefbefund): Besucher-Adresse ausdruecklich an das
+    # Backend weitergeben. nginx reicht fremde Kopfzeilen sonst durch — ein
+    # Besucher koennte X-Forwarded-For selbst setzen und damit die
+    # IP-Sperren beeinflussen. $proxy_add_x_forwarded_for haengt die ECHTE
+    # Adresse des direkten Nachbarn hinten an; rate_limiter.client_ip nimmt
+    # genau den letzten fremden Eintrag.
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  # Statische Build-Dateien mit Hash im Namen: lange cachen.
+  location /static/ {
+    proxy_pass $web_up;
+    # KEIN "always": sonst traegt auch eine 502-Antwort (web-Container kurz
+    # weg) "ein Jahr cachen", und Cloudflare liefert den Fehler danach aus
+    # dem Cache weiter — schwarzer Bildschirm, obwohl die Server laengst
+    # gesund sind (Vorfall 07.09.2026, 15:31-16:08 UTC). Ohne "always"
+    # setzt nginx die Kopfzeile nur bei 200/206/301/302/303/304/307/308.
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    # Rollout Server fuer Server (08.09.2026): Startseite vom NEUEN Server,
+    # Bundle-Anfrage landet ueber den Load Balancer auf dem ALTEN Server ->
+    # 404, das Cloudflare standardmaessig 3 Minuten zwischenspeichert
+    # (schwarzer Bildschirm). Fehlende Bundle-Dateien deshalb ausdruecklich
+    # als "no-store" ausliefern (nur die 404, die 200 bleibt ein Jahr cachebar).
+    proxy_intercept_errors on;
+    error_page 404 = @static_fehlt;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  }
+
+  location @static_fehlt {
+    add_header Cache-Control "no-store" always;
+    return 404;
+  }
+
+  # Alles andere ans Frontend (SPA).
+  location / {
+    proxy_pass $web_up;
+  }
+}

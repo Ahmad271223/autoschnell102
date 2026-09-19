@@ -1,17 +1,23 @@
-import { useState } from "react";
+import { neueFassungLaden } from "@/lib/fassung";
+import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useDriver } from "@/context/DriverContext";
+import { TOKEN_FAHRER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Truck, Mail, Lock } from "lucide-react";
+import { Truck, Hash, Lock } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
 
 export default function DriverLogin() {
   const { driver, ready, login } = useDriver();
   const nav = useNavigate();
-  const [email, setEmail] = useState("");
+  // Kontonummer (13.09.2026): Fahrer melden sich mit ihrer Kontonummer an
+  // (ohne Zusatz, deshalb Ziffern-Tastatur). Konten legt der Betreiber an.
+  const [kennung, setKennung] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  // Wer von hier aus die App installiert, soll beim Start hier landen.
+  useEffect(() => { anmeldeartVormerken(TOKEN_FAHRER); }, []);
 
   if (!ready) return null;
   if (driver) return <Navigate to="/fahrer" replace />;
@@ -20,9 +26,11 @@ export default function DriverLogin() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(email, password);
+      await login(kennung.trim(), password);
       toast.success("Willkommen zurück!");
-      nav("/fahrer");
+      // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
+      // laden — direkt nach der Anmeldung geht dabei nichts verloren.
+      if (!neueFassungLaden("/fahrer")) nav("/fahrer");
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {
@@ -42,7 +50,7 @@ export default function DriverLogin() {
           <div>
             <div className="overline">Fahrer-App</div>
             <div className="font-display font-black text-2xl tracking-tighter">
-              AUTOHANDEL<span style={{ color: "var(--accent-red)" }}>.</span>
+              AutoSchnell<span style={{ color: "var(--accent-red)" }}>.</span>
             </div>
           </div>
         </Link>
@@ -50,15 +58,18 @@ export default function DriverLogin() {
         <div className="tactical-card p-7">
           <h1 className="font-display font-black text-2xl tracking-tighter">Fahrer-Login</h1>
           <p className="text-sm text-zinc-400 mt-2">
-            Mit E-Mail & Passwort einloggen, um deine Abholfahrten zu sehen.
+            Mit Kontonummer &amp; Passwort einloggen, um deine Abholfahrten zu sehen.
           </p>
           <form onSubmit={submit} className="mt-6 space-y-4">
             <div>
               <label className="text-xs text-zinc-400 flex items-center gap-2">
-                <Mail size={12} /> E-Mail
+                <Hash size={12} /> Fahrer-ID (Kontonummer)
               </label>
-              <input data-testid="driver-login-email" type="email" required
-                value={email} onChange={(e) => setEmail(e.target.value)}
+              {/* Fahrer-ID (14.09.2026): "FD-7K2M9QX4" — Buchstaben und Ziffern,
+                  Gross-/Kleinschreibung egal; aeltere reine Nummern gehen weiter. */}
+              <input data-testid="driver-login-kontonummer" type="text" inputMode="text" required
+                value={kennung} onChange={(e) => setKennung(e.target.value)}
+                placeholder="z. B. FD-7K2M9QX4" autoCapitalize="characters" spellCheck={false}
                 className="input-base w-full mt-1" autoComplete="username" />
             </div>
             <div>
@@ -75,11 +86,21 @@ export default function DriverLogin() {
             </button>
           </form>
 
+          <div className="mt-3 text-center text-xs">
+            <Link to="/passwort-vergessen" data-testid="link-driver-reset" className="text-zinc-400 hover:text-white underline">
+              Passwort vergessen? Der Betreiber setzt es neu
+            </Link>
+          </div>
+          <div className="mt-3 text-center text-[11.5px] text-zinc-500" data-testid="driver-login-hinweis">
+            Hier melden sich nur Fahrer an. Firmen und Sucher:{" "}
+            <Link to="/login" className="underline">/login</Link> · Zwischenhändler:{" "}
+            <Link to="/markt/login" className="underline">B2B-Marktplatz</Link>
+          </div>
           <div className="mt-5 text-center text-sm text-zinc-400">
-            Noch kein Fahrer-Account?{" "}
-            <Link to="/fahrer/register" data-testid="link-driver-register"
+            Noch kein Zugang?{" "}
+            <Link to="/anfrage?art=fahrer" data-testid="link-driver-anfrage"
               className="font-semibold" style={{ color: "var(--accent-red)" }}>
-              Registrieren
+              Zugang anfragen
             </Link>
           </div>
 

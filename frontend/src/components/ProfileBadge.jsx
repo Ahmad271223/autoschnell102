@@ -41,7 +41,7 @@ export default function ProfileBadge({ onChange }) {
 
   const isInland = profile === "inland";
   const Icon = isInland ? Flag : Globe2;
-  const color = isInland ? "var(--accent-green)" : "#0a84ff";
+  const color = isInland ? "var(--accent-green)" : "var(--st-blau)";
   const bg = isInland ? "rgba(52,199,89,0.12)" : "rgba(10,132,255,0.12)";
   const border = isInland ? "rgba(52,199,89,0.35)" : "rgba(10,132,255,0.4)";
 
