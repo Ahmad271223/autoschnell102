@@ -83,3 +83,27 @@ def test_06_mfa_pflicht_gilt_schon_bei_der_anmeldung():
     assert len(anmeldung) > 1, "die Pflicht haengt nicht mehr an der Anmeldung"
     regel = inspect.getsource(A.mfa_pflicht_aktiv)
     assert 'APP_ENV' in regel and 'MFA_PFLICHT' in regel
+
+
+def test_07_alle_gelesenen_umgebungsvariablen_erreichen_den_container():
+    """Befund 19.09.2026 (live): BACKUP_S3_ACCESS_KEY/-SECRET_KEY/-REGION
+    standen in der .env, fehlten aber in docker-compose.yml — der eigene
+    Sicherungs-Schluessel erreichte den Container nie, /api/ready meldete
+    weiter "false". Dasselbe Muster gab es frueher bei RESEND_API_KEY.
+
+    Diese Probe zieht ALLE Namen, die die Sicherung liest, aus dem Quelltext
+    und verlangt sie in der Compose-Datei — eine neue Variable faellt damit
+    beim naechsten Mal sofort auf."""
+    import re
+    quelle = (BACKEND / "scripts" / "backup_mongo.py").read_text(encoding="utf-8")
+    compose = (BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    gelesen = set(re.findall(r'os\.environ(?:\.get)?[\(\[]"([A-Z0-9_]+)"', quelle))
+    # Nur die Sicherungs-Schalter; S3_*/MONGO_* stehen ohnehin laengst drin,
+    # BACKUP_DIR/-HOUR setzt die Compose-Datei selbst.
+    # BACKUP_DIR/-HOUR setzt die Compose-Datei selbst; die beiden *_DIR sind
+    # laut backup_mongo.py ausdruecklich "nur fuer Tests".
+    pflicht = ({v for v in gelesen if v.startswith("BACKUP_")}
+               - {"BACKUP_DIR", "BACKUP_HOUR",
+                  "BACKUP_UPLOADS_DIR", "BACKUP_LOCAL_STORAGE_DIR"})
+    fehlend = sorted(v for v in pflicht if v not in compose)
+    assert not fehlend, ("diese Variablen erreichen den Container nicht: %s" % fehlend)

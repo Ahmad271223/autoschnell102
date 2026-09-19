@@ -179,6 +179,17 @@ services:
       - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
       - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
       - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}
+      # 19.09.2026: Diese drei fehlten — der eigene (nur schreibende) Schluessel
+      # fuer den Sicherungs-Bucket stand in der .env, erreichte den Container
+      # aber NIE. Die Sicherung nahm weiter die S3_*-Zugangsdaten, und
+      # /api/ready meldete zu Recht "false" (dasselbe Muster wie frueher bei
+      # RESEND_API_KEY). Fehlen sie in der .env, bleibt alles wie bisher.
+      - BACKUP_S3_ACCESS_KEY=${BACKUP_S3_ACCESS_KEY:-}
+      - BACKUP_S3_SECRET_KEY=${BACKUP_S3_SECRET_KEY:-}
+      - BACKUP_S3_REGION=${BACKUP_S3_REGION:-}
+      # Snapshot-Feinjustierung der Sicherung (Standardwerte im Skript).
+      - BACKUP_SNAPSHOT_VERSUCHE=${BACKUP_SNAPSHOT_VERSUCHE:-}
+      - BACKUP_SNAPSHOT_PAUSE_S=${BACKUP_SNAPSHOT_PAUSE_S:-}
       # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-
       # Bucket statt Spiegel auf die Platte (leer = bucket, sobald
       # BACKUP_S3_BUCKET gesetzt ist).
