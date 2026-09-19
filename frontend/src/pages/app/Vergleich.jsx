@@ -170,6 +170,22 @@ export default function Vergleich() {
   // ausloesen, nur weil man ins Feld klickt.
   const zwischenablageRef = useRef({ zuletzt: "", moeglich: true });
 
+  // Rueckmeldung Ahmad 18.09.2026: Der Start haing frueher am paste-Ereignis.
+  // Das kommt nicht ueberall an (Rechtsklick-Menue, Ziehen und Ablegen,
+  // Einfuegen per Klick). Jetzt zaehlt das Ergebnis: Steht auf einen Schlag
+  // ein gueltiger Inserats-Link im Feld, laeuft der Vergleich los. Beim
+  // Tippen (Zeichen fuer Zeichen) passiert weiterhin nichts.
+  const SPRUNG = 12;   // so viele Zeichen auf einmal = eingefuegt, nicht getippt
+
+  const vielleichtStarten = (text, vorher = "") => {
+    const neu = (text || "").trim();
+    if (!neu || loading || laeuftRef.current) return false;
+    if (!istInseratsLink(neu)) return false;
+    if (neu.length - (vorher || "").trim().length < SPRUNG) return false;
+    startCompare(null, neu);
+    return true;
+  };
+
   const ausZwischenablage = async () => {
     if (loading || url.trim() || !zwischenablageRef.current.moeglich) return;
     const { text, moeglich } = await zwischenablageLesen();
@@ -178,7 +194,10 @@ export default function Vergleich() {
     if (!istInseratsLink(text)) return;
     zwischenablageRef.current.zuletzt = text;
     setUrl(text);
-    toast.success("Link aus der Zwischenablage eingefügt — jetzt „Auslesen“.");
+    // Wunsch Ahmad: nach dem Einfuegen soll er auch loslaufen.
+    if (!vielleichtStarten(text)) {
+      toast.success("Link aus der Zwischenablage eingefügt — jetzt „Auslesen“.");
+    }
   };
 
   const startCompare = async (e, direktUrl) => {
@@ -341,7 +360,11 @@ export default function Vergleich() {
               data-testid="vergleich-url-input"
               required
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                const vorher = url;
+                setUrl(e.target.value);
+                vielleichtStarten(e.target.value, vorher);
+              }}
               onClick={ausZwischenablage}
               onPaste={(e) => {
                 // Einfuegen genuegt: erkennt der Text einen gueltigen
@@ -349,11 +372,10 @@ export default function Vergleich() {
                 // Auslesen sofort — der Knopf bleibt fuers manuelle
                 // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
                 const text = (e.clipboardData?.getData("text") || "").trim();
-                const istInserat = istInseratsLink(text);
-                if (istInserat && !loading) {
+                if (istInseratsLink(text) && !loading) {
                   e.preventDefault();
                   setUrl(text);
-                  startCompare(null, text);
+                  vielleichtStarten(text);
                 }
               }}
               placeholder="Ins Feld klicken — kopierter Link wird eingefügt (Kleinanzeigen, mobile.de, AutoScout24)"

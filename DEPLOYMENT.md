@@ -1958,3 +1958,23 @@ Tabs zu stapeln. Ist kein Browserfenster offen, macht der Browser von sich aus e
 der Schalter da.
 
 Wächter: `src/lib/inseratsLink.test.js`, `src/lib/popup.test.js` („benannter Tab statt eigenem Fenster").
+
+### Automatisch auslesen nach dem Einfügen + Team-Seite ist Chefsache (18.09.2026)
+
+**Auslesen startet jetzt nach jedem Einfügen.** Rückmeldung Ahmad: „automatisch auslesen nach Link
+einfügen klappt irgendwie nicht." Der Start hing bisher am `paste`-Ereignis des Browsers — das kommt
+nicht auf jedem Weg an (Rechtsklick-Menü in manchen Browsern, Ziehen und Ablegen, Einfügen aus der
+Zwischenablage per Klick, Ersetzen eines markierten Texts). Jetzt zählt das Ergebnis im Feld:
+Springt der Inhalt **in einem Rutsch** um mindestens 12 Zeichen auf einen gültigen Inserats-Link
+(`lib/inseratsLink.js`), läuft der Vergleich los. Zeichenweises Tippen löst weiterhin nichts aus,
+ein laufender Abruf wird nicht doppelt gestartet.
+
+**Die Seite „Mitarbeiter / Sucher" schickt Sucher zurück.** Befund aus dem Rollentest: Im Menü sieht
+ein Sucher die Seite nicht, über ein Lesezeichen oder eine alte Adresse kam er trotzdem hin — dann
+liefen drei Chef-Abrufe (`/dealer/sucher`, `/dealer/sucher-plans`, `/dealer/sale-plan`) in 403 und es
+standen rote Fehlermeldungen auf dem Bildschirm. Der Server hat nie Daten herausgegeben
+(`deps.current_chef`); es war eine Anzeige-Sache. Jetzt lädt die Seite für Nicht-Chefs gar nicht
+erst und leitet still auf die eigene Startseite (`/app/vergleich`). „Freigaben" löst dasselbe schon
+länger mit einem Hinweistext — beide Wege bleiben wie sie sind.
+
+Wächter: `backend/tests/test_rollen_sichtbarkeit_20260918.py`, `src/lib/inseratsLink.test.js`.

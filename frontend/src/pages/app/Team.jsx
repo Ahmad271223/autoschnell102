@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { TrendingUp, UserPlus, Info } from "lucide-react";
 import { useFeatures } from "@/lib/features";
+import { useAuth } from "@/context/AuthContext";
+import { startseite } from "@/lib/rollen";
 
 /**
  * Mitarbeiter / Sucher-Übersicht + Weiterverkaufsplan.
@@ -20,6 +22,12 @@ const fmtDatum = (iso) => {
 };
 
 export default function Team() {
+  // Rollentest 18.09.2026: Diese Seite ist Chefsache (der Server lehnt sie
+  // fuer Sucher mit 403 ab). Ueber das Menue kommt ein Sucher nie her —
+  // ueber ein Lesezeichen schon, und dann standen drei rote Fehler auf dem
+  // Bildschirm. Jetzt landet er still auf seiner eigenen Startseite.
+  const { user } = useAuth();
+  const chef = user?.role === "dealer";
   const [sucher, setSucher] = useState([]);
   const [plan, setPlan] = useState(null);
   const [sucherPlans, setSucherPlans] = useState(null);
@@ -29,6 +37,7 @@ export default function Team() {
   // Route antwortet dann mit 503 und haette die ganze Seite leer gelassen).
   const features = useFeatures();
   const load = useCallback(async () => {
+    if (!chef) return;
     try {
       const [s, sp] = await Promise.all([
         api.get("/dealer/sucher"),
@@ -43,7 +52,7 @@ export default function Team() {
       try { const p = await api.get("/dealer/sale-plan"); setPlan(p.data); }
       catch { setPlan(null); }
     }
-  }, [features.marktplatz]);
+  }, [features.marktplatz, chef]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -62,6 +71,8 @@ export default function Team() {
   };
 
   const pct = plan?.quota ? Math.min(100, (plan.used / plan.quota) * 100) : 0;
+
+  if (!chef) return <Navigate to={startseite(user)} replace />;
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-6xl mx-auto" data-testid="team-page">
