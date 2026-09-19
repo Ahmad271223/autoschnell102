@@ -2122,3 +2122,29 @@ Versionierung einschalten (manuell, Ahmad).
    bleiben kostenlos.
 
 Wächter: `backend/tests/test_live_faehig_20260919.py`.
+
+### Inserats-Zwischenspeicher 14 Tage, Vertragsinhaber behaelt seinen Stand (19.09.2026, Wunsch Ahmad)
+
+Der gemeinsame Zwischenspeicher (`listings_cache`) traegt die Inseratsdaten samt **Name, Telefon
+und Anschrift des Verkaeufers** — bei Kleinanzeigen meist Privatpersonen. Er stand auf 90 Tagen,
+damit ein spaeter angefordertes Beweisdokument noch etwas zu dokumentieren hat. Jetzt:
+
+- **14 Tage** (`LISTING_CACHE_TTL_HOURS=336`, vorher 2160/1440 — im Router, im Cleanup, in
+  docker-compose.yml und .env.example stand die Zahl **verschieden**), geloescht spaetestens
+  **21 Tage** nach dem Abruf (`INSERATSCACHE_MAX_TAGE`, 14 + 7 Tage Karenz).
+- **Wer einen Kaufvertrag macht, behaelt den Stand bei sich:** `POST /contracts` friert den ROHEN
+  Inseratsstand aus dem Zwischenspeicher am Vertrag ein (`generated_pdfs.inserat_stand`:
+  cache_key, data, fetched_at, source, item_id, url). Bewusst nicht `vehicles.data` — die darf der
+  Haendler bearbeiten, ein Beweis zeigt nur das Inserat.
+- `POST /beweise/anfordern` greift darauf zurueck, wenn der Zwischenspeicher abgelaufen ist —
+  **nur aus dem eigenen Bereich** (`_vertrag_bereich`: Chef = Firma, Sucher = eigene Vertraege),
+  juengster Vertrag zuerst. Wer keinen Vertrag hat, bekommt wie bisher "bitte noch einmal
+  vergleichen".
+- Datenschutzerklaerung (Abschnitt 5) nachgezogen: "max. 21 Tage; zu einem Kaufvertrag gehoerende
+  Inseratsdaten so lange wie der Vertrag".
+- Nebenwirkung, gewollt: Nach 14 Tagen kostet derselbe Link wieder einen Anbieter-Abruf (vorher
+  bis zu 90 Tage gratis aus dem Speicher). Bei 5 % Wiederholungsrate faellt das kaum ins Gewicht;
+  wer es anders will, setzt `LISTING_CACHE_TTL_HOURS` hoch — dann aber die Datenschutzerklaerung
+  und `INSERATSCACHE_MAX_TAGE` mitziehen.
+
+Wächter: `backend/tests/test_inseratsspeicher_14_tage_20260919.py`.

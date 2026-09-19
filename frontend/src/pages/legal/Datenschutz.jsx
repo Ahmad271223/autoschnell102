@@ -176,7 +176,7 @@ export default function Datenschutz() {
         <li>Zugangs- und Abo-Anfragen (erledigt oder abgelehnt): 60 Tage</li>
         <li>Fehlerprotokolle: max. 60 Tage</li>
         <li>Marktplatz-Anfragen: 60 Tage nach Abschluss</li>
-        <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 60 Tage</li>
+        <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 21 Tage; zu einem Kaufvertrag gehörende Inseratsdaten so lange wie der Vertrag</li>
         <li>Backups: täglich; auf unseren Servern 14 Tage, zusätzlich
             verschlüsselt außer Haus die letzten 14 Sicherungen</li>
       </ul>

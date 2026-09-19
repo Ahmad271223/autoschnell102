@@ -694,6 +694,28 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
+    # Wunsch Ahmad 19.09.2026: Der Inserats-Zwischenspeicher lebt nur noch
+    # 14 Tage — wer einen Vertrag zu dem Wagen macht, "behaelt es bei sich":
+    # der ROHE Inseratsstand aus dem Zwischenspeicher wird am Vertrag
+    # eingefroren (nicht die vom Haendler bearbeitbaren Fahrzeugdaten). Das
+    # Beweisdokument laesst sich damit auch spaeter noch anfordern, ohne dass
+    # die Verkaeuferdaten fuer alle anderen im gemeinsamen Speicher bleiben.
+    inserat_stand = None
+    try:
+        import beweis_service as _bs
+        _schluessel = _bs.inserat_schluessel(v)
+        if _schluessel:
+            _eintrag = await db.listings_cache.find_one(
+                {"cache_key": _schluessel},
+                {"_id": 0, "data": 1, "fetched_at": 1, "source": 1, "item_id": 1, "url": 1})
+            if _eintrag and _eintrag.get("data"):
+                inserat_stand = {"cache_key": _schluessel, "data": _eintrag["data"],
+                                 "fetched_at": _eintrag.get("fetched_at"),
+                                 "source": _eintrag.get("source"),
+                                 "item_id": _eintrag.get("item_id"),
+                                 "url": _eintrag.get("url")}
+    except Exception as exc:  # noqa: BLE001 — der Vertrag darf daran nie scheitern
+        log.warning("Vertrag %s: Inseratsstand nicht eingefroren: %s", body.vehicle_id, exc)
     # Apply dealer defaults if the form didn't override them. Both
     # special_agreements and agb_text now support a per-contract override
     # (otherwise we still fall back to the dealer's saved defaults).
@@ -758,6 +780,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         # E-Mail angehaengt bzw. fuer WhatsApp heruntergeladen.
         "pdf_digital_b64": pdf_digital_b64,
         "vehicle_image_urls": vehicle_image_urls,
+        "inserat_stand": inserat_stand,
         "filename": f"Kaufvertrag_{vehicle.get('make_label','')}_{vehicle.get('model_label','')}_{datetime.now().strftime('%Y%m%d')}.pdf",
         "send_status": [],
         "status": "erstellt",

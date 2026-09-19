@@ -376,11 +376,12 @@ def test_35_abgelaufener_inseratscache_wird_geloescht(welt):
 def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeypatch):
     """Nachbesserung #35: Eintraege aus der Zeit vor ce63a99 tragen
     expires_at = Abruf + 1 Jahr. Massgeblich ist der Abruf plus TTL plus
-    Karenz, hoechstens aber 90 Tage (Datenschutzerklaerung: "max. 90 Tage");
+    Karenz, hoechstens aber INSERATSCACHE_MAX_TAGE (seit 19.09.2026: 21 Tage,
+    Datenschutzerklaerung "max. 21 Tage");
     Lease und Altbestand-Beweis schuetzen weiterhin."""
     import cleanup_service as CS
     w = welt
-    monkeypatch.setattr(CS, "LISTING_CACHE_TTL_HOURS", 2160)
+    monkeypatch.setattr(CS, "LISTING_CACHE_TTL_HOURS", 336)
     jetzt = _jetzt()
     tag = timedelta(days=1)
     daten = {"seller_name": "Max Privat", "seller_phone": "0170 1234567"}
@@ -393,12 +394,12 @@ def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeyp
 
     async def lauf():
         await w.db.listings_cache.insert_many([
-            eintrag("alt", 120),                                          # weg
-            eintrag("jung", 30),                                          # bleibt
-            eintrag("ueber90", 95),                                       # weg: max. 90 Tage
-            eintrag("grenze", 89),                                        # bleibt
-            eintrag("lease", 120, fetching_until=jetzt + timedelta(seconds=60)),
-            eintrag("beweis", 120),
+            eintrag("alt", 40),                                           # weg
+            eintrag("jung", 10),                                          # bleibt
+            eintrag("ueber90", 25),                                       # weg: max. 21 Tage
+            eintrag("grenze", 20),                                        # bleibt
+            eintrag("lease", 40, fetching_until=jetzt + timedelta(seconds=60)),
+            eintrag("beweis", 40),
         ])
         await w.db.inserat_beweise.insert_one(
             {"id": "b35b", "cache_key": "kleinanzeigen:35bbeweis", "status": "offen",
@@ -410,11 +411,11 @@ def test_35b_altbestand_mit_jahresablauf_wird_nach_abruf_geloescht(welt, monkeyp
     n, rest = w.run(lauf())
     assert rest == {"35bjung", "35bgrenze", "35blease", "35bbeweis"}, rest
     assert n == 2
-    # Auch mit laengerer TTL bleibt es bei hoechstens 90 Tagen.
+    # Auch mit laengerer TTL bleibt es bei hoechstens 21 Tagen.
     monkeypatch.setattr(CS, "LISTING_CACHE_TTL_HOURS", 24 * 365)
 
     async def lauf_lang():
-        await w.db.listings_cache.insert_one(eintrag("lang", 91))
+        await w.db.listings_cache.insert_one(eintrag("lang", 22))
         await CS.inseratscache_rotieren(w.db, jetzt)
         return await w.db.listings_cache.count_documents({"item_id": "35blang"})
 

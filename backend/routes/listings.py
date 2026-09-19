@@ -21,7 +21,11 @@ from typing import Annotated, Any, Dict, Optional
 # Default 1 Jahr" gelten nicht mehr. cleanup_service.inseratscache_rotieren
 # loescht den Eintrag nach expires_at plus LISTING_CACHE_KARENZ_TAGE,
 # Altbestand spaetestens nach fetched_at + dieser TTL plus Karenz.
-LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "2160"))
+# Wunsch Ahmad 19.09.2026: 14 Tage (vorher 90 — Verkaeuferdaten lagen so lange
+# im gemeinsamen Speicher). Wer einen Vertrag macht, behaelt den Stand am
+# Vertrag (routes/contracts: inserat_stand). Derselbe Wert in cleanup_service,
+# docker-compose.yml und .env.example — test_inseratsspeicher_14_tage haelt sie zusammen.
+LISTING_CACHE_TTL_HOURS = int(os.environ.get("LISTING_CACHE_TTL_HOURS", "336"))
 # Client-Einreichungen (Browser-HTML) sind nur Momentaufnahmen: kurze TTL in
 # der Quarantaene, und auch nach unabhaengiger Bestaetigung deutlich kuerzer
 # als Server-Abrufe.

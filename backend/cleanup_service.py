@@ -1155,12 +1155,12 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
 LISTING_CACHE_KARENZ_TAGE = zahl_env("LISTING_CACHE_KARENZ_TAGE", 7, unten=0)
 # Gleicher Wert und Default wie routes/listings.py (dort Schreib-TTL); hier
 # direkt aus der Umgebung, um den Router nicht in den Cleanup zu importieren.
-LISTING_CACHE_TTL_HOURS = zahl_env("LISTING_CACHE_TTL_HOURS", 1440, unten=1)
-# Nachpruefung 13.09.2026: Die Datenschutzerklaerung sagt "Inserats-Cache
-# max. 90 Tage". TTL (90 Tage) plus Karenz (7 Tage) waeren 97 — deshalb eine
-# harte Grenze ab dem Abruf, unabhaengig von TTL und Karenz. Wer sie aendert,
-# muss frontend/src/pages/legal/Datenschutz.jsx (Abschnitt 5) nachziehen.
-INSERATSCACHE_MAX_TAGE = 90
+LISTING_CACHE_TTL_HOURS = zahl_env("LISTING_CACHE_TTL_HOURS", 336, unten=1)
+# Nachpruefung 13.09.2026: harte Grenze ab dem Abruf, unabhaengig von TTL und
+# Karenz. Wunsch Ahmad 19.09.2026: 14 Tage TTL + 7 Tage Karenz = 21 Tage. Wer
+# sie aendert, muss frontend/src/pages/legal/Datenschutz.jsx (Abschnitt 5)
+# nachziehen ("max. 21 Tage").
+INSERATSCACHE_MAX_TAGE = 21
 
 
 async def inseratscache_rotieren(db, now: datetime,

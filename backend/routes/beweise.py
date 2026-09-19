@@ -30,6 +30,21 @@ router = APIRouter()
 _NICHT_GEFUNDEN = "Beweisdokument nicht gefunden"
 
 
+async def _stand_aus_eigenem_vertrag(user: dict, cache_key: str) -> Optional[dict]:
+    """Der am EIGENEN Kaufvertrag eingefrorene Inseratsstand (19.09.2026).
+
+    Nur aus dem eigenen Bereich (Chef: Firma, Sucher: eigene Vertraege) —
+    der Stand eines fremden Vertrags ist tabu. Genommen wird der juengste."""
+    from routes.contracts import _vertrag_bereich
+    doc = await db.generated_pdfs.find_one(
+        {"inserat_stand.cache_key": cache_key, **_vertrag_bereich(user)},
+        {"_id": 0, "inserat_stand": 1}, sort=[("created_at", -1)])
+    stand = (doc or {}).get("inserat_stand") or None
+    if not stand or not stand.get("data"):
+        return None
+    return stand
+
+
 def _ist_neuer(abgerufen_am, stand_am) -> bool:
     """Wurde das Inserat NACH dem Vergleich dieses Fahrzeugs neu abgerufen?
     (Befund 154, 19.09.2026 — beide Zeitangaben duerfen fehlen.)"""
@@ -218,6 +233,13 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         {"cache_key": schluessel},
         {"_id": 0, "source": 1, "item_id": 1, "url": 1, "data": 1, "fetched_at": 1})
     daten = (eintrag or {}).get("data") or None
+    if not daten:
+        # Wunsch Ahmad 19.09.2026: Der gemeinsame Zwischenspeicher lebt nur
+        # 14 Tage. Wer einen Kaufvertrag zu dem Wagen gemacht hat, behaelt
+        # den Inseratsstand AN SEINEM Vertrag (contracts: inserat_stand) —
+        # damit geht das Beweisdokument auch danach noch, und nur fuer ihn.
+        eintrag = await _stand_aus_eigenem_vertrag(user, schluessel) or eintrag
+        daten = (eintrag or {}).get("data") or None
     if not daten:
         raise HTTPException(404, "Zu diesem Inserat liegen keine Inseratsdaten mehr "
                                  "vor — bitte den Link noch einmal vergleichen.")
