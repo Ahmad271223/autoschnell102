@@ -188,6 +188,12 @@ services:
       - BACKUP_S3_SECRET_KEY=${BACKUP_S3_SECRET_KEY:-}
       - BACKUP_S3_REGION=${BACKUP_S3_REGION:-}
       # Snapshot-Feinjustierung der Sicherung (Standardwerte im Skript).
+      # BACKUP_SNAPSHOT_PFLICHT wird in backup_bewertung.py gelesen (nicht in
+      # backup_mongo.py) und fehlte deshalb auch nach dem 19.09.-Fix: der
+      # dokumentierte Schalter blieb im Container wirkungslos. Bei einer
+      # MONGO_URL mit replicaSet=... erkennt snapshot_pflicht() die Pflicht
+      # ohnehin selbst — der Schalter ist fuer alle anderen Faelle.
+      - BACKUP_SNAPSHOT_PFLICHT=${BACKUP_SNAPSHOT_PFLICHT:-}
       - BACKUP_SNAPSHOT_VERSUCHE=${BACKUP_SNAPSHOT_VERSUCHE:-}
       - BACKUP_SNAPSHOT_PAUSE_S=${BACKUP_SNAPSHOT_PAUSE_S:-}
       # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-

@@ -2203,4 +2203,18 @@ Super-Admin ist bereits erzwungen** — nicht nur empfohlen. `routes/auth.mfa_pf
 die Anmeldung in Produktion ohne zweiten Faktor ab, und `/api/ready` meldet ein Konto ohne MFA als
 Fehler. Nur `MFA_PFLICHT=false` (Testumgebungen) schaltet das ab.
 
+**Nachtrag 20.09.2026 (zwei berechtigte Einwände):**
+
+- `BACKUP_SNAPSHOT_PFLICHT` fehlte **weiterhin** in `docker-compose.yml` — die Variable wird nicht
+  in `backup_mongo.py` gelesen, sondern im importierten `backup_bewertung.py`, und entging damit
+  auch dem neuen Test. Der dokumentierte Schalter war im Docker-Betrieb wirkungslos. Jetzt
+  durchgereicht und in `.env.example` beschrieben. (Praktische Auswirkung war gering: bei einer
+  `MONGO_URL` mit `replicaSet=…` erkennt `snapshot_pflicht()` die Pflicht ohnehin selbst.)
+- Der Wächter-Test war zu schwach: Er las nur `backup_mongo.py` und fragte lediglich, ob der Name
+  **irgendwo** in der Compose-Datei vorkommt — ein Kommentar hätte gereicht. Jetzt liest er die
+  ganze Sicherungs-Kette (`backup_bewertung.py`, `backup_service.py`, `backup_mongo.py`,
+  `restore_mongo.py`, `offsite_pruefen.py`) und wertet den `environment:`-Block des
+  **backend**-Dienstes aus dem YAML-Baum aus. Gegenprobe gemacht: Zeile entfernt, Kommentar
+  stehen gelassen → Test wird rot und nennt die Variable.
+
 Wächter: `backend/tests/test_haertung_20260919.py`.

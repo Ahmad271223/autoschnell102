@@ -85,25 +85,58 @@ def test_06_mfa_pflicht_gilt_schon_bei_der_anmeldung():
     assert 'APP_ENV' in regel and 'MFA_PFLICHT' in regel
 
 
+def _compose_umgebung(dienst="backend"):
+    """Die Namen, die dieser Dienst wirklich als Umgebung bekommt.
+
+    Bewusst ueber den YAML-Baum statt per Textsuche: ein Name in einem
+    Kommentar oder bei einem ANDEREN Dienst zaehlt nicht."""
+    import yaml
+    daten = yaml.safe_load((BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8"))
+    umgebung = ((daten.get("services") or {}).get(dienst) or {}).get("environment") or []
+    if isinstance(umgebung, dict):
+        return set(umgebung)
+    return {str(z).split("=", 1)[0].strip() for z in umgebung}
+
+
 def test_07_alle_gelesenen_umgebungsvariablen_erreichen_den_container():
     """Befund 19.09.2026 (live): BACKUP_S3_ACCESS_KEY/-SECRET_KEY/-REGION
     standen in der .env, fehlten aber in docker-compose.yml — der eigene
     Sicherungs-Schluessel erreichte den Container nie, /api/ready meldete
     weiter "false". Dasselbe Muster gab es frueher bei RESEND_API_KEY.
 
-    Diese Probe zieht ALLE Namen, die die Sicherung liest, aus dem Quelltext
-    und verlangt sie in der Compose-Datei — eine neue Variable faellt damit
-    beim naechsten Mal sofort auf."""
+    Nachpruefung 20.09.2026 (zwei berechtigte Einwaende): Die erste Fassung
+    dieses Tests las NUR backup_mongo.py — BACKUP_SNAPSHOT_PFLICHT wird aber
+    im importierten backup_bewertung.py gelesen und entging ihm deshalb
+    (die Variable fehlte tatsaechlich weiter). Und sie fragte nur, ob der
+    Name IRGENDWO in der Datei vorkommt: ein blosser Kommentar haette
+    gereicht. Jetzt: die ganze Sicherungs-Kette als Quelle, und geprueft
+    wird der `environment:`-Block des backend-Dienstes aus dem YAML-Baum."""
     import re
-    quelle = (BACKEND / "scripts" / "backup_mongo.py").read_text(encoding="utf-8")
-    compose = (BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8")
-    gelesen = set(re.findall(r'os\.environ(?:\.get)?[\(\[]"([A-Z0-9_]+)"', quelle))
-    # Nur die Sicherungs-Schalter; S3_*/MONGO_* stehen ohnehin laengst drin,
-    # BACKUP_DIR/-HOUR setzt die Compose-Datei selbst.
+    dateien = ["backup_bewertung.py", "backup_service.py",
+               "scripts/backup_mongo.py", "scripts/restore_mongo.py",
+               "scripts/offsite_pruefen.py"]
+    gelesen = set()
+    for datei in dateien:
+        quelle = (BACKEND / datei).read_text(encoding="utf-8")
+        gelesen |= set(re.findall(r'os\.environ(?:\.get)?[\(\[]"([A-Z0-9_]+)"', quelle))
     # BACKUP_DIR/-HOUR setzt die Compose-Datei selbst; die beiden *_DIR sind
     # laut backup_mongo.py ausdruecklich "nur fuer Tests".
     pflicht = ({v for v in gelesen if v.startswith("BACKUP_")}
                - {"BACKUP_DIR", "BACKUP_HOUR",
                   "BACKUP_UPLOADS_DIR", "BACKUP_LOCAL_STORAGE_DIR"})
-    fehlend = sorted(v for v in pflicht if v not in compose)
+    assert "BACKUP_SNAPSHOT_PFLICHT" in pflicht, (
+        "die Quelle mit dem Schalter wird nicht mehr gelesen — Dateiliste pruefen")
+    fehlend = sorted(pflicht - _compose_umgebung())
     assert not fehlend, ("diese Variablen erreichen den Container nicht: %s" % fehlend)
+
+
+def test_08_kommentar_allein_zaehlt_nicht():
+    """Gegenprobe zum Einwand: Der Name muss im environment-Block stehen,
+    nicht irgendwo in der Datei."""
+    umgebung = _compose_umgebung()
+    text = (BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    # Im Kommentar erwaehnt, aber NICHT durchgereicht (Beispiel aus der Datei)
+    assert "MONGO_EXTRA_ARGS" in text and "MONGO_EXTRA_ARGS" not in umgebung, (
+        "Beispiel veraltet — ein nur kommentierter Name muss durchfallen")
+    assert "BACKUP_SNAPSHOT_PFLICHT" in umgebung
+    assert "JWT_SECRET" in umgebung and len(umgebung) > 40
