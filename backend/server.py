@@ -472,6 +472,18 @@ async def readiness_check(response: Response):
             _ziel.append("backup: kein vollstaendiges Backup in den letzten 26 h")
         elif offsite_noetig and not b.get("offsite"):
             _ziel.append("backup: letzte Sicherung ohne Offsite-Kopie")
+        # 19.09.2026: Arbeitet die Sicherung mit DENSELBEN Zugangsdaten wie der
+        # Datei-Speicher, kommt ein gestohlener Schluessel an beides — an die
+        # Daten UND an ihre Sicherungen. Ein eigener, nur schreibender
+        # Schluessel trennt das. Nur ein Hinweis, kein Startverbot.
+        if offsite_noetig and not os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip():
+            info["backup_eigene_zugangsdaten"] = False
+            warnungen.append(
+                "backup: Sicherung nutzt die Zugangsdaten des Datei-Speichers "
+                "(BACKUP_S3_ACCESS_KEY/-SECRET_KEY setzen — ein gestohlener "
+                "Schluessel kaeme sonst auch an die Sicherungen)")
+        elif offsite_noetig:
+            info["backup_eigene_zugangsdaten"] = True
     except Exception as exc:
         warnungen.append(f"backup: {exc}")
     try:

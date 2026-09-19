@@ -2181,3 +2181,26 @@ Stand). Neu ist, was danach passiert:
 
 Wächter: `backend/tests/test_abholung_neuer_vertrag_20260919.py`; Live-Probe (17 Prüfungen) in
 `scratchpad/abholung_probe.py`.
+
+### Härtung 19.09.2026: Anmelde-Geheimnis und Sicherungs-Zugangsdaten
+
+Zwei Punkte aus der Sicherheits-Durchsicht, die der Code bisher nicht selbst geprüft hat:
+
+- **`JWT_SECRET` muss mindestens 32 Zeichen haben.** Es unterschreibt jede Anmeldung — wer es
+  errät, baut sich Sitzungen für jedes Konto. Geprüft wurde bisher nur, DASS es gesetzt ist.
+  Jetzt: in Produktion (`APP_ENV=production`) startet das Backend mit einem kürzeren Wert **nicht
+  mehr**, lokal gibt es eine Warnung. Erzeugen mit `openssl rand -hex 32` (64 Zeichen), auf allen
+  Servern derselbe Wert — **nach dem Wechsel müssen sich alle neu anmelden** (bestehende Sitzungen
+  werden ungültig), deshalb in einer ruhigen Minute wechseln.
+- **Eigene Zugangsdaten für die Sicherung.** Nutzt die Sicherung dieselben S3-Schlüssel wie der
+  Datei-Speicher, kommt ein gestohlener Schlüssel an die Daten *und* an ihre Sicherungen.
+  `/api/ready` meldet jetzt eine Warnung, wenn `BACKUP_S3_ACCESS_KEY` fehlt, und führt
+  `backup_eigene_zugangsdaten` als Feld. Ein nur schreibender Schlüssel für den Sicherungs-Bucket
+  genügt.
+
+Zur Einordnung, weil beides in der Sicherheitsliste stand: Die **Zwei-Faktor-Pflicht für den
+Super-Admin ist bereits erzwungen** — nicht nur empfohlen. `routes/auth.mfa_pflicht_aktiv()` weist
+die Anmeldung in Produktion ohne zweiten Faktor ab, und `/api/ready` meldet ein Konto ohne MFA als
+Fehler. Nur `MFA_PFLICHT=false` (Testumgebungen) schaltet das ab.
+
+Wächter: `backend/tests/test_haertung_20260919.py`.

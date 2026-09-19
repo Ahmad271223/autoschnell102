@@ -42,6 +42,24 @@ if not _jwt_secret_env or _jwt_secret_env == "dev-secret":
         RuntimeWarning, stacklevel=1,
     )
 JWT_SECRET = _jwt_secret_env
+# 19.09.2026: Bisher wurde nur geprueft, DASS ein Secret gesetzt ist — ein
+# kurzes ("geheim123") war damit erlaubt. Es unterschreibt jede Anmeldung:
+# wer es erraet, baut sich Sitzungen fuer jedes Konto. HS256 rechnet intern
+# mit 32 Byte; kuerzer als 32 ZEICHEN ist deutlich zu wenig. In Produktion
+# startet das Backend dann gar nicht erst, sonst gibt es eine Warnung.
+JWT_SECRET_MIN_ZEICHEN = 32
+if len(JWT_SECRET) < JWT_SECRET_MIN_ZEICHEN:
+    _umgebung = os.environ.get("APP_ENV", "").strip().lower()
+    _text = (f"JWT_SECRET ist zu kurz ({len(JWT_SECRET)} Zeichen, mindestens "
+             f"{JWT_SECRET_MIN_ZEICHEN}). Es unterschreibt jede Anmeldung — "
+             "ein kurzes Geheimnis laesst sich durchprobieren. Neues erzeugen "
+             "mit: openssl rand -hex 32 (ergibt 64 Zeichen) und auf ALLEN "
+             "Servern dasselbe setzen. Achtung: nach dem Wechsel muessen sich "
+             "alle neu anmelden.")
+    if _umgebung == "production":
+        raise SystemExit(_text)
+    import warnings as _warnings
+    _warnings.warn(_text, RuntimeWarning, stacklevel=1)
 JWT_ALG = "HS256"
 TOKEN_TTL_DAYS = 7
 
