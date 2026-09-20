@@ -104,10 +104,41 @@ def _s3_wirklich_pruefen(bucket: str):
                 "Zugangsdaten und Netz pruefen.")
 
 
+#: Text, den env_erzeugen.py in jede Zeile schreibt, die noch ausgefuellt
+#: werden muss. Nachpruefung 20.09.2026, Nr. 24/25.
+#: Bewusst nur zwei sehr eindeutige Marken. "DEIN-" oder "XXXX" waeren
+#: zu unscharf: ein zufaellig erzeugtes Geheimnis (base64) koennte sie
+#: rein zufaellig enthalten und den Produktionsstart blockieren.
+PLATZHALTER = ("BITTE-AUSFUELLEN", "CHANGEME")
+
+
+def ist_platzhalter(wert: str) -> bool:
+    """Steht hier noch der Text aus der Vorlage statt eines echten Werts?
+
+    Nachpruefung 20.09.2026, Nr. 24/25: `env_erzeugen.py` schreibt
+    `RESEND_API_KEY=BITTE-AUSFUELLEN-re_...` und
+    `APIFY_TOKEN=BITTE-AUSFUELLEN-oder-leer-lassen`. Die Pruefung fragte nur
+    "ist ein Wert da?" — der Platzhalter ist nicht leer, also galt E-Mail
+    und Fahrzeugsuche als eingerichtet. Produktion startete, und der Fehler
+    fiel erst beim ersten echten Vertragsversand auf, also beim Kunden."""
+    gross = (wert or "").strip().upper()
+    return bool(gross) and any(p in gross for p in PLATZHALTER)
+
+
 def pruefe_produktion(log) -> None:
     ist_prod = os.environ.get("APP_ENV", "").strip().lower() == "production"
     fehler = []
     warnungen = []
+    # Nr. 24/25: JEDE Einstellung, die noch den Vorlagentext traegt — nicht
+    # nur die beiden aufgefallenen. Ein Platzhalter ist schlimmer als ein
+    # leerer Wert: leer faellt auf, Platzhalter besteht jede Anwesenheits-
+    # pruefung und scheitert erst im Betrieb.
+    _offen = sorted(n for n, w in os.environ.items() if ist_platzhalter(w))
+    if _offen:
+        (fehler if ist_prod else warnungen).append(
+            "Noch nicht ausgefuellt (der Text aus der .env-Vorlage steht "
+            "weiterhin drin): " + ", ".join(_offen) +
+            ". Einen Wert eintragen oder die Zeile leeren.")
 
     jwt = os.environ.get("JWT_SECRET", "").strip()
     if jwt in _VERBOTENE_SECRETS or len(jwt) < 32:
@@ -207,11 +238,23 @@ def pruefe_produktion(log) -> None:
             fehler.append("TRUSTED_PROXIES_NUR_LISTE=true, aber TRUSTED_PROXIES enthaelt kein "
                           "10.x-Netz — der Load Balancer (privates Hetzner-Netz) wuerde als "
                           "Besucher gezaehlt und alle Nutzer teilten sich einen Zaehler.")
-    if ist_prod and os.environ.get("BACKUP_S3_BUCKET", "").strip() \
-            and not os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip():
+    # Nachpruefung 20.09.2026, Nr. 45/46: hier wurde NUR "Access Key fehlt"
+    # geprueft. War genau einer der beiden Werte gesetzt, entstand ein
+    # gemischtes Zugangspaar (Schluessel der Sicherung + Geheimnis des
+    # Datei-Speichers) — jede Sicherung scheiterte dann mit einem
+    # Signaturfehler, und der Startcheck sagte nichts dazu.
+    _b_key = os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip()
+    _b_secret = os.environ.get("BACKUP_S3_SECRET_KEY", "").strip()
+    if bool(_b_key) != bool(_b_secret):
+        fehler.append(
+            "BACKUP_S3_" + ("SECRET_KEY" if _b_key else "ACCESS_KEY") + " fehlt, "
+            "der andere Wert ist gesetzt. Schluessel und Geheimnis gehoeren "
+            "zusammen — sonst mischt die Sicherung den einen mit dem Geheimnis "
+            "des Datei-Speichers und schlaegt bei jedem Zugriff fehl.")
+    elif ist_prod and os.environ.get("BACKUP_S3_BUCKET", "").strip() and not _b_key:
         warnungen.append("BACKUP_S3_ACCESS_KEY/SECRET_KEY nicht gesetzt — die Offsite-Kopie nutzt "
-                         "die Zugangsdaten des Datei-Speichers (Empfehlung: eigener, nur "
-                         "schreibender Schluessel fuer den Sicherungs-Bucket).")
+                         "die Zugangsdaten des Datei-Speichers (Empfehlung: eigener Schluessel "
+                         "mit Object Read & Write NUR auf den Sicherungs-Bucket).")
 
     cors = os.environ.get("CORS_ORIGINS", "").strip()
     if not cors or "localhost" in cors or cors == "*":

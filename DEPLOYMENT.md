@@ -1073,11 +1073,20 @@ authentifizierte Endpunkte. Fehlgeschlagene Löschungen landen in
 ### Optional: Ein-Knoten-Replica-Set (Transaktionen, konsistente Backups)
 ```bash
 openssl rand -base64 756 > deploy/mongo-keyfile && chmod 400 deploy/mongo-keyfile
-# docker-compose.yml: command ["mongod","--auth","--replSet","rs0","--keyFile","/etc/mongo-keyfile"]
-#   + Volume ./deploy/mongo-keyfile:/etc/mongo-keyfile:ro
+# Volume in docker-compose.yml: ./deploy/mongo-keyfile:/etc/mongo-keyfile:ro
+# Und den Schalter in die .env — OHNE ihn startet mongod ohne Replica Set
+# und rs.initiate() scheitert mit "not running with --replSet"
+# (Nachpruefung 20.09.2026, Nr. 28 — er stand nur als Kommentar in der
+# Compose-Datei, nicht in .env.example und nicht im Generator):
+sh deploy/env_setzen.sh 'MONGO_EXTRA_ARGS=--replSet rs0 --keyFile /etc/mongo-keyfile'
+docker compose up -d mongo
 docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval "rs.initiate()"
+# Gegenprobe (muss "Replica Set 'rs0'" und einen PRIMARY zeigen):
+docker compose exec backend python scripts/replikat_pruefen.py
 ```
-Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`).
+Das Backup nutzt dann automatisch Snapshot-Sessions (`konsistenz: snapshot`) —
+ohne jede Unterbrechung des Betriebs. `deploy/rollout.sh` prueft das Replikat
+ab jetzt selbst, sobald `replicaSet=` in der `.env` steht (Nr. 29).
 
 ### Staging-Abnahme vor dem Live-Gang (Checkliste)
 1. Denselben Stack (`docker compose up -d --build`) auf einem Staging-Server

@@ -64,6 +64,28 @@ def vorlage_lesen(pfad: str) -> dict:
     return werte
 
 
+def _domain_saeubern(roh: str) -> str:
+    """Schema und Schraegstriche entfernen.
+
+    Nachpruefung 20.09.2026, Nr. 26: hier stand
+    `.lstrip("https://").lstrip("http://")`. `lstrip` entfernt keine
+    Zeichenfolge, sondern JEDES Zeichen der Menge {h,t,p,s,:,/} vom Anfang —
+    aus "shop.example.de" wurde "op.example.de", aus "test.example.de"
+    "est.example.de". Jetzt wird das Schema als echtes Praefix entfernt."""
+    d = roh.strip().lower()
+    for schema in ("https://", "http://"):
+        if d.startswith(schema):
+            d = d[len(schema):]
+            break
+    return d.split("/", 1)[0].strip()
+
+
+def _proxy_vorlage(hinter_lb: bool) -> str:
+    """nginx-Betriebsart (Nr. 27) — Einzelserver ist der Standard."""
+    return ("hinter-loadbalancer.conf.template" if hinter_lb
+            else "default.conf.template")
+
+
 def main() -> int:
     # Immer UTF-8 ausgeben: unter Windows schreibt Python sonst in der
     # Systemkodierung, und die erzeugte .env waere auf dem Linux-Server kaputt.
@@ -80,11 +102,20 @@ def main() -> int:
                          "z.B. 10.0.0.2")
     ap.add_argument("--vorlage", default="",
                     help="bestehende .env, deren Werte uebernommen werden")
+    # Nachpruefung 20.09.2026, Nr. 27: die Betriebsart wurde stillschweigend
+    # auf "hinter dem Load Balancer" gesetzt. Diese nginx-Vorlage verwirft
+    # direkte Zugriffe mit 444 — auf einem normalen Einzelserver war die
+    # Seite damit von aussen nicht erreichbar. Jetzt ist der Einzelserver
+    # der Standard und der Load-Balancer-Betrieb eine bewusste Angabe.
+    ap.add_argument("--hinter-loadbalancer", action="store_true",
+                    help="Server steht hinter einem Load Balancer, der die "
+                         "Verschluesselung beendet (nginx nur auf Port 80). "
+                         "Ohne diese Angabe: Einzelserver, nginx macht TLS selbst.")
     ap.add_argument("--mail-von", default="Auto Schnellkauf <vertrag@auto-schnellkauf.de>")
     ap.add_argument("--mail-name", default="Auto Schnellkauf")
     args = ap.parse_args()
 
-    domain = args.domain.strip().lower().lstrip("https://").lstrip("http://").rstrip("/")
+    domain = _domain_saeubern(args.domain)
     if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", domain):
         print(f"FEHLER: '{args.domain}' sieht nicht wie eine Domain aus", file=sys.stderr)
         return 1
@@ -117,7 +148,7 @@ def main() -> int:
         f"TRUSTED_PROXIES={alt.get('TRUSTED_PROXIES') or '127.0.0.1,172.16.0.0/12,10.0.0.4/32'}",
         "# Betriebsart des Webservers. Hinter einem Load Balancer terminiert",
         "# dieser die Verschluesselung; nginx laeuft dann nur auf Port 80.",
-        f"PROXY_TEMPLATE={alt.get('PROXY_TEMPLATE') or 'hinter-loadbalancer.conf.template'}",
+        f"PROXY_TEMPLATE={alt.get('PROXY_TEMPLATE') or _proxy_vorlage(args.hinter_loadbalancer)}",
         f"PRIVATES_NETZ={alt.get('PRIVATES_NETZ') or '10.0.0.0/16'}",
         "",
         "# ---- Adressen ----",

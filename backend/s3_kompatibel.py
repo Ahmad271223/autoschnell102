@@ -80,6 +80,19 @@ def s3_client(*, endpoint: str = None, bucket_unbenutzt: str = None,
               region: str = None):
     """boto3-Client mit den passenden Eigenheiten des jeweiligen Anbieters."""
     import boto3
+    # Nachpruefung 20.09.2026, Nr. 46: Schluessel und Geheimnis fielen
+    # EINZELN auf die S3_*-Werte zurueck. War nur einer der beiden gesetzt
+    # (z. B. BACKUP_S3_ACCESS_KEY ohne BACKUP_S3_SECRET_KEY), entstand ein
+    # GEMISCHTES Paar: Schluessel der Sicherung, Geheimnis des Datei-
+    # Speichers. Jeder Zugriff scheiterte dann mit einem Signaturfehler, und
+    # niemand sah, warum. Die beiden gehoeren zusammen — entweder beide oder
+    # keiner.
+    if bool(access_key) != bool(secret_key):
+        fehlt = "Geheimnis" if access_key else "Schluessel"
+        raise ValueError(
+            f"S3-Zugangsdaten unvollstaendig: das {fehlt} fehlt. Schluessel und "
+            f"Geheimnis muessen zusammen angegeben werden — sonst entstuende "
+            f"ein gemischtes Paar aus zwei verschiedenen Zugaengen.")
     endpoint = endpoint if endpoint is not None else os.environ.get("S3_ENDPOINT", "")
     kwargs = {
         "aws_access_key_id": access_key or os.environ.get("S3_ACCESS_KEY"),

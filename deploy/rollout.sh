@@ -260,6 +260,25 @@ until docker compose exec -T proxy sh -c "wget -q -O /dev/null --header='Host: $
 done
 echo "   Backend bereit, Oberflaeche antwortet."
 
+# Nachpruefung 20.09.2026, Nr. 29: /api/ready beweist nur, dass die
+# Datenbank ERREICHBAR ist — nicht, dass die Daten wirklich auf beide
+# Server repliziert werden. Nennt MONGO_URL ein Replica Set, wird das
+# jetzt ausdruecklich geprueft, BEVOR der Server zurueck in die Rotation
+# geht. Sonst faellt ein kaputtes Replikat erst auf, wenn ein Server
+# ausfaellt — also genau dann, wenn die Kopie gebraucht wird.
+if grep -qi 'replicaSet=' .env 2>/dev/null; then
+    echo "   Replica Set wird geprueft (PRIMARY, SECONDARY, Rueckstand) ..."
+    if docker compose exec -T backend python scripts/replikat_pruefen.py; then
+        echo "   Replikat gesund."
+    else
+        echo "FEHLER: Das Replica Set ist NICHT gesund (Ausgabe oben)."
+        echo "   Der Server bleibt im Drain. Erst das Replikat in Ordnung bringen —"
+        echo "   ein Rollout auf dem zweiten Server wuerde sonst die Mehrheit"
+        echo "   verlieren und die Plattform anhalten."
+        exit 1
+    fi
+fi
+
 # Abschlusspruefung vorbereiten. Der Befehl steht auch in den Meldungen,
 # damit er von Hand genau so wiederholt werden kann.
 # DKIM mitpruefen, wenn der Selector in der .env steht (z.B. DKIM_SELECTOR=resend)
