@@ -146,6 +146,43 @@ services:
       - IMAGE_QUALITY=${IMAGE_QUALITY:-80}
       - MAX_IMAGE_UPLOAD_BYTES=${MAX_IMAGE_UPLOAD_BYTES:-8388608}
       - MFA_AUSSTELLER=${MFA_AUSSTELLER:-AutoSchnell}
+      # Nachpruefung 20.09.2026, Nr. 81: WIEDER derselbe Fehler, und mein
+      # Waechter von gestern hat ihn nicht gesehen — er verglich nur Namen
+      # aus .env.example gegen diesen Block. Diese hier stehen aber gar
+      # nicht in .env.example, obwohl der Code sie liest. Der Test sucht
+      # jetzt vom CODE aus (os.environ.get(...)), dann kann keiner mehr
+      # durchrutschen. Standardwerte = die Werte aus dem Code.
+      #
+      # Dokumentierte Schalter, die bisher wirkungslos in der .env standen:
+      - BEWEIS_AUTOMATISCH=${BEWEIS_AUTOMATISCH:-}
+      - BILD_PROXY_HOSTS=${BILD_PROXY_HOSTS:-}
+      - VERTRAG_LINK_TAGE=${VERTRAG_LINK_TAGE:-14}
+      - MOBILE_API_BASE=${MOBILE_API_BASE:-https://services.sandbox.mobile.de}
+      # Feinjustierung, ebenfalls nie angekommen:
+      - CLIENT_INGEST_TTL_HOURS=${CLIENT_INGEST_TTL_HOURS:-24}
+      - CLIENT_CONFIRMED_TTL_HOURS=${CLIENT_CONFIRMED_TTL_HOURS:-168}
+      - LINK_JOB_FINISHED_TTL=${LINK_JOB_FINISHED_TTL:-3600}
+      - MAX_IMAGE_PIXELS=${MAX_IMAGE_PIXELS:-80000000}
+      - PROVIDER_SLOT_TTL=${PROVIDER_SLOT_TTL:-120}
+      - PROVIDER_HEAL_INTERVAL=${PROVIDER_HEAL_INTERVAL:-30}
+      - RESEND_PARALLEL=${RESEND_PARALLEL:-3}
+      - RESEND_VERSUCHE=${RESEND_VERSUCHE:-6}
+      - RESEND_WARTEN_MAX=${RESEND_WARTEN_MAX:-20}
+      - SCRAPE_MAX_RETRIES=${SCRAPE_MAX_RETRIES:-3}
+      - ZUSTELLUNG_HAENGT_NACH_SEK=${ZUSTELLUNG_HAENGT_NACH_SEK:-180}
+      - MOCK_PROVIDER_DELAY_MS=${MOCK_PROVIDER_DELAY_MS:-}
+      # Externer Snapshot-Speicher (Altbestand): die Sicherung meldet ihn
+      # als nicht sicherbar, wenn er gesetzt ist — dafuer muss sie ihn sehen.
+      - EMERGENT_LLM_KEY=${EMERGENT_LLM_KEY:-}
+      # Stripe ist am 14.09.2026 entfernt worden. production_check warnt,
+      # wenn noch Reste in der .env stehen ("bitte entfernen") — ohne
+      # Durchreichen war genau diese Warnung wirkungslos.
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # SSL_VERIFY wird BEWUSST NICHT durchgereicht: es schaltet die
+      # Zertifikatspruefung beim Anbieter-Abruf ab und ist nur fuer die
+      # lokale Windows-Entwicklung gedacht. Im Container soll es gar nicht
+      # erst einstellbar sein.
       # Kleinanzeigen zuerst ueber die API (Runde 29) — ohne Schluessel
       # unveraendert der eigene Abruf.
       - KLEINANZEIGEN_API_KEY=${KLEINANZEIGEN_API_KEY:-}

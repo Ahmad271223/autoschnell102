@@ -6,7 +6,17 @@
 
 Grundsatz (Go-Live-Audit): Nach einem Restore ist die Zieldatenbank
 ENTWEDER vollständig auf dem alten ODER vollständig auf dem Backup-Stand —
-nie gemischt. Dafür:
+nie gemischt.
+
+Nachprüfung 20.09.2026 (Nr. 75): Dieser Satz stimmte bisher NICHT für den
+dokumentierten Standardaufruf. Collections, die es nur live gibt (weil sie
+nach dem Backup entstanden sind), blieben unverändert stehen — neben dem
+alten Stand aus dem Backup. Nur das nirgends dokumentierte `--exakt`
+verschob sie weg. Deshalb ist dieses Verhalten jetzt der STANDARD; wer den
+gemischten Stand wirklich will, sagt es mit `--zusaetzliche-behalten`
+ausdrücklich und bekommt eine laute Warnung.
+
+Dafür:
 
   1/6 VORABPRÜFUNG: manifest.json lesen, SHA-256 JEDER Datei prüfen, jede
       .bson.gz vollständig einlesen, Dokumentzahl gegen das Manifest.
@@ -23,12 +33,20 @@ nie gemischt. Dafür:
       Zieldatenbank und Live-Ordner unverändert.
   4/6 WARTUNGSMODUS: system_flags {_id: "wartungsmodus", aktiv: true} in
       der Zieldatenbank — die API antwortet solange mit 503. Danach ggf.
-      S3-Objekte zurückspielen (nicht rückgängig machbar, deshalb VOR dem
-      Umschalten; bei Fehler bleibt Datenbank/Datei-Speicher unverändert).
+      S3-Objekte zurückspielen. Nachprüfung 20.09.2026 (Nr. 77): Vom
+      bisherigen Stand JEDES überschriebenen Objekts wird vorher eine Kopie
+      unter `restore-vorher/<stamp>/` im selben Eimer angelegt (Server zu
+      Server, ohne Herunterladen). Vorher war dieser Schritt nicht
+      rückgängig zu machen: scheiterte danach das Umschalten, wurden
+      Datenbank und lokale Ordner zurückgedreht, die schon überschriebenen
+      S3-Objekte aber nicht — die alte Datenbank zeigte dann auf
+      zurückgespielte Dateien. Jetzt wird auch S3 zurückgedreht; die Kopien
+      verschwinden erst nach einem gelungenen Restore.
   5/6 UMSCHALTEN: Ordner per Rename (live -> <live>.vorher-<stamp>,
       Staging -> live), dann je Collection renameCollection (bisheriger
       Stand -> <db>__vorher_<stamp>). Jeder Fehler: ALLE bereits
-      umgeschalteten Collections und Ordner werden zurückgedreht.
+      umgeschalteten Collections, Ordner UND S3-Objekte werden
+      zurückgedreht.
   6/6 KONTROLLE: Dokumentzahlen und Indexe der Live-Datenbank erneut gegen
       das Manifest. Nur wenn alles passt: "RESTORE OK", Wartungsmodus aus.
       Sonst Rollback, Exit 1.
@@ -458,21 +476,103 @@ def verzeichnisse_zuruecknehmen(geschaltet: list) -> list:
     return fehler
 
 
-def s3_zurueckspielen(s3_dir: Path, objekte: list) -> int:
+#: Praefix, unter dem der bisherige Stand eines ueberschriebenen S3-Objekts
+#: liegt, solange der Restore laeuft (Nachpruefung 20.09.2026, Nr. 77).
+S3_RUECKNAHME_PREFIX = "restore-vorher/"
+
+
+def _s3_client():
     import boto3
-    c = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT"],
-                     aws_access_key_id=os.environ["S3_ACCESS_KEY"],
-                     aws_secret_access_key=os.environ["S3_SECRET_KEY"],
-                     region_name=os.environ.get("S3_REGION", "auto"))
+    return boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT"],
+                        aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+                        aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+                        region_name=os.environ.get("S3_REGION", "auto"))
+
+
+def s3_zurueckspielen(s3_dir: Path, objekte: list, stamp: str = "",
+                      gesichert: list = None) -> int:
+    """Objekte aus dem Backup in den Datei-Speicher zurueckspielen.
+
+    Nachpruefung 20.09.2026, Nr. 77: Vorher wurde hier DIREKT ueber den
+    Live-Stand geschrieben — vor dem Umschalten von Datenbank und lokalen
+    Dateien. Scheiterte danach das Umschalten, wurden Datenbank und Ordner
+    zurueckgedreht, die schon ueberschriebenen S3-Objekte aber NICHT. Die
+    weiterlaufende (alte) Datenbank zeigte dann auf zurueckgespielte, also
+    aeltere oder halb ersetzte Dateien. Der Kopf dieser Datei versprach
+    ausdruecklich das Gegenteil.
+
+    Jetzt wird der bisherige Stand jedes Objekts VOR dem Ueberschreiben im
+    selben Eimer unter `restore-vorher/<stamp>/` gesichert — Server zu
+    Server, ohne Herunterladen. `gesichert` sammelt, was zurueckgenommen
+    werden kann; `s3_zuruecknehmen()` macht es rueckgaengig."""
+    c = _s3_client()
     bucket = os.environ["S3_BUCKET"]
+    sicherung = f"{S3_RUECKNAHME_PREFIX}{stamp}/" if stamp else ""
     n = 0
     try:
         for f in objekte:
-            c.upload_file(str(f), bucket, str(f.relative_to(s3_dir)).replace("\\", "/"))
+            key = str(f.relative_to(s3_dir)).replace("\\", "/")
+            if gesichert is not None:
+                gab_es = True
+                try:
+                    c.head_object(Bucket=bucket, Key=key)
+                except Exception:  # noqa: BLE001 — Objekt existiert noch nicht
+                    gab_es = False
+                if gab_es and sicherung:
+                    c.copy_object(Bucket=bucket, Key=sicherung + key,
+                                  CopySource={"Bucket": bucket, "Key": key})
+                gesichert.append((key, gab_es))
+            c.upload_file(str(f), bucket, key)
             n += 1
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"nach {n} von {len(objekte)} Objekten: {exc}") from exc
     return n
+
+
+def s3_zuruecknehmen(gesichert: list, stamp: str) -> list:
+    """Den S3-Stand von vor dem Restore wiederherstellen (Nr. 77).
+
+    Objekte, die es vorher gab, kommen aus `restore-vorher/<stamp>/`
+    zurueck; Objekte, die der Restore neu angelegt hat, werden entfernt.
+    Liefert die Liste der Schluessel, bei denen das NICHT geklappt hat —
+    der Aufrufer meldet sie laut, statt sie zu verschlucken."""
+    if not gesichert:
+        return []
+    c = _s3_client()
+    bucket = os.environ["S3_BUCKET"]
+    sicherung = f"{S3_RUECKNAHME_PREFIX}{stamp}/"
+    fehler = []
+    for key, gab_es in gesichert:
+        try:
+            if gab_es:
+                c.copy_object(Bucket=bucket, Key=key,
+                              CopySource={"Bucket": bucket, "Key": sicherung + key})
+            else:
+                c.delete_object(Bucket=bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            fehler.append(f"s3://{bucket}/{key}: {exc}")
+    return fehler
+
+
+def s3_sicherung_aufraeumen(gesichert: list, stamp: str) -> None:
+    """Die Ruecknahme-Kopien entfernen — erst NACH einem gelungenen Restore.
+    Fehler sind hier folgenlos (es bleibt hoechstens Speicher liegen)."""
+    if not gesichert:
+        return
+    try:
+        c = _s3_client()
+        bucket = os.environ["S3_BUCKET"]
+        sicherung = f"{S3_RUECKNAHME_PREFIX}{stamp}/"
+        for key, gab_es in gesichert:
+            if gab_es:
+                try:
+                    c.delete_object(Bucket=bucket, Key=sicherung + key)
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Hinweis: Ruecknahme-Kopien unter {S3_RUECKNAHME_PREFIX}{stamp}/ "
+              f"konnten nicht entfernt werden ({exc}) — sie stoeren nicht, "
+              f"belegen aber Speicher.")
 
 
 # ------------------------------------------------------------- Collections
@@ -575,13 +675,19 @@ def _wartungsmodus_befehl(ziel_name: str) -> str:
 
 # ------------------------------------------------------------------ Ablauf
 def _rollback(client, ziel_name, tmp_name, alt_name, umgeschaltet, halb,
-              vorhandene, geschaltet, grund) -> int:
+              vorhandene, geschaltet, grund, s3_gesichert=None, stamp="") -> int:
     print(f"FEHLER: {grund}")
-    print(f"ROLLBACK: {len(umgeschaltet) + (1 if halb else 0)} Collection(s) und "
-          f"{len(geschaltet)} Datei-Speicher werden zurueckgedreht ...")
+    print(f"ROLLBACK: {len(umgeschaltet) + (1 if halb else 0)} Collection(s), "
+          f"{len(geschaltet)} Datei-Speicher"
+          + (f" und {len(s3_gesichert)} S3-Objekte" if s3_gesichert else "")
+          + " werden zurueckgedreht ...")
     fehler = collections_zuruecknehmen(client, ziel_name, tmp_name, alt_name,
                                        umgeschaltet, halb, vorhandene)
     fehler += verzeichnisse_zuruecknehmen(geschaltet)
+    # Nr. 77: Der Datei-Speicher gehoert mit zurueckgedreht — sonst zeigt die
+    # wiederhergestellte alte Datenbank auf zurueckgespielte Dateien.
+    if s3_gesichert:
+        fehler += s3_zuruecknehmen(s3_gesichert, stamp)
     if fehler:
         print("!!! ROLLBACK UNVOLLSTAENDIG — Zieldatenbank/Datei-Speicher sind "
               "GEMISCHT. Manuell pruefen:")
@@ -740,18 +846,30 @@ def wiederherstellen(args) -> int:
     wartungsmodus(ziel, True)
     print(f"  {FLAG_COLLECTION}.{FLAG_ID} aktiv — die API antwortet jetzt mit 503")
     n_s3 = 0
+    s3_gesichert = []
     if s3_aktiv:
-        print(f"  s3: {len(s3_objekte)} Objekte hochladen ...")
+        print(f"  s3: {len(s3_objekte)} Objekte hochladen "
+              f"(bisheriger Stand wird vorher unter "
+              f"{S3_RUECKNAHME_PREFIX}{stamp}/ gesichert) ...")
         try:
-            n_s3 = s3_zurueckspielen(root / "s3", s3_objekte)
+            n_s3 = s3_zurueckspielen(root / "s3", s3_objekte, stamp, s3_gesichert)
         except Exception as exc:  # noqa: BLE001
             print(f"FEHLER beim Zurueckspielen nach S3: {exc}")
+            # Nr. 77: auch hier die schon ueberschriebenen Objekte zurueckholen.
+            s3_fehler = s3_zuruecknehmen(s3_gesichert, stamp)
             staging_entfernen(staging)
             client.drop_database(tmp_name)
             wartungsmodus(ziel, False)
-            print(f"Datenbank '{args.db}' und lokale Datei-Speicher sind unveraendert "
-                  f"(bereits hochgeladene S3-Objekte bleiben im Bucket). "
-                  f"Wartungsmodus beendet.")
+            if s3_fehler:
+                print("!!! ACHTUNG: diese S3-Objekte konnten NICHT zurueckgeholt "
+                      "werden — der Datei-Speicher ist gemischt:")
+                for f in s3_fehler[:20]:
+                    print(f"!!!   - {f}")
+                print(f"!!! Der Stand von vorher liegt unter "
+                      f"{S3_RUECKNAHME_PREFIX}{stamp}/ im selben Eimer.")
+                return 1
+            print(f"Datenbank '{args.db}', lokale Datei-Speicher UND der "
+                  f"S3-Datei-Speicher sind unveraendert. Wartungsmodus beendet.")
             return 1
 
     print(f"5/6 Umschalten (bisheriger Stand -> {alt_name} bzw. *.vorher-{stamp}) ...")
@@ -770,23 +888,34 @@ def wiederherstellen(args) -> int:
                       + "; ".join(abweichungen[:10]))
     if fehler is not None:
         return _rollback(client, args.db, tmp_name, alt_name, umgeschaltet, halb,
-                         vorhandene, geschaltet, fehler)
+                         vorhandene, geschaltet, fehler, s3_gesichert, stamp)
 
     client.drop_database(tmp_name)
+    # Nr. 75: exakt ist der Standard — nur --zusaetzliche-behalten schaltet
+    # es ab (dann ist der Stand bewusst gemischt).
+    exakt = not getattr(args, "zusaetzliche_behalten", False)
     # Phase 3 (3.5, E5): Schema-Version des BACKUPS setzen — sonst bliebe die
     # neuere Live-Version stehen und Migrationen zwischen Backup- und Live-
     # Stand liefen beim naechsten Start nicht mehr.
     schema_version_setzen(ziel, flags_dump)
-    if getattr(args, "exakt", False):
+    exakt_fehler = []
+    if exakt:
         # Phase 3 (3.5, E6): Collections, die es live gibt, im Backup aber
         # nicht, wandern in die Vorher-Datenbank — der Live-Stand entspricht
         # danach exakt dem Backup.
+        #
+        # Nachpruefung 20.09.2026, Nr. 76: Ein gescheitertes Verschieben
+        # wurde nur GEDRUCKT. Danach setzte der Code `extra = []`, und der
+        # Lauf meldete Exit 0 und "RESTORE OK" — obwohl der ausdruecklich
+        # verlangte exakte Stand gar nicht erreicht war. Jetzt zaehlt jeder
+        # Fehlschlag und der Lauf endet mit Exit 1.
         for name in sorted(set(ziel.list_collection_names()) - set(dumps) - {FLAG_COLLECTION}):
             try:
                 _rename_collection(client, f"{args.db}.{name}", f"{alt_name}.{name}")
                 print(f"  exakt: {name} nicht im Backup -> nach {alt_name} verschoben")
             except Exception as exc:  # noqa: BLE001
-                print(f"  exakt: {name} konnte nicht verschoben werden: {exc}")
+                exakt_fehler.append(f"{name}: {exc}")
+                print(f"  exakt: {name} konnte NICHT verschoben werden: {exc}")
     try:
         wartungsmodus(ziel, False)
     except Exception as exc:  # noqa: BLE001
@@ -794,12 +923,37 @@ def wiederherstellen(args) -> int:
               f"    {_wartungsmodus_befehl(args.db)}")
         return 1
     extra = sorted(vorhandene - set(dumps) - {FLAG_COLLECTION})
-    if extra and getattr(args, "exakt", False):
-        extra = []
-    if extra:
+    if exakt:
+        # Nr. 76: NUR das, was wirklich verschoben wurde, verschwindet aus
+        # der Liste. Was haengenblieb, steht weiter drin UND unten im Fehler.
+        nicht_bewegt = {z.split(":", 1)[0] for z in exakt_fehler}
+        extra = [n for n in extra if n in nicht_bewegt]
+    if extra and not exakt:
+        # Nr. 75: Das ist jetzt ein ausdruecklich gewaehlter Mischstand —
+        # und muss auch so benannt werden, nicht als beilaeufiger "Hinweis".
+        print(f"!!! ACHTUNG: --zusaetzliche-behalten war gesetzt. Diese "
+              f"Collections sind NICHT aus dem Backup und stehen jetzt neben "
+              f"dem Backup-Stand: {', '.join(extra)}")
+        print("!!! Der Datenbestand ist damit GEMISCHT (alte Daten aus dem "
+              "Backup neben neueren Collections). Bitte pruefen.")
+    elif extra:
         print(f"  Hinweis: nicht im Backup enthalten und daher unveraendert "
               f"belassen: {', '.join(extra)}")
     n_files = sum(1 for e in geschaltet for f in e["live"].rglob("*") if f.is_file())
+    if exakt_fehler:
+        print(f"!!! RESTORE UNVOLLSTAENDIG: {len(exakt_fehler)} Collection(s) "
+              f"liegen weiterhin live, obwohl sie nicht im Backup sind — der "
+              f"verlangte exakte Stand ist NICHT erreicht:")
+        for z in exakt_fehler[:20]:
+            print(f"!!!   - {z}")
+        print(f"!!! Die Daten selbst sind eingespielt ({len(dumps)} Collections, "
+              f"{total} Dokumente). Die genannten Collections von Hand nach "
+              f"'{alt_name}' verschieben oder pruefen, ob sie bleiben duerfen.")
+        print(f"Der vorherige Datenbestand liegt in '{alt_name}'.")
+        return 1
+    # Nr. 77: Die Ruecknahme-Kopien werden erst jetzt entfernt — vorher
+    # haetten sie bei einem spaeten Fehler noch gebraucht werden koennen.
+    s3_sicherung_aufraeumen(s3_gesichert, stamp)
     print(f"RESTORE OK: {len(dumps)} Collections, {total} Dokumente, "
           f"{n_files} Dateien, {n_s3} S3-Objekte -> {args.db}; Wartungsmodus beendet.")
     if grund_inkonsistent:
@@ -913,9 +1067,20 @@ def main(argv=None) -> int:
     ap.add_argument("--nur-datenbank", action="store_true",
                     help="nur die Datenbank; Datei-Speicher (uploads, "
                          "local_storage, S3) unangetastet lassen")
+    # Nachpruefung 20.09.2026, Nr. 75: Das war ein SCHALTER und stand in
+    # keinem dokumentierten Befehl. Ohne ihn blieben Collections, die es nur
+    # live gibt (weil sie nach dem Backup entstanden sind), unveraendert
+    # stehen — neben dem alten Stand aus dem Backup. Genau der Mischstand,
+    # den Doku und Dateikopf ausdruecklich ausschliessen ("nie gemischt").
+    # Jetzt ist exakt der STANDARD; wer den Mischstand wirklich will, sagt
+    # es ausdruecklich.
     ap.add_argument("--exakt", action="store_true",
-                    help="Collections, die im Backup fehlen, in die Vorher-Datenbank "
-                         "verschieben — der Live-Stand entspricht danach exakt dem Backup")
+                    help="(Standard, nur noch aus Gewohnheit erlaubt) Collections, "
+                         "die im Backup fehlen, in die Vorher-Datenbank verschieben")
+    ap.add_argument("--zusaetzliche-behalten", action="store_true",
+                    help="Collections, die es nur live gibt, STEHEN LASSEN. Achtung: "
+                         "dann ist der Stand gemischt — alte Daten aus dem Backup "
+                         "neben neueren Collections. Nur mit gutem Grund.")
     args = ap.parse_args(argv)
     return wiederherstellen(args)
 

@@ -69,8 +69,13 @@ def tls_pruefen(host):
                 cert = tls.getpeercert()
                 version = tls.version()
         ok(f"Zertifikat gueltig fuer {host} (Kette vom System akzeptiert), Verbindung {version}")
-        ablauf = dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-        rest = (ablauf - dt.datetime.utcnow()).days
+        # 20.09.2026: utcnow() ist abgekuendigt und druckte bei jedem Lauf
+        # eine DeprecationWarning mitten in die Ausgabe. Das Zertifikatsdatum
+        # ist UTC ("GMT"), also ausdruecklich als UTC lesen und mit einer
+        # zeitzonen-bewussten Gegenwart vergleichen.
+        ablauf = dt.datetime.strptime(
+            cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=dt.timezone.utc)
+        rest = (ablauf - dt.datetime.now(dt.timezone.utc)).days
         (ok if rest > 14 else fehler if rest < 3 else warn)(f"Zertifikat laeuft in {rest} Tagen ab ({ablauf:%d.%m.%Y})")
         if version not in ("TLSv1.2", "TLSv1.3"):
             fehler(f"Unerwartete TLS-Version {version}")
@@ -78,15 +83,35 @@ def tls_pruefen(host):
         fehler(f"Zertifikat NICHT gueltig: {exc}")
     except Exception as exc:  # noqa: BLE001
         fehler(f"TLS-Verbindung fehlgeschlagen: {exc}")
-    # Alte Protokolle muessen abgelehnt werden
-    for name, proto in (("TLSv1.0", getattr(ssl, "PROTOCOL_TLSv1", None)),
-                        ("TLSv1.1", getattr(ssl, "PROTOCOL_TLSv1_1", None))):
-        if proto is None:
+    # Alte Protokolle muessen abgelehnt werden.
+    #
+    # 20.09.2026, zwei Korrekturen:
+    #  1. Sowohl ssl.PROTOCOL_TLSv1/-1_1 als auch ssl.TLSVersion.TLSv1/-1_1
+    #     sind abgekuendigt — bei jedem Lauf standen zwei
+    #     DeprecationWarnings mitten in der Ausgabe. Sie werden jetzt genau
+    #     hier (und nur hier) unterdrueckt, mit Begruendung.
+    #  2. Wichtiger: Bisher galt JEDE Ausnahme als "Server lehnt ab". Kann
+    #     der eigene Client das alte Protokoll gar nicht mehr anbieten
+    #     (neueres OpenSSL), meldete die Probe faelschlich, der SERVER habe
+    #     es abgelehnt — geprueft war in Wahrheit nichts. Jetzt wird der
+    #     Aufbau des Kontexts vom Handschlag getrennt.
+    import warnings
+    for name, fassung in (("TLSv1.0", "TLSv1"), ("TLSv1.1", "TLSv1_1")):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                alt = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                alt.check_hostname = False
+                alt.verify_mode = ssl.CERT_NONE
+                stufe = getattr(ssl.TLSVersion, fassung)
+                alt.minimum_version = stufe
+                alt.maximum_version = stufe
+        except Exception as exc:  # noqa: BLE001
+            warn(f"{name} nicht pruefbar — dieser Client kann es nicht mehr "
+                 f"anbieten ({exc.__class__.__name__}). Es ist damit ueber "
+                 f"diesen Weg ohnehin nicht nutzbar.")
             continue
         try:
-            alt = ssl.SSLContext(proto)
-            alt.check_hostname = False
-            alt.verify_mode = ssl.CERT_NONE
             with socket.create_connection((host, 443), timeout=10) as sock:
                 with alt.wrap_socket(sock, server_hostname=host):
                     fehler(f"{name} wird noch akzeptiert — abschalten")

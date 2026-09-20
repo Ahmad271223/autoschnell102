@@ -629,7 +629,20 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
                                       "vertrag.nach_abholung_aktualisiert",
                                       ref=appt["contract_id"],
                                       meta={"protokoll_id": protokoll_id, "neuer_preis": neuer_preis})
-        return bool(ok)
+            return True
+        # Nachpruefung 20.09.2026, Nr. 79: Scheitert das Erzeugen der neuen
+        # Vertrags-PDF, faengt regenerate_contract_for_pickup() die Ausnahme
+        # selbst ab und liefert nur False. Hier wurde der Alarm aber NUR bei
+        # einer durchgereichten Ausnahme gelegt — ein False rutschte still
+        # durch. Ergebnis: unterschriebenes Protokoll, abgeholtes Fahrzeug,
+        # und dauerhaft die ALTE Vertragsfassung, ohne dass es jemand merkt
+        # und ohne Nachholversuch. Jetzt zaehlt False genauso.
+        log.error("Vertrag %s nach Abholung nicht aktualisiert (Neuerzeugung "
+                  "lieferte False)", appt.get("contract_id"))
+        await betrieb.alarm(db, "vertrag_nach_abholung_offen", ref=str(appt.get("contract_id")),
+                            protokoll_id=protokoll_id,
+                            fehler="Neuerzeugung der Vertrags-PDF fehlgeschlagen")
+        return False
     except Exception as exc:  # noqa: BLE001
         log.exception("Vertrag %s nach Abholung nicht aktualisiert", appt.get("contract_id"))
         await betrieb.alarm(db, "vertrag_nach_abholung_offen", ref=str(appt.get("contract_id")),
@@ -1424,8 +1437,16 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"],
                                     appt.get("dealer_id", ""), "abgeholt")
-        await _nacharbeit_erledigt(appt_id, doc)
+        # Nr. 78: Dieser Selbstheilungspfad holte Termin, Preis und
+        # Lebenszyklus nach — die Vertragsneuerzeugung fehlte vollstaendig.
+        # Genau sie ist aber der Schritt, der beim Absturz uebrigbleibt.
+        korrekturen, neue_schaeden = await protokoll_korrekturen(appt, doc)
+        await vertrag_nach_abholung_aktualisieren(
+            appt, doc["id"], doc.get("neuer_preis"), doc.get("sondervereinbarung"),
+            korrekturen=korrekturen, neue_schaeden=neue_schaeden)
         await auto_daten_vor_ort_nachtragen(appt, doc, doc.get("neuer_preis"))
+        # Merker zuletzt — wie im Normalpfad.
+        await _nacharbeit_erledigt(appt_id, doc)
         return heil_out
 
     # Gegenpruefung 12.09.2026: Starb ein frueherer Abschluss mittendrin
@@ -1777,7 +1798,6 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         import kaufvorgang as _kv
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
             await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
-        await _nacharbeit_erledigt(appt_id, doc)
         # Wunsch Ahmad 14.09.2026: Der Kaufvertrag wird abschliessend mit dem vor
         # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
         # Fassung, alte im Archiv). Best effort — das Protokoll ist der Beleg.
@@ -1788,6 +1808,12 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         await vertrag_nach_abholung_aktualisieren(
             appt, doc["id"], _preis_final, filled.get("sondervereinbarung"),
             korrekturen=korrekturen, neue_schaeden=neue_schaeden)
+        # Nachpruefung 20.09.2026, Nr. 78: Der Merker wurde bisher SCHON VOR
+        # der Vertragsneuerzeugung entfernt. Starb der Prozess dazwischen,
+        # sah die Selbstheilung ein finales Protokoll, heilte Termin, Preis
+        # und Lebenszyklus — und die neue Vertragsfassung fehlte fuer immer.
+        # Jetzt faellt der Merker erst, wenn wirklich alles erledigt ist.
+        await _nacharbeit_erledigt(appt_id, doc)
         # Wunsch Ahmad 15.09.2026: Preis vor Ort und Maengel des Fahrers in die
         # Auto-Daten (eigene Spalten, der Einkaufspreis des Vertrags bleibt).
         await auto_daten_vor_ort_nachtragen(appt, filled, _preis_final)

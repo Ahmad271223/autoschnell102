@@ -384,6 +384,15 @@ docker compose exec backend python -X utf8 scripts/restore_mongo.py /backups/aut
 ```
 Grundsatz: Nach dem Restore ist die Datenbank **entweder vollständig alt
 oder vollständig auf Backup-Stand**, nie gemischt.
+
+> **Korrektur 20.09.2026 (Nr. 75):** Dieser Satz stimmte für den obigen
+> Befehl bisher nicht. Collections, die es nur live gibt — weil sie nach dem
+> Backup entstanden sind — blieben unverändert stehen, neben dem alten Stand
+> aus dem Backup. Weggeräumt hat sie nur das nirgends dokumentierte
+> `--exakt`. Das ist jetzt das **Standardverhalten**: solche Collections
+> wandern in die Vorher-Datenbank `<db>__vorher_<zeit>` (gelöscht wird
+> nichts, sie bleibt 30 Tage). Wer den gemischten Stand wirklich braucht,
+> hängt `--zusaetzliche-behalten` an und bekommt eine laute Warnung.
 1. Vorprüfung: Prüfsummen aller Dateien, jede `.bson.gz` vollständig gelesen,
    Dokumentzahlen gegen das Manifest. Unvollständige Backups werden
    abgelehnt; Backups mit `s3/`-Objekten brauchen S3-Konfiguration.
@@ -2383,3 +2392,34 @@ Der Bericht hatte 54 Punkte (Nr. 21-74). Stand nach diesem Durchgang:
 
 Beide Gegenproben stehen als Test fest (`test_72b`, `test_36`), damit die Lage nicht
 unbemerkt kippt.
+
+---
+
+### Nachpruefung 20.09.2026, Nr. 75-81 — Restore, Abholung, Compose
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 75 | Der **dokumentierte** Restore-Befehl liess Collections stehen, die es nur live gibt (weil sie nach dem Backup entstanden sind) — genau der Mischstand, den Doku und Dateikopf mit "nie gemischt" ausschliessen. Weggeraeumt hat sie nur das nirgends dokumentierte `--exakt` | `--exakt` ist jetzt das **Standardverhalten**: solche Collections wandern nach `<db>__vorher_<zeit>` (geloescht wird nichts). Wer den Mischstand braucht, haengt `--zusaetzliche-behalten` an und bekommt eine laute Warnung statt eines beilaeufigen "Hinweis" |
+| 76 | Scheiterte dabei das Verschieben einer Collection, wurde das nur gedruckt — die Liste der Extras wurde danach pauschal geleert, und der Lauf meldete Exit 0 mit `RESTORE OK`, obwohl der verlangte Stand nicht erreicht war | jeder Fehlschlag zaehlt, wird einzeln genannt und beendet den Lauf mit **Exit 1** (`RESTORE UNVOLLSTAENDIG`). Nur wirklich Verschobenes faellt aus der Liste |
+| 77 | S3-Objekte wurden **vor** dem Umschalten direkt im Live-Eimer ueberschrieben. Scheiterte danach das Umschalten, drehte der Rollback Datenbank und lokale Ordner zurueck — die S3-Objekte nicht. Die weiterlaufende alte Datenbank zeigte dann auf zurueckgespielte Dateien | vom bisherigen Stand jedes ueberschriebenen Objekts wird vorher eine Kopie unter `restore-vorher/<zeit>/` im selben Eimer angelegt (Server zu Server, ohne Herunterladen). Der Rollback holt sie zurueck und loescht, was der Restore neu angelegt hat; die Kopien verschwinden erst nach einem **gelungenen** Restore |
+| 78 | Das Protokoll wurde auf `final` gesetzt und der Nacharbeits-Merker entfernt, **bevor** der Vertrag neu erzeugt wurde. Starb der Prozess dazwischen, heilte die Selbstheilung Termin, Preis und Lebenszyklus — die Vertragsneuerzeugung kannte sie gar nicht. Ergebnis: finales Protokoll, abgeholtes Fahrzeug, dauerhaft alte Vertragsfassung | der Merker faellt erst nach der Vertragsneuerzeugung, und der Selbstheilungspfad erzeugt den Vertrag mit (samt Vor-Ort-Korrekturen und neuen Schaeden) |
+| 79 | Scheiterte die neue Vertrags-PDF, fing `regenerate_contract_for_pickup()` die Ausnahme selbst ab und lieferte `False`. Der Aufrufer legte den Betriebsalarm aber nur bei einer **durchgereichten** Ausnahme an — ein `False` rutschte still durch, ohne Alarm und ohne Nachholversuch | `False` loest jetzt denselben Alarm aus. "Es gab nichts zu aendern" bleibt davon unberuehrt (der Fall steigt vor dem `try` aus) |
+| 80 | Der Nachholjob lud nur Preis und Sondervereinbarung. Bei einer Preisaenderung entstand dadurch eine neue, inhaltlich **unvollstaendige** Fassung und der Alarm wurde geschlossen; bestand die Aenderung nur aus Fahrzeugkorrekturen oder neuen Schaeden, konnte er gar keine Fassung erzeugen und der Alarm blieb ewig offen | der Nachholer laedt das ganze Protokoll und berechnet die Korrekturen genauso wie der Normalpfad |
+| 81 | `BEWEIS_AUTOMATISCH`, `BILD_PROXY_HOSTS`, `VERTRAG_LINK_TAGE`, `MOBILE_API_BASE` erreichten den Container nicht — der dokumentierte Beweis-Rollback-Schalter und eine kuerzere Vertragslink-Frist blieben in der Server-`.env` wirkungslos | durchgereicht. Die systematische Suche fand **20** solche Namen, nicht 4; alle sind jetzt drin (ausser `SSL_VERIFY`, das im Container bewusst nicht einstellbar sein soll) |
+
+**Und der Waechter hat diesmal selbst versagt.** `test_09` verglich die Schnittmenge
+aus `.env.example` und Code gegen den `environment:`-Block. Die vier Namen aus Nr. 81
+stehen aber gar nicht in `.env.example` — nur in DEPLOYMENT.md und im Code. Der Test
+konnte sie also grundsaetzlich nicht sehen. Er sucht jetzt **vom Code aus**: was
+`os.environ.get(...)` liest, muss durchgereicht sein oder mit Begruendung in
+`NICHT_IM_CONTAINER` stehen. Ein zweiter Test (`test_09b`) prueft, dass diese
+Ausnahmeliste nicht zum Freibrief wird.
+
+**Nebenbefund aus Ahmads Betriebsprobe:** Die drei `DeprecationWarning`-Zeilen mitten
+im Bericht sind weg (`datetime.utcnow()`, `ssl.PROTOCOL_TLSv1/-1_1`). Dabei fiel auf,
+dass der TLS-1.0/1.1-Test ungenau war: konnte schon der **eigene Client** das alte
+Protokoll nicht mehr anbieten, meldete die Probe "Server lehnt ab" — geprueft war in
+Wahrheit nichts. Aufbau des Kontexts und Handschlag sind jetzt getrennt; im ersten
+Fall steht "nicht pruefbar" statt eines falschen OK.
+
+Waechter: `backend/tests/test_restore_abholung_20260920.py` (20 Tests).

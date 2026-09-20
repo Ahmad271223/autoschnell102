@@ -2381,7 +2381,8 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
     Hier erneut versucht; bei Erfolg wird der Alarm geschlossen."""
     n = 0
     try:
-        from routes.protocols import vertrag_nach_abholung_aktualisieren
+        from routes.protocols import (protokoll_korrekturen,
+                                      vertrag_nach_abholung_aktualisieren)
     except Exception:  # noqa: BLE001
         return 0
     async for a in db.betriebsalarme.find(
@@ -2392,17 +2393,31 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
         if not contract_id or not protokoll_id:
             continue
         try:
-            p = await db.pickup_protocols.find_one(
-                {"id": protokoll_id}, {"_id": 0, "appointment_id": 1, "neuer_preis": 1,
-                                       "sondervereinbarung": 1, "status": 1})
+            # Nachpruefung 20.09.2026, Nr. 80: Hier wurden NUR Preis und
+            # Sondervereinbarung geladen. Die vor Ort korrigierten
+            # Fahrzeugdaten und die neu aufgenommenen Schaeden fehlten —
+            # mit zwei Folgen:
+            #   * Bei einer Preisaenderung entstand eine neue, inhaltlich
+            #     UNVOLLSTAENDIGE Vertragsfassung, und der Alarm wurde
+            #     geschlossen: der Mangel war damit fuer immer weg.
+            #   * Bestand die Aenderung NUR aus Korrekturen oder neuen
+            #     Schaeden, konnte der Nachholer gar keine neue Fassung
+            #     erzeugen (die Funktion steigt ohne Anlass sofort aus) —
+            #     der Alarm blieb ewig offen.
+            # Deshalb wird jetzt das GANZE Protokoll geladen und werden die
+            # Korrekturen genauso berechnet wie im Normalpfad.
+            p = await db.pickup_protocols.find_one({"id": protokoll_id}, {"_id": 0})
             appt = await db.appointments.find_one({"id": (p or {}).get("appointment_id")}, {"_id": 0}) \
                 if p else None
             if not p or not appt or p.get("status") != "final" \
                     or appt.get("contract_id") != contract_id:
                 await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
                 continue
+            korrekturen, neue_schaeden = await protokoll_korrekturen(appt, p)
             if await vertrag_nach_abholung_aktualisieren(
-                    appt, protokoll_id, p.get("neuer_preis"), p.get("sondervereinbarung")):
+                    appt, protokoll_id, p.get("neuer_preis"),
+                    p.get("sondervereinbarung"),
+                    korrekturen=korrekturen, neue_schaeden=neue_schaeden):
                 await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
                 n += 1
         except Exception:  # noqa: BLE001

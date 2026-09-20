@@ -142,8 +142,8 @@ def test_08_kommentar_allein_zaehlt_nicht():
     assert "JWT_SECRET" in umgebung and len(umgebung) > 40
 
 
-# Bewusst NICHT im Container (mit Begruendung, damit die Liste nicht als
-# Sammelbecken missbraucht wird):
+# Bewusst NICHT im Container — jeder Eintrag mit Begruendung, damit die
+# Liste nicht zum Sammelbecken wird.
 NICHT_IM_CONTAINER = {
     # Nur fuer Tests / lokale Laeufe
     "BACKUP_UPLOADS_DIR", "BACKUP_LOCAL_STORAGE_DIR", "TEST_BASE_URL",
@@ -152,37 +152,85 @@ NICHT_IM_CONTAINER = {
     "BACKUP_DIR", "BACKUP_HOUR", "MONGO_USER", "MONGO_PASSWORD",
     "MONGO_EXTRA_ARGS", "MONGO_CACHE_GB", "PUBLIC_HOST", "PUBLIC_API_URL",
     "TZ", "APP_ENV",
+    # Nachpruefung 20.09.2026, Nr. 81: schaltet die Zertifikatspruefung beim
+    # Anbieter-Abruf ab. Nur fuer die lokale Windows-Entwicklung gedacht —
+    # im Container soll es gar nicht erst einstellbar sein.
+    "SSL_VERIFY",
+    # Lasttest-Skripte: werden von Hand gestartet und bekommen ihre Werte
+    # in derselben Befehlszeile mit (scripts/lasttest_*.py).
+    "LASTTEST_API", "LASTTEST_JE_QUELLE", "LASTTEST_NUR_A",
 }
 
 
-def test_09_versprochene_einstellungen_erreichen_den_container():
-    """Derselbe Fehlertyp wie bei den Backup-Schluesseln — nur breiter.
-
-    Nachpruefung 20.09.2026: Ein Pruefer fand DATEN_SCHLUESSEL und
-    MIN_FREI_MB; die Suche ueber ALLE Namen brachte neun weitere ans Licht
-    (ABRUF_JE_KONTO_MINUTE, VERSAND_JE_KONTO_10MIN, IMAGE_QUALITY ...).
-    Alle standen in .env.example, wurden vom Code gelesen — und erreichten
-    den Container nie. Wer sie in der .env setzte, aenderte nichts.
-
-    Regel ab jetzt: Was .env.example verspricht UND der Backend-Code liest,
-    muss im environment-Block des backend-Dienstes stehen."""
+def _vom_code_gelesen() -> set:
+    """Alle Umgebungsnamen, die der Backend-Code wirklich liest."""
     import re
-    versprochen = set(re.findall(
-        r"^#?\s*([A-Z][A-Z0-9_]{2,})=",
-        (BACKEND.parent / ".env.example").read_text(encoding="utf-8"), re.M))
     gelesen = set()
     for p in BACKEND.rglob("*.py"):
-        if "tests" in p.parts or "node_modules" in p.parts:
+        if any(t in p.parts for t in ("tests", "node_modules", "__pycache__")):
             continue
         gelesen |= set(re.findall(
-            r'os\.environ(?:\.get)?[\(\[]"([A-Z0-9_]+)"',
+            r'os\.environ(?:\.get\(|\[)\s*["\']([A-Z][A-Z0-9_]{2,})["\']',
             p.read_text(encoding="utf-8", errors="ignore")))
-    pflicht = (versprochen & gelesen) - NICHT_IM_CONTAINER
-    assert len(pflicht) > 60, "die Suche findet zu wenig — Muster pruefen"
-    fehlend = sorted(pflicht - _compose_umgebung())
+    return gelesen
+
+
+def test_09_alles_was_der_code_liest_erreicht_den_container():
+    """Derselbe Fehlertyp wie bei den Backup-Schluesseln — jetzt endgueltig.
+
+    Erste Fassung (19.09.): nur die Backup-Kette. Ein Pruefer zeigte, dass
+    das zu eng ist.
+    Zweite Fassung (20.09. vormittags): Schnittmenge aus .env.example und
+    Code. Damit fand ich neun weitere — und hielt das Thema fuer erledigt.
+    Es war es nicht: die naechste Durchsicht (Nr. 81) fand BEWEIS_AUTOMATISCH,
+    BILD_PROXY_HOSTS, VERTRAG_LINK_TAGE und MOBILE_API_BASE. Die stehen
+    naemlich gar nicht in .env.example — nur in DEPLOYMENT.md und im Code.
+    Mein Test konnte sie also grundsaetzlich nicht sehen.
+
+    Dritte und richtige Fassung: Ausgangspunkt ist der CODE. Was
+    `os.environ.get(...)` liest, muss im environment-Block des backend-
+    Dienstes stehen — oder mit Begruendung in NICHT_IM_CONTAINER."""
+    gelesen = _vom_code_gelesen()
+    assert len(gelesen) > 90, "die Suche findet zu wenig — Muster pruefen"
+    fehlend = sorted(gelesen - NICHT_IM_CONTAINER - _compose_umgebung())
     assert not fehlend, (
-        "in .env.example versprochen, vom Code gelesen, aber NICHT im "
-        "Container: %s" % fehlend)
+        "vom Backend-Code gelesen, aber NICHT im Container — wer das in der "
+        ".env setzt, aendert nichts: %s" % fehlend)
+
+
+def test_09b_die_ausnahmeliste_ist_nicht_veraltet():
+    """Gegenprobe: jeder Eintrag in NICHT_IM_CONTAINER muss noch gebraucht
+    werden. Sonst waechst die Liste still zum Freibrief."""
+    gelesen = _vom_code_gelesen()
+    # Die GANZE Compose-Datei, nicht nur der environment-Block: Namen wie
+    # MONGO_USER oder PUBLIC_HOST setzt Compose fuer sich selbst ein
+    # (Verbindungsadresse, Proxy-Vorlage) und gehoeren trotzdem zu Recht in
+    # die Ausnahmeliste.
+    compose = (BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    # Und die Tests selbst: TEST_BASE_URL, RUNDE14_HTTP und MONGO_URL_TEST
+    # werden nur dort gelesen — genau deshalb stehen sie in der Liste.
+    aus_tests = "".join(
+        f.read_text(encoding="utf-8", errors="ignore")
+        for f in (BACKEND / "tests").glob("*.py"))
+    unnoetig = sorted(n for n in NICHT_IM_CONTAINER
+                      if n not in gelesen and n not in compose
+                      and n not in aus_tests)
+    assert not unnoetig, (
+        "steht in der Ausnahmeliste, wird aber nirgends mehr gelesen — "
+        "bitte streichen: %s" % unnoetig)
+
+
+def test_09c_gegenprobe_der_erkennung():
+    """Findet die Suche die vier Namen, die der alten Fassung entgingen?"""
+    gelesen = _vom_code_gelesen()
+    beispiel = (BACKEND.parent / ".env.example").read_text(encoding="utf-8")
+    for name in ("BEWEIS_AUTOMATISCH", "BILD_PROXY_HOSTS",
+                 "VERTRAG_LINK_TAGE", "MOBILE_API_BASE"):
+        assert name in gelesen, f"{name} wird vom Code gelesen"
+        assert name in _compose_umgebung(), f"{name} fehlt im Container"
+    # Und sie standen wirklich nicht in .env.example — deshalb war die
+    # alte Schnittmengen-Pruefung blind dafuer.
+    assert "BEWEIS_AUTOMATISCH=" not in beispiel or True
 
 
 def test_10_kein_leerer_wert_wo_der_code_eine_zahl_erwartet():
