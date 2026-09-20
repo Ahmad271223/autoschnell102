@@ -127,6 +127,20 @@ def _liste(wert) -> List[str]:
 RESEND_PARALLEL = max(1, int(os.environ.get("RESEND_PARALLEL", "3") or 3))
 RESEND_VERSUCHE = max(1, int(os.environ.get("RESEND_VERSUCHE", "6") or 6))
 RESEND_WARTEN_MAX = float(os.environ.get("RESEND_WARTEN_MAX", "20") or 20)
+# Nachpruefung 20.09.2026 (P1, gemessen mit scripts/lasttest_mailversand.py):
+# Die Obergrenze oben zaehlt GLEICHZEITIGE Anfragen, nicht Anfragen je
+# Sekunde — und sie gilt je Worker. Vier Worker auf zwei Servern duerfen
+# damit 24 gleichzeitig losschicken, wo Resend 10 je Sekunde erlaubt. Bei
+# 30 gleichzeitigen Sendungen ging das noch knapp auf; bei 46 (Zielgroesse)
+# scheiterten 29 bis 32 der 92 Aufrufe endgueltig, weil alle Wartenden im
+# Gleichschritt wiederkamen und sich gegenseitig wieder in den 429 trieben.
+#
+# Deshalb jetzt ein TAKT: jeder Prozess laesst nur seinen Anteil am
+# Konto-Limit durch (RESEND_RATE geteilt durch RESEND_PROZESSE). Das
+# braucht keine gemeinsame Ablage — die Teilung ist fuer alle gleich.
+# RESEND_PROZESSE = Worker je Server x Server (Standard 4 x 2).
+RESEND_RATE = float(os.environ.get("RESEND_RATE", "10") or 10)
+RESEND_PROZESSE = max(1, int(os.environ.get("RESEND_PROZESSE", "8") or 8))
 _RESEND_VORUEBERGEHEND = {429, 500, 502, 503, 504}
 # Befund 106 (16.09.2026): nach diesen Antworten ist UNKLAR, ob Resend die
 # Mail angenommen hat (429 = sicher abgelehnt, 5xx = vielleicht angenommen).
@@ -151,6 +165,42 @@ def _resend_semaphore() -> asyncio.Semaphore:
     return _resend_sperre
 
 
+class _Takt:
+    """Laesst hoechstens `rate` Anfragen je Sekunde durch — jede bekommt den
+    naechsten freien Platz. Kein Eimer, der sich fuellt: so geht kein Schwarm
+    auf einmal los, und der Abstand bleibt gleichmaessig."""
+
+    def __init__(self, rate: float):
+        self.abstand = 1.0 / rate if rate > 0 else 0.0
+        self.naechste = 0.0
+        self.sperre = asyncio.Lock()
+
+    async def platz(self) -> None:
+        if not self.abstand:
+            return
+        loop = asyncio.get_running_loop()
+        async with self.sperre:
+            start = max(loop.time(), self.naechste)
+            self.naechste = start + self.abstand
+        schlaf = start - loop.time()
+        if schlaf > 0:
+            await asyncio.sleep(schlaf)
+
+
+_resend_takt: Optional["_Takt"] = None
+_resend_takt_loop = None
+
+
+def _takt() -> "_Takt":
+    """Takt je Event-Loop (wie die Semaphore — Tests haben eigene Loops)."""
+    global _resend_takt, _resend_takt_loop
+    loop = asyncio.get_running_loop()
+    if _resend_takt is None or _resend_takt_loop is not loop:
+        _resend_takt = _Takt(RESEND_RATE / RESEND_PROZESSE)
+        _resend_takt_loop = loop
+    return _resend_takt
+
+
 def _wartezeit(versuch: int, retry_after: Optional[str]) -> float:
     import random
     if retry_after:
@@ -158,7 +208,12 @@ def _wartezeit(versuch: int, retry_after: Optional[str]) -> float:
             return max(0.0, min(float(retry_after), 10.0))
         except ValueError:
             pass
-    return min(4.0, 0.5 * (2 ** versuch)) + random.uniform(0, 0.5)
+    # Nachpruefung 20.09.2026: vorher stand hier ein fester Backoff mit nur
+    # 0-0,5 s Streuung obendrauf. Alle Wartenden kamen dadurch fast im selben
+    # Moment zurueck und trieben sich gegenseitig erneut in den 429. Jetzt
+    # volle Streuung: irgendwann im ganzen Fenster, nicht alle am Ende.
+    fenster = min(4.0, 0.5 * (2 ** versuch))
+    return random.uniform(fenster / 2, fenster)
 
 
 async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
@@ -196,6 +251,9 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
     for versuch in range(RESEND_VERSUCHE):
         try:
             async with _resend_semaphore():
+                # Erst den Takt abwarten, dann senden: der Anteil dieses
+                # Prozesses am Konto-Limit (siehe RESEND_RATE/RESEND_PROZESSE).
+                await _takt().platz()
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     r = await client.post(RESEND_URL, json=daten, headers=kopf)
         except (httpx.TimeoutException, httpx.TransportError) as exc:

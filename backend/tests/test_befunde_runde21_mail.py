@@ -56,6 +56,12 @@ def ohne_warten(monkeypatch):
 
     monkeypatch.setattr(E.asyncio, "sleep", _schlaf)
     monkeypatch.setattr(E, "RESEND_API_KEY", "re_test")
+    # Nachpruefung 20.09.2026: seit dem Takt (RESEND_RATE/RESEND_PROZESSE)
+    # schlaeft auch er ueber asyncio.sleep. Hier geht es aber allein um die
+    # WIEDERHOLUNGEN — der Takt wird deshalb abgeschaltet (Rate 0 = kein
+    # Abstand), sonst landen seine Pausen in derselben Liste. Dass der Takt
+    # selbst greift, prueft test_mailtakt_20260920.py.
+    monkeypatch.setattr(E, "_takt", lambda: E._Takt(0))
     return geschlafen
 
 
