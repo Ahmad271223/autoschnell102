@@ -213,10 +213,21 @@ def test_69_send_contract_liest_kein_rohes_haendlerdokument_mehr():
 
 # =============================================================== 118: $slice (unit)
 def test_118_beide_push_stellen_begrenzen_send_status():
+    """Nachpruefung 20.09.2026 (N1): Die zwei Schreibpfade stehen jetzt in
+    EINEM Helfer (_abschluss) — das war der Sinn des Umbaus. Geprueft wird
+    deshalb die Zusage, nicht die Zahl der Fundstellen: jeder Weg, der
+    send_status fortschreibt, muss die Liste deckeln."""
     import routes.contracts as cm
-    quelle = inspect.getsource(cm.send_contract)
-    assert quelle.count('"$push": {"send_status"') == 2, "beide Schreibpfade erwartet"
-    assert quelle.count('"$slice": -SEND_STATUS_MAX') == 2
+    quelle = inspect.getsource(cm._abschluss)
+    assert '"$push": {"send_status"' in quelle
+    assert quelle.count('"$push"') == quelle.count('"$slice": -SEND_STATUS_MAX'), (
+        "ein Schreibpfad haengt send_status an, ohne die Liste zu deckeln")
+    # Im Versandweg bleibt genau EIN eigener $push: die Reservierung
+    # ("zustellung: laeuft"). Auch der muss deckeln.
+    versand = inspect.getsource(cm.send_contract)
+    assert versand.count('"$push": {"send_status"') == 1, (
+        "send_contract schreibt an _abschluss vorbei")
+    assert versand.count('"$slice": -SEND_STATUS_MAX') == 1
     assert cm.SEND_STATUS_MAX == 200
 
 

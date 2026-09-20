@@ -473,6 +473,12 @@ async def _abruf_zaehlen(contract_id: str, token: str, aktuell: bool) -> None:
     """Befund 50 (16.09.2026): Abrufe auch fuer einen ALTEN Link (freigabe_alt)
     zaehlen — vorher traf der Zaehler nur den aktuellen Token, die Statistik
     im Vertrag blieb fuer historisierte Links auf 0."""
+    # Nr. 3 (20.09.2026): Der oeffentliche Link ist ein GET und kaeme damit
+    # an der Schreibpause vorbei. Ein Abrufzaehler ist kein Geschaeftsvorgang
+    # — waehrend einer Sicherung wird er einfach ausgelassen.
+    import wartung as _wartung
+    if await _wartung.schreiben_pausiert(db):
+        return
     if aktuell:
         await db.generated_pdfs.update_one(
             {"id": contract_id, "freigabe.token": token},
@@ -1492,6 +1498,103 @@ def _auto_schluessel(contract_id: str, c: dict, body) -> str:
     return "auto-" + hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
 
 
+async def _reservierung_nachlesen(contract_id: str, bereich: dict,
+                                  idempotency_key: str) -> None:
+    """Pruefbericht 20.09.2026 (Nr. 8): Warum hat die Reservierung nichts
+    geaendert?
+
+    Vorher galt `modified_count == 0` immer als "ein anderer Versand laeuft
+    schon" — die Antwort sagte `zustellung: laeuft, bereits_gesendet: true`.
+    Null Aenderungen entstehen aber genauso, wenn der Vertrag GENAU in diesem
+    Moment geloescht oder einem anderen Konto uebertragen wurde. Dann laeuft
+    gar kein Versand, und der Sucher wartet auf eine Mail, die nie kommt.
+
+    Diese Pruefung wirft in genau diesem Fall. Sagt sie nichts, war es
+    wirklich ein zweiter Versand und der Aufrufer antwortet wie bisher.
+    """
+    doc = await db.generated_pdfs.find_one(
+        {"id": contract_id, **bereich},
+        {"_id": 0, "send_status": 1})
+    if doc is None:
+        raise HTTPException(404, "Dieser Vertrag ist nicht mehr verfügbar — er "
+                                 "wurde gerade gelöscht oder übertragen. Es "
+                                 "wurde NICHTS versendet.")
+    if not any(e.get("idempotency_key") == idempotency_key
+               for e in (doc.get("send_status") or [])):
+        # Vertrag ist da, aber unser Eintrag fehlt — die Reservierung ist aus
+        # einem anderen Grund gescheitert (z.B. Liste gerade gekuerzt).
+        raise HTTPException(409, "Der Versand konnte nicht vorgemerkt werden — "
+                                 "bitte gleich erneut versuchen.",
+                            headers={"Retry-After": "3"})
+
+
+async def _versand_laeuft(contract_id: str) -> bool:
+    """Wird dieser Vertrag GERADE nach draussen verschickt?
+
+    Pruefbericht 20.09.2026 (N2): Die Versandreservierung schuetzt bisher nur
+    davor, DENSELBEN Vertrag zweimal an DENSELBEN Empfaenger zu schicken. Das
+    Aendern und das Loeschen des Vertrags warten aber auf gar nichts — ein
+    Vertrag konnte also mitten im externen Mailversand neu erzeugt oder
+    geloescht werden. Beim Loeschen kam die Mail danach trotzdem beim
+    Verkaeufer an, und die Anwendung vermerkte nur "Status-Vermerk nicht
+    gespeichert".
+
+    Bewusst KEIN Schloss ueber den ganzen Versand: der haengt an einem
+    externen Dienst (Zeitueberschreitung 30 s, dazu Wiederholungen) — ein so
+    lange gehaltenes Schloss wuerde den Abholweg blockieren. Stattdessen
+    wird die Aenderung waehrenddessen abgelehnt; der Nutzer wiederholt sie
+    ein paar Sekunden spaeter. Zusammen mit der Fassungspruefung beim
+    Abschluss (siehe _abschluss) kann der Verkaeufer damit keinen anderen
+    Stand bekommen, als die Anwendung anzeigt.
+
+    "Laeuft" heisst: Eintrag auf `zustellung: laeuft`, der noch nicht als
+    haengend gilt (ZUSTELLUNG_HAENGT_NACH_SEK) — ein abgestuerzter Versand
+    blockiert also nichts dauerhaft.
+    """
+    frisch_ab = (datetime.now(timezone.utc)
+                 - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK)).isoformat()
+    return await db.generated_pdfs.count_documents(
+        {"id": contract_id,
+         "send_status": {"$elemMatch": {
+             "zustellung": "laeuft",
+             "$or": [{"sent_at": {"$gt": frisch_ab}},
+                     {"wiederaufnahme_am": {"$gt": frisch_ab}}]}}},
+        limit=1) > 0
+
+
+VERSAND_LAEUFT_TEXT = ("Dieser Vertrag wird gerade verschickt — bitte in ein paar "
+                       "Sekunden erneut versuchen.")
+
+
+def _abschluss(send_entry: dict, neuer_status: str, fassung_veraltet: bool,
+               *, wiederaufnahme: bool) -> dict:
+    """Das Update, mit dem ein Versand abgeschlossen wird.
+
+    Pruefbericht 20.09.2026 (N1): Entstand WAEHREND des Versands eine neue
+    Fassung, ging beim Verkaeufer Fassung N raus — der Vertrag stand danach
+    aber als Fassung N+1 auf "versendet", und der Merker
+    `nach_abholung_versand_offen` war geloescht. Der Sucher sah also "erledigt",
+    obwohl der Verkaeufer den falschen Stand hatte.
+
+    Deshalb: der send_status-Eintrag wird IMMER geschrieben (er traegt die
+    Fassung, die wirklich rausging — das ist der Beleg). Status und Merker
+    des Vertrags ruehrt der Abschluss nur an, wenn die versendete Fassung
+    auch die aktuelle ist.
+    """
+    eintrag = ({"$set": {"send_status.$": send_entry}} if wiederaufnahme
+               else {"$push": {"send_status": {"$each": [send_entry],
+                                               "$slice": -SEND_STATUS_MAX}}})
+    if fassung_veraltet:
+        eintrag.setdefault("$set", {})["updated_at"] = now_iso()
+        return eintrag
+    eintrag.setdefault("$set", {}).update(
+        {"status": neuer_status, "updated_at": now_iso()})
+    # 19.09.2026: Die Rueckfrage "neuen Vertrag senden?" ist damit
+    # beantwortet — der Hinweis verschwindet aus der Liste.
+    eintrag["$unset"] = {"nach_abholung_versand_offen": ""}
+    return eintrag
+
+
 @router.post("/contracts/{contract_id}/send")
 async def send_contract(contract_id: str, body: SendIn, user=Depends(require_active_sub)):
     # Pruefbericht Runde 8 (09/2026), hoher Befund: Lesen und PDF gingen
@@ -1594,6 +1697,9 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 {"$set": {"send_status.$.zustellung": "laeuft",
                           "send_status.$.wiederaufnahme_am": claim_am}})
             if res.modified_count == 0:
+                # Nr. 8: erst nachsehen, ob der Vertrag ueberhaupt noch da ist.
+                await _reservierung_nachlesen(contract_id, bereich,
+                                              body.idempotency_key)
                 return {"channel": vorhanden.get("channel"), "status": "ok",
                         "sent_at": vorhanden.get("sent_at"),
                         "zustellung": "laeuft", "bereits_gesendet": True}
@@ -1632,9 +1738,20 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 "anfrage_hash": anfrage_hash, "version": int(c.get("version") or 1)}],
                 "$slice": -SEND_STATUS_MAX}}})
         if res.modified_count == 0:
+            # Nr. 8: dasselbe hier — "nichts geaendert" heisst nicht
+            # automatisch "laeuft schon".
+            await _reservierung_nachlesen(contract_id, bereich,
+                                          body.idempotency_key)
             return {"channel": body.channel, "status": "ok", "sent_at": now_iso(),
                     "zustellung": "laeuft", "bereits_gesendet": True}
         reserviert = True
+
+    # Pruefbericht 20.09.2026 (N1): wahr, wenn waehrend des Versands eine neue
+    # Fassung entstand — dann darf der AKTUELLE Vertrag nicht als versendet
+    # gelten (Begruendung bei _abschluss). Bewusst HIER, vor jeder
+    # Verzweigung: sonst fehlt der Merker auf den Wegen, die den
+    # Versandblock gar nicht betreten.
+    fassung_veraltet = False
 
     async def _reservierung_zurueck():
         # Bei einer Wiederaufnahme bleibt der Eintrag stehen: er traegt
@@ -1798,6 +1915,21 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             try:
                 danach = await db.generated_pdfs.find_one({"id": contract_id}, {"_id": 0, "version": 1})
                 if danach is not None and int(danach.get("version") or 1) != int(c.get("version") or 1):
+                    # Pruefbericht 20.09.2026 (N1): DAS hier war der schwerste
+                    # Fehler. Der Hinweis wurde zwar gemeldet — der Vertrag
+                    # bekam danach trotzdem status="versendet" und verlor den
+                    # Merker nach_abholung_versand_offen. Ergebnis: der
+                    # Verkaeufer hatte Fassung N in der Hand, die Liste zeigte
+                    # Fassung N+1 als versendet, und die Erinnerung, die neue
+                    # Fassung nachzuschicken, war weg. Bei einem KAUFVERTRAG
+                    # ist das nicht hinnehmbar.
+                    #
+                    # Jetzt: der Versand wird als das protokolliert, was er
+                    # war — Fassung N ging raus (steht im send_status-Eintrag)
+                    # —, aber der AKTUELLE Vertrag bleibt unversendet und
+                    # behaelt seinen Merker. Die Liste sagt also weiterhin
+                    # "noch zu senden", und genau das stimmt.
+                    fassung_veraltet = True
                     out["hinweis"] = ("Achtung: Der Vertrag wurde während des Versands neu erstellt — "
                                       "die E-Mail enthält noch die vorherige Fassung. Bitte die neue "
                                       "Fassung erneut senden.")
@@ -1874,19 +2006,14 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
              "send_status": {"$elemMatch": {
                  "idempotency_key": body.idempotency_key,
                  **({"wiederaufnahme_am": claim_am} if wiederaufnahme else {})}}},
-            {"$set": {"send_status.$": send_entry,
-                      "status": neuer_status, "updated_at": now_iso()},
-             # 19.09.2026: Die Rueckfrage "neuen Vertrag senden?" ist damit
-             # beantwortet — der Hinweis verschwindet aus der Liste.
-             "$unset": {"nach_abholung_versand_offen": ""}},
+            _abschluss(send_entry, neuer_status, fassung_veraltet,
+                       wiederaufnahme=True),
         )
     else:
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich},
-            {"$push": {"send_status": {"$each": [send_entry],
-                                       "$slice": -SEND_STATUS_MAX}},
-             "$set": {"status": neuer_status, "updated_at": now_iso()},
-             "$unset": {"nach_abholung_versand_offen": ""}},
+            _abschluss(send_entry, neuer_status, fassung_veraltet,
+                       wiederaufnahme=False),
         )
     if reserviert and res.matched_count:
         # Runde 16: Archiv-Eintrag ERST nach dem Erfolg (vorher bei der
@@ -1929,6 +2056,11 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
         {"_id": 0, "user_id": 1, "contract_no": 1})
     if not vorhanden:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    # Pruefbericht 20.09.2026 (N2): nicht mitten im Versand loeschen — die
+    # Mail waere sonst schon unterwegs, wenn der Vertrag verschwindet.
+    if await _versand_laeuft(contract_id):
+        raise HTTPException(409, VERSAND_LAEUFT_TEXT,
+                            headers={"Retry-After": "5"})
     if user.get("role") == "sucher" and vorhanden.get("user_id") != user["id"]:
         raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
                                  "löschen — fremde Verträge löscht der "
@@ -2025,6 +2157,14 @@ async def regenerate_contract_for_pickup(
                            and not preis_aenderung and not korrekturen
                            and not neue_schaeden):
         return False
+    # Pruefbericht 20.09.2026 (N2): keine neue Fassung mitten im Versand.
+    # Sonst haelt der Verkaeufer die alte Fassung in der Hand, waehrend die
+    # Anwendung schon die neue fuehrt. 409 statt still weiterzumachen — der
+    # Aufrufer (Termin verschieben, Protokoll abschliessen) meldet das
+    # weiter, und der Nutzer wiederholt es in ein paar Sekunden.
+    if await _versand_laeuft(contract_id):
+        raise HTTPException(409, VERSAND_LAEUFT_TEXT,
+                            headers={"Retry-After": "5"})
     # Runde 10: derselbe Bereich wie beim Lesen — ein Sucher erzeugt kein
     # PDF fuer den Vertrag eines Kollegen, auch nicht ueber den Termin.
     # Runde 17 (Nr. 373): auch ohne user den Grabstein-Filter (Nr. 348).

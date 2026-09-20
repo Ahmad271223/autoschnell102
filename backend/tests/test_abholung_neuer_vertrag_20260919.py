@@ -113,9 +113,15 @@ def test_07_merker_fuer_die_rueckfrage_nur_nach_der_abholung():
     assert 'grund == "abholung_abgeschlossen"' in q, \
         "eine blosse Terminverschiebung fragt nicht nach dem Versand"
     assert '"felder": sorted(korrigiert.keys())' in q
-    # Nach dem Versand ist die Frage beantwortet
-    versand = inspect.getsource(C.send_contract)
-    assert '"$unset": {"nach_abholung_versand_offen": ""}' in versand
+    # Nach dem Versand ist die Frage beantwortet. Nachpruefung 20.09.2026
+    # (N1): das steht jetzt in _abschluss — und zwar NUR, wenn die
+    # versendete Fassung auch die aktuelle ist. Ging waehrend des Versands
+    # eine aeltere Fassung raus, bleibt die Frage offen.
+    abschluss = inspect.getsource(C._abschluss)
+    assert '"nach_abholung_versand_offen": ""' in abschluss
+    assert "fassung_veraltet" in abschluss, (
+        "der Merker wird auch dann geloescht, wenn der Verkaeufer die ALTE "
+        "Fassung bekommen hat")
 
 
 def test_08_abschluss_reicht_korrekturen_weiter():
