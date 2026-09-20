@@ -1372,12 +1372,18 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
         import kaufvorgang as _kv
         if not await _kv.termin_status_uebernehmen(appt, body.status, user={"id": driver["id"]}) \
                 and appt.get("vehicle_id"):
-            from lifecycle import try_set_lifecycle
-            await try_set_lifecycle(
-                appt["vehicle_id"], appt.get("dealer_id"),
-                "abgeholt" if body.status == "abgeholt" else "nicht_abgeholt",
-                user={"id": driver["id"]},
-            )
+            # Nachpruefung 20.09.2026, Nr. 37/38: Hier stand
+            # "abgeholt" if status == "abgeholt" else "nicht_abgeholt" —
+            # damit wurde aus "erledigt" und "storniert" ein
+            # "nicht_abgeholt", waehrend das Buero fuer dieselben Faelle gar
+            # nichts setzte. Jetzt entscheidet EINE Tabelle (lifecycle.py).
+            from lifecycle import try_set_lifecycle, zustand_fuer_terminstatus
+            zustand = zustand_fuer_terminstatus(body.status)
+            if zustand:
+                await try_set_lifecycle(
+                    appt["vehicle_id"], appt.get("dealer_id"), zustand,
+                    user={"id": driver["id"]},
+                )
     except Exception:  # noqa: BLE001
         log.exception("Nacharbeit nach Fahrer-Status %s an Termin %s fehlgeschlagen",
                       body.status, appt_id)

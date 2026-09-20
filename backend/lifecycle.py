@@ -86,6 +86,34 @@ class LifecycleError(ValueError):
     """Unerlaubter Statusübergang."""
 
 
+#: Welchen Fahrzeugzustand ein abgeschlossener Terminstatus bedeutet.
+#: Nachpruefung 20.09.2026, Nr. 37/38: Das stand vorher an ZWEI Stellen
+#: verschieden. Das Buero (routes/appointments.py) bildete nur "abgeholt"
+#: und "nicht abgeholt" ab; die Fahrer-App (routes/drivers.py) schrieb
+#: "abgeholt" if status == "abgeholt" else "nicht_abgeholt" — und machte
+#: damit aus "erledigt" und "storniert" ein "nicht_abgeholt". Derselbe
+#: Endstatus erzeugte also je nach Weg verschiedene Fahrzeugzustaende.
+#: Jetzt entscheidet diese eine Tabelle.
+#:
+#: "erledigt" zaehlt als abgeschlossene Abholung — drivers.py,
+#: protocols.py und cleanup_service.CLEANUP_RULES behandeln es laengst so.
+#: "storniert" bleibt bewusst OHNE Zuordnung: ein abgesagter Termin sagt
+#: nichts darueber, ob das Fahrzeug spaeter geholt wird; ein Endzustand
+#: waere hier eine Behauptung. Das Buero hat es nie gesetzt, und dabei
+#: bleibt es.
+TERMINSTATUS_FAHRZEUGZUSTAND = {
+    "abgeholt": "abgeholt",
+    "erledigt": "abgeholt",
+    "nicht abgeholt": "nicht_abgeholt",
+    "nicht_abgeholt": "nicht_abgeholt",
+}
+
+
+def zustand_fuer_terminstatus(status: str) -> Optional[str]:
+    """Fahrzeugzustand zu einem Terminstatus — None heisst "nichts aendern"."""
+    return TERMINSTATUS_FAHRZEUGZUSTAND.get(str(status or "").strip().lower())
+
+
 async def set_lifecycle(
     vehicle_id: str, dealer_id: str, new_state: str, *,
     user: Optional[dict] = None, force: bool = False,

@@ -132,23 +132,63 @@ async def ist_replica_set() -> bool:
     return ist
 
 
+#: Antwort, wenn der Ausgang einer Transaktion nicht feststeht (Nr. 30-33).
+COMMIT_UNKLAR = ("Der Vorgang konnte nicht sicher abgeschlossen werden. "
+                 "Bitte die Seite neu laden und nachsehen, ob die Aenderung "
+                 "schon gespeichert ist — sie wird NICHT automatisch "
+                 "wiederholt, damit nichts doppelt passiert.")
+
+
 async def transaktion(fn):
     """fn(session) in einer Transaktion ausfuehren, wenn moeglich; sonst ohne.
-    Bricht die Transaktion technisch ab (PyMongoError), laeuft fn einmal ohne
-    Transaktion — die Schritte muessen idempotent sein. HTTPException geht
-    unveraendert durch."""
+
+    Nachpruefung 20.09.2026, Nr. 30-33: Vorher wurde JEDER PyMongoError
+    gleich behandelt — es lief einfach `fn(None)` noch einmal, ohne
+    Transaktion. Genau das war in zwei Faellen falsch:
+
+      * Steht der Ausgang der Uebergabe nicht fest
+        (UnknownTransactionCommitResult), kann sie sehr wohl geklappt
+        haben. Der zweite Durchlauf sah dann eine bereits geaenderte
+        Datenbank: bei der Terminaenderung passte der Abgleich auf
+        `updated_at` nicht mehr -> "409 Stand veraltet", obwohl gespeichert
+        wurde; beim Loeschen war der Termin schon weg -> "404", obwohl
+        genau dieses Loeschen erfolgreich war.
+      * Und ausgerechnet bei einer Datenbank-Stoerung — also dann, wenn
+        Alles-oder-nichts am wichtigsten ist — lief der mehrschrittige
+        Ablauf bewusst OHNE Transaktion.
+
+    Jetzt entscheiden die Kennzeichen, die MongoDB selbst mitschickt:
+      TransientTransactionError      nichts wurde uebernommen -> einmal
+                                     komplett wiederholen (mit Transaktion)
+      UnknownTransactionCommitResult Ausgang unbekannt -> NICHT wiederholen,
+                                     503 mit klarer Ansage an den Nutzer
+      alles andere                   wie bisher: einmal ohne Transaktion
+                                     (die Schritte sind idempotent)
+
+    HTTPException geht unveraendert durch."""
     if await ist_replica_set():
-        try:
-            async with await client.start_session() as s:
-                async with s.start_transaction():
-                    return await fn(s)
-        except HTTPException:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            from pymongo.errors import PyMongoError
-            if not isinstance(exc, PyMongoError):
+        from pymongo.errors import PyMongoError
+        for versuch in (1, 2):
+            try:
+                async with await client.start_session() as s:
+                    async with s.start_transaction():
+                        return await fn(s)
+            except HTTPException:
                 raise
-            log.warning("Transaktion nicht moeglich (%s) — Schritte laufen einzeln", exc)
+            except Exception as exc:  # noqa: BLE001
+                if not isinstance(exc, PyMongoError):
+                    raise
+                if exc.has_error_label("UnknownTransactionCommitResult"):
+                    log.error("Transaktion mit unklarem Ausgang (%s) — NICHT "
+                              "wiederholt", exc)
+                    raise HTTPException(503, COMMIT_UNKLAR)
+                if exc.has_error_label("TransientTransactionError") and versuch == 1:
+                    log.warning("Transaktion vorzeitig beendet (%s) — sie wurde "
+                                "nachweislich nicht uebernommen, zweiter Versuch", exc)
+                    continue
+                log.warning("Transaktion nicht moeglich (%s) — Schritte laufen einzeln",
+                            exc)
+                break
     return await fn(None)
 
 

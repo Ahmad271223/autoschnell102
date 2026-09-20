@@ -14,7 +14,7 @@ from deps import (TERMIN_OFFEN_WERTE, clean_doc, current_user, datum_iso_pruefen
                   fahrzeug_bereich, log_activity, log_activity_sicher, now_iso,
                   current_firma, termin_bereich,
                   termin_im_bereich, uhrzeit_hhmm_pruefen)
-from lifecycle import try_set_lifecycle
+from lifecycle import try_set_lifecycle, zustand_fuer_terminstatus
 
 log = logging.getLogger("autohandel")
 
@@ -1133,10 +1133,13 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                 await preis_nachholen({**termin_nachher, "dealer_id": user["dealer_id"]})
             hat_vorgang = await _kv.termin_status_uebernehmen(termin_nachher, wirksamer_status, user=user)
             if not hat_vorgang and vehicle_id and status_gewechselt:
-                if update["status"] == "abgeholt":
-                    await try_set_lifecycle(vehicle_id, user["dealer_id"], "abgeholt", user=user)
-                elif update["status"] == "nicht abgeholt":
-                    await try_set_lifecycle(vehicle_id, user["dealer_id"], "nicht_abgeholt", user=user)
+                # Nr. 37/38: dieselbe Tabelle wie die Fahrer-App. Vorher
+                # fehlte hier "erledigt" ganz, waehrend die Fahrer-App es
+                # als "nicht_abgeholt" verbuchte.
+                zustand = zustand_fuer_terminstatus(update["status"])
+                if zustand:
+                    await try_set_lifecycle(vehicle_id, user["dealer_id"],
+                                            zustand, user=user)
             if not hat_vorgang and vehicle_id and nacharbeit_nachholen \
                     and wirksamer_status in TERMIN_OFFEN_WERTE:
                 # Audit 13.09.2026 (#5): wie beim Anlegen (manueller Termin ohne Vorgang).

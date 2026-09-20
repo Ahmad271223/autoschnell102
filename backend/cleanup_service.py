@@ -41,9 +41,13 @@ def now_iso() -> str:
 # Nachpruefung Runde 14 (Nr. 100): "erledigt" gilt in drivers.py/protocols.py
 # als abgeschlossen, fehlte hier aber — Berichts- und Inseratsfotos solcher
 # Termine wurden nie ueber die Termin-Frist geloescht (nur ueber die
-# 90-Tage-Regeln). Jetzt wie "abgeholt" nach 7 Tagen. Offen (Produkt-
-# entscheidung, hier NICHT umgesetzt): Lifecycle-Mapping fuer "erledigt"
-# in appointments.py und eine Frist fuer "storniert".
+# 90-Tage-Regeln). Jetzt wie "abgeholt" nach 7 Tagen.
+# Nachgezogen am 20.09.2026 (Nr. 37/38): Das Lifecycle-Mapping fuer
+# "erledigt" ist jetzt umgesetzt — und zwar an EINER Stelle fuer Buero und
+# Fahrer-App (lifecycle.TERMINSTATUS_FAHRZEUGZUSTAND). "erledigt" zaehlt
+# dort wie hier als abgeschlossene Abholung. "storniert" bekommt bewusst
+# KEINEN Fahrzeugzustand (ein abgesagter Termin sagt nichts darueber, ob
+# das Fahrzeug spaeter geholt wird), wohl aber die Frist unten.
 CLEANUP_RULES = (
     ("abgeholt", 7),
     ("nicht abgeholt", 14),
@@ -1990,25 +1994,35 @@ async def run_cleanup_forever(db):
         if not token:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
             continue
-        async with heartbeat(db, "cleanup-cycle", token, CLEANUP_INTERVAL_SECONDS - 60):
-            try:
-                await _cleanup_once(db)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("cleanup loop error: %s", exc)
-            try:
-                await _reap_stuck_snapshots(db)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("snapshot reaper error: %s", exc)
-            try:
-                await _expire_old_snapshots(db)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("snapshot expiry error: %s", exc)
-            try:
-                from beweis_service import beweise_verfallen
-                await beweise_verfallen(db)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("beweis expiry error: %s", exc)
+        # Nachpruefung 20.09.2026, Nr. 34: Geht die Sperre waehrend des Laufs
+        # verloren, hat sie schon ein anderer Prozess. Vor JEDEM weiteren
+        # Schritt nachsehen und dann aufhoeren — sonst loeschen zwei
+        # Prozesse gleichzeitig dieselben Dateien.
+        from job_lock import SperreVerloren
+        async with heartbeat(db, "cleanup-cycle", token,
+                             CLEANUP_INTERVAL_SECONDS - 60) as wache:
+            schritte = (
+                ("cleanup loop", _cleanup_once),
+                ("snapshot reaper", _reap_stuck_snapshots),
+                ("snapshot expiry", _expire_old_snapshots),
+                ("beweis expiry", _beweise_verfallen),
+            )
+            for name, schritt in schritte:
+                try:
+                    wache.pruefen()
+                    await schritt(db)
+                except SperreVerloren as exc:
+                    log.warning("Aufraeumlauf bei '%s' beendet: %s", name, exc)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("%s error: %s", name, exc)
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
+async def _beweise_verfallen(db) -> None:
+    """Beweisdokumente verfallen lassen (eigener Schritt des Aufraeumlaufs)."""
+    from beweis_service import beweise_verfallen
+    await beweise_verfallen(db)
 
 
 async def _reap_stuck_snapshots(db) -> None:

@@ -430,18 +430,48 @@ async def _sperre_gehalten(db) -> bool:
     return await gehalten(db, _SPERRE)
 
 
-async def _heartbeat(db, stop: "asyncio.Event") -> None:
+class SperreVerloren(RuntimeError):
+    """Die Migrations-Sperre gehoert jetzt einem anderen Prozess (Nr. 35)."""
+
+
+async def _heartbeat(db, stop: "asyncio.Event", wache: "_Wache") -> None:
     """Verlaengert die Migrations-Sperre alle _HEARTBEAT_S Sekunden, bis stop
-    gesetzt ist. Geht die Sperre verloren, wird das laut protokolliert."""
+    gesetzt ist.
+
+    Nachpruefung 20.09.2026, Nr. 35: Ging die Sperre verloren, stand das nur
+    im Protokoll — der alte Migrationslauf machte weiter. Nach Ablauf der
+    600-s-Frist konnte ein zweiter Prozess uebernehmen, und dann liefen ZWEI
+    Migrationen gleichzeitig ueber dieselben Daten. Jetzt merkt sich die
+    Wache den Verlust; `ausfuehren()` sieht vor jeder einzelnen Migration
+    nach und hoert auf."""
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=_HEARTBEAT_S)
             return
         except asyncio.TimeoutError:
             pass
-        if not await _sperre_verlaengern(db):
+        try:
+            gehalten = await _sperre_verlaengern(db)
+        except Exception:  # noqa: BLE001
+            continue        # Stoerung ist kein Beweis fuer den Verlust
+        if not gehalten:
+            wache.verloren = True
             log.error("Migrations-Sperre konnte nicht verlaengert werden — "
-                      "ein zweiter Prozess koennte parallel migrieren")
+                      "ein zweiter Prozess koennte parallel migrieren; der "
+                      "laufende Lauf bricht ab")
+            return
+
+
+class _Wache:
+    def __init__(self):
+        self.verloren = False
+
+    def pruefen(self) -> None:
+        if self.verloren:
+            raise SperreVerloren(
+                "Die Migrations-Sperre ging waehrend des Laufs verloren — "
+                "abgebrochen, damit nicht zwei Prozesse gleichzeitig "
+                "migrieren. Der neue Besitzer der Sperre macht weiter.")
 
 
 async def _sperre_loesen(db) -> None:
@@ -449,8 +479,11 @@ async def _sperre_loesen(db) -> None:
     await release(db, _SPERRE, token=_TOKEN)
 
 
-async def ausfuehren(db, indexe=None, seeds=()) -> dict:
-    """Als Leader: Indizes, Seeds, Datenmigrationen — in dieser Reihenfolge."""
+async def ausfuehren(db, indexe=None, seeds=(), wache=None) -> dict:
+    """Als Leader: Indizes, Seeds, Datenmigrationen — in dieser Reihenfolge.
+
+    `wache` (Nr. 35): vor jeder einzelnen Migration wird geprueft, ob die
+    Sperre noch uns gehoert. Sonst bricht der Lauf ab."""
     if indexe is not None:
         await indexe()
     for seed in seeds:
@@ -460,6 +493,8 @@ async def ausfuehren(db, indexe=None, seeds=()) -> dict:
     for nr, name, fn in MIGRATIONEN:
         if nr <= stand:
             continue
+        if wache is not None:
+            wache.pruefen()
         log.info("Migration %d (%s) laeuft ...", nr, name)
         stats = await fn(db)
         await db.schema_migrations.update_one(
@@ -481,12 +516,22 @@ async def ausfuehren(db, indexe=None, seeds=()) -> dict:
 async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int = 180) -> str:
     """Genau ein Prozess migriert; die anderen warten auf die Zielversion.
     Rueckgabe: "leader" | "gewartet" | "timeout"."""
+    verloren = False
     if await _sperre_holen(db):
         stop = asyncio.Event()
-        herz = asyncio.ensure_future(_heartbeat(db, stop))
+        wache = _Wache()
+        herz = asyncio.ensure_future(_heartbeat(db, stop, wache))
         try:
-            await ausfuehren(db, indexe=indexe, seeds=seeds)
+            await ausfuehren(db, indexe=indexe, seeds=seeds, wache=wache)
             return "leader"
+        except SperreVerloren as exc:
+            # Nr. 35: kein Fehlschlag der Migration selbst — ein anderer
+            # Prozess hat die Sperre uebernommen. Dieser Prozess faellt
+            # deshalb in die Warteschleife unten: er wartet wie jeder
+            # andere auf die Zielversion, statt in Produktion abzubrechen
+            # oder mit halb migrierten Daten weiterzulaufen.
+            log.warning("%s", exc)
+            verloren = True
         except Exception:
             log.exception("Migration fehlgeschlagen")
             if _ist_prod():
@@ -500,6 +545,9 @@ async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int 
             except Exception:  # noqa: BLE001
                 pass
             await _sperre_loesen(db)
+    if verloren:
+        log.info("Migration: warte jetzt wie ein Nicht-Leader auf die "
+                 "Zielversion (die Sperre gehoert einem anderen Prozess)")
     # Kein Leader: warten, bis die Zielversion erreicht ist. warte_sekunden
     # zaehlt nur, solange NIEMAND die Sperre haelt (Leader tot oder fertig,
     # Version trotzdem nicht erreicht); ein lebender Leader darf laenger

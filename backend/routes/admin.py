@@ -113,8 +113,18 @@ async def admin_trigger_cleanup(user=Depends(current_super_admin)):
     if not token:
         raise HTTPException(409, "Ein Aufräumlauf läuft gerade — bitte später erneut.")
     try:
-        async with heartbeat(db, "cleanup-cycle", token, 3300):
-            stats = await _cleanup_once(db)
+        # Nr. 34: geht die Sperre waehrend des Laufs verloren, bricht der
+        # Lauf ab — sonst raeumen zwei Prozesse gleichzeitig auf.
+        from job_lock import SperreVerloren
+        async with heartbeat(db, "cleanup-cycle", token, 3300) as wache:
+            try:
+                stats = await _cleanup_once(db)
+                wache.pruefen()
+            except SperreVerloren as exc:
+                raise HTTPException(
+                    409, "Der Aufraeumlauf wurde abgebrochen, weil die Sperre "
+                         "zwischenzeitlich an einen anderen Server ging. Bitte "
+                         f"spaeter erneut versuchen. ({exc})")
     finally:
         await release(db, "cleanup-cycle", token=token)
     return stats

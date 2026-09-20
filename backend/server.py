@@ -1004,12 +1004,26 @@ async def ensure_indexes():
             "session_id", unique=True, sparse=True,
         )
     except Exception as exc:
-        log.error("ensure_indexes: subscriptions.session_id konnte nicht angelegt werden "
-                  "— Eindeutigkeits-Garantie fehlt! %s", exc)
-        # Pruefung 14.09.2026 (Liste 1, Nr. 5): in Produktion kein Start ohne
-        # den Schutz gegen doppelte Abos aus parallelen Freischaltungen.
-        from indizes import _in_produktion_abbrechen
-        _in_produktion_abbrechen(f"subscriptions.session_id: {exc}")
+        # Nachpruefung 20.09.2026, Nr. 43/44: Hier stand ein Startverbot fuer
+        # Produktion. Das war richtig, SOLANGE Stripe lief — die Freischaltung
+        # legte Abos je session_id an. Seit dem 14.09.2026 gibt es keinen
+        # Stripe-Weg mehr: kein Code schreibt dieses Feld noch. Der Index
+        # schuetzt also nur noch Altdaten. Alte Dubletten aus der frueheren
+        # Zahlungslogik haetten damit ein Deployment verhindert, ohne dass
+        # irgendeine heutige Funktion betroffen waere. Deshalb nur noch
+        # Warnung plus Betriebsalarm — sichtbar, aber kein Stopp.
+        log.warning("ensure_indexes: subscriptions.session_id nicht angelegt (%s). "
+                    "Betrifft nur Altdaten aus der frueheren Stripe-Zahlung — "
+                    "bereinigen mit scripts/dubletten_pruefen.py", exc)
+        try:
+            from betrieb import alarm
+            await alarm(db, "unique_index_fehlt", ref="subscriptions.session_id",
+                        fehler=str(exc)[:300],
+                        hinweis="Altdaten aus der frueheren Stripe-Zahlung; kein "
+                                "heutiger Weg schreibt dieses Feld. Bereinigen "
+                                "mit scripts/dubletten_pruefen.py.")
+        except Exception:  # noqa: BLE001
+            pass
     # Nachpruefung Runde 14 (Nr. 60): zugang_grants ist der Idempotenz-
     # Schluessel der Stripe-Freischaltung (find_one_and_update mit upsert je
     # session_id). Ohne Unique-Index erzeugen parallele Upserts nachweislich
@@ -1022,11 +1036,22 @@ async def ensure_indexes():
         await db.zugang_grants.create_index("session_id", unique=True,
                                             name="grant_je_session")
     except Exception as exc:
-        log.error("ensure_indexes: zugang_grants.session_id (Dubletten im "
-                  "Altbestand? scripts/dubletten_pruefen.py): %s", exc)
-        # Pruefung 14.09.2026 (Liste 1, Nr. 6): in Produktion kein Start.
-        from indizes import _in_produktion_abbrechen
-        _in_produktion_abbrechen(f"zugang_grants.session_id: {exc}")
+        # Nr. 43/44, gleiche Lage: zugang_grants war der Idempotenz-Schluessel
+        # der Stripe-Freischaltung. Diesen Weg gibt es nicht mehr — die
+        # Sammlung wird nur noch als Verlauf gelesen und bei der Firmen-
+        # loeschung mitgeraeumt. Also Warnung statt Startverbot.
+        log.warning("ensure_indexes: zugang_grants.session_id nicht angelegt (%s). "
+                    "Betrifft nur Altdaten aus der frueheren Stripe-Zahlung — "
+                    "bereinigen mit scripts/dubletten_pruefen.py", exc)
+        try:
+            from betrieb import alarm
+            await alarm(db, "unique_index_fehlt", ref="zugang_grants.session_id",
+                        fehler=str(exc)[:300],
+                        hinweis="Altdaten aus der frueheren Stripe-Zahlung; kein "
+                                "heutiger Weg schreibt dieses Feld. Bereinigen "
+                                "mit scripts/dubletten_pruefen.py.")
+        except Exception:  # noqa: BLE001
+            pass
     await _storage_retry_unique_index()
     await _plan_requests_unique_indizes()
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])

@@ -110,14 +110,41 @@ async def verlaengern(db, name: str, ttl_seconds: int = 3600,
         return False
 
 
+class SperreVerloren(RuntimeError):
+    """Die eigene Job-Sperre gehoert jetzt jemand anderem (Nr. 34/35).
+
+    Wer sie faengt, hoert auf zu arbeiten — der neue Besitzer macht weiter."""
+
+
+class Wache:
+    """Zustand einer gehaltenen Sperre waehrend eines langen Laufs."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.verloren = False
+
+    def pruefen(self) -> None:
+        if self.verloren:
+            raise SperreVerloren(
+                f"Sperre {self.name} ging waehrend des Laufs verloren — "
+                f"abgebrochen, damit nicht zwei Prozesse dasselbe tun")
+
+
 @contextlib.asynccontextmanager
 async def heartbeat(db, name: str, token: Optional[str], ttl_seconds: int = 3600,
                     intervall: int = 30):
     """Phase 3 (3.1): haelt die Sperre waehrend eines langen Laufs am Leben —
-    alle `intervall` Sekunden wird sie um `ttl_seconds` verlaengert. Geht sie
-    verloren, steht das laut im Log (der Lauf selbst wird nicht abgebrochen,
-    der zweite Prozess sieht denselben Stand in der Datenbank)."""
+    alle `intervall` Sekunden wird sie um `ttl_seconds` verlaengert.
+
+    Nachpruefung 20.09.2026, Nr. 34: Ging die Sperre verloren, stand das nur
+    im Protokoll — der geschuetzte Lauf machte weiter. Hatte inzwischen ein
+    anderer Server die Sperre uebernommen, liefen alter und neuer Lauf
+    gleichzeitig. Jetzt liefert `async with heartbeat(...) as wache` eine
+    Wache: `wache.verloren` sagt es, `wache.pruefen()` bricht ab. Der Lauf
+    wird bewusst NICHT von aussen abgeschossen — er soll an einer Stelle
+    aufhoeren, die er selbst bestimmt."""
     stop = asyncio.Event()
+    wache = Wache(name)
 
     async def _puls():
         while not stop.is_set():
@@ -126,14 +153,22 @@ async def heartbeat(db, name: str, token: Optional[str], ttl_seconds: int = 3600
                 return
             except asyncio.TimeoutError:
                 pass
-            if not await verlaengern(db, name, ttl_seconds, token=token):
+            try:
+                gehalten = await verlaengern(db, name, ttl_seconds, token=token)
+            except Exception:  # noqa: BLE001
+                # Eine Stoerung ist KEIN Beweis fuer den Verlust — beim
+                # naechsten Schlag noch einmal versuchen.
+                continue
+            if not gehalten:
+                wache.verloren = True
                 logging.getLogger("autohandel").error(
                     "Sperre %s konnte nicht verlaengert werden — ein zweiter Prozess "
-                    "koennte denselben Job starten", name)
+                    "koennte denselben Job starten; der laufende Job bricht ab", name)
+                return
 
     aufgabe = asyncio.ensure_future(_puls())
     try:
-        yield
+        yield wache
     finally:
         stop.set()
         try:
