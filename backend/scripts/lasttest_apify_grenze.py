@@ -182,6 +182,14 @@ async def abbau(db, w: dict) -> None:
     await db.link_jobs.delete_many({"requested_by_dealer": w["firma"]})
 
 
+def _links_eine_quelle(n: int) -> list:
+    """n mobile.de-Links — der Fall "100 Sucher, alle auf derselben Quelle"
+    (Frage Ahmads N9)."""
+    basis = int(SUF[:6], 16) % 400000000 + 100000000
+    return [f"https://suchen.mobile.de/fahrzeuge/details.html?id={basis + i}"
+            for i in range(n)]
+
+
 def _links(n: int) -> list:
     """n mobile.de- und n AutoScout-Links, alle verschieden."""
     basis = int(SUF[:6], 16) % 400000000 + 100000000
@@ -192,7 +200,8 @@ def _links(n: int) -> list:
     return mob + aut
 
 
-async def lauf(je_quelle: int, apify_grenze: int, dauer: float) -> int:
+async def lauf(je_quelle: int, apify_grenze: int, dauer: float,
+               eine_quelle: bool = False) -> int:
     from deps import db
     import httpx
     import link_jobs as LJ
@@ -208,8 +217,10 @@ async def lauf(je_quelle: int, apify_grenze: int, dauer: float) -> int:
     MS.httpx.AsyncClient = Client
     AS._httpx.AsyncClient = Client
 
-    print(f"  je Quelle ................. {je_quelle} Links "
-          f"(= {je_quelle * 2} gleichzeitig)")
+    anzahl = je_quelle if eine_quelle else je_quelle * 2
+    print(f"  Links gleichzeitig ........ {anzahl}"
+          + ("  (alle mobile.de — Frage N9)" if eine_quelle
+             else f"  ({je_quelle} je Quelle)"))
     print(f"  eigene Grenzen ............ mobile {PL.PROVIDER_MAX_CONCURRENT['mobile']}, "
           f"autoscout24 {PL.PROVIDER_MAX_CONCURRENT['autoscout24']}  "
           f"(Summe {PL.PROVIDER_MAX_CONCURRENT['mobile'] + PL.PROVIDER_MAX_CONCURRENT['autoscout24']})")
@@ -220,7 +231,8 @@ async def lauf(je_quelle: int, apify_grenze: int, dauer: float) -> int:
     w = await aufbau(db, je_quelle)
     try:
         # Alle Links gleichzeitig einreihen — je ein Sucher je Link.
-        alle = _links(je_quelle)
+        alle = (_links_eine_quelle(je_quelle) if eine_quelle
+                else _links(je_quelle))
         t0 = time.monotonic()
         await asyncio.gather(*[
             LJ.enqueue_job(db, url, w["firma"], w["sucher"][i % je_quelle])
@@ -247,6 +259,17 @@ async def lauf(je_quelle: int, apify_grenze: int, dauer: float) -> int:
             await asyncio.sleep(0.3)
         gesamt = time.monotonic() - t0
 
+        # N9: Wie lange wartete der LETZTE? Das Frontend gibt nach 120 s auf.
+        wartezeiten = []
+        async for j in db.link_jobs.find(
+                {"requested_by_dealer": w["firma"], "status": "completed"},
+                {"_id": 0, "created_at": 1, "finished_at": 1}):
+            try:
+                a1 = datetime.fromisoformat(j["created_at"])
+                b1 = datetime.fromisoformat(j["finished_at"])
+                wartezeiten.append((b1 - a1).total_seconds())
+            except Exception:  # noqa: BLE001
+                pass
         fertig = await db.link_jobs.count_documents(
             {"requested_by_dealer": w["firma"], "status": "completed"})
         kaputt = await db.link_jobs.count_documents(
@@ -261,6 +284,15 @@ async def lauf(je_quelle: int, apify_grenze: int, dauer: float) -> int:
         print(f"  Apify: mit 429 abgewiesen . {apify.abgewiesen}")
         print(f"  Apify: Hoechststand ....... {apify.hoechststand} gleichzeitig "
               f"(erlaubt {apify_grenze})")
+        if wartezeiten:
+            wartezeiten.sort()
+            mitte = wartezeiten[len(wartezeiten) // 2]
+            print(f"  Wartezeit Mitte/laengste .. {mitte:.1f}s / "
+                  f"{wartezeiten[-1]:.1f}s   (Frontend gibt nach 120 s auf)")
+            ueber = len([x for x in wartezeiten if x > 120])
+            if ueber:
+                print(f"  ueber 120 s ............... {ueber} Sucher haetten "
+                      f"die Anzeige abgebrochen")
         print(f"  Dauer ..................... {gesamt:.1f}s")
         for b in beispiele:
             print(f"     FEHLER {b.get('source')} nach {b.get('attempts')} "
@@ -279,11 +311,15 @@ def main(argv=None) -> int:
                     help="gleichzeitige Actor-Laeufe, die Apify zulaesst")
     ap.add_argument("--dauer", type=float, default=1.5,
                     help="Sekunden je Apify-Lauf")
+    ap.add_argument("--eine-quelle", action="store_true",
+                    help="alle Links auf mobile.de (Frage N9: 100 Sucher, "
+                         "eine Quelle) statt je zur Haelfte")
     a = ap.parse_args(argv)
 
     print("Lasttest Apify-Grenze — Apify wird nachgestellt, es geht KEINE "
           "echte Anfrage raus.\n")
-    kaputt = asyncio.run(lauf(a.je_quelle, a.apify_grenze, a.dauer))
+    kaputt = asyncio.run(lauf(a.je_quelle, a.apify_grenze, a.dauer,
+                              eine_quelle=a.eine_quelle))
     print("\nERGEBNIS")
     if kaputt:
         print(f"  {kaputt} Sucher haetten einen Fehler gesehen — die eigenen "

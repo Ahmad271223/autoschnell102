@@ -30,7 +30,10 @@ log = logging.getLogger("autohandel")
 
 # Gleichzeitige externe Abrufe JE QUELLE, ueber alle Prozesse/Server gesamt.
 PROVIDER_MAX_CONCURRENT = {
-    "kleinanzeigen": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN", "3")),
+    # Nachpruefung 20.09.2026 (N10): hier stand 3, in docker-compose.yml und
+    # .env.example aber 2 — dieselbe Art Drift wie schon am 16.09. Der eigene
+    # Abruf greift Kleinanzeigen direkt ab und bleibt bewusst streng: 2.
+    "kleinanzeigen": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN", "2")),
     # Runde 29 (12.09.2026): Der Weg ueber die API ist ein bezahlter Dienst,
     # kein Abgreifen der Webseite — er darf deutlich mehr gleichzeitig. Die
     # API selbst erlaubt 600 Anfragen je Minute (gemessen), 8 gleichzeitige
@@ -44,7 +47,25 @@ PROVIDER_MAX_CONCURRENT = {
     "kleinanzeigen_api": int(os.environ.get("MAX_CONCURRENT_KLEINANZEIGEN_API", "20")),
     "mobile": int(os.environ.get("MAX_CONCURRENT_MOBILE", "20")),
     "autoscout24": int(os.environ.get("MAX_CONCURRENT_AUTOSCOUT", "20")),
+    # Nachpruefung 20.09.2026 (N9): mobile.de und AutoScout24 laufen BEIDE
+    # ueber Apify. Zwei feste Obergrenzen haben zwei Nachteile zugleich:
+    # zusammen duerfen sie mehr, als der Plan erlaubt (dann 429), und keine
+    # kann die Plaetze der anderen nutzen, wenn die gerade nichts tut.
+    #
+    # Gemessen (scripts/lasttest_apify_grenze.py, 100 mobile.de-Links, je 20 s):
+    #   16 + 16 fest:          Hoechststand 16, letzter Sucher nach 143 s
+    #                          -> das Frontend gibt nach 120 s auf
+    #   gemeinsamer Topf 32:   siehe unten, deutlich schneller
+    #
+    # Deshalb ein ZUSAETZLICHER, gemeinsamer Topf: jeder Apify-Abruf belegt
+    # erst einen Platz hier, dann einen seiner Quelle. Zusammen nie mehr als
+    # der Plan erlaubt, einzeln aber bis zum vollen Plan, wenn die andere
+    # Quelle ruht.
+    "apify": int(os.environ.get("APIFY_MAX_PARALLEL", "32")),
 }
+
+#: Quellen, die sich den Apify-Topf teilen.
+APIFY_QUELLEN = ("mobile", "autoscout24")
 # Nach so vielen Sekunden gilt ein Slot als verwaist (Prozess abgestuerzt).
 SLOT_TTL_SECONDS = int(os.environ.get("PROVIDER_SLOT_TTL", "120"))
 # Mindestabstand zwischen zwei Reparaturlaeufen je Quelle.

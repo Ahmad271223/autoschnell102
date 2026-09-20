@@ -353,18 +353,23 @@ def pruefe_produktion(log) -> None:
     #
     # Kleinanzeigen zaehlt NICHT mit — das laeuft ueber
     # kleinanzeigen-agent.de mit eigenem Limit.
-    _mob = _int_env("MAX_CONCURRENT_MOBILE", "20")
-    _aut = _int_env("MAX_CONCURRENT_AUTOSCOUT", "20")
+    _mob = _int_env("MAX_CONCURRENT_MOBILE", "32")
+    _aut = _int_env("MAX_CONCURRENT_AUTOSCOUT", "32")
     _apify_max = _int_env("APIFY_MAX_PARALLEL", "32")
-    if _apify_max > 0 and _mob + _aut > _apify_max:
+    # Seit dem gemeinsamen Apify-Topf (N9) DARF die Summe ueber dem Plan
+    # liegen — der Topf deckelt beide zusammen, und so liegen keine Plaetze
+    # brach, wenn nur eine Quelle gefragt ist. Schief steht es jetzt
+    # andersherum: eine Quelle, die WENIGER darf als der ganze Plan, kann
+    # ihn nie ausschoepfen.
+    if _apify_max > 0 and min(_mob, _aut) < _apify_max:
         warnungen.append(
-            f"MAX_CONCURRENT_MOBILE ({_mob}) + MAX_CONCURRENT_AUTOSCOUT ({_aut}) "
-            f"= {_mob + _aut} gleichzeitige Abrufe, aber der Apify-Plan erlaubt nur "
-            f"{_apify_max} (APIFY_MAX_PARALLEL). Beide Quellen laufen ueber Apify; "
-            f"was darueber hinausgeht, wird mit 429 abgewiesen und der Sucher sieht "
-            f"nach drei Versuchen einen Fehler. Empfehlung: je "
-            f"{_apify_max // 2} — oder APIFY_MAX_PARALLEL anheben, wenn der Plan "
-            f"mehr erlaubt.")
+            f"MAX_CONCURRENT_MOBILE ({_mob}) bzw. MAX_CONCURRENT_AUTOSCOUT "
+            f"({_aut}) liegt unter APIFY_MAX_PARALLEL ({_apify_max}). Beide "
+            f"Quellen teilen sich seit dem 20.09.2026 EINEN Topf, der sie "
+            f"zusammen deckelt — einzeln duerfen sie den ganzen Plan nutzen. "
+            f"Bleibt eine darunter, liegen Plaetze brach: gemessen brauchten "
+            f"100 mobile.de-Links dadurch 143 s statt 83 s, und das Frontend "
+            f"gibt nach 120 s auf. Empfehlung: beide auf {_apify_max}.")
     _lokal = os.environ.get("STORAGE_LOKAL_ERLAUBT", "").strip().lower() in ("1", "true", "yes")
     if ist_prod and not _lokal and not os.environ.get("BACKUP_S3_BUCKET", "").strip():
         # Entscheidung Ahmad 14.09.2026: Offsite-Backup ist Pflicht im Zwei-Server-Betrieb.

@@ -46,14 +46,32 @@ def _zahl(text: str, name: str) -> int:
 
 
 def test_01_standardwerte_passen_zum_apify_plan():
+    """Seit dem gemeinsamen Topf (N9) deckelt APIFY_MAX_PARALLEL beide
+    Quellen zusammen — einzeln duerfen sie den ganzen Plan nutzen, sonst
+    liegen Plaetze brach (gemessen: 143 s statt 83 s fuer 100 Links)."""
     t = _compose()
     mob = _zahl(t, "MAX_CONCURRENT_MOBILE")
     aut = _zahl(t, "MAX_CONCURRENT_AUTOSCOUT")
     plan = _zahl(t, "APIFY_MAX_PARALLEL")
-    assert mob + aut <= plan, (
-        f"mobile ({mob}) + autoscout ({aut}) = {mob + aut} gleichzeitige "
-        f"Abrufe bei einem Apify-Plan fuer {plan} — gemessen sehen dabei "
-        f"Sucher einen Fehler")
+    assert mob >= plan and aut >= plan, (
+        f"mobile ({mob}) bzw. autoscout ({aut}) duerfen weniger als der "
+        f"Apify-Plan ({plan}) — dann bleiben Plaetze ungenutzt")
+
+
+def test_01b_der_gemeinsame_topf_deckelt_beide():
+    import provider_limiter as PL
+    assert "apify" in PL.PROVIDER_MAX_CONCURRENT, (
+        "es gibt keinen gemeinsamen Apify-Topf (N9)")
+    assert set(PL.APIFY_QUELLEN) == {"mobile", "autoscout24"}
+    quelle = (BACKEND / "listing_identity.py").read_text(encoding="utf-8")
+    code = "\n".join(z.split("#", 1)[0] for z in quelle.splitlines())
+    assert 'acquire_slot(db, "apify")' in code, (
+        "der Abrufweg belegt keinen Platz im gemeinsamen Topf")
+    assert code.count("release_slot(db, apify_slot)") >= 1, (
+        "der Platz im gemeinsamen Topf wird nie zurueckgegeben")
+    # Klappt der zweite Griff nicht, muss der erste zurueck — sonst leckt
+    # bei jeder Ueberlastung ein Platz der Quelle.
+    assert "release_slot(db, slot_id)" in code
 
 
 def test_02_kleinanzeigen_zaehlt_nicht_zum_apify_topf():
@@ -79,18 +97,19 @@ def test_03_startpruefung_warnt_bei_zu_hoher_summe():
 
     alt = dict(os.environ)
     try:
-        os.environ.update({"MAX_CONCURRENT_MOBILE": "20",
-                           "MAX_CONCURRENT_AUTOSCOUT": "20",
+        os.environ.update({"MAX_CONCURRENT_MOBILE": "16",
+                           "MAX_CONCURRENT_AUTOSCOUT": "16",
                            "APIFY_MAX_PARALLEL": "32",
                            "APP_ENV": "entwicklung"})
         log = _Log()
         production_check.pruefe_produktion(log)
         alles = "\n".join(log.zeilen)
-        assert "MAX_CONCURRENT_MOBILE" in alles and "Apify" in alles, (
-            "der Start warnt nicht, wenn die Summe ueber dem Apify-Plan liegt")
+        assert "MAX_CONCURRENT_MOBILE" in alles and "APIFY_MAX_PARALLEL" in alles, (
+            "der Start warnt nicht, wenn eine Quelle weniger darf als der "
+            "Apify-Plan hergibt — dann liegen Plaetze brach")
 
-        os.environ.update({"MAX_CONCURRENT_MOBILE": "16",
-                           "MAX_CONCURRENT_AUTOSCOUT": "16"})
+        os.environ.update({"MAX_CONCURRENT_MOBILE": "32",
+                           "MAX_CONCURRENT_AUTOSCOUT": "32"})
         log2 = _Log()
         production_check.pruefe_produktion(log2)
         assert "APIFY_MAX_PARALLEL" not in "\n".join(log2.zeilen), (

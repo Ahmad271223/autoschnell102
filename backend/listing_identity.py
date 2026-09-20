@@ -588,6 +588,7 @@ async def get_or_fetch_listing(
         except Exception:  # noqa: BLE001 — im Zweifel die strenge Bremse
             pass
     slot_id = None
+    apify_slot = None          # N9: Platz im gemeinsamen Apify-Topf
     try:
         # 0,3-s-Takt statt 1,5 s: bei kurzen Abrufen (Mock 0,4 s; echte
         # Abrufe 1-3 s) verschenkte der grobe Takt bis zu 1,5 s je
@@ -597,6 +598,24 @@ async def get_or_fetch_listing(
             if slot_id:
                 break
             await _aio.sleep(0.3)
+        # Nachpruefung 20.09.2026 (N9): mobile.de und AutoScout24 teilen sich
+        # EINEN Apify-Plan. Zusaetzlich zum Platz der Quelle braucht es also
+        # einen aus dem gemeinsamen Topf — sonst duerfen beide zusammen mehr,
+        # als der Plan hergibt (Apify antwortet dann mit 429).
+        #
+        # Reihenfolge: erst Quelle, dann Topf — ueberall gleich, deshalb kann
+        # sich nichts gegenseitig blockieren. Klappt der zweite Griff nicht,
+        # wird der erste sofort zurueckgegeben.
+        from provider_limiter import APIFY_QUELLEN
+        if slot_id and source in APIFY_QUELLEN:
+            for _try in range(100):
+                apify_slot = await acquire_slot(db, "apify")
+                if apify_slot:
+                    break
+                await _aio.sleep(0.3)
+            if not apify_slot:
+                await release_slot(db, slot_id)
+                slot_id = None
     except Exception:
         # Lease nicht haengen lassen, sonst warten alle anderen 90 s.
         await _lease_freigeben(db, cache_key, claim)
@@ -622,6 +641,8 @@ async def get_or_fetch_listing(
                     {"$set": {"fetching_until":
                               datetime.now(timezone.utc) + timedelta(seconds=90)}})
                 await extend_slot(db, slot_id)
+                if apify_slot:
+                    await extend_slot(db, apify_slot)
             except _aio.CancelledError:
                 raise
             except Exception:
@@ -651,6 +672,8 @@ async def get_or_fetch_listing(
     finally:
         _heartbeat.cancel()
         await _aio.shield(release_slot(db, slot_id))
+        if apify_slot:
+            await _aio.shield(release_slot(db, apify_slot))
     if not isinstance(data, dict):
         await _lease_freigeben(db, cache_key, claim)
         raise RuntimeError(
