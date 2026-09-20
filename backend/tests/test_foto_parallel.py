@@ -72,6 +72,13 @@ def inserat():
     dbx.listings_cache.delete_many({"item_id": {"$regex": "^93"}})
 
 
+# Regel vom 20.09.2026 (Wunsch Ahmad): hoechstens 10 Fotos je Inserat, vorher
+# waren es 40. Diese Tests pruefen die GLEICHZEITIGKEIT (kein Lost Update),
+# nicht die Hoehe der Grenze — sie richten sich deshalb nach der Einstellung
+# statt nach einer fest eingetippten Zahl.
+GRENZE = max(1, int(os.environ.get("INSERAT_FOTOS_MAX", "10") or 10))
+
+
 def _keys(lid):
     doc = _db().resale_listings.find_one({"id": lid},
                                          {"photos.uploaded_keys": 1}) or {}
@@ -85,11 +92,11 @@ def test_20_parallele_uploads_verlieren_nichts(inserat):
             headers=inserat["h"], json={"photos_b64": [FOTO]},
             timeout=60).status_code
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
-        codes = list(ex.map(up, range(20)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=GRENZE) as ex:
+        codes = list(ex.map(up, range(GRENZE)))
     assert all(c == 200 for c in codes), codes
     keys = _keys(inserat["lid"])
-    assert len(keys) == 20, f"{len(keys)} statt 20 Referenzen (Lost Update!)"
+    assert len(keys) == GRENZE, f"{len(keys)} statt {GRENZE} Referenzen (Lost Update!)"
     # Jede Referenz zeigt auf eine echte Datei
     root = Path(__file__).resolve().parents[1] / "uploads"
     fehlend = [k for k in keys if not (root / k).exists()]
@@ -97,25 +104,28 @@ def test_20_parallele_uploads_verlieren_nichts(inserat):
 
 
 def test_parallele_loeschungen_konsistent(inserat):
-    keys = _keys(inserat["lid"])[:10]
+    """Die Haelfte gleichzeitig loeschen — genau die andere Haelfte bleibt."""
+    vorhanden = _keys(inserat["lid"])
+    weg = vorhanden[:len(vorhanden) // 2]
+    bleibt = len(vorhanden) - len(weg)
 
     def rm(k):
         return requests.post(
             f"{API}/resale/{inserat['lid']}/photos/remove",
             headers=inserat["h"], json={"key": k}, timeout=60).status_code
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-        codes = list(ex.map(rm, keys))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(weg))) as ex:
+        codes = list(ex.map(rm, weg))
     assert all(c == 200 for c in codes), codes
     rest = _keys(inserat["lid"])
-    assert len(rest) == 10, f"{len(rest)} statt 10 uebrig"
-    assert not (set(keys) & set(rest)), "geloeschte Keys noch referenziert"
+    assert len(rest) == bleibt, f"{len(rest)} statt {bleibt} uebrig"
+    assert not (set(weg) & set(rest)), "geloeschte Keys noch referenziert"
 
 
-def test_41tes_foto_atomar_abgelehnt(inserat):
-    # auf 40 auffuellen
-    aktuell = len(_keys(inserat["lid"]))
-    fehlen = 40 - aktuell
+def test_ein_foto_ueber_der_grenze_atomar_abgelehnt(inserat):
+    """Bis zur Grenze auffuellen, dann muss das naechste sauber abprallen —
+    ohne die schon vorhandenen anzuruehren."""
+    fehlen = GRENZE - len(_keys(inserat["lid"]))
     while fehlen > 0:                      # max. 20 Fotos je Request
         batch = min(20, fehlen)
         r = requests.post(f"{API}/resale/{inserat['lid']}/photos",
@@ -126,5 +136,7 @@ def test_41tes_foto_atomar_abgelehnt(inserat):
     r = requests.post(f"{API}/resale/{inserat['lid']}/photos",
                       headers=inserat["h"], json={"photos_b64": [FOTO]},
                       timeout=60)
-    assert r.status_code == 400, f"41. Foto durchgerutscht: {r.status_code}"
-    assert len(_keys(inserat["lid"])) == 40
+    assert r.status_code == 400, (
+        f"Foto Nr. {GRENZE + 1} durchgerutscht: {r.status_code}")
+    assert str(GRENZE) in r.text, "die Meldung nennt die Grenze nicht"
+    assert len(_keys(inserat["lid"])) == GRENZE

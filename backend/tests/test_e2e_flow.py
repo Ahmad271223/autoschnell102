@@ -343,6 +343,8 @@ def test_08_inserat_und_marktplatz(welt):
     r = requests.post(f"{API}/resale/{listing_id}/status", headers=welt["H"],
                       json={"status": "verkaufsbereit"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), listing_id)
     r = requests.post(f"{API}/resale/{listing_id}/publish", headers=welt["H"],
                       json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:300]

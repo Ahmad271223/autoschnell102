@@ -1554,6 +1554,91 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
   zeigt den Stand (`{"marktplatz": false}`).
 - Tests und CI laufen mit `MARKTPLATZ_AKTIV=true`, damit die Marktplatz-Tests weiter greifen.
 
+### Regeln fürs Inserieren, wenn der Marktplatz wieder anspringt (20.09.2026)
+
+Entscheidung Ahmad vom 20.09.2026. Alle vier Regeln sind über die Umgebung verstellbar,
+die Standardwerte sind die vereinbarten:
+
+| Regel | Einstellung | Standard |
+|---|---|---|
+| Beschreibung höchstens 500 Zeichen | `INSERAT_BESCHREIBUNG_MAX` | `500` (100–30000) |
+| Höchstens 10 Fotos je Inserat | `INSERAT_FOTOS_MAX` | `10` (1–40) |
+| Inserat läuft nach 3 Wochen ab | `INSERAT_LAUFZEIT_TAGE` | `21` (1–365) |
+| Fotos müssen neu sein | fest verdrahtet | — |
+
+**Fahrzeugdaten** werden aus dem Einkauf übernommen (Marke, Modell, Erstzulassung, Kilometer,
+Leistung, Getriebe, Kraftstoff …) und dürfen im Inserats-Editor **geändert** werden — der Einkauf
+selbst bleibt unangetastet.
+
+**Fotos werden NICHT übernommen.** Ein neues Inserat startet mit
+`photos: {"mode": "neu", "einkauf_urls": [], "uploaded_keys": []}`. Bilder aus dem Portal-Inserat
+(mobile.de, AutoScout24, Kleinanzeigen) gehören dem jeweiligen Verkäufer, nicht uns. Wer
+veröffentlichen will, muss eigene Fotos hochladen: `POST /resale/{id}/publish` weist ein Inserat
+ohne eigenes Bild mit **400** ab.
+
+**Nach 3 Wochen verschwindet nur die Anzeige.** `cleanup_service.abgelaufene_inserate_entfernen()`
+läuft im `marktplatz_rotieren`-Durchgang, nimmt ausschließlich Inserate im Status
+`veroeffentlicht`, deren `published_at` älter als `INSERAT_LAUFZEIT_TAGE` ist, löscht sie samt
+hochgeladener Fotos aus dem Speicher und schreibt den Grund `inserat_laufzeit_abgelaufen` ins
+Protokoll. **Nicht angefasst werden:** Fahrzeug, Kaufvertrag, Abholprotokoll, Beweisdokument und
+alles andere aus dem Einkauf. Wer das Auto gekauft hat, behält seine Unterlagen unverändert.
+
+**Speicher:** 10 Fotos à rund 400 KB sind etwa 4 MB je Inserat. Bei 3 Wochen Laufzeit stehen
+selbst bei 2.000 Inseraten im Monat nie mehr als rund 5,6 GB gleichzeitig im R2-Bucket — im
+Rahmen der heutigen Server. Vor der Regel lief das unbegrenzt mit.
+
+**Großer Rollentest:** `backend/scripts/rollentest_gross.py` fährt alle fünf Rollen (Chef,
+zweites Chef-Konto, Sucher, Zwischenhändler, Fahrer) einmal komplett durch und prüft bei jedem
+Schritt beides — was die Rolle darf *und* was sie nicht darf. 62 Prüfungen, Stand 20.09.2026 alle
+grün. Aufruf bei laufendem Backend:
+
+```
+DB_NAME=... MARKTPLATZ_AKTIV=true TEST_BASE_URL=http://127.0.0.1:8002   python -X utf8 scripts/rollentest_gross.py
+```
+
+Testkonten werden am Ende wieder entfernt (`--behalten` lässt sie stehen). Exit 0 = alles wie
+erwartet.
+
+### Lasttest „30 gleichzeitige Verträge und Mails“ (20.09.2026)
+
+Zwei Einwände aus dem Prüfbericht, beide nachgemessen statt geschätzt.
+
+**`backend/scripts/lasttest_vertraege_gleiches_auto.py`** — 30 Sucher legen an derselben
+Schranke gleichzeitig einen Vertrag an, einmal zum **selben** Auto, einmal zu 30
+verschiedenen. Das Skript spielt danach die Wiederholung der Oberfläche nach (nur bei 503
+mit `X-Wiederholen`, höchstens zweimal).
+
+| | dasselbe Auto | 30 verschiedene |
+|---|---|---|
+| Vertrag bekommen | 30 von 30 | 30 von 30 |
+| davon im ersten Anlauf | 25 | 30 |
+| Fehler für den Nutzer | **0** | **0** |
+| langsamster Fall | 12,8 s | 2,3 s |
+
+Eine garantierte Warteschlange gibt es weiterhin nicht — fünf von dreißig liefen in den 503.
+Die Wiederholung fängt sie alle ab; niemand sieht einen Fehler.
+
+**`backend/scripts/lasttest_mailversand.py`** — Resend wird nachgestellt (echtes Tempolimit,
+429 mit Retry-After), die echte Sendefunktion läuft unverändert. **Es geht keine echte Mail
+raus.** Gemessen wurde der ganze Verbund: 8 Prozesse × `RESEND_PARALLEL` gegen ein Konto.
+
+| Sendungen | vorher | seit dem Takt |
+|---|---|---|
+| 30 (= 60 Mail-Aufrufe) | 0–7 Fehlschläge (schwankend) | **0** |
+| 46 (= 92) | **29–32 Fehlschläge** | **0** |
+| 60 (= 120) | — | **0** |
+
+Der Einwand war berechtigt: `RESEND_PARALLEL` deckelt **gleichzeitige** Anfragen, nicht
+Anfragen je Sekunde, und alle Wartenden kamen im Gleichschritt zurück. Zwei Änderungen:
+
+- **Takt** `RESEND_RATE` ÷ `RESEND_PROZESSE` (Standard 10 ÷ 8) — jeder Worker lässt nur
+  seinen Anteil am Konto-Limit durch, ohne gemeinsame Ablage (die Teilung ist für alle
+  gleich). **Mehr Server oder Worker → `RESEND_PROZESSE` mit anheben.**
+- **Volle Streuung** bei der Wiederholung statt festem Backoff mit 0–0,5 s obendrauf.
+
+Ablehnungen durch Resend fielen damit von 345 auf 6, und die langsamste Mail wurde
+schneller (10,3 s statt 13,6 s). Festgehalten in `tests/test_mailtakt_20260920.py`.
+
 ### Lasttest „180 Sucher, 30 neue Links gleichzeitig“ (16.09.2026)
 
 `backend/scripts/lasttest_links_gleichzeitig.py [links.txt]` legt 180 Wegwerf-Sucher in sechs Firmen

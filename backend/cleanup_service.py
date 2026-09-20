@@ -1257,6 +1257,50 @@ async def _inserat_mit_fotos_loeschen(db, listing: dict, *, grund: str,
     return False
 
 
+async def abgelaufene_inserate_entfernen(db, now: datetime) -> int:
+    """Wunsch Ahmad 20.09.2026: Ein Inserat laeuft hoechstens drei Wochen.
+
+    Danach verschwindet die VERKAUFSANZEIGE samt ihrer Fotos — Kaufvertrag,
+    Kaufvorgang, Fahrzeugakte und die Auto-Daten bleiben unberuehrt. Es
+    wird also nichts vom Kauf geloescht, nur das Angebot.
+
+    Gezaehlt wird ab der ERSTEN Veroeffentlichung (`published_at` bleibt
+    beim Zurueckziehen und erneuten Veroeffentlichen stehen) — "hoechstens
+    drei Wochen" heisst hoechstens drei Wochen, nicht drei je Anlauf.
+
+    Nur `veroeffentlicht` laeuft ab. Bewusst NICHT dabei:
+      * `reserviert` — da verhandelt gerade jemand; ein Inserat unter einer
+        laufenden Verhandlung wegzuloeschen waere das Gegenteil von
+        hilfreich. Es steht ohnehin nicht mehr oeffentlich.
+      * `entwurf`, `verkaufsbereit`, `zurueckgezogen` — nie bzw. nicht mehr
+        auf dem Marktplatz sichtbar.
+      * `verkauft` — Beweis-Historie.
+    """
+    from deps import log_activity_sicher
+    from routes.resale import INSERAT_LAUFZEIT_TAGE
+    grenze = (now - timedelta(days=INSERAT_LAUFZEIT_TAGE)).isoformat()
+    n = 0
+    async for l in db.resale_listings.find(
+            {"status": "veroeffentlicht", "published_at": {"$lt": grenze}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "photos": 1,
+             "published_at": 1, "vehicle_id": 1}).limit(500):
+        try:
+            if await _inserat_mit_fotos_loeschen(
+                    db, l, grund="inserat_laufzeit_abgelaufen",
+                    dealer_id=l.get("dealer_id") or ""):
+                n += 1
+            await log_activity_sicher(
+                l.get("dealer_id") or "", "", "inserat.laufzeit_abgelaufen",
+                ref=l["id"], meta={"veroeffentlicht_am": l.get("published_at"),
+                                   "tage": INSERAT_LAUFZEIT_TAGE})
+        except Exception:  # noqa: BLE001
+            log.exception("Abgelaufenes Inserat %s nicht entfernt", l.get("id"))
+    if n:
+        log.info("%d Inserate nach %d Tagen Laufzeit entfernt",
+                 n, INSERAT_LAUFZEIT_TAGE)
+    return n
+
+
 async def inserate_geloeschter_fahrzeuge_schliessen(db) -> int:
     """Pruefung 14.09.2026 (M2): Ein Fahrzeug war geloescht, sein Marktplatz-
     Inserat lebte weiter (das Schliessen nach dem Loeschen ist best effort).
@@ -1322,6 +1366,8 @@ async def marktplatz_rotieren(db, now: datetime) -> dict:
     stats = {"interessen_geloescht": 0, "inserate_geloescht": 0,
              "favoriten_geloescht": 0, "interessen_verwaist_geschlossen": 0}
     stats["inserate_geloeschter_fahrzeuge"] = await inserate_geloeschter_fahrzeuge_schliessen(db)
+    # Wunsch Ahmad 20.09.2026: Laufzeitgrenze je Inserat (3 Wochen).
+    stats["inserate_abgelaufen"] = await abgelaufene_inserate_entfernen(db, now)
     # Nachpruefung Runde 14 (Befund 54): Verhandlungen zu Inseraten, die
     # verkauft oder geloescht sind (Altbestand vor dem Fix in resale.py),
     # werden geschlossen — sonst zeigten Kaeufer und Haendler ewig eine

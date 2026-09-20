@@ -503,3 +503,20 @@ def kaeufer_registrieren(json=None, timeout=30, **_):
                                   "role": "b2b_buyer", "kontonummer": user.get("kontonummer"),
                                   "company_name": user.get("company_name")},
                          "network_joined": joined})
+
+
+def eigene_fotos_hinterlegen(db, listing_id: str, anzahl: int = 1) -> None:
+    """Regel vom 20.09.2026 (Wunsch Ahmad): veroeffentlichen geht NUR mit
+    eigenen Fotos — aus dem Portal-Inserat wird keines uebernommen.
+
+    Tests, die blosz ein veroeffentlichtes Inserat brauchen (Marktplatz,
+    Kontingent, Mandantentrennung), bauen deshalb nicht den ganzen
+    Bild-Upload nach, sondern legen hier die Pflichtfotos direkt hin.
+    Wer die Regel SELBST prueft, tut das ueber die echte Route
+    (test_marktplatz_regeln_20260920.py).
+    """
+    db.resale_listings.update_one(
+        {"id": listing_id},
+        {"$set": {"photos.mode": "neu",
+                  "photos.uploaded_keys": [f"resale/{listing_id}-{i}.jpg"
+                                           for i in range(max(1, anzahl))]}})

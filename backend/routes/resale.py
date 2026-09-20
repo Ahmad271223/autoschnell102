@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from deps import (clean_doc, current_user, db, log_activity, log_activity_sicher,
                   now_iso)
+from konfig import zahl_env
 from lifecycle import (ALLOWED_TRANSITIONS, LifecycleError, set_lifecycle,
                        try_set_lifecycle)
 from routes.bestand import current_haendler, _clean_costs
@@ -46,6 +47,29 @@ _AKTIV = ("entwurf", "verkaufsbereit", "veroeffentlicht", "reserviert",
 # verworfen — jetzt scheitert der Riesenblock schon an der Validierung.
 _B64_MAX_LEN = 12_000_000
 
+# ---------------------------------------------------------------------
+# Weiterverkauf, Regeln vom 20.09.2026 (Ahmad, vor der Wiederaktivierung
+# des Marktplatzes):
+#
+#   * Die Fahrzeugdaten kommen weiter aus dem Einkauf und duerfen
+#     angepasst werden — daran aendert sich nichts.
+#   * Die Beschreibung ist auf 500 Zeichen begrenzt (vorher 30.000).
+#   * Hoechstens 10 Fotos je Inserat (vorher 40).
+#   * Fotos werden NICHT mehr aus dem Portal-Inserat uebernommen. Sie
+#     muessen neu hochgeladen werden — die Bilder des Verkaeufers gehoeren
+#     ihm bzw. dem Portal, sie auf dem eigenen Marktplatz weiterzunutzen
+#     waere ein urheberrechtliches Risiko. Bestehende Inserate behalten
+#     ihre alten Einkaufsfotos (nichts wird rueckwirkend geloescht), neue
+#     bekommen gar keine mehr.
+#   * Ein Inserat laeuft hoechstens INSERAT_LAUFZEIT_TAGE (21) und
+#     verschwindet danach samt Fotos von selbst. Kaufvertrag, Kaufvorgang
+#     und Fahrzeugakte bleiben davon unberuehrt — geloescht wird nur die
+#     Verkaufsanzeige.
+INSERAT_BESCHREIBUNG_MAX = zahl_env("INSERAT_BESCHREIBUNG_MAX", 500,
+                                    unten=100, oben=30000)
+INSERAT_FOTOS_MAX = zahl_env("INSERAT_FOTOS_MAX", 10, unten=1, oben=40)
+INSERAT_LAUFZEIT_TAGE = zahl_env("INSERAT_LAUFZEIT_TAGE", 21, unten=1, oben=365)
+
 
 # ---------- Models ----------
 # Nachpruefung Runde 14 (Nr. 80): ohne allow_inf_nan=False nahm Pydantic
@@ -53,7 +77,11 @@ _B64_MAX_LEN = 12_000_000
 # Inserat (auch die Liste der Firma) brach danach mit 500 ab.
 class ListingUpdateIn(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
-    description: Optional[str] = Field(default=None, max_length=30000)
+    # 20.09.2026: 500 statt 30.000 Zeichen (Ahmad). Die Oberflaeche zeigt
+    # einen Zaehler; Altbestand mit laengerem Text bleibt lesbar, beim
+    # naechsten Speichern gilt aber die neue Grenze.
+    description: Optional[str] = Field(default=None,
+                                       max_length=INSERAT_BESCHREIBUNG_MAX)
     # Runde 17 (Nr. 336/337): Einzelmangel und Kostenliste schon in der
     # Validierung gedeckelt — vorher lief ein Megabyte-String je Mangel bis
     # zum Kuerzen auf 300 Zeichen durch, die Kosten wurden erst in
@@ -485,12 +513,15 @@ async def create_draft(vehicle_id: str, user=Depends(current_haendler)):
         "data": data,                      # Kopie — bewusst entkoppelt
         "known_defects": known_defects,
         "auto_notes": auto_notes,
+        # 20.09.2026 (Ahmad): KEINE Fotos mehr aus dem Portal-Inserat. Sie
+        # gehoeren dem Verkaeufer bzw. dem Portal; sie auf dem eigenen
+        # Marktplatz weiterzunutzen waere ein urheberrechtliches Risiko.
+        # Der Haendler laedt eigene Fotos hoch (hoechstens
+        # INSERAT_FOTOS_MAX). `einkauf_urls` bleibt als leere Liste
+        # erhalten, damit Altbestand und Oberflaeche dasselbe Feld finden.
         "photos": {
-            "mode": "einkauf",
-            # Kleinanzeigen-Fahrzeuge speichern Fotos unter "images",
-            # mobile.de/manuelle unter "image_urls" — beide Quellen nutzen.
-            "einkauf_urls": list((data.get("image_urls")
-                                  or data.get("images") or []))[:40],
+            "mode": "neu",
+            "einkauf_urls": [],
             "uploaded_keys": [],
         },
         "prices": {"public": None, "b2b": None, "network": None},
@@ -796,8 +827,10 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
                                  validate_image_bytes, bild_verkleinern,
                                  loeschen_oder_vormerken, MAX_IMAGE_BYTES)
     keys = list((l.get("photos") or {}).get("uploaded_keys", []))
-    if len(keys) + len(body.photos_b64) > 40:
-        raise HTTPException(400, "Maximal 40 Fotos pro Inserat")
+    if len(keys) + len(body.photos_b64) > INSERAT_FOTOS_MAX:
+        raise HTTPException(
+            400, f"Maximal {INSERAT_FOTOS_MAX} Fotos pro Inserat "
+                 f"(aktuell {len(keys)})")
     def _alle_speichern() -> tuple:
         """Decode+Validierung+Save fuer bis zu 40 Fotos — als EIN Thread-Hop,
         damit der Event-Loop nicht sekundenlang steht (Review 09/2026).
@@ -922,9 +955,10 @@ async def fotos_aus_abholbericht(listing_id: str, body: Optional[AbholfotosIn] =
     if not wahl:
         raise HTTPException(400, "Keine neuen Fotos vom Fahrer vorhanden")
     keys = list((l.get("photos") or {}).get("uploaded_keys") or [])
-    if len(keys) + len(wahl) > 40:
-        raise HTTPException(400, "Maximal 40 Fotos pro Inserat — bitte vorher "
-                                 "Fotos entfernen oder weniger auswaehlen")
+    if len(keys) + len(wahl) > INSERAT_FOTOS_MAX:
+        raise HTTPException(400, f"Maximal {INSERAT_FOTOS_MAX} Fotos pro Inserat "
+                                 f"(aktuell {len(keys)}) — bitte vorher Fotos "
+                                 f"entfernen oder weniger auswaehlen")
     import asyncio as _asyncio
     from storage_service import (StorageError, bild_verkleinern, load_async,
                                  loeschen_oder_vormerken, make_key, save_async)
@@ -1131,6 +1165,17 @@ async def publish_listing(listing_id: str, body: PublishIn,
         if not (l.get("prices") or {}).get("public"):
             raise HTTPException(400, "Bitte zuerst einen oeffentlichen "
                                      "Verkaufspreis eintragen")
+        # 20.09.2026 (Ahmad): Fotos muessen NEU hochgeladen werden — aus dem
+        # Portal-Inserat wird nichts mehr uebernommen. Ein Inserat ohne
+        # eigenes Foto waere auf dem Marktplatz wertlos, deshalb hier die
+        # Pflicht. Altbestand mit uebernommenen Einkaufsfotos zaehlt mit,
+        # damit vorhandene Inserate weiter veroeffentlicht werden koennen.
+        _fotos = l.get("photos") or {}
+        if not (_fotos.get("uploaded_keys") or _fotos.get("einkauf_urls")):
+            raise HTTPException(
+                400, f"Bitte zuerst mindestens ein eigenes Foto hochladen "
+                     f"(hoechstens {INSERAT_FOTOS_MAX}). Fotos aus dem "
+                     f"urspruenglichen Inserat werden nicht uebernommen.")
         # Nachpruefung Runde 14 (Nr. 81): Fahrzeugweg VOR Kontingent und
         # Statuswechsel pruefen — bei Desync 409 statt Inserat live und
         # Fahrzeug unveraendert (try_set_lifecycle schluckte den Fehler).

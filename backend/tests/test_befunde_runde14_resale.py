@@ -727,6 +727,8 @@ def _inserat(firma, bis="verkaufsbereit"):
     assert requests.post(f"{API}/resale/{lid}/status", headers=firma["kopf"],
                          json={"status": "verkaufsbereit"}, timeout=30).status_code == 200
     if bis == "veroeffentlicht":
+        # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+        konten.eigene_fotos_hinterlegen(_db(), lid)
         r = requests.post(f"{API}/resale/{lid}/publish", headers=firma["kopf"],
                           json={"visibility": "public"}, timeout=30)
         assert r.status_code == 200, r.text[:300]
@@ -838,6 +840,8 @@ def test_http_26_52_106_reservierung_aufheben(firma):
     assert r.status_code == 200 and r.json()["id"] == lid
     assert dbx.resale_listings.count_documents({"vehicle_id": vid, "status": {"$ne": "geloescht"}}) == 1
     # publish danach ohne reserved_for
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     r = requests.post(f"{API}/resale/{lid}/publish", headers=firma["kopf"], json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert "reserved_for" not in dbx.resale_listings.find_one({"id": lid})
@@ -881,6 +885,8 @@ def test_http_81_desync_publish_und_status_409(firma):
         pytest.skip(HTTP_GRUND)
     vid, lid = _inserat(firma)
     _db().vehicles.update_one({"id": vid}, {"$set": {"lifecycle": "bestand"}})
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     r = requests.post(f"{API}/resale/{lid}/publish", headers=firma["kopf"], json={"visibility": "public"}, timeout=30)
     assert r.status_code == 409, r.text[:200]
     d = _db().resale_listings.find_one({"id": lid})
@@ -909,6 +915,8 @@ def test_http_107_preis_null_und_publish_ohne_preis(firma):
     assert _db().resale_listings.find_one({"id": lid})["prices"]["public"] == 9900.0
     assert _status(firma, lid, "zurueckgezogen").status_code == 200
     _db().resale_listings.update_one({"id": lid}, {"$set": {"prices.public": None}})
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     r = requests.post(f"{API}/resale/{lid}/publish", headers=firma["kopf"], json={"visibility": "public"}, timeout=30)
     assert r.status_code == 400, r.text[:200]
     assert _db().resale_listings.find_one({"id": lid})["status"] == "zurueckgezogen"

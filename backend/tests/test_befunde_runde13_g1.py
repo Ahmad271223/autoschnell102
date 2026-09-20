@@ -197,6 +197,8 @@ def _inserat(h, name, sichtbarkeit):
                         json={"price_public": 9900, "price_b2b": 9000}, timeout=30).status_code == 200
     assert requests.post(f"{API}/resale/{lid}/status", headers=h["kopf"],
                          json={"status": "verkaufsbereit"}, timeout=30).status_code == 200
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     r = requests.post(f"{API}/resale/{lid}/publish", headers=h["kopf"],
                       json={"visibility": sichtbarkeit}, timeout=30)
     assert r.status_code == 200, r.text[:300]

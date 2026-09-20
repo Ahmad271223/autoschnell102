@@ -127,6 +127,13 @@ services:
       - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
       - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-3000}
+      # Weiterverkauf, Regeln vom 20.09.2026 (Ahmad): Beschreibung 500
+      # Zeichen, hoechstens 10 eigene Fotos je Inserat, Laufzeit 3
+      # Wochen — danach verschwindet die Anzeige samt Fotos von selbst
+      # (Kaufvertrag und Fahrzeugakte bleiben unberuehrt).
+      - INSERAT_BESCHREIBUNG_MAX=${INSERAT_BESCHREIBUNG_MAX:-500}
+      - INSERAT_FOTOS_MAX=${INSERAT_FOTOS_MAX:-10}
+      - INSERAT_LAUFZEIT_TAGE=${INSERAT_LAUFZEIT_TAGE:-21}
       # Nachpruefung 20.09.2026, Nr. 55: /api/ready loest DB-Ping,
       # Index-, Platten- und Speicherpruefungen aus. Das Ergebnis wird
       # so viele Sekunden zwischengespeichert (0 = wie frueher, jeder
@@ -177,6 +184,13 @@ services:
       - RESEND_PARALLEL=${RESEND_PARALLEL:-3}
       - RESEND_VERSUCHE=${RESEND_VERSUCHE:-6}
       - RESEND_WARTEN_MAX=${RESEND_WARTEN_MAX:-20}
+      # Takt (Nachpruefung 20.09.2026): Anfragen JE SEKUNDE, die Resend fuers
+      # ganze Konto erlaubt, geteilt durch die Zahl der Worker im Verbund
+      # (WEB_CONCURRENCY x Server). Ohne das schickten 46 gleichzeitige
+      # Sendungen rund ein Drittel der Mails in einen endgueltigen 429.
+      # Mehr Server oder mehr Worker? Dann RESEND_PROZESSE mit anheben.
+      - RESEND_RATE=${RESEND_RATE:-10}
+      - RESEND_PROZESSE=${RESEND_PROZESSE:-8}
       - SCRAPE_MAX_RETRIES=${SCRAPE_MAX_RETRIES:-3}
       - ZUSTELLUNG_HAENGT_NACH_SEK=${ZUSTELLUNG_HAENGT_NACH_SEK:-180}
       - MOCK_PROVIDER_DELAY_MS=${MOCK_PROVIDER_DELAY_MS:-}

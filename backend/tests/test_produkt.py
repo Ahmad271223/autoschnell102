@@ -129,6 +129,8 @@ def test_00_aufbau(welt):
                             timeout=30).status_code == 200
         assert requests.post(f"{API}/resale/{lid}/status", headers=welt["H"],
                              json={"status": "verkaufsbereit"}, timeout=30).status_code == 200
+        # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+        konten.eigene_fotos_hinterlegen(_db(), lid)
         r = requests.post(f"{API}/resale/{lid}/publish", headers=welt["H"],
                           json={"visibility": "public"}, timeout=30)
         assert r.status_code == 200, r.text[:300]

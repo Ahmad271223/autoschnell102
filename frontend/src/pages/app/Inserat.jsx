@@ -126,10 +126,25 @@ export default function Inserat() {
   // verkleinert (dabei fallen auch Aufnahmeort und Geraet weg) und in
   // kleinen Paketen hochgeladen.
   const FOTOS_JE_PAKET = 4;
+  // Regeln vom 20.09.2026 (Ahmad) — dieselben Zahlen wie im Server
+  // (routes/resale.py: INSERAT_BESCHREIBUNG_MAX / INSERAT_FOTOS_MAX).
+  const BESCHREIBUNG_MAX = 500;
+  const FOTOS_MAX = 10;
 
   const uploadPhotos = async (files) => {
     if (!files?.length) return;
-    const auswahl = [...files].slice(0, 20);
+    // 20.09.2026 (Ahmad): hoechstens FOTOS_MAX je Inserat. Lieber hier
+    // abschneiden und es sagen, als den Server 400 werfen lassen, nachdem
+    // der Nutzer zehn Fotos hochgeladen hat.
+    const frei = FOTOS_MAX - (l.photos?.uploaded_keys || []).length;
+    if (frei <= 0) {
+      toast.error(`Dieses Inserat hat schon ${FOTOS_MAX} Fotos — bitte zuerst eines entfernen.`);
+      return;
+    }
+    const auswahl = [...files].slice(0, frei);
+    if (files.length > frei) {
+      toast.message(`Es werden ${frei} von ${files.length} Fotos übernommen (maximal ${FOTOS_MAX} je Inserat).`);
+    }
     try {
       const photos = [];
       for (const f of auswahl) {
@@ -312,8 +327,16 @@ export default function Inserat() {
             <label className="text-[11px] text-zinc-500">Titel</label>
             <input value={l.title || ""} onChange={set("title")} className={inputCls} style={st}
                    disabled={l.status === "verkauft"} />
-            <label className="text-[11px] text-zinc-500 mt-3 block">Beschreibung</label>
-            <textarea value={l.description || ""} onChange={set("description")} rows={14}
+            <div className="mt-3 flex items-baseline justify-between">
+              <label className="text-[11px] text-zinc-500">Beschreibung</label>
+              <span className={`text-[11px] ${(l.description || "").length > BESCHREIBUNG_MAX
+                ? "text-red-400 font-semibold" : "text-zinc-500"}`}
+                    data-testid="beschreibung-zaehler">
+                {(l.description || "").length} / {BESCHREIBUNG_MAX}
+              </span>
+            </div>
+            <textarea value={l.description || ""} onChange={set("description")} rows={7}
+                      maxLength={BESCHREIBUNG_MAX}
                       className={inputCls} style={st} disabled={l.status === "verkauft"} />
             <label className="text-[11px] text-zinc-500 mt-3 block">Bekannte Mängel (eine je Zeile)</label>
             <textarea value={(l.known_defects || []).join("\n")}
@@ -373,15 +396,14 @@ export default function Inserat() {
               <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
                      onChange={(e) => uploadPhotos(e.target.files)} />
             </div>
-            <div className="mt-2 flex gap-1.5">
-              {[["einkauf", "Einkaufsfotos"], ["neu", "Nur neue Fotos"], ["beide", "Einkauf + neue"]].map(([k, label]) => (
-                <button key={k}
-                        onClick={() => { setL((s) => ({ ...s, photos: { ...s.photos, mode: k } })); }}
-                        className={`px-3 py-1.5 rounded-lg text-xs border ${mode === k ? "bg-white/10 font-semibold" : "text-zinc-400"}`}
-                        style={st}>
-                  {label}
-                </button>
-              ))}
+            {/* 20.09.2026 (Ahmad): Der Umschalter Einkauf/Neu/Beide ist weg.
+                Fotos aus dem urspruenglichen Inserat werden nicht mehr
+                uebernommen — sie gehoeren dem Verkaeufer bzw. dem Portal.
+                Jedes Inserat braucht eigene Fotos. */}
+            <div className="mt-2 text-[11px] text-zinc-500" data-testid="fotos-regel">
+              {uploadedKeys.length} / {FOTOS_MAX} eigene Fotos
+              {einkaufFotos.length > 0 && ` · ${einkaufFotos.length} aus dem alten Bestand`}
+              {" · "}Fotos aus dem ursprünglichen Inserat werden nicht übernommen.
             </div>
             {(l.abholfotos || []).length > 0 && !["verkauft", "geloescht"].includes(l.status) && (
               <div className="mt-3 rounded-lg p-2.5 flex flex-wrap items-center gap-2" data-testid="abholfotos-hinweis"

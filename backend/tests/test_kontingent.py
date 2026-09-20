@@ -99,6 +99,8 @@ def _inserat_live(H, vid):
     r = requests.post(f"{API}/resale/{lid}/status", headers=H,
                       json={"status": "verkaufsbereit"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     r = requests.post(f"{API}/resale/{lid}/publish", headers=H,
                       json={"visibility": "public"}, timeout=30)
     return lid, r
@@ -193,6 +195,8 @@ def test_04_zurueckziehen_und_reaktivieren_zaehlt_nicht_doppelt(welt):
     r = requests.post(f"{API}/resale/{lid}/status", headers=welt["H"],
                       json={"status": "zurueckgezogen"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     r = requests.post(f"{API}/resale/{lid}/publish", headers=welt["H"],
                       json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:200]   # dasselbe Auto: kein neuer Slot
@@ -211,6 +215,8 @@ def test_05_neuer_monat_gibt_neue_fuenf(welt):
         {"$set": {"sale_plan.period_start": (alt - timedelta(days=31)).isoformat()}})
     p = _plan(welt["H"])
     assert p["used"] == 0 and p["remaining"] == 5, p
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), welt['lid6'])
     r = requests.post(f"{API}/resale/{welt['lid6']}/publish", headers=welt["H"],
                       json={"visibility": "public"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
@@ -233,6 +239,8 @@ def test_06_parallele_veroeffentlichung_zaehlt_genau_einmal(welt):
                          json={"status": "verkaufsbereit"}, timeout=30).status_code == 200
     vorher = _plan(H)["used"]
     codes = []
+    # Regel 20.09.2026: veroeffentlichen nur mit eigenen Fotos.
+    konten.eigene_fotos_hinterlegen(_db(), lid)
     def go():
         codes.append(requests.post(f"{API}/resale/{lid}/publish", headers=H,
                                    json={"visibility": "public"}, timeout=60).status_code)

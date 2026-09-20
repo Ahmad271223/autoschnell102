@@ -82,7 +82,10 @@ class _Welt:
         doc = {"id": lid, "dealer_id": self.dealer_id, "vehicle_id": vid, "status": status,
                "title": "Golf", "description": "", "known_defects": [], "data": {},
                "prices": {"public": 9900.0, "b2b": None, "network": None},
-               "photos": {"mode": "einkauf", "einkauf_urls": [], "uploaded_keys": []},
+               # Regel vom 20.09.2026: veroeffentlichen geht nur mit EIGENEN
+               # Fotos, aus dem Portal-Inserat wird keines uebernommen.
+               "photos": {"mode": "neu", "einkauf_urls": [],
+                          "uploaded_keys": [f"resale/{lid}-1.jpg"]},
                "costs": [], "counted_periods": [], "created_by": self.chef["id"],
                "created_at": _jetzt(), "updated_at": _jetzt()}
         doc.update(extra)
