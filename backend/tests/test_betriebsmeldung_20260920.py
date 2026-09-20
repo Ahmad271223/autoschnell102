@@ -326,3 +326,141 @@ def test_21_zeitpunkte_sind_lesbar():
     _b, text = BM.alarm_text([{"typ": "x", "ref": "", "details": {}, "anzahl": 1,
                                "created_at": "2026-09-20T11:40:37.754523+00:00"}], 1)
     assert "…" not in text.split("seit:")[1].split("\n")[0]
+
+
+# ============================================ Anfragen (Wunsch 20.09.2026)
+def test_22_jede_anfrageart_hat_klartext():
+    """Die Mail soll ohne Nachschlagen verstaendlich sein."""
+    faelle = [
+        ({"type": "zugang", "art": "firma"}, "Neue Firma"),
+        ({"type": "zugang", "art": "kaeufer"}, "Zwischenhaendler"),
+        ({"type": "zugang"}, "Neuer Zugang"),
+        ({"type": "sucher_abo"}, "Sucher-Abo"),
+        ({"type": "buyer_access"}, "Marktplatz-Zugang"),
+        ({"type": "voellig_neu"}, "voellig_neu"),
+        ({}, "unbekannt"),
+    ]
+    for a, erwartet in faelle:
+        assert erwartet in BM.anfrage_ueberschrift(a), a
+
+
+def test_23_die_kontaktdaten_stehen_in_der_mail():
+    """Damit Ahmad zurueckrufen kann, ohne sich erst anzumelden."""
+    betreff, text = BM.anfrage_text([{
+        "id": "r1", "type": "zugang", "art": "firma",
+        "company_name": "Nordlicht Automobile GmbH",
+        "contact_email": "info@nordlicht.de", "contact_phone": "+49 40 1234567",
+        "wanted": "Firmenzugang + 3 Sucher", "sucher_anzahl": 3,
+        "message": "Wir moechten ab Oktober starten.",
+        "created_at": "2026-09-20T09:15:00+00:00"}], gesamt_offen=1)
+    assert "Nordlicht Automobile GmbH" in betreff, "wer, steht im Betreff"
+    for stueck in ("info@nordlicht.de", "+49 40 1234567",
+                   "Firmenzugang + 3 Sucher", "ab Oktober starten"):
+        assert stueck in text, stueck
+    assert "Freischaltungen" in text
+
+
+def test_24_leere_felder_stehen_nicht_in_der_mail():
+    _b, text = BM.anfrage_text([{
+        "id": "r1", "type": "sucher_abo", "sucher_name": "Max",
+        "company_name": "", "contact_phone": None, "sucher_anzahl": 0,
+        "created_at": "2026-09-20T09:15:00+00:00"}], 1)
+    assert "Telefon" not in text and "Firma:" not in text
+    assert "Sucher gewuenscht" not in text, "0 ist keine Angabe"
+    assert "Name: Max" in text
+
+
+def test_25_viele_anfragen_ergeben_EINE_mail():
+    viele = [{"id": f"r{i}", "type": "sucher_abo", "sucher_name": f"S{i}",
+              "created_at": "2026-09-20T09:00:00+00:00"} for i in range(60)]
+    betreff, text = BM.anfrage_text(viele, gesamt_offen=60)
+    assert betreff == "AutoSchnell: 60 neue Anfragen"
+    assert f"und {60 - BM.MAX_EINZELN} weitere" in text
+
+
+def test_26_neue_anfragen_werden_gemeldet_und_markiert(welt):
+    db = welt.db
+
+    async def lauf():
+        await db.plan_requests.insert_many([
+            {"id": "a1", "type": "zugang", "art": "firma", "status": "offen",
+             "company_name": "Nordlicht", "contact_email": "n@x.de",
+             "created_at": _jetzt()},
+            {"id": "a2", "type": "sucher_abo", "status": "offen",
+             "sucher_name": "Max", "created_at": _jetzt()},
+            # Bereits erledigt — gehoert nicht in die Mail.
+            {"id": "a3", "type": "sucher_abo", "status": "erledigt",
+             "sucher_name": "Alt", "created_at": _jetzt()},
+        ])
+        n = await BM.neue_anfragen_melden(db)
+        offen = await db.plan_requests.count_documents(
+            {"status": "offen", "gemeldet_am": {"$exists": False}})
+        n2 = await BM.neue_anfragen_melden(db)
+        return n, offen, n2
+
+    n, offen, n2 = welt.run(lauf())
+    assert n == 2, "nur die OFFENEN, und beide in EINER Mail"
+    assert len(welt.gesendet) == 1
+    assert "Anfrage" in welt.gesendet[0]["betreff"]
+    assert offen == 0 and n2 == 0, "kein zweites Mal dieselbe Mail"
+
+
+def test_27_scheiterter_versand_wird_wiederholt(welt, monkeypatch):
+    db = welt.db
+
+    async def _kaputt(*a, **k):
+        return False
+
+    async def lauf():
+        import email_service
+        await db.plan_requests.insert_one(
+            {"id": "a1", "type": "zugang", "art": "kaeufer", "status": "offen",
+             "company_name": "X", "created_at": _jetzt()})
+        monkeypatch.setattr(email_service, "send_email", _kaputt)
+        n1 = await BM.neue_anfragen_melden(db)
+        unmarkiert = await db.plan_requests.count_documents(
+            {"gemeldet_am": {"$exists": False}})
+        monkeypatch.setattr(email_service, "send_email", welt.fake)
+        n2 = await BM.neue_anfragen_melden(db)
+        return n1, unmarkiert, n2
+
+    n1, unmarkiert, n2 = welt.run(lauf())
+    assert n1 == 0 and unmarkiert == 1
+    assert n2 == 1 and len(welt.gesendet) == 1
+
+
+def test_28_anfragen_stehen_auch_im_tagesbericht(welt):
+    """So faellt eine auf, die beim Eingang uebersehen wurde."""
+    db = welt.db
+
+    async def lauf():
+        await db.plan_requests.insert_many([
+            {"id": "a1", "type": "zugang", "status": "offen",
+             "created_at": _jetzt()},
+            {"id": "a2", "type": "sucher_abo", "status": "offen",
+             "created_at": (datetime.now(timezone.utc)
+                            - timedelta(days=9)).isoformat()},
+        ])
+        return await BM.tagesbericht_daten(db)
+
+    daten = welt.run(lauf())
+    assert daten["anfragen_offen"] == 2
+    assert daten["anfragen_neu"] == 1, "nur die der letzten 24 Stunden"
+    betreff, text = BM.bericht_text(daten, "20.09.2026")
+    assert "Offene Anfragen:      2" in text and "(davon 1 neu)" in text
+
+
+def test_29_offene_anfragen_sind_kein_mangel():
+    """Wichtig: eine wartende Anfrage ist gutes Geschaeft, kein Fehler —
+    sie darf den Betreff nicht auf 'Auffaelligkeiten' drehen."""
+    betreff, text = BM.bericht_text(_daten(anfragen_offen=3), "20.09.")
+    assert "alles in Ordnung" in betreff
+    assert "3 Anfrage(n) warten auf dich" in text
+
+
+def test_30_die_schleife_meldet_auch_anfragen():
+    q = inspect.getsource(BM.run_betriebsmeldung_forever)
+    assert "neue_anfragen_melden(db)" in q
+    # Unter derselben Sperre wie die Alarme — nicht achtmal.
+    vor = q.index('acquire(db, "betriebsmeldung"')
+    assert vor < q.index("neue_anfragen_melden(db)")

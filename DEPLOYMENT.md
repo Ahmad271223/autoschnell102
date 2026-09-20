@@ -2438,7 +2438,14 @@ Jetzt gehen zwei Meldungen an `BETRIEB_MELDUNG_AN`:
 | | Wann | Inhalt |
 |---|---|---|
 | **Sofortmeldung** | sobald ein **neuer** Betriebsalarm entsteht | Typ, betroffener Datensatz, Einzelheiten, seit wann, wie oft |
-| **Tagesbericht** | taeglich um `BETRIEB_TAGESBERICHT_STUNDE` (8 Uhr) | offene Alarme, Fehler der letzten 24 h mit den haeufigsten Wegen, Zustand der Sicherung, haengende Abrufe |
+| **Anfragen** | sobald eine neue Freischaltungs-Anfrage eingeht | Art (neue Firma, Zwischenhaendler, Sucher-Abo, Marktplatz), Firma, Kunden-/Kontonummer, Wunsch, **E-Mail und Telefon**, Nachricht |
+| **Tagesbericht** | taeglich um `BETRIEB_TAGESBERICHT_STUNDE` (8 Uhr) | offene Alarme, Fehler der letzten 24 h mit den haeufigsten Wegen, **offene Anfragen**, Zustand der Sicherung, haengende Abrufe |
+
+Die Anfragen-Mail ist bewusst von den Alarmen getrennt: eine Anfrage ist **kein
+Fehler, sondern Geschaeft** — jemand will zahlen. Sie bringt die Kontaktdaten gleich
+mit, damit sich zurueckrufen laesst, ohne sich erst anzumelden. Im Tagesbericht
+drehen offene Anfragen den Betreff **nicht** auf "Auffaelligkeiten"; sie stehen dort
+nur, damit eine uebersehene wieder auftaucht.
 
 **Der Tagesbericht kommt auch, wenn alles in Ordnung ist.** Das ist Absicht: eine
 Plattform, die schweigt, ist von einer toten nicht zu unterscheiden. Bleibt die Mail

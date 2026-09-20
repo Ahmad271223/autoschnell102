@@ -7,13 +7,18 @@ war beides auf der Betriebs-Seite und in /api/ready — aber niemand erfuhr
 davon. Ging Samstagnacht etwas kaputt, wusste es bis zum naechsten
 Hinsehen keiner.
 
-Zwei Meldungen, beide an BETRIEB_MELDUNG_AN:
+Drei Meldungen, alle an BETRIEB_MELDUNG_AN:
 
   1. SOFORT — sobald ein NEUER Betriebsalarm entsteht. Selten, immer ernst
      (bezahlt ohne Zugang, Sicherung unvollstaendig, Vertrag ohne
      Datensatz, Datei nicht loeschbar). Mit Sammelfrist: entstehen zehn
      Alarme in derselben Minute, kommt EINE Mail mit allen zehn.
-  2. TAGESBERICHT — einmal taeglich. Der ist ausdruecklich auch dann
+  2. ANFRAGEN — sobald eine neue Freischaltungs-Anfrage eingeht (neue
+     Firma, neuer Zwischenhaendler, Sucher-Abo, Marktplatz-Zugang). Das
+     ist KEIN Fehler, sondern Geschaeft: jemand will zahlen. Die Mail
+     bringt die Kontaktdaten gleich mit, damit Ahmad zurueckrufen kann,
+     ohne sich erst anzumelden.
+  3. TAGESBERICHT — einmal taeglich. Der ist ausdruecklich auch dann
      faellig, wenn alles in Ordnung ist: eine Plattform, die schweigt,
      ist von einer toten nicht zu unterscheiden. Bleibt die Mail aus,
      weiss Ahmad, dass etwas nicht stimmt.
@@ -166,6 +171,106 @@ async def neue_alarme_melden(db) -> int:
         return 0
 
 
+# ------------------------------------------------------------- Anfragen
+#: Klartext statt Kuerzel — die Mail soll ohne Nachschlagen verstaendlich
+#: sein. (Wunsch Ahmad 20.09.2026: "Anfragen auch direkt an meine Mail".)
+ANFRAGE_ART = {
+    ("zugang", "firma"): "Neue Firma moechte Zugang",
+    ("zugang", "kaeufer"): "Neuer Zwischenhaendler moechte Zugang",
+    ("zugang", None): "Neuer Zugang angefragt",
+    ("sucher_abo", None): "Sucher-Abo angefragt",
+    ("buyer_access", None): "Marktplatz-Zugang angefragt",
+}
+
+
+def anfrage_ueberschrift(a: dict) -> str:
+    typ = str(a.get("type") or "")
+    art = a.get("art")
+    return (ANFRAGE_ART.get((typ, art))
+            or ANFRAGE_ART.get((typ, None))
+            or f"Anfrage ({typ or 'unbekannt'})")
+
+
+def anfrage_text(anfragen: list, gesamt_offen: int) -> tuple:
+    """(Betreff, Text) der Anfragen-Mail — rein, damit pruefbar.
+
+    Eine Anfrage ist KEIN Fehler, sondern Geschaeft: jemand will zahlen.
+    Deshalb eigener Betreff und die Kontaktdaten gleich mit, damit Ahmad
+    direkt zurueckrufen kann, ohne sich erst anzumelden."""
+    n = len(anfragen)
+    if n == 1:
+        wer = (anfragen[0].get("company_name")
+               or anfragen[0].get("sucher_name") or "").strip()
+        betreff = "AutoSchnell: Neue Anfrage" + (f" — {wer}" if wer else "")
+    else:
+        betreff = f"AutoSchnell: {n} neue Anfragen"
+    zeilen = ["Es " + ("ist eine neue Anfrage" if n == 1
+                       else f"sind {n} neue Anfragen") + " eingegangen.", ""]
+    for a in anfragen[:MAX_EINZELN]:
+        zeilen.append(f"• {anfrage_ueberschrift(a)}")
+        for beschriftung, wert in (
+                ("Firma", a.get("company_name")),
+                ("Name", a.get("sucher_name")),
+                ("Kundennummer", a.get("kunden_nr")),
+                ("Kontonummer", a.get("kontonummer")),
+                ("Wunsch", a.get("wanted")),
+                ("Sucher gewuenscht", a.get("sucher_anzahl")),
+                ("USt-IdNr.", a.get("ust_id")),
+                ("E-Mail", a.get("contact_email") or a.get("sucher_email")),
+                ("Telefon", a.get("contact_phone")),
+                ("Nachricht", a.get("message"))):
+            if wert not in (None, "", 0):
+                zeilen.append(f"    {beschriftung}: {_kurz(wert, 200)}")
+        zeilen.append(f"    eingegangen: {_zeitpunkt(a.get('created_at'))}")
+        zeilen.append("")
+    if n > MAX_EINZELN:
+        zeilen += [f"… und {n - MAX_EINZELN} weitere.", ""]
+    zeilen += [
+        f"Offene Anfragen insgesamt: {gesamt_offen}",
+        "",
+        "Bearbeiten: Freischaltungen im Admin-Bereich.",
+    ]
+    return betreff, "\n".join(zeilen)
+
+
+async def neue_anfragen_melden(db) -> int:
+    """Eine Mail fuer alle noch nicht gemeldeten offenen Anfragen.
+
+    Gleiches Muster wie bei den Alarmen: erst senden, dann markieren —
+    scheitert der Versand, bleibt die Markierung aus und die naechste
+    Runde versucht es erneut. Wirft nie."""
+    ziel = empfaenger()
+    if not ziel:
+        return 0
+    try:
+        anfragen = await db.plan_requests.find(
+            {"status": "offen", "gemeldet_am": {"$exists": False}},
+            {"_id": 0}, sort=[("created_at", 1)]).to_list(200)
+        if not anfragen:
+            return 0
+        gesamt = await db.plan_requests.count_documents({"status": "offen"})
+        betreff, text = anfrage_text(anfragen, gesamt)
+        import hashlib
+
+        from email_service import send_email
+        schluessel = "anfragen-" + hashlib.sha256(
+            ",".join(sorted(str(a.get("id")) for a in anfragen)).encode()
+        ).hexdigest()[:24]
+        if not await send_email(ziel, betreff, text, idempotency_key=schluessel):
+            log.error("[betriebsmeldung] Anfragen-Mail an %s nicht zugestellt "
+                      "— wird erneut versucht", ziel)
+            return 0
+        await db.plan_requests.update_many(
+            {"id": {"$in": [a.get("id") for a in anfragen]}},
+            {"$set": {"gemeldet_am": _jetzt().isoformat()}})
+        log.info("[betriebsmeldung] %d neue Anfragen an %s gemeldet",
+                 len(anfragen), ziel)
+        return len(anfragen)
+    except Exception:  # noqa: BLE001
+        log.exception("[betriebsmeldung] Anfragen-Mail fehlgeschlagen")
+        return 0
+
+
 # --------------------------------------------------------- Tagesbericht
 async def tagesbericht_daten(db) -> dict:
     """Die Zahlen des Berichts — getrennt vom Text, damit pruefbar."""
@@ -188,6 +293,12 @@ async def tagesbericht_daten(db) -> dict:
         daten["backup"] = await letztes_backup_info_global(db)
     except Exception as exc:  # noqa: BLE001
         daten["backup"] = {"hinweis": f"nicht lesbar ({exc})"}
+    # Offene Anfragen gehoeren in den Bericht: so faellt eine auf, die beim
+    # Eingang uebersehen wurde (Wunsch Ahmad 20.09.2026).
+    daten["anfragen_offen"] = await db.plan_requests.count_documents(
+        {"status": "offen"})
+    daten["anfragen_neu"] = await db.plan_requests.count_documents(
+        {"status": "offen", "created_at": {"$gte": seit}})
     daten["link_jobs_haengend"] = await db.link_jobs.count_documents(
         {"status": "queued",
          "created_at": {"$lt": _jetzt() - timedelta(minutes=15)}})
@@ -200,6 +311,9 @@ def bericht_text(daten: dict, tag: str) -> tuple:
     fehler = int(daten.get("fehler") or 0)
     b = daten.get("backup") or {}
     sicherung_ok = bool(b.get("vollstaendig")) and (b.get("alter_stunden") or 99) <= 26
+    anfragen = int(daten.get("anfragen_offen") or 0)
+    # Offene Anfragen sind KEIN Mangel — sie warten nur auf Ahmad. Sie
+    # aendern deshalb nicht den Betreff, stehen aber im Bericht.
     alles_gut = not alarme and not fehler and sicherung_ok \
         and not daten.get("link_jobs_haengend")
 
@@ -209,12 +323,17 @@ def bericht_text(daten: dict, tag: str) -> tuple:
     zeilen = [f"Tagesbericht vom {tag} (letzte 24 Stunden)", ""]
     if alles_gut:
         zeilen += ["Alles in Ordnung. Keine Alarme, keine Fehler, "
-                   "Sicherung aktuell.", ""]
+                   "Sicherung aktuell."
+                   + (f" {anfragen} Anfrage(n) warten auf dich."
+                      if anfragen else ""), ""]
 
     zeilen.append(f"Offene Betriebsalarme: {alarme}"
                   + (f" (davon {daten.get('alarme_neu')} neu)"
                      if daten.get("alarme_neu") else ""))
     zeilen.append(f"Fehler bei Nutzern:   {fehler}")
+    zeilen.append(f"Offene Anfragen:      {anfragen}"
+                  + (f" (davon {daten.get('anfragen_neu')} neu)"
+                     if daten.get("anfragen_neu") else ""))
     for eintrag in (daten.get("fehler_wege") or []):
         zeilen.append(f"    {eintrag['anzahl']}x  {_kurz(eintrag['weg'], 60)}")
 
@@ -295,6 +414,10 @@ async def run_betriebsmeldung_forever(db) -> None:
             if token:
                 try:
                     await neue_alarme_melden(db)
+                    # Wunsch Ahmad 20.09.2026: Anfragen genauso — sie sind
+                    # kein Fehler, sondern Geschaeft, und lagen bisher nur
+                    # auf der Freischaltungs-Seite.
+                    await neue_anfragen_melden(db)
                 finally:
                     await release(db, "betriebsmeldung", token=token)
         except Exception:  # noqa: BLE001
