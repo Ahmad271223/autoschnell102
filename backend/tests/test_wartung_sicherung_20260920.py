@@ -364,3 +364,14 @@ def test_72b_nginx_begrenzt_die_anfragegroesse():
     assert conf.index("http {") < conf.index("client_max_body_size")
     compose = (wurzel / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./deploy/nginx.conf:/etc/nginx/nginx.conf:ro" in compose
+
+
+def test_66g_betriebsseite_zeigt_abgelaufene_wartung_nicht_mehr_an():
+    """Dieselbe Regel ueberall: Middleware, /api/ready UND die Betriebsseite
+    des Betreibers. Sonst stuende dort weiter "Wartung laeuft", obwohl die
+    Plattform nach einem abgestuerzten Sicherungslauf laengst frei ist."""
+    import routes.admin as ADMIN
+    q = inspect.getsource(ADMIN)
+    stelle = q.split('"wartungsmodus":')[1][:200]
+    assert "wartung.pausiert(" in stelle, \
+        "die Betriebsseite darf nicht selbst nur .get('aktiv') lesen (Nr. 66)"

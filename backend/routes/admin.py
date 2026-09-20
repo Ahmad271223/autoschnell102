@@ -6,6 +6,8 @@ import hashlib
 import re
 import asyncio
 import uuid
+
+import wartung
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -2991,8 +2993,12 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "zahlungen_ohne_zugang": await db.payment_transactions.count_documents(
             {"status": {"$in": ["paid", "activating", "activation_failed"]}}),
         "backup": backup,
-        "wartungsmodus": bool(((await db.system_flags.find_one(
-            {"_id": "wartungsmodus"})) or {}).get("aktiv")),
+        # Nachpruefung 20.09.2026, Nr. 66: hier stand nur `.get("aktiv")`.
+        # Ein abgelaufener Merker (abgestuerztes Sicherungsskript) haette die
+        # Betriebsseite weiter als "Wartung laeuft" gezeigt, obwohl die
+        # Plattform laengst wieder frei ist. Dieselbe Regel wie in der
+        # Middleware und in /api/ready.
+        "wartungsmodus": wartung.pausiert(await wartung.lesen_async(db), "POST"),
         # Abo-Audit: Super-Admins ohne Zwei-Faktor sichtbar machen
         # (Kontonummer 13.09.2026: Benutzername zuerst)
         "super_admins_ohne_mfa": [u.get("username") or u.get("email") async for u in db.users.find(
