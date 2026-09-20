@@ -2,7 +2,7 @@ import { fassungMithoeren } from "@/lib/fassung";
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
-import { API_BASE, istLangeAktion, LANGE_AKTION_MS } from "@/lib/api";
+import { API_BASE, gehoertZumAktuellenToken, istLangeAktion, LANGE_AKTION_MS } from "@/lib/api";
 
 /**
  * Zwischenhändler-Auth (Rolle b2b_buyer, eigene Accounts — separat vom
@@ -25,8 +25,13 @@ buyerApi.interceptors.request.use((c) => {
 buyerApi.interceptors.response.use(
   (r) => r,
   (err) => {
+    // Nachpruefung 20.09.2026 (Nr. 41): dasselbe Grundproblem wie in
+    // lib/api.js — eine verspaetete 401 aus einer FRUEHEREN Anmeldung
+    // loeschte den gerade frisch gespeicherten Token. Deshalb zaehlt die
+    // 401 nur, wenn sie zu genau diesem Token gehoert.
     if (err?.response?.status === 401
         && tokenLesen(TOKEN_KAEUFER)
+        && gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_KAEUFER))
         && !String(err?.config?.url || "").includes("/buyer/login")) {
       tokenLoeschen(TOKEN_KAEUFER);
       if (window.location.pathname.startsWith("/markt")

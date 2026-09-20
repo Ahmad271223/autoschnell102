@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { openContractPdf } from "@/lib/pdf";
-import { thumbSrc, thumbFehler } from "@/lib/bilder";
+import { thumbSrc, thumbFehler, verkleinereBildDatei } from "@/lib/bilder";
 import { INSERAT_LABELS } from "@/lib/fahrzeugStatus";
 import { toast } from "sonner";
 import {
@@ -117,15 +117,31 @@ export default function Inserat() {
     }
   };
 
+  // Nachpruefung 20.09.2026 (Nr. 52/53): Hier wurden bis zu 20 Fotos
+  // UNVERKLEINERT als Base64 gelesen und in EINER Anfrage geschickt.
+  // Ein Handyfoto hat oft 5-8 MB, Base64 macht daraus rund ein Drittel
+  // mehr — schon drei Fotos sprengten die 25 MB, die nginx je Anfrage
+  // durchlaesst (deploy/nginx.conf), und der Nutzer sah nur einen
+  // unverstaendlichen Fehler. Jetzt wird jedes Foto im Browser auf 2000 px
+  // verkleinert (dabei fallen auch Aufnahmeort und Geraet weg) und in
+  // kleinen Paketen hochgeladen.
+  const FOTOS_JE_PAKET = 4;
+
   const uploadPhotos = async (files) => {
     if (!files?.length) return;
-    const toB64 = (f) => new Promise((res, rej) => {
-      const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
-    });
+    const auswahl = [...files].slice(0, 20);
     try {
-      const photos = await Promise.all([...files].slice(0, 20).map(toB64));
-      await api.post(`/resale/${l.id}/photos`, { photos_b64: photos });
-      toast.success(`${photos.length} Foto(s) hochgeladen`);
+      const photos = [];
+      for (const f of auswahl) {
+        photos.push(await verkleinereBildDatei(f));
+      }
+      let fertig = 0;
+      for (let i = 0; i < photos.length; i += FOTOS_JE_PAKET) {
+        const paket = photos.slice(i, i + FOTOS_JE_PAKET);
+        await api.post(`/resale/${l.id}/photos`, { photos_b64: paket });
+        fertig += paket.length;
+      }
+      toast.success(`${fertig} Foto(s) hochgeladen`);
       load();
     } catch (e) { toast.error(errMsg(e)); }
   };

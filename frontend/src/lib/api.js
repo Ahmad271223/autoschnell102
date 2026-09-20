@@ -47,11 +47,36 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+/**
+ * Gehoert diese 401 noch zum Token, der GERADE gespeichert ist?
+ *
+ * Nachpruefung 20.09.2026 (Nr. 39/40): Der Abfaenger loeschte bei jeder 401
+ * einfach den aktuell gespeicherten Token — ohne zu pruefen, ob die
+ * gescheiterte Anfrage ueberhaupt mit DIESEM Token losgeschickt wurde.
+ * Der Ablauf, der dabei schiefging:
+ *   1. Eine Anfrage mit Token A ist unterwegs.
+ *   2. Im selben Tab meldet sich jemand als Konto B an -> Token B liegt jetzt.
+ *   3. Die alte Anfrage antwortet verspaetet mit 401 (Token A ist ja weg).
+ *   4. Der Abfaenger loeschte Token B und warf Konto B zurueck zum Login.
+ * Jetzt zaehlt eine 401 nur noch fuer den Token, mit dem sie gesendet wurde.
+ * (Rein exportiert, damit es sich pruefen laesst.)
+ */
+export function gehoertZumAktuellenToken(config, aktuell) {
+  const gesendet = String(config?.headers?.Authorization || "");
+  if (!gesendet) return true;      // ohne Token gesendet: nichts zu schuetzen
+  return gesendet === `Bearer ${aktuell || ""}`;
+}
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err?.response?.status === 401) {
       const url = err?.config?.url || "";
+      if (!gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_APP))) {
+        // Veraltete Antwort einer frueheren Anmeldung — die neue Sitzung
+        // bleibt bestehen (Nr. 39/40).
+        return Promise.reject(err);
+      }
       if (!url.includes("/auth/login")) {
         tokenLoeschen(TOKEN_APP);
         const pfad = window.location.pathname;

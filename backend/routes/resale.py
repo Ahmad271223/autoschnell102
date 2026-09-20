@@ -17,7 +17,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 from pymongo import ReturnDocument
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from deps import (clean_doc, current_user, db, log_activity, log_activity_sicher,
                   now_iso)
@@ -68,9 +68,30 @@ class ListingUpdateIn(BaseModel):
     data: Optional[Dict[str, Any]] = None  # korrigierte Fahrzeugdaten
 
 
+#: Nachpruefung 20.09.2026, Nr. 53: Jedes einzelne Bild hatte eine Grenze,
+#: die GANZE Anfrage aber nicht — 20 x 12 MB waeren 240 MB gewesen, die
+#: FastAPI vor jeder Pruefung komplett einlesen und als JSON auseinander-
+#: nehmen muss. nginx laesst 25 MB je Anfrage durch (deploy/nginx.conf);
+#: mehr kann hier gar nicht ankommen, also ist das die ehrliche Grenze.
+PHOTOS_GESAMT_MAX = 24_000_000
+PHOTOS_JE_ANFRAGE_MAX = 8
+
+
 class PhotoUploadIn(BaseModel):
     photos_b64: List[Annotated[str, StringConstraints(max_length=_B64_MAX_LEN)]] = \
-        Field(min_length=1, max_length=20)
+        Field(min_length=1, max_length=PHOTOS_JE_ANFRAGE_MAX)
+
+    @field_validator("photos_b64")
+    @classmethod
+    def _gesamtgroesse(cls, v):
+        gesamt = sum(len(x) for x in v)
+        if gesamt > PHOTOS_GESAMT_MAX:
+            raise ValueError(
+                f"Die Fotos sind zusammen zu gross ({gesamt // 1_000_000} MB). "
+                f"Bitte in kleineren Gruppen hochladen — die Oberflaeche "
+                f"verkleinert sie vorher und schickt hoechstens "
+                f"{PHOTOS_JE_ANFRAGE_MAX} auf einmal.")
+        return v
 
 
 class ListingStatusIn(BaseModel):

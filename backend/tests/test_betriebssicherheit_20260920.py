@@ -267,3 +267,44 @@ def test_74c_der_bildproxy_machte_es_schon_richtig():
     import bild_proxy
     q = inspect.getsource(bild_proxy._holen)
     assert "follow_redirects=False" in q and "erlaubt(ziel)" in q
+
+
+# ------------------------------------------------------------ Nr. 52/53
+def test_53_gesamtgroesse_einer_fotoanfrage_ist_begrenzt():
+    """Jedes Bild hatte eine Grenze, die ganze Anfrage nicht."""
+    from pydantic import ValidationError
+
+    from routes.resale import (PHOTOS_GESAMT_MAX, PHOTOS_JE_ANFRAGE_MAX,
+                               PhotoUploadIn)
+    assert PHOTOS_JE_ANFRAGE_MAX <= 8, "20 auf einmal waren zu viel (Nr. 53)"
+    # Normal: geht.
+    PhotoUploadIn(photos_b64=["data:image/jpeg;base64,AAAA"] * PHOTOS_JE_ANFRAGE_MAX)
+    # Zu viele Bilder:
+    with pytest.raises(ValidationError):
+        PhotoUploadIn(photos_b64=["x"] * (PHOTOS_JE_ANFRAGE_MAX + 1))
+    # Wenige Bilder, jedes FUER SICH erlaubt — zusammen aber zu gross.
+    # Genau der Fall, den es vorher nicht gab: 20 x 12 MB waeren 240 MB
+    # gewesen, die FastAPI vor jeder Pruefung einlesen muss.
+    from routes.resale import _B64_MAX_LEN
+    einzeln = PHOTOS_GESAMT_MAX // 3 + 10
+    assert einzeln < _B64_MAX_LEN, "jedes Bild fuer sich bleibt erlaubt"
+    gross = "y" * einzeln
+    with pytest.raises(ValidationError) as exc:
+        PhotoUploadIn(photos_b64=[gross, gross, gross])
+    assert "zusammen zu gross" in str(exc.value)
+
+
+def test_52_die_oberflaeche_verkleinert_vor_dem_hochladen():
+    """Nr. 52: Inserat.jsx las die Fotos roh und schickte alle auf einmal."""
+    quelle = (BACKEND.parent / "frontend" / "src" / "pages" / "app"
+              / "Inserat.jsx").read_text(encoding="utf-8")
+    teil = quelle.split("const uploadPhotos")[1].split("};")[0]
+    assert "verkleinereBildDatei" in teil, \
+        "ohne Verkleinern sprengen drei Handyfotos die 25-MB-Grenze (Nr. 52)"
+    assert "readAsDataURL" not in teil, "der rohe Weg ist weg"
+    assert "FOTOS_JE_PAKET" in teil, "und nicht mehr alle in EINER Anfrage"
+    # Die Paketgroesse darf die Servergrenze nicht ueberschreiten.
+    import re
+    from routes.resale import PHOTOS_JE_ANFRAGE_MAX
+    m = re.search(r"const FOTOS_JE_PAKET = (\d+)", quelle)
+    assert m and int(m.group(1)) <= PHOTOS_JE_ANFRAGE_MAX

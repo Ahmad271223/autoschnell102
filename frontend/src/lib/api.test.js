@@ -5,7 +5,7 @@
  * Server weiterarbeitete. Diese Wege bekommen jetzt ein laengeres Zeitlimit.
  */
 import { describe, expect, it } from "vitest";
-import { istLangeAktion, LANGE_AKTION_MS } from "./api";
+import { gehoertZumAktuellenToken, istLangeAktion, LANGE_AKTION_MS } from "./api";
 
 describe("istLangeAktion", () => {
   it("gilt fuer jeden Datei-Abruf (PDF, Bilder)", () => {
@@ -35,5 +35,43 @@ describe("istLangeAktion", () => {
   it("bleibt unter dem Limit von nginx (300 s)", () => {
     expect(LANGE_AKTION_MS).toBeGreaterThan(60000);
     expect(LANGE_AKTION_MS).toBeLessThan(300000);
+  });
+});
+
+/**
+ * Nachpruefung 20.09.2026 (Nr. 39/40/42): Eine verspaetete 401 aus einer
+ * FRUEHEREN Anmeldung loeschte den gerade frisch gespeicherten Token.
+ *
+ * Der Ablauf, der schiefging:
+ *   1. Anfrage mit Token A ist unterwegs.
+ *   2. Im selben Tab meldet sich jemand als Konto B an -> Token B liegt.
+ *   3. Die alte Anfrage antwortet verspaetet mit 401.
+ *   4. Der Abfaenger loeschte Token B und warf Konto B zurueck zum Login.
+ *
+ * Befund Nr. 42 sagte ausdruecklich, dass genau dieser Fall nirgends
+ * geprueft wurde — deshalb steht er jetzt hier.
+ */
+describe("gehoertZumAktuellenToken", () => {
+  it("laesst eine 401 zum AKTUELLEN Token gelten", () => {
+    const config = { headers: { Authorization: "Bearer A" } };
+    expect(gehoertZumAktuellenToken(config, "A")).toBe(true);
+  });
+
+  it("verwirft die verspaetete 401 einer frueheren Anmeldung", () => {
+    const config = { headers: { Authorization: "Bearer A" } };
+    expect(gehoertZumAktuellenToken(config, "B")).toBe(false);
+  });
+
+  it("verwirft sie auch, wenn inzwischen gar kein Token mehr da ist", () => {
+    const config = { headers: { Authorization: "Bearer A" } };
+    expect(gehoertZumAktuellenToken(config, null)).toBe(false);
+    expect(gehoertZumAktuellenToken(config, "")).toBe(false);
+  });
+
+  it("laesst Anfragen ohne Token unveraendert durch", () => {
+    // Anmeldung selbst, oeffentliche Wege: da gibt es nichts zu schuetzen.
+    expect(gehoertZumAktuellenToken({ headers: {} }, "B")).toBe(true);
+    expect(gehoertZumAktuellenToken({}, "B")).toBe(true);
+    expect(gehoertZumAktuellenToken(undefined, "B")).toBe(true);
   });
 });
