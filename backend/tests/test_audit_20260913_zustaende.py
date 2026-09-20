@@ -324,12 +324,17 @@ def test_51_admin_nutzervertraege_nach_rolle_und_obergrenze(welt, monkeypatch):
             # Kuenstliches Alt-Dokument ohne dealer_id — produktiv entsteht so
             # etwas nicht, es macht aber den Filter {dealer_id: None} sichtbar.
             + [{"id": f"c_alt_{welt.s}", "user_id": "fremd", "created_at": _jetzt()}])
+        # 20.09.2026 (Wunsch Ahmad): Die Route blaettert jetzt (Standard 20
+        # je Seite) und setzt X-Truncated — deshalb braucht sie ein
+        # Response-Objekt. Die Zusagen dieses Tests bleiben dieselben: die
+        # Abgrenzung nach Rolle und die gemeldete Obergrenze.
+        from fastapi import Response
         erg = {}
         for uid in (welt.chef["id"], s1, s2, k):
-            r = await A.admin_user_contracts(uid, _=SA)
+            r = await A.admin_user_contracts(uid, Response(), _=SA)
             erg[uid] = (len(r["contracts"]), r.get("umfang"), r.get("abgeschnitten"))
         monkeypatch.setattr(A, "ADMIN_VERTRAEGE_MAX", 3, raising=False)
-        gekappt = await A.admin_user_contracts(welt.chef["id"], _=SA)
+        gekappt = await A.admin_user_contracts(welt.chef["id"], Response(), _=SA)
         return erg, gekappt
 
     erg, gekappt = welt.run(lauf())
