@@ -205,6 +205,17 @@ async function createAppointment(firma, body) {
 }
 
 /** Manuelles Fahrzeug -> Inserat -> verkaufsbereit -> veroeffentlicht (public). */
+// Regel vom 20.09.2026 (Ahmad): veroeffentlichen geht NUR mit eigenen Fotos —
+// aus dem Portal-Inserat wird keines uebernommen. Der Upload prueft die
+// Magic Bytes, kein echtes Bild noetig (storage_service.validate_image_bytes).
+const TEST_FOTO = (() => {
+  const bytes = Buffer.alloc(4102);
+  bytes.set([0xff, 0xd8, 0xff, 0xe0], 0);           // JPEG-Kennung
+  for (let i = 4; i < 4100; i += 1) bytes[i] = (i * 7) % 256;
+  bytes.set([0xff, 0xd9], 4100);                    // JPEG-Ende
+  return `data:image/jpeg;base64,${bytes.toString("base64")}`;
+})();
+
 async function publishListing(firma, { pricePublic = 19900, priceB2b = 18500 } = {}) {
   await superPut(`/admin/dealers/${firma.dealerId}/sale-plan`, { tier: "s5" });
   await put("/dealer/marketplace-profile", { public: true, description: "E2E-Testhaendler" }, { token: firma.token });
@@ -216,6 +227,8 @@ async function publishListing(firma, { pricePublic = 19900, priceB2b = 18500 } =
   const draft = await post(`/resale/draft/${v.id}`, {}, { token: firma.token });
   await put(`/resale/${draft.id}`, { price_public: pricePublic, price_b2b: priceB2b }, { token: firma.token });
   await post(`/resale/${draft.id}/status`, { status: "verkaufsbereit" }, { token: firma.token });
+  // Ohne eigenes Foto antwortet /publish seit dem 20.09.2026 mit 400.
+  await post(`/resale/${draft.id}/photos`, { photos_b64: [TEST_FOTO] }, { token: firma.token });
   await post(`/resale/${draft.id}/publish`, { visibility: "public" }, { token: firma.token });
   return { vehicleId: v.id, listingId: draft.id, title: draft.title };
 }
