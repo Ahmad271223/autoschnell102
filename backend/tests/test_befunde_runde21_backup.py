@@ -595,7 +595,11 @@ def test_a10_wartung_wartet_auf_den_middleware_cache(umgebung, mongo, monkeypatc
     base = umgebung["tmp"] / "a10"
     rc = bm.backup_erstellen(base, db_name=q, mongo_url=MONGO_URL, wartung=True)
     assert rc == 0, (base / "backup.log").read_text(encoding="utf-8")[-800:]
-    assert ereignisse[0] == ("warten", bm.WARTUNG_WARTEN_S) and bm.WARTUNG_WARTEN_S > 5
+    # 20.09.2026 (Nr. 65): aus der festen Konstante WARTUNG_WARTEN_S (6 s)
+    # wurde _wartung_warten_s() — Standard 30 s, ueber
+    # BACKUP_WARTUNG_WARTEN_S einstellbar, Minimum 6 s.
+    assert ereignisse[0] == ("warten", bm._wartung_warten_s())
+    assert bm._wartung_warten_s() >= 30
     assert all(e[2] for e in ereignisse if e[0] == "dump"), ereignisse
     assert _manifest(_ordner(base)[0])["konsistenz"] == "stimmig (Schreibpause)"
     assert mongo[q].system_flags.find_one({"_id": "wartungsmodus"})["aktiv"] is False

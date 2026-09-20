@@ -2235,7 +2235,7 @@ Rechtstexte — ausserhalb des Codes).
 | — | **9 weitere derselben Art**, bei der Suche ueber ALLE Namen gefunden | `ABRUF_JE_KONTO_MINUTE`, `ABRUF_GLEICHZEITIG_JE_KONTO`, `VERGLEICH_JE_KONTO_MINUTE`, `VERSAND_JE_KONTO_10MIN`, `LINK_JOB_SOFORT_MAX`, `LINK_JOB_MAX_ATTEMPTS`, `IMAGE_QUALITY`, `MAX_IMAGE_UPLOAD_BYTES`, `MFA_AUSSTELLER` — alle mit den Code-Standardwerten als Vorgabe (ein leerer Wert haette `int()` zum Absturz gebracht) |
 | 4 | Kaeufer-Login schrieb die Sitzung ohne Bedingung | jetzt `sitzungs_bedingung()` wie bei Firma und Fahrer: ein Passwortwechsel waehrend der Anmeldung laesst keine Sitzung mehr entstehen (401) |
 | 6 | Vertragsfrist 60 vs. 90 Tage | ueberall **60** (`production_check.py` rechnete mit 90, DEPLOYMENT.md nannte 90) |
-| 7 | Sicherung lief immer ohne Schreibpause | `backup_service._schreibpause_noetig()`: ohne Replica Set laeuft sie jetzt mit `--wartung` (wenige Sekunden, 03:00). Schalter `BACKUP_WARTUNG` (leer = automatisch) |
+| 7 | Sicherung lief immer ohne Schreibpause | **am selben Tag korrigiert** — die Automatik "ohne Replica Set immer `--wartung`" war falsch und ist zurueckgenommen. Begruendung und neuer Stand: Abschnitt *Wartungsmodus (Nr. 64-72)* weiter unten |
 | 8 | Nicht stichtagsgenaue Sicherung galt still als gut | `/api/ready` warnt jetzt ausdruecklich und nennt den Weg (Replica Set oder `BACKUP_WARTUNG=true`). Die Bewertung selbst bleibt: ein Einzelserver kann es nicht besser |
 | 9 | Sperre nicht pruefbar = "anderer Worker sichert" | `job_lock.acquire(..., fehler_melden=True)`: eine Datenbank-Stoerung ist jetzt ein Fehlschlag → Wiederholung in einer Stunde |
 | 10 | Doku verlangte einen "nur schreibenden" Schluessel | falsch — Upload (`head_object`), Rotation (list/delete) und der Papierkorb lesen dort. Ueberall auf **"Object Read & Write", auf den Sicherungs-Bucket eingeschraenkt** korrigiert |
@@ -2266,3 +2266,39 @@ Rechtstexte — ausserhalb des Codes).
 Wächter: `backend/tests/test_pruefung_20260920.py` (12 Tests) und die erweiterten Tests in
 `test_haertung_20260919.py` — darunter `test_09`, das ab jetzt **jede** in `.env.example`
 versprochene und vom Code gelesene Einstellung im `environment:`-Block verlangt.
+
+---
+
+### Wartungsmodus und Datei-Sicherung (Nachpruefung 20.09.2026, Nr. 64-72)
+
+Am Vormittag des 20.09.2026 hatte ich die Schreibpause der naechtlichen Sicherung
+**automatisch** eingeschaltet, sobald MongoDB ohne Replica Set laeuft. Die naechste
+Durchsicht hat das zerlegt, und sie hatte in jedem Punkt recht. Die Automatik ist
+**zurueckgenommen**; der Wartungsmodus ist stattdessen abgesichert worden.
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 64 | Der Schreibstopp hielt nur HTTP an; Link-, Beweis- und Aufraeum-Worker schrieben weiter — die Sicherung nannte sich trotzdem stichtagsgenau | alle drei Worker fragen jetzt `wartung.aktiv_async()` und pausieren ihren Zyklus |
+| 65 | Nach dem Einschalten wurde stur 6 s gewartet | `BACKUP_WARTUNG_WARTEN_S` (Standard **30 s**, Minimum 6); `/api/ready` zeigt unter `schreiber_offen`, wie viele schreibende Anfragen noch laufen |
+| 66 | Ohne Besitzer, Ablaufzeit und Waechter konnte ein abgestuerzter Lauf die Plattform **dauerhaft** sperren | der Merker hat `besitzer` + `gilt_bis` (Standard 15 min, waehrend des Laufs jede Minute verlaengert). Abgelaufen = unwirksam; der Serverstart raeumt ihn weg. Aufheben darf nur der Besitzer |
+| 67 | `/api/ready` blieb gruen, der Lastverteiler schickte weiter Kunden hin | Restore (`umfang: alles`) ist jetzt ein **Fehler** → der Server faellt aus der Rotation. Eine reine Schreibpause bleibt eine Warnung, weil Lesen weiterlaeuft |
+| 68 | Die "Schreibpause" war ein kompletter Ausfall — auch GET, Downloads, Marktplatz | `umfang: "schreiben"` laesst GET/HEAD/OPTIONS durch; nur veraendernde Anfragen bekommen 503. Der Restore setzt weiterhin `umfang: "alles"` |
+| 69 | Datenbank und Dateien stammten aus verschiedenen Zeitpunkten (die Pause endete direkt nach dem DB-Dump) | die Pause bleibt bis **nach** der Dateisicherung an |
+| 70 | Die Datei-Sicherung hielt nicht fest, welche Dateien zu einem Backup gehoerten | jedes Backup legt `dateien-liste.json.gz` an (Schluessel, Groesse, ETag) und bekommt dafuer eine SHA-256-Pruefsumme im Manifest. `dateien_zurueckkopieren.py --liste <Backup-Ordner>` prueft dagegen und meldet Fehlendes, Abweichendes und spaeter Dazugekommenes (Exit 2) |
+| 71 | Papierkorb-Fehler wurden nur geloggt, das Backup meldete trotzdem OK | sie zaehlen jetzt als `fehler` → **BACKUP UNVOLLSTAENDIG** (Exit 2) |
+| 72 | Compose/Generator/Doku nannten verschiedene Standardwerte | `BACKUP_S3_KEEP` ueberall **14**, `LINK_JOB_SOFORT_MAX` ueberall **4**, `MAX_IMAGE_UPLOAD_BYTES` ueberall **8 MB** (das sind **8 MB je Foto**; das Limit fuer die ganze Anfrage sind die 25 MB aus `deploy/nginx.conf`) |
+
+**Gegengeprueft und NICHT bestaetigt — Nr. 51 ("nginx blockiert Uploads bei 1 MB"):**
+Die Durchsicht sah nur `default.conf.template` und `hinter-loadbalancer.conf.template` —
+dort steht tatsaechlich kein `client_max_body_size`. Die Vorgabe steht aber im
+`http`-Block von `deploy/nginx.conf` (`client_max_body_size 25m;`), und **genau diese
+Datei** wird in den Proxy-Container gehaengt (`./deploy/nginx.conf:/etc/nginx/nginx.conf:ro`).
+nginx vererbt `http`-Vorgaben an jeden Server- und Location-Block, die wirksame Grenze ist
+also 25 MB, nicht 1 MB. `test_72b_nginx_begrenzt_die_anfragegroesse` haelt beides fest.
+
+**Empfehlung zum Betrieb:** `BACKUP_WARTUNG` bleibt leer. Ahmads Server laufen als
+Replica Set (`rs0`) — dort liest die Sicherung alle Collections in EINER Snapshot-Sitzung,
+ohne jede Unterbrechung. Die Schreibpause ist nur fuer Einzelserver-Installationen da, und
+auch dort eine bewusste Entscheidung.
+
+Waechter: `backend/tests/test_wartung_sicherung_20260920.py` (26 Tests).

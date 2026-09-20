@@ -92,6 +92,7 @@ import re
 import shutil
 import sys
 import tarfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -109,22 +110,47 @@ from backup_bewertung import (KONSISTENZ_RUECKFALL, KONSISTENZ_SCHREIBPAUSE,
                               ist_gut, metadaten_mangel, snapshot_pflicht)
 from pymongo import MongoClient
 
+import wartung
+
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 DB_NAME = os.environ.get("DB_NAME", "autoschnell")
 KEEP = 14
-# Runde 21 (Nebenbefund Schreibpause): die WartungsmodusMiddleware im
-# Backend liest das Flag nur alle 5 s neu. Erst nach dieser Frist sind
-# Schreibzugriffe sicher pausiert.
-WARTUNG_WARTEN_S = 6
+
+
 DEFAULT_DIR = Path(os.environ.get("BACKUP_DIR") or r"C:\AutoSchnell-Backups")
 BACKEND = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = Path(os.environ.get("BACKUP_UPLOADS_DIR") or BACKEND / "uploads")
 LOCAL_STORAGE_DIR = Path(os.environ.get("BACKUP_LOCAL_STORAGE_DIR")
                          or BACKEND / "local_storage")
-MANIFEST_VERSION = 4          # Runde 21: Feld "inkonsistent", Pflicht-Indexdaten
+MANIFEST_VERSION = 5          # 20.09.2026: dateien_kopie.liste_datei (Nr. 70)
+DATEIEN_LISTE = "dateien-liste.json.gz"   # Objektliste dieses Laufs (Nr. 70)
 OFFSITE_PREFIX_DEFAULT = "autoschnell-backups/"
 OFFSITE_KEEP_DEFAULT = 14
 _OFFSITE_ARCHIV = re.compile(r"autoschnell-\d{4}-\d{2}-\d{2}_\d{4}\.tar\.gz$")
+
+
+def _wartung_warten_s() -> float:
+    """Wie lange nach dem Einschalten gewartet wird (Nr. 65).
+
+    Runde 21: die Middleware im Backend liest den Merker nur alle 5 s neu —
+    erst danach sind neue Schreibzugriffe sicher pausiert.
+    Nachpruefung 20.09.2026: dazu kommt eine Auslaufzeit fuer Anfragen, die
+    vorher durchkamen und noch laufen. Standard 30 s."""
+    try:
+        return max(6.0, float(os.environ.get("BACKUP_WARTUNG_WARTEN_S", "").strip()
+                              or 30))
+    except ValueError:
+        return 30.0
+
+
+def _wartung_frist_min() -> int:
+    """Ablaufzeit des Merkers (Nr. 66) — er wird waehrend des Laufs
+    verlaengert, nach einem Absturz laeuft er von selbst ab."""
+    try:
+        return max(2, int(os.environ.get("BACKUP_WARTUNG_FRIST_MIN", "").strip()
+                          or 15))
+    except ValueError:
+        return 15
 
 
 def log(msg: str, logfile: Path) -> None:
@@ -242,23 +268,84 @@ def indexe_gegenpruefen(target: Path, namen) -> dict:
     return out
 
 
-def wartung_setzen(db, an: bool, logfile: Path) -> bool:
-    """Wartungsmodus schalten (Audit 09/2026, Befund "Backup nicht stimmig").
+class Schreibpause:
+    """Schreibpause fuer die Dauer der Sicherung (Audit 09/2026).
 
-    Ohne Replica Set gibt es keine Snapshot-Sicht. Mit --wartung pausiert das
-    Backend fuer die Dauer des Laufs alle Schreibzugriffe (die Middleware
-    antwortet mit 503), sodass die einzelnen Collections zusammenpassen.
-    Liefert True, wenn geschaltet werden konnte."""
-    try:
-        db.system_flags.update_one(
-            {"_id": "wartungsmodus"},
-            {"$set": {"aktiv": bool(an), "grund": "Datensicherung laeuft",
-                      "gesetzt_am": datetime.now(timezone.utc).isoformat()}},
-            upsert=True)
-        log(f"  Wartungsmodus {'AN' if an else 'AUS'} (Schreibpause)", logfile)
+    Ohne Replica Set gibt es keine Snapshot-Sicht. Mit --wartung pausiert die
+    Plattform ihre Schreibzugriffe, sodass die einzelnen Collections
+    zusammenpassen. Die Nachpruefung vom 20.09.2026 hat drei Luecken
+    gezeigt, die hier geschlossen sind:
+
+      Nr. 66  Der Merker bekommt eine ABLAUFZEIT und eine Besitzer-Kennung.
+              Wird dieses Skript hart beendet (Zeitlimit -> kill), laeuft
+              sein Aufraeumen nicht — dann laeuft der Merker von selbst ab
+              und der naechste Serverstart raeumt ihn weg. Solange der Lauf
+              arbeitet, verlaengert ein Faden im Hintergrund die Frist.
+      Nr. 68  Der Umfang ist "schreiben": Lesen, Downloads und Marktplatz
+              laufen weiter, nur veraendernde Anfragen bekommen 503.
+      Nr. 65  Nach dem Einschalten wird nicht mehr stur 6 s gewartet,
+              sondern WARTUNG_WARTEN_S (Standard 30 s, einstellbar ueber
+              BACKUP_WARTUNG_WARTEN_S): 5 s, bis alle Backend-Prozesse den
+              Merker gelesen haben, plus Auslaufzeit fuer Anfragen, die
+              vorher durchkamen. Laenger laufende Anfragen koennen trotzdem
+              noch schreiben — das steht jetzt im Log und im Manifest.
+    """
+
+    def __init__(self, db, logfile: Path):
+        self.db = db
+        self.logfile = logfile
+        self.kennung = None
+        self._stop = threading.Event()
+        self._faden = None
+
+    @property
+    def aktiv(self) -> bool:
+        return self.kennung is not None
+
+    def einschalten(self) -> bool:
+        try:
+            self.kennung = wartung.setzen(
+                self.db[wartung.FLAG_COLLECTION], "Datensicherung laeuft",
+                umfang=wartung.UMFANG_SCHREIBEN, frist_min=_wartung_frist_min())
+        except Exception as exc:  # noqa: BLE001
+            log(f"  WARNUNG: Schreibpause konnte nicht gesetzt werden: {exc}",
+                self.logfile)
+            return False
+        log(f"  Schreibpause AN (Lesen bleibt moeglich, laengstens "
+            f"{_wartung_frist_min()} min)", self.logfile)
+        self._faden = threading.Thread(target=self._verlaengern, daemon=True)
+        self._faden.start()
         return True
-    except Exception as exc:  # noqa: BLE001
-        log(f"  WARNUNG: Wartungsmodus konnte nicht geschaltet werden: {exc}", logfile)
+
+    def _verlaengern(self) -> None:
+        # Alle 60 s die Frist erneuern, solange der Lauf arbeitet.
+        while not self._stop.wait(60):
+            try:
+                wartung.verlaengern(self.db[wartung.FLAG_COLLECTION],
+                                    self.kennung, _wartung_frist_min())
+            except Exception:  # noqa: BLE001
+                pass
+
+    def ausschalten(self) -> None:
+        if not self.aktiv:
+            return
+        self._stop.set()
+        try:
+            wartung.aufheben(self.db[wartung.FLAG_COLLECTION], self.kennung)
+            log("  Schreibpause AUS", self.logfile)
+        except Exception as exc:  # noqa: BLE001
+            # Nicht schlimm: die Frist laeuft ohnehin ab, und der naechste
+            # Serverstart raeumt den Merker weg (Nr. 66).
+            log(f"  WARNUNG: Schreibpause nicht aufgehoben ({exc}) — sie laeuft "
+                f"spaetestens in {_wartung_frist_min()} min von selbst ab",
+                self.logfile)
+        self.kennung = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.ausschalten()
         return False
 
 
@@ -442,13 +529,22 @@ def dateien_aufbewahrung_tage() -> int:
         return DATEIEN_AUFBEWAHRUNG_DEFAULT
 
 
-def _objekte_auflisten(client, bucket: str, praefix: str = "") -> dict:
-    """Schluessel -> (Groesse, LastModified) unter einem Praefix."""
+def _objekte_auflisten(client, bucket: str, praefix: str = "",
+                       etags: dict | None = None) -> dict:
+    """Schluessel -> (Groesse, LastModified) unter einem Praefix.
+
+    Nachpruefung 20.09.2026, Nr. 70: `etags` sammelt zusaetzlich die
+    Pruefsumme je Objekt. Damit haelt jedes Backup fest, WELCHE Dateien in
+    welcher Fassung zu seinem Datenbankstand gehoeren — vorher standen im
+    Manifest nur Zaehler, und ein bestimmter Stand liess sich nicht
+    beweisbar wiederherstellen."""
     aus = {}
     for seite in client.get_paginator("list_objects_v2").paginate(
             Bucket=bucket, Prefix=praefix):
         for obj in seite.get("Contents") or []:
             aus[obj["Key"]] = (int(obj.get("Size") or 0), obj.get("LastModified"))
+            if etags is not None:
+                etags[obj["Key"]] = (obj.get("ETag") or "").strip('"')
     return aus
 
 
@@ -477,7 +573,8 @@ def dateien_in_bucket_sichern(logfile: Path) -> dict:
     frist = timedelta(days=dateien_aufbewahrung_tage())
     sse = sse_optionen(backup_endpoint())
 
-    quelle = _objekte_auflisten(lesen, quelle_bucket)
+    quell_etags: dict = {}
+    quelle = _objekte_auflisten(lesen, quelle_bucket, etags=quell_etags)
     # Liegt die Offsite-Kopie (entgegen der Empfehlung) im Datei-Speicher,
     # die Archive nicht mitkopieren (wie spiegle_s3).
     if os.environ.get("BACKUP_S3_BUCKET", "").strip() == quelle_bucket:
@@ -534,8 +631,25 @@ def dateien_in_bucket_sichern(logfile: Path) -> dict:
                 stand["entfernt"] += 1
         except Exception as exc:  # noqa: BLE001
             # Nie loeschen, was sich nicht sicher einordnen laesst.
-            log(f"  Hinweis: Papierkorb-Eintrag {ziel_key} nicht bearbeitet — {exc}",
+            # Nachpruefung 20.09.2026, Nr. 71: frueher wurde das NUR geloggt,
+            # `fehler` blieb 0 und der Lauf meldete "BACKUP OK" — obwohl die
+            # Loeschfrist nicht umgesetzt wurde und geloeschte personen-
+            # bezogene Dateien unbegrenzt liegenblieben. Jetzt zaehlt es als
+            # Fehler und das Backup gilt als UNVOLLSTAENDIG (Exit 2).
+            stand["fehler"] += 1
+            stand["papierkorb_fehler"] = stand.get("papierkorb_fehler", 0) + 1
+            fehler_beispiel = fehler_beispiel or f"{ziel_key}: {exc}"
+            log(f"  WARNUNG: Papierkorb-Eintrag {ziel_key} nicht bearbeitet — {exc}",
                 logfile)
+
+    # Nr. 70: WELCHE Dateien in welcher Fassung zu genau diesem Backup
+    # gehoeren. Ohne diese Liste aktualisieren alle Laeufe dasselbe
+    # dateien/-Praefix, und ein bestimmter Datenbankstand liess sich nicht
+    # mit seinem damaligen Dateistand wiederherstellen. Der Restore
+    # vergleicht gegen diese Liste (siehe dateien_zurueckkopieren.py).
+    stand["objekte"] = len(quelle)
+    stand["liste"] = {k: {"bytes": v[0], "etag": quell_etags.get(k, "")}
+                      for k, v in sorted(quelle.items())}
 
     log(f"  Dateien -> s3://{ziel_bucket}/{praefix}: {stand['kopiert']} kopiert "
         f"({stand['bytes_kopiert'] / 1e6:.1f} MB), {stand['unveraendert']} unveraendert, "
@@ -724,29 +838,32 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
     # Schreibpause nur, wenn ausdruecklich gewuenscht (Standalone-Mongo):
     # dann pausiert das Backend Schreibzugriffe, damit die Collections
     # zusammenpassen (Audit 09/2026).
-    pause = wartung and wartung_setzen(db, True, logfile)
+    # Nachpruefung 20.09.2026, Nr. 69: die Pause bleibt jetzt bis NACH der
+    # Dateisicherung an. Vorher endete sie direkt nach dem Datenbank-Dump —
+    # eine danach geloeschte Datei war in der Datenbanksicherung noch
+    # verzeichnet, in der Dateisicherung aber schon weg.
+    schreibpause = Schreibpause(db, logfile)
+    pause = wartung and schreibpause.einschalten()
     try:
         if pause:
-            # Runde 21: die Middleware cacht das Flag 5 s je Prozess — erst
-            # danach sind Schreibzugriffe ueber die API sicher pausiert.
-            log(f"  warte {WARTUNG_WARTEN_S} s, bis alle Backend-Prozesse die "
-                f"Schreibpause sehen ...", logfile)
-            time.sleep(WARTUNG_WARTEN_S)
+            log(f"  warte {_wartung_warten_s():.0f} s, bis alle Backend-Prozesse "
+                f"die Schreibpause sehen und laufende Anfragen fertig sind ...",
+                logfile)
+            time.sleep(_wartung_warten_s())
         counts, konsistenz, inkonsistent = dump_datenbank(
             client, db, names, target, logfile, pflicht=snapshot_pflicht(mongo_url))
         indexe = indexe_gegenpruefen(target, counts)
     except IndexMetadatenFehler as exc:
+        schreibpause.ausschalten()
         log(f"FEHLER: Index-Metadaten nicht gesichert — {exc}. Ohne sie fehlen "
             f"nach einem Restore Unique- und TTL-Indexe; kein Backup angelegt.", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
     except Exception as exc:  # noqa: BLE001
+        schreibpause.ausschalten()
         log(f"FEHLER beim Sichern der Datenbank: {exc}", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
-    finally:
-        if pause:
-            wartung_setzen(db, False, logfile)
     if pause:
         # Bei pausierten Schreibzugriffen passen auch nacheinander gelesene
         # Collections zusammen (auch nach einem gescheiterten Snapshot).
@@ -754,53 +871,71 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
     log(f"  Konsistenz: {konsistenz}" + (f" — INKONSISTENT: {inkonsistent}"
                                          if inkonsistent else ""), logfile)
 
-    # ---- Datei-Speicher ----
-    unvollstaendig = []
-    n_files = 0
-    for quelle, name in ((UPLOADS_DIR, "uploads"),
-                         (LOCAL_STORAGE_DIR, "local_storage")):
-        if not quelle.is_dir():
-            unvollstaendig.append(f"{name}: Verzeichnis {quelle} fehlt")
-            log(f"  WARNUNG: {name} nicht gefunden ({quelle})", logfile)
-            continue
-        try:
-            k = spiegle_ordner(quelle, tmp_dir / name)
-        except OSError as exc:
-            unvollstaendig.append(f"{name}: {exc}")
-            log(f"  WARNUNG: {name} nur teilweise gesichert — {exc}", logfile)
-            continue
-        n_files += k
-        log(f"  {name}: {k} Dateien gesichert", logfile)
-    s3_aktiv = all(os.environ.get(v, "").strip() for v in
-                   ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"))
-    dateien_kopie = None
-    modus = dateien_modus() if s3_aktiv else None
-    if s3_aktiv and modus == "spiegel":
-        try:
-            n_files += spiegle_s3(tmp_dir / "s3", logfile)
-        except Exception as exc:  # noqa: BLE001
-            unvollstaendig.append(f"s3: {exc}")
-            log(f"  WARNUNG: S3-Bucket NICHT gesichert — {exc}", logfile)
-    elif s3_aktiv and modus == "bucket":
-        # 19.09.2026: Speicher zu Speicher, nichts davon landet auf der Platte.
-        try:
-            dateien_kopie = dateien_in_bucket_sichern(logfile)
-            if dateien_kopie.get("fehler"):
-                unvollstaendig.append(
-                    f"dateien: {dateien_kopie['fehler']} Objekte nicht in den "
-                    f"Sicherungs-Bucket kopiert")
-        except Exception as exc:  # noqa: BLE001
-            unvollstaendig.append(f"dateien: {exc}")
-            log(f"  WARNUNG: Dateien NICHT in den Sicherungs-Bucket kopiert — {exc}",
-                logfile)
-    elif s3_aktiv:
-        dateien_kopie = {"modus": "aus"}
-        log("  Hinweis: Datei-Speicher wird nicht gesichert (BACKUP_DATEIEN=aus)", logfile)
-    if os.environ.get("EMERGENT_LLM_KEY", "").strip():
-        # Externer Snapshot-Speicher ohne Listing-API: nicht sicherbar.
-        unvollstaendig.append("snapshots: externer Snapshot-Speicher (EMERGENT) "
-                              "ist von hier aus nicht sicherbar")
-        log("  WARNUNG: externer Snapshot-Speicher wird nicht gesichert", logfile)
+    # Nr. 69: die Schreibpause umfasst auch die Dateien — sonst passen
+    # Datenbankstand und Dateistand nicht zusammen. Sie wird erst
+    # danach aufgehoben, auch wenn hier etwas schiefgeht.
+    try:
+        # ---- Datei-Speicher ----
+        unvollstaendig = []
+        n_files = 0
+        for quelle, name in ((UPLOADS_DIR, "uploads"),
+                             (LOCAL_STORAGE_DIR, "local_storage")):
+            if not quelle.is_dir():
+                unvollstaendig.append(f"{name}: Verzeichnis {quelle} fehlt")
+                log(f"  WARNUNG: {name} nicht gefunden ({quelle})", logfile)
+                continue
+            try:
+                k = spiegle_ordner(quelle, tmp_dir / name)
+            except OSError as exc:
+                unvollstaendig.append(f"{name}: {exc}")
+                log(f"  WARNUNG: {name} nur teilweise gesichert — {exc}", logfile)
+                continue
+            n_files += k
+            log(f"  {name}: {k} Dateien gesichert", logfile)
+        s3_aktiv = all(os.environ.get(v, "").strip() for v in
+                       ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"))
+        dateien_kopie = None
+        modus = dateien_modus() if s3_aktiv else None
+        if s3_aktiv and modus == "spiegel":
+            try:
+                n_files += spiegle_s3(tmp_dir / "s3", logfile)
+            except Exception as exc:  # noqa: BLE001
+                unvollstaendig.append(f"s3: {exc}")
+                log(f"  WARNUNG: S3-Bucket NICHT gesichert — {exc}", logfile)
+        elif s3_aktiv and modus == "bucket":
+            # 19.09.2026: Speicher zu Speicher, nichts davon landet auf der Platte.
+            try:
+                dateien_kopie = dateien_in_bucket_sichern(logfile)
+                # Nr. 70: die Objektliste dieses Laufs als eigene Datei im
+                # Backup — sie bekommt damit eine SHA-256-Pruefsumme im
+                # Manifest wie jede andere Datei. Im Manifest selbst steht
+                # nur der Dateiname, sonst wuerde es bei vielen Objekten
+                # riesig.
+                liste = dateien_kopie.pop("liste", None)
+                if liste is not None:
+                    ziel_liste = tmp_dir / DATEIEN_LISTE
+                    with gzip.open(ziel_liste, "wt", encoding="utf-8") as fh:
+                        json.dump(liste, fh, ensure_ascii=False)
+                    dateien_kopie["liste_datei"] = DATEIEN_LISTE
+                if dateien_kopie.get("fehler"):
+                    unvollstaendig.append(
+                        f"dateien: {dateien_kopie['fehler']} Objekte nicht in den "
+                        f"Sicherungs-Bucket kopiert")
+            except Exception as exc:  # noqa: BLE001
+                unvollstaendig.append(f"dateien: {exc}")
+                log(f"  WARNUNG: Dateien NICHT in den Sicherungs-Bucket kopiert — {exc}",
+                    logfile)
+        elif s3_aktiv:
+            dateien_kopie = {"modus": "aus"}
+            log("  Hinweis: Datei-Speicher wird nicht gesichert (BACKUP_DATEIEN=aus)", logfile)
+        if os.environ.get("EMERGENT_LLM_KEY", "").strip():
+            # Externer Snapshot-Speicher ohne Listing-API: nicht sicherbar.
+            unvollstaendig.append("snapshots: externer Snapshot-Speicher (EMERGENT) "
+                                  "ist von hier aus nicht sicherbar")
+            log("  WARNUNG: externer Snapshot-Speicher wird nicht gesichert", logfile)
+
+    finally:
+        schreibpause.ausschalten()
 
     # ---- Manifest mit Pruefsummen ----
     dateien = {}

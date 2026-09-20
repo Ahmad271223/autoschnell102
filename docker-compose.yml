@@ -199,7 +199,7 @@ services:
       - BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT:-}
       - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
       - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
-      - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-30}
+      - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-14}
       # 19.09.2026: Diese drei fehlten — der eigene (nur schreibende) Schluessel
       # fuer den Sicherungs-Bucket stand in der .env, erreichte den Container
       # aber NIE. Die Sicherung nahm weiter die S3_*-Zugangsdaten, und
@@ -215,9 +215,22 @@ services:
       # MONGO_URL mit replicaSet=... erkennt snapshot_pflicht() die Pflicht
       # ohnehin selbst — der Schalter ist fuer alle anderen Faelle.
       - BACKUP_SNAPSHOT_PFLICHT=${BACKUP_SNAPSHOT_PFLICHT:-}
-      # 20.09.2026: Schreibpause waehrend der Sicherung. Leer = nur wenn
-      # noetig (kein Replica Set); true erzwingt sie, false schaltet sie ab.
+      # 20.09.2026: Schreibpause waehrend der Sicherung. Standard AUS.
+      # Nur true schaltet sie ein — sie haelt die Plattform fuer die Dauer
+      # des Dumps an (Lesen geht weiter, Schreiben bekommt 503). Wer eine
+      # stichtagsgenaue Sicherung OHNE Unterbrechung will, betreibt Mongo
+      # als Replica Set; /api/ready sagt es, wenn das fehlt.
       - BACKUP_WARTUNG=${BACKUP_WARTUNG:-}
+      # Wartezeit nach dem Einschalten, bis alle Prozesse die Pause sehen
+      # und laufende Anfragen fertig sind (Sekunden, Standard 30).
+      - BACKUP_WARTUNG_WARTEN_S=${BACKUP_WARTUNG_WARTEN_S:-}
+      # Ablaufzeit des Pause-Merkers in Minuten (Standard 15). Der laufende
+      # Lauf verlaengert sie; stuerzt er ab, laeuft sie von selbst ab und
+      # die Plattform ist wieder frei (statt dauerhaft gesperrt).
+      - BACKUP_WARTUNG_FRIST_MIN=${BACKUP_WARTUNG_FRIST_MIN:-}
+      # Dasselbe aus Sicht des Backends: laenger als das gilt kein
+      # Wartungsmodus ohne Verlaengerung.
+      - WARTUNG_FRIST_MIN=${WARTUNG_FRIST_MIN:-}
       - BACKUP_SNAPSHOT_VERSUCHE=${BACKUP_SNAPSHOT_VERSUCHE:-}
       - BACKUP_SNAPSHOT_PAUSE_S=${BACKUP_SNAPSHOT_PAUSE_S:-}
       # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-

@@ -24,6 +24,8 @@ Garantien:
 Statuswerte: queued | processing | completed | failed
 """
 import asyncio
+
+import wartung
 import os
 import uuid
 import weakref
@@ -926,6 +928,13 @@ async def run_job_worker_forever(db) -> None:
     laufend: set = set()
     while True:
         try:
+            # Nachpruefung 20.09.2026, Nr. 64: waehrend einer Schreibpause
+            # (Sicherung/Restore) darf dieser Worker NICHT schreiben — sonst
+            # aendert sich die Datenbank mitten im Dump und die Sicherung
+            # nennt sich zu Unrecht stichtagsgenau.
+            if await wartung.aktiv_async(db):
+                await asyncio.sleep(5)
+                continue
             laufend = {t for t in laufend if not t.done()}
             await _requeue_stale(db)
             # Lasttest 16.09.2026: freie Plaetze in EINEM Paket fuellen (statt

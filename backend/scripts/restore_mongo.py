@@ -72,10 +72,12 @@ from bson import json_util
 from backup_bewertung import inkonsistenz, ist_stichtagsgenau, metadaten_mangel
 from pymongo import MongoClient
 
+import wartung
+
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 BACKEND = Path(__file__).resolve().parent.parent
-FLAG_COLLECTION = "system_flags"
-FLAG_ID = "wartungsmodus"
+FLAG_COLLECTION = wartung.FLAG_COLLECTION
+FLAG_ID = wartung.FLAG_ID
 S3_VARS = ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")
 
 
@@ -545,15 +547,25 @@ def schema_version_setzen(ziel_db, flags_dump) -> None:
 
 def wartungsmodus(ziel_db, aktiv: bool, grund: str = "Restore") -> None:
     """system_flags.wartungsmodus setzen/aufheben — die API antwortet bei
-    aktiv=True mit 503 (Middleware im Backend)."""
-    jetzt = datetime.now(timezone.utc).isoformat()
+    aktiv=True mit 503 (Middleware im Backend).
+
+    Nachpruefung 20.09.2026: Umfang "alles" — waehrend einer
+    Wiederherstellung darf auch NICHT GELESEN werden, denn die Datenbank
+    ist zwischendurch halb alt und halb neu. Bewusst OHNE Ablaufzeit: ein
+    abgebrochener Restore muss die Plattform gesperrt lassen, bis jemand
+    nachgesehen hat. /api/ready meldet ihn als Fehler, der Lastverteiler
+    nimmt den Server damit aus dem Verkehr, und der Waechter beim
+    Serverstart raeumt nur Merker MIT abgelaufener Frist weg."""
     coll = ziel_db[FLAG_COLLECTION]
     if aktiv:
-        coll.replace_one({"_id": FLAG_ID},
-                         {"_id": FLAG_ID, "aktiv": True, "grund": grund, "seit": jetzt},
-                         upsert=True)
+        coll.replace_one(
+            {"_id": FLAG_ID},
+            {"_id": FLAG_ID, "aktiv": True, "grund": grund,
+             "umfang": wartung.UMFANG_ALLES, "besitzer": "restore",
+             "seit": datetime.now(timezone.utc).isoformat()},
+            upsert=True)
     else:
-        coll.update_one({"_id": FLAG_ID}, {"$set": {"aktiv": False, "beendet": jetzt}})
+        wartung.aufheben(coll, "restore", zwang=True)
 
 
 def _wartungsmodus_befehl(ziel_name: str) -> str:

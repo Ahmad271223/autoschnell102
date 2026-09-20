@@ -159,7 +159,7 @@ def main() -> int:
         f"BACKUP_S3_BUCKET={alt.get('BACKUP_S3_BUCKET', '')}",
         "BACKUP_S3_PREFIX=autoschnell-backups/",
         "BACKUP_S3_OBJECT_LOCK_DAYS=",
-        "BACKUP_S3_KEEP=30",
+        "BACKUP_S3_KEEP=14",
         "",
         "# ---- Anbieter-Abrufe ----",
         f"APIFY_TOKEN={alt.get('APIFY_TOKEN') or 'BITTE-AUSFUELLEN-oder-leer-lassen'}",

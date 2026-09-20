@@ -50,11 +50,20 @@ def test_04b_dieselbe_bedingung_wie_bei_firma_und_fahrer():
 # ------------------------------------------------------------------ #7
 @pytest.mark.parametrize("url,schalter,erwartet", [
     ("mongodb://a/?replicaSet=rs0", "", False),      # Snapshot kann er selbst
-    ("mongodb://a/", "", True),                      # ohne Replica Set: Pause
+    ("mongodb://a/", "", False),                     # KORRIGIERT, siehe unten
     ("mongodb://a/", "false", False),                # bewusst abgeschaltet
     ("mongodb://a/?replicaSet=rs0", "true", True),   # bewusst erzwungen
 ])
-def test_07_schreibpause_nur_wenn_noetig(monkeypatch, url, schalter, erwartet):
+def test_07_schreibpause_nur_auf_anweisung(monkeypatch, url, schalter, erwartet):
+    """KORREKTUR am selben Tag, 20.09.2026.
+
+    Hier stand zuerst: ohne Replica Set schaltet sich die Schreibpause von
+    selbst ein. Die naechste Durchsicht (Nr. 64-68) hat gezeigt, dass das
+    falsch war — der "Wartungsmodus" ist ein kompletter API-Ausfall, er
+    haelt die Hintergrund-Worker gar nicht an, und ohne Ablaufzeit konnte
+    ein Absturz die Plattform dauerhaft sperren. Die Automatik ist
+    zurueckgenommen; die ganze Begruendung steht in
+    tests/test_wartung_sicherung_20260920.py."""
     import backup_service as BS
     monkeypatch.setenv("MONGO_URL", url)
     monkeypatch.setenv("BACKUP_WARTUNG", schalter)

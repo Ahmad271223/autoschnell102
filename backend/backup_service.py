@@ -159,26 +159,34 @@ async def _alarm(db, typ: str, ref: str, **details) -> None:
 
 
 def _schreibpause_noetig() -> bool:
-    """Braucht dieser Lauf eine Schreibpause, um stichtagsgenau zu sein?
+    """Soll dieser Lauf mit Schreibpause (`--wartung`) laufen?
 
-    Nachpruefung 20.09.2026: Der Dienst startete das Skript IMMER ohne
-    `--wartung`. Auf einem Replica Set ist das richtig (dort liest die
-    Sicherung alle Collections in EINER Snapshot-Sitzung). Ohne Replica Set
-    — die Standard-Compose-Datei startet Mongo so — wurde Collection fuer
-    Collection gelesen: Vertrag, Termin und Fahrzeug konnten damit aus
-    verschiedenen Zeitpunkten stammen. Jetzt pausiert der Lauf in diesem
-    Fall kurz die Schreibzugriffe (nachts um 3, Dauer wenige Sekunden).
+    NUR auf ausdrueckliche Anweisung (BACKUP_WARTUNG=true). Zwischenstand
+    dieser Ueberlegung, damit ihn niemand noch einmal gehen muss:
 
-    BACKUP_WARTUNG=false schaltet das ab (dann bleibt es beim alten,
-    nicht stichtagsgenauen Verhalten), =true erzwingt es immer.
+    Am 20.09.2026 vormittags stand hier "automatisch, sobald kein Replica
+    Set laeuft" — gedacht als Abhilfe fuer Sicherungen, die sonst nicht aus
+    EINEM Zeitpunkt stammen. Die naechste Durchsicht hat daran gleich drei
+    Loecher gezeigt, und sie hatte recht:
+
+      * Der "Wartungsmodus" ist keine Schreibpause, sondern ein KOMPLETTER
+        API-Ausfall: die Middleware beantwortet auch lesende Anfragen,
+        Downloads und den Marktplatz mit 503. Automatisch eingeschaltet
+        haette das taeglich einen Ausfall fuer die Dauer des Dumps bedeutet.
+      * Er haelt ohnehin nur die HTTP-Wege an. Link-, Beweis-, Aufraeum- und
+        Abo-Worker schreiben weiter — das Ergebnis waere also trotzdem nicht
+        stichtagsgenau, haette sich aber so genannt.
+      * Bricht das Skript hart ab (Zeitlimit -> kill), laeuft sein
+        Aufraeumen nicht: das Flag bliebe stehen. Dagegen gibt es jetzt eine
+        Ablaufzeit (siehe wartung_setzen/Middleware), aber eine taegliche
+        Automatik waere trotzdem das falsche Standardverhalten.
+
+    Wer wirklich stichtagsgenau sichern will, betreibt Mongo als Replica
+    Set — dann liest die Sicherung alle Collections in EINER Snapshot-
+    Sitzung, ohne jede Unterbrechung. /api/ready sagt es, wenn das fehlt.
     """
-    wahl = os.environ.get("BACKUP_WARTUNG", "").strip().lower()
-    if wahl in ("0", "false", "nein", "no"):
-        return False
-    if wahl in ("1", "true", "ja", "yes"):
-        return True
-    from backup_bewertung import snapshot_pflicht
-    return not snapshot_pflicht(os.environ.get("MONGO_URL", ""))
+    return os.environ.get("BACKUP_WARTUNG", "").strip().lower() in (
+        "1", "true", "ja", "yes")
 
 
 async def _run_backup(db=None) -> bool:

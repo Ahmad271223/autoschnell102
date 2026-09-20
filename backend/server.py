@@ -38,6 +38,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from rate_limiter import SlidingWindowRateLimiter
+import wartung
 
 from auth import hash_password
 from cleanup_service import run_cleanup_forever
@@ -273,26 +274,46 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
 class WartungsmodusMiddleware(BaseHTTPMiddleware):
     """Restore/Wartung (Audit 09/2026, Punkt 5): ist `system_flags`
     {_id: "wartungsmodus", aktiv: true} gesetzt, antwortet die API mit 503
-    — ausser Health/Ready. Der Wert wird 5 s gecacht (kein DB-Zugriff je
-    Request)."""
-    _stand = {"aktiv": False, "bis": 0.0}
+    — ausser Health/Ready. Der Merker wird 5 s gecacht (kein DB-Zugriff je
+    Request).
+
+    Nachpruefung 20.09.2026:
+      Nr. 68  Bei umfang="schreiben" (Sicherung) kommen lesende Anfragen
+              jetzt durch — nur POST/PUT/PATCH/DELETE bekommen 503. Der
+              Restore setzt weiterhin umfang="alles" und sperrt komplett.
+      Nr. 66  Ein Merker, dessen `gilt_bis` vorbei ist, wird ignoriert.
+              Ein abgestuerztes Skript kann die Plattform nicht mehr
+              dauerhaft sperren.
+      Nr. 65  `_offene_schreiber` zaehlt die laufenden schreibenden
+              Anfragen mit; /api/ready veroeffentlicht den Stand, damit
+              die Sicherung sieht, wann wirklich niemand mehr schreibt.
+    """
+    _stand = {"doc": None, "bis": 0.0}
+    _offene_schreiber = 0
 
     async def dispatch(self, request: Request, call_next) -> Response:
         pfad = request.url.path
-        if pfad not in ("/api/health", "/api/ready", "/api/"):
-            import time as _t
-            if _t.monotonic() > self._stand["bis"]:
-                try:
-                    doc = await db.system_flags.find_one({"_id": "wartungsmodus"})
-                    self._stand["aktiv"] = bool((doc or {}).get("aktiv"))
-                except Exception:
-                    pass
-                self._stand["bis"] = _t.monotonic() + 5
-            if self._stand["aktiv"]:
-                return JSONResponse(status_code=503, headers={"Retry-After": "30"},
-                                    content={"detail": "Wartungsmodus — die Plattform "
-                                             "ist in wenigen Minuten wieder da."})
-        return await call_next(request)
+        if pfad in wartung.FREIE_PFADE:
+            return await call_next(request)
+        import time as _t
+        if _t.monotonic() > self._stand["bis"]:
+            try:
+                self._stand["doc"] = await wartung.lesen_async(db)
+            except Exception:
+                pass
+            self._stand["bis"] = _t.monotonic() + 5
+        doc = self._stand["doc"]
+        if wartung.pausiert(doc, request.method):
+            return JSONResponse(status_code=503, headers={"Retry-After": "30"},
+                                content={"detail": "Wartungsmodus — die Plattform "
+                                         "ist in wenigen Minuten wieder da."})
+        if request.method in wartung.LESENDE_METHODEN:
+            return await call_next(request)
+        WartungsmodusMiddleware._offene_schreiber += 1
+        try:
+            return await call_next(request)
+        finally:
+            WartungsmodusMiddleware._offene_schreiber -= 1
 
 
 app.add_middleware(SecurityHeadersMiddleware)
@@ -510,8 +531,29 @@ async def readiness_check(response: Response):
         info["link_jobs_haengend"] = haengend
         if haengend:
             warnungen.append(f"{haengend} Link-Jobs warten > 15 min")
-        wm = await db.system_flags.find_one({"_id": "wartungsmodus"})
-        info["wartungsmodus"] = bool((wm or {}).get("aktiv"))
+        # Nachpruefung 20.09.2026, Nr. 67: der Wartungsmodus stand hier nur
+        # als Notiz. Der Lastverteiler sah eine bereite Instanz, obwohl sie
+        # (fast) alles mit 503 beantwortete. Jetzt ist er ein FEHLER — dann
+        # nimmt der Lastverteiler den Server aus dem Verkehr, statt Kunden
+        # in den 503 zu schicken. Nr. 65: `schreiber_offen` sagt der
+        # Sicherung, wann wirklich keine schreibende Anfrage mehr laeuft.
+        wm = await wartung.lesen_async(db)
+        laeuft = wartung.pausiert(wm, "POST")
+        info["wartungsmodus"] = laeuft
+        info["wartungsmodus_umfang"] = (wm or {}).get("umfang") if laeuft else None
+        info["schreiber_offen"] = WartungsmodusMiddleware._offene_schreiber
+        if laeuft and not wartung.pausiert(wm, "GET"):
+            # Nur Schreiben pausiert (Sicherung): Lesen geht weiter, der
+            # Server soll im Lastverteiler bleiben — aber sichtbar sein.
+            warnungen.append(f"Schreibpause aktiv — {wartung.beschreibung(wm)}")
+        elif laeuft:
+            fehler.append(f"Wartungsmodus aktiv — {wartung.beschreibung(wm)}")
+        elif wartung.abgelaufen(wm):
+            warnungen.append("Wartungsmodus abgelaufen und noch nicht "
+                             "aufgeraeumt — wird beim naechsten Start entfernt")
+        elif wm and wm.get("aktiv") and not wm.get("gilt_bis"):
+            warnungen.append("Wartungsmodus ohne Ablaufzeit gesetzt (alter "
+                             "Eintrag) — bitte von Hand pruefen")
         ohne_mfa = await db.users.count_documents(
             {"role": "admin", "is_super_admin": True, "active": {"$ne": False},
              "mfa.aktiv": {"$ne": True}})
@@ -1250,6 +1292,18 @@ async def on_start():
             else:
                 log.warning("Warte auf MongoDB (%d/30): %s", attempt, exc)
                 await _asyncio.sleep(2)
+    # Nachpruefung 20.09.2026, Nr. 66: Waechter fuer den Wartungsmodus.
+    # Wurde ein Sicherungs- oder Restore-Lauf hart beendet, lief sein
+    # Aufraeumen nie — der Merker blieb stehen und haette die Plattform
+    # dauerhaft gesperrt. Ein Merker mit abgelaufener Frist wird hier
+    # weggeraeumt (einer OHNE Frist bleibt: der kann von einem laufenden
+    # Restore stammen, /api/ready meldet ihn).
+    try:
+        if await wartung.abgelaufenen_merker_aufraeumen(db):
+            log.warning("Wartungsmodus war abgelaufen und wurde aufgehoben "
+                        "(vermutlich abgebrochene Sicherung)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Wartungsmodus nicht pruefbar: %s", exc)
     ergebnis = await ausfuehren_oder_warten(
         db, indexe=_alle_indexe, seeds=(seed_super_admin,))
     log.info("Migration/Indizes: %s", ergebnis)

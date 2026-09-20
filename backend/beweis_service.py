@@ -32,6 +32,8 @@ Statuswerte: offen | in_arbeit | fertig | fehlgeschlagen | geloescht
 from __future__ import annotations
 
 import asyncio
+
+import wartung
 import hashlib
 import logging
 import os
@@ -655,6 +657,13 @@ async def run_beweis_worker_forever(db) -> None:
     letzte_aufraeumung = 0.0
     while True:
         try:
+            # Nachpruefung 20.09.2026, Nr. 64: waehrend einer Schreibpause
+            # (Sicherung/Restore) darf dieser Worker NICHT schreiben — sonst
+            # aendert sich die Datenbank mitten im Dump und die Sicherung
+            # nennt sich zu Unrecht stichtagsgenau.
+            if await wartung.aktiv_async(db):
+                await asyncio.sleep(5)
+                continue
             if time.monotonic() - letzte_aufraeumung > 60:
                 letzte_aufraeumung = time.monotonic()
                 await _aufraeumen(db)

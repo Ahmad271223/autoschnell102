@@ -18,6 +18,8 @@ Der Termin-Eintrag selbst bleibt bestehen (Historie), wird aber mit
 from __future__ import annotations
 
 import asyncio
+
+import wartung
 import logging
 import os
 import uuid
@@ -1971,6 +1973,13 @@ async def run_cleanup_forever(db):
     await asyncio.sleep(30)
     from job_lock import acquire, heartbeat
     while True:
+        # Nachpruefung 20.09.2026, Nr. 64: waehrend einer Schreibpause
+        # (Sicherung/Restore) nichts loeschen — sonst verschwinden Dateien
+        # mitten im Dump und die Sicherung nennt sich zu Unrecht
+        # stichtagsgenau.
+        if await wartung.aktiv_async(db):
+            await asyncio.sleep(30)
+            continue
         # Bei mehreren Worker-Prozessen raeumt nur EINER pro Zyklus auf —
         # sonst loeschen acht Prozesse gleichzeitig dieselben Dateien.
         # Phase 3 (3.1, A11/B14/B15): Besitzer-Token und Heartbeat — ein
