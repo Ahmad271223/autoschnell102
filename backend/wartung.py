@@ -43,6 +43,24 @@ UMFANG_SCHREIBEN = "schreiben"
 UMFANG_ALLES = "alles"
 
 #: Wege, die IMMER erreichbar bleiben (sonst kaeme niemand mehr an die Lage).
+# Nachpruefung 20.09.2026 (N6): Die Schreibpause wartete nach dem Einschalten
+# stur eine feste Zeit (Standard 30 s) und begann dann den Dump — ohne zu
+# WISSEN, ob wirklich niemand mehr schreibt. Eine Anfrage, die vorher noch
+# durchkam und laenger braucht, konnte also mitten im Dump schreiben, und die
+# Sicherung nannte sich trotzdem stichtagsgenau.
+#
+# Der Zaehler in der Middleware (`_offene_schreiber`) weiss das zwar, aber nur
+# JE PROZESS — bei vier Workern auf zwei Servern wissen die anderen sieben
+# nichts davon. Deshalb meldet jeder Prozess seinen Stand hierher, solange
+# eine Schreibpause laeuft; die Sicherung wartet, bis ALLE null melden.
+#
+# Im Normalbetrieb wird hier NICHTS geschrieben, und die Sammlung ist vom
+# Dump ausgenommen — sonst wuerde ausgerechnet der Melder die Datenbank
+# waehrend der Sicherung veraendern.
+SCHREIBER_COLLECTION = "wartung_schreiber"
+#: So alt darf eine Meldung hoechstens sein, um noch zu zaehlen.
+SCHREIBER_FRISCH_S = 10
+
 FREIE_PFADE = ("/api/health", "/api/ready", "/api/")
 
 #: Anfragen, die nichts veraendern — bei umfang="schreiben" duerfen sie durch.
@@ -190,3 +208,55 @@ async def abgelaufenen_merker_aufraeumen(db) -> bool:
         {"$set": {"aktiv": False, "beendet": _jetzt().isoformat(),
                   "abgelaufen": True}})
     return True
+
+
+# ---------------------------------------------------------------- N6: Auslaufen
+def schreiber_kennung() -> str:
+    """Diesen Prozess eindeutig benennen (Rechner + Prozessnummer)."""
+    import os as _os
+    import socket as _socket
+    return f"{_socket.gethostname()}:{_os.getpid()}"
+
+
+async def schreiber_melden(db, offen: int) -> None:
+    """Stand dieses Prozesses melden. Wirft nie — die Sicherung faellt sonst
+    auf ihre Wartezeit zurueck, aber der Betrieb darf daran nicht scheitern."""
+    try:
+        await db[SCHREIBER_COLLECTION].update_one(
+            {"_id": schreiber_kennung()},
+            {"$set": {"offen": int(offen), "stand": _jetzt()}},
+            upsert=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def schreiber_stand(coll, frisch_s: int = SCHREIBER_FRISCH_S) -> tuple:
+    """Fuer die Sicherung (pymongo, synchron): (ruhig, offen_gesamt, prozesse).
+
+    `ruhig` ist nur dann True, wenn MINDESTENS EIN Prozess gemeldet hat und
+    alle frischen Meldungen null sagen. Meldet niemand, ist das kein "ruhig"
+    — dann weiss die Sicherung schlicht nichts und wartet weiter.
+    """
+    from datetime import timedelta as _td
+    grenze = _jetzt() - _td(seconds=frisch_s)
+    offen = prozesse = 0
+    for d in coll.find({"stand": {"$gte": grenze}}, {"_id": 0, "offen": 1}):
+        prozesse += 1
+        offen += int(d.get("offen") or 0)
+    return (prozesse > 0 and offen == 0), offen, prozesse
+
+
+async def schreiben_pausiert(db) -> bool:
+    """Pruefbericht 20.09.2026 (Nr. 3): Die Middleware entscheidet nach der
+    HTTP-Methode — GET darf durch. Einige GET-Wege schreiben aber trotzdem
+    (Altbestands-Reparatur, Abrufzaehler, abgelaufene Merker). Waehrend einer
+    Schreibpause aendern sie damit die Datenbank mitten im Dump.
+
+    Solche Schreibzugriffe sind ALLE nachholbar oder entbehrlich — sie
+    fragen hier nach und lassen es dann einfach. Wirft nie: kann die Frage
+    nicht beantwortet werden, wird geschrieben wie bisher (lieber ein
+    Zaehler zu viel als eine kaputte Funktion)."""
+    try:
+        return await aktiv_async(db, "POST")
+    except Exception:  # noqa: BLE001
+        return False

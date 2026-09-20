@@ -368,8 +368,15 @@ def test_35_abgelaufener_inseratscache_wird_geloescht(welt):
     assert rest == {"2", "3", "5", "6", "7"}, rest
     assert fz == {"neu"}, fz
     assert n == 3
-    quelle = _quelle("backend", "cleanup_service.py")
-    block = quelle[quelle.index("async def _cleanup_once("):quelle.index("async def _cleanup_once(") + 9000]
+    # 20.09.2026: Der Ausschnitt haengt nicht mehr an einer festen Zeichenzahl
+    # (9000) — jede neue Zeile im Aufraeumlauf schob die gesuchte Stelle sonst
+    # irgendwann aus dem Fenster und der Test schlug grundlos fehl. Jetzt der
+    # ECHTE Rumpf der Funktion, ueber den Syntaxbaum.
+    import ast as _ast
+    baum = _ast.parse(_quelle("backend", "cleanup_service.py"))
+    block = next(_ast.unparse(k) for k in baum.body
+                 if isinstance(k, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                 and k.name == "_cleanup_once")
     assert "inseratscache_rotieren(db, now)" in block, "im stuendlichen Lauf verdrahtet"
 
 

@@ -408,6 +408,14 @@ async def run_betriebsmeldung_forever(db) -> None:
     while True:
         takt = sammelfrist_minuten() * 60
         try:
+            # Pruefbericht 20.09.2026 (N7): auch dieser Dienst schreibt
+            # (gemeldet_am in betriebsalarme und plan_requests) und muss
+            # waehrend einer Schreibpause still sein — sonst aendert sich
+            # die Datenbank mitten im Dump.
+            import wartung as _wartung
+            if await _wartung.aktiv_async(db):
+                await asyncio.sleep(30)
+                continue
             # Sofortmeldung: die Sperre laeuft mit dem Takt ab, damit nach
             # einem Ausfall der naechste Prozess uebernimmt.
             token = await acquire(db, "betriebsmeldung", ttl_seconds=takt)

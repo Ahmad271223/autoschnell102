@@ -111,6 +111,10 @@ from backup_bewertung import (KONSISTENZ_RUECKFALL, KONSISTENZ_SCHREIBPAUSE,
 from pymongo import MongoClient
 
 import wartung
+# In `backup_once` heisst ein PARAMETER ebenfalls `wartung` (der Schalter
+# --wartung) und verdeckt dort das Modul. Fuer Zugriffe in diesem Namensraum
+# deshalb ein eigener Name.
+_wartung_modul = wartung
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
 DB_NAME = os.environ.get("DB_NAME", "autoschnell")
@@ -127,6 +131,17 @@ DATEIEN_LISTE = "dateien-liste.json.gz"   # Objektliste dieses Laufs (Nr. 70)
 OFFSITE_PREFIX_DEFAULT = "autoschnell-backups/"
 OFFSITE_KEEP_DEFAULT = 14
 _OFFSITE_ARCHIV = re.compile(r"autoschnell-\d{4}-\d{2}-\d{2}_\d{4}\.tar\.gz$")
+
+
+def _auslaufen_max_s() -> float:
+    """Wie lange hoechstens auf ein echtes Auslaufen gewartet wird (N6).
+    Danach laeuft die Sicherung trotzdem — nur eben ohne die Zusage
+    "stichtagsgenau"."""
+    try:
+        return max(5.0, float(os.environ.get("BACKUP_AUSLAUFEN_MAX_S", "").strip()
+                              or 120))
+    except ValueError:
+        return 120.0
 
 
 def _wartung_warten_s() -> float:
@@ -316,6 +331,53 @@ class Schreibpause:
         self._faden = threading.Thread(target=self._verlaengern, daemon=True)
         self._faden.start()
         return True
+
+    def auslaufen_lassen(self) -> bool:
+        """Nachpruefung 20.09.2026 (N6): Warten, bis WIRKLICH niemand mehr
+        schreibt — statt blind `_wartung_warten_s()` Sekunden zu schlafen.
+
+        Ablauf: erst die Mindestzeit (die Middleware liest den Merker nur alle
+        5 s neu — vorher kommen noch neue Schreibzugriffe durch), dann fragen,
+        was die Backend-Prozesse melden. Jeder meldet waehrend einer Pause
+        einmal je Sekunde seinen Stand nach `wartung_schreiber`.
+
+        Rueckgabe: True, wenn alle meldenden Prozesse null offene
+        Schreibzugriffe hatten. False heisst: die Frist lief ab oder niemand
+        meldete (alter Stand ohne den Melder) — dann steht das im Log und im
+        Manifest, und die Sicherung nennt sich NICHT stichtagsgenau.
+        """
+        mindestens = _wartung_warten_s()
+        log(f"  warte mindestens {mindestens:.0f} s, bis alle Backend-Prozesse "
+            f"die Schreibpause sehen ...", self.logfile)
+        time.sleep(mindestens)
+        coll = self.db[wartung.SCHREIBER_COLLECTION]
+        frist = _auslaufen_max_s()
+        ende = time.monotonic() + frist
+        zuletzt = (None, 0)
+        while time.monotonic() < ende:
+            try:
+                ruhig, offen, prozesse = wartung.schreiber_stand(coll)
+            except Exception as exc:  # noqa: BLE001
+                log(f"  WARNUNG: Stand der Schreibzugriffe nicht lesbar: {exc}",
+                    self.logfile)
+                return False
+            zuletzt = (offen, prozesse)
+            if ruhig:
+                log(f"  alle {prozesse} Backend-Prozesse melden 0 offene "
+                    f"Schreibzugriffe — Sicherung kann starten", self.logfile)
+                return True
+            time.sleep(1)
+        offen, prozesse = zuletzt
+        if not prozesse:
+            log(f"  WARNUNG: kein Backend-Prozess meldet seinen Stand "
+                f"(alte Fassung ohne Melder?). Nach {frist:.0f} s wird trotzdem "
+                f"gesichert — ob dabei noch geschrieben wurde, ist ungewiss.",
+                self.logfile)
+        else:
+            log(f"  WARNUNG: nach {frist:.0f} s melden {prozesse} Prozesse noch "
+                f"{offen} offene Schreibzugriffe. Die Sicherung startet "
+                f"trotzdem, gilt aber NICHT als stichtagsgenau.", self.logfile)
+        return False
 
     def _verlaengern(self) -> None:
         # Alle 60 s die Frist erneuern, solange der Lauf arbeitet.
@@ -829,7 +891,11 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
     try:
         client = MongoClient(mongo_url, serverSelectionTimeoutMS=10000)
         db = client[db_name]
-        names = sorted(db.list_collection_names())
+        names = sorted(n for n in db.list_collection_names()
+                       # N6: die Melde-Sammlung der Schreibpause gehoert nicht
+                       # in die Sicherung — sie wird waehrenddessen beschrieben
+                       # und traegt keine Geschaeftsdaten.
+                       if n != _wartung_modul.SCHREIBER_COLLECTION)
     except Exception as exc:
         log(f"FEHLER: MongoDB nicht erreichbar — {exc}", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -844,12 +910,10 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
     # verzeichnet, in der Dateisicherung aber schon weg.
     schreibpause = Schreibpause(db, logfile)
     pause = wartung and schreibpause.einschalten()
+    ruhig = False          # N6: wurde das Auslaufen bestaetigt?
     try:
         if pause:
-            log(f"  warte {_wartung_warten_s():.0f} s, bis alle Backend-Prozesse "
-                f"die Schreibpause sehen und laufende Anfragen fertig sind ...",
-                logfile)
-            time.sleep(_wartung_warten_s())
+            ruhig = schreibpause.auslaufen_lassen()
         counts, konsistenz, inkonsistent = dump_datenbank(
             client, db, names, target, logfile, pflicht=snapshot_pflicht(mongo_url))
         indexe = indexe_gegenpruefen(target, counts)
@@ -864,10 +928,22 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         log(f"FEHLER beim Sichern der Datenbank: {exc}", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
-    if pause:
+    if pause and ruhig:
         # Bei pausierten Schreibzugriffen passen auch nacheinander gelesene
         # Collections zusammen (auch nach einem gescheiterten Snapshot).
+        #
+        # Nachpruefung 20.09.2026 (N6): NUR wenn das Auslaufen wirklich
+        # geklappt hat. Vorher genuegte "Pause eingeschaltet" — und danach
+        # wurde eine feste Zeit geschlafen, ohne zu wissen, ob noch jemand
+        # schreibt. Eine laenger laufende Anfrage konnte mitten im Dump
+        # schreiben, und die Sicherung nannte sich trotzdem stichtagsgenau.
+        # Jetzt gilt die Zusage nur, wenn ALLE Backend-Prozesse null offene
+        # Schreibzugriffe gemeldet haben (siehe auslaufen_lassen).
         konsistenz, inkonsistent = KONSISTENZ_SCHREIBPAUSE, ""
+    elif pause:
+        log("  HINWEIS: Die Schreibpause lief, aber das Auslaufen konnte nicht "
+            "bestaetigt werden — die Sicherung gilt deshalb NICHT als "
+            "stichtagsgenau.", logfile)
     log(f"  Konsistenz: {konsistenz}" + (f" — INKONSISTENT: {inkonsistent}"
                                          if inkonsistent else ""), logfile)
 

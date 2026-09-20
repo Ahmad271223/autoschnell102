@@ -1516,6 +1516,14 @@ async def on_start():
     except Exception as exc:
         log.warning("abgleich task start failed: %s", exc)
         WORKER_STATUS["abo_abgleich"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+    # N6: meldet waehrend einer Schreibpause, wie viele Schreibzugriffe hier
+    # noch laufen — die Sicherung wartet darauf, statt blind eine feste Zeit.
+    try:
+        _worker_starten("schreiber_melden", lambda: run_schreiber_melden_forever())
+    except Exception as exc:
+        log.warning("schreiber-melder task start failed: %s", exc)
+        WORKER_STATUS["schreiber_melden"] = {"laeuft": False, "neustarts": 0,
+                                             "letzter_fehler": str(exc)[:300]}
     # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
     # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
     # nach, wenn das letzte Backup älter als 24h ist.
@@ -1608,6 +1616,30 @@ async def _alle_indexe():
     await db.storage_delete_retry.create_index("aufgegeben")
 
 
+async def run_schreiber_melden_forever():
+    """N6: Solange eine Schreibpause laeuft, meldet dieser Prozess einmal je
+    Sekunde, wie viele schreibende Anfragen bei ihm noch offen sind.
+
+    Nur waehrend einer Pause — im Normalbetrieb wird nichts geschrieben. Die
+    Sicherung wartet damit auf ein ECHTES Auslaufen statt auf eine feste
+    Zeit; siehe wartung.schreiber_stand und scripts/backup_mongo.py.
+    """
+    import asyncio
+    await asyncio.sleep(10)
+    while True:
+        try:
+            doc = await wartung.lesen_async(db)
+            if wartung.pausiert(doc, "POST"):
+                await wartung.schreiber_melden(
+                    db, WartungsmodusMiddleware._offene_schreiber)
+                await asyncio.sleep(1)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Schreiber-Meldung uebersprungen: %s", exc)
+        # Keine Pause: nur alle paar Sekunden nachsehen, nichts schreiben.
+        await asyncio.sleep(5)
+
+
 async def run_abgleich_forever():
     """Alle 10 Minuten (ein Prozess): abgebrochene Freischaltungs-Vorgaenge
     nachholen, bezahlte Transaktionen ohne Zugang erneut aktivieren."""
@@ -1616,6 +1648,15 @@ async def run_abgleich_forever():
     await asyncio.sleep(20)
     while True:
         try:
+            # Pruefbericht 20.09.2026 (N7): Befund #64 war nur teilweise
+            # repariert. link_jobs, beweis_service und cleanup_service halten
+            # waehrend einer Schreibpause an — dieser Abgleich nicht, obwohl
+            # abo_vorgaenge_nachholen() schreibt. Waehrend eines Dumps haette
+            # er die Datenbank also weiter veraendert, und die Sicherung
+            # haette sich zu Unrecht stichtagsgenau genannt.
+            if await wartung.aktiv_async(db):
+                await asyncio.sleep(30)
+                continue
             if await acquire(db, "abgleich", ttl_seconds=540):
                 from routes.admin import abo_vorgaenge_nachholen
                 a = await abo_vorgaenge_nachholen()

@@ -583,8 +583,21 @@ def test_a10_wartung_wartet_auf_den_middleware_cache(umgebung, mongo, monkeypatc
     q = _quelle(mongo, "a10")
     monkeypatch.setattr(bm, "ist_replica_set", lambda client: False)
     ereignisse = []
+    # Nachpruefung 20.09.2026 (N6): Nach der Mindestwartezeit fragt die
+    # Sicherung nach, ob wirklich niemand mehr schreibt — dafuer braucht sie
+    # auch time.monotonic(). Hier laeuft kein Backend, also meldet NIEMAND
+    # etwas; genau dieser Zweig (Frist laeuft ab, Sicherung gilt nicht als
+    # stichtagsgenau) wird damit gleich mitgeprueft.
+    monkeypatch.setenv("BACKUP_AUSLAUFEN_MAX_S", "5")
+    _uhr = {"t": 0.0}
+
+    def _monotonic():
+        _uhr["t"] += 1.0
+        return _uhr["t"]
+
     monkeypatch.setattr(bm, "time", types.SimpleNamespace(
-        sleep=lambda s: ereignisse.append(("warten", s))))
+        sleep=lambda s: ereignisse.append(("warten", s)),
+        monotonic=_monotonic))
     orig = bm.dump_collection
 
     def dump(coll, out_dir, session=None):
@@ -601,8 +614,48 @@ def test_a10_wartung_wartet_auf_den_middleware_cache(umgebung, mongo, monkeypatc
     assert ereignisse[0] == ("warten", bm._wartung_warten_s())
     assert bm._wartung_warten_s() >= 30
     assert all(e[2] for e in ereignisse if e[0] == "dump"), ereignisse
-    assert _manifest(_ordner(base)[0])["konsistenz"] == "stimmig (Schreibpause)"
+    # Und ohne eine einzige Meldung darf sich die Sicherung NICHT
+    # stichtagsgenau nennen (N6).
+    log = (base / "backup.log").read_text(encoding="utf-8")
+    assert "kein Backend-Prozess meldet seinen Stand" in log, log[-600:]
+    assert "nicht stichtagsgenau" in log or "NICHT" in log
+    # N6: Ohne bestaetigtes Auslaufen faellt die Zusage NICHT mehr. Vorher
+    # genuegte "Pause war an" — genau darin lag der Fehler.
+    assert _manifest(_ordner(base)[0])["konsistenz"] != "stimmig (Schreibpause)"
     assert mongo[q].system_flags.find_one({"_id": "wartungsmodus"})["aktiv"] is False
+
+
+def test_a10b_stichtagsgenau_wenn_alle_prozesse_ruhe_melden(umgebung, mongo, monkeypatch):
+    """Gegenprobe zu a10 (N6): Melden alle Backend-Prozesse null offene
+    Schreibzugriffe, gilt die Sicherung wieder als stichtagsgenau."""
+    import wartung as W
+    bm = umgebung["bm"]
+    q = _quelle(mongo, "a10b")
+    monkeypatch.setattr(bm, "ist_replica_set", lambda client: False)
+    monkeypatch.setenv("BACKUP_AUSLAUFEN_MAX_S", "5")
+    _uhr = {"t": 0.0}
+
+    def _monotonic():
+        _uhr["t"] += 1.0
+        return _uhr["t"]
+
+    monkeypatch.setattr(bm, "time", types.SimpleNamespace(
+        sleep=lambda s: None, monotonic=_monotonic))
+    # Zwei Prozesse melden frisch "nichts offen".
+    from datetime import datetime as _dt, timezone as _tz
+    mongo[q][W.SCHREIBER_COLLECTION].insert_many([
+        {"_id": "rechner:1", "offen": 0, "stand": _dt.now(_tz.utc)},
+        {"_id": "rechner:2", "offen": 0, "stand": _dt.now(_tz.utc)},
+    ])
+    base = umgebung["tmp"] / "a10b"
+    rc = bm.backup_erstellen(base, db_name=q, mongo_url=MONGO_URL, wartung=True)
+    assert rc == 0, (base / "backup.log").read_text(encoding="utf-8")[-800:]
+    log = (base / "backup.log").read_text(encoding="utf-8")
+    assert "melden 0 offene" in log, log[-600:]
+    assert _manifest(_ordner(base)[0])["konsistenz"] == "stimmig (Schreibpause)"
+    # Und die Melde-Sammlung darf NICHT in der Sicherung liegen.
+    ordner = _ordner(base)[0]
+    assert not (ordner / f"{W.SCHREIBER_COLLECTION}.bson.gz").exists()
 
 
 # =================================================================== B
