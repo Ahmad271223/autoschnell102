@@ -89,7 +89,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     payment_method: "",
     pickup_date: "",
     pickup_time: "",
-    additional_terms: dealer?.default_special_agreements || "",
+    // 20.09.2026: die WIRKSAME Fassung — Standardsatz (falls eingeschaltet)
+    // plus eigener Text. Nicht das Freitextfeld allein, sonst fehlte der
+    // Standardsatz. Platzhalter bleiben stehen; sie werden erst beim
+    // Erzeugen des PDF gefuellt, mit dem dann gueltigen Abholdatum.
+    additional_terms: dealer?.sondervereinbarungen_effektiv
+      ?? (dealer?.default_special_agreements || ""),
     agb_text: dealer?.default_terms || "",
     // Wunsch Ahmad 18.09.2026: Der Text, der wirklich im Vertrag landet
     // ("Allgemeine Vertragsbedingungen"), steht jetzt sichtbar im Dialog.
@@ -194,7 +199,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     const vorgaben = {
       digital_vertragstext: (dealer.digital_vertragstext || "").trim()
         || dealer.digital_vertragstext_standard || "",
-      additional_terms: dealer.default_special_agreements || "",
+      additional_terms: dealer.sondervereinbarungen_effektiv
+        ?? (dealer.default_special_agreements || ""),
       agb_text: dealer.default_terms || "",
     };
     setForm((f) => {
@@ -600,7 +606,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                      helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
             </div>
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
-                   helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar." />
+                   helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar. Platzhalter in geschweiften Klammern (z. B. {abholdatum}) werden beim Erstellen des PDF automatisch eingesetzt." />
             {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim
                 Vertrag, sondern spaeter im Terminplaner am Termin. */}
             {user?.role !== "sucher" && (

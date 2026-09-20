@@ -628,8 +628,15 @@ SUCHER_SETTINGS_FIELDS = {
     "comparison_rules", "export_rules", "active_profile",
     # Versand
     "email_subject", "email_template", "whatsapp_template",
+    # Vorlage Ahmad 20.09.2026: die drei Folge-Mails
+    "email_subject_korrektur", "email_template_korrektur",
+    "email_subject_nach_kauf", "email_template_nach_kauf",
+    "whatsapp_template_nach_kauf",
+    "email_subject_bahn", "email_template_bahn",
     # AGB & Vereinbarungen (+ Text der digitalen Ausfertigung, 09.09.2026)
     "default_terms", "default_special_agreements", "digital_vertragstext",
+    # Schalter fuer unseren Standardsatz (20.09.2026)
+    "sondervereinbarung_standard_aktiv",
 }
 
 

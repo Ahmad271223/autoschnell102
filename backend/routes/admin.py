@@ -8,6 +8,7 @@ import asyncio
 import uuid
 
 import wartung
+import vertrag_vorlagen as _vorlagen
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -494,13 +495,14 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
         "comparison_rules": DEFAULT_RULES,
         "export_rules": DEFAULT_EXPORT_RULES,
         "active_profile": "inland",
-        "email_subject": "Kaufvertrag für Ihr Fahrzeug",
-        "email_template": "Guten Tag,\n\nanbei sende ich Ihnen den Kaufvertrag.\n\nMfG\n{händler_name}",
-        "whatsapp_template": "Hallo, hier ist der Kaufvertrag. Bitte prüfen.",
+        # Vorlage Ahmad 20.09.2026: ausformulierte Standardtexte fuer Mail,
+        # WhatsApp, die drei Folge-Mails und die Besonderen Vereinbarungen —
+        # alle mit Platzhaltern, die der Server beim Erstellen einsetzt.
+        # Jede Firma kann sie in den Einstellungen ueberschreiben.
+        **_vorlagen.STARTWERTE,
         "default_terms": "",
         # Runde 26: ein Feld fuer Vertragsbedingungen (vier Klauseln + AGB).
         "digital_vertragstext": _vertragstext_start_admin(),
-        "default_special_agreements": "",
         "created_at": now_iso(),
         }, chef_doc)
     except DuplicateKeyError:

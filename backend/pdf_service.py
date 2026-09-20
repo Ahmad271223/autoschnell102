@@ -588,6 +588,62 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         story.append(Paragraph(f"<b>Abholung:</b> {_xml_escape(_abhol)}", st["body"]))
         story.append(Spacer(1, 12))
 
+    # ---------- Kaufpreis ----------
+    # Wunsch Ahmad 20.09.2026: Der Kaufpreis steht jetzt direkt UNTER den
+    # Angaben zu Halter und Käufer, vor den Fahrzeugdaten. Vorher stand er
+    # weit unten hinter Fahrzeugdaten und Ausstattung — wer den Vertrag
+    # ueberfliegt, sucht die Zahl aber oben bei den beiden Parteien.
+    def _eur(betrag):
+        return (f"{betrag:,.2f} EUR"
+                .replace(",", "X").replace(".", ",").replace("X", "."))
+
+    brutto = float(contract.get("purchase_price") or 0)
+    price_str = _eur(brutto)
+
+    # MwSt-Ausweis (gewerblicher Verkauf, Regelbesteuerung): Kaufpreis ist
+    # der Bruttobetrag, Netto und Steuer werden daraus gerechnet.
+    if contract.get("show_vat"):
+        netto = brutto / 1.19
+        mwst = brutto - netto
+        preis_label = (f"Netto {_eur(netto)}   ·   "
+                       f"zzgl. 19 % MwSt {_eur(mwst)}")
+    else:
+        preis_label = "inkl. aller Bestandteile lt. Vertrag"
+
+    pay_bits = [("Zahlungsart", contract.get("payment_method", "Bar / Überweisung"))]
+    pay_sub = "   ·   ".join(
+        (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
+        for k, v in pay_bits if str(v).strip()
+    )
+    price_box = Table([
+        [
+            Paragraph("KAUFPREIS (VEREINBART)", st["price_label"]),
+            Paragraph(f"<b>{price_str}</b>", st["price_value"]),
+        ],
+        [
+            Paragraph(preis_label, st["price_label"]),
+            # Seit 16.09.2026 kein Strich, wenn keine Zahlungsart angegeben ist.
+            Paragraph(pay_sub, st["price_sub"]),
+        ],
+    ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])
+    price_box.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), DARK),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, 0), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+        ("TOPPADDING", (0, 1), (-1, 1), 2),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
+    ]))
+    story.append(KeepTogether([
+        _section("2 · Kaufpreis & Konditionen", st),
+        Spacer(1, 6),
+        price_box,
+    ]))
+    story.append(Spacer(1, 12))
+
     # ---------- Vehicle data — 2 columns ----------
     def _as_int(val):
         """Robuste Int-Konvertierung — Werte können als Number ODER String
@@ -632,7 +688,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         # Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag.
         ("Vorhalter", contract.get("previous_owners") or vehicle.get("previous_owners", "")),
     ]
-    story.append(_section("1 · Fahrzeugdaten", st))
+    story.append(_section("3 · Fahrzeugdaten", st))
     story.append(Spacer(1, 6))
     veh_rows = _ohne_leere(veh_rows)
     if veh_rows:
@@ -667,7 +723,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     ]
     zus_rows = _ohne_leere(zus_rows)
     if zus_rows:
-        story.append(_section("2 · Zusicherungen & Zustand", st))
+        story.append(_section("4 · Zusicherungen & Zustand", st))
         story.append(Spacer(1, 6))
         story.append(_two_col_kv(zus_rows, st))
         story.append(Spacer(1, 12))
@@ -739,58 +795,15 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ))
         story.append(Spacer(1, 12))
 
-    # ---------- Price & terms ----------
-    def _eur(betrag):
-        return (f"{betrag:,.2f} EUR"
-                .replace(",", "X").replace(".", ",").replace("X", "."))
 
-    brutto = float(contract.get("purchase_price") or 0)
-    price_str = _eur(brutto)
-
-    # MwSt-Ausweis (gewerblicher Verkauf, Regelbesteuerung): Kaufpreis ist
-    # der Bruttobetrag, Netto und Steuer werden daraus gerechnet.
-    if contract.get("show_vat"):
-        netto = brutto / 1.19
-        mwst = brutto - netto
-        preis_label = (f"Netto {_eur(netto)}   ·   "
-                       f"zzgl. 19 % MwSt {_eur(mwst)}")
-    else:
-        preis_label = "inkl. aller Bestandteile lt. Vertrag"
-
-    pay_bits = [("Zahlungsart", contract.get("payment_method", "Bar / Überweisung"))]
-    pay_sub = "   ·   ".join(
-        (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
-        for k, v in pay_bits if str(v).strip()
-    )
-    price_box = Table([
-        [
-            Paragraph("KAUFPREIS (VEREINBART)", st["price_label"]),
-            Paragraph(f"<b>{price_str}</b>", st["price_value"]),
-        ],
-        [
-            Paragraph(preis_label, st["price_label"]),
-            # Seit 16.09.2026 kein Strich, wenn keine Zahlungsart angegeben ist.
-            Paragraph(pay_sub, st["price_sub"]),
-        ],
-    ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])
-    price_box.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), DARK),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, 0), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
-        ("TOPPADDING", (0, 1), (-1, 1), 2),
-        ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
-    ]))
-    story.append(KeepTogether([
-        _section("3 · Kaufpreis & Konditionen", st),
-        Spacer(1, 6),
-        price_box,
-    ]))
-
-    extra = (contract.get("additional_terms") or "").strip()
+    # Wunsch Ahmad 20.09.2026: In den Besonderen Vereinbarungen stehen
+    # Platzhalter ({abholdatum}, {ort}, {zahlungsart} ...). Sie wurden bisher
+    # NUR im Browser ersetzt, und auch nur fuer E-Mail und WhatsApp — im PDF
+    # blieb "Die Fahrzeugübergabe findet bis/am ___ statt" leer und musste von
+    # Hand nachgetragen werden. Jetzt setzt der Server sie selbst ein.
+    from vertrag_platzhalter import ersetzen as _platzhalter_ersetzen
+    extra = _platzhalter_ersetzen(
+        (contract.get("additional_terms") or "").strip(), contract, dealer)
     if extra:
         story.append(Spacer(1, 8))
         story.append(Paragraph("<b>Besondere Vereinbarungen</b>", st["body"]))
@@ -828,7 +841,10 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     ))
 
     # ---------- AGB ----------
-    agb = (contract.get("agb_text") or "").strip()
+    # Auch in den Vertragsbedingungen — dieselbe Regel, damit niemand raten
+    # muss, wo Platzhalter wirken und wo nicht.
+    agb = _platzhalter_ersetzen(
+        (contract.get("agb_text") or "").strip(), contract, dealer)
     if agb:
         story.append(Spacer(1, 12))
         story.append(_section("Allgemeine Geschäftsbedingungen", st))
@@ -846,7 +862,10 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # der Erstellung festgehaltene Text (contract_data); Altvertraege ohne
     # Text haben den Abschnitt nicht (DIGITAL_NACHTRAEGLICH ist ein Hinweis
     # fuer die Unterschriften-Zeile, kein Vertragstext).
-    avb = (contract.get("digital_vertragstext") or "").strip()
+    # Auch der Vertragstext der digitalen Ausfertigung (Ahmads AGB-Block)
+    # darf Platzhalter tragen — sonst waere es die einzige Ausnahme.
+    avb = _platzhalter_ersetzen(
+        (contract.get("digital_vertragstext") or "").strip(), contract, dealer)
     nachtraeglich = bool(avb) and avb == DIGITAL_NACHTRAEGLICH.strip()
     if avb and not nachtraeglich:
         story.append(Spacer(1, 12))

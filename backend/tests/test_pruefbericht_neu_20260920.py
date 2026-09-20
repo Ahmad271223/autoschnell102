@@ -259,12 +259,31 @@ def test_08_nichts_geaendert_heisst_nicht_automatisch_laeuft_schon():
     code = _nur_code("routes/contracts.py")
     assert "async def _reservierung_nachlesen" in code, (
         "es wird weiter geraten, warum die Reservierung nichts geaendert hat")
-    assert code.count("await _reservierung_nachlesen(") == 2, (
+    # Beide Reservierungswege des Vertragsversands — plus seit dem
+    # 20.09.2026 die Folge-Mails, die denselben Schutz nutzen.
+    assert code.count("await _reservierung_nachlesen(") >= 2, (
         "nur einer der beiden Reservierungswege liest nach (Nr. 8)")
+    import ast as _ast
+    baum = _ast.parse((BACKEND / "routes" / "contracts.py")
+                      .read_text(encoding="utf-8"))
+    fuer = {k.name for k in _ast.walk(baum)
+            if isinstance(k, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+            and "_reservierung_nachlesen(" in _ast.unparse(k)}
+    assert "send_contract" in fuer, (
+        f"der Vertragsversand liest nicht nach (gefunden: {sorted(fuer)})")
     anfang = code.index("async def _reservierung_nachlesen")
     block = code[anfang:anfang + 1400]
     assert "404" in block and "nicht mehr verf" in block, (
         "ein geloeschter/uebertragener Vertrag wird nicht als solcher gemeldet")
+    # Und NUR dieser Fall. Ein fehlender Eintrag ist KEIN Fehler: die
+    # Reservierung wird auch abgelehnt, wenn zu demselben Kanal und
+    # Empfaenger gerade ein ANDERER Versand laeuft — dann ist "laeuft schon"
+    # richtig. Eine erste Fassung warf hier 409 und machte aus dem
+    # Normalfall einen sichtbaren Fehler (gefunden vom Parallel-Test
+    # test_verlierer_ueberschreibt_kein_ergebnis).
+    assert "409" not in block, (
+        "die Nachlese wirft bei einem fehlenden Eintrag — das ist der "
+        "Normalfall einer laufenden Zustellung, kein Fehler")
 
 
 # ------------------------------------------------------------------ Nr. 9

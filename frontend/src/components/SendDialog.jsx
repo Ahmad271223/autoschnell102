@@ -26,6 +26,15 @@ export default function SendDialog({ open, contract, onClose }) {
     const abhol = [datumDe, contract?.pickup_time || cd.pickup_time].filter(Boolean).join(" ");
     const marke = contract?.make || cd.make || "";
     const modell = contract?.model || cd.model || "";
+    const roh = String(contract?.payment_method || cd.payment_method || "");
+    const k = roh.toLowerCase();
+    const zahlung = k === "bar" ? "Barzahlung"
+      : k.includes("echtzeit") ? "Echtzeitüberweisung"
+      : ["überweisung", "ueberweisung", "banküberweisung", "bankueberweisung"].includes(k)
+        ? "Banküberweisung" : roh;
+    const preis = Number(contract?.purchase_price ?? cd.purchase_price);
+    const preisText = Number.isFinite(preis)
+      ? `${preis.toLocaleString("de-DE", { minimumFractionDigits: 2 })} €` : "";
     const werte = {
       "{händler_name}": dealer?.company_name || cd.dealer_company || "",
       "{kunde_name}": contract?.seller_name || cd.seller_name || "",
@@ -35,8 +44,24 @@ export default function SendDialog({ open, contract, onClose }) {
       "{abholdatum}": abhol,
       "{telefon}": cd.dealer_phone || dealer?.phone || "",
       "{email}": cd.dealer_email || dealer?.email || dealer?.contact_email || "",
+      // 20.09.2026 (Wunsch Ahmad): Übergabeort und Zahlungsart — dieselben
+      // Namen wie im Backend (vertrag_platzhalter.py), damit derselbe Text
+      // im Versand-Dialog und im PDF gleich aussieht.
+      "{ort}": [contract?.seller_address || cd.seller_address,
+                [contract?.seller_zip || cd.seller_zip,
+                 contract?.seller_city || cd.seller_city]
+                  .filter(Boolean).join(" ")].filter(Boolean).join(", "),
+      "{zahlungsart}": zahlung,
+      "{kaufpreis}": preisText,
+      "{vertragsnummer}": contract?.contract_no || cd.contract_no || "",
+      "{kundennummer}": String(dealer?.kunden_nr || cd.kunden_nr || ""),
+      "{haendler_name}": dealer?.company_name || cd.dealer_company || "",
     };
-    return Object.entries(werte).reduce((s, [k, v]) => s.replaceAll(k, String(v)), text || "");
+    // Wie im Backend: fehlt eine Angabe, steht dort "____" — nie der
+    // Platzhalter selbst. Ein Kunde darf nie "{abholdatum}" lesen.
+    return Object.entries(werte).reduce(
+      (s, [name, wert]) => s.replaceAll(name, String(wert || "").trim() || "____"),
+      text || "");
   };
   const [waMsg, setWaMsg] = useState(platzhalter(dealer?.whatsapp_template));
   const [emailMsg, setEmailMsg] = useState(platzhalter(dealer?.email_template));

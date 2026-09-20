@@ -45,6 +45,22 @@ class DealerSettingsIn(BaseModel):
     whatsapp_template: Optional[str] = None
     default_terms: Optional[str] = None             # AGB (always appended to PDF)
     default_special_agreements: Optional[str] = None  # Standard-Besondere-Vereinbarungen
+    # Vorlage Ahmad 20.09.2026: drei Mails, die der Sucher NACHTRAEGLICH von
+    # Hand verschickt — erneuter Versand nach einer Korrektur, der Hinweis
+    # nach dem Kaufabschluss (per Mail und per WhatsApp) und die
+    # Bahnverbindung fuer die Abholung. Alle mit denselben Platzhaltern.
+    email_subject_korrektur: Optional[str] = None
+    email_template_korrektur: Optional[str] = None
+    email_subject_nach_kauf: Optional[str] = None
+    email_template_nach_kauf: Optional[str] = None
+    whatsapp_template_nach_kauf: Optional[str] = None
+    email_subject_bahn: Optional[str] = None
+    email_template_bahn: Optional[str] = None
+    # Wunsch Ahmad 20.09.2026: Unser Standardsatz fuer die Besonderen
+    # Vereinbarungen (Übergabe/Kundennummer, mit Platzhaltern) laesst sich
+    # ein- und ausschalten. Der eigene Text der Firma steht unabhaengig
+    # davon in default_special_agreements und kommt im Vertrag darunter.
+    sondervereinbarung_standard_aktiv: Optional[bool] = None
     # Text unter "Unterschriften" in der DIGITALEN Ausfertigung (Versand per
     # E-Mail/WhatsApp, ohne Unterschriftslinien). Leer = Standardtext.
     digital_vertragstext: Optional[str] = None
@@ -54,7 +70,11 @@ class DealerSettingsIn(BaseModel):
     # lahmlegen. Freitext-Bloecke 20.000, Kurzfelder 500 Zeichen.
     @field_validator("email_subject", "email_template", "whatsapp_template",
                      "default_terms", "default_special_agreements",
-                     "digital_vertragstext", "active_profile")
+                     "digital_vertragstext", "active_profile",
+                     "email_subject_korrektur", "email_template_korrektur",
+                     "email_subject_nach_kauf", "email_template_nach_kauf",
+                     "whatsapp_template_nach_kauf",
+                     "email_subject_bahn", "email_template_bahn")
     @classmethod
     def _cap_text(cls, v, info):
         if isinstance(v, str):
@@ -126,6 +146,16 @@ def _mit_digital_standard(dealer):
     if isinstance(dealer, dict):
         from pdf_service import DIGITAL_VERTRAGSTEXT_STANDARD
         dealer["digital_vertragstext_standard"] = DIGITAL_VERTRAGSTEXT_STANDARD
+        # Wunsch Ahmad 20.09.2026: Der Vertragsdialog fuellt die Besonderen
+        # Vereinbarungen vor. Er darf dafuer NICHT das Freitextfeld nehmen —
+        # darin steht seit dem Schalter nur noch der eigene Text der Firma,
+        # unser Standardsatz waere beim Anlegen verloren gegangen. Hier kommt
+        # die wirksame Fassung mit: Standardsatz (falls eingeschaltet) plus
+        # eigener Text. Die Platzhalter bleiben stehen — sie werden erst
+        # beim Erzeugen des PDF gefuellt, mit dem DANN gueltigen Abholdatum.
+        import vertrag_vorlagen as _vorlagen
+        dealer["sondervereinbarungen_effektiv"] = _vorlagen.sondervereinbarungen(dealer)
+        dealer["sondervereinbarung_standard_text"] = _vorlagen.BESONDERE_VEREINBARUNGEN
     return dealer
 
 
@@ -134,7 +164,10 @@ def _mit_digital_standard(dealer):
 # Dokument (samt allem, was kuenftig dazukommt: Kontingente, Marktplatz,
 # interne Vermerke) mit den Overrides obendrauf zurueck.
 _SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "created_at", "updated_at",
-                        "digital_vertragstext_standard"}
+                        "digital_vertragstext_standard",
+                        # 20.09.2026: wirksame Besondere Vereinbarungen
+                        "sondervereinbarungen_effektiv",
+                        "sondervereinbarung_standard_text"}
 
 
 def _sucher_sicht(dealer: dict) -> dict:
@@ -261,6 +294,18 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
         update["default_special_agreements"] = body.default_special_agreements
     if body.digital_vertragstext is not None:
         update["digital_vertragstext"] = body.digital_vertragstext
+    # Vorlage Ahmad 20.09.2026: die drei nachtraeglichen Mails und der
+    # Schalter fuer unseren Standardsatz. WICHTIG: `is not None` — beim
+    # Schalter ist `False` ein GUELTIGER Wert; eine Pruefung auf Wahrheit
+    # haette das Abschalten stillschweigend verschluckt.
+    for feld in ("email_subject_korrektur", "email_template_korrektur",
+                 "email_subject_nach_kauf", "email_template_nach_kauf",
+                 "whatsapp_template_nach_kauf",
+                 "email_subject_bahn", "email_template_bahn",
+                 "sondervereinbarung_standard_aktiv"):
+        wert = getattr(body, feld, None)
+        if wert is not None:
+            update[feld] = wert
     return update
 
 

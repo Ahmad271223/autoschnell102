@@ -70,7 +70,11 @@ def test_05_nachtragen_wenn_die_einstellungen_spaeter_kommen():
     dann muessen die Felder nachtraeglich gefuellt werden, aber nur solange
     sie leer und unberuehrt sind."""
     assert "beruehrt.current[feld]" in DIALOG
-    assert "additional_terms: dealer.default_special_agreements" in DIALOG
+    # 20.09.2026: Vorbelegt wird mit der WIRKSAMEN Fassung — unser
+    # Standardsatz (falls eingeschaltet) plus dem eigenen Text der Firma.
+    # Vorher stand hier nur das Freitextfeld; seit dem Schalter waere unser
+    # Satz beim Anlegen eines Vertrags verloren gegangen.
+    assert "additional_terms: dealer.sondervereinbarungen_effektiv" in DIALOG
     assert "}, [dealer]);" in DIALOG
     # Die Hooks stehen VOR dem fruehen Ausstieg (React-Regel).
     assert DIALOG.index("}, [dealer]);") < DIALOG.index("if (!open) return null;")
@@ -80,4 +84,10 @@ def test_06_besondere_vereinbarungen_bleiben_vorbelegt():
     assert 'testid="contract-terms"' in DIALOG
     assert "Aus deinen Einstellungen vorausgefüllt" in DIALOG
     q = inspect.getsource(C.create_contract)
-    assert 'contract_dict["additional_terms"] = dealer.get("default_special_agreements", "") or ""' in q
+    # 20.09.2026 (Wunsch Ahmad): nicht mehr nur das Freitextfeld, sondern
+    # Standardsatz UND eigener Text — zusammengesetzt in einer Stelle.
+    assert "_vorlagen.sondervereinbarungen(dealer)" in q, (
+        "die Vertragsanlage nimmt nicht die wirksame Fassung")
+    assert 'dealer.get("default_special_agreements", "")' not in q, (
+        "es wird weiter nur das Freitextfeld kopiert — der Schalter waere "
+        "dort wirkungslos")

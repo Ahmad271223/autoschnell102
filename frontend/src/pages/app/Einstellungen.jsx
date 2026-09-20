@@ -2,6 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
+
+// Vorlage Ahmad 20.09.2026: dieselben Namen wie im Backend
+// (backend/vertrag_platzhalter.py). Der Test test_vertragstexte_20260920.py
+// haelt beide Listen zusammen — wird hier einer ergaenzt, muss er dort auch
+// stehen, sonst bliebe er im PDF woertlich stehen.
+// Der Standardsatz, wie er im Vertrag steht — zur Anschauung neben dem
+// Schalter. Muss mit backend/vertrag_vorlagen.BESONDERE_VEREINBARUNGEN
+// uebereinstimmen; test_vertragstexte_20260920.py haelt beide zusammen.
+const STANDARD_SONDERSATZ =
+  "• Die Fahrzeugübergabe findet bis/am {abholdatum} in {ort} gegen {zahlungsart} statt.\n"
+  + "• Das Fahrzeug wird nur unter Vorlage der Kundennummer ({kundennummer}) nach einem "
+  + "kurzen Gebrauchtwagencheck und Datenabgleich mit Zulassungsbescheinigung Teil I & II "
+  + "ausgehändigt.";
+
+const PLATZHALTER = [
+  "{kunde_name}", "{fahrzeug}", "{marke}", "{modell}",
+  "{abholdatum}", "{ort}", "{zahlungsart}", "{kaufpreis}",
+  "{vertragsnummer}", "{kundennummer}",
+  "{händler_name}", "{telefon}", "{email}",
+];
 import { toast } from "sonner";
 import { wurdeZusammengefuehrt, zusammenfuehren } from "@/lib/vertragstext";
 import {
@@ -50,6 +70,16 @@ export default function Einstellungen() {
       email_subject: dealer.email_subject || "",
       email_template: dealer.email_template || "",
       whatsapp_template: dealer.whatsapp_template || "",
+      // Vorlage Ahmad 20.09.2026: die drei nachtraeglichen Mails
+      email_subject_korrektur: dealer.email_subject_korrektur || "",
+      email_template_korrektur: dealer.email_template_korrektur || "",
+      email_subject_nach_kauf: dealer.email_subject_nach_kauf || "",
+      email_template_nach_kauf: dealer.email_template_nach_kauf || "",
+      whatsapp_template_nach_kauf: dealer.whatsapp_template_nach_kauf || "",
+      email_subject_bahn: dealer.email_subject_bahn || "",
+      email_template_bahn: dealer.email_template_bahn || "",
+      sondervereinbarung_standard_aktiv:
+        dealer.sondervereinbarung_standard_aktiv !== false,
       // Runde 26: EIN Feld. Ein noch vorhandener AGB-Text wird hier
       // angehaengt; beim Speichern wird das alte Feld geleert.
       default_terms: "",
@@ -388,10 +418,41 @@ export default function Einstellungen() {
               <AppleTextarea label="WhatsApp-Text" rows={5} value={form.whatsapp_template}
                              onChange={(v) => setForm({ ...form, whatsapp_template: v })}
                              icon={MessageSquare} testid="set-wa-template" />
-              <PlaceholderHint placeholders={[
-                "{kunde_name}", "{fahrzeug}", "{marke}", "{modell}",
-                "{abholdatum}", "{händler_name}", "{telefon}", "{email}",
-              ]} />
+              <PlaceholderHint placeholders={PLATZHALTER} />
+            </Section>
+          )}
+          {active === "templates" && (
+            <Section title="Nachträgliche Mails"
+                     subtitle="Diese drei Mails verschickst du von Hand beim Vertrag — sie gehen nie automatisch raus.">
+              <AppleField label="Betreff — erneuter Versand nach Korrektur"
+                          value={form.email_subject_korrektur}
+                          onChange={(v) => setForm({ ...form, email_subject_korrektur: v })}
+                          testid="set-email-subject-korrektur" />
+              <AppleTextarea label="Text — erneuter Versand nach Korrektur" rows={6}
+                             value={form.email_template_korrektur}
+                             onChange={(v) => setForm({ ...form, email_template_korrektur: v })}
+                             icon={Mail} testid="set-email-template-korrektur" />
+              <AppleField label="Betreff — Hinweis nach Kaufabschluss"
+                          value={form.email_subject_nach_kauf}
+                          onChange={(v) => setForm({ ...form, email_subject_nach_kauf: v })}
+                          testid="set-email-subject-nach-kauf" />
+              <AppleTextarea label="Text — Hinweis nach Kaufabschluss (E-Mail)" rows={8}
+                             value={form.email_template_nach_kauf}
+                             onChange={(v) => setForm({ ...form, email_template_nach_kauf: v })}
+                             icon={Mail} testid="set-email-template-nach-kauf" />
+              <AppleTextarea label="Text — Hinweis nach Kaufabschluss (WhatsApp)" rows={8}
+                             value={form.whatsapp_template_nach_kauf}
+                             onChange={(v) => setForm({ ...form, whatsapp_template_nach_kauf: v })}
+                             icon={MessageSquare} testid="set-wa-template-nach-kauf" />
+              <AppleField label="Betreff — Bahnverbindung / Abholinformation"
+                          value={form.email_subject_bahn}
+                          onChange={(v) => setForm({ ...form, email_subject_bahn: v })}
+                          testid="set-email-subject-bahn" />
+              <AppleTextarea label="Text — Bahnverbindung / Abholinformation" rows={6}
+                             value={form.email_template_bahn}
+                             onChange={(v) => setForm({ ...form, email_template_bahn: v })}
+                             icon={Mail} testid="set-email-template-bahn" />
+              <PlaceholderHint placeholders={PLATZHALTER} />
             </Section>
           )}
 
@@ -433,15 +494,47 @@ export default function Einstellungen() {
                   Standardtext ins Feld übernehmen und anpassen
                 </button>
               )}
+              {/* Wunsch Ahmad 20.09.2026: unser Standardsatz ist ein
+                  Schalter. An = steht in jedem neuen Vertrag, mit
+                  automatisch eingesetztem Abholdatum, Übergabeort und
+                  Zahlungsart. Aus = nur der eigene Text darunter. */}
+              <label className="flex items-start gap-3 p-4 rounded-2xl cursor-pointer"
+                     style={{ background: "var(--surface-2)",
+                              border: "1px solid var(--line)" }}
+                     data-testid="set-sonder-standard">
+                <input type="checkbox" className="mt-1 w-5 h-5 shrink-0"
+                       checked={form.sondervereinbarung_standard_aktiv !== false}
+                       onChange={(e) => setForm({
+                         ...form,
+                         sondervereinbarung_standard_aktiv: e.target.checked,
+                       })} />
+                <span>
+                  <span className="block font-semibold"
+                        style={{ color: "var(--text-primary)" }}>
+                    Unseren Standardsatz mitdrucken
+                  </span>
+                  <span className="block text-xs mt-1"
+                        style={{ color: "var(--text-secondary)" }}>
+                    Übergabe bis/am … in … gegen … und die Kundennummer-Regel.
+                    Abholdatum, Anschrift des Verkäufers und Zahlungsart werden
+                    beim Erstellen des Vertrags von selbst eingesetzt.
+                  </span>
+                  <span className="block text-xs mt-2 whitespace-pre-line"
+                        style={{ color: "var(--text-secondary)", opacity: .8 }}>
+                    {STANDARD_SONDERSATZ}
+                  </span>
+                </span>
+              </label>
               <AppleTextarea
-                label="Standard-Besondere-Vereinbarungen"
+                label="Eigene Besondere Vereinbarungen"
                 rows={6}
                 value={form.default_special_agreements}
                 onChange={(v) => setForm({ ...form, default_special_agreements: v })}
                 icon={FileText}
                 testid="set-default-agreements"
-                hint='Wird in das Feld „Besondere Vereinbarungen" jedes neuen Vertrags vorbelegt — kann beim Erstellen überschrieben werden.'
+                hint="Stehen in jedem neuen Vertrag — unter dem Standardsatz, falls der eingeschaltet ist. Platzhalter sind auch hier erlaubt."
               />
+              <PlaceholderHint placeholders={PLATZHALTER} />
             </Section>
           )}
 

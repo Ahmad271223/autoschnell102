@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
 import SendDialog from "@/components/SendDialog";
+import FolgeMailDialog from "@/components/FolgeMailDialog";
 
 const DAY_FILTERS = [
   { v: 0, l: "Alle" },
@@ -26,6 +27,9 @@ export default function PDFArchiv() {
   // Preis/neuen Daten neu erstellt, fragt die App, ob er an den Verkaeufer
   // geht (WhatsApp oder E-Mail) — derselbe Dialog wie beim ersten Versand.
   const [senden, setSenden] = useState(null);
+  // Wunsch Ahmad 20.09.2026: die drei nachtraeglichen Mails (Korrektur,
+  // Hinweis nach Kaufabschluss, Bahnverbindung) — von Hand, nie automatisch.
+  const [folgeMail, setFolgeMail] = useState(null);
 
   // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
@@ -198,6 +202,14 @@ export default function PDFArchiv() {
                               title="Digitale Fassung (für E-Mail/WhatsApp, ohne Unterschriftsfelder)">
                         <FileText size={16} />
                       </button>
+                      <button onClick={() => setFolgeMail(it)}
+                              data-testid={`folgemail-${it.id}`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              style={{ background: "var(--apple-btn-secondary-bg)",
+                                       color: "var(--text-primary)" }}
+                              title="Nachträgliche Mail (Korrektur, Hinweis nach Kaufabschluss, Bahnverbindung)">
+                        <Mail size={16} />
+                      </button>
                       <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-red-500/20"
                               style={{ background: "var(--apple-btn-secondary-bg)",
@@ -217,6 +229,11 @@ export default function PDFArchiv() {
       {senden && (
         <SendDialog open contract={senden}
                     onClose={() => { setSenden(null); load(); }} />
+      )}
+
+      {folgeMail && (
+        <FolgeMailDialog open contract={folgeMail}
+                         onClose={() => { setFolgeMail(null); load(); }} />
       )}
 
       {/* Foto-Galerie: großes Bild, blättern mit Pfeilen / Tastatur / Wischen */}

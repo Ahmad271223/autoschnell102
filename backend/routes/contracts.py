@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Dict, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 import secrets
 
@@ -618,7 +618,10 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     vehicle = v["data"]
     contract_dict = body.model_dump()
     if not (contract_dict.get("additional_terms") or "").strip():
-        contract_dict["additional_terms"] = dealer.get("default_special_agreements", "") or ""
+        # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
+        # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
+        import vertrag_vorlagen as _vorlagen
+        contract_dict["additional_terms"] = _vorlagen.sondervereinbarungen(dealer)
     # AGB: only fall back to dealer default if no override was provided.
     if not (contract_dict.get("agb_text") or "").strip():
         contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
@@ -727,7 +730,10 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # (otherwise we still fall back to the dealer's saved defaults).
     contract_dict = body.model_dump()
     if not (contract_dict.get("additional_terms") or "").strip():
-        contract_dict["additional_terms"] = dealer.get("default_special_agreements", "") or ""
+        # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
+        # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
+        import vertrag_vorlagen as _vorlagen
+        contract_dict["additional_terms"] = _vorlagen.sondervereinbarungen(dealer)
     if not (contract_dict.get("agb_text") or "").strip():
         contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
     if not (contract_dict.get("vehicle_description") or "").strip():
@@ -1519,13 +1525,18 @@ async def _reservierung_nachlesen(contract_id: str, bereich: dict,
         raise HTTPException(404, "Dieser Vertrag ist nicht mehr verfügbar — er "
                                  "wurde gerade gelöscht oder übertragen. Es "
                                  "wurde NICHTS versendet.")
-    if not any(e.get("idempotency_key") == idempotency_key
-               for e in (doc.get("send_status") or [])):
-        # Vertrag ist da, aber unser Eintrag fehlt — die Reservierung ist aus
-        # einem anderen Grund gescheitert (z.B. Liste gerade gekuerzt).
-        raise HTTPException(409, "Der Versand konnte nicht vorgemerkt werden — "
-                                 "bitte gleich erneut versuchen.",
-                            headers={"Retry-After": "3"})
+    # WICHTIG (gefunden am 20.09.2026 durch den Parallel-Test
+    # test_verlierer_ueberschreibt_kein_ergebnis): Ein FEHLENDER Eintrag ist
+    # KEIN Fehler. Die Reservierung wird auch dann abgelehnt, wenn zu
+    # demselben Kanal und Empfaenger gerade ein ANDERER Versand laeuft
+    # (die Sperre oben). Dann gibt es unseren Schluessel natuerlich noch
+    # nicht — und "es laeuft schon" ist genau die richtige Antwort.
+    #
+    # Eine erste Fassung dieser Pruefung antwortete hier mit 409 und machte
+    # aus dem Normalfall einen sichtbaren Fehler. Die Pruefung erkennt
+    # deshalb NUR den Fall, um den es wirklich ging: der Vertrag ist weg
+    # oder gehoert jemand anderem — dann wird sicher nichts versendet.
+    return
 
 
 async def _versand_laeuft(contract_id: str) -> bool:
@@ -2043,6 +2054,115 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                                   meta={"channel": body.channel})
     await log_activity_sicher(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
     return out
+
+
+class FolgeMailIn(BaseModel):
+    """Eine der drei Mails, die der Sucher NACHTRAEGLICH von Hand schickt
+    (Wunsch Ahmad 20.09.2026)."""
+    art: Literal["korrektur", "nach_kauf", "bahn"]
+    recipient: str = Field(max_length=200)
+    subject: Optional[str] = Field(default=None, max_length=500)
+    message: Optional[str] = Field(default=None, max_length=20000)
+    idempotency_key: Optional[str] = Field(
+        default=None, min_length=8, max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@router.get("/contracts/{contract_id}/folge-mail/{art}")
+async def folge_mail_vorschau(contract_id: str, art: str,
+                              user=Depends(current_firma)):
+    """Betreff und Text der Folge-Mail, Platzhalter schon eingesetzt.
+
+    Damit sieht der Sucher VOR dem Senden genau das, was rausgeht — und
+    kann es im Dialog noch aendern."""
+    import vertrag_vorlagen as _vorlagen
+    from vertrag_platzhalter import ersetzen as _ersetzen
+    if art not in _vorlagen.FOLGE_MAILS:
+        raise HTTPException(404, "Unbekannte Vorlage")
+    c = await db.generated_pdfs.find_one(
+        {"id": contract_id, **_vertrag_bereich(user)}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    from deps import effective_dealer
+    firma = await effective_dealer(user) or {}
+    betreff, text = _vorlagen.vorlage(firma, art)
+    return {"art": art,
+            "empfaenger": (c.get("seller_email") or "").strip(),
+            "betreff": _ersetzen(betreff, c, firma, user),
+            "text": _ersetzen(text, c, firma, user)}
+
+
+@router.post("/contracts/{contract_id}/folge-mail")
+async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
+                            user=Depends(require_active_sub)):
+    """Eine Folge-Mail verschicken — ohne Anhang, reiner Text.
+
+    Bewusst getrennt vom Vertragsversand: hier haengt kein PDF dran, es
+    gibt keine Fassungspruefung und keinen Freigabe-Link. Es ist eine
+    Nachricht zum Vorgang, kein Vertrag. Der Versand wird trotzdem am
+    Vertrag vermerkt (send_status mit `art`), damit spaeter nachvollziehbar
+    ist, wer wann was geschickt hat.
+    """
+    import vertrag_vorlagen as _vorlagen
+    from vertrag_platzhalter import ersetzen as _ersetzen
+    empfaenger = (body.recipient or "").strip()
+    if "@" not in empfaenger or empfaenger.startswith("@") or empfaenger.endswith("@"):
+        raise HTTPException(400, "Bitte eine gültige E-Mail-Adresse angeben")
+    # Dieselbe Bremse wie beim Vertragsversand — sonst waere das hier ein
+    # offener Weg, ueber unsere Adresse beliebig viele Mails zu schicken.
+    if not _versand_limiter.erlaubt(user["id"]):
+        raise HTTPException(429, "Zu viele Sendungen in kurzer Zeit — bitte "
+                                 f"höchstens {VERSAND_JE_KONTO_10MIN} je 10 Minuten.")
+    bereich = _vertrag_bereich(user)
+    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    from deps import effective_dealer
+    firma = await effective_dealer(user) or {}
+    std_betreff, std_text = _vorlagen.vorlage(firma, body.art)
+    betreff = (body.subject or "").strip() or _ersetzen(std_betreff, c, firma, user)
+    text = (body.message or "").strip() or _ersetzen(std_text, c, firma, user)
+
+    schluessel = (body.idempotency_key or "").strip()
+    if schluessel:
+        # Doppelklick-Schutz wie beim Vertragsversand: derselbe Schluessel
+        # legt garantiert nur EINEN Eintrag an.
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status.idempotency_key": {"$ne": schluessel}},
+            {"$push": {"send_status": {"$each": [{
+                "idempotency_key": schluessel, "channel": "email",
+                "art": body.art, "recipient": empfaenger, "subject": betreff,
+                "sent_at": now_iso(), "zustellung": "laeuft"}],
+                "$slice": -SEND_STATUS_MAX}}})
+        if res.modified_count == 0:
+            await _reservierung_nachlesen(contract_id, bereich, schluessel)
+            return {"status": "ok", "bereits_gesendet": True, "art": body.art}
+
+    sucher_mail, antwort_adresse = sucher_kontakt(user, firma)
+    ok, beleg = await email_service.send_email_mit_beleg(
+        empfaenger, betreff, text, anhang=None, anhang_name="",
+        html=None, reply_to=antwort_adresse,
+        absender_name=firma.get("company_name") or "",
+        idempotency_key=f"folge-{contract_id}-{schluessel or body.art}")
+    if not ok:
+        if schluessel:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status.idempotency_key": schluessel},
+                {"$set": {"send_status.$.zustellung": "fehlgeschlagen"}})
+        raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — bitte in ein "
+                                 "paar Minuten erneut versuchen.")
+    if schluessel:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status.idempotency_key": schluessel},
+            {"$set": {"send_status.$.zustellung": "versendet",
+                      "send_status.$.beleg": beleg or ""}})
+    await log_activity_sicher(user["dealer_id"], user["id"],
+                              f"pdf.folgemail.{body.art}", ref=contract_id)
+    return {"status": "ok", "art": body.art, "empfaenger": empfaenger,
+            "betreff": betreff}
 
 
 @router.delete("/contracts/{contract_id}")
