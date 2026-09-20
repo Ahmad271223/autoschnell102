@@ -2311,3 +2311,75 @@ ohne jede Unterbrechung. Die Schreibpause ist nur fuer Einzelserver-Installation
 auch dort eine bewusste Entscheidung.
 
 Waechter: `backend/tests/test_wartung_sicherung_20260920.py` (26 Tests).
+
+---
+
+### Nachpruefung 20.09.2026, Nr. 21-74 — vollstaendige Abarbeitung
+
+Der Bericht hatte 54 Punkte (Nr. 21-74). Stand nach diesem Durchgang:
+
+**Inbetriebnahme (Nr. 24-29, 45/46)** — `fix(inbetriebnahme)`
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 24/25 | `env_erzeugen.py` schreibt `BITTE-AUSFUELLEN-...`, die Produktionspruefung fragte nur "ist ein Wert da?" | jede Einstellung mit dem Vorlagentext faellt jetzt durch — nicht nur `RESEND_API_KEY`/`APIFY_TOKEN`, sondern **alle** |
+| 26 | `.lstrip("https://")` entfernte Einzelzeichen: `shop.example.de` → `op.example.de` | echtes Praefix-Entfernen (`_domain_saeubern`) |
+| 27 | Generator setzte still die Load-Balancer-Vorlage (verwirft Direktzugriffe mit 444) | Einzelserver ist Standard, `--hinter-loadbalancer` ist die bewusste Angabe |
+| 28 | `MONGO_EXTRA_ARGS` stand nur als Compose-Kommentar, das Runbook verlangte aber `rs.initiate()` | in `.env.example` und im Runbook, mit Gegenprobe `replikat_pruefen.py` |
+| 29 | Rollout prueft `/api/ready` — das beweist Erreichbarkeit, nicht Replikation | `deploy/rollout.sh` prueft das Replica Set, sobald `replicaSet=` in der `.env` steht; kaputtes Replikat stoppt den Rollout |
+| 45/46 | Halb gesetzte `BACKUP_S3_*`-Zugangsdaten mischten Schluessel und Geheimnis aus zwei Zugaengen | `s3_client()` lehnt das ab, der Startcheck meldet es als Fehler |
+
+**Zahlungen und Zugaenge (Nr. 47-50, 61-63, 73)** — `fix(zahlungen)`
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 47/48 | Zwischenhaendler-Freischaltung ohne Sperre und ohne Abgleich: zwei Klicks = zwei Zahlungen, eine Verlaengerung | eine Sperre je Konto, Zugang zuerst (mit Abgleich auf den gelesenen Stand), Zahlung idempotent ueber `vorgang_id` |
+| 49 | Freischalten und Sperren ohne gemeinsame Sperre | beide nehmen jetzt dieselbe |
+| 50 | Herzschlag verlor die Sperre und beendete nur sich selbst | `_Wache.pruefen()` bricht den Vorgang mit 409 ab; eine DB-Stoerung zaehlt **nicht** als Verlust |
+| 61 | Firmenzahlung liess sich einem Sucher einer anderen Firma zuordnen | wird gegen die Firma geprueft |
+| 62/63 | Deaktivierte Konten konnten bezahlt freigeschaltet werden und blieben gesperrt | 400 mit klarem Text; Sperren bleibt erlaubt |
+| 73 | Laufzeitaenderung las EIN Abo, aenderte per `update_many` aber jedes aktive | Sperre + `update_one` auf die gelesene Id, mit Abgleich auf den gelesenen Ablauf |
+
+**Betrieb und Sicherheit (Nr. 54-60, 74)** — `fix(betrieb)`
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 54 | `/api/ready` gab anonym Schema-Version, freien Speicher, Alarme, Jobs, Super-Admin-Zahlen preis | Einzelheiten nur fuer Super-Admin und aus dem privaten Netz; alle anderen bekommen `ready` true/false. Der Zustandscode bleibt fuer jeden gleich |
+| 55 | teurer Endpunkt ohne Bremse | `READY_CACHE_S` (5 s) |
+| 56 | feste Probedatei `.readiness` → zwei Aufrufe loeschten sie sich gegenseitig | eigener Name je Aufruf (derselbe Fehler steckte auch in `LocalDiskStorage`) |
+| 57 | Vorschau-Pfad des Bildproxys entpackte ohne Pixelpruefung | dieselbe Grenze wie im PDF-Pfad, **vor** dem Entpacken |
+| 58 | `BILD_PROXY_LIMIT` 1500 zu knapp (30 Sucher x 40 Bilder = 1200) | **3000** |
+| 59 | SMTP: jede Ausnahme gab den Idempotenz-Eintrag frei — auch nach Annahme durch den Server | freigegeben wird nur noch bei nachweislicher Nicht-Zustellung; sonst "unklar" und **keine** automatische Wiederholung |
+| 60 | S3-Bereitschaft pruefte nur `head_bucket` | zusaetzlich alle 15 min eine echte Schreibprobe |
+| 74 | Kleinanzeigen-Abruf mit `follow_redirects=True`: die Adresse wurde erst **nach** dem Abruf geprueft | Weiterleitungen von Hand, jede Stufe **vor** dem Abruf geprueft — wie es der Bild-Proxy laengst macht |
+
+**Oberflaeche (Nr. 39-42, 52/53)** — `fix(oberflaeche)`
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 39/40/41 | Der 401-Abfaenger loeschte den Token, ohne zu pruefen, ob die Anfrage mit **diesem** Token lief: eine verspaetete 401 warf ein frisch angemeldetes Konto hinaus | `gehoertZumAktuellenToken()` in `lib/api.js` und `BuyerContext` |
+| 42 | genau dieser Fall war nirgends geprueft | vier Tests in `api.test.js` |
+| 52 | `Inserat.jsx` las bis zu 20 Fotos roh und schickte sie in EINER Anfrage | Verkleinern im Browser (2000 px, entfernt auch Aufnahmeort und Geraet) und Pakete zu vier |
+| 53 | serverseitig nur Grenzen je Bild, nicht fuer die Anfrage | hoechstens 8 Bilder und 24 MB je Anfrage |
+
+**Transaktionen, Sperren, Lebenszyklus (Nr. 30-38, 43/44)** — `fix(transaktionen+sperren)`
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 30-33 | `transaktion()` lief nach JEDEM `PyMongoError` noch einmal ohne Transaktion — auch wenn die Uebergabe geklappt haben konnte (dann sah der Nutzer 409/404, obwohl gespeichert war) | `UnknownTransactionCommitResult` → **nicht** wiederholen, 503 mit klarer Ansage; `TransientTransactionError` → einmal komplett wiederholen (mit Transaktion); sonst wie bisher |
+| 34/35 | Sperrverlust wurde nur protokolliert, der Lauf machte weiter — bei Migrationen also zwei Laeufe ueber dieselben Daten | Wache mit `pruefen()`; der Verlierer einer Migrationssperre wird zum Wartenden statt abzubrechen |
+| 37/38 | "erledigt" ergab je nach Weg einen anderen Fahrzeugzustand | eine Tabelle fuer Buero und Fahrer-App (`lifecycle.TERMINSTATUS_FAHRZEUGZUSTAND`) |
+| 43/44 | alte Stripe-Indizes konnten ein Deployment stoppen, obwohl es keinen Stripe-Weg mehr gibt | Warnung + Betriebsalarm statt Startverbot; ein Test prueft gegen, dass wirklich niemand mehr `session_id` schreibt |
+
+**Gegengeprueft und NICHT bestaetigt:**
+
+- **Nr. 51** ("nginx blockiert Uploads bei 1 MB"): `client_max_body_size 25m` steht im
+  `http`-Block von `deploy/nginx.conf`, und **genau diese Datei** wird in den Container
+  gehaengt. nginx vererbt das an jeden Server-Block — die wirksame Grenze ist 25 MB.
+  Die Durchsicht hatte nur die Server-Block-Vorlagen angesehen.
+- **Nr. 36** (Beweis-Index "nicht fail-closed"): in Produktion wird seit Befund 123
+  (16.09.2026) **ohne** den Unique-Index gar kein Beweisdokument mehr vorgemerkt. Die
+  zitierte Zeile "doppelte Dokumente moeglich" gilt nur ausserhalb von Produktion.
+
+Beide Gegenproben stehen als Test fest (`test_72b`, `test_36`), damit die Lage nicht
+unbemerkt kippt.
