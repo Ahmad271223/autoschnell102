@@ -411,11 +411,6 @@ READY_CACHE_S = zahl_env("READY_CACHE_S", 5, unten=0, oben=60)
 _ready_stand = {"bis": 0.0, "ergebnis": None, "code": 200}
 _ready_lock = asyncio.Lock()
 
-#: Netze, aus denen die Einzelheiten von /api/ready sichtbar bleiben:
-#: die eigenen Container, der Load Balancer und der zweite Server.
-_EIGENE_NETZE = tuple(__import__("ipaddress").ip_network(n) for n in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
-
 
 async def _darf_betriebsdaten_sehen(request: Request) -> bool:
     """Wer die Einzelheiten von /api/ready sehen darf (Nr. 54).
@@ -427,16 +422,19 @@ async def _darf_betriebsdaten_sehen(request: Request) -> bool:
     Container/privaten Netz auch (deploy/rollout.sh und freigeben.sh holen
     die Begruendung genau so). Alle anderen bekommen nur ready true/false
     mit 200 bzw. 503 — das ist alles, was ein Lastverteiler braucht."""
-    from rate_limiter import client_ip
+    # Bewusst der DIREKTE Nachbar (request.client), nicht die proxy-bewusste
+    # rate_limiter.client_ip: Letztere liest X-Forwarded-For, und in einer
+    # Kette aus lauter eigenen Vermittlern faellt sie auf den ERSTEN Eintrag
+    # zurueck — den ein Besucher selbst setzen kann. Fuer Anfragesperren ist
+    # das hinnehmbar, fuer die Freigabe von Betriebsdaten nicht.
+    # Nur die Schleife zaehlt: so kommen rollout.sh und freigeben.sh
+    # (docker compose exec backend curl http://localhost:8001/api/ready) an
+    # die Begruendung, waehrend jede Anfrage von aussen — auch die ueber den
+    # Lastverteiler — einen anderen Nachbarn hat.
     try:
         import ipaddress
-        adresse = ipaddress.ip_address(client_ip(request))
-        # Ausdrueckliche Netze statt `is_private`: das schliesst in Python
-        # auch die Dokumentations-Netze (203.0.113.0/24, 192.0.2.0/24,
-        # 198.51.100.0/24) und Carrier-Grade-NAT ein — echte oeffentliche
-        # Adressen, die hier nichts zu suchen haben.
-        if adresse.is_loopback or adresse.is_link_local or any(
-                adresse in netz for netz in _EIGENE_NETZE):
+        nachbar = (request.client.host if request.client else "") or ""
+        if ipaddress.ip_address(nachbar).is_loopback:
             return True
     except (ImportError, ValueError):
         pass

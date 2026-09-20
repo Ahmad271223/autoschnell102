@@ -165,7 +165,10 @@ def test_16_17_produktionspruefung(monkeypatch):
         konfig.FEHLERHAFT.pop("PROBE_TAGE", None)
     # /ready: Super-Admin-Zaehlung und MFA-Pflicht sind im Code
     import server
-    q = inspect.getsource(server.readiness_check)
+    # 20.09.2026 (Nr. 54/55): die eigentliche Pruefung steht jetzt in
+    # _readiness_pruefen(); readiness_check ist nur noch Zwischenspeicher
+    # und Sichtbarkeits-Entscheidung.
+    q = inspect.getsource(server._readiness_pruefen)
     assert "kein aktives Super-Admin-Konto" in q and "MFA_PFLICHT" in q
     assert "_PROZESS_START" in q
 

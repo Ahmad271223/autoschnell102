@@ -166,9 +166,16 @@ def test_66d_waechter_beim_start_raeumt_nur_abgelaufene_auf():
 
 
 def test_66e_server_startet_den_waechter():
-    import server
-    q = inspect.getsource(server.on_start)
-    assert "abgelaufenen_merker_aufraeumen" in q
+    """Quelltext von der Platte statt inspect.getsource(server.on_start):
+    andere Tests der Suite ersetzen `server` bzw. seine Funktionen zeitweise,
+    und dann liest inspect etwas anderes. Die Zusage bleibt dieselbe."""
+    quelle = (BACKEND / "server.py").read_text(encoding="utf-8")
+    block = quelle[quelle.index("async def on_start("):]
+    ende = block.find("\nasync def on_stop(")
+    if ende > 0:
+        block = block[:ende]
+    assert "abgelaufenen_merker_aufraeumen" in block, \
+        "der Waechter muss beim Start laufen (Nr. 66)"
 
 
 def test_66f_sicherung_verlaengert_und_raeumt_auf():

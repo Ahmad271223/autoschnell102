@@ -51,11 +51,16 @@ def test_01b_kritische_indizes_werden_live_geprueft():
 
 
 def test_02_ready_liefert_503_wenn_ein_fehler_vorliegt():
+    """20.09.2026 (Nr. 55): Die Pruefung steckt jetzt in _readiness_pruefen()
+    und liefert (Ergebnis, Code); readiness_check setzt den Code und
+    entscheidet ueber die Einzelheiten (Nr. 54). Die Zusage bleibt dieselbe:
+    ein Fehler ergibt 503."""
     s = _quelle("backend", "server.py")
     stelle = s.index("bereit = not fehler")
     schwanz = s[stelle:stelle + 400]
-    assert "response.status_code = 503" in schwanz
+    assert "200 if bereit else 503" in schwanz
     assert '"ready": bereit' in schwanz
+    assert "response.status_code = code" in s
 
 
 def test_03_terminloeschung_loest_erst_die_verweise():

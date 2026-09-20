@@ -169,8 +169,16 @@ def test_08_nginx_gibt_die_besucher_adresse_weiter():
 def test_09_bild_limit_reicht_fuer_ein_buero_mit_30_suchern():
     # server.py wird bewusst NICHT importiert (bindet den Motor-Client an den
     # Test-Loop) — der Quelltext reicht fuer diese Zusage.
+    # 20.09.2026 (Nr. 58): von 1500 auf 3000 erhoeht — 30 Sucher x 40 Bilder
+    # sind schon 1200 fuer EINEN Vergleich, die zweite Runde in derselben
+    # Minute lief ins Limit. Geprueft wird die Zusage, nicht die Zahl.
+    import re
     quelle = (WURZEL / "backend" / "server.py").read_text(encoding="utf-8")
-    assert 'os.environ.get("BILD_PROXY_LIMIT", "1500")' in quelle
+    m = re.search(r'os\.environ\.get\("BILD_PROXY_LIMIT", "(\d+)"\)', quelle)
+    assert m, "BILD_PROXY_LIMIT muss aus der Umgebung kommen"
+    assert int(m.group(1)) >= 2400, (
+        "30 Sucher x 40 Bilder = 1200 je Vergleich — es muss fuer mindestens "
+        "zwei Runden in derselben Minute reichen")
     assert "max_attempts=300" not in quelle.split("_bild_limiter")[1][:400]
 
 

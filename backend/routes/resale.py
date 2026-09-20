@@ -73,8 +73,13 @@ class ListingUpdateIn(BaseModel):
 #: FastAPI vor jeder Pruefung komplett einlesen und als JSON auseinander-
 #: nehmen muss. nginx laesst 25 MB je Anfrage durch (deploy/nginx.conf);
 #: mehr kann hier gar nicht ankommen, also ist das die ehrliche Grenze.
+#:
+#: Die ANZAHL bleibt bei 20 (wie bisher): der Befund zielt auf die
+#: Gesamtgroesse, nicht auf die Stueckzahl — 20 kleine Bilder sind harmlos,
+#: und eine schaerfere Zahl waere eine Verhaltensaenderung der Schnittstelle
+#: ohne Not gewesen. Die Oberflaeche schickt ohnehin Pakete zu vier.
 PHOTOS_GESAMT_MAX = 24_000_000
-PHOTOS_JE_ANFRAGE_MAX = 8
+PHOTOS_JE_ANFRAGE_MAX = 20
 
 
 class PhotoUploadIn(BaseModel):
@@ -89,8 +94,7 @@ class PhotoUploadIn(BaseModel):
             raise ValueError(
                 f"Die Fotos sind zusammen zu gross ({gesamt // 1_000_000} MB). "
                 f"Bitte in kleineren Gruppen hochladen — die Oberflaeche "
-                f"verkleinert sie vorher und schickt hoechstens "
-                f"{PHOTOS_JE_ANFRAGE_MAX} auf einmal.")
+                f"verkleinert sie vorher und schickt sie in Paketen.")
         return v
 
 
