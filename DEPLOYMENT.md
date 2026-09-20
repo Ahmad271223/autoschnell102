@@ -1018,7 +1018,7 @@ gegenseitig ausbremsen:
   Sperre, wenn wirklich eine bestand.
 - **Kleinanzeigen-Rückfall:** `ABRUF_RUECKFALL_TAGESLIMIT` (25) gilt je
   **Sucher** und Tag, nicht mehr je Firma.
-- **Vorschaubilder:** `BILD_PROXY_LIMIT` (1500/min je IP). Der Bild-Link ist
+- **Vorschaubilder:** `BILD_PROXY_LIMIT` (3000/min je IP; 20.09.2026 von 1500 erhoeht — 30 Sucher x 40 Bilder sind schon 1200 fuer EINEN Vergleich). Der Bild-Link ist
   signiert und trägt kein Token, deshalb bleibt es ein IP-Limit — der Wert
   ist aber auf ein Büro mit vielen Suchern ausgelegt (ein Vergleich lädt
   bis zu 40 Bilder).

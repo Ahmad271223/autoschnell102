@@ -484,6 +484,34 @@ class ListingGone(RuntimeError):
     """Inserat existiert nicht mehr (404/410) - kein Retry, saubere Meldung."""
 
 
+_WEITERLEITUNGEN = (301, 302, 303, 307, 308)
+_MAX_WEITERLEITUNGEN = 5
+
+
+async def _get_mit_geprueften_weiterleitungen(client, url: str):
+    """GET, bei dem JEDE Weiterleitung VOR dem Abruf geprueft wird.
+
+    Nachpruefung 20.09.2026, Nr. 74: vorher lief der Abruf mit
+    `follow_redirects=True`. httpx holte damit das Ziel der Weiterleitung
+    bereits, und erst DANACH wurde die Endadresse gegen interne Adressen
+    geprueft. Bei einer offenen Weiterleitung auf der erlaubten Domain war
+    der Zugriff auf eine interne Adresse also schon passiert — die
+    Pruefung kam zu spaet. Der Bild-Proxy loest dasselbe Problem seit
+    laengerem richtig (bild_proxy._holen); hier ist es jetzt genauso."""
+    ziel = url
+    for _ in range(_MAX_WEITERLEITUNGEN):
+        r = await client.get(ziel, follow_redirects=False)
+        if r.status_code not in _WEITERLEITUNGEN:
+            return r, ziel
+        ort = r.headers.get("location") or ""
+        if not ort:
+            return r, ziel
+        ziel = str(httpx.URL(ziel).join(ort))
+        # ZUERST pruefen, DANN abrufen.
+        await _assert_public_host(ziel)
+    raise RuntimeError("Zu viele Weiterleitungen beim Abruf.")
+
+
 async def _fetch_html(url: str) -> str:
     await _assert_public_host(url)
     proxy = get_proxy_url()  # rotierender Proxy-Endpoint (oder None = direkt)
@@ -496,8 +524,11 @@ async def _fetch_html(url: str) -> str:
         # Fingerprint traegt.
         headers = dict(_FETCH_HEADERS)
         headers["User-Agent"] = random_user_agent()
+        # Nr. 74: follow_redirects=False — die Weiterleitungen verfolgt
+        # _get_mit_geprueften_weiterleitungen() von Hand und prueft jede
+        # Stufe VOR dem Abruf.
         async with httpx.AsyncClient(
-            headers=headers, follow_redirects=True, timeout=30.0,
+            headers=headers, follow_redirects=False, timeout=30.0,
             verify=_SSL_VERIFY, proxy=proxy,
         ) as client:
             if "kleinanzeigen.de" in url:
@@ -514,16 +545,14 @@ async def _fetch_html(url: str) -> str:
                     await asyncio.sleep((2 ** attempt) * random.uniform(0.6, 1.4))
 
             try:
-                r = await client.get(url)
+                r, final_url = await _get_mit_geprueften_weiterleitungen(client, url)
+            except ListingGone:
+                raise
             except Exception as exc:
                 last_exc = exc
                 await _backoff()
                 continue
-            # Nach Redirects erneut pruefen: die finale URL darf ebenfalls
-            # nicht auf eine interne Adresse zeigen.
-            final_url = str(r.url)
             if final_url != url:
-                await _assert_public_host(final_url)
                 # Geloeschte Anzeigen werden von Kleinanzeigen mit HTTP 200
                 # auf die Kategorie-/Suchseite umgeleitet: der /s-anzeige/-
                 # Pfad verschwindet aus der URL -> Anzeige existiert nicht mehr.

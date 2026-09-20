@@ -38,6 +38,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from rate_limiter import SlidingWindowRateLimiter
+from konfig import zahl_env
 import wartung
 
 from auth import hash_password
@@ -400,12 +401,84 @@ async def _kern_fehler() -> list:
 _PROZESS_START = datetime.now(timezone.utc)
 
 
+#: Nachpruefung 20.09.2026, Nr. 55: /api/ready loeste bei JEDEM Aufruf
+#: einen DB-Ping, mehrere Abfragen, Index- und Plattenpruefungen und bei
+#: S3/R2 ein head_bucket aus — ohne eigene Bremse davor. Ein Fremder konnte
+#: den Betriebscheck damit dauerhaft haemmern. Das Ergebnis wird jetzt
+#: kurz zwischengespeichert: der Lastverteiler fragt alle paar Sekunden,
+#: mehr als ein voller Durchlauf pro Fenster bringt ohnehin nichts.
+READY_CACHE_S = zahl_env("READY_CACHE_S", 5, unten=0, oben=60)
+_ready_stand = {"bis": 0.0, "ergebnis": None, "code": 200}
+_ready_lock = asyncio.Lock()
+
+#: Netze, aus denen die Einzelheiten von /api/ready sichtbar bleiben:
+#: die eigenen Container, der Load Balancer und der zweite Server.
+_EIGENE_NETZE = tuple(__import__("ipaddress").ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
+
+
+async def _darf_betriebsdaten_sehen(request: Request) -> bool:
+    """Wer die Einzelheiten von /api/ready sehen darf (Nr. 54).
+
+    Ohne Anmeldung sah jeder Schema-Version, freien Speicher, offene
+    Betriebsalarme, haengende Jobs, die Zahl der Super-Admins und wie viele
+    davon ohne Zwei-Faktor sind — eine Landkarte fuer einen Angreifer.
+    Jetzt: der Super-Admin sieht alles, und Aufrufe aus dem eigenen
+    Container/privaten Netz auch (deploy/rollout.sh und freigeben.sh holen
+    die Begruendung genau so). Alle anderen bekommen nur ready true/false
+    mit 200 bzw. 503 — das ist alles, was ein Lastverteiler braucht."""
+    from rate_limiter import client_ip
+    try:
+        import ipaddress
+        adresse = ipaddress.ip_address(client_ip(request))
+        # Ausdrueckliche Netze statt `is_private`: das schliesst in Python
+        # auch die Dokumentations-Netze (203.0.113.0/24, 192.0.2.0/24,
+        # 198.51.100.0/24) und Carrier-Grade-NAT ein — echte oeffentliche
+        # Adressen, die hier nichts zu suchen haben.
+        if adresse.is_loopback or adresse.is_link_local or any(
+                adresse in netz for netz in _EIGENE_NETZE):
+            return True
+    except (ImportError, ValueError):
+        pass
+    kopf = request.headers.get("authorization") or ""
+    if not kopf.lower().startswith("bearer "):
+        return False
+    try:
+        from auth import decode_token
+        daten = decode_token(kopf.split(" ", 1)[1].strip())
+        nutzer = await db.users.find_one(
+            {"id": (daten or {}).get("sub")},
+            {"_id": 0, "is_super_admin": 1, "active": 1})
+        return bool(nutzer and nutzer.get("is_super_admin")
+                    and nutzer.get("active") is not False)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @api.get("/ready")
-async def readiness_check(response: Response):
+async def readiness_check(request: Request, response: Response):
     """Readiness (Audit 09/2026, Punkt 42) — getrennt von /health (Liveness).
     Nicht bereit (503): Datenbank, Migrationsstand, Speicherplatz oder
     Datei-Speicher fehlen. Warnungen (200): Backup-Alter, offene
-    Betriebsalarme, haengende Jobs, S3 nicht erreichbar."""
+    Betriebsalarme, haengende Jobs, S3 nicht erreichbar.
+
+    Nachpruefung 20.09.2026: Einzelheiten nur fuer den Super-Admin bzw. aus
+    dem privaten Netz (Nr. 54); das Ergebnis wird READY_CACHE_S Sekunden
+    zwischengespeichert (Nr. 55)."""
+    async with _ready_lock:
+        import time as _t
+        if _t.monotonic() > _ready_stand["bis"] or _ready_stand["ergebnis"] is None:
+            _ready_stand["ergebnis"], _ready_stand["code"] = await _readiness_pruefen()
+            _ready_stand["bis"] = _t.monotonic() + READY_CACHE_S
+        ergebnis, code = _ready_stand["ergebnis"], _ready_stand["code"]
+    response.status_code = code
+    if await _darf_betriebsdaten_sehen(request):
+        return ergebnis
+    return {"ready": ergebnis["ready"]}
+
+
+async def _readiness_pruefen():
+    """Die eigentliche Pruefung — Ergebnis und HTTP-Code."""
     import shutil
     from migrationen import ZIEL_VERSION, aktuelle_version
     fehler, warnungen, info = [], [], {}
@@ -430,9 +503,15 @@ async def readiness_check(response: Response):
             info[f"frei_mb_{name}"] = frei_mb
             if frei_mb < int(os.environ.get("MIN_FREI_MB", "500") or 500):
                 fehler.append(f"{name}: nur {frei_mb} MB frei")
-            probe = pfad / ".readiness"
-            probe.write_text("ok")
-            probe.unlink()
+            # Nachpruefung 20.09.2026, Nr. 56: hier stand fest ".readiness".
+            # Zwei gleichzeitige Aufrufe loeschten sich die Datei gegenseitig,
+            # der zweite unlink() schlug fehl und meldete "nicht schreibbar"
+            # -> falsches 503, obwohl die Platte gesund war.
+            probe = pfad / f".readiness-{uuid.uuid4().hex[:12]}"
+            try:
+                probe.write_text("ok")
+            finally:
+                probe.unlink(missing_ok=True)
         except Exception as exc:
             fehler.append(f"{name}: nicht schreibbar ({exc})")
     if os.environ.get("S3_BUCKET"):
@@ -654,9 +733,8 @@ async def readiness_check(response: Response):
     info["betriebsbereit"] = {**BETRIEBSBEREIT, **{f"index_{k}": v
                                                    for k, v in steht.items()}}
     bereit = not fehler
-    if not bereit:
-        response.status_code = 503
-    return {"ready": bereit, "fehler": fehler, "warnungen": warnungen, **info}
+    return ({"ready": bereit, "fehler": fehler, "warnungen": warnungen, **info},
+            200 if bereit else 503)
 
 
 # ---------- Datei-Auslieferung (Storage-Abstraktion) ----------
@@ -708,14 +786,18 @@ async def serve_file(key: str, exp: Optional[str] = None, sig: Optional[str] = N
 
 
 # ---------- Bild-Proxy fuer Inseratsfotos (10.09.2026) ----------
-# 300 Bilder / 60 s je IP: eine Vergleichsseite laedt hoechstens 10-40.
-# Runde 26 (12.09.2026): 30 Sucher im selben Buero teilen sich EINE oeffentliche
-# IP, und ein Vergleich laedt bis zu 40 Vorschaubilder — mit 300/min bekamen
-# spaetere Nutzer 429 und sahen Fahrzeuge ohne Bild. Die Adresse ist beim
-# signierten Bild-Link die einzige Kennung (kein Token im <img>-Tag), deshalb
-# bleibt es ein IP-Limit, aber mit realistischem Wert (BILD_PROXY_LIMIT).
+# Runde 26 (12.09.2026): 30 Sucher im selben Buero teilen sich EINE
+# oeffentliche IP, und ein Vergleich laedt bis zu 40 Vorschaubilder — mit
+# 300/min bekamen spaetere Nutzer 429 und sahen Fahrzeuge ohne Bild. Die
+# Adresse ist beim signierten Bild-Link die einzige Kennung (kein Token im
+# <img>-Tag), deshalb bleibt es ein IP-Limit (BILD_PROXY_LIMIT).
+# Nachpruefung 20.09.2026, Nr. 58: 1500 war zu knapp gerechnet —
+# 30 Sucher x 40 Bilder = 1200 fuer je EINEN Vergleich. Wer in derselben
+# Minute ein zweites Fahrzeug ansieht, lief ins Limit. Mit 3000 sind das
+# gut zwei volle Runden; die Bilder selbst sind zwischengespeichert, ein
+# Treffer kostet also fast nichts.
 _bild_limiter = SlidingWindowRateLimiter(
-    max_attempts=int(os.environ.get("BILD_PROXY_LIMIT", "1500") or 1500),
+    max_attempts=int(os.environ.get("BILD_PROXY_LIMIT", "3000") or 3000),
     window_seconds=60, name="bild_proxy")
 
 

@@ -238,10 +238,39 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
 
 
 # ----------------------------------------------------------------- SMTP
+#: Fehler, bei denen der SMTP-Server die Mail nachweislich ABGELEHNT hat —
+#: dann ist sicher nichts zugestellt und ein erneuter Versuch ist erlaubt.
+#: Alles andere (z. B. abgerissene Verbindung) ist UNKLAR (Nr. 59).
+_SICHER_ABGELEHNT = (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
+                     smtplib.SMTPHeloError, smtplib.SMTPAuthenticationError,
+                     smtplib.SMTPNotSupportedError, ssl.SSLError,
+                     ConnectionRefusedError, TimeoutError, OSError)
+
+
+def _sicher_nicht_zugestellt(exc: BaseException, fortschritt: dict) -> bool:
+    """Darf nach diesem Fehler gefahrlos erneut gesendet werden?
+
+    Nachpruefung 20.09.2026, Nr. 59: vorher wurde bei JEDER Ausnahme
+    waehrend `send_message()` der Idempotenz-Eintrag freigegeben. Hatte der
+    SMTP-Server die Mail aber schon angenommen und riss die Verbindung erst
+    vor seiner Antwort ab, galt sie lokal als fehlgeschlagen — der naechste
+    Versuch stellte sie ein ZWEITES Mal zu. Bei Resend verhindert das der
+    Idempotency-Key; SMTP kennt so etwas nicht.
+
+    Freigegeben wird jetzt nur noch, wenn die Uebergabe gar nicht begonnen
+    hat (Verbindung/Anmeldung gescheitert) oder der Server ausdruecklich
+    abgelehnt hat."""
+    if not fortschritt.get("uebergabe_laeuft"):
+        return True
+    return isinstance(exc, _SICHER_ABGELEHNT) and not isinstance(
+        exc, smtplib.SMTPServerDisconnected)
+
+
 def _send_sync(*, to: str, subject: str, text: str, html: Optional[str],
                anhang: Optional[bytes], anhang_name: str,
                reply_to: Sequence[str], kopie: Sequence[str],
-               absender_name: Optional[str]) -> None:
+               absender_name: Optional[str],
+               fortschritt: Optional[dict] = None) -> None:
     msg = EmailMessage()
     msg["From"] = _absender(absender_name)
     msg["To"] = to
@@ -257,16 +286,22 @@ def _send_sync(*, to: str, subject: str, text: str, html: Optional[str],
         msg.add_attachment(anhang, maintype="application", subtype="pdf",
                            filename=anhang_name or "Dokument.pdf")
 
+    # Nr. 59: ab dem Aufruf von send_message() ist der Ausgang bei einem
+    # Fehler nicht mehr sicher zu beurteilen — das haelt `fortschritt` fest.
+    fortschritt = fortschritt if fortschritt is not None else {}
     ctx = ssl.create_default_context()
     if SMTP_PORT == 465:
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=20) as s:
             s.login(SMTP_USER, SMTP_PASS)
+            fortschritt["uebergabe_laeuft"] = True
             s.send_message(msg)
     else:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
             s.starttls(context=ctx)
             s.login(SMTP_USER, SMTP_PASS)
+            fortschritt["uebergabe_laeuft"] = True
             s.send_message(msg)
+    fortschritt["fertig"] = True
 
 
 async def send_email(to: str, subject: str, text: str,
@@ -350,11 +385,21 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
                 log.error("email_service: SMTP-Abgabe an %s unter %s ist unklar (frueherer "
                           "Versuch ohne Ergebnis) — NICHT erneut gesendet", to, idempotency_key)
                 return False, ""
+        fortschritt: dict = {}
         try:
-            await asyncio.to_thread(lambda: _send_sync(**argumente))
-        except Exception:
-            if idempotency_key:
+            await asyncio.to_thread(
+                lambda: _send_sync(**argumente, fortschritt=fortschritt))
+        except Exception as exc:
+            # Nr. 59: nur freigeben, wenn sicher NICHTS zugestellt wurde.
+            # Sonst bleibt der Eintrag stehen und gilt beim naechsten Mal
+            # als "unklar" — dann wird NICHT automatisch erneut gesendet,
+            # und der Nutzer sieht den Zustand im Versandstatus.
+            if idempotency_key and _sicher_nicht_zugestellt(exc, fortschritt):
                 await _smtp_idempotenz_freigeben(idempotency_key)
+            elif idempotency_key:
+                log.error("email_service: SMTP-Abgabe an %s ist UNKLAR (%s nach "
+                          "Uebergabe) — der Eintrag bleibt stehen, es wird nicht "
+                          "automatisch erneut gesendet", to, exc.__class__.__name__)
             raise
         if idempotency_key:
             await _smtp_idempotenz_abschliessen(idempotency_key)

@@ -89,9 +89,27 @@ def gueltig(url: str, exp, sig) -> bool:
     return hmac.compare_digest(_mac(url, exp_i), sig)
 
 
+# Dekompressionsbomben: ein 8-MB-JPEG kann 100+ Megapixel ausgeben.
+# Gilt fuer BEIDE Pfade — Vorschau und PDF (Nr. 57).
+_MAX_PIXEL = 40_000_000
+
+
 def _verkleinern(raw: bytes) -> bytes:
+    """Vorschaubild erzeugen.
+
+    Nachpruefung 20.09.2026, Nr. 57: hier stand `Image.open(...)` direkt
+    gefolgt von `im.load()` — OHNE die Pixelpruefung, die der PDF-Pfad
+    (_fuer_pdf) schon hatte. Ein stark komprimiertes Bild mit riesigen
+    Abmessungen ("Dekompressionsbombe") belegte damit beim Entpacken
+    hunderte MB Arbeitsspeicher, obwohl die Datei selbst klein war und die
+    Byte-Grenze (MAX_BYTES) locker einhielt. Jetzt gilt dieselbe Grenze in
+    beiden Pfaden — geprueft VOR dem Entpacken."""
     from PIL import Image
     im = Image.open(io.BytesIO(raw))
+    w, h = im.size
+    if w * h > _MAX_PIXEL:
+        raise ValueError(f"Bild zu gross ({w}x{h})")
+    im.draft("RGB", (THUMB_KANTE, THUMB_KANTE))   # JPEG kleiner dekodieren
     im.load()
     if im.mode not in ("RGB", "L"):
         im = im.convert("RGB")
@@ -102,8 +120,6 @@ def _verkleinern(raw: bytes) -> bytes:
 
 
 _WEITERLEITUNGEN = (301, 302, 303, 307, 308)
-# Dekompressionsbomben: ein 8-MB-JPEG kann 100+ Megapixel ausgeben.
-_MAX_PIXEL = 40_000_000
 
 
 async def _holen(url: str) -> Optional[bytes]:

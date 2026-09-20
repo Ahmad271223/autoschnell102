@@ -126,7 +126,12 @@ services:
       - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-100}
       - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
       - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
-      - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-1500}
+      - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-3000}
+      # Nachpruefung 20.09.2026, Nr. 55: /api/ready loest DB-Ping,
+      # Index-, Platten- und Speicherpruefungen aus. Das Ergebnis wird
+      # so viele Sekunden zwischengespeichert (0 = wie frueher, jeder
+      # Aufruf rechnet neu).
+      - READY_CACHE_S=${READY_CACHE_S:-5}
       # Nachpruefung 20.09.2026: Diese neun standen in .env.example, wurden vom
       # Code gelesen — und erreichten den Container NIE. Wer sie in der .env
       # setzte, aenderte nichts. Die Standardwerte hier sind dieselben wie im

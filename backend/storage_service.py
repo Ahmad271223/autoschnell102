@@ -283,9 +283,14 @@ class LocalDiskStorage:
         pruefung suchte sie, fand nichts und uebersprang den Speicher
         stillschweigend (Pruefbericht 09/2026, roter Befund)."""
         try:
-            probe = self.root / ".erreichbar"
-            probe.write_bytes(b"ok")
-            probe.unlink()
+            # Nr. 56 (gleicher Fehler wie in /api/ready): fester Dateiname
+            # -> zwei gleichzeitige Pruefungen loeschten sich die Datei
+            # gegenseitig und meldeten faelschlich "nicht erreichbar".
+            probe = self.root / f".erreichbar-{uuid.uuid4().hex[:12]}"
+            try:
+                probe.write_bytes(b"ok")
+            finally:
+                probe.unlink(missing_ok=True)
             return True
         except Exception:                       # noqa: BLE001
             return False
@@ -407,16 +412,45 @@ class S3Storage:
         except Exception:
             return False
 
+    #: Wie oft wirklich geschrieben wird (Sekunden). Eine Schreibprobe bei
+    #: JEDEM /api/ready waere unnoetiger Verkehr; nie zu schreiben war aber
+    #: auch falsch — siehe unten.
+    SCHREIBPROBE_ABSTAND_S = 900
+    _letzte_schreibprobe = 0.0
+
     def erreichbar(self) -> bool:
-        """Antwortet der Objektspeicher, und darf dieser Schluessel den
-        Eimer sehen? head_bucket kostet fast nichts und eignet sich fuer
-        die Bereitschaftspruefung bei jedem Aufruf. Ob auch geschrieben
-        werden darf, prueft production_check einmal beim Start."""
+        """Antwortet der Objektspeicher — und darf hier noch GESCHRIEBEN
+        werden?
+
+        Nachpruefung 20.09.2026, Nr. 60: hier stand nur `head_bucket()`.
+        Das beweist Lesezugriff auf den Eimer. Werden dem Schluessel nach
+        dem Start die Schreibrechte entzogen (R2-Token geaendert, Richtlinie
+        angepasst), blieb /api/ready trotzdem gruen — waehrend kein einziges
+        Foto und kein Protokoll mehr gespeichert werden konnte. Jetzt wird
+        zusaetzlich alle SCHREIBPROBE_ABSTAND_S Sekunden wirklich eine
+        winzige Datei geschrieben und wieder geloescht."""
         try:
             self.client.head_bucket(Bucket=self.bucket)
-            return True
         except Exception:                       # noqa: BLE001
             return False
+        import time as _t
+        if _t.monotonic() - self._letzte_schreibprobe < self.SCHREIBPROBE_ABSTAND_S:
+            return True
+        from s3_kompatibel import sse_optionen
+        key = f".bereitschaft/{uuid.uuid4().hex}.txt"
+        try:
+            self.client.put_object(
+                Bucket=self.bucket, Key=key, Body=b"ok",
+                **dict(sse_optionen(os.environ.get("S3_ENDPOINT", ""))))
+            type(self)._letzte_schreibprobe = _t.monotonic()
+        except Exception:                       # noqa: BLE001
+            return False
+        finally:
+            try:
+                self.client.delete_object(Bucket=self.bucket, Key=key)
+            except Exception:                   # noqa: BLE001
+                pass
+        return True
 
 
 def _build_storage():
