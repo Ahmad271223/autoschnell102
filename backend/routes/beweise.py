@@ -85,12 +85,20 @@ async def _fahrzeug_erlaubt(user: dict, vehicle_id: str) -> bool:
         {"vehicle_id": vehicle_id, **await termin_bereich(user)}, limit=1) > 0
 
 
-async def _firmenstatus_pruefen(user: dict) -> None:
+async def _firmenstatus_pruefen(user: dict) -> dict:
     """Runde 16 (15.09.2026): die direkten Beweis-Routen haengen an current_user
     — Chef und Sucher muessen trotzdem durch dieselbe Firmenpruefung wie alle
-    Firmenrouten (Loeschung laeuft -> 409, gesperrt -> 403)."""
+    Firmenrouten (Loeschung laeuft -> 409, gesperrt -> 403).
+
+    Pruefbericht 20.09.2026 (N5): Der Rueckgabewert wurde WEGGEWORFEN. Seit
+    current_firma ein dealer-Konto, das nicht der eingetragene Chef ist, auf
+    Sucher einnordet, steckt genau darin die richtige Rolle — _darf_sehen
+    arbeitete danach weiter mit role="dealer" und gab einem solchen Konto die
+    firmenweite Beweis-Sicht. Jetzt wird das eingenordete Konto
+    zurueckgegeben und von den Aufrufern verwendet."""
     if user.get("role") in ("dealer", "sucher"):
-        await current_firma(user)
+        return await current_firma(user)
+    return user
 
 
 async def _darf_sehen(user: dict, doc: dict) -> bool:
@@ -169,7 +177,12 @@ async def beweis_zum_fahrzeug(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0, "inserat_schluessel": 1, "quelle": 1, "mobile_ad_id": 1,
          "data.detail_url": 1, "data.kleinanzeigen_url": 1})
     ck = BS.inserat_schluessel(v)
-    if ck and v is not None and not v.get("inserat_schluessel"):
+    # Nr. 3 (20.09.2026): Diese Reparatur laeuft in einem GET und wuerde
+    # deshalb an der Schreibpause vorbei schreiben. Sie ist reine Kuer —
+    # beim naechsten Aufruf klappt sie wieder.
+    import wartung as _wartung
+    if (ck and v is not None and not v.get("inserat_schluessel")
+            and not await _wartung.schreiben_pausiert(db)):
         # Altbestand (vor 10.09.2026 verglichen): Zuordnung einmal festhalten,
         # damit Download und Fahrer-App das Dokument ebenfalls finden.
         await db.vehicles.update_one(
@@ -271,7 +284,7 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
 
 @router.get("/beweise/{beweis_id}")
 async def beweis_status(beweis_id: str, user=Depends(current_user)):
-    await _firmenstatus_pruefen(user)
+    user = await _firmenstatus_pruefen(user)
     doc = await db.inserat_beweise.find_one({"id": beweis_id}, {"_id": 0})
     if not doc or not await _darf_sehen(user, doc):
         raise HTTPException(404, _NICHT_GEFUNDEN)
@@ -280,9 +293,9 @@ async def beweis_status(beweis_id: str, user=Depends(current_user)):
 
 @router.get("/beweise/{beweis_id}/pdf")
 async def beweis_pdf(beweis_id: str, user=Depends(current_user)):
-    await _firmenstatus_pruefen(user)
     """Nur mit Authorization-Header (kein ?auth= — Token gehoert nicht in
     Verlauf und Logs); das Frontend laedt per fetch und zeigt eine Blob-URL."""
+    user = await _firmenstatus_pruefen(user)
     doc = await db.inserat_beweise.find_one({"id": beweis_id}, {"_id": 0})
     if not doc or not await _darf_sehen(user, doc):
         raise HTTPException(404, _NICHT_GEFUNDEN)

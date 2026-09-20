@@ -1090,6 +1090,21 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
                 if any(uebergabe.values()):
                     log.info("Sucher %s geloescht: Vorgang an Chef %s uebergeben: %s",
                              user_id, chef["id"], uebergabe)
+                # Pruefbericht 20.09.2026 (Nr. 2): Grabstein fuer die Nachlese.
+                # Eine Anfrage, die VOR der Loeschung durch die Anmeldung kam,
+                # laeuft weiter und kann danach noch einen Vertrag oder Termin
+                # mit dieser user_id anlegen — der bliebe als Waise liegen.
+                # cleanup_service.konto_nachlese_abarbeiten wiederholt die
+                # Uebergabe deshalb noch eine Weile (idempotent).
+                try:
+                    from cleanup_service import KONTO_NACHLESE
+                    await db[KONTO_NACHLESE].update_one(
+                        {"_id": user_id},
+                        {"$set": {"dealer_id": u["dealer_id"], "an": chef["id"],
+                                  "seit": now_iso()}},
+                        upsert=True)
+                except Exception:  # noqa: BLE001 — Loeschung darf daran nie scheitern
+                    log.exception("Konto-Grabstein fuer %s nicht gesetzt", user_id)
             else:
                 log.warning("Sucher %s geloescht: Firma %s ohne Hauptaccount — "
                             "Fahrzeuge bleiben beim alten Besitzer", user_id,

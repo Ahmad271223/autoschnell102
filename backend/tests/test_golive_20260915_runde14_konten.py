@@ -366,7 +366,12 @@ def test_migration_konten_aktiv_feld(wegwerf):
     assert run(db.users.find_one({"id": "mit"}))["active"] is True
     assert run(db.driver_accounts.find_one({"id": "fohne"}))["active"] is True
     assert run(db.driver_accounts.find_one({"id": "fmit"}))["active"] is False
-    assert MIG.ZIEL_VERSION == 8 and MIGRATION_NAMEN()[-1] == "konten_aktiv_feld"
+    # Nachpruefung 20.09.2026 (N3): m9 traegt den Chef-Zeiger im Altbestand
+    # nach. Geprueft wird deshalb, dass m8 weiter DRIN ist und die Zielversion
+    # mit der Liste zusammenpasst — nicht mehr eine feste Zahl.
+    assert "konten_aktiv_feld" in MIGRATION_NAMEN()
+    assert MIG.ZIEL_VERSION == max(n for n, _, _ in MIG.MIGRATIONEN), (
+        "ZIEL_VERSION passt nicht zur Migrationsliste")
 
 
 def MIGRATION_NAMEN():

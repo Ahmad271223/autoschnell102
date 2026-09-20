@@ -278,8 +278,15 @@ async def _fremdes_dealer_konto():
     class _Dealers:
         find_one = staticmethod(firma_lesen)
 
+    class _Users:
+        # Nachpruefung 20.09.2026 (N4): current_firma prueft nach der
+        # Einnordung die Firmensperre — die liest das Chef-Konto.
+        @staticmethod
+        async def find_one(_filter, _proj=None, sort=None):
+            return {"id": chef, "active": True}
+
     echt = deps.db
-    deps.db = SimpleNamespace(dealers=_Dealers())
+    deps.db = SimpleNamespace(dealers=_Dealers(), users=_Users())
     try:
         chef_konto = {"id": chef, "role": "dealer", "dealer_id": firma}
         rest = {"id": zweiter, "role": "dealer", "dealer_id": firma}

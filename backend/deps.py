@@ -369,11 +369,41 @@ async def current_firma(user=Depends(current_user)):
     # Nur bei GESETZTEM Zeiger: fehlt er (Altbestand), greift weiterhin die
     # Ersatzregel aus `ist_haupt_chef`/`current_chef` (aeltestes dealer-Konto),
     # und `current_chef` traegt den Zeiger beim naechsten Mal nach.
+    # Nachpruefung 20.09.2026 (N3): Die Einnordung griff nur bei GESETZTEM
+    # Zeiger. Bei Altbestand ohne `dealers.user_id` blieben dagegen ALLE
+    # dealer-Konten Chef — genau der Fall, den der Fix abdecken sollte.
+    # Jetzt wird der Hauptchef immer eindeutig bestimmt: fehlt der Zeiger,
+    # gilt das aelteste dealer-Konto, und der Zeiger wird per CAS nachgetragen
+    # (dieselbe Regel wie in current_chef/ist_haupt_chef, damit nicht zwei
+    # Stellen unterschiedlich entscheiden). Die Zusatzabfrage trifft nur
+    # Firmen ohne Zeiger, und auch die nur einmal — danach steht er.
     haupt = firma.get("user_id")
+    if user.get("role") == "dealer" and not haupt:
+        aeltester = await db.users.find_one(
+            {"dealer_id": user["dealer_id"], "role": "dealer"},
+            {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+        haupt = (aeltester or {}).get("id")
+        if haupt:
+            try:
+                await db.dealers.update_one(
+                    {"id": user["dealer_id"],
+                     "$or": [{"user_id": {"$exists": False}}, {"user_id": None},
+                             {"user_id": ""}]},
+                    {"$set": {"user_id": haupt}})
+            except Exception:  # noqa: BLE001 — Nachtragen ist Kuer, nicht Pflicht
+                pass
     if user.get("role") == "dealer" and haupt and haupt != user["id"]:
         user = dict(user)          # nie das Dokument des Aufrufers veraendern
         user["role"] = "sucher"
         user["kein_haupt_chef"] = True
+        # Nachpruefung 20.09.2026 (N4): current_user prueft die Firmensperre
+        # nur fuer Konten, die SCHON als Sucher ankommen. Ein uebrig
+        # gebliebenes dealer-Konto kam daran vorbei und lief danach als
+        # Sucher weiter — also die Sperre umgangen. Deshalb hier, direkt
+        # nach der Einnordung, dieselbe Pruefung.
+        if await firma_gesperrt(user["dealer_id"]):
+            raise HTTPException(403, "Die Firma ist gesperrt — bitte den "
+                                     "Administrator kontaktieren.")
     return user
 
 

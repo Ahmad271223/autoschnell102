@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 8
+ZIEL_VERSION = 9
 _SPERRE = "migration"
 
 
@@ -381,6 +381,42 @@ async def m8_konten_aktiv_feld(db) -> dict:
     return {"users_gesperrt": u.modified_count, "fahrer_aktiv": d.modified_count}
 
 
+async def m9_chef_zeiger(db) -> dict:
+    """Pruefbericht 20.09.2026 (N3): `dealers.user_id` zeigt auf den EINEN
+    Hauptchef der Firma. Daran haengen current_chef, ist_haupt_chef und seit
+    dem 20.09. auch die Einnordung in current_firma — wer nicht der
+    eingetragene Chef ist, arbeitet als Sucher.
+
+    Bei Altbestand fehlt der Zeiger. Dann galt die Ersatzregel "aeltestes
+    dealer-Konto", die zwar richtig entscheidet, aber bei JEDER Anfrage eine
+    zusaetzliche Abfrage kostet — und solange sie greift, bleibt ein zweites
+    altes dealer-Konto unentdeckt, wenn es zufaellig das aelteste ist.
+
+    Diese Migration traegt den Zeiger einmalig nach: je Firma ohne
+    `user_id` das aelteste Konto mit role="dealer". Firmen ohne ein einziges
+    dealer-Konto bleiben unberuehrt (die haben ein groesseres Problem, das
+    hier nicht still repariert werden soll) und werden gezaehlt.
+    """
+    gesetzt = ohne_chef = 0
+    async for firma in db.dealers.find(
+            {"$or": [{"user_id": {"$exists": False}}, {"user_id": None},
+                     {"user_id": ""}]},
+            {"_id": 0, "id": 1}):
+        chef = await db.users.find_one(
+            {"dealer_id": firma["id"], "role": "dealer"},
+            {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+        if not chef:
+            ohne_chef += 1
+            continue
+        res = await db.dealers.update_one(
+            {"id": firma["id"],
+             "$or": [{"user_id": {"$exists": False}}, {"user_id": None},
+                     {"user_id": ""}]},
+            {"$set": {"user_id": chef["id"]}})
+        gesetzt += res.modified_count
+    return {"chef_zeiger_gesetzt": gesetzt, "firmen_ohne_chef": ohne_chef}
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -390,6 +426,7 @@ MIGRATIONEN = [
     (6, "besitzer_nachbessern", m6_besitzer_nachbessern),
     (7, "kaeuferdaten_einfrieren", m7_kaeuferdaten_einfrieren),
     (8, "konten_aktiv_feld", m8_konten_aktiv_feld),
+    (9, "chef_zeiger", m9_chef_zeiger),
 ]
 
 
