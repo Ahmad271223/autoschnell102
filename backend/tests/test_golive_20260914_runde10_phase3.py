@@ -209,7 +209,14 @@ def test_35_backup_tagessperre_offsite_zugang_und_restore(wegwerf):
     rq = inspect.getsource(RM.main)
     assert '"--exakt"' in rq
     assert "schema_version_setzen(ziel, flags_dump)" in inspect.getsource(RM.wiederherstellen)
-    assert 'getattr(args, "exakt", False)' in inspect.getsource(RM.wiederherstellen)
+    # Nachpruefung 20.09.2026 (Nr. 75): "exakt" war ein Schalter, den der
+    # dokumentierte Befehl nie setzte — dadurch blieben live-eigene
+    # Collections stehen (Mischstand). Jetzt ist es der Standard, und nur
+    # --zusaetzliche-behalten schaltet es ab. Die Zusage bleibt dieselbe:
+    # der Live-Stand entspricht danach dem Backup.
+    assert 'exakt = not getattr(args, "zusaetzliche_behalten", False)' in \
+        inspect.getsource(RM.wiederherstellen)
+    assert '"--zusaetzliche-behalten"' in rq
 
 
 # ============================================================ 3.6
