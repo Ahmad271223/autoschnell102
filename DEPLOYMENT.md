@@ -1544,7 +1544,17 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
 
 ### Go-Live-Schalter: Marktplatz und Inserieren (15.09.2026)
 
-- **Standard in Produktion: aus.** `MARKTPLATZ_AKTIV` (Compose-Default `false`) schaltet den
+> **STAND 20.09.2026: Der Marktplatz ist WIEDER AUF.** Der Compose-Standard steht auf
+> `true`. Der Schalter bleibt vollständig erhalten — `MARKTPLATZ_AKTIV=false` in der
+> Server-`.env` plus Rollout schließt alles wieder, ohne Code anzufassen.
+> **Achtung:** Eine ausdrückliche Zeile in der Server-`.env` gewinnt über den
+> Compose-Standard. Stand dort beim Abschalten am 15.09. ein `MARKTPLATZ_AKTIV=false`,
+> muss es zum Öffnen entfernt oder auf `true` gesetzt werden:
+> `sh deploy/env_setzen.sh MARKTPLATZ_AKTIV=true`
+>
+> Der Abschnitt unten beschreibt den Schalter, wie er am 15.09.2026 gebaut wurde.
+
+- **Ursprünglich: Standard aus.** `MARKTPLATZ_AKTIV` schaltet den
   B2B-Marktplatz (Zwischenhändler-Anmeldung, Marktplatz-Seiten, Kaufanfragen, Einladungen,
   Verkaufspaket) und das Inserieren („Jetzt inserieren“, „Weiterverkaufen“, Inserats-Editor) ab.
   Die Routen antworten mit **503 „Demnächst verfügbar“**, die Oberfläche blendet Menüpunkte,
@@ -1598,6 +1608,54 @@ DB_NAME=... MARKTPLATZ_AKTIV=true TEST_BASE_URL=http://127.0.0.1:8002   python -
 
 Testkonten werden am Ende wieder entfernt (`--behalten` lässt sie stehen). Exit 0 = alles wie
 erwartet.
+
+### Cloudflare schneidet lange Anfragen vor nginx ab (20.09.2026)
+
+nginx laesst in beiden Produktionsvorlagen `proxy_read_timeout 300s` zu, und Teile der
+Anwendung rechnen mit bis zu 180 s. **Cloudflare bricht aber frueher ab** — der
+dokumentierte Standard liegt bei rund 100 Sekunden (Fehler **524**). Was laenger dauert,
+sieht der Nutzer als Cloudflare-Fehlerseite, waehrend nginx und das Backend noch arbeiten.
+
+**Was daraus folgt:** Kein Weg, auf den ein Nutzer wartet, darf synchron laenger als etwa
+90 Sekunden laufen. Lange Arbeit gehoert in einen Auftrag mit Statusabfrage — so laeuft
+das Einlesen neuer Links bereits (`link_jobs`, das Frontend fragt nach). Beim Bauen neuer
+Funktionen ist das die Grenze, an der man sich orientiert, nicht die 300 s aus nginx.
+
+**Betroffen sind heute:** Vertrags-PDF mit vielen Fotos und der Protokoll-Abschluss. Beide
+liegen normal weit darunter; der gemeinsame Apify-Topf (siehe unten) hat den langsamsten
+gemessenen Fall von 143 s auf 83 s gedrueckt und damit zusaetzlich Luft geschaffen.
+
+### Gemeinsamer Apify-Topf und echtes Auslaufen der Schreibpause (20.09.2026, Nachpruefung)
+
+**Gemeinsamer Topf statt zwei fester Grenzen.** mobile.de und AutoScout24 laufen beide
+ueber Apify. Zwei feste Obergrenzen hatten zwei Nachteile zugleich: zusammen durften sie
+mehr, als der Plan erlaubt (429), und keine konnte die Plaetze der anderen nutzen, wenn
+die gerade ruhte. Gemessen mit `backend/scripts/lasttest_apify_grenze.py --eine-quelle`
+(100 mobile.de-Links, je 20 s Apify-Zeit):
+
+| Einstellung | Hoechststand | letzter Sucher |
+|---|---|---|
+| 16 + 16 fest | 16 | **143 s** — das Frontend gibt nach 120 s auf |
+| gemeinsamer Topf 32 | 32 | **83 s** |
+
+Jeder Apify-Abruf belegt jetzt einen Platz im Topf `apify` **und** einen seiner Quelle.
+Zusammen nie mehr als `APIFY_MAX_PARALLEL`, einzeln bis zum vollen Plan. Standard:
+`MAX_CONCURRENT_MOBILE=32`, `MAX_CONCURRENT_AUTOSCOUT=32`, `APIFY_MAX_PARALLEL=32`. Der
+Start **warnt**, wenn eine Quelle weniger darf als der Plan — dann liegen Plaetze brach.
+`LINK_JOB_MAX_OFFEN_JE_FIRMA` steht jetzt auf 200 (vorher exakt die Zielgroesse 100).
+
+**Echtes Auslaufen statt blindem Schlafen.** Die Schreibpause (`BACKUP_WARTUNG=true`,
+nur ohne Replica Set noetig) wartete nach dem Einschalten stur `BACKUP_WARTUNG_WARTEN_S`
+Sekunden und begann dann den Dump — ohne zu wissen, ob noch jemand schreibt. Jetzt meldet
+**jeder Backend-Prozess** waehrend einer Pause einmal je Sekunde seine offenen
+Schreibzugriffe nach `wartung_schreiber`; die Sicherung wartet, bis alle null melden
+(hoechstens `BACKUP_AUSLAUFEN_MAX_S`, Standard 120 s).
+
+**Wichtig:** Die Zusage „stichtagsgenau" faellt jetzt **nur** bei bestaetigtem Auslaufen.
+Meldet niemand (alte Fassung ohne Melder) oder laeuft die Frist ab, wird trotzdem
+gesichert — aber im Log und im Manifest steht, dass die Sicherung nicht stichtagsgenau
+ist. Die Melde-Sammlung ist vom Dump ausgenommen und wird im Normalbetrieb gar nicht
+beschrieben.
 
 ### Apify-Grenze: mobile.de und AutoScout24 teilen sich einen Plan (20.09.2026)
 

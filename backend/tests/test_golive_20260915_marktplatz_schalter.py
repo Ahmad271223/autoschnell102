@@ -83,9 +83,12 @@ def test_router_und_routen_tragen_den_schalter():
     team = (BACKEND / "routes" / "team.py").read_text(encoding="utf-8")
     assert '@router.get("/dealer/sale-plan", dependencies=[Depends(marktplatz_freigeschaltet)])' in team
     assert '@router.post("/dealer/sale-plan/upgrade-request", dependencies=[Depends(marktplatz_freigeschaltet)])' in team
-    # Produktion: Compose-Default aus, CI: an
+    # Wunsch Ahmad 20.09.2026: Der Marktplatz ist wieder AUF — der
+    # Compose-Standard steht deshalb auf true. Der SCHALTER bleibt
+    # vollstaendig erhalten: eine Zeile in der Server-.env schliesst alles
+    # wieder, ohne Code anzufassen. Genau das prueft dieser Test jetzt.
     compose = (BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-false}" in compose
+    assert "MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-true}" in compose
     ci = (BACKEND.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert ci.count('MARKTPLATZ_AKTIV: "true"') == 2
     # Oberflaeche: Schalter-Seiten und Ausblendungen

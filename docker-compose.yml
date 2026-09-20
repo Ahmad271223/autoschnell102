@@ -123,7 +123,9 @@ services:
       - LOGIN_KONTO_LIMIT=${LOGIN_KONTO_LIMIT:-30}
       - LOGIN_KONTO_FENSTER=${LOGIN_KONTO_FENSTER:-900}
       - LINK_JOB_MAX_OFFEN_JE_KONTO=${LINK_JOB_MAX_OFFEN_JE_KONTO:-20}
-      - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-100}
+      # N9: 100 war exakt Ahmads Zielgroesse — schon ein aelterer offener
+      # Auftrag liess dann keine vollen 100 mehr zu. Jetzt Luft nach oben.
+      - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-200}
       - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
       - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-3000}
@@ -225,12 +227,23 @@ services:
       # 20+20 gegen einen 32er-Plan -> 8 von 40 Suchern sahen einen Fehler;
       # 16+16 -> null. Kleinanzeigen zaehlt NICHT mit (eigener Dienst).
       # Groesserer Apify-Plan? Dann APIFY_MAX_PARALLEL und beide Werte anheben.
-      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-16}
-      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-16}
+      # Seit dem gemeinsamen Apify-Topf (N9) duerfen beide Quellen bis zum
+      # vollen Plan — zusammen deckelt APIFY_MAX_PARALLEL. Vorher lagen 16
+      # Plaetze brach, wenn nur eine Quelle gefragt war: 100 mobile.de-Links
+      # brauchten 143 s, das Frontend gibt nach 120 s auf.
+      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-32}
+      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-32}
       - APIFY_MAX_PARALLEL=${APIFY_MAX_PARALLEL:-32}
       # Abstand, bevor ein wegen Tempolimit abgewiesener Abruf erneut startet.
       # Ohne ihn waren alle drei Versuche in gut einer Sekunde verbraucht.
       - LINK_JOB_TEMPOLIMIT_WARTEN=${LINK_JOB_TEMPOLIMIT_WARTEN:-5}
+      # Wie lange die Sicherung hoechstens darauf wartet, dass alle
+      # Backend-Prozesse null offene Schreibzugriffe melden (N6). Danach
+      # laeuft sie trotzdem, gilt aber nicht als stichtagsgenau.
+      - BACKUP_AUSLAUFEN_MAX_S=${BACKUP_AUSLAUFEN_MAX_S:-120}
+      # Wie lange nach dem Loeschen eines Suchers noch nachgesehen wird, ob
+      # eine laufende Anfrage Waisendaten hinterlassen hat (Nr. 2).
+      - KONTO_NACHLESE_FENSTER_MIN=${KONTO_NACHLESE_FENSTER_MIN:-30}
       - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-32}
       # Eigenheiten S3-kompatibler Speicher (Cloudflare R2)
       - S3_SSE=${S3_SSE:-auto}
@@ -242,7 +255,11 @@ services:
       # Entscheidung Ahmad 14.09.2026: Zwei-Faktor fuer den Super-Admin ist Pflicht
       - MFA_PFLICHT=${MFA_PFLICHT:-true}
       # Go-Live-Schalter (15.09.2026): Marktplatz + Inserieren aus, bis true
-      - MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-false}
+      # Wunsch Ahmad 20.09.2026: Der Marktplatz ist WIEDER AUF. Der Schalter
+      # bleibt bestehen — auf "false" ist alles mit einem Rollout wieder zu,
+      # ohne Code anzufassen. ACHTUNG: eine ausdrueckliche Zeile in der
+      # Server-.env gewinnt ueber diesen Standard.
+      - MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-true}
       - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-60}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
