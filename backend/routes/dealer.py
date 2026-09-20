@@ -91,7 +91,10 @@ async def get_settings(user=Depends(current_firma)):
     # Runde 13: C5 — Ein GET eines Suchers schrieb fehlende Regelpakete in das
     # gemeinsame dealers-Dokument. Jetzt: Backfill in der Datenbank nur durch
     # den Chef; ein Sucher bekommt die Standardwerte nur in der Antwort.
-    ist_chef = user.get("role") == "dealer"
+    # Pruefbericht 20.09.2026 (P0): nur der EINE Hauptchef schreibt in das
+    # gemeinsame Firmen-Dokument zurueck.
+    from deps import ist_haupt_chef
+    ist_chef = await ist_haupt_chef(user)
     if dealer:
         for feld, standard in _SETTINGS_STANDARDS:
             if dealer.get(feld):
@@ -146,8 +149,10 @@ async def set_active_profile(body: ActiveProfileIn, user=Depends(current_firma))
     Sucher wechseln nur IHR eigenes Profil (Override), nicht das des Chefs."""
     if body.active_profile not in ("inland", "export"):
         raise HTTPException(400, "active_profile muss 'inland' oder 'export' sein")
-    from deps import log_activity_sicher
-    if user.get("role") == "sucher":
+    from deps import ist_haupt_chef, log_activity_sicher
+    # Pruefbericht 20.09.2026 (P0): wie bei den Einstellungen — nur der
+    # Hauptchef schaltet das Profil der FIRMA um, alle anderen ihr eigenes.
+    if not await ist_haupt_chef(user):
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": {"settings_override.active_profile": body.active_profile}},
@@ -264,9 +269,13 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
     """Chef schreibt die Händler-Vorgaben. Sucher speichern dieselben Felder
     als PERSÖNLICHEN Override (users.settings_override) — die Chef-Werte
     bleiben unverändert und dienen weiter als Vorbefüllung."""
-    from deps import SUCHER_SETTINGS_FIELDS, effective_dealer
+    from deps import SUCHER_SETTINGS_FIELDS, effective_dealer, ist_haupt_chef
     update = _collect_settings_update(body)
-    if user.get("role") == "sucher":
+    # Pruefbericht 20.09.2026 (P0): frueher entschied `role == "sucher"`.
+    # Ein zweites dealer-Konto derselben Firma schrieb damit die
+    # firmenweiten Vorgaben um. Jetzt bekommt JEDER ausser dem Hauptchef
+    # einen persoenlichen Override — das ist die sichere Seite.
+    if not await ist_haupt_chef(user):
         from deps import log_activity_sicher
         # Nur ECHTE Abweichungen von der Chef-Vorgabe werden Override. Die
         # Oberflaeche schickt beim Speichern alle effektiven Werte zurueck —
@@ -344,7 +353,12 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     logo_url auf den ausgelieferten /api/files/<key>-Pfad. Entscheidung Ahmad
     16.09.2026: nur der Chef — Sucher bekommen 403 (vorher setzten sie ein
     persoenliches Logo als Override)."""
-    if user.get("role") == "sucher":
+    # Pruefbericht 20.09.2026 (P0): hier stand nur `role == "sucher"`. Ein
+    # zweites oder liegengebliebenes dealer-Konto derselben Firma kam damit
+    # durch und konnte das Firmenlogo aller austauschen. Jetzt entscheidet
+    # dieselbe Regel wie in current_chef: nur der eingetragene Hauptchef.
+    from deps import ist_haupt_chef
+    if not await ist_haupt_chef(user):
         raise HTTPException(403, "Das Firmenlogo ändert nur der Chef.")
     import base64
     from storage_service import make_key, storage, StorageError, loeschen_oder_vormerken
@@ -545,7 +559,10 @@ async def dealer_cancel_subscription(user=Depends(current_firma)):
     uns das Datum, lassen das Abo aber bis `expires_at` weiter aktiv. Damit
     bekommt der Händler die bezahlte Zeit zu Ende und keine sofortige
     Sperre. Verlängern bleibt jederzeit möglich (neuer Checkout)."""
-    if user.get("role") == "sucher":
+    # Pruefbericht 20.09.2026 (P0): ein zweites dealer-Konto der Firma kam
+    # hier durch und konnte das Abo der Firma kuendigen.
+    from deps import ist_haupt_chef
+    if not await ist_haupt_chef(user):
         raise HTTPException(403, "Nur der Händler-Hauptaccount darf Abos verwalten")
     # Nachpruefung Runde 14 (Nr. 70): GENAU das Abo kuendigen, das die
     # Anzeige zeigt (massgebliches_abo). Vorher suchte die Kuendigung nur das

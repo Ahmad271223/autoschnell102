@@ -999,10 +999,29 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
         # haengen bleibt, den es nicht mehr gibt. Scheitert das, wird die
         # Loeschung trotzdem zu Ende gefuehrt — aber NICHT still: ein
         # Betriebsalarm nennt das Fahrzeug, damit es jemand nachzieht.
+        #
+        # Pruefbericht 20.09.2026 (P1): Hier wurde NUR auf eine Ausnahme
+        # geachtet — `fahrzeug_status_aggregieren` wirft aber ausdruecklich
+        # NIE nach aussen, sie liefert bei einem CAS- oder Datenbank-Konflikt
+        # ein stilles None. Das hiess: Vertrag weg, Kaufvorgang storniert,
+        # Fahrzeug steht weiter auf "gekauft" oder "Abholung geplant" — ohne
+        # Alarm und ohne Nachholer. Besonders leicht zu treffen, wenn zwei
+        # Sucher am selben Inserat arbeiten.
+        # 250 Zeilen weiter oben macht es die Vertrags-Nacharbeit laengst
+        # richtig (`... is None` -> Merker bleibt stehen); jetzt hier genauso.
         try:
             import kaufvorgang as _kv
-            for vid in {k.get("vehicle_id") for k in betroffen if k.get("vehicle_id")}:
-                await _kv.fahrzeug_status_aggregieren(vid, dealer_id)
+            fahrzeuge = {k.get("vehicle_id") for k in betroffen if k.get("vehicle_id")}
+            offen = [vid for vid in sorted(fahrzeuge)
+                     if await _kv.fahrzeug_status_aggregieren(vid, dealer_id) is None]
+            if offen:
+                log.warning("Fahrzeugstatus nach Vertragsloeschung %s fuer %s "
+                            "nicht abgeleitet", contract_id, offen)
+                await alarm(db, "fahrzeugstatus_nach_loeschung_offen",
+                            ref=contract_id, dealer_id=dealer_id or "",
+                            fahrzeuge=offen,
+                            fehler="Zusammenfassung lieferte kein Ergebnis "
+                                   "(CAS- oder Datenbank-Konflikt)")
         except Exception as exc:  # noqa: BLE001
             log.exception("Fahrzeugstatus nach Vertragsloeschung %s nicht aktualisiert", contract_id)
             try:

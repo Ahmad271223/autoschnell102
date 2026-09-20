@@ -634,7 +634,10 @@ async def list_appointments(response: Response, user=Depends(current_firma),
     drivers_map = {}
     # Nachpruefung 15.09.2026 (Fahrer Nr. 15): Sucher sehen Name und Status des
     # Fahrers, aber keine Fahrer-ID und keine E-Mail (nur der Chef).
-    chef_sicht = user.get("role") == "dealer"
+    # Pruefbericht 20.09.2026 (P0): nur der EINE Hauptchef sieht Fahrer-ID
+    # und E-Mail — ein zweites dealer-Konto der Firma bekam sie bisher auch.
+    from deps import ist_haupt_chef
+    chef_sicht = await ist_haupt_chef(user)
     link_ids = [
         link["driver_account_id"] async for link in
         db.dealer_drivers.find({"dealer_id": user["dealer_id"]}, {"_id": 0, "driver_account_id": 1})
@@ -713,7 +716,10 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
             {"_id": 0, "id": 1, "display_name": 1, "driver_code": 1, "email": 1},
         )
         if d:
-            chef_sicht = user.get("role") == "dealer"     # Nachpruefung 15.09.2026 (Fahrer Nr. 15)
+            # Nachpruefung 15.09.2026 (Fahrer Nr. 15); 20.09.2026 (P0): nur
+            # der eingetragene Hauptchef, nicht jedes dealer-Konto.
+            from deps import ist_haupt_chef
+            chef_sicht = await ist_haupt_chef(user)
             a["driver"] = {
                 "id": d["id"], "name": d.get("display_name"),
                 "driver_code": d.get("driver_code") if chef_sicht else None,

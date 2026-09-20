@@ -2515,3 +2515,57 @@ ziehen. Die Schnittstelle: `GET /api/admin/users/{id}/contracts?seite=&limit=`
 (Standard 20) liefert zusaetzlich `gesamt`, `weitere` und `seite`.
 
 Waechter: `backend/tests/test_probeabo_vertragsliste_20260920.py` (15 Tests).
+
+---
+
+### Pruefbericht 20.09.2026 (P0/P1) — drei bestaetigt, drei schon erledigt
+
+| # | Befund | Stand |
+|---|---|---|
+| **P0** | Zweites/aelteres dealer-Konto bekam Chef-Rechte | **bestaetigt und behoben** |
+| **P1** | Gleichzeitige Vertragserstellung scheitert sichtbar mit 503 | **bestaetigt und behoben** |
+| **P1** | Fahrzeugstatus nach Vertragsloeschung dauerhaft falsch | **bestaetigt und behoben** |
+| P1 | Compose reicht nicht alle Limits durch | schon erledigt (Nr. 21-23 + Nr. 81) |
+| P1 | Backup ohne harten Snapshot | trifft diese Installation nicht (Replica Set) |
+| P1 | Backup-Lock-Fehler galt als "anderer Worker" | schon erledigt (Nr. 9) |
+
+**P0 — der kritischste.** `current_chef` prueft seit dem 15.09.2026 richtig gegen
+`dealers.user_id`. Sechs andere Stellen fragten aber nur `role == "dealer"` und
+behandelten damit **jedes** dealer-Konto der Firma als Chef:
+
+| Weg | Was ein zweites Chef-Konto konnte |
+|---|---|
+| `PUT /dealer/settings` | firmenweite Vorgaben ueberschreiben |
+| `POST /dealer/logo` | Firmenlogo aller austauschen |
+| `POST /dealer/subscription/cancel` | **das Abo der Firma kuendigen** |
+| `PUT /dealer/active-profile` | Firmenprofil umschalten |
+| Terminliste | Fahrer-ID und E-Mail sehen |
+| Fahrerliste | vollstaendige Fahrerdaten sehen |
+
+Die Sucher- und Abo-**Verwaltung** war nie betroffen: `current_haendler` ist
+`current_chef`. Neu ist `deps.ist_haupt_chef(user)` — dieselbe Regel wie
+`current_chef`, nur als Ja/Nein statt als 403, fail-closed und an allen sechs
+Stellen verwendet.
+
+Wie entsteht ueberhaupt ein zweites dealer-Konto? Im Normalbetrieb **gar nicht**:
+die Anlage legt genau eines an, und der Chefwechsel stuft unter einer Sperre alle
+anderen zu Suchern herab. Es bleiben zwei echte Wege — ein Chefwechsel, der zwischen
+den Schritten abbricht, und Altbestand von vor dem 15.09.2026. Genau dafuer ist die
+Pruefung da.
+
+**P1 Vertragssperre.** `auto_daten.vertrag_sperre()` wartet 6 s und wirft dann
+`SperreBelegt` -> 503. An dieser Stelle steht fest, dass **nichts** geschrieben wurde
+(die Sperre kam nie zustande) — ein zweiter Versuch ist also gefahrlos. Der Server
+sagt das jetzt mit `X-Wiederholen: 1`, und die Oberflaeche wiederholt bis zu zweimal
+nach `Retry-After`. **Nur bei dieser Kopfzeile**: ein beliebiger 503 wird nie
+wiederholt, sonst entstuende beim Vertragsanlegen ein zweiter Vertrag.
+
+**P1 Fahrzeugstatus.** `fahrzeug_status_aggregieren()` wirft ausdruecklich **nie** —
+sie liefert bei einem CAS- oder Datenbank-Konflikt ein stilles `None`. Der Loeschpfad
+achtete aber nur auf eine Ausnahme. Ergebnis konnte sein: Vertrag weg, Kaufvorgang
+storniert, Fahrzeug weiter auf "gekauft". Jetzt wird der Rueckgabewert geprueft und
+ein Betriebsalarm nennt genau die betroffenen Fahrzeuge — so, wie es die
+Vertrags-Nacharbeit 250 Zeilen weiter oben seit Phase 2 macht.
+
+Waechter: `backend/tests/test_pruefbericht_p0p1_20260920.py` (14) und
+sechs weitere in `frontend/src/lib/api.test.js`.

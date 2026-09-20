@@ -67,9 +67,46 @@ export function gehoertZumAktuellenToken(config, aktuell) {
   return gesendet === `Bearer ${aktuell || ""}`;
 }
 
+/** Höchstens so viele automatische Wiederholungen je Anfrage. */
+export const WIEDERHOLEN_MAX = 2;
+
+/**
+ * Darf diese gescheiterte Anfrage automatisch wiederholt werden?
+ *
+ * Prüfbericht 20.09.2026 (P1): Legen zwei Sucher fast gleichzeitig einen
+ * Vertrag zum SELBEN Fahrzeug an, wartet der zweite serverseitig 6 s und
+ * bekam dann einen sichtbaren Fehler — er musste von Hand noch einmal
+ * speichern. Der Server weiß an dieser Stelle aber, dass NICHTS
+ * geschrieben wurde, und sagt es mit `X-Wiederholen: 1`.
+ *
+ * Wichtig: NUR bei dieser Kopfzeile. Ein beliebiger 503 darf niemals
+ * wiederholt werden — beim Anlegen eines Vertrags entstünde sonst ein
+ * zweiter. (Rein exportiert, damit es sich prüfen lässt.)
+ */
+export function darfWiederholen(err) {
+  const r = err?.response;
+  if (!r || r.status !== 503) return false;
+  const kopf = r.headers?.["x-wiederholen"] ?? r.headers?.["X-Wiederholen"];
+  if (String(kopf || "") !== "1") return false;
+  return (err.config?.__versuche || 0) < WIEDERHOLEN_MAX;
+}
+
+/** Wartezeit bis zum nächsten Versuch (Sekunden aus Retry-After, sonst 3 s). */
+export function wiederholenNachMs(err) {
+  const roh = err?.response?.headers?.["retry-after"];
+  const sek = Number.parseInt(String(roh ?? ""), 10);
+  return (Number.isFinite(sek) && sek > 0 ? Math.min(sek, 30) : 3) * 1000;
+}
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {
+    if (darfWiederholen(err)) {
+      const config = err.config;
+      config.__versuche = (config.__versuche || 0) + 1;
+      return new Promise((res) => setTimeout(res, wiederholenNachMs(err)))
+        .then(() => api(config));
+    }
     if (err?.response?.status === 401) {
       const url = err?.config?.url || "";
       if (!gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_APP))) {

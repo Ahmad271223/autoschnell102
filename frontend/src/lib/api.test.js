@@ -5,7 +5,10 @@
  * Server weiterarbeitete. Diese Wege bekommen jetzt ein laengeres Zeitlimit.
  */
 import { describe, expect, it } from "vitest";
-import { gehoertZumAktuellenToken, istLangeAktion, LANGE_AKTION_MS } from "./api";
+import {
+  darfWiederholen, gehoertZumAktuellenToken, istLangeAktion,
+  LANGE_AKTION_MS, wiederholenNachMs, WIEDERHOLEN_MAX,
+} from "./api";
 
 describe("istLangeAktion", () => {
   it("gilt fuer jeden Datei-Abruf (PDF, Bilder)", () => {
@@ -73,5 +76,60 @@ describe("gehoertZumAktuellenToken", () => {
     expect(gehoertZumAktuellenToken({ headers: {} }, "B")).toBe(true);
     expect(gehoertZumAktuellenToken({}, "B")).toBe(true);
     expect(gehoertZumAktuellenToken(undefined, "B")).toBe(true);
+  });
+});
+
+/**
+ * Pruefbericht 20.09.2026 (P1): Legen zwei Sucher fast gleichzeitig einen
+ * Vertrag zum SELBEN Fahrzeug an, wartet der zweite serverseitig 6 s und
+ * bekam dann einen sichtbaren Fehler — er musste von Hand noch einmal
+ * speichern. Der Server weiss an der Stelle, dass NICHTS geschrieben
+ * wurde, und sagt es mit `X-Wiederholen: 1`.
+ */
+describe("darfWiederholen", () => {
+  const fehler = (status, headers = {}, versuche = 0) => ({
+    response: { status, headers },
+    config: { __versuche: versuche },
+  });
+
+  it("wiederholt die belegte Vertragssperre", () => {
+    expect(darfWiederholen(fehler(503, { "x-wiederholen": "1" }))).toBe(true);
+  });
+
+  it("wiederholt NIE einen beliebigen 503", () => {
+    // Sonst entstuende beim Vertragsanlegen ein zweiter Vertrag.
+    expect(darfWiederholen(fehler(503))).toBe(false);
+    expect(darfWiederholen(fehler(503, { "retry-after": "3" }))).toBe(false);
+    expect(darfWiederholen(fehler(503, { "x-wiederholen": "0" }))).toBe(false);
+  });
+
+  it("wiederholt keine anderen Fehler", () => {
+    for (const s of [400, 401, 403, 409, 500, 502, 504]) {
+      expect(darfWiederholen(fehler(s, { "x-wiederholen": "1" }))).toBe(false);
+    }
+    expect(darfWiederholen({})).toBe(false);        // Netzfehler ohne Antwort
+    expect(darfWiederholen(undefined)).toBe(false);
+  });
+
+  it("hoert nach WIEDERHOLEN_MAX auf", () => {
+    const kopf = { "x-wiederholen": "1" };
+    expect(darfWiederholen(fehler(503, kopf, WIEDERHOLEN_MAX - 1))).toBe(true);
+    expect(darfWiederholen(fehler(503, kopf, WIEDERHOLEN_MAX))).toBe(false);
+    expect(darfWiederholen(fehler(503, kopf, 99))).toBe(false);
+  });
+});
+
+describe("wiederholenNachMs", () => {
+  it("nimmt Retry-After in Sekunden", () => {
+    expect(wiederholenNachMs({ response: { headers: { "retry-after": "3" } } })).toBe(3000);
+    expect(wiederholenNachMs({ response: { headers: { "retry-after": "10" } } })).toBe(10000);
+  });
+
+  it("faellt auf 3 s zurueck und wartet nie ewig", () => {
+    expect(wiederholenNachMs({ response: { headers: {} } })).toBe(3000);
+    expect(wiederholenNachMs({ response: { headers: { "retry-after": "quatsch" } } })).toBe(3000);
+    expect(wiederholenNachMs({ response: { headers: { "retry-after": "-5" } } })).toBe(3000);
+    expect(wiederholenNachMs({ response: { headers: { "retry-after": "9999" } } })).toBe(30000);
+    expect(wiederholenNachMs(undefined)).toBe(3000);
   });
 });

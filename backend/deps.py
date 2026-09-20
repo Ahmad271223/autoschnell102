@@ -353,6 +353,37 @@ async def current_firma(user=Depends(current_user)):
     return user
 
 
+async def ist_haupt_chef(user) -> bool:
+    """Ist dieses Konto der EINE Hauptchef seiner Firma?
+
+    Pruefbericht 20.09.2026 (P0): `current_chef` hat das schon immer richtig
+    gemacht (Zeiger `dealers.user_id`), aber SECHS andere Stellen fragten nur
+    `role == "dealer"` — und behandelten damit jedes dealer-Konto der Firma
+    als Chef. Betroffen waren die firmenweiten Einstellungen, das Logo, die
+    Abo-Kuendigung, das Firmenprofil sowie Fahrer-ID/E-Mail in der Termin-
+    und Fahrerliste.
+
+    Ein zweites dealer-Konto entsteht im Normalbetrieb nicht (die Anlage legt
+    genau eines an, der Chefwechsel stuft alle anderen unter einer Sperre zu
+    Suchern herab). Es bleiben zwei echte Wege: ein Chefwechsel, der zwischen
+    den Schritten abbricht, und Altbestand von vor dem 15.09.2026. Genau
+    dafuer ist diese Pruefung da — sie kostet eine indexierte Abfrage.
+
+    Wirft nie; im Zweifel False (fail-closed)."""
+    if user.get("role") != "dealer" or not user.get("dealer_id"):
+        return False
+    firma = await db.dealers.find_one({"id": user["dealer_id"]},
+                                      {"_id": 0, "user_id": 1})
+    haupt = (firma or {}).get("user_id")
+    if haupt:
+        return haupt == user["id"]
+    # Altbestand ohne Zeiger: das aelteste dealer-Konto gilt als Chef.
+    aeltester = await db.users.find_one(
+        {"dealer_id": user["dealer_id"], "role": "dealer"},
+        {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+    return not aeltester or aeltester["id"] == user["id"]
+
+
 async def current_chef(user=Depends(current_firma)):
     """NUR der Haendler-Hauptaccount. Berechtigungsmatrix (PR-Review
     09/2026): destruktive und firmenweite Aktionen (Fahrerliste, fremde

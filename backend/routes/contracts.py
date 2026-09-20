@@ -819,9 +819,17 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     try:
         sperre = await auto_daten.vertrag_sperre(db, user["dealer_id"], body.vehicle_id)
     except auto_daten.SperreBelegt:
+        # Pruefbericht 20.09.2026 (P1): Legen zwei Sucher fast gleichzeitig
+        # einen Vertrag zum SELBEN Fahrzeug an, wartet der zweite 6 s und
+        # bekam dann diesen Fehler zu sehen — er musste von Hand noch einmal
+        # speichern. An dieser Stelle steht fest, dass NICHTS geschrieben
+        # wurde (die Sperre kam nie zustande), ein zweiter Versuch ist also
+        # gefahrlos. `X-Wiederholen` sagt das der Oberflaeche ausdruecklich;
+        # sie wiederholt nur bei DIESER Kopfzeile, nie bei einem beliebigen
+        # 503 (das koennte einen zweiten Vertrag anlegen).
         raise HTTPException(503, "Für dieses Fahrzeug wird gerade ein Kaufvertrag angelegt — "
                                  "bitte in ein paar Sekunden erneut versuchen.",
-                            headers={"Retry-After": "3"})
+                            headers={"Retry-After": "3", "X-Wiederholen": "1"})
     auto_daten_neu = False
     auto_daten_id = None
     # Befund 134 (16.09.2026): die Sperre wird in JEDEM Fall wieder freigegeben

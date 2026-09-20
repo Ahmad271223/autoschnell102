@@ -438,7 +438,10 @@ async def list_drivers(user=Depends(current_firma), response: Response = None):
         async for da in db.driver_accounts.find(
                 {"id": {"$in": ids}}, {"_id": 0, "password_hash": 0}):
             konten[da["id"]] = da
-    voll = user.get("role") == "dealer"
+    # Pruefbericht 20.09.2026 (P0): die vollstaendigen Fahrerdaten
+    # (Kennung, E-Mail) sieht nur der eingetragene Hauptchef.
+    from deps import ist_haupt_chef
+    voll = await ist_haupt_chef(user)
     out = [_fahrer_eintrag(konten[l["driver_account_id"]], l, voll=voll)
            for l in links if l.get("driver_account_id") in konten]
     out.sort(key=lambda d: (d.get("name") or "").lower())
