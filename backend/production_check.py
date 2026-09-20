@@ -267,7 +267,10 @@ def pruefe_produktion(log) -> None:
                 "Uploads/Snapshots wuerden im Betrieb scheitern (Volume-"
                 "Rechte fuer Benutzer 'app' pruefen).")
 
-    for var, default in (("VERTRAG_AUFBEWAHRUNG_TAGE", "90"),
+    # Nachpruefung 20.09.2026: stand hier auf 90, waehrend cleanup_service,
+    # .env.example und Compose mit 60 arbeiten — bei Loeschfristen fuer
+    # Personendaten darf es nur EINE Zahl geben.
+    for var, default in (("VERTRAG_AUFBEWAHRUNG_TAGE", "60"),
                          ("SNAPSHOT_RETENTION_DAYS", "60"),
                          ("BEWEIS_AUFBEWAHRUNG_TAGE", "30")):
         if _int_env(var, default) <= 0:

@@ -87,6 +87,10 @@ services:
       - TRUSTED_PROXIES_NUR_LISTE=${TRUSTED_PROXIES_NUR_LISTE:-false}
       - RATE_LIMIT_EXEMPT_LOOPBACK=false
       - JWT_SECRET=${JWT_SECRET}
+      # Nachpruefung 20.09.2026: fehlte — ein DATEN_SCHLUESSEL in der .env
+      # blieb wirkungslos, MFA-Geheimnisse und bekannte Anmelde-IPs hingen
+      # weiter an JWT_SECRET (mfa.py, rate_limiter.py).
+      - DATEN_SCHLUESSEL=${DATEN_SCHLUESSEL:-}
       - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
       - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
       - SMTP_HOST=${SMTP_HOST:-}
@@ -123,6 +127,20 @@ services:
       - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
       - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-1500}
+      # Nachpruefung 20.09.2026: Diese neun standen in .env.example, wurden vom
+      # Code gelesen — und erreichten den Container NIE. Wer sie in der .env
+      # setzte, aenderte nichts. Die Standardwerte hier sind dieselben wie im
+      # Code; ein LEERER Wert waere gefaehrlich (int("") stuerzt ab), deshalb
+      # ueberall ein ausdruecklicher Vorgabewert.
+      - ABRUF_JE_KONTO_MINUTE=${ABRUF_JE_KONTO_MINUTE:-60}
+      - ABRUF_GLEICHZEITIG_JE_KONTO=${ABRUF_GLEICHZEITIG_JE_KONTO:-8}
+      - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
+      - VERSAND_JE_KONTO_10MIN=${VERSAND_JE_KONTO_10MIN:-300}
+      - LINK_JOB_SOFORT_MAX=${LINK_JOB_SOFORT_MAX:-4}
+      - LINK_JOB_MAX_ATTEMPTS=${LINK_JOB_MAX_ATTEMPTS:-3}
+      - IMAGE_QUALITY=${IMAGE_QUALITY:-80}
+      - MAX_IMAGE_UPLOAD_BYTES=${MAX_IMAGE_UPLOAD_BYTES:-8388608}
+      - MFA_AUSSTELLER=${MFA_AUSSTELLER:-AutoSchnell}
       # Kleinanzeigen zuerst ueber die API (Runde 29) — ohne Schluessel
       # unveraendert der eigene Abruf.
       - KLEINANZEIGEN_API_KEY=${KLEINANZEIGEN_API_KEY:-}
@@ -169,6 +187,9 @@ services:
       - FAHRZEUGPOOL_MAX_VERGLEICHE=${FAHRZEUGPOOL_MAX_VERGLEICHE:-30}
       - CLIENT_INGEST_PROMOTE_MIN_DEALERS=${CLIENT_INGEST_PROMOTE_MIN_DEALERS:-0}
       - DATEI_SIGNATUR_PFLICHT=${DATEI_SIGNATUR_PFLICHT:-true}
+      # Nachpruefung 20.09.2026: fehlte — der Container blieb beim
+      # Code-Standard 500 MB, egal was in der .env stand (server.py /ready).
+      - MIN_FREI_MB=${MIN_FREI_MB:-500}
       # Backups: lokal im Volume + verschluesselte Offsite-Kopie (S3-kompatibel)
       - BACKUP_DIR=/backups
       - BACKUP_HOUR=${BACKUP_HOUR:-3}
@@ -194,6 +215,9 @@ services:
       # MONGO_URL mit replicaSet=... erkennt snapshot_pflicht() die Pflicht
       # ohnehin selbst — der Schalter ist fuer alle anderen Faelle.
       - BACKUP_SNAPSHOT_PFLICHT=${BACKUP_SNAPSHOT_PFLICHT:-}
+      # 20.09.2026: Schreibpause waehrend der Sicherung. Leer = nur wenn
+      # noetig (kein Replica Set); true erzwingt sie, false schaltet sie ab.
+      - BACKUP_WARTUNG=${BACKUP_WARTUNG:-}
       - BACKUP_SNAPSHOT_VERSUCHE=${BACKUP_SNAPSHOT_VERSUCHE:-}
       - BACKUP_SNAPSHOT_PAUSE_S=${BACKUP_SNAPSHOT_PAUSE_S:-}
       # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-

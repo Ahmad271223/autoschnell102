@@ -189,7 +189,7 @@ def _fahrerfoto_tage() -> int:
 
 
 # Runde 21 (Befund Ahmad 10.09.2026): Fahrerfotos bleiben so lange wie der
-# Kaufvertrag (90 Tage, vgl. VERTRAG_AUFBEWAHRUNG_TAGE) — gezaehlt ab dem
+# Kaufvertrag (VERTRAG_AUFBEWAHRUNG_TAGE, Standard 60) — gezaehlt ab dem
 # Hochladen des Berichts, unabhaengig vom Terminstatus. Vorher 7/14 Tage ab
 # dem ERSTEN Terminabschluss: zu kurz als Beweis, Fotos geloeschter oder
 # stornierter Termine blieben fuer immer liegen, und wiedergeoeffnete

@@ -791,8 +791,19 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     # ohnehin frei; der Zaehler laeuft mit dem Fenster ab, vorher hebt nur der
     # Betreiber die Sperre auf (Passwort setzen, anmeldesperre_aufheben.py).
     sid = new_session_id()
-    await db.users.update_one({"id": u["id"]},
-                              {"$set": {"current_session_id": sid}})
+    # Nachpruefung 20.09.2026: Hier stand nur {"id": u["id"]} — der
+    # Firmen-Login (routes/auth.sitzungs_bedingung) und der Fahrer-Login
+    # schreiben die Sitzung laengst NUR, wenn das Konto noch genau so
+    # dasteht wie geprueft. Ohne diese Bedingung konnte ein Passwortwechsel
+    # zwischen Pruefung und Schreiben eine gueltige Sitzung mit dem ALTEN
+    # Passwort entstehen lassen. Jetzt auch beim Kaeufer: gleiches Passwort,
+    # noch aktiv, nicht in Loeschung.
+    from routes.auth import SITZUNG_UNGUELTIG, sitzungs_bedingung
+    r = await db.users.update_one(
+        {"id": u["id"], **sitzungs_bedingung(u)},
+        {"$set": {"current_session_id": sid}})
+    if r.matched_count == 0:
+        raise HTTPException(401, SITZUNG_UNGUELTIG)
     await bekannte_ip_merken(db, "users", u["id"], ip)
     # Pruefung 14.09.2026 (Liste 1, Nr. 18): dieselbe Anmeldespur wie /auth/login.
     await log_activity_sicher("", u["id"], "auth.login",

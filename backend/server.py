@@ -472,10 +472,23 @@ async def readiness_check(response: Response):
             _ziel.append("backup: kein vollstaendiges Backup in den letzten 26 h")
         elif offsite_noetig and not b.get("offsite"):
             _ziel.append("backup: letzte Sicherung ohne Offsite-Kopie")
+        # Nachpruefung 20.09.2026: "vollstaendig" sagt noch nicht, dass alle
+        # Collections aus EINEM Zeitpunkt stammen. Ohne Replica Set und ohne
+        # Schreibpause koennen Vertrag, Termin und Fahrzeug aus verschiedenen
+        # Momenten kommen — das stand bisher nirgends. Warnung, kein Fehler:
+        # ein Einzelserver ohne Replica Set kann es nicht besser (dann greift
+        # BACKUP_WARTUNG, siehe backup_service._schreibpause_noetig).
+        if b.get("vollstaendig") and b.get("stichtagsgenau") is False:
+            warnungen.append(
+                "backup: letzte Sicherung ist NICHT stichtagsgenau "
+                f"({b.get('konsistenz') or 'unbekannt'}) — Mongo als Replica Set "
+                "betreiben oder BACKUP_WARTUNG=true setzen")
         # 19.09.2026: Arbeitet die Sicherung mit DENSELBEN Zugangsdaten wie der
         # Datei-Speicher, kommt ein gestohlener Schluessel an beides — an die
-        # Daten UND an ihre Sicherungen. Ein eigener, nur schreibender
-        # Schluessel trennt das. Nur ein Hinweis, kein Startverbot.
+        # Daten UND an ihre Sicherungen. Ein eigener Schluessel, der NUR auf
+        # den Sicherungs-Bucket zeigt (R2: "Object Read & Write"), trennt das
+        # — rein schreibend genuegt nicht (Korrektur 20.09.2026: Upload,
+        # Rotation und Papierkorb lesen dort auch). Hinweis, kein Startverbot.
         if offsite_noetig and not os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip():
             info["backup_eigene_zugangsdaten"] = False
             warnungen.append(

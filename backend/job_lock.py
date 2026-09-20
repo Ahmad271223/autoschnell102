@@ -48,7 +48,8 @@ async def ensure_lock_index(db) -> None:
         raise
 
 
-async def acquire(db, name: str, ttl_seconds: int = 3600) -> Optional[str]:
+async def acquire(db, name: str, ttl_seconds: int = 3600,
+                  fehler_melden: bool = False) -> Optional[str]:
     """Besitzer-Token (wahr), wenn dieser Prozess den Job ausfuehren darf,
     sonst None. Phase 3 (15.09.2026, 3.1 / A11 B14 B15): jede Sperre traegt ein
     eigenes Token — ein alter Lauf desselben Prozesses kann eine spaeter neu
@@ -73,6 +74,16 @@ async def acquire(db, name: str, ttl_seconds: int = 3600) -> Optional[str]:
     except Exception:
         # Im Zweifel NICHT ausfuehren — lieber ein Lauf zu wenig als
         # mehrere gleichzeitig.
+        #
+        # Nachpruefung 20.09.2026: Der Aufrufer konnte "ein anderer Worker
+        # hat die Sperre" (normal) nicht von "die Datenbank antwortet nicht"
+        # (Stoerung) unterscheiden — beides war None. Die Sicherung wertete
+        # das als "nichts zu tun" und startete deshalb KEINEN Wiederholungs-
+        # versuch nach einer Stunde. Mit fehler_melden=True bekommt der
+        # Aufrufer die Stoerung zu sehen; ohne den Schalter bleibt alles wie
+        # bisher.
+        if fehler_melden:
+            raise
         return None
 
 

@@ -358,7 +358,7 @@ vermerkt das im Manifest unter `offsite` (`bucket`, `key`, `uploaded_at`,
 | `BACKUP_S3_PREFIX` | Schlüssel-Präfix, Standard `autoschnell-backups/` |
 | `BACKUP_S3_OBJECT_LOCK_DAYS` | `> 0`: Objekt wird mit `ObjectLockMode=COMPLIANCE` für N Tage unlöschbar (Schutz vor Ransomware/Admin-Fehler). Der Bucket muss **beim Anlegen mit Object Lock (Versionierung) erstellt** worden sein, sonst schlägt der Upload fehl. |
 | `BACKUP_S3_KEEP` | Offsite-Aufbewahrung in Archiven, Standard 14 (Rotation best effort; gesperrte Objekte bleiben bis zum Ablauf). |
-| `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY`, `BACKUP_S3_REGION` | Eigene Zugangsdaten NUR für den Sicherungs-Bucket (Phase 3, 15.09.2026): ein Schlüssel, der nur schreiben darf. Leer = die `S3_*`-Zugangsdaten (dann meldet die Produktionsprüfung einen Hinweis). |
+| `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY`, `BACKUP_S3_REGION` | Eigene Zugangsdaten NUR für den Sicherungs-Bucket (Phase 3, 15.09.2026). **Berechtigung "Object Read & Write", eingeschränkt auf genau diesen Bucket** — rein schreibend genügt nicht: der Upload prüft die Größe (`head_object`), die Rotation listet und löscht alte Archive, die Dateikopie führt einen Papierkorb (Korrektur 20.09.2026). Leer = die `S3_*`-Zugangsdaten (dann meldet die Bereitschaftsprüfung einen Hinweis). |
 
 Ohne S3-Offsite das Volume regelmäßig auf einen ANDEREN Ort kopieren
 (z. B. Hetzner Storage Box), damit ein Server-Ausfall nicht auch die Backups
@@ -519,7 +519,7 @@ Seit Runde 17 (08.09.2026) außerdem:
 
 ## Auto-Daten & 90-Tage-Löschung
 - Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)
-  werden nach `VERTRAG_AUFBEWAHRUNG_TAGE` (Standard 90) vom stündlichen
+  werden nach `VERTRAG_AUFBEWAHRUNG_TAGE` (Standard 60) vom stündlichen
   Aufräumjob **vollständig gelöscht**; Terminverweise auf den Vertrag werden
   gekappt.
 - Bei jeder Vertragserstellung entsteht zusätzlich ein **anonymer
@@ -2195,8 +2195,8 @@ Zwei Punkte aus der Sicherheits-Durchsicht, die der Code bisher nicht selbst gep
 - **Eigene Zugangsdaten für die Sicherung.** Nutzt die Sicherung dieselben S3-Schlüssel wie der
   Datei-Speicher, kommt ein gestohlener Schlüssel an die Daten *und* an ihre Sicherungen.
   `/api/ready` meldet jetzt eine Warnung, wenn `BACKUP_S3_ACCESS_KEY` fehlt, und führt
-  `backup_eigene_zugangsdaten` als Feld. Ein nur schreibender Schlüssel für den Sicherungs-Bucket
-  genügt.
+  `backup_eigene_zugangsdaten` als Feld. Nötig ist ein eigener Schlüssel mit "Object Read & Write"
+  **nur auf dem Sicherungs-Bucket** — er kommt damit nicht an die Dateien der App.
 
 Zur Einordnung, weil beides in der Sicherheitsliste stand: Die **Zwei-Faktor-Pflicht für den
 Super-Admin ist bereits erzwungen** — nicht nur empfohlen. `routes/auth.mfa_pflicht_aktiv()` weist
@@ -2218,3 +2218,51 @@ Fehler. Nur `MFA_PFLICHT=false` (Testumgebungen) schaltet das ab.
   stehen gelassen → Test wird rot und nennt die Variable.
 
 Wächter: `backend/tests/test_haertung_20260919.py`.
+
+### Go-Live-Durchsicht 20.09.2026 — 20 Punkte, geprueft und eingeordnet
+
+Ein Pruefer hat den Stand `70ead7c` durchgesehen und 20 Live-Blocker gemeldet. Jeder Punkt wurde
+im Code gegengeprueft. Ergebnis: **9 echte Code-/Konfigurationsfehler (behoben)**, **3 bewusste
+Entscheidungen Ahmads (kein Fehler)**, **8 Betreiber-Aufgaben** (Rotation, Staging, Lasttest,
+Rechtstexte — ausserhalb des Codes).
+
+**Behoben in diesem Stand:**
+
+| # | Befund | Korrektur |
+|---|---|---|
+| 2 | `DATEN_SCHLUESSEL` erreichte den Container nie | durchgereicht — MFA-Geheimnisse und bekannte Anmelde-IPs hingen sonst weiter an `JWT_SECRET` |
+| 20 | `MIN_FREI_MB` erreichte den Container nie | durchgereicht (mit Vorgabewert 500) |
+| — | **9 weitere derselben Art**, bei der Suche ueber ALLE Namen gefunden | `ABRUF_JE_KONTO_MINUTE`, `ABRUF_GLEICHZEITIG_JE_KONTO`, `VERGLEICH_JE_KONTO_MINUTE`, `VERSAND_JE_KONTO_10MIN`, `LINK_JOB_SOFORT_MAX`, `LINK_JOB_MAX_ATTEMPTS`, `IMAGE_QUALITY`, `MAX_IMAGE_UPLOAD_BYTES`, `MFA_AUSSTELLER` — alle mit den Code-Standardwerten als Vorgabe (ein leerer Wert haette `int()` zum Absturz gebracht) |
+| 4 | Kaeufer-Login schrieb die Sitzung ohne Bedingung | jetzt `sitzungs_bedingung()` wie bei Firma und Fahrer: ein Passwortwechsel waehrend der Anmeldung laesst keine Sitzung mehr entstehen (401) |
+| 6 | Vertragsfrist 60 vs. 90 Tage | ueberall **60** (`production_check.py` rechnete mit 90, DEPLOYMENT.md nannte 90) |
+| 7 | Sicherung lief immer ohne Schreibpause | `backup_service._schreibpause_noetig()`: ohne Replica Set laeuft sie jetzt mit `--wartung` (wenige Sekunden, 03:00). Schalter `BACKUP_WARTUNG` (leer = automatisch) |
+| 8 | Nicht stichtagsgenaue Sicherung galt still als gut | `/api/ready` warnt jetzt ausdruecklich und nennt den Weg (Replica Set oder `BACKUP_WARTUNG=true`). Die Bewertung selbst bleibt: ein Einzelserver kann es nicht besser |
+| 9 | Sperre nicht pruefbar = "anderer Worker sichert" | `job_lock.acquire(..., fehler_melden=True)`: eine Datenbank-Stoerung ist jetzt ein Fehlschlag → Wiederholung in einer Stunde |
+| 10 | Doku verlangte einen "nur schreibenden" Schluessel | falsch — Upload (`head_object`), Rotation (list/delete) und der Papierkorb lesen dort. Ueberall auf **"Object Read & Write", auf den Sicherungs-Bucket eingeschraenkt** korrigiert |
+
+**Bewusste Entscheidungen — kein Fehler:**
+
+- **#5 `VERTRAG_LOESCHUNG_AKTIV=true`:** Ahmads Entscheidung vom 14.09.2026 ("scharf"), in
+  `.env.example` mit Begruendung dokumentiert. Der Trockenlauf bleibt per `false` verfuegbar.
+- **#12 `w:1` beim Replica Set:** bewusst gewaehlt (2 Datenserver + Arbiter). Das Fenster ist in
+  der Replica-Doku beschrieben; `w:majority` waere die Alternative, kostet aber Schreib-Tempo —
+  Ahmads Abwaegung.
+- **#13 `MARKTPLATZ_AKTIV=false`:** Go-Live-Schalter vom 15.09.2026. Der Marktplatz ist
+  absichtlich aus ("Demnaechst verfuegbar"), bis Ahmad ihn freigibt.
+
+**Eingeordnet, aber nicht als Blocker:**
+
+- **#11 Load Balancer prueft `/api/health`, nicht `/api/ready`:** absichtlich — der Rollout
+  braucht einen Server, der waehrend des Neubaus aus der Rotation geht, aber nicht bei jeder
+  Readiness-Warnung (z. B. offene Betriebsalarme) rausfaellt. `rollout.sh` setzt den Drain-Marker
+  selbst; `/api/ready` meldet inhaltliche Probleme an den Betreiber.
+- **#14 Kleinanzeigen-Engpass:** Bei Ahmad ist `KLEINANZEIGEN_API_KEY` gesetzt
+  (`MAX_CONCURRENT_KLEINANZEIGEN_API=20`); die strenge Bremse von 2 gilt nur fuer den
+  Selbst-Abruf ohne API-Schluessel.
+- **#1, #15-#19:** Secret-Rotation, echter Provider-Probelauf, Staging-Abnahme, Lasttest,
+  Offsite-Pruefung und die Rechtstexte sind Betreiber-Aufgaben aus der eigenen Checkliste —
+  sie stehen dort weiter offen und koennen nicht im Code erledigt werden.
+
+Wächter: `backend/tests/test_pruefung_20260920.py` (12 Tests) und die erweiterten Tests in
+`test_haertung_20260919.py` — darunter `test_09`, das ab jetzt **jede** in `.env.example`
+versprochene und vom Code gelesene Einstellung im `environment:`-Block verlangt.

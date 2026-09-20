@@ -140,3 +140,63 @@ def test_08_kommentar_allein_zaehlt_nicht():
         "Beispiel veraltet — ein nur kommentierter Name muss durchfallen")
     assert "BACKUP_SNAPSHOT_PFLICHT" in umgebung
     assert "JWT_SECRET" in umgebung and len(umgebung) > 40
+
+
+# Bewusst NICHT im Container (mit Begruendung, damit die Liste nicht als
+# Sammelbecken missbraucht wird):
+NICHT_IM_CONTAINER = {
+    # Nur fuer Tests / lokale Laeufe
+    "BACKUP_UPLOADS_DIR", "BACKUP_LOCAL_STORAGE_DIR", "TEST_BASE_URL",
+    "RUNDE14_HTTP", "MONGO_URL_TEST",
+    # Setzt die Compose-Datei selbst bzw. gehoeren anderen Diensten
+    "BACKUP_DIR", "BACKUP_HOUR", "MONGO_USER", "MONGO_PASSWORD",
+    "MONGO_EXTRA_ARGS", "MONGO_CACHE_GB", "PUBLIC_HOST", "PUBLIC_API_URL",
+    "TZ", "APP_ENV",
+}
+
+
+def test_09_versprochene_einstellungen_erreichen_den_container():
+    """Derselbe Fehlertyp wie bei den Backup-Schluesseln — nur breiter.
+
+    Nachpruefung 20.09.2026: Ein Pruefer fand DATEN_SCHLUESSEL und
+    MIN_FREI_MB; die Suche ueber ALLE Namen brachte neun weitere ans Licht
+    (ABRUF_JE_KONTO_MINUTE, VERSAND_JE_KONTO_10MIN, IMAGE_QUALITY ...).
+    Alle standen in .env.example, wurden vom Code gelesen — und erreichten
+    den Container nie. Wer sie in der .env setzte, aenderte nichts.
+
+    Regel ab jetzt: Was .env.example verspricht UND der Backend-Code liest,
+    muss im environment-Block des backend-Dienstes stehen."""
+    import re
+    versprochen = set(re.findall(
+        r"^#?\s*([A-Z][A-Z0-9_]{2,})=",
+        (BACKEND.parent / ".env.example").read_text(encoding="utf-8"), re.M))
+    gelesen = set()
+    for p in BACKEND.rglob("*.py"):
+        if "tests" in p.parts or "node_modules" in p.parts:
+            continue
+        gelesen |= set(re.findall(
+            r'os\.environ(?:\.get)?[\(\[]"([A-Z0-9_]+)"',
+            p.read_text(encoding="utf-8", errors="ignore")))
+    pflicht = (versprochen & gelesen) - NICHT_IM_CONTAINER
+    assert len(pflicht) > 60, "die Suche findet zu wenig — Muster pruefen"
+    fehlend = sorted(pflicht - _compose_umgebung())
+    assert not fehlend, (
+        "in .env.example versprochen, vom Code gelesen, aber NICHT im "
+        "Container: %s" % fehlend)
+
+
+def test_10_kein_leerer_wert_wo_der_code_eine_zahl_erwartet():
+    """Gegenprobe zum Durchreichen: `- X=${X:-}` setzt bei fehlender .env
+    einen LEEREN Text. Wo der Code int(...) rechnet, stuerzt das ab — diese
+    Variablen brauchen im Compose einen ausdruecklichen Vorgabewert."""
+    import re
+    quelle = "".join(p.read_text(encoding="utf-8", errors="ignore")
+                     for p in BACKEND.rglob("*.py")
+                     if "tests" not in p.parts)
+    # int(os.environ.get("X", ...)) ohne "or"-Rueckfall
+    zahlen = set(re.findall(r'int\(os\.environ(?:\.get)?\("([A-Z0-9_]+)"[^)]*\)\)', quelle))
+    text = (BACKEND.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    leer = sorted(v for v in zahlen
+                  if re.search(r"- %s=\$\{%s:-\}\s*$" % (v, v), text, re.M))
+    assert not leer, ("diese Variablen kaemen als leerer Text an und wuerden "
+                      "int() zum Absturz bringen: %s" % leer)

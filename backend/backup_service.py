@@ -158,9 +158,35 @@ async def _alarm(db, typ: str, ref: str, **details) -> None:
     await alarm(db, typ, ref=ref, **details)
 
 
+def _schreibpause_noetig() -> bool:
+    """Braucht dieser Lauf eine Schreibpause, um stichtagsgenau zu sein?
+
+    Nachpruefung 20.09.2026: Der Dienst startete das Skript IMMER ohne
+    `--wartung`. Auf einem Replica Set ist das richtig (dort liest die
+    Sicherung alle Collections in EINER Snapshot-Sitzung). Ohne Replica Set
+    — die Standard-Compose-Datei startet Mongo so — wurde Collection fuer
+    Collection gelesen: Vertrag, Termin und Fahrzeug konnten damit aus
+    verschiedenen Zeitpunkten stammen. Jetzt pausiert der Lauf in diesem
+    Fall kurz die Schreibzugriffe (nachts um 3, Dauer wenige Sekunden).
+
+    BACKUP_WARTUNG=false schaltet das ab (dann bleibt es beim alten,
+    nicht stichtagsgenauen Verhalten), =true erzwingt es immer.
+    """
+    wahl = os.environ.get("BACKUP_WARTUNG", "").strip().lower()
+    if wahl in ("0", "false", "nein", "no"):
+        return False
+    if wahl in ("1", "true", "ja", "yes"):
+        return True
+    from backup_bewertung import snapshot_pflicht
+    return not snapshot_pflicht(os.environ.get("MONGO_URL", ""))
+
+
 async def _run_backup(db=None) -> bool:
+    argumente = [str(_SCRIPT), "--dir", str(BACKUP_DIR)]
+    if _schreibpause_noetig():
+        argumente.append("--wartung")
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-X", "utf8", str(_SCRIPT), "--dir", str(BACKUP_DIR),
+        sys.executable, "-X", "utf8", *argumente,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     try:
@@ -347,12 +373,25 @@ async def run_backup_forever(db=None) -> None:
         from job_lock import acquire
         # 20h TTL: erst am naechsten Tag darf wieder jemand ran; faellt der
         # Gewinner aus, uebernimmt nach Ablauf ein anderer Worker.
-        return await acquire(db, f"backup-{tag}", ttl_seconds=20 * 3600)
+        # fehler_melden (20.09.2026): eine STOERUNG der Datenbank kommt als
+        # Ausnahme zurueck statt als None — sonst haelt der Aufrufer sie
+        # faelschlich fuer "ein anderer Worker sichert schon".
+        return await acquire(db, f"backup-{tag}", ttl_seconds=20 * 3600,
+                             fehler_melden=True)
 
     async def _lauf_mit_sperre() -> bool:
         """True = ok oder nichts zu tun (anderer Worker); False = Fehlschlag."""
         tag = datetime.now().strftime("%Y-%m-%d")
-        token = await _may_run(tag)
+        try:
+            token = await _may_run(tag)
+        except Exception as exc:  # noqa: BLE001
+            # Nachpruefung 20.09.2026: Liess sich die Sperre wegen einer
+            # Datenbank-Stoerung nicht pruefen, galt der Lauf als "nichts zu
+            # tun" — der Tag blieb ohne Sicherung und ohne Wiederholung.
+            # Jetzt: Fehlschlag, also in einer Stunde noch einmal.
+            log.warning("[backup] Tagessperre nicht pruefbar (%s) — "
+                        "Wiederholung in einer Stunde", exc)
+            return False
         if not token:
             return True
         ok = await _run_backup(db)
