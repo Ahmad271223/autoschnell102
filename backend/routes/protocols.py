@@ -273,6 +273,19 @@ async def _appt_or_404(appt_id: str, driver: dict) -> dict:
     # konnte ein Fahrer, der die Fahrt noch nicht (oder nicht mehr) angenommen
     # hatte, Protokoll, Verkaeuferdaten und PDF laden und sogar abschliessen.
     zuteilung_offen_oder_409(appt)
+    # Pruefbericht 20.09.2026 (Nr. 1): Die Sichtfrist (14 Tage nach der
+    # Abholung, 30 nach anderem Abschluss) hing bisher NUR an den einzelnen
+    # Dokumentrouten in drivers.py. Die Protokollwege hier — Ansicht, PDF,
+    # Speichern, Einreichen, Korrektur, Abschluss — kannten sie nicht. Wer
+    # sich die Adresse gemerkt hatte, kam Monate spaeter noch an das
+    # unterschriebene Abholprotokoll mit Verkaeuferdaten und Unterschrift,
+    # obwohl die Fahrt laengst aus seiner App verschwunden war.
+    #
+    # Zentral hier, damit JEDER Weg ueber _appt_or_404 sie automatisch
+    # bekommt — auch jeder kuenftige. Offene Fahrten sind nicht betroffen:
+    # die Frist gilt nur fuer abgeschlossene bzw. stornierte.
+    from routes.drivers import unterlagen_zugriff_oder_404
+    unterlagen_zugriff_oder_404(appt)
     return appt
 
 

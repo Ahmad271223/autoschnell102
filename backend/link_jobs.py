@@ -330,6 +330,19 @@ async def wartender_darf_abrufen(db, user_id: str, job: dict) -> Optional[str]:
         # Befund 148: Firma geloescht oder mitten in der Loeschkaskade
         if not d or (d.get("loeschung") or {}).get("status") == "laeuft":
             return None
+        # Pruefbericht 20.09.2026 (Nr. 9): ... und nicht GESPERRT. Wird nur
+        # der Hauptchef deaktiviert, bleiben die Sucher im Konto weiter
+        # "active" — in der normalen API sperrt sie `firma_gesperrt`, hier
+        # aber wurde nur nach der LOESCHUNG gefragt. Ein schon eingereihter
+        # Job konnte danach weiter bei Apify/Kleinanzeigen abrufen und
+        # Kontingent und Geld verbrauchen, obwohl die Firma stillsteht.
+        try:
+            from deps import firma_gesperrt
+            if await firma_gesperrt(firma):
+                return None
+        except Exception:  # noqa: BLE001 — im Zweifel nicht abrufen
+            log.warning("link_jobs: Firmensperre von %s nicht pruefbar", firma)
+            return None
     return firma
 
 

@@ -106,7 +106,11 @@ class ListingUpdateIn(BaseModel):
 #: Gesamtgroesse, nicht auf die Stueckzahl — 20 kleine Bilder sind harmlos,
 #: und eine schaerfere Zahl waere eine Verhaltensaenderung der Schnittstelle
 #: ohne Not gewesen. Die Oberflaeche schickt ohnehin Pakete zu vier.
-PHOTOS_GESAMT_MAX = 24_000_000
+# Nr. 7 (20.09.2026): 24 Mio. Base64-Zeichen liegen mit dem Rest der Anfrage
+# dicht an der nginx-Grenze (client_max_body_size 25m) — wird sie gerissen,
+# antwortet der Proxy mit 413, bevor das Backend etwas davon merkt. Gleicher
+# Abstand wie beim Fahrer-Upload.
+PHOTOS_GESAMT_MAX = 20_000_000
 PHOTOS_JE_ANFRAGE_MAX = 20
 
 
@@ -873,23 +877,30 @@ async def upload_photos(listing_id: str, body: PhotoUploadIn,
     # ATOMAR anhaengen ($push $each) statt die ganze Liste zu ueberschreiben:
     # das alte Lesen-Aendern-Schreiben verlor bei PARALLELEN Uploads aufs
     # selbe Inserat Referenzen (im Lasttest: hunderte Dateien ohne
-    # DB-Eintrag). Das 40er-Limit prueft dieselbe Bedingung atomar mit —
+    # DB-Eintrag). Die Obergrenze prueft dieselbe Bedingung atomar mit —
     # der Verlierer eines Rennens raeumt seine Dateien wieder weg.
     # Nachpruefung Runde 14 (Nr. 29): Statusfilter im atomaren Write — wird
     # das Inserat waehrend des Uploads verkauft/geloescht, raeumt der
-    # Verlierer seine Dateien wie beim 40er-Limit wieder weg.
+    # Verlierer seine Dateien wie beim Limit wieder weg.
+    #
+    # Pruefbericht 20.09.2026 (Nr. 5): Hier stand eine harte 40, waehrend die
+    # Vorpruefung weiter oben laengst INSERAT_FOTOS_MAX (10) nimmt. Damit war
+    # das neue Limit unter Gleichzeitigkeit wirkungslos: zwei Uploads mit je
+    # 6 Bildern bestanden beide die Vorpruefung (0 + 6 <= 10) und liefen
+    # danach BEIDE durch den Riegel — 12 Fotos im Inserat. Jetzt haelt der
+    # atomare Riegel dieselbe Zahl wie die Vorpruefung.
     res = await db.resale_listings.update_one(
         {"id": listing_id, "dealer_id": user["dealer_id"],
          "status": {"$nin": list(_ABGESCHLOSSEN)},
-         f"photos.uploaded_keys.{40 - len(added)}": {"$exists": False}},
+         f"photos.uploaded_keys.{INSERAT_FOTOS_MAX - len(added)}": {"$exists": False}},
         {"$push": {"photos.uploaded_keys": {"$each": added}},
          "$set": {"updated_at": now_iso()}})
     if res.modified_count == 0:
         for k in added:
             await loeschen_oder_vormerken(
                 db, key=k, grund="inserat_foto_limit", dealer_id=user["dealer_id"])
-        raise HTTPException(400, "Maximal 40 Fotos pro Inserat — oder das Inserat "
-                                 "ist inzwischen verkauft/geloescht")
+        raise HTTPException(400, f"Maximal {INSERAT_FOTOS_MAX} Fotos pro Inserat — "
+                                 "oder das Inserat ist inzwischen verkauft/geloescht")
     doc = await db.resale_listings.find_one(
         {"id": listing_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "photos.uploaded_keys": 1})
@@ -990,7 +1001,8 @@ async def fotos_aus_abholbericht(listing_id: str, body: Optional[AbholfotosIn] =
         {"id": listing_id, "dealer_id": user["dealer_id"],
          "status": {"$nin": list(_ABGESCHLOSSEN)},
          "photos.aus_abholbericht": {"$nin": wahl},
-         f"photos.uploaded_keys.{40 - len(added)}": {"$exists": False}},
+         # Nr. 5: dieselbe Zahl wie die Vorpruefung (vorher hart 40).
+         f"photos.uploaded_keys.{INSERAT_FOTOS_MAX - len(added)}": {"$exists": False}},
         {"$push": {"photos.uploaded_keys": {"$each": added}},
          "$addToSet": {"photos.aus_abholbericht": {"$each": wahl}},
          "$set": {"updated_at": now_iso()}})
@@ -999,7 +1011,8 @@ async def fotos_aus_abholbericht(listing_id: str, body: Optional[AbholfotosIn] =
             await loeschen_oder_vormerken(db, key=nk, grund="abholfoto_uebernahme_limit",
                                           dealer_id=user["dealer_id"])
         raise HTTPException(409, "Die Fotos wurden gerade schon uebernommen, das Inserat "
-                                 "ist voll (max. 40 Fotos) oder inzwischen verkauft/geloescht.")
+                                 f"ist voll (max. {INSERAT_FOTOS_MAX} Fotos) oder "
+                                 "inzwischen verkauft/geloescht.")
     # Zeigt das Inserat bisher nur Einkaufsfotos, waeren die uebernommenen
     # unsichtbar — dann Einkaufs- UND neue Fotos zeigen.
     await db.resale_listings.update_one(
@@ -1054,13 +1067,33 @@ async def remove_photo(listing_id: str, body: PhotoRemoveIn,
         # loeschen — sonst loescht ein Rennen mit dem Verkauf die Datei
         # trotzdem. ATOMAR ($pull), weil parallele Loeschungen sich sonst
         # gegenseitig verdraengten.
+        # Pruefbericht 20.09.2026 (Nr. 6): Ein VEROEFFENTLICHTES Inserat darf
+        # sein letztes eigenes Foto nicht verlieren — sonst steht es oeffentlich
+        # ohne Bild da, obwohl genau das beim Veroeffentlichen verboten ist.
+        # Atomar mitgeprueft: entweder ist es (noch) nicht veroeffentlicht,
+        # oder es bleibt danach mindestens ein Bild uebrig (Index 1 vorhanden
+        # = zwei Stueck) bzw. es gibt Einkaufsfotos aus dem Altbestand.
         res = await db.resale_listings.update_one(
             {"id": listing_id, "dealer_id": user["dealer_id"],
              "status": {"$nin": list(_ABGESCHLOSSEN)},
-             "photos.uploaded_keys": body.key},
+             "photos.uploaded_keys": body.key,
+             "$or": [{"status": {"$ne": "veroeffentlicht"}},
+                     {"photos.uploaded_keys.1": {"$exists": True}},
+                     {"photos.einkauf_urls.0": {"$exists": True}}]},
             {"$pull": {"photos.uploaded_keys": body.key},
              "$set": {"updated_at": now_iso()}})
         if res.matched_count == 0:
+            nach = await db.resale_listings.find_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"]},
+                {"_id": 0, "status": 1, "photos": 1}) or {}
+            _p = nach.get("photos") or {}
+            if (nach.get("status") == "veroeffentlicht"
+                    and len(_p.get("uploaded_keys") or []) <= 1
+                    and not _p.get("einkauf_urls")):
+                raise HTTPException(
+                    400, "Das ist das letzte Foto eines veroeffentlichten "
+                         "Inserats. Bitte zuerst ein anderes Foto hochladen "
+                         "oder das Inserat zurueckziehen.")
             raise HTTPException(409, "Inserat wurde zwischenzeitlich verkauft "
                                      "oder geloescht — Foto bleibt erhalten")
         # Laesst sich die Datei nicht loeschen, wird sie vorgemerkt; der Key
@@ -1283,15 +1316,32 @@ async def publish_listing(listing_id: str, body: PublishIn,
         # Nachpruefung Runde 14 (Nr. 81/89): bedingt auf den gelesenen Status
         # — ein paralleler Statuswechsel (verkauft/geloescht) darf nicht
         # durch "veroeffentlicht" ueberschrieben werden.
+        # Pruefbericht 20.09.2026 (Nr. 6): Der finale Abgleich prueft jetzt
+        # AUCH den Fotostand. Vorher stand er nur auf dem Status — wurde
+        # zwischen dem Lesen (Foto war da) und hier das letzte Foto entfernt,
+        # ging das Inserat trotzdem mit NULL Fotos live, obwohl
+        # Veroeffentlichen ohne Foto verboten ist.
         res = await db.resale_listings.update_one(
             {"id": listing_id, "dealer_id": user["dealer_id"],
-             "status": l.get("status")},
+             "status": l.get("status"),
+             "$or": [{"photos.uploaded_keys.0": {"$exists": True}},
+                     {"photos.einkauf_urls.0": {"$exists": True}}]},
             {"$set": {"status": "veroeffentlicht",
                       "visibility": body.visibility,
                       "published_at": l.get("published_at") or now_iso(),
                       "updated_at": now_iso()}})
         if res.matched_count == 0:
             await _kontingent_zurueckgeben()
+            # Nr. 6: Fotos weg oder Status geaendert — beides getrennt melden,
+            # sonst sucht der Sucher an der falschen Stelle.
+            jetzt_doc = await db.resale_listings.find_one(
+                {"id": listing_id, "dealer_id": user["dealer_id"]},
+                {"_id": 0, "photos": 1}) or {}
+            _p = jetzt_doc.get("photos") or {}
+            if not (_p.get("uploaded_keys") or _p.get("einkauf_urls")):
+                raise HTTPException(
+                    400, "Das letzte Foto wurde gerade entfernt — bitte "
+                         "mindestens ein eigenes Foto hochladen.")
             raise HTTPException(409, "Inserat wurde zwischenzeitlich geaendert "
                                      "— bitte neu laden")
         if pfad:

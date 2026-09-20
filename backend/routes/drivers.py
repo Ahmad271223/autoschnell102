@@ -123,7 +123,15 @@ class PickupReportIn(BaseModel):
         return v
 
 
-FOTOS_GESAMT_MAX = 40_000_000
+# Pruefbericht 20.09.2026 (Nr. 7): Hier standen 40 Mio. Base64-Zeichen — der
+# Koerper einer solchen Anfrage ist rund 40 MB gross, waehrend der
+# Produktions-nginx nur `client_max_body_size 25m` durchlaesst. FastAPI hielt
+# die Anfrage also fuer gueltig, der Reverse Proxy wies sie mit 413 ab, und
+# der Fahrer sah einen Fehler ohne brauchbaren Hinweis. Jetzt deutlich unter
+# der nginx-Grenze, mit Luft fuer den Rest der Anfrage (Notizen, Abweichungen).
+# ACHTUNG: wird `client_max_body_size` geaendert, muss dieser Wert mit —
+# festgehalten in tests/test_pruefbericht_neu_20260920.py.
+FOTOS_GESAMT_MAX = 20_000_000
 
 
 # ---------- Driver code generation & auth ----------
@@ -1477,9 +1485,19 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
         raise HTTPException(404, "Datei nicht gefunden")
     # Runde 21: ... und nur solange der Termin noch IHM zugeteilt ist. Nach
     # einer Neuzuteilung an einen anderen Fahrer endet der Zugriff.
-    if not await db.appointments.find_one(
-            {"id": eigener_bericht.get("appointment_id"), "driver_id": driver["id"]},
-            {"_id": 1}):
+    # Pruefbericht 20.09.2026 (Nr. 1): ... und nur innerhalb der Sichtfrist.
+    # Kaufvertrag, Abholauftrag und Beweisdokument pruefen sie laengst, die
+    # Abweichungsfotos nicht — der Fahrer kam mit einer gemerkten Adresse
+    # weiter an sie heran, obwohl die Fahrt aus seiner App verschwunden war.
+    _termin = await db.appointments.find_one(
+        {"id": eigener_bericht.get("appointment_id"), "driver_id": driver["id"]},
+        {"_id": 0, "status": 1, "abgeschlossen_seit": 1,
+         "status_changed_at": 1, "updated_at": 1})
+    if not _termin:
+        raise HTTPException(404, "Datei nicht gefunden")
+    try:
+        unterlagen_zugriff_oder_404(_termin)
+    except HTTPException:
         raise HTTPException(404, "Datei nicht gefunden")
     from storage_service import guess_media_type, load_async, StorageError
     try:

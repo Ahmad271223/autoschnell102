@@ -467,6 +467,7 @@ async def _cleanup_once(db) -> dict:
     # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
     stats["termin_nacharbeit_nachgeholt"] = await termin_nacharbeit_nachholen(db, now)
     stats["vertrags_nacharbeit_nachgeholt"] = await vertrags_nacharbeit_nachholen(db)
+    stats["konto_nachlese"] = await konto_nachlese_abarbeiten(db, now)
     stats["kaufvorgang_nacharbeit_nachgeholt"] = await kaufvorgang_nacharbeit_nachholen(db)
     stats["termin_verweise_bereinigt"] = await termin_verweise_bereinigen(db, now)
     stats["inserat_fahrzeug_nachgezogen"] = await inserat_fahrzeug_nacharbeit_nachholen(db)
@@ -700,6 +701,66 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
             upd["$set"]["vertrag_geloescht_ref"] = contract_id
         upd["$unset"] = unset
         await db.pickup_protocols.update_one({"id": p["id"]}, upd)
+
+
+#: Sammlung mit den Grabsteinen geloeschter Sucher (Nr. 2).
+KONTO_NACHLESE = "konto_nachlese"
+#: So lange nach der Loeschung wird nachgesehen (Minuten).
+KONTO_NACHLESE_FENSTER_MIN = zahl_env("KONTO_NACHLESE_FENSTER_MIN", 30,
+                                      unten=5, oben=1440)
+
+
+async def konto_nachlese_abarbeiten(db, now: datetime) -> int:
+    """Pruefbericht 20.09.2026 (Nr. 2): Nachlese nach dem Loeschen eines Suchers.
+
+    Beim Loeschen gehen Fahrzeuge, Vertraege, Termine und Kaufvorgaenge an den
+    Chef, DANN faellt das Konto. Eine Anfrage, die vorher durch die Anmeldung
+    kam, laeuft aber weiter — sie kann DANACH noch einen Vertrag oder Termin
+    mit der gerade geloeschten `user_id` anlegen. Der bliebe als Waise liegen:
+    kein Sucher kann ihn uebernehmen, der Chef sieht ihn nicht als seinen.
+
+    (Ein NEUER Aufruf ist nicht betroffen: current_user liest das Konto bei
+    jeder Anfrage frisch und antwortet 401. Es geht nur um das Fenster von
+    Sekunden, in dem eine Anfrage schon mittendrin war.)
+
+    Deshalb hinterlaesst die Loeschung einen Grabstein, und dieser Lauf
+    wiederholt die Uebergabe, solange das Fenster offen ist. Danach faellt
+    der Grabstein weg. Idempotent — eine zweite Uebergabe findet schlicht
+    nichts mehr.
+    """
+    from routes.bestand import vorgang_uebergeben
+    nachgeholt = 0
+    grenze = now - timedelta(minutes=KONTO_NACHLESE_FENSTER_MIN)
+    async for stein in db[KONTO_NACHLESE].find({}, {"_id": 1, "dealer_id": 1,
+                                                    "an": 1, "seit": 1}):
+        seit = stein.get("seit")
+        try:
+            zeit = (seit if isinstance(seit, datetime)
+                    else datetime.fromisoformat(str(seit)))
+            if zeit.tzinfo is None:
+                zeit = zeit.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            # Unlesbarer Zeitstempel -> abraeumen. Bewusst ECHT aelter als die
+            # Grenze: genau auf der Grenze wuerde der Vergleich unten ("<")
+            # nicht greifen und der Grabstein bliebe fuer immer liegen.
+            zeit = grenze - timedelta(seconds=1)
+        if zeit < grenze:
+            await db[KONTO_NACHLESE].delete_one({"_id": stein["_id"]})
+            continue
+        if not (stein.get("dealer_id") and stein.get("an")):
+            await db[KONTO_NACHLESE].delete_one({"_id": stein["_id"]})
+            continue
+        try:
+            z = await vorgang_uebergeben(stein["dealer_id"], None,
+                                         stein["_id"], stein["an"])
+        except Exception:  # noqa: BLE001 — Nachlese darf den Lauf nie kippen
+            log.exception("Konto-Nachlese fuer %s fehlgeschlagen", stein["_id"])
+            continue
+        if any(z.values()):
+            nachgeholt += 1
+            log.info("Konto-Nachlese: Waisendaten von %s nachtraeglich an %s "
+                     "uebergeben: %s", stein["_id"], stein["an"], z)
+    return nachgeholt
 
 
 async def vertrags_nacharbeit_nachholen(db) -> int:
