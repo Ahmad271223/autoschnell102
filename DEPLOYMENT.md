@@ -1599,6 +1599,38 @@ DB_NAME=... MARKTPLATZ_AKTIV=true TEST_BASE_URL=http://127.0.0.1:8002   python -
 Testkonten werden am Ende wieder entfernt (`--behalten` lässt sie stehen). Exit 0 = alles wie
 erwartet.
 
+### Apify-Grenze: mobile.de und AutoScout24 teilen sich einen Plan (20.09.2026)
+
+Frage Ahmads: Kleinanzeigen läuft über einen eigenen bezahlten Dienst
+(kleinanzeigen-agent.de, eigenes Limit) — **mobile.de und AutoScout24 aber beide über
+Apify**. Jede Quelle hatte ihre eigene Obergrenze, eine gemeinsame gab es nicht.
+
+Gemessen mit `backend/scripts/lasttest_apify_grenze.py` (Apify nachgestellt, echter
+Job-Weg, echte Zähler in der Datenbank, Verbund aus 8 Prozessen — **es geht keine echte
+Anfrage raus**):
+
+| Einstellung | Summe | Ergebnis |
+|---|---|---|
+| mobile 20 + autoscout 20 | 40 | **8 von 40 Suchern sahen einen Fehler** (24 Apify-Ablehnungen) |
+| mobile 16 + autoscout 16 | 32 | 0 Fehler |
+| 20 + 20, aber mit Abstand | 40 | 0 Fehler (8 Abweisungen, nach 5 s durch) |
+
+Ursache: der Starter-Plan erlaubt 32 gleichzeitige Actor-Läufe. Alles darüber wird mit
+429 abgewiesen — und der Auftrag ging bisher **ohne Wartezeit** zurück in die Schlange,
+sodass alle drei Versuche in gut einer Sekunde verbraucht waren und alle drei in dieselbe
+Überlastung liefen.
+
+Zwei Absicherungen:
+
+- **Standardwerte** `MAX_CONCURRENT_MOBILE=16`, `MAX_CONCURRENT_AUTOSCOUT=16`,
+  `APIFY_MAX_PARALLEL=32`. Der Start **warnt**, wenn die Summe über dem Plan liegt —
+  so fällt eine falsche `.env` auf, statt still Fehler zu erzeugen.
+- **`LINK_JOB_TEMPOLIMIT_WARTEN=5`** — nur ein Tempolimit (429) bekommt diesen Abstand,
+  bevor der Auftrag erneut anläuft. Alle anderen Fehler laufen wie bisher sofort wieder an.
+
+**Größerer Apify-Plan?** Dann `APIFY_MAX_PARALLEL` **und** beide Quellwerte anheben.
+Festgehalten in `tests/test_apify_grenze_20260920.py`.
+
 ### Lasttest „30 gleichzeitige Verträge und Mails“ (20.09.2026)
 
 Zwei Einwände aus dem Prüfbericht, beide nachgemessen statt geschätzt.

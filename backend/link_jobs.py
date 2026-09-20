@@ -55,6 +55,35 @@ HERZSCHLAG_SEKUNDEN = max(1, PROCESSING_TTL_SECONDS // 3)
 HERZSCHLAG_MAX_SEKUNDEN = int(os.environ.get("LINK_JOB_HERZSCHLAG_MAX", "900") or 900)
 # Maximale Wiederanlaeufe, bevor ein Job endgueltig failed wird.
 MAX_ATTEMPTS = int(os.environ.get("LINK_JOB_MAX_ATTEMPTS", "3"))
+# Nachpruefung 20.09.2026 (gemessen mit scripts/lasttest_apify_grenze.py):
+# Antwortete der Anbieter mit einem Tempolimit (429), ging der Job SOFORT
+# zurueck in die Schlange und der Worker holte ihn im 0,3-s-Takt gleich
+# wieder. Alle drei Versuche waren damit in gut einer Sekunde verbraucht —
+# und weil die Ueberlastung laenger dauert, liefen alle drei in denselben
+# 429. Der Sucher sah einen Fehler, obwohl ein paar Sekunden gereicht
+# haetten. Jetzt bekommt NUR das Tempolimit einen Abstand; alle anderen
+# Fehler (Inserat weg, Netz, Zeitueberschreitung) laufen wie bisher sofort
+# wieder an.
+TEMPOLIMIT_WARTEN = zahl_env("LINK_JOB_TEMPOLIMIT_WARTEN", 5, unten=0, oben=120)
+
+
+def _reif() -> dict:
+    """Filter-Baustein: Jobs, deren Wartezeit abgelaufen ist (oder die gar
+    keine haben — der Normalfall)."""
+    return {"$or": [{"fruehestens": {"$exists": False}},
+                    {"fruehestens": None},
+                    {"fruehestens": {"$lte": _now()}}]}
+
+
+def _ist_tempolimit(exc: BaseException) -> bool:
+    """War das eine Tempolimit-Antwort des Anbieters (429)?"""
+    try:
+        from anbieter_fehler import AnbieterFehler, ART_LIMIT
+        if isinstance(exc, AnbieterFehler):
+            return exc.art == ART_LIMIT
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 # Fertige/gescheiterte Jobs verschwinden nach dieser Zeit automatisch.
 FINISHED_TTL_SECONDS = int(os.environ.get("LINK_JOB_FINISHED_TTL", "3600"))
 
@@ -601,7 +630,7 @@ async def _requeue_stale(db) -> None:
 async def _beanspruchen(db, filter_zusatz: dict) -> Optional[dict]:
     """Einen wartenden Job in Bearbeitung nehmen (aeltester zuerst)."""
     return await db.link_jobs.find_one_and_update(
-        {"status": "queued", "active": True, **filter_zusatz},
+        {"status": "queued", "active": True, **_reif(), **filter_zusatz},
         {"$set": {"status": "processing", "worker": _WORKER,
                   # Audit 13.09.2026 (#32): Kennung DIESES Claims — Herzschlag
                   # und Rueckstellung beruehren nur den eigenen Claim.
@@ -661,7 +690,7 @@ async def _claim_one(db) -> Optional[dict]:
     ]):
         laufend[reihe["_id"] or ""] = reihe["n"]
     kandidaten = [reihe async for reihe in db.link_jobs.aggregate([
-        {"$match": {"status": "queued", "active": True}},
+        {"$match": {"status": "queued", "active": True, **_reif()}},
         *je_konto,
         {"$sort": {"created_at": 1}},
         {"$group": {"_id": konto,
@@ -710,7 +739,7 @@ async def _claim_many(db, n: int) -> list:
         laufend[reihe["_id"] or ""] = reihe["n"]
     for _runde in range(4):
         kandidaten = [reihe async for reihe in db.link_jobs.aggregate([
-            {"$match": {"status": "queued", "active": True}},
+            {"$match": {"status": "queued", "active": True, **_reif()}},
             *je_konto,
             {"$sort": {"created_at": 1}},
             {"$group": {"_id": konto,
@@ -901,12 +930,16 @@ async def _process(db, job: dict) -> None:
                               "error": fehlertext(exc), "error_intern": str(exc)[:300],
                               "finished_at": _now(), "updated_at": _now()}})
             else:
+                neu_setzen = {"status": "queued",
+                              "error": fehlertext(exc),
+                              "error_intern": str(exc)[:300],
+                              "updated_at": _now()}
+                if _ist_tempolimit(exc) and TEMPOLIMIT_WARTEN > 0:
+                    neu_setzen["fruehestens"] = _now() + timedelta(
+                        seconds=TEMPOLIMIT_WARTEN)
                 await db.link_jobs.update_one(
                     eigener_claim,
-                    {"$set": {"status": "queued",
-                              "error": fehlertext(exc), "error_intern": str(exc)[:300],
-                              "updated_at": _now()},
-                     "$unset": {"claim_id": ""}})
+                    {"$set": neu_setzen, "$unset": {"claim_id": ""}})
             return
         r = await db.link_jobs.update_one(
             eigener_claim,

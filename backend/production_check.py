@@ -343,6 +343,28 @@ def pruefe_produktion(log) -> None:
         # ohne Anbieter-Zugang startet Produktion nicht (Ausnahme: Mock im Test).
         (fehler if (ist_prod and not _mock) else warnungen).append(
             "APIFY_TOKEN fehlt — mobile.de/AutoScout24-Abrufe sind nicht moeglich.")
+    # Nachpruefung 20.09.2026 (Frage Ahmad, gemessen mit
+    # scripts/lasttest_apify_grenze.py): mobile.de und AutoScout24 laufen
+    # BEIDE ueber Apify, haben aber je eine eigene Obergrenze — und keine
+    # gemeinsame. Standen beide auf 20, durften 40 Abrufe gleichzeitig
+    # laufen, waehrend der Apify-Starter-Plan nur 32 zulaesst: gemessen
+    # sahen 8 von 40 Suchern einen Fehler (24 Apify-Ablehnungen, alle drei
+    # Wiederholungen in 4,5 s verbraucht). Mit 16+16 = 32: null Fehler.
+    #
+    # Kleinanzeigen zaehlt NICHT mit — das laeuft ueber
+    # kleinanzeigen-agent.de mit eigenem Limit.
+    _mob = _int_env("MAX_CONCURRENT_MOBILE", "20")
+    _aut = _int_env("MAX_CONCURRENT_AUTOSCOUT", "20")
+    _apify_max = _int_env("APIFY_MAX_PARALLEL", "32")
+    if _apify_max > 0 and _mob + _aut > _apify_max:
+        warnungen.append(
+            f"MAX_CONCURRENT_MOBILE ({_mob}) + MAX_CONCURRENT_AUTOSCOUT ({_aut}) "
+            f"= {_mob + _aut} gleichzeitige Abrufe, aber der Apify-Plan erlaubt nur "
+            f"{_apify_max} (APIFY_MAX_PARALLEL). Beide Quellen laufen ueber Apify; "
+            f"was darueber hinausgeht, wird mit 429 abgewiesen und der Sucher sieht "
+            f"nach drei Versuchen einen Fehler. Empfehlung: je "
+            f"{_apify_max // 2} — oder APIFY_MAX_PARALLEL anheben, wenn der Plan "
+            f"mehr erlaubt.")
     _lokal = os.environ.get("STORAGE_LOKAL_ERLAUBT", "").strip().lower() in ("1", "true", "yes")
     if ist_prod and not _lokal and not os.environ.get("BACKUP_S3_BUCKET", "").strip():
         # Entscheidung Ahmad 14.09.2026: Offsite-Backup ist Pflicht im Zwei-Server-Betrieb.

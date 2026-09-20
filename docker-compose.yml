@@ -219,8 +219,18 @@ services:
       # Actor-Laeufe erlaubt.
       - MAX_CONCURRENT_KLEINANZEIGEN_API=${MAX_CONCURRENT_KLEINANZEIGEN_API:-20}
       - MAX_CONCURRENT_KLEINANZEIGEN=${MAX_CONCURRENT_KLEINANZEIGEN:-2}
-      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-20}
-      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-20}
+      # Nachpruefung 20.09.2026: mobile.de und AutoScout24 laufen BEIDE ueber
+      # Apify. Ihre Summe darf APIFY_MAX_PARALLEL nicht uebersteigen — sonst
+      # weist Apify mit 429 ab. Gemessen (scripts/lasttest_apify_grenze.py):
+      # 20+20 gegen einen 32er-Plan -> 8 von 40 Suchern sahen einen Fehler;
+      # 16+16 -> null. Kleinanzeigen zaehlt NICHT mit (eigener Dienst).
+      # Groesserer Apify-Plan? Dann APIFY_MAX_PARALLEL und beide Werte anheben.
+      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-16}
+      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-16}
+      - APIFY_MAX_PARALLEL=${APIFY_MAX_PARALLEL:-32}
+      # Abstand, bevor ein wegen Tempolimit abgewiesener Abruf erneut startet.
+      # Ohne ihn waren alle drei Versuche in gut einer Sekunde verbraucht.
+      - LINK_JOB_TEMPOLIMIT_WARTEN=${LINK_JOB_TEMPOLIMIT_WARTEN:-5}
       - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-32}
       # Eigenheiten S3-kompatibler Speicher (Cloudflare R2)
       - S3_SSE=${S3_SSE:-auto}
