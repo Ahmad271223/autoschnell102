@@ -1525,6 +1525,26 @@ async def on_start():
     except Exception as exc:
         log.warning("backup task start failed: %s", exc)
         WORKER_STATUS["backup"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+    # Betriebsmeldungen per E-Mail (20.09.2026, Wunsch Ahmad): Fehler lagen
+    # bisher NUR in der Datenbank — sichtbar auf der Betriebs-Seite, aber
+    # niemand erfuhr davon. Jetzt: Mail bei jedem NEUEN Betriebsalarm und
+    # ein Tagesbericht (auch wenn alles in Ordnung ist — eine Plattform,
+    # die schweigt, ist von einer toten nicht zu unterscheiden).
+    # Ohne BETRIEB_MELDUNG_AN beendet sich der Dienst sofort und sauber.
+    try:
+        from betriebsmeldung import empfaenger, run_betriebsmeldung_forever
+        if empfaenger():
+            _worker_starten("betriebsmeldung",
+                            lambda: run_betriebsmeldung_forever(db))
+        else:
+            # Gar nicht erst starten: ein Hintergrundjob, der sich beendet,
+            # gilt in /api/ready als Fehler (503).
+            log.info("Betriebsmeldungen aus (BETRIEB_MELDUNG_AN leer) — "
+                     "Fehler bleiben nur auf der Betriebs-Seite sichtbar")
+    except Exception as exc:
+        log.warning("betriebsmeldung task start failed: %s", exc)
+        WORKER_STATUS["betriebsmeldung"] = {"laeuft": False, "neustarts": 0,
+                                            "letzter_fehler": str(exc)[:300]}
 
 
 async def _alle_indexe():

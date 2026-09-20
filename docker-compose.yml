@@ -146,6 +146,15 @@ services:
       - IMAGE_QUALITY=${IMAGE_QUALITY:-80}
       - MAX_IMAGE_UPLOAD_BYTES=${MAX_IMAGE_UPLOAD_BYTES:-8388608}
       - MFA_AUSSTELLER=${MFA_AUSSTELLER:-AutoSchnell}
+      # Betriebsmeldungen per E-Mail (20.09.2026): Mail bei jedem NEUEN
+      # Betriebsalarm und ein Tagesbericht. LEERE Adresse = alles aus,
+      # dann bleiben Fehler nur auf der Betriebs-Seite sichtbar.
+      - BETRIEB_MELDUNG_AN=${BETRIEB_MELDUNG_AN:-}
+      # Sammelfrist in Minuten: zehn Alarme in derselben Minute ergeben
+      # EINE Mail, nicht zehn.
+      - BETRIEB_MELDUNG_SOFORT_MIN=${BETRIEB_MELDUNG_SOFORT_MIN:-10}
+      # Stunde des Tagesberichts (-1 schaltet nur ihn ab).
+      - BETRIEB_TAGESBERICHT_STUNDE=${BETRIEB_TAGESBERICHT_STUNDE:-8}
       # Nachpruefung 20.09.2026, Nr. 81: WIEDER derselbe Fehler, und mein
       # Waechter von gestern hat ihn nicht gesehen — er verglich nur Namen
       # aus .env.example gegen diesen Block. Diese hier stehen aber gar

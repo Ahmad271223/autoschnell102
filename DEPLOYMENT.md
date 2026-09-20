@@ -2423,3 +2423,51 @@ Wahrheit nichts. Aufbau des Kontexts und Handschlag sind jetzt getrennt; im erst
 Fall steht "nicht pruefbar" statt eines falschen OK.
 
 Waechter: `backend/tests/test_restore_abholung_20260920.py` (20 Tests).
+
+---
+
+### Betriebsmeldungen per E-Mail (20.09.2026)
+
+Bis heute landete jeder Fehler **nur in der Datenbank**: ein 500er in `error_logs`,
+ein schwerer Vorgang zusaetzlich als Betriebsalarm. Sichtbar war beides auf der
+Betriebs-Seite und in `/api/ready` — aber **niemand erfuhr davon**. Ging Samstagnacht
+etwas kaputt, wusste es bis zum naechsten Hinsehen keiner.
+
+Jetzt gehen zwei Meldungen an `BETRIEB_MELDUNG_AN`:
+
+| | Wann | Inhalt |
+|---|---|---|
+| **Sofortmeldung** | sobald ein **neuer** Betriebsalarm entsteht | Typ, betroffener Datensatz, Einzelheiten, seit wann, wie oft |
+| **Tagesbericht** | taeglich um `BETRIEB_TAGESBERICHT_STUNDE` (8 Uhr) | offene Alarme, Fehler der letzten 24 h mit den haeufigsten Wegen, Zustand der Sicherung, haengende Abrufe |
+
+**Der Tagesbericht kommt auch, wenn alles in Ordnung ist.** Das ist Absicht: eine
+Plattform, die schweigt, ist von einer toten nicht zu unterscheiden. Bleibt die Mail
+aus, stimmt etwas nicht.
+
+**Einstellungen** (alle in `docker-compose.yml` durchgereicht):
+
+```
+BETRIEB_MELDUNG_AN=ahmadfkh006@gmail.com   # LEER = alles aus
+BETRIEB_MELDUNG_SOFORT_MIN=10              # Sammelfrist in Minuten
+BETRIEB_TAGESBERICHT_STUNDE=8              # -1 schaltet nur den Bericht ab
+```
+
+Setzen auf beiden Servern:
+```bash
+sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=ahmadfkh006@gmail.com
+```
+
+**Warum es nicht achtmal kommt:** zwei Server mit je vier Prozessen. Jede Runde laeuft
+unter einer Job-Sperre, der Tagesbericht unter einer Tagessperre (20 h) wie die
+Sicherung. Jeder gemeldete Alarm bekommt `gemeldet_am` — scheitert der Versand,
+bleibt die Markierung aus und die naechste Runde versucht es erneut. Ein bereits
+gemeldeter Alarm meldet sich **nicht** noch einmal, auch wenn er oefter auftritt
+(`betrieb.alarm` zaehlt dann nur `anzahl` hoch).
+
+**Stolperstein beim Bauen, der fast durchgerutscht waere:** `/api/ready` wertet einen
+beendeten Hintergrundjob als **Fehler** (503). Der erste Entwurf beendete den Dienst,
+wenn keine Adresse gesetzt ist — der Server waere aus dem Lastverteiler geflogen, nur
+weil niemand Meldungen haben will. Jetzt zweifach abgesichert: `server.py` startet den
+Dienst ohne Adresse gar nicht erst, und die Schleife beendet sich auch dann nicht.
+
+Waechter: `backend/tests/test_betriebsmeldung_20260920.py` (30 Tests).
