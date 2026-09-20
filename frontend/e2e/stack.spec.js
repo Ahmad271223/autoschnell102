@@ -46,13 +46,26 @@ test.describe("Produktions-Stack (nginx + Container + MongoDB mit Auth)", () => 
     expect(gesund.status()).toBe(200);
     expect((await gesund.json()).db).toBe("up");
 
-    // Bereitschaft: hier faellt auf, wenn Migration, Speicherplatz oder
-    // Datei-Speicher im Container nicht stimmen.
+    // Bereitschaft aus BESUCHERSICHT. Seit dem 20.09.2026 (Nr. 54) liefert
+    // /api/ready einem nicht ausgewiesenen Aufrufer nur noch ready true/false
+    // mit 200 bzw. 503 — genau das, was ein Lastverteiler braucht. Die
+    // Einzelheiten (Schema-Version, freier Speicher, offene Alarme, Zahl der
+    // Super-Admins ohne zweiten Faktor) waren vorher fuer jeden lesbar.
+    //
+    // Dieser Rauchtest laeuft ueber nginx, ist also ein Besucher. Er prueft
+    // deshalb ZWEIERLEI: dass die Plattform bereit ist, und dass dabei nichts
+    // nach aussen dringt. Der inhaltliche Blick (welcher Fehler genau?) steht
+    // einen Schritt vorher in der CI — `docker compose exec backend curl -fsS
+    // .../api/ready` laeuft IM Container, sieht die volle Antwort und bricht
+    // bei 503 ab.
     const bereit = await request.get("/api/ready");
     const daten = await bereit.json();
-    expect(daten.fehler, `nicht bereit: ${JSON.stringify(daten.fehler)}`).toEqual([]);
-    expect(bereit.status()).toBe(200);
+    expect(bereit.status(), `nicht bereit: ${JSON.stringify(daten)}`).toBe(200);
     expect(daten.ready).toBe(true);
+    for (const geheim of ["fehler", "warnungen", "info", "schema_version"]) {
+      expect(daten[geheim], `/api/ready verraet "${geheim}" nach aussen`)
+        .toBeUndefined();
+    }
   });
 
   test("Anmeldung und ein geschuetzter Aufruf gehen durch den ganzen Weg",
