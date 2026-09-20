@@ -341,7 +341,12 @@ def test_verkaeuferdaten_erst_nach_annahme_und_sucher_ohne_kontaktdaten():
     knapp = DRV._fahrer_eintrag(da, {"added_at": "x"}, voll=False)
     assert voll["driver_code"] == "FD-1" and voll["email"] == "m@x.de"
     assert knapp["driver_code"] is None and knapp["email"] is None and knapp["name"] == "Max"
-    assert 'voll = user.get("role") == "dealer"' in inspect.getsource(DRV.list_drivers)
+    # Pruefbericht 20.09.2026 (P0): die vollstaendigen Fahrerdaten haengen
+    # jetzt am eingetragenen Hauptchef statt an der blossen Rolle — ein
+    # zweites dealer-Konto der Firma sah sie sonst auch. Die Zusage dieses
+    # Tests (Sucher sieht nur Name und Status) ist dieselbe geblieben und
+    # wird oben am echten Verhalten geprueft.
+    assert "voll = await ist_haupt_chef(user)" in inspect.getsource(DRV.list_drivers)
     assert inspect.getsource(A.list_appointments).count('if chef_sicht else None') == 2
     assert inspect.getsource(A.get_appointment).count('if chef_sicht else None') == 2
     # Fotos je Bericht gedeckelt

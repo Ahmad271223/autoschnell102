@@ -67,8 +67,11 @@ def test_c5_quelle():
     src = inspect.getsource(d.get_settings)
     # Runde 11 bleibt: Backfill nur, wenn das Feld WEITERHIN fehlt
     assert "$exists" in src, "Backfill muss an 'Feld fehlt weiterhin' gebunden sein"
-    # Runde 13: Schreiben ist an die Chef-Rolle gebunden — und zwar VOR update_one
-    assert "ist_chef" in src and 'role") == "dealer"' in src
+    # Runde 13: Schreiben ist an die Chef-Rolle gebunden — und zwar VOR
+    # update_one. Pruefbericht 20.09.2026 (P0): die Bindung ist jetzt
+    # STRENGER — nicht mehr die blosse Rolle, sondern der eingetragene
+    # Hauptchef (ein zweites dealer-Konto der Firma schrieb sonst mit).
+    assert "ist_chef" in src and "ist_haupt_chef(user)" in src
     assert src.index("if not ist_chef") < src.index("update_one("), \
         "die Rollenweiche muss vor dem Schreibzugriff stehen"
     # Beide Zweige nutzen dieselbe Liste; der Sucher-Zweig mischt die
