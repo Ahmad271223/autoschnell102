@@ -2344,7 +2344,7 @@ Der Bericht hatte 54 Punkte (Nr. 21-74). Stand nach diesem Durchgang:
 
 | # | Befund | Korrektur |
 |---|---|---|
-| 54 | `/api/ready` gab anonym Schema-Version, freien Speicher, Alarme, Jobs, Super-Admin-Zahlen preis | Einzelheiten nur fuer Super-Admin und aus dem privaten Netz; alle anderen bekommen `ready` true/false. Der Zustandscode bleibt fuer jeden gleich |
+| 54 | `/api/ready` gab anonym Schema-Version, freien Speicher, Alarme, Jobs, Super-Admin-Zahlen preis | Einzelheiten nur noch, wenn der **direkte Nachbar die Schleife ist** (so lesen `rollout.sh` und `freigeben.sh` die Begruendung), mit Super-Admin-Token, oder mit der Kennung `X-Ready-Token`, die `scripts/betriebsprobe.py` und der Server beide aus `JWT_SECRET` ableiten (keine zusaetzliche Einstellung). Alle anderen bekommen nur `ready` true/false — der Zustandscode 200/503 bleibt fuer jeden gleich, der Lastverteiler merkt nichts. Bewusst NICHT `rate_limiter.client_ip`: die liest `X-Forwarded-For` und faellt bei einer Kette aus lauter eigenen Vermittlern auf den ersten Eintrag zurueck, den ein Besucher selbst setzen kann |
 | 55 | teurer Endpunkt ohne Bremse | `READY_CACHE_S` (5 s) |
 | 56 | feste Probedatei `.readiness` → zwei Aufrufe loeschten sie sich gegenseitig | eigener Name je Aufruf (derselbe Fehler steckte auch in `LocalDiskStorage`) |
 | 57 | Vorschau-Pfad des Bildproxys entpackte ohne Pixelpruefung | dieselbe Grenze wie im PDF-Pfad, **vor** dem Entpacken |

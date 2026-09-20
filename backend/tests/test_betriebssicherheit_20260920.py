@@ -324,3 +324,42 @@ def test_52_die_oberflaeche_verkleinert_vor_dem_hochladen():
     from routes.resale import PHOTOS_JE_ANFRAGE_MAX
     m = re.search(r"const FOTOS_JE_PAKET = (\d+)", quelle)
     assert m and int(m.group(1)) <= PHOTOS_JE_ANFRAGE_MAX
+
+
+def test_54e_die_betriebsprobe_kommt_weiterhin_an_die_begruendung():
+    """`scripts/betriebsprobe.py` laeuft IM Container, ruft die Seite aber
+    bewusst von aussen auf (Cloudflare + Lastverteiler) — ihr direkter
+    Nachbar ist also der Proxy, nicht die Schleife. Ohne diesen Weg haette
+    Nr. 54 ihre Ausgabe entwertet: "bereit (Schema None, Alarme offen:
+    None)" und keine Warnungen mehr. Beide Seiten leiten die Kennung aus
+    JWT_SECRET ab — keine zusaetzliche Einstellung."""
+    import os
+    import sys as _sys
+    _sys.path.insert(0, str(BACKEND / "scripts"))
+    import betriebsprobe
+    import server
+
+    alt = os.environ.get("JWT_SECRET")
+    try:
+        os.environ["JWT_SECRET"] = "probe-geheimnis-1234567890abcdefghij"
+        # Ohne Geheimnis: kein Kopf, und die Probe sieht eben nur den Zustand.
+        os.environ["JWT_SECRET"] = ""
+        assert betriebsprobe._ready_kopf() == {}
+        os.environ["JWT_SECRET"] = "probe-geheimnis-1234567890abcdefghij"
+        kopf = betriebsprobe._ready_kopf()
+        assert "X-Ready-Token" in kopf
+    finally:
+        if alt is None:
+            os.environ.pop("JWT_SECRET", None)
+        else:
+            os.environ["JWT_SECRET"] = alt
+
+    # Server und Probe muessen dieselbe Kennung errechnen.
+    marke = server.betriebsdaten_marke()
+    assert len(marke) == 32 and marke.isalnum()
+    mit_marke = _anfrage("203.0.113.7", {"x-ready-token": marke})
+    assert asyncio.run(server._darf_betriebsdaten_sehen(mit_marke)) is True
+    falsch = _anfrage("203.0.113.7", {"x-ready-token": "f" * 32})
+    assert asyncio.run(server._darf_betriebsdaten_sehen(falsch)) is False
+    assert asyncio.run(server._darf_betriebsdaten_sehen(
+        _anfrage("203.0.113.7", {"x-ready-token": ""}))) is False

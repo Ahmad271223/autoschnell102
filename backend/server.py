@@ -18,6 +18,7 @@ import logging
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 import os
+import secrets
 import sys
 import uuid
 from pathlib import Path
@@ -412,6 +413,18 @@ _ready_stand = {"bis": 0.0, "ergebnis": None, "code": 200}
 _ready_lock = asyncio.Lock()
 
 
+def betriebsdaten_marke() -> str:
+    """Kennung, mit der sich die Betriebsprobe ausweist (siehe unten).
+
+    Aus JWT_SECRET abgeleitet — beide Seiten rechnen sie selbst aus, es gibt
+    also nichts zusaetzlich zu setzen und nichts zusaetzlich zu schuetzen."""
+    import hashlib
+    import hmac as _hmac
+    from auth import JWT_SECRET
+    return _hmac.new(str(JWT_SECRET).encode(), b"ready-detail",
+                     hashlib.sha256).hexdigest()[:32]
+
+
 async def _darf_betriebsdaten_sehen(request: Request) -> bool:
     """Wer die Einzelheiten von /api/ready sehen darf (Nr. 54).
 
@@ -438,6 +451,16 @@ async def _darf_betriebsdaten_sehen(request: Request) -> bool:
             return True
     except (ImportError, ValueError):
         pass
+    # Die Betriebsprobe (scripts/betriebsprobe.py) laeuft IM Container, ruft
+    # die Seite aber bewusst von aussen ueber Cloudflare und den
+    # Lastverteiler auf — wie ein Besucher. Ihr direkter Nachbar ist deshalb
+    # der Proxy, nicht die Schleife. Damit sie trotzdem die Begruendung
+    # bekommt, weist sie sich mit einer Kennung aus, die beide Seiten aus
+    # JWT_SECRET ableiten: keine zusaetzliche Einstellung, nichts, was von
+    # aussen zu erraten waere.
+    marke = request.headers.get("x-ready-token") or ""
+    if marke and secrets.compare_digest(marke, betriebsdaten_marke()):
+        return True
     kopf = request.headers.get("authorization") or ""
     if not kopf.lower().startswith("bearer "):
         return False

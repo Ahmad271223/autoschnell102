@@ -147,6 +147,24 @@ def header_pruefen(host):
             warn(f"{pfad}: Server-Header verraet Version ({h['server']}) — server_tokens off")
 
 
+def _ready_kopf() -> dict:
+    """Kennung fuer die Einzelheiten von /api/ready (Nachpruefung 20.09.2026,
+    Nr. 54).
+
+    Genauso berechnet wie in server.betriebsdaten_marke(): beide Seiten
+    leiten sie aus JWT_SECRET ab — es gibt nichts zusaetzlich zu setzen.
+    Ohne JWT_SECRET (Aufruf ausserhalb des Servers) bleibt es bei
+    ready true/false."""
+    import hashlib
+    import hmac
+    import os
+    geheim = os.environ.get("JWT_SECRET", "").strip()
+    if not geheim:
+        return {}
+    return {"X-Ready-Token": hmac.new(geheim.encode(), b"ready-detail",
+                                      hashlib.sha256).hexdigest()[:32]}
+
+
 def api_pruefen(host):
     print("5. Health / Readiness")
     try:
@@ -155,7 +173,14 @@ def api_pruefen(host):
     except Exception as exc:  # noqa: BLE001
         fehler(f"/api/health: {exc}")
     try:
-        r = requests.get(f"https://{host}/api/ready", timeout=15)
+        # Nachpruefung 20.09.2026, Nr. 54: /api/ready gibt die Einzelheiten
+        # nur noch an die eigene Seite heraus. Diese Probe laeuft zwar im
+        # Container, ruft die Seite aber bewusst von aussen auf (ueber
+        # Cloudflare und den Lastverteiler) — deshalb weist sie sich mit
+        # einer aus JWT_SECRET abgeleiteten Kennung aus. Fehlt JWT_SECRET
+        # (Aufruf ausserhalb des Servers), kommt eben nur ready true/false.
+        r = requests.get(f"https://{host}/api/ready", timeout=15,
+                         headers=_ready_kopf())
         d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         if r.status_code == 200 and d.get("ready"):
             ok(f"/api/ready bereit (Schema {d.get('schema_version')}, Alarme offen: {d.get('alarme_offen')})")
