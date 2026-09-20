@@ -215,3 +215,120 @@ def test_13_die_nacharbeit_hat_es_immer_richtig_gemacht():
     import cleanup_service as CS
     q = inspect.getsource(CS)
     assert "fahrzeug_status_aggregieren(c.get(\"vehicle_id\"), c[\"dealer_id\"]) is None" in q
+
+
+# --------------------------------------------------------------------------
+# Nachpruefung desselben Tages: der Bericht bemaengelt zu Recht, dass die
+# Tests oben NUR nach `role == "dealer"` suchen. Ebenso gefaehrlich sind die
+# Umkehrung `role != "dealer"` und die zentrale Annahme "wer kein Sucher ist,
+# ist Chef" (ist_sucher()). Genau dort haengen fahrzeug_bereich,
+# eigene_fahrzeug_ids, termin_bereich, termin_im_bereich und _vertrag_bereich.
+#
+# Geloest wird das NICHT an zwoelf Stellen, sondern einmal in current_firma:
+# ein dealer-Konto, das nicht der eingetragene Chef ist, arbeitet fuer die
+# Dauer der Anfrage als Sucher. Diese Tests halten das fest.
+# --------------------------------------------------------------------------
+
+def _quelle(datei: str) -> str:
+    return (BACKEND / datei).read_text(encoding="utf-8")
+
+
+def test_07_current_firma_nordet_ein_fremdes_dealer_konto_ein():
+    quelle = _quelle("deps.py")
+    anfang = quelle.index("async def current_firma")
+    block = quelle[anfang:quelle.index("async def ist_haupt_chef")]
+    code = "\n".join(z.split("#", 1)[0] for z in block.splitlines())
+    assert '"user_id": 1' in code, (
+        "current_firma liest den Chef-Zeiger nicht mit — ohne ihn kann es ein "
+        "fremdes dealer-Konto nicht erkennen")
+    assert 'user["role"] = "sucher"' in code, (
+        "current_firma stuft ein dealer-Konto, das NICHT der eingetragene Chef "
+        "ist, nicht auf Sucher herab (P0-Nachpruefung 20.09.2026)")
+    assert "user = dict(user)" in code, (
+        "current_firma veraendert das Dokument des Aufrufers, statt eine Kopie "
+        "einzunorden")
+
+
+def test_08_einnordung_haengt_am_zeiger_nicht_an_der_rolle():
+    """Fehlt der Zeiger (Altbestand), darf NICHT herabgestuft werden —
+    sonst verlieren alte Firmen ohne dealers.user_id ihren Chef."""
+    quelle = _quelle("deps.py")
+    anfang = quelle.index("async def current_firma")
+    block = quelle[anfang:quelle.index("async def ist_haupt_chef")]
+    code = "\n".join(z.split("#", 1)[0] for z in block.splitlines())
+    assert 'haupt and haupt != user["id"]' in code, (
+        "die Einnordung prueft nicht auf einen GESETZTEN Zeiger — ein "
+        "Altbestand ohne dealers.user_id verloere seinen Chef")
+
+
+def test_09_fremdes_dealer_konto_bekommt_sucher_bereiche():
+    """Am echten Code: dasselbe Konto, einmal als eingetragener Chef und
+    einmal als liegengebliebenes zweites dealer-Konto."""
+    asyncio.run(_fremdes_dealer_konto())
+
+
+async def _fremdes_dealer_konto():
+    import deps
+
+    firma, chef, zweiter = f"f-{uuid.uuid4().hex[:8]}", "chef-1", "zweit-1"
+
+    async def firma_lesen(_filter, _proj=None):
+        return {"id": firma, "user_id": chef}
+
+    class _Dealers:
+        find_one = staticmethod(firma_lesen)
+
+    echt = deps.db
+    deps.db = SimpleNamespace(dealers=_Dealers())
+    try:
+        chef_konto = {"id": chef, "role": "dealer", "dealer_id": firma}
+        rest = {"id": zweiter, "role": "dealer", "dealer_id": firma}
+
+        raus_chef = await deps.current_firma(chef_konto)
+        raus_rest = await deps.current_firma(rest)
+    finally:
+        deps.db = echt
+
+    assert raus_chef["role"] == "dealer", "der echte Chef wurde herabgestuft"
+    assert not deps.ist_sucher(raus_chef)
+    assert deps.fahrzeug_bereich(raus_chef) == {
+        "dealer_id": firma, "lifecycle": {"$ne": "geloescht"}}, \
+        "der Chef sieht nicht mehr die ganze Firma"
+
+    assert raus_rest["role"] == "sucher", (
+        "ein zweites dealer-Konto gilt weiter als Chef (P0-Nachpruefung)")
+    assert deps.ist_sucher(raus_rest)
+    bereich = deps.fahrzeug_bereich(raus_rest)
+    assert "$or" in bereich, (
+        "das zweite dealer-Konto bekommt weiter die Firmensicht statt nur "
+        "seiner eigenen Fahrzeuge")
+    assert rest["role"] == "dealer", (
+        "current_firma hat das uebergebene Dokument veraendert statt eine "
+        "Kopie einzunorden")
+
+
+def test_10_chefwechsel_ist_unteilbar():
+    quelle = _quelle("routes/admin.py")
+    anfang = quelle.index('sperre = await acquire(db, f"chefwechsel-')
+    block = quelle[anfang:anfang + 2600]
+    code = "\n".join(z.split("#", 1)[0] for z in block.splitlines())
+    assert "await transaktion(" in code, (
+        "der Chefwechsel laeuft noch als vier einzelne Schreibvorgaenge — "
+        "ein Abbruch dazwischen laesst ein zweites dealer-Konto zurueck")
+    kern = code[code.index("async def _wechseln"):code.index("await transaktion(")]
+    assert kern.count("session=s") == 4, (
+        "nicht alle vier Schritte des Chefwechsels haengen an derselben "
+        f"Transaktion (gefunden: {kern.count('session=s')})")
+
+
+def test_11_ready_rauchtest_erwartet_die_besuchersicht():
+    """P1 des Berichts: der Browser-Rauchtest verlangte weiter die
+    ausfuehrliche /api/ready-Antwort und machte die Pipeline rot."""
+    spec = (BACKEND.parent / "frontend" / "e2e" / "stack.spec.js").read_text(
+        encoding="utf-8")
+    assert "expect(daten.fehler" not in spec, (
+        "der Rauchtest erwartet weiter daten.fehler — seit dem 20.09.2026 "
+        "bekommt ein Besucher nur noch {ready: true|false}")
+    assert 'expect(daten[geheim]' in spec and '"schema_version"' in spec, (
+        "der Rauchtest prueft nicht, dass /api/ready nach aussen nichts "
+        "ueber den Betrieb verraet")

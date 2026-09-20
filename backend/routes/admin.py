@@ -735,22 +735,39 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                         raise HTTPException(409, "Ein Chefwechsel dieser Firma läuft gerade — "
                                                  "bitte gleich erneut versuchen")
                     try:
-                        await db.dealers.update_one(
-                            {"id": target["dealer_id"]},
-                            {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
-                        await db.users.update_one(
-                            {"id": target["id"]},
-                            {"$set": {"role": "dealer", "current_session_id": None,
-                                      "updated_at": now_iso()}})
-                        await db.users.update_one(
-                            {"id": chef["id"], "role": "dealer"},
-                            {"$set": {"role": "sucher", "current_session_id": None,
-                                      "updated_at": now_iso()}})
-                        await db.users.update_many(
-                            {"dealer_id": target["dealer_id"], "role": "dealer",
-                             "id": {"$ne": target["id"]}},
-                            {"$set": {"role": "sucher", "current_session_id": None,
-                                      "updated_at": now_iso()}})
+                        # Nachpruefung 20.09.2026: die vier Schritte laufen jetzt
+                        # als EINER. Vorher konnte ein Abbruch dazwischen ein
+                        # zweites Konto mit role="dealer" zuruecklassen — die
+                        # Reihenfolge verhinderte zwar, dass die Firma ohne Chef
+                        # dasteht, aber nicht den Rest. (Harmlos ist so ein Konto
+                        # seit demselben Tag ohnehin: current_firma nordet jedes
+                        # dealer-Konto, das nicht der eingetragene Chef ist, auf
+                        # Sucher ein. Trotzdem soll der Zustand gar nicht erst
+                        # entstehen.) Ohne Replica Set laeuft es wie bisher —
+                        # die Schritte sind einzeln wiederholbar.
+                        from deps import transaktion
+
+                        async def _wechseln(s):
+                            jetzt = now_iso()
+                            await db.dealers.update_one(
+                                {"id": target["dealer_id"]},
+                                {"$set": {"user_id": target["id"], "updated_at": jetzt}},
+                                session=s)
+                            await db.users.update_one(
+                                {"id": target["id"]},
+                                {"$set": {"role": "dealer", "current_session_id": None,
+                                          "updated_at": jetzt}}, session=s)
+                            await db.users.update_one(
+                                {"id": chef["id"], "role": "dealer"},
+                                {"$set": {"role": "sucher", "current_session_id": None,
+                                          "updated_at": jetzt}}, session=s)
+                            await db.users.update_many(
+                                {"dealer_id": target["dealer_id"], "role": "dealer",
+                                 "id": {"$ne": target["id"]}},
+                                {"$set": {"role": "sucher", "current_session_id": None,
+                                          "updated_at": jetzt}}, session=s)
+
+                        await transaktion(_wechseln)
                     finally:
                         await release(db, f"chefwechsel-{target['dealer_id']}", token=sperre)
                     await log_activity_sicher(

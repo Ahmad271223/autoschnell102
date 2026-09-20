@@ -119,7 +119,14 @@ def test_02_chefwechsel_sperre_und_loeschguards(wegwerf):
     db, run = wegwerf.db, wegwerf.run
     src = inspect.getsource(ADMIN.admin_update_user)
     assert 'acquire(db, f"chefwechsel-{target[\'dealer_id\']}"' in src
-    assert '"id": {"$ne": target["id"]}},\n                            {"$set": {"role": "sucher"' in src
+    # Nachpruefung 20.09.2026: die vier Schritte stehen jetzt in _wechseln()
+    # unter EINER Transaktion, also eine Ebene tiefer eingerueckt. Geprueft
+    # wird deshalb die Aussage statt der Einrueckung: alle uebrigen
+    # dealer-Konten der Firma werden zu Suchern — und zwar in einem Zug.
+    ohne_raum = " ".join(src.split())
+    assert '"id": {"$ne": target["id"]}}, {"$set": {"role": "sucher"' in ohne_raum
+    assert "await transaktion(" in ohne_raum, (
+        "der Chefwechsel laeuft nicht mehr als EIN Vorgang")
     assert 'get("status") == "laeuft":\n        raise HTTPException(409, "Dieses Konto wird gerade gelöscht' in src
     # Firma in Loeschung: current_firma 409
     run(db.dealers.insert_one({"id": "d1", "company_name": "X",

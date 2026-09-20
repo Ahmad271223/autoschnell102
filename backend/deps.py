@@ -341,7 +341,9 @@ async def current_firma(user=Depends(current_user)):
     # lieferte effective_dealer {} und Termine/Vertraege/Versand liefen mit
     # leerer Firmenidentitaet und Default-Regeln weiter. Eine indexierte
     # find_one je Firmen-Request.
-    firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "id": 1, "loeschung": 1})
+    firma = await db.dealers.find_one(
+        {"id": user["dealer_id"]},
+        {"_id": 0, "id": 1, "loeschung": 1, "user_id": 1})
     if firma is None:
         raise HTTPException(403, "Kein Händlerprofil — bitte den "
                                  "Administrator kontaktieren")
@@ -350,6 +352,28 @@ async def current_firma(user=Depends(current_user)):
     # konkurrieren sie mit der Loeschkaskade und legen Daten neu an.
     if (firma.get("loeschung") or {}).get("status") == "laeuft":
         raise HTTPException(409, "Diese Firma wird gerade gelöscht — keine Änderungen mehr möglich")
+    # Nachpruefung 20.09.2026: `ist_haupt_chef` und `current_chef` erkennen ein
+    # uebrig gebliebenes zweites dealer-Konto korrekt — die BEREICHS-Logik aber
+    # nicht. `ist_sucher()` fragt nur `role == "sucher"`, also gilt dort
+    # ueberall "wer kein Sucher ist, ist Chef": fahrzeug_bereich,
+    # eigene_fahrzeug_ids, termin_bereich, termin_im_bereich, _vertrag_bereich
+    # und jede `role == "dealer"`-Abfrage haetten so einem Konto die
+    # Firmensicht gegeben. (Kein Mandantenleck — alle diese Wege filtern
+    # zuerst nach dealer_id, es bleibt also in der eigenen Firma.)
+    #
+    # Statt zwoelf Stellen einzeln umzubauen, wird das Konto HIER einmal
+    # eingenordet: wer nicht der eingetragene Chef ist, arbeitet fuer die
+    # Dauer dieser Anfrage als Sucher. Alle Helfer ziehen damit automatisch
+    # nach. Kostet nichts — `user_id` kommt aus der Abfrage, die ohnehin laeuft.
+    #
+    # Nur bei GESETZTEM Zeiger: fehlt er (Altbestand), greift weiterhin die
+    # Ersatzregel aus `ist_haupt_chef`/`current_chef` (aeltestes dealer-Konto),
+    # und `current_chef` traegt den Zeiger beim naechsten Mal nach.
+    haupt = firma.get("user_id")
+    if user.get("role") == "dealer" and haupt and haupt != user["id"]:
+        user = dict(user)          # nie das Dokument des Aufrufers veraendern
+        user["role"] = "sucher"
+        user["kein_haupt_chef"] = True
     return user
 
 
