@@ -57,7 +57,23 @@ SALE_PLANS = {
 SUCHER_PLANS = {
     "monthly": {"label": "Monatlich", "price": 150.00, "days": 30},
     "yearly":  {"label": "Jährlich",  "price": 1500.00, "days": 365},
+    # Wunsch Ahmad 20.09.2026: Probe-Abo. Kostenlos, laeuft nach wenigen
+    # Tagen von selbst ab — danach sperrt die Abo-Pruefung die Sucher-
+    # Funktion automatisch, genau wie bei jedem abgelaufenen Abo.
+    # `probe: True` trennt sie ueberall von den bezahlten Plaenen: der
+    # Sucher kann sie NICHT selbst anfragen (nur der Betreiber vergibt
+    # sie), und sie erzeugt keine Zahlung.
+    "probe3": {"label": "Probe 3 Tage", "price": 0.00, "days": 3, "probe": True},
+    "probe5": {"label": "Probe 5 Tage", "price": 0.00, "days": 5, "probe": True},
 }
+
+#: Die Plaene, die ein Sucher/Chef selbst anfragen kann — Probe-Abos
+#: vergibt ausschliesslich der Betreiber.
+ANFRAGBARE_PLANS = {k: v for k, v in SUCHER_PLANS.items() if not v.get("probe")}
+
+
+def ist_probe(plan) -> bool:
+    return bool((SUCHER_PLANS.get(str(plan or "")) or {}).get("probe"))
 
 
 # ---------- Models ----------
@@ -378,7 +394,10 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
     plan = body.get("plan", "monthly")
     # Befund 92 (16.09.2026): {"plan": []} oder {"plan": {}} ist nicht hashbar —
     # der Mitgliedstest endete mit TypeError (500) statt mit 400.
-    if not isinstance(plan, str) or plan not in SUCHER_PLANS:
+    if not isinstance(plan, str) or plan not in ANFRAGBARE_PLANS:
+        # Probe-Abos stehen hier bewusst nicht zur Wahl: sie vergibt der
+        # Betreiber, sonst koennte sich jeder selbst immer neue drei Tage
+        # holen.
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     ist_sucher = user.get("role") == "sucher"
@@ -429,7 +448,8 @@ async def eigenes_abo_anfrage(body: dict = Body(default={}),
 # ---------- Sucher-Abo ----------
 @router.get("/dealer/sucher-plans")
 async def sucher_plans(user=Depends(current_haendler)):
-    return {"plans": SUCHER_PLANS}
+    # Ohne Probe-Abos: die Firma soll sie in ihrer Auswahl gar nicht sehen.
+    return {"plans": ANFRAGBARE_PLANS}
 
 
 @router.post("/dealer/sucher/{sucher_id}/abo-anfrage")

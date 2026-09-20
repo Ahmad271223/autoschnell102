@@ -2471,3 +2471,40 @@ weil niemand Meldungen haben will. Jetzt zweifach abgesichert: `server.py` start
 Dienst ohne Adresse gar nicht erst, und die Schleife beendet sich auch dann nicht.
 
 Waechter: `backend/tests/test_betriebsmeldung_20260920.py` (30 Tests).
+
+---
+
+### Probe-Abo und Blaettern in der Vertragsliste (20.09.2026, Wunsch Ahmad)
+
+**Probe-Abo.** Neben "150 €/M" und "1.500 €/J" gibt es auf der Firmenseite zwei
+weitere Knoepfe: **Probe 3 T** und **Probe 5 T**. Kostenlos, laeuft nach 3 bzw. 5
+Tagen ab — danach sperrt die Abo-Pruefung die Sucher-Funktion automatisch, genau wie
+bei jedem abgelaufenen Abo. Das Konto selbst (Anmeldung, Bestand, Vertraege) bleibt
+erhalten; gesperrt wird nur die kostenpflichtige Sucher-Funktion. Das ist dieselbe
+Regel wie bei "Abo aufheben" und seit 09/2026 so gewollt.
+
+Drei Vorkehrungen, ohne die es schiefgegangen waere:
+
+| | |
+|---|---|
+| **Ein bezahltes Abo wird nie ersetzt** | `_abo_vorgang_ausfuehren` ersetzt ALLE bisherigen Abos durch das neue. Eine Probe auf ein laufendes Jahr haette ein bezahltes Jahr durch drei Tage ersetzt. Die Route lehnt das jetzt mit 400 ab und nennt Plan und Ablauf des laufenden Abos |
+| **Die Probe beginnt JETZT** | nicht am Ende einer Restlaufzeit — sonst ergaeben zwei Proben sechs Tage |
+| **Der Sucher kann sie nicht selbst anfragen** | sonst holte sich jeder alle drei Tage neue drei Tage. `ANFRAGBARE_PLANS` enthaelt sie nicht, und `/dealer/sucher-plans` zeigt sie der Firma gar nicht |
+
+Kein Betrag und kein eigenes Ablaufdatum: beides lehnt die Route ab, die Laufzeit
+entscheidet der Plan. In den Zahlungen erscheint die Probe mit **0,00 €** und
+Zahlungsart **`probe`** — getrennt von "Kulanz", damit die Abrechnung sauber bleibt.
+
+Wichtig fuer die Wirkung: `probe3`/`probe5` stehen auch in `deps.ABO_PLAENE_ERLAUBT`.
+Ohne diesen Eintrag waere das Abo zwar angelegt, gaebe aber **keinen Zugang** (der
+Plan gaelte als "ungueltig").
+
+**Vertragsliste.** Die Firmenseite laedt jetzt **20 Vertraege** und darunter einen
+Knopf "Weitere 20 anzeigen"; die schon geladenen bleiben stehen, die naechsten kommen
+darunter dazu. Der Zaehler oben zeigt die Gesamtzahl, daneben steht, wie viele davon
+geladen sind. Die Obergrenze bleibt bei **2.000** (`ADMIN_VERTRAEGE_MAX`) — am Ende
+verschwindet der Knopf und ein Hinweis nennt die wahre Zahl, statt sie still zu
+ziehen. Die Schnittstelle: `GET /api/admin/users/{id}/contracts?seite=&limit=`
+(Standard 20) liefert zusaetzlich `gesamt`, `weitere` und `seite`.
+
+Waechter: `backend/tests/test_probeabo_vertragsliste_20260920.py` (15 Tests).

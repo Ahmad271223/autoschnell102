@@ -1607,14 +1607,30 @@ async def admin_all_contracts(response: Response, _=Depends(current_admin),
     return items[:limit]
 
 
+#: Wunsch Ahmad 20.09.2026: Die Firmenseite laedt die Vertraege in
+#: 20er-Schritten nach ("weitere 20 anzeigen"), statt bis zu 2000 Stueck auf
+#: einmal. Bei einer Firma mit vielen Vertraegen war die Seite sonst
+#: sekundenlang am Laden, bevor ueberhaupt etwas zu sehen war.
+ADMIN_VERTRAEGE_SEITE = 20
+
+
 @router.get("/admin/users/{user_id}/contracts")
-async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
+async def admin_user_contracts(user_id: str, response: Response,
+                               _=Depends(current_admin),
+                               seite: int = 1,
+                               limit: int = ADMIN_VERTRAEGE_SEITE):
     """Listet die Verträge eines Nutzers auf (read-only).
     Chef (role dealer): alle Verträge seiner Firma (umfang "firma"); jedes
     andere Konto: nur die selbst erzeugten (umfang "nutzer").
     Enthält keine PDF-Bytes — nur Metadaten + extrahierte Vertragsdaten,
     damit die Liste schnell lädt. PDF kann separat über
     /api/admin/contracts/{id}/pdf abgerufen werden (falls benötigt).
+
+    Wunsch Ahmad 20.09.2026 — Blaettern: `seite` und `limit` (Standard 20,
+    hoechstens ADMIN_VERTRAEGE_MAX). Die Antwort nennt zusaetzlich
+    `gesamt` (wie viele es wirklich sind) und `weitere` (ob es noch mehr
+    gibt), damit die Oberflaeche "weitere 20 anzeigen" sauber anbieten und
+    am Ende ausblenden kann.
     """
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "mfa": 0,
                                                      "current_session_id": 0})
@@ -1636,15 +1652,32 @@ async def admin_user_contracts(user_id: str, _=Depends(current_admin)):
         filt, umfang = {"dealer_id": user["dealer_id"]}, "firma"
     else:
         filt, umfang = {"user_id": user_id}, "nutzer"
+    limit = max(1, min(int(limit or ADMIN_VERTRAEGE_SEITE), ADMIN_VERTRAEGE_MAX))
+    # Wie bei /admin/contracts: die Seitenzahl nach oben begrenzen, sonst
+    # sprengt (seite - 1) * limit int64 und pymongo wirft OverflowError (500).
+    seite = max(1, min(int(seite or 1), 10 ** 6))
+    ueberspringen = (seite - 1) * limit
+    gesamt = await db.generated_pdfs.count_documents(filt)
     items = await db.generated_pdfs.find(
         filt, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
-    ).sort("created_at", -1).to_list(ADMIN_VERTRAEGE_MAX + 1)
-    abgeschnitten = len(items) > ADMIN_VERTRAEGE_MAX
+    ).sort("created_at", -1).skip(ueberspringen).to_list(limit + 1)
+    weitere = len(items) > limit
+    items = items[:limit]
+    # Die Obergrenze bleibt wie bisher: mehr als ADMIN_VERTRAEGE_MAX zeigt
+    # die Admin-Ansicht nicht — das wird gesagt, nicht still gezogen.
+    erreichbar = min(gesamt, ADMIN_VERTRAEGE_MAX)
+    abgeschnitten = gesamt > ADMIN_VERTRAEGE_MAX
+    if ueberspringen + len(items) >= ADMIN_VERTRAEGE_MAX:
+        weitere = False
     if abgeschnitten:
-        log.warning("Admin-Vertragsansicht %s (%s) auf %s Eintraege gekuerzt",
-                    user_id, umfang, ADMIN_VERTRAEGE_MAX)
-    return {"user": user, "contracts": items[:ADMIN_VERTRAEGE_MAX],
-            "umfang": umfang, "abgeschnitten": abgeschnitten}
+        log.warning("Admin-Vertragsansicht %s (%s): %s Vertraege, angezeigt "
+                    "werden hoechstens %s", user_id, umfang, gesamt,
+                    ADMIN_VERTRAEGE_MAX)
+    response.headers["X-Truncated"] = "1" if weitere else "0"
+    return {"user": user, "contracts": items, "umfang": umfang,
+            "abgeschnitten": abgeschnitten, "gesamt": gesamt,
+            "erreichbar": erreichbar, "seite": seite, "limit": limit,
+            "weitere": weitere}
 
 
 @router.get("/admin/contracts/{contract_id}/pdf")
@@ -1956,13 +1989,13 @@ class AboFreischaltenIn(BaseModel):
     Audit 09/2026: feste Plantypen, echte Betragspruefung (kein stilles
     Ersetzen durch den Listenpreis, kein 0 EUR), Zahlungsart mit
     Pflichtbegruendung bei Kulanz."""
-    plan: Optional[Literal["monthly", "yearly"]] = None
+    plan: Optional[Literal["monthly", "yearly", "probe3", "probe5"]] = None
     gueltig_bis: Optional[str] = Field(default=None, max_length=30)
     betrag: Optional[Decimal] = Field(default=None, gt=Decimal("0"),
                                       le=Decimal("100000"))
     gezahlt_am: Optional[str] = Field(default=None, max_length=10)
     notiz: str = Field(default="", max_length=500)
-    zahlungsart: Literal["rechnung_bezahlt", "kulanz"] = "rechnung_bezahlt"
+    zahlungsart: Literal["rechnung_bezahlt", "kulanz", "probe"] = "rechnung_bezahlt"
     grund: str = Field(default="", max_length=300)
     waehrung: Literal["EUR"] = "EUR"
 
@@ -2021,6 +2054,33 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
         return {"ok": True, "active": False}
     if body.plan not in SUCHER_PLANS:
         raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {body.plan}")
+    # Wunsch Ahmad 20.09.2026 — Probe-Abo (kostenlos, wenige Tage):
+    from routes.team import ist_probe
+    probe = ist_probe(body.plan)
+    if probe:
+        # FALLE, die hier sonst zuschlaegt: _abo_vorgang_ausfuehren ersetzt
+        # ALLE bisherigen Abos durch das neue. Eine Probe auf ein laufendes
+        # Jahres-Abo wuerde also ein bezahltes Jahr durch drei Tage
+        # ersetzen. Deshalb nur fuer Konten OHNE laufendes bezahltes Abo.
+        laeuft = await db.subscriptions.find_one(
+            {"subject_user_id": sucher_id, "status": "active",
+             "plan": {"$nin": ["probe3", "probe5"]}},
+            {"_id": 0, "plan": 1, "expires_at": 1})
+        if laeuft and (laeuft.get("expires_at") or "") > now_iso():
+            raise HTTPException(
+                400, "Dieses Konto hat bereits ein bezahltes Abo "
+                     f"({laeuft.get('plan')}, gueltig bis "
+                     f"{str(laeuft.get('expires_at'))[:10]}). Ein Probe-Abo "
+                     f"wuerde es ersetzen — erst das bezahlte Abo aufheben.")
+        if body.betrag is not None:
+            raise HTTPException(400, "Ein Probe-Abo ist kostenlos — kein Betrag.")
+        if body.gueltig_bis:
+            raise HTTPException(
+                400, "Beim Probe-Abo entscheidet die Laufzeit des Plans "
+                     "(3 bzw. 5 Tage) — kein eigenes Datum.")
+        body.zahlungsart = "probe"
+    elif body.zahlungsart == "probe":
+        raise HTTPException(400, "Zahlungsart 'probe' gibt es nur beim Probe-Abo")
     if body.zahlungsart == "kulanz" and not body.grund.strip():
         raise HTTPException(400, "Kulanz-Freischaltung braucht eine Begruendung")
     gezahlt_am = _datum_pruefen_400(body.gezahlt_am, "gezahlt_am")
@@ -2131,7 +2191,7 @@ async def _sperre(name: str, besitzer: str):
 
 async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenIn,
                             gezahlt_am: str, admin: dict, wache=None) -> dict:
-    from routes.team import SUCHER_PLANS
+    from routes.team import SUCHER_PLANS, ist_probe
     plan = body.plan
     days = SUCHER_PLANS[plan]["days"]
     gueltig_bis = _gueltig_bis_parsen(body.gueltig_bis)
@@ -2142,12 +2202,20 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
     else:
         # Restlaufzeit erhalten: erneutes Freischalten verlaengert ab dem
         # bisherigen Ablauf, nicht ab "jetzt".
-        basis = _restlaufzeit_basis(
-            (await db.subscriptions.find_one(
-                {"subject_user_id": sucher_id, "status": "active"},
-                {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
-        expires_at = (basis + timedelta(days=days)).isoformat()
-    if body.zahlungsart == "kulanz":
+        if ist_probe(plan):
+            # Die Probe beginnt JETZT — nicht am Ende einer Restlaufzeit.
+            # Sonst ergaebe eine zweite Probe sechs statt drei Tage.
+            expires_at = (datetime.now(timezone.utc)
+                          + timedelta(days=days)).isoformat()
+        else:
+            basis = _restlaufzeit_basis(
+                (await db.subscriptions.find_one(
+                    {"subject_user_id": sucher_id, "status": "active"},
+                    {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
+            expires_at = (basis + timedelta(days=days)).isoformat()
+    if body.zahlungsart in ("kulanz", "probe"):
+        # Probe-Abo (20.09.2026): kostenlos wie Kulanz, aber ein eigener
+        # Grund — in der Zahlungsliste soll "Probe" stehen, nicht "Kulanz".
         betrag = 0.0
     elif body.betrag is not None:
         betrag = round(float(body.betrag), 2)
@@ -2203,7 +2271,7 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
             "period_until": v["expires_at"],       # bezahlt bis = Ablauf bei Freischaltung
             "note": v.get("notiz", ""),
             "zahlungsart": v.get("zahlungsart", "rechnung_bezahlt"),
-            "kostenlos": v.get("zahlungsart") == "kulanz",
+            "kostenlos": v.get("zahlungsart") in ("kulanz", "probe"),
             "grund": v.get("grund", ""),
             "quelle": "manuell", "vorgang_id": vid,
             "recorded_by": v.get("admin_email", ""), "created_at": jetzt}},

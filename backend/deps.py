@@ -408,7 +408,11 @@ async def current_super_admin(user=Depends(current_admin)):
     return user
 
 
-ABO_PLAENE_ERLAUBT = {"monthly", "yearly", "trial", "lifetime"}
+# Wunsch Ahmad 20.09.2026: probe3/probe5 sind vollwertige Abos — ohne
+# sie hier waere das Probe-Abo zwar angelegt, wuerde aber KEINEN Zugang
+# geben (der Plan gilt dann als "ungueltig", siehe unten).
+ABO_PLAENE_ERLAUBT = {"monthly", "yearly", "trial", "lifetime",
+                      "probe3", "probe5"}
 # Zustaende, in denen ein Abo (noch) Zugang gewaehrt: gekuendigt laeuft bis
 # zum Ablaufdatum weiter. Alles andere (ersetzt, expired, suspended,
 # revoked, unbekannt) ist fail-closed inaktiv.

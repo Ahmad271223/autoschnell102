@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft, FileText, Crown, Mail, Building2, Calendar, Download, Eye,
-  UserPlus, X, Euro, Ban, Trash2, Check,
+  UserPlus, X, Euro, Ban, Trash2, Check, ChevronDown,
 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum } from "./_ui";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
@@ -33,6 +33,12 @@ export default function AdminUserDetail() {
   const [zahlungen, setZahlungen] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [gueltigBis, setGueltigBis] = useState({});   // je Konto-Id das Datumsfeld
+  // Wunsch Ahmad 20.09.2026: Vertraege in 20er-Schritten nachladen statt
+  // bis zu 2000 auf einmal. Die schon geladenen bleiben stehen, die
+  // naechsten 20 kommen darunter dazu.
+  const [mehr, setMehr] = useState([]);        // nachgeladene Vertraege
+  const [seite, setSeite] = useState(1);       // zuletzt geladene Seite
+  const [laedtMehr, setLaedtMehr] = useState(false);
   const [busy, setBusy] = useState(null);           // Doppelklick-Schutz je Konto
   const busyRef = useRef(null);                     // synchroner Guard (State hinkt im selben Tick nach)
   const sperren = (id) => { if (busyRef.current) return false; busyRef.current = id; setBusy(id); return true; };
@@ -41,8 +47,10 @@ export default function AdminUserDetail() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get(`/admin/users/${id}/contracts`);
+      const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: 1 } });
       setData(r.data);
+      setMehr([]);
+      setSeite(1);
     } catch (e) {
       toast.error(errMsg(e, "Fehler beim Laden"));
     } finally {
@@ -70,7 +78,23 @@ export default function AdminUserDetail() {
   if (loading) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
   if (!data) return <EmptyState title="Nutzer nicht gefunden" />;
   const u = data.user || {};
-  const contracts = data.contracts || [];
+  const contracts = [...(data.contracts || []), ...mehr];
+  const gesamt = data.gesamt != null ? data.gesamt : contracts.length;
+
+  const weitereLaden = async () => {
+    if (laedtMehr) return;
+    setLaedtMehr(true);
+    try {
+      const naechste = seite + 1;
+      const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: naechste } });
+      setMehr((m) => [...m, ...(r.data?.contracts || [])]);
+      setSeite(naechste);
+      // "weitere" kommt vom Server mit — so weiss die Oberflaeche, wann
+      // der Knopf verschwinden muss, ohne selbst zu rechnen.
+      setData((d) => ({ ...d, weitere: r.data?.weitere, gesamt: r.data?.gesamt }));
+    } catch (e) { toast.error(errMsg(e, "Weitere Verträge konnten nicht geladen werden")); }
+    finally { setLaedtMehr(false); }
+  };
 
   const openPdf = async (c) => {
     try {
@@ -81,14 +105,30 @@ export default function AdminUserDetail() {
     } catch (e) { toast.error(errMsg(e, "PDF nicht verfügbar")); }
   };
 
+  // Wunsch Ahmad 20.09.2026: dazu die Probe-Abos. Sie sind kostenlos, laufen
+  // nach 3 bzw. 5 Tagen ab und sperren die Sucher-Funktion dann automatisch.
+  // EINE Tabelle fuer Knopf, Erfolgsmeldung und Anzeige des laufenden Abos —
+  // vorher stand "jährlich · 1.500 €" an drei Stellen im Text.
+  const PLAENE = {
+    monthly: { kurz: "150 €/M", lang: "150 € / Monat", zeigen: "monatlich · 150 €" },
+    yearly: { kurz: "1.500 €/J", lang: "1.500 € / Jahr", zeigen: "jährlich · 1.500 €" },
+    probe3: { kurz: "Probe 3 T", lang: "Probe, 3 Tage", zeigen: "Probe · 3 Tage", probe: true },
+    probe5: { kurz: "Probe 5 T", lang: "Probe, 5 Tage", zeigen: "Probe · 5 Tage", probe: true },
+  };
+  const planText = (plan, feld) => (PLAENE[plan] || {})[feld] || plan || "—";
+
   const grantAbo = async (s, plan) => {
     if (!sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
+    const probe = !!PLAENE[plan]?.probe;
     try {
-      const datum = (gueltigBis[s.id] || "").trim();
+      // Beim Probe-Abo entscheidet die Laufzeit des Plans — ein eigenes
+      // Datum lehnt der Server ausdruecklich ab.
+      const datum = probe ? "" : (gueltigBis[s.id] || "").trim();
       await api.post(`/admin/sucher/${s.id}/abo`,
         { plan, ...(datum ? { gueltig_bis: datum } : {}) });
-      toast.success(`Abo freigeschaltet (${plan === "yearly" ? "1.500 € / Jahr" : "150 € / Monat"})`
-        + (datum ? ` · gültig bis ${datum}` : "") + " — Zahlung erfasst");
+      toast.success(`Abo freigeschaltet (${planText(plan, "lang")})`
+        + (datum ? ` · gültig bis ${datum}` : "")
+        + (probe ? " — kostenlos, sperrt danach automatisch" : " — Zahlung erfasst"));
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
       loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
@@ -177,7 +217,12 @@ export default function AdminUserDetail() {
             <div className="flex items-center gap-2">
               <FileText size={16} className="text-zinc-500" />
               <span className="text-[15px] font-semibold text-white">Verträge</span>
-              <Badge>{fmtNum(contracts.length)}</Badge>
+              <Badge>{fmtNum(gesamt)}</Badge>
+              {contracts.length < gesamt && (
+                <span className="text-[12px] text-zinc-500">
+                  {fmtNum(contracts.length)} geladen
+                </span>
+              )}
             </div>
             <span className="text-[12px] text-zinc-500">read-only · keine Bearbeitung</span>
           </div>
@@ -208,6 +253,23 @@ export default function AdminUserDetail() {
                 </li>
               ))}
             </ul>
+          )}
+          {data.weitere && (
+            <div className="px-5 py-4 flex justify-center"
+                 style={{ borderTop: "1px solid var(--wa-06)" }}>
+              <Button variant="outline" size="sm" onClick={weitereLaden}
+                      disabled={laedtMehr} data-testid="vertraege-mehr">
+                {laedtMehr ? <Spinner /> : <ChevronDown size={14} />}
+                {laedtMehr ? "lädt…" : "Weitere 20 anzeigen"}
+              </Button>
+            </div>
+          )}
+          {data.abgeschnitten && !data.weitere && (
+            <div className="px-5 py-3 text-[12px] text-zinc-500 text-center"
+                 style={{ borderTop: "1px solid var(--wa-06)" }}>
+              Es werden höchstens 2.000 Verträge angezeigt — diese Firma hat{" "}
+              {fmtNum(gesamt)}.
+            </div>
           )}
         </Card>
       </div>
@@ -256,7 +318,7 @@ export default function AdminUserDetail() {
                         <td className="px-4 py-2.5">
                           {s.subscription?.active ? (
                             <Badge tone="green">
-                              Sucher-Funktion: ja · {s.subscription.plan === "yearly" ? "jährlich · 1.500 €" : "monatlich · 150 €"}
+                              Sucher-Funktion: ja · {planText(s.subscription.plan, "zeigen")}
                             </Badge>
                           ) : (
                             <div className="flex items-center gap-1.5 flex-wrap">
@@ -270,6 +332,16 @@ export default function AdminUserDetail() {
                                       data-testid={`abo-jahr-${s.id}`}
                                       title="Freischalten — erfasst 1.500 € Zahlung (Rechnung bezahlt); ohne Datum 365 Tage gültig">
                                 1.500 €/J
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "probe3")} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`abo-probe3-${s.id}`}
+                                      title="Probe-Abo: kostenlos, 3 Tage. Danach sperrt die Sucher-Funktion automatisch. Nur für Konten ohne laufendes bezahltes Abo.">
+                                Probe 3 T
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "probe5")} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`abo-probe5-${s.id}`}
+                                      title="Probe-Abo: kostenlos, 5 Tage. Danach sperrt die Sucher-Funktion automatisch. Nur für Konten ohne laufendes bezahltes Abo.">
+                                Probe 5 T
                               </Button>
                             </div>
                           )}
