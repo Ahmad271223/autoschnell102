@@ -1978,15 +1978,26 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
     from routes.team import SUCHER_PLANS
     sucher = await db.users.find_one(
         {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
-        {"_id": 0, "id": 1, "dealer_id": 1, "email": 1})
+        {"_id": 0, "id": 1, "dealer_id": 1, "email": 1, "active": 1})
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
+    # Nachpruefung 20.09.2026, Nr. 63: gesucht wurde nur nach Id und Rolle.
+    # Ein deaktiviertes Konto liess sich kostenpflichtig verlaengern und
+    # blieb trotzdem gesperrt — Zahlung und nutzbarer Zugang liefen
+    # auseinander. Das Aufheben (plan=None) bleibt erlaubt, es macht
+    # nichts kostenpflichtig.
+    if body.plan is not None and sucher.get("active") is False:
+        raise HTTPException(
+            400, "Dieses Konto ist deaktiviert — eine Freischaltung wuerde "
+                 "bezahlt, das Konto bliebe aber gesperrt. Erst das Konto "
+                 "wieder aktivieren.")
     if body.plan is None:
       # Aufheben = NUR die kostenpflichtige Sucher-Funktion sperren
       # (Login/Bestand bleiben). Auch Lifetime wird damit inaktiv.
       # Pruefung 14.09.2026 (G7): dieselbe Sperre wie beim Freischalten —
       # sonst konnten sich Aufheben und Freischalten ueberholen.
-      async with _sperre(f"abo:{sucher_id}", _handelnder(admin)):
+      async with _sperre(f"abo:{sucher_id}", _handelnder(admin)) as wache:
+        wache.pruefen()
         await db.subscriptions.update_many(
             {"subject_user_id": sucher_id, "status": {"$in": ["active", "cancelled"]}},
             {"$set": {"status": "cancelled", "expires_at": now_iso(),
@@ -2006,12 +2017,33 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
     # Compare-and-Swap uebernommen, nie blind geloescht.
     sperre = f"abo:{sucher_id}"
     besitzer = str(uuid.uuid4())
-    async with _sperre(sperre, besitzer):
-        return await _abo_freischalten(sucher, sucher_id, body, gezahlt_am, admin)
+    async with _sperre(sperre, besitzer) as wache:
+        return await _abo_freischalten(sucher, sucher_id, body, gezahlt_am,
+                                       admin, wache)
 
 
 SPERRE_FRIST_S = 45           # so lange gilt eine Sperre ohne Herzschlag
 SPERRE_HERZSCHLAG_S = 15      # so oft wird sie waehrend der Arbeit verlaengert
+
+
+class _Wache:
+    """Zustand einer laufenden Sperre (Nachpruefung 20.09.2026, Nr. 50).
+
+    `pruefen()` steht vor jedem entscheidenden Schreibvorgang: hat der
+    Herzschlag die Sperre verloren, bricht der Vorgang hier ab, statt
+    parallel zu einem zweiten weiterzuschreiben."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.verloren = False
+
+    def pruefen(self) -> None:
+        if self.verloren:
+            raise HTTPException(
+                409, "Der Vorgang wurde abgebrochen, weil die Sperre "
+                     "zwischenzeitlich verlorenging (Datenbank-Stoerung). "
+                     "Bitte noch einmal ausloesen — es wurde nichts doppelt "
+                     "gebucht.")
 
 
 @asynccontextmanager
@@ -2052,17 +2084,30 @@ async def _sperre(name: str, besitzer: str):
         if r.modified_count == 0:
             raise belegt
 
+    # Nachpruefung 20.09.2026, Nr. 50: Verlor der Herzschlag die Sperre,
+    # beendete er nur sich selbst — der geschuetzte Code lief weiter, und
+    # ein neuer Besitzer konnte gleichzeitig denselben Vorgang starten.
+    # Jetzt merkt sich die Wache den Verlust; vor jedem entscheidenden
+    # Schreibvorgang fragt der geschuetzte Code sie mit pruefen().
+    wache = _Wache(name)
+
     async def _herzschlag():
         while True:
             await asyncio.sleep(SPERRE_HERZSCHLAG_S)
-            r = await db.sperren.update_one(
-                {"_id": name, "owner": besitzer},
-                {"$set": {"bis": _bis(SPERRE_FRIST_S)}})
+            try:
+                r = await db.sperren.update_one(
+                    {"_id": name, "owner": besitzer},
+                    {"$set": {"bis": _bis(SPERRE_FRIST_S)}})
+            except Exception:  # noqa: BLE001
+                # Eine Stoerung ist KEIN Beweis fuer den Verlust — beim
+                # naechsten Schlag noch einmal versuchen.
+                continue
             if r.matched_count == 0:
-                return                      # Sperre gehoert uns nicht mehr
+                wache.verloren = True       # Sperre gehoert uns nicht mehr
+                return
     schlag = asyncio.create_task(_herzschlag())
     try:
-        yield
+        yield wache
     finally:
         schlag.cancel()
         try:
@@ -2073,7 +2118,7 @@ async def _sperre(name: str, besitzer: str):
 
 
 async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenIn,
-                            gezahlt_am: str, admin: dict) -> dict:
+                            gezahlt_am: str, admin: dict, wache=None) -> dict:
     from routes.team import SUCHER_PLANS
     plan = body.plan
     days = SUCHER_PLANS[plan]["days"]
@@ -2107,6 +2152,10 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
         "status": "laeuft", "schritte": {},
         "created_at": now_iso(), "updated_at": now_iso(),
     }
+    # Nr. 50: letzte Gegenprobe, bevor Abo und Zahlung entstehen — die
+    # Restlaufzeit oben wurde gelesen, als die Sperre noch uns gehoerte.
+    if wache is not None:
+        wache.pruefen()
     await db.abo_vorgaenge.insert_one(dict(vorgang))
     await _abo_vorgang_ausfuehren(vorgang)
     return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at,
@@ -2216,15 +2265,30 @@ async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
     grund = str(body.get("grund", ""))[:300].strip()
     if not grund:
         raise HTTPException(400, "Bitte einen Grund fuer die Laufzeitaenderung angeben")
-    aktiv = await db.subscriptions.find_one(
-        {"subject_user_id": sucher_id, "status": "active"},
-        {"_id": 0, "id": 1, "expires_at": 1, "dealer_id": 1, "plan": 1},
-        sort=[("created_at", -1)])
-    if not aktiv:
-        raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
-    await db.subscriptions.update_many(
-        {"subject_user_id": sucher_id, "status": "active"},
-        {"$set": {"expires_at": gueltig_bis, "updated_at": now_iso()}})
+    # Nachpruefung 20.09.2026, Nr. 73: hier wurde EIN aktives Abo gelesen,
+    # danach aber JEDES dann aktive Abo geaendert — ohne Id, ohne Abgleich
+    # und ohne dieselbe Sperre wie die Freischaltung. Eine parallel laufende
+    # Freischaltung konnte so ihr frisch bezahltes Abo ueberschrieben
+    # bekommen, waehrend der Verlaufseintrag auf das alte Abo zeigte.
+    # Jetzt: dieselbe Sperre, Aenderung NUR am gelesenen Abo, und der alte
+    # Ablauf muss beim Schreiben noch derselbe sein.
+    async with _sperre(f"abo:{sucher_id}", _handelnder(admin)) as wache:
+        aktiv = await db.subscriptions.find_one(
+            {"subject_user_id": sucher_id, "status": "active"},
+            {"_id": 0, "id": 1, "expires_at": 1, "dealer_id": 1, "plan": 1},
+            sort=[("created_at", -1)])
+        if not aktiv:
+            raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
+        wache.pruefen()
+        r = await db.subscriptions.update_one(
+            {"id": aktiv["id"], "status": "active",
+             "expires_at": aktiv.get("expires_at")},
+            {"$set": {"expires_at": gueltig_bis, "updated_at": now_iso()}})
+        if r.matched_count == 0:
+            raise HTTPException(
+                409, "Das Abo hat sich zwischenzeitlich geaendert (vermutlich "
+                     "eine parallele Freischaltung). Bitte die Seite neu laden "
+                     "und noch einmal ansehen — es wurde nichts geaendert.")
     await db.zugangs_aenderungen.insert_one({
         "id": str(uuid.uuid4()), "subject_user_id": sucher_id,
         "dealer_id": aktiv.get("dealer_id"), "abo_id": aktiv.get("id"),
@@ -2530,6 +2594,22 @@ async def admin_add_zahlung(dealer_id: str, body: AdminZahlungIn,
     dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "id": 1})
     if not dealer:
         raise HTTPException(404, "Firma nicht gefunden")
+    # Nachpruefung 20.09.2026, Nr. 61: geprueft wurde nur, ob die FIRMA
+    # existiert. Der mitgegebene Sucher wurde ungeprueft uebernommen — durch
+    # einen Auswahl- oder Anzeigefehler konnte eine Zahlung unter Firma X
+    # mit einem Sucher aus Firma Y landen. In der Firmenabrechnung taucht
+    # sie dann bei der falschen Firma auf.
+    if body.subject_user_id:
+        person = await db.users.find_one(
+            {"id": body.subject_user_id},
+            {"_id": 0, "id": 1, "dealer_id": 1, "email": 1})
+        if not person:
+            raise HTTPException(404, "Der angegebene Sucher wurde nicht gefunden")
+        if (person.get("dealer_id") or "") != dealer_id:
+            raise HTTPException(
+                400, "Der angegebene Sucher gehoert nicht zu dieser Firma — "
+                     "die Zahlung wuerde in der falschen Firmenabrechnung "
+                     "landen.")
     doc = {
         "id": str(uuid.uuid4()), "dealer_id": dealer_id,
         "subject_user_id": body.subject_user_id or None,
@@ -2572,22 +2652,37 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
     (plan='monthly') oder mit plan=null sperren."""
     from routes.marketplace import BUYER_ACCESS_DAYS, BUYER_ACCESS_PRICE
     buyer = await db.users.find_one(
-        {"id": buyer_id, "role": "b2b_buyer"}, {"_id": 0, "id": 1})
+        {"id": buyer_id, "role": "b2b_buyer"}, {"_id": 0, "id": 1, "active": 1})
     if not buyer:
         raise HTTPException(404, "Zwischenhändler nicht gefunden")
     plan = body.get("plan")
+    # Nachpruefung 20.09.2026, Nr. 62: geladen wurde nur Id und Rolle. Ein
+    # deaktiviertes Konto bekam Zahlung und marketplace_access.active=True,
+    # konnte sich aber weiterhin nicht anmelden — Zahlung und nutzbarer
+    # Zugang liefen auseinander. Sperren (plan=None) bleibt erlaubt.
+    if plan is not None and buyer.get("active") is False:
+        raise HTTPException(
+            400, "Dieses Konto ist deaktiviert — eine Freischaltung wuerde "
+                 "bezahlt, der Zwischenhaendler kaeme aber trotzdem nicht "
+                 "hinein. Erst das Konto wieder aktivieren.")
     if plan is None:
         # Runde 13: C6 — die Sperre ist ein EIGENER Zustand (gesperrt), der
         # auch im Kostenlos-Modus gilt und den eine Stripe-Zahlung nicht
         # loescht (marketplace._access_status, payments._zugang_freischalten).
         # active=False bleibt fuer den Altbestand als Sperr-Signal erhalten.
-        await db.users.update_one(
-            {"id": buyer_id},
-            {"$set": {"marketplace_access.active": False,
-                      "marketplace_access.gesperrt": True,
-                      "marketplace_access.gesperrt_am": now_iso(),
-                      "marketplace_access.gesperrt_von": _handelnder(admin),
-                      "marketplace_access.updated_at": now_iso()}})
+        # Nachpruefung 20.09.2026, Nr. 49: Freischalten und Sperren liefen
+        # ohne gemeinsame Sperre — der zuletzt eintreffende Write gewann,
+        # und es konnte eine Zahlung gespeichert sein, obwohl das Konto
+        # danach gesperrt war. Beide Wege nehmen jetzt DIESELBE Sperre.
+        async with _sperre(f"buyer-zugang:{buyer_id}", _handelnder(admin)) as wache:
+            wache.pruefen()
+            await db.users.update_one(
+                {"id": buyer_id},
+                {"$set": {"marketplace_access.active": False,
+                          "marketplace_access.gesperrt": True,
+                          "marketplace_access.gesperrt_am": now_iso(),
+                          "marketplace_access.gesperrt_von": _handelnder(admin),
+                          "marketplace_access.updated_at": now_iso()}})
         await log_activity_sicher("", admin["id"], "admin.buyer.zugang.gesperrt",
                            ref=buyer_id)
         return {"ok": True, "active": False, "gesperrt": True}
@@ -2599,34 +2694,67 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
     grund = str(body.get("grund", ""))[:300].strip()
     if zahlungsart == "kulanz" and not grund:
         raise HTTPException(400, "Kulanz-Freischaltung braucht eine Begruendung")
-    voll = await db.users.find_one({"id": buyer_id}, {"_id": 0, "marketplace_access": 1})
-    acc = (voll or {}).get("marketplace_access") or {}
-    basis = _restlaufzeit_basis(acc.get("expires_at") if acc.get("active") else None)
-    expires_at = (basis + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
-    # Audit 09/2026: manuelle Marktplatz-Freischaltung erzeugt jetzt einen
-    # Zahlungsdatensatz (Zugang und Finanzhistorie laufen nicht auseinander).
-    await db.manual_payments.insert_one({
-        "id": str(uuid.uuid4()), "dealer_id": None, "subject_user_id": buyer_id,
-        "plan": "marktplatz",
-        "amount": 0.0 if zahlungsart == "kulanz" else float(BUYER_ACCESS_PRICE),
-        "currency": "EUR", "paid_at": now_iso()[:10], "period_until": expires_at,
-        "zahlungsart": zahlungsart, "kostenlos": zahlungsart == "kulanz",
-        "grund": grund, "note": str(body.get("notiz", ""))[:500],
-        "quelle": "manuell", "recorded_by": _handelnder(admin),
-        "created_at": now_iso()})
-    await db.users.update_one(
-        {"id": buyer_id},
-        {"$set": {"marketplace_access": {
-            "active": True, "plan": "monthly",
-            "price": BUYER_ACCESS_PRICE, "expires_at": expires_at,
-            "activated_by": _handelnder(admin), "updated_at": now_iso()}}})
+    # Nachpruefung 20.09.2026, Nr. 47/48: Diese Route hatte — anders als die
+    # Sucher-Freischaltung — WEDER Sperre NOCH Abgleich. Zwei schnell
+    # hintereinander abgeschickte Klicks lasen denselben Ablaufstand,
+    # legten ZWEI Zahlungen an und verlaengerten trotzdem nur EINMAL um 30
+    # Tage. Und Zahlung und Zugang wurden nacheinander geschrieben: starb
+    # der Prozess dazwischen, stand die Zahlung in der Historie, der
+    # Zwischenhaendler hatte aber keinen Zugang.
+    # Jetzt derselbe Weg wie beim Sucher: eine Sperre je Konto und EIN
+    # Vorgang, dessen Schritte alle idempotent sind (Upsert ueber
+    # vorgang_id) — eine Wiederholung legt nichts doppelt an.
+    vid = str(uuid.uuid4())
+    async with _sperre(f"buyer-zugang:{buyer_id}", _handelnder(admin)) as wache:
+        voll = await db.users.find_one({"id": buyer_id},
+                                       {"_id": 0, "marketplace_access": 1})
+        acc = (voll or {}).get("marketplace_access") or {}
+        basis = _restlaufzeit_basis(acc.get("expires_at") if acc.get("active") else None)
+        expires_at = (basis + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
+        wache.pruefen()
+        # Zuerst der Zugang (das braucht der Kunde), mit Abgleich auf den
+        # gelesenen Stand: hat inzwischen jemand anderes etwas geaendert,
+        # wird hier abgebrochen statt blind ueberschrieben.
+        r = await db.users.update_one(
+            {"id": buyer_id,
+             "marketplace_access.expires_at": acc.get("expires_at"),
+             "marketplace_access.active": acc.get("active")},
+            {"$set": {"marketplace_access": {
+                "active": True, "plan": "monthly",
+                "price": BUYER_ACCESS_PRICE, "expires_at": expires_at,
+                "vorgang_id": vid,
+                "activated_by": _handelnder(admin), "updated_at": now_iso()}}})
+        if r.matched_count == 0:
+            raise HTTPException(
+                409, "Der Zugang hat sich zwischenzeitlich geaendert "
+                     "(Doppelklick oder zweiter Admin). Bitte die Seite neu "
+                     "laden — es wurde nichts doppelt gebucht.")
+        # Audit 09/2026: manuelle Marktplatz-Freischaltung erzeugt einen
+        # Zahlungsdatensatz (Zugang und Finanzhistorie laufen nicht
+        # auseinander). Upsert ueber vorgang_id: genau EINE Zahlung je
+        # Vorgang, auch wenn dieser Schritt wiederholt wird.
+        await db.manual_payments.update_one(
+            {"vorgang_id": vid},
+            {"$setOnInsert": {
+                "id": str(uuid.uuid4()), "dealer_id": None,
+                "subject_user_id": buyer_id, "plan": "marktplatz",
+                "amount": 0.0 if zahlungsart == "kulanz" else float(BUYER_ACCESS_PRICE),
+                "currency": "EUR", "paid_at": now_iso()[:10],
+                "period_until": expires_at,
+                "zahlungsart": zahlungsart, "kostenlos": zahlungsart == "kulanz",
+                "grund": grund, "note": str(body.get("notiz", ""))[:500],
+                "quelle": "manuell", "vorgang_id": vid,
+                "recorded_by": _handelnder(admin), "created_at": now_iso()}},
+            upsert=True)
     await log_activity_sicher("", admin["id"], "admin.buyer.zugang.freigeschaltet",
-                       ref=buyer_id, meta={"expires_at": expires_at})
+                       ref=buyer_id, meta={"expires_at": expires_at,
+                                           "vorgang_id": vid})
     await db.plan_requests.update_many(
         {"type": "buyer_access", "buyer_user_id": buyer_id, "status": "offen"},
         {"$set": {"status": "erledigt", "updated_at": now_iso(),
                   "erledigt_durch": "freischaltung"}})
-    return {"ok": True, "active": True, "expires_at": expires_at}
+    return {"ok": True, "active": True, "expires_at": expires_at,
+            "vorgang_id": vid}
 
 
 @router.put("/admin/plan-requests/{req_id}")
