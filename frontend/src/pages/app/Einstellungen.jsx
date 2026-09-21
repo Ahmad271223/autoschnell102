@@ -25,6 +25,7 @@ const PLATZHALTER = [
 ];
 import { toast } from "sonner";
 import { wurdeZusammengefuehrt, zusammenfuehren } from "@/lib/vertragstext";
+import KopierKnopf from "@/components/KopierKnopf";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
   CreditCard, Calendar, X, ArrowRight, Bolt, Store,
@@ -47,7 +48,8 @@ function formAus(dealer) {
     email_subject: dealer.email_subject || "",
     email_template: dealer.email_template || "",
     whatsapp_template: dealer.whatsapp_template || "",
-    // Vorlage Ahmad 20.09.2026: die drei nachtraeglichen Mails
+    // Vorlage Ahmad 20.09.2026: Korrektur (Versand) und die Vorlagen zum
+    // Kopieren (21.09.2026: die App verschickt sie nicht)
     email_subject_korrektur: dealer.email_subject_korrektur || "",
     email_template_korrektur: dealer.email_template_korrektur || "",
     email_subject_nach_kauf: dealer.email_subject_nach_kauf || "",
@@ -130,10 +132,12 @@ const FELD_TITEL = {
   active_profile: "aktives Profil",
   email_subject: "E-Mail-Betreff", email_template: "E-Mail-Vorlage",
   whatsapp_template: "WhatsApp-Vorlage",
-  email_subject_korrektur: "Korrektur-Mail (Betreff)", email_template_korrektur: "Korrektur-Mail",
-  email_subject_nach_kauf: "Mail nach Kauf (Betreff)", email_template_nach_kauf: "Mail nach Kauf",
-  whatsapp_template_nach_kauf: "WhatsApp nach Kauf",
-  email_subject_bahn: "Bahn-Mail (Betreff)", email_template_bahn: "Bahn-Mail",
+  email_subject_korrektur: "Betreff erneuter Versand (Korrektur)",
+  email_template_korrektur: "Text erneuter Versand (Korrektur)",
+  email_subject_nach_kauf: "Hinweis nach Kaufabschluss (Betreff)",
+  email_template_nach_kauf: "Hinweis nach Kaufabschluss (E-Mail)",
+  whatsapp_template_nach_kauf: "Hinweis nach Kaufabschluss (WhatsApp)",
+  email_subject_bahn: "Bahnverbindung (Betreff)", email_template_bahn: "Bahnverbindung (E-Mail)",
   default_terms: "AGB", default_special_agreements: "Besondere Vereinbarungen",
   digital_vertragstext: "Vertragstext", sondervereinbarung_standard_aktiv: "Standardsatz an/aus",
 };
@@ -551,51 +555,63 @@ export default function Einstellungen() {
           )}
 
           {active === "templates" && (
-            <Section title="Versand-Vorlagen"
-                     subtitle="Standardtexte für E-Mail und WhatsApp beim Verschicken eines Kaufvertrags.">
+            <Section title="Kaufvertrag verschicken"
+                     subtitle="Diese Texte gehen mit dem Kaufvertrag raus, wenn du ihn per E-Mail oder WhatsApp verschickst.">
               <AppleField label="E-Mail-Betreff" value={form.email_subject}
                           onChange={(v) => setForm({ ...form, email_subject: v })}
                           testid="set-email-subject" />
-              <AppleTextarea label="E-Mail-Text" rows={6} value={form.email_template}
+              <AppleTextarea label="E-Mail-Text" rows={8} value={form.email_template}
                              onChange={(v) => setForm({ ...form, email_template: v })}
                              icon={Mail} testid="set-email-template" />
-              <AppleTextarea label="WhatsApp-Text" rows={5} value={form.whatsapp_template}
+              {/* Wunsch Ahmad 21.09.2026: Betreff und Text für den erneuten
+                  Versand nach einer Korrektur. Der Versand-Dialog nimmt sie
+                  von selbst, sobald eine frühere Fassung verschickt wurde —
+                  mit dem korrigierten Vertrag als Anhang. */}
+              <AppleField label="Betreff – erneuter Versand (nach Korrektur)"
+                          value={form.email_subject_korrektur}
+                          onChange={(v) => setForm({ ...form, email_subject_korrektur: v })}
+                          testid="set-email-subject-korrektur" />
+              <AppleTextarea label="E-Mail-Text – erneuter Versand (nach Korrektur)" rows={8}
+                             value={form.email_template_korrektur}
+                             onChange={(v) => setForm({ ...form, email_template_korrektur: v })}
+                             icon={Mail} testid="set-email-template-korrektur"
+                             hint="Wird beim Senden automatisch genommen, wenn eine frühere Fassung dieses Vertrags schon verschickt wurde." />
+              <AppleTextarea label="WhatsApp-Text" rows={8} value={form.whatsapp_template}
                              onChange={(v) => setForm({ ...form, whatsapp_template: v })}
                              icon={MessageSquare} testid="set-wa-template" />
               <PlaceholderHint placeholders={PLATZHALTER} />
             </Section>
           )}
           {active === "templates" && (
-            <Section title="Nachträgliche Mails"
-                     subtitle="Diese drei Mails verschickst du von Hand beim Vertrag — sie gehen nie automatisch raus.">
-              <AppleField label="Betreff — erneuter Versand nach Korrektur"
-                          value={form.email_subject_korrektur}
-                          onChange={(v) => setForm({ ...form, email_subject_korrektur: v })}
-                          testid="set-email-subject-korrektur" />
-              <AppleTextarea label="Text — erneuter Versand nach Korrektur" rows={6}
-                             value={form.email_template_korrektur}
-                             onChange={(v) => setForm({ ...form, email_template_korrektur: v })}
-                             icon={Mail} testid="set-email-template-korrektur" />
-              <AppleField label="Betreff — Hinweis nach Kaufabschluss"
-                          value={form.email_subject_nach_kauf}
-                          onChange={(v) => setForm({ ...form, email_subject_nach_kauf: v })}
-                          testid="set-email-subject-nach-kauf" />
-              <AppleTextarea label="Text — Hinweis nach Kaufabschluss (E-Mail)" rows={8}
-                             value={form.email_template_nach_kauf}
-                             onChange={(v) => setForm({ ...form, email_template_nach_kauf: v })}
-                             icon={Mail} testid="set-email-template-nach-kauf" />
-              <AppleTextarea label="Text — Hinweis nach Kaufabschluss (WhatsApp)" rows={8}
-                             value={form.whatsapp_template_nach_kauf}
-                             onChange={(v) => setForm({ ...form, whatsapp_template_nach_kauf: v })}
-                             icon={MessageSquare} testid="set-wa-template-nach-kauf" />
-              <AppleField label="Betreff — Bahnverbindung / Abholinformation"
+            <Section title="Vorlagen zum Kopieren"
+                     subtitle="Diese Texte verschickt die App nicht. Kopiere sie und füge sie in deine eigene E-Mail oder WhatsApp ein. Im PDF-Archiv gibt es sie bei jedem Vertrag schon mit Name und Daten ausgefüllt.">
+              <div className="text-xs font-semibold text-zinc-300 pt-1">Bahnverbindung</div>
+              <AppleField label="Betreff" kopieren
                           value={form.email_subject_bahn}
                           onChange={(v) => setForm({ ...form, email_subject_bahn: v })}
                           testid="set-email-subject-bahn" />
-              <AppleTextarea label="Text — Bahnverbindung / Abholinformation" rows={6}
+              <AppleTextarea label="E-Mail-Text (Bahnverbindung)" rows={8} kopieren
                              value={form.email_template_bahn}
                              onChange={(v) => setForm({ ...form, email_template_bahn: v })}
                              icon={Mail} testid="set-email-template-bahn" />
+              <div className="text-xs font-semibold text-zinc-300 pt-3">Hinweis nach Kaufabschluss</div>
+              <AppleField label="Betreff" kopieren
+                          value={form.email_subject_nach_kauf}
+                          onChange={(v) => setForm({ ...form, email_subject_nach_kauf: v })}
+                          testid="set-email-subject-nach-kauf" />
+              <AppleTextarea label="E-Mail-Text (Hinweis nach Kaufabschluss)" rows={14} kopieren
+                             value={form.email_template_nach_kauf}
+                             onChange={(v) => setForm({ ...form, email_template_nach_kauf: v })}
+                             icon={Mail} testid="set-email-template-nach-kauf" />
+              <AppleTextarea label="WhatsApp-Text (Hinweis nach Kaufabschluss)" rows={14} kopieren
+                             value={form.whatsapp_template_nach_kauf}
+                             onChange={(v) => setForm({ ...form, whatsapp_template_nach_kauf: v })}
+                             icon={MessageSquare} testid="set-wa-template-nach-kauf" />
+              <div className="text-[11px] text-zinc-500 leading-snug">
+                Hier kopiert, stehen die Platzhalter (z. B. {"{kunde_name}"}) noch im Text — bitte
+                beim Einfügen durch den Namen ersetzen. Im PDF-Archiv (Knopf mit dem
+                Kopier-Symbol beim Vertrag) sind sie schon ausgefüllt.
+              </div>
               <PlaceholderHint placeholders={PLATZHALTER} />
             </Section>
           )}
@@ -713,11 +729,18 @@ function RuleRow({ label, children, last }) {
   );
 }
 
-function AppleField({ label, value, onChange, testid }) {
+function AppleField({ label, value, onChange, testid, kopieren = false }) {
   // U-135/M50: dieselbe Grenze wie der Server (Profilfelder max. 500 Zeichen)
   return (
     <div className="space-y-1.5">
-      <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">{label}</label>
+      {/* Knopf NEBEN dem Label, nicht darin — ein Label ohne htmlFor
+          beschriftet sein erstes Bedienelement, ein Klick auf den Titel
+          hätte sonst kopiert. */}
+      <div className="flex items-center gap-1.5">
+        <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">{label}</label>
+        {kopieren && <KopierKnopf text={value} className="ml-auto"
+                                   testid={testid ? `${testid}-kopieren` : undefined} />}
+      </div>
       <input data-testid={testid} value={value || ""} maxLength={500}
              onChange={(e) => onChange(e.target.value)}
              className="apple-input" />
@@ -751,12 +774,16 @@ function AppleNumber({ value, onChange, min, max, className = "", testid }) {
   );
 }
 
-function AppleTextarea({ label, rows = 4, value, onChange, hint, testid, icon: Icon }) {
+function AppleTextarea({ label, rows = 4, value, onChange, hint, testid, icon: Icon, kopieren = false }) {
   return (
     <div className="space-y-1.5">
-      <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
-        {Icon && <Icon size={12} />} {label}
-      </label>
+      <div className="flex items-center gap-1.5">
+        <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+          {Icon && <Icon size={12} />} {label}
+        </label>
+        {kopieren && <KopierKnopf text={value} className="ml-auto"
+                                   testid={testid ? `${testid}-kopieren` : undefined} />}
+      </div>
       <textarea data-testid={testid} rows={rows} value={value || ""}
                 onChange={(e) => onChange(e.target.value)}
                 className="apple-input resize-y leading-relaxed" />

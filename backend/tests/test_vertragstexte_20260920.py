@@ -190,29 +190,22 @@ def test_12_der_versand_dialog_kennt_dieselben_namen():
 
 
 # ------------------------------------------------------- Die Folge-Mails
-def test_13_die_drei_folge_mails_gibt_es_als_route():
+def test_13_die_folge_mails_gibt_es_nur_noch_als_vorschau():
+    """Wunsch Ahmad 21.09.2026: "wir selber schicken die nicht raus". Die
+    Vorschau (Text mit eingesetzten Daten zum Kopieren) bleibt, der Versand
+    ueber unsere Adresse ist weg — die POST-Route antwortet nur noch 410.
+    (Frueher pruefte dieser Test die Versandbremse am Versandweg; ohne
+    Versandweg gibt es nichts mehr zu bremsen.)"""
     quelle = (BACKEND / "routes" / "contracts.py").read_text(encoding="utf-8")
-    assert '@router.post("/contracts/{contract_id}/folge-mail")' in quelle
     assert '@router.get("/contracts/{contract_id}/folge-mail/{art}")' in quelle
-    # Sie duerfen NIE automatisch laufen — nur auf Anforderung — und haengen
-    # an derselben Versandbremse wie der Vertragsversand.
-    # Pruefbericht 20.09.2026: Hier stand frueher `_versand_limiter.erlaubt`
-    # als Pflicht — eine Methode, die es gar nicht gibt. Der Test war damit
-    # gruen, waehrend jeder echte Versand mit 500 scheiterte. Jetzt wird am
-    # echten Funktionskoerper geprueft UND in test_sucher_dashboard_20260920
-    # wirklich versendet.
     import ast
-    import rate_limiter
-    assert hasattr(rate_limiter.SlidingWindowRateLimiter, "check")
-    assert not hasattr(rate_limiter.SlidingWindowRateLimiter, "erlaubt")
     baum = ast.parse(quelle)
     fn = next(k for k in ast.walk(baum)
               if isinstance(k, ast.AsyncFunctionDef) and k.name == "folge_mail_senden")
     koerper = ast.unparse(fn)
-    assert "await _versand_limiter.check(" in koerper, (
-        "die Folge-Mails haengen nicht an der Versandbremse — offener Weg, "
-        "ueber unsere Adresse beliebig viele Mails zu schicken")
-    assert set(V.FOLGE_MAILS) == {"korrektur", "nach_kauf", "bahn"}
+    assert "HTTPException(410" in koerper
+    assert "send_email" not in koerper and "email_service" not in koerper
+    assert set(V.FOLGE_MAILS) == {"korrektur", "nach_kauf", "nach_kauf_whatsapp", "bahn"}
 
 
 def test_14_die_oberflaeche_hat_den_knopf():
@@ -221,9 +214,11 @@ def test_14_die_oberflaeche_hat_den_knopf():
     assert "FolgeMailDialog" in jsx, "der Knopf fehlt in der Vertragsliste"
     dialog = (PROJEKT / "frontend" / "src" / "components"
               / "FolgeMailDialog.jsx").read_text(encoding="utf-8")
-    for art in ("korrektur", "nach_kauf", "bahn"):
+    for art in ("nach_kauf", "nach_kauf_whatsapp", "bahn"):
         assert f'id: "{art}"' in dialog, f"{art} fehlt im Dialog"
-    assert "idempotency_key" in dialog, "kein Doppelklick-Schutz"
+    # Nur kopieren — nichts verschicken (21.09.2026).
+    assert "api.post" not in dialog, "der Dialog verschickt noch"
+    assert "KopierKnopf" in dialog
 
 
 # ---------------------------------------- Schalter fuer unseren Standardsatz

@@ -595,7 +595,13 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     story.append(Spacer(1, 12))
 
     # Abholung direkt unter den Halter-/Kaeuferangaben (Wunsch Ahmad 12.09.2026).
-    _abhol = _abholzeile(contract)
+    # Wunsch Ahmad 21.09.2026: nur, wenn die Besonderen Vereinbarungen die
+    # Uebergabe NICHT schon nennen — mit unserem Standardsatz ("Die
+    # Fahrzeugübergabe findet bis/am {abholdatum} in {ort} …") stuenden
+    # Datum und Ort sonst zweimal im Vertrag.
+    import vertrag_vorlagen as _vorlagen
+    _abhol = ("" if _vorlagen.uebergabe_in_vereinbarungen(contract.get("additional_terms"))
+              else _abholzeile(contract))
     if _abhol:
         story.append(Paragraph(f"<b>Abholung:</b> {_xml_escape(_abhol)}", st["body"]))
         story.append(Spacer(1, 12))
@@ -652,7 +658,9 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
     ]))
     story.append(KeepTogether([
-        _section("2 · Kaufpreis & Konditionen", st),
+        # Wunsch Ahmad 21.09.2026: der Kaufpreis ohne Nummer, die
+        # Abschnitte danach zaehlen ab 1.
+        _section("Kaufpreis & Konditionen", st),
         Spacer(1, 6),
         price_box,
     ]))
@@ -702,7 +710,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         # Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag.
         ("Vorhalter", contract.get("previous_owners") or vehicle.get("previous_owners", "")),
     ]
-    story.append(_section("3 · Fahrzeugdaten", st))
+    story.append(_section("1 · Fahrzeugdaten", st))
     story.append(Spacer(1, 6))
     veh_rows = _ohne_leere(veh_rows)
     if veh_rows:
@@ -744,7 +752,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     ]
     zus_rows = _ohne_leere(zus_rows)
     if zus_rows:
-        story.append(_section("4 · Zusicherungen & Zustand", st))
+        story.append(_section("2 · Zusicherungen & Zustand", st))
         story.append(Spacer(1, 6))
         story.append(_two_col_kv(zus_rows, st))
         story.append(Spacer(1, 12))

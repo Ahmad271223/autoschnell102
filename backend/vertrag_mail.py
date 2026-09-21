@@ -177,11 +177,16 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
 
     betreff = (betreff or "").strip() or f"Ihr Kaufvertrag – {titel}"
 
-    anrede = f"Hallo {empfaenger}," if empfaenger else "Hallo,"
-    text_zeilen = [
-        anrede, "",
-        (nachricht or "").strip() or
-        "anbei erhalten Sie den Kaufvertrag für Ihr Fahrzeug als PDF.",
+    # Wunsch Ahmad 21.09.2026: Die Vorlage aus den Einstellungen bringt ihre
+    # eigene Anrede ("Sehr geehrte/r Frau/Herr …") und Grussformel ("Vielen
+    # Dank / Ihr Autohaus / …") mit und soll WOERTLICH ankommen. Vorher stand
+    # davor noch "Hallo <Name>," und dahinter "Freundliche Grüße" — der
+    # Verkaeufer bekam zwei Anreden und zwei Grussformeln. Eigene Anrede und
+    # Gruss nur noch, wenn keine Nachricht mitkommt.
+    eigener_text = (nachricht or "").strip()
+    anrede = "" if eigener_text else (f"Hallo {empfaenger}," if empfaenger else "Hallo,")
+    text_zeilen = ([anrede, ""] if anrede else []) + [
+        eigener_text or "anbei erhalten Sie den Kaufvertrag für Ihr Fahrzeug als PDF.",
         "",
         f"Fahrzeug: {titel}",
     ]
@@ -192,17 +197,28 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
         text_zeilen.append(f"Vereinbarter Kaufpreis: {_eur(preis)}")
     if nummer:
         text_zeilen.append(f"Vertragsnummer: {nummer}")
-    text_zeilen += [
-        "",
-        "Der vollständige Kaufvertrag liegt dieser E-Mail als PDF bei.",
-        "Bitte prüfen Sie ihn in Ruhe. Bei Fragen antworten Sie einfach auf "
-        "diese E-Mail — Ihre Antwort geht direkt an "
-        f"{sucher_name}{f' ({sucher_mail})' if sucher_mail else ''}.",
-        "",
-        "Freundliche Grüße",
-        sucher_name,
-        firmenname,
-    ]
+    antwort_an = f"{sucher_name}{f' ({sucher_mail})' if sucher_mail else ''}"
+    if eigener_text:
+        # Gruss steht schon in der Vorlage — hier nur noch der Kontakt.
+        text_zeilen += [
+            "",
+            "Der vollständige Kaufvertrag liegt dieser E-Mail als PDF bei.",
+            "Bei Fragen antworten Sie einfach auf diese E-Mail — Ihre Antwort "
+            f"geht direkt an {antwort_an}.",
+            "",
+            f"Kontakt: {sucher_name} · {firmenname}",
+        ]
+    else:
+        text_zeilen += [
+            "",
+            "Der vollständige Kaufvertrag liegt dieser E-Mail als PDF bei.",
+            "Bitte prüfen Sie ihn in Ruhe. Bei Fragen antworten Sie einfach auf "
+            f"diese E-Mail — Ihre Antwort geht direkt an {antwort_an}.",
+            "",
+            "Freundliche Grüße",
+            sucher_name,
+            firmenname,
+        ]
     if sucher_tel:
         text_zeilen.append(f"Telefon: {sucher_tel}")
     text = "\n".join(text_zeilen)
@@ -219,10 +235,10 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
         + '<tr><td style="padding:24px 28px 6px 28px">'
         + f'<div style="font:700 20px/1.3 Arial,Helvetica,sans-serif;color:{FARBE_TEXT}">'
           f'Kaufvertrag{f" {escape(nummer)}" if nummer else ""}</div>'
+        + (f'<div style="font:400 14px/1.6 Arial,Helvetica,sans-serif;color:{FARBE_TEXT};'
+           f'margin-top:16px">{_absatz(anrede)}</div>' if anrede else "")
         + f'<div style="font:400 14px/1.6 Arial,Helvetica,sans-serif;color:{FARBE_TEXT};'
-          f'margin-top:16px">{_absatz(anrede)}</div>'
-        + f'<div style="font:400 14px/1.6 Arial,Helvetica,sans-serif;color:{FARBE_TEXT};'
-          f'margin-top:12px">{_absatz((nachricht or "").strip() or "anbei erhalten Sie den Kaufvertrag für Ihr Fahrzeug als PDF.")}</div>'
+          f'margin-top:{12 if anrede else 16}px">{_absatz(eigener_text or "anbei erhalten Sie den Kaufvertrag für Ihr Fahrzeug als PDF.")}</div>'
         + '</td></tr>'
         + '<tr><td style="padding:6px 28px 0 28px">'
         + _preisblock(preis)

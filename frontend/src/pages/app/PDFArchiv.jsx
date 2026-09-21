@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Copy } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
@@ -277,8 +277,9 @@ export default function PDFArchiv() {
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
                               style={{ background: "var(--apple-btn-secondary-bg)",
                                        color: "var(--text-primary)" }}
-                              title="Nachträgliche Mail (Korrektur, Hinweis nach Kaufabschluss, Bahnverbindung)">
-                        <Mail size={16} />
+                              aria-label="Vorlagen zum Kopieren"
+                              title="Vorlagen zum Kopieren (Hinweis nach Kaufabschluss, Bahnverbindung) — mit Name und Daten dieses Vertrags">
+                        <Copy size={16} />
                       </button>
                       <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
                               disabled={!!loeschtId}
@@ -304,7 +305,7 @@ export default function PDFArchiv() {
 
       {folgeMail && (
         <FolgeMailDialog open contract={folgeMail}
-                         onClose={() => { setFolgeMail(null); load(); }} />
+                         onClose={() => setFolgeMail(null)} />
       )}
 
       {/* Foto-Galerie: großes Bild, blättern mit Pfeilen / Tastatur / Wischen */}

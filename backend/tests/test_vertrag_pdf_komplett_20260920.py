@@ -383,12 +383,13 @@ def test_e3_sehr_langer_text_bricht_das_pdf_nicht(welt):
 
 def test_e4_folge_mail_vorschau_und_versand_sind_gefuellt(welt):
     v = _vertrag(welt, nr=14, seller_email=f"kunde{SUF}@e2etest-mail.de")
-    for art in ("korrektur", "nach_kauf", "bahn"):
+    for art in ("korrektur", "nach_kauf", "nach_kauf_whatsapp", "bahn"):
         r = requests.get(f"{API}/contracts/{v['id']}/folge-mail/{art}",
                          headers=welt["kopf"], timeout=30)
         assert r.status_code == 200, r.text[:300]
         d = r.json()
-        assert d["betreff"] and d["text"]
+        # WhatsApp hat keinen Betreff (21.09.2026)
+        assert d["text"] and (d["betreff"] or art == "nach_kauf_whatsapp")
         assert "{" not in d["text"], f"{art}: Platzhalter blieb stehen: {d['text'][:200]}"
         assert "Max Mustermann" in d["text"]
     # Unbekannte Vorlage -> 404, nicht stillschweigend irgendwas.

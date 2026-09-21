@@ -206,7 +206,12 @@ def test_04_super_admin_kann_eigene_mfa_nicht_zuruecksetzen():
         eintrag = dbx.zugangs_aenderungen.find_one({"subject_user_id": uid2,
                                                     "art": "mfa_zurueckgesetzt"})
         assert eintrag and eintrag["grund"] == "Handy verloren"
-        assert dbx.betriebsalarme.find_one({"typ": "mfa_zurueckgesetzt", "ref": mail2})
+        # Ueber ALARM_JE_TYP_MAX offenen Alarmen (lange lokale Test-DB) faltet
+        # betrieb.alarm den Einzelalarm in den Sammelalarm "*weitere*" — dann
+        # steht das Konto dort als letzter_ref.
+        assert (dbx.betriebsalarme.find_one({"typ": "mfa_zurueckgesetzt", "ref": mail2})
+                or dbx.betriebsalarme.find_one({"typ": "mfa_zurueckgesetzt", "ref": "*weitere*",
+                                                "details.letzter_ref": mail2[:80]}))
     finally:
         dbx.users.delete_many({"email": {"$in": [mail, f"r6_super2_{SUF}@{MAIL}"]}})
         dbx.zugangs_aenderungen.delete_many({"admin_id": uid})

@@ -1,81 +1,71 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
-import { Mail, X } from "lucide-react";
+import KopierKnopf from "@/components/KopierKnopf";
+import { Copy, X } from "lucide-react";
 import { toast } from "sonner";
 
 /**
- * Nachträgliche Mails zu einem Kaufvertrag (Wunsch Ahmad 20.09.2026).
+ * Vorlagen zum Kopieren beim Kaufvertrag (Wunsch Ahmad 21.09.2026).
  *
- * Drei Vorlagen, die NIE automatisch rausgehen — der Sucher schickt sie von
- * Hand, wenn es passt:
+ * "Wir selber schicken die nicht raus — diese Vorlagen sollen da nur sein,
+ * damit der Kunde sie immer kopieren kann und bei Mail selber einfügen
+ * kann." Die App verschickt hier NICHTS: der Sucher kopiert Betreff und
+ * Text und schickt sie aus seinem eigenen Postfach oder WhatsApp.
  *
- *   korrektur  erneuter Versand, nachdem am Vertrag etwas geändert wurde
- *   nach_kauf  Hinweis nach dem Kaufabschluss (Inserat rausnehmen usw.)
- *   bahn       Bahnverbindung / Abholinformation für den Verkäufer
+ *   nach_kauf           Hinweis nach Kaufabschluss (E-Mail)
+ *   nach_kauf_whatsapp  Hinweis nach Kaufabschluss (WhatsApp)
+ *   bahn                Bahnverbindung
  *
- * Betreff und Text kommen aus den Einstellungen der Firma, mit bereits
- * eingesetzten Platzhaltern — der Server liefert sie fertig. Beides lässt
- * sich hier vor dem Senden noch ändern.
+ * Betreff und Text kommen aus den Einstellungen der Firma, der Server setzt
+ * Name und Daten dieses Vertrags schon ein. Vor dem Kopieren lässt sich
+ * beides hier noch ändern.
+ *
+ * Bis 21.09.2026 lief hier auch der Versand (samt "Korrektur") über unsere
+ * Adresse. Die Korrektur geht jetzt über den normalen Versand — mit dem
+ * korrigierten Vertrag als Anhang (SendDialog).
  */
 const ARTEN = [
-  { id: "korrektur", label: "Korrigierte Fassung",
-    hilfe: "Nach einer Änderung am Vertrag erneut schicken." },
-  { id: "nach_kauf", label: "Hinweis nach Kaufabschluss",
-    hilfe: "Inserat rausnehmen, keine Auskünfte, Abholung." },
+  { id: "nach_kauf", label: "Hinweis nach Kaufabschluss (E-Mail)",
+    hilfe: "Inserat rausnehmen, keine Auskünfte, Abholung — für deine eigene E-Mail." },
+  { id: "nach_kauf_whatsapp", label: "Hinweis nach Kaufabschluss (WhatsApp)",
+    hilfe: "Derselbe Hinweis für WhatsApp — ohne Betreff." },
   { id: "bahn", label: "Bahnverbindung",
-    hilfe: "Ankunftszeit des Fahrers ankündigen." },
+    hilfe: "Ankunftszeit des Fahrers ankündigen — die Bahnverbindung selbst hängst du an." },
 ];
 
 export default function FolgeMailDialog({ open, contract, onClose }) {
-  const [art, setArt] = useState("korrektur");
-  const [empfaenger, setEmpfaenger] = useState("");
+  const [art, setArt] = useState("nach_kauf");
   const [betreff, setBetreff] = useState("");
   const [text, setText] = useState("");
   const [laedt, setLaedt] = useState(false);
-  const [sendet, setSendet] = useState(false);
 
-  // Vorschau vom Server holen: er setzt die Platzhalter ein, damit hier
-  // genau das steht, was gleich rausgeht.
+  // Vorlage vom Server holen: er setzt Name und Daten des Vertrags ein.
+  // Beim Wechsel und nach einem Fehler werden die Felder geleert — sonst
+  // liesse sich waehrenddessen noch der Text der VORIGEN Vorlage kopieren.
   useEffect(() => {
     if (!open || !contract?.id) return;
     let abgebrochen = false;
     setLaedt(true);
+    setBetreff("");
+    setText("");
     api.get(`/contracts/${contract.id}/folge-mail/${art}`)
       .then(({ data }) => {
         if (abgebrochen) return;
-        setEmpfaenger(data.empfaenger || contract.seller_email || "");
         setBetreff(data.betreff || "");
         setText(data.text || "");
       })
-      .catch((e) => !abgebrochen && toast.error(errMsg(e)))
+      .catch((e) => {
+        if (abgebrochen) return;
+        setBetreff("");
+        setText("");
+        toast.error(errMsg(e));
+      })
       .finally(() => !abgebrochen && setLaedt(false));
     return () => { abgebrochen = true; };
-  }, [open, contract?.id, art]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, contract?.id, art]);
 
   if (!open) return null;
-
-  const senden = async () => {
-    if (!empfaenger.includes("@")) {
-      toast.error("Bitte eine gültige E-Mail-Adresse angeben.");
-      return;
-    }
-    setSendet(true);
-    try {
-      const { data } = await api.post(`/contracts/${contract.id}/folge-mail`, {
-        art, recipient: empfaenger.trim(), subject: betreff, message: text,
-        // Doppelklick-Schutz: ein Schlüssel je Klick.
-        idempotency_key: `fm-${art}-${crypto.randomUUID().slice(0, 18)}`,
-      });
-      toast.success(data?.bereits_gesendet
-        ? "Diese Mail wurde bereits verschickt."
-        : "Mail verschickt.");
-      onClose?.();
-    } catch (e) {
-      toast.error(errMsg(e));
-    } finally {
-      setSendet(false);
-    }
-  };
+  const mitBetreff = art !== "nach_kauf_whatsapp";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -86,7 +76,7 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
              style={{ borderBottom: "1px solid var(--line)" }}>
           <div className="flex items-center gap-2 font-semibold"
                style={{ color: "var(--text-primary)" }}>
-            <Mail size={18} /> Nachträgliche Mail
+            <Copy size={18} /> Vorlagen zum Kopieren
           </div>
           <button onClick={onClose} data-testid="folgemail-schliessen"
                   className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10"
@@ -111,56 +101,48 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
               </button>
             ))}
           </div>
-          <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            {ARTEN.find((a) => a.id === art)?.hilfe}
+          <div className="text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}
+               data-testid="folgemail-hinweis">
+            {ARTEN.find((a) => a.id === art)?.hilfe} Die App verschickt diese Nachricht
+            nicht — kopiere sie und sende sie selbst.
           </div>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-              Empfänger
-            </span>
-            <input value={empfaenger} onChange={(e) => setEmpfaenger(e.target.value)}
-                   data-testid="folgemail-empfaenger" type="email"
-                   className="px-3 py-2 rounded-xl outline-none"
-                   style={{ background: "var(--surface-2)", color: "var(--text-primary)",
-                            border: "1px solid var(--line)" }} />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-              Betreff
-            </span>
-            <input value={betreff} onChange={(e) => setBetreff(e.target.value)}
-                   data-testid="folgemail-betreff"
-                   className="px-3 py-2 rounded-xl outline-none"
-                   style={{ background: "var(--surface-2)", color: "var(--text-primary)",
-                            border: "1px solid var(--line)" }} />
-          </label>
+          {mitBetreff && (
+            <label className="flex flex-col gap-1">
+              <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                Betreff
+              </span>
+              <input value={betreff} onChange={(e) => setBetreff(e.target.value)}
+                     data-testid="folgemail-betreff"
+                     className="px-3 py-2 rounded-xl outline-none"
+                     style={{ background: "var(--surface-2)", color: "var(--text-primary)",
+                              border: "1px solid var(--line)" }} />
+            </label>
+          )}
 
           <label className="flex flex-col gap-1">
             <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
               Text {laedt && "(wird geladen …)"}
             </span>
             <textarea value={text} onChange={(e) => setText(e.target.value)}
-                      rows={12} data-testid="folgemail-text"
+                      rows={14} data-testid="folgemail-text"
                       className="px-3 py-2 rounded-xl outline-none resize-y"
                       style={{ background: "var(--surface-2)", color: "var(--text-primary)",
                                border: "1px solid var(--line)" }} />
           </label>
         </div>
 
-        <div className="px-5 py-4 flex justify-end gap-2"
+        <div className="px-5 py-4 flex flex-wrap justify-end gap-2"
              style={{ borderTop: "1px solid var(--line)" }}>
-          <button onClick={onClose} className="px-4 py-2 rounded-xl"
-                  style={{ background: "var(--apple-btn-secondary-bg)",
-                           color: "var(--text-primary)" }}>
-            Abbrechen
-          </button>
-          <button onClick={senden} disabled={sendet || laedt}
-                  data-testid="folgemail-senden"
-                  className="px-4 py-2 rounded-xl disabled:opacity-50"
+          {mitBetreff && (
+            <KopierKnopf text={betreff} label="Betreff" disabled={laedt}
+                         testid="folgemail-betreff-kopieren" />
+          )}
+          <KopierKnopf text={text} label="Text" disabled={laedt}
+                       testid="folgemail-text-kopieren" />
+          <button onClick={onClose} className="px-4 py-1.5 rounded-lg text-xs font-semibold"
                   style={{ background: "var(--apple-btn-primary-bg)", color: "#fff" }}>
-            {sendet ? "Wird verschickt …" : "Verschicken"}
+            Fertig
           </button>
         </div>
       </div>

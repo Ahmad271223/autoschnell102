@@ -37,7 +37,7 @@ SUCHER = {"first_name": "Max", "last_name": "Sucher",
 def test_vertrag_mail_enthaelt_alles_wichtige():
     betreff, text, html = vertrag_mail.vertrag_mail(
         vertrag=VERTRAG, firma=FIRMA, sucher=SUCHER,
-        nachricht="Hallo Frau Verkauf,\nwie besprochen anbei der Vertrag.",
+        nachricht="Sehr geehrte/r Frau/Herr Sabine Verkauf,\nwie besprochen anbei der Vertrag.",
         betreff=None)
     assert "Volkswagen Golf VII 1.6 TDI" in betreff
     for erwartet in ("Sabine Verkauf", "8.490,00 €", "KV-20260904-A1B2C3",
@@ -53,6 +53,23 @@ def test_vertrag_mail_enthaelt_alles_wichtige():
     assert "max-width:600px" in html
     # Zeilenumbrueche der Nachricht bleiben erhalten
     assert "<br>" in html
+
+
+def test_vorlage_kommt_woertlich_an_ohne_zweite_anrede():
+    """Wunsch Ahmad 21.09.2026: Die Vorlage bringt Anrede und Gruss mit —
+    die Mail setzt kein "Hallo …" davor und kein "Freundliche Grüße" dahinter."""
+    import vertrag_platzhalter as P
+    import vertrag_vorlagen as V
+    vorlage = P.ersetzen(V.EMAIL_TEXT, VERTRAG, FIRMA)
+    _, text, html = vertrag_mail.vertrag_mail(
+        vertrag=VERTRAG, firma=FIRMA, sucher=SUCHER, nachricht=vorlage, betreff=None)
+    assert text.startswith(vorlage), text[:200]
+    assert "Hallo" not in text and "Hallo" not in html
+    assert "Freundliche Grüße" not in text
+    assert text.count("Sehr geehrte") == 1 and html.count("Sehr geehrte") == 1
+    assert "Ihr Autohaus<br>Autohaus Muster" in html
+    # Kontakt und Antwortweg bleiben
+    assert "Max Sucher" in text and "max@autohaus-muster.de" in text
 
 
 def test_vertrag_mail_ohne_nachricht_und_ohne_daten():

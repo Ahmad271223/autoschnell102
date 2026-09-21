@@ -105,12 +105,13 @@ def test_04_abholzeile_steht_unter_den_kaeuferangaben():
     # Wunsch Ahmad (15.09.2026): ohne Uhrzeit, ohne Kennzeichen im Vertrag
     i_ab = f.find("Wird abgeholt am 13.09.2026, ul. Osiecka 1")
     assert "10:00 Uhr" not in f and "Kennzeichen" not in f
-    i_eins, i_drei = f.find("1 "), f.find("3 ")
     assert i_ab > 0, f
     assert i_ab < f.index("Fahrzeugdaten"), "Abholung steht VOR den Fahrzeugdaten"
     assert i_ab < f.index("Kaufpreis"), "und nicht mehr im Kaufpreis-Kasten"
     assert "Zahlungsart: Bar" in f
-    assert i_eins >= 0 and i_drei >= 0
+    # Wunsch Ahmad 21.09.2026: Kaufpreis ohne Nummer, danach ab 1 gezaehlt
+    # (vorher "2 · Kaufpreis", "3 · Fahrzeugdaten").
+    assert "1 · Fahrzeugdaten" in f and "3 · " not in f
 
 
 def test_05_ohne_abholdatum_keine_zeile():

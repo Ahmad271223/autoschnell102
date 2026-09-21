@@ -252,44 +252,37 @@ def _vertrag(welt, kopf=None):
     return r.json()
 
 
-def test_folgemail_wird_wirklich_versendet(welt):
-    """b6cd893 lieferte die Route, aber JEDER Versand endete mit 500
-    (`_versand_limiter.erlaubt` gibt es nicht, zwei Importe fehlten). Der
-    alte Test pruefte nur, dass es die Route gibt — dieser schickt wirklich."""
+def test_folgemail_nur_zum_kopieren_nie_versendet(welt):
+    """Wunsch Ahmad 21.09.2026: Hinweis nach Kaufabschluss und Bahnverbindung
+    verschickt die App NICHT — der Sucher kopiert sie. Die Vorschau liefert
+    den fertigen Text mit Namen und Daten; der alte Versandweg antwortet 410
+    und schreibt nichts in den Vertrag."""
     c = _vertrag(welt)
-    vorschau = requests.get(f"{API}/contracts/{c['id']}/folge-mail/nach_kauf",
-                            headers=welt["kopf"], timeout=30)
-    assert vorschau.status_code == 200, vorschau.text[:300]
-    assert vorschau.json()["empfaenger"] == "verkaeufer@e2etest-mail.de"
-    assert "{" not in vorschau.json()["text"], "Platzhalter nicht ersetzt"
+    for art in ("nach_kauf", "nach_kauf_whatsapp", "bahn", "korrektur"):
+        vorschau = requests.get(f"{API}/contracts/{c['id']}/folge-mail/{art}",
+                                headers=welt["kopf"], timeout=30)
+        assert vorschau.status_code == 200, (art, vorschau.text[:300])
+        d = vorschau.json()
+        assert "{" not in d["text"], (art, "Platzhalter nicht ersetzt")
+        assert "Hans Beispiel" in d["text"], art
+        assert bool(d["betreff"]) == (art != "nach_kauf_whatsapp"), (art, d["betreff"])
 
-    schluessel = f"folgetest{SUF}"
-    body = {"art": "nach_kauf", "recipient": "verkaeufer@e2etest-mail.de",
-            "idempotency_key": schluessel}
-    r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
-                      timeout=60, json=body)
-    assert r.status_code == 200, r.text[:500]
-    assert r.json()["zustellung"] in ("mock", "versendet")
-    # Doppelklick: derselbe Schluessel stellt nicht noch einmal zu.
-    r2 = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
-                       timeout=60, json=body)
-    assert r2.status_code == 200 and r2.json().get("bereits_gesendet") is True, r2.text[:300]
+    for art in ("nach_kauf", "bahn", "korrektur"):
+        r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                          timeout=60, json={"art": art, "recipient": "verkaeufer@e2etest-mail.de",
+                                            "idempotency_key": f"folgetest{SUF}{art}"})
+        assert r.status_code == 410, (art, r.status_code, r.text[:300])
+        assert "kopieren" in r.json().get("detail", ""), r.text[:300]
     doc = _db().generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "send_status": 1})
-    eintraege = [e for e in doc.get("send_status") or [] if e.get("art") == "nach_kauf"]
-    assert len(eintraege) == 1 and eintraege[0]["zustellung"] in ("mock", "versendet")
-
-    for art in ("korrektur", "bahn"):
-        r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
-                          timeout=60, json={"art": art, "recipient": "verkaeufer@e2etest-mail.de"})
-        assert r.status_code == 200, (art, r.text[:300])
+    assert not [e for e in doc.get("send_status") or [] if e.get("art")], (
+        "eine Folge-Mail wurde am Vertrag als versendet vermerkt")
 
 
-def test_folgemail_lehnt_ungueltige_adresse_ab(welt):
+def test_folgemail_ohne_anmeldung_abgelehnt(welt):
     c = _vertrag(welt)
-    for falsch in ("keine-adresse", "a@", "@b.de", "a b@c.de"):
-        r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
-                          timeout=30, json={"art": "bahn", "recipient": falsch})
-        assert r.status_code in (400, 422), (falsch, r.status_code, r.text[:200])
+    r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", timeout=30,
+                      json={"art": "bahn", "recipient": "a@b.de"})
+    assert r.status_code == 401, r.text[:200]
 
 
 # ------------------------------------------------------------------ CORS

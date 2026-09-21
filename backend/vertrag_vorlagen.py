@@ -8,9 +8,10 @@ Alle Texte duerfen Platzhalter enthalten (siehe vertrag_platzhalter.py).
 Fehlt eine Angabe, setzt der Server "____" ein — also genau die Luecke,
 die frueher von Hand ausgefuellt wurde. Ein Kunde liest nie "{abholdatum}".
 
-Die vier zusaetzlichen Vorlagen (Korrektur, Hinweis nach Kaufabschluss per
-Mail und per WhatsApp, Bahnverbindung) gehoeren zu Mails, die der Sucher
-NACHTRAEGLICH von Hand verschickt — sie gehen nie automatisch raus.
+Die Korrektur-Vorlage nimmt der Versand-Dialog beim erneuten Versand
+eines geaenderten Vertrags. Hinweis nach Kaufabschluss (Mail und WhatsApp)
+und Bahnverbindung verschickt die App NIE (Wunsch Ahmad 21.09.2026) — sie
+sind nur zum Kopieren da.
 """
 
 # ---------------------------------------------------------------- Vertrag
@@ -30,6 +31,28 @@ BESONDERE_VEREINBARUNGEN = (
     "({kundennummer}) nach einem kurzen Gebrauchtwagencheck und "
     "Datenabgleich mit Zulassungsbescheinigung Teil I & II ausgehändigt."
 )
+
+#: Woran der Vertrag erkennt, dass die Uebergabe (Datum UND Ort) schon in
+#: den Besonderen Vereinbarungen steht — der feste Anfang unseres Satzes.
+UEBERGABE_SATZ_ANFANG = "Die Fahrzeugübergabe findet bis/am"
+
+
+def uebergabe_in_vereinbarungen(text) -> bool:
+    """Steht die Uebergabe mit Datum und Ort schon in diesem Text?
+
+    Wunsch Ahmad 21.09.2026: Hat der Vertrag unsere Besondere Vereinbarung,
+    steht die Zeile "Abholung: Wird abgeholt am …" NICHT noch einmal ueber
+    dem Kaufpreis — nur Vertraege ohne unseren Satz brauchen sie.
+
+    Erkannt wird unser Satz am festen Anfang (auch wenn die Luecken schon
+    von Hand ausgefuellt wurden) oder ein eigener Satz, der Abholdatum UND
+    Uebergabeort als Platzhalter nennt — dann steht beides ebenfalls da.
+    """
+    roh = str(text or "")
+    if UEBERGABE_SATZ_ANFANG in roh:
+        return True
+    return "{abholdatum}" in roh and "{ort}" in roh
+
 
 #: Standardstellung des Schalters: AN. Eine Firma, die den Satz nicht will,
 #: schaltet ihn in den Einstellungen ab.
@@ -66,6 +89,10 @@ def sondervereinbarungen(firma: dict) -> str:
     return "\n\n".join(teile)
 
 # ---------------------------------------------------------------- E-Mail
+# Wunsch Ahmad 21.09.2026: die Texte WOERTLICH nach seiner Vorlage. Zwei
+# Angleichungen: "{Platzhalter}" heisst hier {kunde_name} bzw.
+# {haendler_name}, und die Anrede lautet einheitlich "Sehr geehrte/r
+# Frau/Herr" (in der Vorlage stand teils "Sehr geehrter Frau/Herr").
 EMAIL_BETREFF = "KFZ-E-Mail-Bestätigung"
 
 EMAIL_TEXT = (
@@ -75,20 +102,47 @@ EMAIL_TEXT = (
     "die im Kaufvertrag eingetragenen Daten und bestätigen Sie anschließend "
     "diese E-Mail.\n\n"
     "Vielen Dank\n"
-    "Ihr {haendler_name}"
+    "Ihr Autohaus\n"
+    "{haendler_name}"
 )
 
-#: Erneuter Versand, nachdem am Vertrag etwas geaendert wurde.
-EMAIL_BETREFF_KORREKTUR = "KFZ-Kaufvertrag — korrigierte Fassung"
+#: Erneuter Versand, nachdem am Vertrag etwas geaendert wurde. Seit
+#: 21.09.2026 nimmt der Versand-Dialog diese Vorlage von selbst, wenn schon
+#: eine FRUEHERE Fassung desselben Vertrags verschickt wurde — und der
+#: korrigierte Vertrag haengt wirklich an (vorher ging die Korrektur als
+#: reine Textmail ohne Anhang raus, obwohl der Text einen Anhang ankuendigte).
+EMAIL_BETREFF_KORREKTUR = "KFZ-E-Mail-Bestätigung – korrigierte Fassung"
 
 EMAIL_TEXT_KORREKTUR = (
     "Sehr geehrte/r Frau/Herr {kunde_name},\n\n"
-    "im Anhang erhalten Sie den Kaufvertrag in der korrigierten Fassung. "
-    "Die vorherige Fassung ist damit hinfällig. Bitte prüfen Sie die Angaben "
-    "noch einmal und bestätigen Sie diese E-Mail.\n\n"
+    "wie besprochen erhalten Sie im Anhang dieser E-Mail den Kaufvertrag in "
+    "der korrigierten Fassung. Die vorherige Fassung ist damit hinfällig. "
+    "Bitte überprüfen Sie sorgfältig die im Kaufvertrag eingetragenen Daten "
+    "und bestätigen Sie anschließend diese E-Mail.\n\n"
     "Vielen Dank\n"
-    "Ihr {haendler_name}"
+    "Ihr Autohaus\n"
+    "{haendler_name}"
 )
+
+# ---------------------------------------------------------------- WhatsApp
+WHATSAPP_TEXT = (
+    "Sehr geehrte/r Frau/Herr {kunde_name},\n\n"
+    "danke für das nette Gespräch bezüglich Ihres Fahrzeugs. Wie bereits "
+    "besprochen, erhalten Sie nachfolgend den Kaufvertrag. Bitte überprüfen "
+    "Sie diesen sorgfältig auf die darin gemachten Angaben, und bestätigen "
+    "Sie ihn anschließend.\n\n"
+    "Vielen Dank\n"
+    "Ihr Autohaus\n"
+    "{haendler_name}"
+)
+
+# ============================================== Vorlagen NUR zum Kopieren
+# Wunsch Ahmad 21.09.2026: "wir selber schicken die nicht raus — diese
+# Vorlagen sollen da nur sein, damit der Kunde sie immer kopieren kann und
+# bei Mail selber einfügen kann". Die App verschickt den Hinweis nach
+# Kaufabschluss und die Bahnverbindung NICHT. Sie stehen in den
+# Einstellungen (mit Kopier-Knopf) und beim Vertrag im PDF-Archiv (dort mit
+# eingesetztem Namen und Daten), der Sucher schickt sie selbst.
 
 # ------------------------------------------------- Hinweis nach Abschluss
 EMAIL_BETREFF_NACH_KAUF = "Bestätigung des Kaufvertrags"
@@ -97,43 +151,37 @@ _NACH_KAUF_KERN = (
     "Daher bitte ich Sie darum, weiteren Interessenten mitzuteilen, dass "
     "das Fahrzeug bereits verkauft ist.\n"
     "Sollte das Fahrzeug nach der Übergabe noch angemeldet sein, "
-    "verpflichten wir uns, es innerhalb von fünf Werktagen abzumelden.\n"
-    "Bitte geben Sie keine Auskünfte über Kaufpreis, Abholzeit und Käufer "
-    "heraus. Ich melde mich stets zu Beginn des Gesprächs mit der "
-    "Kundennummer. Nach telefonischer Vereinbarung erscheint ein Fahrer bei "
-    "Ihnen, der das Fahrzeug entgegennimmt und Ihnen die Kaufsumme wie "
+    "verpflichten wir uns, das Fahrzeug innerhalb von fünf Werktagen "
+    "abzumelden. Bitte geben Sie keine Auskünfte über Kaufpreis, Abholzeit "
+    "und Käufer aus. Ich melde mich stets eingangs des Gesprächs mit der "
+    "Kundennummer. Nach telefonischer Vereinbarung wird ein Fahrer bei Ihnen "
+    "erscheinen, der das Fahrzeug entgegennimmt und Ihnen die Kaufsumme wie "
     "vertraglich vereinbart mittels der im Vertrag festgelegten "
     "Zahlungsmethode überreicht.\n\n"
     "Ich bitte Sie ferner darum, das Inserat nun aus dem Netz zu nehmen.\n"
-    "Bei weiteren Fragen können Sie uns gerne anrufen oder eine E-Mail "
+    "Bei weiteren Fragen können Sie uns gerne anrufen oder eine Email "
     "schreiben.\n\n"
     "Liebe Grüße\n"
-    "Ihr {haendler_name}"
+    "Ihr Autohaus\n"
+    "{haendler_name}"
 )
 
+#: Die Vorlage nennt die Bestaetigung "per WhatsApp" — die E-Mail-Fassung
+#: sagt an dieser einen Stelle "per E-Mail", sonst ist sie gleich.
 EMAIL_TEXT_NACH_KAUF = (
     "Sehr geehrte/r Frau/Herr {kunde_name},\n\n"
-    "ich bedanke mich für das Rücksenden der Mail. Auf Grundlage von Angebot "
-    "und Annahme ist somit zwischen uns beiden ein rechtskräftiger Vertrag "
-    "zustande gekommen, der seine Gültigkeit hat.\n\n"
+    "ich bedanke mich für die Bestätigung des Kaufvertrags per E-Mail. Auf "
+    "Grundlage von Angebot und Annahme ist somit zwischen uns beiden ein "
+    "rechtskräftiger und im Rechtsverkehr mustergültiger Vertrag zustande "
+    "gekommen, der seine Gültigkeit hat.\n\n"
 ) + _NACH_KAUF_KERN
-
-# ---------------------------------------------------------------- WhatsApp
-WHATSAPP_TEXT = (
-    "Sehr geehrte/r Frau/Herr {kunde_name},\n\n"
-    "danke für das nette Gespräch bezüglich Ihres Fahrzeugs. Wie besprochen "
-    "erhalten Sie nachfolgend den Kaufvertrag. Bitte überprüfen Sie ihn "
-    "sorgfältig auf die darin gemachten Angaben und bestätigen Sie ihn "
-    "anschließend.\n\n"
-    "Vielen Dank\n"
-    "Ihr {haendler_name}"
-)
 
 WHATSAPP_TEXT_NACH_KAUF = (
     "Sehr geehrte/r Frau/Herr {kunde_name},\n\n"
     "ich bedanke mich für die Bestätigung des Kaufvertrags per WhatsApp. Auf "
     "Grundlage von Angebot und Annahme ist somit zwischen uns beiden ein "
-    "rechtskräftiger Vertrag zustande gekommen, der seine Gültigkeit hat.\n\n"
+    "rechtskräftiger und im Rechtsverkehr mustergültiger Vertrag zustande "
+    "gekommen, der seine Gültigkeit hat.\n\n"
 ) + _NACH_KAUF_KERN
 
 # ------------------------------------------------------- Bahnverbindung
@@ -142,11 +190,12 @@ EMAIL_BETREFF_BAHN = "Bahnverbindung / Abholinformation"
 EMAIL_TEXT_BAHN = (
     "Sehr geehrte/r Frau/Herr {kunde_name},\n\n"
     "anbei erhalten Sie die Bahnverbindung mit der voraussichtlichen "
-    "Ankunftszeit unseres Fahrers für den {abholdatum} in {ort}.\n"
-    "Sollte es zu einer Verspätung kommen, meldet sich unser Fahrer "
-    "telefonisch bei Ihnen.\n\n"
+    "Ankunftszeit unseres Fahrers.\n"
+    "Sollte es zu einer Verspätung kommen, wird sich unser Fahrer bei Ihnen "
+    "telefonisch melden.\n\n"
     "Vielen Dank\n"
-    "Ihr {haendler_name}"
+    "Ihr Autohaus\n"
+    "{haendler_name}"
 )
 
 
@@ -169,26 +218,57 @@ STARTWERTE = {
     "sondervereinbarung_standard_aktiv": STANDARD_SONDERVEREINBARUNG_AN,
 }
 
-#: Die drei Folge-Mails, die ein Sucher nachtraeglich von Hand schickt.
-#: Schluessel -> (Betreff-Feld, Text-Feld, Standardbetreff, Standardtext).
-FOLGE_MAILS = {
-    "korrektur": ("email_subject_korrektur", "email_template_korrektur",
-                  EMAIL_BETREFF_KORREKTUR, EMAIL_TEXT_KORREKTUR),
+#: Die Vorlagen, die die App NICHT verschickt: der Sucher kopiert sie (im
+#: PDF-Archiv mit eingesetztem Namen und Daten) und schickt sie selbst.
+#: Schluessel -> (Betreff-Feld, Text-Feld, Standardbetreff, Standardtext);
+#: WhatsApp hat keinen Betreff (None).
+KOPIER_VORLAGEN = {
     "nach_kauf": ("email_subject_nach_kauf", "email_template_nach_kauf",
                   EMAIL_BETREFF_NACH_KAUF, EMAIL_TEXT_NACH_KAUF),
+    "nach_kauf_whatsapp": (None, "whatsapp_template_nach_kauf",
+                           "", WHATSAPP_TEXT_NACH_KAUF),
     "bahn": ("email_subject_bahn", "email_template_bahn",
              EMAIL_BETREFF_BAHN, EMAIL_TEXT_BAHN),
 }
 
+#: Alle Vorlagen mit Vorschau beim Vertrag: die zum Kopieren und die
+#: Korrektur (die der Versand-Dialog beim erneuten Versand nimmt).
+FOLGE_MAILS = {
+    "korrektur": ("email_subject_korrektur", "email_template_korrektur",
+                  EMAIL_BETREFF_KORREKTUR, EMAIL_TEXT_KORREKTUR),
+    **KOPIER_VORLAGEN,
+}
+
 
 def vorlage(firma: dict, art: str) -> tuple:
-    """(Betreff, Text) einer Folge-Mail — eigener Text der Firma, sonst der
-    Standard. Unbekannte Art -> ("", "")."""
+    """(Betreff, Text) einer Vorlage — eigener Text der Firma, sonst der
+    Standard. Unbekannte Art -> ("", ""); WhatsApp -> Betreff ""."""
     eintrag = FOLGE_MAILS.get(art)
     if not eintrag:
         return "", ""
     betreff_feld, text_feld, betreff_std, text_std = eintrag
     firma = firma or {}
-    betreff = (firma.get(betreff_feld) or "").strip() or betreff_std
+    betreff = ((firma.get(betreff_feld) or "").strip() or betreff_std) if betreff_feld else ""
     text = (firma.get(text_feld) or "").strip() or text_std
     return betreff, text
+
+
+def mit_standardtexten(firma: dict) -> dict:
+    """Leere Vorlagenfelder mit dem Standard fuellen — NUR fuer die Antwort.
+
+    Firmen, die vor dem 20.09.2026 angelegt wurden, haben die Felder fuer
+    Korrektur, Hinweis nach Kaufabschluss und Bahnverbindung nicht (und wer
+    ein Feld geleert hat, hat es leer gespeichert). Die Oberflaeche zeigte
+    dann leere Felder (Einstellungen) bzw. schickte keinen Text. Jetzt sieht
+    jeder die wirksame Vorlage; gespeichert wird erst, was jemand selbst
+    speichert. Aeltere, NICHT leere Standardtexte stellt die Migration
+    m10_vorlagen_texte um.
+    """
+    if not isinstance(firma, dict):
+        return firma
+    for feld, standard in STARTWERTE.items():
+        if not isinstance(standard, str) or not standard:
+            continue                      # Schalter und leeres Freitextfeld
+        if not str(firma.get(feld) or "").strip():
+            firma[feld] = standard
+    return firma

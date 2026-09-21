@@ -158,6 +158,9 @@ def _mit_digital_standard(dealer):
         import vertrag_vorlagen as _vorlagen
         dealer["sondervereinbarungen_effektiv"] = _vorlagen.sondervereinbarungen(dealer)
         dealer["sondervereinbarung_standard_text"] = _vorlagen.BESONDERE_VEREINBARUNGEN
+        # 21.09.2026: leere Vorlagen (Firmen von vor dem 20.09.) zeigen den
+        # Standardtext — in den Einstellungen und im Versand-Dialog.
+        _vorlagen.mit_standardtexten(dealer)
     return dealer
 
 

@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
 import secrets
 
@@ -2084,25 +2084,15 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     return out
 
 
-class FolgeMailIn(BaseModel):
-    """Eine der drei Mails, die der Sucher NACHTRAEGLICH von Hand schickt
-    (Wunsch Ahmad 20.09.2026)."""
-    art: Literal["korrektur", "nach_kauf", "bahn"]
-    recipient: str = Field(max_length=200)
-    subject: Optional[str] = Field(default=None, max_length=500)
-    message: Optional[str] = Field(default=None, max_length=20000)
-    idempotency_key: Optional[str] = Field(
-        default=None, min_length=8, max_length=80,
-        pattern=r"^[A-Za-z0-9_-]+$")
-
-
 @router.get("/contracts/{contract_id}/folge-mail/{art}")
 async def folge_mail_vorschau(contract_id: str, art: str,
                               user=Depends(current_firma)):
-    """Betreff und Text der Folge-Mail, Platzhalter schon eingesetzt.
+    """Betreff und Text einer Vorlage, Platzhalter schon eingesetzt.
 
-    Damit sieht der Sucher VOR dem Senden genau das, was rausgeht — und
-    kann es im Dialog noch aendern."""
+    Wunsch Ahmad 21.09.2026: Hinweis nach Kaufabschluss (E-Mail/WhatsApp)
+    und Bahnverbindung verschickt die App nicht — der Sucher kopiert hier
+    den fertigen Text mit Namen und Daten des Vertrags und schickt ihn
+    selbst."""
     import vertrag_vorlagen as _vorlagen
     from vertrag_platzhalter import ersetzen as _ersetzen
     if art not in _vorlagen.FOLGE_MAILS:
@@ -2121,95 +2111,19 @@ async def folge_mail_vorschau(contract_id: str, art: str,
 
 
 @router.post("/contracts/{contract_id}/folge-mail")
-async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
-                            user=Depends(require_active_sub)):
-    """Eine Folge-Mail verschicken — ohne Anhang, reiner Text.
+async def folge_mail_senden(contract_id: str, user=Depends(current_firma)):
+    """Frueher: eine nachtraegliche Mail ueber unsere Adresse verschicken.
 
-    Bewusst getrennt vom Vertragsversand: hier haengt kein PDF dran, es
-    gibt keine Fassungspruefung und keinen Freigabe-Link. Es ist eine
-    Nachricht zum Vorgang, kein Vertrag. Der Versand wird trotzdem am
-    Vertrag vermerkt (send_status mit `art`), damit spaeter nachvollziehbar
-    ist, wer wann was geschickt hat.
-    """
-    import email_service
-    import vertrag_vorlagen as _vorlagen
-    from provider_fetch import MOCK_PROVIDER_FETCH
-    from vertrag_mail import sucher_kontakt
-    from vertrag_platzhalter import ersetzen as _ersetzen
-    empfaenger = (body.recipient or "").strip()
-    # Pruefbericht 20.09.2026: dieselbe Adresspruefung wie der Mailversand
-    # selbst (vorher nur "enthaelt ein @").
-    if not email_service.gueltige_adresse(empfaenger):
-        raise HTTPException(400, "Bitte eine gültige E-Mail-Adresse angeben")
-    # Dieselbe Bremse wie beim Vertragsversand — sonst waere das hier ein
-    # offener Weg, ueber unsere Adresse beliebig viele Mails zu schicken.
-    # Pruefbericht 20.09.2026: hier stand `_versand_limiter.erlaubt(...)` —
-    # diese Methode gibt es nicht; JEDE Folge-Mail endete mit Fehler 500.
-    if not await _versand_limiter.check(f"konto:{user.get('id')}"):
-        raise HTTPException(429, "Zu viele Sendungen in kurzer Zeit — bitte "
-                                 f"höchstens {VERSAND_JE_KONTO_10MIN} je 10 Minuten.")
-    if not MOCK_PROVIDER_FETCH and not email_service.email_configured():
-        raise HTTPException(503, "E-Mail-Versand ist nicht eingerichtet — die Mail "
-                                 "wurde NICHT versendet.")
-    bereich = _vertrag_bereich(user)
-    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
-    if not c:
-        raise HTTPException(404, "Vertrag nicht gefunden")
-    from deps import effective_dealer
-    firma = await effective_dealer(user) or {}
-    std_betreff, std_text = _vorlagen.vorlage(firma, body.art)
-    betreff = (body.subject or "").strip() or _ersetzen(std_betreff, c, firma, user)
-    text = (body.message or "").strip() or _ersetzen(std_text, c, firma, user)
-
-    schluessel = (body.idempotency_key or "").strip()
-    if schluessel:
-        # Doppelklick-Schutz wie beim Vertragsversand: derselbe Schluessel
-        # legt garantiert nur EINEN Eintrag an.
-        res = await db.generated_pdfs.update_one(
-            {"id": contract_id, **bereich,
-             "send_status.idempotency_key": {"$ne": schluessel}},
-            {"$push": {"send_status": {"$each": [{
-                "idempotency_key": schluessel, "channel": "email",
-                "art": body.art, "recipient": empfaenger, "subject": betreff,
-                "sent_at": now_iso(), "zustellung": "laeuft"}],
-                "$slice": -SEND_STATUS_MAX}}})
-        if res.modified_count == 0:
-            await _reservierung_nachlesen(contract_id, bereich, schluessel)
-            return {"status": "ok", "bereits_gesendet": True, "art": body.art}
-
-    _, antwort_adresse = sucher_kontakt(user, firma)
-    if MOCK_PROVIDER_FETCH:
-        # Last-/CI-Tests: kein echter Versand, aber ehrlich markiert (wie der
-        # Vertragsversand).
-        ok, beleg = True, "mock"
-    else:
-        try:
-            ok, beleg = await email_service.send_email_mit_beleg(
-                empfaenger, betreff, text, anhang=None, anhang_name="",
-                html=None, reply_to=antwort_adresse,
-                absender_name=firma.get("company_name") or "",
-                idempotency_key=f"folge-{contract_id}-{schluessel or body.art}")
-        except Exception:  # noqa: BLE001 — Anbieterfehler = nicht versendet
-            log.exception("Folge-Mail %s zu %s fehlgeschlagen", body.art, contract_id)
-            ok, beleg = False, ""
-    if not ok:
-        if schluessel:
-            await db.generated_pdfs.update_one(
-                {"id": contract_id, **bereich,
-                 "send_status.idempotency_key": schluessel},
-                {"$set": {"send_status.$.zustellung": "fehlgeschlagen"}})
-        raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — bitte in ein "
-                                 "paar Minuten erneut versuchen.")
-    if schluessel:
-        await db.generated_pdfs.update_one(
-            {"id": contract_id, **bereich,
-             "send_status.idempotency_key": schluessel},
-            {"$set": {"send_status.$.zustellung": "mock" if beleg == "mock" else "versendet",
-                      "send_status.$.beleg": beleg or ""}})
-    await log_activity_sicher(user["dealer_id"], user["id"],
-                              f"pdf.folgemail.{body.art}", ref=contract_id)
-    return {"status": "ok", "art": body.art, "empfaenger": empfaenger,
-            "betreff": betreff, "zustellung": "mock" if beleg == "mock" else "versendet"}
+    Wunsch Ahmad 21.09.2026: "wir selber schicken die nicht raus". Hinweis
+    nach Kaufabschluss und Bahnverbindung kopiert der Sucher und schickt sie
+    selbst; ein korrigierter Vertrag geht ueber den normalen Versand — mit
+    dem Vertrag als Anhang (die Textmail kuendigte einen Anhang an, der nie
+    dabei war). Die Route bleibt nur, damit ein noch offener alter
+    Browser-Stand eine verstaendliche Antwort bekommt statt 405."""
+    raise HTTPException(410, "Diese Vorlagen verschickt die App nicht — bitte den "
+                             "Text kopieren und selbst per E-Mail oder WhatsApp "
+                             "senden. Einen korrigierten Vertrag bitte über "
+                             "„Senden“ neu verschicken.")
 
 
 @router.delete("/contracts/{contract_id}")

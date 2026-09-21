@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon, FileText, ShieldCheck } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { dateiTeilen, kannDateiTeilen, pdfDatei } from "@/lib/teilen";
+import { nachKorrektur } from "@/lib/versand";
 
 export default function SendDialog({ open, contract, onClose }) {
   const { dealer } = useAuth();
@@ -13,7 +14,13 @@ export default function SendDialog({ open, contract, onClose }) {
   const [tab, setTab] = useState("whatsapp");
   const [phone, setPhone] = useState(contract.seller_phone || "");
   const [email, setEmail] = useState(contract.seller_email || "");
-  const [subject, setSubject] = useState(dealer?.email_subject || "Kaufvertrag für Ihr Fahrzeug");
+  // Wunsch Ahmad 21.09.2026: Ging schon eine FRUEHERE Fassung dieses
+  // Vertrags raus, ist das hier der "erneute Versand (nach Korrektur)" —
+  // mit eigenem Betreff und Text aus den Einstellungen.
+  const korrektur = nachKorrektur(contract);
+  const [subject, setSubject] = useState(
+    (korrektur && dealer?.email_subject_korrektur) || dealer?.email_subject
+    || "Kaufvertrag für Ihr Fahrzeug");
   // 19.09.2026 (sichtbarer Mangel 3): Die Einstellungen bewerben acht
   // Platzhalter, ersetzt wurde nur {händler_name} — {kunde_name}, {fahrzeug},
   // {abholdatum} usw. gingen WOERTLICH an den Verkaeufer. Jetzt werden alle
@@ -64,7 +71,8 @@ export default function SendDialog({ open, contract, onClose }) {
       text || "");
   };
   const [waMsg, setWaMsg] = useState(platzhalter(dealer?.whatsapp_template));
-  const [emailMsg, setEmailMsg] = useState(platzhalter(dealer?.email_template));
+  const [emailMsg, setEmailMsg] = useState(platzhalter(
+    (korrektur && dealer?.email_template_korrektur) || dealer?.email_template));
   const [busy, setBusy] = useState(false);
   // Wunsch Ahmad 18.09.2026: Das Beweisdokument entsteht nicht mehr
   // automatisch bei jedem Vergleich. Nach dem Versand fragen wir einmal
@@ -411,6 +419,13 @@ export default function SendDialog({ open, contract, onClose }) {
           ) : (
             <>
               <Field label="E-Mail-Empfänger" value={email} onChange={setEmail} type="email" testid="email-to" />
+              {korrektur && (
+                <div className="text-[11px] rounded-sm border px-2.5 py-2" data-testid="email-korrektur-hinweis"
+                     style={{ borderColor: "var(--border-default)", color: "var(--text-secondary)" }}>
+                  Erneuter Versand nach Korrektur: Betreff und Text für die korrigierte Fassung
+                  (änderbar in den Einstellungen unter „Versand“).
+                </div>
+              )}
               <Field label="Betreff" value={subject} onChange={setSubject} testid="email-subject" />
               <div className="text-[11px] text-zinc-500 mt-1">Versand über AutoSchnell mit deinem Firmennamen. Antwortet der Verkäufer, landet die Antwort in deinem Postfach — du bekommst zusätzlich eine Kopie mit PDF.</div>
               <div>

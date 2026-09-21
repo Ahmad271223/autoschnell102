@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 9
+ZIEL_VERSION = 10
 _SPERRE = "migration"
 
 
@@ -417,6 +417,80 @@ async def m9_chef_zeiger(db) -> dict:
     return {"chef_zeiger_gesetzt": gesetzt, "firmen_ohne_chef": ohne_chef}
 
 
+#: Die Standardtexte, die Firmen beim Anlegen gespeichert bekamen:
+#:   * seit 20.09.2026 (b6cd893) vertrag_vorlagen.STARTWERTE in dieser Fassung,
+#:   * davor (seit 79a98d9) feste Texte beim Anlegen durch den Betreiber
+#:     (routes/admin.py) — das ist JEDE Live-Firma seit dem Reset am 14.09.,
+#:   * und bis 14.09. (535f034) die Selbstregistrierung (routes/auth.py).
+#: Nur WOERTLICH gleiche Texte werden ersetzt — was eine Firma selbst
+#: geaendert hat, bleibt.
+_FRUEHERE_VORLAGEN = {
+    'email_subject': (
+        'Kaufvertrag für Ihr Fahrzeug',
+    ),
+    'email_template': (
+        'Guten Tag,\n\nanbei sende ich Ihnen den Kaufvertrag.\n\nMfG\n{händler_name}',
+        'Guten Tag,\n\nanbei sende ich Ihnen den Kaufvertrag für Ihr Fahrzeug.\n'
+        'Bitte prüfen Sie die Angaben und geben Sie mir kurz Rückmeldung.\n\n'
+        'Mit freundlichen Grüßen\n{händler_name}',
+        'Sehr geehrte/r Frau/Herr {kunde_name},\n\nvielen Dank für das nette Gespräch. Wie besprochen erhalten Sie im Anhang dieser E-Mail den Kaufvertrag. Bitte überprüfen Sie sorgfältig die im Kaufvertrag eingetragenen Daten und bestätigen Sie anschließend diese E-Mail.\n\nVielen Dank\nIhr {haendler_name}',
+    ),
+    'email_subject_korrektur': (
+        'KFZ-Kaufvertrag — korrigierte Fassung',
+    ),
+    'email_template_korrektur': (
+        'Sehr geehrte/r Frau/Herr {kunde_name},\n\nim Anhang erhalten Sie den Kaufvertrag in der korrigierten Fassung. Die vorherige Fassung ist damit hinfällig. Bitte prüfen Sie die Angaben noch einmal und bestätigen Sie diese E-Mail.\n\nVielen Dank\nIhr {haendler_name}',
+    ),
+    'email_template_nach_kauf': (
+        'Sehr geehrte/r Frau/Herr {kunde_name},\n\nich bedanke mich für das Rücksenden der Mail. Auf Grundlage von Angebot und Annahme ist somit zwischen uns beiden ein rechtskräftiger Vertrag zustande gekommen, der seine Gültigkeit hat.\n\nDaher bitte ich Sie darum, weiteren Interessenten mitzuteilen, dass das Fahrzeug bereits verkauft ist.\nSollte das Fahrzeug nach der Übergabe noch angemeldet sein, verpflichten wir uns, es innerhalb von fünf Werktagen abzumelden.\nBitte geben Sie keine Auskünfte über Kaufpreis, Abholzeit und Käufer heraus. Ich melde mich stets zu Beginn des Gesprächs mit der Kundennummer. Nach telefonischer Vereinbarung erscheint ein Fahrer bei Ihnen, der das Fahrzeug entgegennimmt und Ihnen die Kaufsumme wie vertraglich vereinbart mittels der im Vertrag festgelegten Zahlungsmethode überreicht.\n\nIch bitte Sie ferner darum, das Inserat nun aus dem Netz zu nehmen.\nBei weiteren Fragen können Sie uns gerne anrufen oder eine E-Mail schreiben.\n\nLiebe Grüße\nIhr {haendler_name}',
+    ),
+    'whatsapp_template': (
+        'Hallo, hier ist der Kaufvertrag. Bitte prüfen.',
+        'Hallo,\nhier ist der Kaufvertrag für Ihr Fahrzeug.\n'
+        'Bitte einmal prüfen und kurz bestätigen. Danke!',
+        'Sehr geehrte/r Frau/Herr {kunde_name},\n\ndanke für das nette Gespräch bezüglich Ihres Fahrzeugs. Wie besprochen erhalten Sie nachfolgend den Kaufvertrag. Bitte überprüfen Sie ihn sorgfältig auf die darin gemachten Angaben und bestätigen Sie ihn anschließend.\n\nVielen Dank\nIhr {haendler_name}',
+    ),
+    'whatsapp_template_nach_kauf': (
+        'Sehr geehrte/r Frau/Herr {kunde_name},\n\nich bedanke mich für die Bestätigung des Kaufvertrags per WhatsApp. Auf Grundlage von Angebot und Annahme ist somit zwischen uns beiden ein rechtskräftiger Vertrag zustande gekommen, der seine Gültigkeit hat.\n\nDaher bitte ich Sie darum, weiteren Interessenten mitzuteilen, dass das Fahrzeug bereits verkauft ist.\nSollte das Fahrzeug nach der Übergabe noch angemeldet sein, verpflichten wir uns, es innerhalb von fünf Werktagen abzumelden.\nBitte geben Sie keine Auskünfte über Kaufpreis, Abholzeit und Käufer heraus. Ich melde mich stets zu Beginn des Gesprächs mit der Kundennummer. Nach telefonischer Vereinbarung erscheint ein Fahrer bei Ihnen, der das Fahrzeug entgegennimmt und Ihnen die Kaufsumme wie vertraglich vereinbart mittels der im Vertrag festgelegten Zahlungsmethode überreicht.\n\nIch bitte Sie ferner darum, das Inserat nun aus dem Netz zu nehmen.\nBei weiteren Fragen können Sie uns gerne anrufen oder eine E-Mail schreiben.\n\nLiebe Grüße\nIhr {haendler_name}',
+    ),
+    'email_template_bahn': (
+        'Sehr geehrte/r Frau/Herr {kunde_name},\n\nanbei erhalten Sie die Bahnverbindung mit der voraussichtlichen Ankunftszeit unseres Fahrers für den {abholdatum} in {ort}.\nSollte es zu einer Verspätung kommen, meldet sich unser Fahrer telefonisch bei Ihnen.\n\nVielen Dank\nIhr {haendler_name}',
+    ),
+}
+
+
+def _varianten(text: str) -> list:
+    """Derselbe Text, wie ihn Formulare auch speichern koennten."""
+    return list(dict.fromkeys([text, text.replace("\n", "\r\n"),
+                               text + "\n", text.strip()]))
+
+
+async def m10_vorlagen_texte(db) -> dict:
+    """Wunsch Ahmad 21.09.2026: Mail- und WhatsApp-Vorlagen woertlich nach
+    seiner Vorlage ("Ihr Autohaus" + Firmenname, Hinweis nach Kaufabschluss
+    mit "mustergueltiger Vertrag", Bahnverbindung ohne Datum/Ort).
+
+    Neue Firmen bekommen die neuen Texte ueber STARTWERTE. Bestehende Firmen
+    haben die ALTEN Standardtexte gespeichert — ohne diese Migration saehen
+    sie die neuen nie. Ersetzt wird nur, was noch WOERTLICH dem alten
+    Standard entspricht: bei der Firma und in persoenlichen Einstellungen
+    der Sucher (settings_override). Eigene Texte bleiben unberuehrt.
+    """
+    import vertrag_vorlagen as V
+    firmen = sucher = 0
+    for feld, alte in _FRUEHERE_VORLAGEN.items():
+        neu = V.STARTWERTE[feld]
+        varianten = [v for alt in alte for v in _varianten(alt)]
+        r = await db.dealers.update_many({feld: {"$in": varianten}},
+                                         {"$set": {feld: neu}})
+        firmen += r.modified_count
+        r = await db.users.update_many(
+            {f"settings_override.{feld}": {"$in": varianten}},
+            {"$set": {f"settings_override.{feld}": neu}})
+        sucher += r.modified_count
+    return {"firmen_felder": firmen, "sucher_felder": sucher}
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -427,6 +501,7 @@ MIGRATIONEN = [
     (7, "kaeuferdaten_einfrieren", m7_kaeuferdaten_einfrieren),
     (8, "konten_aktiv_feld", m8_konten_aktiv_feld),
     (9, "chef_zeiger", m9_chef_zeiger),
+    (10, "vorlagen_texte", m10_vorlagen_texte),
 ]
 
 
