@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { aboNeuLadenAnmelden, api } from "@/lib/api";
 import { sitzungsSpeicher } from "@/lib/speicher";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import { TOKEN_APP, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
@@ -93,6 +93,11 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     refresh();
+  }, [refresh]);
+  // U-143: bei einer 402 irgendwo in der App den Abo-Stand neu laden.
+  useEffect(() => {
+    aboNeuLadenAnmelden(() => { refresh(); });
+    return () => aboNeuLadenAnmelden(null);
   }, [refresh]);
 
   // Nach dem Token noch /auth/me: erst wenn das klappt, ist die Anmeldung

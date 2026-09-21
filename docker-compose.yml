@@ -159,6 +159,10 @@ services:
       # Betriebsalarm und ein Tagesbericht. LEERE Adresse = alles aus,
       # dann bleiben Fehler nur auf der Betriebs-Seite sichtbar.
       - BETRIEB_MELDUNG_AN=${BETRIEB_MELDUNG_AN:-}
+      # Pruefbericht 20.09.2026 (AL-04): offene Einzelalarme je Typ, danach
+      # zaehlt ein Sammelalarm; geschlossene Alarme verfallen nach N Tagen
+      - ALARM_JE_TYP_MAX=${ALARM_JE_TYP_MAX:-100}
+      - ALARM_AUFBEWAHRUNG_TAGE=${ALARM_AUFBEWAHRUNG_TAGE:-90}
       # Sammelfrist in Minuten: zehn Alarme in derselben Minute ergeben
       # EINE Mail, nicht zehn.
       - BETRIEB_MELDUNG_SOFORT_MIN=${BETRIEB_MELDUNG_SOFORT_MIN:-10}
@@ -264,8 +268,8 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
-      # Aufbewahrung / Loeschung (Audit 09/2026: Vertragsloeschung erst nach
-      # Freigabe scharf schalten — bis dahin Dry-Run mit Loeschvorschau)
+      # Aufbewahrung / Loeschung: Vertragsloeschung ist seit 14.09.2026 SCHARF
+      # (Entscheidung Ahmad). Nur-Vorschau: VERTRAG_LOESCHUNG_AKTIV=false.
       - VERTRAG_AUFBEWAHRUNG_TAGE=${VERTRAG_AUFBEWAHRUNG_TAGE:-60}
       - VERTRAG_LOESCHUNG_AKTIV=${VERTRAG_LOESCHUNG_AKTIV:-true}
       - AUTO_DATEN_SCHAEDEN_FREITEXT=${AUTO_DATEN_SCHAEDEN_FREITEXT:-false}

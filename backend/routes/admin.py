@@ -3074,7 +3074,7 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
     """Sichtbarkeit fuer alles, was frueher still scheiterte (Audit 09/2026):
     offene Betriebsalarme, nicht loeschbare Dateien, haengende
     Freischaltungs-Vorgaenge, Zahlungen ohne Zugang, letztes Backup."""
-    from betrieb import offene_alarme
+    from betrieb import alarm_uebersicht, offene_alarme
     try:
         # Runde 21 (Nebenbefund): serveruebergreifend wie /ready — sonst
         # zeigte der Server ohne eigene Sicherung "kein Backup". Die
@@ -3087,6 +3087,8 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
     frist = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
     return {
         "alarme": await offene_alarme(db),
+        # AL-02/AD-13: vollstaendige Zahlen je Typ, auch wenn die Liste gekuerzt ist
+        "alarm_uebersicht": await alarm_uebersicht(db),
         "datei_loeschungen_offen": await db.storage_delete_retry.count_documents({}),
         "datei_loeschungen_aufgegeben": await db.storage_delete_retry.find(
             {"aufgegeben": True}, {"_id": 0}).limit(50).to_list(50),

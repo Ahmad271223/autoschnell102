@@ -31,6 +31,13 @@ export default function Team() {
   const [sucher, setSucher] = useState([]);
   const [plan, setPlan] = useState(null);
   const [sucherPlans, setSucherPlans] = useState(null);
+  // Pruefbericht 20.09.2026 (U-159): drei Abrufe gekoppelt, ohne Lade- und
+  // Fehlerzustand — fiel einer aus, stand gleichzeitig "Noch keine Sucher" und
+  // "Kein Verkaufspaket aktiv" da. Jetzt getrennt, mit sichtbarem Fehler.
+  const [ladeZustand, setLadeZustand] = useState("laedt");
+  const [ladeFehler, setLadeFehler] = useState("");
+  // U-161: je Sucher gesperrt, solange die Anfrage laeuft.
+  const [fragtAn, setFragtAn] = useState("");
 
   // Go-Live-Schalter (15.09.2026): der Weiterverkaufsplan gehoert zum
   // Marktplatz — ausgeschaltet wird er weder geladen noch angezeigt (die
@@ -39,15 +46,18 @@ export default function Team() {
   const load = useCallback(async () => {
     if (!chef) return;
     try {
-      const [s, sp] = await Promise.all([
-        api.get("/dealer/sucher"),
-        api.get("/dealer/sucher-plans"),
-      ]);
-      setSucher(s.data);
-      setSucherPlans(sp.data.plans);
+      const s = await api.get("/dealer/sucher");
+      setSucher(Array.isArray(s.data) ? s.data : []);
+      setLadeZustand("ok");
+      setLadeFehler("");
     } catch (e) {
-      toast.error(errMsg(e, "Team konnte nicht geladen werden"));
+      setLadeZustand("fehler");
+      setLadeFehler(errMsg(e, "Team konnte nicht geladen werden"));
     }
+    try {
+      const sp = await api.get("/dealer/sucher-plans");
+      setSucherPlans(sp.data?.plans || null);
+    } catch { setSucherPlans(null); }
     if (features.marktplatz) {
       try { const p = await api.get("/dealer/sale-plan"); setPlan(p.data); }
       catch { setPlan(null); }
@@ -56,11 +66,23 @@ export default function Team() {
 
   useEffect(() => { load(); }, [load]);
 
+  // U-161: Eine schon offene Anfrage wurde ignoriert — ein weiterer Klick
+  // aenderte still den Wunsch der offenen Anfrage (der Betreiber sah dann
+  // "monatlich" statt "jaehrlich"), und die Meldung war immer dieselbe.
   const requestAbo = async (s, planKey) => {
+    if (fragtAn) return;
+    setFragtAn(s.id);
     try {
-      await api.post(`/dealer/sucher/${s.id}/abo-anfrage`, { plan: planKey });
-      toast.success("Anfrage an den Betreiber gesendet — nach Zahlungseingang wird freigeschaltet");
+      const { data } = await api.post(`/dealer/sucher/${s.id}/abo-anfrage`, { plan: planKey });
+      const planText = sucherPlans?.[planKey]?.label || planKey;
+      if (data?.bereits_offen) {
+        toast.info(`Für diesen Sucher lag schon eine Anfrage vor — der Wunsch steht jetzt auf „${planText}“.`);
+      } else {
+        toast.success("Anfrage an den Betreiber gesendet — nach Zahlungseingang wird freigeschaltet");
+      }
+      await load();
     } catch (e) { toast.error(errMsg(e)); }
+    finally { setFragtAn(""); }
   };
 
   const requestUpgrade = async (tier) => {
@@ -187,7 +209,18 @@ export default function Team() {
             </tr>
           </thead>
           <tbody>
-            {sucher.length === 0 && (
+            {ladeZustand === "fehler" && (
+              <tr><td colSpan={7} className="px-4 py-6 text-center" role="alert" data-testid="team-ladefehler">
+                <span style={{ color: "var(--text-primary)" }}>{ladeFehler}</span>{" "}
+                <button type="button" onClick={load} className="underline underline-offset-2 font-semibold">
+                  Erneut versuchen
+                </button>
+              </td></tr>
+            )}
+            {ladeZustand === "laedt" && (
+              <tr><td colSpan={7} className="px-4 py-10 text-center text-zinc-500">lade…</td></tr>
+            )}
+            {ladeZustand === "ok" && sucher.length === 0 && (
               <tr><td colSpan={7} className="px-4 py-10 text-center text-zinc-500">
                 Noch keine Sucher angelegt — melde dich beim Betreiber, wir richten die Zugänge für dich ein.
               </td></tr>
@@ -211,9 +244,9 @@ export default function Team() {
                       <span className="text-amber-400 text-xs">nicht freigeschaltet</span>
                       <div className="flex gap-1">
                         {Object.entries(sucherPlans || {}).map(([k, p]) => (
-                          <button key={k} onClick={() => requestAbo(s, k)}
+                          <button key={k} onClick={() => requestAbo(s, k)} disabled={!!fragtAn}
                                   title={`${p.label} anfragen — Freischaltung nach Rechnungszahlung`}
-                                  className="px-2 py-0.5 rounded-md border text-[10px] text-zinc-300 hover:text-white"
+                                  className="px-2 py-0.5 rounded-md border text-[10px] text-zinc-300 hover:text-white disabled:opacity-50"
                                   style={{ borderColor: "var(--border-default)" }}>
                             {p.price.toLocaleString("de-DE")} €{k === "monthly" ? "/M" : "/J"} anfragen
                           </button>

@@ -95,3 +95,33 @@ describe("H23: vertragStatus", () => {
     expect(vertragStatus("unbekannt").text).toBe("unbekannt");
   });
 });
+
+describe("A-03: Stand der Inseratsdaten", async () => {
+  const { datenStand } = await import("./Vergleich");
+  const jetzt = Date.parse("2026-09-21T12:00:00Z");
+  it("frisch abgerufen", () => {
+    expect(datenStand({ abgerufen_am: "2026-09-21T11:40:00Z" }, jetzt).text).toBe("Daten eben abgerufen");
+  });
+  it("älter als ein Tag wird hervorgehoben", () => {
+    const s = datenStand({ abgerufen_am: "2026-09-12T12:00:00Z" }, jetzt);
+    expect(s.alt).toBe(true);
+    expect(s.text).toMatch(/Daten vom 12\.09\.2026/);
+  });
+  it("ohne Angabe nichts anzeigen", () => {
+    expect(datenStand({}, jetzt)).toBeNull();
+  });
+});
+
+describe("U-21/M14: Eingaben der manuellen Suche", async () => {
+  const { sucheFehler } = await import("./ManuelleSuche");
+  it("gültige Eingaben", () => {
+    expect(sucheFehler({ ezFrom: "2015", ezTo: "2020", kmMin: "10000", kmMax: "90000", kw: "110", leistungQuelle: "kw" })).toBeNull();
+  });
+  it("von > bis wird auf Deutsch gemeldet", () => {
+    expect(sucheFehler({ kmMin: "90000", kmMax: "10000" })).toMatch(/Kilometerstand/);
+    expect(sucheFehler({ ezFrom: "2021", ezTo: "2019" })).toMatch(/Erstzulassung/);
+  });
+  it("PS über der Grenze (2050 PS ergab 1508 kW)", () => {
+    expect(sucheFehler({ ps: "2050", leistungQuelle: "ps" })).toMatch(/2039 PS/);
+  });
+});

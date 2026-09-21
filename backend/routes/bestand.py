@@ -277,8 +277,14 @@ async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_fi
                               ref=vehicle_id, meta={"an_chef": war_besitzer,
                                                     "owner_user_id": neuer_besitzer,
                                                     **({"uebergabe": uebergabe} if uebergabe else {})})
-    return {"ok": True, "entfernt": True, "an_chef": war_besitzer,
-            "owner_user_id": neuer_besitzer, "uebergabe": uebergabe}
+    # Pruefbericht 20.09.2026 (R1-02): War der Sucher nur Mitbearbeiter, blieb
+    # der Hauptbearbeiter ein KOLLEGE — seine Konto-ID ging hier an den Sucher
+    # zurueck, obwohl die Maskierungsregel genau das verbietet. Die Kennung
+    # steht nur noch in der Antwort, wenn das Fahrzeug an den Chef ging.
+    antwort = {"ok": True, "entfernt": True, "an_chef": war_besitzer, "uebergabe": uebergabe}
+    if war_besitzer:
+        antwort["owner_user_id"] = neuer_besitzer
+    return antwort
 
 
 async def _inserate_zum_fahrzeug_schliessen(vehicle_id: str, user: Dict[str, Any]) -> List[str]:

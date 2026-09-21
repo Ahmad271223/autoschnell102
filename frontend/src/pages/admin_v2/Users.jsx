@@ -406,7 +406,9 @@ function CreateUserModal({ onClose, onCreated }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-      onClick={onClose}
+      // Pruefbericht 20.09.2026 (AD-04/O1): Steht die Karte mit dem Passwort,
+      // schliesst ein Klick daneben NICHT mehr — nur "Fertig".
+      onClick={() => { if (!ergebnis) onClose(); }}
       data-testid="admin-create-user-modal"
     >
       <div

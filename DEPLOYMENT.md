@@ -12,7 +12,8 @@ läuft in Docker-Containern; du brauchst keine tiefen Server-Kenntnisse.
 
 ## 1. Projekt auf den Server laden
 ```bash
-git clone <dein-repo> autoschnell && cd autoschnell
+# Der Live-Stand liegt im Zweig feature/plattform-ausbau-2026-08 (nicht main).
+git clone -b feature/plattform-ausbau-2026-08 <dein-repo> autoschnell && cd autoschnell
 ```
 
 ## 2. Konfiguration setzen
@@ -1064,11 +1065,16 @@ gegenseitig ausbremsen:
   und erzeugt den Proxy neu; von Hand:
   `docker compose up -d --force-recreate --no-deps proxy`.
 
-### Vertragslöschung (60 Tage) ist standardmäßig NUR Vorschau
-`VERTRAG_LOESCHUNG_AKTIV=false`: der stündliche Lauf schreibt eine
-Löschvorschau (`system_reports`, typ `vertrag_loeschvorschau`) und löscht
-nichts. Vor dem Scharfschalten: `python scripts/vertraege_bestand_pruefen.py`
-(muss Exit 0 liefern), externes Backup, dann `VERTRAG_LOESCHUNG_AKTIV=true`.
+### Vertragslöschung (60 Tage) ist SCHARF (Entscheidung Ahmad, 14.09.2026)
+Compose und `.env.example` stehen auf `VERTRAG_LOESCHUNG_AKTIV=true`: der
+stündliche Lauf löscht Kaufverträge samt Verkäuferdaten, PDFs und
+Unterschriften 60 Tage nach Erstellung endgültig — ohne Restore sind sie weg.
+Kaufverträge sind Buchungsbelege: der Händler muss sie vorher in sein eigenes
+Archiv übernehmen (steht so auch in der Datenschutzerklärung).
+Nur-Vorschau (Trockenlauf) per `sh deploy/env_setzen.sh VERTRAG_LOESCHUNG_AKTIV=false`:
+dann schreibt der Lauf eine Löschvorschau (`system_reports`, typ
+`vertrag_loeschvorschau`) und löscht nichts. Prüfen mit
+`python scripts/vertraege_bestand_pruefen.py` (muss Exit 0 liefern).
 Gelöscht wird nur, wenn der dauerhafte Auto-Datensatz nachweislich
 existiert; sonst Alarm `vertrag_ohne_auto_daten`.
 

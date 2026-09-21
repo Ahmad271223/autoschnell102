@@ -1,6 +1,7 @@
 import { neueFassungLaden } from "@/lib/fassung";
 import { useEffect, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { lesen, sitzungsSpeicher } from "@/lib/speicher";
 import { useDriver } from "@/context/DriverContext";
 import { TOKEN_FAHRER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
@@ -16,6 +17,14 @@ export default function DriverLogin() {
   const [kennung, setKennung] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  // R1-27: Grund der Abmeldung (vom 401-Abfaenger der Fahrer-App gemerkt).
+  const [params] = useSearchParams();
+  const [abmeldegrund] = useState(() => {
+    const speicher = sitzungsSpeicher();
+    const g = lesen(speicher, "ah_fahrer_abmeldegrund", "") || "";
+    try { speicher?.removeItem("ah_fahrer_abmeldegrund"); } catch { /* egal */ }
+    return g;
+  });
   // Wer von hier aus die App installiert, soll beim Start hier landen.
   useEffect(() => { anmeldeartVormerken(TOKEN_FAHRER); }, []);
 
@@ -57,6 +66,13 @@ export default function DriverLogin() {
 
         <div className="tactical-card p-7">
           <h1 className="font-display font-black text-2xl tracking-tighter">Fahrer-Login</h1>
+          {params.get("reason") === "session" && (
+            <div className="mt-4 text-xs px-3 py-2 rounded-sm border" data-testid="fahrer-abmeldegrund" role="alert"
+                 style={{ borderColor: "var(--accent-red)", background: "rgba(255,59,48,0.08)", color: "var(--accent-red)" }}>
+              {abmeldegrund || "Du wurdest abgemeldet (neu angemeldet auf einem anderen Gerät, Sperre oder "
+                + "neues Passwort). Bitte neu anmelden."}
+            </div>
+          )}
           <p className="text-sm text-zinc-400 mt-2">
             Mit Kontonummer &amp; Passwort einloggen, um deine Abholfahrten zu sehen.
           </p>

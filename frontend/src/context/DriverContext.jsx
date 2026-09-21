@@ -2,7 +2,10 @@ import { fassungMithoeren } from "@/lib/fassung";
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_FAHRER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
-import { API_BASE, istLangeAktion, LANGE_AKTION_MS, openAuthedFile } from "@/lib/api";
+import {
+  API_BASE, blobFehlerLesbar, gehoertZumAktuellenToken, istLangeAktion, LANGE_AKTION_MS, openAuthedFile,
+} from "@/lib/api";
+import { schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { verbindungsGrund } from "@/components/VerbindungsFehler";
 
 /**
@@ -23,6 +26,33 @@ driverApi.interceptors.request.use((c) => {
   if (istLangeAktion(c)) c.timeout = LANGE_AKTION_MS;
   return c;
 });
+
+// Pruefbericht 20.09.2026 (R1-38/R1-27): Die Fahrer-App hatte keinen
+// 401-Abfaenger. Endete die Sitzung (neue Anmeldung auf einem anderen Handy,
+// Sperre, Passwort neu gesetzt), blieb der Fahrer auf der Seite, jede Aktion
+// scheiterte still, und er erfuhr nie, warum. Jetzt: Token weg, Grund
+// merken, zur Fahrer-Anmeldung — wie in der Haendler- und Kaeufer-App.
+driverApi.interceptors.response.use(
+  (r) => r,
+  async (err) => {
+    await blobFehlerLesbar(err);             // M34: Klartext auch bei PDF-Abrufen
+    const url = String(err?.config?.url || "");
+    if (err?.response?.status === 401
+        && tokenLesen(TOKEN_FAHRER)
+        && gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_FAHRER))
+        && !url.includes("/driver/login")) {
+      tokenLoeschen(TOKEN_FAHRER);
+      const detail = err?.response?.data?.detail;
+      schreiben(sitzungsSpeicher(), "ah_fahrer_abmeldegrund",
+                typeof detail === "string" && detail ? detail : "");
+      const pfad = window.location.pathname;
+      if (pfad.startsWith("/fahrer") && !pfad.startsWith("/fahrer/login")) {
+        window.location.href = "/fahrer/login?reason=session";
+      }
+    }
+    return Promise.reject(err);
+  },
+);
 
 // PDF in neuem Tab oeffnen — Abruf per Authorization-Header statt
 // ?auth=<token> in der URL (der Token landete sonst in Browser-Verlauf

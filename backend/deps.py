@@ -923,7 +923,10 @@ async def besitzer_namen(dealer_id: str, ids) -> Dict[str, str]:
 # ausgeblendet; die Konto-Kennungen der Kollegen standen weiterhin in
 # /bestand, /vehicles, /vehicles/{id} und in der Fahrzeugakte.
 KONTO_FELDER = ("owner_user_id", "mitbearbeiter_ids", "uebernommen_von",
-                "besitzer_migriert_von", "besitzer_vorher")
+                "besitzer_migriert_von", "besitzer_vorher",
+                # Pruefbericht 20.09.2026 (R1-03): verliess ein Sucher das
+                # Fahrzeug, stand seine Konto-ID hier und ging an den naechsten.
+                "entfernt_von_sucher")
 
 
 def konten_maskieren(user, fahrzeuge):

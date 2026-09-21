@@ -143,3 +143,17 @@ describe("H8: gescheiterter Vergleich holt nicht das alte Auto zurück", () => {
     expect(vergleichEntfernen(null, "u1")).toBe(false);
   });
 });
+
+describe("U-08/U-29: Netzfehler auf Deutsch", async () => {
+  const { errMsg } = await import("./api");
+  it("Zeitüberschreitung ohne Serverantwort", () => {
+    expect(errMsg({ code: "ECONNABORTED", message: "timeout of 60000ms exceeded" }))
+      .toMatch(/nicht rechtzeitig geantwortet/);
+  });
+  it("keine Verbindung", () => {
+    expect(errMsg({ code: "ERR_NETWORK", message: "Network Error" })).toMatch(/Keine Verbindung/);
+  });
+  it("Serverantworten bleiben unverändert", () => {
+    expect(errMsg({ response: { data: { detail: "Vertrag nicht gefunden" } } })).toBe("Vertrag nicht gefunden");
+  });
+});

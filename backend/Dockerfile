@@ -40,4 +40,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # Audit 09/2026 (Punkt 18/19): ZUERST genau eine Migration (Indizes, Seeds,
 # versionierte Datenmigrationen — mit Sperre), DANN die Worker. Default 4
 # Worker (statt 8) — WEB_CONCURRENCY an die Servergroesse anpassen.
-CMD ["sh", "-c", "python migrationen.py && uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-4} --proxy-headers --forwarded-allow-ips='*'"]
+# Pruefbericht 20.09.2026 (SV-01/S1): Mit --forwarded-allow-ips='*' nahm
+# uvicorn den LINKESTEN Eintrag aus X-Forwarded-For als Besucheradresse —
+# also den, den der Aufrufer selbst mitschickt (nginx haengt die echte Adresse
+# nur hinten an). Jede Anmelde-, Konto- und Fahrersperre war damit per frei
+# gewaehlter Kopfzeile auszuhebeln. Jetzt gelten nur die eigenen Netze (nginx
+# im Docker-Netz, LB im privaten Netz) als Vermittler; uvicorn nimmt dann den
+# rechtesten FREMDEN Eintrag = die Adresse, die nginx eingetragen hat.
+CMD ["sh", "-c", "python migrationen.py && uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-4} --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}\""]

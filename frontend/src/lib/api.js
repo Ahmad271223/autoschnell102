@@ -121,6 +121,17 @@ function blobAlsText(blob) {
   });
 }
 
+/**
+ * Pruefbericht 20.09.2026 (U-143/H2): Lief das persoenliche Abo mitten in der
+ * Sitzung ab, blieb der Kontext auf "aktiv" — die Routensperre griff nie,
+ * jeder Klick brachte nur einen Drei-Wort-Toast. Der AuthProvider meldet hier
+ * seinen refresh() an; bei jeder 402 wird der Abo-Stand neu geladen (danach
+ * leitet ProtectedRoute die abo-pflichtigen Seiten selbst auf /abo um).
+ */
+let _aboNeuLaden = null;
+let _aboZuletzt = 0;
+export function aboNeuLadenAnmelden(fn) { _aboNeuLaden = fn; }
+
 /** Höchstens so viele automatische Wiederholungen je Anfrage. */
 export const WIEDERHOLEN_MAX = 2;
 
@@ -161,6 +172,10 @@ api.interceptors.response.use(
       config.__versuche = (config.__versuche || 0) + 1;
       return new Promise((res) => setTimeout(res, wiederholenNachMs(err)))
         .then(() => api(config));
+    }
+    if (err?.response?.status === 402 && _aboNeuLaden && Date.now() - _aboZuletzt > 5000) {
+      _aboZuletzt = Date.now();
+      try { _aboNeuLaden(); } catch { /* egal */ }
     }
     if (istFirmensperre(err)) {
       // Pruefbericht 20.09.2026 (B2/H1): Firma waehrend der Arbeit gesperrt.
@@ -232,6 +247,18 @@ export async function openAuthedFile(path, mime = "application/pdf", client = ap
  * line so it's safe to pass to `toast.error(...)` or JSX.
  */
 export const errMsg = (err, fallback = "Ein Fehler ist aufgetreten") => {
+  // Pruefbericht 20.09.2026 (U-08/U-29/M9): Ohne Serverantwort kamen die
+  // englischen axios-Texte durch ("timeout of 60000ms exceeded",
+  // "Network Error"). Jetzt deutsch und mit Handlungsanweisung.
+  if (err && !err.response) {
+    const code = String(err.code || "");
+    if (code === "ECONNABORTED" || code === "ETIMEDOUT" || /timeout/i.test(String(err.message || ""))) {
+      return "Der Server hat nicht rechtzeitig geantwortet — bitte gleich noch einmal versuchen.";
+    }
+    if (code === "ERR_NETWORK" || String(err.message || "") === "Network Error") {
+      return "Keine Verbindung zum Server — bitte Internetverbindung prüfen und erneut versuchen.";
+    }
+  }
   const d = err?.response?.data?.detail;
   if (typeof d === "string") return d;
   if (Array.isArray(d)) {

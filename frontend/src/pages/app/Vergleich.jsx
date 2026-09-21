@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { lokalerSpeicher, sitzungsSpeicher } from "@/lib/speicher";
 import { thumbSrc } from "@/lib/bilder";
@@ -26,6 +27,21 @@ import {
 } from "@/lib/vergleichSpeicher";
 
 
+// Pruefbericht 20.09.2026 (A-03/V5): Stand der Inseratsdaten zeigen — aus dem
+// gemeinsamen Zwischenspeicher koennen Preis und km bis zu 14 Tage alt sein.
+// Aelter als 24 Stunden wird hervorgehoben.
+export function datenStand(result, jetzt = Date.now()) {
+  const roh = result?.abgerufen_am;
+  if (!roh) return null;
+  const t = new Date(roh).getTime();
+  if (!Number.isFinite(t)) return null;
+  const stunden = (jetzt - t) / 3600000;
+  const datum = new Date(t).toLocaleString("de-DE", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  if (stunden < 1) return { text: "Daten eben abgerufen", alt: false };
+  return { text: `Daten vom ${datum}${stunden >= 24 ? " — Preis/km ggf. veraltet" : ""}`, alt: stunden >= 24 };
+}
+
 // Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
 // und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
 // und das automatische Oeffnen nach dem Auslesen.
@@ -41,7 +57,8 @@ export default function Vergleich() {
   // haengt am KONTO. Vorher lag er unter einem festen Schluessel — meldete
   // sich am selben Browser ein anderer Sucher an, sah er Fahrzeug,
   // Verkaeuferdaten und den letzten Vertrag seines Kollegen.
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
+  const nav = useNavigate();
   const kontoId = user?.id || null;
   const gespeichert = vergleichLaden(sitzungsSpeicher(), kontoId);
   // Pruefbericht 20.09.2026 (B3): Nur ein Stand MIT Fahrzeug wird
@@ -58,6 +75,7 @@ export default function Vergleich() {
   const [showContract, setShowContract] = useState(false);
   const [contract, setContract] = useState(restored?.contract || null);
   const [showSend, setShowSend] = useState(false);
+  const [pdfLaeuft, setPdfLaeuft] = useState(false);
   // Portal-Toggles — Zustand wird in localStorage gespeichert
   const [portalMobile, setPortalMobile] = useState(() => {
     return einstellungLesen(lokalerSpeicher(),
@@ -209,7 +227,7 @@ export default function Vergleich() {
     }
   };
 
-  const startCompare = async (e, direktUrl) => {
+  const startCompare = async (e, direktUrl, { behalteVertrag = false } = {}) => {
     e?.preventDefault?.();
     const ziel = (direktUrl ?? url).trim();
     if (!ziel) return;
@@ -222,7 +240,9 @@ export default function Vergleich() {
     setWaitMsg(null);
     setResult(null);
     setCounter(null);
-    setContract(null);
+    // M7/U-06: Der Profilwechsel laeuft denselben Link neu — der eben
+    // erstellte Kaufvertrag gehoert weiter dazu und darf nicht verschwinden.
+    if (!behalteVertrag) setContract(null);
     // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
     // traegt die Links des vorherigen Ergebnisses — mit dem alten Ergebnis weg.
     toast.dismiss(FILTER_TOAST_ID);
@@ -319,8 +339,15 @@ export default function Vergleich() {
       hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
       if (istAbbruch(err)) {
         // Abgebrochen (X): die Meldung kam schon beim Klick.
-      } else if (err?.code === "timeout") {
+      } else if (err?.code === "timeout" || err?.code === "ECONNABORTED" || err?.code === "ETIMEDOUT") {
         toast.info(TIMEOUT_MESSAGE);
+      } else if (err?.response?.status === 402) {
+        // H2/M11: Abo abgelaufen — Kontext neu laden (die Routensperre greift
+        // dann) und den Weg zur Abo-Seite zeigen statt drei Worten.
+        refresh?.();
+        toast.error("Für den Vergleich brauchst du ein aktives persönliches Sucher-Abo.", {
+          duration: 12000, action: { label: "Zum Abo", onClick: () => nav("/abo") },
+        });
       } else {
         toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
       }
@@ -363,7 +390,7 @@ export default function Vergleich() {
             truegen sonst die Filter des vorherigen Profils). */}
         <ProfileBadge onChange={(p) => {
           if (result && url.trim() && !loading) {
-            startCompare(null, url);
+            startCompare(null, url, { behalteVertrag: true });
           } else {
             setResult((r) => r ? { ...r, active_profile: p } : r);
           }
@@ -582,6 +609,13 @@ export default function Vergleich() {
                     {result.vehicle.list_price ? `${result.vehicle.list_price.toLocaleString("de-DE")} €` : "—"}
                   </div>
                   <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>Listenpreis · nicht im Vertrag</div>
+                  {datenStand(result) && (
+                    <div className={`text-[11px] ${datenStand(result).alt ? "font-semibold" : ""}`}
+                         data-testid="vergleich-datenstand"
+                         style={{ color: datenStand(result).alt ? "var(--tx-amber)" : "var(--text-muted)" }}>
+                      {datenStand(result).text}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -702,13 +736,14 @@ export default function Vergleich() {
             <div className="apple-surface p-5" data-testid="live-counter-card">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="live-dot" />
-                  <span className="overline">live</span>
+                  {/* M8/U-07: den Live-Punkt nur mit echtem Zaehlerstand */}
+                  {counter && <span className="live-dot" />}
+                  <span className="overline">{counter ? "live" : "Zähler nicht verfügbar"}</span>
                 </div>
                 <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>aktualisiert alle 30s</span>
               </div>
               <div className="font-display font-black text-4xl mt-3 tracking-tight">
-                {counter?.active_now ?? 0}
+                {counter ? (counter.active_now ?? 0) : "—"}
               </div>
               {/* Runde 27: Gezaehlt werden VERGLEICHE, nicht Haendler — ein
                   Sucher kann mehrfach vergleichen. Und das Fenster steht dabei. */}
@@ -718,7 +753,7 @@ export default function Vergleich() {
                   : `Keine Vergleiche in den letzten ${counter?.fenster_minuten ?? 10} Minuten`}
               </div>
               <div className="text-[11px] mt-3 pt-3 border-t" style={{ color: "var(--text-muted)", borderColor: "var(--hairline)" }}>
-                Heute insg.: <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{counter?.today ?? 1}</span> Vergleiche
+                Heute insg.: <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{counter ? (counter.today ?? 0) : "—"}</span> Vergleiche
               </div>
             </div>
 
@@ -739,11 +774,18 @@ export default function Vergleich() {
               {contract && (
                 <div className="mt-3 space-y-2">
                   <button
-                    onClick={() => openContractPdf(contract.id)}
+                    onClick={async () => {
+                      if (pdfLaeuft) return;
+                      setPdfLaeuft(true);
+                      try { await openContractPdf(contract.id); }
+                      catch (err) { toast.error(errMsg(err, "Kaufvertrag konnte nicht geladen werden")); }
+                      finally { setPdfLaeuft(false); }
+                    }}
+                    disabled={pdfLaeuft}
                     data-testid="open-pdf-btn"
-                    className="apple-btn apple-btn-secondary w-full"
+                    className="apple-btn apple-btn-secondary w-full disabled:opacity-60"
                   >
-                    <FileText size={14} /> PDF öffnen
+                    <FileText size={14} /> {pdfLaeuft ? "Lädt…" : "PDF öffnen"}
                   </button>
                   <button onClick={() => setShowSend(true)} data-testid="send-pdf-btn"
                           className="apple-btn apple-btn-secondary w-full">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -31,6 +32,10 @@ export default function AdminUserDetail() {
   const [loading, setLoading] = useState(true);
   const [sucher, setSucher] = useState(null);
   const [zahlungen, setZahlungen] = useState(null);
+  // Pruefbericht 20.09.2026 (AD-02/O5): Ein Ladefehler zeigte "Noch keine
+  // Sucher — lege die Zugaenge an"; der Betreiber legte bestehende Konten ein
+  // zweites Mal an und rechnete sie ab. Jetzt: Fehlerkarte statt Leerzustand.
+  const [firmaFehler, setFirmaFehler] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [gueltigBis, setGueltigBis] = useState({});   // je Konto-Id das Datumsfeld
   // Wunsch Ahmad 20.09.2026: Vertraege in 20er-Schritten nachladen statt
@@ -64,14 +69,28 @@ export default function AdminUserDetail() {
 
   const loadFirma = useCallback(async () => {
     if (!dealerId) return;
+    // AD-01/O4: Die Liste endete bei 200 Konten (aelteste zuerst) — neue
+    // Sucher ab Nr. 201 waren unsichtbar und damit nie freischaltbar. Jetzt
+    // seitenweise ALLE Konten; getrennt von den Zahlungen, damit ein Fehler
+    // dort die Sucherliste nicht mitreisst.
     try {
-      const [s, z] = await Promise.all([
-        api.get(`/admin/dealers/${dealerId}/sucher`),
-        api.get(`/admin/dealers/${dealerId}/zahlungen`),
-      ]);
-      setSucher(s.data);
+      const alle = [];
+      for (let seite = 1; seite <= 50; seite += 1) {
+        const r = await api.get(`/admin/dealers/${dealerId}/sucher`, { params: { limit: 2000, seite } });
+        alle.push(...(Array.isArray(r.data) ? r.data : []));
+        if (String(r.headers?.["x-truncated"] || "") !== "1") break;
+      }
+      setSucher(alle);
+      setFirmaFehler("");
+    } catch (e) {
+      setFirmaFehler(errMsg(e, "Chef und Sucher konnten nicht geladen werden"));
+    }
+    try {
+      const z = await api.get(`/admin/dealers/${dealerId}/zahlungen`);
       setZahlungen(z.data);
-    } catch (e) { console.warn("firma laden:", e?.response?.status || e); }
+    } catch (e) {
+      toast.error(errMsg(e, "Zahlungen konnten nicht geladen werden"));
+    }
   }, [dealerId]);
   useEffect(() => { loadFirma(); }, [loadFirma]);
 
@@ -96,12 +115,13 @@ export default function AdminUserDetail() {
     finally { setLaedtMehr(false); }
   };
 
+  // B15/M36: nach dem Laden kein window.open (Popup-Sperre, mit noopener
+  // ausserdem weisser Tab) — derselbe Weg wie in der Haendler-Oberflaeche.
   const openPdf = async (c) => {
+    const startMs = Date.now();
     try {
       const r = await api.get(`/admin/contracts/${c.id}/pdf`, { responseType: "blob" });
-      const url = URL.createObjectURL(r.data);
-      window.open(url, "_blank", "noopener,noreferrer");
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      blobOeffnen(r.data, { startMs, titel: "Der Kaufvertrag", mime: "application/pdf" });
     } catch (e) { toast.error(errMsg(e, "PDF nicht verfügbar")); }
   };
 
@@ -130,7 +150,9 @@ export default function AdminUserDetail() {
         + (datum ? ` · gültig bis ${datum}` : "")
         + (probe ? " — kostenlos, sperrt danach automatisch" : " — Zahlung erfasst"));
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
-      loadFirma();
+      // AD-12: erst nach dem Neuladen freigeben — sonst zeigte die Zeile kurz
+      // den alten Stand mit aktiven Knoepfen, ein zweiter Klick buchte doppelt.
+      await loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
@@ -146,14 +168,14 @@ export default function AdminUserDetail() {
       await api.patch(`/admin/sucher/${s.id}/abo-gueltig-bis`, { gueltig_bis: datum, grund });
       toast.success(`Gültig bis ${datum} gespeichert — danach wird automatisch gesperrt`);
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
-      loadFirma();
+      await loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
   const revokeAbo = async (s) => {
     if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${sucherLabel(s)} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
     if (!sperren(s.id)) return;
-    try { await api.post(`/admin/sucher/${s.id}/abo`, { plan: null }); toast.success("Abo aufgehoben"); loadFirma(); }
+    try { await api.post(`/admin/sucher/${s.id}/abo`, { plan: null }); toast.success("Abo aufgehoben"); await loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
@@ -284,11 +306,22 @@ export default function AdminUserDetail() {
                 <span className="text-[15px] font-semibold text-white">Chef & Sucher — Freischaltung</span>
                 <Badge>{fmtNum((sucher || []).length)}</Badge>
               </div>
-              <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher" disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin"}>
+              <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher"
+                      disabled={!superAdmin || !!firmaFehler || sucher === null}
+                      title={!superAdmin ? "Nur der Super-Admin" : firmaFehler ? "Erst die Liste laden — sonst drohen doppelte Konten" : ""}>
                 <UserPlus size={14} /> Sucher anlegen
               </Button>
             </div>
-            {!sucher?.length ? (
+            {firmaFehler ? (
+              <div className="px-5 py-6 text-[13px] text-red-300" role="alert" data-testid="admin-sucher-ladefehler">
+                {firmaFehler} — die Liste ist NICHT leer, sie konnte nur nicht geladen werden.{" "}
+                <button type="button" onClick={loadFirma} className="underline underline-offset-2 font-semibold text-white">
+                  Erneut laden
+                </button>
+              </div>
+            ) : sucher === null ? (
+              <div className="flex items-center gap-2 text-zinc-500 text-sm px-5 py-6"><Spinner /> lade…</div>
+            ) : !sucher.length ? (
               <EmptyState title="Noch keine Sucher" hint="Lege die Zugänge an — die Kontonummer vergibt das System, das Passwort vergibst du hier." />
             ) : (
               <div className="overflow-x-auto">
@@ -479,7 +512,8 @@ function AddSucherDialog({ dealerId, onClose, onAngelegt }) {
            data-testid="sucher-anlegen-dialog">
         <div className="flex items-center justify-between mb-3">
           <div className="text-lg font-bold text-white">Sucher anlegen</div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200"><X size={20} /></button>
+          {/* AD-08: mit angezeigtem Passwort nur ueber "Fertig" schliessen */}
+          {!ergebnis && <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>}
         </div>
         {ergebnis ? (
           <ZugangsdatenKarte titel="Sucher angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}

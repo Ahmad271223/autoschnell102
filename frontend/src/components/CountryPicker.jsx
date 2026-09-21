@@ -78,10 +78,18 @@ export const MOBILE_COUNTRIES = [
 
 const labelFor = (code) => MOBILE_COUNTRIES.find((c) => c.code === code)?.name || code;
 
+// Pruefbericht 20.09.2026 (U-26/M19): so viele Laender nimmt der Server an
+// (backend/regeln.py MAX_LAENDER) — vorher waren 67 waehlbar, und ab dem
+// 41. scheiterte das ganze Speichern.
+export const MAX_LAENDER = 40;
+
 export default function CountryPicker({ value, onChange }) {
-  const mode = value?.mode || "exact";
+  // U-28/N10: "any" (beliebig) ist dasselbe wie "alle" — vorher stand dann
+  // "Nur Deutschland" in der Auswahl.
+  const mode = value?.mode === "any" ? "all" : (value?.mode || "exact");
   const codes = value?.codes || ["DE"];
   const [showAll, setShowAll] = useState(false);
+  const [hinweis, setHinweis] = useState("");
 
   const setMode = (m) => {
     if (m === "all") {
@@ -95,8 +103,22 @@ export default function CountryPicker({ value, onChange }) {
   };
 
   const toggleCode = (code) => {
-    const next = codes.includes(code) ? codes.filter((c) => c !== code) : [...codes, code];
-    onChange({ mode: "exact", codes: next });
+    setHinweis("");
+    if (codes.includes(code)) {
+      // U-132/M18: Das letzte Land liess sich abwaehlen; der Server lehnte
+      // dann den GESAMTEN Speichervorgang ab (auch Vorlagen und Vertragstexte).
+      if (codes.length === 1) {
+        setHinweis("Mindestens ein Land muss ausgewählt bleiben — sonst „Alle Länder“ wählen.");
+        return;
+      }
+      onChange({ mode: "exact", codes: codes.filter((c) => c !== code) });
+      return;
+    }
+    if (codes.length >= MAX_LAENDER) {
+      setHinweis(`Höchstens ${MAX_LAENDER} Länder — für mehr bitte „Alle Länder“ wählen.`);
+      return;
+    }
+    onChange({ mode: "exact", codes: [...codes, code] });
   };
 
   const isCustom = mode === "exact" && (codes.length !== 1 || codes[0] !== "DE" || showAll);
@@ -117,6 +139,13 @@ export default function CountryPicker({ value, onChange }) {
 
       {currentMode === "custom" && (
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2">
+          <div className="text-[11px]" style={{ color: "var(--text-muted)" }} data-testid="rule-country-zaehler">
+            {codes.length} von höchstens {MAX_LAENDER} Ländern ausgewählt
+          </div>
+          {hinweis && (
+            <div className="text-[12px]" role="alert" style={{ color: "var(--tx-amber)" }}
+                 data-testid="rule-country-hinweis">{hinweis}</div>
+          )}
           {codes.length > 0 && (
             <div className="flex flex-wrap gap-1.5" data-testid="rule-country-selected">
               {codes.map((code) => (

@@ -29,9 +29,11 @@ class DealerProfile(BaseModel):
     # Profilfelder landen im Vertrags-PDF (enge Tabellenzellen). Cap 500.
     @field_validator("*")
     @classmethod
-    def _cap(cls, v):
+    def _cap(cls, v, info):
         if isinstance(v, str) and len(v) > 500:
-            raise ValueError("Profilfeld zu lang (max. 500 Zeichen)")
+            # Pruefbericht 20.09.2026 (U-135): mit Feldnamen — vorher wusste
+            # niemand, welches der zehn Felder zu lang war.
+            raise ValueError(f"Profilfeld '{info.field_name}' zu lang (max. 500 Zeichen)")
         return v
 
 

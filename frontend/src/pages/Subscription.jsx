@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import RechtsLinks from "@/components/RechtsLinks";
 import { Check, Bolt, ShieldCheck, Mail, Clock } from "lucide-react";
 
 /**
@@ -36,6 +37,15 @@ export default function Subscription() {
             <span className="font-display font-black text-lg">AutoSchnell<span style={{color:"var(--accent-red)"}}>.</span></span>
           </div>
           <div className="flex items-center gap-3 text-sm">
+            {/* Pruefbericht 20.09.2026 (U-144/H3): Die Seite war eine Sackgasse —
+                auch fuer den kostenlosen Chef, der ueber das Logo oder die
+                App-Verknuepfung hier landete. Jetzt geht es zurueck in die
+                kostenlosen Bereiche (Vertraege, Termine, Bestand). */}
+            <Link to={istSucher ? "/app/vertraege" : "/app/bestand"} data-testid="abo-zurueck"
+                  className="px-3 py-1 rounded-sm border hover:bg-white/5"
+                  style={{ borderColor: "var(--border-default)" }}>
+              Zurück zur App
+            </Link>
             {/* Kontonummer (13.09.2026): Anmeldekennung statt E-Mail */}
             <span className="text-zinc-400">{user?.kontonummer ? `Konto ${user.kontonummer}` : (user?.username || user?.email)}</span>
             <button data-testid="logout-paywall" onClick={async () => { await logout(); nav("/"); }}
@@ -115,6 +125,7 @@ export default function Subscription() {
         <div className="mt-8 text-center text-xs text-zinc-500 flex items-center justify-center gap-2">
           <ShieldCheck size={14} /> Abrechnung per Rechnung · Freischaltung &amp; Sperrung durch den Betreiber
         </div>
+        <RechtsLinks className="mt-6" />
       </div>
     </div>
   );

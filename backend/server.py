@@ -299,11 +299,17 @@ class WartungsmodusMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         import time as _t
         if _t.monotonic() > self._stand["bis"]:
+            # Pruefbericht 20.09.2026 (SV-02/B4): ZUERST den naechsten
+            # Zeitpunkt setzen, DANN lesen — so liest je Prozess nur eine
+            # Anfrage, alle anderen nehmen den bisherigen Stand. Und das Lesen
+            # hat ein Zeitlimit: hakte MongoDB kurz, warteten vorher ALLE
+            # gleichzeitigen Anfragen (auch Bilder und Dateien) bis zum
+            # Treiber-Timeout. Bei Zeitueberschreitung gilt der alte Stand.
+            self._stand["bis"] = _t.monotonic() + 5
             try:
-                self._stand["doc"] = await wartung.lesen_async(db)
+                self._stand["doc"] = await asyncio.wait_for(wartung.lesen_async(db), timeout=0.5)
             except Exception:
                 pass
-            self._stand["bis"] = _t.monotonic() + 5
         doc = self._stand["doc"]
         if wartung.pausiert(doc, request.method):
             return JSONResponse(status_code=503, headers={"Retry-After": "30"},
@@ -1610,6 +1616,10 @@ async def _alle_indexe():
     await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
     await db.betriebsalarme.create_index([("offen", 1), ("created_at", -1)])
     await db.betriebsalarme.create_index([("typ", 1), ("ref", 1), ("offen", 1)])
+    # Pruefbericht 20.09.2026 (AL-04): geschlossene Alarme verfallen
+    # (loeschen_ab setzen alarm_schliessen/quittieren; offene haben es nicht).
+    await db.betriebsalarme.create_index("loeschen_ab", expireAfterSeconds=0,
+                                         name="alarm_verfall")
     await db.error_logs.create_index([("hash", 1), ("created_at", -1)])
     await db.zugangs_aenderungen.create_index([("subject_user_id", 1), ("created_at", -1)])
     await db.payment_transactions.create_index([("status", 1), ("updated_at", 1)])

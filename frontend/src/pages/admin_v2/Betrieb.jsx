@@ -15,14 +15,19 @@ export default function AdminBetrieb() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Pruefbericht 20.09.2026 (AD-14): Ladefehler endeten bei "Keine
+  // Betriebsdaten" — der Alarmstand war dann unbekannt, sah aber ruhig aus.
+  const [ladeFehler, setLadeFehler] = useState("");
+  const [quittiert, setQuittiert] = useState("");
 
   const load = async () => {
     setLoading(true);
     try {
       const r = await api.get("/admin/betrieb");
       setData(r.data);
+      setLadeFehler("");
     } catch (e) {
-      toast.error(errMsg(e, "Betriebsdaten konnten nicht geladen werden"));
+      setLadeFehler(errMsg(e, "Betriebsdaten konnten nicht geladen werden"));
     } finally {
       setLoading(false);
     }
@@ -30,25 +35,45 @@ export default function AdminBetrieb() {
   useEffect(() => { load(); }, []);
 
   const quittieren = async (a) => {
+    if (quittiert) return;                 // AD-31: kein zweiter Klick -> kein roter 404
+    setQuittiert(a.id);
     try {
       await api.post(`/admin/betrieb/alarme/${a.id}/quittieren`);
       toast.success("Alarm quittiert");
-      load();
-    } catch (e) { toast.error(errMsg(e)); }
+    } catch (e) {
+      if (e?.response?.status !== 404) toast.error(errMsg(e));
+    } finally {
+      await load();
+      setQuittiert("");
+    }
   };
   const nachholen = async () => {
     setBusy(true);
     try {
       const r = await api.post("/admin/betrieb/nachholen");
-      toast.success(`Reparaturlauf: Abo-Vorgänge ${r.data?.abo_vorgaenge ?? 0}, Zahlungen ${JSON.stringify(r.data?.zahlungen || {})}`);
+      const z = r.data?.zahlungen;
+      const zText = z && typeof z === "object"
+        ? Object.entries(z).map(([k, v]) => `${k} ${v}`).join(", ") || "keine" : String(z ?? 0);
+      toast.success(`Reparaturlauf: Abo-Vorgänge ${r.data?.abo_vorgaenge ?? 0}, Zahlungen ${zText}`);
       load();
     } catch (e) { toast.error(errMsg(e)); }
     finally { setBusy(false); }
   };
 
   if (loading && !data) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
-  if (!data) return <EmptyState title="Keine Betriebsdaten" />;
+  if (!data) {
+    return (
+      <Card data-testid="betrieb-ladefehler">
+        <div className="text-[14px] text-red-300">
+          {ladeFehler || "Betriebsdaten nicht ladbar"} — der Alarmstand ist UNBEKANNT.
+        </div>
+        <Button size="sm" className="mt-3" onClick={load}><RefreshCw size={14} /> Erneut laden</Button>
+      </Card>
+    );
+  }
   const alarme = data.alarme || [];
+  const uebersicht = data.alarm_uebersicht || null;
+  const alarmeGesamt = uebersicht?.gesamt ?? alarme.length;
   const backup = data.backup || {};
 
   return (
@@ -67,7 +92,7 @@ export default function AdminBetrieb() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
-        <Kachel label="Offene Alarme" wert={alarme.length} tone={alarme.length ? "red" : "green"} />
+        <Kachel label="Offene Alarme" wert={alarmeGesamt} tone={alarmeGesamt ? "red" : "green"} />
         <Kachel label="Dateilöschungen offen" wert={data.datei_loeschungen_offen} tone={data.datei_loeschungen_offen ? "yellow" : "green"} />
         <Kachel label="Abo-Vorgänge hängend" wert={data.abo_vorgaenge_haengend} tone={data.abo_vorgaenge_haengend ? "yellow" : "green"} />
         <Kachel label="Zahlungen ohne Zugang" wert={data.zahlungen_ohne_zugang} tone={data.zahlungen_ohne_zugang ? "red" : "green"} />
@@ -102,8 +127,30 @@ export default function AdminBetrieb() {
         <div className="flex items-center gap-2 px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <AlertTriangle size={16} className="text-zinc-500" />
           <span className="text-[15px] font-semibold text-white">Offene Betriebsalarme</span>
-          <Badge>{alarme.length}</Badge>
+          <Badge>{alarmeGesamt}</Badge>
         </div>
+        {ladeFehler && (
+          <div className="px-5 py-2 text-[12.5px] text-red-300" role="alert">
+            Aktualisieren fehlgeschlagen ({ladeFehler}) — angezeigt ist der letzte Stand.
+          </div>
+        )}
+        {uebersicht?.je_typ?.length > 0 && (
+          <div className="px-5 py-3 flex flex-wrap gap-2" data-testid="alarm-uebersicht"
+               style={{ borderBottom: "1px solid var(--wa-06)" }}>
+            {uebersicht.je_typ.map((t) => (
+              <span key={t.typ} className="text-[12px] text-zinc-300 rounded-lg px-2 py-1"
+                    style={{ background: "var(--wa-05)" }} title={`zuletzt ${fmtDate(t.zuletzt)}`}>
+                {t.typ}: <b className="text-white">{t.eintraege}</b>
+                {t.vorkommen > t.eintraege ? ` (${t.vorkommen}×)` : ""}
+              </span>
+            ))}
+          </div>
+        )}
+        {alarmeGesamt > alarme.length && (
+          <div className="px-5 py-2 text-[12.5px] text-amber-300" data-testid="alarme-gekuerzt">
+            Angezeigt werden die {alarme.length} zuletzt aufgetretenen von {alarmeGesamt} offenen Alarmen.
+          </div>
+        )}
         {alarme.length === 0 ? (
           <EmptyState title="Keine offenen Alarme" hint="Bezahlt-ohne-Zugang, nicht löschbare Dateien, Verträge ohne Datensatz und Backup-Probleme erscheinen hier." />
         ) : (
@@ -115,10 +162,10 @@ export default function AdminBetrieb() {
                   <div className="text-[13.5px] text-white truncate">{a.ref || "—"}{a.anzahl > 1 ? ` · ${a.anzahl}×` : ""}</div>
                   <div className="text-[12px] text-zinc-500 truncate">
                     {Object.entries(a.details || {}).map(([k, v]) => `${k}: ${v}`).join(" · ") || "keine Details"}
-                    {" · "}{fmtDate(a.created_at)}
+                    {" · "}zuletzt {fmtDate(a.zuletzt || a.created_at)}
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={() => quittieren(a)} title="Als erledigt markieren">
+                <Button size="sm" variant="ghost" onClick={() => quittieren(a)} disabled={!!quittiert} title="Als erledigt markieren">
                   <Check size={14} /> Quittieren
                 </Button>
               </li>

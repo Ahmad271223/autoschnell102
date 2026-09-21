@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Check, Copy, KeyRound } from "lucide-react";
+import { Check, ClipboardCopy, Copy, KeyRound } from "lucide-react";
+import { ungespeichertMelden } from "@/lib/ungespeichert";
 
 /**
  * Kontonummer (13.09.2026): Zugangsdaten direkt nach der Anlage durch den
@@ -24,16 +25,42 @@ const ANMELDESEITE = {
 export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kontonummer,
                                             driverCode, bereich = "app", hinweis, passwort, onClose }) {
   const [kopiert, setKopiert] = useState("");
+  // Pruefbericht 20.09.2026 (AD-05/O2): Kontonummer und Passwort lebten nur in
+  // dieser Karte. F5 oder ein Seitenwechsel verwarfen sie ohne Rueckfrage —
+  // danach existierte das Konto, aber niemand kannte das Passwort. Solange ein
+  // Passwort angezeigt wird, fragt der Browser jetzt vor dem Verlassen nach,
+  // und "Fertig" fragt nach, wenn noch nichts kopiert wurde.
+  const [gesichert, setGesichert] = useState(false);
+  useEffect(() => {
+    if (!passwort || gesichert) return undefined;
+    return ungespeichertMelden();
+  }, [passwort, gesichert]);
 
-  const kopieren = async (was, wert) => {
+  const anmeldeAdresse = `${window.location.origin}${ANMELDESEITE[bereich] || "/login"}`;
+  const kopieren = async (was, wert, { alles = false } = {}) => {
     try {
       await navigator.clipboard.writeText(String(wert || ""));
       setKopiert(was);
+      if (alles || !passwort || was === "Passwort") setGesichert(true);
       toast.success(`${was} kopiert`);
       setTimeout(() => setKopiert(""), 2000);
     } catch {
       window.prompt(`${was} kopieren:`, String(wert || ""));
     }
+  };
+  const allesText = [
+    name ? `Konto: ${name}` : null,
+    `Kontonummer: ${kontonummer || "—"}`,
+    passwort ? `Passwort: ${passwort}` : null,
+    driverCode && driverCode !== kontonummer ? `Fahrer-ID: ${driverCode}` : null,
+    `Anmeldung: ${anmeldeAdresse}`,
+  ].filter(Boolean).join("\n");
+  const fertig = () => {
+    if (passwort && !gesichert && !window.confirm(
+      "Passwort notiert? Nach dem Schließen ist es nicht mehr abrufbar — "
+      + "dann hilft nur „Passwort setzen“.")) return;
+    setGesichert(true);
+    onClose?.();
   };
 
   return (
@@ -85,6 +112,14 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
         </div>
       </div>
 
+      <button type="button" onClick={() => kopieren("Zugangsdaten", allesText, { alles: true })}
+              data-testid="zugangsdaten-alles-kopieren"
+              className="mt-3 w-full inline-flex items-center justify-center gap-2 h-10 rounded-xl text-[13px] font-medium text-white"
+              style={{ background: "var(--wa-08)", border: "1px solid var(--wa-12)" }}>
+        {kopiert === "Zugangsdaten" ? <Check size={15} /> : <ClipboardCopy size={15} />}
+        Alle Zugangsdaten kopieren (Kontonummer, Passwort, Anmeldeseite)
+      </button>
+
       <div className="mt-3 flex items-start gap-2 text-[12px] text-zinc-400">
         <KeyRound size={13} className="mt-0.5 shrink-0" />
         <span>
@@ -95,7 +130,7 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
       </div>
 
       {onClose && (
-        <button type="button" onClick={onClose} data-testid="zugangsdaten-fertig"
+        <button type="button" onClick={fertig} data-testid="zugangsdaten-fertig"
                 className="mt-4 w-full h-10 rounded-xl text-[14px] font-medium text-white"
                 style={{ background: "var(--accent-red)" }}>
           Fertig

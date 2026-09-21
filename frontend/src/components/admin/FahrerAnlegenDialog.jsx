@@ -51,7 +51,8 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
            data-testid="fahrer-anlegen-dialog">
         <div className="flex items-center justify-between mb-1">
           <div className="text-lg font-bold text-white">Fahrer anlegen</div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>
+          {/* AD-08: mit angezeigtem Passwort nur ueber "Fertig" schliessen */}
+          {!ergebnis && <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>}
         </div>
         {ergebnis ? (
           <ZugangsdatenKarte titel="Fahrer angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}

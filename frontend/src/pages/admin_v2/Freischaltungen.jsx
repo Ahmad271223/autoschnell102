@@ -26,23 +26,45 @@ export default function AdminFreischaltungen() {
   const [fahrerReq, setFahrerReq] = useState(null);   // Zugangs-Anfrage art=fahrer -> Dialog
   const [pwBuyer, setPwBuyer] = useState(null);
   const [gekuerzt, setGekuerzt] = useState(false);   // Phase 4 (4.3): Liste vom Server gekuerzt
+  // Pruefbericht 20.09.2026 (AD-03/O6): Ladefehler landeten nur in der
+  // Konsole — die Seite sagte "Keine offenen Anfragen", und wartende Sucher-
+  // Abos blieben liegen. Anfragen und Zwischenhaendler jetzt getrennt, jeder
+  // Fehler sichtbar.
+  const [anfragenFehler, setAnfragenFehler] = useState("");
+  const [kaeuferFehler, setKaeuferFehler] = useState("");
+  // AD-11: je Anfrage/Zeile gesperrt, bis die Liste neu geladen ist — ein
+  // zweiter Klick buchte sonst einen zweiten Vorgang samt Zahlung.
+  const [arbeitet, setArbeitet] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
+    let gek = false;
     try {
-      const [r, b] = await Promise.all([
-        api.get("/admin/plan-requests?status=offen"),
-        api.get("/admin/buyers"),
-      ]);
+      const r = await api.get("/admin/plan-requests?status=offen");
       setRequests(r.data);
-      setBuyers(b.data);
-      setGekuerzt(r.headers?.["x-truncated"] === "1" || b.headers?.["x-truncated"] === "1");
+      gek = gek || r.headers?.["x-truncated"] === "1";
+      setAnfragenFehler("");
     } catch (e) {
-      console.warn("Freischaltungen laden:", e?.response?.status || e);
-    } finally {
-      setLoading(false);
+      setAnfragenFehler(errMsg(e, "Offene Anfragen konnten nicht geladen werden"));
     }
+    try {
+      const b = await api.get("/admin/buyers");
+      setBuyers(b.data);
+      gek = gek || b.headers?.["x-truncated"] === "1";
+      setKaeuferFehler("");
+    } catch (e) {
+      setKaeuferFehler(errMsg(e, "Zwischenhändler konnten nicht geladen werden"));
+    }
+    setGekuerzt(gek);
+    setLoading(false);
   }, []);
+
+  // Eine Aktion je Zeile, Sperre erst nach dem Neuladen aufheben.
+  const aktion = async (schluessel, fn) => {
+    if (arbeitet) return;
+    setArbeitet(schluessel);
+    try { await fn(); } finally { await load(); setArbeitet(""); }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -59,45 +81,58 @@ export default function AdminFreischaltungen() {
     } catch (e) { toast.error(errMsg(e, "Prüfung fehlgeschlagen")); }
   };
 
+  // AD-10: Fehler beim Schliessen wurden verschluckt ("egal") — beim
+  // Verkaufspaket blieb die Anfrage dann offen und liess sich ein zweites Mal
+  // freischalten. Jetzt sagt die Oberflaeche es.
   const closeReq = async (id, status = "erledigt") => {
-    try { await api.put(`/admin/plan-requests/${id}`, { status }); } catch (e) { /* egal */ }
+    await api.put(`/admin/plan-requests/${id}`, { status });
+  };
+  const anfrageSchliessen = async (req) => {
+    try { await closeReq(req.id); }
+    catch (e) {
+      toast.warning(`Freigeschaltet — aber die Anfrage konnte nicht geschlossen werden (${errMsg(e, "Fehler")}). `
+        + "Bitte nicht noch einmal freischalten, sondern die Anfrage ablehnen/erledigen.", { duration: 12000 });
+    }
   };
 
-  const grantSucher = async (req) => {
+  const grantSucher = (req) => aktion(req.id, async () => {
     try {
       await api.post(`/admin/sucher/${req.subject_user_id}/abo`,
         { plan: req.wanted_plan || "monthly" });
-      await closeReq(req.id);
+      await anfrageSchliessen(req);
       toast.success(`Sucher-Abo aktiviert (${req.sucher_name || req.kontonummer || ""})`);
-      load();
     } catch (e) { toast.error(errMsg(e)); }
-  };
+  });
 
-  const grantPlan = async (req) => {
+  const grantPlan = (req) => aktion(req.id, async () => {
     try {
       await api.put(`/admin/dealers/${req.dealer_id}/sale-plan`, { tier: req.wanted_tier });
-      await closeReq(req.id);
+      await anfrageSchliessen(req);
       toast.success(`Verkaufspaket ${req.wanted_tier} aktiviert (${req.company_name || ""})`);
-      load();
     } catch (e) { toast.error(errMsg(e)); }
-  };
+  });
 
-  const grantBuyer = async (req) => {
+  const grantBuyer = (req) => aktion(req.id, async () => {
     try {
       await api.post(`/admin/buyers/${req.buyer_user_id}/access`, { plan: "monthly" });
-      await closeReq(req.id);
+      await anfrageSchliessen(req);
       toast.success("Marktplatz-Zugang aktiviert");
-      load();
     } catch (e) { toast.error(errMsg(e)); }
-  };
+  });
 
-  const setBuyerAccess = async (buyer, activate) => {
+  const ablehnen = (req) => aktion(req.id, async () => {
+    try {
+      await closeReq(req.id, "abgelehnt");
+      toast.success("Anfrage abgelehnt");
+    } catch (e) { toast.error(errMsg(e, "Ablehnen fehlgeschlagen")); }
+  });
+
+  const setBuyerAccess = (buyer, activate) => aktion(`k-${buyer.id}`, async () => {
     try {
       await api.post(`/admin/buyers/${buyer.id}/access`, { plan: activate ? "monthly" : null });
       toast.success(activate ? "Zugang aktiviert" : "Zugang gesperrt");
-      load();
     } catch (e) { toast.error(errMsg(e)); }
-  };
+  });
 
   const ZUGANG_ART = {
     firma: { label: "Neue Firma", tone: "green" },
@@ -129,7 +164,15 @@ export default function AdminFreischaltungen() {
                 sichtbaren bearbeiten, danach neu laden.
               </div>
             )}
-            {!requests?.length ? (
+            {anfragenFehler ? (
+              <div className="rounded-xl border px-4 py-3 text-sm text-red-300" role="alert"
+                   data-testid="freischaltungen-ladefehler" style={{ borderColor: "#ef444455", background: "#ef444414" }}>
+                {anfragenFehler} — ob Anfragen warten, ist gerade UNBEKANNT.{" "}
+                <button type="button" onClick={load} className="underline underline-offset-2 font-semibold text-white">
+                  Erneut laden
+                </button>
+              </div>
+            ) : !requests?.length ? (
               <EmptyState title="Keine offenen Anfragen" hint="Neue Sucher-Abo- und Zugangsanfragen erscheinen hier." />
             ) : (
               <div className="space-y-3">
@@ -192,12 +235,12 @@ export default function AdminFreischaltungen() {
                               <Truck size={14} /> Fahrer anlegen
                             </Button>
                           )}
-                          {isSucher && <Button size="sm" onClick={() => grantSucher(r)} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>}
-                          {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)}><Check size={14} /> Zugang aktivieren</Button>}
+                          {isSucher && <Button size="sm" onClick={() => grantSucher(r)} disabled={!!arbeitet} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>}
+                          {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)} disabled={!!arbeitet}><Check size={14} /> Zugang aktivieren</Button>}
                           {!isZugang && !isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
-                            <Button size="sm" onClick={() => grantPlan(r)}><Check size={14} /> Paket aktivieren</Button>
+                            <Button size="sm" onClick={() => grantPlan(r)} disabled={!!arbeitet}><Check size={14} /> Paket aktivieren</Button>
                           )}
-                          <Button size="sm" variant="ghost" onClick={() => { closeReq(r.id, "abgelehnt").then(load); }} data-testid={`abo-nein-${r.id}`}>
+                          <Button size="sm" variant="ghost" onClick={() => ablehnen(r)} disabled={!!arbeitet} data-testid={`abo-nein-${r.id}`}>
                             <X size={14} /> {isSucher ? "Nein, ablehnen" : "Ablehnen"}
                           </Button>
                         </div>
@@ -274,9 +317,9 @@ export default function AdminFreischaltungen() {
                               <KeyRound size={13} /> Passwort setzen
                             </Button>
                             {b.access?.active ? (
-                              <Button size="sm" variant="ghost" onClick={() => setBuyerAccess(b, false)}>Sperren</Button>
+                              <Button size="sm" variant="ghost" onClick={() => setBuyerAccess(b, false)} disabled={!!arbeitet}>Sperren</Button>
                             ) : (
-                              <Button size="sm" onClick={() => setBuyerAccess(b, true)}>Freischalten</Button>
+                              <Button size="sm" onClick={() => setBuyerAccess(b, true)} disabled={!!arbeitet}>Freischalten</Button>
                             )}
                           </td>
                         </tr>
@@ -323,7 +366,7 @@ export default function AdminFreischaltungen() {
 const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
 const inputStyle = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
 
-function DialogRahmen({ titel, testid, onClose, children }) {
+function DialogRahmen({ titel, testid, onClose, children, schliessbar = true }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
       <div className="w-full max-w-md rounded-2xl p-5"
@@ -331,7 +374,8 @@ function DialogRahmen({ titel, testid, onClose, children }) {
            data-testid={testid}>
         <div className="flex items-center justify-between mb-1">
           <div className="text-lg font-bold text-white">{titel}</div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>
+          {/* AD-08: mit angezeigtem Passwort nur ueber "Fertig" schliessen */}
+          {schliessbar && <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>}
         </div>
         {children}
       </div>
@@ -372,7 +416,7 @@ function FirmaAnlegenDialog({ request, onClose }) {
   };
 
   return (
-    <DialogRahmen titel="Firma anlegen" testid="firma-anlegen-dialog" onClose={onClose}>
+    <DialogRahmen titel="Firma anlegen" testid="firma-anlegen-dialog" onClose={onClose} schliessbar={!ergebnis}>
       {ergebnis ? (
         <ZugangsdatenKarte titel="Firmen-Konto angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
                            passwort={ergebnis.passwort}
@@ -447,7 +491,7 @@ function KaeuferAnlegenDialog({ request, onClose }) {
   };
 
   return (
-    <DialogRahmen titel="Zwischenhändler anlegen" testid="kaeufer-anlegen-dialog" onClose={onClose}>
+    <DialogRahmen titel="Zwischenhändler anlegen" testid="kaeufer-anlegen-dialog" onClose={onClose} schliessbar={!ergebnis}>
       {ergebnis ? (
         <ZugangsdatenKarte titel="Zwischenhändler angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
                            passwort={ergebnis.passwort}

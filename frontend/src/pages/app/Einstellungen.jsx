@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
+import { ungespeichertMelden } from "@/lib/ungespeichert";
 
 // Vorlage Ahmad 20.09.2026: dieselben Namen wie im Backend
 // (backend/vertrag_platzhalter.py). Der Test test_vertragstexte_20260920.py
@@ -162,6 +163,15 @@ export default function Einstellungen() {
   // geaendert" (B19) und fuer das Erhalten ungespeicherter Eingaben (H37).
   const ausgangRef = useRef(null);
   const istChef = user?.role === "dealer";
+
+  // Pruefbericht 20.09.2026 (U-130): Ungespeicherte Aenderungen gingen beim
+  // Verlassen/Neuladen ohne Rueckfrage verloren. Jetzt meldet die Seite sie
+  // an, solange das Formular vom letzten Serverstand abweicht.
+  const geaendert = !!form && !!ausgangRef.current && (() => {
+    const { _edit_profile, _agb_zusammengefuehrt, ...rest } = form;
+    return Object.keys(nurGeaenderte(rest, ausgangRef.current)).filter((k) => k !== "default_terms").length > 0;
+  })();
+  useEffect(() => (geaendert ? ungespeichertMelden() : undefined), [geaendert]);
 
   useEffect(() => {
     // 16.09.2026: nach "Speichern" (refresh) bleibt der Regel-Editor auf dem
@@ -342,8 +352,10 @@ export default function Einstellungen() {
                   <label className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white cursor-pointer"
                          style={{ background: "var(--accent-red)" }} data-testid="set-logo">
                     Logo hochladen
+                    {/* U-133/M50: nach einem Fehlschlag laesst sich dieselbe Datei
+                        wieder waehlen (sonst feuert onChange nicht erneut). */}
                     <input type="file" accept="image/*" className="hidden"
-                           onChange={(e) => uploadLogo(e.target.files?.[0])} />
+                           onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; uploadLogo(f); }} />
                   </label>
                   <div className="text-[11px] text-zinc-500 mt-1.5">PNG/JPG, max. 2 MB. Erscheint auf Vertrag & Marktplatz.</div>
                   {form.profile.logo_url && (
@@ -702,10 +714,11 @@ function RuleRow({ label, children, last }) {
 }
 
 function AppleField({ label, value, onChange, testid }) {
+  // U-135/M50: dieselbe Grenze wie der Server (Profilfelder max. 500 Zeichen)
   return (
     <div className="space-y-1.5">
       <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">{label}</label>
-      <input data-testid={testid} value={value || ""}
+      <input data-testid={testid} value={value || ""} maxLength={500}
              onChange={(e) => onChange(e.target.value)}
              className="apple-input" />
     </div>

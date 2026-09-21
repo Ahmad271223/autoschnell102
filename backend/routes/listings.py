@@ -657,10 +657,29 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # nie im gespeicherten Fahrzeug (die Links laufen ab).
     from bild_proxy import thumbs as _thumbs
     _bilder = (vehicle or {}).get("images") or (vehicle or {}).get("image_urls") or []
+    # Pruefbericht 20.09.2026 (A-03/V5): Wie alt sind die Daten? Der
+    # gemeinsame Zwischenspeicher gilt bis zu 14 Tage als frisch — ein Preis
+    # von vor zehn Tagen sah aus wie eben abgerufen. Die Oberflaeche zeigt
+    # jetzt "Stand vom …".
+    abgerufen_am = None
+    if was_cached:
+        try:
+            _c = await db.listings_cache.find_one({"cache_key": identity["cache_key"]},
+                                                  {"_id": 0, "fetched_at": 1})
+            _f = (_c or {}).get("fetched_at")
+            abgerufen_am = _f.isoformat() if hasattr(_f, "isoformat") else (_f or None)
+        except Exception:  # noqa: BLE001 — Anzeige, kein Muss
+            abgerufen_am = None
+    else:
+        abgerufen_am = now_iso()
     return {
         "vehicle_id": vid,
         "ad_id": ad_id,
-        "vehicle": {**(vehicle or {}), "images_thumbs": _thumbs(_bilder[:40])},
+        # U-03/H6: Die offizielle mobile.de-Schnittstelle liefert image_urls,
+        # die Oberflaeche liest images — dort erschienen nie Fotos.
+        "vehicle": {**(vehicle or {}), "images": _bilder,
+                    "images_thumbs": _thumbs(_bilder[:40])},
+        "abgerufen_am": abgerufen_am,
         "search_url": search_url,
         "autoscout_url": autoscout_url,
         # Runde 11: welche Firmenregeln der AutoScout-Link nicht umsetzt
