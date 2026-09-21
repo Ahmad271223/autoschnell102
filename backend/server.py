@@ -381,6 +381,30 @@ KRITISCHE_INDIZES = {
     "kaufvorgaenge": ("contract_id",),
 }
 _KERN_CACHE: dict = {"bis": 0.0, "fehler": []}
+#: Pruefbericht 20.09.2026 (AL-14): ein Tippfehler in der .env kippt den Start nicht
+MIN_FREI_MB = zahl_env("MIN_FREI_MB", 500, unten=0)
+
+
+def _platte_fehler() -> list:
+    """Pruefbericht 20.09.2026 (DP-08): freier Platz und Schreibbarkeit des
+    lokalen Datei-Volumes. Das betrifft nur DIESEN Server — /health meldet 503,
+    der Lastverteiler nimmt genau ihn aus der Rotation (S3/R2 bleibt bewusst
+    draussen: ein R2-Ausfall soll nicht alle Server abschalten)."""
+    import shutil
+    pfad = ROOT_DIR / "uploads"
+    try:
+        pfad.mkdir(parents=True, exist_ok=True)
+        frei_mb = shutil.disk_usage(str(pfad)).free // (1024 * 1024)
+        if frei_mb < MIN_FREI_MB:
+            return [f"platte: nur {frei_mb} MB frei (MIN_FREI_MB {MIN_FREI_MB})"]
+        probe = pfad / f".health-{uuid.uuid4().hex[:12]}"
+        try:
+            probe.write_text("ok")
+        finally:
+            probe.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        return [f"platte: nicht schreibbar ({exc})"]
+    return []
 
 
 async def _kern_fehler() -> list:
@@ -411,6 +435,10 @@ async def _kern_fehler() -> list:
             fehler.append("unique-index fehlt: " + ", ".join(sorted(_indizes.FEHLENDE_UNIQUE)))
     except Exception:  # noqa: BLE001
         pass
+    try:
+        fehler += await asyncio.to_thread(_platte_fehler)
+    except Exception as exc:  # noqa: BLE001
+        fehler.append(f"platte: {exc}")
     _KERN_CACHE["bis"] = _time.monotonic() + 60
     _KERN_CACHE["fehler"] = fehler
     return list(fehler)
@@ -539,7 +567,7 @@ async def _readiness_pruefen():
             pfad.mkdir(parents=True, exist_ok=True)
             frei_mb = shutil.disk_usage(str(pfad)).free // (1024 * 1024)
             info[f"frei_mb_{name}"] = frei_mb
-            if frei_mb < int(os.environ.get("MIN_FREI_MB", "500") or 500):
+            if frei_mb < MIN_FREI_MB:
                 fehler.append(f"{name}: nur {frei_mb} MB frei")
             # Nachpruefung 20.09.2026, Nr. 56: hier stand fest ".readiness".
             # Zwei gleichzeitige Aufrufe loeschten sich die Datei gegenseitig,

@@ -70,6 +70,16 @@ cd /opt/autoschnell && sh deploy/rollout.sh
 Ohne `ERSTER_SERVER=1` endet die Abschlussprobe auf prod2 mit Code 3 (das
 neue Oberflaechen-Skript fehlt auf prod1 noch — 404).
 
+**Lange Datenmigration (Pruefbericht 20.09.2026, AL-05):** Das Skript wartet
+hoechstens rund drei Minuten auf `/api/ready`. Bringt ein Update eine lange
+Migration mit (im Log `docker compose logs -f backend`: "Migration … laeuft"),
+bricht es mit "Backend nicht bereit" ab — der Server bleibt dann bewusst im
+Drain, die Besucher bedient der andere Server. Nichts neu starten: warten, bis
+im Log "Migration … fertig" steht und
+`docker compose exec -T backend curl -s http://localhost:8001/api/ready`
+`"ready": true` meldet, dann `sh deploy/freigeben.sh` und erst danach der
+zweite Server. (Stand 21.09.2026: alle Migrationen sind durch.)
+
 Dauer je Server rund drei Minuten (zweimal 60 s Wartezeit fuer den Load
 Balancer). Waehrenddessen traegt der andere Server die Last allein.
 

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { thumbFehler, thumbSrc } from "@/lib/bilder";
 import { ChevronLeft, ChevronRight, X, Image as ImageIcon } from "lucide-react";
 
 /**
@@ -7,7 +8,9 @@ import { ChevronLeft, ChevronRight, X, Image as ImageIcon } from "lucide-react";
  * - Fullscreen-Viewer mit ← / → (Tastatur + Buttons) + Swipe (touch)
  * - Schließen per ESC oder Klick auf Backdrop
  */
-export default function PhotoGallery({ photos = [], label = "Fotos" }) {
+// Pruefbericht 20.09.2026 (U-102): Vorschaubilder ueber den eigenen Bild-Proxy
+// (thumbs), bei einem Fehler einmal das Original; nie mit Verweis-Adresse.
+export default function PhotoGallery({ photos = [], thumbs = [], label = "Fotos" }) {
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
 
@@ -53,7 +56,8 @@ export default function PhotoGallery({ photos = [], label = "Fotos" }) {
             data-testid={`gallery-thumb-${i}`}
             className="aspect-square rounded-md overflow-hidden bg-zinc-800 relative group"
           >
-            <img src={src} alt="" loading="lazy"
+            <img src={thumbSrc(thumbs?.[i], src)} alt="" loading="lazy" referrerPolicy="no-referrer"
+                 onError={(e) => thumbFehler(e, src)}
                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
             {i === 11 && photos.length > 12 && (
               <div className="absolute inset-0 flex items-center justify-center font-bold text-lg text-white"
@@ -98,6 +102,7 @@ export default function PhotoGallery({ photos = [], label = "Fotos" }) {
           <img
             src={photos[index]}
             alt=""
+            referrerPolicy="no-referrer"
             onClick={(e) => e.stopPropagation()}
             className="max-w-[92vw] max-h-[85vh] object-contain select-none"
             draggable={false}

@@ -96,6 +96,24 @@ def test_01_api_antwort_wird_zur_internen_fahrzeugform():
     assert v["_source"] == "kleinanzeigen" and v["_abrufweg"] == "api"
 
 
+def test_01b_preisart_und_verhandlungsbasis():
+    """Pruefbericht 20.09.2026 (S-13): VB und Verschenken gehen nicht verloren."""
+    import copy
+    A = _modul("kleinanzeigen_api")
+    ad = copy.deepcopy(_ad())
+    ad["price"] = {"amount": 13900, "currency_code": "EUR", "price_type": "NEGOTIABLE",
+                   "negotiable": True}
+    v = A.fahrzeug_aus_api(ad, URL, "3458821471")
+    assert v["list_price"] == 13900.0 and v["price_label"] == "13.900 € VB"
+    assert v["price_negotiable"] is True
+    ad["price"] = {"amount": 0, "currency_code": "EUR", "price_type": "GIVE_AWAY"}
+    v = A.fahrzeug_aus_api(ad, URL, "3458821471")
+    assert v["list_price"] is None and v["price_label"] == "Zu verschenken"
+    ad["price"] = {"amount": 0, "currency_code": "EUR", "price_type": "SPECIFIED_AMOUNT"}
+    v = A.fahrzeug_aus_api(ad, URL, "3458821471")
+    assert v["list_price"] is None and v["price_label"] is None, "0 € ist kein Preis"
+
+
 def test_02_leistung_ohne_einheit_wird_als_ps_gelesen():
     """Die API liefert die blanke Zahl ("122"), die Webseite "122 PS"."""
     A = _modul("kleinanzeigen_api")

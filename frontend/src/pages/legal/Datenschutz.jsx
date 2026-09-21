@@ -103,9 +103,18 @@ export default function Datenschutz() {
             Übermittlung in die USA sind EU-Standardvertragsklauseln
             (Art.&nbsp;46 DSGVO). Datenschutzhinweise:
             cloudflare.com/de-de/privacypolicy.</li>
+        <li><b>Fahrzeugfotos der Inserate:</b> Vorschaubilder laden wir über
+            unseren eigenen Server (Bild-Proxy) — das Portal erfährt dabei
+            nicht, wer das Bild ansieht. Die vergrößerte Ansicht eines Fotos
+            und ausnahmsweise ein Vorschaubild, das unser Server nicht liefern
+            konnte, lädt Ihr Browser direkt beim jeweiligen Portal (mobile.de,
+            AutoScout24, kleinanzeigen.de); dabei erhält das Portal technisch
+            bedingt Ihre IP-Adresse. Als Verweis-Adresse sendet der Browser
+            höchstens den Namen unserer Plattform, nie die aufgerufene
+            Seite.</li>
         <li><b>Beweisdokumente zu Inseraten:</b> kein externer Dienst im
-            Einsatz. Wird ein Inserats-Link zum ersten Mal über die Plattform
-            verwendet, erstellt unser eigener Server ein PDF mit den im
+            Einsatz. Auf Wunsch (per Knopfdruck) erstellt
+            unser eigener Server ein PDF mit den im
             Inserat öffentlich angegebenen Fahrzeugdaten, Fotos, der
             Anzeigen-ID und der Inserats-Adresse. Es wird dafür nichts an
             Dritte übermittelt. Anbieterangaben: bei gewerblichen Anbietern

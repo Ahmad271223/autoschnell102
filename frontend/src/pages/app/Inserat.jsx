@@ -66,6 +66,21 @@ export default function Inserat() {
     load();
   }, [load]);
 
+  // Pruefbericht 20.09.2026 (U-97): Eigene Fotos haben signierte Links
+  // (Standard 1 h). Laedt der Browser danach neu (Tab-Wiederherstellung,
+  // Originalgroesse), gab es leere Rahmen. Dann frische Links holen — NUR die
+  // Fotoadressen, damit nichts Ungespeichertes ueberschrieben wird.
+  const fotoLinksAm = useRef(0);
+  const fotoFehler = useCallback(async () => {
+    const jetzt = Date.now();
+    if (jetzt - fotoLinksAm.current < 60_000) return;
+    fotoLinksAm.current = jetzt;
+    try {
+      const r = await api.get(`/resale/${id}`);
+      setL((s) => (s ? { ...s, photo_urls: r.data?.photo_urls || [] } : s));
+    } catch { /* bleibt beim leeren Rahmen */ }
+  }, [id]);
+
   // Eingabetext je Preisfeld (so, wie getippt) — gezeigt wird der Text, gerechnet
   // mit der gelesenen Zahl in l.prices.
   const [preisEingabe, setPreisEingabe] = useState({});
@@ -559,7 +574,8 @@ export default function Inserat() {
               {(mode !== "einkauf") && uploadedKeys.map((k) => (
                 <div key={k} className="relative group">
                   <a href={fotoUrl(k)} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                    <img src={fotoUrl(k)} alt="" className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
+                    <img src={fotoUrl(k)} alt="" onError={fotoFehler}
+                         className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
                   </a>
                   <button onClick={() => removePhoto({ key: k })}
                           data-testid={`foto-del-${k.slice(-8)}`}

@@ -554,3 +554,43 @@ def test_05c_paralleler_erstbericht_genau_einmal(welt):
     assert dbx.pickup_reports.count_documents({"appointment_id": aid}) == 1
     dbx.appointments.delete_one({"id": aid})
     dbx.pickup_reports.delete_many({"appointment_id": aid})
+
+
+# ============================================================ Pruefbericht 20.09.2026 (T-19/T-20/T-21)
+def test_t19_t21_sucher_kommt_an_keine_chef_schnittstelle(welt):
+    """Pruefbericht 20.09.2026 (T-19/T-20/T-21): Sucher-Negativfaelle ueber
+    HTTP mit echtem Token — Team/Abo, Netzwerk/Einladungen/Marktplatzprofil,
+    Weiterverkauf und Bestand. Vorher prueften das nur Quelltexttests bzw.
+    ein Handskript ausserhalb der CI (scripts/rollentest_gross.py)."""
+    r = _login(f"rt_sucher_{SUF}@e2etest-mail.de")
+    assert r.status_code == 200, r.text[:200]
+    hs = _hdr(r.json()["token"])
+    vid = welt["vehicle_id"]
+    faelle = [
+        ("GET", "/dealer/sucher", None),
+        ("GET", "/dealer/sucher-plans", None),
+        ("POST", f"/dealer/sucher/{welt['sucher_id']}/abo-anfrage", {"plan": "monthly"}),
+        ("GET", "/dealer/invites", None),
+        ("POST", "/dealer/invites", {"validity_hours": 24, "max_uses": 1}),
+        ("DELETE", "/dealer/invites/gibt-es-nicht", None),
+        ("GET", "/dealer/network/members", None),
+        ("DELETE", "/dealer/network/members/gibt-es-nicht", None),
+        ("GET", "/dealer/marketplace-profile", None),
+        ("PUT", "/dealer/marketplace-profile", {"public": True}),
+        ("POST", f"/resale/draft/{vid}", None),
+        ("GET", "/resale", None),
+        ("GET", "/resale/gibt-es-nicht", None),
+        ("PUT", "/resale/gibt-es-nicht", {"title": "x"}),
+        ("POST", "/resale/gibt-es-nicht/photos", {"photos_b64": []}),
+        ("POST", "/resale/gibt-es-nicht/publish", {}),
+        ("POST", f"/vehicles/{vid}/decision", {"decision": "bestand"}),
+        ("PUT", f"/vehicles/{vid}/bestand", {}),
+        ("POST", "/vehicles/manual", {}),
+        ("PUT", f"/vehicles/{vid}/besitzer", {"owner_user_id": welt["sucher_id"]}),
+    ]
+    falsch = []
+    for methode, pfad, daten in faelle:
+        r = requests.request(methode, f"{API}{pfad}", headers=hs, json=daten, timeout=30)
+        if r.status_code != 403:
+            falsch.append((methode, pfad, r.status_code, r.text[:120]))
+    assert not falsch, falsch

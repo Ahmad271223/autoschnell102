@@ -115,6 +115,23 @@ async def anlegen(*, dealer_id: str, user_id: str, vehicle_id: str, contract_id:
     return doc
 
 
+async def _vertragszeiger_nachziehen(contract: dict, kv: Optional[dict]) -> None:
+    """Pruefbericht 20.09.2026 (R2-01): Die Selbstheilung fand bzw. legte den
+    Vorgang an, schrieb seine ID aber nie an den Vertrag zurueck — jeder
+    weitere Aufruf alarmierte erneut, und neue Termine kopierten den alten,
+    falschen Zeiger. Jetzt per Compare-and-Set (nur der gelesene Stand)."""
+    if not contract or not kv or not contract.get("id") \
+            or contract.get("kaufvorgang_id") == kv.get("id"):
+        return
+    try:
+        await db.generated_pdfs.update_one(
+            {"id": contract["id"], "kaufvorgang_id": contract.get("kaufvorgang_id")},
+            {"$set": {"kaufvorgang_id": kv["id"]}})
+    except Exception:  # noqa: BLE001  (der naechste Aufruf versucht es erneut)
+        log.exception("Vertragszeiger %s -> Kaufvorgang %s nicht nachgezogen",
+                      contract.get("id"), kv.get("id"))
+
+
 async def fuer_vertrag(contract: dict) -> Optional[dict]:
     if not contract:
         return None
@@ -135,6 +152,7 @@ async def fuer_vertrag(contract: dict) -> Optional[dict]:
         kv = await db.kaufvorgaenge.find_one({"contract_id": contract["id"]}, {"_id": 0})
         if kv:
             if _passt(kv, dealer_id=contract.get("dealer_id"), vehicle_id=contract.get("vehicle_id")):
+                await _vertragszeiger_nachziehen(contract, kv)
                 return kv
             # Phase 2 (2.3, G15): der Vorgang zum Vertrag gehoert einer anderen
             # Firma / einem anderen Fahrzeug — nicht als gueltig uebernehmen.
@@ -146,12 +164,14 @@ async def fuer_vertrag(contract: dict) -> Optional[dict]:
         # Selbstheilung: der Vertrag traegt eine kaufvorgang_id, der Vorgang
         # fehlt (Anlage nach dem Vertrags-Insert gescheitert) -> nachlegen.
         if contract.get("dealer_id") and contract.get("vehicle_id") and contract.get("user_id"):
-            return await anlegen(
+            neu = await anlegen(
                 dealer_id=contract["dealer_id"], user_id=contract["user_id"],
                 vehicle_id=contract["vehicle_id"], contract_id=contract["id"],
                 purchase_price=contract.get("purchase_price"),
                 kaufvorgang_id=None if zeiger_falsch else (contract.get("kaufvorgang_id") or None),
                 appointment_id=contract.get("appointment_id"))
+            await _vertragszeiger_nachziehen(contract, neu)
+            return neu
     return None
 
 

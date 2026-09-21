@@ -420,7 +420,8 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
         vertrag_doc = await db.generated_pdfs.find_one(
             {"id": body.contract_id, **_vertrag_bereich(user)},
             {"_id": 0, "id": 1, "seller_name": 1, "seller_phone": 1, "seller_email": 1,
-             "contract_data": 1, "kaufvorgang_id": 1})
+             "contract_data": 1, "kaufvorgang_id": 1, "dealer_id": 1, "vehicle_id": 1,
+             "user_id": 1, "purchase_price": 1, "appointment_id": 1})
         if vertrag_doc is None:
             raise HTTPException(404, "Vertrag nicht gefunden")
     await _fahrzeug_passt_zum_vertrag(user["dealer_id"], body.vehicle_id, body.contract_id)
@@ -460,8 +461,20 @@ async def create_appointment(body: AppointmentIn, user=Depends(current_firma)):
                 {"dealer_id": user["dealer_id"], "contract_id": body.contract_id}, limit=1):
         raise HTTPException(409, "Zu diesem Vertrag gibt es bereits einen Termin — ein weiterer "
                                  "abgeschlossener Termin ist nicht möglich.")
-    if vertrag_doc and vertrag_doc.get("kaufvorgang_id"):
-        doc["kaufvorgang_id"] = vertrag_doc["kaufvorgang_id"]
+    if vertrag_doc:
+        # Pruefbericht 20.09.2026 (R2-01): den Vorgang ueber den Vertrag
+        # ermitteln (prueft und heilt den Zeiger), statt den Zeiger blind zu
+        # kopieren — ein falscher Zeiger setzte sonst appointment_id am
+        # FREMDEN Vorgang. Ohne Treffer bleibt das Feld leer; die Nacharbeit
+        # findet den Vorgang spaeter ueber contract_id.
+        import kaufvorgang as _kv_termin
+        try:
+            _vorgang = await _kv_termin.fuer_vertrag(vertrag_doc)
+        except Exception:  # noqa: BLE001
+            log.exception("Kaufvorgang zu Vertrag %s nicht ermittelbar", vertrag_doc.get("id"))
+            _vorgang = None
+        if _vorgang:
+            doc["kaufvorgang_id"] = _vorgang["id"]
     if vertrag_doc:
         # Runde 17 (Nr. 12): leere Verkaeuferfelder aus dem Vertrag fuellen
         # (Abholauftrag und Protokoll lesen sie vom Termin). Abweichende,
@@ -663,6 +676,7 @@ async def list_appointments(response: Response, user=Depends(current_firma),
                 {"dealer_id": user["dealer_id"], "id": {"$in": fahrzeug_ids}},
                 {"_id": 0, "id": 1, "data": 1, "status": 1, "lifecycle": 1,
                  "source": 1, "mobile_ad_id": 1}):
+            _vorschaubilder(v)
             vehicles_map[v["id"]] = v
     # Ehemalige Fahrer (Verknuepfung entfernt / Konto geloescht): nur noch
     # Name aus der Historie, keine Live-Berechtigung (Audit 09/2026, Punkt 13).
@@ -687,6 +701,24 @@ async def list_appointments(response: Response, user=Depends(current_firma),
     return items
 
 
+def _vorschaubilder(v: dict) -> None:
+    """Pruefbericht 20.09.2026 (U-102): Vorschaubilder der Inseratsfotos ueber
+    den eigenen Bild-Proxy (signierte Adressen, wie im Vergleich). Die
+    Terminseite lud die Fotos vorher direkt beim Portal. Wirft nie."""
+    try:
+        import bild_proxy
+        daten = v.get("data") if isinstance(v, dict) else None
+        if not isinstance(daten, dict):
+            return
+        bilder = [u for u in (daten.get("image_urls") or daten.get("images")
+                              or daten.get("photos") or daten.get("pictures") or [])
+                  if isinstance(u, str) and u][:40]
+        if bilder:
+            daten["images_thumbs"] = bild_proxy.thumbs(bilder)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @router.get("/appointments/{appt_id}")
 async def get_appointment(appt_id: str, user=Depends(current_firma)):
     a = await db.appointments.find_one({"id": appt_id, **await termin_bereich(user)}, {"_id": 0})
@@ -709,6 +741,7 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
             await __import__("kaufvorgang").einkauf_fuer_sucher_maskieren(user, v)
             from deps import konten_maskieren
             konten_maskieren(user, v)
+            _vorschaubilder(v)
             a["vehicle"] = v
     if a.get("driver_id"):
         d = await db.driver_accounts.find_one(

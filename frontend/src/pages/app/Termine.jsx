@@ -902,7 +902,7 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
             return (
               <div className="mt-4 rounded-xl p-4"
                    style={{ background: "var(--hover-bg)", border: "1px solid var(--divider)" }}>
-                <PhotoGallery photos={photos} label="Inserat-Fotos" />
+                <PhotoGallery photos={photos} thumbs={d.images_thumbs || []} label="Inserat-Fotos" />
               </div>
             );
           })()}

@@ -3,6 +3,7 @@ import { monatJahrFehler } from "@/lib/monatJahr";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
@@ -161,6 +162,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // Runde 31: rund 60 Felder ohne Zwischenspeicher — solange der Dialog offen
   // ist, fragt der Browser vor dem Neuladen oder Schliessen nach.
   useUngespeichert(Boolean(open));
+  // Pruefbericht 20.09.2026 (U-78): X und "Abbrechen" schlossen ohne
+  // Rueckfrage — rund 60 Felder waren mit einem Klick weg. Gefragt wird nur,
+  // wenn der Nutzer selbst etwas eingegeben hat (das automatische Nachfuellen
+  // aus den Einstellungen zaehlt nicht).
+  const bearbeitet = useRef(false);
+  useEffect(() => { if (open) bearbeitet.current = false; }, [open]);
+  const schliessen = () => {
+    if (bearbeitet.current
+        && !window.confirm("Eingaben im Kaufvertrag verwerfen? Sie sind noch nicht gespeichert.")) {
+      return;
+    }
+    onClose?.();
+  };
   // Runde 24 (11.09.2026): Käuferdaten sind Pflicht (Wunsch Ahmad). Der
   // Hinweis sagt, was die EINSTELLUNGEN offen lassen — daher aus dem Profil
   // abgeleitet, nicht aus dem Formular: er bleibt stehen, während der
@@ -231,6 +245,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   //    folgt "Käufer → Ort" (z.B. Ort im Inserat fehlte und wird nachgetragen).
 
   const set = (k, v) => setForm((f) => {
+    bearbeitet.current = true;
     beruehrt.current[k] = true;
     const next = { ...f, [k]: v };
     if (k === "pickup_date" && f.empfang_datum === (f.pickup_date || heute)) {
@@ -250,6 +265,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // nicht "KFZ mit 0 Schlüssel(n)" angekreuzt ins PDF bringen.
   const setSchluesselAnzahl = (raw) => {
     const n = cleanIntStr(raw).replace(/^0+/, "");
+    bearbeitet.current = true;
     setForm((f) => ({
       ...f,
       schluessel_anzahl: n,
@@ -269,15 +285,16 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       return;
     }
     setPreviewing(true);
+    const startMs = Date.now();
     try {
       const res = await api.post("/contracts/preview", buildPayload(), {
         responseType: "blob",
       });
-      const blob = new Blob([res.data], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank", "noopener,noreferrer");
-      // Revoke after a delay so the new tab has time to load
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      // Pruefbericht 20.09.2026 (U-76): window.open nach dem await verwarf
+      // ein Popup-Blocker still. blobOeffnen oeffnet direkt, solange der
+      // Klick frisch ist — sonst ein Hinweis mit "Öffnen"-Knopf.
+      blobOeffnen(new Blob([res.data], { type: "application/pdf" }),
+                  { startMs, titel: "Die Vorschau", mime: "application/pdf" });
     } catch (err) {
       toast.error(errMsg(err, "Vorschau konnte nicht erzeugt werden"));
     } finally {
@@ -347,7 +364,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               {vehicle?.make_label} {vehicle?.model_label}
             </div>
           </div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-white" data-testid="close-contract">
+          <button onClick={schliessen} className="text-zinc-400 hover:text-white" data-testid="close-contract"
+                  aria-label="Kaufvertrag schließen">
             <X size={20} />
           </button>
         </div>
@@ -560,9 +578,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           <Section title="Schäden / Beschädigungen">
             <DamageSelector
               damages={form.damages}
-              onChange={(list, text) =>
-                setForm((f) => ({ ...f, damages: list, damages_text: text }))
-              }
+              onChange={(list, text) => {
+                bearbeitet.current = true;
+                setForm((f) => ({ ...f, damages: list, damages_text: text }));
+              }}
             />
           </Section>
 
@@ -720,7 +739,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
           <div className="flex flex-wrap items-center justify-end gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-6 px-6 border-t"
                style={{ borderColor: "var(--border-default)" }}>
-            <button type="button" onClick={onClose}
+            <button type="button" onClick={schliessen}
                     className="apple-btn apple-btn-secondary" data-testid="cancel-contract">
               Abbrechen
             </button>

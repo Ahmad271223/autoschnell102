@@ -1390,12 +1390,13 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
     # Folgeversionen an. Nur wer das superseded-Flag selbst setzt, darf die
     # neue Version anlegen — jeder weitere Aufruf findet die Version nicht
     # mehr als aktuell vor und bekommt 409.
-    abgeloest = await db.pickup_protocols.find_one_and_update(
-        {"id": doc["id"], "status": "final", "superseded": {"$ne": True}},
-        {"$set": {"superseded": True, "superseded_at": now_iso()}})
-    if abgeloest is None:
-        raise HTTPException(409, "Korrektur läuft bereits / Version nicht "
-                                 "mehr aktuell")
+    # Pruefbericht 20.09.2026 (R1-20): Abloesen und Anlegen der Folgeversion
+    # laufen jetzt in EINER Transaktion (Replica-Set, also Produktion). Starb
+    # der Prozess vorher zwischen beiden Schritten, hatte der Termin keine
+    # aktuelle Version mehr; ein Speichern in den 120 s danach legte einen
+    # Entwurf OHNE corrects_version an, und die unterschriebene Fassung blieb
+    # fuer immer abgeloest. Ohne Replica-Set wie bisher mit Ruecknahme.
+    from deps import transaktion
     new_doc = {k: v for k, v in doc.items()
                if k not in ("id", "status", "pdf_path", "pdf_sha256", "finalized_at",
                             "signature_driver_key", "signature_seller_key",
@@ -1413,12 +1414,8 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
     # Pruefung 14.09.2026 (C3): NICHT "aktuelle + 1" — nach einer verworfenen
     # Korrektur (Version 2 verworfen, Version 1 wieder aktuell) kollidierte die
     # naechste Korrektur mit der verworfenen 2 (Unique-Index) und lief in 409.
-    hoechste = await db.pickup_protocols.find_one(
-        {"appointment_id": appt_id}, {"_id": 0, "version": 1}, sort=[("version", -1)])
-    naechste = max(int((hoechste or {}).get("version") or 1), int(doc.get("version", 1))) + 1
     new_doc.update({
         "id": str(uuid.uuid4()),
-        "version": naechste,
         "status": "entwurf",
         "superseded": False,
         "corrects_version": doc.get("version", 1),
@@ -1443,21 +1440,42 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
             log.exception("Protokoll-Korrektur: Abloesung von %s konnte "
                           "nicht zurueckgenommen werden", doc["id"])
 
-    try:
-        await db.pickup_protocols.insert_one(new_doc)
-    except DuplicateKeyError:
-        # Unique-Index (appointment_id, version) bzw. "ein aktuelles
-        # Protokoll je Termin": ein paralleler Aufruf hat die Folgeversion
-        # bereits angelegt.
-        await _abloesung_zuruecknehmen()
-        raise HTTPException(409, "Korrektur läuft bereits / Version nicht "
-                                 "mehr aktuell")
-    except Exception:
-        await _abloesung_zuruecknehmen()
-        raise HTTPException(500, "Korrektur konnte nicht angelegt werden — "
-                                 "bitte erneut versuchen (alte Version ist "
-                                 "weiterhin gültig).")
-    return {k: v for k, v in new_doc.items() if k != "_id"}
+    async def _abloesen_und_anlegen(session=None) -> dict:
+        ses = {"session": session} if session is not None else {}
+        abgeloest = await db.pickup_protocols.find_one_and_update(
+            {"id": doc["id"], "status": "final", "superseded": {"$ne": True}},
+            {"$set": {"superseded": True, "superseded_at": now_iso()}}, **ses)
+        if abgeloest is None:
+            raise HTTPException(409, "Korrektur läuft bereits / Version nicht "
+                                     "mehr aktuell")
+        hoechste = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id}, {"_id": 0, "version": 1},
+            sort=[("version", -1)], **ses)
+        neu = dict(new_doc)
+        neu["version"] = max(int((hoechste or {}).get("version") or 1),
+                             int(doc.get("version", 1))) + 1
+        try:
+            await db.pickup_protocols.insert_one(dict(neu), **ses)
+        except DuplicateKeyError:
+            # Unique-Index (appointment_id, version) bzw. "ein aktuelles
+            # Protokoll je Termin": ein paralleler Aufruf hat die Folgeversion
+            # bereits angelegt. (In der Transaktion rollt der Abbruch die
+            # Abloesung selbst zurueck.)
+            if session is None:
+                await _abloesung_zuruecknehmen()
+            raise HTTPException(409, "Korrektur läuft bereits / Version nicht "
+                                     "mehr aktuell")
+        except Exception:
+            if session is not None:
+                raise                       # Abbruch -> Rueckabwicklung, transaktion() entscheidet
+            await _abloesung_zuruecknehmen()
+            raise HTTPException(500, "Korrektur konnte nicht angelegt werden — "
+                                     "bitte erneut versuchen (alte Version ist "
+                                     "weiterhin gültig).")
+        return neu
+
+    neu = await transaktion(_abloesen_und_anlegen)
+    return {k: v for k, v in neu.items() if k != "_id"}
 
 
 @router.post("/driver/appointments/{appt_id}/protocol/finalize")

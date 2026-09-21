@@ -249,6 +249,14 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         betrag = float(betrag) if betrag is not None else None
     except (TypeError, ValueError):
         betrag = None
+    # Pruefbericht 20.09.2026 (S-13): Preisart und Verhandlungsbasis wurden
+    # verworfen — ein Verschenken-Inserat kam als "0 €" in Vergleich und
+    # Beweisdokument, "VB" fehlte ganz. Ein Betrag von 0 ist nie ein Preis.
+    preisart = str(preis.get("price_type") or "").strip().upper()
+    verschenken = preisart in ("GIVE_AWAY", "GIVEAWAY", "FREE", "ZU_VERSCHENKEN")
+    verhandelbar = bool(preis.get("negotiable")) or preisart in ("NEGOTIABLE", "VB")
+    if verschenken or (betrag is not None and betrag <= 0):
+        betrag = None
 
     ort = ad.get("location") if isinstance(ad.get("location"), dict) else {}
     plz = str(ort.get("zip") or "").strip() or None
@@ -352,8 +360,10 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "seller_phone": None,
         "seller_email": None,
         "title": titel,
-        "price_label": (f"{int(betrag):,} €".replace(",", ".")
+        "price_label": ("Zu verschenken" if verschenken
+                        else (f"{int(betrag):,} €".replace(",", ".") + (" VB" if verhandelbar else ""))
                         if betrag is not None else None),
+        "price_negotiable": verhandelbar,
         "location": ortszeile,
         "images": bilder,
         "image_count": len(bilder),

@@ -98,16 +98,19 @@ async def verlaengern(db, name: str, ttl_seconds: int = 3600,
                       token: Optional[str] = None) -> bool:
     """Eigene Sperre verlaengern (Heartbeat eines laufenden Jobs). False, wenn
     sie inzwischen abgelaufen und von einem anderen Prozess uebernommen wurde
-    (oder die Datenbank nicht antwortet) — dann darf der Lauf nicht weiter
-    davon ausgehen, allein zu sein. Mit `token` nur die eigene Instanz."""
-    try:
-        r = await db.job_locks.update_one(
-            _eigene(name, token),
-            {"$set": {"expires_at": datetime.now(timezone.utc)
-                      + timedelta(seconds=ttl_seconds)}})
-        return bool(r.matched_count)
-    except Exception:
-        return False
+    — dann darf der Lauf nicht weiter davon ausgehen, allein zu sein. Mit
+    `token` nur die eigene Instanz.
+
+    Pruefbericht 20.09.2026 (AL-12/AL-15): Eine Datenbank-STOERUNG (Failover,
+    kurzer Aussetzer) wirft jetzt, statt False zu liefern. Vorher beendete
+    schon ein Replikat-Wechsel den Heartbeat und brach Aufraeumen bzw.
+    Migration ab — der Zweig "Stoerung ist kein Beweis" der Aufrufer war
+    toter Code. Nur ein echter Besitzerwechsel zaehlt als Verlust."""
+    r = await db.job_locks.update_one(
+        _eigene(name, token),
+        {"$set": {"expires_at": datetime.now(timezone.utc)
+                  + timedelta(seconds=ttl_seconds)}})
+    return bool(r.matched_count)
 
 
 class SperreVerloren(RuntimeError):

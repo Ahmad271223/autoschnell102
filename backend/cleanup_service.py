@@ -331,8 +331,16 @@ async def _anderer_vorgang_offen(db, dealer_id: str, vehicle_id: str, appt_id: s
          "status": {"$in": list(_VORGANG_OFFEN)}}, limit=1))
 
 
-async def _cleanup_once(db) -> dict:
-    """Ein Durchlauf. Liefert Metriken."""
+def _weiter(wache) -> None:
+    """Pruefbericht 20.09.2026 (AL-12): zwischen den Abschnitten eines langen
+    Laufs nachsehen, ob die Sperre noch uns gehoert (sonst SperreVerloren)."""
+    if wache is not None:
+        wache.pruefen()
+
+
+async def _cleanup_once(db, wache=None) -> dict:
+    """Ein Durchlauf. Liefert Metriken. `wache` (AL-12): die Wache der
+    Job-Sperre — zwischen den Abschnitten wird geprueft, ob sie noch gilt."""
     now = datetime.now(timezone.utc)
     stats = {"checked": 0, "cleaned": 0, "snapshots_deleted": 0, "photos_cleared": 0}
 
@@ -458,6 +466,7 @@ async def _cleanup_once(db) -> dict:
             stats["cleaned"] += 1
 
     # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
+    _weiter(wache)
     stats["berichtsfotos_frist"] = await berichtsfotos_nach_frist_loeschen(db, now, stats)
     stats["berichte_frist"] = await berichte_nach_frist_loeschen(db, now, stats)
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
@@ -468,6 +477,7 @@ async def _cleanup_once(db) -> dict:
     # Reihenfolge (Runde 5): ZUERST fehlende Auto-Datensaetze nachtragen,
     # DANN loeschen — sonst verschwanden Altvertraege beim allerersten
     # Lauf, bevor ihr dauerhafter Datensatz je existierte.
+    _weiter(wache)
     stats["auto_daten_repariert"] = await auto_daten_reparieren(db)
     # Abgebrochene Loeschungen (Grabstein aelter als 10 min) zu Ende bringen
     stats["vertragsloeschungen_wiederaufgenommen"] = \
@@ -479,6 +489,7 @@ async def _cleanup_once(db) -> dict:
     # Pruefung 14.09.2026: liegengebliebene Nacharbeit (C4), gescheiterte
     # Freigabe-Ruecknahmen (C19), Termine ohne aktuelle Protokollversion
     # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
+    _weiter(wache)
     stats["termin_nacharbeit_nachgeholt"] = await termin_nacharbeit_nachholen(db, now)
     stats["vertrags_nacharbeit_nachgeholt"] = await vertrags_nacharbeit_nachholen(db)
     stats["konto_nachlese"] = await konto_nachlese_abarbeiten(db, now)
@@ -496,6 +507,7 @@ async def _cleanup_once(db) -> dict:
         await _requeue_stale(db)
     except Exception:  # noqa: BLE001
         log.exception("Haengende Link-Jobs nicht zurueckgestellt")
+    _weiter(wache)
     stats["fahrernamen_nachgezogen"] = await fahrernamen_nachziehen(db)
     stats["konten_ohne_firma_gesperrt"] = await konten_ohne_firma_sperren(db)
     stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)
@@ -509,6 +521,7 @@ async def _cleanup_once(db) -> dict:
     stats.update(await marktplatz_rotieren(db, now))
     # Runde 12 (15.09.2026): Nachholjobs fuer Abholbericht-Nacharbeit (Nr. 22),
     # Vertrag nach Abholung (Nr. 25) und Frischabgleich ohne Merker (Nr. 29).
+    _weiter(wache)
     stats["abholberichte_nachgeholt"] = await abholberichte_nacharbeit_nachholen(db)
     stats["vertraege_nach_abholung_nachgeholt"] = await vertrag_nach_abholung_nachholen(db)
     stats["vertraege_veraltet_nachgeholt"] = await vertraege_veraltet_nachholen(db)
@@ -2202,7 +2215,7 @@ async def run_cleanup_forever(db):
         async with heartbeat(db, "cleanup-cycle", token,
                              CLEANUP_INTERVAL_SECONDS - 60) as wache:
             schritte = (
-                ("cleanup loop", _cleanup_once),
+                ("cleanup loop", lambda d, _w=wache: _cleanup_once(d, wache=_w)),
                 ("snapshot reaper", _reap_stuck_snapshots),
                 ("snapshot expiry", _expire_old_snapshots),
                 ("beweis expiry", _beweise_verfallen),

@@ -37,7 +37,10 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
   async function kontonummerAusKarte(page) {
     const nr = page.getByTestId("zugangsdaten-kontonummer");
     // Kontonummer (Chef/Sucher/Fahrer) oder Kaeufer-Code (14.09.2026, z. B. 6FE7K2M)
-    await expect(nr).toHaveText(/^(\d+(-\d+)?|[A-HJ-NP-Z2-9]{6,9}|FD-[A-HJ-NP-Z2-9]{8})$/);
+    // 30 s: Die Anlage laeuft mit Passwort-Hashing und Nummernvergabe; auf
+    // einer vollen Test-Datenbank dauerte sie lokal einmal knapp ueber 10 s.
+    await expect(nr).toHaveText(/^(\d+(-\d+)?|[A-HJ-NP-Z2-9]{6,9}|FD-[A-HJ-NP-Z2-9]{8})$/,
+                                { timeout: 30_000 });
     const wert = (await nr.textContent()).trim();
     return wert;
   }
