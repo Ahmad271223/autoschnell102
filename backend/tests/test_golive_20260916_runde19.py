@@ -4,7 +4,8 @@ Auto-Daten — in-process gegen eine Wegwerf-Datenbank (echtes Mongo), keine
 HTTP-Aufrufe.
 
 - Termin-Antworten fuer Sucher ohne Konto-Kennungen; Termin-Detail mit Projektion
-- Entfernen = Uebergabe des ganzen Vorgangs; Besitzerwechsel mit Merker + Nachholen
+- Entfernen = Uebergabe des ganzen Vorgangs; Besitzerwechsel durch den Chef seit
+  21.09.2026 abgeschaltet (R1-01, 410), alte Merker werden weiter nachgeholt
 - Altbestand ohne Besitzer: Verlierer wird Mitbearbeiter
 - Pool-Trimmen: Nachfolger wird nachgetrimmt, geschuetzte Fahrzeuge bleiben
 - Abruf-Lease mit Claim-Token; Link-Jobs schliessen nur den eigenen Claim ab
@@ -110,39 +111,45 @@ def test_entfernen_uebergibt_ganzen_vorgang_an_chef(wegwerf):
     assert run(db.vehicles.find_one({"id": "v1"}))["owner_user_id"] == "chef"
 
 
-def test_besitzerwechsel_merker_nachholen_und_protokollsperre_je_firma(wegwerf):
+def test_besitzerwechsel_abgeschaltet_alte_merker_werden_nachgeholt(wegwerf):
+    """Wunsch Ahmad 21.09.2026 (R1-01): den Besitzerwechsel durch den Chef
+    gibt es nicht mehr (410, nichts wandert, kein neuer Merker). Merker
+    uebergabe_offen aus der Zeit davor (abgebrochene Uebergabe: Fahrzeug schon
+    beim neuen Konto, Vertrag noch beim alten) bringen uebergabe_nachholen und
+    der Stundenlauf weiter zu Ende. Die Protokollsperre je Firma gehoerte nur
+    zum Umhaengen und ist mit ihm entfallen."""
+    from fastapi import HTTPException
     db, run = wegwerf.db, wegwerf.run
     run(db.users.insert_many([{"id": "s1", "dealer_id": "d1", "role": "sucher", "active": True},
                               {"id": "s2", "dealer_id": "d1", "role": "sucher", "active": True}]))
     run(db.vehicles.insert_one({"id": "v1", "dealer_id": "d1", "owner_user_id": "s1", "mitbearbeiter_ids": []}))
     run(db.generated_pdfs.insert_one({"id": "c1", "dealer_id": "d1", "vehicle_id": "v1", "user_id": "s1"}))
-    # Protokoll einer ANDEREN Firma (gleiche Fahrzeug-ID) sperrt nicht mehr
-    run(db.pickup_protocols.insert_one({"id": "p9", "dealer_id": "d2", "vehicle_id": "v1",
-                                        "status": "zur_freigabe", "appointment_id": "tx"}))
-    out = run(B.set_vehicle_owner("v1", B.BesitzerIn(owner_user_id="s2"), dict(CHEF)))
-    assert out["owner_user_id"] == "s2" and out["uebergabe"]["vertraege"] == 1
+    with pytest.raises(HTTPException) as e:
+        run(B.fahrzeug_umhaengen_entfernt("v1", dict(CHEF)))
+    assert e.value.status_code == 410
     v = run(db.vehicles.find_one({"id": "v1"}))
-    assert v["owner_user_id"] == "s2" and "uebergabe_offen" not in v
-    # Abgebrochene Uebergabe (Merker steht, Vertrag noch beim alten Konto): die
-    # Wiederholung mit demselben Ziel holt nach statt "unveraendert" zu melden
-    run(db.generated_pdfs.update_one({"id": "c1"}, {"$set": {"user_id": "s2"}}))
-    run(db.vehicles.update_one({"id": "v1"}, {"$set": {"owner_user_id": "s1",
-                                                      "uebergabe_offen": {"von": "s2", "an": "s1", "seit": _jetzt(-300)}}}))
-    out = run(B.set_vehicle_owner("v1", B.BesitzerIn(owner_user_id="s1"), dict(CHEF)))
-    assert out.get("unveraendert") is True and out["uebergabe"]["vertraege"] == 1
+    assert v["owner_user_id"] == "s1" and "uebergabe_offen" not in v
     assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "s1"
+    # Alter Merker (vor dem 21.09.): Fahrzeug stand schon bei s2, der Vertrag
+    # noch bei s1 — das direkte Nachholen bringt ihn zu Ende und raeumt den Merker.
+    merker = {"von": "s1", "an": "s2", "seit": _jetzt(-300)}
+    run(db.vehicles.update_one({"id": "v1"}, {"$set": {"owner_user_id": "s2", "uebergabe_offen": merker}}))
+    z = run(B.uebergabe_nachholen("d1", "v1", merker))
+    assert z["vertraege"] == 1
+    assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "s2"
     assert "uebergabe_offen" not in run(db.vehicles.find_one({"id": "v1"}))
-    # Aufraeumjob holt liegengebliebene Merker nach
+    assert run(B.uebergabe_nachholen("d1", "v1", None)) == {}
+    assert run(B.uebergabe_nachholen("d1", "v1", {"von": "s1"})) == {}
+    # Aufraeumjob holt liegengebliebene alte Merker nach
+    run(db.generated_pdfs.update_one({"id": "c1"}, {"$set": {"user_id": "s1"}}))
     run(db.vehicles.update_one({"id": "v1"}, {"$set": {"uebergabe_offen": {"von": "s1", "an": "s2", "seit": _jetzt(-300)}}}))
     assert run(CS.uebergaben_nachholen(db, datetime.now(timezone.utc))) == 1
     assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "s2"
-    # eigene Firma mit laufendem Protokoll: Sperre greift
-    run(db.pickup_protocols.insert_one({"id": "p1", "dealer_id": "d1", "vehicle_id": "v1",
-                                        "status": "zur_freigabe", "appointment_id": "t1"}))
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException) as e:
-        run(B.set_vehicle_owner("v1", B.BesitzerIn(owner_user_id="s2"), dict(CHEF)))
-    assert e.value.status_code == 409
+    assert "uebergabe_offen" not in run(db.vehicles.find_one({"id": "v1"}))
+    # Ein frischer Merker (juenger als 2 Minuten) wartet noch
+    run(db.vehicles.update_one({"id": "v1"}, {"$set": {"uebergabe_offen": {"von": "s2", "an": "s1", "seit": _jetzt()}}}))
+    assert run(CS.uebergaben_nachholen(db, datetime.now(timezone.utc))) == 0
+    assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "s2"
 
 
 def test_altbestand_ohne_besitzer_verlierer_wird_mitbearbeiter(wegwerf):

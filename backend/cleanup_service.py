@@ -528,7 +528,9 @@ async def _cleanup_once(db, wache=None) -> dict:
     stats["termine_frisch_abgeglichen"] = await termine_frisch_abgleichen(db, now)
     stats["fahrer_trennungen_nachgeholt"] = await fahrer_trennung_nachholen(db)
     stats["fahrer_verknuepfungen_abgeglichen"] = await fahrer_verknuepfung_abgleichen(db)
-    # Runde 19 (Nr. 6/7): abgebrochene Besitzerwechsel zu Ende bringen
+    # Runde 19 (Nr. 6/7): abgebrochene Besitzerwechsel zu Ende bringen —
+    # seit 21.09.2026 (R1-01) nur noch alte Merker von vor der Abschaltung
+    # des Umhaengens durch den Chef.
     stats["uebergaben_nachgeholt"] = await uebergaben_nachholen(db, now)
     # Runde 14 (15.09.2026): Fahrer-Pseudonym in Berichten nachholen (Nr. 9/10),
     # Termine ohne Vertrag loesen (Nr. 3/4).
@@ -686,6 +688,31 @@ async def vertrag_noch_in_gebrauch(db, contract_id: str, cutoff: str) -> bool:
 
 
 _TERMIN_GESCHLOSSEN = ("abgeholt", "nicht abgeholt", "storniert", "erledigt")
+# Pruefbericht 20.09.2026 (V-12): Endzustaende, in denen ein Kauf NICHT (mehr)
+# als abgeholt gilt (wie routes.appointments.AUSGANG_ZURUECK; dort kein Import
+# auf Modulebene wegen Zyklus) — kein Vertrag "nach Abholung" mehr erzeugen.
+_AUSGANG_ZURUECK = ("storniert", "nicht abgeholt")
+
+
+async def _hinweis_bei_storno_entfernen(db, appt: dict, protokoll_id: Optional[str]) -> bool:
+    """Pruefung 21.09.2026 (V-12): Nach einer Neuerzeugung des Vertrags "nach
+    Abholung" den Termin FRISCH lesen. Hat der Chef ihn inzwischen storniert /
+    auf "nicht abgeholt" gesetzt, lief sein Aufraeumen (ausgang_nachziehen)
+    womoeglich, bevor unser Write den Merker setzte — dann stand dauerhaft
+    "Neuen Vertrag senden" an einem stornierten Termin. Merker und Alarm
+    entfernen (Compare-and-Set auf nach_abholung_protokoll_id). True, wenn der
+    Termin storniert / nicht abgeholt ist."""
+    if not appt.get("contract_id"):
+        return False
+    frisch = await db.appointments.find_one(
+        {"id": appt.get("id")}, {"_id": 0, "status": 1, "dealer_id": 1})
+    if not frisch or (frisch.get("status") or "offen") not in _AUSGANG_ZURUECK:
+        return False
+    from routes.appointments import vertrag_hinweis_aussetzen
+    await vertrag_hinweis_aussetzen(appt.get("id"),
+                                    frisch.get("dealer_id") or appt.get("dealer_id", ""),
+                                    appt["contract_id"], protokoll_id=protokoll_id)
+    return True
 
 
 async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
@@ -878,24 +905,52 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
             from routes.appointments import _vertragszeiger_abgleichen
             await _vertragszeiger_abgleichen(appt.get("dealer_id", ""), appt["id"],
                                              appt.get("contract_id"))
+            # Pruefung 21.09.2026 (V-12): mit dem FRISCHEN Terminstatus
+            # weiterarbeiten — hat der Chef den Termin seit dem Lesen oben
+            # storniert, setzte der alte Status "abgeholt" den Vorgang per
+            # Compare-and-Set wieder auf abgeholt und erzeugte den Vertrag nach
+            # der Abholung neu.
+            frisch = await db.appointments.find_one({"id": appt["id"]}, {"_id": 0})
+            if not frisch:
+                continue
+            appt = frisch
+            status = appt.get("status") or "offen"
             hat_vorgang = await _kv.termin_status_uebernehmen(appt, status)
             # Pruefbericht 20.09.2026 (V-25): Starb der Prozess zwischen dem
             # finalen Protokoll und dem Alarm, fehlte die neue Vertragsfassung
             # (Preis vor Ort, Korrekturen, Schaeden) — und dieser Lauf loeschte
             # den Merker trotzdem. Jetzt wird der Vertragsstand vorher
             # sichergestellt (idempotent); gelingt das nicht, bleibt der Merker.
-            if appt.get("contract_id") and (appt.get("nacharbeit_protokoll_id")
-                                            or status in ("abgeholt", "erledigt")):
+            # Pruefbericht 20.09.2026 (V-12): NICHT fuer einen Termin, den der Chef
+            # nachtraeglich auf "storniert"/"nicht abgeholt" gesetzt hat — sonst
+            # entstand der Vertrag nach Abholung (samt "Neuen Vertrag senden")
+            # fuer einen Kauf, der nicht mehr gilt. Wieder geoeffnete Termine
+            # (Korrektur, Vorgang bleibt abgeholt) holen weiter nach.
+            if appt.get("contract_id") and status not in _AUSGANG_ZURUECK \
+                    and (appt.get("nacharbeit_protokoll_id")
+                         or status in ("abgeholt", "erledigt")):
                 from routes.protocols import vertrag_nach_abholung_sicherstellen
                 p_filter = ({"id": appt["nacharbeit_protokoll_id"]}
                             if appt.get("nacharbeit_protokoll_id")
                             else {"appointment_id": appt["id"], "status": "final",
                                   "superseded": {"$ne": True}})
                 protokoll = await db.pickup_protocols.find_one(p_filter, {"_id": 0})
-                if protokoll and not await vertrag_nach_abholung_sicherstellen(appt, protokoll):
+                gesichert = (not protokoll) or await vertrag_nach_abholung_sicherstellen(
+                    appt, protokoll)
+                if protokoll:
+                    # Pruefung 21.09.2026 (V-12): Storno waehrend der Neuerzeugung
+                    await _hinweis_bei_storno_entfernen(db, appt, protokoll["id"])
+                if not gesichert:
                     log.warning("Termin-Nacharbeit %s: Vertrag nach Abholung weiter offen",
                                 appt["id"])
                     continue
+            if appt.get("ausgang_geaendert") and status in (*_AUSGANG_ZURUECK, "abgeholt", "erledigt"):
+                # Pruefbericht 20.09.2026 (V-12): der Chef hat den Ausgang
+                # nachtraeglich geaendert und ein Folgeschritt (Fahrzeug ohne
+                # Vorgang, Vertragshinweis) scheiterte — idempotent nachholen.
+                # Scheitert es wieder, bleibt der Merker (except unten).
+                from routes.appointments import ausgang_nachziehen
+                await ausgang_nachziehen(appt, appt.get("dealer_id", ""), hat_vorgang=hat_vorgang)
             if hat_vorgang and ((await _kv.fuer_termin(appt)) or {}).get("nacharbeit_offen"):
                 # Phase 2 (2.4, Liste 4 Nr. 2): Fahrzeug-Zusammenfassung scheiterte
                 # (Merker am Vorgang) — Merker am Termin bleibt, naechster Lauf erneut.
@@ -2622,15 +2677,26 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
             p = await db.pickup_protocols.find_one({"id": protokoll_id}, {"_id": 0})
             appt = await db.appointments.find_one({"id": (p or {}).get("appointment_id")}, {"_id": 0}) \
                 if p else None
+            # Pruefbericht 20.09.2026 (V-12): hat der Chef die Abholung
+            # nachtraeglich storniert / auf "nicht abgeholt" gesetzt, wird der
+            # Vertrag NICHT mehr nach der Abholung neu erzeugt (sonst stand
+            # "Neuen Vertrag senden" fuer einen Kauf, der nicht mehr gilt).
             if not p or not appt or p.get("status") != "final" \
-                    or appt.get("contract_id") != contract_id:
+                    or appt.get("contract_id") != contract_id \
+                    or (appt.get("status") or "offen") in _AUSGANG_ZURUECK:
                 await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
                 continue
             korrekturen, neue_schaeden = await protokoll_korrekturen(appt, p)
-            if await vertrag_nach_abholung_aktualisieren(
-                    appt, protokoll_id, p.get("neuer_preis"),
-                    p.get("sondervereinbarung"),
-                    korrekturen=korrekturen, neue_schaeden=neue_schaeden):
+            erneuert = await vertrag_nach_abholung_aktualisieren(
+                appt, protokoll_id, p.get("neuer_preis"),
+                p.get("sondervereinbarung"),
+                korrekturen=korrekturen, neue_schaeden=neue_schaeden)
+            # Pruefung 21.09.2026 (V-12): Die Neuerzeugung dauert Sekunden. Hat
+            # der Chef in dieser Zeit storniert, fand sein Aufraeumen den Merker
+            # noch nicht vor — jetzt frisch lesen und Merker/Alarm entfernen.
+            if await _hinweis_bei_storno_entfernen(db, appt, protokoll_id):
+                continue
+            if erneuert:
                 await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
                 n += 1
         except Exception:  # noqa: BLE001
@@ -2684,7 +2750,9 @@ async def uebergaben_nachholen(db, now: datetime, mindestalter_s: int = 120, lim
     """Runde 19 (16.09.2026, Nr. 6/7): ein Besitzerwechsel schreibt zuerst das
     Fahrzeug (mit Merker uebergabe_offen) und uebertraegt dann Kaufvorgaenge,
     Vertraege und Termine. Bleibt der zweite Schritt liegen (Ausfall), holt
-    ihn dieser Lauf nach — der Merker traegt von/an."""
+    ihn dieser Lauf nach — der Merker traegt von/an. Seit 21.09.2026 (R1-01:
+    der Chef haengt nichts mehr um) entstehen keine neuen Merker; das hier
+    bringt nur alte zu Ende."""
     grenze = (now - timedelta(seconds=mindestalter_s)).isoformat()
     n = 0
     try:

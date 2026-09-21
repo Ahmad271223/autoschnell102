@@ -14,6 +14,10 @@ function MfaKarte() {
   const [code, setCode] = useState("");
   const [codes, setCodes] = useState(null);      // Wiederherstellungscodes (einmalig)
   const [busy, setBusy] = useState(false);
+  // Wunsch Ahmad 21.09.2026 (Pruefbericht AD-06): nur die Notfall-Codes neu
+  // erzeugen — vorher ging das nur ueber Abschalten und Neu-Einrichten.
+  const [neuOffen, setNeuOffen] = useState(false);
+  const [neuCode, setNeuCode] = useState("");
   // Runde 31: Die Codes werden genau einmal gezeigt — ein Neuladen haette den
   // Notzugang des einzigen Super-Admins vernichtet.
   useUngespeichert(Boolean(codes?.length));
@@ -39,8 +43,18 @@ function MfaKarte() {
     const c = window.prompt("Zum Abschalten den aktuellen Code aus der App eingeben:");
     if (!c) return;
     setBusy(true);
-    try { await api.post("/admin/me/mfa/deaktivieren", { code: c }); toast.success("Zwei-Faktor abgeschaltet"); setCodes(null); load(); }
+    try { await api.post("/admin/me/mfa/deaktivieren", { code: c }); toast.success("Zwei-Faktor abgeschaltet"); setCodes(null); setNeuOffen(false); load(); }
     catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+  };
+  const codesNeu = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post("/admin/me/mfa/codes-neu", { code: neuCode.trim() });
+      setCodes(r.data.wiederherstellungscodes || []);
+      setNeuOffen(false); setNeuCode("");
+      toast.success("Neue Notfall-Codes erzeugt — die alten gelten nicht mehr");
+      load();
+    } catch (e) { toast.error(errMsg(e)); setNeuCode(""); } finally { setBusy(false); }
   };
   return (
     <Card className="lg:col-span-2" data-testid="mfa-karte">
@@ -103,9 +117,33 @@ function MfaKarte() {
           </div>
         </div>
       )}
+      {st && st.aktiv && neuOffen && !codes && (
+        <div className="rounded-lg p-3 mb-3" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }} data-testid="mfa-codes-neu-box">
+          <div className="text-[12px] text-zinc-400 mb-1">
+            Neue Notfall-Codes (Wiederherstellungscodes) erzeugen: Die bisherigen Codes gelten danach sofort nicht mehr.
+            Der Eintrag in der Authenticator-App bleibt unverändert.
+          </div>
+          <div className="text-[12px] text-zinc-400 mb-1">Aktuellen 6-stelligen Code aus der App eingeben (nicht den Code vom Anmelden):</div>
+          <div className="flex flex-wrap gap-2">
+            <input value={neuCode} onChange={(e) => setNeuCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code"
+                   placeholder="123456" maxLength={7} data-testid="mfa-codes-neu-code"
+                   onKeyDown={(e) => { if (e.key === "Enter" && !busy && neuCode.replace(/\s/g, "").length === 6) codesNeu(); }}
+                   className="h-9 px-3 rounded-lg bg-transparent border text-sm outline-none w-40" style={{ borderColor: "var(--border-default)" }} />
+            <Button size="sm" onClick={codesNeu} disabled={busy || neuCode.replace(/\s/g, "").length !== 6} data-testid="mfa-codes-neu-bestaetigen">Codes erzeugen</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setNeuOffen(false); setNeuCode(""); }}>Abbrechen</Button>
+          </div>
+        </div>
+      )}
       {st && st.aktiv && (
-        <div className="flex items-center gap-3">
-          <span className="text-[12px] text-zinc-500">aktiv seit {st.aktiviert_am ? new Date(st.aktiviert_am).toLocaleDateString("de-DE") : "—"} · {st.wiederherstellungscodes_uebrig} Wiederherstellungscodes übrig</span>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-[12px] text-zinc-500">
+            aktiv seit {st.aktiviert_am ? new Date(st.aktiviert_am).toLocaleDateString("de-DE") : "—"} · {st.wiederherstellungscodes_uebrig} Wiederherstellungscodes übrig
+            {st.codes_erneuert_am ? ` · neu erzeugt am ${new Date(st.codes_erneuert_am).toLocaleDateString("de-DE")}` : ""}
+          </span>
+          {!codes && !neuOffen && (
+            <Button size="sm" variant="secondary" onClick={() => { setNeuOffen(true); setNeuCode(""); }} disabled={busy}
+                    data-testid="mfa-codes-neu">Neue Notfall-Codes erzeugen</Button>
+          )}
           <Button size="sm" variant="ghost" onClick={deaktivieren} disabled={busy} data-testid="mfa-deaktivieren">Abschalten</Button>
         </div>
       )}

@@ -512,12 +512,14 @@ der Routen (409 „bereits ein offener Abholtermin"), nicht der Index.
 Seit Runde 16 (Beschluss 08.09.2026) sehen **Sucher nur noch ihren eigenen
 Arbeitsbereich**: Fahrzeuge (`vehicles.owner_user_id`), Termine,
 Beweisdokumente, Abholberichte und Protokolle; der Händler-Hauptaccount sieht die
-ganze Firma und hängt Fahrzeuge in der Fahrzeugakte um. Die Migration m4
+ganze Firma. (Fahrzeuge in der Fahrzeugakte umhängen konnte der Chef bis zum
+21.09.2026; seitdem entfallen — Entscheidung Ahmad R1-01: niemandem wird ein
+Fahrzeug, Vertrag oder Termin weggenommen.) Die Migration m4
 (läuft beim ersten Start automatisch, Protokoll in `schema_migrations`)
 ordnet den Altbestand zu: ältester Vertrag → ältester Vergleich →
 Aktivität → ältester Termin → Chef. Fahrzeuge, die sich keinem Konto der
-Firma zuordnen lassen (`stats.offen`), sieht nur der Chef, bis er sie
-zuweist. Ein Sucher, der ein Inserat vergleicht, das ein Kollege bereits
+Firma zuordnen lassen (`stats.offen`), sieht nur der Chef; ein Sucher
+übernimmt sie beim erneuten Vergleich des Links. Ein Sucher, der ein Inserat vergleicht, das ein Kollege bereits
 führt, wird **Mitbearbeiter** (Wunsch 09.09.2026): das Fahrzeug erscheint
 auch in seinem Bereich und er darf einen eigenen Kaufvertrag anlegen.
 Hauptbearbeiter bleibt, wer zuerst verglichen hat.
@@ -1165,11 +1167,13 @@ ab jetzt selbst, sobald `replicaSet=` in der `.env` steht (Nr. 29).
 
 - Jeder Admin/Super-Admin richtet sie selbst ein: **Einstellungen → Zwei-Faktor-Anmeldung → Einrichten**, Geheimnis bzw. `otpauth://`-Link in eine Authenticator-App (Google Authenticator, Aegis, 1Password …) übernehmen, Code eingeben → **8 Wiederherstellungscodes** erscheinen genau einmal — sicher ablegen.
 - Danach fragt die Anmeldung nach dem Passwort zusätzlich den 6-stelligen Code (5 Minuten Zeit, 5 Fehlversuche → 15 Minuten Sperre). Ein Wiederherstellungscode gilt je einmal.
+- **Neue Notfall-Codes** (Codes verbraucht, verlegt oder nie sicher abgelegt): **Einstellungen → Zwei-Faktor-Anmeldung → Neue Notfall-Codes erzeugen**, den aktuellen 6-stelligen Code aus der App eingeben (nicht den Code vom Anmelden, kein Notfall-Code). Es erscheinen 8 neue Codes — **Als Datei speichern**, zusätzlich außer Haus ablegen (USB-Stick, Passwort-Manager, Ausdruck), dann **Codes sicher abgelegt**. Die bisherigen Codes gelten sofort nicht mehr; der Eintrag in der App und die Sitzung bleiben. Kein Abschalten nötig — so entsteht kein Zeitfenster ohne zweiten Faktor. Ein vertippter Code meldet nicht mehr ab; 5 falsche Codes → 15 Minuten Sperre.
 - App verloren: mit einem **Wiederherstellungscode** anmelden und neu einrichten. Es gibt bewusst nur EINEN Super-Admin — ohne Code bleibt nur der Notweg auf dem Server (unten, `mfa_pruefen.py --abschalten --ja`).
 - **Ausgesperrt („Code ungültig“, obwohl er vorher passte):** erst mit einem **Wiederherstellungscode** im Code-Feld anmelden. Sonst auf dem Server prüfen, ob die Uhr der App oder ein fremdes Geheimnis schuld ist:
   `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --code 123456`
   (nur lesend). Notfall ohne Wiederherstellungscode — Zwei-Faktor abschalten, dann **innerhalb von 30 Minuten** mit Benutzername + Passwort anmelden und neu einrichten (danach verlangt die Anmeldung in Produktion wieder den zweiten Faktor, Runde 14):
   `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --abschalten --ja`
+  Die 30 Minuten gelten auch, wenn das Konto gar keine Zwei-Faktor-Daten mehr hat (z. B. in den Einstellungen abgeschaltet und den Tab vor „Einrichten“ verloren) — `MFA_PFLICHT` muss dafür nicht geändert werden.
 - `/api/ready` und der Bereich **Betrieb** zeigen, welche Super-Admin-Konten noch ohne Zwei-Faktor sind — vor dem Go-Live alle einrichten.
 - Sucher/Fahrer/Zwischenhändler sind nicht betroffen (nur Admin-Rollen).
 
@@ -1878,6 +1882,14 @@ Kosten); die echte Anbieterzeit misst nur ein Abruf mit echten Links.
   `vehicles.uebergabe_offen`; eine Wiederholung oder der Stundenlauf (`uebergaben_nachholen`)
   bringt eine abgebrochene Übergabe zu Ende. Die Protokollsperre gilt je Firma und wird nach dem
   Write nochmals geprüft.
+- **Nachtrag 21.09.2026 (Entscheidung Ahmad, R1-01):** Den Besitzerwechsel durch den Chef
+  (Feld „Bearbeiter“ in der Fahrzeugakte, `PUT /vehicles/{id}/besitzer`) gibt es nicht mehr —
+  „man soll nie an dem sein abgeschlossenen Vertrag oder sonstwas wegnehmen“. Die Route
+  antwortet immer 410 und ändert nichts; die Akte zeigt den Bearbeiter nur noch als Text.
+  Fahrzeug, Verträge, Kaufvorgänge und Termine bleiben bei dem, der sie angelegt hat. Den
+  ganzen Vorgang an den Chef übergeben nur noch „Aus meiner Liste entfernen“ (der Sucher selbst)
+  und das Löschen eines Sucher-Kontos durch den Betreiber. Neue Merker
+  `uebergabe_offen` entstehen nicht mehr; `uebergaben_nachholen` bringt nur alte Merker zu Ende.
 - **Fahrzeugpool:** Übergabe an einen Mitbearbeiter trimmt anschließend dessen Pool; während ein
   Vertrag oder Termin entsteht, ist das Fahrzeug fünf Minuten geschützt (`geschuetzt_bis`).
   Altbestand ohne Besitzer: der Verlierer des Wettrennens wird Mitbearbeiter.
@@ -2021,7 +2033,10 @@ alle Quellen (mobile.de, AutoScout, Kleinanzeigen): `ANBIETER_TAGESLIMIT_JE_KONT
 Mitwarten an einem laufenden Abruf und technisch gescheiterte Abrufe (Rückbuchung) kosten nichts.
 Der 401. Abruf bekommt 429 mit klarer Meldung („Tageslimit für neue Links erreicht … morgen
 erneut“), ein Link-Job scheitert sofort ohne weitere Versuche. Firmen- und Gesamtlimit bleiben aus
-(0), die Tageswarnung `ANBIETER_TAGESWARNUNG` bleibt ein Hinweis. Tageswechsel um 0 Uhr UTC
+(0), die Tageswarnung `ANBIETER_TAGESWARNUNG` bleibt ein Hinweis (Compose-Vorgabe seit 21.09.2026
+**5000** statt 500 — bei 1.000–3.240 erwarteten Apify-Abrufen am Tag kam sonst jeden Tag ein
+Alarm samt Betriebsmail; steht in der Server-`.env` noch `ANBIETER_TAGESWARNUNG=500`, gilt der
+alte Wert: `sh deploy/env_setzen.sh ANBIETER_TAGESWARNUNG=5000`). Tageswechsel um 0 Uhr UTC
 (Zähler `provider_budget`, Schlüssel `<Tag>:konto:<user_id>`). Erwartete Menge (Ahmad, 16.09.):
 30 Sucher × 150 Vergleiche × 30 Tage, davon 10 % bekannt, 70 % mobile.de, 10 % AutoScout, 20 %
 Kleinanzeigen — rund 4.500 Vergleiche am Tag; Apify-Plan „Starter“ (32 gleichzeitige Läufe) reicht,
@@ -2034,8 +2049,41 @@ Werte ohne Editor setzen (ersetzt vorhandene Zeilen an Ort und Stelle, hängt fe
 cd /opt/autoschnell && sh deploy/env_setzen.sh MAX_CONCURRENT_MOBILE=16 MAX_CONCURRENT_AUTOSCOUT=16 MAX_CONCURRENT_KLEINANZEIGEN_API=20 LINK_JOB_CONCURRENCY=32 ANBIETER_TAGESLIMIT_JE_KONTO=400
 ```
 
-Danach `sh deploy/rollout.sh` (neuer Stand) oder `docker compose up -d` (nur Werte geändert);
-prüfen mit `docker compose exec backend env | grep -E "MAX_CONCURRENT|LINK_JOB|TAGESLIMIT"`.
+**Rechte der `.env` (21.09.2026):** `env_setzen.sh` schreibt die Datei über eine Zwischendatei neu.
+Bis zum 21.09.2026 war die neue `.env` danach für **jeden Benutzer** auf dem Server lesbar (644)
+— sie enthält aber alle Geheimnisse (Schritt 5 verlangt `chmod 600`). Jetzt entstehen `.env` und
+`.env.bak-<Datum>` nur für den Besitzer lesbar, und jeder Aufruf setzt die `.env` wieder auf
+`600` — auch eine, die ein älterer Aufruf offen hinterlassen hat. Prüfen: `ls -l .env .env.bak-*`
+→ `-rw-------`. **Server mit Stand vor dem 21.09.2026: einmal `chmod 600 .env .env.bak-*`** — dort
+liegt bis zum `git pull` noch das alte `env_setzen.sh` ohne diese Rechte, der erste Aufruf nach
+dieser Anleitung lässt `.env` und Sicherung also noch offen. Ab dem 21.09.2026 setzt auch
+`sh deploy/rollout.sh` nach dem `git pull` jedes Mal `chmod 600 .env .env.bak-*`.
+
+Danach neu starten — **Server für Server, nie beide gleichzeitig** (erst prod2, dann prod1):
+
+- **Neuer Stand aus Git:** `sh deploy/rollout.sh` (wie oben, prod2 mit `ERSTER_SERVER=1`).
+- **Nur Werte geändert, gleicher Stand:** nicht einfach `docker compose up -d` — das startet das
+  Backend neu, während der Load Balancer noch Besucher schickt. Erst aus der Rotation nehmen:
+
+  ```bash
+  cd /opt/autoschnell
+  grep -q '^COMPOSE_FILE=' .env || export COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml
+  touch deploy/drain/aktiv     # Load Balancer nimmt den Server heraus
+  sleep 60                     # bis er es gemerkt hat
+  docker compose up -d         # Container mit den neuen Werten neu erzeugen
+  sh deploy/freigeben.sh       # prueft /api/ready und die Startseite, erst dann zurueck
+  ```
+
+  Die `grep`-Zeile setzt `COMPOSE_FILE` nur, wenn die `.env` es nicht schon vorgibt — ohne den
+  Eintrag startet der Stack sonst ohne die Replica-Set-Einstellungen (Vorfall 07.09.2026, das
+  Mitglied fällt aus `rs0`; `rollout.sh`/`freigeben.sh` setzen das selbst).
+  Erwartet: „Drain aufgehoben — der Load Balancer nimmt … in ca. 45 s wieder auf.“ Meldet
+  `freigeben.sh` „Backend meldet sich nicht bereit“, ist das Backend meist nur noch beim Start:
+  30 s warten und `sh deploy/freigeben.sh` erneut aufrufen — bis dahin bleibt der Server sicher
+  im Drain, der andere trägt die Last. Danach 60 s warten, dann derselbe Ablauf auf dem anderen
+  Server.
+
+Prüfen mit `docker compose exec backend env | grep -E "MAX_CONCURRENT|LINK_JOB|TAGESLIMIT"`.
 
 ### Versand, Kundenfassung und Abrufe seit Runde 16 (15.09.2026)
 
@@ -2690,9 +2738,65 @@ Setzen auf beiden Servern:
 sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=ahmadfkh006@gmail.com
 ```
 
+Genau **eine** Adresse, ohne Leerzeichen und ohne Anführungszeichen. `env_setzen.sh` lässt die
+`.env` dabei nur für root lesbar (`chmod 600`) — aber erst in der Fassung ab dem 21.09.2026.
+**Server mit Stand vor dem 21.09.2026: danach einmal `chmod 600 .env .env.bak-*`** — bis zum
+`git pull` liegt dort noch das alte Skript, und das hinterlässt `.env` und Sicherung für jeden
+Benutzer lesbar. Ab dem nächsten `sh deploy/rollout.sh` erledigt das der Rollout nach dem Pull
+selbst. Die Adresse wirkt erst nach einem **Neustart des Backends**:
+der Meldedienst startet nur, wenn sie beim Start schon da ist. Also zusammen mit dem nächsten
+`sh deploy/rollout.sh` (prod2 mit `ERSTER_SERVER=1`, dann prod1) — oder, wenn sich nur der Wert
+ändert, Server für Server über den Drain (Einzelheiten unter „Tageslimit je Konto und Werte in
+der .env setzen“):
+
+```bash
+cd /opt/autoschnell
+grep -q '^COMPOSE_FILE=' .env || export COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.replica.yml
+touch deploy/drain/aktiv
+sleep 60
+docker compose up -d
+sh deploy/freigeben.sh     # "Drain aufgehoben ..."; meldet es "nicht bereit": 30 s warten, erneut
+```
+
+Die `grep`-Zeile nicht weglassen: fehlt `COMPOSE_FILE` in der `.env`, erzeugt
+`docker compose up -d` mongo und backend ohne die Replica-Set-Ergänzung neu — das Mitglied fällt
+aus `rs0`, `freigeben.sh` wartet vergeblich auf `/api/ready` (Vorfall 07.09.2026).
+Erst danach, nach weiteren 60 s, der andere Server. Nie beide gleichzeitig.
+
+**Prüfen per Knopf (21.09.2026):** Admin → Betrieb zeigt „Meldungen gehen an: <adresse>“ —
+ist `BETRIEB_MELDUNG_AN` leer, steht dort weiter der gelbe Hinweis „Alarme werden an niemanden
+per E-Mail gemeldet …“. Daneben schickt **„Testmail senden“** sofort eine kurze Probe-Mail über
+denselben Weg wie Alarme und Tagesbericht (`POST /api/admin/betrieb/testmail`, nur Super-Admin,
+höchstens eine je Minute und Prozess). Man muss also nicht mehr auf den Tagesbericht um 8 Uhr
+warten. Antworten:
+
+| Meldung | Bedeutung |
+|---|---|
+| „Testmail an … verschickt“ | Anbieter hat angenommen — Posteingang und Spam-Ordner ansehen |
+| 400 „Keine Adresse eingetragen (BETRIEB_MELDUNG_AN)“ | Wert fehlt auf diesem Server (oder Backend nicht neu gestartet) |
+| 400 „… keine gültige E-Mail-Adresse …“ | mehrere Adressen, Leerzeichen oder Anführungszeichen im Wert |
+| 503 „E-Mail-Versand ist nicht eingerichtet …“ | `RESEND_API_KEY` bzw. `SMTP_*` fehlt — dann kommen auch keine Alarme |
+| rot „Testmail an … nicht zugestellt: …“ | der Anbieter hat abgelehnt; der Grund steht dabei (z. B. Absender-Domain bei Resend nicht verifiziert) |
+| rot „Der Mail-Anbieter hat nicht innerhalb von 45 s geantwortet …“ | Ausgang unklar — die Mail kann noch ankommen; Posteingang ansehen, Server-Protokoll prüfen |
+| 429 „Höchstens eine Testmail pro Minute …“ | kurz warten |
+
+Die beiden roten Meldungen kommen seit der Prüfung vom 21.09.2026 als Antwort **200** mit
+`{"ok": false, "grund": "…"}` — nicht mehr als 502. Cloudflare ersetzt 502/504 vom Server durch
+eine eigene Fehlerseite; im Browser stand dann nur „Request failed with status code 502“ und der
+Grund fehlte. Der Versand ist auf 45 s begrenzt (vorher bis zu ~3 Minuten bei einem nicht
+erreichbaren Resend — länger, als Browser und Cloudflare warten).
+
+Im Testbetrieb (`MOCK_PROVIDER_FETCH=true`) geht keine Mail hinaus; die Seite meldet dann
+„Testmodus“. Der Load Balancer verteilt die Klicks auf beide Server — ein paarmal
+„Aktualisieren“ klicken und prüfen, dass beide dieselbe Adresse zeigen.
+
 **Warum es nicht achtmal kommt:** zwei Server mit je vier Prozessen. Jede Runde laeuft
 unter einer Job-Sperre, der Tagesbericht unter einer Tagessperre (20 h) wie die
-Sicherung. Jeder gemeldete Alarm bekommt `gemeldet_am` — scheitert der Versand,
+Sicherung. **Scheitert der Tagesbericht** (21.09.2026), wird seine Tagessperre auf
+45 Minuten verkuerzt: hoechstens vier Versuche am Tag, jeder mit eigenem
+Idempotency-Key — vorher kam der naechste Versuch erst am folgenden Morgen. Nach einem
+erfolgreichen Versand bleibt es bei genau einem Bericht je Tag.
+Jeder gemeldete Alarm bekommt `gemeldet_am` — scheitert der Versand,
 bleibt die Markierung aus und die naechste Runde versucht es erneut. Ein bereits
 gemeldeter Alarm meldet sich **nicht** noch einmal, auch wenn er oefter auftritt
 (`betrieb.alarm` zaehlt dann nur `anzahl` hoch).
@@ -2703,7 +2807,9 @@ wenn keine Adresse gesetzt ist — der Server waere aus dem Lastverteiler geflog
 weil niemand Meldungen haben will. Jetzt zweifach abgesichert: `server.py` startet den
 Dienst ohne Adresse gar nicht erst, und die Schleife beendet sich auch dann nicht.
 
-Waechter: `backend/tests/test_betriebsmeldung_20260920.py` (30 Tests).
+Waechter: `backend/tests/test_betriebsmeldung_20260920.py` (30 Tests),
+`backend/tests/test_betrieb_testmail_20260921.py` (Testmail, Wiederholung des
+Tagesberichts, Rechte der `.env`).
 
 ---
 

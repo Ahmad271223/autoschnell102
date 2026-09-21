@@ -265,13 +265,16 @@ async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_fi
     if not chef_id:
         raise HTTPException(409, "Firma ohne Hauptaccount — bitte den Betreiber informieren")
     if war_besitzer:
-        filt["owner_user_id"] = user["id"]          # CAS wie bei /besitzer
+        filt["owner_user_id"] = user["id"]          # CAS auf den gelesenen Besitzer
         upd["$set"].update({"owner_user_id": chef_id, "entfernt_von_sucher": user["id"],
                             "entfernt_von_sucher_am": now_iso()})
         neuer_besitzer = chef_id
     res = await db.vehicles.update_one(filt, upd)
     if res.matched_count == 0:
-        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehängt — bitte neu laden")
+        # Wunsch Ahmad 21.09.2026 (R1-01): der Chef haengt nichts mehr um —
+        # der Besitzer kann sich nur noch durch die Pool-Begrenzung oder ein
+        # paralleles Entfernen geaendert haben.
+        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich geändert — bitte neu laden")
     uebergabe = await vorgang_uebergeben(user["dealer_id"], vehicle_id, user["id"], chef_id)
     await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.sucher.entfernt",
                               ref=vehicle_id, meta={"an_chef": war_besitzer,
@@ -395,7 +398,8 @@ BESTAND_MAX = 500
 #     im Grabstein; Verschicken setzt Speichern voraus), oder
 #   * SEIN Kauf abgeholt wurde (Kaufvorgang "abgeholt" — haelt das Auto auch,
 #     wenn der Vertrag danach geloescht wird), oder
-#   * es von Hand angelegt ist UND ihm gehoert (vom Chef zugewiesen).
+#   * es von Hand angelegt ist UND ihm gehoert (Altdaten: vor dem
+#     21.09.2026 vom Chef zugewiesen — das Umhaengen ist seitdem entfallen).
 # Besitz allein reicht nicht: Besitzer wird schon, wer ein Inserat als Erster
 # VERGLEICHT — sonst stuende das Auto, das ein Kollege gekauft hat, auch bei
 # ihm im Bestand.
@@ -657,29 +661,21 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         except (ValueError, TypeError):
             pass
 
-    # Runde 16: Besitzer sichtbar; der Chef bekommt die Konten der Firma
-    # zum Umhaengen (PUT /vehicles/{id}/besitzer) gleich mit.
+    # Runde 16: Besitzer sichtbar (nur der Chef).
+    # Wunsch Ahmad 21.09.2026 (R1-01): "man soll nie an dem sein abgeschlossenen
+    # Vertrag oder sonstwas wegnehmen" — das Umhaengen per Auswahlfeld ist
+    # entfallen. Die Akte liefert deshalb keine Liste zuweisbarer Konten
+    # (zuweisbar/zuweisbar_an) mehr, nur noch den Bearbeiter zum Anzeigen;
+    # "hauptaccount" ersetzt die Rolle aus der frueheren Auswahlliste.
     owner = None
-    zuweisbar_an = []
-    if not ist_sucher:
-        namen = await besitzer_namen(user["dealer_id"], [v.get("owner_user_id")])
-        if v.get("owner_user_id"):
-            owner = {"id": v["owner_user_id"],
-                     "name": namen.get(v["owner_user_id"]) or "unbekanntes Konto"}
-        # Audit 13.09.2026 (#54): ohne 1000er-Grenze — wegen der aufsteigenden
-        # Sortierung fehlten sonst gerade die neuesten Konten im Auswahlfeld.
-        # Kleine Projektion, auch fuer einige Tausend Konten unkritisch.
-        konten = await db.users.find(
-            {"dealer_id": user["dealer_id"], "role": {"$in": ["dealer", "sucher"]},
-             "active": {"$ne": False}},
-            {"_id": 0, "id": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1}
-        ).sort("created_at", 1).to_list(None)
-        for u in konten:
-            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip()
-            if not name:
-                name = ("Händler-Hauptaccount" if u.get("role") == "dealer"
-                        else (u.get("email") or u["id"]))
-            zuweisbar_an.append({"id": u["id"], "name": name, "role": u.get("role")})
+    if not ist_sucher and v.get("owner_user_id"):
+        namen = await besitzer_namen(user["dealer_id"], [v["owner_user_id"]])
+        konto = await db.users.find_one(
+            {"id": v["owner_user_id"], "dealer_id": user["dealer_id"]},
+            {"_id": 0, "role": 1})
+        owner = {"id": v["owner_user_id"],
+                 "name": namen.get(v["owner_user_id"]) or "unbekanntes Konto",
+                 "hauptaccount": (konto or {}).get("role") == "dealer"}
     # Runde 29: Wer sonst noch an diesem Auto arbeitet, geht einen Sucher
     # nichts an (Regel Ahmad: Konten nicht vermischen). Nur der Chef sieht
     # die Mitbearbeiter — fuer Sucher gar keine Namensabfrage.
@@ -730,8 +726,6 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "mitbearbeiter": [] if ist_sucher else [
             {"id": m, "name": mit_namen.get(m, m)}
             for m in (v.get("mitbearbeiter_ids") or [])],
-        "zuweisbar": not ist_sucher,
-        "zuweisbar_an": zuweisbar_an,
         "retention_days_left": retention_days_left,
         "contracts": contracts,
         "contracts_gesamt": contracts_gesamt,
@@ -868,13 +862,6 @@ async def create_manual_vehicle(body: ManualVehicleIn,
     return clean_doc(doc)
 
 
-class BesitzerIn(BaseModel):
-    owner_user_id: str = Field(min_length=1, max_length=100)
-
-
-_PROTOKOLL_LAEUFT = ("zur_freigabe", "freigegeben", "wird_abgeschlossen")
-
-
 async def vorgang_uebergeben(dealer_id: str, vehicle_id, von, an: str) -> dict:
     """Runde 13 (15.09.2026, Liste 3 Nr. 1-8/20 und Liste 4 Nr. 1/2): Eine
     Uebergabe ist der GANZE Vorgang, nicht nur das Fahrzeug — Kaufvorgaenge,
@@ -882,7 +869,15 @@ async def vorgang_uebergeben(dealer_id: str, vehicle_id, von, an: str) -> dict:
     (vehicle_id None: zu allen Fahrzeugen, Sucher-Loeschung) gehen an das
     neue Konto. Sonst sah der alte Sucher weiter Termine mit Verkaeuferdaten,
     und der neue bekam das Fahrzeug ohne den laufenden Abholprozess.
-    Der Herkunftsvermerk (uebergeben_von) bleibt fuer die Historie."""
+    Der Herkunftsvermerk (uebergeben_von) bleibt fuer die Historie.
+
+    Wunsch Ahmad 21.09.2026 (R1-01): der Chef nimmt einem Sucher nichts mehr
+    weg (PUT /vehicles/{id}/besitzer ist abgeschaltet). Aufrufer sind nur
+    noch Wege, bei denen der Vorgang an den Chef geht: der Sucher entfernt
+    ein Fahrzeug selbst aus SEINER Liste (vehicle_fuer_sucher_entfernen),
+    der Betreiber loescht ein Sucher-Konto (routes/admin.py admin_delete_user,
+    mit Nachlese in cleanup_service),
+    und das Nachholen alter, abgebrochener Uebergaben (uebergabe_nachholen)."""
     if not von or von == an:
         return {}
     jetzt = now_iso()
@@ -909,7 +904,13 @@ async def vorgang_uebergeben(dealer_id: str, vehicle_id, von, an: str) -> dict:
 async def uebergabe_nachholen(dealer_id: str, vehicle_id: str, merker) -> dict:
     """Runde 19 (Nr. 6/7): einen nach dem Fahrzeug-Write abgebrochenen
     Besitzerwechsel zu Ende bringen (Kaufvorgaenge, Vertraege, Termine) und
-    den Merker entfernen. Idempotent; liefert die Zaehler oder {}."""
+    den Merker entfernen. Idempotent; liefert die Zaehler oder {}.
+
+    Wunsch Ahmad 21.09.2026 (R1-01): den Merker uebergabe_offen schrieb nur
+    das abgeschaltete Umhaengen durch den Chef. Neue Merker entstehen nicht
+    mehr; der Stundenlauf (cleanup_service.uebergaben_nachholen) bringt nur
+    noch Merker aus der Zeit davor zu Ende — dort steht das Fahrzeug schon
+    beim neuen Konto, ohne Nachholen blieben Vertrag und Termin getrennt."""
     if not isinstance(merker, dict) or not merker.get("von") or not merker.get("an"):
         return {}
     z = await vorgang_uebergeben(dealer_id, vehicle_id, merker["von"], merker["an"])
@@ -919,89 +920,31 @@ async def uebergabe_nachholen(dealer_id: str, vehicle_id: str, merker) -> dict:
     return z
 
 
-@router.put("/vehicles/{vehicle_id}/besitzer")
-async def set_vehicle_owner(vehicle_id: str, body: BesitzerIn,
-                            user=Depends(current_haendler)):
-    """Runde 16: der Chef haengt ein Fahrzeug einem anderen Konto der Firma
-    um (Sucher-Wechsel, Krankheit, Kollege hat es zuerst verglichen).
-    Runde 13 (15.09.2026): mit dem Fahrzeug gehen Kaufvorgaenge, Vertraege
-    und Termine des bisherigen Bearbeiters zu diesem Fahrzeug an das neue
-    Konto (vorgang_uebergeben) — Termine, Berichte, Protokolle und Snapshots
-    folgen damit wirklich; der bisherige Bearbeiter verliert den Zugriff."""
-    # Audit 13.09.2026 (#9): "id" mitprojizieren — ohne owner_user_id kam
-    # sonst {} zurueck, galt als "nicht gefunden" (404), und Altbestand ohne
-    # Besitzer liess sich nie zuweisen.
-    v = await db.vehicles.find_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "id": 1, "owner_user_id": 1, "uebergabe_offen": 1})
-    if not v:
-        raise HTTPException(404, "Fahrzeug nicht gefunden")
-    ziel = await db.users.find_one(
-        {"id": body.owner_user_id, "dealer_id": user["dealer_id"],
-         "role": {"$in": ["dealer", "sucher"]},
-         "loeschung.status": {"$ne": "laeuft"}},      # Runde 13 (Nr. 17)
-        {"_id": 0, "id": 1, "active": 1})
-    if not ziel or ziel.get("active") is False:
-        raise HTTPException(404, "Konto nicht gefunden oder nicht in deiner Firma")
-    alt = v.get("owner_user_id")
-    namen = await besitzer_namen(user["dealer_id"], [ziel["id"]])
-    if alt == ziel["id"]:
-        # Runde 19 (Nr. 6/7): brach eine fruehere Uebergabe nach dem Fahrzeug-
-        # Write ab (Merker uebergabe_offen), holt die Wiederholung den Rest
-        # nach, statt "unveraendert" zu melden.
-        uebergabe = await uebergabe_nachholen(user["dealer_id"], vehicle_id, v.get("uebergabe_offen"))
-        return {"ok": True, "owner_user_id": ziel["id"],
-                "owner_name": namen.get(ziel["id"]), "unveraendert": True,
-                **({"uebergabe": uebergabe} if uebergabe else {})}
-    # Der neue Hauptbearbeiter ist nicht zugleich Mitbearbeiter; andere
-    # Mitbearbeiter (haben das Inserat selbst verglichen) bleiben.
-    # Audit 13.09.2026 (#9): CAS auf den gelesenen Besitzer — bei zwei
-    # parallelen Umhaengungen stand sonst ein falsches "von" im Audit. Ist
-    # alt None, trifft der Filter auch das fehlende Feld (Altbestand).
-    # Abgeschlossene Fahrzeuge bleiben bewusst umhaengbar (Sucher-Wechsel,
-    # Loeschen eines Suchers durch den Betreiber) — Einfrieren waere eine
-    # Produktentscheidung.
-    # Runde 13 (Nr. 19): waehrend ein Fahrerprotokoll zu diesem Fahrzeug beim
-    # Chef liegt, freigegeben ist oder gerade abgeschlossen wird, keine
-    # Uebergabe — sonst wechseln Rechte mitten im Abschluss.
-    # Runde 19 (Nr. 8): die Protokollsperre gilt je Firma — Fahrzeug-IDs sind
-    # firmenuebergreifend gleich (v_<Anzeige>).
-    protokoll_filter = {"vehicle_id": vehicle_id,
-                        "$or": [{"dealer_id": user["dealer_id"]}, {"dealer_id": {"$exists": False}}],
-                        "superseded": {"$ne": True},
-                        "status": {"$in": list(_PROTOKOLL_LAEUFT)}}
-    if await db.pickup_protocols.count_documents(protokoll_filter, limit=1):
-        raise HTTPException(409, "Zu diesem Fahrzeug liegt gerade ein Abholprotokoll zur "
-                                 "Freigabe bzw. im Abschluss — bitte erst abschließen, "
-                                 "dann übergeben.")
-    merker = {"von": alt, "an": ziel["id"], "seit": now_iso()}
-    res = await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": alt},
-        {"$set": {"owner_user_id": ziel["id"], "updated_at": now_iso(),
-                  "uebergabe_offen": merker},
-         "$pull": {"mitbearbeiter_ids": ziel["id"]}})
-    if res.matched_count == 0:
-        raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich umgehaengt — "
-                                 "bitte neu laden")
-    # Runde 19 (Nr. 9): zwischen Pruefung und Write kann ein Fahrer ein Protokoll
-    # zur Freigabe geschickt haben — dann den Wechsel zuruecknehmen.
-    if await db.pickup_protocols.count_documents(protokoll_filter, limit=1):
-        await db.vehicles.update_one(
-            {"id": vehicle_id, "dealer_id": user["dealer_id"], "owner_user_id": ziel["id"],
-             "uebergabe_offen.seit": merker["seit"]},
-            {"$set": {"owner_user_id": alt, "updated_at": now_iso()},
-             "$unset": {"uebergabe_offen": ""}})
-        raise HTTPException(409, "Zu diesem Fahrzeug ist gerade ein Abholprotokoll zur "
-                                 "Freigabe eingegangen — bitte erst abschließen, dann übergeben.")
-    uebergabe = await vorgang_uebergeben(user["dealer_id"], vehicle_id, alt, ziel["id"])
-    await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"], "uebergabe_offen.seit": merker["seit"]},
-        {"$unset": {"uebergabe_offen": ""}})
-    await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.zugewiesen",
-                              ref=vehicle_id, meta={"von": alt, "nach": ziel["id"],
-                                                    **({"uebergabe": uebergabe} if uebergabe else {})})
-    return {"ok": True, "owner_user_id": ziel["id"], "owner_name": namen.get(ziel["id"]),
-            "uebergabe": uebergabe}
+# Wunsch Ahmad 21.09.2026 (R1-01), woertlich: "nein das soll entfernt werden
+# man soll nie an dem sein abgeschlossenen Vertrag oder sonstwas wegnehmen".
+# Bis dahin konnte der Chef in der Fahrzeugakte ("Bearbeiter") ein Fahrzeug
+# einem anderen Konto umhaengen; mit dem Fahrzeug gingen Vertraege,
+# Kaufvorgaenge und Termine des bisherigen Suchers an das neue Konto
+# (vorgang_uebergeben). Das gibt es nicht mehr: Fahrzeug, Vertraege, Vorgaenge
+# und Termine bleiben bei dem, der sie angelegt hat. Die Route bleibt nur
+# stehen, damit alte Oberflaechen/Skripte eine klare Antwort bekommen (410
+# statt eines stillen 404/405). Die Rollenpruefung bleibt davor: ohne
+# Anmeldung 401, Sucher 403, erst der Chef sieht die 410.
+# Weiter erlaubt (kein "Wegnehmen" durch den Chef): der Sucher entfernt ein
+# Fahrzeug selbst aus seiner Liste, der Betreiber loescht ein Sucher-Konto,
+# und die automatische Pool-Begrenzung (fahrzeugpool.py).
+UMHAENGEN_ENTFERNT = ("Fahrzeuge umhängen gibt es nicht mehr (Entscheidung 21.09.2026): "
+                      "Fahrzeug, Verträge, Vorgänge und Termine bleiben immer bei dem, "
+                      "der sie angelegt hat.")
+
+
+@router.put("/vehicles/{vehicle_id}/besitzer", deprecated=True)
+async def fahrzeug_umhaengen_entfernt(vehicle_id: str, user=Depends(current_haendler)):
+    """Abgeschaltet (Wunsch Ahmad 21.09.2026, R1-01): antwortet immer 410 und
+    aendert nichts — kein Fahrzeug, kein Vertrag, kein Vorgang, kein Termin.
+    Bewusst ohne Body-Modell: sonst bekaeme ein alter Client mit leerem oder
+    kaputtem Body 422 statt der klaren Meldung."""
+    raise HTTPException(410, UMHAENGEN_ENTFERNT)
 
 
 @router.put("/vehicles/manual/{vehicle_id}")

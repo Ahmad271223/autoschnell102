@@ -19,6 +19,7 @@ import os
 import secrets
 import struct
 import time
+import unicodedata
 from typing import List, Optional, Tuple
 from urllib.parse import quote
 
@@ -81,12 +82,41 @@ def totp(secret: str, zaehler: Optional[int] = None) -> str:
     return str(code).zfill(STELLEN)
 
 
+def code_normalisieren(code: str) -> str:
+    """Leerraum entfernen und Ziffern anderer Schriften in ASCII-Ziffern
+    umsetzen (arabisch-indisch, vollbreit, Devanagari ... — alles mit
+    Unicode-Kategorie "Nd").
+
+    Pruefung 21.09.2026 (MFA): '١٢٣٤٥٦' oder '１２３４５６' bestanden
+    isdigit(), hmac.compare_digest warf dann bei Nicht-ASCII einen TypeError
+    -> 500 statt "Code ungueltig". Solche Tastaturen (iOS "Arabisch-Indisch",
+    arabische Android-/Windows-Tastatur) funktionieren jetzt; alle anderen
+    Zeichen (z. B. hochgestellte Ziffern) bleiben stehen und fallen bei
+    code_format_ok() durch."""
+    aus = []
+    for c in (code or ""):
+        if c.isspace():
+            continue
+        if not c.isascii():
+            d = unicodedata.decimal(c, None)
+            if d is not None:
+                c = str(d)
+        aus.append(c)
+    return "".join(aus)
+
+
+def code_format_ok(code: str) -> bool:
+    """Genau STELLEN ASCII-Ziffern (nach code_normalisieren)."""
+    return len(code) == STELLEN and code.isascii() and code.isdigit()
+
+
 def code_pruefen(secret: str, code: str, letzter_zaehler: int = -1,
                  toleranz: int = 1) -> Optional[int]:
     """Gibt den passenden Zaehler zurueck (oder None). Zaehler <= letzter
-    gelten als bereits benutzt (Replay-Schutz)."""
-    code = (code or "").strip().replace(" ", "")
-    if not code.isdigit() or len(code) != STELLEN:
+    gelten als bereits benutzt (Replay-Schutz). Wirft nie wegen der Eingabe:
+    nur ASCII-Ziffern erreichen hmac.compare_digest (Pruefung 21.09.2026)."""
+    code = code_normalisieren(code)
+    if not code_format_ok(code):
         return None
     jetzt = int(time.time() // SCHRITT)
     for delta in range(-toleranz, toleranz + 1):

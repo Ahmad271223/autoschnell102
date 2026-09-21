@@ -8,7 +8,9 @@
 - falscher Code 401, richtiger Code -> Sitzung; derselbe Code kein 2. Mal
 - Wiederherstellungscode funktioniert genau einmal
 - 5 Fehlversuche -> 15 Minuten Sperre
-- Abschalten nur mit Code; Super-Admin kann 2FA eines Admins zuruecksetzen;
+- Notfall-Codes neu erzeugen ohne Abschalten (AD-06, 21.09.2026)
+- Ziffern anderer Schriften fuehren nie zu 500 (Pruefung 21.09.2026)
+- Abschalten nur mit Code (falscher Code 400, nicht 401); Super-Admin kann 2FA eines Admins zuruecksetzen;
   Geheimnisse tauchen in keiner API-Antwort auf
 
 Braucht laufendes Backend (TEST_BASE_URL) + Mongo.
@@ -209,10 +211,56 @@ def test_04_fehlversuche_sperren(welt):
     welt["S"] = _hdr(r.json()["token"])
 
 
+def test_04b_notfall_codes_neu_ohne_abschalten(welt):
+    """Wunsch Ahmad 21.09.2026 (Pruefbericht AD-06): nur die Notfall-Codes
+    neu erzeugen — mit aktuellem App-Code, Schluessel und Sitzung bleiben,
+    die alten Codes gelten sofort nicht mehr."""
+    S = welt["S"]
+    r = requests.post(f"{API}/admin/me/mfa/codes-neu", headers=S, json={"code": "000000"}, timeout=30)
+    assert r.status_code == 400, r.text[:200]            # nie 401 (Abmeldung)
+    r = requests.post(f"{API}/admin/me/mfa/codes-neu", headers=S,
+                      json={"code": _frischer_code(welt["secret"], welt["super_id"])}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    neu = r.json()["wiederherstellungscodes"]
+    assert len(neu) == 8 and all("-" in c for c in neu)
+    st = requests.get(f"{API}/admin/me/mfa", headers=S, timeout=30).json()
+    assert st["aktiv"] is True and st["wiederherstellungscodes_uebrig"] == 8
+    # alter (noch unbenutzter) Code gilt nicht mehr, ein neuer schon
+    zt = _login(f"mfa_super_{SUF}@{MAIL}").json()["mfa_token"]
+    r = requests.post(f"{API}/auth/login/mfa", json={"mfa_token": zt, "code": welt["codes"][1]}, timeout=30)
+    assert r.status_code == 401, r.text[:200]
+    r = requests.post(f"{API}/auth/login/mfa", json={"mfa_token": zt, "code": neu[0]}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    welt["S"] = _hdr(r.json()["token"])
+    welt["codes"] = neu[1:]
+
+
+def test_04c_ziffern_anderer_schriften_nie_500(welt):
+    """Pruefung 21.09.2026 (MFA): '١٢٣٤٥٦' / '１２３４５６' bestanden isdigit(),
+    hmac.compare_digest warf dann -> 500. Jetzt werden sie in ASCII umgesetzt
+    (arabisch-indische Tastatur funktioniert), alles andere ist 400/401."""
+    S = welt["S"]
+    # nicht umsetzbar (hochgestellt): 400 mit Hinweis statt 500
+    r = requests.post(f"{API}/admin/me/mfa/codes-neu", headers=S, json={"code": "¹²³⁴⁵⁶"}, timeout=30)
+    assert r.status_code == 400 and "6-stelligen Code" in r.json().get("detail", ""), r.text[:200]
+    zt = _login(f"mfa_super_{SUF}@{MAIL}").json()["mfa_token"]
+    r = requests.post(f"{API}/auth/login/mfa", json={"mfa_token": zt, "code": "¹²³⁴⁵⁶"}, timeout=30)
+    assert r.status_code == 401, r.text[:200]
+    # richtiger Code mit arabisch-indischen Ziffern meldet an
+    code = _frischer_code(welt["secret"], welt["super_id"])
+    arabisch = "".join(chr(0x0660 + int(c)) for c in code)
+    r = requests.post(f"{API}/auth/login/mfa", json={"mfa_token": zt, "code": arabisch}, timeout=30)
+    assert r.status_code == 200 and r.json().get("token"), r.text[:200]
+    welt["S"] = _hdr(r.json()["token"])
+
+
 def test_05_abschalten_nur_mit_code_und_zuruecksetzen(welt):
     import mfa
     S = welt["S"]
-    assert requests.post(f"{API}/admin/me/mfa/deaktivieren", headers=S, json={"code": "000000"}, timeout=30).status_code == 401
+    # Wunsch Ahmad 21.09.2026 (AD-06): falscher Code -> 400, nicht 401 — die
+    # Oberflaeche meldet bei jeder 401 ab. Die Sitzung bleibt gueltig.
+    assert requests.post(f"{API}/admin/me/mfa/deaktivieren", headers=S, json={"code": "000000"}, timeout=30).status_code == 400
+    assert requests.get(f"{API}/admin/me/mfa", headers=S, timeout=30).status_code == 200
     # Normaler Admin richtet 2FA ein, Super-Admin setzt sie zurueck (Aussperrung)
     A = welt["A"]
     sec = requests.post(f"{API}/admin/me/mfa/einrichten", headers=A, timeout=30).json()["secret"]

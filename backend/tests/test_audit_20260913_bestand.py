@@ -4,13 +4,15 @@
 
    7  apply-deviations: Write mit Lifecycle-CAS, nur geaenderte data-Felder
    8  PUT /vehicles/manual/{id}: Write mit Lifecycle-CAS
-   9  PUT /vehicles/{id}/besitzer: CAS auf den gelesenen Besitzer
+   9  PUT /vehicles/{id}/besitzer: frueher CAS auf den gelesenen Besitzer —
+      seit 21.09.2026 abgeschaltet (Wunsch Ahmad, R1-01): 410, nichts aendert sich
   10  Akte: kaufvorgaenge_gesamt (die Liste endet bei 50)
   48  Archivierung: Nebenaufraeumen mit Nachhol-Marker, wirft nicht
   49  Archivierung: Statuswechsel als CAS VOR dem Aufraeumen
   50  Archivierung: nur Fotofelder schreiben, nicht das ganze data-Objekt
   53  Akte: history_gekuerzt (die Historie endet bei 100)
-  54  Akte: zuweisbar_an ohne 1000er-Grenze
+  54  Akte: frueher zuweisbar_an ohne 1000er-Grenze — seit 21.09.2026 (R1-01)
+      keine Kontenliste mehr, nur noch der Bearbeiter
 
 In-Prozess gegen eine Wegwerf-DB; kein Server.
 """
@@ -225,36 +227,30 @@ def test_08_manuelles_fahrzeug_nach_zwischenzeitlicher_archivierung_409(welt):
     assert welt.run(_logs(welt, vid, "fahrzeug.manuell.geaendert")) == 1
 
 
-# ================================================= Nr. 9
-def test_09_umhaengen_mit_cas_auf_den_gelesenen_besitzer(welt):
+# ================================================= Nr. 9 (seit 21.09.2026 abgeschaltet)
+def test_09_umhaengen_abgeschaltet_nichts_aendert_sich(welt):
+    """Wunsch Ahmad 21.09.2026 (R1-01): "man soll nie an dem sein
+    abgeschlossenen Vertrag oder sonstwas wegnehmen". Frueher stand hier der
+    CAS auf den gelesenen Besitzer; jetzt antwortet die Route immer 410 —
+    auch fuer Altbestand ohne Besitzer — und schreibt weder Fahrzeug noch
+    Audit-Eintrag."""
     B = _modul("routes.bestand")
-    vid = f"v9_{welt.s}"
-    welt.run(welt.db.vehicles.insert_one(
+    vid, vid2 = f"v9_{welt.s}", f"v9b_{welt.s}"
+    welt.run(welt.db.vehicles.insert_many([
         {"id": vid, "dealer_id": welt.dealer_id, "lifecycle": "bestand",
-         "owner_user_id": welt.chef["id"]}))
-
-    async def anderer_tab(vehicles):
-        await vehicles.update_one({"id": vid, "dealer_id": welt.dealer_id},
-                                  {"$set": {"owner_user_id": welt.kollege["id"]}})
-    B.db = _DbEingriff(welt.db, _VehEingriff(welt.db.vehicles, vid, anderer_tab))
-    with pytest.raises(HTTPException) as exc:
-        welt.run(B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id=welt.sucher["id"]),
-                                     welt.chef))
-    assert exc.value.status_code == 409
+         "owner_user_id": welt.sucher["id"]},
+        {"id": vid2, "dealer_id": welt.dealer_id, "lifecycle": "bestand"}]))   # Altbestand
+    for x in (vid, vid2):
+        with pytest.raises(HTTPException) as exc:
+            welt.run(B.fahrzeug_umhaengen_entfernt(x, user=welt.chef))
+        assert exc.value.status_code == 410 and "gibt es nicht mehr" in exc.value.detail
     v = welt.run(welt.db.vehicles.find_one({"id": vid}, {"_id": 0}))
-    assert v["owner_user_id"] == welt.kollege["id"]
-    assert welt.run(_logs(welt, vid, "fahrzeug.zugewiesen")) == 0
-
-    # Fahrzeug ganz ohne owner_user_id (Altbestand): None trifft das fehlende Feld
-    B.db = welt.db
-    vid2 = f"v9b_{welt.s}"
-    welt.run(welt.db.vehicles.insert_one(
-        {"id": vid2, "dealer_id": welt.dealer_id, "lifecycle": "bestand"}))
-    r = welt.run(B.set_vehicle_owner(vid2, B.BesitzerIn(owner_user_id=welt.sucher["id"]),
-                                     welt.chef))
-    assert r["ok"] is True and r["owner_user_id"] == welt.sucher["id"]
     v2 = welt.run(welt.db.vehicles.find_one({"id": vid2}, {"_id": 0}))
-    assert v2["owner_user_id"] == welt.sucher["id"]
+    assert v["owner_user_id"] == welt.sucher["id"] and "uebergabe_offen" not in v
+    assert "owner_user_id" not in v2, "Altbestand wird nicht still zugewiesen"
+    assert welt.run(_logs(welt, vid, "fahrzeug.zugewiesen")) == 0
+    assert welt.run(_logs(welt, vid2, "fahrzeug.zugewiesen")) == 0
+    assert not hasattr(B, "set_vehicle_owner") and not hasattr(B, "BesitzerIn")
 
 
 # ================================================= Nr. 10
@@ -360,20 +356,29 @@ def test_53_nachbesserung_akte_historie_hat_index(welt):
     assert "archiv_aufraeumen_offen" in _plan_indizes(exp["queryPlanner"]["winningPlan"])
 
 
-# ================================================= Nr. 54
-def test_54_zuweisbar_an_ohne_1000er_grenze(welt, monkeypatch):
+# ================================================= Nr. 54 (seit 21.09.2026 ohne Kontenliste)
+def test_54_akte_ohne_kontenliste_nur_bearbeiter(welt, monkeypatch):
+    """Audit #54 betraf die Auswahlliste zum Umhaengen (1000er-Grenze). Seit
+    21.09.2026 (Wunsch Ahmad, R1-01) gibt es das Umhaengen nicht mehr — die
+    Akte liefert keine Kontenliste (zuweisbar/zuweisbar_an), sondern nur den
+    Bearbeiter samt Hauptaccount-Kennzeichen, auch bei sehr vielen Konten."""
     B = _modul("routes.bestand")
     _bericht_attrappe(monkeypatch, None)
-    vid = f"v54_{welt.s}"
-    welt.run(welt.db.vehicles.insert_one(
+    vid, vid_s = f"v54_{welt.s}", f"v54s_{welt.s}"
+    welt.run(welt.db.vehicles.insert_many([
         {"id": vid, "dealer_id": welt.dealer_id, "lifecycle": "bestand",
-         "owner_user_id": welt.chef["id"], "created_at": _jetzt(), "data": {}}))
+         "owner_user_id": welt.chef["id"], "created_at": _jetzt(), "data": {}},
+        {"id": vid_s, "dealer_id": welt.dealer_id, "lifecycle": "bestand",
+         "owner_user_id": welt.sucher["id"], "created_at": _jetzt(), "data": {}}]))
     welt.run(welt.db.users.insert_many([
         {"id": f"viele{i}_{welt.s}", "dealer_id": welt.dealer_id, "role": "sucher",
          "active": True, "email": f"v{i}{welt.s}@t.invalid",
          "created_at": f"2026-02-01T00:00:{i % 60:02d}+00:00"} for i in range(1001)]))
     akte = welt.run(B.vehicle_akte(vid, user=welt.chef))
-    assert len(akte["zuweisbar_an"]) == 1001 + 3
+    assert "zuweisbar_an" not in akte and "zuweisbar" not in akte
+    assert akte["owner"] == {"id": welt.chef["id"], "name": "Chef A", "hauptaccount": True}
+    akte_s = welt.run(B.vehicle_akte(vid_s, user=welt.chef))
+    assert akte_s["owner"] == {"id": welt.sucher["id"], "name": "Sam Sucher", "hauptaccount": False}
 
 
 # ================================================= Nr. 48 / 49 / 50

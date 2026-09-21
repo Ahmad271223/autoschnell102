@@ -172,7 +172,7 @@ export default function CountryPicker({ value, onChange }) {
                   className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-left transition ${
                     sel
                       ? "bg-[var(--accent)]/15 text-[var(--accent)] font-medium"
-                      : "hover:bg-[var(--hover)] text-[var(--text)]"
+                      : "hover:bg-[var(--wa-06)] text-[var(--text-primary)]"
                   }`}
                   data-testid={`country-option-${code}`}
                 >

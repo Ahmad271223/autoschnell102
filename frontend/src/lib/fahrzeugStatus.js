@@ -76,6 +76,8 @@ const AKTION_TEXTE = {
   "fahrzeug.entscheidung.geloescht": "Fahrzeug gelöscht",
   "termin.erstellt": "Abholtermin angelegt",
   "termin.aktualisiert": "Abholtermin geändert",
+  // Pruefbericht 20.09.2026 (V-12): Chef-Uebersteuerung abgeholt -> storniert/nicht abgeholt
+  "termin.ausgang.geaendert": "Ausgang der Abholung nachträglich geändert (Hauptaccount)",
   "termin.geloescht": "Abholtermin gelöscht",
   "vertrag.abholtermin.geaendert": "Abholtermin im Vertrag geändert",
   "vertrag.link.abgerufen": "Vertrag über den Download-Link abgerufen",

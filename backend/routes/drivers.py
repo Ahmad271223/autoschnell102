@@ -193,6 +193,12 @@ async def current_driver(request: Request, auth: Optional[str] = None,
 # (PR-Review 09/2026): Status-Umschaltung und neue Berichtsversionen sind
 # gesperrt; eine Korrektur laeuft ueber den Haendler (Termin wieder oeffnen).
 _TERMIN_ABGESCHLOSSEN = {"abgeholt", "nicht abgeholt", "storniert", "erledigt"}
+# Pruefung 21.09.2026 (V-12): "nicht abgeholt" an einer belegten Abholung
+# (finales Protokoll bzw. Kauf abgeholt, Termin zur Korrektur wieder offen).
+ABHOLUNG_BELEGT_HINWEIS = ("Für diese Fahrt gibt es bereits ein unterschriebenes "
+                           "Abholprotokoll — „nicht abgeholt“ kann jetzt nur der Händler "
+                           "setzen. Bitte eine Korrektur-Version abschließen oder den "
+                           "Händler anrufen.")
 # Wunsch Ahmad 14.09.2026: Sichtbarkeit abgeschlossener Fahrten in der Fahrer-App.
 from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
 FAHRER_SICHT_ABGEHOLT_TAGE = zahl_env("FAHRER_SICHT_ABGEHOLT_TAGE", 14, unten=1)
@@ -1326,6 +1332,15 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
     # setzt der Aufraeumlauf binnen einer Stunde auf "offen".
     if (appt.get("zuteilung") or "angenommen") != "angenommen":
         raise HTTPException(409, "Bitte zuerst die Fahrt annehmen (oder ablehnen).")
+    # Pruefung 21.09.2026 (V-12): Hat der Haendler eine unterschriebene Abholung
+    # zur Korrektur wieder geoeffnet, bleibt der Kauf abgeholt (D15). "Nicht
+    # abgeholt" aus der App nahm sie sonst ohne Rueckfrage zurueck — samt
+    # Fahrzeug und Einkaufspreis. Das entscheidet nur der Haendler; der Fahrer
+    # schliesst eine Korrektur-Version ab.
+    if body.status == "nicht abgeholt":
+        from routes.appointments import abholung_beleg
+        if await abholung_beleg(appt, appt.get("dealer_id", ""), protokoll_genuegt=True):
+            raise HTTPException(409, ABHOLUNG_BELEGT_HINWEIS)
     # Vereinheitlichter Abschluss: "abgeholt" gibt es NUR mit unterschriebenem
     # Abholprotokoll (Beweiskette: Zustand + beide Unterschriften). Der alte
     # Schnellweg ohne Protokoll erzeugte "abgeholt"-Termine ohne jeden Beleg.

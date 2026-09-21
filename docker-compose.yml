@@ -119,7 +119,10 @@ services:
       # Entscheidung Ahmad 16.09.2026: 400 neue Abrufe je Konto und Tag (alle
       # Quellen). Bekannte Links aus dem Speicher und Mitwarten kosten nichts.
       - ANBIETER_TAGESLIMIT_JE_KONTO=${ANBIETER_TAGESLIMIT_JE_KONTO:-400}
-      - ANBIETER_TAGESWARNUNG=${ANBIETER_TAGESWARNUNG:-500}
+      # Pruefung 21.09.2026 (Kapazitaet): erwartet sind 1.000–3.240 Apify-
+      # Abrufe am Tag (30 Sucher) — bei 500 kaeme der Hinweis (und mit
+      # BETRIEB_MELDUNG_AN eine Mail) jeden Tag. Nur ein Hinweis, kein Riegel.
+      - ANBIETER_TAGESWARNUNG=${ANBIETER_TAGESWARNUNG:-5000}
       - ABRUF_RUECKFALL_TAGESLIMIT=${ABRUF_RUECKFALL_TAGESLIMIT:-25}
       - LOGIN_IP_LIMIT=${LOGIN_IP_LIMIT:-120}
       # Kontonummer (13.09.2026): Fehlversuche je Kennung ohne IP (0 = nur Alarm)

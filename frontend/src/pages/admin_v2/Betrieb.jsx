@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Activity, AlertTriangle, Check, RefreshCw, ShieldAlert } from "lucide-react";
+import { Activity, AlertTriangle, Check, Mail, RefreshCw, Send, ShieldAlert } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 
 /**
@@ -19,6 +19,7 @@ export default function AdminBetrieb() {
   // Betriebsdaten" — der Alarmstand war dann unbekannt, sah aber ruhig aus.
   const [ladeFehler, setLadeFehler] = useState("");
   const [quittiert, setQuittiert] = useState("");
+  const [testmailLaeuft, setTestmailLaeuft] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -58,6 +59,31 @@ export default function AdminBetrieb() {
       load();
     } catch (e) { toast.error(errMsg(e)); }
     finally { setBusy(false); }
+  };
+  // Wunsch Ahmad 21.09.2026: Probe-Mail an BETRIEB_MELDUNG_AN per Knopf —
+  // bisher war der einzige Test der Tagesbericht um 8 Uhr.
+  const testmail = async () => {
+    if (testmailLaeuft) return;
+    setTestmailLaeuft(true);
+    try {
+      const r = await api.post("/admin/betrieb/testmail");
+      if (r.data?.ok === false) {
+        // Pruefung 21.09.2026 (Betrieb): Ablehnung oder keine Antwort des
+        // Anbieters kommt als 200 mit ok:false und Grund — ein 502 ersetzte
+        // Cloudflare durch eine eigene Fehlerseite, der Grund ging verloren.
+        toast.error(r.data.grund || "Testmail nicht zugestellt — Server-Protokoll prüfen.",
+          { duration: 15000 });
+      } else if (r.data?.zustellung === "mock") {
+        toast.success("Testmodus: keine echte Mail verschickt (MOCK_PROVIDER_FETCH ist an).");
+      } else {
+        toast.success(`Testmail an ${r.data?.an || data?.alarm_empfaenger} verschickt — bitte Posteingang und Spam-Ordner prüfen.`,
+          { duration: 10000 });
+      }
+    } catch (e) {
+      toast.error(errMsg(e, "Testmail konnte nicht gesendet werden"), { duration: 15000 });
+    } finally {
+      setTestmailLaeuft(false);
+    }
   };
 
   if (loading && !data) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
@@ -104,6 +130,22 @@ export default function AdminBetrieb() {
           <div className="text-[13.5px] text-amber-200">
             Alarme werden an niemanden per E-Mail gemeldet (BETRIEB_MELDUNG_AN ist leer) — auf
             beiden Servern setzen: <span className="font-mono">sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=deine@adresse.de</span>
+          </div>
+        </Card>
+      )}
+      {data.alarm_empfaenger && (
+        // Wunsch Ahmad 21.09.2026: sichtbar, WOHIN Alarme, Anfragen und
+        // Tagesbericht gehen — und per Knopf pruefbar.
+        <Card className="mb-4" data-testid="alarm-empfaenger">
+          <div className="flex flex-wrap items-center gap-3">
+            <Mail size={16} className="text-zinc-500 shrink-0" />
+            <div className="text-[13.5px] text-zinc-300 flex-1 min-w-0">
+              Meldungen gehen an: <span className="font-mono text-white break-all">{data.alarm_empfaenger}</span>
+            </div>
+            <Button size="sm" variant="outline" onClick={testmail} disabled={testmailLaeuft}
+                    data-testid="betrieb-testmail">
+              <Send size={14} /> {testmailLaeuft ? "Sende…" : "Testmail senden"}
+            </Button>
           </div>
         </Card>
       )}

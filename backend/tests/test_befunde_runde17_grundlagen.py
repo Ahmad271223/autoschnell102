@@ -305,17 +305,22 @@ def test_13_alarm_schliessen(welt):
 def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapshots(welt):
     """Umbau Kaufvorgaenge 09.09.2026 (Beschluss Ahmad): Sucher A hat zu
     seinem Fahrzeug einen Vertrag, einen eigenen Termin (mit Bericht und
-    Protokoll) und einen Snapshot. Der Chef weist das Fahrzeug B zu.
+    Protokoll) und einen Snapshot.
+
+    Wunsch Ahmad 21.09.2026 (R1-01): der Chef kann das Fahrzeug NICHT mehr
+    einem anderen Konto zuweisen (410) — A behaelt alles, Kollege B bekommt
+    nichts. Frueher lief die Uebergabe hier ueber PUT /besitzer an B.
 
     Runde 13 (15.09.2026, Reviewer-Liste "Uebergabe"): die Uebergabe nimmt den
     ganzen Vorgang mit — Vertrag, Termin, Bericht und Protokoll zu diesem
-    Fahrzeug gehen an B; A behaelt nur, was nicht an diesem Fahrzeug haengt.
-    (Vorher: A behielt seine eigenen Termine — das liess Waisenvorgaenge zurueck.)
-    A verliert nur die Fahrzeug-Sichtbarkeit (weder Besitzer noch
+    Fahrzeug gehen an das neue Konto; A behaelt nur, was nicht an diesem
+    Fahrzeug haengt. Diese Mechanik (vorgang_uebergeben) bleibt fuer
+    "Aus meiner Liste entfernen" (A selbst, Vorgang an den Chef) und die
+    Konto-Loeschung; geprueft wird sie jetzt ueber das Entfernen durch A.
+    A verliert danach die Fahrzeug-Sichtbarkeit (weder Besitzer noch
     Mitbearbeiter; der Vertrag wurde hier direkt eingefuegt, nicht ueber
-    create_contract, das den Sucher zum Mitbearbeiter macht). B sieht das
-    Fahrzeug und dessen Snapshot, aber NICHT A's Termin, Bericht oder
-    Protokoll (Verkaeuferdaten des Kollegen)."""
+    create_contract, das den Sucher zum Mitbearbeiter macht). Der Kollege B
+    sieht zu keinem Zeitpunkt A's Termin, Bericht oder Protokoll."""
     B = _module("routes.bestand")
     L = _module("routes.listings")
     A_ = _module("routes.appointments")
@@ -330,18 +335,26 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
     b = {"id": f"sb_r17g_{welt.s}", "dealer_id": welt.dealer_id, "role": "sucher"}
     vid, aid, sid, cid, pid = (f"v_{welt.s}", f"t_{welt.s}", f"s_{welt.s}", f"c_{welt.s}", f"p_{welt.s}")
 
+    chef = welt.chef
+
     async def lauf():
         await welt.db.users.insert_many([
+            {"id": chef["id"], "dealer_id": welt.dealer_id, "role": "dealer", "active": True,
+             "first_name": "Chef", "last_name": "C", "email": f"{chef['id']}@e2etest-mail.de"},
             {"id": a["id"], "dealer_id": welt.dealer_id, "role": "sucher", "active": True,
              "first_name": "Anna", "last_name": "A", "email": f"{a['id']}@e2etest-mail.de"},
             {"id": b["id"], "dealer_id": welt.dealer_id, "role": "sucher", "active": True,
              "first_name": "Ben", "last_name": "B", "email": f"{b['id']}@e2etest-mail.de"}])
-        await welt.db.vehicles.insert_one(welt.fahrzeug(vid, owner_user_id=a["id"]))
+        await welt.db.dealers.insert_one({"id": welt.dealer_id, "user_id": chef["id"],
+                                          "company_name": "R17g GmbH", "created_at": _jetzt()})
+        await welt.db.vehicles.insert_one(welt.fahrzeug(vid, owner_user_id=a["id"], lifecycle="abgeholt"))
         await welt.db.generated_pdfs.insert_one({"id": cid, "dealer_id": welt.dealer_id, "user_id": a["id"],
                                                  "vehicle_id": vid, "created_at": _jetzt()})
+        # Der Termin zum Fahrzeug ist erledigt (abgeholt) — mit einem noch
+        # laufenden Termin laesst "Aus meiner Liste entfernen" nicht zu (409).
         await welt.db.appointments.insert_many([
             {"id": aid, "dealer_id": welt.dealer_id, "vehicle_id": vid, "contract_id": cid,
-             "created_by": a["id"], "status": "offen", "pickup_date": "2099-01-01", "created_at": _jetzt()},
+             "created_by": a["id"], "status": "abgeholt", "pickup_date": "2099-01-01", "created_at": _jetzt()},
             {"id": f"{aid}_ohne", "dealer_id": welt.dealer_id, "created_by": a["id"], "status": "offen",
              "pickup_date": "2099-01-02", "created_at": _jetzt()}])
         await welt.db.listing_snapshots.insert_one({"id": sid, "dealer_id": welt.dealer_id, "user_id": a["id"],
@@ -355,14 +368,23 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
                                                    "pdf_path": "p.pdf", "created_at": _jetzt()})
         vorher = {t["id"] for t in await A_.list_appointments(Response(), a)}
         fzg_a_vorher = (await L.get_vehicle_detail(vid, a))["id"]
-        # Chef uebergibt das Fahrzeug an B
-        await B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id=b["id"]), welt.chef)
+        # Wunsch Ahmad 21.09.2026 (R1-01): der Chef kann nicht mehr an B umhaengen
+        with pytest.raises(HTTPException) as e_chef:
+            await B.fahrzeug_umhaengen_entfernt(vid, chef)
+        nach_chef_a = {t["id"] for t in await A_.list_appointments(Response(), a)}
+        nach_chef_b = {t["id"] for t in await A_.list_appointments(Response(), b)}
+        nach_chef_fzg_a = (await L.get_vehicle_detail(vid, a))["id"]
+        nach_chef_vertrag_a = await welt.db.generated_pdfs.count_documents({"id": cid, "user_id": a["id"]})
+        # Die verbliebene Uebergabe: A entfernt das Fahrzeug selbst aus seiner Liste
+        # -> Fahrzeug und ganzer Vorgang gehen an den Chef (vorgang_uebergeben).
+        out = await B.vehicle_fuer_sucher_entfernen(vid, a)
         nachher_a = {t["id"] for t in await A_.list_appointments(Response(), a)}
         nachher_b = {t["id"] for t in await A_.list_appointments(Response(), b)}
+        nachher_chef = {t["id"] for t in await A_.list_appointments(Response(), chef)}
         t_neu = await welt.db.appointments.find_one({"id": aid}, {"_id": 0})
         darf_a = await A_._sucher_darf(a, t_neu)
         darf_b = await A_._sucher_darf(b, t_neu)
-        rep_b = await A_.get_pickup_report(aid, 0, b)
+        rep_chef = await A_.get_pickup_report(aid, 0, chef)
         with pytest.raises(HTTPException) as e_rep:
             await A_.get_pickup_report(aid, 0, a)
         snaps_a = {s["id"] for s in await L.list_snapshots(None, a)}
@@ -372,34 +394,49 @@ def test_14_uebergabe_laesst_altem_bearbeiter_eigene_termine_berichte_und_snapsh
         with pytest.raises(HTTPException) as e_snap:
             await L._load_snapshot_or_404(sid, a)
         snap_a = e_snap.value.status_code
-        snap_b = (await L._load_snapshot_or_404(sid, b))["id"]
+        snap_chef = (await L._load_snapshot_or_404(sid, chef))["id"]
         proto_a = await P._protokoll_im_bereich(a, {"vehicle_id": vid, "appointment_id": aid})
         proto_b = await P._protokoll_im_bereich(b, {"vehicle_id": vid, "appointment_id": aid})
-        vertrag_a = await welt.db.generated_pdfs.count_documents({"id": cid, "user_id": a["id"]})
+        vertrag = await welt.db.generated_pdfs.find_one({"id": cid}, {"_id": 0})
         with pytest.raises(HTTPException) as e_fzg:
             await L.get_vehicle_detail(vid, a)
-        fzg_b = (await L.get_vehicle_detail(vid, b))["id"]
-        await welt.db.users.delete_many({"id": {"$in": [a["id"], b["id"]]}})
-        for c in ("appointments", "generated_pdfs", "listing_snapshots", "pickup_reports", "pickup_protocols"):
+        v_neu = await welt.db.vehicles.find_one({"id": vid}, {"_id": 0})
+        await welt.db.users.delete_many({"id": {"$in": [chef["id"], a["id"], b["id"]]}})
+        await welt.db.dealers.delete_many({"id": welt.dealer_id})
+        for c in ("appointments", "generated_pdfs", "listing_snapshots", "pickup_reports", "pickup_protocols",
+                  "kaufvorgaenge"):
             await welt.db[c].delete_many({"dealer_id": welt.dealer_id})
-        return (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_b, e_rep.value.status_code,
-                snaps_a, snaps_b, snap_a, snap_b, proto_a, proto_b, vertrag_a, e_fzg.value.status_code, fzg_b)
+        return (vorher, fzg_a_vorher, e_chef.value.status_code, nach_chef_a, nach_chef_b, nach_chef_fzg_a,
+                nach_chef_vertrag_a, out, nachher_a, nachher_b, nachher_chef, t_neu, darf_a, darf_b, rep_chef,
+                e_rep.value.status_code, snaps_a, snaps_b, snap_a, snap_chef, proto_a, proto_b, vertrag,
+                e_fzg.value.status_code, v_neu)
 
     try:
-        (vorher, fzg_a_vorher, nachher_a, nachher_b, darf_a, darf_b, rep_b, s_rep, snaps_a, snaps_b,
-         snap_a, snap_b, proto_a, proto_b, vertrag_a, s_fzg, fzg_b) = welt.run(lauf())
+        (vorher, fzg_a_vorher, s_chef, nach_chef_a, nach_chef_b, nach_chef_fzg_a, nach_chef_vertrag_a, out,
+         nachher_a, nachher_b, nachher_chef, t_neu, darf_a, darf_b, rep_chef, s_rep, snaps_a, snaps_b,
+         snap_a, snap_chef, proto_a, proto_b, vertrag, s_fzg, v_neu) = welt.run(lauf())
     finally:
         for m, d in alt:
             m.db = d
     assert vorher == {aid, f"{aid}_ohne"} and fzg_a_vorher == vid
-    # Runde 13 (15.09.2026, Uebergabe = ganzer Vorgang): Termin, Vertrag und
-    # Bericht zu diesem Fahrzeug gehen an B; A behaelt nur den Termin ohne Fahrzeug.
+    # R1-01: Chef bekommt 410, bei A bleibt alles, B bekommt nichts
+    assert s_chef == 410
+    assert nach_chef_a == vorher and nach_chef_fzg_a == vid and nach_chef_vertrag_a == 1
+    assert nach_chef_b == set(), "Kollege B bekommt nichts"
+    # Runde 13 (15.09.2026, Uebergabe = ganzer Vorgang) — jetzt ueber das
+    # Entfernen durch A selbst: Termin, Vertrag und Bericht zu diesem Fahrzeug
+    # gehen an den Chef; A behaelt nur den Termin ohne Fahrzeug.
+    assert out["an_chef"] is True and out["uebergabe"]["termine"] == 1 and out["uebergabe"]["vertraege"] == 1
+    assert v_neu["owner_user_id"] == chef["id"] and v_neu["entfernt_von_sucher"] == a["id"]
     assert nachher_a == {f"{aid}_ohne"}, "A behaelt nur Termine ohne dieses Fahrzeug"
-    assert nachher_b == {aid}, "B bekommt den Termin des uebergebenen Vorgangs"
-    assert darf_a is False and darf_b is True
-    assert rep_b["report"]["id"] == f"r_{welt.s}" and s_rep == 404
-    assert snaps_a == set() and snaps_b == {sid}, "Snapshot: nach der Uebergabe nur noch B (Fahrzeug)"
-    assert snap_a == 404 and snap_b == sid
-    assert proto_a is False and proto_b is True
-    assert vertrag_a == 0, "der Vertrag geht mit dem Vorgang an B (Runde 13)"
-    assert s_fzg == 404 and fzg_b == vid, "A verliert nur die Fahrzeug-Sichtbarkeit"
+    assert nachher_b == set(), "B bekommt auch beim Entfernen durch A nichts"
+    assert aid in nachher_chef
+    assert t_neu["created_by"] == chef["id"] and t_neu["uebergeben_von"] == a["id"]
+    assert darf_a is False and darf_b is False
+    assert rep_chef["report"]["id"] == f"r_{welt.s}" and s_rep == 404
+    assert snaps_a == set() and snaps_b == set(), "Snapshot: nach der Uebergabe nur noch der Chef"
+    assert snap_a == 404 and snap_chef == sid
+    assert proto_a is False and proto_b is False
+    assert vertrag["user_id"] == chef["id"] and vertrag["uebergeben_von"] == a["id"], \
+        "der Vertrag geht mit dem Vorgang an den Chef (Runde 13)"
+    assert s_fzg == 404, "A verliert die Fahrzeug-Sichtbarkeit"

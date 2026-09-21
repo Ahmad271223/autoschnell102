@@ -21,7 +21,12 @@ Drei Meldungen, alle an BETRIEB_MELDUNG_AN:
   3. TAGESBERICHT — einmal taeglich. Der ist ausdruecklich auch dann
      faellig, wenn alles in Ordnung ist: eine Plattform, die schweigt,
      ist von einer toten nicht zu unterscheiden. Bleibt die Mail aus,
-     weiss Ahmad, dass etwas nicht stimmt.
+     weiss Ahmad, dass etwas nicht stimmt. Scheitert der Versand, folgen
+     am selben Tag bis zu drei weitere Versuche im Abstand von 45 min
+     (21.09.2026).
+
+Dazu die Testmail per Knopf auf der Betrieb-Seite (testmail_senden,
+POST /api/admin/betrieb/testmail, 21.09.2026).
 
 Zwei Server mit je vier Prozessen — ohne Sperre kaeme jede Meldung
 achtmal. Deshalb laeuft jede Runde unter einer Job-Sperre, und jeder
@@ -35,6 +40,7 @@ Umgebung:
                                 -1 schaltet nur den Tagesbericht ab
 """
 import asyncio
+import contextvars
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -362,7 +368,7 @@ def bericht_text(daten: dict, tag: str) -> tuple:
     return betreff, "\n".join(zeilen)
 
 
-async def tagesbericht_senden(db, tag: str = "") -> bool:
+async def tagesbericht_senden(db, tag: str = "", versuch: int = 1) -> bool:
     """Den Tagesbericht verschicken. Wirft nie."""
     ziel = empfaenger()
     if not ziel or bericht_stunde() < 0:
@@ -371,8 +377,16 @@ async def tagesbericht_senden(db, tag: str = "") -> bool:
         tag = tag or datetime.now().strftime("%d.%m.%Y")
         betreff, text = bericht_text(await tagesbericht_daten(db), tag)
         from email_service import send_email
+        # Wunsch Ahmad 21.09.2026 (Betrieb): jeder Wiederholungsversuch am
+        # selben Tag bekommt einen eigenen Schluessel. Mit dem alten haette
+        # Resend den neuen Bericht (andere Zahlen = anderer Inhalt) als
+        # Schluessel-Missbrauch abgelehnt, und die SMTP-Idempotenz haette
+        # einen unklaren ersten Versuch fuer den ganzen Tag gesperrt. Ein
+        # doppelter Tagesbericht ist harmlos, ein fehlender nicht.
+        schluessel = f"tagesbericht-{tag}" if versuch <= 1 \
+            else f"tagesbericht-{tag}-v{versuch}"
         ok = await send_email(ziel, betreff, text,
-                              idempotency_key=f"tagesbericht-{tag}")
+                              idempotency_key=schluessel)
         if ok:
             log.info("[betriebsmeldung] Tagesbericht %s an %s", tag, ziel)
         else:
@@ -381,6 +395,156 @@ async def tagesbericht_senden(db, tag: str = "") -> bool:
     except Exception:  # noqa: BLE001
         log.exception("[betriebsmeldung] Tagesbericht fehlgeschlagen")
         return False
+
+
+#: Wunsch Ahmad 21.09.2026 (Betrieb): scheiterte der Tagesbericht (Resend
+#: kurz gestoert, Schluessel noch nicht eingetragen), hielt die Tagessperre
+#: trotzdem 20 Stunden — der naechste Versuch kam erst am folgenden Morgen.
+#: Jetzt wird die Sperre nach einem Fehlschlag auf diese Pause verkuerzt,
+#: hoechstens TAGESBERICHT_MAX_VERSUCHE mal am Tag. Nach einem ERFOLG bleibt
+#: die 20-h-Sperre wie bisher: genau ein Bericht je Tag.
+TAGESBERICHT_WIEDERHOLUNG_MIN = 45
+TAGESBERICHT_MAX_VERSUCHE = 4
+
+
+async def _tagesbericht_versuch_zaehlen(db, name: str, token: str) -> int:
+    """Nummer dieses Versuchs am Tag (1, 2, ...).
+
+    Gezaehlt wird am Dokument der Tagessperre selbst: acquire() setzt dort
+    nur seine eigenen Felder und laesst `versuche` stehen, der Name traegt
+    den Tag — morgen beginnt die Zaehlung von vorn."""
+    from pymongo import ReturnDocument
+    try:
+        doc = await db.job_locks.find_one_and_update(
+            {"name": name, "token": token}, {"$inc": {"versuche": 1}},
+            projection={"_id": 0, "versuche": 1},
+            return_document=ReturnDocument.AFTER)
+        return max(1, int((doc or {}).get("versuche") or 1))
+    except Exception:  # noqa: BLE001
+        log.warning("[betriebsmeldung] Versuchszaehler fuer %s nicht lesbar", name)
+        return 1
+
+
+async def tagesbericht_mit_wiederholung(db, name: str, token: str,
+                                        datum: str) -> bool:
+    """Tagesbericht unter der gehaltenen Tagessperre `name` senden.
+
+    Scheitert der Versand, wird die Sperre auf TAGESBERICHT_WIEDERHOLUNG_MIN
+    verkuerzt statt 20 Stunden zu halten — ein spaeterer Durchlauf (auf
+    irgendeinem Server) versucht es dann erneut. Wirft nie."""
+    try:
+        versuch = await _tagesbericht_versuch_zaehlen(db, name, token)
+        if await tagesbericht_senden(db, datum, versuch=versuch):
+            return True
+        if versuch >= TAGESBERICHT_MAX_VERSUCHE:
+            log.error("[betriebsmeldung] Tagesbericht %s nach %d Versuchen "
+                      "aufgegeben — naechster Bericht morgen", datum, versuch)
+            return False
+        from job_lock import verlaengern
+        await verlaengern(db, name, ttl_seconds=TAGESBERICHT_WIEDERHOLUNG_MIN * 60,
+                          token=token)
+        log.warning("[betriebsmeldung] Tagesbericht %s: Versuch %d von %d "
+                    "gescheitert — neuer Versuch in etwa %d min", datum,
+                    versuch, TAGESBERICHT_MAX_VERSUCHE,
+                    TAGESBERICHT_WIEDERHOLUNG_MIN)
+        return False
+    except Exception:  # noqa: BLE001
+        log.exception("[betriebsmeldung] Tagesbericht-Wiederholung fehlgeschlagen")
+        return False
+
+
+# ------------------------------------------------------------- Testmail
+def testmail_text(ziel: str, von: str = "", server: str = "") -> tuple:
+    """(Betreff, Text) der Probe-Mail von der Betrieb-Seite — rein, damit
+    pruefbar. Wunsch Ahmad 21.09.2026: bisher war der Tagesbericht der
+    einzige Test, und der kam erst um 8 Uhr."""
+    jetzt = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
+    stunde = bericht_stunde()
+    bericht = ("der Tagesbericht ist abgeschaltet (BETRIEB_TAGESBERICHT_STUNDE=-1)"
+               if stunde < 0 else f"der Tagesbericht täglich um {stunde:02d}:00 Uhr")
+    zeilen = [
+        "Das ist eine Testmail von der Betrieb-Seite im Admin-Bereich.",
+        "",
+        "Kommt sie an, erreichen dich auch die echten Betriebsmeldungen:",
+        "Sofortmeldungen bei neuen Betriebsalarmen, neue Anfragen und",
+        f"{bericht}.",
+        "",
+        f"Empfänger (BETRIEB_MELDUNG_AN): {ziel}",
+        f"Ausgelöst: {jetzt}" + (f" von {von}" if von else ""),
+    ]
+    if server:
+        zeilen.append(f"Server: {server}")
+    zeilen += [
+        "",
+        "Liegt diese Mail im Spam-Ordner, bitte als „kein Spam“ markieren —",
+        "sonst landen dort auch die echten Meldungen.",
+    ]
+    return "AutoSchnell: Testmail der Betriebsmeldungen", "\n".join(zeilen)
+
+
+#: Liste der Warn-/Fehlerzeilen des Mailversands im laufenden Testmail-Aufruf
+#: (None = kein Testmail-Aufruf in diesem Kontext).
+_mitschrift: contextvars.ContextVar = contextvars.ContextVar(
+    "betrieb_testmail_mitschrift", default=None)
+
+
+class _Mitschrift(logging.Handler):
+    """Sammelt die Zeilen von email_service NUR aus dem eigenen Aufruf.
+
+    email_service liefert bei einem Fehlschlag nur False und schreibt den
+    Grund (z. B. "Resend lehnt ab (HTTP 403): domain not verified") ins
+    Protokoll. Den braucht die Betrieb-Seite als Antwort. Die Kontextvariable
+    trennt den eigenen Aufruf von gleichzeitigen Vertragsmails anderer Nutzer
+    (asyncio-Aufgaben und asyncio.to_thread tragen den Kontext mit)."""
+
+    def emit(self, record):
+        liste = _mitschrift.get()
+        if liste is None:
+            return
+        try:
+            text = record.getMessage()
+        except Exception:  # noqa: BLE001
+            return
+        if text.startswith("email_service"):
+            liste.append((record.levelno, text.split(":", 1)[-1].strip()))
+
+
+async def testmail_senden(ziel: str, von: str = "") -> tuple:
+    """Probe-Mail an `ziel` ueber denselben Weg wie Alarme und Tagesbericht.
+
+    Liefert (ok, beleg, grund): beleg wie send_email_mit_beleg
+    ("resend:<id>" / "smtp"), grund = was email_service zum Fehlschlag
+    protokolliert hat (leer, wenn nichts). Wirft nie."""
+    import socket
+    import uuid
+
+    import email_service
+    betreff, text = testmail_text(ziel, von=von, server=socket.gethostname())
+    zeilen: list = []
+    marke = _mitschrift.set(zeilen)
+    handler = _Mitschrift(logging.WARNING)
+    email_service.log.addHandler(handler)
+    try:
+        # Eigener Schluessel je Klick: interne Wiederholungen bei Resend sind
+        # damit sicher, ein zweiter Klick verschickt trotzdem eine neue Mail.
+        ok, beleg = await email_service.send_email_mit_beleg(
+            ziel, betreff, text,
+            idempotency_key=f"betrieb-testmail-{uuid.uuid4().hex}")
+    except Exception as exc:  # noqa: BLE001
+        ok, beleg = False, ""
+        zeilen.append((logging.ERROR, f"{exc.__class__.__name__}: {exc}"))
+    finally:
+        email_service.log.removeHandler(handler)
+        _mitschrift.reset(marke)
+    fehler = [t for stufe, t in zeilen if stufe >= logging.ERROR] \
+        or [t for _stufe, t in zeilen]
+    grund = " / ".join(dict.fromkeys(fehler))[:500] if not ok else ""
+    if ok:
+        log.info("[betriebsmeldung] Testmail an %s (%s)", ziel, beleg)
+    else:
+        log.error("[betriebsmeldung] Testmail an %s NICHT zugestellt: %s",
+                  ziel, grund or "ohne Angabe")
+    return ok, beleg, grund
 
 
 # ------------------------------------------------------------- Schleife
@@ -434,6 +598,9 @@ async def run_betriebsmeldung_forever(db) -> None:
         # EINMAL faellt — auf beiden Servern zusammen. Geprueft wird nur,
         # ob die Stunde schon da ist; wer zuerst die Sperre bekommt,
         # schickt. Kein Zeitfenster-Rechnen, das man falsch verstehen kann.
+        # Wunsch Ahmad 21.09.2026: scheitert der Versand, verkuerzt
+        # tagesbericht_mit_wiederholung die Sperre (45 min, hoechstens vier
+        # Versuche am Tag) — sonst kam der naechste Versuch erst morgen.
         try:
             jetzt = datetime.now()
             if bericht_stunde() >= 0 and jetzt.hour >= bericht_stunde():
@@ -441,7 +608,9 @@ async def run_betriebsmeldung_forever(db) -> None:
                 bericht_token = await acquire(db, f"tagesbericht-{tag}",
                                               ttl_seconds=20 * 3600)
                 if bericht_token:
-                    await tagesbericht_senden(db, jetzt.strftime("%d.%m.%Y"))
+                    await tagesbericht_mit_wiederholung(
+                        db, f"tagesbericht-{tag}", bericht_token,
+                        jetzt.strftime("%d.%m.%Y"))
         except Exception:  # noqa: BLE001
             log.exception("[betriebsmeldung] Tagesbericht-Runde fehlgeschlagen")
         await asyncio.sleep(takt)

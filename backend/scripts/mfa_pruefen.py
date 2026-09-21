@@ -23,13 +23,16 @@ Betreiber ausgesperrt: "Code ungueltig", obwohl er vorher immer passte):
 schaltet die Zwei-Faktor-Anmeldung des Kontos ab und beendet seine Sitzung.
 Danach Anmeldung nur mit Benutzername + Passwort; in den Einstellungen
 anschliessend NEU einrichten (neuer Schluessel, neue Wiederherstellungscodes).
+Die 30 Minuten Gnadenfrist gelten auch dann, wenn das Konto gar keine
+Zwei-Faktor-Daten mehr hat (in den Einstellungen abgeschaltet, Tab vor
+"Einrichten" verloren).
     python scripts/mfa_pruefen.py --konto chef-f525c3 --abschalten --ja
 """
 import argparse
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -88,9 +91,6 @@ def main() -> int:
         if not args.ja:
             print("\nABBRUCH: --abschalten braucht die Bestaetigung --ja. Nichts geaendert.")
             return 2
-        if not m:
-            print("\nKeine Zwei-Faktor-Daten vorhanden — nichts abzuschalten.")
-            return 0
         # Geheimnis, Wiederherstellungscodes und Sperre komplett entfernen;
         # laufende Sitzung beenden (das Zwischen-Token der Anmeldung passt
         # danach ohnehin nicht mehr zum Kontozustand).
@@ -98,21 +98,58 @@ def main() -> int:
         # ohne Zwei-Faktor nicht mehr herein — nach dem Notfall-Abschalten gilt
         # 30 Minuten Gnadenfrist (mfa.pflicht_ausgesetzt_bis), um sich mit
         # Passwort anzumelden und den zweiten Faktor neu einzurichten.
-        from datetime import datetime, timedelta, timezone
+        # Pruefbericht 20.09.2026 (AD-06): die Gnadenfrist gilt AUCH ohne
+        # Zwei-Faktor-Daten. Wer in den Einstellungen "Abschalten" geklickt und
+        # den Tab vor "Einrichten" verloren hatte, bekam hier nur "nichts
+        # abzuschalten" — und blieb in Produktion ausgesperrt, bis MFA_PFLICHT
+        # auf beiden Servern geaendert und das Backend neu gestartet war.
+        # Pruefung 21.09.2026 (MFA): den Vorzustand EINMAL bestimmen und in
+        # Protokoll UND Meldung verwenden. Vorher galt jedes nicht leere `mfa`
+        # als "eingerichtet_nicht_aktiv" — auch der Rest eines frueheren
+        # Laufs dieses Befehls ({aktiv: False, pflicht_ausgesetzt_bis}). Genau
+        # der dokumentierte zweite Lauf nach Ablauf der Frist schrieb dann
+        # einen falschen Audit-Wert und meldete "halb fertige Einrichtung
+        # verworfen", obwohl es weder pending_secret noch secret gab.
+        if aktiv:
+            vorher = "aktiv"
+        elif m.get("pending_secret") or m.get("secret"):
+            vorher = "eingerichtet_nicht_aktiv"
+        else:
+            vorher = "keine_daten"
+        frist_vorher = m.get("pflicht_ausgesetzt_bis")
         frist = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         res = db.users.update_one({"id": nutzer["id"]},
                                   {"$set": {"mfa": {"aktiv": False, "pflicht_ausgesetzt_bis": frist},
                                             "current_session_id": None}})
-        print(f"Gnadenfrist ohne Zwei-Faktor bis {frist[:16].replace('T', ' ')} UTC — "
-              "jetzt anmelden und den zweiten Faktor neu einrichten.")
+        meta = {"skript": "mfa_pruefen.py", "username": nutzer.get("username"), "vorher": vorher}
+        if frist_vorher:
+            meta["frist_vorher"] = frist_vorher
         db.activity_logs.insert_one({
             "id": __import__("uuid").uuid4().hex, "dealer_id": "", "user_id": nutzer["id"],
             "action": "auth.mfa.abgeschaltet.betreiber",
-            "meta": {"skript": "mfa_pruefen.py", "username": nutzer.get("username")},
+            "meta": meta,
             "created_at": datetime.now(timezone.utc).isoformat()})
-        print(f"\nZwei-Faktor-Anmeldung ABGESCHALTET ({res.modified_count} Konto geaendert).")
+        if vorher == "aktiv":
+            print(f"\nZwei-Faktor-Anmeldung ABGESCHALTET ({res.modified_count} Konto geaendert).")
+        elif vorher == "eingerichtet_nicht_aktiv":
+            print("\nZwei-Faktor war nicht aktiv — eine halb fertige Einrichtung wurde "
+                  f"verworfen ({res.modified_count} Konto geaendert).")
+        else:
+            if frist_vorher:
+                print("\nKeine Zwei-Faktor-Daten vorhanden, nur die Gnadenfrist eines frueheren "
+                      f"Laufs dieses Befehls (bis {str(frist_vorher)[:16].replace('T', ' ')} UTC) "
+                      "— es gab nichts abzuschalten.")
+            else:
+                print("\nKeine Zwei-Faktor-Daten vorhanden (z. B. nach 'Abschalten' in den "
+                      "Einstellungen) — es gab nichts abzuschalten.")
+            print("Die Gnadenfrist wird trotzdem gesetzt, damit die Anmeldung mit "
+                  "Passwort wieder moeglich ist.")
+        print(f"Gnadenfrist ohne Zwei-Faktor bis {frist[:16].replace('T', ' ')} UTC "
+              "(30 Minuten).")
         print("-> Jetzt mit Benutzername + Passwort anmelden, dann in den Einstellungen")
         print("   die Zwei-Faktor-Anmeldung NEU einrichten (alten Eintrag in der App loeschen).")
+        print("   Nach Ablauf der Frist verlangt die Anmeldung in Produktion wieder den")
+        print("   zweiten Faktor — dann diesen Befehl einfach noch einmal ausfuehren.")
         return 0
 
     quelle = "secret" if aktiv else "pending_secret"
@@ -150,7 +187,9 @@ def main() -> int:
         print("\nMit --code <6 Ziffern> laesst sich ein Code aus der App pruefen.")
         return 0
 
-    code = args.code.strip().replace(" ", "")
+    # Pruefung 21.09.2026 (MFA): wie der Server — Ziffern anderer Schriften
+    # (arabisch-indisch, vollbreit) gelten als ASCII-Ziffern.
+    code = mfa.code_normalisieren(args.code)
     for delta in range(-args.fenster, args.fenster + 1):
         if mfa.totp(secret, jetzt + delta) == code:
             versatz = delta * 30

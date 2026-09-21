@@ -24,6 +24,25 @@ router = APIRouter()
 # Termine.jsx). Nachpruefung Runde 14: Grundlage fuer die Chef-Sperre bei
 # nachtraeglichen Aenderungen (Nr. 99/98) und die Aufraeumfrist (Nr. 114).
 ABGESCHLOSSEN = frozenset({"abgeholt", "nicht abgeholt", "storniert", "erledigt"})
+# Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: "Darf der Chef
+# einen Termin mit unterschriebenem Abholprotokoll noch auf 'storniert' oder
+# 'nicht abgeholt' setzen? — ja". Mit Pflicht-Bestaetigung (ausgang_bestaetigt),
+# Merker ausgang_geaendert am Termin, eigenem Verlaufseintrag und Aufraeumen
+# von Fahrzeug und Vertragshinweis. "erledigt" zaehlt beim Kauf wie "abgeholt".
+AUSGANG_ABGEHOLT = frozenset({"abgeholt", "erledigt"})
+AUSGANG_ZURUECK = frozenset({"storniert", "nicht abgeholt"})
+# Darf NICHT "neu laden" enthalten — Termine.jsx laedt bei 409 + "neu laden" den
+# Termin frisch und verwirft die Eingabe.
+AUSGANG_BESTAETIGEN_HINWEIS = ("Diese Abholung ist bereits abgeschlossen. Wird sie nachträglich "
+                               "auf „storniert“ oder „nicht abgeholt“ gesetzt, gilt der Kauf "
+                               "nicht mehr als abgeholt — bitte die Rückfrage im Terminplaner "
+                               "bestätigen.")
+AUSGANG_FAHRZEUG_WEITER_HINWEIS = ("Das Fahrzeug steht bereits im Bestand bzw. im Weiterverkauf "
+                                   "und wurde nicht zurückgesetzt — bitte dort entscheiden.")
+# Fahrzeugzustaende NACH der Entscheidung "abgeholt" — hier setzt der Rueckweg
+# nichts zurueck (nur Hinweis).
+_NACH_ABHOLUNG_WEITER = frozenset({"bestand", "verkaufsentwurf", "verkaufsbereit",
+                                   "veroeffentlicht", "reserviert", "verkauft", "archiviert"})
 
 
 class _StandVeraltet(Exception):
@@ -38,7 +57,7 @@ VERTRAG_VERALTET_HINWEIS = ("Termin gespeichert — der Kaufvertrag zeigt noch d
                             "alten Abholtermin, bitte erneut speichern")
 # Runde 17 (Nr. 2): Steuerflags im Eingabemodell, die NICHT in der Datenbank
 # landen (siehe AppointmentIn.contract_loesen / fahrzeug_loesen).
-_STEUERFELDER = frozenset({"contract_loesen", "fahrzeug_loesen", "stand"})
+_STEUERFELDER = frozenset({"contract_loesen", "fahrzeug_loesen", "stand", "ausgang_bestaetigt"})
 
 
 class AppointmentIn(BaseModel):
@@ -86,6 +105,10 @@ class AppointmentIn(BaseModel):
     # hat — wer auf einem veralteten Stand speichert, bekommt "bitte neu laden"
     # statt die Aenderung des Kollegen (oder des Fahrers) zu ueberschreiben.
     stand: Optional[str] = None
+    # Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: der Chef
+    # bestaetigt ausdruecklich, dass eine abgeholte/erledigte Abholung
+    # nachtraeglich storniert bzw. "nicht abgeholt" wird. Steuerfeld, nie gespeichert.
+    ausgang_bestaetigt: Optional[bool] = None
 
     # Runde 17 (Nr. 2): leerer/whitespace-String bei ID-Feldern -> None.
     @field_validator("vehicle_id", "contract_id", "driver_id", mode="before")
@@ -588,6 +611,11 @@ def termin_fuer_sucher(user: dict, a: dict) -> dict:
     if user.get("role") == "sucher" and isinstance(a, dict):
         for feld in _TERMIN_INTERN:
             a.pop(feld, None)
+        # Pruefbericht 20.09.2026 (V-12): Merker der Chef-Uebersteuerung ohne
+        # Konto-Kennung (dieselbe Regel wie oben).
+        if isinstance(a.get("ausgang_geaendert"), dict):
+            a["ausgang_geaendert"] = {k: w for k, w in a["ausgang_geaendert"].items()
+                                      if k != "von"}
     return a
 
 
@@ -770,6 +798,244 @@ async def _sucher_darf(user: dict, appt: dict) -> bool:
     return await termin_im_bereich(user, appt)
 
 
+def ausgang_gilt_als_abgeholt(appt: dict) -> bool:
+    """Pruefung 21.09.2026 (V-12): Gilt der Termin als abgeschlossene
+    ABHOLUNG? "abgeholt" immer; "erledigt" nur, wenn am Termin ein Kauf bzw.
+    ein Fahrzeug haengt (vehicle_id, contract_id oder kaufvorgang_id).
+    Allgemeine Termine ohne beides (Werkstatt, Besichtigung) duerfen
+    "erledigt" <-> "storniert" wie vor V-12 wechseln — ohne Rueckfrage und
+    ohne Sperre fuer Sucher (Termine.jsx spiegelt die Regel: hatKauf)."""
+    status = (appt or {}).get("status")
+    if status == "abgeholt":
+        return True
+    return status == "erledigt" and bool(
+        appt.get("vehicle_id") or appt.get("contract_id") or appt.get("kaufvorgang_id"))
+
+
+async def abholung_beleg(appt: dict, dealer_id: str, *,
+                         protokoll_genuegt: bool = False) -> Optional[Dict[str, Any]]:
+    """Pruefung 21.09.2026 (V-12): Gilt die Abholung dieses Termins als
+    erfolgt — unabhaengig vom Terminstatus? Vorher hing die Regel nur am
+    ALTEN Terminstatus: ein zur Korrektur wieder geoeffneter Termin (abgeholt
+    -> offen, der Vorgang bleibt wegen D15 "abgeholt") liess sich von Sucher,
+    Fahrer und Chef ohne Rueckfrage stornieren — samt Ruecknahme von
+    Fahrzeug und Einkaufspreis.
+
+    Belegt:
+      * mit Kaufvorgang (wie kaufvorgang.fuer_termin: kaufvorgang_id bzw.
+        Vertrag): genau dann, wenn er "abgeholt" ist — das ist der Zustand,
+        den ein Storno zuruecknimmt. Waehrend einer laufenden Korrektur ist
+        die finale Version abgeloest, der Vorgang aber abgeholt. Ein
+        finales Protokoll an einem Termin, dessen Kauf schon zurueckgenommen
+        ist (Storno, danach wieder geoeffnet), belegt nichts mehr;
+      * ohne Kaufvorgang: finales, nicht abgeloestes Protokoll und das
+        Fahrzeug (falls vorhanden) steht noch auf "abgeholt" bzw. danach;
+      * mit `protokoll_genuegt` (Fahrer-App) zaehlt jedes finale Protokoll.
+    Liefert {"protokoll": {id, version} oder None} bzw. None (nicht belegt)."""
+    appt_id = (appt or {}).get("id")
+    if not appt_id:
+        return None
+    proto = await db.pickup_protocols.find_one(
+        {"appointment_id": appt_id, "status": "final", "superseded": {"$ne": True}},
+        {"_id": 0, "id": 1, "version": 1})
+    if proto and protokoll_genuegt:
+        return {"protokoll": proto}
+    oder = []
+    if appt.get("kaufvorgang_id"):
+        oder.append({"id": appt["kaufvorgang_id"]})
+    if appt.get("contract_id"):
+        oder.append({"contract_id": appt["contract_id"]})
+    kv = await db.kaufvorgaenge.find_one(
+        {"dealer_id": dealer_id, "$or": oder}, {"_id": 0, "id": 1, "status": 1},
+        sort=[("updated_at", -1)]) if oder else None
+    if kv:
+        if kv.get("status") != "abgeholt":
+            return None
+        if not proto:
+            # Beleg fuer Merker/Verlauf: die zuletzt unterschriebene Version
+            # (sie wird beim Schliessen per korrektur_verwerfen wieder aktuell).
+            proto = await db.pickup_protocols.find_one(
+                {"appointment_id": appt_id, "status": "final"},
+                {"_id": 0, "id": 1, "version": 1}, sort=[("version", -1)])
+        return {"protokoll": proto}
+    if not proto:
+        return None
+    if appt.get("vehicle_id"):
+        v = await db.vehicles.find_one({"id": appt["vehicle_id"], "dealer_id": dealer_id},
+                                       {"_id": 0, "lifecycle": 1})
+        if (v or {}).get("lifecycle") not in ({"abgeholt"} | _NACH_ABHOLUNG_WEITER):
+            return None
+    return {"protokoll": proto}
+
+
+async def vertrag_hinweis_aussetzen(appt_id: Optional[str], dealer_id: str, contract_id: str, *,
+                                    protokoll_id: Optional[str] = None) -> bool:
+    """Pruefbericht 20.09.2026 (V-12): Termin gilt nicht mehr als abgeholt —
+    "Neuen Vertrag senden" (nach_abholung_versand_offen) und der Alarm
+    vertrag_nach_abholung_offen entfallen; die Fassung nach der Abholung
+    bleibt als Nachweis. Nicht, wenn ein anderer Termin desselben Vertrags
+    weiter abgeholt/erledigt ist (dann False).
+
+    Pruefung 21.09.2026 (V-12): Im SELBEN Write wird festgehalten, dass der
+    Merker hier entfernt wurde (nach_abholung_versand_ausgesetzt) — nur dann
+    stellt der Rueckweg ihn wieder her. Mit `protokoll_id` nur, wenn der
+    Vertrag auf dieser Abholung steht (Compare-and-Set fuer die Aufraeumjobs).
+    Idempotent."""
+    if await db.appointments.count_documents(
+            {"dealer_id": dealer_id, "id": {"$ne": appt_id}, "contract_id": contract_id,
+             "status": {"$in": sorted(AUSGANG_ABGEHOLT)}}, limit=1):
+        return False
+    filt: Dict[str, Any] = {"id": contract_id, "dealer_id": dealer_id,
+                            "nach_abholung_versand_offen": True}
+    if protokoll_id:
+        filt["nach_abholung_protokoll_id"] = protokoll_id
+    await db.generated_pdfs.update_one(
+        filt, {"$unset": {"nach_abholung_versand_offen": ""},
+               "$set": {"nach_abholung_versand_ausgesetzt": {"am": now_iso(),
+                                                             "termin_id": appt_id}}})
+    import betrieb as _betrieb
+    await _betrieb.alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
+    return True
+
+
+async def vertrag_hinweis_wiederherstellen(appt: dict, dealer_id: str) -> None:
+    """Pruefung 21.09.2026 (V-12): Rueckweg storniert/nicht abgeholt ->
+    abgeholt/erledigt. Vorher blieben Hinweis und Alarm nach dem Storno fuer
+    immer weg:
+      a) "Neuen Vertrag senden" kommt wieder — nur, wenn das Storno den Merker
+         entfernt hat (nach_abholung_versand_ausgesetzt), der Vertrag noch auf
+         DIESER Abholung steht und seitdem nicht versendet wurde.
+      b) War die Neuerzeugung nach der Abholung gescheitert (Alarm, den das
+         Storno schloss), holt vertrag_nach_abholung_sicherstellen sie nach —
+         idempotent ueber nach_abholung_protokoll_id; scheitert es, steht der
+         Alarm wieder (der Alarm-Nachholer versucht es erneut).
+    Wirft nie."""
+    appt_id, contract_id = appt.get("id"), appt.get("contract_id")
+    if not appt_id or not contract_id:
+        return
+    try:
+        proto = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "status": "final", "superseded": {"$ne": True}},
+            {"_id": 0})
+        if not proto or ("contract_id" in proto
+                         and (proto.get("contract_id") or None) != contract_id):
+            return
+        vertrag = await db.generated_pdfs.find_one(
+            {"id": contract_id, "dealer_id": dealer_id},
+            {"_id": 0, "nach_abholung_versand_ausgesetzt": 1})
+        aus = (vertrag or {}).get("nach_abholung_versand_ausgesetzt")
+        if isinstance(aus, dict) and aus.get("am"):
+            gleicher = {"id": contract_id, "dealer_id": dealer_id,
+                        "nach_abholung_versand_ausgesetzt.am": aus["am"]}
+            r = await db.generated_pdfs.update_one(
+                {**gleicher, "nach_abholung_protokoll_id": proto["id"],
+                 # kein Versand seit dem Storno (der Versand beantwortet die Rueckfrage)
+                 "send_status": {"$not": {"$elemMatch": {"sent_at": {"$gt": aus["am"]}}}}},
+                {"$set": {"nach_abholung_versand_offen": True},
+                 "$unset": {"nach_abholung_versand_ausgesetzt": ""}})
+            if not r.matched_count:
+                # seitdem versendet bzw. andere Fassung: nichts wiederbeleben
+                await db.generated_pdfs.update_one(
+                    gleicher, {"$unset": {"nach_abholung_versand_ausgesetzt": ""}})
+        termin = await db.appointments.find_one(
+            {"id": appt_id, "dealer_id": dealer_id},
+            {"_id": 0, "id": 1, "dealer_id": 1, "created_by": 1, "contract_id": 1,
+             "vehicle_id": 1}) or {}
+        from routes.protocols import vertrag_nach_abholung_sicherstellen
+        await vertrag_nach_abholung_sicherstellen({**appt, **termin, "dealer_id": dealer_id}, proto)
+    except Exception:  # noqa: BLE001
+        log.exception("Vertragshinweis nach dem Rueckweg zu Termin %s nicht wiederhergestellt",
+                      appt_id)
+
+
+async def ausgang_nachziehen(appt: dict, dealer_id: str, *, hat_vorgang: bool,
+                             user: Optional[dict] = None) -> Dict[str, Any]:
+    """Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: Folgen,
+    wenn der Chef den Ausgang einer Abholung nachtraeglich aendert. Idempotent
+    (auch fuer cleanup_service.termin_nacharbeit_nachholen). `appt` braucht id,
+    status (der jetzt gilt), vehicle_id, contract_id.
+
+    Termin jetzt "storniert"/"nicht abgeholt":
+      * Kaufvertrag: "Neuen Vertrag senden" (nach_abholung_versand_offen) und
+        der Alarm vertrag_nach_abholung_offen entfallen — die Fassung nach der
+        Abholung bleibt als Nachweis. Nicht, wenn ein anderer Termin desselben
+        Vertrags weiter abgeholt/erledigt ist.
+      * Fahrzeug OHNE Kaufvorgang (Terminplaner ohne Vertrag): streng aus
+        "abgeholt" zuruecknehmen (lifecycle.abholung_zuruecknehmen) — nur, wenn
+        keine andere Abholung am Fahrzeug mehr abgeholt ist. MIT Vorgang
+        erledigt das kaufvorgang.fahrzeug_status_aggregieren.
+      * Steht das Fahrzeug schon in Bestand/Weiterverkauf: nichts aendern,
+        Hinweis zurueckgeben (dort entscheidet der Chef).
+    Termin wieder "abgeholt"/"erledigt" (Rueckweg) ohne Vorgang: Fahrzeug
+    wieder auf "abgeholt" (mit Vorgang: Zusammenfassung).
+
+    Liefert {"fahrzeug": Lebenszyklus danach, "hinweis": Text oder None}.
+    Wirft bei einem verlorenen Rueckweg (Aufrufer setzt nacharbeit_offen).
+
+    Pruefung 21.09.2026 (V-12): Beim Rueckweg (Termin wieder abgeholt/erledigt
+    mit Vertrag) kommen "Neuen Vertrag senden" und — falls die Neuerzeugung
+    nach der Abholung gescheitert war — deren Nachholung samt Alarm wieder
+    (vertrag_hinweis_wiederherstellen). Vorher war beides nach Storno und
+    Rueckweg fuer immer weg."""
+    from lifecycle import LifecycleError, abholung_zuruecknehmen
+    status = appt.get("status") or "offen"
+    zurueck = status in AUSGANG_ZURUECK
+    vehicle_id = appt.get("vehicle_id")
+    contract_id = appt.get("contract_id")
+    ergebnis: Dict[str, Any] = {"fahrzeug": None, "hinweis": None}
+    andere_termine = {"dealer_id": dealer_id, "id": {"$ne": appt.get("id")},
+                      "status": {"$in": sorted(AUSGANG_ABGEHOLT)}}
+    if zurueck and contract_id:
+        await vertrag_hinweis_aussetzen(appt.get("id"), dealer_id, contract_id)
+    elif status in AUSGANG_ABGEHOLT and contract_id:
+        await vertrag_hinweis_wiederherstellen(appt, dealer_id)
+    if not vehicle_id:
+        return ergebnis
+    felder = {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1}
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id}, felder)
+    if not v:
+        return ergebnis
+
+    async def _andere_abholung() -> bool:
+        # Doppel-Abholung: eine andere Abholung am selben Auto ist weiter abgeholt.
+        return bool(await db.appointments.count_documents(
+            {**andere_termine, "vehicle_id": vehicle_id}, limit=1)
+            or await db.kaufvorgaenge.count_documents(
+                {"vehicle_id": vehicle_id, "dealer_id": dealer_id, "status": "abgeholt"},
+                limit=1))
+
+    async def _wieder_abgeholt(von: str) -> None:
+        # Pruefung 21.09.2026 (V-12): ein uebersprungener Schritt ist kein
+        # Erfolg (Phase 2, G5) — LifecycleError, der Aufrufer setzt
+        # nacharbeit_offen, der Aufraeumjob wiederholt diesen Aufruf.
+        import kaufvorgang as _kv
+        for schritt in _kv._schritte(von, "abgeholt"):
+            if not await try_set_lifecycle(vehicle_id, dealer_id, schritt, user=user):
+                log.warning("Rueckweg der Abholung %s: Fahrzeug %s bleibt vor %s stehen",
+                            appt.get("id"), vehicle_id, schritt)
+                raise LifecycleError(f"Rueckweg der Abholung: Fahrzeug bleibt vor '{schritt}' stehen")
+
+    lc = v.get("lifecycle")
+    if not hat_vorgang:
+        if zurueck and lc == "abgeholt" and not v.get("abgeholt_kaufvorgang_id") \
+                and not await _andere_abholung():
+            ziel = "storniert" if status == "storniert" else "nicht_abgeholt"
+            if not await abholung_zuruecknehmen(vehicle_id, dealer_id, ziel, user=user):
+                raise LifecycleError("Fahrzeugstatus wurde zwischenzeitlich geändert")
+            # Pruefung 21.09.2026 (V-12): Pruefen und Zuruecknehmen sind nicht
+            # atomar — schloss inzwischen eine andere Abholung dieses Autos ab,
+            # gehoert es wieder auf "abgeholt".
+            if await _andere_abholung():
+                await _wieder_abgeholt(ziel)
+        elif not zurueck and status in AUSGANG_ABGEHOLT and lc in ("storniert", "nicht_abgeholt"):
+            await _wieder_abgeholt(lc)
+        v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id}, felder) or v
+    ergebnis["fahrzeug"] = v.get("lifecycle")
+    if zurueck and v.get("lifecycle") in _NACH_ABHOLUNG_WEITER and not await _andere_abholung():
+        ergebnis["hinweis"] = AUSGANG_FAHRZEUG_WEITER_HINWEIS
+    return ergebnis
+
+
 @router.put("/appointments/{appt_id}")
 async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(current_firma)):
     existing = await db.appointments.find_one(
@@ -790,6 +1056,8 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     contract_loesen = bool(update.pop("contract_loesen", False))
     fahrzeug_loesen = bool(update.pop("fahrzeug_loesen", False))
     stand = update.pop("stand", None)
+    # Pruefbericht 20.09.2026 (V-12): Bestaetigung des Chefs, nie gespeichert.
+    ausgang_bestaetigt = bool(update.pop("ausgang_bestaetigt", False))
     # Ein ausdruecklich gesendetes null bleibt nur dort erhalten, wo es
     # etwas bedeutet (driver_id = Fahrer entfernen); sonst wuerde null
     # Pflichtfelder auf None setzen.
@@ -842,6 +1110,15 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # drivers.py). Die Oberflaeche sendet immer das ganze Objekt — daher
     # zaehlt nur, was sich tatsaechlich aendert. Status/Notizen bleiben frei.
     status_neu = update.get("status", existing.get("status"))
+    # Pruefung 21.09.2026 (V-12): Die Rueckfrage/Sperre haengt am BELEG der
+    # Abholung (Vorgang "abgeholt", ohne Vorgang das finale Protokoll; siehe
+    # abholung_beleg), nicht nur am alten Terminstatus — sonst umging das
+    # Wiederoeffnen (abgeholt -> offen) mit anschliessendem Storno jede
+    # Bestaetigung.
+    ausgang_beleg = None
+    if status_neu in AUSGANG_ZURUECK and status_neu != existing.get("status") \
+            and existing.get("status") not in AUSGANG_ZURUECK:
+        ausgang_beleg = await abholung_beleg(existing, user["dealer_id"])
     if existing.get("status") in ABGESCHLOSSEN and user.get("role") != "dealer":
         # Runde 12 (15.09.2026, Nr. 11): auch Datum und Uhrzeit sind Beweisdaten.
         geschuetzt = ("driver_id", "vehicle_id", "contract_id", "seller_name",
@@ -862,13 +1139,57 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                                      "Händler-Hauptaccount wieder")
         # Runde 12 (15.09.2026, Nr. 12): auch der Wechsel zwischen Endzustaenden
         # (abgeholt -> storniert / nicht abgeholt) ist Chefsache.
+        # Pruefbericht 20.09.2026 (V-12): "erledigt" zaehlt beim Kauf wie
+        # "abgeholt" — ein Sucher konnte einen erledigten Termin ohne Protokoll
+        # stornieren und damit den Kauf zuruecknehmen. Ebenso bleibt ein vom
+        # Chef nachtraeglich geaenderter Ausgang (ausgang_geaendert) Chefsache.
+        # Pruefung 21.09.2026 (V-12): "erledigt" nur mit Kauf/Fahrzeug (allgemeine
+        # Termine wie vor V-12); der Merker gilt nur bis zum Wiederoeffnen (dort
+        # entfernt, unten).
         if status_neu != existing.get("status") and (
-                existing.get("status") == "abgeholt"
+                ausgang_gilt_als_abgeholt(existing)
+                or existing.get("ausgang_geaendert")
                 or await db.pickup_protocols.count_documents(
                     {"appointment_id": appt_id, "superseded": {"$ne": True}, "status": "final"},
                     limit=1)):
             raise HTTPException(403, "Den Ausgang einer abgeschlossenen Abholung ändert "
                                      "nur der Händler-Hauptaccount")
+    # Pruefung 21.09.2026 (V-12): auch ein zur Korrektur wieder geoeffneter
+    # Termin mit belegter Abholung wird vom Sucher nicht storniert / auf "nicht
+    # abgeholt" gesetzt (vorher: Rueckweg ueber den offenen Status).
+    if user.get("role") != "dealer" and existing.get("status") not in ABGESCHLOSSEN \
+            and ausgang_beleg:
+        raise HTTPException(403, "Den Ausgang einer abgeschlossenen Abholung ändert "
+                                 "nur der Händler-Hauptaccount")
+    # Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: Der Chef darf
+    # eine abgeholte/erledigte Abholung (auch mit unterschriebenem Protokoll)
+    # nachtraeglich auf "storniert" / "nicht abgeholt" setzen — aber nur mit
+    # ausdruecklicher Bestaetigung (sonst 409, nichts geschrieben). Nur der
+    # Chef erreicht diese Stelle (Sucher: 403 oben). Der Rueckweg zu
+    # "abgeholt"/"erledigt" nach einer solchen Aenderung wird ebenso belegt.
+    # Pruefung 21.09.2026 (V-12): ebenso aus einem offenen (wieder geoeffneten)
+    # Status, solange die Abholung belegt ist; "erledigt" ohne Kauf/Fahrzeug
+    # nur mit finalem Protokoll (ausgang_beleg).
+    ausgang_zurueck = (ausgang_beleg is not None
+                       or (status_neu in AUSGANG_ZURUECK
+                           and ausgang_gilt_als_abgeholt(existing)))
+    ausgang_rueckweg = (existing.get("status") in AUSGANG_ZURUECK
+                        and status_neu in AUSGANG_ABGEHOLT
+                        and bool(existing.get("ausgang_geaendert")))
+    ausgang_proto = (ausgang_beleg or {}).get("protokoll")
+    if (ausgang_zurueck or ausgang_rueckweg) and not ausgang_proto:
+        ausgang_proto = await db.pickup_protocols.find_one(
+            {"appointment_id": appt_id, "status": "final", "superseded": {"$ne": True}},
+            {"_id": 0, "id": 1, "version": 1})
+    if ausgang_zurueck and not ausgang_bestaetigt:
+        # Pruefung 21.09.2026 (V-12): zuerst den Stand des Dialogs pruefen —
+        # zeigt er noch einen aelteren Status (der Fahrer hat inzwischen
+        # abgeschlossen), fragte die Oberflaeche nie nach; mit "neu laden"
+        # baut Termine.jsx den Dialog frisch auf (B11), und beim naechsten
+        # Speichern erscheint die Rueckfrage.
+        if stand and existing.get("updated_at") and stand != existing["updated_at"]:
+            raise HTTPException(409, TERMIN_VERALTET_HINWEIS)
+        raise HTTPException(409, AUSGANG_BESTAETIGEN_HINWEIS)
     # Go-Live 13.09.2026 (P3, P6-Zusatz-Umhaengen): Liegt das Protokoll beim
     # Chef, ist es freigegeben oder wird gerade unterschrieben, darf der Termin
     # nicht an einen anderen Vertrag/ein anderes Fahrzeug gehaengt werden —
@@ -1027,6 +1348,24 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                                          "'Abgeholt' entsteht jetzt nur über eine Korrektur-"
                                          "Version, die der eingeteilte Fahrer abschließt.")
         update["status_changed_at"] = now_iso()
+        if ausgang_zurueck or ausgang_rueckweg:
+            # Pruefbericht 20.09.2026 (V-12): wer, wann, alt/neu und Protokoll —
+            # im SELBEN Write wie der Status (kein Status ohne Beleg).
+            update["ausgang_geaendert"] = {
+                "am": update["status_changed_at"], "von": user["id"],
+                "von_status": existing.get("status"), "nach_status": update["status"],
+                "protokoll_id": (ausgang_proto or {}).get("id")}
+        elif existing.get("ausgang_geaendert"):
+            # Pruefung 21.09.2026 (V-12): Der Merker gilt nur fuer die gerade
+            # geltende Uebersteuerung. Wieder geoeffnet -> weg (der Beleg bleibt
+            # im Verlauf termin.ausgang.geaendert); sonst blieben Hinweis,
+            # Sucher-Sperre und "Rueckweg" an spaeteren, regulaeren Abschluessen
+            # haengen. Wechselt der Chef zwischen Endzustaenden (storniert <->
+            # nicht abgeholt), folgt der Merker dem Status.
+            if update["status"] not in ABGESCHLOSSEN:
+                unset["ausgang_geaendert"] = ""
+            elif isinstance(existing["ausgang_geaendert"], dict):
+                update["ausgang_geaendert.nach_status"] = update["status"]
         # Nachpruefung Runde 14 (Nr. 114): Die Aufraeumfrist zaehlt ab dem
         # ERSTEN Erreichen eines Endstatus (abgeschlossen_seit) und startet
         # beim Wieder-Oeffnen nicht neu; das Feld wird deshalb nie geloescht.
@@ -1121,6 +1460,9 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     status_gewechselt = "status" in update and update["status"] != existing.get("status")
     nacharbeit_fehler = False
     merker_gesetzt = False
+    # Pruefbericht 20.09.2026 (V-12): Ergebnis der Ausgangs-Nacharbeit (Verlauf, Hinweis).
+    ausgang_folgen: Dict[str, Any] = {}
+    ausgang_kv_id = existing.get("kaufvorgang_id")
     try:
         if vertrag_wechsel or fahrzeug_wechsel or fahrer_wechsel:
             # Pruefung 14.09.2026 (Liste 4, Nr. 1/2/3/6): ein angefangener Entwurf
@@ -1206,6 +1548,17 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                 if zustand:
                     await try_set_lifecycle(vehicle_id, user["dealer_id"],
                                             zustand, user=user)
+            # Pruefbericht 20.09.2026 (V-12): Ausgang nachtraeglich geaendert —
+            # Fahrzeug (ohne Vorgang) und Vertragshinweis nachziehen; auch beim
+            # Nachholen, wenn dieser Schritt beim letzten Mal scheiterte.
+            if ausgang_zurueck or ausgang_rueckweg or (
+                    nacharbeit_nachholen and existing.get("ausgang_geaendert")
+                    and wirksamer_status in (AUSGANG_ZURUECK | AUSGANG_ABGEHOLT)):
+                ausgang_kv_id = termin_nachher.get("kaufvorgang_id") or ausgang_kv_id
+                ausgang_folgen = await ausgang_nachziehen(
+                    {"id": appt_id, "status": wirksamer_status, "vehicle_id": vehicle_id,
+                     "contract_id": contract_id}, user["dealer_id"],
+                    hat_vorgang=hat_vorgang, user=user)
             if not hat_vorgang and vehicle_id and nacharbeit_nachholen \
                     and wirksamer_status in TERMIN_OFFEN_WERTE:
                 # Audit 13.09.2026 (#5): wie beim Anlegen (manueller Termin ohne Vorgang).
@@ -1329,9 +1682,24 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # schon geschrieben — ein fehlender Audit-Eintrag darf kein 500 geben.
     await log_activity_sicher(user["dealer_id"], user["id"], "termin.aktualisiert",
                               ref=appt_id, meta=meta)
+    if ausgang_zurueck or ausgang_rueckweg:
+        # Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: eigener
+        # Verlaufseintrag fuer die Chef-Uebersteuerung (und ihren Rueckweg) —
+        # mit Protokoll, alt/neu, Konto (user_id) und Zeit (created_at).
+        await log_activity_sicher(
+            user["dealer_id"], user["id"], "termin.ausgang.geaendert", ref=appt_id,
+            meta={"status_von": existing.get("status"), "status_nach": update["status"],
+                  "protokoll_id": (ausgang_proto or {}).get("id"),
+                  "protokoll_version": (ausgang_proto or {}).get("version"),
+                  "vehicle_id": vehicle_id, "contract_id": contract_pruefen,
+                  "kaufvorgang_id": ausgang_kv_id,
+                  "fahrzeug_nachher": ausgang_folgen.get("fahrzeug"),
+                  "bestaetigt": ausgang_bestaetigt})
     out = {"ok": True, "pickup_date_changed": pickup_changed,
            "contract_updated": vertrag_aktualisiert}
     hinweise = []
+    if ausgang_folgen.get("hinweis"):
+        hinweise.append(ausgang_folgen["hinweis"])
     if fahrer_entfernt:
         hinweise.append(FAHRER_ENTFERNT_HINWEIS)
     elif vertrag_veraltet:

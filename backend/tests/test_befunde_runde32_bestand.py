@@ -361,22 +361,36 @@ def test_15_zurueckgezogener_eigener_kauf_holt_kein_fremdes_auto(welt):
 
 def test_16_von_hand_angelegtes_nur_fuer_den_besitzer(welt):
     """Gegenpruefung (niedrig): Ein Mitbearbeiter behielt das von Hand
-    angelegte Chef-Auto dauerhaft. Jetzt nur, wem es gehoert."""
+    angelegte Chef-Auto dauerhaft. Jetzt nur, wem es gehoert.
+
+    Wunsch Ahmad 21.09.2026 (R1-01): der Chef haengt nichts mehr um (410) —
+    das Chef-Auto bleibt beim Chef. Ein von Hand angelegtes Auto im Besitz
+    eines Suchers gibt es nur noch als Altdaten aus der Zeit davor; die
+    Regel "nur fuer den Besitzer" gilt dafuer weiter."""
     w = welt
     B = _modul("routes.bestand")
+    from fastapi import HTTPException
     hand = _fahrzeug(w, "hand_mit", w.chef, source="manuell", lifecycle="bestand",
                      mitbearbeiter_ids=[w.b["id"]])
+    alt_a = _fahrzeug(w, "hand_alt_a", w.a, source="manuell", lifecycle="bestand",
+                      mitbearbeiter_ids=[w.b["id"]])
 
     async def lauf():
         await _anlegen(w, [hand])
         vorher = await _alle(w)
-        await B.set_vehicle_owner(hand["id"], B.BesitzerIn(owner_user_id=w.a["id"]), w.chef)
-        return vorher, await _alle(w)
+        with pytest.raises(HTTPException) as e:
+            await B.fahrzeug_umhaengen_entfernt(hand["id"], w.chef)
+        nachher = await _alle(w)
+        besitzer = (await w.db.vehicles.find_one({"id": hand["id"]}, {"_id": 0}))["owner_user_id"]
+        await _anlegen(w, [alt_a])
+        return vorher, e.value.status_code, nachher, besitzer, await _alle(w)
 
-    vorher, nachher = w.run(lauf())
+    vorher, status, nachher, besitzer, mit_alt = w.run(lauf())
     assert _ids(vorher[0]) == {hand["id"]} and _ids(vorher[2]) == set()
-    assert _ids(nachher[1]) == {hand["id"]}, "dem Sucher zugewiesen"
-    assert _ids(nachher[2]) == set()
+    assert status == 410 and besitzer == w.chef["id"], "Chef-Auto bleibt beim Chef"
+    assert _ids(nachher[1]) == set() and _ids(nachher[2]) == set()
+    assert _ids(mit_alt[1]) == {alt_a["id"]}, "Altdaten: von Hand angelegtes Auto des Suchers"
+    assert _ids(mit_alt[2]) == set(), "Mitbearbeiter sieht es nicht"
 
 
 # ------------------------------------------------------------ Chef: Hof & Termine

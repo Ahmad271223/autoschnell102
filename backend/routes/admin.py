@@ -3182,6 +3182,81 @@ async def _konten_ohne_nummer_zaehlen() -> dict:
     return await konten_ohne_nummer(db)
 
 
+# Wunsch Ahmad 21.09.2026 (Betrieb): Testmail an BETRIEB_MELDUNG_AN per Knopf.
+# Bisher war der einzige Test der Tagesbericht — erst um 8 Uhr, und bei einem
+# Fehlschlag erst am naechsten Morgen wieder. Hoechstens eine Testmail je
+# Minute und Prozess: ein Dauerklick soll das Resend-Kontingent nicht leeren.
+BETRIEB_TESTMAIL_ABSTAND_S = 60
+_betrieb_testmail = {"zuletzt": None}      # time.monotonic() des letzten Versands
+# Pruefung 21.09.2026 (Betrieb): der Versand wartete synchron — bei einem
+# nicht erreichbaren Resend bis zu 6 x 30 s + Pausen (~3 Minuten). axios bricht
+# nach 60 s ab, Cloudflare nach ~100 s (524): genau der Fall, den die Testmail
+# aufklaeren soll, kam ohne Grund an. Jetzt hoechstens 45 s, dann eine klare
+# Meldung. Abbrechen ist sicher: jeder Klick hat einen eigenen Idempotency-Key.
+BETRIEB_TESTMAIL_MAX_S = 45
+BETRIEB_TESTMAIL_PROTOKOLL = "Server-Protokoll: docker compose logs --since 10m backend | grep email_service"
+
+
+@router.post("/admin/betrieb/testmail")
+async def admin_betrieb_testmail(admin=Depends(current_super_admin)):
+    """Kurze Probe-Mail an BETRIEB_MELDUNG_AN ueber denselben Versandweg wie
+    Alarme, Anfragen und Tagesbericht (betriebsmeldung -> email_service).
+
+    Pruefung 21.09.2026 (Betrieb): Lehnt der Anbieter ab oder antwortet er
+    nicht, kommt 200 mit {ok: false, grund} — KEIN 502/504. Cloudflare ersetzt
+    502/504 vom Server durch eine eigene Fehlerseite; im Browser stand dann
+    nur "Request failed with status code 502", der Grund (z. B. "Resend lehnt
+    ab (HTTP 403): domain not verified") ging verloren."""
+    import time
+
+    import betriebsmeldung
+    import email_service
+    from provider_fetch import MOCK_PROVIDER_FETCH
+    ziel = betriebsmeldung.empfaenger()
+    if not ziel:
+        raise HTTPException(400, "Keine Adresse eingetragen (BETRIEB_MELDUNG_AN)")
+    if not email_service.gueltige_adresse(ziel):
+        raise HTTPException(400, f"BETRIEB_MELDUNG_AN ist keine gültige E-Mail-Adresse "
+                                 f"(„{ziel[:120]}“) — genau eine Adresse, ohne Leerzeichen "
+                                 f"und ohne Anführungszeichen.")
+    if not MOCK_PROVIDER_FETCH and not email_service.email_configured():
+        raise HTTPException(503, "E-Mail-Versand ist nicht eingerichtet (RESEND_API_KEY "
+                                 "oder SMTP_* in der .env setzen) — es wurde keine Mail "
+                                 "verschickt. Ohne Versandweg kommen auch Alarme und "
+                                 "Tagesbericht nicht an.")
+    jetzt = time.monotonic()
+    zuletzt = _betrieb_testmail["zuletzt"]
+    if zuletzt is not None and jetzt - zuletzt < BETRIEB_TESTMAIL_ABSTAND_S:
+        rest = int(BETRIEB_TESTMAIL_ABSTAND_S - (jetzt - zuletzt)) + 1
+        raise HTTPException(429, f"Höchstens eine Testmail pro Minute — bitte noch "
+                                 f"{rest} s warten.")
+    # Vor dem Versand merken (kein await dazwischen): ein Doppelklick
+    # schickt keine zweite Mail hinterher.
+    _betrieb_testmail["zuletzt"] = jetzt
+    if MOCK_PROVIDER_FETCH:
+        # Last-/CI-Tests: kein echter Versand, aber ehrlich markiert (wie
+        # beim Vertragsversand).
+        return {"ok": True, "an": ziel, "zustellung": "mock"}
+    try:
+        ok, beleg, grund = await asyncio.wait_for(
+            betriebsmeldung.testmail_senden(ziel, von=_handelnder(admin)),
+            timeout=BETRIEB_TESTMAIL_MAX_S)
+    except asyncio.TimeoutError:
+        log.error("[betriebsmeldung] Testmail an %s: keine Antwort des Mail-Anbieters "
+                  "innerhalb von %s s", ziel, BETRIEB_TESTMAIL_MAX_S)
+        return {"ok": False, "an": ziel, "zustellung": "unklar",
+                "grund": f"Der Mail-Anbieter hat nicht innerhalb von {BETRIEB_TESTMAIL_MAX_S} s "
+                         f"geantwortet — Ausgang unklar (die Testmail an {ziel} kann noch "
+                         f"ankommen). {BETRIEB_TESTMAIL_PROTOKOLL}"}
+    if not ok:
+        return {"ok": False, "an": ziel, "zustellung": "abgelehnt",
+                "grund": f"Testmail an {ziel} nicht zugestellt: "
+                         + (grund or "der Mail-Anbieter hat sie nicht angenommen")
+                         + f" — {BETRIEB_TESTMAIL_PROTOKOLL}"}
+    return {"ok": True, "an": ziel, "zustellung": beleg.split(":", 1)[0] or "versendet",
+            "beleg": beleg}
+
+
 @router.post("/admin/betrieb/alarme/{alarm_id}/quittieren")
 async def admin_alarm_quittieren(alarm_id: str, admin=Depends(current_super_admin)):
     from betrieb import quittieren
@@ -3224,6 +3299,8 @@ async def admin_mfa_status(admin=Depends(current_admin)):
     m = (voll or {}).get("mfa") or {}
     return {"aktiv": bool(m.get("aktiv")), "aktiviert_am": m.get("aktiviert_am"),
             "wiederherstellungscodes_uebrig": len(m.get("wiederherstellung") or []),
+            # Wunsch Ahmad 21.09.2026 (AD-06): wann die Notfall-Codes zuletzt neu erzeugt wurden
+            "codes_erneuert_am": m.get("codes_erneuert_am"),
             "einrichtung_offen": bool(m.get("pending_secret"))}
 
 
@@ -3325,16 +3402,85 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
                        "Andere Geräte müssen sich neu anmelden (jetzt mit zweitem Faktor)."}
 
 
+MFA_CODE_VERBRAUCHT = ("Dieser Code wurde gerade schon verwendet — bitte den nächsten "
+                       "Code aus der App abwarten.")
+MFA_FEHLVERSUCHE_MAX = 5                 # wie /auth/login/mfa: danach 15 Minuten Sperre
+MFA_ZU_VIELE_EINGABEN = ("Zu viele Code-Eingaben für die Zwei-Faktor-Anmeldung — bitte "
+                         "60 Sekunden warten.")
+
+# Pruefung 21.09.2026 (MFA): gemeinsamer Zaehler je Admin-Konto (Mongo, alle
+# Worker, beide Server) wie login_mfa_limiter beim Anmelden. Die Sperre nach 5
+# falschen Codes allein hielt nur Einzelanfragen nacheinander auf: ein Schwung
+# GLEICHZEITIGER Anfragen hatte den Stand vor der Sperre gelesen und wurde voll
+# gegen TOTP geprueft. Schluessel ist die Konto-ID, nicht die IP — auch viele
+# IPs mit derselben (gestohlenen) Sitzung werden gebremst. fail_closed: faellt
+# der gemeinsame Zaehler aus, gilt "gesperrt" statt eines Zaehlers je Prozess.
+from rate_limiter import SlidingWindowRateLimiter as _Begrenzer  # noqa: E402
+
+_admin_mfa_limiter = _Begrenzer(max_attempts=10, window_seconds=60, name="admin-mfa",
+                                fail_closed=True)
+
+
+async def _mfa_app_code_bestaetigen(admin_id: str, m: dict, code: str) -> int:
+    """Aktuellen 6-stelligen App-Code einer AKTIVEN Zwei-Faktor-Anmeldung
+    pruefen (Abschalten, neue Notfall-Codes). Liefert den passenden
+    30-s-Zaehler.
+
+    Wunsch Ahmad 21.09.2026 (Pruefbericht AD-06): dieselben Regeln wie beim
+    Anmelden (/auth/login/mfa) — Replay-Schutz ueber letzter_zaehler, 5
+    Fehlversuche -> 15 Minuten Sperre (vorher liess sich der Code hier aus
+    einer laufenden Sitzung beliebig oft raten), dazu die Mengenbremse
+    _admin_mfa_limiter (10 je Minute und Konto). Nur ein App-Code, KEIN
+    Wiederherstellungscode.
+    Fehler sind 400, nie 401: lib/api.js meldet bei JEDER 401 ab — ein
+    vertippter Code beim "Abschalten" warf den Betreiber aus der Sitzung."""
+    import mfa as _mfa
+    # Pruefung 21.09.2026 (MFA): VOR allem anderen zaehlen — auch Formfehler
+    # und richtige Codes, genau wie beim Anmelden.
+    if not await _admin_mfa_limiter.check(admin_id):
+        raise HTTPException(429, MFA_ZU_VIELE_EINGABEN)
+    sperre = m.get("gesperrt_bis")
+    if sperre and sperre > now_iso():
+        raise HTTPException(429, "Zweiter Faktor vorübergehend gesperrt (zu viele falsche Codes) — "
+                                 "bitte in 15 Minuten erneut versuchen.")
+    # Pruefung 21.09.2026 (MFA): Ziffern anderer Schriften ('١٢٣٤٥٦',
+    # '１２３４５６') erst in ASCII umsetzen, dann NUR ASCII-Ziffern zulassen —
+    # vorher bestanden sie isdigit(), und hmac.compare_digest warf 500.
+    code = _mfa.code_normalisieren(code)
+    if not _mfa.code_format_ok(code):
+        # Kann nie passen (z.B. ein Notfall-Code) — kein Rateversuch, kein Fehlversuch.
+        raise HTTPException(400, "Bitte den aktuellen 6-stelligen Code aus der Authenticator-App "
+                                 "eingeben (nur Ziffern; hier gilt kein Notfall-Code).")
+    secret = _mfa.entschluesseln(m.get("secret", "")) or ""
+    zaehler = _mfa.code_pruefen(secret, code, int(m.get("letzter_zaehler", -1))) if secret else None
+    if zaehler is not None:
+        return zaehler
+    if secret and _mfa.code_pruefen(secret, code, -1) is not None:
+        # Richtig, aber schon benutzt (meist der Code vom Anmelden): kein Fehlversuch.
+        raise HTTPException(400, MFA_CODE_VERBRAUCHT)
+    from pymongo import ReturnDocument
+    doc = await db.users.find_one_and_update(
+        {"id": admin_id, "mfa.aktiv": True}, {"$inc": {"mfa.fehlversuche": 1}},
+        projection={"_id": 0, "mfa.fehlversuche": 1}, return_document=ReturnDocument.AFTER)
+    if int(((doc or {}).get("mfa") or {}).get("fehlversuche", 0)) >= MFA_FEHLVERSUCHE_MAX:
+        await db.users.update_one(
+            {"id": admin_id, "mfa.fehlversuche": {"$gte": MFA_FEHLVERSUCHE_MAX}},
+            {"$set": {"mfa.gesperrt_bis": (datetime.now(timezone.utc)
+                                           + timedelta(minutes=15)).isoformat(),
+                      "mfa.fehlversuche": 0}})
+    await log_activity_sicher("", admin_id, "admin.mfa.code_falsch")
+    raise HTTPException(400, "Code ungültig")
+
+
 @router.post("/admin/me/mfa/deaktivieren")
 async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
-    import mfa as _mfa
     voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
     m = (voll or {}).get("mfa") or {}
     if not m.get("aktiv"):
         raise HTTPException(400, "Zwei-Faktor ist nicht aktiv")
-    secret = _mfa.entschluesseln(m.get("secret", "")) or ""
-    if _mfa.code_pruefen(secret, body.code, int(m.get("letzter_zaehler", -1))) is None:
-        raise HTTPException(401, "Code ungültig")
+    # Wunsch Ahmad 21.09.2026 (AD-06): falscher Code -> 400 statt 401 (sonst
+    # Abmeldung), Fehlversuche zaehlen wie beim Anmelden.
+    await _mfa_app_code_bestaetigen(admin["id"], m, body.code)
     # Runde 15: nur GENAU das geprueft Geheimnis abschalten — ein alter
     # Abschalt-Aufruf loeschte sonst eine inzwischen neu eingerichtete MFA.
     r = await db.users.update_one(
@@ -3345,6 +3491,66 @@ async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
                                  "bitte Seite neu laden.")
     await log_activity_sicher("", admin["id"], "admin.mfa.deaktiviert")
     return {"ok": True, "aktiv": False}
+
+
+@router.post("/admin/me/mfa/codes-neu")
+async def admin_mfa_codes_neu(body: MfaCodeIn, admin=Depends(current_admin)):
+    """NUR die 8 Notfall-Codes (Wiederherstellungscodes) neu erzeugen — der
+    Schluessel in der Authenticator-App bleibt, die Sitzung auch.
+
+    Wunsch Ahmad 21.09.2026 (Pruefbericht AD-06): Neue Codes gab es vorher
+    nur ueber Abschalten -> Einrichten -> Aktivieren. Dazwischen war der
+    Betreiber ohne zweiten Faktor, und ging der Tab verloren, liess ihn die
+    Anmeldung in Produktion nicht mehr herein. Verlangt wird der aktuelle
+    App-Code (kein Notfall-Code — sonst vermehrte ein gefundener Code sich
+    selbst). Alle bisherigen Codes gelten ab sofort nicht mehr; die neuen
+    stehen genau einmal in der Antwort."""
+    import mfa as _mfa
+    voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
+    m = (voll or {}).get("mfa") or {}
+    if not m.get("aktiv"):
+        raise HTTPException(409, "Die Zwei-Faktor-Anmeldung ist nicht aktiv — bitte zuerst "
+                                 "einrichten; dabei entstehen die Notfall-Codes.")
+    zaehler = await _mfa_app_code_bestaetigen(admin["id"], m, body.code)
+    codes, hashes = _mfa.wiederherstellungscodes()
+    # Compare-and-set wie beim Anmelden: GENAU das geprueft Geheimnis, und
+    # der Code wird dabei atomar verbraucht. Zwei parallele Klicks erzeugen
+    # so nicht zwei Code-Saetze, von denen der zuerst angezeigte nie galt.
+    r = await db.users.update_one(
+        {"id": admin["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret"),
+         "$or": [{"mfa.letzter_zaehler": {"$lt": zaehler}},
+                 {"mfa.letzter_zaehler": {"$exists": False}}]},
+        {"$set": {"mfa.wiederherstellung": hashes, "mfa.letzter_zaehler": zaehler,
+                  "mfa.fehlversuche": 0, "mfa.codes_erneuert_am": now_iso()}})
+    if r.matched_count == 0:
+        jetzt = ((await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1}))
+                 or {}).get("mfa") or {}
+        if jetzt.get("aktiv") and jetzt.get("secret") == m.get("secret"):
+            raise HTTPException(400, MFA_CODE_VERBRAUCHT)
+        raise HTTPException(409, "Die Zwei-Faktor-Anmeldung wurde inzwischen geändert — "
+                                 "bitte Seite neu laden.")
+    uebrig_alt = len(m.get("wiederherstellung") or [])
+    # Die Codes sind schon ersetzt: ein Fehler im Verlauf darf die Antwort
+    # nicht mehr mit 500 abbrechen — sonst waeren die alten Codes ungueltig
+    # und die neuen nie angezeigt.
+    try:
+        await db.zugangs_aenderungen.insert_one({
+            "id": str(uuid.uuid4()), "art": "mfa_codes_neu",
+            "subject_user_id": admin["id"], "subject_email": admin.get("email", ""),
+            "subject_super_admin": bool(admin.get("is_super_admin")),
+            "alt": f"{uebrig_alt}_wiederherstellungscodes",
+            "neu": f"{len(codes)}_neue_wiederherstellungscodes",
+            "grund": "selbst erneuert (Einstellungen, mit App-Code)",
+            "admin_id": admin["id"], "admin_email": _handelnder(admin),
+            "created_at": now_iso()})
+    except Exception:
+        log.exception("zugangs_aenderungen: Eintrag mfa_codes_neu fuer %s nicht gespeichert",
+                      admin["id"])
+    await log_activity_sicher("", admin["id"], "admin.mfa.codes_neu",
+                              meta={"alt_uebrig": uebrig_alt, "neu": len(codes)})
+    return {"ok": True, "wiederherstellungscodes": codes,
+            "hinweis": "Die bisherigen Notfall-Codes gelten ab sofort nicht mehr. Diese Codes "
+                       "jetzt sicher aufbewahren — sie werden nur einmal angezeigt."}
 
 
 @router.post("/admin/users/{user_id}/mfa-zuruecksetzen")

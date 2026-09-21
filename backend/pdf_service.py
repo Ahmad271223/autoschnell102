@@ -9,6 +9,7 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, Flowable,
+    CondPageBreak,
 )
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 
@@ -150,6 +151,48 @@ def _section(title, st):
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
     return t
+
+
+def _absaetze(text, style):
+    """Freitext -> Paragraphs. Eine Leerzeile trennt Absaetze, ein einfacher
+    Zeilenumbruch bleibt als <br/> erhalten. Nutzertext wird zuerst escaped."""
+    out = []
+    for para in (text or "").split("\n\n"):
+        txt = _xml_escape(para).replace("\n", "<br/>").strip()
+        if txt:
+            out.append(Paragraph(txt, style))
+    return out
+
+
+# Wunsch Ahmad 21.09.2026: Eine Ueberschrift darf nie allein unten auf einer
+# Seite stehen. Ist der erste Absatz kurz, halten Ueberschrift und Absatz per
+# KeepTogether zusammen. Ein sehr langer erster Absatz (z. B. eigene AGB ohne
+# Leerzeilen) wuerde mit KeepTogether komplett auf die naechste Seite rutschen
+# und eine halbe Seite leer lassen — dann verlangt ein bedingter Umbruch nur
+# Platz fuer die Ueberschrift und die ersten Zeilen.
+_KOPF_ZUSAMMEN_BIS = 7 * cm
+_KOPF_MIN_PLATZ = 2.5 * cm
+
+
+def _abschnitt_mit_text(title, absaetze, st, abstand):
+    """Abschnitt mit Balken-Ueberschrift (_section, ohne Nummer) und Absaetzen.
+
+    Zwischen den Absaetzen `abstand` pt, am Ende 12 pt wie bei den
+    Abschnitten weiter oben — der naechste Abschnitt beginnt ohne eigenen
+    Abstand, so entsteht nie ein doppelter."""
+    if not absaetze:
+        return []
+    kopf = [_section(title, st), Spacer(1, 6)]
+    erster = absaetze[0]
+    _, hoehe = erster.wrap(CONTENT_W, PAGE_H)
+    if hoehe <= _KOPF_ZUSAMMEN_BIS:
+        teile = [KeepTogether(kopf + [erster])]
+    else:
+        teile = [CondPageBreak(_KOPF_MIN_PLATZ)] + kopf + [erster]
+    for p in absaetze[1:]:
+        teile += [Spacer(1, abstand), p]
+    teile.append(Spacer(1, 12))
+    return teile
 
 
 def _kv_compact(rows, st, label_w, value_w):
@@ -523,8 +566,11 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     """Build a Kaufvertrag PDF and return raw bytes.
 
     digital=True: Ausfertigung fuer den Versand per E-Mail/WhatsApp — ohne
-    Unterschriftslinien; unter "Unterschriften" steht der digitale
-    Vertragstext (contract["digital_vertragstext"], sonst Standard)."""
+    Abschnitt "Unterschriften" und ohne Empfangsbestaetigung, am Ende steht
+    nur der Satz zur Gueltigkeit (seit 15.09.2026).
+
+    Vertragsende in beiden Fassungen (Wunsch Ahmad 21.09.2026): Besondere
+    Vereinbarungen -> AGB -> Unterschrift (digital: der Gueltigkeitssatz)."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -600,7 +646,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # Fahrzeugübergabe findet bis/am {abholdatum} in {ort} …") stuenden
     # Datum und Ort sonst zweimal im Vertrag.
     import vertrag_vorlagen as _vorlagen
-    _abhol = ("" if _vorlagen.uebergabe_in_vereinbarungen(contract.get("additional_terms"))
+    from vertrag_platzhalter import ersetzen as _platzhalter_ersetzen
+    _abhol =("" if _vorlagen.uebergabe_in_vereinbarungen(contract.get("additional_terms"))
               else _abholzeile(contract))
     if _abhol:
         story.append(Paragraph(f"<b>Abholung:</b> {_xml_escape(_abhol)}", st["body"]))
@@ -824,65 +871,51 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ))
         story.append(Spacer(1, 12))
 
-
-    # Wunsch Ahmad 20.09.2026: In den Besonderen Vereinbarungen stehen
-    # Platzhalter ({abholdatum}, {ort}, {zahlungsart} ...). Sie wurden bisher
-    # NUR im Browser ersetzt, und auch nur fuer E-Mail und WhatsApp — im PDF
-    # blieb "Die Fahrzeugübergabe findet bis/am ___ statt" leer und musste von
-    # Hand nachgetragen werden. Jetzt setzt der Server sie selbst ein.
-    from vertrag_platzhalter import ersetzen as _platzhalter_ersetzen
-    extra = _platzhalter_ersetzen(
-        (contract.get("additional_terms") or "").strip(), contract, dealer)
-    if extra:
-        story.append(Spacer(1, 8))
-        story.append(Paragraph("<b>Besondere Vereinbarungen</b>", st["body"]))
-        story.append(Spacer(1, 2))
-        for para in extra.split("\n\n"):
-            # Escape user content first, then restore intentional <br/> line-breaks.
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["body"]))
-                story.append(Spacer(1, 2))
-    notes = (contract.get("notes") or "").strip()
-    if notes:
-        story.append(Spacer(1, 4))
-        story.append(Paragraph(f"<b>Notizen (intern):</b> {_xml_escape(notes)}", st["small"]))
+    # Wunsch Ahmad 21.09.2026: Das Vertragsende lautet in BEIDEN Fassungen
+    # immer Besondere Vereinbarungen -> AGB -> Unterschrift. Vorher standen
+    # Notizen, Fahrzeugbeschreibung und der Gewaehrleistungs-Absatz noch
+    # zwischen Besonderen Vereinbarungen und AGB. Alle Abschnitte ab hier
+    # enden mit 12 pt Abstand und beginnen ohne eigenen (kein doppelter).
 
     # ---------- Vehicle description (from listing or manually edited in dialog) ----------
+    # Kommt wie die Ausstattung aus dem Inserat, steht deshalb direkt dahinter.
     vd = (contract.get("vehicle_description") or "").strip()
-    if vd:
-        story.append(Spacer(1, 12))
-        story.append(_section("Fahrzeugbeschreibung (vom Inserat)", st))
-        story.append(Spacer(1, 6))
-        for para in vd.split("\n\n"):
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["body"]))
-                story.append(Spacer(1, 2))
+    story.extend(_abschnitt_mit_text(
+        "Fahrzeugbeschreibung (vom Inserat)", _absaetze(vd, st["body"]), st, 2))
+
+    # Wunsch Ahmad 21.09.2026: "Notizen (intern)" (contract.notes, traegt nur
+    # der Chef im Vertragsdialog ein) stehen NICHT mehr im Vertrag — beide
+    # Fassungen gehen an den Verkaeufer (E-Mail/WhatsApp/Ausdruck). Die Notiz
+    # bleibt im Vertragsdatensatz gespeichert.
 
     # ---------- Disclaimer ----------
-    story.append(Spacer(1, 12))
     story.append(Paragraph(
         "<b>Gewährleistung:</b> Das Fahrzeug wird unter Ausschluss jeglicher Gewährleistung verkauft, "
         "soweit gesetzlich zulässig. Eigenschaftszusicherungen siehe oben. "
         "Der Käufer ist Händler im Sinne des § 14 BGB.",
         st["body"],
     ))
+    story.append(Spacer(1, 12))
+
+    # ---------- Besondere Vereinbarungen ----------
+    # Wunsch Ahmad 20.09.2026: In den Besonderen Vereinbarungen stehen
+    # Platzhalter ({abholdatum}, {ort}, {zahlungsart} ...). Sie wurden bisher
+    # NUR im Browser ersetzt, und auch nur fuer E-Mail und WhatsApp — im PDF
+    # blieb "Die Fahrzeugübergabe findet bis/am ___ statt" leer und musste von
+    # Hand nachgetragen werden. Jetzt setzt der Server sie selbst ein.
+    # Seit 21.09.2026 mit Balken-Ueberschrift wie die AGB (ohne Nummer).
+    extra = _platzhalter_ersetzen(
+        (contract.get("additional_terms") or "").strip(), contract, dealer)
+    story.extend(_abschnitt_mit_text(
+        "Besondere Vereinbarungen", _absaetze(extra, st["body"]), st, 2))
 
     # ---------- AGB ----------
     # Auch in den Vertragsbedingungen — dieselbe Regel, damit niemand raten
     # muss, wo Platzhalter wirken und wo nicht.
     agb = _platzhalter_ersetzen(
         (contract.get("agb_text") or "").strip(), contract, dealer)
-    if agb:
-        story.append(Spacer(1, 12))
-        story.append(_section("Allgemeine Geschäftsbedingungen", st))
-        story.append(Spacer(1, 6))
-        for para in agb.split("\n\n"):
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["small"]))
-                story.append(Spacer(1, 4))
+    story.extend(_abschnitt_mit_text(
+        "Allgemeine Geschäftsbedingungen", _absaetze(agb, st["small"]), st, 4))
 
     # ---------- Allgemeine Vertragsbedingungen (Beschluss Ahmad 10.09.2026) ----------
     # Der Standardtext (vier Klauseln) bzw. der in den Einstellungen
@@ -897,15 +930,11 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         (contract.get("digital_vertragstext") or "").strip(), contract, dealer)
     nachtraeglich = bool(avb) and avb == DIGITAL_NACHTRAEGLICH.strip()
     if avb and not nachtraeglich:
-        story.append(Spacer(1, 12))
-        story.append(_section("Allgemeine Vertragsbedingungen", st))
-        story.append(Spacer(1, 6))
-        for para in avb.split("\n\n"):
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["body"]))
-                story.append(Spacer(1, 4))
+        story.extend(_abschnitt_mit_text(
+            "Allgemeine Vertragsbedingungen", _absaetze(avb, st["body"]), st, 4))
 
+    # Der vorige Abschnitt endet schon mit 12 pt — zusammen 20 pt vor dem
+    # Schlussblock (Gueltigkeitssatz bzw. Unterschriften), wie bisher.
     # ---------- Digitale Ausfertigung: ein Satz statt Unterschriftslinien ----------
     if digital:
         # Wunsch Ahmad (15.09.2026): die Kundenfassung (E-Mail/WhatsApp) traegt
@@ -921,7 +950,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
                 if txt:
                     block.append(Paragraph(txt, st["small"]))
                     block.append(Spacer(1, 3))
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 8))
         story.append(KeepTogether(block))
         footer_left = company
         footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
@@ -934,7 +963,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
     # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
     sig = _empfang_paar(contract, st, unterschrift=True)
-    story.append(Spacer(1, 20))
+    story.append(Spacer(1, 8))
     story.append(KeepTogether([
         _section("Unterschriften", st),
         Spacer(1, 8),

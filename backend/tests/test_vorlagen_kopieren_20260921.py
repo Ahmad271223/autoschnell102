@@ -174,31 +174,43 @@ def test_09_kopiervorlagen_und_whatsapp_ohne_betreff():
     assert V.vorlage(eigen, "nach_kauf_whatsapp") == ("", "Mein WhatsApp-Text")
 
 
-def test_10_die_app_verschickt_sie_nicht():
-    """Die Route antwortet 410 und hat keinen Weg mehr zum Mailversand."""
+def test_10_verschicken_nur_von_hand_mit_bremse():
+    """Wunsch Ahmad 21.09.2026 (spaet): "doch zum Verschicken kann bleiben".
+    Die E-Mail-Fassungen gehen wieder per Knopf raus — nie automatisch, mit
+    Versandbremse, nicht nach Storno, WhatsApp und Korrektur nicht per Mail."""
     import ast
+    import routes.contracts as C
     quelle = (BACKEND / "routes" / "contracts.py").read_text(encoding="utf-8")
-    baum = ast.parse(quelle)
-    fn = next(k for k in ast.walk(baum)
+    fn = next(k for k in ast.walk(ast.parse(quelle))
               if isinstance(k, ast.AsyncFunctionDef) and k.name == "folge_mail_senden")
     koerper = ast.unparse(fn)
-    assert "410" in koerper
-    for verboten in ("send_email", "email_service", "send_status", "update_one"):
-        assert verboten not in koerper, f"{verboten} im Folge-Mail-Weg"
-    assert "class FolgeMailIn" not in quelle
+    assert "await _versand_limiter.check(" in koerper, "keine Versandbremse"
+    assert "FOLGE_MAIL_STORNIERT" in koerper and "kaufvorgaenge" in koerper
+    assert "_firma_des_vertrags(" in koerper, "Firma des Aufrufers statt des Vertrags"
+    assert "_ersetzen((body.message" in koerper, "eigener Text ohne Platzhalter-Ersetzung"
+    assert C.FOLGE_MAIL_VERSCHICKBAR == ("nach_kauf", "bahn")
+    assert set(C.FOLGE_MAIL_ART_HINWEIS) == {"korrektur", "nach_kauf_whatsapp"}
+    # Firma aus dem Vertrag gewinnt ueber die des Aufrufers
+    f = C._firma_des_vertrags({"contract_data": {"dealer_company": "Sucher GmbH"}},
+                              {"company_name": "Chef AG", "phone": "1"})
+    assert f["company_name"] == "Sucher GmbH" and f["phone"] == "1"
 
 
-def test_11_oberflaeche_kopiert_statt_zu_senden():
+def test_11_oberflaeche_kopiert_oder_verschickt():
     dialog = (PROJEKT / "frontend" / "src" / "components"
               / "FolgeMailDialog.jsx").read_text(encoding="utf-8")
     for art in V.KOPIER_VORLAGEN:
         assert f'id: "{art}"' in dialog, art
-    assert "api.post" not in dialog, "der Dialog verschickt noch"
-    assert 'id: "korrektur"' not in dialog
+    assert 'id: "korrektur"' not in dialog, "Korrektur geht ueber den Vertragsversand"
     assert "KopierKnopf" in dialog
+    assert "api.post(`/contracts/${contract.id}/folge-mail`" in dialog
+    # EIN Schluessel je Dialog/Vorlage, kein crypto.randomUUID ohne Ersatz
+    assert "idempotency_key: schluessel.current" in dialog
+    assert "crypto.randomUUID()" not in dialog
+    assert 'globalThis.crypto?.randomUUID?.()' in dialog
     einst = (PROJEKT / "frontend" / "src" / "pages" / "app"
              / "Einstellungen.jsx").read_text(encoding="utf-8")
-    block = einst[einst.index('title="Vorlagen zum Kopieren"'):]
+    block = einst[einst.index('title="Hinweis nach Kaufabschluss & Bahnverbindung"'):]
     block = block[:block.index("</Section>")]
     for feld in ("email_subject_bahn", "email_template_bahn", "email_subject_nach_kauf",
                  "email_template_nach_kauf", "whatsapp_template_nach_kauf"):

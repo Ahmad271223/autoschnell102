@@ -2090,9 +2090,8 @@ async def folge_mail_vorschau(contract_id: str, art: str,
     """Betreff und Text einer Vorlage, Platzhalter schon eingesetzt.
 
     Wunsch Ahmad 21.09.2026: Hinweis nach Kaufabschluss (E-Mail/WhatsApp)
-    und Bahnverbindung verschickt die App nicht — der Sucher kopiert hier
-    den fertigen Text mit Namen und Daten des Vertrags und schickt ihn
-    selbst."""
+    und Bahnverbindung — der Sucher kopiert den fertigen Text mit Namen und
+    Daten des Vertrags oder verschickt ihn per E-Mail (POST folge-mail)."""
     import vertrag_vorlagen as _vorlagen
     from vertrag_platzhalter import ersetzen as _ersetzen
     if art not in _vorlagen.FOLGE_MAILS:
@@ -2102,7 +2101,7 @@ async def folge_mail_vorschau(contract_id: str, art: str,
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
     from deps import effective_dealer
-    firma = await effective_dealer(user) or {}
+    firma = _firma_des_vertrags(c, await effective_dealer(user) or {})
     betreff, text = _vorlagen.vorlage(firma, art)
     return {"art": art,
             "empfaenger": (c.get("seller_email") or "").strip(),
@@ -2110,20 +2109,146 @@ async def folge_mail_vorschau(contract_id: str, art: str,
             "text": _ersetzen(text, c, firma, user)}
 
 
-@router.post("/contracts/{contract_id}/folge-mail")
-async def folge_mail_senden(contract_id: str, user=Depends(current_firma)):
-    """Frueher: eine nachtraegliche Mail ueber unsere Adresse verschicken.
+class FolgeMailIn(BaseModel):
+    """Eine Vorlage per E-Mail verschicken (Hinweis nach Kaufabschluss oder
+    Bahnverbindung). Die Art wird in der Route geprueft — so gibt es eine
+    deutsche Meldung statt der englischen Pydantic-Fehlermeldung."""
+    art: str = Field(max_length=40)
+    recipient: str = Field(max_length=200)
+    subject: Optional[str] = Field(default=None, max_length=500)
+    message: Optional[str] = Field(default=None, max_length=20000)
+    idempotency_key: Optional[str] = Field(
+        default=None, min_length=8, max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$")
 
-    Wunsch Ahmad 21.09.2026: "wir selber schicken die nicht raus". Hinweis
-    nach Kaufabschluss und Bahnverbindung kopiert der Sucher und schickt sie
-    selbst; ein korrigierter Vertrag geht ueber den normalen Versand — mit
-    dem Vertrag als Anhang (die Textmail kuendigte einen Anhang an, der nie
-    dabei war). Die Route bleibt nur, damit ein noch offener alter
-    Browser-Stand eine verstaendliche Antwort bekommt statt 405."""
-    raise HTTPException(410, "Diese Vorlagen verschickt die App nicht — bitte den "
-                             "Text kopieren und selbst per E-Mail oder WhatsApp "
-                             "senden. Einen korrigierten Vertrag bitte über "
-                             "„Senden“ neu verschicken.")
+
+#: Per E-Mail verschickbar. Die WhatsApp-Fassung wird kopiert, eine
+#: Korrektur geht ueber den normalen Versand MIT Vertrag als Anhang.
+FOLGE_MAIL_VERSCHICKBAR = ("nach_kauf", "bahn")
+FOLGE_MAIL_ART_HINWEIS = {
+    "korrektur": ("Einen korrigierten Vertrag bitte über „Senden“ verschicken — "
+                  "dann hängt der Vertrag an."),
+    "nach_kauf_whatsapp": ("Den WhatsApp-Text bitte kopieren und in WhatsApp "
+                           "einfügen."),
+}
+FOLGE_MAIL_STORNIERT = ("Der Kauf ist storniert bzw. nicht abgeholt — diese "
+                        "Mail wird nicht mehr verschickt.")
+
+
+def _firma_des_vertrags(vertrag: dict, firma: dict) -> dict:
+    """Rollenpruefung 21.09.2026: Die Folge-Mail nannte die Firma des
+    AUFRUFERS (Chef verschickt fuer einen Sucher -> Chef-Firma). Massgeblich
+    sind die beim Vertrag eingefrorenen Kaeuferdaten (kaeufer_einfrieren)."""
+    daten = vertrag.get("contract_data") or {}
+    out = dict(firma or {})
+    for feld, ziel in (("dealer_company", "company_name"), ("dealer_phone", "phone"),
+                       ("dealer_email", "email")):
+        wert = str(daten.get(feld) or "").strip()
+        if wert:
+            out[ziel] = wert
+    return out
+
+
+@router.post("/contracts/{contract_id}/folge-mail")
+async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
+                            user=Depends(require_active_sub)):
+    """Hinweis nach Kaufabschluss oder Bahnverbindung per E-Mail verschicken.
+
+    Wunsch Ahmad 21.09.2026: erst "wir selber schicken die nicht raus",
+    spaeter am selben Abend "doch zum Verschicken kann bleiben". Also: der
+    Sucher kann die Vorlage beim Vertrag KOPIEREN oder hier verschicken —
+    nie automatisch. Ohne Anhang, reiner Text; es ist eine Nachricht zum
+    Vorgang, kein Vertrag. Der Versand wird am Vertrag vermerkt (send_status
+    mit `art`).
+    """
+    import email_service
+    import vertrag_vorlagen as _vorlagen
+    from provider_fetch import MOCK_PROVIDER_FETCH
+    from vertrag_mail import sucher_kontakt
+    from vertrag_platzhalter import ersetzen as _ersetzen
+    art = (body.art or "").strip()
+    if art in FOLGE_MAIL_ART_HINWEIS:
+        raise HTTPException(400, FOLGE_MAIL_ART_HINWEIS[art])
+    if art not in FOLGE_MAIL_VERSCHICKBAR:
+        raise HTTPException(400, "Unbekannte Vorlage")
+    empfaenger = (body.recipient or "").strip()
+    if not email_service.gueltige_adresse(empfaenger):
+        raise HTTPException(400, "Bitte eine gültige E-Mail-Adresse angeben")
+    # Dieselbe Bremse wie beim Vertragsversand — sonst waere das hier ein
+    # offener Weg, ueber unsere Adresse beliebig viele Mails zu schicken.
+    if not await _versand_limiter.check(f"konto:{user.get('id')}"):
+        raise HTTPException(429, "Zu viele Sendungen in kurzer Zeit — bitte "
+                                 f"höchstens {VERSAND_JE_KONTO_10MIN} je 10 Minuten.")
+    if not MOCK_PROVIDER_FETCH and not email_service.email_configured():
+        raise HTTPException(503, "E-Mail-Versand ist nicht eingerichtet — die Mail "
+                                 "wurde NICHT versendet.")
+    bereich = _vertrag_bereich(user)
+    c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    # Rollenpruefung 21.09.2026: nach Storno / "nicht abgeholt" passt weder
+    # "Fahrzeug ist verkauft" noch die Bahnverbindung des Fahrers.
+    kv = await db.kaufvorgaenge.find_one(
+        {"contract_id": contract_id, "dealer_id": c.get("dealer_id")},
+        {"_id": 0, "status": 1})
+    if (kv or {}).get("status") in ("storniert", "nicht_abgeholt"):
+        raise HTTPException(409, FOLGE_MAIL_STORNIERT)
+    from deps import effective_dealer
+    firma = _firma_des_vertrags(c, await effective_dealer(user) or {})
+    std_betreff, std_text = _vorlagen.vorlage(firma, art)
+    # Auch ein selbst geaenderter Text bekommt seine Platzhalter ersetzt —
+    # sonst las der Verkaeufer "{kunde_name}" (Rollenpruefung 21.09.2026).
+    betreff = _ersetzen((body.subject or "").strip() or std_betreff, c, firma, user)
+    text = _ersetzen((body.message or "").strip() or std_text, c, firma, user)
+
+    schluessel = (body.idempotency_key or "").strip()
+    if schluessel:
+        # Doppelklick-Schutz wie beim Vertragsversand: derselbe Schluessel
+        # legt garantiert nur EINEN Eintrag an.
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status.idempotency_key": {"$ne": schluessel}},
+            {"$push": {"send_status": {"$each": [{
+                "idempotency_key": schluessel, "channel": "email",
+                "art": art, "recipient": empfaenger, "subject": betreff,
+                "sent_at": now_iso(), "zustellung": "laeuft"}],
+                "$slice": -SEND_STATUS_MAX}}})
+        if res.modified_count == 0:
+            await _reservierung_nachlesen(contract_id, bereich, schluessel)
+            return {"status": "ok", "bereits_gesendet": True, "art": art}
+
+    _, antwort_adresse = sucher_kontakt(user, firma)
+    if MOCK_PROVIDER_FETCH:
+        # Last-/CI-Tests: kein echter Versand, aber ehrlich markiert.
+        ok, beleg = True, "mock"
+    else:
+        try:
+            ok, beleg = await email_service.send_email_mit_beleg(
+                empfaenger, betreff, text, anhang=None, anhang_name="",
+                html=None, reply_to=antwort_adresse,
+                absender_name=firma.get("company_name") or "",
+                idempotency_key=f"folge-{contract_id}-{schluessel or art}")
+        except Exception:  # noqa: BLE001 — Anbieterfehler = nicht versendet
+            log.exception("Folge-Mail %s zu %s fehlgeschlagen", art, contract_id)
+            ok, beleg = False, ""
+    if not ok:
+        if schluessel:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status.idempotency_key": schluessel},
+                {"$set": {"send_status.$.zustellung": "fehlgeschlagen"}})
+        raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — bitte in ein "
+                                 "paar Minuten erneut versuchen.")
+    if schluessel:
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status.idempotency_key": schluessel},
+            {"$set": {"send_status.$.zustellung": "mock" if beleg == "mock" else "versendet",
+                      "send_status.$.beleg": beleg or ""}})
+    await log_activity_sicher(user["dealer_id"], user["id"],
+                              f"pdf.folgemail.{art}", ref=contract_id)
+    return {"status": "ok", "art": art, "empfaenger": empfaenger,
+            "betreff": betreff, "zustellung": "mock" if beleg == "mock" else "versendet"}
 
 
 @router.delete("/contracts/{contract_id}")
@@ -2202,6 +2327,54 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
                     dealer_id=user["dealer_id"],
                     contract_no=vorhanden.get("contract_no") or "")
     return {"ok": True}
+
+
+# Pruefung 21.09.2026 (pdf): Kennzeichnung der vor Ort gefundenen Schaeden im
+# Schadenstext der neuen Vertragsfassung.
+NACH_ABHOLUNG_SCHADEN_ZUSATZ = "(bei Abholung festgestellt)"
+
+
+def _schadenstext_nach_abholung(damages_text: Optional[str],
+                                schaeden_neu: list) -> Optional[str]:
+    """Haengt die bei der Abholung aufgenommenen Schaeden an den Schadenstext an.
+
+    Pruefung 21.09.2026 (pdf): pdf_service druckt NUR damages_text, sobald er
+    gesetzt ist (die Liste `damages` ist nur der Rueckfall). Jeder Vertrag mit
+    Skizzen-Schaeden hat ihn (DamageSelector schreibt beides) — die vor Ort
+    gefundenen Schaeden standen deshalb nur in `damages`, nicht in der neuen
+    Fassung, die der Verkaeufer als aktuellen Stand bekommt.
+
+    Zeile je Schaden: "• {Art}: {Bauteil} (bei Abholung festgestellt)", mit
+    denselben Rueckfaellen wie pdf_service beim Drucken der Liste. Leerer Text
+    bleibt leer — dann druckt pdf_service die Liste, und die enthaelt die
+    neuen Schaeden schon. Idempotent: eine Zeile, die schon im Text steht,
+    kommt nicht ein zweites Mal dazu (Nachholer, erneute Neuerzeugung)."""
+    bisher = damages_text or ""
+    if not bisher.strip() or not schaeden_neu:
+        return damages_text
+    vorhanden = {z.strip() for z in bisher.split("\n") if z.strip()}
+    zeilen = []
+    for d in schaeden_neu:
+        if isinstance(d, dict):
+            art = str(d.get("type_label") or d.get("type_key")
+                      or d.get("label") or d.get("type") or "Schaden")
+            zone = str(d.get("zone") or d.get("part_label") or d.get("part") or "")
+            kern = f"{art}: {zone}" if zone.strip() else art
+        else:
+            kern = str(d or "")
+        # Zeilenumbrueche im Eintrag wuerden die Zeile im PDF zerreissen und
+        # den Abgleich auf "steht schon da" aushebeln.
+        kern = " ".join(kern.split())
+        if not kern:
+            continue
+        zeile = f"• {kern} {NACH_ABHOLUNG_SCHADEN_ZUSATZ}"
+        if zeile in vorhanden:
+            continue
+        vorhanden.add(zeile)
+        zeilen.append(zeile)
+    if not zeilen:
+        return damages_text
+    return bisher.rstrip() + "\n" + "\n".join(zeilen)
 
 
 async def regenerate_contract_for_pickup(
@@ -2306,6 +2479,12 @@ async def regenerate_contract_for_pickup(
         # Die vor Ort aufgenommenen Schaeden kommen zu den im Vertrag
         # dokumentierten dazu — die alten waren bekannt und bleiben stehen.
         contract_dict["damages"] = schaeden_alt + schaeden_neu
+        # Pruefung 21.09.2026 (pdf): steht ein Schadenstext im Vertrag, druckt
+        # das PDF nur ihn — die neuen Schaeden muessen also auch dort hinein.
+        schadenstext = _schadenstext_nach_abholung(
+            contract_dict.get("damages_text"), schaeden_neu)
+        if schadenstext != contract_dict.get("damages_text"):
+            contract_dict["damages_text"] = schadenstext
     contract_dict["pickup_date"] = neu_datum or ""
     contract_dict["pickup_time"] = neu_zeit or ""
     if preis_neu:

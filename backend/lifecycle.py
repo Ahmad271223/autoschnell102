@@ -196,6 +196,58 @@ async def try_set_lifecycle(vehicle_id: str, dealer_id: str, new_state: str, *,
         return False
 
 
+#: Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: Der Chef darf
+#: eine abgeholte Abholung nachtraeglich auf "storniert" bzw. "nicht abgeholt"
+#: setzen. Das Fahrzeug blieb dabei "abgeholt" (ALLOWED_TRANSITIONS kennt
+#: keinen Weg zurueck). Erlaubte Ziele des Rueckwegs:
+ABHOLUNG_ZURUECK_ZIELE = frozenset({"gekauft", "abholung_geplant", "nicht_abgeholt", "storniert"})
+_PREIS_EGAL = object()
+
+
+async def abholung_zuruecknehmen(vehicle_id: str, dealer_id: str, ziel: str, *,
+                                 kaufvorgang_id: Optional[str] = None,
+                                 preis=_PREIS_EGAL, preis_entfernen: bool = False,
+                                 user: Optional[dict] = None) -> bool:
+    """Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: Fahrzeug
+    aus "abgeholt" zuruecknehmen, weil die Abholung nachtraeglich storniert
+    bzw. als "nicht abgeholt" gewertet wurde.
+
+    Bewusst KEIN Eintrag in ALLOWED_TRANSITIONS["abgeholt"]: sonst setzte jedes
+    try_set_lifecycle eines ANDEREN Termins am selben Auto (Fahrer-App,
+    Terminplaner) ein abgeholtes Fahrzeug still zurueck. Dieser Weg ist streng:
+    Compare-and-Set auf lifecycle == "abgeholt", den festgehaltenen Vorgang
+    (abgeholt_kaufvorgang_id; None = Feld fehlt, Termin ohne Vorgang) und —
+    wenn mitgegeben — den gelesenen Preis. Der Verweis auf den Vorgang faellt
+    weg, der Einkaufspreis nur mit preis_entfernen (er stammte aus genau
+    dieser Abholung). Liefert True, wenn geschrieben; False, wenn sich das
+    Fahrzeug inzwischen geaendert hat (Aufrufer: Nacharbeit)."""
+    if ziel not in ABHOLUNG_ZURUECK_ZIELE:
+        raise LifecycleError(f"Rueckweg aus 'abgeholt' nach '{ziel}' ist nicht vorgesehen")
+    filt: dict = {"id": vehicle_id, "dealer_id": dealer_id, "lifecycle": "abgeholt",
+                  # None trifft auch das fehlende Feld
+                  "abgeholt_kaufvorgang_id": kaufvorgang_id or None}
+    if preis is not _PREIS_EGAL:
+        filt["purchase_price"] = preis
+    jetzt = now_iso()
+    unset = {"abgeholt_kaufvorgang_id": ""}
+    if preis_entfernen:
+        unset["purchase_price"] = ""
+    r = await db.vehicles.update_one(
+        filt, {"$set": {"lifecycle": ziel, "lifecycle_changed_at": jetzt, "updated_at": jetzt},
+               "$unset": unset})
+    if r.matched_count == 0:
+        log.info("Abholung an %s nicht zurueckgenommen (Stand geaendert) -> %s",
+                 vehicle_id, ziel)
+        return False
+    await log_activity_sicher(
+        dealer_id, (user or {}).get("id", ""), f"fahrzeug.status.{ziel}",
+        ref=vehicle_id, meta={"von": "abgeholt", "nach": ziel,
+                              "grund": "abholung_zurueckgenommen",
+                              "kaufvorgang_id": kaufvorgang_id,
+                              "preis_entfernt": bool(preis_entfernen)})
+    return True
+
+
 async def migrate_missing_lifecycles() -> int:
     """Startup-Migration: setzt `lifecycle` für Fahrzeuge, die noch keins
     haben, anhand des alten Freitext-Status + Terminlage. Idempotent."""

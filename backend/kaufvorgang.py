@@ -30,7 +30,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from deps import db, now_iso
-from lifecycle import try_set_lifecycle
+from lifecycle import abholung_zuruecknehmen, try_set_lifecycle
 
 log = logging.getLogger("autohandel")
 
@@ -346,6 +346,37 @@ def _schritte(aktuell: str, ziel: str) -> list:
     return []
 
 
+async def _abholung_zuruecknehmen(v: dict, vehicle_id: str, dealer_id: str, ziel: str, *,
+                                  user: Optional[dict] = None) -> Optional[bool]:
+    """Pruefbericht 20.09.2026 (V-12): Fahrzeug steht auf "abgeholt", aber kein
+    Vorgang ist mehr abgeholt. Zustaendig nur, wenn der am Fahrzeug
+    festgehaltene Vorgang existiert und inzwischen storniert / nicht abgeholt
+    ist und kein Termin am Fahrzeug mehr "abgeholt"/"erledigt" steht.
+    Sonst None (bewusst: ein Verweis auf einen fehlenden Vorgang laesst das
+    Fahrzeug abgeholt — Runde 27, Test 03; ebenso ein wieder geoeffneter
+    Termin ohne Protokoll). True/False = Rueckweg geschrieben / Stand verloren."""
+    fest = v.get("abgeholt_kaufvorgang_id")
+    if not fest:
+        return None
+    kv = await db.kaufvorgaenge.find_one(
+        {"id": fest, "vehicle_id": vehicle_id, "dealer_id": dealer_id},
+        {"_id": 0, "id": 1, "status": 1, "purchase_price": 1})
+    if not kv or kv.get("status") not in ("storniert", "nicht_abgeholt"):
+        return None
+    if await db.appointments.count_documents(
+            {"vehicle_id": vehicle_id, "dealer_id": dealer_id,
+             "status": {"$in": ["abgeholt", "erledigt"]}}, limit=1):
+        return None
+    # Der Einkaufspreis faellt nur weg, wenn er aus DIESER Abholung stammt
+    # (von Hand geaenderte Preise bleiben stehen).
+    preis = v.get("purchase_price")
+    preis_entfernen = preis is not None and kv.get("purchase_price") is not None \
+        and preis == kv.get("purchase_price")
+    return await abholung_zuruecknehmen(vehicle_id, dealer_id, ziel, kaufvorgang_id=fest,
+                                        preis=preis, preis_entfernen=preis_entfernen,
+                                        user=user)
+
+
 async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
                                       user: Optional[dict] = None) -> Optional[str]:
     """Fahrzeug-Lebenszyklus aus ALLEN Kaufvorgaengen des Fahrzeugs ableiten:
@@ -441,6 +472,16 @@ async def fahrzeug_status_aggregieren(vehicle_id: str, dealer_id: str, *,
             ziel = "gekauft"
         else:
             ziel = "nicht_abgeholt" if "nicht_abgeholt" in stati else "storniert"
+        # Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: Der Chef
+        # hat die Abholung nachtraeglich storniert / auf "nicht abgeholt" gesetzt.
+        # _schritte kennt keinen Weg aus "abgeholt" — das Fahrzeug blieb samt
+        # Verweis und Einkaufspreis stehen, und hier wurde trotzdem Erfolg
+        # gemeldet. Jetzt ueber den streng geprueften Rueckweg; nicht zustaendig
+        # (None) -> weiter wie bisher.
+        if aktuell == "abgeholt" and "abgeholt" not in stati and v is not None:
+            zurueck = await _abholung_zuruecknehmen(v, vehicle_id, dealer_id, ziel, user=user)
+            if zurueck is not None:
+                return ziel if zurueck else None
         schritt_fehlt = False
         for schritt in _schritte(aktuell, ziel):
             # Phase 2 (2.4, G5): ein uebersprungener Schritt (Stand-Pruefung

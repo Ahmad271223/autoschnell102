@@ -594,3 +594,18 @@ def test_t19_t21_sucher_kommt_an_keine_chef_schnittstelle(welt):
         if r.status_code != 403:
             falsch.append((methode, pfad, r.status_code, r.text[:120]))
     assert not falsch, falsch
+    # Wunsch Ahmad 21.09.2026 (R1-01): Umhaengen gibt es auch fuer den Chef
+    # nicht mehr — 410 statt 200, und der Bearbeiter bleibt, wer er war.
+    vorher = requests.get(f"{API}/vehicles/{vid}/akte", headers=welt["HA"], timeout=30)
+    assert vorher.status_code == 200, vorher.text[:200]
+    r = requests.put(f"{API}/vehicles/{vid}/besitzer", headers=welt["HA"],
+                     json={"owner_user_id": welt["sucher_id"]}, timeout=30)
+    assert r.status_code == 410 and "gibt es nicht mehr" in r.text, (r.status_code, r.text[:200])
+    r = requests.put(f"{API}/vehicles/{vid}/besitzer", headers=welt["HA"], timeout=30)
+    assert r.status_code == 410, "auch ohne Body keine 422"
+    nachher = requests.get(f"{API}/vehicles/{vid}/akte", headers=welt["HA"], timeout=30)
+    assert nachher.status_code == 200
+    assert nachher.json()["owner"] == vorher.json()["owner"]
+    assert "zuweisbar_an" not in nachher.json()
+    # ohne Anmeldung weiter 401
+    assert requests.put(f"{API}/vehicles/{vid}/besitzer", timeout=30).status_code == 401

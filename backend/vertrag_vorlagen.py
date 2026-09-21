@@ -10,8 +10,9 @@ die frueher von Hand ausgefuellt wurde. Ein Kunde liest nie "{abholdatum}".
 
 Die Korrektur-Vorlage nimmt der Versand-Dialog beim erneuten Versand
 eines geaenderten Vertrags. Hinweis nach Kaufabschluss (Mail und WhatsApp)
-und Bahnverbindung verschickt die App NIE (Wunsch Ahmad 21.09.2026) — sie
-sind nur zum Kopieren da.
+und Bahnverbindung gehen nie automatisch raus: der Sucher kopiert sie oder
+verschickt die E-Mail-Fassung von Hand beim Vertrag (Wunsch Ahmad
+21.09.2026).
 """
 
 # ---------------------------------------------------------------- Vertrag
@@ -136,13 +137,13 @@ WHATSAPP_TEXT = (
     "{haendler_name}"
 )
 
-# ============================================== Vorlagen NUR zum Kopieren
-# Wunsch Ahmad 21.09.2026: "wir selber schicken die nicht raus — diese
-# Vorlagen sollen da nur sein, damit der Kunde sie immer kopieren kann und
-# bei Mail selber einfügen kann". Die App verschickt den Hinweis nach
-# Kaufabschluss und die Bahnverbindung NICHT. Sie stehen in den
-# Einstellungen (mit Kopier-Knopf) und beim Vertrag im PDF-Archiv (dort mit
-# eingesetztem Namen und Daten), der Sucher schickt sie selbst.
+# ============================ Vorlagen zum Kopieren oder Verschicken
+# Wunsch Ahmad 21.09.2026: erst "wir selber schicken die nicht raus — diese
+# Vorlagen sollen da nur sein, damit der Kunde sie immer kopieren kann",
+# am selben Abend dann "doch zum Verschicken kann bleiben". Sie stehen in
+# den Einstellungen (mit Kopier-Knopf) und beim Vertrag im PDF-Archiv (mit
+# eingesetztem Namen und Daten): kopieren ODER per E-Mail verschicken, nie
+# automatisch. Die WhatsApp-Fassung wird nur kopiert.
 
 # ------------------------------------------------- Hinweis nach Abschluss
 EMAIL_BETREFF_NACH_KAUF = "Bestätigung des Kaufvertrags"
@@ -218,8 +219,8 @@ STARTWERTE = {
     "sondervereinbarung_standard_aktiv": STANDARD_SONDERVEREINBARUNG_AN,
 }
 
-#: Die Vorlagen, die die App NICHT verschickt: der Sucher kopiert sie (im
-#: PDF-Archiv mit eingesetztem Namen und Daten) und schickt sie selbst.
+#: Die Vorlagen beim Vertrag im PDF-Archiv: kopieren (mit eingesetztem
+#: Namen und Daten) oder die E-Mail-Fassung von Hand verschicken.
 #: Schluessel -> (Betreff-Feld, Text-Feld, Standardbetreff, Standardtext);
 #: WhatsApp hat keinen Betreff (None).
 KOPIER_VORLAGEN = {

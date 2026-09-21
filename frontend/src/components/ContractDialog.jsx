@@ -627,9 +627,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
                    helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar. Platzhalter in geschweiften Klammern (z. B. {abholdatum}) werden beim Erstellen des PDF automatisch eingesetzt." />
             {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim
-                Vertrag, sondern spaeter im Terminplaner am Termin. */}
+                Vertrag, sondern spaeter im Terminplaner am Termin.
+                Wunsch Ahmad 21.09.2026: die Notiz steht nicht mehr im Vertrags-PDF
+                (beide Fassungen gehen an den Verkaeufer). */}
             {user?.role !== "sucher" && (
-              <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes" />
+              <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes"
+                     helper="Steht nicht im Vertrag — nur intern sichtbar (im Vertragsarchiv)." />
             )}
           </Section>
 

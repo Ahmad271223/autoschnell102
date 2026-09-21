@@ -765,8 +765,9 @@ TERMIN_OFFEN_WERTE = list(TERMIN_OFFEN) + ["", None]
 # Fahrzeuge, Termine, Beweis-Snapshots, Abholberichte und Protokolle nur
 # noch im EIGENEN Arbeitsbereich; der Chef sieht die ganze Firma.
 #   vehicles.owner_user_id = Konto, das das Fahrzeug angelegt hat (erster
-#   Vergleich bzw. manuelle Anlage). Der Chef haengt per
-#   PUT /vehicles/{id}/besitzer um. Ein Sucher, der ein Inserat vergleicht,
+#   Vergleich bzw. manuelle Anlage). Umhaengen durch den Chef gibt es seit
+#   21.09.2026 nicht mehr (Wunsch Ahmad, R1-01: PUT /vehicles/{id}/besitzer
+#   antwortet 410). Ein Sucher, der ein Inserat vergleicht,
 #   das ein Kollege bereits fuehrt, bekommt das Ergebnis mit Hinweis, das
 #   Fahrzeug bleibt beim Kollegen.
 # Regel wie bei Vertraegen (_vertrag_bereich in routes/contracts.py): fehlt
@@ -854,8 +855,8 @@ def uhrzeit_hhmm_pruefen(v):
 
 # Uebergabe-Regel (Runde 13, 15.09.2026): Der Bereich eines Suchers sind
 # seine Kaufvorgaenge, Vertraege und Termine (siehe termin_bereich). Eine
-# Uebergabe durch den Chef (PUT /vehicles/{id}/besitzer) oder die Loeschung
-# eines Suchers uebertraegt genau diese Objekte zum Fahrzeug mit
+# Uebergabe ("Aus meiner Liste entfernen" durch den Sucher selbst) oder die
+# Loeschung eines Suchers uebertraegt genau diese Objekte zum Fahrzeug mit
 # (routes.bestand.vorgang_uebergeben) — der bisherige Bearbeiter verliert
 # damit den Zugriff auf Termine, Berichte und Protokolle, der neue bekommt
 # den ganzen Vorgang. Das Fahrzeug allein gibt keinen Terminzugriff (mehrere

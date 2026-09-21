@@ -170,6 +170,12 @@ fi
 
 echo "== 2/6 Code holen"
 git pull --ff-only
+# Pruefung 21.09.2026 (Betrieb): die .env enthaelt alle Geheimnisse und ist
+# nur fuer ihren Besitzer lesbar (600). Ein env_setzen.sh von vor dem
+# 21.09.2026 — auf dem Server liegt es bis zu genau diesem Pull — hinterliess
+# .env und .env.bak-* fuer jeden Benutzer lesbar (644). Hier bei jedem Rollout
+# wieder schliessen; fehlt eine Sicherung, ist das kein Fehler.
+chmod 600 .env .env.bak-* 2>/dev/null || true
 if [ "$(vorlagen_stand)" != "$VORLAGE_VORHER" ]; then
     PROXY_NEU=1
     echo "   nginx-Vorlage geaendert ($VORLAGE) — der Proxy wird neu erzeugt"

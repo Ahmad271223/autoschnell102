@@ -26,7 +26,7 @@ export default function DemnaechstVerfuegbar({ bereich = "Dieser Bereich", einge
   );
   if (eingebettet) return inhalt;
   return (
-    <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--bg-page)" }}>
+    <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--bg-app)" }}>
       <div className="w-full max-w-md">{inhalt}</div>
     </div>
   );

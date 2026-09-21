@@ -109,6 +109,8 @@ def test_01_normaler_admin_darf_nicht_verwalten(welt):
         ("POST", f"/admin/buyers/gibtesnicht/access", {"plan": "monthly"}),
         ("POST", f"/admin/cleanup/run", None),
         ("GET", f"/admin/betrieb", None),
+        # Betrieb 21.09.2026: Testmail an BETRIEB_MELDUNG_AN — nur Super-Admin
+        ("POST", "/admin/betrieb/testmail", None),
     ]
     for methode, pfad, body in versuche:
         r = requests.request(methode, f"{API}{pfad}", headers=N, json=body, timeout=30)

@@ -3,7 +3,8 @@
 
 Sucher sehen Fahrzeuge, Termine, Beweis-Snapshots, Abholberichte und
 Protokolle nur noch im eigenen Arbeitsbereich (vehicles.owner_user_id);
-der Chef sieht die ganze Firma und kann Fahrzeuge umhaengen.
+der Chef sieht die ganze Firma. Umhaengen durch den Chef gibt es seit
+21.09.2026 nicht mehr (Wunsch Ahmad, R1-01) — Test 04 prueft die 410.
 
 Umbau Kaufvorgaenge (09.09.2026, Beschluss Ahmad): owner_user_id und
 mitbearbeiter_ids bestimmen nur noch die SICHTBARKEIT des Fahrzeugs
@@ -217,40 +218,62 @@ def test_03_bestand_und_akte_je_rolle(welt):
     chef, a, akte_a, status, akte_chef = welt.run(lauf())
     assert len(chef["items"]) == 2 and chef["counts"] == {"bestand": 2}
     assert [i["id"] for i in a["items"]] == [f"v_a{w.s}"] and a["counts"] == {"bestand": 1}
-    assert akte_a["zuweisbar"] is False and akte_a["owner"] is None and akte_a["zuweisbar_an"] == []
+    # Wunsch Ahmad 21.09.2026 (R1-01): keine Kontenliste zum Umhaengen mehr
+    # (zuweisbar/zuweisbar_an entfallen); der Chef sieht nur den Bearbeiter.
+    assert akte_a["owner"] is None and "zuweisbar_an" not in akte_a and "zuweisbar" not in akte_a
     assert status == 404
-    assert akte_chef["zuweisbar"] is True and akte_chef["owner"] == {"id": w.b["id"], "name": "Ben B"}
-    ids = {k["id"] for k in akte_chef["zuweisbar_an"]}
-    assert ids == {w.chef["id"], w.a["id"], w.b["id"]}
+    assert akte_chef["owner"] == {"id": w.b["id"], "name": "Ben B", "hauptaccount": False}
+    assert "zuweisbar_an" not in akte_chef and "zuweisbar" not in akte_chef
 
 
-# ================================================= Umhaengen (Chef)
-def test_04_chef_haengt_fahrzeug_um_sucher_nicht(welt):
+# ================================================= Umhaengen (Chef) — seit 21.09.2026 abgeschaltet
+def test_04_chef_kann_fahrzeug_nicht_mehr_umhaengen(welt):
+    """Wunsch Ahmad 21.09.2026 (R1-01): "man soll nie an dem sein
+    abgeschlossenen Vertrag oder sonstwas wegnehmen". Der Chef bekommt 410;
+    Fahrzeug, Vertrag, Kaufvorgang und Termin von A bleiben bei A, B bekommt
+    nichts, und es entsteht kein Audit-Eintrag "fahrzeug.zugewiesen"."""
     B = _module("routes.bestand")
     w, db = welt.w, welt.db
-    vid = f"v_a{w.s}"
+    vid, cid, kid, tid = f"v_a{w.s}", f"c_a{w.s}", f"k_a{w.s}", f"t_a{w.s}"
 
     async def lauf():
-        await db.vehicles.insert_one(w.fahrzeug(vid, owner=w.a["id"]))
-        r = await B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id=w.b["id"]), w.chef)
-        v = await db.vehicles.find_one({"id": vid}, {"_id": 0, "owner_user_id": 1})
-        log = await db.activity_logs.find_one({"dealer_id": w.dealer_id, "action": "fahrzeug.zugewiesen"},
-                                              {"_id": 0})
-        with pytest.raises(HTTPException) as fremd:
-            await B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id="jemand_anders"), w.chef)
-        r2 = await B.set_vehicle_owner(vid, B.BesitzerIn(owner_user_id=w.b["id"]), w.chef)
-        return r, v, log, fremd.value.status_code, r2
+        await db.vehicles.insert_one(w.fahrzeug(vid, owner=w.a["id"], lifecycle="abholung_geplant",
+                                                mitbearbeiter_ids=[w.b["id"]]))
+        await db.generated_pdfs.insert_one({"id": cid, "dealer_id": w.dealer_id, "user_id": w.a["id"],
+                                            "vehicle_id": vid, "created_at": _jetzt()})
+        await db.kaufvorgaenge.insert_one({"id": kid, "dealer_id": w.dealer_id, "user_id": w.a["id"],
+                                           "vehicle_id": vid, "contract_id": cid,
+                                           "status": "abholung_geplant", "created_at": _jetzt(),
+                                           "updated_at": _jetzt()})
+        await db.appointments.insert_one(w.appt(tid, vehicle_id=vid, contract_id=cid,
+                                                kaufvorgang_id=kid, created_by=w.a["id"]))
+        codes = []
+        for _ in range(2):          # auch eine Wiederholung aendert nichts
+            with pytest.raises(HTTPException) as e:
+                await B.fahrzeug_umhaengen_entfernt(vid, w.chef)
+            codes.append((e.value.status_code, e.value.detail))
+        v = await db.vehicles.find_one({"id": vid}, {"_id": 0})
+        c = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0})
+        k = await db.kaufvorgaenge.find_one({"id": kid}, {"_id": 0})
+        t = await db.appointments.find_one({"id": tid}, {"_id": 0})
+        n_log = await db.activity_logs.count_documents({"dealer_id": w.dealer_id,
+                                                        "action": "fahrzeug.zugewiesen"})
+        return codes, v, c, k, t, n_log
 
-    r, v, log, status_fremd, r2 = welt.run(lauf())
-    assert r["ok"] and r["owner_name"] == "Ben B" and v["owner_user_id"] == w.b["id"]
-    assert log["ref"] == vid and log["meta"]["von"] == w.a["id"] and log["meta"]["nach"] == w.b["id"]
-    assert "uebergabe" in log["meta"]          # Runde 13: Umfang der Uebergabe im Audit
-    assert status_fremd == 404
-    assert r2.get("unveraendert") is True
-    # Route ist Chefsache (current_haendler)
+    codes, v, c, k, t, n_log = welt.run(lauf())
+    assert all(s == 410 and "gibt es nicht mehr" in d for s, d in codes), codes
+    assert v["owner_user_id"] == w.a["id"] and v["mitbearbeiter_ids"] == [w.b["id"]]
+    assert "uebergabe_offen" not in v
+    assert c["user_id"] == w.a["id"] and "uebergeben_von" not in c
+    assert k["user_id"] == w.a["id"] and "uebergeben_von" not in k
+    assert t["created_by"] == w.a["id"] and "uebergeben_von" not in t
+    assert n_log == 0
+    # Route bleibt Chefsache (current_haendler): Sucher bekommen weiter 403
+    # aus der Abhaengigkeit, erst der Chef sieht die 410.
     import inspect
-    sig = inspect.signature(B.set_vehicle_owner)
+    sig = inspect.signature(B.fahrzeug_umhaengen_entfernt)
     assert sig.parameters["user"].default.dependency is B.current_haendler
+    assert "body" not in sig.parameters, "ohne Body-Modell: kein 422 vor der 410"
 
 
 # ================================================= Termine

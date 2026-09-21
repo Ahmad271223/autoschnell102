@@ -25,8 +25,8 @@ POOL_MAX = zahl_env("FAHRZEUGPOOL_MAX_VERGLEICHE", 30, unten=1)
 
 async def _aktive_konten(db, dealer_id: str, ids) -> set:
     """Runde 23: welche der Konten sind aktive Konten DIESER Firma (Chef
-    oder Sucher)? Gleiche Regel wie der Besitzerwechsel durch den Chef
-    (routes/bestand.py set_vehicle_owner): active=False zaehlt nicht."""
+    oder Sucher)? Gleiche Regel wie der fruehere Besitzerwechsel durch den
+    Chef (bis 21.09.2026, seitdem entfallen — R1-01): active=False zaehlt nicht."""
     ids = [i for i in ids if i]
     if not ids:
         return set()
@@ -105,9 +105,10 @@ async def fahrzeugpool_trimmen(db, dealer_id: str, limit=None,
     # gemeinsame Fahrzeug, obwohl ein Kollege (Mitbearbeiter) denselben Link
     # verglichen hatte und es noch in seinem Bereich brauchte. Jetzt:
     # Fahrzeuge mit aktivem Mitbearbeiter wechseln den Hauptbearbeiter
-    # (CAS wie lifecycle.py, Muster wie der Besitzerwechsel in
+    # (CAS wie lifecycle.py, Muster wie der fruehere Besitzerwechsel in
     # routes/bestand.py: neuer Hauptbearbeiter ist nicht zugleich
-    # Mitbearbeiter). updated_at bleibt unveraendert — die Reihenfolge im
+    # Mitbearbeiter). Betrifft nur reine Vergleichsfahrzeuge ohne Vertrag
+    # und Termin — kein "Wegnehmen" im Sinne von R1-01 (21.09.2026). updated_at bleibt unveraendert — die Reihenfolge im
     # Pool des Nachfolgers richtet sich weiter nach dem letzten Vergleich.
     alle_mitbearbeiter = {m for v in offen for m in (v.get("mitbearbeiter_ids") or [])
                           if m and m != v.get("owner_user_id")}

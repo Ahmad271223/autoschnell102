@@ -264,8 +264,9 @@ OHNE_BESITZER = {"$or": [{"owner_user_id": {"$exists": False}},
 
 async def _offene_besitzer_melden(db, ungueltige: int = 0) -> None:
     """Runde 17 (Migrations-Befund 5): Fahrzeuge ohne zuordenbaren Besitzer
-    duerfen nicht still bleiben — als Betriebsalarm sichtbar (/admin/betrieb),
-    der Chef weist sie in der Akte zu. Kein Startabbruch: seit dem Umbau
+    duerfen nicht still bleiben — als Betriebsalarm sichtbar (/admin/betrieb).
+    Zuweisen durch den Chef gibt es seit 21.09.2026 nicht mehr (R1-01); ein
+    Sucher uebernimmt sie beim erneuten Vergleich des Links. Kein Startabbruch: seit dem Umbau
     Kaufvorgaenge ist der Besitzer nur organisatorisch.
 
     Runde 18: Gesamtzahl = Fahrzeuge OHNE Besitzer (immer frisch aus der

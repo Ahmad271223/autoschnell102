@@ -245,7 +245,13 @@ def test_03_jeder_vertrag_bekommt_eigenen_abholtermin_kollege_sieht_ihn_nicht(we
     assert n == 3
 
 
-def test_04_uebergabe_neuer_hauptbearbeiter_verliert_mitbearbeiter_status_alter_verliert_zugriff(welt):
+def test_04_chef_haengt_nicht_mehr_um_haupt_und_mitbearbeiter_bleiben(welt):
+    """Frueher: der Chef machte Mitbearbeiter B per PUT /besitzer zum
+    Hauptbearbeiter, A verlor den Zugriff. Wunsch Ahmad 21.09.2026 (R1-01):
+    "man soll nie an dem sein abgeschlossenen Vertrag oder sonstwas
+    wegnehmen" — die Route antwortet 410; A bleibt Hauptbearbeiter, B und C
+    bleiben Mitbearbeiter (Regel vom 09.09.: jeder darf einen eigenen
+    Vertrag anlegen), niemand verliert den Zugriff."""
     Bst = _module("routes.bestand")
     D = _module("deps")
     w = welt
@@ -257,15 +263,16 @@ def test_04_uebergabe_neuer_hauptbearbeiter_verliert_mitbearbeiter_status_alter_
                                         "mitbearbeiter_ids": [w.b["id"], w.c["id"]],
                                         "data": {"make_label": "BMW"}, "created_at": _jetzt(),
                                         "updated_at": _jetzt()})
-        await Bst.set_vehicle_owner(vid, Bst.BesitzerIn(owner_user_id=w.b["id"]), w.chef)
+        with pytest.raises(HTTPException) as e:
+            await Bst.fahrzeug_umhaengen_entfernt(vid, w.chef)
         v = await w.db.vehicles.find_one({"id": vid}, {"_id": 0, "owner_user_id": 1, "mitbearbeiter_ids": 1})
-        return v, await D.fahrzeug_im_bereich(w.a, vid), await D.fahrzeug_im_bereich(w.b, vid), \
-            await D.fahrzeug_im_bereich(w.c, vid)
+        return e.value.status_code, v, await D.fahrzeug_im_bereich(w.a, vid), \
+            await D.fahrzeug_im_bereich(w.b, vid), await D.fahrzeug_im_bereich(w.c, vid)
 
-    v, a_ok, b_ok, c_ok = w.run(lauf())
-    assert v["owner_user_id"] == w.b["id"] and v["mitbearbeiter_ids"] == [w.c["id"]]
-    assert a_ok is False, "bisheriger Hauptbearbeiter verliert den Zugriff"
-    assert b_ok is True and c_ok is True, "Mitbearbeiter C hat selbst verglichen und bleibt"
+    status, v, a_ok, b_ok, c_ok = w.run(lauf())
+    assert status == 410
+    assert v["owner_user_id"] == w.a["id"] and v["mitbearbeiter_ids"] == [w.b["id"], w.c["id"]]
+    assert a_ok is True and b_ok is True and c_ok is True, "niemand verliert den Zugriff"
 
 
 def test_05_akte_zeigt_mitbearbeiter(welt):

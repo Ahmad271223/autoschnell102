@@ -52,7 +52,10 @@ class TageslimitErreicht(RuntimeError):
 # Ab dieser Zahl Abrufe an einem Tag gibt es EINEN Betriebsalarm — ein
 # Hinweis, kein Riegel. So faellt ein Ausreisser auf, bevor die Rechnung
 # kommt. 0 schaltet auch die Warnung ab.
-TAGESWARNUNG = int(os.environ.get("ANBIETER_TAGESWARNUNG", "500"))
+# 21.09.2026: 5000 statt 500 — bei 30 Suchern sind 1.000–3.240 Abrufe am Tag
+# normal; mit 500 kam der Alarm (samt Betriebsmail) an jedem Arbeitstag.
+# Derselbe Wert steht in docker-compose.yml, .env.example und env_erzeugen.py.
+TAGESWARNUNG = int(os.environ.get("ANBIETER_TAGESWARNUNG", "5000"))
 
 
 async def _warnen_wenn_viel(db, tag: str, stand: int) -> None:

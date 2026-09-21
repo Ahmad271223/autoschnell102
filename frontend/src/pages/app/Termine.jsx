@@ -29,6 +29,54 @@ const STATUSES = ["offen", "bestätigt", "in Bearbeitung", "abgeholt", "nicht ab
 // Abgeschlossene Zustaende — wandern in der Liste automatisch nach unten
 // (dieselbe Menge wie ABGESCHLOSSEN in backend/routes/appointments.py).
 const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storniert"]);
+// Pruefbericht 20.09.2026 (V-12): dieselben Mengen wie AUSGANG_ABGEHOLT /
+// AUSGANG_ZURUECK in backend/routes/appointments.py ("erledigt" zaehlt beim
+// Kauf wie "abgeholt").
+const AUSGANG_ABGEHOLT = new Set(["abgeholt", "erledigt"]);
+const AUSGANG_ZURUECK = new Set(["storniert", "nicht abgeholt"]);
+// Pruefung 21.09.2026 (V-12): Fahrzeugzustaende NACH der Entscheidung
+// "abgeholt" (wie _NACH_ABHOLUNG_WEITER im Backend) — dort setzt eine
+// Stornierung nichts zurueck.
+const NACH_ABHOLUNG_WEITER = new Set(["bestand", "verkaufsentwurf", "verkaufsbereit",
+  "veroeffentlicht", "reserviert", "verkauft", "archiviert"]);
+const AUSGANG_SPERRE = "Den Ausgang einer Abholung ändert nur der Hauptaccount";
+
+/**
+ * Pruefung 21.09.2026 (V-12): "erledigt" zaehlt nur dann wie "abgeholt", wenn
+ * am Termin ein Kauf bzw. ein Fahrzeug haengt (wie ausgang_gilt_als_abgeholt
+ * im Backend) — allgemeine Termine (Werkstatt, Besichtigung) bleiben frei.
+ */
+export function terminHatKauf(appt) {
+  return !!(appt?.vehicle_id || appt?.contract_id || appt?.kaufvorgang_id);
+}
+
+function giltAlsAbgeholt(alt, hatKauf) {
+  return AUSGANG_ABGEHOLT.has(alt) && (alt === "abgeholt" || !!hatKauf);
+}
+
+/**
+ * Pruefung 21.09.2026 (V-12): Ein wieder geoeffneter Termin mit
+ * unterschriebenem Protokoll gilt als erfolgte Abholung, solange das Fahrzeug
+ * noch auf "abgeholt" (bzw. danach im Bestand/Weiterverkauf) steht — wie
+ * abholung_beleg im Backend (dort: Kaufvorgang "abgeholt"). Wurde der Kauf
+ * schon zurueckgenommen (Storno, danach wieder geoeffnet), ist nichts mehr
+ * belegt. Zustand unbekannt: vorsichtshalber belegt.
+ */
+function wiederOffenBelegt(protokoll, { hatFahrzeug = true, lifecycle = null } = {}) {
+  if (!protokoll) return false;
+  if (!hatFahrzeug || !lifecycle) return true;
+  return lifecycle === "abgeholt" || NACH_ABHOLUNG_WEITER.has(lifecycle);
+}
+
+/**
+ * Pruefung 21.09.2026 (V-12): Der Merker ausgang_geaendert gilt nur, solange
+ * der Termin noch in dem Status steht, den der Chef gesetzt hat — sonst zeigte
+ * der Dialog einen veralteten Hinweis und sperrte Sucher dauerhaft.
+ */
+export function ausgangWirksam(appt) {
+  const ag = appt?.ausgang_geaendert;
+  return !!ag && typeof ag === "object" && (appt.status || "offen") === ag.nach_status;
+}
 
 /**
  * Darf dieses Konto den Termin auf `neu` setzen? Pruefbericht 20.09.2026
@@ -38,8 +86,18 @@ const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storni
  * Abgeschlossene Termine oeffnet nur der Chef wieder, und den Ausgang einer
  * Abholung ("abgeholt") aendert nur er. Rueckgabe: null = erlaubt, sonst
  * der Grund fuer den Tooltip.
+ * Pruefbericht 20.09.2026 (V-12): wie im Backend auch bei "erledigt" (zaehlt
+ * beim Kauf wie "abgeholt"), bei unterschriebenem Protokoll und nach einer
+ * Ausgangs-Aenderung des Chefs (ausgang) — vorher waren die Knoepfe aktiv und
+ * das Speichern endete in 403.
+ * Pruefung 21.09.2026 (V-12): "erledigt" nur mit Kauf/Fahrzeug (hatKauf);
+ * ein zur Korrektur wieder geoeffneter Termin mit Protokoll laesst sich vom
+ * Sucher nicht stornieren / auf "nicht abgeholt" setzen; `ausgang` nur, solange
+ * der Merker zum Status passt (ausgangWirksam).
  */
-export function statusSperre(neu, alt, chef, { fahrer = false, protokoll = false } = {}) {
+export function statusSperre(neu, alt, chef,
+  { fahrer = false, protokoll = false, ausgang = false, hatKauf = true,
+    hatFahrzeug = true, lifecycle = null } = {}) {
   // Pruefbericht 20.09.2026 (U-54): Mit eingeteiltem Fahrer entsteht
   // "abgeholt"/"erledigt" nur ueber sein unterschriebenes Protokoll — der
   // Server lehnt den Handweg ab, die Oberflaeche bot ihn trotzdem an.
@@ -47,10 +105,85 @@ export function statusSperre(neu, alt, chef, { fahrer = false, protokoll = false
     return "Mit eingeteiltem Fahrer entsteht „abgeholt“ über das unterschriebene Abholprotokoll";
   }
   if (chef || !alt || neu === alt) return null;
-  if (!ABGESCHLOSSEN.has(alt)) return null;
+  if (!ABGESCHLOSSEN.has(alt)) {
+    return AUSGANG_ZURUECK.has(neu) && wiederOffenBelegt(protokoll, { hatFahrzeug, lifecycle })
+      ? AUSGANG_SPERRE : null;
+  }
   if (!ABGESCHLOSSEN.has(neu)) return "Abgeschlossene Termine öffnet nur der Hauptaccount wieder";
-  if (alt === "abgeholt") return "Den Ausgang einer Abholung ändert nur der Hauptaccount";
+  if (giltAlsAbgeholt(alt, hatKauf) || protokoll || ausgang) return AUSGANG_SPERRE;
   return null;
+}
+
+/**
+ * Pruefbericht 20.09.2026 (V-12), Entscheidung Ahmad 21.09.2026: Der Chef darf
+ * eine abgeholte/erledigte Abholung nachtraeglich auf "storniert" bzw. "nicht
+ * abgeholt" setzen — nur nach dieser Rueckfrage (der Server verlangt
+ * ausgang_bestaetigt, sonst 409). Text der Rueckfrage, sonst null (keine
+ * Rueckfrage noetig).
+ * Pruefung 21.09.2026 (V-12): dieselben Faelle wie im Backend — auch ein zur
+ * Korrektur wieder geoeffneter Termin mit Protokoll, "erledigt" nur mit
+ * Kauf/Fahrzeug (hatKauf) oder Protokoll; `belegt` erzwingt die Rueckfrage,
+ * wenn der Server sie verlangt (Kauf abgeholt, ohne protocol_id im Termin).
+ * Der Text sagt nur zu, was das Backend tut: ohne Fahrzeug kein Fahrzeugteil,
+ * im Bestand/Weiterverkauf bleibt das Fahrzeug samt Preis, ohne Kauf wird kein
+ * Einkaufspreis entfernt; ist der Zustand unbekannt, bleibt die Aussage bedingt.
+ */
+export function ausgangFrage(alt, neu, hatProtokoll = false,
+  { hatKauf = true, hatFahrzeug = true, lifecycle = null, belegt = false } = {}) {
+  if (!AUSGANG_ZURUECK.has(neu) || !alt || alt === neu || AUSGANG_ZURUECK.has(alt)) return null;
+  const wiederOffen = !ABGESCHLOSSEN.has(alt);
+  const gefragt = belegt || giltAlsAbgeholt(alt, hatKauf)
+    || (hatProtokoll && alt === "erledigt")
+    || (wiederOffen && wiederOffenBelegt(hatProtokoll, { hatFahrzeug, lifecycle }));
+  if (!gefragt) return null;
+  const subjekt = hatKauf ? "gilt der Kauf nicht mehr als abgeholt"
+    : "gilt die Abholung nicht mehr als erfolgt";
+  let kauf;
+  if (!hatFahrzeug) {
+    kauf = `${subjekt},`;
+  } else if (lifecycle && NACH_ABHOLUNG_WEITER.has(lifecycle)) {
+    kauf = `${subjekt} – das Fahrzeug steht bereits im Bestand bzw. im Weiterverkauf und bleibt`
+      + `${hatKauf ? " samt Einkaufspreis" : ""} unverändert (bitte dort entscheiden),`;
+  } else if (lifecycle && lifecycle !== "abgeholt") {
+    // Das Fahrzeug steht gar nicht (mehr) auf "abgeholt" — nichts zurueckzunehmen.
+    kauf = `${subjekt},`;
+  } else {
+    const bedingung = lifecycle === "abgeholt"
+      ? "sofern keine andere Abholung dieses Fahrzeugs abgeschlossen ist"
+      : "sofern das Fahrzeug nicht schon im Bestand/Weiterverkauf steht und keine andere "
+        + "Abholung dieses Fahrzeugs abgeschlossen ist";
+    kauf = `${subjekt} – ${bedingung}, verschwindet das Fahrzeug aus „Entscheidung fällig“`
+      + `${hatKauf ? " und der Einkaufspreis aus dieser Abholung wird entfernt" : ""},`;
+  }
+  const punkte = [kauf];
+  if (hatProtokoll) {
+    punkte.push("bleiben Protokoll und Kaufvertrag unverändert als Nachweis gespeichert,");
+    // Nur bei "storniert" sperrt die Fahrer-App die Unterlagen sofort.
+    if (neu === "storniert") punkte.push("sieht der Fahrer die Unterlagen dieser Fahrt nicht mehr,");
+  }
+  punkte.push("wird die Änderung mit deinem Namen und der Uhrzeit im Verlauf festgehalten.");
+  let kopf;
+  if (hatProtokoll && wiederOffen) {
+    kopf = "Für diese Abholung gibt es ein unterschriebenes Abholprotokoll (der Termin ist zur "
+      + "Korrektur wieder geöffnet).";
+  } else if (hatProtokoll) {
+    kopf = "Diese Abholung ist mit unterschriebenem Abholprotokoll abgeschlossen.";
+  } else {
+    kopf = "Diese Abholung ist bereits abgeschlossen.";
+  }
+  return `${kopf} Wenn du sie auf „${neu}“ setzt:\n`
+    + punkte.map((p) => `• ${p}`).join("\n")
+    + "\n\nWirklich ändern?";
+}
+
+/** Hinweis im Termin-Dialog, wenn der Ausgang nachtraeglich geaendert wurde. */
+export function ausgangHinweis(ag) {
+  if (!ag || typeof ag !== "object") return null;
+  const am = safeParse(ag.am);
+  const wann = am ? ` am ${format(am, "dd.MM.yyyy, HH:mm")} Uhr` : "";
+  const wechsel = ag.von_status && ag.nach_status ? ` („${ag.von_status}“ → „${ag.nach_status}“)` : "";
+  return `Ausgang der Abholung${wann} vom Hauptaccount nachträglich geändert${wechsel}`
+    + (ag.protokoll_id ? " — das Abholprotokoll bleibt als Nachweis gespeichert." : ".");
 }
 
 const STATUS_META = {
@@ -157,6 +290,14 @@ export default function Termine() {
       return true;
     } catch (err) {
       const status = err?.response?.status;
+      // Pruefung 21.09.2026 (V-12): Der Server verlangt die Rueckfrage zum
+      // Ausgang, die der Dialog nicht gestellt hat (z. B. Kauf abgeholt ohne
+      // Protokollverweis am Termin) — der Dialog fragt jetzt nach und
+      // speichert mit Bestaetigung erneut. Kein Fehler-Toast.
+      if (status === 409 && a.id && !a.ausgang_bestaetigt
+          && /Rückfrage im Terminplaner/i.test(errMsg(err, ""))) {
+        return "ausgang";
+      }
       // Pruefbericht 20.09.2026 (B11): Beim veralteten Stand (409 "bitte neu
       // laden") behielt der Dialog seinen alten Stand samt updated_at — jeder
       // weitere Versuch scheiterte identisch, ohne Ausweg. Jetzt wird der
@@ -618,9 +759,30 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
       toast.error("Sonstige Kosten: bitte einen Betrag ab 0 € eintragen.");
       return;
     }
+    // Pruefbericht 20.09.2026 (V-12): abgeholt/erledigt -> storniert / nicht
+    // abgeholt nur nach Rueckfrage; Abbrechen laesst den alten Status stehen.
+    // Pruefung 21.09.2026 (V-12): mit Kauf- und Fahrzeugstand des Termins,
+    // damit der Text nur zusagt, was der Server tut.
+    const altStatus = appt?.status || "offen";
+    const ausgangOpts = { hatKauf: terminHatKauf(appt), hatFahrzeug: !!appt?.vehicle_id,
+                          lifecycle: appt?.vehicle?.lifecycle || null };
+    const frage = !isNew && chef
+      ? ausgangFrage(altStatus, a.status, !!appt.protocol_id, ausgangOpts) : null;
+    if (frage && !window.confirm(frage)) {
+      set("status", altStatus);
+      return;
+    }
     setArbeitet(true);
     try {
-      const ok = await onSave(a);
+      let ok = await onSave(frage ? { ...a, ausgang_bestaetigt: true } : a);
+      if (ok === "ausgang") {
+        // Pruefung 21.09.2026 (V-12): Der Server verlangt die Rueckfrage.
+        const nachfrage = ausgangFrage(altStatus, a.status, !!appt.protocol_id,
+          { ...ausgangOpts, belegt: true });
+        ok = nachfrage && window.confirm(nachfrage)
+          ? await onSave({ ...a, ausgang_bestaetigt: true }) : false;
+        if (ok === "ausgang") ok = false;
+      }
       // U-54: nach einem gescheiterten Speichern zeigt der Dialog wieder den
       // Status, der wirklich gilt — nicht den abgelehnten.
       if (ok === false && !isNew && (a.status || "offen") !== (appt.status || "offen")) {
@@ -719,7 +881,9 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
                   const meta = STATUS_META[s];
                   const active = (a.status || "offen") === s;
                   const sperre = statusSperre(s, isNew ? null : (appt.status || "offen"), chef,
-                    { fahrer: !!(a.driver_id || appt?.driver_id), protokoll: !!appt?.protocol_id });
+                    { fahrer: !!(a.driver_id || appt?.driver_id), protokoll: !!appt?.protocol_id,
+                      ausgang: ausgangWirksam(appt), hatKauf: terminHatKauf(appt),
+                      hatFahrzeug: !!appt?.vehicle_id, lifecycle: appt?.vehicle?.lifecycle || null });
                   return (
                     <button key={s} onClick={() => set("status", s)} data-testid={`status-${s}`}
                             type="button" disabled={!!sperre} title={sperre || undefined}
@@ -732,6 +896,17 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
                   );
                 })}
               </div>
+              {/* Pruefbericht 20.09.2026 (V-12): nachtraeglich geaenderter Ausgang —
+                  Pruefung 21.09.2026: nur solange der Merker zum Status passt */}
+              {!isNew && ausgangWirksam(appt) && (
+                <div data-testid="ausgang-geaendert-hinweis"
+                     className="mt-2 p-2.5 rounded-sm text-xs leading-relaxed"
+                     style={{ background: "rgba(255,149,0,0.12)",
+                              border: "1px solid rgba(255,149,0,0.35)",
+                              color: "var(--tx-amber)" }}>
+                  {ausgangHinweis(appt.ausgang_geaendert)}
+                </div>
+              )}
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">

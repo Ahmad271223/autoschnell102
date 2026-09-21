@@ -201,7 +201,7 @@ def main() -> int:
         "ANBIETER_TAGESLIMIT_GESAMT=0",
         "# Je Konto: 400 neue Abrufe am Tag (Entscheidung Ahmad 16.09.2026), 0 = aus.",
         "ANBIETER_TAGESLIMIT_JE_KONTO=400",
-        "ANBIETER_TAGESWARNUNG=500",
+        "ANBIETER_TAGESWARNUNG=5000",
         "ABRUF_RUECKFALL_TAGESLIMIT=25",
         "",
         "# ---- Zahlungen (leer lassen, solange nicht genutzt) ----",

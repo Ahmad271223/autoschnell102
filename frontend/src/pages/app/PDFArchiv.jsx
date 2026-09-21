@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Copy } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
@@ -227,6 +227,17 @@ export default function PDFArchiv() {
                       </span>
                     </div>
                     <AbholZeile item={it} />
+                    {/* Wunsch Ahmad 21.09.2026: "Notizen (intern)" stehen nicht mehr im
+                        Kundenvertrag (beide Fassungen gehen an den Verkaeufer) — hier
+                        bleiben sie fuer das Buero sichtbar. */}
+                    {String(it.contract_data?.notes || "").trim() && (
+                      <div className="mt-1.5 text-[12.5px] leading-relaxed whitespace-pre-line"
+                           data-testid={`vertrag-notiz-${it.id}`}
+                           style={{ color: "var(--text-muted)" }}>
+                        <span className="font-semibold">Notiz (intern): </span>
+                        {String(it.contract_data.notes).trim()}
+                      </div>
+                    )}
                     <NachAbholungHinweis item={it} onSenden={() => setSenden(it)} />
                     <div className="mt-3">
                       {it.vehicle_id ? (
@@ -277,9 +288,9 @@ export default function PDFArchiv() {
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
                               style={{ background: "var(--apple-btn-secondary-bg)",
                                        color: "var(--text-primary)" }}
-                              aria-label="Vorlagen zum Kopieren"
-                              title="Vorlagen zum Kopieren (Hinweis nach Kaufabschluss, Bahnverbindung) — mit Name und Daten dieses Vertrags">
-                        <Copy size={16} />
+                              aria-label="Hinweis nach Kaufabschluss und Bahnverbindung"
+                              title="Hinweis nach Kaufabschluss / Bahnverbindung — per E-Mail verschicken oder kopieren, mit Name und Daten dieses Vertrags">
+                        <Mail size={16} />
                       </button>
                       <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
                               disabled={!!loeschtId}
@@ -305,7 +316,7 @@ export default function PDFArchiv() {
 
       {folgeMail && (
         <FolgeMailDialog open contract={folgeMail}
-                         onClose={() => setFolgeMail(null)} />
+                         onClose={(gesendet) => { setFolgeMail(null); if (gesendet) load(); }} />
       )}
 
       {/* Foto-Galerie: großes Bild, blättern mit Pfeilen / Tastatur / Wischen */}

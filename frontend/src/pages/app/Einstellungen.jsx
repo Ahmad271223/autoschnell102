@@ -583,8 +583,8 @@ export default function Einstellungen() {
             </Section>
           )}
           {active === "templates" && (
-            <Section title="Vorlagen zum Kopieren"
-                     subtitle="Diese Texte verschickt die App nicht. Kopiere sie und füge sie in deine eigene E-Mail oder WhatsApp ein. Im PDF-Archiv gibt es sie bei jedem Vertrag schon mit Name und Daten ausgefüllt.">
+            <Section title="Hinweis nach Kaufabschluss & Bahnverbindung"
+                     subtitle="Diese Texte gehen nie automatisch raus. Im Vertragsarchiv (Knopf mit dem Brief-Symbol beim Vertrag) sind Name und Daten schon eingesetzt — dort per E-Mail verschicken oder kopieren. Hier kannst du sie anpassen und kopieren.">
               <div className="text-xs font-semibold text-zinc-300 pt-1">Bahnverbindung</div>
               <AppleField label="Betreff" kopieren
                           value={form.email_subject_bahn}
@@ -609,8 +609,8 @@ export default function Einstellungen() {
                              icon={MessageSquare} testid="set-wa-template-nach-kauf" />
               <div className="text-[11px] text-zinc-500 leading-snug">
                 Hier kopiert, stehen die Platzhalter (z. B. {"{kunde_name}"}) noch im Text — bitte
-                beim Einfügen durch den Namen ersetzen. Im PDF-Archiv (Knopf mit dem
-                Kopier-Symbol beim Vertrag) sind sie schon ausgefüllt.
+                beim Einfügen durch den Namen ersetzen. Im Vertragsarchiv (Knopf mit dem
+                Brief-Symbol beim Vertrag) sind sie schon ausgefüllt.
               </div>
               <PlaceholderHint placeholders={PLATZHALTER} />
             </Section>
@@ -659,8 +659,8 @@ export default function Einstellungen() {
                   automatisch eingesetztem Abholdatum, Übergabeort und
                   Zahlungsart. Aus = nur der eigene Text darunter. */}
               <label className="flex items-start gap-3 p-4 rounded-2xl cursor-pointer"
-                     style={{ background: "var(--surface-2)",
-                              border: "1px solid var(--line)" }}
+                     style={{ background: "var(--wa-03)",
+                              border: "1px solid var(--border-default)" }}
                      data-testid="set-sonder-standard">
                 <input type="checkbox" className="mt-1 w-5 h-5 shrink-0"
                        checked={form.sondervereinbarung_standard_aktiv !== false}

@@ -190,21 +190,25 @@ def test_12_der_versand_dialog_kennt_dieselben_namen():
 
 
 # ------------------------------------------------------- Die Folge-Mails
-def test_13_die_folge_mails_gibt_es_nur_noch_als_vorschau():
-    """Wunsch Ahmad 21.09.2026: "wir selber schicken die nicht raus". Die
-    Vorschau (Text mit eingesetzten Daten zum Kopieren) bleibt, der Versand
-    ueber unsere Adresse ist weg — die POST-Route antwortet nur noch 410.
-    (Frueher pruefte dieser Test die Versandbremse am Versandweg; ohne
-    Versandweg gibt es nichts mehr zu bremsen.)"""
+def test_13_die_folge_mails_gibt_es_als_route():
+    """Vorschau zum Kopieren und Versand per Knopf (Wunsch Ahmad 21.09.2026:
+    erst nur kopieren, dann "doch zum Verschicken kann bleiben"). Der Versand
+    haengt an derselben Bremse wie der Vertragsversand.
+    Pruefbericht 20.09.2026: Hier stand frueher `_versand_limiter.erlaubt` —
+    eine Methode, die es nicht gibt; jeder Versand endete mit 500. Deshalb
+    wird am echten Funktionskoerper geprueft UND in
+    test_sucher_dashboard_20260920 wirklich versendet."""
     quelle = (BACKEND / "routes" / "contracts.py").read_text(encoding="utf-8")
     assert '@router.get("/contracts/{contract_id}/folge-mail/{art}")' in quelle
+    assert '@router.post("/contracts/{contract_id}/folge-mail")' in quelle
     import ast
-    baum = ast.parse(quelle)
-    fn = next(k for k in ast.walk(baum)
+    import rate_limiter
+    assert hasattr(rate_limiter.SlidingWindowRateLimiter, "check")
+    assert not hasattr(rate_limiter.SlidingWindowRateLimiter, "erlaubt")
+    fn = next(k for k in ast.walk(ast.parse(quelle))
               if isinstance(k, ast.AsyncFunctionDef) and k.name == "folge_mail_senden")
     koerper = ast.unparse(fn)
-    assert "HTTPException(410" in koerper
-    assert "send_email" not in koerper and "email_service" not in koerper
+    assert "await _versand_limiter.check(" in koerper
     assert set(V.FOLGE_MAILS) == {"korrektur", "nach_kauf", "nach_kauf_whatsapp", "bahn"}
 
 
@@ -216,9 +220,8 @@ def test_14_die_oberflaeche_hat_den_knopf():
               / "FolgeMailDialog.jsx").read_text(encoding="utf-8")
     for art in ("nach_kauf", "nach_kauf_whatsapp", "bahn"):
         assert f'id: "{art}"' in dialog, f"{art} fehlt im Dialog"
-    # Nur kopieren — nichts verschicken (21.09.2026).
-    assert "api.post" not in dialog, "der Dialog verschickt noch"
     assert "KopierKnopf" in dialog
+    assert "idempotency_key" in dialog, "kein Doppelklick-Schutz"
 
 
 # ---------------------------------------- Schalter fuer unseren Standardsatz

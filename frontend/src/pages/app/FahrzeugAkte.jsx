@@ -72,8 +72,8 @@ export default function FahrzeugAkte() {
   const [selectedDevs, setSelectedDevs] = useState([]);
   const [bestandForm, setBestandForm] = useState(null);
   const [busy, setBusy] = useState(false);
-  // Pruefbericht 20.09.2026 (B5): Ein Ladefehler (404 nach Umhaengen durch
-  // den Chef, 500, Funkloch) liess die Seite fuer immer auf "lade…" stehen —
+  // Pruefbericht 20.09.2026 (B5): Ein Ladefehler (404 nach Entfernen oder
+  // Loeschen, 500, Funkloch) liess die Seite fuer immer auf "lade…" stehen —
   // der Rueckweg lag hinter diesem Zustand. Jetzt: Text, Zurueck, Erneut.
   const [ladeFehler, setLadeFehler] = useState(null);
   const { user } = useAuth();
@@ -99,9 +99,11 @@ export default function FahrzeugAkte() {
         costs: b.costs || [],
       });
     } catch (e) {
+      // Wunsch Ahmad 21.09.2026 (R1-01): der Chef haengt keine Fahrzeuge mehr
+      // um — "einem anderen Konto zugeordnet" ist deshalb kein Grund mehr.
       const text = e?.response?.status === 404
         ? "Diese Fahrzeugakte ist nicht (mehr) für dich sichtbar — das Fahrzeug wurde "
-          + "gelöscht, aus deiner Liste entfernt oder einem anderen Konto zugeordnet."
+          + "gelöscht oder aus deiner Liste entfernt."
         : errMsg(e, "Akte konnte nicht geladen werden");
       setLadeFehler(text);
       toast.error(text);
@@ -183,18 +185,6 @@ export default function FahrzeugAkte() {
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
   };
 
-  // Runde 16: der Chef haengt das Fahrzeug einem anderen Konto der Firma um;
-  // Termine, Snapshots, Berichte und Protokolle folgen dem Fahrzeug.
-  const zuweisen = async (ownerId) => {
-    if (busy || !ownerId || ownerId === akte.owner?.id) return;
-    setBusy(true);
-    try {
-      const r = await api.put(`/vehicles/${v.id}/besitzer`, { owner_user_id: ownerId });
-      toast.success(`Fahrzeug jetzt bei ${r.data.owner_name || "neuem Konto"}`);
-      load();
-    } catch (e) { toast.error(errMsg(e, "Zuweisen fehlgeschlagen")); } finally { setBusy(false); }
-  };
-
   const saveBestand = async () => {
     if (busy) return;
     setBusy(true);
@@ -231,18 +221,18 @@ export default function FahrzeugAkte() {
               Status
               <StatusSchild status={v.lifecycle} text={lifecycleText(v.lifecycle)} data-testid="akte-status" />
             </span>
-            {akte.zuweisbar && (
+            {/* Wunsch Ahmad 21.09.2026 (R1-01): "man soll nie an dem sein
+                abgeschlossenen Vertrag oder sonstwas wegnehmen" — das
+                Auswahlfeld zum Umhaengen ist entfallen. Der Chef sieht den
+                Bearbeiter nur noch als Text. */}
+            {!sucher && (
               <span className="inline-flex flex-wrap items-center gap-2" data-testid="akte-besitzer">
                 Bearbeiter
-                <select value={akte.owner?.id || ""} onChange={(e) => zuweisen(e.target.value)}
-                        className="rounded-md px-2 py-1 text-xs bg-transparent border"
-                        style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}
-                        data-testid="akte-besitzer-select">
-                  {!akte.owner && <option value="">— nicht zugeordnet —</option>}
-                  {(akte.zuweisbar_an || []).map((k) => (
-                    <option key={k.id} value={k.id}>{k.name}{k.role === "dealer" ? " (Hauptaccount)" : ""}</option>
-                  ))}
-                </select>
+                <span style={{ color: "var(--text-primary)" }}>
+                  {akte.owner
+                    ? `${akte.owner.name}${akte.owner.hauptaccount ? " (Hauptaccount)" : ""}`
+                    : "— nicht zugeordnet —"}
+                </span>
                 {akte.mitbearbeiter?.length > 0 && (
                   <span data-testid="akte-mitbearbeiter">mit {akte.mitbearbeiter.map((m) => m.name).join(", ")}</span>
                 )}

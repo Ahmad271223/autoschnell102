@@ -5,8 +5,9 @@
   L3 1-8, 20 / L4 1-2  Uebergabe = ganzer Vorgang (Kaufvorgaenge, Vertraege,
                         Termine folgen dem Fahrzeug); Sucher-Loeschung uebergibt
                         den Vorgang an den Chef
-  L3 17, 19            Zielkonto nicht in Loeschung; keine Uebergabe waehrend
-                        Freigabe/Abschluss
+  L3 17, 19            (Zielkonto nicht in Loeschung; keine Uebergabe waehrend
+                        Freigabe/Abschluss) — entfallen mit dem Umhaengen durch
+                        den Chef (Wunsch Ahmad 21.09.2026, R1-01: 410)
   L3 9-13              Revision Pflicht, Submit mit Revisions-CAS, Insert faengt
                         nur Dubletten, Vertragsanker im Entwurf
   L3 14/15             Kaufvorgang-Status mit Ausgangsstatus-CAS, Frischabgleich
@@ -90,6 +91,12 @@ def _welt(db, run):
 
 # ============================================================ Uebergabe
 def test_uebergabe_nimmt_den_ganzen_vorgang_mit(wegwerf):
+    """Wunsch Ahmad 21.09.2026 (R1-01): der Chef nimmt nichts mehr weg —
+    PUT /besitzer antwortet 410, bei A bleibt alles. Die Uebergabe-Mechanik
+    (vorgang_uebergeben) bleibt fuer "Aus meiner Liste entfernen" und die
+    Sucher-Loeschung; sie wird hier direkt geprueft (Ziel: der Chef, wie in
+    beiden verbliebenen Wegen). Die frueheren Punkte Nr. 17/19 (Zielkonto in
+    Loeschung, Protokollsperre) gehoerten nur zum Umhaengen und sind entfallen."""
     db, run = wegwerf.db, wegwerf.run
     _welt(db, run)
     chef = {"id": "chef", "dealer_id": "d1", "role": "dealer"}
@@ -97,28 +104,33 @@ def test_uebergabe_nimmt_den_ganzen_vorgang_mit(wegwerf):
     sb = {"id": "sb", "dealer_id": "d1", "role": "sucher"}
     assert run(deps.termin_im_bereich(sa, run(db.appointments.find_one({"id": "t1"})))) is True
     assert run(deps.termin_im_bereich(sb, run(db.appointments.find_one({"id": "t1"})))) is False
-    erg = run(BST.set_vehicle_owner("v1", BST.BesitzerIn(owner_user_id="sb"), chef))
-    assert erg["ok"] and erg["uebergabe"] == {"kaufvorgaenge": 1, "vertraege": 1, "termine": 1}
+    # R1-01: kein Umhaengen durch den Chef — nichts wandert
+    with pytest.raises(HTTPException) as e:
+        run(BST.fahrzeug_umhaengen_entfernt("v1", chef))
+    assert e.value.status_code == 410
+    assert run(db.vehicles.find_one({"id": "v1"}))["owner_user_id"] == "sa"
+    assert run(db.appointments.find_one({"id": "t1"}))["created_by"] == "sa"
+    assert run(db.kaufvorgaenge.find_one({"id": "k1"}))["user_id"] == "sa"
+    assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "sa"
+    # Mechanik der verbliebenen Uebergaben: der ganze Vorgang geht mit
+    erg = run(BST.vorgang_uebergeben("d1", "v1", "sa", "chef"))
+    assert erg == {"kaufvorgaenge": 1, "vertraege": 1, "termine": 1}
     t1 = run(db.appointments.find_one({"id": "t1"}))
-    assert t1["created_by"] == "sb" and t1["uebergeben_von"] == "sa"
-    assert run(db.kaufvorgaenge.find_one({"id": "k1"}))["user_id"] == "sb"
-    assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "sb"
-    # Bereich folgt: A sieht den Termin nicht mehr, B schon
+    assert t1["created_by"] == "chef" and t1["uebergeben_von"] == "sa"
+    assert run(db.kaufvorgaenge.find_one({"id": "k1"}))["user_id"] == "chef"
+    assert run(db.generated_pdfs.find_one({"id": "c1"}))["user_id"] == "chef"
+    # Bereich folgt: A sieht den Termin nicht mehr, Kollege B nie
     assert run(deps.termin_im_bereich(sa, t1)) is False
-    assert run(deps.termin_im_bereich(sb, t1)) is True
-    # Nr. 19: waehrend einer laufenden Freigabe keine Uebergabe
-    run(db.pickup_protocols.insert_one({"id": "p1", "appointment_id": "t1", "vehicle_id": "v1",
-                                        "status": "zur_freigabe", "superseded": False, "version": 1}))
-    with pytest.raises(HTTPException) as e:
-        run(BST.set_vehicle_owner("v1", BST.BesitzerIn(owner_user_id="sa"), chef))
-    assert e.value.status_code == 409 and "Freigabe" in e.value.detail
-    # Nr. 17: Zielkonto in Loeschung -> 404
-    run(db.pickup_protocols.delete_many({}))
-    run(db.users.update_one({"id": "sa"}, {"$set": {"loeschung": {"status": "laeuft"}}}))
-    with pytest.raises(HTTPException) as e:
-        run(BST.set_vehicle_owner("v1", BST.BesitzerIn(owner_user_id="sa"), chef))
-    assert e.value.status_code == 404
+    assert run(deps.termin_im_bereich(sb, t1)) is False
+    assert run(deps.termin_im_bereich(chef, t1)) is True
+    # Wiederholung ist idempotent; gleiches Konto oder ohne "von" tut nichts
+    assert run(BST.vorgang_uebergeben("d1", "v1", "sa", "chef")) == {
+        "kaufvorgaenge": 0, "vertraege": 0, "termine": 0}
+    assert run(BST.vorgang_uebergeben("d1", "v1", "chef", "chef")) == {}
+    assert run(BST.vorgang_uebergeben("d1", "v1", None, "chef")) == {}
     assert "vorgang_uebergeben(" in inspect.getsource(ADMIN.admin_delete_user), "Sucher-Loeschung uebergibt"
+    assert "vorgang_uebergeben(" in inspect.getsource(BST.vehicle_fuer_sucher_entfernen), \
+        "Aus meiner Liste entfernen uebergibt"
 
 
 def test_sucher_loeschung_uebergibt_an_den_chef(wegwerf):

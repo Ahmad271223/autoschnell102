@@ -252,11 +252,12 @@ def _vertrag(welt, kopf=None):
     return r.json()
 
 
-def test_folgemail_nur_zum_kopieren_nie_versendet(welt):
+def test_folgemail_kopieren_und_verschicken(welt):
     """Wunsch Ahmad 21.09.2026: Hinweis nach Kaufabschluss und Bahnverbindung
-    verschickt die App NICHT — der Sucher kopiert sie. Die Vorschau liefert
-    den fertigen Text mit Namen und Daten; der alte Versandweg antwortet 410
-    und schreibt nichts in den Vertrag."""
+    lassen sich kopieren (Vorschau mit Namen und Daten) UND per Knopf
+    verschicken. Korrektur und WhatsApp nicht per Mail (400, deutsch).
+    b6cd893 lieferte die Route, aber JEDER Versand endete mit 500 — deshalb
+    wird hier wirklich verschickt."""
     c = _vertrag(welt)
     for art in ("nach_kauf", "nach_kauf_whatsapp", "bahn", "korrektur"):
         vorschau = requests.get(f"{API}/contracts/{c['id']}/folge-mail/{art}",
@@ -267,15 +268,45 @@ def test_folgemail_nur_zum_kopieren_nie_versendet(welt):
         assert "Hans Beispiel" in d["text"], art
         assert bool(d["betreff"]) == (art != "nach_kauf_whatsapp"), (art, d["betreff"])
 
-    for art in ("nach_kauf", "bahn", "korrektur"):
-        r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
-                          timeout=60, json={"art": art, "recipient": "verkaeufer@e2etest-mail.de",
-                                            "idempotency_key": f"folgetest{SUF}{art}"})
-        assert r.status_code == 410, (art, r.status_code, r.text[:300])
-        assert "kopieren" in r.json().get("detail", ""), r.text[:300]
+    schluessel = f"folgetest{SUF}"
+    body = {"art": "nach_kauf", "recipient": "verkaeufer@e2etest-mail.de",
+            "message": "Sehr geehrte/r {kunde_name}, danke.", "idempotency_key": schluessel}
+    r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                      timeout=60, json=body)
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["zustellung"] in ("mock", "versendet")
+    # Doppelklick: derselbe Schluessel stellt nicht noch einmal zu.
+    r2 = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                       timeout=60, json=body)
+    assert r2.status_code == 200 and r2.json().get("bereits_gesendet") is True, r2.text[:300]
     doc = _db().generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "send_status": 1})
-    assert not [e for e in doc.get("send_status") or [] if e.get("art")], (
-        "eine Folge-Mail wurde am Vertrag als versendet vermerkt")
+    eintraege = [e for e in doc.get("send_status") or [] if e.get("art") == "nach_kauf"]
+    assert len(eintraege) == 1 and eintraege[0]["zustellung"] in ("mock", "versendet")
+
+    r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                      timeout=60, json={"art": "bahn", "recipient": "verkaeufer@e2etest-mail.de"})
+    assert r.status_code == 200, r.text[:300]
+    for art, wort in (("korrektur", "Senden"), ("nach_kauf_whatsapp", "WhatsApp"),
+                      ("quatsch", "Unbekannt")):
+        r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                          timeout=60, json={"art": art, "recipient": "verkaeufer@e2etest-mail.de"})
+        assert r.status_code == 400 and wort in r.json().get("detail", ""), (art, r.text[:300])
+
+
+def test_folgemail_nicht_nach_storno(welt):
+    c = _vertrag(welt)
+    _db().kaufvorgaenge.update_one({"contract_id": c["id"]}, {"$set": {"status": "storniert"}})
+    r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                      timeout=60, json={"art": "bahn", "recipient": "verkaeufer@e2etest-mail.de"})
+    assert r.status_code == 409 and "storniert" in r.json().get("detail", ""), r.text[:300]
+
+
+def test_folgemail_lehnt_ungueltige_adresse_ab(welt):
+    c = _vertrag(welt)
+    for falsch in ("keine-adresse", "a@", "@b.de", "a b@c.de"):
+        r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                          timeout=30, json={"art": "bahn", "recipient": falsch})
+        assert r.status_code in (400, 422), (falsch, r.status_code, r.text[:200])
 
 
 def test_folgemail_ohne_anmeldung_abgelehnt(welt):
