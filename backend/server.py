@@ -161,6 +161,9 @@ BETRIEBSBEREIT: dict = {}
 # Job, der nicht laeuft, als Fehler (vorher blieb der Prozess "ready", obwohl
 # z.B. nie mehr aufgeraeumt oder gesichert wurde).
 WORKER_STATUS: dict = {}
+#: Pruefbericht 20.09.2026 (SV-06): starke Referenzen auf die Hintergrund-
+#: Tasks — die Ereignisschleife haelt Tasks nur schwach (Python-Doku).
+_HINTERGRUND: set = set()
 
 
 def _worker_starten(name: str, fabrik) -> None:
@@ -193,7 +196,9 @@ def _worker_starten(name: str, fabrik) -> None:
                     pass
                 await _asyncio.sleep(min(300, 10 * (2 ** min(neustarts, 5))))
 
-    _asyncio.create_task(_laufen())
+    task = _asyncio.create_task(_laufen())
+    _HINTERGRUND.add(task)
+    task.add_done_callback(_HINTERGRUND.discard)
 
 api = APIRouter(prefix="/api")
 
@@ -1504,9 +1509,21 @@ async def on_start():
         _in_produktion_abbrechen(f"provider_limits.provider: {exc}")
     # Linkpruefungs-Jobs: Indizes synchron, dann die Job-Schleife dieses
     # Workers starten (Details in link_jobs.py).
+    # Pruefbericht 20.09.2026 (A-08): Indizes und Worker-Start getrennt (wie
+    # beim Beweis-Worker). Scheiterte ein Unique-Index an einer Altdublette,
+    # startete der Link-Worker vorher gar nicht — kein neuer Link wurde mehr
+    # abgerufen, haengende Jobs blieben bis zum 24-h-TTL liegen.
     try:
         from link_jobs import ensure_job_indexes, run_job_worker_forever
-        await ensure_job_indexes(db)
+        try:
+            await ensure_job_indexes(db)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Link-Job-Indizes: %s — Link-Worker startet trotzdem", exc)
+            try:
+                from betrieb import alarm
+                await alarm(db, "link_job_index_fehlt", ref="link_jobs", fehler=str(exc)[:300])
+            except Exception:  # noqa: BLE001
+                pass
         _worker_starten("link_jobs", lambda: run_job_worker_forever(db))
         BETRIEBSBEREIT["link_worker"] = True
     except Exception as exc:

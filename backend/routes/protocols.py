@@ -83,7 +83,7 @@ CONDITION_FIELDS = [
 # (echte Inserate haben 30-60 Zeilen). 80 ist nur noch die Grenze
 # gegen Ausreisser — die Antwort des Fahrers darf ebenso viele Zeilen
 # tragen (FELD_MAX unten).
-AUSSTATTUNG_MAX = 80
+AUSSTATTUNG_MAX = PV.AUSSTATTUNG_MAX
 # Felder je Abschnitt in der Antwort des Fahrers (Ausstattung + Reserve).
 FELD_MAX = AUSSTATTUNG_MAX + 20
 

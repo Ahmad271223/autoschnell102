@@ -36,6 +36,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from vertrag_felder import _apply_contract_overrides
 
+#: Hoechstens so viele Ausstattungszeilen des Inserats pruefen Online-Protokoll
+#: UND PDF (Pruefbericht 20.09.2026, P-22: das PDF druckte ALLE — was ueber die
+#: Grenze hinausging, stand im unterschriebenen PDF als "ungeprueft").
+AUSSTATTUNG_MAX = 80
+
 # Abschnitt 1 im PDF: 12 Zeilen mit "stimmt / weicht ab" (bzw. Ja/Nein/
 # unbekannt). Der Fahrer kreuzt jede Zeile am Handy an und kann bei
 # Abweichung den korrekten Wert eintippen. (routes.protocols.VEHICLE_CHECK_FIELDS)

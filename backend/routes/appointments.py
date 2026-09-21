@@ -959,13 +959,40 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         if update["status"] in ("abgeholt", "erledigt") and fahrer_effektiv:
             final_proto = await db.pickup_protocols.find_one(
                 {"appointment_id": appt_id, "status": "final",
-                 "superseded": {"$ne": True}}, {"_id": 0, "id": 1})
+                 "superseded": {"$ne": True}},
+                {"_id": 0, "id": 1, "driver_account_id": 1, "vehicle_id": 1, "contract_id": 1})
             if not final_proto:
                 raise HTTPException(409, "Für diesen Termin ist ein Fahrer "
                                          "eingeteilt. 'Abgeholt' bzw. 'Erledigt' "
                                          "entsteht automatisch, sobald der Fahrer "
                                          "das Abholprotokoll unterschrieben "
                                          "abschließt.")
+            # Pruefbericht 20.09.2026 (V-13/R1-10): Bisher genuegte IRGENDEIN
+            # altes finales Protokoll. Nach dem Wiederoeffnen liessen sich so
+            # Fahrer, Fahrzeug oder Vertrag tauschen und der Termin mit dem
+            # Protokoll der ALTEN Abholung wieder auf "abgeholt" setzen — ein
+            # Beleg, der zu dieser Abholung gar nicht passt. Jetzt muss das
+            # Protokoll zu Fahrer, Fahrzeug und Vertrag passen, die NACH dem
+            # Update gelten; sonst schliesst der Fahrer eine Korrektur ab.
+            fahrzeug_danach = (update.get("vehicle_id") if "vehicle_id" in update
+                               else (None if fahrzeug_loesen else existing.get("vehicle_id")))
+            vertrag_danach = (update.get("contract_id") if "contract_id" in update
+                              else (None if contract_loesen else existing.get("contract_id")))
+            abweichend = []
+            if final_proto.get("driver_account_id") and \
+                    final_proto["driver_account_id"] != fahrer_effektiv:
+                abweichend.append("Fahrer")
+            if "vehicle_id" in final_proto and \
+                    (final_proto.get("vehicle_id") or None) != (fahrzeug_danach or None):
+                abweichend.append("Fahrzeug")
+            if "contract_id" in final_proto and \
+                    (final_proto.get("contract_id") or None) != (vertrag_danach or None):
+                abweichend.append("Vertrag")
+            if abweichend:
+                raise HTTPException(409, "Das unterschriebene Abholprotokoll gehört zu einem "
+                                         f"anderen Stand ({', '.join(abweichend)} geändert). "
+                                         "'Abgeholt' entsteht jetzt nur über eine Korrektur-"
+                                         "Version, die der eingeteilte Fahrer abschließt.")
         update["status_changed_at"] = now_iso()
         # Nachpruefung Runde 14 (Nr. 114): Die Aufraeumfrist zaehlt ab dem
         # ERSTEN Erreichen eines Endstatus (abgeschlossen_seit) und startet

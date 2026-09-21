@@ -11,6 +11,34 @@
 export const PASSWORT_MIN = 10;
 export const PASSWORT_MAX_BYTES = 72;
 
+// Pruefbericht 20.09.2026 (K-04): dieselbe Sperrliste und dieselben
+// Sonderzeichen wie backend/passwoerter.py (_VERBOTEN, _SONDERZEICHEN). Vorher
+// fehlte beides — "Passwort123!" oder "Hannover2026" gingen hier durch und
+// scheiterten erst am Server. tests/test_passwort_listen_20260921.py gleicht
+// beide Seiten ab.
+export const VERBOTEN = new Set([
+  "password", "passwort", "passwort1", "password1", "qwertz", "qwerty",
+  "123456", "1234567", "12345678", "123456789", "1234567890", "abc123",
+  "111111", "letmein", "welcome", "willkommen", "admin", "administrator",
+  "iloveyou", "monkey", "dragon", "sunshine", "princess", "football",
+  "baseball", "master", "hallo", "hallo123", "schalke", "bayern", "ficken",
+  "geheim", "sommer", "winter", "herbst", "fruehling", "test", "testtest",
+  "autohaus", "autoschnell", "autohandel", "kfz", "mercedes", "bmw", "audi",
+  "porsche", "hannover", "berlin", "muenchen", "hamburg", "deutschland",
+  "changeme", "secret", "default", "login", "user", "root", "guest",
+]);
+export const SONDERZEICHEN = new Set("!@#$%^&*()_+-=[]{}|;':\",./<>?`~\\ ");
+
+const istRand = (c) => /[0-9]/.test(c) || SONDERZEICHEN.has(c);
+
+/** Kern ohne fuehrende/abschliessende Ziffern und Sonderzeichen (wie _stamm). */
+export function stamm(pw) {
+  let s = String(pw ?? "").trim().toLowerCase();
+  while (s && istRand(s[s.length - 1])) s = s.slice(0, -1);
+  while (s && istRand(s[0])) s = s.slice(1);
+  return s;
+}
+
 // Ohne I, l, O, o (Verwechslung beim Abtippen/Vorlesen), mit Ziffern ohne 0/1.
 const BUCHSTABEN = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
 const ZIFFERN = "23456789";
@@ -49,12 +77,16 @@ export function passwortProblem(pw) {
   if (new TextEncoder().encode(s).length > PASSWORT_MAX_BYTES) {
     return `Passwort darf höchstens ${PASSWORT_MAX_BYTES} Zeichen lang sein`;
   }
-  if (!/[0-9]/.test(s) && !/[^A-Za-z0-9]/.test(s)) {
+  // K-04: Umlaute zaehlen (wie am Server) NICHT als Sonderzeichen.
+  if (![...s].some(istRand)) {
     return "Passwort braucht mindestens eine Ziffer oder ein Sonderzeichen";
   }
   // Nachpruefung 15.09.2026: nur Ziffern (5837294615) reichen nicht.
   if (!/\p{L}/u.test(s)) return "Passwort braucht mindestens einen Buchstaben";
   if (new Set(s).size < 3) return "Passwort ist zu einfach (immer dasselbe Zeichen)";
+  if (VERBOTEN.has(stamm(s)) || VERBOTEN.has(s.trim().toLowerCase())) {
+    return "Dieses Passwort ist zu bekannt/unsicher — bitte ein anderes wählen";
+  }
   return "";
 }
 

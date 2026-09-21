@@ -489,6 +489,13 @@ async def _cleanup_once(db) -> dict:
         await protokoll_freigaben_nachziehen(db)
     stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
     stats["protokoll_entwuerfe_ohne_termin"] = await verwaiste_protokoll_entwuerfe_loeschen(db, now)
+    # Pruefbericht 20.09.2026 (A-08): haengende Link-Jobs auch dann
+    # zurueckstellen, wenn der Link-Worker dieses Prozesses nicht laeuft.
+    try:
+        from link_jobs import _requeue_stale
+        await _requeue_stale(db)
+    except Exception:  # noqa: BLE001
+        log.exception("Haengende Link-Jobs nicht zurueckgestellt")
     stats["fahrernamen_nachgezogen"] = await fahrernamen_nachziehen(db)
     stats["konten_ohne_firma_gesperrt"] = await konten_ohne_firma_sperren(db)
     stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)

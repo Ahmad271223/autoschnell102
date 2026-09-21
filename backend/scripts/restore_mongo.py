@@ -378,6 +378,52 @@ def pruefe_datenbank(db, dumps: dict, manifest) -> list:
 
 
 # ----------------------------------------------------------- Datei-Speicher
+#: Pruefbericht 20.09.2026 (SK-01): Im Container sind /app/uploads und
+#: /app/local_storage eingehaengte Volumes. Einen Einhaengepunkt kann man
+#: nicht umbenennen (EBUSY) — der Restore rollte deshalb bei JEDEM Backup mit
+#: Dateien in Schritt 5 zurueck. Bei einem Einhaengepunkt liegen Staging und
+#: Vorher-Stand deshalb als Unterordner IM Volume, und umgeschaltet wird
+#: Eintrag fuer Eintrag (dasselbe Dateisystem, also schnelle Renames).
+INNEN_STAGING = ".restore-"
+INNEN_VORHER = ".vorher-"
+
+
+def _ist_einhaengepunkt(pfad: Path) -> bool:
+    """In Tests austauschbar."""
+    try:
+        return os.path.ismount(pfad)
+    except OSError:
+        return False
+
+
+def _staging_ziel(live_dir: Path, stamp: str) -> Path:
+    if live_dir.exists() and _ist_einhaengepunkt(live_dir):
+        return live_dir / f"{INNEN_STAGING}{stamp}"
+    return live_dir.parent / f"{live_dir.name}.restore-{stamp}"
+
+
+def _innen(live_dir: Path, staging_dir: Path) -> bool:
+    return Path(staging_dir).parent == Path(live_dir)
+
+
+def _eintraege(ordner: Path) -> list:
+    """Inhalt eines Datei-Speichers OHNE die Hilfsordner des Restores."""
+    if not ordner.is_dir():
+        return []
+    return [e for e in ordner.iterdir()
+            if not e.name.startswith((INNEN_STAGING, INNEN_VORHER))]
+
+
+def _dateien_zaehlen(ordner: Path) -> int:
+    n = 0
+    for e in _eintraege(ordner):
+        if e.is_file():
+            n += 1
+        elif e.is_dir():
+            n += sum(1 for f in e.rglob("*") if f.is_file())
+    return n
+
+
 def dateien_bereitstellen(root: Path, live: dict, stamp: str, manifest):
     """uploads/ und local_storage/ aus dem Backup in Staging-Ordner NEBEN den
     Live-Ordnern kopieren (<live>.restore-<stamp>) und die Pruefsummen der
@@ -389,7 +435,7 @@ def dateien_bereitstellen(root: Path, live: dict, stamp: str, manifest):
         quelle = root / name
         if not quelle.is_dir():
             continue
-        ziel = live_dir.parent / f"{live_dir.name}.restore-{stamp}"
+        ziel = _staging_ziel(live_dir, stamp)
         try:
             if ziel.exists():
                 shutil.rmtree(ziel)
@@ -424,13 +470,78 @@ def _verzeichnis_umbenennen(von: Path, nach: Path) -> None:
     os.rename(von, nach)
 
 
-def verzeichnisse_umschalten(staging: dict, live: dict, stamp: str):
+def _innen_umschalten(live_dir: Path, stg: Path, stamp: str) -> Path:
+    """SK-01: Umschalten INNERHALB eines eingehaengten Volumes. Liefert den
+    Vorher-Ordner; bei einem Fehler ist alles Bewegte zurueckgelegt."""
+    vorher = live_dir / f"{INNEN_VORHER}{stamp}"
+    n = 1
+    while vorher.exists():
+        n += 1
+        vorher = live_dir / f"{INNEN_VORHER}{stamp}-{n}"
+    alt_bewegt, neu_bewegt = [], []
+    try:
+        vorher.mkdir()
+        for e in _eintraege(live_dir):
+            _verzeichnis_umbenennen(e, vorher / e.name)
+            alt_bewegt.append(e.name)
+        for e in list(stg.iterdir()):
+            _verzeichnis_umbenennen(e, live_dir / e.name)
+            neu_bewegt.append(e.name)
+        stg.rmdir()
+    except BaseException:
+        # zuruecklegen, was schon bewegt wurde (best effort)
+        stg.mkdir(exist_ok=True)
+        for nm in reversed(neu_bewegt):
+            try:
+                _verzeichnis_umbenennen(live_dir / nm, stg / nm)
+            except Exception:  # noqa: BLE001
+                pass
+        for nm in reversed(alt_bewegt):
+            try:
+                _verzeichnis_umbenennen(vorher / nm, live_dir / nm)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            vorher.rmdir()
+        except OSError:
+            pass
+        raise
+    return vorher
+
+
+def _innen_zuruecknehmen(e: dict) -> None:
+    """SK-01: Gegenstueck zu _innen_umschalten (Backup-Stand raus, Vorher-Stand
+    zurueck ins Volume)."""
+    live_dir, stg, vorher = e["live"], e["staging"], e["vorher"]
+    stg.mkdir(exist_ok=True)
+    for x in _eintraege(live_dir):
+        _verzeichnis_umbenennen(x, stg / x.name)
+    for x in list(vorher.iterdir()):
+        _verzeichnis_umbenennen(x, live_dir / x.name)
+    vorher.rmdir()
+    shutil.rmtree(stg, ignore_errors=True)
+
+
+def verzeichnisse_umschalten(staging: dict, live: dict, stamp: str, geschaltet=None):
     """Je Datei-Speicher: live -> <live>.vorher-<stamp>, Staging -> live.
     Liefert ([umgeschaltete Eintraege], fehler|None). Ein Eintrag:
-    {name, live, vorher (None wenn es keinen Live-Ordner gab), staging}."""
-    geschaltet = []
+    {name, live, vorher (None wenn es keinen Live-Ordner gab), staging}.
+    SK-01: liegt der Staging-Ordner IM Live-Ordner (Einhaengepunkt), wird
+    innerhalb des Volumes umgeschaltet (Eintrag "innen": True).
+    SK-03: `geschaltet` darf eine Liste des Aufrufers sein — sie traegt den
+    Fortschritt auch bei einem harten Abbruch (Strg+C)."""
+    geschaltet = geschaltet if geschaltet is not None else []
     for name, stg in staging.items():
         live_dir = live[name]
+        if _innen(live_dir, stg):
+            try:
+                vorher = _innen_umschalten(live_dir, stg, stamp)
+            except Exception as exc:  # noqa: BLE001
+                return geschaltet, f"Datei-Speicher {name}: {exc}"
+            geschaltet.append({"name": name, "live": live_dir, "vorher": vorher,
+                               "staging": stg, "innen": True})
+            print(f"  {name}: umgeschaltet (im Volume, bisher -> {vorher.name})")
+            continue
         vorher = (live_dir.parent / f"{live_dir.name}.vorher-{stamp}"
                   if live_dir.exists() else None)
         # Kollision vermeiden (CI 09/2026): gleicher Zeitstempel innerhalb
@@ -465,6 +576,9 @@ def verzeichnisse_zuruecknehmen(geschaltet: list) -> list:
     fehler = []
     for e in reversed(geschaltet):
         try:
+            if e.get("innen"):
+                _innen_zuruecknehmen(e)
+                continue
             _verzeichnis_umbenennen(e["live"], e["staging"])
             if e["vorher"] is not None:
                 _verzeichnis_umbenennen(e["vorher"], e["live"])
@@ -582,19 +696,26 @@ def _rename_collection(client, von: str, nach: str) -> None:
 
 
 def collections_umschalten(client, ziel_name: str, tmp_name: str, alt_name: str,
-                           namen: list, vorhandene: set):
+                           namen: list, vorhandene: set, stand=None):
     """Je Collection: ziel -> alt (falls vorhanden), tmp -> ziel.
     Liefert (umgeschaltet, halb, fehler). 'halb' ist die Collection, deren
     bisheriger Stand schon nach alt verschoben war, als der zweite Schritt
-    scheiterte (None, wenn nichts halb ist)."""
-    umgeschaltet = []
+    scheiterte (None, wenn nichts halb ist).
+    SK-03: `stand` (dict) traegt den Fortschritt laufend mit
+    ({"umgeschaltet": [...], "halb": name|None}) — auch wenn der Lauf hart
+    abbricht (Strg+C, Verbindung weg), weiss der Aufrufer, was zurueck muss."""
+    stand = stand if stand is not None else {}
+    umgeschaltet = stand.setdefault("umgeschaltet", [])
+    stand.setdefault("halb", None)
     for name in namen:
         alt_da = False
         try:
             if name in vorhandene:
                 _rename_collection(client, f"{ziel_name}.{name}", f"{alt_name}.{name}")
                 alt_da = True
+                stand["halb"] = name
             _rename_collection(client, f"{tmp_name}.{name}", f"{ziel_name}.{name}")
+            stand["halb"] = None
         except Exception as exc:  # noqa: BLE001
             return umgeschaltet, (name if alt_da else None), f"Collection {name}: {exc}"
         umgeschaltet.append(name)
@@ -669,8 +790,11 @@ def wartungsmodus(ziel_db, aktiv: bool, grund: str = "Restore") -> None:
 
 
 def _wartungsmodus_befehl(ziel_name: str) -> str:
-    return (f"mongosh --eval \"db.getSiblingDB('{ziel_name}').{FLAG_COLLECTION}"
-            f".updateOne({{_id:'{FLAG_ID}'}},{{$set:{{aktiv:false}}}})\"")
+    # Pruefbericht 20.09.2026 (SK-04): vorher stand hier ein mongosh-Aufruf —
+    # im Backend-Container gibt es kein mongosh, und die Datenbank verlangt
+    # eine Anmeldung. Der Befehl lief also nie. Jetzt ein Skript im Image.
+    return (f"docker compose exec backend python scripts/wartung_aufheben.py "
+            f"--db {ziel_name} --ja")
 
 
 # ------------------------------------------------------------------ Ablauf
@@ -697,8 +821,12 @@ def _rollback(client, ziel_name, tmp_name, alt_name, umgeschaltet, halb,
               f"'{alt_name}'. Der Wartungsmodus bleibt AKTIV; nach der "
               f"Bereinigung aufheben mit:\n    {_wartungsmodus_befehl(ziel_name)}")
         return 1
-    client.drop_database(tmp_name)
-    client.drop_database(alt_name)
+    try:
+        client.drop_database(tmp_name)
+        client.drop_database(alt_name)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Hinweis: temporaere Datenbanken nicht entfernt ({exc}) — "
+              f"'{tmp_name}' und '{alt_name}' von Hand loeschen.")
     try:
         wartungsmodus(client[ziel_name], False)
     except Exception as exc:  # noqa: BLE001
@@ -780,6 +908,26 @@ def wiederherstellen(args) -> int:
         flags_dump = dumps.pop(FLAG_COLLECTION)
         print(f"  Hinweis: {FLAG_COLLECTION} (Betriebs-Flags) wird nicht zurueckgespielt — "
               "nur die Schema-Version daraus wird uebernommen")
+    if args.dry_run and not args.nur_datenbank:
+        # SK-01: wie wird umgeschaltet, und ist das Ziel schreibbar?
+        nicht_schreibbar = []
+        for name, live_dir in live_verzeichnisse().items():
+            if not (root / name).is_dir():
+                continue
+            ziel_probe = _staging_ziel(live_dir, "probe")
+            basis = ziel_probe.parent
+            while not basis.exists() and basis != basis.parent:
+                basis = basis.parent
+            art = ("im Volume (Einhaengepunkt)" if _innen(live_dir, ziel_probe)
+                   else "per Umbenennen des Ordners")
+            ok = os.access(basis, os.W_OK)
+            print(f"  {name}: Umschalten {art} — {'schreibbar' if ok else 'NICHT schreibbar'}")
+            if not ok:
+                nicht_schreibbar.append(f"{name} ({basis})")
+        if nicht_schreibbar:
+            print("FEHLER: kein Schreibrecht fuer " + ", ".join(nicht_schreibbar)
+                  + " — der Restore wuerde in Schritt 3 scheitern. Es wurde NICHTS veraendert.")
+            return 1
     if args.dry_run:
         # Runde 21: "konsistent" nur sagen, wenn es stimmt.
         if grund_inkonsistent:
@@ -853,7 +1001,7 @@ def wiederherstellen(args) -> int:
               f"{S3_RUECKNAHME_PREFIX}{stamp}/ gesichert) ...")
         try:
             n_s3 = s3_zurueckspielen(root / "s3", s3_objekte, stamp, s3_gesichert)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001  (SK-03: auch Strg+C)
             print(f"FEHLER beim Zurueckspielen nach S3: {exc}")
             # Nr. 77: auch hier die schon ueberschriebenen Objekte zurueckholen.
             s3_fehler = s3_zuruecknehmen(s3_gesichert, stamp)
@@ -873,22 +1021,33 @@ def wiederherstellen(args) -> int:
             return 1
 
     print(f"5/6 Umschalten (bisheriger Stand -> {alt_name} bzw. *.vorher-{stamp}) ...")
-    vorhandene = set(ziel.list_collection_names())
-    geschaltet, fehler = verzeichnisse_umschalten(staging, live, stamp)
-    umgeschaltet, halb = [], None
-    if fehler is None:
-        umgeschaltet, halb, fehler = collections_umschalten(
-            client, args.db, tmp_name, alt_name, list(dumps), vorhandene)
-    if fehler is None:
-        print(f"  {len(umgeschaltet)} Collections umgeschaltet")
-        print("6/6 Kontrolle nach dem Umschalten ...")
-        abweichungen = pruefe_datenbank(ziel, dumps, manifest)
-        if abweichungen:
-            fehler = ("Kontrolle nach dem Umschalten: "
-                      + "; ".join(abweichungen[:10]))
+    # Pruefbericht 20.09.2026 (SK-03): Schritte 5 und 6 standen in keinem
+    # try. Ein Verbindungsabbruch (list_collection_names, pruefe_datenbank)
+    # oder Strg+C uebersprang Rueckbau UND Aufheben — die Plattform blieb im
+    # Wartungsmodus ohne Ablaufzeit stehen. Jetzt fuehrt JEDER Abbruch in den
+    # Rueckbau; der Fortschritt steht laufend in `stand`/`geschaltet`.
+    vorhandene: set = set()
+    geschaltet: list = []
+    stand = {"umgeschaltet": [], "halb": None}
+    fehler = None
+    try:
+        vorhandene = set(ziel.list_collection_names())
+        _, fehler = verzeichnisse_umschalten(staging, live, stamp, geschaltet=geschaltet)
+        if fehler is None:
+            _, _, fehler = collections_umschalten(
+                client, args.db, tmp_name, alt_name, list(dumps), vorhandene, stand=stand)
+        if fehler is None:
+            print(f"  {len(stand['umgeschaltet'])} Collections umgeschaltet")
+            print("6/6 Kontrolle nach dem Umschalten ...")
+            abweichungen = pruefe_datenbank(ziel, dumps, manifest)
+            if abweichungen:
+                fehler = ("Kontrolle nach dem Umschalten: "
+                          + "; ".join(abweichungen[:10]))
+    except BaseException as exc:  # noqa: BLE001  (auch KeyboardInterrupt)
+        fehler = f"Abbruch waehrend des Umschaltens ({type(exc).__name__}: {exc})"
     if fehler is not None:
-        return _rollback(client, args.db, tmp_name, alt_name, umgeschaltet, halb,
-                         vorhandene, geschaltet, fehler, s3_gesichert, stamp)
+        return _rollback(client, args.db, tmp_name, alt_name, stand["umgeschaltet"],
+                         stand["halb"], vorhandene, geschaltet, fehler, s3_gesichert, stamp)
 
     client.drop_database(tmp_name)
     # Nr. 75: exakt ist der Standard — nur --zusaetzliche-behalten schaltet
@@ -897,7 +1056,16 @@ def wiederherstellen(args) -> int:
     # Phase 3 (3.5, E5): Schema-Version des BACKUPS setzen — sonst bliebe die
     # neuere Live-Version stehen und Migrationen zwischen Backup- und Live-
     # Stand liefen beim naechsten Start nicht mehr.
-    schema_version_setzen(ziel, flags_dump)
+    try:
+        schema_version_setzen(ziel, flags_dump)
+    except Exception as exc:  # noqa: BLE001
+        # SK-03: Die Daten SIND eingespielt. Ohne die Schema-Version des
+        # Backups liefen fehlende Migrationen beim Start nicht — deshalb
+        # bleibt der Wartungsmodus bewusst an, bis das geklaert ist.
+        print(f"!!! Schema-Version aus dem Backup konnte nicht gesetzt werden ({exc}).")
+        print(f"!!! Die Daten sind eingespielt; der Wartungsmodus bleibt AKTIV. Nach "
+              f"der Klaerung aufheben mit:\n    {_wartungsmodus_befehl(args.db)}")
+        return 1
     exakt_fehler = []
     if exakt:
         # Phase 3 (3.5, E6): Collections, die es live gibt, im Backup aber
@@ -939,7 +1107,7 @@ def wiederherstellen(args) -> int:
     elif extra:
         print(f"  Hinweis: nicht im Backup enthalten und daher unveraendert "
               f"belassen: {', '.join(extra)}")
-    n_files = sum(1 for e in geschaltet for f in e["live"].rglob("*") if f.is_file())
+    n_files = sum(_dateien_zaehlen(e["live"]) for e in geschaltet)
     if exakt_fehler:
         print(f"!!! RESTORE UNVOLLSTAENDIG: {len(exakt_fehler)} Collection(s) "
               f"liegen weiterhin live, obwohl sie nicht im Backup sind — der "
@@ -1020,13 +1188,19 @@ def alte_sicherungen_aufraeumen(client, db_name: str, tage: int,
     ordner = []
     for basis in (live_ordner or []):
         elternteil = Path(basis).parent
-        if not elternteil.is_dir():
-            continue
-        for eintrag in elternteil.iterdir():
-            if eintrag.is_dir() and f"{Path(basis).name}.vorher-" in eintrag.name:
-                st = _stempel(eintrag.name.split(".vorher-")[-1])
-                if st:
-                    ordner.append((st, eintrag))
+        if elternteil.is_dir():
+            for eintrag in elternteil.iterdir():
+                if eintrag.is_dir() and f"{Path(basis).name}.vorher-" in eintrag.name:
+                    st = _stempel(eintrag.name.split(".vorher-")[-1].split("-")[0])
+                    if st:
+                        ordner.append((st, eintrag))
+        # SK-01: Vorher-Staende IM eingehaengten Volume
+        if Path(basis).is_dir():
+            for eintrag in Path(basis).iterdir():
+                if eintrag.is_dir() and eintrag.name.startswith(INNEN_VORHER):
+                    st = _stempel(eintrag.name[len(INNEN_VORHER):].split("-")[0])
+                    if st:
+                        ordner.append((st, eintrag))
     ordner.sort(reverse=True)
     for st, eintrag in ordner[behalte:]:
         if st < grenze:

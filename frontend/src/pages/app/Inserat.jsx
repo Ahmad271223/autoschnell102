@@ -305,6 +305,9 @@ export default function Inserat() {
         ...(r.data.uploaded_keys ? { uploaded_keys: r.data.uploaded_keys } : {}),
         ...(r.data.einkauf_urls ? { einkauf_urls: r.data.einkauf_urls } : {}) } }));
       toast.success("Bild entfernt" + (l.status === "veroeffentlicht" ? " — Änderung ist sofort live" : ""));
+      // Pruefbericht 20.09.2026 (U-96): die Vorschaubilder (einkauf_thumbs)
+      // haengen am Index — ohne Neuladen waren sie danach verschoben.
+      load();
     } catch (e) { toast.error(errMsg(e)); }
   };
 
@@ -546,7 +549,8 @@ export default function Inserat() {
                   <button onClick={() => removePhoto({ url: u })}
                           data-testid={`foto-del-e${i}`}
                           title="Bild aus dem Inserat entfernen (Original bleibt in der Akte)"
-                          className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition"
+                          aria-label="Bild aus dem Inserat entfernen"
+                          className="foto-aktion absolute top-1 right-1 w-9 h-9 rounded-full flex items-center justify-center text-white transition"
                           style={{ background: "rgba(0,0,0,0.7)" }}>
                     <X size={13} />
                   </button>
@@ -560,7 +564,8 @@ export default function Inserat() {
                   <button onClick={() => removePhoto({ key: k })}
                           data-testid={`foto-del-${k.slice(-8)}`}
                           title="Bild endgültig löschen"
-                          className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition"
+                          aria-label="Bild endgültig löschen"
+                          className="foto-aktion absolute top-1 right-1 w-9 h-9 rounded-full flex items-center justify-center text-white transition"
                           style={{ background: "rgba(0,0,0,0.7)" }}>
                     <X size={13} />
                   </button>

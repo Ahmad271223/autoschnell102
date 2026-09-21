@@ -443,6 +443,19 @@ html, body, #root {
   border-bottom: 1px solid var(--border-default);
 }
 
+/* Pruefbericht 20.09.2026 (M-09): iOS vergroessert die Seite beim Antippen
+   jedes Eingabefelds unter 16 px — am Touchgeraet deshalb 16 px. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px !important; }
+}
+/* M-10: Knoepfe auf Fotos (Entfernen) — am Touchgeraet immer sichtbar, mit
+   Maus erst beim Darueberfahren bzw. mit Tastaturfokus. */
+.foto-aktion { opacity: 1; }
+@media (hover: hover) and (pointer: fine) {
+  .foto-aktion { opacity: 0; }
+  .group:hover .foto-aktion, .foto-aktion:focus-visible { opacity: 1; }
+}
+
 .input-base {
   background: var(--bg-input);
   border: 1px solid var(--border-default);

@@ -39,7 +39,13 @@ const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storni
  * Abholung ("abgeholt") aendert nur er. Rueckgabe: null = erlaubt, sonst
  * der Grund fuer den Tooltip.
  */
-export function statusSperre(neu, alt, chef) {
+export function statusSperre(neu, alt, chef, { fahrer = false, protokoll = false } = {}) {
+  // Pruefbericht 20.09.2026 (U-54): Mit eingeteiltem Fahrer entsteht
+  // "abgeholt"/"erledigt" nur ueber sein unterschriebenes Protokoll — der
+  // Server lehnt den Handweg ab, die Oberflaeche bot ihn trotzdem an.
+  if (fahrer && !protokoll && neu !== alt && (neu === "abgeholt" || neu === "erledigt")) {
+    return "Mit eingeteiltem Fahrer entsteht „abgeholt“ über das unterschriebene Abholprotokoll";
+  }
   if (chef || !alt || neu === alt) return null;
   if (!ABGESCHLOSSEN.has(alt)) return null;
   if (!ABGESCHLOSSEN.has(neu)) return "Abgeschlossene Termine öffnet nur der Hauptaccount wieder";
@@ -71,7 +77,12 @@ export default function Termine() {
   const chef = user?.role === "dealer";
   const [items, setItems] = useState([]);
   const [drivers, setDrivers] = useState([]);
-  const [view, setView] = useState("month");          // 'month' | 'list'
+  // M-04: am Handy zeigt die Monatsansicht in 7 Spalten praktisch keinen
+  // Text — dort startet die Liste (umschaltbar wie bisher).
+  const [view, setView] = useState(() => {
+    try { return window.matchMedia?.("(max-width: 639px)")?.matches ? "list" : "month"; }
+    catch { return "month"; }
+  });          // 'month' | 'list'
   const [cursor, setCursor] = useState(new Date());   // current month for month view
   const [selectedDay, setSelectedDay] = useState(new Date());
   const [filter, setFilter] = useState("");
@@ -608,7 +619,14 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
       return;
     }
     setArbeitet(true);
-    try { await onSave(a); } finally { setArbeitet(false); }
+    try {
+      const ok = await onSave(a);
+      // U-54: nach einem gescheiterten Speichern zeigt der Dialog wieder den
+      // Status, der wirklich gilt — nicht den abgelehnten.
+      if (ok === false && !isNew && (a.status || "offen") !== (appt.status || "offen")) {
+        set("status", appt.status || "offen");
+      }
+    } finally { setArbeitet(false); }
   };
   const loeschen = async () => {
     if (arbeitet || !onDelete) return;
@@ -692,14 +710,16 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
           </div>
 
           {/* Status + Driver */}
-          <div className="grid grid-cols-2 gap-3">
+          {/* M-06: am Handy untereinander, Statusknoepfe zweispaltig */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Status</label>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
                 {STATUSES.map((s) => {
                   const meta = STATUS_META[s];
                   const active = (a.status || "offen") === s;
-                  const sperre = isNew ? null : statusSperre(s, appt.status || "offen", chef);
+                  const sperre = statusSperre(s, isNew ? null : (appt.status || "offen"), chef,
+                    { fahrer: !!(a.driver_id || appt?.driver_id), protokoll: !!appt?.protocol_id });
                   return (
                     <button key={s} onClick={() => set("status", s)} data-testid={`status-${s}`}
                             type="button" disabled={!!sperre} title={sperre || undefined}

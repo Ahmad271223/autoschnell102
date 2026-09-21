@@ -506,7 +506,13 @@ def spiegle_ordner(quelle: Path, ziel: Path) -> int:
     for src in quelle.rglob("*"):
         if not src.is_file():
             continue
-        dst = ziel / src.relative_to(quelle)
+        rel = src.relative_to(quelle)
+        # Pruefbericht 20.09.2026 (SK-01): Hilfsordner einer Wiederherstellung
+        # (.restore-*, .vorher-*) liegen IM Volume — sie gehoeren nicht in die
+        # Sicherung, sonst waechst jede Sicherung um den ganzen alten Stand.
+        if rel.parts and rel.parts[0].startswith((".restore-", ".vorher-")):
+            continue
+        dst = ziel / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         n += 1
@@ -849,8 +855,8 @@ def _manifest_lesen(ordner: Path):
         return None
 
 
-def rotate(base: Path, logfile: Path) -> None:
-    """Lokal die letzten KEEP Backups behalten.
+def rotate(base: Path, logfile: Path, keep: int = None) -> None:
+    """Lokal die letzten KEEP Backups behalten (bzw. `keep`, siehe platz_pruefen).
 
     Runde 21 (Nebenbefund Rotation): das juengste GUTE Backup (vollstaendig
     und stimmig) bleibt immer erhalten, auch ausserhalb der letzten KEEP —
@@ -860,12 +866,75 @@ def rotate(base: Path, logfile: Path) -> None:
                     if p.is_dir() and p.name.startswith("autoschnell-")])
     gute = [p for p in dumps if ist_gut(_manifest_lesen(p))]
     schutz = gute[-1] if gute else None
-    for old in dumps[:-KEEP]:
+    for old in dumps[:-(KEEP if keep is None else max(1, keep))]:
         if old == schutz:
             log(f"Backup {old.name} bleibt erhalten: juengstes gutes Backup", logfile)
             continue
         shutil.rmtree(old, ignore_errors=True)
         log(f"Altes Backup entfernt: {old.name}", logfile)
+
+
+#: Pruefbericht 20.09.2026 (SK-08): Reste abgebrochener Laeufe, die aelter als
+#: so viele Stunden sind, werden zu Beginn jedes Laufs entfernt (ein Lauf wird
+#: nach 3 h beendet, siehe backup_service).
+RESTE_ALTER_H = 4.0
+
+
+def reste_aufraeumen(base: Path, logfile: Path, alter_h: float = RESTE_ALTER_H) -> list:
+    """SK-08: Arbeitsordner (.tmp-autoschnell-*) und Offsite-Archive
+    (.tmp-*.tar.gz) abgebrochener Laeufe entfernen. rotate() erfasst nur
+    fertige Staende — scheiterte ein Lauf nach dem Dump (Pruefsummen,
+    Manifest) oder wurde er nach 3 h beendet, blieb der Rest fuer immer
+    liegen. Liefert die entfernten Namen."""
+    grenze = datetime.now(timezone.utc).timestamp() - alter_h * 3600
+    weg = []
+    for p in sorted(base.glob(".tmp-*")):
+        try:
+            if p.stat().st_mtime > grenze:
+                continue
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink()
+            weg.append(p.name)
+            log(f"  Rest eines abgebrochenen Laufs entfernt: {p.name}", logfile)
+        except OSError:
+            continue
+    return weg
+
+
+def _groesse(ordner: Path) -> int:
+    try:
+        return sum(f.stat().st_size for f in ordner.rglob("*") if f.is_file())
+    except OSError:
+        return 0
+
+
+def platz_pruefen(base: Path, logfile: Path) -> bool:
+    """Pruefbericht 20.09.2026 (AL-10): VOR dem Dump pruefen, ob der Platz
+    reicht (Schaetzung: 1,5 x die juengste Sicherung). Vorher lief die Platte
+    beim Dump voll, der Lauf endete mit Exit 1 — und weil rotate() nur nach
+    einem GELUNGENEN Lauf aufraeumt, scheiterte jeder weitere Lauf genauso.
+    Reicht der Platz nicht, wird vorab eine Sicherung weniger behalten; reicht
+    er dann immer noch nicht, endet der Lauf mit klarer Meldung (Exit 1)."""
+    dumps = sorted(p for p in base.iterdir()
+                   if p.is_dir() and p.name.startswith("autoschnell-"))
+    if not dumps:
+        return True
+    bedarf = int(_groesse(dumps[-1]) * 1.5)
+    frei = shutil.disk_usage(base).free
+    if frei >= bedarf:
+        return True
+    log(f"  WARNUNG: wenig Platz ({frei / 1e6:.0f} MB frei, gebraucht etwa "
+        f"{bedarf / 1e6:.0f} MB) — die aelteste Sicherung wird schon jetzt entfernt", logfile)
+    rotate(base, logfile, keep=KEEP - 1)
+    frei = shutil.disk_usage(base).free
+    if frei >= bedarf:
+        return True
+    log(f"FEHLER: zu wenig Speicher fuer die Sicherung ({frei / 1e6:.0f} MB frei, "
+        f"gebraucht etwa {bedarf / 1e6:.0f} MB) — Platz schaffen, siehe DEPLOYMENT.md "
+        f"\"Speicher voll\"", logfile)
+    return False
 
 
 def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
@@ -879,6 +948,12 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         print(f"FEHLER: Backup-Verzeichnis {base} nicht beschreibbar — {exc}")
         return 1
     logfile = base / "backup.log"
+    reste_aufraeumen(base, logfile)
+    try:
+        if not platz_pruefen(base, logfile):
+            return 1
+    except OSError as exc:
+        log(f"  Hinweis: freier Platz nicht pruefbar ({exc})", logfile)
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     final_dir = base / f"autoschnell-{stamp}"
@@ -1024,11 +1099,18 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         schreibpause.ausschalten()
 
     # ---- Manifest mit Pruefsummen ----
-    dateien = {}
-    for f in sorted(tmp_dir.rglob("*")):
-        if f.is_file():
-            dateien[str(f.relative_to(tmp_dir)).replace("\\", "/")] = {
-                "sha256": sha256_datei(f), "bytes": f.stat().st_size}
+    # SK-08: scheitert diese Phase (Platte voll, Lesefehler), bleibt kein
+    # halber Arbeitsordner liegen.
+    try:
+        dateien = {}
+        for f in sorted(tmp_dir.rglob("*")):
+            if f.is_file():
+                dateien[str(f.relative_to(tmp_dir)).replace("\\", "/")] = {
+                    "sha256": sha256_datei(f), "bytes": f.stat().st_size}
+    except OSError as exc:
+        log(f"FEHLER beim Pruefsummen-Bilden: {exc} — kein Backup angelegt", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return 1
     manifest = {
         "version": MANIFEST_VERSION, "db": db_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1044,9 +1126,14 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         # 19.09.2026: wo die Dateien liegen (Sicherungs-Bucket) bzw. dass sie
         # bewusst nicht gesichert werden — der Restore liest das mit.
         manifest["dateien_kopie"] = dateien_kopie
-    schreibe_manifest(tmp_dir, manifest)
-    size_mb = sum(v["bytes"] for v in dateien.values()) / 1e6
-    tmp_dir.rename(final_dir)          # atomarer Abschluss des lokalen Backups
+    try:
+        schreibe_manifest(tmp_dir, manifest)
+        size_mb = sum(v["bytes"] for v in dateien.values()) / 1e6
+        tmp_dir.rename(final_dir)          # atomarer Abschluss des lokalen Backups
+    except OSError as exc:
+        log(f"FEHLER beim Abschliessen der Sicherung: {exc} — kein Backup angelegt", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return 1
 
     # ---- Offsite-Kopie (nach dem lokalen Abschluss; Manifest wird danach
     #      um "offsite" bzw. den Fehler ergaenzt) ----

@@ -119,6 +119,20 @@ def _now() -> datetime:
 _letzter_eingang = datetime.min.replace(tzinfo=timezone.utc)
 
 
+#: Pruefbericht 20.09.2026 (A-07): So lange darf ein Job wegen voller
+#: Anbieter-Plaetze (ListingBusy) warten; danach endet er mit klarer Meldung.
+BUSY_FRIST_S = 600
+BUSY_FEHLER = ("Der Anbieter ist gerade ausgelastet — der Link konnte 10 Minuten lang "
+               "nicht abgerufen werden. Bitte später erneut prüfen.")
+
+
+def _als_utc(wert) -> Optional[datetime]:
+    """Mongo liefert Zeitpunkte ohne Zeitzone zurueck (naiv = UTC)."""
+    if not isinstance(wert, datetime):
+        return None
+    return wert if wert.tzinfo else wert.replace(tzinfo=timezone.utc)
+
+
 def _eingangszeit() -> datetime:
     """created_at eines neuen Jobs — je Prozess streng steigend, auf volle
     Millisekunden (so speichert Mongo). Audit 13.09.2026 (#28): Die
@@ -896,9 +910,23 @@ async def _process(db, job: dict) -> None:
         except ListingBusy:
             # Anbieter gerade voll ausgelastet — zurueck in die Schlange,
             # zaehlt nicht als Fehlversuch.
+            # Pruefbericht 20.09.2026 (A-07): Vorher OHNE Wartezeit (der Job
+            # kreiste sofort wieder), und eine Gesamtfrist gab es nicht — erst
+            # der 24-h-TTL raeumte ab. Jetzt wachsender Abstand und nach
+            # BUSY_FRIST_S ein klares Ende.
+            busy = int(job.get("busy_versuche") or 0) + 1
+            erstellt = _als_utc(job.get("created_at"))
+            if erstellt is not None and (_now() - erstellt).total_seconds() > BUSY_FRIST_S:
+                await db.link_jobs.update_one(
+                    eigener_claim,
+                    {"$set": {"status": "failed", "active": False, "error": BUSY_FEHLER,
+                              "finished_at": _now(), "updated_at": _now()}})
+                return
             await db.link_jobs.update_one(
                 eigener_claim,
-                {"$set": {"status": "queued", "updated_at": _now()},
+                {"$set": {"status": "queued", "updated_at": _now(),
+                          "busy_versuche": busy,
+                          "fruehestens": _now() + timedelta(seconds=min(60, 2 ** min(busy, 6)))},
                  "$unset": {"claim_id": ""},
                  "$inc": {"attempts": -1}})
             return

@@ -47,4 +47,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # gewaehlter Kopfzeile auszuhebeln. Jetzt gelten nur die eigenen Netze (nginx
 # im Docker-Netz, LB im privaten Netz) als Vermittler; uvicorn nimmt dann den
 # rechtesten FREMDEN Eintrag = die Adresse, die nginx eingetragen hat.
-CMD ["sh", "-c", "python migrationen.py && uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-4} --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}\""]
+# Pruefbericht 20.09.2026 (DP-06): "exec" — sonst bleibt sh Prozess 1 und
+# reicht das SIGTERM von "docker compose up/stop" NIE an uvicorn weiter; nach
+# 10 s kam SIGKILL mitten in laufende Anfragen und Hintergrundarbeiten.
+# uvicorn beendet sich jetzt geordnet (hoechstens 50 s, stop_grace_period 60 s).
+CMD ["sh", "-c", "python migrationen.py && exec uvicorn server:app --host 0.0.0.0 --port 8001 --workers ${WEB_CONCURRENCY:-4} --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}\" --timeout-graceful-shutdown 50"]

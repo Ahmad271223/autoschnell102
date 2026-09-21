@@ -55,6 +55,9 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    # Pruefbericht 20.09.2026 (DP-06): Zeit fuer das geordnete Beenden
+    # (uvicorn --timeout-graceful-shutdown 50) — Docker-Standard waren 10 s.
+    stop_grace_period: 60s
     depends_on:
       mongo:
         condition: service_healthy

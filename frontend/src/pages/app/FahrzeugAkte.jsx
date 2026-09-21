@@ -334,7 +334,9 @@ export default function FahrzeugAkte() {
                   gelöscht. Wichtige Fotos vorher im Verkaufsinserat übernehmen.
                 </div>
               )}
-              <table className="w-full text-sm">
+              {/* Pruefbericht 20.09.2026 (M-08): am Handy waagerecht scrollbar statt abgeschnitten */}
+              <div className="overflow-x-auto">
+              <table className="w-full min-w-[480px] text-sm">
                 <thead>
                   <tr className="text-left overline">
                     {!sucher && <th className="py-2 pr-2 w-8"></th>}
@@ -371,6 +373,7 @@ export default function FahrzeugAkte() {
                   ))}
                 </tbody>
               </table>
+              </div>
               {/* Runde 19: Uebernahme ist Chefsache (Backend current_haendler) */}
               {!sucher && (
                 <button onClick={applyDeviations} disabled={busy}

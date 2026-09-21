@@ -818,7 +818,8 @@ def build_pickup_pdf(
     story.append(Spacer(1, 0.4 * cm))
     story.append(_section("3 · Ausstattung laut Inserat — vor Ort prüfen", st))
     story.append(Spacer(1, 4))
-    features = vehicle.get("features") or []
+    from protokoll_vergleich import AUSSTATTUNG_MAX
+    features = (vehicle.get("features") or [])[:AUSSTATTUNG_MAX]
     if features:
         feat_items = [(str(f), "") for f in features if str(f).strip()]
     else:

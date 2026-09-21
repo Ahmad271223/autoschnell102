@@ -438,14 +438,17 @@ Zieldatenbank `system_flags` → `{_id: "wartungsmodus", aktiv: true, grund:
 "Restore", seit: <iso>}`; die API-Middleware antwortet solange mit **503**.
 Nach Erfolg oder Rollback wird `aktiv: false` gesetzt. Nur wenn ein Rollback
 selbst scheitert (Zustand gemischt), bleibt er absichtlich aktiv — die
-Ausgabe nennt dann den Befehl; manuell aufheben:
+Ausgabe nennt dann den Befehl; manuell aufheben (zeigt ohne `--ja` nur den Stand):
 ```bash
-mongosh --eval "db.getSiblingDB('autoschnell').system_flags.updateOne({_id:'wartungsmodus'},{\$set:{aktiv:false}})"
+docker compose exec backend python scripts/wartung_aufheben.py --ja
 ```
 `system_flags` selbst wird nie aus dem Backup zurückgespielt.
 
 Nach dem Restore bleiben `autoschnell__vorher_<zeit>` sowie
-`uploads.vorher-<zeit>` / `local_storage.vorher-<zeit>` als Rückfalllinie —
+`uploads.vorher-<zeit>` / `local_storage.vorher-<zeit>` als Rückfalllinie
+(im Container sind beide Ordner eingehängte Volumes — dort liegt der
+bisherige Stand als Unterordner `.vorher-<zeit>` **im** Volume, weil sich ein
+Einhängepunkt nicht umbenennen lässt; `--dry-run` nennt den Weg) —
 nach der Kontrolle löschen. Offsite-Archiv zurückholen: `tar.gz` aus dem
 Bucket laden, SHA-256 mit `manifest.offsite.sha256` vergleichen, entpacken
 und den Ordner wie oben an `restore_mongo.py` übergeben (Prüfsummen greifen
@@ -897,8 +900,8 @@ bricht ein Migrations-/Indexfehler den Start ab (fail-closed). Stand:
 ### Wartungsmodus
 `system_flags {_id:"wartungsmodus", aktiv:true}` lässt die API mit 503
 antworten (außer /health, /ready). Der Restore setzt und löscht das Flag
-selbst; manuell per mongosh:
-`db.system_flags.updateOne({_id:"wartungsmodus"},{$set:{aktiv:false}})`.
+selbst; manuell: `docker compose exec backend python scripts/wartung_aufheben.py --ja`
+(ohne `--ja` zeigt es nur, wer den Merker seit wann hält).
 
 ### Proxy: Host-Allowlist und Sicherheits-Header
 `PUBLIC_HOST` (in .env, Pflicht) ist die einzige bediente Domain; andere
