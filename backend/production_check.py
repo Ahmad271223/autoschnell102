@@ -411,6 +411,10 @@ def pruefe_produktion(log) -> None:
     if stripe_key or stripe_whsec:
         warnungen.append("STRIPE_* ist gesetzt, wird aber nicht mehr verwendet (Stripe entfernt "
                          "am 14.09.2026) — aus der .env entfernen.")
+    # Pruefbericht 20.09.2026 (AL-03): Alarme brauchen einen Empfaenger.
+    if ist_prod and not os.environ.get("BETRIEB_MELDUNG_AN", "").strip():
+        warnungen.append("BETRIEB_MELDUNG_AN ist leer — Betriebsalarme (Sicherung, "
+                         "Abrufe, Anmeldeangriffe) erreichen niemanden per E-Mail.")
     if os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "").strip().lower() in ("1", "true", "yes"):
         warnungen.append("AUTO_DATEN_SCHAEDEN_FREITEXT=true: Freitext-Schaeden koennen "
                          "Personendaten enthalten (Standard: false).")

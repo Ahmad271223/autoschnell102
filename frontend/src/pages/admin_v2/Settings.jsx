@@ -75,6 +75,32 @@ function MfaKarte() {
         <div className="rounded-lg p-3 mb-3" style={{ background: "rgba(52,199,89,0.08)", border: "1px solid rgba(52,199,89,0.3)" }} data-testid="mfa-wiederherstellung">
           <div className="text-[12.5px] text-emerald-200 mb-1">Wiederherstellungscodes — jetzt sicher aufbewahren (werden nur einmal angezeigt, jeder gilt einmal):</div>
           <div className="font-mono text-[13px] text-white grid grid-cols-2 gap-x-6 select-all">{codes.map((c) => <div key={c}>{c}</div>)}</div>
+          {/* Pruefbericht 20.09.2026 (AD-06/O3): Die Codes standen nur als Text
+              da — ein Klick in die Seitenleiste, und der einzige Notzugang des
+              einzigen Super-Admins war weg. Jetzt: kopieren, als Datei
+              speichern, und erst "sicher abgelegt" gibt die Seite frei. */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" data-testid="mfa-codes-kopieren"
+                    onClick={async () => {
+                      try { await navigator.clipboard.writeText(codes.join("\n")); toast.success("Codes kopiert"); }
+                      catch { window.prompt("Codes kopieren:", codes.join(" ")); }
+                    }}>Kopieren</Button>
+            <Button size="sm" variant="secondary" data-testid="mfa-codes-datei"
+                    onClick={() => {
+                      const text = "AutoSchnell — Wiederherstellungscodes (Zwei-Faktor)\n"
+                        + `erstellt ${new Date().toLocaleString("de-DE")} — jeder Code gilt einmal\n\n`
+                        + codes.join("\n") + "\n";
+                      const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+                      const a = document.createElement("a");
+                      a.href = url; a.download = "autoschnell-wiederherstellungscodes.txt";
+                      document.body.appendChild(a); a.click(); a.remove();
+                      setTimeout(() => URL.revokeObjectURL(url), 60000);
+                    }}>Als Datei speichern</Button>
+            <Button size="sm" data-testid="mfa-codes-abgelegt"
+                    onClick={() => {
+                      if (window.confirm("Codes wirklich sicher abgelegt? Danach werden sie nie wieder angezeigt.")) setCodes(null);
+                    }}>Codes sicher abgelegt</Button>
+          </div>
         </div>
       )}
       {st && st.aktiv && (

@@ -3,6 +3,7 @@ self-password, cleanup trigger.
 """
 import base64
 import hashlib
+import os
 import re
 import asyncio
 import uuid
@@ -1329,13 +1330,30 @@ async def admin_user_set_active(
         raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
     if u.get("id") == admin.get("id") and not body.active:
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
+    # Pruefbericht 20.09.2026 (V-05): Konten in Loeschung (oder einer Firma in
+    # Loeschung) liessen sich hier wieder aktivieren — der Weg der Oberflaeche
+    # pruefte, anders als PUT /admin/users, keinen Grabstein.
+    if body.active:
+        if (u.get("loeschung") or {}).get("status") == "laeuft":
+            raise HTTPException(409, "Dieses Konto wird gerade gelöscht — Entsperren ist nicht möglich")
+        if u.get("dealer_id"):
+            firma = await db.dealers.find_one({"id": u["dealer_id"]}, {"_id": 0, "loeschung": 1})
+            if ((firma or {}).get("loeschung") or {}).get("status") == "laeuft":
+                raise HTTPException(409, "Die Firma dieses Kontos wird gerade gelöscht — "
+                                         "Entsperren ist nicht möglich")
     patch = {"active": bool(body.active), "updated_at": now_iso()}
     if not body.active or not u.get("active", True):
         # Sperren beendet die Sitzung; Entsperren verwirft eine WAEHREND der
         # Sperre entstandene Sitzung (Nachpruefung 15.09.2026, Anmeldung
         # Nr. 3/4: ein Login, der die Sperre ueberholte, lebte sonst wieder auf).
         patch["current_session_id"] = None
-    await db.users.update_one({"id": user_id}, {"$set": patch})
+    filt = {"id": user_id}
+    if body.active:
+        # auch gegen ein Rennen mit dem Loeschstart: nur ohne laufenden Grabstein
+        filt["loeschung.status"] = {"$ne": "laeuft"}
+    res = await db.users.update_one(filt, {"$set": patch})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Das Konto wurde inzwischen geändert (z. B. Löschung gestartet) — bitte neu laden")
     if not body.active and u.get("role") == "b2b_buyer":
         # Nachpruefung Runde 14 (Befund 1): Ein gesperrter Kaeufer darf keine
         # laufende Verhandlung behalten — sonst koennte der Haendler seine
@@ -3089,6 +3107,8 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         "alarme": await offene_alarme(db),
         # AL-02/AD-13: vollstaendige Zahlen je Typ, auch wenn die Liste gekuerzt ist
         "alarm_uebersicht": await alarm_uebersicht(db),
+        # AL-03: ohne Empfaenger meldet niemand die Alarme per E-Mail
+        "alarm_empfaenger": os.environ.get("BETRIEB_MELDUNG_AN", "").strip() or None,
         "datei_loeschungen_offen": await db.storage_delete_retry.count_documents({}),
         "datei_loeschungen_aufgegeben": await db.storage_delete_retry.find(
             {"aufgegeben": True}, {"_id": 0}).limit(50).to_list(50),
@@ -3330,8 +3350,10 @@ async def admin_mfa_zuruecksetzen(user_id: str, body: dict = Body(default={}),
             400, "Die eigene Zwei-Faktor-Anmeldung kann hier nicht "
                  "zurueckgesetzt werden. Zum Abschalten den Weg "
                  "Einstellungen -> Abschalten mit gueltigem Code nutzen; "
-                 "bei Verlust des Geraets muss ein anderer Super-Admin "
-                 "zuruecksetzen.")
+                 "bei Verlust des Geraets mit einem Wiederherstellungscode "
+                 "anmelden oder auf dem Server "
+                 "'python scripts/mfa_pruefen.py --konto <name> --abschalten --ja' "
+                 "ausfuehren (siehe DEPLOYMENT.md).")
     u = await db.users.find_one({"id": user_id, "role": "admin"},
                                 {"_id": 0, "id": 1, "email": 1, "username": 1,
                                  "is_super_admin": 1})

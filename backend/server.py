@@ -631,6 +631,13 @@ async def _readiness_pruefen():
         info["alarme_offen"] = n
         if n:
             warnungen.append(f"{n} offene Betriebsalarme")
+        # Pruefbericht 20.09.2026 (AL-03/U3): Ohne BETRIEB_MELDUNG_AN gehen
+        # Alarme an NIEMANDEN — schlaegt die Sicherung ab Freitag fehl, merkt
+        # es frueestens Montag jemand. In Produktion eine sichtbare Warnung.
+        if (os.environ.get("APP_ENV", "").strip().lower() == "production"
+                and not os.environ.get("BETRIEB_MELDUNG_AN", "").strip()):
+            warnungen.append("BETRIEB_MELDUNG_AN ist leer — Betriebsalarme werden an "
+                             "niemanden gemeldet (sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=…)")
         alt = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
         haengend = await db.link_jobs.count_documents(
             {"status": "queued", "created_at": {"$lt": datetime.now(timezone.utc) - timedelta(minutes=15)}})

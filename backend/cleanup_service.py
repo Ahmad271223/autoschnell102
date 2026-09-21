@@ -403,28 +403,42 @@ async def _cleanup_once(db) -> dict:
                 stats["zurueckgestellt"] = stats.get("zurueckgestellt", 0) + 1
                 continue
 
-            # 1) Snapshots + Storage-Objekte wegwerfen
+            # 1) Fotos aus dem Vehicle-Cache räumen — Runde 18: NUR die
+            #    Fotofelder ($set data.<feld>), nicht das ganze data-Objekt
+            #    zurueckschreiben. Vorher gingen zwischenzeitliche
+            #    Korrekturen (Kilometerstand, Fahrzeugdaten) verloren.
+            #    Pruefbericht 20.09.2026 (R1-29): als Compare-and-Set auf den
+            #    Lebenszyklus — uebernahm der Chef das Fahrzeug ZWISCHEN der
+            #    Pruefung oben und diesem Schreiben in den Bestand/Verkauf,
+            #    wurden seine Fotos trotzdem geleert. Und die Snapshots
+            #    (Schritt 2) gehen erst nach erfolgreichem CAS.
             if vehicle_id:
-                deleted = await _delete_snapshots_for_vehicle(
-                    db, vehicle_id, dealer_id=appt.get("dealer_id", ""))
-                stats["snapshots_deleted"] += deleted
-
-                # 2) Fotos aus dem Vehicle-Cache räumen — Runde 18: NUR die
-                #    Fotofelder ($set data.<feld>), nicht das ganze data-Objekt
-                #    zurueckschreiben. Vorher gingen zwischenzeitliche
-                #    Korrekturen (Kilometerstand, Fahrzeugdaten) verloren.
                 v = await db.vehicles.find_one(
                     {"id": vehicle_id, "dealer_id": firma},
                     {"_id": 0, "data": 1, "mobile_ad_id": 1})
-                if v and isinstance(v.get("data"), dict):
-                    data = v["data"]
+                if v is not None:
+                    data = v.get("data") if isinstance(v.get("data"), dict) else {}
                     leeren = {f"data.{key}": [] for key in _iter_photo_keys() if data.get(key)}
-                    if leeren:
-                        await db.vehicles.update_one(
-                            {"id": vehicle_id, "dealer_id": firma},
-                            {"$set": {**leeren, "assets_cleaned_at": now.isoformat()}},
+                    res = await db.vehicles.update_one(
+                        {"id": vehicle_id, "dealer_id": firma,
+                         "lifecycle": {"$nin": sorted(_DECIDED_STATES)}},
+                        {"$set": {**leeren, "assets_cleaned_at": now.isoformat()}},
+                    )
+                    if res.matched_count == 0:
+                        # inzwischen entschieden -> nichts anfassen
+                        await db.appointments.update_one(
+                            {"id": appt["id"]},
+                            {"$set": {"assets_cleaned_at": now.isoformat(),
+                                      "cleanup_skipped": "haendler_entscheidung"}},
                         )
+                        continue
+                    if leeren:
                         stats["photos_cleared"] += 1
+
+                # 2) Snapshots + Storage-Objekte wegwerfen
+                deleted = await _delete_snapshots_for_vehicle(
+                    db, vehicle_id, dealer_id=appt.get("dealer_id", ""))
+                stats["snapshots_deleted"] += deleted
 
                 # 3) Listings-Cache-Eintrag entfernen, damit ein neuer
                 #    Vergleich wieder frisch zieht. WICHTIG: der
@@ -489,6 +503,7 @@ async def _cleanup_once(db) -> dict:
     # Vertrag nach Abholung (Nr. 25) und Frischabgleich ohne Merker (Nr. 29).
     stats["abholberichte_nachgeholt"] = await abholberichte_nacharbeit_nachholen(db)
     stats["vertraege_nach_abholung_nachgeholt"] = await vertrag_nach_abholung_nachholen(db)
+    stats["vertraege_veraltet_nachgeholt"] = await vertraege_veraltet_nachholen(db)
     stats["termine_frisch_abgeglichen"] = await termine_frisch_abgleichen(db, now)
     stats["fahrer_trennungen_nachgeholt"] = await fahrer_trennung_nachholen(db)
     stats["fahrer_verknuepfungen_abgeglichen"] = await fahrer_verknuepfung_abgleichen(db)
@@ -839,6 +854,23 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
             await _vertragszeiger_abgleichen(appt.get("dealer_id", ""), appt["id"],
                                              appt.get("contract_id"))
             hat_vorgang = await _kv.termin_status_uebernehmen(appt, status)
+            # Pruefbericht 20.09.2026 (V-25): Starb der Prozess zwischen dem
+            # finalen Protokoll und dem Alarm, fehlte die neue Vertragsfassung
+            # (Preis vor Ort, Korrekturen, Schaeden) — und dieser Lauf loeschte
+            # den Merker trotzdem. Jetzt wird der Vertragsstand vorher
+            # sichergestellt (idempotent); gelingt das nicht, bleibt der Merker.
+            if appt.get("contract_id") and (appt.get("nacharbeit_protokoll_id")
+                                            or status in ("abgeholt", "erledigt")):
+                from routes.protocols import vertrag_nach_abholung_sicherstellen
+                p_filter = ({"id": appt["nacharbeit_protokoll_id"]}
+                            if appt.get("nacharbeit_protokoll_id")
+                            else {"appointment_id": appt["id"], "status": "final",
+                                  "superseded": {"$ne": True}})
+                protokoll = await db.pickup_protocols.find_one(p_filter, {"_id": 0})
+                if protokoll and not await vertrag_nach_abholung_sicherstellen(appt, protokoll):
+                    log.warning("Termin-Nacharbeit %s: Vertrag nach Abholung weiter offen",
+                                appt["id"])
+                    continue
             if hat_vorgang and ((await _kv.fuer_termin(appt)) or {}).get("nacharbeit_offen"):
                 # Phase 2 (2.4, Liste 4 Nr. 2): Fahrzeug-Zusammenfassung scheiterte
                 # (Merker am Vorgang) — Merker am Termin bleibt, naechster Lauf erneut.
@@ -2551,6 +2583,48 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
     return n
 
 
+async def vertraege_veraltet_nachholen(db, limit: int = 100) -> int:
+    """Pruefbericht 20.09.2026 (V-26): Termine mit Merker vertrag_veraltet
+    (die Neuerzeugung nach einer Terminverschiebung scheiterte oder wurde
+    wegen eines laufenden Versands abgewiesen) wurden nur beim NAECHSTEN
+    Speichern des Termins nachgeholt. Kam keins, zeigte der Vertrag dauerhaft
+    den alten Abholtermin. Jetzt versucht es der Aufraeumjob selbst."""
+    n = 0
+    try:
+        from fastapi import HTTPException as _HTTPException
+        from routes.appointments import _vertrag_zeigt_termin
+        from routes.contracts import regenerate_contract_for_pickup
+    except Exception:  # noqa: BLE001
+        return 0
+    async for appt in db.appointments.find(
+            {"vertrag_veraltet": True, "contract_id": {"$nin": [None, ""]}},
+            {"_id": 0, "id": 1, "dealer_id": 1, "contract_id": 1, "pickup_date": 1,
+             "pickup_time": 1, "created_by": 1}).limit(limit):
+        dealer_id = appt.get("dealer_id") or ""
+        try:
+            erledigt = await _vertrag_zeigt_termin(
+                dealer_id, appt["contract_id"], appt.get("pickup_date"), appt.get("pickup_time"))
+            if not erledigt:
+                erledigt = await regenerate_contract_for_pickup(
+                    contract_id=appt["contract_id"], dealer_id=dealer_id,
+                    user={"id": appt.get("created_by") or "", "dealer_id": dealer_id,
+                          "role": "dealer"},
+                    pickup_date=appt.get("pickup_date") or "",
+                    pickup_time=appt.get("pickup_time") or "",
+                    leeren_erlaubt=True)
+            if erledigt:
+                await db.appointments.update_one(
+                    {"id": appt["id"], "vertrag_veraltet": True},
+                    {"$unset": {"vertrag_veraltet": ""}})
+                n += 1
+        except _HTTPException:
+            # 409: der Vertrag wird gerade verschickt — naechster Lauf
+            continue
+        except Exception:  # noqa: BLE001
+            log.exception("Veralteter Vertrag zu Termin %s nicht nachgezogen", appt.get("id"))
+    return n
+
+
 async def uebergaben_nachholen(db, now: datetime, mindestalter_s: int = 120, limit: int = 200) -> int:
     """Runde 19 (16.09.2026, Nr. 6/7): ein Besitzerwechsel schreibt zuerst das
     Fahrzeug (mit Merker uebergabe_offen) und uebertraegt dann Kaufvorgaenge,
@@ -2582,6 +2656,8 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
     n = 0
     try:
         from routes.appointments import _vertragszeiger_abgleichen
+        from routes.protocols import preis_nachholen
+        from lifecycle import try_set_lifecycle, zustand_fuer_terminstatus
         import kaufvorgang as _kv
     except Exception:  # noqa: BLE001
         return 0
@@ -2593,12 +2669,39 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
         paket = await db.appointments.find(
             {"updated_at": {op: ab}, "dealer_id": {"$type": "string"}},
             {"_id": 0, "id": 1, "dealer_id": 1, "contract_id": 1, "status": 1,
-             "vehicle_id": 1, "kaufvorgang_id": 1, "updated_at": 1},
+             "vehicle_id": 1, "kaufvorgang_id": 1, "updated_at": 1,
+             "status_changed_at": 1, "abgeschlossen_seit": 1},
         ).sort("updated_at", 1).to_list(limit)
         for appt in paket:
             try:
                 await _vertragszeiger_abgleichen(appt["dealer_id"], appt["id"], appt.get("contract_id"))
-                await _kv.termin_status_uebernehmen(appt, appt.get("status") or "offen")
+                status = appt.get("status") or "offen"
+                # Pruefbericht 20.09.2026 (V-29): dieselben Schritte wie der
+                # Merker-Weg (termin_nacharbeit_nachholen) — der Merker selbst
+                # ist nur Best-Effort. Preis VOR der Statusuebernahme (wie im
+                # Abschluss), idempotent und ohne einen Handpreis zu ueberschreiben.
+                # Eigener try: scheitert NUR der Preis, laufen Status und
+                # Lebenszyklus trotzdem (der naechste Lauf holt den Preis nach).
+                try:
+                    await preis_nachholen(appt)
+                except Exception:  # noqa: BLE001
+                    log.exception("Frischabgleich: Preis zu Termin %s nicht nachgezogen",
+                                  appt.get("id"))
+                hat_vorgang = await _kv.termin_status_uebernehmen(appt, status)
+                if not hat_vorgang and appt.get("vehicle_id"):
+                    # Termin ohne Kaufvorgang: Lebenszyklus direkt (dieselbe
+                    # Tabelle wie Fahrer-App und Buero; ungueltige Uebergaenge
+                    # lehnt try_set_lifecycle ab).
+                    ziel = zustand_fuer_terminstatus(status) or (
+                        "abholung_geplant" if status not in _TERMIN_GESCHLOSSEN else None)
+                    if ziel:
+                        await try_set_lifecycle(appt["vehicle_id"], appt["dealer_id"], ziel)
+                if status in _TERMIN_GESCHLOSSEN and not appt.get("abgeschlossen_seit") \
+                        and appt.get("status_changed_at"):
+                    # Frist ab dem ersten Endstatus (sonst nur ueber den Rueckfall)
+                    await db.appointments.update_one(
+                        {"id": appt["id"], "abgeschlossen_seit": {"$in": [None, ""]}},
+                        {"$set": {"abgeschlossen_seit": appt["status_changed_at"]}})
                 n += 1
             except Exception:  # noqa: BLE001
                 log.exception("Frischabgleich Termin %s fehlgeschlagen", appt.get("id"))

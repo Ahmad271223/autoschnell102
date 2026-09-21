@@ -98,6 +98,15 @@ export default function AdminBetrieb() {
         <Kachel label="Zahlungen ohne Zugang" wert={data.zahlungen_ohne_zugang} tone={data.zahlungen_ohne_zugang ? "red" : "green"} />
         <Kachel label="Wartungsmodus" wert={data.wartungsmodus ? "AKTIV" : "aus"} tone={data.wartungsmodus ? "red" : "green"} />
       </div>
+      {"alarm_empfaenger" in data && !data.alarm_empfaenger && (
+        // Pruefbericht 20.09.2026 (AL-03/U3): ohne Empfaenger gehen Alarme an niemanden
+        <Card className="mb-4" data-testid="alarm-empfaenger-fehlt">
+          <div className="text-[13.5px] text-amber-200">
+            Alarme werden an niemanden per E-Mail gemeldet (BETRIEB_MELDUNG_AN ist leer) — auf
+            beiden Servern setzen: <span className="font-mono">sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=deine@adresse.de</span>
+          </div>
+        </Card>
+      )}
       {(data.super_admins_ohne_mfa || []).length > 0 && (
         <Card className="mb-4" data-testid="mfa-hinweis">
           <div className="text-[13.5px] text-amber-200">

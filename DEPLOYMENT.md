@@ -1120,7 +1120,7 @@ ab jetzt selbst, sobald `replicaSet=` in der `.env` steht (Nr. 29).
 
 - Jeder Admin/Super-Admin richtet sie selbst ein: **Einstellungen → Zwei-Faktor-Anmeldung → Einrichten**, Geheimnis bzw. `otpauth://`-Link in eine Authenticator-App (Google Authenticator, Aegis, 1Password …) übernehmen, Code eingeben → **8 Wiederherstellungscodes** erscheinen genau einmal — sicher ablegen.
 - Danach fragt die Anmeldung nach dem Passwort zusätzlich den 6-stelligen Code (5 Minuten Zeit, 5 Fehlversuche → 15 Minuten Sperre). Ein Wiederherstellungscode gilt je einmal.
-- App verloren: ein anderer Super-Admin setzt unter **Nutzer → 2FA zurücksetzen** die Zwei-Faktor-Anmeldung zurück (Sitzung wird beendet).
+- App verloren: mit einem **Wiederherstellungscode** anmelden und neu einrichten. Es gibt bewusst nur EINEN Super-Admin — ohne Code bleibt nur der Notweg auf dem Server (unten, `mfa_pruefen.py --abschalten --ja`).
 - **Ausgesperrt („Code ungültig“, obwohl er vorher passte):** erst mit einem **Wiederherstellungscode** im Code-Feld anmelden. Sonst auf dem Server prüfen, ob die Uhr der App oder ein fremdes Geheimnis schuld ist:
   `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --code 123456`
   (nur lesend). Notfall ohne Wiederherstellungscode — Zwei-Faktor abschalten, dann **innerhalb von 30 Minuten** mit Benutzername + Passwort anmelden und neu einrichten (danach verlangt die Anmeldung in Produktion wieder den zweiten Faktor, Runde 14):

@@ -968,8 +968,18 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
                 continue
             n_files += k
             log(f"  {name}: {k} Dateien gesichert", logfile)
-        s3_aktiv = all(os.environ.get(v, "").strip() for v in
-                       ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"))
+        s3_namen = ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")
+        s3_aktiv = all(os.environ.get(v, "").strip() for v in s3_namen)
+        # Pruefbericht 20.09.2026 (AL-01/D1): War EINE der vier Variablen leer
+        # oder vertippt, wurde der Datei-Speicher kommentarlos uebersprungen —
+        # und das Backup galt trotzdem als vollstaendig. Alle Fahrzeugfotos,
+        # Protokoll-PDFs und Unterschriften fehlten, ohne dass es jemand merkte.
+        s3_fehlt = [v for v in s3_namen if not os.environ.get(v, "").strip()]
+        if not s3_aktiv and len(s3_fehlt) < len(s3_namen):
+            unvollstaendig.append("s3: nur teilweise konfiguriert (fehlt: "
+                                  + ", ".join(s3_fehlt) + ") — Datei-Speicher NICHT gesichert")
+            log("  WARNUNG: S3 nur teilweise konfiguriert — Dateien NICHT gesichert "
+                f"(fehlt: {', '.join(s3_fehlt)})", logfile)
         dateien_kopie = None
         modus = dateien_modus() if s3_aktiv else None
         if s3_aktiv and modus == "spiegel":

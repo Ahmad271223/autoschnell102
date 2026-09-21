@@ -83,6 +83,16 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
     // Pruefbericht 20.09.2026 (K-01/F20, R1-43): deutsch lesen ("85.120" ist
     // fuenfundachtzigtausend, nicht 85), keine negativen Werte, und ohne
     // Kilometerstand kein Bericht — vorher ging ein leeres Feld still durch.
+    // Pruefbericht 20.09.2026 (DP-02/K-02/U2): Der Proxy nimmt hoechstens 25 MB
+    // je Anfrage. Scheiterte die Verkleinerung (HEIC, defektes EXIF), gingen
+    // die Originale raus — vier Handyfotos genuegten, und der fertige Bericht
+    // samt Kilometerstand war weg. Jetzt vorher pruefen und klar sagen.
+    const fotoSumme = deviations.reduce((n, d) => n + String(d.photo_b64 || "").length, 0);
+    if (fotoSumme > 18_000_000) {
+      toast.error("Die Fotos sind zusammen zu groß zum Senden. Bitte ein oder zwei Fotos "
+        + "entfernen oder neu aufnehmen (kleinere Auflösung).");
+      return;
+    }
     const km = kmAusText(mileage);
     if (km === null) { toast.error("Bitte den Kilometerstand bei Abholung eintragen."); return; }
     if (Number.isNaN(km)) {

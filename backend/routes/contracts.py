@@ -1576,6 +1576,20 @@ async def _versand_laeuft(contract_id: str) -> bool:
         limit=1) > 0
 
 
+def _kein_laufender_versand() -> Dict[str, Any]:
+    """Pruefbericht 20.09.2026 (V-26): dieselbe Bedingung wie _versand_laeuft,
+    aber als TEIL eines Schreibfilters. Die Vorpruefung allein reichte nicht:
+    eine Neuerzeugung, die vor der Versand-Reservierung geprueft hatte, konnte
+    danach noch committen — der Verkaeufer bekam die alte Fassung. Steht die
+    Bedingung im Compare-and-Set, sind Pruefung und Schreiben atomar."""
+    frisch_ab = (datetime.now(timezone.utc)
+                 - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK)).isoformat()
+    return {"send_status": {"$not": {"$elemMatch": {
+        "zustellung": "laeuft",
+        "$or": [{"sent_at": {"$gt": frisch_ab}},
+                {"wiederaufnahme_am": {"$gt": frisch_ab}}]}}}}
+
+
 VERSAND_LAEUFT_TEXT = ("Dieser Vertrag wird gerade verschickt — bitte in ein paar "
                        "Sekunden erneut versuchen.")
 
@@ -2273,6 +2287,7 @@ async def regenerate_contract_for_pickup(
     korrekturen: Optional[Dict[str, Any]] = None,
     neue_schaeden: Optional[list] = None,
     grund: str = "abholtermin_geaendert", protokoll_id: Optional[str] = None,
+    ergebnis: Optional[dict] = None,
 ) -> bool:
     """Erzeugt das Kaufvertrags-PDF mit GEAENDERTEM Abholtermin neu.
 
@@ -2286,7 +2301,19 @@ async def regenerate_contract_for_pickup(
     zeigen. Der bisherige Termin wird in `pickup_history` mitgeschrieben,
     damit nachvollziehbar bleibt, was wann geaendert wurde.
     Rueckgabe: True, wenn das PDF neu erzeugt wurde.
+
+    ergebnis (Pruefbericht 20.09.2026, V-25): optionales dict, in das der
+    Grund eines False geschrieben wird ("kein_anlass", "nicht_gefunden",
+    "keine_aenderung", "pdf_fehler", "cas_verloren"). Der Nachholer nach der
+    Abholung muss "schon eingearbeitet" von "gescheitert" unterscheiden —
+    vorher loeste jeder Doppeltipp nach einem gelungenen Abschluss einen
+    Alarm aus, der nie wieder zuging.
     """
+    def _grund(wert: str) -> bool:
+        if ergebnis is not None:
+            ergebnis["grund"] = wert
+        return False
+
     # Wunsch Ahmad 14.09.2026: nach der Abholung wird der Vertrag mit dem vor
     # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
     # Fassung, die alte bleibt im Archiv) — der Kunde bekommt den aktuellen Stand.
@@ -2298,7 +2325,7 @@ async def regenerate_contract_for_pickup(
     if not contract_id or (pickup_date is None and pickup_time is None
                            and not preis_aenderung and not korrekturen
                            and not neue_schaeden):
-        return False
+        return _grund("kein_anlass")
     # Pruefbericht 20.09.2026 (N2): keine neue Fassung mitten im Versand.
     # Sonst haelt der Verkaeufer die alte Fassung in der Hand, waehrend die
     # Anwendung schon die neue fuehrt. 409 statt still weiterzumachen — der
@@ -2314,7 +2341,7 @@ async def regenerate_contract_for_pickup(
                else {"dealer_id": dealer_id, "loeschung.status": {"$ne": "laeuft"}})
     doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not doc:
-        return False
+        return _grund("nicht_gefunden")
 
     alt_datum = doc.get("pickup_date")
     alt_zeit = doc.get("pickup_time")
@@ -2343,6 +2370,8 @@ async def regenerate_contract_for_pickup(
                   if str(contract_dict.get(k) or "").strip() != str(w).strip()}
     schaeden_alt = list(contract_dict.get("damages") or [])
     schaeden_neu = [d for d in neue_schaeden if d not in schaeden_alt]
+    # gilt, wenn der naechste Block aussteigt (der Vertrag zeigt schon alles)
+    _grund("keine_aenderung")
     if (neu_datum or "") == (alt_datum or "") and (neu_zeit or "") == (alt_zeit or "") \
             and not preis_neu and not sonder_neu and not korrigiert and not schaeden_neu:
         return False
@@ -2411,6 +2440,7 @@ async def regenerate_contract_for_pickup(
     except Exception:
         log.exception("Kaufvertrag konnte mit neuem Abholtermin nicht neu "
                       "erzeugt werden (contract=%s)", contract_id)
+        _grund("pdf_fehler")
         return False
 
     # BEWEISSICHERUNG: Die bisherige PDF-Fassung wird NICHT ueberschrieben,
@@ -2418,21 +2448,38 @@ async def regenerate_contract_for_pickup(
     # Vertragstext (mit welchem Abholtermin) zu jedem Zeitpunkt galt.
     alte_version = int(doc.get("version") or 1)
     archiv_id = str(uuid.uuid4())
-    await db.generated_pdf_versions.insert_one({
-        "id": archiv_id,
-        "contract_id": contract_id,
-        "dealer_id": dealer_id,
-        "version": alte_version,
-        "pdf_b64": doc.get("pdf_b64"),
-        "pdf_digital_b64": doc.get("pdf_digital_b64"),
-        "contract_data": doc.get("contract_data"),
-        "pickup_date": alt_datum,
-        "pickup_time": alt_zeit,
-        "filename": doc.get("filename"),
-        "archived_at": now_iso(),
-        "archived_by": user.get("id"),
-        "grund": grund,
-    })
+    # Pruefbericht 20.09.2026 (V-27): Archiv per Upsert statt insert_one. Der
+    # Unique-Index (contract_id, version) verhindert zwar doppelte Fassungen —
+    # starb aber ein frueherer Lauf zwischen Archiv und Compare-and-Set, warf
+    # JEDE spaetere Neuerzeugung DuplicateKeyError, und der Vertrag blieb fuer
+    # immer auf der alten Fassung (ebenso der Verlierer zweier paralleler
+    # Neuerzeugungen: 500 statt sauber False). Jetzt: vorhandene Archivfassung
+    # derselben Version bleibt stehen (sie traegt denselben Stand), und beim
+    # verlorenen CAS wird nur eine SELBST angelegte Fassung wieder entfernt.
+    archiv_angelegt = False
+    try:
+        archiv_res = await db.generated_pdf_versions.update_one(
+            {"contract_id": contract_id, "version": alte_version},
+            {"$setOnInsert": {
+                "id": archiv_id,
+                "contract_id": contract_id,
+                "dealer_id": dealer_id,
+                "version": alte_version,
+                "pdf_b64": doc.get("pdf_b64"),
+                "pdf_digital_b64": doc.get("pdf_digital_b64"),
+                "contract_data": doc.get("contract_data"),
+                "pickup_date": alt_datum,
+                "pickup_time": alt_zeit,
+                "filename": doc.get("filename"),
+                "archived_at": now_iso(),
+                "archived_by": user.get("id"),
+                "grund": grund,
+            }},
+            upsert=True)
+        archiv_angelegt = archiv_res.upserted_id is not None
+    except DuplicateKeyError:
+        # paralleles Upsert derselben Fassung — die andere Anlage gilt
+        archiv_angelegt = False
 
     # Runde 17 (Nr. 373): Compare-and-Swap auf die GELESENE Version — zwei
     # gleichzeitige Verschiebungen (oder eine parallele Loeschung) schrieben
@@ -2445,7 +2492,9 @@ async def regenerate_contract_for_pickup(
     res = await db.generated_pdfs.update_one(
         {"id": contract_id, "dealer_id": dealer_id,
          "version": doc.get("version"),
-         "loeschung.status": {"$ne": "laeuft"}},
+         "loeschung.status": {"$ne": "laeuft"},
+         # V-26: kein Versand, der seit der Vorpruefung begonnen hat
+         **_kein_laufender_versand()},
         {"$set": {
             "pdf_b64": base64.b64encode(pdf_bytes).decode(),
             "pdf_digital_b64": base64.b64encode(pdf_digital).decode(),
@@ -2485,10 +2534,16 @@ async def regenerate_contract_for_pickup(
          }], "$slice": -PICKUP_HISTORY_MAX}}},
     )
     if res.modified_count == 0:
-        await db.generated_pdf_versions.delete_one({"id": archiv_id})
+        if archiv_angelegt:
+            await db.generated_pdf_versions.delete_one({"id": archiv_id})
+        if await _versand_laeuft(contract_id):
+            # V-26: der Versand hat zwischen Vorpruefung und Schreiben begonnen
+            raise HTTPException(409, VERSAND_LAEUFT_TEXT,
+                                headers={"Retry-After": "5"})
         log.warning("Kaufvertrag %s: Neuerzeugung verworfen — Version %s wurde "
                     "zwischenzeitlich geaendert oder der Vertrag wird geloescht",
                     contract_id, doc.get("version"))
+        _grund("cas_verloren")
         return False
     # Vertragskorrektur innerhalb der Frist: den BESTEHENDEN Auto-Datensatz
     # aktualisieren (nie ein zweiter); Altvertraege ohne id bekommen ihn
@@ -2507,4 +2562,6 @@ async def regenerate_contract_for_pickup(
     await log_activity_sicher(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
                               ref=contract_id,
                               meta={"von": alt_datum, "auf": neu_datum})
+    if ergebnis is not None:
+        ergebnis["grund"] = "neu"
     return True

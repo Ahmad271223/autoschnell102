@@ -1200,18 +1200,29 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
                 or veraltet_nachholen) and contract_id:
             nachziehen = contract_gewechselt or veraltet_nachholen
             from routes.contracts import regenerate_contract_for_pickup
-            vertrag_aktualisiert = await regenerate_contract_for_pickup(
-                contract_id=contract_id,
-                dealer_id=user["dealer_id"],
-                user=user,
-                pickup_date=update.get("pickup_date", existing.get("pickup_date")
-                                       if nachziehen else None),
-                pickup_time=update.get("pickup_time", existing.get("pickup_time")
-                                       if nachziehen else None),
-                # Nachpruefung Runde 14 (Befund 84): ein bewusst geleertes Datum
-                # oder eine geleerte Uhrzeit verschwindet auch aus dem Vertrag.
-                leeren_erlaubt=True,
-            )
+            try:
+                vertrag_aktualisiert = await regenerate_contract_for_pickup(
+                    contract_id=contract_id,
+                    dealer_id=user["dealer_id"],
+                    user=user,
+                    pickup_date=update.get("pickup_date", existing.get("pickup_date")
+                                           if nachziehen else None),
+                    pickup_time=update.get("pickup_time", existing.get("pickup_time")
+                                           if nachziehen else None),
+                    # Nachpruefung Runde 14 (Befund 84): ein bewusst geleertes Datum
+                    # oder eine geleerte Uhrzeit verschwindet auch aus dem Vertrag.
+                    leeren_erlaubt=True,
+                )
+            except HTTPException as exc:
+                # Pruefbericht 20.09.2026 (V-26): 409 = der Vertrag wird gerade
+                # verschickt. Der TERMIN ist hier schon gespeichert — ein
+                # durchgereichter 409 liess ihn mit neuem Datum und den Vertrag
+                # mit dem alten stehen, und ein erneutes Speichern erkannte
+                # keine Aenderung mehr. Jetzt: als veraltet merken (unten);
+                # der Aufraeumjob bzw. das naechste Speichern erzeugt nach.
+                if exc.status_code != 409:
+                    raise
+                vertrag_aktualisiert = False
             if vertrag_aktualisiert:
                 if existing.get("vertrag_veraltet"):
                     await db.appointments.update_one(

@@ -28,6 +28,8 @@ export default function Inserat() {
   const [l, setL] = useState(null);
   const [busy, setBusy] = useState(false);
   const [abholBusy, setAbholBusy] = useState(false);
+  // U-103/H35: waehrend des Hochladens gesperrt (kein zweiter Upload parallel)
+  const [ladeHoch, setLadeHoch] = useState(false);
   // Wunsch Ahmad 14.09.2026: Beim Inserieren soll der Chef das unterschriebene
   // Abholprotokoll und den abschliessenden Kaufvertrag weiter oeffnen koennen —
   // nur in SEINER Ansicht. Der Marktplatz bekommt davon nichts: die
@@ -211,13 +213,18 @@ export default function Inserat() {
   // verkleinert (dabei fallen auch Aufnahmeort und Geraet weg) und in
   // kleinen Paketen hochgeladen.
   const FOTOS_JE_PAKET = 4;
+  // Pruefbericht 20.09.2026 (DP-01/U1): Pakete zusaetzlich nach GROESSE —
+  // scheiterte die Verkleinerung (HEIC, defektes EXIF), ging das Original
+  // (6-8 MB) mit, und vier davon sprengten die 25 MB des Proxys.
+  const PAKET_ZEICHEN_MAX = 15_000_000;
+  const EINZELFOTO_ZEICHEN_MAX = 12_000_000;
   // Regeln vom 20.09.2026 (Ahmad) — dieselben Zahlen wie im Server
   // (routes/resale.py: INSERAT_BESCHREIBUNG_MAX / INSERAT_FOTOS_MAX).
   const BESCHREIBUNG_MAX = 500;
   const FOTOS_MAX = 10;
 
   const uploadPhotos = async (files) => {
-    if (!files?.length) return;
+    if (!files?.length || ladeHoch) return;
     // 20.09.2026 (Ahmad): hoechstens FOTOS_MAX je Inserat. Lieber hier
     // abschneiden und es sagen, als den Server 400 werfen lassen, nachdem
     // der Nutzer zehn Fotos hochgeladen hat.
@@ -230,20 +237,47 @@ export default function Inserat() {
     if (files.length > frei) {
       toast.message(`Es werden ${frei} von ${files.length} Fotos übernommen (maximal ${FOTOS_MAX} je Inserat).`);
     }
+    setLadeHoch(true);
     try {
       const photos = [];
+      let zuGross = 0;
       for (const f of auswahl) {
-        photos.push(await verkleinereBildDatei(f));
+        const bild = await verkleinereBildDatei(f);
+        if (String(bild || "").length > EINZELFOTO_ZEICHEN_MAX) { zuGross += 1; continue; }
+        photos.push(bild);
       }
+      if (zuGross) {
+        toast.warning(`${zuGross} Foto(s) zu groß und nicht verkleinerbar (z. B. HEIC) — bitte als JPG aufnehmen oder speichern.`);
+      }
+      // Pakete: hoechstens FOTOS_JE_PAKET Fotos UND hoechstens PAKET_ZEICHEN_MAX.
+      const pakete = [];
+      let aktuell = [];
+      let groesse = 0;
+      for (const bild of photos) {
+        const n = String(bild).length;
+        if (aktuell.length && (aktuell.length >= FOTOS_JE_PAKET || groesse + n > PAKET_ZEICHEN_MAX)) {
+          pakete.push(aktuell);
+          aktuell = [];
+          groesse = 0;
+        }
+        aktuell.push(bild);
+        groesse += n;
+      }
+      if (aktuell.length) pakete.push(aktuell);
       let fertig = 0;
-      for (let i = 0; i < photos.length; i += FOTOS_JE_PAKET) {
-        const paket = photos.slice(i, i + FOTOS_JE_PAKET);
+      for (const paket of pakete) {
         await api.post(`/resale/${l.id}/photos`, { photos_b64: paket });
         fertig += paket.length;
       }
-      toast.success(`${fertig} Foto(s) hochgeladen`);
+      if (fertig) toast.success(`${fertig} Foto(s) hochgeladen`);
       load();
-    } catch (e) { toast.error(errMsg(e)); }
+    } catch (e) {
+      toast.error(e?.response?.status === 413
+        ? "Die Fotos sind zu groß für eine Übertragung — bitte weniger Fotos auf einmal hochladen."
+        : errMsg(e));
+    } finally {
+      setLadeHoch(false);
+    }
   };
 
   // Runde 21: Fotos aus dem Abholbericht (z.B. Schaeden) mit einem Klick uebernehmen.
@@ -476,7 +510,8 @@ export default function Inserat() {
                 <Camera size={14} /> Neue Fotos hochladen
               </button>
               <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
-                     onChange={(e) => uploadPhotos(e.target.files)} />
+                     disabled={ladeHoch}
+                     onChange={(e) => { const f = e.target.files; uploadPhotos(f ? [...f] : []); e.target.value = ""; }} />
             </div>
             {/* 20.09.2026 (Ahmad): Der Umschalter Einkauf/Neu/Beide ist weg.
                 Fotos aus dem urspruenglichen Inserat werden nicht mehr

@@ -659,13 +659,36 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
         return False
     try:
         from routes.contracts import regenerate_contract_for_pickup
-        ok = await regenerate_contract_for_pickup(
-            contract_id=appt["contract_id"], dealer_id=appt.get("dealer_id", ""),
-            user={"id": appt.get("created_by"), "dealer_id": appt.get("dealer_id", ""),
-                  "role": "dealer"},
-            neuer_preis=neuer_preis, sondervereinbarung=sondervereinbarung,
-            korrekturen=korrekturen, neue_schaeden=neue_schaeden,
-            grund="abholung_abgeschlossen", protokoll_id=protokoll_id)
+        # Pruefbericht 20.09.2026 (V-25): idempotent. Traegt der Vertrag diese
+        # Abholung schon (Merker der Neuerzeugung), ist nichts mehr zu tun —
+        # vorher lieferte die Neuerzeugung dann "keine Aenderung" = False, und
+        # jeder Doppeltipp bzw. jeder Nachholer legte einen Alarm an, der nie
+        # wieder zuging.
+        stand = await db.generated_pdfs.find_one(
+            {"id": appt["contract_id"]}, {"_id": 0, "nach_abholung_protokoll_id": 1})
+        if stand and stand.get("nach_abholung_protokoll_id") == protokoll_id:
+            return True
+        ok = False
+        erg: Dict[str, Any] = {}
+        # Verliert der Compare-and-Set gegen eine parallele Neuerzeugung
+        # (z. B. Termin verschoben), fehlten Preis/Schaeden in deren Fassung —
+        # also mit dem neuen Stand erneut versuchen (hoechstens dreimal).
+        for _versuch in range(3):
+            erg = {}
+            ok = await regenerate_contract_for_pickup(
+                contract_id=appt["contract_id"], dealer_id=appt.get("dealer_id", ""),
+                user={"id": appt.get("created_by"), "dealer_id": appt.get("dealer_id", ""),
+                      "role": "dealer"},
+                neuer_preis=neuer_preis, sondervereinbarung=sondervereinbarung,
+                korrekturen=korrekturen, neue_schaeden=neue_schaeden,
+                grund="abholung_abgeschlossen", protokoll_id=protokoll_id,
+                ergebnis=erg)
+            if ok or erg.get("grund") != "cas_verloren":
+                break
+        if not ok and erg.get("grund") in ("keine_aenderung", "nicht_gefunden"):
+            # Der Vertrag zeigt schon alles (bzw. ist geloescht / in Loeschung):
+            # kein Fehler, kein Alarm.
+            return True
         if ok:
             await log_activity_sicher(appt.get("dealer_id", ""), appt.get("created_by") or "",
                                       "vertrag.nach_abholung_aktualisiert",
@@ -689,6 +712,34 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
         log.exception("Vertrag %s nach Abholung nicht aktualisiert", appt.get("contract_id"))
         await betrieb.alarm(db, "vertrag_nach_abholung_offen", ref=str(appt.get("contract_id")),
                             protokoll_id=protokoll_id, fehler=str(exc)[:300])
+        return False
+
+
+async def vertrag_nach_abholung_sicherstellen(appt: dict, protokoll: dict) -> bool:
+    """Pruefbericht 20.09.2026 (V-25): Steht der Vertrag auf dem Stand dieses
+    finalen Protokolls? Fuer den Aufraeumjob: starb der Prozess zwischen dem
+    finalen Protokoll und dem Alarm, loeschte termin_nacharbeit_nachholen den
+    Merker, OHNE den Vertrag neu zu erzeugen. True = erledigt oder nichts zu
+    tun; False = gescheitert (der Alarm steht dann). Wirft nie."""
+    try:
+        if not appt.get("contract_id") or not protokoll \
+                or protokoll.get("status") != "final" or protokoll.get("superseded"):
+            return True
+        if "contract_id" in protokoll and \
+                (protokoll.get("contract_id") or None) != (appt.get("contract_id") or None):
+            # der Termin haengt inzwischen an einem anderen Vertrag — nicht anfassen
+            return True
+        korrekturen, neue_schaeden = await protokoll_korrekturen(appt, protokoll)
+        if protokoll.get("neuer_preis") is None \
+                and not (protokoll.get("sondervereinbarung") or "").strip() \
+                and not korrekturen and not neue_schaeden:
+            return True
+        return await vertrag_nach_abholung_aktualisieren(
+            appt, protokoll["id"], protokoll.get("neuer_preis"),
+            protokoll.get("sondervereinbarung"),
+            korrekturen=korrekturen, neue_schaeden=neue_schaeden)
+    except Exception:  # noqa: BLE001
+        log.exception("Vertragsstand nach Abholung zu Termin %s nicht geprueft", appt.get("id"))
         return False
 
 

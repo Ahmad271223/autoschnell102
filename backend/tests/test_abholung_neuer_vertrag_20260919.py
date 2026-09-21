@@ -102,7 +102,8 @@ def test_06_neue_fassung_traegt_korrekturen_und_schaeden():
     # Ohne Aenderung bleibt die alte Fassung stehen
     assert "and not korrigiert and not schaeden_neu:\n        return False" in q
     # Beweissicherung der alten Fassung (bestand schon, darf nicht wegfallen)
-    assert "generated_pdf_versions.insert_one" in q
+    # Pruefbericht 20.09.2026 (V-27): per Upsert statt insert_one
+    assert "generated_pdf_versions.update_one" in q and "$setOnInsert" in q
     assert '"version": alte_version + 1' in q
 
 

@@ -1056,6 +1056,13 @@ async def driver_appointments(driver=Depends(current_driver),
             "beweis_id": beweis_map.get(schluessel),
             "bericht_vorhanden": a.get("id") in mit_bericht,
             "status_changed_at": a.get("status_changed_at"),
+            # Pruefbericht 20.09.2026 (V-09): Stand des Termins — die App
+            # schickt ihn beim Annehmen mit, der Server lehnt einen veralteten
+            # Stand ab (vorher fehlte das Feld hier, die Pruefung lief leer).
+            "updated_at": a.get("updated_at"),
+            # R1-39: "Termin wurde geaendert, bitte erneut annehmen" — die App
+            # kannte den Hinweis, bekam das Kennzeichen aber nie.
+            "zuteilung_neu_wegen_aenderung": bool(a.get("zuteilung_neu_wegen_aenderung")),
         })
     return out
 
