@@ -47,7 +47,7 @@ from cleanup_service import run_cleanup_forever
 from snapshot_service import init_storage
 
 # Shared deps (DB connection, helpers) — required for index/seed setup.
-from indizes import _termin_unique_index, _unique_index_sicher  # noqa: F401
+from indizes import _termin_unique_index, _unique_index_sicher, unique_anlegen  # noqa: F401
 from deps import (client, db, kunden_nummern_nachziehen, log,
                   naechste_kunden_nr, now_iso)
 
@@ -344,7 +344,7 @@ async def features():
 
 
 @api.get("/health")
-async def health_check(response: Response):
+async def health_check(response: Response, request: Request = None):
     """Health-Check fuers Monitoring / Load Balancer / automatischen Neustart.
     Prueft die DB-Verbindung real (ping) — meldet 503, wenn die
     Datenbank haengt, damit ein Watchdog eingreifen kann.
@@ -360,7 +360,13 @@ async def health_check(response: Response):
     kern = await _kern_fehler()
     if kern:
         response.status_code = 503
-        return {"status": "unhealthy", "db": "up", "kern": kern}
+        # Pruefbericht 20.09.2026 (SV-07): Migrationsstand und fehlende
+        # Indizes nur fuer Berechtigte (wie /api/ready) — der Lastverteiler
+        # braucht nur den Code 503.
+        # (request fehlt nur beim direkten Aufruf im Prozess — der ist vertraut)
+        if request is None or await _darf_betriebsdaten_sehen(request):
+            return {"status": "unhealthy", "db": "up", "kern": kern}
+        return {"status": "unhealthy", "db": "up"}
     return {"status": "healthy", "db": "up"}
 
 
@@ -938,7 +944,14 @@ async def _kunden_nr_unique_index() -> None:
     vorhandene = {i["name"]: i async for i in db.dealers.list_indexes()}
     alt = vorhandene.get("kunden_nr_1")
     if alt is not None and not alt.get("unique"):
-        await db.dealers.drop_index("kunden_nr_1")
+        # Pruefbericht 20.09.2026 (AL-08): parallel startende Prozesse — hat
+        # ein anderer den alten Index schon entfernt, ist das kein Fehler.
+        from pymongo.errors import OperationFailure
+        try:
+            await db.dealers.drop_index("kunden_nr_1")
+        except OperationFailure as exc:
+            if exc.code != 27:              # IndexNotFound
+                raise
     if "kunden_nr_unique" not in vorhandene:
         await db.dealers.create_index("kunden_nr", unique=True, sparse=True,
                                       name="kunden_nr_unique")
@@ -990,31 +1003,34 @@ async def ensure_indexes():
     from indizes import email_eindeutigkeit_entfernen
     await email_eindeutigkeit_entfernen(db)
     await _unique_index_sicher(db.dealers, "user_id")
-    await db.vehicle_cache.create_index("mobile_ad_id", unique=True)
+    # Pruefbericht 20.09.2026 (SV-03): Unique-Indizes ueber unique_anlegen —
+    # eine Altdublette gibt eine klare Meldung und einen Alarm statt einer
+    # rohen Rueckverfolgung im Start (weich = Cache, kein Startabbruch).
+    await unique_anlegen(db.vehicle_cache, "mobile_ad_id", weich=True)
     # Genau EIN aktuelles Abholprotokoll je Termin (Race-Schutz: zwei
     # parallele Entwurf-Anlagen koennen sonst zwei "aktuelle" Versionen
     # erzeugen). Berichte: je Termin darf jede Versionsnummer nur einmal
     # existieren — der Verlierer eines Rennens bekommt DuplicateKey und
     # wiederholt mit frisch gelesener Version.
-    await db.pickup_protocols.create_index(
-        "appointment_id", unique=True,
+    await unique_anlegen(
+        db.pickup_protocols, "appointment_id",
         partialFilterExpression={"superseded": False},
         name="ein_aktuelles_protokoll_je_termin")
     # Pruefung 14.09.2026 (Liste 3, Nr. 1): ein Vertrag je Idempotenz-Schluessel
-    await db.generated_pdfs.create_index(
-        [("dealer_id", 1), ("user_id", 1), ("idempotency_key", 1)], unique=True,
+    await unique_anlegen(
+        db.generated_pdfs, [("dealer_id", 1), ("user_id", 1), ("idempotency_key", 1)],
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="vertrag_idempotenz")
     # Pruefung 14.09.2026 (Liste 4, Nr. 79): SMTP-Idempotenz — ein Eintrag je
     # Schluessel (parallele Upserts), nach 30 Tagen automatisch weg.
-    await db.mail_idempotenz.create_index("key", unique=True, name="mail_schluessel")
+    await unique_anlegen(db.mail_idempotenz, "key", name="mail_schluessel", weich=True)
     # Pruefung 14.09.2026 (A5): Versand-Schluessel ueberleben die Verlaufsliste
-    await db.versand_schluessel.create_index([("contract_id", 1), ("key", 1)], unique=True,
-                                             name="versand_schluessel")
+    await unique_anlegen(db.versand_schluessel, [("contract_id", 1), ("key", 1)],
+                         name="versand_schluessel", weich=True)
     await db.mail_idempotenz.create_index("begonnen", expireAfterSeconds=30 * 86400,
                                           name="mail_idempotenz_ttl")
-    await db.pickup_reports.create_index(
-        [("appointment_id", 1), ("version", 1)], unique=True,
+    await unique_anlegen(
+        db.pickup_reports, [("appointment_id", 1), ("version", 1)],
         name="berichtsversion_eindeutig")
     # Runde 21: Fahrerfotos laufen FAHRERFOTO_TAGE nach dem Hochladen ab
     # (cleanup_service.berichtsfotos_nach_frist_loeschen sucht nach created_at).
@@ -1091,8 +1107,8 @@ async def ensure_indexes():
     await db.generated_pdfs.create_index([("dealer_id", 1), ("created_at", -1)])
     # WhatsApp-Download-Link (09.09.2026): Token -> Vertrag, nur fuer
     # Vertraege mit Freigabe (partial), eindeutig.
-    await db.generated_pdfs.create_index(
-        "freigabe.token", unique=True, name="vertrag_freigabe_token",
+    await unique_anlegen(
+        db.generated_pdfs, "freigabe.token", name="vertrag_freigabe_token",
         partialFilterExpression={"freigabe.token": {"$exists": True}})
     # Audit-Log + Fehler-Meldungen (Admin-Bereich)
     await db.activity_logs.create_index([("created_at", -1)])
@@ -1170,9 +1186,9 @@ async def ensure_indexes():
     await db.generated_pdfs.create_index([("user_id", 1), ("created_at", -1)])
     await db.resale_listings.create_index([("vehicle_id", 1)])
     # Phase 3: Marktplatz
-    await db.dealer_invites.create_index("token", unique=True)
-    await db.network_members.create_index(
-        [("dealer_id", 1), ("buyer_user_id", 1)], unique=True)
+    await unique_anlegen(db.dealer_invites, "token")
+    await unique_anlegen(db.network_members, [("dealer_id", 1), ("buyer_user_id", 1)],
+                         weich=True)
     await db.listing_interest.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.listing_interest.create_index([("buyer_user_id", 1), ("created_at", -1)])
     # Audit 13.09.2026 (#18/#19/#27): neue Eindeutigkeitsregeln im Marktplatz
@@ -1192,9 +1208,7 @@ async def ensure_indexes():
     await _termin_unique_index()
     # Fahrer-Accounts + Dealer-Driver-Links (E-Mail ohne Index, Kontonummer: konto_indizes)
     await _unique_index_sicher(db.driver_accounts, "driver_code")
-    await db.dealer_drivers.create_index(
-        [("dealer_id", 1), ("driver_account_id", 1)], unique=True,
-    )
+    await unique_anlegen(db.dealer_drivers, [("dealer_id", 1), ("driver_account_id", 1)])
     await db.dealer_drivers.create_index("driver_account_id")
     # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
     # Audit 13.09.2026 (#36): Cache-Dubletten werden automatisch
@@ -1204,7 +1218,7 @@ async def ensure_indexes():
     await listings_cache_unique_index(db)
     # Snapshots: das Frontend pollt alle 4 s auf (id, dealer_id) — ohne Index
     # ist das ab ein paar tausend Snapshots ein Collection-Scan pro Poll.
-    await db.listing_snapshots.create_index("id", unique=True)
+    await unique_anlegen(db.listing_snapshots, "id", weich=True)
     await db.listing_snapshots.create_index([("dealer_id", 1), ("created_at", -1)])
     await db.listing_snapshots.create_index([("vehicle_id", 1), ("status", 1)])
     await db.listing_snapshots.create_index([("status", 1), ("created_at", 1)])
@@ -1232,7 +1246,7 @@ async def ensure_indexes():
     # Auto-Daten (dauerhaft, anonym — auto_daten.py): eindeutige Zufalls-id,
     # Suche nach Marke/Modell, Filter; KEIN Index auf irgendeine Quell-ID,
     # weil es keine gibt. Vertraege: created_at fuer die 90-Tage-Loeschung.
-    await db.admin_vehicle_data.create_index("id", unique=True)
+    await unique_anlegen(db.admin_vehicle_data, "id", weich=True)
     await db.admin_vehicle_data.create_index([("brand", 1), ("model", 1)])
     await db.admin_vehicle_data.create_index("purchase_price_cents")
     await db.generated_pdfs.create_index("created_at")
@@ -1593,14 +1607,10 @@ async def _alle_indexe():
     # fehlt der Index, gibt es einen Betriebsalarm.
     from beweis_service import beweis_indizes_sichern
     await beweis_indizes_sichern(db)
-    try:
-        await db.pickup_protocols.create_index(
-            [("appointment_id", 1), ("version", 1)], unique=True,
-            name="protokollversion_eindeutig")
-    except Exception as exc:
-        log.error("Index protokollversion_eindeutig: %s", exc)
-        if os.environ.get("APP_ENV", "").strip().lower() == "production":
-            raise
+    # SV-03/SV-04: ohne rohe Ausnahme — fehlt der Index, steht er in
+    # FEHLENDE_UNIQUE, und Produktion bricht gesammelt ab (on_start/_main).
+    await unique_anlegen(db.pickup_protocols, [("appointment_id", 1), ("version", 1)],
+                         name="protokollversion_eindeutig")
     try:
         # Gegenpruefung 12.09.2026: Der Zaehler "Freigaben" im Menue fragt alle
         # 20 s je offenem Tab — ohne Index durchsuchte das die ganze Sammlung.
@@ -1618,8 +1628,8 @@ async def _alle_indexe():
     # Bereinigung, und die Dublettenpruefung kann den Start nicht abbrechen.
     from indizes import abo_unique_index
     await abo_unique_index(db)
-    await db.manual_payments.create_index("vorgang_id", unique=True, sparse=True,
-                                          name="zahlung_je_vorgang")
+    await unique_anlegen(db.manual_payments, "vorgang_id", sparse=True,
+                         name="zahlung_je_vorgang")
     await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
     await db.betriebsalarme.create_index([("offen", 1), ("created_at", -1)])
     await db.betriebsalarme.create_index([("typ", 1), ("ref", 1), ("offen", 1)])

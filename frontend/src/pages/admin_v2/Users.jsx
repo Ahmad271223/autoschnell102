@@ -34,7 +34,10 @@ async function deleteUserSmart(u) {
     await api.delete(`/admin/users/${u.id}`);
     return true;
   } catch (e) {
-    if (e?.response?.status !== 409) throw e;
+    // Pruefbericht 20.09.2026 (AD-09): 409 kommt auch fuer einen Sucher,
+    // dessen Firma keinen Hauptaccount hat — dann NICHT die Rueckfrage
+    // "komplette Firma loeschen", sondern der echte Grund.
+    if (e?.response?.status !== 409 || u.role !== "dealer") throw e;
   }
   let vorschau = "";
   try {
@@ -63,13 +66,20 @@ export default function AdminUsers() {
   const [creating, setCreating] = useState(false);
   const [deleteUser, setDeleteUser] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  // Pruefbericht 20.09.2026 (AD-15/AD-16): Ladefehler nicht als "0 Konten /
+  // keine Nutzer gefunden" zeigen; eine gekuerzte Liste als solche kennzeichnen.
+  const [ladeFehler, setLadeFehler] = useState("");
+  const [gekuerzt, setGekuerzt] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get("/admin/users");
+      const { data, headers } = await api.get("/admin/users");
       setUsers(data.users || data || []);
+      setGekuerzt(headers?.["x-truncated"] === "1");
+      setLadeFehler("");
     } catch (e) {
+      setLadeFehler(errMsg(e, "Konten konnten nicht geladen werden"));
       toast.error(errMsg(e, "Fehler beim Laden"));
     } finally {
       setLoading(false);
@@ -155,7 +165,8 @@ export default function AdminUsers() {
     <div>
       <PageHeader
         title="Nutzer"
-        subtitle={`${users.length} Konten insgesamt`}
+        subtitle={ladeFehler && !users.length ? "Konten konnten nicht geladen werden"
+          : `${users.length} Konten insgesamt${gekuerzt ? " (Liste gekürzt)" : ""}`}
         action={
           <Button disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin legt Firmen an"}
             data-testid="admin-create-user-btn"
@@ -181,10 +192,22 @@ export default function AdminUsers() {
           />
         </div>
 
+        {gekuerzt && !loading && (
+          <div className="px-4 py-2 text-[12.5px] text-amber-200" data-testid="admin-users-gekuerzt"
+               style={{ borderBottom: "1px solid var(--wa-08)" }}>
+            Liste gekürzt: angezeigt werden die neuesten 1.000 Konten — ältere sind hier nicht sichtbar.
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-12 text-zinc-500 text-sm"><Spinner /> lade…</div>
+        ) : ladeFehler && users.length === 0 ? (
+          <div className="px-4 py-10 text-center" data-testid="admin-users-ladefehler">
+            <div className="text-[14px] text-red-300 mb-3">{ladeFehler}</div>
+            <Button size="sm" variant="secondary" onClick={load}>Erneut laden</Button>
+          </div>
         ) : filtered.length === 0 ? (
-          <EmptyState title="Keine Nutzer gefunden" hint="Versuche es mit einer anderen Suche." />
+          <EmptyState title="Keine Nutzer gefunden"
+                      hint={q.trim() ? "Versuche es mit einer anderen Suche." : "Es sind noch keine Konten angelegt."} />
         ) : (
           <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
             {filtered.map((u) => (

@@ -169,9 +169,15 @@ def _vom_code_gelesen() -> set:
     for p in BACKEND.rglob("*.py"):
         if any(t in p.parts for t in ("tests", "node_modules", "__pycache__")):
             continue
+        text = p.read_text(encoding="utf-8", errors="ignore")
         gelesen |= set(re.findall(
-            r'os\.environ(?:\.get\(|\[)\s*["\']([A-Z][A-Z0-9_]{2,})["\']',
-            p.read_text(encoding="utf-8", errors="ignore")))
+            r'os\.environ(?:\.get\(|\[)\s*["\']([A-Z][A-Z0-9_]{2,})["\']', text))
+        # Pruefbericht 20.09.2026 (DP-03): auch die Lese-Helfer (konfig.zahl_env
+        # und Verwandte). Sechs Namen, die NUR so gelesen werden, fehlten im
+        # Container — die Suche nach os.environ konnte sie nicht sehen.
+        gelesen |= set(re.findall(
+            r'\b(?:zahl_env|_zahl_env|_int_env|schalter_env)\(\s*["\']([A-Z][A-Z0-9_]{2,})["\']',
+            text))
     return gelesen
 
 

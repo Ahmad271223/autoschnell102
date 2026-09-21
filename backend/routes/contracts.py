@@ -1635,6 +1635,17 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    # Pruefbericht 20.09.2026 (P-05): fuer E-Mail GENAU eine gueltige Adresse.
+    # Vorher ging der freie Text ungeprueft weiter — per SMTP wurde er zum
+    # To-Kopf (Komma = mehrere Empfaenger), und eine vom Mail-Dienst
+    # abgelehnte Adresse endete als "bitte in ein paar Minuten erneut".
+    if body.channel == "email":
+        import email_service as _es
+        adresse = (body.recipient or "").strip()
+        if any(z in adresse for z in ",;") or not _es.gueltige_adresse(adresse):
+            raise HTTPException(422, "Bitte genau EINE gültige E-Mail-Adresse eingeben "
+                                     "(z. B. name@beispiel.de).")
+        body.recipient = adresse
     # Runde 16 (15.09.2026): Versand-Limit je Konto — kein Spam-/Kostenpfad
     # ueber frei eingetragene Empfaenger (Resend/SMTP).
     if not await _versand_limiter.check(f"konto:{user.get('id')}"):

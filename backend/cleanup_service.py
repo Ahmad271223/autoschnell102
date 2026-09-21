@@ -488,6 +488,7 @@ async def _cleanup_once(db) -> dict:
     stats["protokoll_freigaben_zurueckgenommen"] = \
         await protokoll_freigaben_nachziehen(db)
     stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
+    stats["protokoll_entwuerfe_ohne_termin"] = await verwaiste_protokoll_entwuerfe_loeschen(db, now)
     stats["fahrernamen_nachgezogen"] = await fahrernamen_nachziehen(db)
     stats["konten_ohne_firma_gesperrt"] = await konten_ohne_firma_sperren(db)
     stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)
@@ -709,7 +710,11 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         # Pruefung 14.09.2026 (Liste 4, Nr. 13): keine toten Verweise auf den
         # geloeschten Vertrag/Vorgang im Protokoll — der Beleg traegt den
         # Vermerk vertrag_geloescht, die IDs bleiben nur in vertrag_geloescht_ref.
+        # Pruefbericht 20.09.2026 (R1-30): auch die Freitexte (Notizen bis
+        # 5000 Zeichen, Sondervereinbarung, Preis-Notiz) — dort stehen oft
+        # Name, Telefon oder Absprachen mit dem Verkaeufer.
         upd = {"$set": {"seller_name": "", "place": "", "pickup_address": "",
+                        "notes": "", "sondervereinbarung": "", "preis_notiz": "",
                         "pii_geloescht_at": jetzt, "vertrag_geloescht": True, **offen}}
         unset = {**unset, "contract_id": "", "kaufvorgang_id": ""}
         if contract_id:
@@ -892,6 +897,36 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
     return n
 
 
+async def verwaiste_protokoll_entwuerfe_loeschen(db, now: datetime, mindestalter_min: int = 60,
+                                                 limit: int = 200) -> int:
+    """Pruefbericht 20.09.2026 (V-18): nicht abgeschlossene Protokolle, deren
+    Termin geloescht ist (Rennen Abschicken <-> Terminloeschung, abgebrochene
+    Laeufe). Entwuerfe haben weder PDF noch Unterschriften — Dateien entstehen
+    erst beim Abschluss —, es wird also nur das Dokument entfernt. Finale
+    Protokolle bleiben als Beleg IMMER stehen."""
+    grenze = (now - timedelta(minutes=mindestalter_min)).isoformat()
+    kandidaten = await db.pickup_protocols.aggregate([
+        {"$match": {"status": {"$in": ["entwurf", "zur_freigabe", "freigegeben"]},
+                    "$or": [{"updated_at": {"$lt": grenze}},
+                            {"updated_at": {"$exists": False}, "created_at": {"$lt": grenze}}]}},
+        {"$lookup": {"from": "appointments", "localField": "appointment_id",
+                     "foreignField": "id", "as": "termin"}},
+        {"$match": {"termin": {"$size": 0}}},
+        {"$project": {"_id": 0, "id": 1, "status": 1}},
+        {"$limit": limit},
+    ]).to_list(limit)
+    n = 0
+    for p in kandidaten:
+        try:
+            res = await db.pickup_protocols.delete_one({"id": p["id"], "status": p["status"]})
+            n += res.deleted_count
+        except Exception:  # noqa: BLE001
+            log.exception("Verwaistes Protokoll %s nicht geloescht", p.get("id"))
+    if n:
+        log.info("Aufraeumen: %d Protokoll-Entwuerfe ohne Termin entfernt", n)
+    return n
+
+
 async def protokoll_freigaben_nachziehen(db) -> int:
     """Pruefung 14.09.2026 (C19): Freigaben an geschlossenen Terminen
     zuruecknehmen, deren Ruecknahme beim Schliessen gescheitert war; der
@@ -1044,7 +1079,7 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
         await db.appointments.update_many(
             {"contract_id": contract_id},
             {"$set": {"contract_id": None, "seller_name": "", "seller_phone": "",
-                      "seller_email": "", "pickup_address": "",
+                      "seller_email": "", "pickup_address": "", "notes": "",
                       "pii_geloescht_at": jetzt, "updated_at": jetzt}})
     # 4) Verweise kappen (auch ohne PII-Bereinigung; idempotent)
     await db.appointments.update_many(
@@ -1829,7 +1864,7 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
         await db.appointments.update_one(
             {"id": a["id"]},
             {"$set": {"seller_name": "", "seller_phone": "", "seller_email": "",
-                      "pickup_address": "", "pii_geloescht_at": jetzt,
+                      "pickup_address": "", "notes": "", "pii_geloescht_at": jetzt,
                       "pii_grund": "termin_ohne_vertrag_frist", "updated_at": jetzt}})
         n += 1
     return n

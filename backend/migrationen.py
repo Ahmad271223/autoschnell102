@@ -628,16 +628,36 @@ def _main() -> int:
     # haette also bereits Migrationen und Seeds ausgefuehrt, bevor der
     # Serverstart abbricht.
     from production_check import pruefe_produktion
-    pruefe_produktion(log)
 
     async def lauf():
-        import server  # registriert ensure_indexes/seeds
+        # Pruefbericht 20.09.2026 (AL-13): ZUERST alle Module laden — erst dabei
+        # lesen sie ihre Zahlen aus der Umgebung (konfig.zahl_env), und nur dann
+        # kennt die Produktionspruefung jeden Tippfehler (vorher war
+        # konfig.FEHLERHAFT hier noch leer). Das Laden aendert nichts an der
+        # Datenbank — die Pruefung laeuft weiter VOR jeder Aenderung.
+        try:
+            import server  # registriert ensure_indexes/seeds
+        except Exception:
+            pruefe_produktion(log)   # klare Meldung, falls die Konfiguration schuld ist
+            raise
+        pruefe_produktion(log)
+        import indizes
         from deps import db
         ergebnis = await ausfuehren_oder_warten(
-            db, indexe=server.ensure_indexes,
+            # SV-04: ALLE Indizes. Vorher nur ensure_indexes — protokoll-
+            # version_eindeutig, zahlung_je_vorgang u. a. entstanden erst in den
+            # wartenden Web-Prozessen, deren Fehler nur als Warnung im Log standen.
+            db, indexe=server._alle_indexe,
             # Kontonummer (13.09.2026), Schritt 5: nur noch der Super-Admin
             seeds=(server.seed_super_admin,), warte_sekunden=300)
         log.info("Migration: %s (Version %d)", ergebnis, await aktuelle_version(db))
+        if indizes.FEHLENDE_UNIQUE and _ist_prod():
+            # SV-04: dieselbe Regel wie server.on_start — nur hier, BEVOR
+            # uvicorn ueberhaupt startet, und mit der vollstaendigen Liste.
+            log.error("Start ABGEBROCHEN: eindeutige Indizes fehlen: %s — Dubletten "
+                      "bereinigen (python scripts/dubletten_pruefen.py)",
+                      sorted(indizes.FEHLENDE_UNIQUE))
+            return 78
         return 0 if ergebnis in ("leader", "gewartet") else 1
 
     return asyncio.run(lauf())

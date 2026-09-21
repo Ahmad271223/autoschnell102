@@ -387,7 +387,9 @@ def test_52c_nutzerliste_riesige_seite_liefert_leere_liste_statt_500(welt):
     A = _m("routes.admin")
 
     async def lauf():
-        return await A.admin_list_users(_=SA, page=10 ** 16, limit=1000)
+        # Pruefbericht 20.09.2026 (AD-16): die Route setzt X-Truncated und
+        # bekommt dafuer die Antwort mitgegeben.
+        return await A.admin_list_users(Response(), _=SA, page=10 ** 16, limit=1000)
 
     assert welt.run(lauf()) == []
 

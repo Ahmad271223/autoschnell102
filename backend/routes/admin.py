@@ -569,7 +569,7 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
 
 
 @router.get("/admin/users")
-async def admin_list_users(_=Depends(current_admin),
+async def admin_list_users(response: Response, _=Depends(current_admin),
                            page: int = 1, limit: int = 1000):
     """Nutzerliste MIT Firmenname und Abo-Status — in 3 Abfragen gesamt
     statt 2 Abfragen JE NUTZER (vorher: bis zu 2001 Abfragen bei 1000
@@ -584,7 +584,10 @@ async def admin_list_users(_=Depends(current_admin),
     users = await db.users.find({}, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
                                       "mfa.pending_secret": 0, "mfa.wiederherstellung": 0,
                                       "current_session_id": 0}) \
-        .sort("created_at", -1).skip((page - 1) * limit).to_list(limit)
+        .sort("created_at", -1).skip((page - 1) * limit).to_list(limit + 1)
+    # Pruefbericht 20.09.2026 (AD-16): eine Zeile mehr lesen — gibt es sie,
+    # ist die Liste gekuerzt (X-Truncated), die Oberflaeche sagt es.
+    users = _seite_kopf(response, users, limit)
     for u in users:                     # nur der Schalter, nie das Geheimnis
         u["mfa_aktiv"] = bool((u.pop("mfa", None) or {}).get("aktiv"))
     dealer_ids = list({u.get("dealer_id") for u in users if u.get("dealer_id")})
@@ -778,6 +781,16 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                         ref=target["dealer_id"],
                         meta={"alter_chef": chef.get("kontonummer") or chef["id"],
                               "neuer_chef": target.get("kontonummer") or target["id"]})
+                else:
+                    # Pruefbericht 20.09.2026 (R1-35): Ohne anderen Chef setzte
+                    # dieser Weg nur role='dealer' — dealers.user_id zeigte
+                    # weiter auf das alte (geloeschte/herabgestufte) Konto.
+                    # current_firma/current_chef lassen nur den Zeiger gelten:
+                    # das befoerderte Konto hatte keine Chef-Rechte, und
+                    # Uebergaben gingen an das alte Zeiger-Konto.
+                    await db.dealers.update_one(
+                        {"id": target["dealer_id"]},
+                        {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
             if alte_rolle == "dealer" and target.get("dealer_id"):
                 # Runde 12: Der Hauptaccount wird NIE direkt herabgestuft.
                 # Vorher war es erlaubt, sobald kein weiterer Zugang

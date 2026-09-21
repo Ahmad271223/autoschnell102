@@ -146,7 +146,7 @@ Livegang (steht so auch in der [STAGING-CHECKLISTE](STAGING-CHECKLISTE.md)):
 1. **Vor dem öffentlichen Start eine ausdrückliche Vereinbarung bzw. einen
    offiziellen API-Zugang anstreben** (analog zur mobile.de Search-API);
    bis dahin die Abrufe minimal halten (Limit 3, 1 Abruf je Inserat,
-   1-Jahres-Cache — genau das belegen die Tests).
+   14-Tage-Cache, spätestens nach 21 Tagen gelöscht — genau das belegen die Tests).
 2. Die Drosselung und der Nachweis „kein Inserat doppelt" sind Argumente
    FÜR eine solche Vereinbarung, ersetzen sie aber nicht.
 3. Lasttests laufen ausschließlich gegen den Mock — nie gegen den

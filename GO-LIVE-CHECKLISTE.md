@@ -11,7 +11,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 3 | Datenverlust bei >500 Alt-Verträgen | ✅ | Backfill läuft bis zur Erschöpfung; Löschung nur bei nachweislich vorhandenem Datensatz; `VERTRAG_LOESCHUNG_AKTIV=false` = Dry-Run mit Löschvorschau; `scripts/vertraege_bestand_pruefen.py` vorab. |
 | 4 | Restore akzeptiert unvollständige Backups | ✅ | Harter Abbruch, Notfall nur mit `--notfall-unvollstaendig-akzeptieren`; S3 fehlt → Abbruch ohne `--ohne-s3`; Vor-/Nachvalidierung (Zählungen, Prüfsummen, Indizes). |
 | 5 | Restore kann gemischten Stand erzeugen | ✅ | Wartungsmodus (503) während des Umschaltens, Staging-Verzeichnisse mit atomarem Tausch, Rollback aller umgeschalteten Collections bei Fehler; Replica-Set-Option dokumentiert. |
-| 6 | Stripe-Kauf funktioniert nicht im Image | ✅ | Offizielles Stripe-SDK, Webhook-Signatur Pflicht, Feature-Flag (`/api/payments/config`), UI zeigt Stripe nur wenn aktiv; 9 Tests inkl. echter Signatur. **Echter Testkauf im Stripe-Testmodus auf Staging: 🔧** |
+| 6 | Stripe-Kauf funktioniert nicht im Image | ➖ entfällt seit 14.09.2026 (Stripe entfernt, Freischaltung per Rechnung) — *historisch:* | Offizielles Stripe-SDK, Webhook-Signatur Pflicht, Feature-Flag (`/api/payments/config`), UI zeigt Stripe nur wenn aktiv; 9 Tests inkl. echter Signatur. **Echter Testkauf im Stripe-Testmodus auf Staging: 🔧** |
 | 7 | Produktionsdeployment nie durchgespielt | 🔧 | CI startet jetzt den echten Compose-Stack (Mongo 8 + Auth, Migration, Proxy, Health/Ready). **Staging-Abnahme mit Bestandsdaten: DEPLOYMENT.md → Checkliste.** |
 
 ## Hoch
@@ -30,7 +30,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 17 | Unbegrenzte Hintergrundaufgaben | ✅ | Sofort-Anstöße begrenzt/dedupliziert (`LINK_JOB_SOFORT_MAX`). |
 | 18 | Startmigrationen in 8 Workern | ✅ | `migrationen.py` mit Sperre + Versionierung, vor den Workern; Fehler bricht in Produktion ab. |
 | 19 | Ressourcenbedarf | ✅ | 4 Worker, kein Browser mehr (Beweisdokument statt Snapshot, 10.09.2026), Limits in Compose, `maxPoolSize`; Lasttest-Skript `backend/scripts/lasttest.py` (gegen Staging mit `MOCK_PROVIDER_FETCH=true`) — **Lauf auf Staging 🔧 Betreiber**. |
-| 20 | Datenschutz/AGB widersprechen Code | 🔧 | Texte angeglichen (90 Tage, Empfänger, Fristen, USt), Fonts lokal, B2B-Bestätigung. **Platzhalter `[…]` ausfüllen + juristische Prüfung.** |
+| 20 | Datenschutz/AGB widersprechen Code | 🔧 | Texte angeglichen (Vertragsfrist 60 Tage, Empfänger, Fristen, USt), Fonts lokal, B2B-Bestätigung. **Platzhalter `[…]` ausfüllen + juristische Prüfung.** |
 | 21 | Backups nur lokal | 🔧 | Verschlüsselte Offsite-Kopie mit Object-Lock-Option (`BACKUP_S3_*`), Alter/Vollständigkeit in `/api/ready` und Betrieb; Prüfskript `python scripts/offsite_pruefen.py [--laden]` (Bucket erreichbar, Verschlüsselung, Object Lock, jüngstes Backup, Prüfsumme, Manifest). **Bucket anlegen + Skript monatlich.** |
 
 ## Mittel
@@ -54,7 +54,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | 36 | Korrekturversionen Race | ✅ atomarer Claim + Unique-Index |
 | 37 | Fahrer-Konfliktsuche | ✅ echte Endzustände |
 | 38 | Kundennummer >9999 | ✅ läuft 5-stellig weiter (kein Abbruch), Unique-Index |
-| 39 | Aufbewahrung Cache/Marktplatz | ✅ Cache 90 Tage, Interessen 180 Tage, gelöschte Inserate 90 Tage; Datenverzeichnis in Datenschutz §5 |
+| 39 | Aufbewahrung Cache/Marktplatz | ✅ Cache 14 Tage (spätestens nach 21 Tagen gelöscht), Interessen 180 Tage, gelöschte Inserate 90 Tage; Datenverzeichnis in Datenschutz §5 |
 | 40 | B2B ohne Verifikation | ✅ Pflicht-Bestätigung + USt-IdNr. mit Landesformat-Prüfung bei der Registrierung (`ustid.py`, 29 Länder; Handelsregister-Nr. weiter erlaubt) + Online-Prüfung beim EU-Dienst VIES durch den Admin (Freischaltungen → Prüfen, Ergebnis mit Firmenname/Adresse am Käufer gespeichert) |
 | 41 | Verkäuferadresse in Übersicht | ✅ standardmäßig eingeklappt |
 | 42 | Readiness nur Mongo | ✅ `/api/ready` |
@@ -67,7 +67,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 | # | Befund | Stand |
 |---|--------|-------|
 | 46 | Frontend ungetestet | ✅ Playwright-E2E (Rollen, Logins, Freischaltung, Fahrer, Marktplatz, Mobile) im CI-Job `e2e` |
-| 47 | Stripe-Erfolgsfall | ✅ Tests mit echter Signatur/Wiederholung; echter Testmodus-Kauf 🔧 |
+| 47 | Stripe-Erfolgsfall | ➖ entfällt seit 14.09.2026 (Stripe entfernt, Freischaltung per Rechnung) |
 | 48 | Providerintegration | ✅ Ausfallpfade simuliert (`tests/test_anbieter_fehlerfaelle.py`): Token ungültig, Guthaben leer, Anbieter-Limit, Zeitüberschreitung, Anbieter-5xx, kaputte Antwort, Tagesbudget → klare Nutzertexte (`anbieter_fehler.py`) und Betriebsalarm bei Token/Guthaben (max. 1/Std.); Probelauf mit echten Zugängen auf Staging ⏳ Betreiber |
 | 49 | Frontend-Audit wirkungslos | ✅ Gate im richtigen Ordner, blockierend |
 | 50 | Buildwarnungen unterdrückt | ✅ `CI=true`, Warnungen bereinigt |
@@ -100,9 +100,9 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 
 ## Was NUR du erledigen kannst (in dieser Reihenfolge)
 1. Zugangsdaten rotieren (alle), Sitzungen widerrufen, im Betriebsprotokoll dokumentieren.
-2. `.env` vollständig füllen: `PUBLIC_HOST`, Stripe-Test-/Live-Schlüssel + Webhook-Secret (Dashboard-Endpunkt `/api/webhook/stripe`), SMTP, Offsite-Bucket (`BACKUP_S3_*`).
+2. `.env` vollständig füllen: `PUBLIC_HOST`, SMTP bzw. `RESEND_API_KEY`, Offsite-Bucket (`BACKUP_S3_*`), `BETRIEB_MELDUNG_AN`. (Stripe entfällt seit 14.09.2026 — Freischaltung per Rechnung.)
 3. Datenschutz/AGB: Platzhalter `[…]` ausfüllen, USt-Entscheidung bestätigen, juristische Prüfung.
-4. Staging-Abnahme nach DEPLOYMENT.md (Update, Rollback, Backup/Restore, Stripe-Testkauf, Lasttest).
+4. Staging-Abnahme nach DEPLOYMENT.md (Update, Rollback, Backup/Restore, Lasttest).
 5. Erst danach: Merge + Deploy; `VERTRAG_LOESCHUNG_AKTIV` erst nach Backup + Bestandsprüfung scharf schalten.
 
 ## Pruefbericht Runde 6 (09/2026)

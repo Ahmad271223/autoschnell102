@@ -48,8 +48,11 @@ export default function Fahrer() {
     if (!window.confirm("Fahrer aus deiner Liste entfernen?")) return;
     setEntfernt(id);
     try {
-      await api.delete(`/drivers/${id}`);
-      toast.success("Entfernt");
+      const { data } = await api.delete(`/drivers/${id}`);
+      // Pruefbericht 20.09.2026 (U-160): "Termine konnten nicht vollstaendig
+      // bereinigt werden" kam als Hinweis zurueck und ging verloren.
+      if (data?.hinweis) toast.warning(data.hinweis, { duration: 10000 });
+      else toast.success("Entfernt");
     } catch (e) {
       toast.error(errMsg(e, "Fahrer konnte nicht entfernt werden"));
     } finally {

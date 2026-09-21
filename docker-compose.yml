@@ -286,6 +286,18 @@ services:
       # Nachpruefung 20.09.2026: fehlte — der Container blieb beim
       # Code-Standard 500 MB, egal was in der .env stand (server.py /ready).
       - MIN_FREI_MB=${MIN_FREI_MB:-500}
+      # Pruefbericht 20.09.2026 (DP-03): vom Code ueber konfig.zahl_env u. a.
+      # gelesen, erreichten den Container aber nicht (Vorgabewerte = Code)
+      - DATEI_LINK_TTL_SEKUNDEN=${DATEI_LINK_TTL_SEKUNDEN:-3600}
+      - MAX_IMAGE_EDGE=${MAX_IMAGE_EDGE:-1600}
+      - BEWEIS_FOTO_KANTE_ERSTE=${BEWEIS_FOTO_KANTE_ERSTE:-1000}
+      - BEWEIS_FOTO_KANTE=${BEWEIS_FOTO_KANTE:-640}
+      - BEWEIS_FOTO_QUALITAET_ERSTE=${BEWEIS_FOTO_QUALITAET_ERSTE:-68}
+      - BEWEIS_FOTO_QUALITAET=${BEWEIS_FOTO_QUALITAET:-62}
+      - BILD_PROXY_KANTE=${BILD_PROXY_KANTE:-640}
+      - BILD_PROXY_CACHE=${BILD_PROXY_CACHE:-400}
+      - LINK_JOB_PROCESSING_TTL=${LINK_JOB_PROCESSING_TTL:-240}
+      - LISTING_CACHE_KARENZ_TAGE=${LISTING_CACHE_KARENZ_TAGE:-7}
       # Backups: lokal im Volume + verschluesselte Offsite-Kopie (S3-kompatibel)
       - BACKUP_DIR=/backups
       - BACKUP_HOUR=${BACKUP_HOUR:-3}

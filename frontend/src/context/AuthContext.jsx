@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { aboNeuLadenAnmelden, api } from "@/lib/api";
 import { sitzungsSpeicher } from "@/lib/speicher";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
-import { TOKEN_APP, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
+import { TOKEN_APP, TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import { verbindungsGrund } from "@/components/VerbindungsFehler";
 
 const AuthCtx = createContext(null);
@@ -120,6 +120,14 @@ export const AuthProvider = ({ children }) => {
       // Zwei-Faktor (Admin/Super-Admin): noch kein Sitzungs-Token — die
       // Login-Seite fragt jetzt den Code aus der Authenticator-App ab.
       return { mfa_erforderlich: true, mfa_token: data.mfa_token };
+    }
+    if (data?.user?.role === "b2b_buyer") {
+      // Pruefbericht 20.09.2026 (U-145): Zwischenhaendler gehoeren in den
+      // Marktplatz, dessen Anmeldung TOKEN_KAEUFER liest. Vorher landete das
+      // Token unter TOKEN_APP — /markt kannte niemanden, und es hiess erneut
+      // anmelden. Login.jsx laedt danach den Marktplatz-Stand nach.
+      tokenSetzen(TOKEN_KAEUFER, data.token);
+      return data.user;
     }
     tokenSetzen(TOKEN_APP, data.token, { nurSitzung: !!data.user?.is_super_admin });
     await sitzungPruefen();

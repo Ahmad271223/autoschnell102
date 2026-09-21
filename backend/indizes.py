@@ -26,6 +26,62 @@ async def _index_steht(db, typ: str, ref: str) -> None:
     await alarm_schliessen(db, typ, ref=ref)
 
 
+async def unique_anlegen(coll, schluessel, *, name: str = None, weich: bool = False,
+                         **optionen) -> bool:
+    """Pruefbericht 20.09.2026 (SV-03): EIN Weg fuer die schlichten Unique-Indizes.
+
+    Vorher standen ein Dutzend Anlagen als nacktes create_index(unique=True)
+    im Start. Eine einzige Altdublette (z. B. nach dem Einspielen einer alten
+    Sicherung) warf DuplicateKeyError: 'python migrationen.py' endete mit
+    einer rohen Rueckverfolgung, uvicorn startete wegen '&&' nie, und der
+    Container startete endlos neu — ohne verstaendliche Meldung.
+
+    Jetzt: klare Meldung (Sammlung, Index, was zu tun ist) plus Betriebsalarm,
+    und die UEBRIGEN Indizes werden trotzdem angelegt.
+      hart (Standard): Eintrag in FEHLENDE_UNIQUE — in Produktion bricht der
+        Start danach gesammelt ab (server.on_start, migrationen._main), /health
+        meldet 503.
+      weich (Caches, Protokoll-Hilfssammlungen): nur Alarm, kein Abbruch.
+    Liefert True, wenn der Index steht."""
+    from pymongo.errors import OperationFailure
+    ref = f"{coll.name}.{name or '_'.join(f for f, _ in _schluessel_liste(schluessel))}"
+    datenbank = coll.database
+    try:
+        await coll.create_index(schluessel, unique=True,
+                                **({"name": name} if name else {}), **optionen)
+    except OperationFailure as exc:          # DuplicateKeyError ist eine OperationFailure
+        doppelt = exc.code in (11000, 11001) or "duplicate key" in str(exc).lower()
+        msg = (f"{ref}: " + ("doppelte Werte vorhanden" if doppelt
+                             else f"nicht anlegbar (Code {exc.code})")
+               + " — Unique-Index NICHT angelegt. "
+               + ("Bereinigen: python scripts/dubletten_pruefen.py" if doppelt
+                  else "Vorhandenen Index gleichen Namens/Schluessels pruefen "
+                       "(db.<sammlung>.getIndexes())."))
+        log.error("ensure_indexes: %s", msg)
+        try:
+            if weich:
+                from betrieb import alarm
+                await alarm(datenbank, "unique_index_fehlt_weich", ref=ref,
+                            fehler=str(exc)[:300])
+            else:
+                await _index_fehlt(datenbank, "unique_index_fehlt", ref=ref,
+                                   fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            if not weich:
+                FEHLENDE_UNIQUE.add(ref)
+            log.exception("Alarm fuer fehlenden Index %s nicht gesetzt", ref)
+        return False
+    try:
+        if weich:
+            from betrieb import alarm_schliessen
+            await alarm_schliessen(datenbank, "unique_index_fehlt_weich", ref=ref)
+        else:
+            await _index_steht(datenbank, "unique_index_fehlt", ref=ref)
+    except Exception:  # noqa: BLE001
+        FEHLENDE_UNIQUE.discard(ref)
+    return True
+
+
 async def _unique_index_sicher(coll, feld, abbruch_in_produktion: bool = True) -> bool:
     """Unique-Index nur anlegen, wenn keine Dubletten existieren (Runde 5).
     Vorher scheiterte die Anlage still, und die Eindeutigkeit (z.B. eine
@@ -293,15 +349,39 @@ async def _termin_unique_index() -> bool:
         await alarm(db, "termin_index_fehlt", ref="appointments", beispiele=beispiele)
         _in_produktion_abbrechen("termin_offen_je_vertrag: doppelte offene Termine")
         return False
+    from pymongo.errors import OperationFailure
+
+    def _passt(info: dict) -> bool:
+        i = info.get(name) or {}
+        return bool(i.get("unique")) and i.get("partialFilterExpression") == filter_
     try:
-        vorhanden = await db.appointments.index_information()
-        alt = vorhanden.get(name)
-        if alt is not None and alt.get("partialFilterExpression") != filter_:
-            # Filter hat sich geaendert (Runde 17: $gt "") -> neu anlegen
-            await db.appointments.drop_index(name)
-        await db.appointments.create_index(
-            [("dealer_id", 1), ("contract_id", 1)], unique=True,
-            name=name, partialFilterExpression=filter_)
+        # Pruefbericht 20.09.2026 (AL-08): Anfuehrer und wartende Prozesse
+        # fuehren das GLEICHZEITIG aus. Vorher brach ein Drop, den ein anderer
+        # Prozess schon erledigt hatte (IndexNotFound), oder ein von ihm
+        # abgebrochener Aufbau den Start in Produktion ab. Jetzt: neu lesen,
+        # hoechstens dreimal versuchen, nur bei echtem Scheitern abbrechen.
+        for versuch in range(3):
+            try:
+                vorhanden = await db.appointments.index_information()
+                if _passt(vorhanden):
+                    break
+                alt = vorhanden.get(name)
+                if alt is not None and alt.get("partialFilterExpression") != filter_:
+                    # Filter hat sich geaendert (Runde 17: $gt "") -> neu anlegen
+                    try:
+                        await db.appointments.drop_index(name)
+                    except OperationFailure as exc:
+                        if exc.code != 27:          # IndexNotFound: der andere war schneller
+                            raise
+                await db.appointments.create_index(
+                    [("dealer_id", 1), ("contract_id", 1)], unique=True,
+                    name=name, partialFilterExpression=filter_)
+                break
+            except OperationFailure as exc:
+                if _passt(await db.appointments.index_information()):
+                    break
+                if exc.code not in (85, 86, 68, 27, 276, 12587) or versuch == 2:
+                    raise
         FEHLENDE_UNIQUE.discard("appointments.termin_offen_je_vertrag")
         await alarm_schliessen(db, "termin_index_fehlt", ref="appointments")
         return True

@@ -2,6 +2,7 @@ import { neueFassungLaden } from "@/lib/fassung";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import { useBuyer } from "@/context/BuyerContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { sicheresZiel } from "@/lib/rollen";
@@ -11,6 +12,7 @@ import RechtsLinks from "@/components/RechtsLinks";
 
 export default function Login() {
   const { login, loginMfa } = useAuth();
+  const kaeufer = useBuyer();
   const [mfaToken, setMfaToken] = useState(null);   // Zwei-Faktor-Schritt (Admin)
   const [mfaCode, setMfaCode] = useState("");
   const nav = useNavigate();
@@ -43,6 +45,10 @@ export default function Login() {
         setMfaToken(u.mfa_token);
         toast.message("Bitte den Code aus deiner Authenticator-App eingeben");
         return;
+      }
+      if (u?.role === "b2b_buyer") {
+        // U-145: Marktplatz-Stand laden, bevor dorthin gewechselt wird.
+        try { await kaeufer?.refresh?.(); } catch { /* Marktplatz meldet sich selbst */ }
       }
       toast.success("Willkommen zurück");
       // Dem ?next aus der Adresszeile wird nur gefolgt, wenn das Ziel zur

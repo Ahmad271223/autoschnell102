@@ -43,6 +43,10 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
   }
 
   test("anlegen ueber die Dialoge, danach Anmeldung in allen vier Masken", async ({ page, browser }) => {
+    // Pruefbericht 20.09.2026 (AD-05/O2): "Fertig" fragt nach, ob das Passwort
+    // notiert ist (sonst ist es verloren). Der Test hat es — er bestaetigt.
+    const rueckfragen = [];
+    page.on("dialog", (d) => { rueckfragen.push(d.message()); d.accept(); });
     await h.authPage(page, "app", await h.superAdmin());
 
     // 1. Firma (Chef-Konto)
@@ -55,6 +59,7 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
     const chefNr = await kontonummerAusKarte(page);
     expect(chefNr).toMatch(/^\d+$/);
     await page.getByTestId("zugangsdaten-fertig").click();
+    expect(rueckfragen.some((m) => m.includes("Passwort notiert"))).toBe(true);
     const chef = (await h.superGet("/admin/users")).find((u) => u.email === mails.chef);
     expect(chef?.kontonummer).toBe(chefNr);
     await expect(page.getByTestId(`user-kontonummer-${chef.id}`)).toHaveText(`Kontonummer ${chefNr}`);

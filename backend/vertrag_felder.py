@@ -59,9 +59,18 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
         "vehicle_license_plate": ("license_plate", "kennzeichen"),
         "vehicle_damage_note": ("damage_note",),
     }
+    # Pruefbericht 20.09.2026 (P-06): Die FIN schickt der Dialog IMMER mit
+    # (vorbelegt aus dem Inserat). Ein bewusst geleertes Feld heisst "keine
+    # FIN" — vorher machte take() daraus None, und die Inserats-FIN stand
+    # wieder im Vertrag.
+    leerbar = {"vehicle_vin"}
     for src, targets in veh_map.items():
         val = take(src)
         if val is None:
+            if src in leerbar and isinstance(contract.get(src), str) \
+                    and not contract[src].strip():
+                for t in targets:
+                    v[t] = ""
             continue
         for t in targets:
             v[t] = val

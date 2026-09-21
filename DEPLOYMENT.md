@@ -8,7 +8,9 @@ läuft in Docker-Containern; du brauchst keine tiefen Server-Kenntnisse.
   gleichzeitige Vergleiche: **CCX53** (32 Kerne, 128 GB). Zum Starten
   reicht **CPX41** (8 Kerne) — später per Klick vergrößern.
 - Deine Domain (z. B. autoschnell.de), DNS auf die Server-IP zeigend.
-- Docker + Docker Compose auf dem Server (`apt install docker.io docker-compose-plugin`).
+- Docker + Docker Compose auf dem Server — **aus der offiziellen Docker-Quelle**
+  (`docker-ce` + `docker-compose-plugin`, genau so in Schritt 4 unten). Das
+  Ubuntu-Paket `docker.io` hat kein `docker-compose-plugin`, der Befehl scheitert.
 
 ## 1. Projekt auf den Server laden
 ```bash
@@ -59,8 +61,14 @@ des Neubaus des Oberflaechen-Containers rund 45 Sekunden lang 502 (Vorfall
 ganze Zeit gesund war.
 
 ```bash
-cd /opt/autoschnell && sh deploy/rollout.sh     # zuerst prod2, nach "FERTIG" prod1
+# 1) prod2 (erster Server — die Abschlussprobe wertet das neue Bundle hier nur als Zwischenstand):
+cd /opt/autoschnell && ERSTER_SERVER=1 sh deploy/rollout.sh
+# 2) erst nach "FERTIG" auf prod2, dann prod1:
+cd /opt/autoschnell && sh deploy/rollout.sh
 ```
+
+Ohne `ERSTER_SERVER=1` endet die Abschlussprobe auf prod2 mit Code 3 (das
+neue Oberflaechen-Skript fehlt auf prod1 noch — 404).
 
 Dauer je Server rund drei Minuten (zweimal 60 s Wartezeit fuer den Load
 Balancer). Waehrenddessen traegt der andere Server die Last allein.
@@ -330,6 +338,11 @@ auf einer 160-GB-Platte. Jetzt (`BACKUP_DATEIEN=bucket`, Standard sobald
 - **Zusätzlich empfohlen:** im Cloudflare-Dashboard beim Datei-Bucket
   (`S3_BUCKET`) die **Versionierung** einschalten — dann lässt sich auch ohne
   Sicherung jede versehentlich gelöschte Datei sofort zurückholen.
+- **Plattenbedarf lokal:** ≈ 15 × Größe eines DB-Dumps (14 Stände + Arbeitsordner;
+  Messwert: `docker compose exec backend sh -c 'du -sh /backups/autoschnell-*'`).
+  Im Spiegel-Modus kommen 15 × Datei-Speicher dazu — ohne `BACKUP_S3_BUCKET`
+  deshalb `BACKUP_DATEIEN=aus` setzen oder einen Sicherungs-Bucket einrichten,
+  sonst läuft die Platte voll (siehe „Speicher voll“).
 - `BACKUP_DATEIEN=spiegel` schaltet den alten Weg wieder ein (nur für kleine
   Installationen), `aus` sichert keine Dateien. Sonst `BACKUP UNVOLLSTAENDIG` (Exit 2) mit
 Begründung in `manifest.json` → `unvollstaendig` und Betriebsalarm
@@ -513,7 +526,7 @@ ersten Start automatisch; Protokoll in `schema_migrations`.
 
 Seit Runde 17 (08.09.2026) außerdem:
 - **`VERTRAG_LOESCHUNG_AKTIV` muss in der Produktions-.env stehen** — `true`
-  (90-Tage-Löschung scharf) oder `false` (Trockenlauf). Fehlt die Variable
+  (Löschung nach `VERTRAG_AUFBEWAHRUNG_TAGE`, Standard 60 Tage, scharf) oder `false` (Trockenlauf). Fehlt die Variable
   ganz, bricht der Start ab (bewusste Entscheidung statt Vergessen).
 - Die Betrieb-Seite im Admin zeigt `termin_index_aktiv` und
   `fahrzeug_index_aktiv`. Fehlt einer der beiden Unique-Indizes wegen
@@ -527,7 +540,7 @@ Seit Runde 17 (08.09.2026) außerdem:
 - Bricht ein Rollout ab, bleibt der Server im Drain (siehe oben,
   `deploy/freigeben.sh`).
 
-## Auto-Daten & 90-Tage-Löschung
+## Auto-Daten & Vertragslöschung (60 Tage)
 - Kaufverträge (Verkäufer-Personendaten, PDF, Versionen, Versandstatus)
   werden nach `VERTRAG_AUFBEWAHRUNG_TAGE` (Standard 60) vom stündlichen
   Aufräumjob **vollständig gelöscht**; Terminverweise auf den Vertrag werden
@@ -895,12 +908,31 @@ Permissions-Policy und `Content-Security-Policy: frame-ancestors 'none'`
 für ALLE Antworten (auch die React-Oberfläche). Prüfen nach dem Start:
 `curl -sI https://PUBLIC_HOST/ | grep -i -E "strict|frame|content-type-options"`.
 
+### Speicher voll
+Anzeichen: `/api/ready` meldet zu wenig freien Speicher (unter `MIN_FREI_MB`),
+die Sicherung endet mit Exit 1, Uploads scheitern.
+
+1. Nachsehen: `df -h /` und `docker system df`; die Sicherungen mit
+   `docker compose exec backend sh -c 'du -sh /backups/* | sort -h | tail -20'`.
+2. Gefahrlos löschen darf man:
+   - ältere Sicherungsordner `/backups/autoschnell-*` — **den jüngsten mit
+     `BACKUP OK` immer behalten**;
+   - Reste abgebrochener Läufe: `/backups/.tmp-autoschnell-*` und `/backups/.tmp-*.tar.gz`;
+   - nach einem geprüften Restore die Rückfalllinie: Datenbank `<db>__vorher_<zeit>`
+     und die Ordner `uploads.vorher-<zeit>` / `local_storage.vorher-<zeit>`;
+   - alte Docker-Images: `docker image prune -a` (laufende bleiben).
+3. **Wichtig:** Die Rotation (14 Stände) läuft erst **nach einem erfolgreichen
+   Lauf**. Scheitert die Sicherung an voller Platte, bleiben alle alten Stände
+   liegen, bis von Hand Platz geschaffen ist. Danach die Sicherung nachholen:
+   `docker compose exec backend python scripts/backup_mongo.py`.
+
 ### Ressourcen
 Standard 4 Worker, seit 10.09.2026 ohne Browser (Beweisdokumente
 entstehen mit ReportLab; je Dokument mit 20 Fotos etwa 1–2 s Rechenzeit und
-1–2,5 MB in R2 — bei 100.000 neuen Inseraten im Monat und 60 Tagen
-Aufbewahrung grob 0,2–0,5 TB; Entscheidung Ahmad 14.09.2026: keine Frist
-über 60 Tage, Backups offsite 14 Archive). `docker-compose.yml`
+1–2,5 MB in R2). Seit 18.09.2026 entsteht ein Beweisdokument nur noch auf
+Knopfdruck (`BEWEIS_AUTOMATISCH`) und wird 30 Tage aufbewahrt — Dauerstand
+rund 6 GB (Rechnung im Abschnitt Beweisdokument). Entscheidung Ahmad
+14.09.2026: keine Frist über 60 Tage, Backups offsite 14 Archive. `docker-compose.yml`
 setzt Speicher-/CPU-Limits (`BACKEND_MEM_LIMIT`, `MONGO_MEM_LIMIT`, …) und
 begrenzt den Mongo-Pool (`maxPoolSize=20` in MONGO_URL). Faustregel:
 Backend-RAM ≈ 400 MB × Worker + 500 MB.
@@ -1972,7 +2004,7 @@ behoben (A `d051d02`, B `3fdc655`, C `729a7c1`, D `8ab1d50`). Neue Regeln, die n
 
 Entscheidung Ahmad (16.09.2026): **höchstens 400 neue Anbieter-Abrufe je Konto und Tag**, über
 alle Quellen (mobile.de, AutoScout, Kleinanzeigen): `ANBIETER_TAGESLIMIT_JE_KONTO` (Compose-Vorgabe
-400; 0 = aus). Gezählt wird nur ein echter Abruf: bekannte Links aus dem Speicher (90 Tage),
+400; 0 = aus). Gezählt wird nur ein echter Abruf: bekannte Links aus dem Speicher (14 Tage, spätestens nach 21 Tagen gelöscht),
 Mitwarten an einem laufenden Abruf und technisch gescheiterte Abrufe (Rückbuchung) kosten nichts.
 Der 401. Abruf bekommt 429 mit klarer Meldung („Tageslimit für neue Links erreicht … morgen
 erneut“), ein Link-Job scheitert sofort ohne weitere Versuche. Firmen- und Gesamtlimit bleiben aus
@@ -2087,7 +2119,7 @@ Neu:
   wenn die Erzeugung gescheitert ist. Nach dem Vertragsversand (WhatsApp **oder** E-Mail) fragt der
   Versand-Dialog einmal: „Beweisdokument erstellen lassen?" → *Ja, erstellen* / *Nein, danke*.
 - **Datenstand:** Angefordert wird mit dem Stand aus dem Inseratsspeicher (`listings_cache`,
-  90 Tage) — ersatzweise mit den beim Vergleich am Fahrzeug gespeicherten Daten. Die Fotos holt der
+  14 Tage, spätestens nach 21 Tagen gelöscht) — ersatzweise mit den beim Vergleich am Fahrzeug gespeicherten Daten. Die Fotos holt der
   Worker beim Erzeugen vom Portal; ist das Inserat dann schon offline, entsteht das Dokument ohne
   Fotos (die Fotoadressen stehen weiter im Anhang). Wer das Dokument sicher mit Fotos will, fordert
   es am selben Tag an.

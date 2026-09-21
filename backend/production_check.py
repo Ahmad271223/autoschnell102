@@ -425,13 +425,14 @@ def pruefe_produktion(log) -> None:
         # Trockenlauf, sondern vergessen — dann startet Produktion nicht.
         # Ein ausdrueckliches false bleibt erlaubt (Warnung unten).
         fehler.append("VERTRAG_LOESCHUNG_AKTIV fehlt in der .env: bewusst 'true' "
-                      "(90-Tage-Loeschung scharf) oder 'false' (Trockenlauf) setzen.")
+                      "(Vertragsloeschung nach VERTRAG_AUFBEWAHRUNG_TAGE, Standard 60, "
+                      "scharf) oder 'false' (Trockenlauf) setzen.")
     elif ist_prod:
         # Nachpruefung Runde 14 (Nr. 97): der Trockenlauf ist die dokumentierte
         # Go-Live-Voreinstellung — wird das Scharfschalten aber vergessen,
-        # laeuft die versprochene 90-Tage-Loeschung (und die Termin-Frist
+        # laeuft die versprochene Vertragsloeschung (und die Termin-Frist
         # ohne Vertrag) in Produktion nie. Deshalb laut sagen, nicht abbrechen.
-        warnungen.append("VERTRAG_LOESCHUNG_AKTIV fehlt/false: 90-Tage-Loeschung von "
+        warnungen.append("VERTRAG_LOESCHUNG_AKTIV fehlt/false: die Loeschung von "
                          "Vertraegen laeuft nur als Vorschau (Trockenlauf) — nach "
                          "Bestandspruefung und Backup auf true setzen (DEPLOYMENT.md).")
     # Seit 10.09.2026 kein Browser mehr (Beweisdokument statt Snapshot).

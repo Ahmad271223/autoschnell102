@@ -77,7 +77,10 @@ Befehl und Abnahmekriterium stehen jeweils dabei.
   docs/kleinanzeigen-abruf.md. **Keine Lasttests gegen echte Anbieter**
   (der Lasttest verweigert den Start ohne Mock — automatisiert geprüft).
 
-## 7. Stripe (kann nach dem Start folgen; manuelle Freischaltung reicht)
+## 7. Stripe — entfällt seit 14.09.2026
+
+Stripe ist entfernt (Entscheidung Ahmad: Rechnung, Zahlung, dann Zugangsdaten);
+es gibt keinen Webhook mehr. Der folgende Abschnitt ist nur noch historisch.
 
 - [ ] Live-Keys (`STRIPE_API_KEY`) + Webhook-Endpunkt
   `https://…/api/webhook/stripe` im Stripe-Dashboard anlegen und das

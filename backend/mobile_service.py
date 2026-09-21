@@ -1052,14 +1052,28 @@ def _resolve_model(make_entry: Dict[str, Any], vehicle: dict) -> Optional[str]:
             continue
         if norm in models:
             return models[norm]
+        # Pruefbericht 20.09.2026 (B-03): zuerst die VOLLE Bezeichnung. Die
+        # Verkuerzung unten begann bei len-1 — 'CLS' wurde so zur CL-Klasse,
+        # 'GLS' zur GL-Klasse, 'Actros' zur A-Klasse, und das still als
+        # "aufgeloest". Jetzt: <Name>-Klasse, dann ein Katalogname, der mit
+        # dem vollen Namen beginnt ('SLS' -> 'SLS AMG').
+        treffer = sorted((n for n in models if n.startswith(norm + "klasse")), key=len)
+        if not treffer and len(norm) >= 3:
+            treffer = sorted((n for n in models if n.startswith(norm)), key=len)
+        if treffer:
+            return models[treffer[0]]
         # Prefix shrink — e.g. mobile.de catalogue has 'C-Klasse' (norm=cklasse)
         # but the ad reports model_label 'C 200' (norm=c200). Try shrinking
         # the candidate one char at a time and look for a model name that
         # *starts with* that prefix.
+        # B-03: die "<x>-Klasse"-Zuordnung nur fuer Typbezeichnungen MIT
+        # Ziffern ('C 200', 'ML 350'); reine Namen ('Passat Variant') nur auf
+        # einen exakt vorhandenen kuerzeren Namen ('Passat').
+        mit_ziffer = bool(re.search(r"\d", norm))
         for length in range(len(norm) - 1, 0, -1):
             prefix = norm[:length]
             for mname_norm, mid in models.items():
-                if mname_norm == prefix or mname_norm.startswith(prefix + "klasse"):
+                if mname_norm == prefix or (mit_ziffer and mname_norm.startswith(prefix + "klasse")):
                     return mid
             # Also try matching a model whose first token equals the prefix
             # (e.g. 'passatvariant' → first try 'passat' which exists).

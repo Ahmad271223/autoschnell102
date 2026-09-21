@@ -147,6 +147,14 @@ def regeln_validieren(rohe: Any) -> Dict[str, Any]:
                 # gespeichert — die Portal-Bauer rechnen int(None) und jeder
                 # Vergleich brach mit 500 ab. Ohne den Schluessel gilt der
                 # Standardwert des Bauers (z.B. 5 PS, 30.000 km, 1 Jahr).
+        # Pruefbericht 20.09.2026 (B-02): jedes Zahlenfeld wurde nur einzeln
+        # geprueft — "min 200000 / max 1000" oder "von 2024 / bis 2001" wurde
+        # gespeichert, und jede Suche fand danach schlicht nichts.
+        for unten, oben in (("min", "max"), ("from", "to")):
+            if neu.get(unten) is not None and neu.get(oben) is not None \
+                    and neu[unten] > neu[oben]:
+                raise RegelFehler(f"{regel}: '{unten}' ({neu[unten]}) ist größer als "
+                                  f"'{oben}' ({neu[oben]}) — bitte die Grenzen tauschen")
         if regel == "country" and "codes" in eintrag:
             codes = eintrag.get("codes") or []
             if not isinstance(codes, list):

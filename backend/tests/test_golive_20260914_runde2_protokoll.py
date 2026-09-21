@@ -291,7 +291,9 @@ def test_f1_f2_geloeschter_termin_waehrend_abschicken_und_abschluss(welt, monkey
     monkeypatch.setattr(P, "_fahrzeug_und_vertrag", _weg)
     code, _ = _fehler(w, P.submit_protocol(t.aid, w.driver))
     monkeypatch.setattr(P, "_fahrzeug_und_vertrag", echt)
-    assert code == 404 and _doc(w, "pickup_protocols", t.pid)["status"] == "entwurf"
+    # Pruefbericht 20.09.2026 (V-18): der zurueckgenommene Entwurf gehoert zu
+    # keinem Termin mehr und wird entfernt (vorher blieb er verwaist liegen).
+    assert code == 404 and _doc(w, "pickup_protocols", t.pid) is None
     # F1: Termin verschwindet waehrend des Abschlusses -> Rollback, nicht final
     t2 = _abholung(w, name="f1")
 

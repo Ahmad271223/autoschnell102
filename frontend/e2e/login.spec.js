@@ -53,6 +53,14 @@ test.describe("Anmeldung per Formular", () => {
     await expect(page.getByTestId("markt-page")).toBeVisible();
   });
 
+  test("Zwischenhaendler ueber die normale Anmeldung landet angemeldet im Marktplatz (U-145)", async ({ page }) => {
+    // Pruefbericht 20.09.2026: vorher lag das Token unter dem App-Schluessel,
+    // /markt kannte niemanden und schickte zur zweiten Anmeldung.
+    await h.formLogin(page, "auth", buyer);
+    await expect(page).toHaveURL(/\/markt\/?$/);
+    await expect(page.getByTestId("markt-page")).toBeVisible();
+  });
+
   test("Einladungslink: Zwischenhaendler meldet sich an und tritt dem Netzwerk bei", async ({ page }) => {
     expect(einladung.link).toBe(`/markt/login?invite=${einladung.token}`);
     await h.formLogin(page, "buyer", buyer, { pfad: einladung.link });

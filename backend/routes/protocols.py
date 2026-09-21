@@ -1353,6 +1353,14 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
         # verwaister Freigabevorgang beim Chef.
         await _freigabe_zuruecknehmen(
             {"id": doc["id"], "status": ZUR_FREIGABE, "freigabe_stand": jetzt}, None)
+        # Pruefbericht 20.09.2026 (V-18): Der zurueckgenommene Entwurf gehoert
+        # zu keinem Termin mehr. Lief das Entwurf-Aufraeumen der Terminloeschung
+        # schon VORHER, bliebe er fuer immer liegen. Entwuerfe haben weder PDF
+        # noch Unterschriften (die entstehen erst beim Abschluss).
+        try:
+            await db.pickup_protocols.delete_one({"id": doc["id"], "status": "entwurf"})
+        except Exception:  # noqa: BLE001  (der Aufraeumjob holt es nach)
+            log.exception("Verwaister Protokoll-Entwurf %s nicht geloescht", doc["id"])
         raise HTTPException(404, "Termin nicht gefunden")
     if (frisch.get("status") or "offen") in _ABGESCHLOSSEN:
         await _freigabe_zuruecknehmen(
