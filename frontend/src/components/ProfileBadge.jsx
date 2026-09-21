@@ -12,14 +12,20 @@ import { Globe2, Flag, Loader2, ArrowLeftRight } from "lucide-react";
 export default function ProfileBadge({ onChange }) {
   const [profile, setProfile] = useState(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
+  // Pruefbericht 20.09.2026 (K-03/U-137): Bei einem Ladefehler zeigte das
+  // Abzeichen "Inland" — geraten. Ein Klick darauf schaltete dann womoeglich
+  // ungewollt auf Export um. Jetzt: "unbekannt", Klick laedt neu.
+  const [unbekannt, setUnbekannt] = useState(false);
+  const laden = () => {
+    setUnbekannt(false);
     api.get("/dealer/settings")
       .then((r) => setProfile(r.data?.active_profile || "inland"))
-      .catch(() => setProfile("inland"));
-  }, []);
+      .catch(() => { setProfile(null); setUnbekannt(true); });
+  };
+  useEffect(() => { laden(); }, []);
 
   const toggle = async () => {
+    if (unbekannt) { laden(); return; }
     if (busy || !profile) return;
     const next = profile === "inland" ? "export" : "inland";
     setBusy(true);
@@ -37,6 +43,16 @@ export default function ProfileBadge({ onChange }) {
     }
   };
 
+  if (unbekannt) {
+    return (
+      <button onClick={toggle} data-testid="profile-badge-unbekannt"
+              title="Das aktive Profil konnte nicht geladen werden. Klick lädt neu."
+              className="flex items-center gap-2 px-3.5 py-2 rounded-xl shrink-0 border text-sm"
+              style={{ borderColor: "var(--border-default)", color: "var(--text-secondary)" }}>
+        <ArrowLeftRight size={13} /> Profil unbekannt – neu laden
+      </button>
+    );
+  }
   if (!profile) return null;
 
   const isInland = profile === "inland";

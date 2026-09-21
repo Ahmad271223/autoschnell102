@@ -167,7 +167,9 @@ _SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "created_at", "updated_at",
                         "digital_vertragstext_standard",
                         # 20.09.2026: wirksame Besondere Vereinbarungen
                         "sondervereinbarungen_effektiv",
-                        "sondervereinbarung_standard_text"}
+                        "sondervereinbarung_standard_text",
+                        # 20.09.2026 (B19): persoenlich ueberschriebene Felder
+                        "eigene_einstellungen"}
 
 
 def _sucher_sicht(dealer: dict) -> dict:
@@ -379,6 +381,41 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
                        meta={"felder": sorted(k for k in update if k != "updated_at")})
     dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0})
     return dealer
+
+
+class OverrideZuruecksetzenIn(BaseModel):
+    # Leer/fehlend = alle persoenlichen Werte zuruecksetzen.
+    felder: Optional[list[str]] = Field(default=None, max_length=60)
+
+
+@router.post("/dealer/settings/zuruecksetzen")
+async def settings_zuruecksetzen(body: OverrideZuruecksetzenIn, user=Depends(current_firma)):
+    """Persoenliche Werte eines Suchers loeschen — danach gelten wieder die
+    Vorgaben des Chefs (und jede spaetere Aenderung des Chefs kommt an).
+
+    Pruefbericht 20.09.2026 (B19): Einmal gespeichert, blieben abweichende
+    Werte fuer immer als persoenlicher Override stehen; die Oberflaeche bot
+    keinen Weg zurueck."""
+    from deps import SUCHER_SETTINGS_FIELDS, effective_dealer, ist_haupt_chef, log_activity_sicher
+    if await ist_haupt_chef(user):
+        raise HTTPException(400, "Der Hauptaccount hat keine persönlichen Abweichungen — "
+                                 "seine Werte SIND die Vorgaben der Firma.")
+    felder = set(body.felder or SUCHER_SETTINGS_FIELDS)
+    unbekannt = felder - SUCHER_SETTINGS_FIELDS
+    if unbekannt:
+        raise HTTPException(400, f"Unbekannte Einstellung: {', '.join(sorted(unbekannt))}")
+    aktuell = user.get("settings_override") or {}
+    weg = sorted(k for k in felder if k in aktuell)
+    if weg:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$unset": {f"settings_override.{k}": "" for k in weg}})
+        await log_activity_sicher(
+            user["dealer_id"], user["id"], "sucher.einstellungen.override",
+            meta={"gesetzt": [], "zurueckgesetzt": weg})
+    fresh_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"zurueckgesetzt": weg,
+            "dealer": _mit_digital_standard(_sucher_sicht(await effective_dealer(fresh_user)))}
 
 
 # Nachpruefung Runde 14 (Nr. 116): 2 MB Bild sind als Base64 ~2,8 MB plus

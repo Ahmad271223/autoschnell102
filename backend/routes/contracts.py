@@ -1223,6 +1223,9 @@ async def list_contracts(
             {"make": {"$regex": q_safe, "$options": "i"}},
             {"model": {"$regex": q_safe, "$options": "i"}},
             {"seller_name": {"$regex": q_safe, "$options": "i"}},
+            # Pruefbericht 20.09.2026 (M37): die Vertragsnummer vom Ausdruck
+            # soll im Archiv wiederauffindbar sein (so sagt es contract_no).
+            {"contract_no": {"$regex": q_safe, "$options": "i"}},
         ]
     if channel:
         # Pruefung 14.09.2026 (Liste 3, Nr. 7): in der Abfrage filtern — vorher
@@ -2103,16 +2106,26 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
     Vertrag vermerkt (send_status mit `art`), damit spaeter nachvollziehbar
     ist, wer wann was geschickt hat.
     """
+    import email_service
     import vertrag_vorlagen as _vorlagen
+    from provider_fetch import MOCK_PROVIDER_FETCH
+    from vertrag_mail import sucher_kontakt
     from vertrag_platzhalter import ersetzen as _ersetzen
     empfaenger = (body.recipient or "").strip()
-    if "@" not in empfaenger or empfaenger.startswith("@") or empfaenger.endswith("@"):
+    # Pruefbericht 20.09.2026: dieselbe Adresspruefung wie der Mailversand
+    # selbst (vorher nur "enthaelt ein @").
+    if not email_service.gueltige_adresse(empfaenger):
         raise HTTPException(400, "Bitte eine gültige E-Mail-Adresse angeben")
     # Dieselbe Bremse wie beim Vertragsversand — sonst waere das hier ein
     # offener Weg, ueber unsere Adresse beliebig viele Mails zu schicken.
-    if not _versand_limiter.erlaubt(user["id"]):
+    # Pruefbericht 20.09.2026: hier stand `_versand_limiter.erlaubt(...)` —
+    # diese Methode gibt es nicht; JEDE Folge-Mail endete mit Fehler 500.
+    if not await _versand_limiter.check(f"konto:{user.get('id')}"):
         raise HTTPException(429, "Zu viele Sendungen in kurzer Zeit — bitte "
                                  f"höchstens {VERSAND_JE_KONTO_10MIN} je 10 Minuten.")
+    if not MOCK_PROVIDER_FETCH and not email_service.email_configured():
+        raise HTTPException(503, "E-Mail-Versand ist nicht eingerichtet — die Mail "
+                                 "wurde NICHT versendet.")
     bereich = _vertrag_bereich(user)
     c = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
     if not c:
@@ -2139,12 +2152,21 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
             await _reservierung_nachlesen(contract_id, bereich, schluessel)
             return {"status": "ok", "bereits_gesendet": True, "art": body.art}
 
-    sucher_mail, antwort_adresse = sucher_kontakt(user, firma)
-    ok, beleg = await email_service.send_email_mit_beleg(
-        empfaenger, betreff, text, anhang=None, anhang_name="",
-        html=None, reply_to=antwort_adresse,
-        absender_name=firma.get("company_name") or "",
-        idempotency_key=f"folge-{contract_id}-{schluessel or body.art}")
+    _, antwort_adresse = sucher_kontakt(user, firma)
+    if MOCK_PROVIDER_FETCH:
+        # Last-/CI-Tests: kein echter Versand, aber ehrlich markiert (wie der
+        # Vertragsversand).
+        ok, beleg = True, "mock"
+    else:
+        try:
+            ok, beleg = await email_service.send_email_mit_beleg(
+                empfaenger, betreff, text, anhang=None, anhang_name="",
+                html=None, reply_to=antwort_adresse,
+                absender_name=firma.get("company_name") or "",
+                idempotency_key=f"folge-{contract_id}-{schluessel or body.art}")
+        except Exception:  # noqa: BLE001 — Anbieterfehler = nicht versendet
+            log.exception("Folge-Mail %s zu %s fehlgeschlagen", body.art, contract_id)
+            ok, beleg = False, ""
     if not ok:
         if schluessel:
             await db.generated_pdfs.update_one(
@@ -2157,12 +2179,12 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
         await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
              "send_status.idempotency_key": schluessel},
-            {"$set": {"send_status.$.zustellung": "versendet",
+            {"$set": {"send_status.$.zustellung": "mock" if beleg == "mock" else "versendet",
                       "send_status.$.beleg": beleg or ""}})
     await log_activity_sicher(user["dealer_id"], user["id"],
                               f"pdf.folgemail.{body.art}", ref=contract_id)
     return {"status": "ok", "art": body.art, "empfaenger": empfaenger,
-            "betreff": betreff}
+            "betreff": betreff, "zustellung": "mock" if beleg == "mock" else "versendet"}
 
 
 @router.delete("/contracts/{contract_id}")

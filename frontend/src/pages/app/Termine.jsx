@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -26,6 +26,27 @@ import { de } from "date-fns/locale";
 const STATUSES = ["offen", "bestätigt", "in Bearbeitung", "abgeholt", "nicht abgeholt",
                   "verschoben", "erledigt", "storniert"];
 
+// Abgeschlossene Zustaende — wandern in der Liste automatisch nach unten
+// (dieselbe Menge wie ABGESCHLOSSEN in backend/routes/appointments.py).
+const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storniert"]);
+
+/**
+ * Darf dieses Konto den Termin auf `neu` setzen? Pruefbericht 20.09.2026
+ * (H17): Das Raster bot jedem alle Zustaende an; fuer Sucher lieferten
+ * einige davon 403, und danach zeigte der Dialog einen Status, der nie
+ * gespeichert war. Dieselben Regeln wie im Backend (update_appointment):
+ * Abgeschlossene Termine oeffnet nur der Chef wieder, und den Ausgang einer
+ * Abholung ("abgeholt") aendert nur er. Rueckgabe: null = erlaubt, sonst
+ * der Grund fuer den Tooltip.
+ */
+export function statusSperre(neu, alt, chef) {
+  if (chef || !alt || neu === alt) return null;
+  if (!ABGESCHLOSSEN.has(alt)) return null;
+  if (!ABGESCHLOSSEN.has(neu)) return "Abgeschlossene Termine öffnet nur der Hauptaccount wieder";
+  if (alt === "abgeholt") return "Den Ausgang einer Abholung ändert nur der Hauptaccount";
+  return null;
+}
+
 const STATUS_META = {
   "offen":           { dot: "var(--st-blau)", chipClass: "st-offen-bg",         text: "st-offen" },
   "bestätigt":       { dot: "var(--st-himmel)", chipClass: "st-offen-bg",         text: "st-offen" },
@@ -46,6 +67,8 @@ const safeParse = (s) => {
 };
 
 export default function Termine() {
+  const { user } = useAuth();
+  const chef = user?.role === "dealer";
   const [items, setItems] = useState([]);
   const [drivers, setDrivers] = useState([]);
   const [view, setView] = useState("month");          // 'month' | 'list'
@@ -58,13 +81,26 @@ export default function Termine() {
   // Runde 16 (15.09.2026): Kuerzung (X-Truncated ab 2.000) und Ladefehler
   // sichtbar machen — vorher sah beides wie "keine Termine" aus.
   const [gekuerzt, setGekuerzt] = useState(false);
+  // Pruefbericht 20.09.2026 (B10/M29): Es gab weder Lade- noch Fehlerzustand.
+  // Ein 500 oder Funkloch zeigte "Keine Termine" — der Sucher legte seine
+  // Abholungen ein zweites Mal an. "laedt" | "ok" | "fehler".
+  const [ladeZustand, setLadeZustand] = useState("laedt");
+  const [ladeFehler, setLadeFehler] = useState("");
+  // M20: nur die Antwort der LETZTEN Anfrage zaehlt (schneller Filterwechsel).
+  const anfrageNr = useRef(0);
   const load = async () => {
+    const nr = ++anfrageNr.current;
     try {
       const r = await api.get("/appointments", { params: filter ? { status: filter } : {} });
+      if (nr !== anfrageNr.current) return;
       setItems(Array.isArray(r.data) ? r.data : []);
       setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+      setLadeZustand("ok");
+      setLadeFehler("");
     } catch (e) {
-      toast.error(errMsg(e, "Termine konnten nicht geladen werden"));
+      if (nr !== anfrageNr.current) return;
+      setLadeZustand("fehler");
+      setLadeFehler(errMsg(e, "Termine konnten nicht geladen werden"));
     }
   };
 
@@ -72,12 +108,17 @@ export default function Termine() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
+  // H21: Ob die Fahrerliste da ist — sonst darf der Dialog einen schon
+  // zugeteilten Fahrer nicht als "kein Fahrer" anzeigen (und beim Speichern
+  // entfernen).
+  const [fahrerGeladen, setFahrerGeladen] = useState(false);
   useEffect(() => {
     api.get("/drivers")
-      .then((r) => setDrivers(Array.isArray(r.data) ? r.data : []))
+      .then((r) => { setDrivers(Array.isArray(r.data) ? r.data : []); setFahrerGeladen(true); })
       .catch((e) => toast.error(errMsg(e, "Fahrerliste konnte nicht geladen werden")));
   }, []);
 
+  // Rueckgabe true = gespeichert (Dialog schliesst), false = Dialog bleibt.
   const save = async (a) => {
     try {
       if (a.id) {
@@ -102,19 +143,54 @@ export default function Termine() {
       setEditing(null);
       setCreating(false);
       load();
+      return true;
     } catch (err) {
-      toast.error(errMsg(err, "Fehler beim Speichern"));
-      // Veralteter Stand (409): Liste neu laden, damit der aktuelle Stand sichtbar ist.
-      if (err?.response?.status === 409) load();
+      const status = err?.response?.status;
+      // Pruefbericht 20.09.2026 (B11): Beim veralteten Stand (409 "bitte neu
+      // laden") behielt der Dialog seinen alten Stand samt updated_at — jeder
+      // weitere Versuch scheiterte identisch, ohne Ausweg. Jetzt wird der
+      // Termin frisch geladen und der Dialog damit neu aufgebaut.
+      if (status === 409 && a.id && /neu laden/i.test(errMsg(err, ""))) {
+        try {
+          const { data: frisch } = await api.get(`/appointments/${a.id}`);
+          setEditing(frisch);
+          toast.error("Der Termin wurde inzwischen geändert (z. B. vom Fahrer). Der aktuelle Stand "
+            + "ist jetzt geladen — bitte deine Änderung noch einmal eintragen und speichern.",
+            { duration: 10000 });
+        } catch {
+          toast.error(errMsg(err, "Fehler beim Speichern"));
+        }
+        load();
+        return false;
+      }
+      toast.error(errMsg(err, "Fehler beim Speichern"), { duration: 8000 });
+      // M25: auch bei 403/404/503 den aktuellen Stand der Liste holen.
+      load();
+      return false;
     }
   };
 
+  // Pruefbericht 20.09.2026 (B9/F12): await ohne Fehlerbehandlung — jeder
+  // Backend-Fehler ("abgeschlossene Termine loescht nur der Hauptaccount",
+  // "bitte zuerst stornieren") verschwand; der Dialog blieb einfach stehen.
   const remove = async (id) => {
-    if (!window.confirm("Termin löschen?")) return;
-    await api.delete(`/appointments/${id}`);
-    toast.success("Gelöscht");
-    setEditing(null);
-    load();
+    if (!window.confirm("Termin löschen?")) return false;
+    try {
+      await api.delete(`/appointments/${id}`);
+      toast.success("Gelöscht");
+      setEditing(null);
+      load();
+      return true;
+    } catch (err) {
+      if (err?.response?.status === 404) {
+        toast.info("Den Termin gibt es schon nicht mehr.");
+        setEditing(null);
+        load();
+        return true;
+      }
+      toast.error(errMsg(err, "Termin konnte nicht gelöscht werden"), { duration: 10000 });
+      return false;
+    }
   };
 
   // Group appointments by day (yyyy-MM-dd)
@@ -142,10 +218,14 @@ export default function Termine() {
   const selectedKey = format(selectedDay, "yyyy-MM-dd");
   const selectedAppts = apptsByDay.get(selectedKey) || [];
 
+  // M28: "Bevorstehend" nur fuer noch offene Termine — eine heute Morgen
+  // erledigte Abholung ist keine anstehende Fahrt mehr.
   const upcomingAppts = useMemo(() => {
     const todayKey = format(new Date(), "yyyy-MM-dd");
     return items
-      .filter((a) => (a.pickup_date || "") >= todayKey)
+      .filter((a) => (a.pickup_date || "") >= todayKey && !ABGESCHLOSSEN.has(a.status))
+      .sort((x, y) => (x.pickup_date || "").localeCompare(y.pickup_date || "")
+        || (x.pickup_time || "").localeCompare(y.pickup_time || ""))
       .slice(0, 8);
   }, [items]);
 
@@ -200,7 +280,23 @@ export default function Termine() {
         ))}
       </div>
 
-      {view === "month" ? (
+      {ladeZustand === "fehler" && (
+        <div className="mb-5 rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3" role="alert"
+             data-testid="termine-ladefehler"
+             style={{ borderColor: "#ef444455", background: "#ef444414", color: "var(--text-primary)" }}>
+          <span className="flex-1 min-w-0">
+            {ladeFehler}
+            {items.length > 0 ? " — angezeigt ist der zuletzt geladene Stand." : " — deine Termine sind nicht weg."}
+          </span>
+          <button type="button" onClick={load} className="apple-btn apple-btn-secondary">Erneut versuchen</button>
+        </div>
+      )}
+
+      {ladeZustand === "laedt" && items.length === 0 ? (
+        <div className="apple-surface-gloss p-12 text-center text-zinc-500" data-testid="termine-laedt">
+          Termine werden geladen…
+        </div>
+      ) : ladeZustand === "fehler" && items.length === 0 ? null : view === "month" ? (
         <MonthView
           cursor={cursor} setCursor={setCursor}
           days={daysOfMonth}
@@ -211,7 +307,7 @@ export default function Termine() {
           onEdit={setEditing}
         />
       ) : (
-        <ListView items={items} onEdit={setEditing} />
+        <ListView items={items} onEdit={setEditing} gekuerzt={gekuerzt} />
       )}
 
       {/* Floating + button (mobile-friendly) */}
@@ -221,8 +317,12 @@ export default function Termine() {
 
       {(editing || creating) && (
         <EditDialog
+          // B11: neuer Stand vom Server (updated_at) -> Dialog neu aufbauen
+          key={editing ? `${editing.id}-${editing.updated_at || ""}` : "neu"}
           appt={editing || { pickup_date: format(selectedDay, "yyyy-MM-dd"), status: "offen", title: "" }}
           drivers={drivers}
+          fahrerGeladen={fahrerGeladen}
+          chef={chef}
           isNew={creating}
           onClose={() => { setEditing(null); setCreating(false); }}
           onSave={save}
@@ -318,7 +418,7 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
             </div>
           ) : (
             <div className="space-y-2">
-              {selectedAppts.map((a) => <DayApptItem key={a.id} a={a} onEdit={onEdit} />)}
+              {selectedAppts.map((a) => <DayApptItem key={a.id} a={a} onEdit={onEdit} mitBeweis />)}
             </div>
           )}
         </div>
@@ -338,7 +438,10 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
   );
 }
 
-function DayApptItem({ a, onEdit, compact }) {
+// M26: Die Beweis-Karte (eigener Abruf + Nachfragen im Takt) nur dort, wo
+// wenige Termine stehen (Tagesfeld) — in der Liste mit hunderten Terminen
+// waren das hunderte parallele Anfragen. Im Termin-Dialog steht sie immer.
+function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
   const meta = STATUS_META[a.status] || STATUS_META.offen;
   // Runde 21: Abholbericht samt Fahrerfotos direkt am Termin (auch fuer Sucher).
   const [bericht, setBericht] = useState(false);
@@ -396,7 +499,7 @@ function DayApptItem({ a, onEdit, compact }) {
             </span>
           )}
         </div>
-        {a.vehicle_id && !compact && (
+        {a.vehicle_id && !compact && mitBeweis && (
           <div className="mt-2" onClick={(e) => e.stopPropagation()}>
             <BeweisCard vehicleId={a.vehicle_id} compact />
           </div>
@@ -409,10 +512,7 @@ function DayApptItem({ a, onEdit, compact }) {
 
 /* ───────────────────────── List View ───────────────────────── */
 
-// Abgeschlossene Zustaende — wandern in der Liste automatisch nach unten
-const ABGESCHLOSSEN = new Set(["abgeholt", "nicht abgeholt", "erledigt", "storniert"]);
-
-function ListView({ items, onEdit }) {
+function ListView({ items, onEdit, gekuerzt = false }) {
   if (!items.length) {
     return (
       <div className="apple-surface-gloss p-12 text-center text-zinc-500">
@@ -493,10 +593,40 @@ function ListView({ items, onEdit }) {
 
 /* ───────────────────────── Modal ───────────────────────── */
 
-function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
+function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, onClose, onSave, onDelete }) {
   const [a, setA] = useState({ ...appt });
-  const set = (k, v) => setA({ ...a, [k]: v });
+  const set = (k, v) => setA((alt) => ({ ...alt, [k]: v }));
   const [conflict, setConflict] = useState(null);
+  // H19: Doppelklick legte zwei identische Termine an — waehrend des
+  // Speicherns/Loeschens sind die Knoepfe gesperrt.
+  const [arbeitet, setArbeitet] = useState(false);
+  const speichern = async () => {
+    if (arbeitet) return;
+    const kosten = a.extra_costs;
+    if (kosten !== null && kosten !== undefined && kosten !== "" && !(Number(kosten) >= 0)) {
+      toast.error("Sonstige Kosten: bitte einen Betrag ab 0 € eintragen.");
+      return;
+    }
+    setArbeitet(true);
+    try { await onSave(a); } finally { setArbeitet(false); }
+  };
+  const loeschen = async () => {
+    if (arbeitet || !onDelete) return;
+    setArbeitet(true);
+    try { await onDelete(); } finally { setArbeitet(false); }
+  };
+  // H20: PDF-Knoepfe mit Fehlermeldung und ohne Mehrfachklick (jeder Klick
+  // war sonst ein neuer, bis zu 180 s langer Abruf).
+  const [pdfLaeuft, setPdfLaeuft] = useState("");
+  const pdfAktion = async (name, fn, fehlerText) => {
+    if (pdfLaeuft) return;
+    setPdfLaeuft(name);
+    try { await fn(); } catch (e) { toast.error(errMsg(e, fehlerText)); } finally { setPdfLaeuft(""); }
+  };
+  // H21: Ist der zugeteilte Fahrer nicht in der Liste (Liste nicht geladen,
+  // Fahrer inzwischen entfernt), bleibt er als eigene Option stehen — sonst
+  // zeigte das Feld "kein Fahrer" und das Speichern entfernte ihn.
+  const fahrerFehlt = !!a.driver_id && !drivers.some((d) => d.id === a.driver_id);
 
   // Warnung: schon eine Fahrt am selben Tag?
   useEffect(() => {
@@ -569,10 +699,11 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
                 {STATUSES.map((s) => {
                   const meta = STATUS_META[s];
                   const active = (a.status || "offen") === s;
+                  const sperre = isNew ? null : statusSperre(s, appt.status || "offen", chef);
                   return (
                     <button key={s} onClick={() => set("status", s)} data-testid={`status-${s}`}
-                            type="button"
-                            className={`text-[11px] font-medium px-2 py-2 rounded-lg border transition-all flex items-center justify-center gap-1.5 ${
+                            type="button" disabled={!!sperre} title={sperre || undefined}
+                            className={`text-[11px] font-medium px-2 py-2 rounded-lg border transition-all flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
                               active ? `${meta.chipClass} ${meta.text} border-current/40` : "bg-white/[0.03] text-zinc-500 border-white/[0.06] hover:text-zinc-300"
                             }`}>
                       <span className="cal-dot" style={{ background: meta.dot }} />
@@ -590,6 +721,12 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
                       onChange={(e) => set("driver_id", e.target.value || null)}
                       className="apple-input">
                 <option value="">— kein Fahrer —</option>
+                {fahrerFehlt && (
+                  <option value={a.driver_id}>
+                    {a.driver?.name || appt.driver?.name || "zugeteilter Fahrer"}
+                    {fahrerGeladen ? " (nicht mehr in deiner Fahrerliste)" : ""}
+                  </option>
+                )}
                 {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
               </select>
               {conflict && (
@@ -638,8 +775,11 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sonstige Kosten (€)</label>
-              <input data-testid="edit-extra-costs" type="number" value={a.extra_costs || ""}
-                     onChange={(e) => set("extra_costs", Number(e.target.value) || null)}
+              {/* N18: "0" ist ein gueltiger Betrag (vorher wurde er verworfen),
+                  negative Betraege lehnt speichern() ab. */}
+              <input data-testid="edit-extra-costs" type="number" min="0" step="0.01"
+                     value={a.extra_costs ?? ""}
+                     onChange={(e) => set("extra_costs", e.target.value === "" ? null : Number(e.target.value))}
                      className="apple-input" />
             </div>
           </div>
@@ -657,16 +797,18 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
               (neuer Tab), „Drucken" zeigt direkt den Druckdialog. */}
           {a.contract_id && (
             <div className="grid grid-cols-2 gap-2" data-testid="contract-actions">
-              <button type="button"
-                      onClick={() => openContractPdf(a.contract_id)}
+              <button type="button" disabled={!!pdfLaeuft}
+                      onClick={() => pdfAktion("vertrag", () => openContractPdf(a.contract_id),
+                                               "Kaufvertrag konnte nicht geladen werden")}
                       data-testid="contract-open-btn"
-                      className="apple-btn apple-btn-secondary">
-                <FileText size={14} /> Kaufvertrag öffnen
+                      className="apple-btn apple-btn-secondary disabled:opacity-60">
+                <FileText size={14} /> {pdfLaeuft === "vertrag" ? "Lädt…" : "Kaufvertrag öffnen"}
               </button>
-              <button type="button"
-                      onClick={() => printContractPdf(a.contract_id)}
+              <button type="button" disabled={!!pdfLaeuft}
+                      onClick={() => pdfAktion("vertrag-druck", () => printContractPdf(a.contract_id),
+                                               "Kaufvertrag konnte nicht geladen werden")}
                       data-testid="contract-print-btn"
-                      className="apple-btn apple-btn-secondary">
+                      className="apple-btn apple-btn-secondary disabled:opacity-60">
                 <Printer size={14} /> Drucken
               </button>
             </div>
@@ -695,25 +837,27 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
                 Schadens-Check. Fahrer prüft alle Punkte vor Ort ab.
               </div>
               <div className="grid grid-cols-3 gap-2">
-                <button type="button"
-                        onClick={() => openPickupOrderPdf(a.id)}
+                <button type="button" disabled={!!pdfLaeuft}
+                        onClick={() => pdfAktion("auftrag", () => openPickupOrderPdf(a.id),
+                                                 "Abholauftrag konnte nicht geladen werden")}
                         data-testid="pickup-open-btn"
-                        className="apple-btn apple-btn-primary !py-2 !text-[11px]">
-                  <FileText size={12} /> Öffnen
+                        className="apple-btn apple-btn-primary !py-2 !text-[11px] disabled:opacity-60">
+                  <FileText size={12} /> {pdfLaeuft === "auftrag" ? "Lädt…" : "Öffnen"}
                 </button>
-                <button type="button"
-                        onClick={() => printPickupOrderPdf(a.id)}
+                <button type="button" disabled={!!pdfLaeuft}
+                        onClick={() => pdfAktion("auftrag-druck", () => printPickupOrderPdf(a.id),
+                                                 "Abholauftrag konnte nicht geladen werden")}
                         data-testid="pickup-print-btn"
-                        className="apple-btn apple-btn-secondary !py-2 !text-[11px]">
+                        className="apple-btn apple-btn-secondary !py-2 !text-[11px] disabled:opacity-60">
                   <Printer size={12} /> Drucken
                 </button>
-                <button type="button"
-                        onClick={() => downloadPickupOrderPdf(
+                <button type="button" disabled={!!pdfLaeuft}
+                        onClick={() => pdfAktion("auftrag-datei", () => downloadPickupOrderPdf(
                           a.id,
                           `Abholauftrag_${(a.title || "Termin").replace(/[^\w\- ]+/g, "_")}.pdf`,
-                        )}
+                        ), "Abholauftrag konnte nicht geladen werden")}
                         data-testid="pickup-download-btn"
-                        className="apple-btn apple-btn-secondary !py-2 !text-[11px]">
+                        className="apple-btn apple-btn-secondary !py-2 !text-[11px] disabled:opacity-60">
                   <Download size={12} /> Download
                 </button>
               </div>
@@ -748,15 +892,15 @@ function EditDialog({ appt, drivers, isNew, onClose, onSave, onDelete }) {
         <div className="px-6 py-4 border-t border-white/[0.08] flex items-center justify-between gap-2 sticky bottom-0 bg-[var(--bg-elevated)] rounded-b-[18px]">
           <div>
             {onDelete && (
-              <button onClick={onDelete} className="apple-btn apple-btn-danger" data-testid="delete-appt-btn">
+              <button onClick={loeschen} disabled={arbeitet} className="apple-btn apple-btn-danger disabled:opacity-60" data-testid="delete-appt-btn">
                 <Trash2 size={14} /> Löschen
               </button>
             )}
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="apple-btn apple-btn-ghost">Abbrechen</button>
-            <button onClick={() => onSave(a)} data-testid="save-appt-btn" className="apple-btn apple-btn-primary">
-              {isNew ? "Anlegen" : "Speichern"}
+            <button onClick={speichern} disabled={arbeitet} data-testid="save-appt-btn" className="apple-btn apple-btn-primary disabled:opacity-60">
+              {arbeitet ? "Speichert…" : isNew ? "Anlegen" : "Speichern"}
             </button>
           </div>
         </div>

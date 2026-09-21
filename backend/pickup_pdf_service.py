@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -100,9 +101,17 @@ SKETCHES = {
 # Styles
 # ---------------------------------------------------------------------------
 
+def _schrift(helvetica_name: str) -> str:
+    from pdf_schrift import ersatz_fuer
+    return ersatz_fuer(helvetica_name)
+
+
 def _styles() -> Dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
-    return {
+    # Pruefbericht 20.09.2026 (P-02): Unicode-Schrift statt Helvetica — Namen
+    # neben der Unterschrift erschienen sonst als Kaestchen.
+    from pdf_schrift import styles_anpassen
+    return styles_anpassen({
         "title": ParagraphStyle("title", parent=base["Title"], fontSize=24, leading=27,
                                 textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=0),
         "subtitle": ParagraphStyle("subtitle", parent=base["Normal"], fontSize=9,
@@ -134,7 +143,7 @@ def _styles() -> Dict[str, ParagraphStyle]:
                                       leading=11, textColor=PRIMARY),
         "check_opt": ParagraphStyle("check_opt", parent=base["Normal"], fontSize=8,
                                     leading=10, textColor=PRIMARY, alignment=TA_CENTER),
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +197,14 @@ def _check_row(label: str, value: Any, options: List[str], st, *,
         "rl", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY)
     value_style = ParagraphStyle(
         "rv", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY,
-        fontName="Helvetica-Bold" if bold_value else "Helvetica",
+        fontName=_schrift("Helvetica-Bold") if bold_value else _schrift("Helvetica"),
     )
     opt_style = ParagraphStyle(
         "ro", parent=st["body"], fontSize=10, leading=13,
         textColor=GREY, alignment=TA_LEFT,
     )
     opt_style_sel = ParagraphStyle(
-        "ros", parent=opt_style, textColor=PRIMARY, fontName="Helvetica-Bold")
+        "ros", parent=opt_style, textColor=PRIMARY, fontName=_schrift("Helvetica-Bold"))
     row = [Paragraph(label, label_style), Paragraph(_xe(_fmt(value)), value_style)]
     for opt in options:
         # "[ ]" statt "○": das Kreis-Zeichen existiert nicht in Helvetica
@@ -267,7 +276,8 @@ class CarSketch(Flowable):
         self.orig_w = meta["w"]
         self.orig_h = meta["h"]
         self.label = meta["label"]
-        self.damages = [d for d in damages if d.get("view") == view_key] if damages else []
+        self.damages = ([d for d in damages if isinstance(d, dict) and d.get("view") == view_key]
+                        if damages else [])
         self.empty = empty
 
         self.max_width = max_width_cm * cm
@@ -282,7 +292,7 @@ class CarSketch(Flowable):
         c = self.canv
         # Label at top
         c.setFillColor(GREY)
-        c.setFont("Helvetica-Bold", 7)
+        c.setFont(_schrift("Helvetica-Bold"), 7)
         c.drawString(0, self.height - 0.4 * cm, self.label.upper())
         # Marker counter on label row
         if self.damages and not self.empty:
@@ -301,7 +311,7 @@ class CarSketch(Flowable):
                 c.setFillColor(LIGHT_BG)
                 c.rect(0, 0, self.width, img_h, stroke=0, fill=1)
                 c.setFillColor(GREY)
-                c.setFont("Helvetica-Oblique", 8)
+                c.setFont(_schrift("Helvetica-Oblique"), 8)
                 c.drawCentredString(self.width / 2, img_h / 2,
                                     f"[Skizze {self.label}]")
         except Exception:
@@ -337,7 +347,7 @@ class CarSketch(Flowable):
             c.setLineWidth(0.8)
             c.circle(x, y, 8, stroke=1, fill=1)
             c.setFillColor(colors.white)
-            c.setFont("Helvetica-Bold", 7)
+            c.setFont(_schrift("Helvetica-Bold"), 7)
             code = d.get("type_abbr") or d.get("abbr") or str(i)
             c.drawCentredString(x, y - 2.2, str(code)[:2])
 
@@ -374,7 +384,18 @@ def _sketch_grid(damages: List[dict], *, empty: bool = False) -> Table:
     return t
 
 
+_FARBE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+def _sichere_farbe(wert) -> str:
+    """P-26: eine ungueltige Farbe im Schadenseintrag brach den Absatz-Parser
+    von reportlab und damit das ganze PDF — nur echte Hex-Farben zulassen."""
+    s = str(wert or "").strip()
+    return s if _FARBE.match(s) else "#FF3B30"
+
+
 def _damage_legend(damages: List[dict], st) -> Optional[Flowable]:
+    damages = [d for d in (damages or []) if isinstance(d, dict)]
     if not damages:
         return Paragraph(
             "Keine Schäden im Kaufvertrag dokumentiert.", st["small"])
@@ -385,7 +406,7 @@ def _damage_legend(damages: List[dict], st) -> Optional[Flowable]:
         counts.setdefault(key, {
             "label": d.get("type_label") or key,
             "abbr": d.get("type_abbr") or d.get("abbr") or "?",
-            "color": d.get("color") or "#FF3B30",
+            "color": _sichere_farbe(d.get("color")),
             "n": 0,
         })
         counts[key]["n"] += 1
@@ -452,7 +473,7 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
             self.setLineWidth(0.5)
             self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
             self.setFillColor(GREY)
-            self.setFont("Helvetica", 7)
+            self.setFont(_schrift("Helvetica"), 7)
             self.drawString(MARGIN, y, footer_left)
             self.drawCentredString(PAGE_W / 2, y, footer_center)
             self.drawRightString(PAGE_W - MARGIN, y,
@@ -509,7 +530,18 @@ def build_pickup_pdf(
     _fill_cond = filled.get("condition") or {}
 
     # Damages: prefer contract.damages, fallback to vehicle.damages
-    damages = (contract.get("damages") or vehicle.get("damages") or [])
+    # Pruefbericht 20.09.2026 (P-03): Das Vertragsmodell erlaubt in der
+    # Schadensliste ausdruecklich auch reinen Text ("Kratzer hinten links").
+    # Hier wurde jeder Eintrag als Objekt gelesen -> AttributeError, der
+    # Abholauftrag lieferte dauerhaft 500 und der Fahrer konnte vor Ort NIE
+    # abschliessen. Skizze/Legende bekommen nur Objekte, der Text wird unten
+    # als Liste gedruckt (nichts geht verloren).
+    _roh_schaeden = (contract.get("damages") or vehicle.get("damages") or [])
+    if not isinstance(_roh_schaeden, list):
+        _roh_schaeden = [_roh_schaeden]
+    damages = [d for d in _roh_schaeden if isinstance(d, dict)]
+    freitext_schaeden = [str(d).strip() for d in _roh_schaeden
+                         if isinstance(d, str) and str(d).strip()]
 
     buf = io.BytesIO()
     doc = _make_doc(buf)
@@ -570,10 +602,11 @@ def build_pickup_pdf(
                    or contract.get("seller_name") or "")
     if seller_name:
         seller_lines.append(f"<b>{_xe(seller_name)}</b>")
+    # P-21: ein vorhandenes, aber leeres Feld (None) brach hier mit TypeError.
     addr = (appointment.get("pickup_address")
-            or " ".join([contract.get("seller_address", ""),
-                         contract.get("seller_zip", ""),
-                         contract.get("seller_city", "")]).strip())
+            or " ".join([str(contract.get("seller_address") or ""),
+                         str(contract.get("seller_zip") or ""),
+                         str(contract.get("seller_city") or "")]).strip())
     if addr:
         seller_lines.append(_xe(addr))
     seller_phone = (appointment.get("seller_phone")
@@ -700,6 +733,10 @@ def build_pickup_pdf(
         "Vertrag  →  vor Ort" im PDF — ein alter Korrekturwert bei "stimmt"
         gehoert nicht ins unterschriebene Dokument (Befund 12.09.2026)."""
         entry = _vc.get(key) or {}
+        if not isinstance(entry, dict):
+            # P-27: ein Eintrag als reiner Text ("stimmt") statt Objekt
+            # fuehrte zum AttributeError und brach das ganze PDF ab.
+            entry = {"status": str(entry)}
         sel = entry.get("status")
         zeile = _zeilen.get(key)
         shown = value
@@ -748,7 +785,7 @@ def build_pickup_pdf(
         ("LINEABOVE", (0, 0), (-1, -1), 0.4, DIVIDER),
         # Letzte Zeile braucht auch unten eine Linie
         ("LINEBELOW", (0, -1), (-1, -1), 0.4, DIVIDER),
-        ("FONTNAME", (0, 0), (0, -1), "Helvetica"),
+        ("FONTNAME", (0, 0), (0, -1), _schrift("Helvetica")),
         ("FONTSIZE", (0, 0), (0, -1), 10),
     ]))
     story.append(t)
@@ -868,6 +905,13 @@ def build_pickup_pdf(
     if legend:
         story.append(legend)
         story.append(Spacer(1, 0.25 * cm))
+    if freitext_schaeden:
+        # P-03: Schaeden, die im Vertrag als Text stehen, gehoeren genauso
+        # auf das Protokoll — sie haben nur keinen Punkt auf der Skizze.
+        story.append(Paragraph(
+            "<b>Weitere Schäden laut Kaufvertrag:</b> "
+            + " &nbsp;·&nbsp; ".join(_xe(t) for t in freitext_schaeden[:40]), st["small"]))
+        story.append(Spacer(1, 0.25 * cm))
     story.append(KeepTogether(_sketch_grid(damages, empty=False)))
 
     story.append(PageBreak())
@@ -877,7 +921,7 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     story.append(_section("6 · Vor-Ort-Aufnahme durch den Fahrer", st))
     story.append(Spacer(1, 4))
-    _new_damages = filled.get("new_damages") or []
+    _new_damages = [d for d in (filled.get("new_damages") or []) if isinstance(d, dict)]
     if _new_damages:
         # Digital ausgefuellt: die vom Fahrer auf der Skizze markierten
         # NEUEN Schaeden — gleiche Darstellung wie die Vertrags-Schaeden.

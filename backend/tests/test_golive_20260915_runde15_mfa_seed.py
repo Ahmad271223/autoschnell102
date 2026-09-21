@@ -239,5 +239,9 @@ def test_diagnose_422_und_firmensperre():
     assert SRV._geheim_redigieren(("body", "new_password"), {"x": 1}) == "***"
     assert SRV._geheim_redigieren(("body",), {"password": "a", "email": "e"}) == {"password": "***", "email": "e"}
     assert SRV._geheim_redigieren(("body", "email"), "e@x.de") == "e@x.de"
-    assert "firma_gesperrt(user[\"dealer_id\"])" in inspect.getsource(AUTH.login)
+    # Pruefbericht 20.09.2026 (B2): die Pruefung steht jetzt in EINER Funktion,
+    # die Passwort- und Zwei-Faktor-Anmeldung beide aufrufen.
+    assert "_firmensperre_pruefen(user)" in inspect.getsource(AUTH.login)
+    assert "_firmensperre_pruefen(user)" in inspect.getsource(AUTH.login_mfa)
+    assert "firma_gesperrt(user[\"dealer_id\"])" in inspect.getsource(AUTH._firmensperre_pruefen)
     assert ADMIN.AdminSelfPasswordIn.model_fields["current_password"].metadata

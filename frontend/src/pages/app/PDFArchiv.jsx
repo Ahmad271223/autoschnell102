@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
 import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail } from "lucide-react";
@@ -8,6 +8,21 @@ import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
 import SendDialog from "@/components/SendDialog";
 import FolgeMailDialog from "@/components/FolgeMailDialog";
+
+// Pruefbericht 20.09.2026 (H23): Jeder Status stand als GRUENE Pille da —
+// auch "versand_vorbereitet", den das Backend bewusst setzt, weil WhatsApp
+// nur den Chat oeffnet. Wer nie auf Senden getippt hat, hielt den Vertrag
+// fuer zugestellt.
+const VERTRAG_STATUS = {
+  versendet:           { text: "versendet", farbe: "var(--accent-green)", grund: "rgba(52,199,89,0.12)", rand: "rgba(52,199,89,0.25)" },
+  versand_vorbereitet: { text: "WhatsApp geöffnet – Versand nicht bestätigt", farbe: "var(--tx-amber)", grund: "rgba(255,159,10,0.12)", rand: "rgba(255,159,10,0.35)" },
+  "neu erstellt":      { text: "neu erstellt – noch nicht versendet", farbe: "var(--st-blau)", grund: "rgba(10,132,255,0.12)", rand: "rgba(10,132,255,0.3)" },
+  erstellt:            { text: "erstellt – noch nicht versendet", farbe: "var(--text-secondary)", grund: "var(--wa-04)", rand: "var(--border-default)" },
+};
+export function vertragStatus(status) {
+  return VERTRAG_STATUS[status] || { text: status || "—", farbe: "var(--text-secondary)",
+                                     grund: "var(--wa-04)", rand: "var(--border-default)" };
+}
 
 const DAY_FILTERS = [
   { v: 0, l: "Alle" },
@@ -35,7 +50,10 @@ export default function PDFArchiv() {
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
   const [ladeFehler, setLadeFehler] = useState(false);
   const [gekuerzt, setGekuerzt] = useState(false);
+  // M20: nur die letzte Anfrage zaehlt (Zeitraum schnell gewechselt).
+  const anfrageNr = useRef(0);
   const load = async () => {
+    const nr = ++anfrageNr.current;
     setLoading(true);
     setLadeFehler(false);
     try {
@@ -43,27 +61,65 @@ export default function PDFArchiv() {
       if (q) params.q = q;
       if (days) params.days = days;
       const r = await api.get("/contracts", { params });
+      if (nr !== anfrageNr.current) return;
       setItems(Array.isArray(r.data) ? r.data : []);
       setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
     } catch (e) {
+      if (nr !== anfrageNr.current) return;
+      // Pruefbericht 20.09.2026 (B13): errMsg war hier nicht importiert —
+      // der Fehlerzweig warf selbst einen Fehler.
       setLadeFehler(true);
       toast.error(errMsg(e, "Verträge konnten nicht geladen werden"));
-    } finally { setLoading(false); }
+    } finally {
+      if (nr === anfrageNr.current) setLoading(false);
+    }
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [days]);
 
-  const openPdf = (id) => openContractPdf(id);
+  // Pruefbericht 20.09.2026 (B15/F14): Fehler beim Oeffnen blieben stumm,
+  // und jeder weitere Klick startete einen neuen, bis zu 180 s langen Abruf.
+  // Jetzt: Knopf gesperrt, solange geladen wird, Fehler als Meldung.
+  const [pdfLaeuft, setPdfLaeuft] = useState("");
+  const pdfOeffnen = async (id, variante) => {
+    const name = `${id}:${variante}`;
+    if (pdfLaeuft) return;
+    setPdfLaeuft(name);
+    try {
+      await openContractPdf(id, variante === "digital" ? { variante: "digital" } : undefined);
+    } catch (e) {
+      toast.error(errMsg(e, "Kaufvertrag konnte nicht geladen werden"));
+    } finally {
+      setPdfLaeuft("");
+    }
+  };
+  const openPdf = (id) => pdfOeffnen(id, "druck");
   // Digitale Fassung: ohne Unterschriftsfelder, mit dem digitalen Vertragstext
   // (das ist die Fassung, die per E-Mail/WhatsApp verschickt wird).
-  const openDigital = (id) => openContractPdf(id, { variante: "digital" });
+  const openDigital = (id) => pdfOeffnen(id, "digital");
 
+  // Pruefbericht 20.09.2026 (B14/F13): ohne try/catch verschwanden 403
+  // ("nur der Hauptaccount") und 409 ("Abholprotokoll laeuft") spurlos.
+  const [loeschtId, setLoeschtId] = useState("");
   const remove = async (id) => {
+    if (loeschtId) return;
     if (!window.confirm("Vertrag wirklich löschen?")) return;
-    await api.delete(`/contracts/${id}`);
-    toast.success("Gelöscht");
-    load();
+    setLoeschtId(id);
+    try {
+      await api.delete(`/contracts/${id}`);
+      toast.success("Gelöscht");
+      load();
+    } catch (e) {
+      if (e?.response?.status === 404) {
+        toast.info("Diesen Vertrag gibt es schon nicht mehr.");
+        load();
+      } else {
+        toast.error(errMsg(e, "Vertrag konnte nicht gelöscht werden"), { duration: 10000 });
+      }
+    } finally {
+      setLoeschtId("");
+    }
   };
 
   return (
@@ -77,7 +133,7 @@ export default function PDFArchiv() {
           <Search size={17} className="shrink-0" style={{ color: "var(--text-muted)" }} />
           <input data-testid="pdf-search-input" value={q} onChange={(e) => setQ(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && load()}
-                 placeholder="Suche nach Marke / Modell / Verkäufer"
+                 placeholder="Suche nach Marke / Modell / Verkäufer / Vertragsnummer"
                  className="bg-transparent outline-none w-full text-[15px]" />
         </div>
         <div className="flex items-center gap-1 rounded-full p-1"
@@ -140,10 +196,11 @@ export default function PDFArchiv() {
                         {it.make || "—"} {it.model || ""}
                       </span>
                       <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
-                            style={{ background: "rgba(52,199,89,0.12)",
-                                     border: "1px solid rgba(52,199,89,0.25)",
-                                     color: "var(--accent-green)" }}>
-                        {it.status}
+                            data-testid={`pdf-status-${it.id}`}
+                            style={{ background: vertragStatus(it.status).grund,
+                                     border: `1px solid ${vertragStatus(it.status).rand}`,
+                                     color: vertragStatus(it.status).farbe }}>
+                        {vertragStatus(it.status).text}
                       </span>
                       {(it.version || 1) > 1 && (
                         <span className="text-[11px] font-semibold px-2 py-1 rounded-full"
@@ -189,18 +246,31 @@ export default function PDFArchiv() {
                     </div>
                     <div className="flex items-center gap-2">
                       <button onClick={() => openPdf(it.id)} data-testid={`open-pdf-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              disabled={!!pdfLaeuft} aria-busy={pdfLaeuft === `${it.id}:druck`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
                               style={{ background: "var(--apple-btn-secondary-bg)",
                                        color: "var(--text-primary)" }}
                               title="Vertrag öffnen (Druckfassung mit Unterschriftsfeldern)">
                         <Eye size={16} />
                       </button>
                       <button onClick={() => openDigital(it.id)} data-testid={`open-pdf-digital-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              disabled={!!pdfLaeuft} aria-busy={pdfLaeuft === `${it.id}:digital`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
                               style={{ background: "var(--apple-btn-secondary-bg)",
                                        color: "var(--text-primary)" }}
                               title="Digitale Fassung (für E-Mail/WhatsApp, ohne Unterschriftsfelder)">
                         <FileText size={16} />
+                      </button>
+                      {/* Pruefbericht 20.09.2026 (H24): Aus dem Archiv liess sich ein
+                          Vertrag gar nicht erneut versenden — meldete sich der
+                          Verkaeufer einen Tag spaeter, blieb nur ein neuer Vertrag. */}
+                      <button onClick={() => setSenden(it)}
+                              data-testid={`senden-${it.id}`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              style={{ background: "var(--apple-btn-secondary-bg)",
+                                       color: "var(--text-primary)" }}
+                              title="Vertrag an den Verkäufer senden (WhatsApp oder E-Mail)">
+                        <Send size={16} />
                       </button>
                       <button onClick={() => setFolgeMail(it)}
                               data-testid={`folgemail-${it.id}`}
@@ -211,7 +281,8 @@ export default function PDFArchiv() {
                         <Mail size={16} />
                       </button>
                       <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-red-500/20"
+                              disabled={!!loeschtId}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-red-500/20 disabled:opacity-50"
                               style={{ background: "var(--apple-btn-secondary-bg)",
                                        color: "var(--text-secondary)" }}
                               title="Löschen">

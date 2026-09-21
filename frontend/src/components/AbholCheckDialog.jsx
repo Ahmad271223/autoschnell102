@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
 import { verkleinereBildDatei } from "@/lib/bilder";
+import { kmAusText } from "@/lib/preis";
 import { toast } from "sonner";
 import { X, Plus, Trash2, Camera, CheckCircle2 } from "lucide-react";
 
@@ -79,6 +80,20 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
     for (const d of deviations) {
       if (!d.label.trim()) { toast.error("Bitte jede Abweichung kurz benennen."); return; }
     }
+    // Pruefbericht 20.09.2026 (K-01/F20, R1-43): deutsch lesen ("85.120" ist
+    // fuenfundachtzigtausend, nicht 85), keine negativen Werte, und ohne
+    // Kilometerstand kein Bericht — vorher ging ein leeres Feld still durch.
+    const km = kmAusText(mileage);
+    if (km === null) { toast.error("Bitte den Kilometerstand bei Abholung eintragen."); return; }
+    if (Number.isNaN(km)) {
+      toast.error("Kilometerstand bitte als ganze Zahl eintragen, z. B. 85.120 oder 85120.");
+      return;
+    }
+    const schluessel = keys === "" ? null : Number(keys);
+    if (schluessel !== null && (!Number.isInteger(schluessel) || schluessel < 0 || schluessel > 20)) {
+      toast.error("Anzahl Schlüssel bitte als ganze Zahl von 0 bis 20 eintragen.");
+      return;
+    }
     setBusy(true);
     try {
       // "Abgeholt" gibt es nur mit unterschriebenem Protokoll. Vorher wurde
@@ -100,8 +115,8 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
         }
       }
       await driverApi.post(`/driver/appointments/${appointment.id}/report`, {
-        mileage_at_pickup: mileage ? parseInt(mileage, 10) : null,
-        keys_count: keys ? parseInt(keys, 10) : null,
+        mileage_at_pickup: km,
+        keys_count: schluessel,
         fuel_level: fuel,
         deviations: deviations.map((d) => ({
           field: d.field,
@@ -146,9 +161,12 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] text-zinc-500">Kilometerstand bei Abholung</label>
-            <input type="number" inputMode="numeric" value={mileage}
+            {/* text + inputMode: "85.120" bleibt so stehen, wie getippt, und
+                wird deutsch gelesen (ein Zahlenfeld machte daraus 85,12). */}
+            <input type="text" inputMode="numeric" value={mileage}
                    onChange={(e) => setMileage(e.target.value)}
-                   placeholder="z.B. 85120" className={inputCls} style={inputStyle} />
+                   data-testid="abholcheck-km" autoComplete="off"
+                   placeholder="z. B. 85.120" className={inputCls} style={inputStyle} />
           </div>
           <div>
             <label className="text-[11px] text-zinc-500">Anzahl Schlüssel</label>

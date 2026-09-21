@@ -224,8 +224,7 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
         # Runde 13: A8/A9 — die Regel steht jetzt EINMAL in firma_gesperrt
         # (Login, Marktplatz und Einladungen teilen sie sich).
         if await firma_gesperrt(user["dealer_id"]):
-            raise HTTPException(403, "Die Firma ist gesperrt — bitte den "
-                                     "Administrator kontaktieren.")
+            raise firma_gesperrt_fehler()
     if not user or not user.get("active"):
         raise HTTPException(401, "Account deaktiviert")
     # Single-session enforcement (strikt): Das Token-sid MUSS der aktuell
@@ -263,6 +262,22 @@ def sitzung_beendet_grund(user: dict) -> str:
     if geraet:
         teile.append(f"von {geraet}")
     return " ".join(teile) + ". Es ist immer nur eine Anmeldung je Konto aktiv."
+
+
+FIRMA_GESPERRT_TEXT = "Die Firma ist gesperrt — bitte den Administrator kontaktieren."
+
+
+def firma_gesperrt_fehler() -> HTTPException:
+    """403 fuer Konten einer gesperrten Firma — MIT Kopfzeile `X-Sperre: firma`.
+
+    Pruefbericht 20.09.2026 (B2/H1): Ein nacktes 403 sah fuer die Oberflaeche
+    aus wie jedes andere "darfst du nicht". Die Anmeldung lief deshalb in eine
+    Schleife (Login ok, /auth/me 403, Token still weg), und wurde die Firma
+    waehrend der Arbeit gesperrt, blieben die Seiten einfach leer. Mit der
+    Kopfzeile meldet api.js ab und zeigt diesen Text auf der Anmeldeseite.
+    Nur fuer Konten DER Firma — Fahrer arbeiten fuer mehrere Firmen und
+    bekommen weiter das nackte 403 (routes/drivers.py)."""
+    return HTTPException(403, FIRMA_GESPERRT_TEXT, headers={"X-Sperre": "firma"})
 
 
 async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
@@ -402,8 +417,7 @@ async def current_firma(user=Depends(current_user)):
         # Sucher weiter — also die Sperre umgangen. Deshalb hier, direkt
         # nach der Einnordung, dieselbe Pruefung.
         if await firma_gesperrt(user["dealer_id"]):
-            raise HTTPException(403, "Die Firma ist gesperrt — bitte den "
-                                     "Administrator kontaktieren.")
+            raise firma_gesperrt_fehler()
     return user
 
 
@@ -649,9 +663,15 @@ async def effective_dealer(user: dict) -> dict:
         return regelpakete_vervollstaendigen(dealer)
     override = user.get("settings_override") or {}
     merged = dict(dealer)
+    eigene = []
     for k, v in override.items():
         if k in SUCHER_SETTINGS_FIELDS and v is not None:
             merged[k] = v
+            eigene.append(k)
+    # Pruefbericht 20.09.2026 (B19): Welche Felder sind PERSOENLICH gesetzt?
+    # Die Einstellungen zeigen das an und bieten "auf Chef-Vorgaben
+    # zuruecksetzen" — vorher gab es keinen Weg zurueck.
+    merged["eigene_einstellungen"] = sorted(eigene)
     return regelpakete_vervollstaendigen(merged)
 
 

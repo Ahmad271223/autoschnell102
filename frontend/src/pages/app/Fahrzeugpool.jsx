@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Copy, ExternalLink } from "lucide-react";
+import StatusSchild from "@/components/StatusSchild";
+import { lifecycleText } from "@/lib/fahrzeugStatus";
+
+// N17: Altdaten mit Text ergaben "NaN km".
+function kmText(n) {
+  const zahl = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(zahl) && zahl > 0 ? `${zahl.toLocaleString("de-DE")} km` : "—";
+}
 
 // Der beim Vergleich eingefuegte Inserats-Link wird automatisch am
 // Fahrzeug gespeichert — je nach Quelle unter kleinanzeigen_url,
@@ -48,8 +57,8 @@ export default function Fahrzeugpool() {
       <div className="overline">Fahrzeugpool</div>
       <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">Verglichene & geprüfte Fahrzeuge</h1>
 
-      <div className="mt-6 tactical-card overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="mt-6 tactical-card overflow-x-auto">
+        <table className="w-full text-sm min-w-[720px]">
           <thead>
             <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Mobile-ID</th>
@@ -80,17 +89,23 @@ export default function Fahrzeugpool() {
               <tr key={v.id} className="border-t" style={{ borderColor: "var(--border-default)" }} data-testid={`pool-${v.id}`}>
                 <td className="px-4 py-3 font-mono text-xs text-zinc-400">{v.mobile_ad_id}</td>
                 <td className="px-4 py-3">
-                  <div className="font-semibold">{v.data?.make_label} {v.data?.model_label}</div>
+                  {/* Weg zur Fahrzeugakte — fuer Sucher ist dies die einzige
+                      Fahrzeugliste (der Bestand ist Chefsache). */}
+                  <Link to={`/app/akte/${v.id}`} className="font-semibold hover:underline underline-offset-2"
+                        data-testid={`pool-akte-${v.id}`}>
+                    {v.data?.make_label} {v.data?.model_label}
+                  </Link>
                   <div className="text-xs text-zinc-500">{v.data?.model_description}</div>
                 </td>
                 <td className="px-4 py-3">{v.data?.first_registration || "—"}</td>
-                <td className="px-4 py-3">{v.data?.mileage ? `${Number(v.data.mileage).toLocaleString("de-DE")} km` : "—"}</td>
+                <td className="px-4 py-3">{kmText(v.data?.mileage)}</td>
                 <td className="px-4 py-3">{v.data?.power_ps ? `${v.data.power_ps} PS` : "—"}</td>
                 <td className="px-4 py-3">
-                  <span className="text-xs px-2 py-0.5 rounded-sm border"
-                        style={{ borderColor: "var(--border-default)", color: "var(--text-secondary)" }}>
-                    {v.status || "verglichen"}
-                  </span>
+                  {/* Pruefbericht 20.09.2026 (U-40/H16): der aktuelle Lebenszyklus
+                      statt des alten Freitext-Status — sonst stand ein laengst
+                      abgeholtes Fahrzeug hier weiter auf "Vertrag erstellt". */}
+                  <StatusSchild status={v.lifecycle || "verglichen"}
+                                text={lifecycleText(v.lifecycle || "verglichen")} />
                 </td>
                 {mitBearbeiter && (
                   <td className="px-4 py-3 text-xs text-zinc-300" data-testid={`pool-owner-${v.id}`}>

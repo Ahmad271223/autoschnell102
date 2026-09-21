@@ -26,6 +26,21 @@ const TAKT_MS = 3000;
 const MAX_ABFRAGEN = 100; // 100 x 3 s = 5 min
 const LAUFEND = ["offen", "in_arbeit"];
 
+// Pruefbericht 20.09.2026 (U-101/H33): "wird_geloescht" zaehlte weder als
+// laufend noch als geloescht — die Karte zeigte fuer ein Dokument, das gerade
+// verschwindet, endlos "wird erstellt".
+function anzeigeStatus(status) {
+  return status === "wird_geloescht" ? "geloescht" : status;
+}
+
+// 4xx (nicht vorhanden, keine Berechtigung, abgelaufen) aendert sich durch
+// Nachfragen nicht — nur Netz- und Serverfehler lohnen einen neuen Versuch
+// (U-100/H32: vorher 100 Abfragen ins Leere, danach "dauert länger").
+function endgueltig(err) {
+  const st = err?.response?.status;
+  return typeof st === "number" && st >= 400 && st < 500 && st !== 408 && st !== 429;
+}
+
 function datum(iso, mitZeit = false) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -33,11 +48,14 @@ function datum(iso, mitZeit = false) {
   return mitZeit ? d.toLocaleString("de-DE") : d.toLocaleDateString("de-DE");
 }
 
+// M44: Der Server nennt den Grund (abgelaufen, noch nicht fertig, Datei
+// fehlt, Pruefsumme) — der wird jetzt angezeigt statt eines Einheitssatzes
+// bzw. des englischen Rohtexts beim Drucken.
 async function pdfOeffnen(id) {
   try {
     await openAuthedFile(`/beweise/${id}/pdf`, "application/pdf");
-  } catch {
-    toast.error("Beweisdokument konnte nicht geladen werden");
+  } catch (err) {
+    toast.error(errMsg(err, "Beweisdokument konnte nicht geladen werden"));
   }
 }
 
@@ -46,9 +64,9 @@ async function pdfDrucken(id) {
     const r = await api.get(`/beweise/${id}/pdf`, { responseType: "blob" });
     const blobUrl = URL.createObjectURL(r.data);
     printBlobUrl(blobUrl, { label: "Beweisdokument" });
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10 * 60 * 1000);
   } catch (err) {
-    toast.error("Drucken nicht möglich: " + (err?.message || "Fehler"));
+    toast.error(errMsg(err, "Drucken nicht möglich"));
   }
 }
 
@@ -59,6 +77,11 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
   const [geladen, setGeladen] = useState(!vehicleId);
   const [zeitUeber, setZeitUeber] = useState(false);
   const [holt, setHolt] = useState(false);
+  // U-98/H30: "nicht ladbar" ist etwas anderes als "gibt es nicht" — vorher
+  // sahen "kein Dokument", "keine Berechtigung" und "Server kaputt" gleich aus.
+  const [ladeFehler, setLadeFehler] = useState("");
+  const [nichtVerfuegbar, setNichtVerfuegbar] = useState(false);
+  const [neuLaden, setNeuLaden] = useState(0);
   const id = beweis?.id || start?.id || beweisId;
   // Ohne Fahrzeug oder Inseratsschluessel kann man nichts anfordern (z. B.
   // wenn die Karte nur ueber eine Beweis-ID eingebunden ist).
@@ -95,6 +118,7 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
       try {
         const { data } = await api.get("/beweise", { params: { vehicle_id: vehicleId } });
         if (aus) return;
+        setLadeFehler("");
         if (data?.beweis) setBeweis(data.beweis);
         // Alte Aufnahme (vor 10.09.2026) IMMER mit anzeigen: sie belegt den
         // Stand zum Vertragsschluss, ein spaeteres Beweisdokument evtl. nicht.
@@ -104,22 +128,26 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
         } catch {
           /* keine alten Snapshots */
         }
-      } catch {
-        /* nichts anzeigen */
+      } catch (err) {
+        if (aus) return;
+        // 403/404: dieses Konto darf/kann hier nichts sehen — Karte weglassen.
+        if (endgueltig(err)) setNichtVerfuegbar(true);
+        else setLadeFehler(errMsg(err, "Beweisdokument konnte nicht geladen werden"));
       } finally {
         if (!aus) setGeladen(true);
       }
     })();
     return () => { aus = true; };
-  }, [vehicleId]);
+  }, [vehicleId, neuLaden]);
 
   // Solange das Dokument erstellt wird: regelmaessig nachfragen.
-  const status = beweis?.status || (id ? "offen" : null);
+  const status = anzeigeStatus(beweis?.status || (id ? "offen" : null));
   useEffect(() => {
-    if (!id || (status && !LAUFEND.includes(status))) return undefined;
+    if (!id || nichtVerfuegbar || (status && !LAUFEND.includes(status))) return undefined;
     let aus = false;
     let n = 0;
     let timer;
+    setZeitUeber(false);
     const tick = async () => {
       n += 1;
       try {
@@ -127,8 +155,9 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
         if (aus) return;
         setBeweis(data);
         if (!LAUFEND.includes(data?.status)) return;
-      } catch {
+      } catch (err) {
         if (aus) return;
+        if (endgueltig(err)) { setNichtVerfuegbar(true); return; }
       }
       if (n >= MAX_ABFRAGEN) { setZeitUeber(true); return; }
       timer = setTimeout(tick, TAKT_MS);
@@ -136,9 +165,24 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
     timer = setTimeout(tick, n === 0 && start ? TAKT_MS : 0);
     return () => { aus = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, status]);
+  }, [id, status, neuLaden, nichtVerfuegbar]);
 
-  if (!geladen) return null;
+  // M45: Nach der Wartezeit nicht einfach stehen bleiben — erneut nachsehen.
+  const erneut = () => { setLadeFehler(""); setZeitUeber(false); setNeuLaden((x) => x + 1); };
+
+  if (!geladen || nichtVerfuegbar) return null;
+  if (ladeFehler && !id) {
+    return (
+      <div className={compact ? "text-[11px]" : "apple-surface p-4 text-xs"} role="alert"
+           data-testid="beweis-ladefehler" style={{ color: "var(--text-muted)" }}>
+        <ShieldCheck size={11} className="inline mr-1 text-[var(--accent-red)]" />
+        {ladeFehler}{" "}
+        <button type="button" onClick={erneut} className="underline underline-offset-2 font-semibold">
+          Erneut versuchen
+        </button>
+      </div>
+    );
+  }
   if (!id) {
     if (!kannAnfordern) {
       return altSnapshot ? <AltSnapshot snap={altSnapshot} compact={compact} /> : null;
@@ -209,7 +253,15 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
             </span>
           </>
         ) : (
-          <StatusBadge status={status} zeitUeber={zeitUeber} />
+          <>
+            <StatusBadge status={status} zeitUeber={zeitUeber} />
+            {zeitUeber && (
+              <button type="button" onClick={erneut} data-testid="beweis-erneut-inline"
+                      className="text-[10px] underline underline-offset-2" style={{ color: "var(--text-muted)" }}>
+                erneut prüfen
+              </button>
+            )}
+          </>
         )}
       </div>
       {alt}
@@ -279,7 +331,15 @@ export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKe
       ) : (
         <div className="text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
           Alle Inseratsdaten und Fotos werden als PDF festgehalten (Beweis bei Streitfällen).
-          Das dauert meist nur wenige Sekunden …
+          {zeitUeber ? (
+            <>
+              {" "}Das dauert heute länger als üblich.{" "}
+              <button type="button" onClick={erneut} data-testid="beweis-erneut"
+                      className="underline underline-offset-2 font-semibold">
+                Erneut prüfen
+              </button>
+            </>
+          ) : " Das dauert meist nur wenige Sekunden …"}
         </div>
       )}
     </div>

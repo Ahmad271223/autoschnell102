@@ -18,7 +18,7 @@ from auth import (
     new_session_id, verify_password_async, _DUMMY_HASH,
 )
 from deps import (
-    current_user, db, firma_gesperrt, get_subscription_status, now_iso,
+    current_user, db, firma_gesperrt, firma_gesperrt_fehler, get_subscription_status, now_iso,
     log_activity, log_activity_sicher,
 )
 from rate_limiter import (client_ip, SlidingWindowRateLimiter, bekannte_ip_merken,
@@ -271,6 +271,20 @@ def geraet_kurz(request) -> str:
     return f"{browser} auf {system}"
 
 
+async def _firmensperre_pruefen(user: dict) -> None:
+    """Keine Sitzung fuer Konten einer gesperrten Firma.
+
+    Pruefbericht 20.09.2026 (B2): Geprueft wurden nur Konten mit role
+    "sucher". Ein weiteres dealer-Konto derselben Firma (deps.current_firma
+    behandelt es seit dem 20.09. als Sucher) bekam ein Token, /auth/me
+    antwortete 403, die Oberflaeche verwarf beides — Anmeldeschleife ohne
+    Begruendung. Der Chef selbst faellt schon vorher an "Account ist
+    deaktiviert"; fuer ihn liefert firma_gesperrt hier False."""
+    if user.get("role") in ("sucher", "dealer") and user.get("dealer_id") \
+            and await firma_gesperrt(user["dealer_id"]):
+        raise firma_gesperrt_fehler()
+
+
 async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
     """Passwort (und ggf. 2. Faktor) sind geprueft: neue Einzel-Sitzung,
     Token, Audit. Runde 19: Zeitpunkt und Geraet der Sitzung werden am Konto
@@ -395,6 +409,7 @@ async def login_mfa(body: MfaLoginIn, request: Request):
             raise HTTPException(401, "Code ungültig")
     # Nachpruefung 15.09.2026 (Anmeldung Nr. 7): der Passwort-Zaehler wird erst
     # hier, nach dem vollstaendigen zweiten Schritt, geleert.
+    await _firmensperre_pruefen(user)
     await login_limiter.reset(login_schluessel(
         ip, user.get("kontonummer") or user.get("username") or user.get("email") or ""))
     return await _sitzung_ausstellen(user, ip, geraet_kurz(request))
@@ -435,11 +450,9 @@ async def login(body: LoginIn, request: Request):
         raise HTTPException(401, LOGIN_FALSCH)
     if not user.get("active"):
         raise HTTPException(403, "Account ist deaktiviert")
-    if user.get("role") == "sucher" and user.get("dealer_id") \
-            and await firma_gesperrt(user["dealer_id"]):
-        # Runde 15: gesperrter Chef = gesperrte Firma — schon HIER, nicht erst
-        # beim naechsten Request (vorher: Token + "auth.login"-Audit, dann 403).
-        raise HTTPException(403, "Die Firma ist gesperrt — bitte den Administrator kontaktieren.")
+    # Runde 15: gesperrter Chef = gesperrte Firma — schon HIER, nicht erst
+    # beim naechsten Request (vorher: Token + "auth.login"-Audit, dann 403).
+    await _firmensperre_pruefen(user)
     mfa_aktiv = bool((user.get("mfa") or {}).get("aktiv"))
     # Gnadenfrist nach dem Notfall-Abschalten (scripts/mfa_pruefen.py --abschalten):
     # 30 Minuten, um sich anzumelden und den zweiten Faktor neu einzurichten.
@@ -488,6 +501,18 @@ async def logout(user=Depends(current_user)):
 @router.get("/auth/me")
 async def me(user=Depends(current_user)):
     from deps import effective_dealer, subscription_for
+    if user.get("role") == "dealer" and user.get("dealer_id"):
+        # Pruefbericht 20.09.2026 (B6): Ein weiteres dealer-Konto derselben
+        # Firma ist fuer alle Firmenwege ein Sucher (deps.current_firma). Die
+        # Oberflaeche sah hier aber role "dealer" und zeigte Chef-Knoepfe,
+        # die dann alle 403 lieferten. Nur bei eindeutigem Zeiger auf ein
+        # ANDERES Konto — ohne Zeiger (Altbestand) bleibt es wie bisher.
+        firma = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "user_id": 1})
+        haupt = (firma or {}).get("user_id")
+        if haupt and haupt != user["id"]:
+            user = dict(user)
+            user["role"] = "sucher"
+            user["kein_haupt_chef"] = True
     sub = await subscription_for(user)
     dealer = await effective_dealer(user)
     if user.get("role") == "sucher":

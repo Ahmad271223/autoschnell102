@@ -319,6 +319,20 @@ NOISE_PATTERNS = (
     re.compile(r"^preis", re.I),
     re.compile(r"^der preis", re.I),
     re.compile(r"\bzu verkaufen\b", re.I),
+    # Pruefbericht 20.09.2026 (S-15): Zustands- und Verkaufsaussagen aus dem
+    # Fliesstext landeten als "Ausstattung laut Inserat" im Kaufvertrag
+    # ("Unfallfrei", "TÜV neu", "2. Hand", "kein Raucherauto").
+    re.compile(r"unfall", re.I),
+    re.compile(r"\bt[üu]v\b|\bhu\b|\bau\b neu|hauptuntersuchung", re.I),
+    re.compile(r"\b\d+\.?\s*hand\b|\bhand\s*\d", re.I),
+    # "kein Raucherauto" faengt die naechste Zeile; "Nichtraucherfahrzeug"
+    # (ein Wort) ist ein offizielles Merkmal und bleibt.
+    re.compile(r"^(kein|keine|ohne|nicht)\b", re.I),
+    re.compile(r"\b(verkaufe|verkaufen|biete|tausch|inzahlung|probefahrt|besichtigung)\w*", re.I),
+    # "Scheckheftgepflegt" und "Nichtraucherfahrzeug" sind dagegen offizielle
+    # Merkmale der Portale (Vokabelliste unten) und bleiben erhalten.
+    re.compile(r"\b(top|guter|sehr guter|gepflegter)\s+zustand\b", re.I),
+    re.compile(r"\b(mängel|maengel|defekt|kratzer|delle|rost)\b", re.I),
 )
 
 
@@ -333,12 +347,27 @@ def _is_equipment_like(item: str) -> bool:
     return True
 
 
+def _zustand_unfall(text) -> Optional[bool]:
+    from mobile_service import zustand_unfall
+    return zustand_unfall(None, str(text or ""))
+
+
+# Obergrenze der Ausstattungsliste (wie kleinanzeigen_api.MAX_MERKMALE).
+MAX_AUSSTATTUNG = 150
+
+
 def _parse_equipment(visible: str) -> List[str]:
     """Pull comma-separated list under 'Ausstattung' if present, else fall
     back to a known-vocabulary scan. Filters out obvious noise items
-    (price hints, seller-type lines, postcodes, country names)."""
+    (price hints, seller-type lines, postcodes, country names).
+
+    Pruefbericht 20.09.2026 (A-01): Die Dublettenpruefung lief ueber eine
+    Liste (`it not in items`) ohne Obergrenze — quadratisch. 0,5 MB
+    eingereichtes HTML hielten den Server 12 Sekunden fest, die erlaubten
+    6 MB ueber zwanzig Minuten. Jetzt Menge + Obergrenze."""
 
     items: List[str] = []
+    gesehen: set = set()
     m = re.search(
         r"\nAusstattung\n(.+?)(?:\nInserat bereitgestellt von|\nAnbieter|"
         r"\nNachricht|\nDer Preis|\nVerhandlungsbasis|\nPrivatanbieter|$)",
@@ -347,8 +376,11 @@ def _parse_equipment(visible: str) -> List[str]:
     if m:
         for part in re.split(r",|\n", m.group(1)):
             it = _clean(part)
-            if it and _is_equipment_like(it) and it not in items:
+            if it and _is_equipment_like(it) and it not in gesehen:
+                gesehen.add(it)
                 items.append(it)
+                if len(items) >= MAX_AUSSTATTUNG:
+                    break
         return items
     # vocabulary fallback
     vocab = (
@@ -723,8 +755,9 @@ def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
         "hu": structured.get("HU bis"),
         "previous_owners": _to_int(structured.get("Anzahl der Fahrzeughalter"))
                            or extract_owners_from_text(visible),
-        "accident_damaged": False,
-        "roadworthy": True,
+        # Pruefbericht 20.09.2026 (S-05/S-06): nur echte Angaben, sonst None.
+        "accident_damaged": _zustand_unfall(structured.get("Fahrzeugzustand")),
+        "roadworthy": None,
         "features": _parse_equipment(visible),
         "description": _parse_description(visible) or _meta(soup, "og:description", "description"),
         "list_price": float(price_amount) if price_amount else None,

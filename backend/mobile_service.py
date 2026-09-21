@@ -124,7 +124,12 @@ def _desc(node):
         return None
     d = node.get("resource:local-description")
     if isinstance(d, list):
-        d = next((x for x in d if isinstance(x, dict) and x.get("@xml-lang") == "en"), d[0] if d else None)
+        # Pruefbericht 20.09.2026 (S-18): Deutsch zuerst — der Kaufvertrag ist
+        # deutsch; vorher wurde ausdruecklich die englische Fassung gewaehlt
+        # ("Alloy wheels", "SUV/Off-road Vehicle/Pickup Truck").
+        d = (next((x for x in d if isinstance(x, dict) and x.get("@xml-lang") == "de"), None)
+             or next((x for x in d if isinstance(x, dict) and x.get("@xml-lang") == "en"), None)
+             or (d[0] if d else None))
     if isinstance(d, dict):
         return d.get("#text")
     return d
@@ -141,6 +146,25 @@ def _features_list(vehicle: dict) -> List[str]:
         if label:
             out.append(str(label).replace("_", " ").title() if str(label).isupper() else str(label))
     return out
+
+
+def _xml_bool(knoten) -> Optional[bool]:
+    """<ad:x value="true|false"/> -> True/False, fehlt/unklar -> None."""
+    wert = str(_attr(knoten or {}, "value") or "").strip().lower()
+    return True if wert == "true" else False if wert == "false" else None
+
+
+def _xml_unfall(vehicle: dict) -> Optional[bool]:
+    """Unfallschaden laut Inserat. ad:accident-damaged ist die eigentliche
+    Angabe; ad:damage-and-unrepaired="true" (beschaedigt und nicht repariert)
+    ist ebenfalls ein Schaden. "false" dort sagt dagegen NICHT "unfallfrei" —
+    ein reparierter Unfall ist auch "nicht unrepariert"."""
+    unfall = _xml_bool(vehicle.get("ad:accident-damaged"))
+    if unfall is not None:
+        return unfall or bool(_xml_bool(vehicle.get("ad:damage-and-unrepaired")))
+    if _xml_bool(vehicle.get("ad:damage-and-unrepaired")) is True:
+        return True
+    return None
 
 
 def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
@@ -162,7 +186,15 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         fr = f"{fr[5:7]}/{fr[0:4]}"
     cubic = _attr(specifics.get("ad:cubic-capacity") or {}, "value")
     doors = _attr(specifics.get("ad:door-count") or vehicle.get("ad:door-count") or {}, "key")
-    seats = _attr(specifics.get("ad:seats") or vehicle.get("ad:seats") or {}, "value")
+    # Pruefbericht 20.09.2026 (S-07): Das Element heisst ad:num-seats — ad:seats
+    # kommt in den Daten nicht vor, die Sitzzahl blieb immer leer.
+    seats = _attr(specifics.get("ad:num-seats") or specifics.get("ad:seats")
+                  or vehicle.get("ad:num-seats") or vehicle.get("ad:seats") or {}, "value")
+    # S-08: HU steht unter ad:general-inspection ("2027-05" -> "05/2027").
+    hu = _attr(specifics.get("ad:general-inspection") or vehicle.get("ad:general-inspection")
+               or specifics.get("ad:hu") or vehicle.get("ad:hu") or {}, "value")
+    if hu and re.fullmatch(r"\d{4}-\d{2}", str(hu)):
+        hu = f"{hu[5:7]}/{hu[0:4]}"
     color = _desc(specifics.get("ad:exterior-color") or vehicle.get("ad:exterior-color"))
 
     price_node = ad.get("ad:price") or {}
@@ -224,18 +256,20 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         "color": color,
         "vin": _attr(vehicle.get("ad:vin") or {}, "value"),
         "license_plate": None,
-        "hu": _attr(specifics.get("ad:hu") or vehicle.get("ad:hu") or {}, "value"),
+        "hu": hu,
         "previous_owners": _attr(specifics.get("ad:previous-owner") or vehicle.get("ad:previous-owner") or {}, "value")
                            or extract_owners_from_text(description),
-        "accident_damaged": (_attr(vehicle.get("ad:accident-damaged") or {}, "value") == "true"),
-        "roadworthy": (_attr(vehicle.get("ad:roadworthy") or {}, "value") != "false"),
+        # Pruefbericht 20.09.2026 (S-01): fehlt die Angabe, bleibt sie None —
+        # vorher wurde daraus "kein Unfallschaden" und "fahrbereit".
+        "accident_damaged": _xml_unfall(vehicle),
+        "roadworthy": _xml_bool(vehicle.get("ad:roadworthy")),
         "features": _features_list(vehicle),
         "description": description,
         "list_price": float(list_price) if list_price else None,
         "currency": _attr(price_node, "currency") or "EUR",
         "seller_name": _attr(seller_node.get("seller:contact-person") or {}, "value")
                        or _attr(seller_node.get("seller:company-name") or {}, "value")
-                       or ("Händler" if _attr(seller_node.get("seller:type") or {}, "commercial") == "true" else "Privatverkäufer"),
+                       or None,
         # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
         "seller_type": {"true": "haendler", "false": "privat"}.get(
             _attr(seller_node.get("seller:type") or {}, "commercial") or ""),
@@ -367,12 +401,98 @@ def _apify_attr(item: dict, *tags: str) -> Optional[str]:
     return None
 
 
-def _apify_zahl(text: Optional[str]) -> Optional[int]:
-    """'111,016 km' / '111.016 km' / '1,984 ccm' -> 111016 / 1984."""
-    if not text:
+_ZAHL_MIT_TRENNER = re.compile(r"\d{1,3}(?:[.,\u00a0\u202f]\d{3})+(?!\d)|\d+")
+_BEREICH = re.compile(r"\d\s*(?:-|–|bis)\s*\d")
+
+
+def _apify_zahl(text) -> Optional[int]:
+    """'111,016 km' / '111.016 km' / '1,984 ccm' -> 111016 / 1984.
+
+    Pruefbericht 20.09.2026 (S-11/S-12): Vorher wurde JEDES Nicht-Ziffern-
+    Zeichen entfernt — aus "12.500,50 km" wurden 1.250.050 km, aus
+    "10.000 - 20.000 km" eine Milliarde und aus "€ 2.000,50" 200.050 €.
+    Jetzt zaehlt die ERSTE Zahl (mit Tausendertrennern), ein Dezimalanteil
+    faellt weg, und eine Spanne ist keine Angabe (None)."""
+    if text is None or isinstance(text, bool):
         return None
-    ziffern = re.sub(r"[^0-9]", "", str(text))
+    if isinstance(text, (int, float)):
+        return int(text) if text >= 0 else None
+    s = str(text).strip()
+    if not s or _BEREICH.search(s):
+        return None
+    m = _ZAHL_MIT_TRENNER.search(s)
+    if not m:
+        return None
+    ziffern = re.sub(r"\D", "", m.group(0))
     return int(ziffern) if ziffern else None
+
+
+_UNFALL_JA = ("beschädigt", "beschaedigt", "unfallwagen", "unfallfahrzeug",
+              "unfallschaden", "damaged", "accident", "nicht repariert")
+_UNFALL_NEIN = ("unfallfrei", "unbeschädigt", "unbeschaedigt", "not damaged",
+                "accident-free", "accident free", "no accident")
+_FAHRBEREIT_NEIN = ("nicht fahrtauglich", "nicht fahrbereit", "nicht fahrfähig",
+                    "nicht fahrfaehig", "not roadworthy", "not drivable",
+                    "not ready to drive")
+
+
+def zustand_unfall(schadensfall, text: str = "") -> Optional[bool]:
+    """Unfallschaden laut Inserat: True/False nur bei echter Angabe, sonst None.
+
+    Pruefbericht 20.09.2026 (S-03/S-06): Gesucht wurde nur "damaged" und
+    "unfall" — "Beschädigtes Fahrzeug" ergab "kein Unfallschaden". Und ohne
+    jede Angabe wurde ebenfalls "kein Unfallschaden" daraus."""
+    if schadensfall is True:
+        return True
+    t = (text or "").lower()
+    # Verneinungen zuerst entfernen, sonst steckt "beschädigt" in "unbeschädigt".
+    rest = t
+    for wort in _UNFALL_NEIN:
+        rest = rest.replace(wort, " ")
+    if any(w in rest for w in _UNFALL_JA):
+        return True
+    if schadensfall is False or any(w in t for w in _UNFALL_NEIN):
+        return False
+    return None
+
+
+def zustand_fahrbereit(bereit, text: str = "") -> Optional[bool]:
+    """Fahrbereit laut Inserat: True/False nur bei echter Angabe, sonst None
+    (S-04: "Nicht fahrtauglich" im Zustandstext wurde ignoriert)."""
+    t = (text or "").lower()
+    if bereit is False or any(w in t for w in _FAHRBEREIT_NEIN):
+        return False
+    if bereit is True:
+        return True
+    return None
+
+
+def telefon_aus(telefone) -> str:
+    """Telefonnummer aus Listen/Zeichenketten der Anbieter.
+
+    Pruefbericht 20.09.2026 (S-17): Eine Zeichenkette wurde wie eine Liste
+    behandelt (erstes ZEICHEN = "0"), und bei Listen gewann blind der erste
+    Eintrag — auch wenn das die Faxnummer war."""
+    if not telefone:
+        return ""
+    if isinstance(telefone, str):
+        return telefone.strip()
+    if isinstance(telefone, dict):
+        telefone = [telefone]
+    if not isinstance(telefone, list):
+        return ""
+    kandidaten = []
+    for eintrag in telefone:
+        if isinstance(eintrag, dict):
+            nummer = str(eintrag.get("number") or eintrag.get("value") or "").strip()
+            art = str(eintrag.get("type") or "").upper()
+        else:
+            nummer, art = str(eintrag or "").strip(), ""
+        if nummer and "FAX" not in art:
+            kandidaten.append((0 if art in ("MOBILE", "CELL") else 1 if art in ("PHONE", "") else 2,
+                               nummer))
+    kandidaten.sort(key=lambda k: k[0])
+    return kandidaten[0][1] if kandidaten else ""
 
 
 def _apify_leistung(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
@@ -436,7 +556,10 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
     preis = None
     p = item.get("price")
     if isinstance(p, dict):
-        for knoten in (p.get("grs"), p.get("gross"), p.get("nettoAmount"), p):
+        # Pruefbericht 20.09.2026 (S-10): nettoAmount ist KEIN Listenpreis —
+        # vorher stand dann der Nettobetrag (20.042 statt 23.850 €) als Preis
+        # im Vergleich und im Beweisdokument.
+        for knoten in (p.get("grs"), p.get("gross"), p):
             if isinstance(knoten, dict) and isinstance(
                     knoten.get("amount"), (int, float)):
                 preis = float(knoten["amount"])
@@ -459,16 +582,12 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
     m = re.search(r"(\d{5})\s+(.+)", adr2)
     if m:
         plz, stadt = m.group(1), m.group(2).strip()
-    telefone = kontakt.get("phones") or []
-    telefon = ""
-    if telefone and isinstance(telefone[0], dict):
-        telefon = telefone[0].get("number") or ""
+    telefon = telefon_aus(kontakt.get("phones"))
 
     beschreibung = _apify_html_zu_text(item.get("htmlDescription") or "")
 
     schaden_text = (_apify_attr(item, "damageCondition") or "").lower()
-    unfall = bool(item.get("isDamageCase")) or "damaged" in schaden_text \
-        or "unfall" in schaden_text.replace("unfallfrei", "")
+    unfall = zustand_unfall(item.get("isDamageCase"), schaden_text)
 
     halter = _apify_zahl(_apify_attr(item, "numberOfPreviousOwners"))
 
@@ -508,15 +627,18 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
         "previous_owners": str(halter) if halter is not None
                            else extract_owners_from_text(beschreibung),
         "accident_damaged": unfall,
-        "roadworthy": item.get("readyToDrive") is not False,
+        "roadworthy": zustand_fahrbereit(item.get("readyToDrive"), schaden_text),
         "features": [str(f) for f in item.get("features") or []],
         "description": beschreibung,
         "list_price": preis,
         "currency": "EUR",
+        # Pruefbericht 20.09.2026 (S-16): kein Platzhalter "Händler"/
+        # "Privatverkäufer" als Name — er fuellte im Vertragsdialog das
+        # Pflichtfeld "Name / Firma", der echte Name wurde nie verlangt.
+        # Die Art steht in seller_type.
         "seller_name": kontakt.get("name")
                        or ((kontakt.get("person") or {}).get("name") if isinstance(kontakt.get("person"), dict) else None)
-                       or ("Händler" if str(kontakt.get("enumType") or "").upper() == "DEALER"
-                           else "Privatverkäufer"),
+                       or None,
         # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
         "seller_type": {"DEALER": "haendler", "PRIVATE": "privat",
                         "PRIVATE_SELLER": "privat"}.get(

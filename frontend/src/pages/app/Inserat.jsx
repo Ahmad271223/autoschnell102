@@ -6,6 +6,7 @@ import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { openContractPdf } from "@/lib/pdf";
 import { thumbSrc, thumbFehler, verkleinereBildDatei } from "@/lib/bilder";
 import { INSERAT_LABELS } from "@/lib/fahrzeugStatus";
+import { preisAusText, preisText } from "@/lib/preis";
 import { toast } from "sonner";
 import {
   ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X, FileText, PenLine,
@@ -36,14 +37,44 @@ export default function Inserat() {
   const fileRef = useRef(null);
   const backend = process.env.REACT_APP_BACKEND_URL;
 
+  // Pruefbericht 20.09.2026 (B18/F1-F4): Jeder Ladefehler (404, 403 fuer
+  // Sucher, 500, Funkloch) liess die Seite fuer immer auf "lade…" stehen —
+  // ohne Text, ohne Rueckweg, ohne neuen Versuch.
+  const [ladeFehler, setLadeFehler] = useState("");
   const load = useCallback(async () => {
     try {
       const r = await api.get(`/resale/${id}`);
+      setLadeFehler("");
       setL(r.data);
-    } catch (e) { toast.error(errMsg(e, "Inserat konnte nicht geladen werden")); }
+    } catch (e) {
+      const status = e?.response?.status;
+      const text = status === 404
+        ? "Dieses Inserat gibt es nicht (mehr)."
+        : status === 403
+          ? errMsg(e, "Inserate bearbeitet der Hauptaccount der Firma.")
+          : errMsg(e, "Inserat konnte nicht geladen werden");
+      setLadeFehler(text);
+      toast.error(text);
+    }
   }, [id]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setL(null);
+    setLadeFehler("");
+    load();
+  }, [load]);
+
+  // Eingabetext je Preisfeld (so, wie getippt) — gezeigt wird der Text, gerechnet
+  // mit der gelesenen Zahl in l.prices.
+  const [preisEingabe, setPreisEingabe] = useState({});
+  const inseratId = l?.id;
+  useEffect(() => {
+    if (!inseratId) return;
+    const text = (n) => (n === null || n === undefined ? "" : Number(n).toLocaleString("de-DE"));
+    setPreisEingabe({ public: text(l?.prices?.public), b2b: text(l?.prices?.b2b),
+                      network: text(l?.prices?.network) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inseratId]);
 
   const vehicleId = l?.vehicle_id;
   useEffect(() => {
@@ -55,15 +86,50 @@ export default function Inserat() {
     return () => { aktiv = false; };
   }, [vehicleId]);
 
-  if (!l) return <div className="p-10 text-zinc-500 text-sm">lade…</div>;
+  if (!l) {
+    return (
+      <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto" data-testid="inserat-laedt">
+        <Link to="/app/bestand" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
+          <ArrowLeft size={14} /> Zurück zum Bestand
+        </Link>
+        {ladeFehler ? (
+          <div className="tactical-card p-4 mt-4 text-sm" role="alert" data-testid="inserat-ladefehler">
+            <div style={{ color: "var(--text-primary)" }}>{ladeFehler}</div>
+            <button type="button" onClick={() => { setLadeFehler(""); load(); }}
+                    className="mt-3 rounded-lg px-3 py-2 text-xs border font-semibold"
+                    style={{ borderColor: "var(--border-default)" }}>
+              Erneut versuchen
+            </button>
+          </div>
+        ) : (
+          <div className="mt-6 text-zinc-500 text-sm">lade…</div>
+        )}
+      </div>
+    );
+  }
 
   const set = (k) => (e) => setL((s) => ({ ...s, [k]: e.target.value }));
-  const setPrice = (k) => (e) =>
-    setL((s) => ({ ...s, prices: { ...s.prices, [k]: e.target.value === "" ? null : parseFloat(e.target.value) } }));
+  // Pruefbericht 20.09.2026 (H36/U-104): Preise wurden mit parseFloat bzw. als
+  // Zahlenfeld gelesen — "20.900" wurde 20,90 €, "20.900 €" leer, und die
+  // Margenanzeige rechnete damit weiter. Jetzt deutsch (preisAusText), und ein
+  // unlesbarer Wert blockiert das Speichern mit Hinweis statt still falsch.
+  const setPrice = (k) => (e) => {
+    const text = e.target.value;
+    setPreisEingabe((p) => ({ ...p, [k]: text }));
+    const zahl = preisAusText(text);
+    setL((s) => ({ ...s, prices: { ...s.prices, [k]: text.trim() === "" ? null : zahl } }));
+  };
+  const preisFehler = Object.entries(preisEingabe)
+    .filter(([, text]) => String(text || "").trim() && preisAusText(text) === null)
+    .map(([k]) => k);
 
   const save = async (extra = {}) => {
     const ezFehler = monatJahrFehler(l.data?.first_registration);
     if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return false; }
+    if (preisFehler.length) {
+      toast.error("Bitte die Preise als Zahl eintragen, z. B. 20.900 oder 20900.");
+      return false;
+    }
     setBusy(true);
     try {
       const r = await api.put(`/resale/${l.id}`, {
@@ -91,6 +157,25 @@ export default function Inserat() {
       toast.success(`Status: ${STATUS_LABELS[status] || status}`);
       load();
     } catch (e) { toast.error(errMsg(e)); }
+  };
+
+  // H36/U-104: Der tatsaechliche Verkaufspreis wird deutsch gelesen und vor
+  // dem Speichern so angezeigt, wie er verstanden wurde ("20.900" -> 20.900 €).
+  const verkauftMelden = () => {
+    const vorschlag = l.prices?.public != null ? Number(l.prices.public).toLocaleString("de-DE") : "";
+    const roh = window.prompt("Tatsächlicher Verkaufspreis in € (z. B. 20.900):", vorschlag);
+    if (roh === null) return;
+    if (!roh.trim()) {
+      if (window.confirm("Ohne Verkaufspreis als verkauft markieren?")) setStatus("verkauft", null);
+      return;
+    }
+    const preis = preisAusText(roh);
+    if (preis === null || preis <= 0) {
+      toast.error("Bitte den Verkaufspreis als Zahl eintragen, z. B. 20.900.");
+      return;
+    }
+    if (!window.confirm(`Verkaufspreis ${preisText(preis)} speichern?`)) return;
+    setStatus("verkauft", preis);
   };
 
   const removeListing = async () => {
@@ -258,8 +343,7 @@ export default function Inserat() {
               </button>
               <button onClick={() => setStatus("reserviert")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservieren</button>
               <button onClick={() => {
-                        const p = window.prompt("Verkaufspreis (€):", l.prices?.public || "");
-                        if (p !== null) setStatus("verkauft", parseFloat(p || 0) || null);
+                        verkauftMelden();
                       }}
                       className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white"
                       style={{ background: "var(--st-gruen)" }}>
@@ -276,8 +360,7 @@ export default function Inserat() {
               </span>
               <button onClick={() => setStatus("reserviert")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservieren</button>
               <button onClick={() => {
-                        const p = window.prompt("Verkaufspreis (€):", l.prices?.public || "");
-                        if (p !== null) setStatus("verkauft", parseFloat(p || 0) || null);
+                        verkauftMelden();
                       }}
                       className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white"
                       style={{ background: "var(--st-gruen)" }}>
@@ -301,8 +384,7 @@ export default function Inserat() {
           {l.status === "reserviert" && (
             <>
               <button onClick={() => {
-                        const p = window.prompt("Verkaufspreis (€):", l.prices?.public || "");
-                        if (p !== null) setStatus("verkauft", parseFloat(p || 0) || null);
+                        verkauftMelden();
                       }}
                       className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white" style={{ background: "var(--st-gruen)" }}>
                 Als verkauft markieren
@@ -461,13 +543,16 @@ export default function Inserat() {
           <div className="tactical-card p-4">
             <div className="text-sm font-bold uppercase tracking-wide mb-2">Preise</div>
             <label className="text-[11px] text-zinc-500">Verkaufspreis (öffentlich) *</label>
-            <input type="number" value={l.prices?.public ?? ""} onChange={setPrice("public")}
-                   className={inputCls} style={st} placeholder="20900" disabled={l.status === "verkauft"} />
+            <input type="text" inputMode="decimal" value={preisEingabe.public ?? ""} onChange={setPrice("public")}
+                   aria-invalid={preisFehler.includes("public")}
+                   className={inputCls} style={st} placeholder="20.900" disabled={l.status === "verkauft"} />
             <label className="text-[11px] text-zinc-500 mt-2 block">B2B-Preis (optional)</label>
-            <input type="number" value={l.prices?.b2b ?? ""} onChange={setPrice("b2b")}
+            <input type="text" inputMode="decimal" value={preisEingabe.b2b ?? ""} onChange={setPrice("b2b")}
+                   aria-invalid={preisFehler.includes("b2b")}
                    className={inputCls} style={st} disabled={l.status === "verkauft"} />
             <label className="text-[11px] text-zinc-500 mt-2 block">Privater Netzwerkpreis (optional)</label>
-            <input type="number" value={l.prices?.network ?? ""} onChange={setPrice("network")}
+            <input type="text" inputMode="decimal" value={preisEingabe.network ?? ""} onChange={setPrice("network")}
+                   aria-invalid={preisFehler.includes("network")}
                    className={inputCls} style={st} disabled={l.status === "verkauft"} />
           </div>
 
@@ -487,11 +572,18 @@ export default function Inserat() {
               <div className="flex justify-between border-t pt-1" style={st}><span className="text-zinc-500">Gesamtkosten</span><span>{fmtEur(margin.total_cost)}</span></div>
               <div className="flex justify-between text-base font-bold pt-1">
                 <span>Erwartete Marge</span>
-                <span style={{ color: (margin.expected_margin ?? 0) >= 0 ? "var(--st-gruen)" : "var(--st-rot)" }}>
-                  {l.status === "verkauft" && l.sold_price != null
-                    ? fmtEur(l.sold_price - (margin.total_cost || 0))
-                    : fmtEur(margin.expected_margin)}
-                </span>
+                {(() => {
+                  // M39: Farbe und angezeigter Wert aus DERSELBEN Zahl — vorher
+                  // war ein Verlustgeschaeft nach dem Verkauf gruen.
+                  const marge = l.status === "verkauft" && l.sold_price != null
+                    ? l.sold_price - (margin.total_cost || 0)
+                    : margin.expected_margin;
+                  return (
+                    <span style={{ color: (marge ?? 0) >= 0 ? "var(--st-gruen)" : "var(--st-rot)" }}>
+                      {fmtEur(marge)}
+                    </span>
+                  );
+                })()}
               </div>
               {l.status === "verkauft" && (
                 <div className="flex justify-between text-xs text-zinc-500">

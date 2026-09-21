@@ -1715,4 +1715,9 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With",
                    "Idempotency-Key", "X-CSRF-Token"],
+    # 20.09.2026: Kopfzeilen, die die Oberflaeche auswertet. In Produktion
+    # liegt die API unter derselben Herkunft (dort sind sie ohnehin lesbar);
+    # bei getrennter API-Adresse blieben sie ohne diese Liste unsichtbar.
+    expose_headers=["X-Sperre", "X-Wiederholen", "Retry-After", "X-AH-Fassung",
+                    "X-Truncated", "X-Truncated-Laufend", "X-Next-Before"],
 )

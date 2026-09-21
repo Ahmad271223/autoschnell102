@@ -221,6 +221,35 @@ class FreigabeIn(BaseModel):
     preis_zuruecksetzen: bool = False
 
 
+def unterschrift_hat_tinte(raw: bytes, mindest_pixel: int = 50) -> bool:
+    """Ist auf dem Unterschriftsbild ueberhaupt etwas gezeichnet?
+
+    Pruefbericht 20.09.2026 (U-156/F21): Ein leeres Feld galt als
+    unterschrieben. Die App schickte bei jedem Loslassen ein Bild — auch ohne
+    einen einzigen Strich —, und ein weisses PNG ist groesser als jede
+    Mindestlaenge. Das Fahrzeug galt dann als abgeholt, das rechtsverbindliche
+    Protokoll trug eine leere Unterschrift, unwiderruflich.
+
+    Gezaehlt werden dunkle Pixel (auf Weiss gelegt, Transparenz = weiss).
+    Mindestens `mindest_pixel`, bei winzigen Bildern mindestens eines.
+    Nicht lesbar -> False (die Lesbarkeit prueft vorher bild_lesbar_pruefen)."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as bild:
+            bild.load()
+            rgba = bild.convert("RGBA")
+        grund = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        grund.alpha_composite(rgba)
+        grau = grund.convert("L")
+        dunkel = sum(grau.histogram()[:160])
+        gesamt = grau.size[0] * grau.size[1]
+    except Exception:  # noqa: BLE001 — unlesbar = keine Tinte
+        return False
+    schwelle = max(1, min(mindest_pixel, int(gesamt * 0.0002)))
+    return dunkel >= schwelle
+
+
 def _vehicle_check_values(vehicle: dict, contract: dict) -> Dict[str, str]:
     """Soll-Werte fuer Abschnitt 1 — dieselben wie im Protokoll-PDF und im
     Freigabe-Kasten.
@@ -1633,6 +1662,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         except (ValueError, TypeError):
             raise HTTPException(400, f"Unterschrift ({who}) konnte nicht gelesen "
                                      "werden — bitte noch einmal unterschreiben")
+        if not unterschrift_hat_tinte(raw):
+            raise HTTPException(400, f"Unterschrift ({who}) ist leer — bitte im Feld "
+                                     "unterschreiben")
         if not raw or len(raw) > 2 * 1024 * 1024:
             raise HTTPException(400, f"Unterschrift ({who}) ungültig oder zu groß")
         try:

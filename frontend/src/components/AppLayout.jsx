@@ -12,6 +12,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
 import ThemeToggle from "@/components/ThemeToggle";
 import InstallPWAButton from "@/components/InstallPWAButton";
+import RechtsLinks from "@/components/RechtsLinks";
 
 const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
@@ -154,12 +155,17 @@ export default function AppLayout({ children }) {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-x-hidden min-w-0">
-        <NachladeFehler>
-          <Suspense fallback={<SeiteLaedt />}>
-            {children}
-          </Suspense>
-        </NachladeFehler>
+      <main className="flex-1 overflow-x-hidden min-w-0 flex flex-col">
+        <div className="flex-1">
+          <NachladeFehler>
+            <Suspense fallback={<SeiteLaedt />}>
+              {children}
+            </Suspense>
+          </NachladeFehler>
+        </div>
+        {/* Pruefbericht 20.09.2026 (RE-01): Impressum und Datenschutz von
+            jeder Seite des angemeldeten Bereichs aus erreichbar. */}
+        <RechtsLinks className="py-4" />
       </main>
 
     </div>

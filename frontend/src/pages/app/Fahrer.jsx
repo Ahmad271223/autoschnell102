@@ -13,8 +13,14 @@ export default function Fahrer() {
   const [items, setItems] = useState([]);
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
+  // Pruefbericht 20.09.2026 (R1-40/U-167): Ladefehler wurden verschluckt —
+  // die Seite sagte "Noch keine Fahrer", obwohl welche verknuepft waren.
+  const [ladeZustand, setLadeZustand] = useState("laedt");
+  const [ladeFehler, setLadeFehler] = useState("");
 
-  const load = () => api.get("/drivers").then((r) => setItems(r.data)).catch(() => {});
+  const load = () => api.get("/drivers")
+    .then((r) => { setItems(Array.isArray(r.data) ? r.data : []); setLadeZustand("ok"); setLadeFehler(""); })
+    .catch((e) => { setLadeZustand("fehler"); setLadeFehler(errMsg(e, "Fahrer konnten nicht geladen werden")); });
   useEffect(() => { load(); }, []);
 
   const add = async (e) => {
@@ -34,15 +40,28 @@ export default function Fahrer() {
     }
   };
 
+  // R1-41: Fehler beim Entfernen (z. B. Fahrer hat offene Fahrten) wurden
+  // verschluckt — kein Hinweis, keine Aktualisierung.
+  const [entfernt, setEntfernt] = useState("");
   const remove = async (id) => {
+    if (entfernt) return;
     if (!window.confirm("Fahrer aus deiner Liste entfernen?")) return;
-    await api.delete(`/drivers/${id}`);
-    toast.success("Entfernt");
-    load();
+    setEntfernt(id);
+    try {
+      await api.delete(`/drivers/${id}`);
+      toast.success("Entfernt");
+    } catch (e) {
+      toast.error(errMsg(e, "Fahrer konnte nicht entfernt werden"));
+    } finally {
+      setEntfernt("");
+      load();
+    }
   };
 
+  // U-166: Kopieren kann scheitern (keine Berechtigung, alter Browser).
   const copy = async (c) => {
-    try { await navigator.clipboard.writeText(c); toast.success("Kopiert"); } catch {}
+    try { await navigator.clipboard.writeText(c); toast.success("Kopiert"); }
+    catch { toast.error(`Kopieren nicht möglich — bitte von Hand abschreiben: ${c}`); }
   };
 
   return (
@@ -93,7 +112,18 @@ export default function Fahrer() {
             </tr>
           </thead>
           <tbody>
-            {items.length === 0 && (
+            {ladeZustand === "fehler" && (
+              <tr><td colSpan={5} className="px-4 py-6 text-center" role="alert" data-testid="drivers-ladefehler">
+                <span style={{ color: "var(--text-primary)" }}>{ladeFehler}</span>{" "}
+                <button type="button" onClick={load} className="underline underline-offset-2 font-semibold">
+                  Erneut versuchen
+                </button>
+              </td></tr>
+            )}
+            {ladeZustand === "laedt" && items.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-10 text-center text-zinc-500">lade…</td></tr>
+            )}
+            {ladeZustand === "ok" && items.length === 0 && (
               <tr><td colSpan={5} className="px-4 py-10 text-center text-zinc-500">
                 <User size={22} className="mx-auto mb-2 opacity-50" />
                 Noch keine Fahrer. Frag deine Fahrer nach ihrer Fahrer-ID.

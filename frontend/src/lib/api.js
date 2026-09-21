@@ -2,6 +2,8 @@ import { fassungMithoeren } from "@/lib/fassung";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import axios from "axios";
 import { TOKEN_APP, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
+import { schreiben, sitzungsSpeicher } from "@/lib/speicher";
+import { blobOeffnen } from "@/lib/dateiOeffnen";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND}/api`;
@@ -67,6 +69,58 @@ export function gehoertZumAktuellenToken(config, aktuell) {
   return gesendet === `Bearer ${aktuell || ""}`;
 }
 
+/**
+ * Ist das die 403 einer gesperrten Firma (Kopfzeile `X-Sperre: firma`)?
+ * Nur diese eine 403 fuehrt zur Abmeldung — jede andere 403 ("nur der
+ * Hauptaccount darf das") bleibt ein normaler Fehler der Seite.
+ */
+export function istFirmensperre(err) {
+  const r = err?.response;
+  if (!r || r.status !== 403) return false;
+  const kopf = r.headers?.["x-sperre"] ?? r.headers?.["X-Sperre"];
+  return String(kopf || "") === "firma";
+}
+
+/**
+ * Abmeldegrund fuer die Anmeldeseite merken (nur dieser Tab, nie in der URL)
+ * und den zuletzt angezeigten Vergleich verwerfen — beides darf nie werfen.
+ */
+export function abmeldegrundMerken(detail) {
+  const speicher = sitzungsSpeicher();
+  schreiben(speicher, "ah_abmeldegrund", typeof detail === "string" && detail ? detail : "");
+  // Runde 27 (Pruefbefund P0): Auch der zuletzt angezeigte Vergleich muss
+  // weg — sonst sieht der naechste Nutzer an diesem Browser Fahrzeug,
+  // Verkaeuferdaten und Vertrag des vorherigen Kontos.
+  try { vergleichLeeren(speicher); } catch { /* gesperrter Speicher */ }
+}
+
+/**
+ * Fehlerantworten auf Datei-Abrufe (responseType "blob") kommen als Blob an —
+ * errMsg fand darin keinen Text und zeigte "Request failed with status code
+ * 400" statt der deutschen Meldung des Servers (Pruefbericht 20.09.2026, M34).
+ * Hier wird ein JSON-Blob in ein normales Objekt zurueckverwandelt.
+ */
+export async function blobFehlerLesbar(err) {
+  const d = err?.response?.data;
+  if (typeof Blob === "undefined" || !(d instanceof Blob)) return err;
+  if (!/json/i.test(d.type || "")) return err;
+  try {
+    err.response.data = JSON.parse(await blobAlsText(d));
+  } catch { /* kein JSON — dann bleibt es bei der allgemeinen Meldung */ }
+  return err;
+}
+
+// Blob.text() fehlt in aelteren Browsern (Safari < 14) — dann FileReader.
+function blobAlsText(blob) {
+  if (typeof blob.text === "function") return blob.text();
+  return new Promise((res, rej) => {
+    const leser = new FileReader();
+    leser.onload = () => res(String(leser.result || ""));
+    leser.onerror = () => rej(leser.error);
+    leser.readAsText(blob);
+  });
+}
+
 /** Höchstens so viele automatische Wiederholungen je Anfrage. */
 export const WIEDERHOLEN_MAX = 2;
 
@@ -100,12 +154,28 @@ export function wiederholenNachMs(err) {
 
 api.interceptors.response.use(
   (r) => r,
-  (err) => {
+  async (err) => {
+    await blobFehlerLesbar(err);
     if (darfWiederholen(err)) {
       const config = err.config;
       config.__versuche = (config.__versuche || 0) + 1;
       return new Promise((res) => setTimeout(res, wiederholenNachMs(err)))
         .then(() => api(config));
+    }
+    if (istFirmensperre(err)) {
+      // Pruefbericht 20.09.2026 (B2/H1): Firma waehrend der Arbeit gesperrt.
+      // Vorher lieferte jeder Endpunkt ein stummes 403, Seiten mit
+      // verschluckten Fehlern blieben leer. Jetzt: abmelden wie bei 401, mit
+      // dem Text des Servers als Begruendung auf der Anmeldeseite.
+      if (gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_APP)) && tokenLesen(TOKEN_APP)) {
+        tokenLoeschen(TOKEN_APP);
+        abmeldegrundMerken(err?.response?.data?.detail);
+        const pfad = window.location.pathname;
+        if (pfad.startsWith("/app") || pfad.startsWith("/admin")) {
+          window.location.href = "/login?reason=session";
+        }
+      }
+      return Promise.reject(err);
     }
     if (err?.response?.status === 401) {
       const url = err?.config?.url || "";
@@ -125,16 +195,7 @@ api.interceptors.response.use(
           // Abmeldung, Sperre, abgelaufen) — vorher stand fuer jede 401
           // "auf einem anderen Geraet verwendet". Nicht in die URL (Verlauf,
           // Logs), sondern nur fuer diesen Tab.
-          const detail = err?.response?.data?.detail;
-          try {
-            window.sessionStorage.setItem("ah_abmeldegrund",
-              typeof detail === "string" && detail ? detail : "");
-            // Runde 27 (Pruefbefund P0): Auch der zuletzt angezeigte
-            // Vergleich muss weg — sonst sieht der naechste Nutzer an
-            // diesem Browser Fahrzeug, Verkaeuferdaten und Vertrag des
-            // vorherigen Kontos.
-            vergleichLeeren(window.sessionStorage);
-          } catch { /* Storage gesperrt — dann nur die allgemeine Meldung */ }
+          abmeldegrundMerken(err?.response?.data?.detail);
         }
         if (imBereich) window.location.href = "/login?reason=session";
       }
@@ -148,25 +209,18 @@ api.interceptors.response.use(
 // sonst in Browser-Verlauf, Proxy- und Server-Logs).
 export async function openAuthedFile(path, mime = "application/pdf", client = api) {
   // Datei erst laden, dann per unsichtbarem <a target="_blank">-Klick
-  // oeffnen — dasselbe Muster wie beim Kaufvertrag-PDF (openContractPdf),
-  // das zuverlaessig funktioniert. Der fruehere Weg (leeren Tab synchron
-  // oeffnen, opener kappen, Blob-URL nachtragen) bleibt in neueren
-  // Chrome-Versionen dauerhaft weiss: nach `opener = null` liegt der Tab
-  // in einer eigenen Storage-Partition und darf die Blob-URL des
-  // Ursprungs-Tabs nicht mehr laden.
+  // oeffnen — dasselbe Muster wie beim Kaufvertrag-PDF (openContractPdf).
+  // Der fruehere Weg (leeren Tab synchron oeffnen, opener kappen, Blob-URL
+  // nachtragen) bleibt in neueren Chrome-Versionen dauerhaft weiss: nach
+  // `opener = null` liegt der Tab in einer eigenen Storage-Partition und
+  // darf die Blob-URL des Ursprungs-Tabs nicht mehr laden.
+  // Pruefbericht 20.09.2026 (B15): dauert das Laden laenger, als der Browser
+  // den Klick gelten laesst, kommt ein Hinweis mit Knopf (lib/dateiOeffnen).
+  const startMs = Date.now();
   const res = await client.get(path, { responseType: "blob" });
-  const url = URL.createObjectURL(new Blob([res.data], { type: mime }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => a.remove(), 1000);
-  // Spaet freigeben — der eingebaute PDF-Betrachter laedt die Adresse
-  // beim Drucken/Neuladen erneut.
-  setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+  return blobOeffnen(res.data, {
+    startMs, mime, titel: String(mime).startsWith("image/") ? "Das Foto" : "Das Dokument",
+  });
 }
 
 /**

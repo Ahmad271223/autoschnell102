@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
@@ -30,6 +30,113 @@ import {
 } from "lucide-react";
 import CountryPicker from "@/components/CountryPicker";
 
+// Formular aus dem (wirksamen) Haendlerdokument — ohne reine UI-Felder.
+function formAus(dealer) {
+  return {
+    profile: {
+      company_name: dealer.company_name || "", contact_person: dealer.contact_person || "",
+      phone: dealer.phone || "", whatsapp_number: dealer.whatsapp_number || dealer.phone || "",
+      email: dealer.email || "", address: dealer.address || "",
+      zip_code: dealer.zip_code || "", city: dealer.city || "",
+      opening_hours: dealer.opening_hours || "", logo_url: dealer.logo_url || "",
+    },
+    comparison_rules: dealer.comparison_rules || {},
+    export_rules: dealer.export_rules || {},
+    active_profile: dealer.active_profile || "inland",
+    email_subject: dealer.email_subject || "",
+    email_template: dealer.email_template || "",
+    whatsapp_template: dealer.whatsapp_template || "",
+    // Vorlage Ahmad 20.09.2026: die drei nachtraeglichen Mails
+    email_subject_korrektur: dealer.email_subject_korrektur || "",
+    email_template_korrektur: dealer.email_template_korrektur || "",
+    email_subject_nach_kauf: dealer.email_subject_nach_kauf || "",
+    email_template_nach_kauf: dealer.email_template_nach_kauf || "",
+    whatsapp_template_nach_kauf: dealer.whatsapp_template_nach_kauf || "",
+    email_subject_bahn: dealer.email_subject_bahn || "",
+    email_template_bahn: dealer.email_template_bahn || "",
+    sondervereinbarung_standard_aktiv:
+      dealer.sondervereinbarung_standard_aktiv !== false,
+    // Runde 26: EIN Feld. Ein noch vorhandener AGB-Text wird hier
+    // angehaengt; beim Speichern wird das alte Feld geleert.
+    default_terms: "",
+    default_special_agreements: dealer.default_special_agreements || "",
+    digital_vertragstext: zusammenfuehren(dealer.default_terms, dealer.digital_vertragstext),
+    _agb_zusammengefuehrt: wurdeZusammengefuehrt(dealer.default_terms, dealer.digital_vertragstext),
+  };
+}
+
+const gleich = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+
+/**
+ * Pruefbericht 20.09.2026 (H37): Nach dem Logo-Hochladen (oder jedem anderen
+ * Neuladen des Kontexts) wurde das Formular komplett aus den Serverwerten neu
+ * gebaut — Firmenname, Oeffnungszeiten, AGB-Text: alles Ungespeicherte weg.
+ * Jetzt bleiben Felder, die seit dem letzten Serverstand geaendert wurden,
+ * stehen; alle anderen kommen frisch vom Server.
+ */
+export function mitOffenenAenderungen(alt, alterStand, neu) {
+  const out = { ...neu, _edit_profile: alt?._edit_profile || "inland" };
+  if (!alt || !alterStand) return out;
+  for (const k of Object.keys(neu)) {
+    if (k.startsWith("_")) continue;
+    if (k === "profile") {
+      const p = { ...neu.profile };
+      for (const pk of Object.keys(neu.profile)) {
+        if (!gleich(alt.profile?.[pk], alterStand.profile?.[pk])) p[pk] = alt.profile[pk];
+      }
+      out.profile = p;
+    } else if (!gleich(alt[k], alterStand[k])) {
+      out[k] = alt[k];
+    }
+  }
+  return out;
+}
+
+/**
+ * Pruefbericht 20.09.2026 (B19/F18): Das Formular schickte beim Speichern
+ * ALLE Werte zurueck, darunter abgeleitete (WhatsApp faellt auf die
+ * Telefonnummer zurueck, AGB-Feld immer leer, Vertragstext zusammengefuehrt).
+ * Fuer einen Sucher wich das vom Chef-Wert ab und wurde als persoenlicher
+ * Wert eingefroren — spaetere Aenderungen des Chefs kamen nie mehr an.
+ * Sucher senden deshalb nur, was sie wirklich geaendert haben.
+ * default_terms und digital_vertragstext gehoeren zusammen (Runde 26).
+ */
+export function nurGeaenderte(payload, stand) {
+  if (!stand) return payload;
+  const out = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (k === "default_terms") continue;
+    if (k === "profile") {
+      const p = {};
+      for (const [pk, pv] of Object.entries(v || {})) {
+        if (!gleich(pv, stand.profile?.[pk])) p[pk] = pv;
+      }
+      if (Object.keys(p).length) out.profile = p;
+    } else if (!gleich(v, stand[k])) {
+      out[k] = v;
+    }
+  }
+  if ("digital_vertragstext" in out) out.default_terms = "";
+  return out;
+}
+
+// Anzeige der persoenlich ueberschriebenen Felder (Sucher).
+const FELD_TITEL = {
+  company_name: "Firmenname", contact_person: "Ansprechpartner", phone: "Telefon",
+  whatsapp_number: "WhatsApp-Nummer", email: "E-Mail", address: "Adresse",
+  zip_code: "PLZ", city: "Ort", opening_hours: "Öffnungszeiten",
+  comparison_rules: "Vergleichsregeln Inland", export_rules: "Vergleichsregeln Export",
+  active_profile: "aktives Profil",
+  email_subject: "E-Mail-Betreff", email_template: "E-Mail-Vorlage",
+  whatsapp_template: "WhatsApp-Vorlage",
+  email_subject_korrektur: "Korrektur-Mail (Betreff)", email_template_korrektur: "Korrektur-Mail",
+  email_subject_nach_kauf: "Mail nach Kauf (Betreff)", email_template_nach_kauf: "Mail nach Kauf",
+  whatsapp_template_nach_kauf: "WhatsApp nach Kauf",
+  email_subject_bahn: "Bahn-Mail (Betreff)", email_template_bahn: "Bahn-Mail",
+  default_terms: "AGB", default_special_agreements: "Besondere Vereinbarungen",
+  digital_vertragstext: "Vertragstext", sondervereinbarung_standard_aktiv: "Standardsatz an/aus",
+};
+
 const SECTIONS = [
   { id: "profile",    label: "Profil",         icon: Building2 },
   { id: "rules",      label: "Vergleich",      icon: Sliders },
@@ -50,43 +157,21 @@ export default function Einstellungen() {
   const [form, setForm] = useState(null);
   const [active, setActive] = useState("profile");
   const [savedFlash, setSavedFlash] = useState(false);
+  const [speichert, setSpeichert] = useState(false);
+  // Letzter Serverstand des Formulars — Grundlage fuer "was hat sich
+  // geaendert" (B19) und fuer das Erhalten ungespeicherter Eingaben (H37).
+  const ausgangRef = useRef(null);
+  const istChef = user?.role === "dealer";
 
   useEffect(() => {
     // 16.09.2026: nach "Speichern" (refresh) bleibt der Regel-Editor auf dem
     // Profil, das gerade bearbeitet wurde — vorher sprang er auf Inland
     // zurueck und die eben gespeicherten Export-Regeln schienen verschwunden.
-    if (dealer) setForm((alt) => ({
-      _edit_profile: alt?._edit_profile || "inland",
-      profile: {
-        company_name: dealer.company_name || "", contact_person: dealer.contact_person || "",
-        phone: dealer.phone || "", whatsapp_number: dealer.whatsapp_number || dealer.phone || "",
-        email: dealer.email || "", address: dealer.address || "",
-        zip_code: dealer.zip_code || "", city: dealer.city || "",
-        opening_hours: dealer.opening_hours || "", logo_url: dealer.logo_url || "",
-      },
-      comparison_rules: dealer.comparison_rules || {},
-      export_rules: dealer.export_rules || {},
-      active_profile: dealer.active_profile || "inland",
-      email_subject: dealer.email_subject || "",
-      email_template: dealer.email_template || "",
-      whatsapp_template: dealer.whatsapp_template || "",
-      // Vorlage Ahmad 20.09.2026: die drei nachtraeglichen Mails
-      email_subject_korrektur: dealer.email_subject_korrektur || "",
-      email_template_korrektur: dealer.email_template_korrektur || "",
-      email_subject_nach_kauf: dealer.email_subject_nach_kauf || "",
-      email_template_nach_kauf: dealer.email_template_nach_kauf || "",
-      whatsapp_template_nach_kauf: dealer.whatsapp_template_nach_kauf || "",
-      email_subject_bahn: dealer.email_subject_bahn || "",
-      email_template_bahn: dealer.email_template_bahn || "",
-      sondervereinbarung_standard_aktiv:
-        dealer.sondervereinbarung_standard_aktiv !== false,
-      // Runde 26: EIN Feld. Ein noch vorhandener AGB-Text wird hier
-      // angehaengt; beim Speichern wird das alte Feld geleert.
-      default_terms: "",
-      default_special_agreements: dealer.default_special_agreements || "",
-      digital_vertragstext: zusammenfuehren(dealer.default_terms, dealer.digital_vertragstext),
-      _agb_zusammengefuehrt: wurdeZusammengefuehrt(dealer.default_terms, dealer.digital_vertragstext),
-    }));
+    if (!dealer) return;
+    const neu = formAus(dealer);
+    const alterStand = ausgangRef.current;   // VOR dem Ueberschreiben merken
+    ausgangRef.current = neu;
+    setForm((alt) => mitOffenenAenderungen(alt, alterStand, neu));
   }, [dealer]);
 
   if (!form) return <div className="p-10 text-zinc-500">Lade…</div>;
@@ -120,16 +205,47 @@ export default function Einstellungen() {
   });
 
   const save = async () => {
+    if (speichert) return;
+    // _edit_profile ist nur UI-State, nicht ans Backend schicken
+    const { _edit_profile, _agb_zusammengefuehrt, ...alles } = form;
+    // B19: Sucher schicken nur echte Aenderungen (sonst wurden geerbte
+    // Chef-Werte als persoenliche Werte eingefroren). Der Chef schreibt die
+    // Firmenvorgaben und schickt wie bisher alles.
+    const payload = istChef ? alles : nurGeaenderte(alles, ausgangRef.current);
+    if (!istChef && Object.keys(payload).length === 0) {
+      toast.info("Keine Änderungen zum Speichern.");
+      return;
+    }
+    setSpeichert(true);
     try {
-      // _edit_profile ist nur UI-State, nicht ans Backend schicken
-      const { _edit_profile, _agb_zusammengefuehrt, ...payload } = form;
       await api.put("/dealer/settings", payload);
+      // Nach dem Speichern gilt der Serverstand — nichts mehr "offen".
+      ausgangRef.current = null;
       await refresh();
       toast.success("Einstellungen gespeichert");
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1500);
     } catch (err) {
       toast.error(errMsg(err, "Fehler beim Speichern"));
+    } finally {
+      setSpeichert(false);
+    }
+  };
+
+  // B19: Weg zurueck zu den Vorgaben des Chefs.
+  const eigene = (!istChef && Array.isArray(dealer?.eigene_einstellungen))
+    ? dealer.eigene_einstellungen.filter((k) => k !== "active_profile") : [];
+  const aufChefZuruecksetzen = async () => {
+    if (!window.confirm("Alle eigenen Werte löschen? Danach gelten wieder die Vorgaben deines Chefs "
+      + "(auch für künftige Änderungen).")) return;
+    try {
+      await api.post("/dealer/settings/zuruecksetzen", {});
+      ausgangRef.current = null;
+      setForm(null);
+      await refresh();
+      toast.success("Zurückgesetzt — es gelten wieder die Vorgaben deines Chefs.");
+    } catch (err) {
+      toast.error(errMsg(err, "Zurücksetzen fehlgeschlagen"));
     }
   };
 
@@ -159,11 +275,27 @@ export default function Einstellungen() {
             Profil & Vorgaben
           </h1>
         </div>
-        <button onClick={save} data-testid="save-settings-btn"
-                className={`apple-btn ${savedFlash ? "apple-btn-secondary" : "apple-btn-primary"}`}>
-          {savedFlash ? <><Check size={14} /> Gespeichert</> : <><Save size={14} /> Speichern</>}
+        <button onClick={save} data-testid="save-settings-btn" disabled={speichert}
+                className={`apple-btn ${savedFlash ? "apple-btn-secondary" : "apple-btn-primary"} disabled:opacity-60`}>
+          {savedFlash ? <><Check size={14} /> Gespeichert</> : <><Save size={14} /> {speichert ? "Speichert…" : "Speichern"}</>}
         </button>
       </div>
+
+      {eigene.length > 0 && (
+        <div className="mb-5 rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3"
+             data-testid="eigene-einstellungen"
+             style={{ borderColor: "rgba(10,132,255,0.35)", background: "rgba(10,132,255,0.08)",
+                      color: "var(--text-primary)" }}>
+          <span className="flex-1 min-w-0">
+            Eigene Werte (gelten nur für dich): {eigene.map((k) => FELD_TITEL[k] || k).join(", ")}.
+            {" "}Ändert dein Chef diese Felder, kommt das bei dir nicht an.
+          </span>
+          <button type="button" onClick={aufChefZuruecksetzen} data-testid="eigene-zuruecksetzen"
+                  className="apple-btn apple-btn-secondary">
+            Auf Chef-Vorgaben zurücksetzen
+          </button>
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-[220px_1fr] gap-5">
         {/* Sidebar nav */}

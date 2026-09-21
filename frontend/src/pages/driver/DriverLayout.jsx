@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
 import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, NavLink, Navigate, Outlet, useNavigate } from "react-router-dom";
+import RechtsLinks from "@/components/RechtsLinks";
 import { useDriver } from "@/context/DriverContext";
 import { Truck, Calendar, Settings, LogOut } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
@@ -60,6 +61,7 @@ export default function DriverLayout() {
         <NachladeFehler>
           <Suspense fallback={<SeiteLaedt />}>
             <Outlet />
+            <RechtsLinks className="py-4" />
           </Suspense>
         </NachladeFehler>
       </main>

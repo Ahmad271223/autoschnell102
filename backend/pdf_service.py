@@ -97,7 +97,9 @@ def digitaler_vertragstext(dealer: dict) -> str:
 
 def _styles():
     s = getSampleStyleSheet()
-    return {
+    # Pruefbericht 20.09.2026 (P-01): Unicode-Schrift statt Helvetica.
+    from pdf_schrift import styles_anpassen
+    return styles_anpassen({
         "title": ParagraphStyle("title", parent=s["Title"], fontSize=24, leading=27,
                                 textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=0),
         "subtitle": ParagraphStyle("subtitle", parent=s["Normal"], fontSize=9,
@@ -130,7 +132,7 @@ def _styles():
                                     alignment=TA_RIGHT),
         "sig_label": ParagraphStyle("sig_label", parent=s["Normal"], fontSize=8,
                                     leading=10, textColor=GREY),
-    }
+    })
 
 
 def _section(title, st):
@@ -230,6 +232,15 @@ def _two_col_kv(rows, st):
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
     return t
+
+
+def _ja_nein_oder_nichts(wert) -> str:
+    """True -> "Ja", False -> "Nein", alles andere -> "—" (Zeile faellt weg)."""
+    if wert is True:
+        return "Ja"
+    if wert is False:
+        return "Nein"
+    return "—"
 
 
 def _ohne_leere(rows):
@@ -453,7 +464,8 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
             self.setLineWidth(0.5)
             self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
             self.setFillColor(GREY)
-            self.setFont("Helvetica", 7)
+            from pdf_schrift import ersatz_fuer
+            self.setFont(ersatz_fuer("Helvetica"), 7)
             self.drawString(MARGIN, y, footer_left)
             self.drawCentredString(PAGE_W / 2, y, footer_center)
             self.drawRightString(PAGE_W - MARGIN, y,
@@ -610,7 +622,9 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     else:
         preis_label = "inkl. aller Bestandteile lt. Vertrag"
 
-    pay_bits = [("Zahlungsart", contract.get("payment_method", "Bar / Überweisung"))]
+    # Pruefbericht 20.09.2026 (P-09): ein vorhandenes, aber leeres Feld (None)
+    # stand als "None" im Vertrag — der Standard griff nur bei fehlendem Feld.
+    pay_bits = [("Zahlungsart", contract.get("payment_method") or "Bar / Überweisung")]
     pay_sub = "   ·   ".join(
         (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
         for k, v in pay_bits if str(v).strip()
@@ -705,7 +719,9 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         hu_teile.append(f"gültig bis {contract['hu_until']}")
     hu_value = ", ".join(hu_teile)
     accident_value = _yn(contract.get("accident_free"))
-    if contract.get("accident_free", "").strip().lower() == "nein" and contract.get("accident_location"):
+    # P-04: accident_free=None (Feld vorhanden, leer) brach hier mit
+    # AttributeError — die Vertragsanlage scheiterte dann mit 400.
+    if str(contract.get("accident_free") or "").strip().lower() == "nein" and contract.get("accident_location"):
         accident_value = f"Nein (Schaden: {contract['accident_location']})"
 
     zus_rows = [
@@ -718,8 +734,13 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("Gewerblich genutzt seit EZ", _yn(contract.get("commercial_since_ez"))),
         # Runde 22 (11.09.2026, Vorlage Ahmad): angemeldet oder abgemeldet.
         ("Zulassung", _zulassung_anzeige(contract.get("zulassung"))),
-        ("Unfallschaden (Inserat)", "Nein" if not vehicle.get("accident_damaged") else "Ja"),
-        ("Fahrbereit (Inserat)", "Ja" if vehicle.get("roadworthy", True) else "Nein"),
+        # Pruefbericht 20.09.2026 (S-01/S-02/S-05): Nur eine ECHTE Angabe des
+        # Inserats wird gedruckt. Vorher wurde aus "keine Angabe" (None, oder
+        # ein fehlendes Feld) "Unfallschaden: Nein" und "Fahrbereit: Ja" — bei
+        # AutoScout sogar "Fahrbereit: Nein". Beides stand als Zusicherung im
+        # Kaufvertrag, obwohl das Inserat nichts dazu sagte.
+        ("Unfallschaden (Inserat)", _ja_nein_oder_nichts(vehicle.get("accident_damaged"))),
+        ("Fahrbereit (Inserat)", _ja_nein_oder_nichts(vehicle.get("roadworthy"))),
     ]
     zus_rows = _ohne_leere(zus_rows)
     if zus_rows:

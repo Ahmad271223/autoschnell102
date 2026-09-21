@@ -519,6 +519,9 @@ def test_13_ingest_gedeckelt_429(welt, monkeypatch):
     w = welt.w
     monkeypatch.setattr(RL, "_RATE_LIMIT_ENABLED", True)
     assert L._ingest_limiter.max_attempts == 20 and L._ingest_limiter.window_seconds == 60
+    # Pruefbericht 20.09.2026 (A-02): Browser-HTML nimmt der Server nur noch im
+    # Erweiterungsmodus an — die Bremse gilt dort weiter.
+    monkeypatch.setattr(L, "_erweiterung_noetig", lambda: True)
 
     async def lauf():
         for _ in range(20):
@@ -528,6 +531,17 @@ def test_13_ingest_gedeckelt_429(welt, monkeypatch):
         return _status(e)
 
     assert welt.run(lauf()) == 429
+
+    # Mit Kleinanzeigen-Schnittstelle holt der Server selbst: Einreichen aus
+    # dem Browser ist abgeschaltet (409), bevor ueberhaupt etwas gelesen wird.
+    monkeypatch.setattr(L, "_erweiterung_noetig", lambda: False)
+
+    async def api_modus():
+        with pytest.raises(HTTPException) as e:
+            await L.ingest_client_html(L.IngestIn(url=KA_URL, html="x" * 500), w.chef)
+        return _status(e)
+
+    assert welt.run(api_modus()) == 409
     q = inspect.getsource(L.ingest_client_html)
     assert q.index("_ingest_limiter.check") < q.index("peek_cached_listing")
 

@@ -679,7 +679,9 @@ async def compare(body: CompareIn, background: BackgroundTasks,
 
 class IngestIn(BaseModel):
     url: str = Field(min_length=1, max_length=URL_MAX)
-    html: str = Field(min_length=500, max_length=6_000_000)
+    # Pruefbericht 20.09.2026 (A-01): 6 MB waren das Vierfache einer echten
+    # Kleinanzeigen-Seite und die Grundlage des Rechenzeit-Angriffs.
+    html: str = Field(min_length=500, max_length=3_000_000)
 
 
 # Runde 17 (Nr. 292): je Konto hoechstens 20 HTML-Einreichungen pro Minute —
@@ -700,6 +702,14 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
     ist der Link schon im Speicher, wird NICHTS überschrieben (first-wins).
     """
     raw_url = (body.url or "").strip()
+    # Pruefbericht 20.09.2026 (A-01/A-02): Mit Kleinanzeigen-Schnittstelle
+    # holt der SERVER jedes Inserat selbst — dann gibt es keinen Grund, HTML
+    # aus dem Browser anzunehmen. Vorher war der Weg immer offen: ein Sucher
+    # konnte ein erfundenes Fahrzeug (Marke, Preis, km) einreichen, das seine
+    # Kollegen dann bis in den Kaufvertrag uebernahmen.
+    if not _erweiterung_noetig():
+        raise HTTPException(409, "Kleinanzeigen wird direkt über die Schnittstelle abgerufen — "
+                                 "Einreichen aus dem Browser ist abgeschaltet.")
     try:
         identity = get_listing_identity(raw_url)
     except ListingIdentityError as exc:

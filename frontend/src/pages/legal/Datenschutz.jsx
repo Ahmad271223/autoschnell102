@@ -72,8 +72,8 @@ export default function Datenschutz() {
         <li><b>Server-Hosting und Datenbank:</b> Hetzner Online GmbH,
             Industriestr. 25, 91710 Gunzenhausen, Deutschland. Betrieb der
             Anwendung und Speicherung sämtlicher Plattformdaten (Account-,
-            Geschäfts- und Nutzungsdaten). Rechenzentrum:
-            [Standort eintragen, z.&nbsp;B. Falkenstein oder Nürnberg].</li>
+            Geschäfts- und Nutzungsdaten). Rechenzentrum: Nürnberg
+            (Deutschland).</li>
         <li><b>E-Mail-Versand:</b> Vertrags-E-Mails (den Kaufvertrag an den
             Verkäufer und die Kopie an den Sucher) versenden wir über Resend, Inc., 2261 Market Street #5039,
             San Francisco, CA 94114, USA. Der Versand läuft über die
@@ -127,7 +127,8 @@ export default function Datenschutz() {
           Zusagen — eine abschliessende rechtliche Pruefung steht noch aus.
           Quellen: backend/cleanup_service.py (VERTRAG_AUFBEWAHRUNG_TAGE=60,
           LOG_AUFBEWAHRUNG_TAGE=60, SNAPSHOT_RETENTION_DAYS=60 (nur Alt-Snapshots),
-          beweis_service.py BEWEIS_AUFBEWAHRUNG_TAGE=60,
+          beweis_service.py BEWEIS_AUFBEWAHRUNG_TAGE=30,
+          BERICHT_AUFBEWAHRUNG_TAGE=60 (ganzer Abholbericht ab Terminabschluss),
           CLEANUP_RULES 7/14 Tage fuer Inseratsfotos, FAHRERFOTO_TAGE=60
           fuer Fahrerfotos ab dem Hochladen), routes/bestand.py
           (BESTAND_RETENTION_DAYS=50), routes/listings.py
@@ -158,13 +159,14 @@ export default function Datenschutz() {
       <p>
         Fotos, die der Fahrer bei der Abholung zu Abweichungen aufnimmt,
         werden 60 Tage nach dem Hochladen automatisch gelöscht, also etwa so
-        lange, wie der zugehörige Kaufvertrag aufbewahrt wird; der Text des
-        Abholberichts bleibt als Geschäftsunterlage erhalten. Aus dem
+        lange, wie der zugehörige Kaufvertrag aufbewahrt wird. Der
+        Abholbericht selbst (Kilometerstand, Mängel, Notizen, Name des
+        Fahrers) wird 60 Tage nach Abschluss des Termins gelöscht. Aus dem
         Inserat übernommene Fahrzeugfotos werden 7 Tage nach der Abholung
         (bei nicht abgeholten Fahrzeugen nach 14 Tagen) gelöscht, sofern das
         Fahrzeug nicht in den Bestand oder Verkauf übernommen wurde.
         Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert.
-        Beweisdokumente zu Inseraten löschen wir 60 Tage nach ihrer
+        Beweisdokumente zu Inseraten löschen wir 30 Tage nach ihrer
         Erstellung, außer zu dem Inserat besteht bei einem Händler noch ein
         Kaufvertrag, ein Abholtermin, ein Verkaufsinserat oder ein
         Bestandsfahrzeug — dann so lange wie dieser Vorgang. Beweis-Aufnahmen aus der Zeit vor dem

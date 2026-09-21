@@ -3,7 +3,7 @@
  * so im unterschriebenen Abholprotokoll und im Kaufvorgang.
  */
 import { describe, expect, it } from "vitest";
-import { preisAusText, preisText } from "./preis";
+import { kmAusText, preisAusText, preisText } from "./preis";
 
 describe("preisAusText", () => {
   it("liest deutsche Tausenderpunkte richtig", () => {
@@ -52,5 +52,23 @@ describe("preisText", () => {
     expect(preisText(null)).toBe("—");
     expect(preisText(undefined)).toBe("—");
     expect(preisText("")).toBe("—");
+  });
+});
+
+describe("kmAusText (Prüfbericht 20.09.2026, K-01)", () => {
+  it("liest deutsche Kilometerstände als ganze Zahl", () => {
+    expect(kmAusText("85.120")).toBe(85120);
+    expect(kmAusText("85 120")).toBe(85120);
+    expect(kmAusText("85120")).toBe(85120);
+    expect(kmAusText("85.120 km")).toBe(85120);
+    expect(kmAusText("1.250.000")).toBe(1250000);
+  });
+  it("leer ist null, Unsinn ist NaN", () => {
+    expect(kmAusText("")).toBeNull();
+    expect(kmAusText(null)).toBeNull();
+    expect(Number.isNaN(kmAusText("85,5"))).toBe(true);
+    expect(Number.isNaN(kmAusText("-3"))).toBe(true);
+    expect(Number.isNaN(kmAusText("abc"))).toBe(true);
+    expect(Number.isNaN(kmAusText("3.000.000"))).toBe(true);
   });
 });

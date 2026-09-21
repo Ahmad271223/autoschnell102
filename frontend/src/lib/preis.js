@@ -48,3 +48,27 @@ export function preisText(v) {
     style: "currency", currency: "EUR",
   }).format(zahl);
 }
+
+/**
+ * Kilometerstand aus deutscher Schreibweise — nur ganze Zahlen.
+ *
+ * Prüfbericht 20.09.2026 (K-01/F20): Der Abhol-Check las den Wert mit
+ * parseInt — aus "85.120" wurden 85 km, und das stand dann im unveränderbaren
+ * Bericht gegen 84.000 km laut Vertrag.
+ *   "85.120" / "85 120" / "85120" / "85.120 km" → 85120
+ *   "" → null (nichts eingetragen)
+ *   "85,5" / "-3" / "abc" / über 2 Mio. → NaN (der Aufrufer meldet es)
+ */
+export const KM_HOECHSTENS = 2000000;
+
+export function kmAusText(eingabe) {
+  if (eingabe === null || eingabe === undefined) return null;
+  let t = String(eingabe).trim();
+  if (!t) return null;
+  t = t.replace(/km$/i, "").replace(/[\s\u00a0\u202f']/g, "");
+  if (!t) return null;
+  if (!/^\d{1,3}([.,]\d{3})+$|^\d+$/.test(t)) return NaN;
+  const zahl = Number(t.replace(/[.,]/g, ""));
+  if (!Number.isFinite(zahl) || zahl < 0 || zahl > KM_HOECHSTENS) return NaN;
+  return zahl;
+}

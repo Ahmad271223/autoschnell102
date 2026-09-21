@@ -512,21 +512,17 @@ def parse_autoscout_item(item: dict, item_id: str,
     Der Actor liefert flache Felder mit deutschen Werten ("Schaltgetriebe",
     "Benzin", "242.000 km") und fertige Bild-URLs — deutlich einfacher als
     bei mobile.de."""
-    from mobile_service import _apify_leistung, _apify_zahl
+    from mobile_service import _apify_leistung, _apify_zahl, telefon_aus
 
     adresse = item.get("address") or {}
     kw, ps = _apify_leistung(item.get("power"))
 
-    verkaeufer = (item.get("contactName") or "").strip()
-    if not verkaeufer:
-        art = (item.get("seller") or "").strip().lower()
-        verkaeufer = "Privatverkäufer" if art.startswith("privat") else "Händler"
+    # Pruefbericht 20.09.2026 (S-16): kein Platzhalter als Name — die Art
+    # (privat/gewerblich) steht in seller_type.
+    verkaeufer = (item.get("contactName") or "").strip() or None
 
-    telefone = item.get("phones") or []
-    telefon = ""
-    if telefone:
-        telefon = telefone[0].get("number", "") if isinstance(telefone[0], dict) \
-            else str(telefone[0])
+    # S-17: eine Zeichenkette ist EINE Nummer (vorher: ihr erstes Zeichen).
+    telefon = telefon_aus(item.get("phones"))
 
     beschreibung = (item.get("descriptionText") or "").strip()
     if not beschreibung and item.get("description"):

@@ -194,9 +194,22 @@ def test_13_die_drei_folge_mails_gibt_es_als_route():
     quelle = (BACKEND / "routes" / "contracts.py").read_text(encoding="utf-8")
     assert '@router.post("/contracts/{contract_id}/folge-mail")' in quelle
     assert '@router.get("/contracts/{contract_id}/folge-mail/{art}")' in quelle
-    code = "\n".join(z.split("#", 1)[0] for z in quelle.splitlines())
-    # Sie duerfen NIE automatisch laufen — nur auf Anforderung.
-    assert "_versand_limiter.erlaubt" in code, (
+    # Sie duerfen NIE automatisch laufen — nur auf Anforderung — und haengen
+    # an derselben Versandbremse wie der Vertragsversand.
+    # Pruefbericht 20.09.2026: Hier stand frueher `_versand_limiter.erlaubt`
+    # als Pflicht — eine Methode, die es gar nicht gibt. Der Test war damit
+    # gruen, waehrend jeder echte Versand mit 500 scheiterte. Jetzt wird am
+    # echten Funktionskoerper geprueft UND in test_sucher_dashboard_20260920
+    # wirklich versendet.
+    import ast
+    import rate_limiter
+    assert hasattr(rate_limiter.SlidingWindowRateLimiter, "check")
+    assert not hasattr(rate_limiter.SlidingWindowRateLimiter, "erlaubt")
+    baum = ast.parse(quelle)
+    fn = next(k for k in ast.walk(baum)
+              if isinstance(k, ast.AsyncFunctionDef) and k.name == "folge_mail_senden")
+    koerper = ast.unparse(fn)
+    assert "await _versand_limiter.check(" in koerper, (
         "die Folge-Mails haengen nicht an der Versandbremse — offener Weg, "
         "ueber unsere Adresse beliebig viele Mails zu schicken")
     assert set(V.FOLGE_MAILS) == {"korrektur", "nach_kauf", "bahn"}

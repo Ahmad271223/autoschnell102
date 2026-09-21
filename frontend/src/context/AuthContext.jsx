@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { sitzungsSpeicher } from "@/lib/speicher";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import { TOKEN_APP, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import { verbindungsGrund } from "@/components/VerbindungsFehler";
@@ -26,6 +27,12 @@ export const AuthProvider = ({ children }) => {
   // die alten Daten verworfen, damit nicht Konto A mit dem Token von B
   // stehen bleibt.
   const geladenFuerToken = useRef(null);
+  // Pruefbericht 20.09.2026 (B2): Warum hat der letzte refresh() keinen
+  // Nutzer geliefert? login() braucht das — vorher meldete die Anmeldung
+  // "Willkommen zurueck", obwohl /auth/me die Sitzung gerade abgelehnt
+  // hatte (gesperrte Firma), und der Nutzer stand wortlos wieder auf der
+  // leeren Anmeldemaske.
+  const letzteAblehnung = useRef("");
 
   const refresh = useCallback(async () => {
     const token = tokenLesen(TOKEN_APP);
@@ -41,6 +48,7 @@ export const AuthProvider = ({ children }) => {
     try {
       const { data } = await api.get("/auth/me");
       geladenFuerToken.current = token;
+      letzteAblehnung.current = "";
       setUser(data.user);
       setDealer(data.dealer);
       setSubscription(data.subscription);
@@ -54,6 +62,8 @@ export const AuthProvider = ({ children }) => {
       // Jetzt nur noch, wenn der Server die Sitzung wirklich ablehnt:
       // 401 (beendet/abgelaufen) oder 403 (Firma gesperrt).
       const status = e?.response?.status;
+      const detail = e?.response?.data?.detail;
+      letzteAblehnung.current = typeof detail === "string" && detail ? detail : "";
       if (status === 401 || status === 403) {
         // Bei 401 hat der Interceptor in api.js den Token schon geloescht
         // (samt Abmeldegrund und Umleitung). Nur loeschen, solange dieser
@@ -85,6 +95,17 @@ export const AuthProvider = ({ children }) => {
     refresh();
   }, [refresh]);
 
+  // Nach dem Token noch /auth/me: erst wenn das klappt, ist die Anmeldung
+  // wirklich durch. Sonst einen Fehler MIT dem Text des Servers werfen —
+  // die Anmeldeseite zeigt ihn statt "Willkommen zurueck" (B2).
+  const sitzungPruefen = async () => {
+    const me = await refresh();
+    if (me) return me;
+    const fehler = new Error(letzteAblehnung.current
+      || "Die Anmeldung konnte nicht abgeschlossen werden – bitte erneut versuchen.");
+    throw fehler;
+  };
+
   // Kontonummer (13.09.2026): Anmeldekennung ist die Kontonummer (bzw. der
   // Benutzername des Betreibers). Konten legt nur der Betreiber an — die
   // fruehere register()-Funktion gibt es nicht mehr.
@@ -96,13 +117,13 @@ export const AuthProvider = ({ children }) => {
       return { mfa_erforderlich: true, mfa_token: data.mfa_token };
     }
     tokenSetzen(TOKEN_APP, data.token, { nurSitzung: !!data.user?.is_super_admin });
-    await refresh();
+    await sitzungPruefen();
     return data.user;
   };
   const loginMfa = async (mfaToken, code) => {
     const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code });
     tokenSetzen(TOKEN_APP, data.token, { nurSitzung: !!data.user?.is_super_admin });
-    await refresh();
+    await sitzungPruefen();
     return data.user;
   };
 
@@ -111,7 +132,10 @@ export const AuthProvider = ({ children }) => {
       await api.post("/auth/logout");
     } catch (_) {}
     tokenLoeschen(TOKEN_APP);
-    vergleichLeeren(window.sessionStorage);   // Runde 27: auch fremde Staende
+    // Runde 27: auch fremde Staende. 20.09.2026 (B1/B4): ueber den sicheren
+    // Zugriff — der blanke window.sessionStorage wirft bei gesperrtem
+    // Speicher, und dann haette das Abmelden selbst abgebrochen.
+    vergleichLeeren(sitzungsSpeicher());
     geladenFuerToken.current = null;
     setUser(null);
     setDealer(null);

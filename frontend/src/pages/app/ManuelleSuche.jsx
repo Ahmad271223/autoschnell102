@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { lesen, schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import PortalSheet from "@/components/PortalSheet";
@@ -17,8 +19,42 @@ const FUELS = [
 ];
 const GEARBOXES = ["Automatik", "Manuell"];
 
+// Pruefbericht 20.09.2026 (U-21/M14): Grenzen wie im Backend (manual_search.py).
+// Vorher kamen englische Pydantic-Meldungen — und 2050 PS (erlaubt) wurden
+// automatisch zu 1508 kW umgerechnet, was der Server ablehnte.
+const KW_MAX = 1500;
+const PS_MAX = 2039;          // = 1500 kW
+const KM_MAX = 2000000;
+
+/** Eingaben pruefen, deutsche Meldung oder null. */
+export function sucheFehler({ ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle }) {
+  const zahl = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+  const km1 = zahl(kmMin); const km2 = zahl(kmMax);
+  for (const [name, v] of [["von km", km1], ["bis km", km2]]) {
+    if (v !== null && (!Number.isInteger(v) || v < 0 || v > KM_MAX)) {
+      return `Kilometerstand (${name}): bitte eine ganze Zahl zwischen 0 und 2.000.000.`;
+    }
+  }
+  if (km1 !== null && km2 !== null && km1 > km2) return "Kilometerstand: „von“ liegt über „bis“.";
+  if (ezFrom && ezTo && Number(ezFrom) > Number(ezTo)) return "Erstzulassung: „von“ liegt nach „bis“.";
+  if (leistungQuelle === "kw") {
+    const v = zahl(kw);
+    if (v !== null && (!Number.isInteger(v) || v < 1 || v > KW_MAX)) return `Leistung: bitte 1 bis ${KW_MAX} kW.`;
+  }
+  if (leistungQuelle === "ps") {
+    const v = zahl(ps);
+    if (v !== null && (!Number.isInteger(v) || v < 1 || v > PS_MAX)) return `Leistung: bitte 1 bis ${PS_MAX} PS.`;
+  }
+  return null;
+}
+
+// U-24/M17: Das ausgefuellte Formular ging bei jedem Seitenwechsel verloren.
+// Je Konto im Sitzungsspeicher (nicht dauerhaft, nicht fuer andere Konten).
+const FORM_KEY = (userId) => `ah_suche:${userId || "unbekannt"}`;
+
 export default function ManuelleSuche() {
-  const { dealer } = useAuth();
+  const { dealer, user, refresh } = useAuth();
+  const nav = useNavigate();
   // Runde 11: Das aktive Regelprofil (Inland/Export) bestimmt Land,
   // Unfallwagen, Anbieter usw. der Suche — vorher stand es nirgends auf
   // dieser Seite, zwei gleiche Eingaben konnten voellig verschieden suchen.
@@ -41,13 +77,44 @@ export default function ManuelleSuche() {
   const [gearbox, setGearbox] = useState("");
   const [busy, setBusy] = useState(false);
   const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout, aufgeloest, profil }
+  // U-22/M15: Nur das Feld, das der Nutzer selbst getippt hat, geht an den
+  // Server — vorher immer beide, und jede Suche meldete "kW und PS beide".
+  const [leistungQuelle, setLeistungQuelle] = useState(null);
 
-  // Marken laden — einmal je Sitzung (Modul-Cache, Nachpruefung Runde 10)
+  // U-24: gespeicherten Formularstand einmal wiederherstellen.
+  const wiederhergestellt = useRef(false);
   useEffect(() => {
+    if (wiederhergestellt.current || !user?.id) return;
+    wiederhergestellt.current = true;
+    try {
+      const roh = lesen(sitzungsSpeicher(), FORM_KEY(user.id));
+      if (!roh) return;
+      const f = JSON.parse(roh);
+      setMakeId(f.makeId ?? null); setModelId(f.modelId ?? null);
+      setEzFrom(f.ezFrom || ""); setEzTo(f.ezTo || "");
+      setKmMin(f.kmMin || ""); setKmMax(f.kmMax || "");
+      setKw(f.kw || ""); setPs(f.ps || ""); setLeistungQuelle(f.leistungQuelle || null);
+      setFuel(f.fuel || ""); setGearbox(f.gearbox || "");
+    } catch { /* unlesbar — dann eben leer */ }
+  }, [user?.id]);
+  useEffect(() => {
+    if (!user?.id || !wiederhergestellt.current) return;
+    schreiben(sitzungsSpeicher(), FORM_KEY(user.id), JSON.stringify({
+      makeId, modelId, ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle, fuel, gearbox,
+    }));
+  }, [user?.id, makeId, modelId, ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle, fuel, gearbox]);
+
+  // Marken laden — einmal je Sitzung (Modul-Cache, Nachpruefung Runde 10).
+  // U-17/H10: Scheitert der Abruf, bleibt die Seite nicht dauerhaft tot —
+  // "Erneut versuchen" laedt neu (der Modul-Cache verwirft Fehler selbst).
+  const [makesFehler, setMakesFehler] = useState("");
+  const markenLaden = () => {
+    setMakesFehler("");
     ladeMakes(api)
-      .then((data) => setMakes(data))
-      .catch((e) => toast.error(errMsg(e, "Marken konnten nicht geladen werden")));
-  }, []);
+      .then((data) => setMakes(Array.isArray(data) ? data : []))
+      .catch((e) => setMakesFehler(errMsg(e, "Marken konnten nicht geladen werden")));
+  };
+  useEffect(() => { markenLaden(); }, []);
 
   const selectedMake = useMemo(
     () => makes.find((m) => m.id === makeId) || null,
@@ -74,12 +141,14 @@ export default function ManuelleSuche() {
   // Wenn der User KW eingibt, schätzen wir PS und umgekehrt
   const onKwChange = (v) => {
     setKw(v);
+    setLeistungQuelle(v ? "kw" : null);
     if (v && !isNaN(Number(v))) {
       setPs(String(Math.round(Number(v) * 1.359621617)));
     } else if (!v) setPs("");
   };
   const onPsChange = (v) => {
     setPs(v);
+    setLeistungQuelle(v ? "ps" : null);
     if (v && !isNaN(Number(v))) {
       setKw(String(Math.round(Number(v) / 1.359621617)));
     } else if (!v) setKw("");
@@ -94,6 +163,8 @@ export default function ManuelleSuche() {
       toast.error("Bitte zuerst eine Marke auswählen");
       return;
     }
+    const fehler = sucheFehler({ ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle });
+    if (fehler) { toast.error(fehler); return; }
     // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
     // der vorherigen Suche wuerde deren Link in den Filter-Tab laden.
     toast.dismiss(FILTER_TOAST_ID);
@@ -106,8 +177,8 @@ export default function ManuelleSuche() {
         ez_to: ezTo ? parseInt(ezTo, 10) : null,
         km_min: kmMin ? parseInt(kmMin, 10) : null,
         km_max: kmMax ? parseInt(kmMax, 10) : null,
-        kw: kw ? parseInt(kw, 10) : null,
-        ps: ps ? parseInt(ps, 10) : null,
+        kw: leistungQuelle === "kw" && kw ? parseInt(kw, 10) : null,
+        ps: leistungQuelle === "ps" && ps ? parseInt(ps, 10) : null,
         fuel: fuel || null,
         gearbox: gearbox || null,
       });
@@ -123,7 +194,16 @@ export default function ManuelleSuche() {
       // Runde 24 (11.09.2026): feste id je Text — derselbe Hinweis steht nie doppelt.
       hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
     } catch (e) {
-      toast.error(errMsg(e, "Suche fehlgeschlagen"));
+      if (e?.response?.status === 402) {
+        // U-18/H11: Abo abgelaufen — Kontext neu laden (die Routensperre greift
+        // dann) und den Weg zur Abo-Seite anbieten statt drei Worten.
+        refresh?.();
+        toast.error("Für die Suche brauchst du ein aktives persönliches Sucher-Abo.", {
+          duration: 12000, action: { label: "Zum Abo", onClick: () => nav("/abo") },
+        });
+      } else {
+        toast.error(errMsg(e, "Suche fehlgeschlagen"));
+      }
     } finally {
       setBusy(false);
     }
@@ -132,7 +212,7 @@ export default function ManuelleSuche() {
   const reset = () => {
     setMakeId(null); setModelId(null); setMakeSearch(""); setModelSearch("");
     setEzFrom(""); setEzTo(""); setKmMin(""); setKmMax("");
-    setKw(""); setPs(""); setFuel(""); setGearbox("");
+    setKw(""); setPs(""); setFuel(""); setGearbox(""); setLeistungQuelle(null);
     // Runde 11: Links der VORHERIGEN Suche gehoeren nicht zu leeren Feldern.
     setPortalUrls(null);
     toast.dismiss(FILTER_TOAST_ID);   // Runde 22: dito fuer den Blockade-Hinweis
@@ -163,10 +243,23 @@ export default function ManuelleSuche() {
           mit fertigem Filter (beide auf einmal, sobald Pop-ups für AutoSchnell erlaubt sind).
         </p>
         <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }} data-testid="suche-profil">
-          Aktives Regelprofil: <strong>{aktivesProfil}</strong> — Land, Unfallwagen und Anbieter
+          Aktives Regelprofil: <strong>{portalUrls?.profil
+            ? (portalUrls.profil === "export" ? "Export" : "Inland")
+            : aktivesProfil}</strong> — Land, Unfallwagen und Anbieter
           kommen aus diesem Profil (Einstellungen).
         </p>
       </div>
+
+      {makesFehler && (
+        <div className="rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3" role="alert"
+             data-testid="manual-makes-fehler"
+             style={{ borderColor: "#ef444455", background: "#ef444414", color: "var(--text-primary)" }}>
+          <span className="flex-1 min-w-0">{makesFehler}</span>
+          <button type="button" onClick={markenLaden} className="apple-btn apple-btn-secondary">
+            Erneut versuchen
+          </button>
+        </div>
+      )}
 
       {/* Marke + Modell */}
       <div className="grid md:grid-cols-2 gap-5">

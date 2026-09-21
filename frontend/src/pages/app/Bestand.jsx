@@ -1,7 +1,7 @@
 import MonatJahrEingabe from "@/components/MonatJahrEingabe";
 import { monatJahrFehler } from "@/lib/monatJahr";
-import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
@@ -18,6 +18,25 @@ import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
  * - Bestand mit Lifecycle-Filter, 50-Tage-Countdown und Quellen-Kennzeichnung
  * - Manuelles Hinzufügen vorhandener Fahrzeuge (source: manuell)
  */
+
+// Kilometer nur als echte Zahl anzeigen — Altdaten mit Text ergaben "NaN km"
+// (Pruefbericht 20.09.2026, N17).
+function kmText(n) {
+  const zahl = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(zahl) && zahl > 0 ? `${zahl.toLocaleString("de-DE")} km` : "";
+}
+
+// Pruefbericht 20.09.2026 (B8): Field stand INNERHALB des Dialogs — jeder
+// Tastendruck erzeugte einen neuen Komponententyp, React baute das Feld neu
+// auf und der Fokus sprang heraus (ein Zeichen pro Klick, 14 Felder).
+function Field({ label, children }) {
+  return (
+    <div>
+      <label className="text-[11px] text-zinc-500">{label}</label>
+      {children}
+    </div>
+  );
+}
 
 const FILTERS = [
   { key: "",                label: "Alle" },
@@ -36,16 +55,30 @@ export default function Bestand() {
   const [sourceFilter, setSourceFilter] = useState("");
   const [showManual, setShowManual] = useState(false);
   const [busy, setBusy] = useState(null);
+  const nav = useNavigate();
+  // Pruefbericht 20.09.2026 (M23/F8): Ladefehler NICHT als "Noch keine
+  // Fahrzeuge" zeigen — sonst haelt der Nutzer seinen Bestand fuer weg.
+  const [ladeFehler, setLadeFehler] = useState(null);
+  const [geladen, setGeladen] = useState(false);
+  // M20: Beim schnellen Filterwechsel gewinnt nur die LETZTE Anfrage —
+  // eine langsamere aeltere Antwort darf die Liste nicht ueberschreiben.
+  const anfrageNr = useRef(0);
 
   const load = useCallback(async () => {
+    const nr = ++anfrageNr.current;
     try {
       const params = new URLSearchParams();
       if (filter) params.set("lifecycle", filter);
       if (sourceFilter) params.set("source", sourceFilter);
       const r = await api.get(`/bestand?${params.toString()}`);
-      setData(r.data);
+      if (nr !== anfrageNr.current) return;
+      setData(r.data || { items: [], counts: {} });
+      setLadeFehler(null);
     } catch (e) {
-      toast.error(errMsg(e, "Bestand konnte nicht geladen werden"));
+      if (nr !== anfrageNr.current) return;
+      setLadeFehler(errMsg(e, "Bestand konnte nicht geladen werden"));
+    } finally {
+      if (nr === anfrageNr.current) setGeladen(true);
     }
   }, [filter, sourceFilter]);
 
@@ -64,7 +97,9 @@ export default function Bestand() {
       if (decision === "verkaufsentwurf") {
         const draft = await api.post(`/resale/draft/${vehicleId}`);
         toast.success("Inseratsentwurf erstellt");
-        window.location.href = `/app/inserat/${draft.data.id}`;
+        // N14: innerhalb der App navigieren statt die Seite neu zu laden.
+        if (draft?.data?.id) nav(`/app/inserat/${draft.data.id}`);
+        else load();
         return;
       }
       toast.success(decision === "bestand"
@@ -162,19 +197,34 @@ export default function Bestand() {
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm"
              data-testid="bestand-gekuerzt"
              style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
-          Es werden {data.items.length} von {data.gesamt} Fahrzeugen angezeigt.
+          Es werden {(data.items || []).length} von {data.gesamt} Fahrzeugen angezeigt.
           Nutze die Filter oben, um ältere Fahrzeuge zu finden.
         </div>
       )}
+      {ladeFehler && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3" role="alert"
+             data-testid="bestand-ladefehler"
+             style={{ borderColor: "#ef444455", background: "#ef444414", color: "var(--text-primary)" }}>
+          <AlertTriangle size={16} />
+          <span className="flex-1 min-w-0">{ladeFehler}</span>
+          <button type="button" onClick={load} className="rounded-lg px-3 py-1.5 text-xs border font-semibold"
+                  style={{ borderColor: "var(--border-default)" }}>
+            Erneut versuchen
+          </button>
+        </div>
+      )}
       <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {data.items.length === 0 && (
+        {!geladen && !ladeFehler && (
+          <div className="col-span-full text-center py-16 text-zinc-500 text-sm">lade…</div>
+        )}
+        {geladen && !ladeFehler && (data.items || []).length === 0 && (
           <div className="col-span-full text-center py-16 text-zinc-500 text-sm">
             {filter || sourceFilter
               ? "Keine Fahrzeuge für diesen Filter."
               : "Noch keine Fahrzeuge im Bestand. Ein Auto erscheint hier, sobald ein Kaufvertrag gespeichert oder verschickt ist — oder wenn du es von Hand hinzufügst."}
           </div>
         )}
-        {data.items.map((v) => {
+        {(data.items || []).map((v) => {
           const d = v.data || {};
           const lc = v.lifecycle || "verglichen";
           const img = (d.image_urls || d.images || [])[0];
@@ -202,7 +252,7 @@ export default function Bestand() {
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: "var(--text-secondary)" }}>
                   {d.first_registration && <span>EZ {d.first_registration}</span>}
-                  {d.mileage && <span>{Number(d.mileage).toLocaleString("de-DE")} km</span>}
+                  {kmText(d.mileage) && <span>{kmText(d.mileage)}</span>}
                   {v.purchase_price != null && (
                     <span className="text-zinc-300">EK {Number(v.purchase_price).toLocaleString("de-DE")} €</span>
                   )}
@@ -322,12 +372,6 @@ function ManualVehicleDialog({ onClose, onDone }) {
 
   const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
   const st = { borderColor: "var(--border-default)" };
-  const Field = ({ label, children }) => (
-    <div>
-      <label className="text-[11px] text-zinc-500">{label}</label>
-      {children}
-    </div>
-  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>

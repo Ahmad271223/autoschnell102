@@ -40,6 +40,20 @@ export function vergleichSichern(storage, userId, daten) {
   }, false) || false;
 }
 
+/**
+ * Den Stand DIESES Kontos entfernen. Pruefbericht 20.09.2026 (H8): Bisher
+ * wurde nur bei Erfolg geschrieben und nie geloescht — scheiterte ein neuer
+ * Vergleich, holte das Neuladen das ALTE Auto samt Vertragsknoepfen zurueck,
+ * als waere es ein frisches Ergebnis.
+ */
+export function vergleichEntfernen(storage, userId) {
+  if (!storage || !userId) return false;
+  return sicher(() => {
+    storage.removeItem(vergleichKey(userId));
+    return true;
+  }, false) || false;
+}
+
 /** Alle Schluessel eines Speichers — Storage-API zuerst, sonst Object.keys. */
 function alleSchluessel(storage) {
   const anzahl = sicher(() => Number(storage.length), 0) || 0;

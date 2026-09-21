@@ -111,17 +111,33 @@ export default function SendDialog({ open, contract, onClose }) {
     catch { return null; }
   }, []);
   const geraetKannTeilen = kannDateiTeilen(pdf || probe);
+  // Pruefbericht 20.09.2026 (B16/F17): Scheiterte das Vorabladen (503, 404),
+  // blieb der Hauptknopf fuer immer auf "PDF wird vorbereitet…" — ohne
+  // Grund, ohne neuen Versuch. Jetzt: Fehlertext + "Erneut versuchen".
+  const [pdfFehler, setPdfFehler] = useState("");
+  const pdfFuer = useRef(null);
   useEffect(() => {
     if (!open || !contract?.id) return undefined;
     let aktiv = true;
-    setPdf(null);
+    // Nur bei einem ANDEREN Vertrag leeren — das Auffrischen alle 45 s liess
+    // den Knopf sonst jedes Mal kurz auf "wird vorbereitet" springen.
+    if (pdfFuer.current !== contract.id) {
+      pdfFuer.current = contract.id;
+      setPdf(null);
+    }
     api.get(`/contracts/${contract.id}/pdf`, { responseType: "blob", params: { variante: "digital" } })
       .then((r) => {
         if (!aktiv) return;
         const name = contract.filename || `Kaufvertrag ${contract.make || ""} ${contract.model || ""}`.trim();
         setPdf(pdfDatei(r.data, name));
+        setPdfFehler("");
       })
-      .catch(() => { if (aktiv) setPdf(null); });
+      .catch((err) => {
+        if (!aktiv) return;
+        // Eine schon geladene Fassung bleibt nutzbar, wenn nur das
+        // Auffrischen scheitert; ohne Fassung wird der Grund angezeigt.
+        setPdfFehler(errMsg(err, "Die PDF-Datei konnte nicht vorbereitet werden"));
+      });
     return () => { aktiv = false; };
   }, [open, contract?.id, pdfStand]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -131,10 +147,19 @@ export default function SendDialog({ open, contract, onClose }) {
   // Klick oeffnen und erst danach auf die WhatsApp-Adresse leiten. Klappt
   // auch das nicht (strenger Blocker), bleibt ein Knopf zum Nachoeffnen.
   const [waUrl, setWaUrl] = useState("");
+  // Pruefbericht 20.09.2026 (M31): Nach einem erfolgreichen Versand gibt es
+  // bewusst einen neuen Schluessel (ein gewollter zweiter Versand bleibt
+  // moeglich) — ein versehentlicher zweiter Klick stellte damit aber sicher
+  // doppelt zu. Jetzt fragt der zweite E-Mail-Versand einmal nach.
+  const [emailGesendet, setEmailGesendet] = useState(false);
 
   if (!open) return null;
 
   const send = async (channel) => {
+    if (channel === "email" && emailGesendet
+        && !window.confirm("Diese E-Mail wurde gerade schon versendet. Wirklich noch einmal senden?")) {
+      return;
+    }
     setBusy(true);
     let fenster = null;
     if (channel === "whatsapp") {
@@ -185,6 +210,7 @@ export default function SendDialog({ open, contract, onClose }) {
             + "auf Senden klicken — es wird garantiert nicht doppelt zugestellt.");
         } else if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
         else if (z === "versendet") {
+          setEmailGesendet(true);
           // Der Sucher bekommt immer eine Kopie mit dem PDF (09/2026).
           toast.success(data?.kopie === "gesendet"
             ? "E-Mail mit Vertrag versendet · Kopie liegt in deinem Postfach"
@@ -329,8 +355,23 @@ export default function SendDialog({ open, contract, onClose }) {
                   </div>
                   <button type="button" data-testid="wa-share-btn" onClick={teilen} disabled={busy || !pdf}
                           className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">
-                    <Send size={15} /> {pdf ? "Per WhatsApp teilen (PDF anhängen)" : "PDF wird vorbereitet…"}
+                    <Send size={15} /> {pdf ? "Per WhatsApp teilen (PDF anhängen)"
+                      : pdfFehler ? "PDF gerade nicht verfügbar" : "PDF wird vorbereitet…"}
                   </button>
+                  {!pdf && pdfFehler && (
+                    <div className="text-[11.5px] rounded-sm border px-3 py-2 flex flex-wrap items-center gap-2"
+                         role="alert" data-testid="wa-pdf-fehler"
+                         style={{ borderColor: "rgba(255,159,10,0.35)", background: "rgba(255,159,10,0.10)",
+                                  color: "var(--text-primary)" }}>
+                      <span className="flex-1 min-w-0">
+                        {pdfFehler} — du kannst stattdessen den Chat mit Download-Link öffnen.
+                      </span>
+                      <button type="button" onClick={() => setPdfStand((n) => n + 1)}
+                              className="underline underline-offset-2 font-semibold">
+                        Erneut versuchen
+                      </button>
+                    </div>
+                  )}
                   <button type="button" data-testid="send-wa-btn" onClick={() => send("whatsapp")} disabled={busy || !phone}
                           className="w-full py-2.5 rounded-sm flex items-center justify-center gap-2 text-sm font-semibold border disabled:opacity-50"
                           style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>

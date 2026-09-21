@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Sun, Moon } from "lucide-react";
+import { lokalerSpeicher, lesen, schreiben } from "@/lib/speicher";
 
 const STORAGE_KEY = "ah_theme";
 
@@ -12,7 +13,11 @@ function setzen(theme) {
 }
 
 export function applyStoredTheme() {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  // Pruefbericht 20.09.2026 (B1): Das hier laeuft auf Modulebene, BEVOR
+  // React startet. Ein ungeschuetzter Speicherzugriff warf bei blockierten
+  // Website-Daten (Safari/iOS, Firmenrichtlinie) — und die App startete gar
+  // nicht erst: komplett weisse Seite, keine Fehlergrenze konnte greifen.
+  const stored = lesen(lokalerSpeicher(), STORAGE_KEY);
   const theme = stored === "light" ? "light" : "dark";
   setzen(theme);
   return theme;
@@ -42,7 +47,7 @@ export default function ThemeToggle() {
 
   useEffect(() => {
     setzen(theme);
-    localStorage.setItem(STORAGE_KEY, theme);
+    schreiben(lokalerSpeicher(), STORAGE_KEY, theme);
   }, [theme]);
 
   const toggle = () => setTheme((t) => (t === "light" ? "dark" : "light"));

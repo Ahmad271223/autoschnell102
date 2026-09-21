@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { lokalerSpeicher, sitzungsSpeicher } from "@/lib/speicher";
 import { thumbSrc } from "@/lib/bilder";
 import { checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
 import { istInseratsLink, zwischenablageLesen } from "@/lib/inseratsLink";
@@ -21,7 +22,7 @@ import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
 import {
-  einstellungLesen, einstellungSchreiben, vergleichLaden, vergleichSichern,
+  einstellungLesen, einstellungSchreiben, vergleichEntfernen, vergleichLaden, vergleichSichern,
 } from "@/lib/vergleichSpeicher";
 
 
@@ -42,8 +43,12 @@ export default function Vergleich() {
   // Verkaeuferdaten und den letzten Vertrag seines Kollegen.
   const { user } = useAuth();
   const kontoId = user?.id || null;
-  const restored = vergleichLaden(
-    typeof window !== "undefined" ? window.sessionStorage : null, kontoId);
+  const gespeichert = vergleichLaden(sitzungsSpeicher(), kontoId);
+  // Pruefbericht 20.09.2026 (B3): Nur ein Stand MIT Fahrzeug wird
+  // wiederhergestellt — eine aeltere Fassung konnte eine Antwort ohne
+  // Fahrzeug ("needs_client_fetch") ablegen, und die liess die Seite beim
+  // Rendern abstuerzen, bei jedem Neuladen erneut.
+  const restored = gespeichert?.result?.vehicle ? gespeichert : null;
 
   const [url, setUrl] = useState(restored?.url || "");
   const [loading, setLoading] = useState(false);
@@ -55,18 +60,18 @@ export default function Vergleich() {
   const [showSend, setShowSend] = useState(false);
   // Portal-Toggles — Zustand wird in localStorage gespeichert
   const [portalMobile, setPortalMobile] = useState(() => {
-    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+    return einstellungLesen(lokalerSpeicher(),
                             "ah_portal_mobile", user?.id, true);
   });
   const [portalAutoscout, setPortalAutoscout] = useState(() => {
-    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+    return einstellungLesen(lokalerSpeicher(),
                             "ah_portal_autoscout", user?.id, true);
   });
 
   // Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen —
   // Standard AN (Wunsch Ahmad: Einfuegen genuegt, alles geht von selbst auf).
   const [filterAuto, setFilterAuto] = useState(() => {
-    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+    return einstellungLesen(lokalerSpeicher(),
                             "ah_filter_automatisch", user?.id, true);
   });
   // Runde 22 (11.09.2026, Gegenpruefung): aktuelle Schalter-Staende fuer das
@@ -77,24 +82,24 @@ export default function Vergleich() {
   const toggleMobile = (v) => {
     setPortalMobile(v);
     schalterRef.current.mobile = v;
-    einstellungSchreiben(window.localStorage, "ah_portal_mobile", kontoId, v);
+    einstellungSchreiben(lokalerSpeicher(), "ah_portal_mobile", kontoId, v);
   };
   const toggleAutoscout = (v) => {
     setPortalAutoscout(v);
     schalterRef.current.autoscout = v;
-    einstellungSchreiben(window.localStorage, "ah_portal_autoscout", kontoId, v);
+    einstellungSchreiben(lokalerSpeicher(), "ah_portal_autoscout", kontoId, v);
   };
   const toggleFilterAuto = (v) => {
     setFilterAuto(v);
     schalterRef.current.auto = v;
-    einstellungSchreiben(window.localStorage, "ah_filter_automatisch", kontoId, v);
+    einstellungSchreiben(lokalerSpeicher(), "ah_filter_automatisch", kontoId, v);
   };
   // 15.09.2026 (Wunsch Ahmad): Filter-Fenster neben der App bzw. auf dem
   // zweiten Bildschirm statt ueber der Seite. Die Bildschirm-Berechtigung
   // fragt der Browser beim Einschalten (Klick) ab; ist sie schon erteilt,
   // reicht das stille Nachfragen beim Laden.
   const [fensterDaneben, setFensterDaneben] = useState(() => {
-    return einstellungLesen(typeof window !== "undefined" ? window.localStorage : null,
+    return einstellungLesen(lokalerSpeicher(),
                             "ah_fenster_daneben", user?.id, false);
   });
   useEffect(() => {
@@ -103,7 +108,7 @@ export default function Vergleich() {
   }, [fensterDaneben]);
   const toggleFensterDaneben = async (v) => {
     setFensterDaneben(v);
-    einstellungSchreiben(window.localStorage, "ah_fenster_daneben", kontoId, v);
+    einstellungSchreiben(lokalerSpeicher(), "ah_fenster_daneben", kontoId, v);
     fensterDanebenSetzen(v);
     if (!v) return;
     const r = await zweitenBildschirmAnfragen();
@@ -133,11 +138,15 @@ export default function Vergleich() {
   const laeuftRef = useRef(false);
   const hinweisIdsRef = useRef([]);
 
-  // Persist on every meaningful state change.
+  // Persist on every meaningful state change. Ohne Ergebnis (neuer Lauf
+  // gestartet oder gescheitert) wird der alte Stand entfernt (H8) — sonst
+  // kam nach dem Neuladen das vorherige Auto zurueck.
   useEffect(() => {
     try {
       if (result) {
-        vergleichSichern(window.sessionStorage, kontoId, { url, result, counter, contract });
+        vergleichSichern(sitzungsSpeicher(), kontoId, { url, result, counter, contract });
+      } else {
+        vergleichEntfernen(sitzungsSpeicher(), kontoId);
       }
     } catch { /* quota/private mode — silent */ }
   }, [url, result, counter, contract, kontoId]);
@@ -269,6 +278,18 @@ export default function Vergleich() {
         }
       }
 
+      // Pruefbericht 20.09.2026 (B3): Auch der zweite Vergleich kann noch
+      // "needs_client_fetch" liefern — das Tageskontingent fuer Abrufe ohne
+      // Erweiterung ist zwischen Link-Pruefung und Vergleich aufgebraucht
+      // worden (ein zweiter Tab genuegt). Ohne Fahrzeug nichts anzeigen:
+      // vorher griff die Seite auf result.vehicle zu und stuerzte mit der
+      // falschen Meldung "kurz nach einem Update" ab.
+      if (!data?.vehicle) {
+        throw new Error(data?.needs_client_fetch
+          ? "Dieses Kleinanzeigen-Inserat lässt sich heute nicht mehr ohne Browser-Erweiterung laden "
+            + "(Tageskontingent aufgebraucht). Bitte die Erweiterung nutzen oder morgen erneut versuchen."
+          : "Zu diesem Link kam kein Fahrzeug zurück — bitte erneut versuchen.");
+      }
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0 });
       // Runde 22 (11.09.2026): Filter der aktiven Portale gleich mit oeffnen.
@@ -535,7 +556,7 @@ export default function Vergleich() {
       )}
 
       {/* RESULT */}
-      {result && (
+      {result?.vehicle && (
         <div className="mt-10 grid lg:grid-cols-12 gap-5">
           {/* Left — vehicle */}
           <div className="lg:col-span-8 space-y-5">
@@ -748,7 +769,7 @@ export default function Vergleich() {
         </div>
       )}
 
-      {showContract && result && (
+      {showContract && result?.vehicle && (
         <ContractDialog
           open={showContract}
           onClose={() => setShowContract(false)}

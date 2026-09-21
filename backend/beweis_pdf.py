@@ -92,38 +92,9 @@ def portal_name(quelle: Any) -> str:
 # Beschreibungen sicher erscheinen. Im Docker-Image liegt Liberation Sans
 # (fonts-liberation), lokal unter Windows Arial. Fehlt beides, bleibt es bei
 # Helvetica und der Text wird auf deren Zeichensatz (cp1252) begrenzt.
-_SCHRIFT_KANDIDATEN = [
-    ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
-    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-    (r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
-]
-_schrift: Optional[Tuple[str, str, bool]] = None
-
-
-def _schriften() -> Tuple[str, str, bool]:
-    global _schrift
-    if _schrift is not None:
-        return _schrift
-    from reportlab.lib.fonts import addMapping
-    from reportlab.pdfbase.ttfonts import TTFont
-    for normal, fett in _SCHRIFT_KANDIDATEN:
-        if not (os.path.isfile(normal) and os.path.isfile(fett)):
-            continue
-        try:
-            pdfmetrics.registerFont(TTFont("BeweisSans", normal))
-            pdfmetrics.registerFont(TTFont("BeweisSans-Bold", fett))
-            addMapping("BeweisSans", 0, 0, "BeweisSans")
-            addMapping("BeweisSans", 1, 0, "BeweisSans-Bold")
-            addMapping("BeweisSans", 0, 1, "BeweisSans")
-            addMapping("BeweisSans", 1, 1, "BeweisSans-Bold")
-            _schrift = ("BeweisSans", "BeweisSans-Bold", True)
-            return _schrift
-        except Exception:  # noqa: BLE001 — naechste Schrift versuchen
-            continue
-    _schrift = ("Helvetica", "Helvetica-Bold", False)
-    return _schrift
+# Pruefbericht 20.09.2026 (P-01/P-02): dieselbe Schrift gilt jetzt fuer ALLE
+# PDFs — die Registrierung wohnt in pdf_schrift.py.
+from pdf_schrift import schriften as _schriften  # noqa: E402
 
 
 _UNSICHTBAR = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufe00-\ufe0f\u00ad]")

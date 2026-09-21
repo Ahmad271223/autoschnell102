@@ -38,7 +38,10 @@ def test_parse_echter_datensatz(item):
     assert v["category_label"] == "Kombi"
     assert v["displacement"] == 1498
     assert v["doors"] == "5" and v["seats"] == 5
-    assert v["seller_name"] == "Privatverkäufer"       # seller: "Privat"
+    # Pruefbericht 20.09.2026 (S-16): kein Platzhalter als Name — er fuellte im
+    # Vertragsdialog das Pflichtfeld. Die Art steht in seller_type.
+    assert v["seller_name"] is None                    # seller: "Privat"
+    assert v["seller_type"] == "privat"
     assert v["seller_zip"] == "47059"
     assert "Duisburg" in v["seller_city"]
     # Keine Unfall-Angabe im Actor-Datensatz -> ehrlich leer, nicht erfunden
@@ -61,7 +64,8 @@ def test_preis_fallback_aus_text(item):
 def test_haendler_statt_privat(item):
     item["seller"] = "Händler"
     item["contactName"] = ""
-    assert parse_autoscout_item(item, UUID)["seller_name"] == "Händler"
+    v = parse_autoscout_item(item, UUID)
+    assert v["seller_name"] is None and v["seller_type"] == "haendler"   # S-16
     item["contactName"] = "Autohaus Muster"
     assert parse_autoscout_item(item, UUID)["seller_name"] == "Autohaus Muster"
 

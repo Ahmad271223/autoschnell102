@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { sicheresZiel } from "@/lib/rollen";
 import { Bolt, ArrowRight } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
+import RechtsLinks from "@/components/RechtsLinks";
 
 export default function Login() {
   const { login, loginMfa } = useAuth();
@@ -135,6 +136,7 @@ export default function Login() {
             {loading ? "..." : <>Anmelden <ArrowRight size={15} /></>}
           </button>
 
+          <RechtsLinks className="mt-8" />
           <div className="mt-6 text-sm text-zinc-400 text-center space-y-2">
             <div>
               <Link to="/passwort-vergessen" className="hover:text-white hover:underline">Passwort vergessen?</Link>

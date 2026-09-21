@@ -298,7 +298,9 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     bilder = _bilder(ad)
     # "Unbeschaedigtes Fahrzeug" / "Beschaedigtes Fahrzeug"
     zustand = (tabelle.get("Fahrzeugzustand") or "").lower()
-    unfall = "beschädigt" in zustand and "unbeschädigt" not in zustand
+    # Pruefbericht 20.09.2026 (S-06): ohne Angabe None statt "kein Unfall".
+    from mobile_service import zustand_fahrbereit, zustand_unfall
+    unfall = zustand_unfall(None, zustand)
 
     ergebnis: Dict[str, Any] = {
         "mobile_ad_id": nummer,
@@ -330,7 +332,8 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "previous_owners": (_to_int(tabelle.get("Anzahl der Fahrzeughalter"))
                             or extract_owners_from_text(beschreibung or "")),
         "accident_damaged": unfall,
-        "roadworthy": True,
+        # S-05: Kleinanzeigen kennt keine Fahrbereit-Angabe — nichts erfinden.
+        "roadworthy": zustand_fahrbereit(None, zustand),
         "features": _alle_merkmale(tabelle, beschreibung),
         "description": beschreibung,
         "list_price": betrag,
@@ -339,6 +342,10 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         # im sichtbaren Text) — ueber die API kommt er mit und spart dem
         # Sucher das Abtippen im Kaufvertrag.
         "seller_name": verkaeufer_name,
+        # Pruefbericht 20.09.2026 (S-14): gewerblich/privat wie bei den anderen
+        # Quellen — vorher galten gewerbliche Anbieter als "unbekannt".
+        "seller_type": {"COMMERCIAL": "haendler", "PRIVATE": "privat"}.get(
+            str(verkaeufer.get("type") or "").strip().upper()),
         "seller_address": None,
         "seller_zip": plz,
         "seller_city": stadt,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { api, errMsg } from "@/lib/api";
@@ -58,18 +58,31 @@ export default function Anfragen() {
   const [counterFor, setCounterFor] = useState(null); // interest_id mit offenem Gegenangebots-Formular
   const [counterVal, setCounterVal] = useState("");
   const [counterMsg, setCounterMsg] = useState("");
+  // Pruefbericht 20.09.2026 (U-19/H12): Ein Ladefehler wurde zu "Keine
+  // Anfragen" — der Chef verpasste offene Kaufanfragen.
+  const [ladeFehler, setLadeFehler] = useState("");
+  const [gekuerzt, setGekuerzt] = useState(false);
+  const anfrageNr = useRef(0);          // U-27: nur die letzte Antwort zaehlt
+  const istChef = user?.role === "dealer";
 
   const load = useCallback(async () => {
+    // U-20/M13: Sucher werden gleich umgeleitet — keinen Chef-Abruf mehr
+    // abfeuern, dessen 403 dann auf der naechsten Seite als Fehler aufpoppt.
+    if (!istChef) return;
+    const nr = ++anfrageNr.current;
     try {
-      const { data } = await api.get("/dealer/interessen", {
+      const r = await api.get("/dealer/interessen", {
         params: filter ? { status: filter } : {},
       });
-      setItems(Array.isArray(data) ? data : []);
+      if (nr !== anfrageNr.current) return;
+      setItems(Array.isArray(r.data) ? r.data : []);
+      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+      setLadeFehler("");
     } catch (e) {
-      toast.error(errMsg(e, "Anfragen konnten nicht geladen werden"));
-      setItems([]);
+      if (nr !== anfrageNr.current) return;
+      setLadeFehler(errMsg(e, "Anfragen konnten nicht geladen werden"));
     }
-  }, [filter]);
+  }, [filter, istChef]);
   useEffect(() => { load(); }, [load]);
 
   const antworten = async (it, action, extra = {}) => {
@@ -96,7 +109,9 @@ export default function Anfragen() {
   };
 
   // Nur der Haendler-Hauptaccount bearbeitet Kaufanfragen (Backend: current_haendler)
-  if (user && user.role !== "dealer") return <Navigate to="/app/vergleich" replace />;
+  // M6/U-152: nicht auf den abo-pflichtigen Vergleich umleiten — ein Sucher
+  // ohne Abo landete sonst auf der Paywall. /app waehlt die passende Seite.
+  if (user && user.role !== "dealer") return <Navigate to="/app" replace />;
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto" data-testid="anfragen-page">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -121,9 +136,23 @@ export default function Anfragen() {
         ))}
       </div>
 
+      {ladeFehler && (
+        <div className="mt-5 rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3" role="alert"
+             data-testid="anfragen-ladefehler"
+             style={{ borderColor: "#ef444455", background: "#ef444414", color: "var(--text-primary)" }}>
+          <span className="flex-1 min-w-0">{ladeFehler}{items?.length ? " — angezeigt ist der letzte Stand." : ""}</span>
+          <button type="button" onClick={load} className="rounded-lg px-3 py-1.5 text-xs border font-semibold"
+                  style={{ borderColor: "var(--border-default)" }}>Erneut versuchen</button>
+        </div>
+      )}
+      {gekuerzt && (
+        <div className="mt-4 text-xs" style={{ color: "var(--text-muted)" }} data-testid="anfragen-gekuerzt">
+          Es werden nur die neuesten Anfragen angezeigt — ältere erledigte findest du über den Status-Filter.
+        </div>
+      )}
       {items === null ? (
-        <div className="mt-10 text-sm" style={{ color: "var(--text-muted)" }}>Lädt…</div>
-      ) : items.length === 0 ? (
+        ladeFehler ? null : <div className="mt-10 text-sm" style={{ color: "var(--text-muted)" }}>Lädt…</div>
+      ) : items.length === 0 && !ladeFehler ? (
         <div className="mt-10 text-center py-16 tactical-card">
           <Inbox size={28} className="mx-auto mb-3" style={{ color: "var(--text-muted)" }} />
           <div className="text-[15px] font-semibold">Keine Anfragen{filter ? " mit diesem Status" : ""}</div>
