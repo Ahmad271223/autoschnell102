@@ -1,5 +1,8 @@
 """PDF generation for car purchase contracts (Kaufvertrag) using ReportLab."""
 import io
+import logging
+import math
+import re
 from datetime import datetime
 from xml.sax.saxutils import escape as _xml_escape
 from reportlab.lib.pagesizes import A4
@@ -12,6 +15,8 @@ from reportlab.platypus import (
     CondPageBreak,
 )
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+
+log = logging.getLogger("autohandel")
 
 
 def _safe_para(text) -> str:
@@ -507,9 +512,16 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
             self.setLineWidth(0.5)
             self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
             self.setFillColor(GREY)
-            from pdf_schrift import ersatz_fuer
-            self.setFont(ersatz_fuer("Helvetica"), 7)
-            self.drawString(MARGIN, y, footer_left)
+            from pdf_schrift import auf_breite, ersatz_fuer
+            schrift = ersatz_fuer("Helvetica")
+            self.setFont(schrift, 7)
+            # Pruefbericht 20.09.2026 (P-08): ein langer Firmenname lief links
+            # in die mittlere Zeile hinein (das Abholprotokoll kuerzte schon).
+            # Links nur so viel, wie bis zur Mitte Platz ist (mit Abstand),
+            # sonst mit "…" gekuerzt.
+            mitte_breite = self.stringWidth(footer_center, schrift, 7)
+            links_max = (PAGE_W / 2 - mitte_breite / 2) - MARGIN - 0.4 * cm
+            self.drawString(MARGIN, y, auf_breite(footer_left, schrift, 7, links_max))
             self.drawCentredString(PAGE_W / 2, y, footer_center)
             self.drawRightString(PAGE_W - MARGIN, y,
                                  f"Seite {self._pageNumber} von {total}")
@@ -518,11 +530,64 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
     return _NumberedCanvas
 
 
+def _monat_jahr(wert, art: str) -> str:
+    """Pruefbericht 20.09.2026 (P-20): Monat/Jahr im Vertrag einheitlich als
+    MM/JJJJ drucken. Die API normiert seitdem beim Anlegen; Altvertraege und
+    Korrekturen koennen noch '2027-03' oder '3.2027' tragen — die standen
+    roh im Vertrag ("gültig bis 2027-03")."""
+    from protokoll_vergleich import monat_jahr_text
+    return monat_jahr_text(wert, art=art)
+
+
+def _ausstattung_liste(wert) -> list:
+    """Pruefbericht 20.09.2026 (P-15): Ausstattung als saubere Liste. Import-/
+    Altdaten koennen einen Text liefern — der wurde in 3er-Stuecke geschnitten
+    und `row.append` auf einem str brach mit AttributeError. Text wird an
+    Kommas getrennt, Listen gesaeubert, alles andere ist leer."""
+    if isinstance(wert, str):
+        teile = wert.split(",")
+    elif isinstance(wert, (list, tuple)):
+        teile = wert
+    else:
+        return []
+    return [str(x).strip() for x in teile if x is not None and str(x).strip()]
+
+
+def _preis_zahl(wert) -> float:
+    """Pruefbericht 20.09.2026 (P-16): Kaufpreis robust lesen. Die API laesst
+    nur Zahlen zu; Alt-/Importdaten koennen '12.500,00 EUR' oder '12500,50'
+    tragen — float() brach damit, und die Neuerzeugung scheiterte still.
+    Unlesbares wird 0 mit Warnung im Log (faellt im Vertrag sofort auf)."""
+    if wert is None or isinstance(wert, bool):
+        return 0.0
+    if isinstance(wert, (int, float)):
+        return float(wert) if math.isfinite(wert) else 0.0
+    roh = str(wert).strip()
+    s = re.sub(r"[^\d,.\-]", "", roh)
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):          # 12.500,00 -> deutsch
+            s = s.replace(".", "").replace(",", ".")
+        else:                                    # 12,500.00 -> englisch
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")                  # 12500,50
+    elif s.count(".") > 1 or re.fullmatch(r"-?\d{1,3}\.\d{3}", s):
+        s = s.replace(".", "")                   # 12.500 / 1.250.000 -> Tausenderpunkte
+    try:
+        zahl = float(s) if s else 0.0
+    except ValueError:
+        zahl = float("nan")
+    if not math.isfinite(zahl):
+        log.warning("Kaufvertrag: Kaufpreis %r nicht lesbar — 0,00 EUR im PDF", roh)
+        return 0.0
+    return zahl
+
+
 def _scheckheft_anzeige(contract: dict) -> str:
     """Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl — "Ja,
     lueckenlos" / "Nein" / "Teilweise, bis MM/JJJJ"."""
     wert = str(contract.get("service_book") or "").strip().lower()
-    bis = str(contract.get("service_book_until") or "").strip()
+    bis = _monat_jahr(str(contract.get("service_book_until") or "").strip(), art="ez")
     if wert == "ja":
         return "Ja, lückenlos"
     if wert == "nein":
@@ -750,7 +815,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         return (f"{betrag:,.2f} EUR"
                 .replace(",", "X").replace(".", ",").replace("X", "."))
 
-    brutto = float(contract.get("purchase_price") or 0)
+    brutto = _preis_zahl(contract.get("purchase_price"))   # P-16
     price_str = _eur(brutto)
 
     # MwSt-Ausweis (gewerblicher Verkauf, Regelbesteuerung): Kaufpreis ist
@@ -868,7 +933,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # Vertrag, wenn das (gesperrte, aber nicht geleerte) Datumsfeld noch einen
     # Wert trug. Ohne HU gibt es kein "gültig bis".
     if contract.get("hu_until") and _yn(contract.get("hu_valid")) != "Nein":
-        hu_teile.append(f"gültig bis {contract['hu_until']}")
+        hu_teile.append(f"gültig bis {_monat_jahr(contract['hu_until'], art='hu')}")   # P-20
     hu_value = ", ".join(hu_teile)
     accident_value = _yn(contract.get("accident_free"))
     # P-04: accident_free=None (Feld vorhanden, leer) brach hier mit
@@ -952,7 +1017,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         story.append(Spacer(1, 12))
 
     # ---------- Features ----------
-    feats = vehicle.get("features") or []
+    feats = _ausstattung_liste(vehicle.get("features"))   # P-15
     if feats:
         story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
         story.append(Spacer(1, 6))

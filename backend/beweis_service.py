@@ -598,6 +598,13 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
                               "quelle_abgerufen_am": abgerufen_am or _jetzt()}})
         except Exception as exc:  # noqa: BLE001
             log.warning("Beweisdokument %s: Cache-Stand nicht eingefroren: %s", doc.get("id"), exc)
+    # Pruefbericht 20.09.2026 (P-35): fehlt der Abrufzeitpunkt (Altbestand ohne
+    # fetched_at bzw. ohne quelle_abgerufen_am), stand "unbekannt" im fertigen
+    # Dokument. Die Vormerkung (erstellt_am) ist der spaeteste moegliche
+    # Zeitpunkt — Dokument und Datensatz sagen dann "spaetestens am".
+    abgerufen_spaetestens = False
+    if not abgerufen_am and doc.get("erstellt_am"):
+        abgerufen_am, abgerufen_spaetestens = doc.get("erstellt_am"), True
     urls = foto_urls(daten)
     fotos = await _fotos_laden(urls[:BEWEIS_FOTOS_MAX])
     # Pruefung 14.09.2026 (B7): Inserat MIT Fotos, aber KEINES ladbar (Portal
@@ -619,7 +626,8 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
         fotos=fotos, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN,
         # Rollenpruefung 22.09.2026 (RP-498): nach Verfall neu angefordert —
         # das Dokument nennt das fruehere.
-        frueheres_dokument=doc.get("neu_nach_verfall"))
+        frueheres_dokument=doc.get("neu_nach_verfall"),
+        abgerufen_spaetestens=abgerufen_spaetestens)
     key = neuer_speicher_key(doc)
     # Erst vermerken, dann schreiben: jeder je geschriebene Schluessel steht in
     # alle_keys und wird beim Verfall mit geloescht (auch verwaiste).
@@ -632,6 +640,7 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
                   "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
                   "fertig_am": erstellt,
                   "daten_abgerufen_am": abgerufen_am,
+                  "daten_abgerufen_spaetestens": abgerufen_spaetestens,   # P-35
                   "fotos_eingebettet": sum(1 for f in fotos if f),
                   "fotos_gesamt": len(urls), "fehler": None,
                   # Phase 4 (4.5, B22/B23): Herkunft der Daten und "ohne Fotos"

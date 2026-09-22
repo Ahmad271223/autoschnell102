@@ -239,5 +239,28 @@ def test_17_autoscout_ersatzname_haendler_macht_niemanden_gewerblich():
 def test_18_fotos_binaer_eingebettet():
     pdf = _pdf()
     assert b"/ASCII85Decode" not in pdf
+    # Pruefbericht 20.09.2026 (P-36): die Einstellung gilt prozessweit (einmal
+    # beim Import von pdf_schrift) — kein Umschalten je Aufbau mehr, das bei
+    # parallel erzeugten Vertraegen/Protokollen den alten Wert falsch
+    # zurueckschreiben konnte.
     from reportlab import rl_config
-    assert rl_config.useA85 == 1, "Einstellung wird nach dem Aufbau zurueckgesetzt"
+    assert rl_config.useA85 == 0
+    import inspect
+    assert "rl_config.useA85 = " not in inspect.getsource(B)
+
+
+def test_19_monat_jahr_spannen_sind_keine_telefonnummern():
+    """Pruefbericht 20.09.2026 (P-28): 'Zahnriemen gewechselt 06/2019 - 03/2024'
+    (12 Ziffern, beginnt mit 0) wurde zur Kontaktangabe erklaert."""
+    satz = "Zahnriemen gewechselt 06/2019 - 03/2024"
+    assert B.kontakt_maskieren(satz) == satz
+    einzeln = "HU 03/2027, 05.2015, TÜV 04/2026, Motor getauscht 12.2020 – 01.2021"
+    assert B.kontakt_maskieren(einzeln) == einzeln
+    # Telefonnummern daneben werden weiter entfernt
+    t = B.kontakt_maskieren("06/2019 - 03/2024, Rueckfragen 0171 2223334")
+    assert t.startswith("06/2019 - 03/2024") and "2223334" not in t and B.KONTAKT_ENTFERNT in t
+    assert B.KONTAKT_ENTFERNT in B.kontakt_maskieren("Tel. +49 (171) 222-3335")
+    text = _text(_pdf(quelle="kleinanzeigen",
+                      daten=dict(BASIS, mobile_ad_id="1", seller_type="privat",
+                                 description=satz))).replace("\n", " ")
+    assert "06/2019 - 03/2024" in text

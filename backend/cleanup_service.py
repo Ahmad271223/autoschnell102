@@ -714,7 +714,8 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
         if anzahl:
             # Nachpruefung Runde 14 (Nr. 97): der Trockenlauf ist gewollt
             # (Go-Live-Entscheidung), aber ein vergessenes Flag darf nicht
-            # still bleiben — sonst laeuft die versprochene 90-Tage-Frist nie.
+            # still bleiben — sonst laeuft die versprochene Vertragsfrist
+            # (VERTRAG_AUFBEWAHRUNG_TAGE, 60 Tage; Pruefbericht R1-33) nie.
             # Ein Alarm je (typ, ref) wird nur hochgezaehlt, nicht dupliziert.
             await alarm(db, "vertrag_loeschung_trockenlauf",
                         ref="vertrag_loeschvorschau", anzahl=anzahl,
@@ -1254,14 +1255,36 @@ async def protokoll_orte_nachziehen(db) -> int:
 # Import-Zyklus braucht; der Test haelt beide Listen zusammen.
 _KV_OFFEN = ("vertrag_erstellt", "gesendet", "abholung_geplant")
 
+
+class LoeschungAbgelehnt(Exception):
+    """Pruefbericht 20.09.2026 (R1-07): die Vorpruefung des Aufrufers (nach dem
+    Grabstein) hat die Loeschung abgelehnt — der Text ist der Grund fuer den
+    Nutzer, der Grabstein ist bereits zurueckgenommen, der Vertrag unberuehrt."""
+
+
+async def _grabstein_zuruecknehmen(db, contract_id: str, gestartet: str) -> None:
+    """Nur den EIGENEN Grabstein (Startzeit dieses Aufrufs) entfernen — nie den
+    einer parallel begonnenen Loeschung."""
+    await db.generated_pdfs.update_one(
+        {"id": contract_id, "loeschung.status": "laeuft", "loeschung.gestartet": gestartet},
+        {"$unset": {"loeschung": ""}})
+
+
 async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
-                                      grund: str, audit: bool = True) -> bool:
+                                      grund: str, audit: bool = True,
+                                      vor_kaskade=None) -> bool:
     """Einen Kaufvertrag endgueltig loeschen — idempotent und wiederaufnehmbar.
 
     Ablauf (jeder Schritt darf beliebig oft laufen):
       0) Grabstein `loeschung: {status: laeuft, gestartet, grund, scrub_pii}`
          auf dem Vertrag. Bricht der Prozess mittendrin ab, nimmt der
          Aufraeumjob (vertragsloeschungen_wiederaufnehmen) hier wieder auf.
+      0b) vor_kaskade (Pruefbericht 20.09.2026, R1-07): optionale async
+         Pruefung des Aufrufers, die ERST NACH dem Grabstein laeuft (laufendes
+         Protokoll, Beleg-Sperre fuer Sucher, Termine stornieren). Liefert sie
+         einen Text, kommt der eigene Grabstein weg und LoeschungAbgelehnt
+         traegt den Text. Nur beim frischen Grabstein — eine Wiederaufnahme
+         setzt eine Loeschung fort, deren Pruefungen schon bestanden sind.
       1) archivierte Vorversionen loeschen
       2) Termin-IDs einsammeln
       3) scrub_pii: Protokoll-Dateien (PDF, Unterschriften) loeschen bzw.
@@ -1308,6 +1331,19 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
             wiederaufnahme = True
             grund = grab.get("grund") or grund
             scrub_pii = bool(grab.get("scrub_pii", scrub_pii))
+    if vor_kaskade is not None and not wiederaufnahme:
+        # 0b) R1-07: Vorher lief die Protokoll-Pruefung in DELETE /contracts VOR
+        # dem Grabstein — im Fenster dazwischen konnte der Fahrer noch einen
+        # Entwurf beginnen, den die Kaskade sofort bereinigte (die Sperre in
+        # protocols._vertrag_nicht_in_loeschung sieht nur den Grabstein).
+        try:
+            ablehnung = await vor_kaskade()
+        except BaseException:
+            await _grabstein_zuruecknehmen(db, contract_id, jetzt)
+            raise
+        if ablehnung:
+            await _grabstein_zuruecknehmen(db, contract_id, jetzt)
+            raise LoeschungAbgelehnt(str(ablehnung))
     # 1) Vorversionen
     await db.generated_pdf_versions.delete_many({"contract_id": contract_id})
     await db.versand_schluessel.delete_many({"contract_id": contract_id})
@@ -2678,7 +2714,8 @@ async def _archiv_nebenaufraeumen(db, vid: str, firma: str) -> bool:
     und Snapshots eines archivierten Fahrzeugs entfernen, danach den Marker
     `archiv_aufraeumen_offen` loeschen. Wirft nie — vorher lief ein Fehler in
     _delete_snapshots_for_vehicle durch _cleanup_once und liess fuer diesen
-    Zyklus u.a. die 90-Tage-Vertragsloeschung aus. Beide Schritte sind
+    Zyklus u.a. die Vertragsloeschung nach Frist (VERTRAG_AUFBEWAHRUNG_TAGE,
+    60 Tage) aus. Beide Schritte sind
     idempotent. True = erledigt."""
     try:
         # Nicht loeschbare Fotos werden vorgemerkt, das Inserat bleibt dann

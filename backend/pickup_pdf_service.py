@@ -32,6 +32,11 @@ from reportlab.platypus import (
     PageTemplate, Paragraph, Spacer, Table, TableStyle,
 )
 
+# Rollenprüfung 22.09.2026 (RP-071/170): Text auf eine Breite kuerzen (mit
+# "…"). Pruefbericht 20.09.2026 (P-08): wohnt jetzt in pdf_schrift, weil der
+# Kaufvertrag dieselbe Kuerzung braucht; der alte Name bleibt fuer Aufrufer.
+from pdf_schrift import auf_breite as _auf_breite
+
 # Einheitliches Design mit dem Kaufvertrag (pdf_service.py):
 # Schwarz/Zinc + roter Akzent, Abschnittsbalken, Fußzeile mit Seitenzahlen.
 PRIMARY = colors.HexColor("#18181B")
@@ -44,6 +49,17 @@ DARK = colors.HexColor("#0A0A0A")
 PAGE_W, PAGE_H = A4
 MARGIN = 1.8 * cm
 CONTENT_W = PAGE_W - 2 * MARGIN
+# Pruefbericht 20.09.2026 (P-32): Der Rahmen (Frame) polstert innen 6 pt je
+# Seite — feste Tabellenbreiten von 17,5 cm ragten rund 3 mm in den rechten
+# Rand. Alle festen Breiten (Checkliste, Bemerkungen, technischer Zustand,
+# Abschnitt 1) leiten sich jetzt anteilig aus dieser Breite ab.
+TABELLEN_B = CONTENT_W - 12
+
+
+def _anteilig(*breiten: float) -> List[float]:
+    """Spaltenbreiten (Verhaeltnis, in cm gedacht) auf TABELLEN_B skalieren."""
+    summe = float(sum(breiten))
+    return [TABELLEN_B * b / summe for b in breiten]
 
 # Damage sketches live in the frontend's public folder. The backend just
 # reads them as static assets. Alle Skizzen sind 1536 × 1024 px (Mai 2026).
@@ -351,12 +367,16 @@ def _checklist(items: List[tuple], st, col_count: int = 2,
             para_html += f"<br/><font size=7 color='#71717A'>{_xe(str(note))}</font>"
         cells.append(Paragraph(para_html, st["body"]))
 
+    # Pruefbericht 20.09.2026 (P-30): ohne Punkte kein Table(rows=[]) —
+    # ReportLab bricht damit mit ValueError ab.
+    if not cells:
+        return Paragraph("—", st["body"])
     # Pad to multiple of col_count so Table stays rectangular
     while len(cells) % col_count:
         cells.append(Paragraph("", st["body"]))
 
     rows = [cells[i:i + col_count] for i in range(0, len(cells), col_count)]
-    col_w = (17.5 * cm) / col_count
+    col_w = TABELLEN_B / col_count   # P-32: innerhalb des Rahmens
     t = Table(rows, colWidths=[col_w] * col_count, hAlign="LEFT")
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -546,18 +566,6 @@ def _make_doc(buf: io.BytesIO) -> BaseDocTemplate:
     return doc
 
 
-def _auf_breite(text: str, schrift: str, groesse: float, max_breite: float) -> str:
-    """Rollenprüfung 22.09.2026 (RP-071/170): Text auf eine Breite kuerzen
-    (mit "…"), gemessen in der tatsaechlichen Schrift."""
-    from reportlab.pdfbase.pdfmetrics import stringWidth
-    text = str(text or "")
-    if max_breite <= 0:
-        return ""
-    if stringWidth(text, schrift, groesse) <= max_breite:
-        return text
-    while text and stringWidth(text + "…", schrift, groesse) > max_breite:
-        text = text[:-1]
-    return (text.rstrip() + "…") if text else ""
 
 
 def _numbered_canvas_factory(footer_left: str, footer_center: str):
@@ -936,7 +944,7 @@ def _build_pickup_pdf(
         return _check_row(label, shown, options or ["stimmt", "weicht ab"],
                           st, bold_value=bold, selected=sel)
 
-    col_w = [4.6 * cm, 6.4 * cm, 2.0 * cm, 2.0 * cm, 2.5 * cm]
+    col_w = _anteilig(4.6, 6.4, 2.0, 2.0, 2.5)   # P-32: innerhalb des Rahmens
     check_rows = [
         _vrow("make", "Marke", make, bold=True),
         _vrow("model", "Modell", model, bold=True),
@@ -1009,10 +1017,16 @@ def _build_pickup_pdf(
     story.append(_section("3 · Ausstattung laut Inserat — vor Ort prüfen", st))
     story.append(Spacer(1, 4))
     from protokoll_vergleich import AUSSTATTUNG_MAX
-    features = (vehicle.get("features") or [])[:AUSSTATTUNG_MAX]
-    if features:
-        feat_items = [(str(f), "") for f in features if str(f).strip()]
-    else:
+    features = vehicle.get("features") or []
+    if isinstance(features, str):
+        # Import-/Altdaten: Ausstattung als Text — sonst zerfiele sie in Zeichen.
+        features = features.split(",")
+    # Pruefbericht 20.09.2026 (P-30): ERST saeubern, DANN entscheiden — eine
+    # Liste wie ['', ' '] ergab feat_items=[] und ein Table(rows=[]), das
+    # Protokoll-PDF scheiterte mit ValueError.
+    feat_items = [(str(f).strip(), "") for f in features
+                  if f is not None and str(f).strip()][:AUSSTATTUNG_MAX]
+    if not feat_items:
         feat_items = [
             ("Klimaanlage / Klimaautomatik", ""),
             ("Navigationssystem", ""),
@@ -1052,9 +1066,22 @@ def _build_pickup_pdf(
             return empty
         return f"<b>{_xe(str(v))}{suffix}</b>"
 
+    def _val_km(field: str, empty: str) -> str:
+        """Pruefbericht 20.09.2026 (P-33): '85120 km' -> '85.120 km' — _fmt_km
+        hatte bis dahin keinen Aufrufer. Nicht Lesbares bleibt Text mit ' km'."""
+        v = _fill_cond.get(field)
+        if v in (None, ""):
+            return empty
+        text = _fmt_km(v)
+        if text == "—":
+            text = f"{v} km"
+        elif not text.endswith("km"):
+            text += " km"
+        return f"<b>{_xe(text)}</b>"
+
     tech_rows = [
         [Paragraph("Kilometerstand bei Abholung", st["check_label"]),
-         Paragraph(_val("mileage", "<u>_____________ km</u>", " km"), st["value"]),
+         Paragraph(_val_km("mileage", "<u>_____________ km</u>"), st["value"]),
          Paragraph("Tankfüllstand", st["check_label"]),
          Paragraph(_opts("fuel_level", ["leer", "1/4", "1/2", "3/4", "voll"]), st["check_opt"])],
         [Paragraph("Reifenprofil VL / VR / HL / HR", st["check_label"]),
@@ -1070,7 +1097,7 @@ def _build_pickup_pdf(
          Paragraph("Sauberkeit Außen", st["check_label"]),
          Paragraph(_opts("clean_outside", ["gut", "mittel", "schlecht"]), st["check_opt"])],
     ]
-    tech_t = Table(tech_rows, colWidths=[4.5 * cm, 4.2 * cm, 4.5 * cm, 4.3 * cm])
+    tech_t = Table(tech_rows, colWidths=_anteilig(4.5, 4.2, 4.5, 4.3))   # P-32
     tech_t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
@@ -1183,7 +1210,7 @@ def _build_pickup_pdf(
         bem_style = [("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
                      ("TOPPADDING", (0, 0), (-1, -1), 8),
                      ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]
-    bem_t = Table(bem_lines, colWidths=[17.5 * cm])
+    bem_t = Table(bem_lines, colWidths=[TABELLEN_B])   # P-32
     bem_t.setStyle(TableStyle(bem_style))
     story.append(bem_t)
 

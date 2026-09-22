@@ -604,8 +604,13 @@ def test_23_pdf_kein_kilometerpfeil_bei_stimmt():
     vc = {k: {"status": _o[0]} for k, _l, _o in P.VEHICLE_CHECK_FIELDS}
     bestaetigt = text(vc)
     assert "86.000 km" in bestaetigt
-    assert "88.000 km" not in bestaetigt, "bei 'stimmt' keine Korrektur neben dem Vertragswert"
+    # Pruefbericht 20.09.2026 (P-33): der Stand bei Abholung steht in Abschnitt 4
+    # jetzt ebenfalls mit Tausenderpunkt ("88.000 km") — geprueft wird deshalb
+    # der Pfeil "Vertrag → vor Ort" neben dem Vertragswert.
+    assert "→" not in bestaetigt, "bei 'stimmt' keine Korrektur neben dem Vertragswert"
+    assert "88.000 km" in bestaetigt, "Kilometerstand bei Abholung mit Tausenderpunkt (P-33)"
 
     vc["mileage_contract"] = {"status": "weicht ab", "value": "72000"}
-    assert "72.000 km" in text(vc), "bei 'weicht ab' bleibt der Pfeil"
+    abweichend = text(vc)
+    assert "72.000 km" in abweichend and "→" in abweichend, "bei 'weicht ab' bleibt der Pfeil"
 

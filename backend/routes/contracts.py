@@ -38,7 +38,7 @@ from deps import (
     require_active_sub, datum_iso_pruefen, uhrzeit_hhmm_pruefen,
 )
 import auto_daten
-from cleanup_service import vertrag_endgueltig_loeschen
+from cleanup_service import LoeschungAbgelehnt, vertrag_endgueltig_loeschen
 from lifecycle import try_set_lifecycle
 from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf, digitaler_vertragstext
 from rate_limiter import SlidingWindowRateLimiter
@@ -81,6 +81,22 @@ class DamageIn(BaseModel):
     # werden abgelehnt statt bis ins PDF durchgereicht.
     x: Optional[float] = Field(default=None, allow_inf_nan=False, ge=-10000, le=10000)
     y: Optional[float] = Field(default=None, allow_inf_nan=False, ge=-10000, le=10000)
+
+
+def _monat_jahr_normieren(v, art: str) -> str:
+    """P-20: '2027-03' / '3.2027' / '06/26' -> 'MM/JJJJ' (Regel wie
+    protokoll_vergleich.monat_jahr_text); Unlesbares wird abgelehnt."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if not s:
+        return ""
+    from protokoll_vergleich import monat_jahr_text
+    norm = monat_jahr_text(s, art=art)
+    m = re.fullmatch(r"(0[1-9]|1[0-2])/(\d{4})", norm)
+    if not m or not (1900 <= int(m.group(2)) <= 2100):
+        raise ValueError("Bitte als Monat/Jahr angeben (MM/JJJJ)")
+    return norm
 
 
 class ContractIn(BaseModel):
@@ -158,6 +174,16 @@ class ContractIn(BaseModel):
     # "teilweise" der Monat/Jahr, bis zu dem das Scheckheft gefuehrt wurde.
     service_book: Optional[str] = ""       # "" | "ja" | "nein" | "teilweise"
     service_book_until: Optional[str] = ""  # MM/JJJJ, nur bei "teilweise"
+
+    @field_validator("hu_until", "service_book_until")
+    @classmethod
+    def _monat_jahr_pruefen(cls, v, info):
+        # Pruefbericht 20.09.2026 (P-20): Der Dialog normiert auf MM/JJJJ, die
+        # API nahm aber jeden Text ("2027-03", "3.2027", "bald") und das PDF
+        # druckte ihn roh. Jetzt wie monatJahrAusText im Browser: lesbare
+        # Formen werden zu MM/JJJJ, alles andere wird abgelehnt; leer bleibt leer.
+        return _monat_jahr_normieren(v, art="hu" if info.field_name == "hu_until" else "ez")
+
     accident_free: Optional[str] = ""      # "Ja" | "Nein" | ""
     accident_location: Optional[str] = ""  # nur wenn accident_free == "Nein"
     eu_import: Optional[str] = ""          # "Ja" | "Nein" | ""
@@ -394,12 +420,16 @@ async def _digitales_pdf_bytes(c: dict, user: dict, cache: bool = True) -> Optio
         v = await db.vehicles.find_one(
             {"id": c.get("vehicle_id"), "dealer_id": c.get("dealer_id")}, {"_id": 0}) or {}
         vehicle = dict(v.get("data") or {})
-        # Firmenidentitaet aus dem Haendler-Dokument; die im Vertrag
-        # festgehaltenen Firmenangaben (Name, Anschrift, Telefon) gewinnen
-        # ohnehin ueber _apply_contract_overrides. Kein effective_dealer:
-        # dessen Sucher-Overrides haengen am ABRUFENDEN bzw. am heutigen
-        # Stand des Erstellers und machten das Dokument abrufabhaengig.
-        dealer = await db.dealers.find_one({"id": c.get("dealer_id")}, {"_id": 0}) or {}
+        # Die im Vertrag festgehaltenen Firmenangaben (Name, Anschrift,
+        # Telefon) gewinnen ueber _apply_contract_overrides. Der ABRUFENDE
+        # fliesst nie ein (das machte das Dokument abrufabhaengig).
+        # Pruefbericht 20.09.2026 (P-13): Basis ist wie bei der Neuerzeugung
+        # (regenerate_contract_for_pickup) der ERSTELLER des Vertrags ueber
+        # kaeufer_basis — das rohe Haendler-Dokument gab Altvertraegen ohne
+        # eingefrorene Kaeuferdaten die Chef-Identitaet, und die wurde gecacht.
+        from auftraggeber import kaeufer_basis
+        dealer = await kaeufer_basis(dealer_id=c.get("dealer_id"),
+                                     user_ids=(c.get("user_id"),)) or {}
         gespeichert = (contract_dict.get("digital_vertragstext") or "").strip()
         contract_dict["digital_vertragstext"] = gespeichert or DIGITAL_NACHTRAEGLICH
         vehicle, dealer = _apply_contract_overrides(
@@ -444,6 +474,17 @@ async def _digitales_pdf_bytes(c: dict, user: dict, cache: bool = True) -> Optio
 DIGITAL_FEHLER_HINWEIS = ("Die digitale Vertragsfassung konnte nicht erzeugt werden. "
                           "Bitte in ein paar Minuten erneut versuchen — ersatzweise "
                           "die Druckfassung herunterladen und von Hand anhängen.")
+
+
+def _anhang_zu_gross_hinweis() -> str:
+    """Pruefbericht 20.09.2026 (P-18): Das PDF ueberschreitet die Anhang-Grenze
+    des Mailversands — klare Meldung mit dem Link-Weg statt 'Versand
+    fehlgeschlagen, spaeter erneut versuchen'."""
+    import email_service
+    mb = email_service.MAIL_ANHANG_MAX_BYTES / (1024 * 1024)
+    return (f"Das Vertrags-PDF ist größer als {mb:g} MB und kann nicht als E-Mail-Anhang "
+            "verschickt werden — der Vertrag wurde NICHT versendet. Bitte per WhatsApp "
+            "mit Download-Link teilen oder das PDF herunterladen und selbst anhängen.")
 
 
 def wa_nummer(recipient: Optional[str]) -> str:
@@ -1119,7 +1160,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         # sonst gegenseitig). vehicles.purchase_price wird erst beim Abholen
         # aus dem erfolgreichen Vorgang uebernommen (kaufvorgang.py).
         await db.vehicles.update_one(
-            {"id": body.vehicle_id, "dealer_id": user["dealer_id"]},
+            {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
+             # Pruefbericht 20.09.2026 (R2-10): nicht auf ein inzwischen
+             # verkauftes/geloeschtes/archiviertes Fahrzeug schreiben — die
+             # Pruefungen oben lassen ein kleines Rennfenster.
+             "lifecycle": {"$nin": list(VERTRAG_GESPERRT)}},
             {"$set": {"status": "Vertrag erstellt"}},
         )
         if user.get("role") == "sucher":
@@ -2264,7 +2309,10 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 await _reservierung_zurueck()
                 raise HTTPException(503, DIGITAL_FEHLER_HINWEIS
                                     + " Der Vertrag wurde NICHT versendet.")
-            dateiname = c.get("filename") or "Kaufvertrag.pdf"
+            # Pruefbericht 20.09.2026 (P-11): Altvertraege tragen einen
+            # unbereinigten Dateinamen — im Mailanhang genauso saeubern wie
+            # bei der Anlage und im Download.
+            dateiname = _safe_filename(c.get("filename") or "", fallback="Kaufvertrag.pdf")
             # Nachpruefung Runde 14: dieselbe Firmenidentitaet wie im PDF —
             # effective_dealer legt die gewollten Sucher-Overrides (Firmen-
             # name, Telefon, Logo, E-Mail) ueber die Chef-Vorgaben. Vorher
@@ -2307,6 +2355,11 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}")
             if ok and beleg:
                 out["beleg"] = beleg
+            if not ok and beleg == "anhang_zu_gross":
+                # P-18: nichts an den Anbieter uebergeben — der Sucher bekommt
+                # den Ausweg (Link-Weg) genannt, kein "spaeter erneut".
+                await _reservierung_zurueck()
+                raise HTTPException(413, _anhang_zu_gross_hinweis())
             if not ok:
                 await _reservierung_zurueck()
                 raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
@@ -2854,26 +2907,50 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
         raise HTTPException(403, "Sucher dürfen nur ihre eigenen Verträge "
                                  "löschen — fremde Verträge löscht der "
                                  "Händler-Hauptaccount")
-    # Pruefung 14.09.2026 (F3/F4): Liegt zu einem Termin dieses Vertrags ein
-    # Protokoll beim Chef, ist es freigegeben oder wird gerade unterschrieben,
-    # bleibt der Vertrag — sonst verliert der laufende Abschluss seinen
-    # Vertrag (und ein Scrub koennte mit dem Abschluss um Personendaten ringen).
-    termin_ids = [a["id"] async for a in db.appointments.find(
-        {"contract_id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})]
-    # Befund 124 (16.09.2026): dieselbe Protokollmenge wie die Loeschkaskade —
-    # auch Protokolle, die nur noch ueber ihr eigenes contract_id am Vertrag
-    # haengen (Termin inzwischen umgehaengt oder geloest).
-    protokolle_zum_vertrag = {"$or": [{"appointment_id": {"$in": termin_ids}},
-                                      {"contract_id": contract_id}],
-                              "superseded": {"$ne": True}}
-    if await db.pickup_protocols.count_documents(
-            {**protokolle_zum_vertrag,
-             # Pruefung 14.09.2026 (B28): auch ein begonnener Entwurf zaehlt
-             "status": {"$in": ["entwurf", "zur_freigabe", "freigegeben",
-                                "wird_abgeschlossen"]}}, limit=1):
-        raise HTTPException(409, "Zu diesem Vertrag läuft gerade ein Abholprotokoll "
-                                 "(Freigabe oder Unterschrift) — der Vertrag kann jetzt "
-                                 "nicht gelöscht werden.")
+    async def _vor_kaskade() -> Optional[str]:
+        """Pruefbericht 20.09.2026 (R1-07): Diese Pruefungen laufen ERST NACH
+        dem Grabstein (cleanup_service.vertrag_endgueltig_loeschen ruft sie
+        auf). Vorher lagen sie davor, und im Fenster dazwischen konnte der
+        Fahrer noch einen Entwurf beginnen, den die Kaskade sofort
+        bereinigte — protocols._vertrag_nicht_in_loeschung sieht nur den
+        Grabstein. Ein Text = Ablehnung (Grabstein kommt weg, 409)."""
+        # Pruefung 14.09.2026 (F3/F4): Liegt zu einem Termin dieses Vertrags ein
+        # Protokoll beim Chef, ist es freigegeben oder wird gerade unterschrieben,
+        # bleibt der Vertrag — sonst verliert der laufende Abschluss seinen
+        # Vertrag (und ein Scrub koennte mit dem Abschluss um Personendaten ringen).
+        termin_ids = [a["id"] async for a in db.appointments.find(
+            {"contract_id": contract_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "id": 1})]
+        # Befund 124 (16.09.2026): dieselbe Protokollmenge wie die Loeschkaskade —
+        # auch Protokolle, die nur noch ueber ihr eigenes contract_id am Vertrag
+        # haengen (Termin inzwischen umgehaengt oder geloest).
+        protokolle_zum_vertrag = {"$or": [{"appointment_id": {"$in": termin_ids}},
+                                          {"contract_id": contract_id}],
+                                  "superseded": {"$ne": True}}
+        if await db.pickup_protocols.count_documents(
+                {**protokolle_zum_vertrag,
+                 # Pruefung 14.09.2026 (B28): auch ein begonnener Entwurf zaehlt
+                 "status": {"$in": ["entwurf", "zur_freigabe", "freigegeben",
+                                    "wird_abgeschlossen"]}}, limit=1):
+            return ("Zu diesem Vertrag läuft gerade ein Abholprotokoll "
+                    "(Freigabe oder Unterschrift) — der Vertrag kann jetzt "
+                    "nicht gelöscht werden.")
+        # Runde 19 (16.09.2026, Vertraege Nr. 1): ein unterschriebenes Abholprotokoll
+        # macht den Vertrag zum Beleg — der Sucher loescht ihn nicht mehr, nur der
+        # Chef (mit Blick auf die Aufbewahrungspflicht).
+        if user.get("role") == "sucher" and await db.pickup_protocols.count_documents(
+                {**protokolle_zum_vertrag, "status": "final"}, limit=1):
+            return ("Zu diesem Vertrag gibt es ein unterschriebenes Abhol-"
+                    "protokoll — der Beleg bleibt. Löschen kann ihn nur der "
+                    "Händler-Hauptaccount.")
+        # Rollenpruefung 22.09.2026 (RP-415): Die Kaskade leerte am OFFENEN Termin
+        # nur Verkaeuferdaten und Adresse — Status und Fahrer-Zusage blieben. Der
+        # Fahrer sah eine offene Fahrt ohne Adresse, und der Sucher konnte sie
+        # nicht mehr loeschen (409 bei angenommener Fahrt). Offene Termine des
+        # Vertrags werden jetzt vorher storniert (mit Verlaufseintrag). Das
+        # Loeschrecht des Chefs bleibt wie entschieden (21.09.2026).
+        await _offene_termine_beim_loeschen_stornieren(user, contract_id)
+        return None
+
     # Kaskade ueber EINE idempotente, wiederaufnehmbare Funktion (Go-Live-
     # Audit 09/2026): Grabstein am Vertrag, dann Versionen loeschen, Termin-
     # Verweise kappen, zuletzt der Vertrag. Bricht der Vorgang ab, fuehrt
@@ -2882,23 +2959,12 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Pruefung 14.09.2026 (Liste 6, Nr. 5): auch die manuelle Loeschung
     # entfernt Verkaeuferdaten aus Termin, Protokoll und Bericht — ein
     # geloeschter Vertrag hinterlaesst keine Personendaten.
-    # Runde 19 (16.09.2026, Vertraege Nr. 1): ein unterschriebenes Abholprotokoll
-    # macht den Vertrag zum Beleg — der Sucher loescht ihn nicht mehr, nur der
-    # Chef (mit Blick auf die Aufbewahrungspflicht).
-    if user.get("role") == "sucher" and await db.pickup_protocols.count_documents(
-            {**protokolle_zum_vertrag, "status": "final"}, limit=1):
-        raise HTTPException(409, "Zu diesem Vertrag gibt es ein unterschriebenes Abhol-"
-                                 "protokoll — der Beleg bleibt. Löschen kann ihn nur der "
-                                 "Händler-Hauptaccount.")
-    # Rollenpruefung 22.09.2026 (RP-415): Die Kaskade leerte am OFFENEN Termin
-    # nur Verkaeuferdaten und Adresse — Status und Fahrer-Zusage blieben. Der
-    # Fahrer sah eine offene Fahrt ohne Adresse, und der Sucher konnte sie
-    # nicht mehr loeschen (409 bei angenommener Fahrt). Offene Termine des
-    # Vertrags werden jetzt vorher storniert (mit Verlaufseintrag). Das
-    # Loeschrecht des Chefs bleibt wie entschieden (21.09.2026).
-    await _offene_termine_beim_loeschen_stornieren(user, contract_id)
-    ok = await vertrag_endgueltig_loeschen(
-        db, contract_id, scrub_pii=True, grund="manuell", audit=False)
+    try:
+        ok = await vertrag_endgueltig_loeschen(
+            db, contract_id, scrub_pii=True, grund="manuell", audit=False,
+            vor_kaskade=_vor_kaskade)
+    except LoeschungAbgelehnt as exc:
+        raise HTTPException(409, str(exc))
     if not ok:
         raise HTTPException(404, "Vertrag nicht gefunden")
     # Audit 13.09.2026 (#45): Der Vertrag ist bereits geloescht — ein 500
@@ -3297,6 +3363,12 @@ async def regenerate_contract_for_pickup(
     except Exception:
         log.exception("Kaufvertrag konnte mit neuem Abholtermin nicht neu "
                       "erzeugt werden (contract=%s)", contract_id)
+        # Pruefbericht 20.09.2026 (P-16): nicht nur ins Log — der Betrieb
+        # sieht den Alarm (alle Aufrufer: Termin, Abholung, Verkaeufer-
+        # Korrektur, Nachholer); der Aufrufer meldet "pdf_fehler" weiter.
+        import betrieb as _betrieb
+        await _betrieb.alarm(db, "vertrag_neuerzeugung_fehlgeschlagen", ref=contract_id,
+                             dealer_id=dealer_id or "", grund=grund)
         _grund("pdf_fehler")
         return False
 

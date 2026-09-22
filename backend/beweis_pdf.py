@@ -128,6 +128,11 @@ def _xml(wert: Any) -> str:
 # Kilometerstaende (beginnen nicht mit 0 bzw. zu wenige Ziffern) bleiben.
 _TEL = re.compile(r"(?<![\w+])(?:\+\d{1,3}|00\d{1,3}|0)[\d \-/().]{5,}\d")
 _MAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Pruefbericht 20.09.2026 (P-28): Monat/Jahr-Angaben und -Spannen beginnen
+# mit 0 und haben ab zwei Terminen 7+ Ziffern — "Zahnriemen gewechselt
+# 06/2019 - 03/2024" wurde zur "[Kontaktangabe entfernt]". Was vollstaendig
+# so aussieht, ist keine Telefonnummer und bleibt stehen.
+_MONAT_JAHR_SPANNE = re.compile(r"\d{2}[./]\d{4}(?:\s*[-–]\s*\d{2}[./]\d{4})?")
 KONTAKT_ENTFERNT = "[Kontaktangabe entfernt]"
 _NICHT_MASKIEREN = {"detail_url", "kleinanzeigen_url", "images", "image_urls",
                     "images_thumbs", "mobile_ad_id", "kleinanzeigen_id"}
@@ -135,8 +140,11 @@ _NICHT_MASKIEREN = {"detail_url", "kleinanzeigen_url", "images", "image_urls",
 
 def kontakt_maskieren(text: str) -> str:
     def _tel(m):
-        ziffern = sum(ch.isdigit() for ch in m.group(0))
-        return KONTAKT_ENTFERNT if 7 <= ziffern <= 15 else m.group(0)
+        treffer = m.group(0)
+        if _MONAT_JAHR_SPANNE.fullmatch(treffer.strip()):
+            return treffer
+        ziffern = sum(ch.isdigit() for ch in treffer)
+        return KONTAKT_ENTFERNT if 7 <= ziffern <= 15 else treffer
     return _TEL.sub(_tel, _MAIL.sub(KONTAKT_ENTFERNT, str(text)))
 
 
@@ -429,7 +437,10 @@ def _bild(bts: Optional[bytes], max_b: float, max_h: float, ersatz: Paragraph):
     if not groesse:
         return ersatz
     w, h = groesse
-    f = min(max_b / max(1, w), max_h / max(1, h))
+    # Pruefbericht 20.09.2026 (P-34): nur verkleinern, nie vergroessern —
+    # kleine Quellbilder wurden sonst auf volle Breite gezogen und verpixelten
+    # (Pixel als Punkte, also 72 dpi: das Bild bleibt in Originalgroesse).
+    f = min(max_b / max(1, w), max_h / max(1, h), 1.0)
     try:
         return Image(io.BytesIO(bts), width=w * f, height=h * f)
     except Exception:  # noqa: BLE001
@@ -441,7 +452,8 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
                beweis_id: str, abgerufen_am: Any, erstellt_am: Any,
                fotos: Sequence[Optional[bytes]], foto_urls: Sequence[str],
                privatdaten: bool = False,
-               frueheres_dokument: Optional[Dict[str, Any]] = None) -> bytes:
+               frueheres_dokument: Optional[Dict[str, Any]] = None,
+               abgerufen_spaetestens: bool = False) -> bytes:
     """Beweisdokument als PDF-Bytes.
 
     fotos: JPEG-Bytes der ersten Inseratsfotos, in derselben Reihenfolge wie
@@ -449,6 +461,9 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
     Inserats (Anhang). privatdaten: Name/Anschrift/Telefon auch bei privaten
     oder unbekannten Anbietern drucken (Standard nein — das Dokument teilen
     sich alle Firmen, die das Inserat nutzen).
+    abgerufen_spaetestens (Pruefbericht 20.09.2026, P-35): abgerufen_am ist
+    nicht der Abruf selbst, sondern die Vormerkung — der genaue Abruf ist
+    nicht ueberliefert (Altbestand); das Dokument sagt "spaetestens am".
     """
     q = quelle_norm(quelle)
     normal, fett, _ = _schriften()
@@ -529,10 +544,14 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
     ]
     if item_id and str(item_id) != anzeigen_id:
         herkunft.append(("Kennung in der Adresse", _saeubern(item_id)))
-    herkunft += [
-        ("Daten ausgelesen am", abgerufen),
-        ("Dokument erstellt am", erstellt),
-    ]
+    if abgerufen_spaetestens and abgerufen != "unbekannt":
+        # P-35: statt "unbekannt" der spaeteste moegliche Zeitpunkt.
+        herkunft.append(("Daten ausgelesen",
+                         f"spätestens am {abgerufen} (Zeitpunkt der Vormerkung — der "
+                         "genaue Abruf ist nicht überliefert)"))
+    else:
+        herkunft.append(("Daten ausgelesen am", abgerufen))
+    herkunft.append(("Dokument erstellt am", erstellt))
     if isinstance(frueheres_dokument, dict) and frueheres_dokument:
         # Rollenpruefung 22.09.2026 (RP-498): nach Ablauf der Aufbewahrungsfrist
         # neu angefordert — das fruehere Dokument wird genannt, damit dieses
@@ -728,15 +747,10 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
         if len(urls) > 200:
             story.append(Paragraph(f"… und {len(urls) - 200} weitere.", st_klein))
 
-    # Fotos binaer statt ASCII85 einbetten (sonst rund ein Viertel groesser).
-    # Die Einstellung gilt nur waehrend des Aufbaus; ein parallel erzeugtes
-    # anderes PDF bleibt in jedem Fall gueltig.
-    from reportlab import rl_config
-    alt_a85 = rl_config.useA85
-    rl_config.useA85 = 0
-    try:
-        dokument.build(story, canvasmaker=_seiten_canvas(
-            quelle=q, anzeigen_id=anzeigen_id or "—", erstellt=erstellt, dok_nr=dok_nr))
-    finally:
-        rl_config.useA85 = alt_a85
+    # Fotos binaer statt ASCII85 einbetten (sonst rund ein Viertel groesser):
+    # Pruefbericht 20.09.2026 (P-36) — rl_config.useA85 wird nicht mehr je
+    # Aufbau prozessweit umgeschaltet (Rennen mit parallel erzeugten
+    # Vertraegen/Protokollen), sondern einmal beim Import in pdf_schrift.
+    dokument.build(story, canvasmaker=_seiten_canvas(
+        quelle=q, anzeigen_id=anzeigen_id or "—", erstellt=erstellt, dok_nr=dok_nr))
     return puffer.getvalue()

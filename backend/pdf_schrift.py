@@ -16,7 +16,15 @@ entstehen weiter.
 import os
 from typing import Dict, Tuple
 
+from reportlab import rl_config
 from reportlab.pdfbase import pdfmetrics
+
+# Pruefbericht 20.09.2026 (P-36): Bilder binaer statt ASCII85 einbetten (sonst
+# rund ein Viertel groesser). Vorher schaltete beweis_pdf den Wert je Aufbau
+# um und zurueck — prozessweit, waehrend Vertraege und Protokolle parallel in
+# Threads entstanden; bei verschraenkten Laeufen konnte der alte Wert falsch
+# zurueckgeschrieben werden. Jetzt EINMAL beim Import, fuer alle PDFs.
+rl_config.useA85 = 0
 
 FAMILIE = "BeweisSans"          # Name aus dem Beweisdokument, bewusst beibehalten
 
@@ -70,3 +78,19 @@ def styles_anpassen(styles: Dict) -> Dict:
         for st in styles.values():
             st.fontName = ersatz_fuer(getattr(st, "fontName", ""))
     return styles
+
+
+def auf_breite(text: str, schrift: str, groesse: float, max_breite: float) -> str:
+    """Text auf eine Breite kuerzen (mit "…"), gemessen in der tatsaechlichen
+    Schrift. Rollenpruefung 22.09.2026 (RP-071/170) fuer das Abholprotokoll;
+    Pruefbericht 20.09.2026 (P-08): hierher verschoben, damit auch die
+    Fusszeile des Kaufvertrags einen langen Firmennamen nicht in die
+    mittlere Zeile laufen laesst."""
+    text = str(text or "")
+    if max_breite <= 0:
+        return ""
+    if pdfmetrics.stringWidth(text, schrift, groesse) <= max_breite:
+        return text
+    while text and pdfmetrics.stringWidth(text + "…", schrift, groesse) > max_breite:
+        text = text[:-1]
+    return (text.rstrip() + "…") if text else ""

@@ -370,6 +370,14 @@ def _send_sync(*, to: str, subject: str, text: str, html: Optional[str],
     fortschritt["fertig"] = True
 
 
+# Pruefbericht 20.09.2026 (P-18): Groesse eines Anhangs, ab der NICHT gesendet
+# wird (Resend nimmt 40 MB je Mail, viele Postfaecher deutlich weniger).
+# Vorher ging ein zu grosses PDF ungeprueft an den Anbieter und kam als
+# nichtssagender "Versand fehlgeschlagen" zurueck; jetzt meldet der Aufrufer
+# den Link-Weg (WhatsApp/Download).
+MAIL_ANHANG_MAX_BYTES = zahl_env("MAIL_ANHANG_MAX_BYTES", 20 * 1024 * 1024, unten=1024)
+
+
 async def send_email(to: str, subject: str, text: str,
                      anhang: bytes = None, anhang_name: str = "",
                      *, html: str = None, reply_to=None, kopie=None,
@@ -408,11 +416,19 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
     weil er zwischen Abgabe und Speichern abgestuerzt war — liefert
     Resend die erste Abgabe zurueck, statt ein zweites Mal zuzustellen
     (Pruefbericht Runde 8, Befund 3: "nicht einfach erneut senden").
+
+    Bei (False, "anhang_zu_gross") ueberschreitet der Anhang
+    MAIL_ANHANG_MAX_BYTES — es wurde nichts an den Anbieter uebergeben (P-18).
     """
     if not email_configured():
         log.warning("email_service: kein Versandweg eingerichtet (RESEND_API_KEY "
                     "oder SMTP_*) — '%s' an %s NICHT gesendet", subject, to)
         return False, ""
+    if anhang and len(anhang) > MAIL_ANHANG_MAX_BYTES:
+        log.error("email_service: Anhang '%s' an %s ist %.1f MB gross (Grenze "
+                  "%.1f MB, MAIL_ANHANG_MAX_BYTES) — NICHT gesendet",
+                  anhang_name, to, len(anhang) / 1048576, MAIL_ANHANG_MAX_BYTES / 1048576)
+        return False, "anhang_zu_gross"
     reply_to = [a for a in _liste(reply_to) if gueltige_adresse(a)]
     kopie = [a for a in _liste(kopie) if gueltige_adresse(a) and a.lower() != (to or "").lower()]
     argumente = dict(to=to, subject=subject, text=text, html=html, anhang=anhang,
@@ -476,14 +492,19 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
         return False, ""
 
 
-# Laeuft ein SMTP-Versuch laenger als das, gilt sein Ausgang als unklar
-# (Prozess gestorben) — dann wird NICHT automatisch wiederholt.
-SMTP_VERSUCH_MAX_SEKUNDEN = 180
+# Ein Eintrag "laeuft" ohne Ergebnis (Prozess mitten im Versand gestorben)
+# sperrt seinen Schluessel: der Ausgang ist unklar, es wird NICHT automatisch
+# wiederholt. Pruefbericht 20.09.2026 (P-10): nach dieser Zeit gilt der
+# haengende Eintrag als aufgegeben und darf neu beansprucht werden — vorher
+# lief ein identischer Versand unter seinem Schluessel fuer immer in 502
+# (die beiden Zweige lieferten ohnehin beide "unklar").
+SMTP_UNKLAR_SPERRE_SEKUNDEN = 24 * 3600
 
 
 async def _smtp_idempotenz_beanspruchen(key: str, to: str) -> str:
     """'neu' = jetzt senden; 'gesendet' = schon abgegeben; 'unklar' = ein
-    frueherer Versuch hat kein Ergebnis hinterlassen."""
+    frueherer Versuch hat kein Ergebnis hinterlassen (juenger als
+    SMTP_UNKLAR_SPERRE_SEKUNDEN)."""
     from datetime import datetime, timezone
     try:
         from deps import db
@@ -501,8 +522,18 @@ async def _smtp_idempotenz_beanspruchen(key: str, to: str) -> str:
         begonnen = alt.get("begonnen")
         if begonnen is not None and begonnen.tzinfo is None:
             begonnen = begonnen.replace(tzinfo=timezone.utc)
-        if begonnen and (jetzt - begonnen).total_seconds() > SMTP_VERSUCH_MAX_SEKUNDEN:
-            return "unklar"
+        if begonnen and (jetzt - begonnen).total_seconds() > SMTP_UNKLAR_SPERRE_SEKUNDEN:
+            # P-10: den haengenden Eintrag uebernehmen — Compare-and-Set auf die
+            # alte Startzeit, damit zwei Wiederaufnahmen nicht beide senden.
+            r2 = await db.mail_idempotenz.update_one(
+                {"key": key, "status": "laeuft", "begonnen": alt.get("begonnen")},
+                {"$set": {"begonnen": jetzt, "empfaenger": to},
+                 "$inc": {"uebernahmen": 1}})
+            if r2.modified_count:
+                log.warning("email_service: haengender SMTP-Versuch unter %s (seit %s) "
+                            "gilt nach %d h als aufgegeben — wird neu gesendet",
+                            key, begonnen.isoformat(), SMTP_UNKLAR_SPERRE_SEKUNDEN // 3600)
+                return "neu"
         return "unklar"
     except Exception as exc:  # noqa: BLE001
         # Phase 3 (3.6, A22): fail-closed — ohne Datenbank ist nicht pruefbar, ob
