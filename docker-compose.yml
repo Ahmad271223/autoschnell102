@@ -119,6 +119,9 @@ services:
       # Entscheidung Ahmad 16.09.2026: 400 neue Abrufe je Konto und Tag (alle
       # Quellen). Bekannte Links aus dem Speicher und Mitwarten kosten nichts.
       - ANBIETER_TAGESLIMIT_JE_KONTO=${ANBIETER_TAGESLIMIT_JE_KONTO:-400}
+      # Pruefbericht 20.09. (B-04): gleichzeitige Plaetze je Quelle, die EINE Firma
+      # hoechstens belegen darf, sobald eine andere Firma wartet (100 = aus).
+      - ANBIETER_FIRMENANTEIL_PROZENT=${ANBIETER_FIRMENANTEIL_PROZENT:-50}
       # Pruefung 21.09.2026 (Kapazitaet): erwartet sind 1.000–3.240 Apify-
       # Abrufe am Tag (30 Sucher) — bei 500 kaeme der Hinweis (und mit
       # BETRIEB_MELDUNG_AN eine Mail) jeden Tag. Nur ein Hinweis, kein Riegel.
@@ -135,6 +138,8 @@ services:
       - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
       - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-3000}
+      # Pruefbericht 20.09. (B-09): Fehlschlaege des Bild-Proxys so lange merken.
+      - BILD_PROXY_NEGATIV_SEKUNDEN=${BILD_PROXY_NEGATIV_SEKUNDEN:-600}
       # Pruefbericht 20.09.2026 (SV-10): IP-Limit fuer /api/files
       - DATEI_LIMIT=${DATEI_LIMIT:-3000}
       # Weiterverkauf, Regeln vom 20.09.2026 (Ahmad): Beschreibung 500
@@ -204,6 +209,8 @@ services:
       # Sendungen rund ein Drittel der Mails in einen endgueltigen 429.
       # Mehr Server oder mehr Worker? Dann RESEND_PROZESSE mit anheben.
       - RESEND_RATE=${RESEND_RATE:-10}
+      # Pruefbericht 20.09. (P-18): groessere Anhaenge werden nicht per Mail verschickt.
+      - MAIL_ANHANG_MAX_BYTES=${MAIL_ANHANG_MAX_BYTES:-20971520}
       - RESEND_PROZESSE=${RESEND_PROZESSE:-8}
       - SCRAPE_MAX_RETRIES=${SCRAPE_MAX_RETRIES:-3}
       - ZUSTELLUNG_HAENGT_NACH_SEK=${ZUSTELLUNG_HAENGT_NACH_SEK:-180}
@@ -246,6 +253,11 @@ services:
       - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-32}
       - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-32}
       - APIFY_MAX_PARALLEL=${APIFY_MAX_PARALLEL:-32}
+      # Pruefbericht 20.09. (DP-04/A-17/A-06): Apify-Lauf hoechstens 85 s (Cloudflare
+      # bricht bei ~100 s ab), Gesamtfrist je Abruf, Lease-Herzschlag hoechstens 300 s.
+      - APIFY_TIMEOUT_SEKUNDEN=${APIFY_TIMEOUT_SEKUNDEN:-85}
+      - ABRUF_GESAMT_SEKUNDEN=${ABRUF_GESAMT_SEKUNDEN:-90}
+      - LEASE_HERZSCHLAG_MAX=${LEASE_HERZSCHLAG_MAX:-300}
       # Abstand, bevor ein wegen Tempolimit abgewiesener Abruf erneut startet.
       # Ohne ihn waren alle drei Versuche in gut einer Sekunde verbraucht.
       - LINK_JOB_TEMPOLIMIT_WARTEN=${LINK_JOB_TEMPOLIMIT_WARTEN:-5}
