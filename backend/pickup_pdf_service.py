@@ -822,6 +822,12 @@ def _build_pickup_pdf(
     mail = _txt(dealer.get("email"))
     if mail:
         dealer_lines.append(f"E-Mail: {_xe(mail)}")
+    # Entscheidung Ahmad 22.09.2026: die Vertrags-Kundennummer steht im
+    # Kaufvertrag ("nur unter Vorlage der Kundennummer") — der Fahrer muss
+    # sie vor Ort nennen koennen. Nie die Anmeldenummer (kunden_nr).
+    vertrags_nr = _txt(dealer.get("vertrags_kundennummer"))
+    if vertrags_nr:
+        dealer_lines.append(f"Kundennummer (Vertrag): {_xe(vertrags_nr)}")
     dealer_block = "<br/>".join(dealer_lines) or "—"
 
     card_w = 8.55 * cm

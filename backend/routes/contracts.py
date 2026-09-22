@@ -2727,6 +2727,113 @@ async def _offene_termine_beim_loeschen_stornieren(user: dict, contract_id: str)
     return n
 
 
+class VerkaeuferKorrekturIn(BaseModel):
+    """Entscheidung Ahmad 22.09.2026 (Rollenpruefung RP-481): Verkaeuferdaten
+    eines schon verschickten Vertrags korrigieren — neue Fassung, die alte
+    bleibt im Archiv. Felder wie beim Anlegen (ContractIn)."""
+    seller_name: str = Field(max_length=500)
+    seller_address: Optional[str] = Field(default=None, max_length=500)
+    seller_zip: Optional[str] = Field(default=None, max_length=20)
+    seller_city: Optional[str] = Field(default=None, max_length=100)
+    seller_phone: Optional[str] = Field(default=None, max_length=500)
+    seller_email: Optional[str] = Field(default=None, max_length=500)
+    id_document: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("seller_name")
+    @classmethod
+    def _verkaeufer_pflicht(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Bitte den Namen des Verkäufers angeben")
+        return v
+
+
+@router.put("/contracts/{contract_id}/verkaeufer")
+async def verkaeufer_korrigieren(contract_id: str, body: VerkaeuferKorrekturIn,
+                                 user=Depends(current_firma)):
+    """Verkaeuferdaten korrigieren (Entscheidung Ahmad 22.09.2026, RP-481).
+
+    Vorher gab es fuer einen Tippfehler im Namen oder eine falsche Anschrift
+    in einem verschickten Vertrag keinen Weg ausser Loeschen (das nahm auch
+    das Protokoll mit). Jetzt: neue Fassung ueber denselben Mechanismus wie
+    beim verschobenen Termin (Archiv, Compare-and-Set, Fassungskennzeichen);
+    der Sucher schickt sie danach ueber "Senden" — der Versand-Dialog nimmt
+    von selbst die Korrektur-Vorlage, weil eine fruehere Fassung schon raus
+    war. Der offene Termin zum Vertrag bekommt Name, Telefon, E-Mail und
+    Abholadresse mit; ein Protokoll-Entwurf, der noch den ALTEN Namen traegt,
+    verliert ihn und nimmt beim Abschluss den korrigierten (RP-082).
+    Chef: alle Vertraege der Firma; Sucher: nur eigene (_vertrag_bereich).
+    """
+    bereich = _vertrag_bereich(user)
+    doc = await db.generated_pdfs.find_one(
+        {"id": contract_id, **bereich},
+        {"_id": 0, "id": 1, "version": 1, "contract_data": 1, "seller_name": 1})
+    if not doc:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    daten = body.model_dump()
+    erg: dict = {}
+    neu = await regenerate_contract_for_pickup(
+        contract_id=contract_id, dealer_id=user["dealer_id"], user=user,
+        verkaeufer=daten, grund="verkaeufer_korrigiert", ergebnis=erg)
+    if not neu:
+        grund = erg.get("grund")
+        if grund == "keine_aenderung":
+            return {"geaendert": False, "version": int(doc.get("version") or 1)}
+        if grund == "cas_verloren":
+            raise HTTPException(409, "Der Vertrag wurde gerade anderweitig geändert — "
+                                     "bitte neu laden und noch einmal versuchen.")
+        if grund == "pdf_fehler":
+            raise HTTPException(500, "Die neue Fassung konnte nicht erzeugt werden.")
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    frisch = await db.generated_pdfs.find_one(
+        {"id": contract_id, **bereich}, {"_id": 0, "version": 1, "contract_data": 1})
+    cd = (frisch or {}).get("contract_data") or {}
+    alter_name = str((doc.get("contract_data") or {}).get("seller_name")
+                     or doc.get("seller_name") or "").strip()
+    neuer_name = str(cd.get("seller_name") or "").strip()
+    # Offene Termine zu diesem Vertrag mitziehen (abgeschlossene bleiben als
+    # Beleg, wie sie waren). Die Zusage des Fahrers wird NICHT zurueckgesetzt:
+    # der Termin selbst (Zeit, Ort) aendert sich nicht.
+    from routes.appointments import ABGESCHLOSSEN
+    from routes.protocols import SELLER_NAME_GEAENDERT_AM
+    adresse = " ".join(x for x in (
+        str(cd.get("seller_address") or "").strip(),
+        str(cd.get("seller_zip") or "").strip(),
+        str(cd.get("seller_city") or "").strip()) if x)[:500]
+    termin_set = {"seller_name": neuer_name,
+                  "seller_phone": str(cd.get("seller_phone") or "").strip(),
+                  "seller_email": str(cd.get("seller_email") or "").strip(),
+                  "updated_at": now_iso()}
+    if adresse:
+        termin_set["pickup_address"] = adresse
+    if neuer_name != alter_name:
+        termin_set[SELLER_NAME_GEAENDERT_AM] = termin_set["updated_at"]
+    offene: list = []
+    try:
+        offene = [a["id"] async for a in db.appointments.find(
+            {"contract_id": contract_id, "dealer_id": user["dealer_id"],
+             "status": {"$nin": list(ABGESCHLOSSEN)}}, {"_id": 0, "id": 1})]
+        if offene:
+            await db.appointments.update_many({"id": {"$in": offene}}, {"$set": termin_set})
+            if neuer_name != alter_name and alter_name:
+                await db.pickup_protocols.update_many(
+                    {"appointment_id": {"$in": offene}, "dealer_id": user["dealer_id"],
+                     "status": "entwurf", "superseded": {"$ne": True},
+                     "seller_name": alter_name},
+                    {"$unset": {"seller_name": ""}})
+    except Exception:  # noqa: BLE001 — der Vertrag steht; Termin ist Beiwerk
+        log.exception("Verkaeuferkorrektur %s: Termin nicht nachgezogen", contract_id)
+    await log_activity_sicher(user["dealer_id"], user["id"], "vertrag.verkaeufer.korrigiert",
+                              ref=contract_id,
+                              meta={"version": (frisch or {}).get("version"),
+                                    "name_geaendert": neuer_name != alter_name,
+                                    "termine": len(offene)})
+    return {"geaendert": True, "version": int((frisch or {}).get("version") or 0),
+            "termine_aktualisiert": len(offene),
+            # fuer den Versand-Dialog direkt danach (ohne Neuladen der Liste)
+            "verkaeufer": {k: str(cd.get(k) or "") for k in VERKAEUFER_FELDER}}
+
+
 @router.delete("/contracts/{contract_id}")
 async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Berechtigungsmatrix (PR-Review 09/2026): Loeschen ist destruktiv —
@@ -2865,8 +2972,14 @@ FASSUNGS_FELDER = ("fassung", "fassung_erstellt_am", "ersetzt_fassung_am")
 #: RP-479: Diese Angaben kommen beim Neuaufbau aus dem Stand vor der Abholung
 #: trotzdem aus der AKTUELLEN Fassung — sie aendert keine Abholung: Termin,
 #: eingefrorene Kaeuferdaten (Runde 25), Logo und Fassungsangaben.
+#: Entscheidung Ahmad 22.09.2026: Verkaeuferdaten eines verschickten Vertrags
+#: sind korrigierbar (neue Fassung). Beim Neuaufbau aus dem Stand vor der
+#: Abholung kommen sie aus der AKTUELLEN Fassung, sonst ginge eine Korrektur
+#: bei der naechsten Protokoll-Neuerzeugung wieder verloren.
+VERKAEUFER_FELDER = ("seller_name", "seller_address", "seller_zip", "seller_city",
+                     "seller_phone", "seller_email", "id_document")
 _AUS_AKTUELLER_FASSUNG = ("pickup_date", "pickup_time", "empfang_datum", "logo_key",
-                          *KAEUFER_FELDER, *FASSUNGS_FELDER)
+                          *KAEUFER_FELDER, *FASSUNGS_FELDER, *VERKAEUFER_FELDER)
 #: Rollenprüfung 22.09.2026 (Review): die Vertragsfelder, die eine Protokoll-
 #: Korrektur setzt (protokoll_vergleich.vertrags_korrekturen / hu_korrektur).
 #: protocols.protokoll_korrekturen ermittelt sie gegen die AKTUELLE Fassung —
@@ -2901,6 +3014,7 @@ async def regenerate_contract_for_pickup(
     neuer_preis: Optional[float] = None, sondervereinbarung: Optional[str] = None,
     korrekturen: Optional[Dict[str, Any]] = None,
     neue_schaeden: Optional[list] = None,
+    verkaeufer: Optional[Dict[str, Any]] = None,
     grund: str = "abholtermin_geaendert", protokoll_id: Optional[str] = None,
     ergebnis: Optional[dict] = None,
 ) -> bool:
@@ -2946,6 +3060,10 @@ async def regenerate_contract_for_pickup(
             and str(roh_korrekturen.get("hu_valid") or "").strip() == "Nein":
         korrekturen["hu_until"] = ""
     neue_schaeden = [d for d in (neue_schaeden or []) if d]
+    # Entscheidung Ahmad 22.09.2026: korrigierte Verkaeuferdaten (nur die
+    # bekannten Felder, getrimmt; None = Feld nicht angefasst).
+    verkaeufer = {k: str(w).strip() for k, w in (verkaeufer or {}).items()
+                  if k in VERKAEUFER_FELDER and w is not None}
     # Rollenpruefung 22.09.2026 (RP-479): Nach der Abholung wird die neue
     # Fassung aus dem Stand VOR der Abholung aufgebaut (siehe unten) — eine
     # korrigierte Protokollversion OHNE Preis/Aenderungen darf deshalb nicht
@@ -2953,7 +3071,8 @@ async def regenerate_contract_for_pickup(
     # zurueck. Ob es etwas zurueckzunehmen gibt, steht erst am Vertrag.
     abholung = grund == "abholung_abgeschlossen"
     ohne_anlass = (pickup_date is None and pickup_time is None
-                   and not preis_aenderung and not korrekturen and not neue_schaeden)
+                   and not preis_aenderung and not korrekturen and not neue_schaeden
+                   and not verkaeufer)
     if not contract_id or (ohne_anlass and not abholung):
         return _grund("kein_anlass")
     # Pruefbericht 20.09.2026 (N2): keine neue Fassung mitten im Versand.
@@ -3051,14 +3170,19 @@ async def regenerate_contract_for_pickup(
                   if str(contract_dict.get(k) or "").strip() != str(w).strip()}
     schaeden_alt = list(contract_dict.get("damages") or [])
     schaeden_neu = [d for d in neue_schaeden if d not in schaeden_alt]
+    verk_korrigiert = {k: w for k, w in verkaeufer.items()
+                       if str(contract_dict.get(k) or "").strip() != w}
     # gilt, wenn der naechste Block aussteigt (der Vertrag zeigt schon alles)
     _grund("keine_aenderung")
     if basis is None and (neu_datum or "") == (alt_datum or "") \
             and (neu_zeit or "") == (alt_zeit or "") \
-            and not preis_neu and not sonder_neu and not korrigiert and not schaeden_neu:
+            and not preis_neu and not sonder_neu and not korrigiert and not schaeden_neu \
+            and not verk_korrigiert:
         return False
     if korrigiert:
         contract_dict.update(korrigiert)
+    if verk_korrigiert:
+        contract_dict.update(verk_korrigiert)
     # Hinweis im Archiv ("was ist anders?"): wie der Preis (preis_vorher) gegen
     # den Vertrag VOR der Abholung — auch wenn die Werte schon aus der
     # vorigen Protokollversion stammen (Rollenprüfung 22.09.2026, Review).
@@ -3130,6 +3254,11 @@ async def regenerate_contract_for_pickup(
     # standen sie nur in contract_data — Mail-Betreff, Archivliste, Suche und
     # Dateiname nannten weiter das alte Fahrzeug (make/model oben am Vertrag).
     kopf: Dict[str, Any] = {}
+    # Entscheidung Ahmad 22.09.2026: Name, Telefon und E-Mail des Verkaeufers
+    # stehen auch oben am Vertrag (Archivliste, Suche, Versand-Dialog).
+    for feld in ("seller_name", "seller_phone", "seller_email"):
+        if feld in verk_korrigiert:
+            kopf[feld] = verk_korrigiert[feld]
     if any((contract_dict.get(k) or "") != (cd_aktuell.get(k) or "")
            for k in ("vehicle_make", "vehicle_model")):
         marke = str(contract_dict.get("vehicle_make") or doc.get("make") or "").strip()

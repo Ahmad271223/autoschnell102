@@ -34,7 +34,8 @@ MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 
 FIRMA = {"company_name": "Autohaus Probe GmbH", "address": "Hauptstr. 1",
          "zip_code": "10115", "city": "Berlin", "phone": "030 123",
-         "email": "info@probe.test", "kunden_nr": "4711"}
+         "email": "info@probe.test", "kunden_nr": "4711",
+         "vertrags_kundennummer": "593017"}
 VERTRAG = {"seller_name": "Max Muster", "seller_address": "Musterweg 5",
            "seller_zip": "20095", "seller_city": "Hamburg", "purchase_price": 12500,
            "contract_no": "KV-0921", "pickup_date": "2026-09-25",

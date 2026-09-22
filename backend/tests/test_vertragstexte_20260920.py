@@ -43,6 +43,7 @@ VERTRAG = {
     "make": "BMW", "model": "320d",
 }
 FIRMA = {"company_name": "Autohaus Schnell", "kunden_nr": 10023,
+         "vertrags_kundennummer": "482913",   # 22.09.2026: eigene Nummer fuer Vertraege
          "phone": "0211 12345", "email": "info@example.invalid"}
 
 
@@ -52,7 +53,10 @@ def test_01_die_drei_luecken_werden_gefuellt():
     assert "03.10.2026 um 14:30 Uhr" in text, text
     assert "Hauptstr. 5, 40210 Düsseldorf" in text, text
     assert "Echtzeitüberweisung" in text, text
-    assert "10023" in text, "die Kundennummer fehlt"
+    # Entscheidung Ahmad 22.09.2026 (RP-428): die Vertrags-Kundennummer, NIE
+    # die Anmeldenummer des Chefs (kunden_nr 10023).
+    assert "482913" in text, "die Vertrags-Kundennummer fehlt"
+    assert "10023" not in text, "die Anmeldenummer steht im Vertrag"
     assert "{" not in text, f"ein Platzhalter blieb stehen: {text}"
 
 
@@ -371,7 +375,10 @@ def test_23_die_besonderen_vereinbarungen_stehen_gefuellt_im_pdf():
     assert "03.10.2026" in text, "das Abholdatum wurde nicht eingesetzt"
     assert "Hauptstr. 5, 40210" in text, "der Übergabeort fehlt"
     assert "Echtzeitüberweisung" in text, "die Zahlungsart fehlt"
-    assert "10023" in text, "die Kundennummer fehlt"
+    # Entscheidung Ahmad 22.09.2026 (RP-428): die Vertrags-Kundennummer, NIE
+    # die Anmeldenummer des Chefs (kunden_nr 10023).
+    assert "482913" in text, "die Vertrags-Kundennummer fehlt"
+    assert "10023" not in text, "die Anmeldenummer steht im Vertrag"
     for platzhalter in ("{abholdatum}", "{ort}", "{zahlungsart}", "{kundennummer}"):
         assert platzhalter not in text, (
             f"{platzhalter} steht woertlich im Kaufvertrag des Kunden")

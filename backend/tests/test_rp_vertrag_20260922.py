@@ -53,7 +53,8 @@ MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
 
 FIRMA = {"company_name": "Autohaus RPV GmbH", "address": "Hauptstr. 1",
          "zip_code": "30159", "city": "Hannover", "phone": "0511 1",
-         "email": "info@rpv.test", "kunden_nr": "10077"}
+         "email": "info@rpv.test", "kunden_nr": "10077",
+         "vertrags_kundennummer": "775301"}
 
 
 def _jetzt(delta_s: int = 0) -> str:

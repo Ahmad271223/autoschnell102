@@ -117,7 +117,9 @@ export default function SendDialog({ open, contract, onClose }) {
       "{zahlungsart}": zahlung,
       "{kaufpreis}": preisText,
       "{vertragsnummer}": contract?.contract_no || cd.contract_no || "",
-      "{kundennummer}": String(cd.kunden_nr || d?.kunden_nr || ""),
+      // Entscheidung Ahmad 22.09.2026: die Vertrags-Kundennummer, nie die
+      // Anmeldenummer (kunden_nr) — dieselbe Regel wie im Backend.
+      "{kundennummer}": String(cd.vertrags_kundennummer || d?.vertrags_kundennummer || ""),
       "{haendler_name}": cd.dealer_company || d?.company_name || "",
     };
     // Wie im Backend: fehlt eine Angabe, steht dort "____" — nie der

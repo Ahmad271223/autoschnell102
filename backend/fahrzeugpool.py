@@ -20,7 +20,10 @@ import os
 log = logging.getLogger("autohandel")
 
 from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
-POOL_MAX = zahl_env("FAHRZEUGPOOL_MAX_VERGLEICHE", 30, unten=1)
+# Entscheidung Ahmad 22.09.2026 (Rollenpruefung RP-443): 300 statt 30 —
+# bei 150-300 Links am Tag hielt der Pool nur 1-2 Stunden, danach fielen
+# Fahrzeuge ohne Vertrag still heraus ("Vertrag erstellen" -> 404).
+POOL_MAX = zahl_env("FAHRZEUGPOOL_MAX_VERGLEICHE", 300, unten=1)
 
 
 async def _aktive_konten(db, dealer_id: str, ids) -> set:

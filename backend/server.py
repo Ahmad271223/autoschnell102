@@ -1157,6 +1157,12 @@ async def ensure_indexes():
     from indizes import email_eindeutigkeit_entfernen
     await email_eindeutigkeit_entfernen(db)
     await _unique_index_sicher(db.dealers, "user_id")
+    # Entscheidung Ahmad 22.09.2026 (RP-428): Vertrags-Kundennummer je Firma
+    # eindeutig (sparse: Altbestand ohne Feld bis Migration 14 laeuft; weich:
+    # eine Dublette waere nur ein Schoenheitsfehler, kein Startabbruch).
+    from indizes import unique_anlegen as _unique_anlegen
+    await _unique_anlegen(db.dealers, "vertrags_kundennummer",
+                          name="vertrags_kundennummer_unique", weich=True, sparse=True)
     # Pruefbericht 20.09.2026 (SV-03): Unique-Indizes ueber unique_anlegen —
     # eine Altdublette gibt eine klare Meldung und einen Alarm statt einer
     # rohen Rueckverfolgung im Start (weich = Cache, kein Startabbruch).

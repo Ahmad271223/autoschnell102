@@ -292,10 +292,10 @@ def test_migrationen_eingetragen():
     M = _m("migrationen")
     nummern = [n for n, _, _ in M.MIGRATIONEN]
     assert nummern == sorted(nummern) and len(set(nummern)) == len(nummern)
-    assert M.ZIEL_VERSION == max(nummern) == 13
+    assert M.ZIEL_VERSION == max(nummern) == 14
     namen = {n: name for n, name, _ in M.MIGRATIONEN}
     assert namen[11] == "firmen_abo_art" and namen[12] == "termine_abschluss_zeit" \
-        and namen[13] == "inserat_fotomodus"
+        and namen[13] == "inserat_fotomodus" and namen[14] == "vertrags_kundennummern"
 
 
 # ====================================================================== RP-517

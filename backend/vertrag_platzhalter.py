@@ -44,7 +44,7 @@ PLATZHALTER_HILFE = {
     "{zahlungsart}": "Bar, Echtzeitüberweisung oder Banküberweisung",
     "{kaufpreis}": "Kaufpreis in Euro",
     "{vertragsnummer}": "Nummer des Kaufvertrags",
-    "{kundennummer}": "Kundennummer der Firma",
+    "{kundennummer}": "Kundennummer für Verträge (nicht die Anmeldenummer)",
     "{telefon}": "Telefonnummer der Firma",
     "{email}": "E-Mail-Adresse der Firma",
 }
@@ -171,7 +171,12 @@ def werte(vertrag: dict, firma: Optional[dict] = None,
         "{kaufpreis}": _euro(vertrag.get("purchase_price")
                              or daten.get("purchase_price")),
         "{vertragsnummer}": aus_vertrag("contract_no"),
-        "{kundennummer}": _text(firma.get("kunden_nr")),
+        # Entscheidung Ahmad 22.09.2026 (Rollenpruefung RP-428): NIE die
+        # Anmeldenummer des Chefs (kunden_nr) — der Verkaeufer bekam sie im
+        # Vertrag genannt. Nur die eigene Vertrags-Kundennummer, beim Vertrag
+        # eingefroren, sonst aus der Firma; fehlt sie, bleibt die Luecke.
+        "{kundennummer}": (_text(daten.get("vertrags_kundennummer"))
+                           or _text(firma.get("vertrags_kundennummer"))),
         "{telefon}": telefon,
         "{email}": mail,
     }

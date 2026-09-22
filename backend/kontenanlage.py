@@ -163,19 +163,52 @@ async def naechster_sucher_zusatz(db, dealer_id: str, kunden_nr: int) -> int:
 
 
 # ------------------------------------------------------------ Anlage
+VERTRAGS_KUNDENNUMMER_STELLEN = 6
+
+
+async def vertrags_kundennummer_ziehen(db) -> str:
+    """Entscheidung Ahmad 22.09.2026 (Rollenpruefung RP-428): Im Kaufvertrag
+    stand als "Kundennummer" die ANMELDENUMMER des Chefs (dealers.kunden_nr) —
+    jeder Verkaeufer kannte damit die Login-Nummer, und Sucher-Nummern
+    (<nr>-1, -2 ...) liessen sich ableiten. Jetzt bekommt jede Firma eine
+    eigene, zufaellige sechsstellige Vertrags-Kundennummer, die nur im
+    Vertrag, in den Vorlagen und im Abholauftrag steht.
+
+    Zufaellig (secrets), keine fuehrende Null, nie gleich einer vergebenen
+    kunden_nr oder Vertrags-Kundennummer. Der Unique-Index
+    dealers.vertrags_kundennummer_unique faengt das Rennen zweier Anlagen ab
+    (firma_einfuegen zieht dann neu)."""
+    import secrets
+    untere, obere = 10 ** (VERTRAGS_KUNDENNUMMER_STELLEN - 1), 10 ** VERTRAGS_KUNDENNUMMER_STELLEN
+    for _ in range(50):
+        nr = str(untere + secrets.randbelow(obere - untere))
+        belegt = await db.dealers.find_one(
+            {"$or": [{"vertrags_kundennummer": nr}, {"kunden_nr": int(nr)}]}, {"_id": 1})
+        if not belegt:
+            return nr
+    raise RuntimeError("Vertrags-Kundennummer: keine freie Nummer gefunden")  # pragma: no cover
+
+
 async def firma_einfuegen(db, doc: dict, nummer_ziehen=None) -> int:
     """Firmenprofil mit frischer Kundennummer einfuegen; bei DuplicateKey auf
     kunden_nr (Rennen mit korrigiertem Zaehler) neue Nummer, max. 3 Versuche.
     `nummer_ziehen` (async, ohne Argumente) ersetzt die Reihe — nur fuer die
-    alte Weiterleitung routes.admin._dealer_anlegen_mit_kunden_nr."""
+    alte Weiterleitung routes.admin._dealer_anlegen_mit_kunden_nr.
+    Seit 22.09.2026 bekommt die Firma dabei auch ihre Vertrags-Kundennummer."""
     for versuch in range(_VERSUCHE):
         doc.pop("_id", None)            # insert_one schreibt _id ins dict
         doc["kunden_nr"] = await (nummer_ziehen() if nummer_ziehen else naechste_nummer(db))
+        if not doc.get("vertrags_kundennummer"):
+            doc["vertrags_kundennummer"] = await vertrags_kundennummer_ziehen(db)
         try:
             await db.dealers.insert_one(doc)
             return doc["kunden_nr"]
         except DuplicateKeyError as e:
-            if "kunden_nr" not in str(e) or versuch == _VERSUCHE - 1:
+            if versuch == _VERSUCHE - 1:
+                raise
+            if "vertrags_kundennummer" in str(e):
+                doc.pop("vertrags_kundennummer", None)   # neu ziehen
+            elif "kunden_nr" not in str(e):
                 raise
     raise RuntimeError("Firma: keine freie Kundennummer")  # pragma: no cover
 

@@ -20,6 +20,10 @@ KAEUFER_FELDER = {
     "dealer_address": "address",
     "dealer_zip": "zip_code",
     "dealer_city": "city",
+    # Entscheidung Ahmad 22.09.2026: eigene Kundennummer fuer Vertraege —
+    # nicht die Anmeldenummer des Chefs (dealers.kunden_nr). Wird wie die
+    # anderen Kaeuferdaten beim Vertrag eingefroren.
+    "vertrags_kundennummer": "vertrags_kundennummer",
 }
 
 

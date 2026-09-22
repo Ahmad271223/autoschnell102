@@ -891,6 +891,17 @@ function ListView({ items, onEdit, gekuerzt = false }) {
 
 /* ───────────────────────── Modal ───────────────────────── */
 
+/**
+ * Entscheidung Ahmad 22.09.2026: Bei einer Abholung OHNE Abholprotokoll
+ * (Büro-Abholung) gibt es das Feld "vor Ort vereinbarter Preis" wieder —
+ * nur bei abgeholt/erledigt und nur, solange kein Protokoll zum Termin
+ * existiert (mit Protokoll kommt der Preis über Freigabe/Unterschrift; der
+ * Server lehnt final_price dann mit 409 ab).
+ */
+export function vorOrtPreisSichtbar(status, hatProtokoll, isNew = false) {
+  return !isNew && !hatProtokoll && (status === "abgeholt" || status === "erledigt");
+}
+
 function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, onClose, onSave, onDelete }) {
   const [a, setA] = useState({ ...appt });
   const set = (k, v) => setA((alt) => ({ ...alt, [k]: v }));
@@ -902,6 +913,10 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
   // Schreibweise), erst beim Speichern über preisAusText in eine Zahl.
   const kostenStart = kostenAlsText(appt?.extra_costs);
   const [kostenText, setKostenText] = useState(kostenStart);
+  // Entscheidung Ahmad 22.09.2026: vor Ort vereinbarter Preis (Abholung ohne
+  // Protokoll) — als getippter Text, wie die Kosten.
+  const preisStart = kostenAlsText(appt?.final_price);
+  const [preisText, setPreisText] = useState(preisStart);
   const speichern = async () => {
     if (arbeitet) return;
     const kosten = kostenAusEingabe(kostenText);
@@ -911,7 +926,15 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
     }
     // Unverändertes Feld: der gespeicherte Betrag geht unverändert mit (keine
     // Rundung über die Anzeige); nur ein neu getippter Betrag wird umgerechnet.
-    const mitKosten = kostenText === kostenStart ? a : { ...a, extra_costs: kosten.wert };
+    let mitKosten = kostenText === kostenStart ? a : { ...a, extra_costs: kosten.wert };
+    if (preisText !== preisStart) {
+      const p = preisText.trim() ? preisAusText(preisText) : null;
+      if (preisText.trim() && !(p > 0)) {
+        toast.error("Vor Ort vereinbarter Preis: bitte einen Betrag über 0 € eintragen, z. B. 15.000.");
+        return;
+      }
+      if (p) mitKosten = { ...mitKosten, final_price: p };
+    }
     // Pruefbericht 20.09.2026 (V-12): abgeholt/erledigt -> storniert / nicht
     // abgeholt nur nach Rueckfrage; Abbrechen laesst den alten Status stehen.
     // Pruefung 21.09.2026 (V-12): mit Kauf- und Fahrzeugstand des Termins,
@@ -988,7 +1011,8 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
   // schließen wie bisher sofort.
   const hintergrundKlick = () => {
     if (arbeitet) return;
-    const geaendert = dialogGeaendert(a, appt) || kostenText !== kostenStart;
+    const geaendert = dialogGeaendert(a, appt) || kostenText !== kostenStart
+      || preisText !== preisStart;
     if (!geaendert || window.confirm("Änderungen verwerfen?")) onClose();
   };
 
@@ -1142,8 +1166,24 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
           </div>
 
           {/* 14.09.2026 (Entscheidung Ahmad): kein Endpreis-Feld mehr — der Preis
-              kommt ueber Abholprotokoll und Freigabe in den Kaufvertrag. */}
+              kommt ueber Abholprotokoll und Freigabe in den Kaufvertrag.
+              22.09.2026 (Entscheidung Ahmad): AUSSER bei einer Abholung ohne
+              Protokoll (Büro) — dann gibt es das Feld wieder, nur bei
+              abgeholt/erledigt (vorOrtPreisSichtbar). */}
           <div className="grid grid-cols-2 gap-3">
+            {vorOrtPreisSichtbar(a.status, !!appt?.protocol_id, isNew) && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Vor Ort vereinbarter Preis (€)</label>
+                <input data-testid="edit-final-price" type="text" inputMode="decimal"
+                       value={preisText}
+                       onChange={(e) => setPreisText(e.target.value)}
+                       placeholder="leer = Vertragspreis"
+                       className="apple-input" />
+                <div className="text-[11px] text-zinc-500">
+                  Nur bei Abholung ohne Abholprotokoll. Wird der Einkaufspreis dieses Kaufs.
+                </div>
+              </div>
+            )}
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sonstige Kosten (€)</label>
               {/* N18: "0" ist ein gueltiger Betrag (vorher wurde er verworfen),

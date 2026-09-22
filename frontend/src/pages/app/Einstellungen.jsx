@@ -435,6 +435,21 @@ export default function Einstellungen() {
                 )}
               </div>
 
+              {/* Entscheidung Ahmad 22.09.2026: eigene Kundennummer fuer Vertraege —
+                  im Kaufvertrag, in den Vorlagen ({kundennummer}) und im Abholauftrag.
+                  Nicht die Anmeldenummer. Vergibt der Server, nicht aenderbar. */}
+              {dealer?.vertrags_kundennummer && (
+                <div className="rounded-xl border p-3 text-[12.5px] leading-relaxed mb-1"
+                     data-testid="vertrags-kundennummer"
+                     style={{ borderColor: "var(--border-default)", background: "var(--wa-03)" }}>
+                  <span className="font-semibold">Kundennummer für Verträge: </span>
+                  <span className="font-mono text-[14px]">{dealer.vertrags_kundennummer}</span>
+                  <div className="text-[11px] text-zinc-500 mt-1">
+                    Steht im Kaufvertrag („nur unter Vorlage der Kundennummer“), in den Versand-Vorlagen
+                    als {"{kundennummer}"} und im Abholauftrag des Fahrers. Das ist nicht eure Anmeldenummer.
+                  </div>
+                </div>
+              )}
               <div className="grid md:grid-cols-2 gap-3">
                 <AppleField label="Firmenname" value={form.profile.company_name} onChange={(v) => setProfile("company_name", v)} testid="set-company" />
                 <AppleField label="Ansprechpartner" value={form.profile.contact_person} onChange={(v) => setProfile("contact_person", v)} testid="set-contact" />

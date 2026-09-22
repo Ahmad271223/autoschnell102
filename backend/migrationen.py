@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 13
+ZIEL_VERSION = 14
 _SPERRE = "migration"
 
 
@@ -570,6 +570,34 @@ async def m13_inserat_fotomodus(db) -> dict:
     return {"inserate": r.modified_count}
 
 
+async def m14_vertrags_kundennummern(db) -> dict:
+    """Entscheidung Ahmad 22.09.2026 (Rollenpruefung RP-428): jede Firma
+    bekommt eine eigene Vertrags-Kundennummer (kontenanlage), damit der
+    Kaufvertrag nicht mehr die Anmeldenummer des Chefs nennt. Bestehende
+    Vertraege bleiben, wie sie sind; neue Fassungen und neue Vertraege nutzen
+    die neue Nummer. Idempotent (nur Firmen ohne Feld)."""
+    from kontenanlage import vertrags_kundennummer_ziehen
+    vergeben = 0
+    async for firma in db.dealers.find(
+            {"$or": [{"vertrags_kundennummer": {"$exists": False}},
+                     {"vertrags_kundennummer": {"$in": [None, ""]}}]},
+            {"_id": 0, "id": 1}):
+        for _ in range(3):
+            nr = await vertrags_kundennummer_ziehen(db)
+            try:
+                r = await db.dealers.update_one(
+                    {"id": firma["id"],
+                     "$or": [{"vertrags_kundennummer": {"$exists": False}},
+                             {"vertrags_kundennummer": {"$in": [None, ""]}}]},
+                    {"$set": {"vertrags_kundennummer": nr}})
+                vergeben += r.modified_count
+                break
+            except Exception as exc:  # noqa: BLE001 — Dublette im Rennen: neu ziehen
+                if "duplicate" not in str(exc).lower():
+                    raise
+    return {"vertrags_kundennummern_vergeben": vergeben}
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -585,6 +613,8 @@ MIGRATIONEN = [
     (11, "firmen_abo_art", m11_firmen_abo_art),
     (12, "termine_abschluss_zeit", m12_termine_abschluss_zeit),
     (13, "inserat_fotomodus", m13_inserat_fotomodus),
+    # Entscheidung Ahmad 22.09.2026 (RP-428)
+    (14, "vertrags_kundennummern", m14_vertrags_kundennummern),
 ]
 
 

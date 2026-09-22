@@ -169,7 +169,7 @@ def _mit_digital_standard(dealer):
 # die er selbst einstellen darf, plus Kennung. Vorher kam das ganze
 # Dokument (samt allem, was kuenftig dazukommt: Kontingente, Marktplatz,
 # interne Vermerke) mit den Overrides obendrauf zurueck.
-_SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "created_at", "updated_at",
+_SUCHER_SICHT_ZUSATZ = {"id", "kunden_nr", "vertrags_kundennummer", "created_at", "updated_at",
                         "digital_vertragstext_standard",
                         # 20.09.2026: wirksame Besondere Vereinbarungen
                         "sondervereinbarungen_effektiv",

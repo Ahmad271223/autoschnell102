@@ -3,12 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus, UserRoundPen } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
 import SendDialog, { abholterminAnlegen, TERMIN_MELDUNG } from "@/components/SendDialog";
 import FolgeMailDialog from "@/components/FolgeMailDialog";
+import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
 export const ARCHIV_SEITE = 50;
@@ -58,6 +59,9 @@ export default function PDFArchiv() {
   // Wunsch Ahmad 20.09.2026: die drei nachtraeglichen Mails (Korrektur,
   // Hinweis nach Kaufabschluss, Bahnverbindung) — von Hand, nie automatisch.
   const [folgeMail, setFolgeMail] = useState(null);
+  // Entscheidung Ahmad 22.09.2026 (RP-481): Verkaeuferdaten eines Vertrags
+  // korrigieren -> neue Fassung, danach direkt der Versand-Dialog.
+  const [korrektur, setKorrektur] = useState(null);
 
   // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
@@ -382,6 +386,15 @@ export default function PDFArchiv() {
                               title="Hinweis nach Kaufabschluss / Bahnverbindung — per E-Mail verschicken oder kopieren, mit Name und Daten dieses Vertrags">
                         <Mail size={16} />
                       </button>
+                      <button onClick={() => setKorrektur(it)}
+                              data-testid={`verkaeufer-korrektur-${it.id}`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              style={{ background: "var(--apple-btn-secondary-bg)",
+                                       color: "var(--text-primary)" }}
+                              aria-label="Verkäuferdaten korrigieren"
+                              title="Verkäuferdaten korrigieren (Name, Anschrift, Kontakt) — erzeugt eine neue Fassung">
+                        <UserRoundPen size={16} />
+                      </button>
                       <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
                               disabled={!!loeschtId}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-red-500/20 disabled:opacity-50"
@@ -416,6 +429,21 @@ export default function PDFArchiv() {
       {folgeMail && (
         <FolgeMailDialog open contract={folgeMail}
                          onClose={(gesendet) => { setFolgeMail(null); if (gesendet) load(); }} />
+      )}
+
+      {korrektur && (
+        <VerkaeuferKorrekturDialog open contract={korrektur}
+          onClose={(erg) => {
+            const it = korrektur;
+            setKorrektur(null);
+            if (erg?.geaendert) {
+              // Gleich weiter zum Versand: neue Fassung, Empfaenger aus der
+              // Korrektur; der Versand-Dialog erkennt die fruehere Fassung im
+              // send_status und nimmt die Korrektur-Vorlage.
+              setSenden({ ...it, ...(erg.verkaeufer || {}), version: erg.version });
+            }
+            if (erg) load();
+          }} />
       )}
 
       {/* Foto-Galerie: großes Bild, blättern mit Pfeilen / Tastatur / Wischen */}
