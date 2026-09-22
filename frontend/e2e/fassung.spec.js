@@ -103,7 +103,10 @@ test.describe("Neue Fassung (Runde 31)", () => {
     // Der Server meldet weiter die neuere Fassung: Hinweis sichtbar ...
     const hinweis = page.getByTestId("fassungs-hinweis");
     await expect(hinweis).toBeVisible();
-    await expect(hinweis).toContainText("Neue Version verfügbar");
+    // Pruefbericht 20.09. (K-09): das Neuladen ist hier schon passiert und der
+    // Server meldet trotzdem die neuere Fassung (alter Build) — dann sagt das
+    // Band "wird gerade verteilt" statt "verfuegbar".
+    await expect(hinweis).toContainText(/Neue Version (verfügbar|wird gerade verteilt)/);
     // ... und er verdeckt weder die Kopfzeile (Name, Abmelden) noch die Tableiste.
     const b = await hinweis.boundingBox();
     const kopf = await page.locator("header").first().boundingBox();

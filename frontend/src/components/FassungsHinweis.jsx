@@ -54,8 +54,10 @@ export default function FassungsHinweis() {
            color: "var(--text-strong)",
          }}>
       <RefreshCw size={14} className="shrink-0" style={{ color: "var(--accent-red)" }} />
-      <span className="whitespace-nowrap" data-testid="fassungs-hinweis-text">
-        {verteilt ? "Neue Version wird gerade verteilt – gleich noch einmal" : "Neue Version verfügbar"}
+      {/* Kein nowrap: auf Handybreite muss der laengere "verteilt"-Text
+          umbrechen, sonst rutscht "Spaeter" aus dem Bild (E2E fassung.spec). */}
+      <span className="min-w-0 leading-tight" data-testid="fassungs-hinweis-text">
+        {verteilt ? "Neue Version wird gerade verteilt" : "Neue Version verfügbar"}
       </span>
       <button type="button" data-testid="fassungs-hinweis-laden"
               onClick={aktualisieren}
