@@ -144,7 +144,7 @@ describe("U-117 / M-14 / U-124: PortalSheet", () => {
 describe("U-164 / U-171 / U-163: Freigaben", () => {
   it("Überschrift nennt 'mindestens' nur bei Kürzung", () => {
     expect(wartendUeberschrift(3, false)).toBe("Warten auf Freigabe (3)");
-    expect(wartendUeberschrift(500, true)).toBe("Warten auf Freigabe (mindestens 500 — älteste nicht angezeigt)");
+    expect(wartendUeberschrift(500, true)).toBe("Warten auf Freigabe (mindestens 500 — neueste nicht angezeigt)");
   });
   it("Preis 0 oder negativ wird vor dem Senden abgefangen", () => {
     expect(preisFehler(null)).toMatch(/gültigen Preis/);

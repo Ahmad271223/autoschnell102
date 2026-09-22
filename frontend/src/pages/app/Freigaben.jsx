@@ -394,7 +394,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
  *  per X-Truncated — dann "mindestens N" statt einer scheinbar vollen Zahl. */
 export function wartendUeberschrift(anzahl, gekuerzt) {
   return gekuerzt
-    ? `Warten auf Freigabe (mindestens ${anzahl} — älteste nicht angezeigt)`
+    ? `Warten auf Freigabe (mindestens ${anzahl} — neueste nicht angezeigt)`
     : `Warten auf Freigabe (${anzahl})`;
 }
 
