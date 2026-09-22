@@ -135,7 +135,15 @@ def test_b10_pruefsumme_wird_beim_ausliefern_gegengerechnet(welt, monkeypatch):
     assert code == 409 and "Prüfsumme" in text
     alarm = welt.run(welt.db.betriebsalarme.find_one(
         {"typ": "beweis_pruefsumme_abweichend", "ref": doc["id"], "offen": True}, {"_id": 0}))
+    if alarm is None:
+        # Ueber ALARM_JE_TYP_MAX offenen Alarmen (lange lokale Test-DB) faltet
+        # betrieb.alarm den Einzelalarm in den Sammelalarm "*weitere*".
+        alarm = welt.run(welt.db.betriebsalarme.find_one(
+            {"typ": "beweis_pruefsumme_abweichend", "ref": "*weitere*", "offen": True,
+             "details.letzter_ref": doc["id"][:80]}, {"_id": 0}))
     assert alarm and alarm["details"]["ist"] == echt
+    welt.run(welt.db.betriebsalarme.delete_many(
+        {"typ": "beweis_pruefsumme_abweichend", "ref": doc["id"]}))
     # Altbestand ohne gespeicherte Pruefsumme: Kopf traegt die errechnete
     r = welt.run(RB._pdf_antwort({**doc, "pdf_sha256": None}))
     assert r.status_code == 200 and r.headers["x-beweis-sha256"] == echt

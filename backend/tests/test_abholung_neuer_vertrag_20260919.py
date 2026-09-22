@@ -100,7 +100,9 @@ def test_06_neue_fassung_traegt_korrekturen_und_schaeden():
     assert "contract_dict.update(korrigiert)" in q
     assert 'contract_dict["damages"] = schaeden_alt + schaeden_neu' in q
     # Ohne Aenderung bleibt die alte Fassung stehen
-    assert "and not korrigiert and not schaeden_neu:\n        return False" in q
+    # (22.09.2026: Verkaeuferkorrektur zaehlt ebenfalls als Aenderung)
+    assert "and not korrigiert and not schaeden_neu" in q
+    assert "and not verk_korrigiert:\n        return False" in q
     # Beweissicherung der alten Fassung (bestand schon, darf nicht wegfallen)
     # Pruefbericht 20.09.2026 (V-27): per Upsert statt insert_one
     assert "generated_pdf_versions.update_one" in q and "$setOnInsert" in q

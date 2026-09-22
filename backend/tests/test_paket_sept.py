@@ -141,9 +141,12 @@ def test_01_beweisdokument_fuer_jedes_portal_statt_snapshot(welt):
     assert _db().listing_snapshots.count_documents({"dealer_id": welt["dealer_id"]}) == 0
 
 
-# ---------- Fahrzeugpool: max. 30 Vergleiche ----------
+# ---------- Fahrzeugpool: Grenze je Konto (30 bis 22.09.2026, seit dem 300) ----------
 def test_02_fahrzeugpool_maximal_30(welt):
+    from fahrzeugpool import POOL_MAX
     dbx = _db()
+    vorher = len([v for v in requests.get(f"{API}/vehicles", headers=welt["S"], timeout=30).json()
+                  if v.get("lifecycle") == "verglichen"])
     ids = []
     for n in range(2, 32):                    # 30 weitere Vergleiche (Nr. 2..31)
         r = _compare(welt["S"], _ka_url(n))
@@ -151,6 +154,22 @@ def test_02_fahrzeugpool_maximal_30(welt):
         ids.append(f"v_{r.json()['ad_id']}")
     pool = requests.get(f"{API}/vehicles", headers=welt["S"], timeout=30).json()
     verglichen = [v for v in pool if v.get("lifecycle") == "verglichen"]
+    if POOL_MAX > 34:
+        # Entscheidung Ahmad 22.09.2026 (RP-443): Grenze 300 — mit 34 Vergleichen
+        # faellt nichts raus; das Trimmen selbst prueft
+        # test_befunde_runde23_fahrzeugpool in-process mit limit=30.
+        assert len(verglichen) == vorher + 30, (vorher, len(verglichen))
+        r = requests.post(f"{API}/appointments", headers=welt["H"], json={
+            "vehicle_id": ids[0], "pickup_date": "2099-01-01", "pickup_time": "10:00",
+            "status": "offen"}, timeout=30)
+        assert r.status_code == 200, r.text[:300]
+        welt["termin_id"] = r.json().get("id") or r.json().get("appointment", {}).get("id")
+        for n in range(32, 35):
+            assert _compare(welt["S"], _ka_url(n)).status_code == 200
+        pool = {v["id"]: v for v in requests.get(f"{API}/vehicles", headers=welt["S"], timeout=30).json()}
+        assert all(i in pool for i in ids), "unter der Grenze darf nichts rausfallen"
+        assert sum(1 for v in pool.values() if v.get("lifecycle") == "verglichen") == vorher + 33
+        return
     assert len(verglichen) == 30, len(verglichen)          # Nr.1 (aeltester) ist raus
     # Schutz: Fahrzeug mit Abholtermin bleibt, auch wenn es das aelteste ist
     aeltestes = ids[0]                                      # Nr. 2 ist jetzt das aelteste
