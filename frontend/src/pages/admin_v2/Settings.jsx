@@ -39,7 +39,29 @@ function MfaKarte() {
       // dieser Tab bekommt sein neues Token gleich mit.
       if (r.data.token) tokenSetzen(TOKEN_APP, r.data.token, { nurSitzung: true });
       setCodes(r.data.wiederherstellungscodes || []); setSetup(null); setCode("");
-      toast.success("Zwei-Faktor-Anmeldung ist aktiv"); load();
+      // Rollenpruefung RP-556 (Welle B3): derselbe Aufruf schliesst auch den
+      // Geraetewechsel ab — die Sitzung bleibt, es gibt neue Notfall-Codes.
+      if (r.data.geraet_gewechselt) toast.success("Gerät gewechselt — ab jetzt gilt nur der Schlüssel auf dem neuen Gerät; den alten Eintrag in der bisherigen App löschen.", { duration: 12000 });
+      else toast.success("Zwei-Faktor-Anmeldung ist aktiv");
+      load();
+    } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+  };
+  const geraetWechseln = async () => {
+    // Rollenpruefung 22.09.2026 (RP-556, Welle B3): Geraet wechseln OHNE
+    // Abschalten — der Server legt ein neues Geheimnis NEBEN dem aktiven an
+    // (POST /admin/me/mfa/wechsel, aktueller App-Code Pflicht); erst der
+    // bestaetigte Code vom neuen Geraet (/aktivieren) ersetzt den alten
+    // Schluessel. Kein Zeitfenster ohne zweiten Faktor, keine Gnadenfrist.
+    const c = window.prompt(
+      "Gerät wechseln: den aktuellen 6-stelligen Code aus der BISHERIGEN App eingeben.\n\n"
+      + "Der bisherige Schlüssel gilt weiter, bis der Code vom neuen Gerät bestätigt ist "
+      + "(15 Minuten Zeit). Danach gibt es neue Notfall-Codes.");
+    if (!c) return;
+    setBusy(true);
+    try {
+      const r = await api.post("/admin/me/mfa/wechsel", { code: c.trim() });
+      setSetup({ ...r.data, wechsel: true }); setCode(""); setCodes(null); setNeuOffen(false);
+      load();
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
   };
   const deaktivieren = async () => {
@@ -47,9 +69,11 @@ function MfaKarte() {
     // fuer den Betreiber Pflicht — wer abschaltet und sich abmeldet, kam
     // vorher nie wieder herein. Jetzt: deutliche Rueckfrage, der Server laesst
     // 30 Minuten Gnadenfrist, und die Neu-Einrichtung oeffnet sich sofort.
+    // Welle B3: fuer ein neues Handy ist "Gerät wechseln" der bessere Weg.
     if (st?.pflicht && !window.confirm(
       "Achtung: Für den Betreiber ist die Zwei-Faktor-Anmeldung Pflicht.\n\n"
-      + "Nach dem Abschalten bleiben 30 Minuten, um sie (z. B. auf dem neuen Handy) neu "
+      + "Neues Handy? Dann besser „Gerät wechseln“ nutzen — ohne Lücke.\n\n"
+      + "Nach dem Abschalten bleiben 30 Minuten, um sie neu "
       + "einzurichten. Danach ist nach dem Abmelden KEINE Anmeldung mehr möglich "
       + "(nur noch über scripts/mfa_pruefen.py auf dem Server).\n\nTrotzdem abschalten?")) return;
     const c = window.prompt("Zum Abschalten den aktuellen Code aus der App eingeben:");
@@ -110,16 +134,30 @@ function MfaKarte() {
       {st && st.aktiv === false && !setup && (
         <Button size="sm" onClick={einrichten} disabled={busy} data-testid="mfa-einrichten">Einrichten</Button>
       )}
+      {st && st.aktiv && st.wechsel_offen && !setup && (
+        <div className="rounded-lg p-3 mb-3 text-[12.5px] text-amber-200" role="status" data-testid="mfa-wechsel-offen"
+             style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.35)" }}>
+          Ein Gerätewechsel ist begonnen{st.wechsel_bis ? ` (gültig bis ${new Date(st.wechsel_bis).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })} Uhr)` : ""} —
+          der bisherige Schlüssel gilt weiter. Schlüssel nicht mehr sichtbar? Erneut „Gerät wechseln“ wählen.
+        </div>
+      )}
       {setup && (
-        <div className="rounded-lg p-3 mb-3" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }}>
-          <div className="text-[12px] text-zinc-400 mb-1">1. In der App „Konto hinzufügen“ und diesen Schlüssel eingeben (oder den Link öffnen):</div>
+        <div className="rounded-lg p-3 mb-3" style={{ background: "var(--wa-03)", border: "1px solid var(--wa-08)" }} data-testid={setup.wechsel ? "mfa-wechsel-box" : "mfa-einrichten-box"}>
+          {setup.wechsel && (
+            <div className="text-[12.5px] text-amber-200 mb-2">
+              Gerätewechsel: Der bisherige Schlüssel gilt weiter, bis der Code vom neuen Gerät bestätigt ist
+              {setup.gueltig_bis ? ` (bis ${new Date(setup.gueltig_bis).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })} Uhr)` : ""}.
+              Danach gelten neue Notfall-Codes; die Sitzung bleibt.
+            </div>
+          )}
+          <div className="text-[12px] text-zinc-400 mb-1">1. {setup.wechsel ? "Auf dem NEUEN Gerät in der App" : "In der App"} „Konto hinzufügen“ und diesen Schlüssel eingeben (oder den Link öffnen):</div>
           <div className="font-mono text-[13px] text-white break-all select-all" data-testid="mfa-secret">{setup.secret}</div>
           <a href={setup.otpauth_uri} className="text-[12px] text-sky-400 underline break-all">{setup.otpauth_uri}</a>
-          <div className="text-[12px] text-zinc-400 mt-3 mb-1">2. Den angezeigten 6-stelligen Code eingeben:</div>
+          <div className="text-[12px] text-zinc-400 mt-3 mb-1">2. Den {setup.wechsel ? "auf dem neuen Gerät " : ""}angezeigten 6-stelligen Code eingeben:</div>
           <div className="flex gap-2">
             <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" placeholder="123456" data-testid="mfa-aktivieren-code"
                    className="h-9 px-3 rounded-lg bg-transparent border text-sm outline-none w-40" style={{ borderColor: "var(--border-default)" }} />
-            <Button size="sm" onClick={aktivieren} disabled={busy || code.length < 6} data-testid="mfa-aktivieren">Aktivieren</Button>
+            <Button size="sm" onClick={aktivieren} disabled={busy || code.length < 6} data-testid="mfa-aktivieren">{setup.wechsel ? "Neues Gerät bestätigen" : "Aktivieren"}</Button>
             <Button size="sm" variant="ghost" onClick={() => setSetup(null)}>Abbrechen</Button>
           </div>
         </div>
@@ -182,6 +220,10 @@ function MfaKarte() {
           {!codes && !neuOffen && (
             <Button size="sm" variant="secondary" onClick={() => { setNeuOffen(true); setNeuCode(""); }} disabled={busy}
                     data-testid="mfa-codes-neu">Neue Notfall-Codes erzeugen</Button>
+          )}
+          {!codes && !setup && (
+            <Button size="sm" variant="secondary" onClick={geraetWechseln} disabled={busy}
+                    data-testid="mfa-geraet-wechseln">Gerät wechseln</Button>
           )}
           <Button size="sm" variant="ghost" onClick={deaktivieren} disabled={busy} data-testid="mfa-deaktivieren">Abschalten</Button>
         </div>

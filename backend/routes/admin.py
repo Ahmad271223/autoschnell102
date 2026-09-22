@@ -4064,16 +4064,51 @@ async def admin_mfa_status(admin=Depends(current_admin)):
     # mitliefern — die Einstellungen warnen dann auch nach einem Neuladen.
     from routes.auth import mfa_pflicht_aktiv
     frist = m.get("pflicht_ausgesetzt_bis") if not m.get("aktiv") else None
+    # Rollenpruefung RP-556 (Welle B3): laeuft ein Geraetewechsel (Pending-
+    # Geheimnis NEBEN dem aktiven), meldet der Status bis wann.
+    wechsel_bis = _mfa_wechsel_bis(m)
     return {"aktiv": bool(m.get("aktiv")), "aktiviert_am": m.get("aktiviert_am"),
             "wiederherstellungscodes_uebrig": len(m.get("wiederherstellung") or []),
             # Wunsch Ahmad 21.09.2026 (AD-06): wann die Notfall-Codes zuletzt neu erzeugt wurden
             "codes_erneuert_am": m.get("codes_erneuert_am"),
-            "einrichtung_offen": bool(m.get("pending_secret")),
+            "einrichtung_offen": bool(m.get("pending_secret")) and not m.get("aktiv"),
+            "wechsel_offen": wechsel_bis is not None,
+            "wechsel_bis": wechsel_bis,
+            "geraet_gewechselt_am": m.get("geraet_gewechselt_am"),
             "pflicht": mfa_pflicht_aktiv() and bool(admin.get("is_super_admin")),
             "neu_einrichten_bis": frist if frist and str(frist) > now_iso() else None}
 
 
 MFA_EINRICHTUNG_MAX_S = 3600
+# Rollenpruefung RP-556 (Welle B3): ein begonnener Geraetewechsel (neues
+# Geheimnis neben dem aktiven) verfaellt nach 15 Minuten.
+MFA_WECHSEL_MAX_S = 900
+
+
+def _pending_alter_s(m: dict) -> float:
+    """Alter des Pending-Geheimnisses in Sekunden (fehlt der Zeitstempel:
+    'uralt', also abgelaufen)."""
+    try:
+        return (datetime.now(timezone.utc)
+                - datetime.fromisoformat(m.get("pending_seit", ""))).total_seconds()
+    except (TypeError, ValueError):
+        return 10 ** 9
+
+
+def _mfa_wechsel_laeuft(m: dict) -> bool:
+    """Rollenpruefung RP-556 (Welle B3): aktive Zwei-Faktor MIT Pending-
+    Geheimnis aus /admin/me/mfa/wechsel (Kennzeichen pending_wechsel) — nur
+    dann darf /aktivieren das aktive Geheimnis ersetzen."""
+    return bool(m.get("aktiv") and m.get("pending_secret") and m.get("pending_wechsel"))
+
+
+def _mfa_wechsel_bis(m: dict):
+    if not _mfa_wechsel_laeuft(m):
+        return None
+    rest = MFA_WECHSEL_MAX_S - _pending_alter_s(m)
+    if rest <= 0:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=rest)).isoformat()
 # Rollenpruefung 22.09.2026 (RP-556): Frist nach dem Abschalten zum Neu-
 # Einrichten (wie das Notfall-Skript scripts/mfa_pruefen.py).
 MFA_GNADENFRIST_MIN = 30
@@ -4094,9 +4129,14 @@ async def admin_mfa_einrichten(admin=Depends(current_admin)):
         # Runde 15 (15.09.2026): eine aktive Zwei-Faktor-Anmeldung wird NICHT
         # aus einer laufenden Sitzung heraus ersetzt — sonst stellt ein
         # gestohlenes Token MFA auf das eigene Geraet um. Geraetewechsel:
-        # mit dem aktuellen Code abschalten, dann neu einrichten.
-        raise HTTPException(409, "Zwei-Faktor ist bereits aktiv. Zum Wechsel des Geräts zuerst "
-                                 "mit dem aktuellen Code abschalten, dann neu einrichten.")
+        # Rollenpruefung RP-556 (Welle B3): /admin/me/mfa/wechsel mit dem
+        # aktuellen App-Code (der alte Schluessel gilt bis zur Bestaetigung
+        # weiter) — oder wie bisher abschalten, dann neu einrichten.
+        raise HTTPException(409, "Zwei-Faktor ist bereits aktiv. Zum Wechsel des Geräts "
+                                 "„Gerät wechseln“ nutzen (aktueller Code aus der bisherigen "
+                                 "App; der alte Schlüssel gilt weiter, bis der neue bestätigt "
+                                 "ist) — oder mit dem aktuellen Code abschalten, dann neu "
+                                 "einrichten.")
     secret = None
     if vorhanden.get("pending_secret") and not vorhanden.get("aktiv"):
         try:
@@ -4127,21 +4167,35 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
     import mfa as _mfa
     voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
     m = (voll or {}).get("mfa") or {}
-    if m.get("aktiv"):
+    # Rollenpruefung RP-556 (Welle B3): Geraetewechsel — bei AKTIVER Zwei-
+    # Faktor gilt der Aufruf dem Pending-Geheimnis aus /admin/me/mfa/wechsel
+    # (dort war der aktuelle App-Code Pflicht). Ohne ein solches bleibt es
+    # bei "bereits aktiv": eine gestohlene Sitzung allein ersetzt nichts.
+    wechsel = _mfa_wechsel_laeuft(m)
+    if m.get("aktiv") and not wechsel:
         raise HTTPException(409, "Zwei-Faktor ist bereits aktiv.")
     secret = _mfa.entschluesseln(m.get("pending_secret", "")) if m.get("pending_secret") else None
     if not secret:
         raise HTTPException(400, "Zuerst einrichten (Geheimnis erzeugen)")
     # Runde 15: ein nie abgeschlossenes Geheimnis verfaellt nach einer Stunde
     # (vorher pruefte nur /einrichten das Alter, /aktivieren nie).
-    try:
-        alter = (datetime.now(timezone.utc)
-                 - datetime.fromisoformat(m.get("pending_seit", ""))).total_seconds()
-    except (TypeError, ValueError):
-        alter = 10 ** 9
+    alter = _pending_alter_s(m)
+    if wechsel and alter > MFA_WECHSEL_MAX_S:
+        # Abgelaufener Wechsel: Pending-Geheimnis weg, das aktive bleibt.
+        await db.users.update_one(
+            {"id": admin["id"], "mfa.pending_secret": m.get("pending_secret")},
+            {"$unset": {"mfa.pending_secret": "", "mfa.pending_seit": "",
+                        "mfa.pending_wechsel": ""}})
+        raise HTTPException(410, "Der Gerätewechsel ist abgelaufen (15 Minuten) — der bisherige "
+                                 "Schlüssel gilt weiter. Bitte erneut „Gerät wechseln“ wählen "
+                                 "und den neuen Schlüssel in die App übernehmen.")
     if alter > MFA_EINRICHTUNG_MAX_S:
         raise HTTPException(410, "Die Einrichtung ist abgelaufen — bitte neu einrichten und den "
                                  "neuen Schlüssel in die App übernehmen.")
+    if wechsel and not await _admin_mfa_limiter.check(admin["id"]):
+        # Beim Wechsel ersetzt ein passender Code das AKTIVE Geheimnis —
+        # dieselbe Mengenbremse wie bei Abschalten/Notfall-Codes (10/min).
+        raise HTTPException(429, MFA_ZU_VIELE_EINGABEN)
     zaehler = _mfa.code_pruefen(secret, body.code)
     if zaehler is None:
         raise HTTPException(
@@ -4151,6 +4205,52 @@ async def admin_mfa_aktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
                  "Eintrag dort löschen und den hier angezeigten Schlüssel neu "
                  "übernehmen.")
     codes, hashes = _mfa.wiederherstellungscodes()
+    if wechsel:
+        # Rollenpruefung RP-556 (Welle B3): erst JETZT, nach bestaetigtem Code
+        # vom neuen Geraet, ersetzt das neue Geheimnis das aktive — per
+        # Compare-and-set auf GENAU das aktive UND das geprueft Pending-
+        # Geheimnis (paralleles Abschalten oder ein zweiter Wechsel -> 409).
+        # Notfall-Codes werden NEU erzeugt (die alten gelten nicht mehr):
+        # /aktivieren liefert sie immer, die Oberflaeche zeigt sie mit dem
+        # Ablage-Zwang an, und der bisherige Weg (Abschalten -> Einrichten)
+        # erzeugte sie ebenfalls neu — ein Geraetewechsel ist der Moment, an
+        # dem ein vollstaendiger, frischer Satz gebraucht wird. Die Sitzung
+        # bleibt: sie wurde bereits mit zweitem Faktor ausgestellt.
+        jetzt = now_iso()
+        r = await db.users.update_one(
+            {"id": admin["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret"),
+             "mfa.pending_secret": m.get("pending_secret")},
+            {"$set": {"mfa": {"aktiv": True, "secret": _mfa.verschluesseln(secret),
+                              "letzter_zaehler": zaehler, "fehlversuche": 0,
+                              "wiederherstellung": hashes,
+                              "aktiviert_am": m.get("aktiviert_am") or jetzt,
+                              "geraet_gewechselt_am": jetzt, "codes_erneuert_am": jetzt}}})
+        if r.matched_count == 0:
+            raise HTTPException(409, "Die Zwei-Faktor-Anmeldung wurde inzwischen geändert — "
+                                     "bitte Seite neu laden.")
+        uebrig_alt = len(m.get("wiederherstellung") or [])
+        try:
+            await db.zugangs_aenderungen.insert_one({
+                "id": str(uuid.uuid4()), "art": "mfa_geraet_gewechselt",
+                "subject_user_id": admin["id"], "subject_email": admin.get("email", ""),
+                "subject_super_admin": bool(admin.get("is_super_admin")),
+                "alt": f"{uebrig_alt}_wiederherstellungscodes",
+                "neu": f"{len(codes)}_neue_wiederherstellungscodes",
+                "grund": "Gerät gewechselt (Einstellungen, mit App-Code des alten und des "
+                         "neuen Geräts)",
+                "admin_id": admin["id"], "admin_email": _handelnder(admin),
+                "created_at": jetzt})
+        except Exception:
+            log.exception("zugangs_aenderungen: Eintrag mfa_geraet_gewechselt fuer %s nicht "
+                          "gespeichert", admin["id"])
+        await log_activity_sicher("", admin["id"], "admin.mfa.geraet_gewechselt",
+                                  meta={"alt_uebrig": uebrig_alt, "neu": len(codes)})
+        return {"ok": True, "aktiv": True, "geraet_gewechselt": True,
+                "wiederherstellungscodes": codes,
+                "hinweis": "Gerät gewechselt: ab jetzt gilt nur der Schlüssel auf dem neuen "
+                           "Gerät — den alten Eintrag in der bisherigen App löschen. Die "
+                           "bisherigen Notfall-Codes gelten nicht mehr; diese Codes jetzt "
+                           "sicher aufbewahren — sie werden nur einmal angezeigt."}
     # Runde 15: (a) Compare-and-set auf GENAU das geprueft Pending-Geheimnis —
     # zwei parallele Aktivierungen erzeugten sonst zwei Code-Saetze, von denen
     # der angezeigte nie galt; (b) die bisherige, OHNE zweiten Faktor
@@ -4339,6 +4439,59 @@ async def admin_mfa_codes_neu(body: MfaCodeIn, admin=Depends(current_admin)):
     return {"ok": True, "wiederherstellungscodes": codes,
             "hinweis": "Die bisherigen Notfall-Codes gelten ab sofort nicht mehr. Diese Codes "
                        "jetzt sicher aufbewahren — sie werden nur einmal angezeigt."}
+
+
+@router.post("/admin/me/mfa/wechsel")
+async def admin_mfa_wechsel(body: MfaCodeIn, admin=Depends(current_admin)):
+    """Rollenpruefung 22.09.2026 (RP-556, Welle B3): Geraet wechseln OHNE
+    Abschalten. Vorher fuehrte der Weg ueber "Abschalten -> neu einrichten"
+    — dazwischen war der Betreiber ohne zweiten Faktor, und in Produktion
+    liess ihn die Anmeldung nach Ablauf der Gnadenfrist nicht mehr herein.
+
+    Jetzt: mit dem AKTUELLEN App-Code (kein Notfall-Code; dieselben Regeln
+    wie Abschalten — Replay-Schutz, 5 Fehlversuche -> Sperre, 10/min) wird
+    ein neues Geheimnis NEBEN dem aktiven abgelegt (pending_secret +
+    pending_wechsel) und als Schluessel/otpauth-Link fuer das neue Geraet
+    zurueckgegeben. Das aktive Geheimnis bleibt bis dahin unveraendert
+    gueltig; erst /admin/me/mfa/aktivieren mit dem Code des NEUEN Geraets
+    ersetzt es (CAS). Der Wechsel verfaellt nach MFA_WECHSEL_MAX_S (15 min).
+    Ein erneuter Aufruf erzeugt ein neues Pending-Geheimnis (jeder Aufruf
+    verbraucht ohnehin einen frischen App-Code; der zuletzt angezeigte
+    Schluessel ist der einzige, der gilt)."""
+    import mfa as _mfa
+    voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
+    m = (voll or {}).get("mfa") or {}
+    if not m.get("aktiv"):
+        raise HTTPException(409, "Die Zwei-Faktor-Anmeldung ist nicht aktiv — bitte über "
+                                 "„Einrichten“ anlegen.")
+    zaehler = await _mfa_app_code_bestaetigen(admin["id"], m, body.code)
+    secret = _mfa.secret_erzeugen()
+    jetzt = now_iso()
+    # Compare-and-set wie bei den Notfall-Codes: GENAU das geprueft Geheimnis,
+    # und der App-Code wird dabei atomar verbraucht.
+    r = await db.users.update_one(
+        {"id": admin["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret"),
+         "$or": [{"mfa.letzter_zaehler": {"$lt": zaehler}},
+                 {"mfa.letzter_zaehler": {"$exists": False}}]},
+        {"$set": {"mfa.pending_secret": _mfa.verschluesseln(secret), "mfa.pending_seit": jetzt,
+                  "mfa.pending_wechsel": True, "mfa.letzter_zaehler": zaehler,
+                  "mfa.fehlversuche": 0}})
+    if r.matched_count == 0:
+        aktuell = ((await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1}))
+                   or {}).get("mfa") or {}
+        if aktuell.get("aktiv") and aktuell.get("secret") == m.get("secret"):
+            raise HTTPException(400, MFA_CODE_VERBRAUCHT)
+        raise HTTPException(409, "Die Zwei-Faktor-Anmeldung wurde inzwischen geändert — "
+                                 "bitte Seite neu laden.")
+    await log_activity_sicher("", admin["id"], "admin.mfa.wechsel_begonnen")
+    bis = (datetime.now(timezone.utc) + timedelta(seconds=MFA_WECHSEL_MAX_S)).isoformat()
+    return {"secret": secret, "wechsel": True, "gueltig_bis": bis,
+            "otpauth_uri": _mfa.provisioning_uri(
+                secret, admin.get("username") or admin.get("email") or admin["id"]),
+            "hinweis": "Diesen Schlüssel in die Authenticator-App auf dem NEUEN Gerät übernehmen "
+                       "und den dort angezeigten Code eingeben. Bis dahin gilt der bisherige "
+                       f"Schlüssel weiter; der Wechsel verfällt nach {MFA_WECHSEL_MAX_S // 60} "
+                       "Minuten."}
 
 
 @router.post("/admin/users/{user_id}/mfa-zuruecksetzen")

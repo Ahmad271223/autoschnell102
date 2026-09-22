@@ -1320,7 +1320,8 @@ ab jetzt selbst, sobald `replicaSet=` in der `.env` steht (Nr. 29).
 - Jeder Admin/Super-Admin richtet sie selbst ein: **Einstellungen → Zwei-Faktor-Anmeldung → Einrichten**, Geheimnis bzw. `otpauth://`-Link in eine Authenticator-App (Google Authenticator, Aegis, 1Password …) übernehmen, Code eingeben → **8 Wiederherstellungscodes** erscheinen genau einmal — sicher ablegen.
 - Danach fragt die Anmeldung nach dem Passwort zusätzlich den 6-stelligen Code (5 Minuten Zeit, 5 Fehlversuche → 15 Minuten Sperre). Ein Wiederherstellungscode gilt je einmal.
 - **Neue Notfall-Codes** (Codes verbraucht, verlegt oder nie sicher abgelegt): **Einstellungen → Zwei-Faktor-Anmeldung → Neue Notfall-Codes erzeugen**, den aktuellen 6-stelligen Code aus der App eingeben (nicht den Code vom Anmelden, kein Notfall-Code). Es erscheinen 8 neue Codes — **Als Datei speichern**, zusätzlich außer Haus ablegen (USB-Stick, Passwort-Manager, Ausdruck), dann **Codes sicher abgelegt**. Die bisherigen Codes gelten sofort nicht mehr; der Eintrag in der App und die Sitzung bleiben. Kein Abschalten nötig — so entsteht kein Zeitfenster ohne zweiten Faktor. Ein vertippter Code meldet nicht mehr ab; 5 falsche Codes → 15 Minuten Sperre.
-- App verloren: mit einem **Wiederherstellungscode** anmelden und neu einrichten. Es gibt bewusst nur EINEN Super-Admin — ohne Code bleibt nur der Notweg auf dem Server (unten, `mfa_pruefen.py --abschalten --ja`).
+- **Neues Handy (Gerätewechsel, Rollenprüfung 22.09.2026, RP-556):** **Einstellungen → Zwei-Faktor-Anmeldung → Gerät wechseln**, den aktuellen Code aus der **bisherigen** App eingeben → neuer Schlüssel/Link erscheint → auf dem neuen Gerät „Konto hinzufügen“ → den dort angezeigten Code eingeben (**Neues Gerät bestätigen**, 15 Minuten Zeit). Bis dahin gilt der alte Schlüssel weiter — kein Abschalten, keine Gnadenfrist, die Sitzung bleibt. Danach gelten 8 **neue** Notfall-Codes (die alten nicht mehr) — wie oben ablegen; den alten Eintrag in der bisherigen App löschen. Ohne die bisherige App (verloren, defekt) geht dieser Weg nicht — siehe „App verloren“.
+- App verloren: mit einem **Wiederherstellungscode** anmelden. „Gerät wechseln“ und „Abschalten“ verlangen den Code der bisherigen App — ohne sie bleibt nur der Notweg auf dem Server (unten, `mfa_pruefen.py --abschalten --ja`, danach innerhalb von 30 Minuten neu einrichten). Es gibt bewusst nur EINEN Super-Admin.
 - **Ausgesperrt („Code ungültig“, obwohl er vorher passte):** erst mit einem **Wiederherstellungscode** im Code-Feld anmelden. Sonst auf dem Server prüfen, ob die Uhr der App oder ein fremdes Geheimnis schuld ist:
   `docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --code 123456`
   (nur lesend). Notfall ohne Wiederherstellungscode — Zwei-Faktor abschalten, dann **innerhalb von 30 Minuten** mit Benutzername + Passwort anmelden und neu einrichten (danach verlangt die Anmeldung in Produktion wieder den zweiten Faktor, Runde 14):
@@ -1741,17 +1742,23 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
 
 ### Zwei-Faktor, Betreiberkonto und Anmeldesperren seit Runde 15 (15.09.2026)
 
-- **Zwei-Faktor wird nicht aus einer laufenden Sitzung ersetzt.** Gerätewechsel: unter
-  Einstellungen mit dem aktuellen Code **abschalten**, dann neu einrichten. Eine begonnene
-  Einrichtung verfällt nach einer Stunde. Seit der Rollenprüfung 22.09.2026 (RP-556) gilt nach
-  dem Abschalten eine **Gnadenfrist von 30 Minuten** (`mfa.pflicht_ausgesetzt_bis`); die
-  Einstellungen öffnen die Einrichtung sofort und zeigen die Frist an. **Abschalten und neu
-  Einrichten in einem Zug erledigen:** Wer sich nach Ablauf der Frist ohne neuen zweiten Faktor
-  abmeldet, kommt in Produktion nur noch über den Notweg auf dem Server herein
+- **Zwei-Faktor wird nicht aus einer laufenden Sitzung ersetzt.** Gerätewechsel seit der
+  Rollenprüfung 22.09.2026 (RP-556, Welle B3): **Einstellungen → Zwei-Faktor → Gerät wechseln** —
+  aktueller Code der bisherigen App (`POST /admin/me/mfa/wechsel`), dann der Code des neuen
+  Geräts (`POST /admin/me/mfa/aktivieren`, 15 Minuten Zeit). Das neue Geheimnis liegt so lange
+  als `mfa.pending_secret` mit `pending_wechsel` **neben** dem aktiven; erst der bestätigte Code
+  ersetzt es per Compare-and-set. Kein Zeitfenster ohne zweiten Faktor, keine Gnadenfrist, die
+  Sitzung bleibt; es entstehen 8 neue Notfall-Codes (die alten gelten nicht mehr). Der alte
+  Weg — mit dem aktuellen Code **abschalten**, dann neu einrichten — bleibt: eine begonnene
+  Einrichtung verfällt nach einer Stunde, nach dem Abschalten gilt eine **Gnadenfrist von
+  30 Minuten** (`mfa.pflicht_ausgesetzt_bis`); die Einstellungen öffnen die Einrichtung sofort
+  und zeigen die Frist an. **Abschalten und neu Einrichten in einem Zug erledigen:** Wer sich
+  nach Ablauf der Frist ohne neuen zweiten Faktor abmeldet, kommt in Produktion nur noch über
+  den Notweg auf dem Server herein
   (`docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --abschalten --ja`,
-  setzt erneut 30 Minuten). Die Aktivierung beendet die bisherige Sitzung ohne
-  zweiten Faktor (andere Geräte müssen sich neu anmelden, jetzt mit Code); der Tab, der aktiviert
-  hat, läuft mit neuem Token weiter.
+  setzt erneut 30 Minuten). Die Aktivierung nach dem Abschalten beendet die bisherige Sitzung
+  ohne zweiten Faktor (andere Geräte müssen sich neu anmelden, jetzt mit Code); der Tab, der
+  aktiviert hat, läuft mit neuem Token weiter.
 - **`DATEN_SCHLUESSEL`** (optional, `openssl rand -hex 32`): eigener Schlüssel für die Ablage der
   Zwei-Faktor-Geheimnisse und der bekannten Anmelde-IPs. Ohne ihn gilt wie bisher `JWT_SECRET`;
   nach dem Setzen bleiben vorhandene Geheimnisse lesbar (beide Schlüssel werden probiert), und
