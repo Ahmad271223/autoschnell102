@@ -1,7 +1,8 @@
-# Kleinanzeigen-Abruf: Wer ruft wann mit welcher IP ab? (Stand 29.08.2026)
+# Kleinanzeigen-Abruf: Wer ruft wann mit welcher IP ab? (Stand 22.09.2026)
 
 Reine Dokumentation des Ist-Zustands — keine Änderung. Alle Zeilenangaben
-beziehen sich auf den aktuellen Branch-Stand.
+beziehen sich auf den aktuellen Branch-Stand. Nachgeführt am 22.09.2026
+(Prüfbericht 20.09.2026, DO-16/DO-20): Limit 2 statt 3, API-Dienst (Runde 29).
 
 ## Klare Antwort vorab
 
@@ -11,6 +12,7 @@ ab (Standard: **aus**):
 | Konstellation | Wer ruft die Kleinanzeigen-Seite ab | Welche IP sieht Kleinanzeigen |
 | --- | --- | --- |
 | Schalter AUS (Standard, heutiger Betrieb) | **Backend-Server** (Datenabruf) | Server-IP |
+| `KLEINANZEIGEN_API_KEY` gesetzt (API-Dienst, Runde 29) — egal welcher Schalter | **API-Dienst kleinanzeigen-agent.de** (der Server fragt die API, der Dienst holt das Inserat); bei API-Störung Rückfall auf den Backend-Server | IP des API-Dienstes (Rückfall: Server-IP) |
 | Schalter AN, Inseratsdaten | **Browser des Nutzers** über die Erweiterung | Nutzer-IP |
 | Schalter AN, `/listings/resolve` bei unbekanntem Link | **Backend-Server** | Server-IP |
 | Bekanntes Inserat (Cache-Treffer), egal welcher Schalter | **niemand** — nur Datenbank | keine |
@@ -56,8 +58,25 @@ auslösen.
 ([kleinanzeigen_service.py:480/555](../backend/kleinanzeigen_service.py)).
 Das ist ein **HTTP-Abruf durch den Backend-Server** — Kleinanzeigen sieht
 die **Server-IP**. Gedrosselt auf `MAX_CONCURRENT_KLEINANZEIGEN` (Standard
-3) gleichzeitige Abrufe über alle Prozesse
+2) gleichzeitige Abrufe über alle Prozesse
 ([provider_limiter.py](../backend/provider_limiter.py)).
+
+**API-Dienst (Runde 29, 12.09.2026):** Ist `KLEINANZEIGEN_API_KEY` gesetzt,
+versucht `fetch_listing` ([provider_fetch.py](../backend/provider_fetch.py))
+**zuerst** die API von kleinanzeigen-agent.de
+([kleinanzeigen_api.py](../backend/kleinanzeigen_api.py); Adresse
+`KLEINANZEIGEN_API_URL`, Zeitlimit `KLEINANZEIGEN_API_TIMEOUT` = 12 s, bis zu
+`MAX_CONCURRENT_KLEINANZEIGEN_API` = 20 gleichzeitig). An den Dienst gehen
+Anzeigen-Nummer und Link; er holt das Inserat — Kleinanzeigen sieht dann die
+**IP des API-Dienstes**, nicht die des Servers. Bei jedem API-Problem
+(Schlüssel abgelaufen, Limit erreicht, Störung) fällt der Abruf still auf den
+eigenen Server-Abruf zurück (`ApiNichtNutzbar`). Ohne Schlüssel (Tests,
+Entwicklung) bleibt alles beim Server-Abruf. Mit Schlüssel greift der
+Client-Abruf über die Erweiterung nicht mehr (`needs_client_fetch` nur ohne
+API, [routes/listings.py](../backend/routes/listings.py)). Läuft der Dienst in
+Produktion, ist er ein weiterer Empfänger der Inseratslinks — ob und wie das
+in die Datenschutzerklärung kommt, entscheidet der Inhaber (nicht Teil dieser
+Doku).
 
 **Schalter AN:** `/listings/check` und `/mobile/compare` antworten bei
 unbekanntem Link mit `needs_client_fetch`
@@ -89,7 +108,8 @@ Schalter greift** (der frühere Beweis-Snapshot per Playwright ist seit
 | Variable | Wirkung |
 | --- | --- |
 | `CLIENT_FETCH_KLEINANZEIGEN` (Standard aus) | AN = neue Kleinanzeigen-Links holt der Nutzer-Browser via Erweiterung; Server-Datenabruf für diese Links abgeschaltet (außer Restpfade oben) |
-| `MAX_CONCURRENT_KLEINANZEIGEN` (3) | globale Obergrenze gleichzeitiger Server-Abrufe, über alle Worker/Server |
+| `MAX_CONCURRENT_KLEINANZEIGEN` (Standard 2) | globale Obergrenze gleichzeitiger Server-Abrufe, über alle Worker/Server |
+| `KLEINANZEIGEN_API_KEY`, `KLEINANZEIGEN_API_URL`, `KLEINANZEIGEN_API_TIMEOUT` (12 s), `MAX_CONCURRENT_KLEINANZEIGEN_API` (20) | Schlüssel gesetzt = neue Kleinanzeigen-Links zuerst über den API-Dienst kleinanzeigen-agent.de (Runde 29), Rückfall auf den Server-Abruf |
 | `LISTING_CACHE_TTL_HOURS` (336 = 14 Tage) | wie lange ein Server-Abruf im globalen Cache gilt; geloescht wird spaetestens 21 Tage nach dem Abruf (`cleanup_service.INSERATSCACHE_MAX_TAGE`); der Vertragsinhaber behaelt den Stand am Vertrag |
 | `CLIENT_INGEST_TTL_HOURS` (24) / `CLIENT_CONFIRMED_TTL_HOURS` (168) | Gültigkeit von Client-Einreichungen in Quarantäne / nach Freigabe |
 | `MOCK_PROVIDER_FETCH` (aus; nur Staging) | ersetzt JEDEN externen Abruf durch synthetische Daten; Produktions-Check verweigert damit den Start |
@@ -145,7 +165,7 @@ Livegang (steht so auch in der [STAGING-CHECKLISTE](STAGING-CHECKLISTE.md)):
 
 1. **Vor dem öffentlichen Start eine ausdrückliche Vereinbarung bzw. einen
    offiziellen API-Zugang anstreben** (analog zur mobile.de Search-API);
-   bis dahin die Abrufe minimal halten (Limit 3, 1 Abruf je Inserat,
+   bis dahin die Abrufe minimal halten (`MAX_CONCURRENT_KLEINANZEIGEN`, Standard 2 gleichzeitig, 1 Abruf je Inserat,
    14-Tage-Cache, spätestens nach 21 Tagen gelöscht — genau das belegen die Tests).
 2. Die Drosselung und der Nachweis „kein Inserat doppelt" sind Argumente
    FÜR eine solche Vereinbarung, ersetzen sie aber nicht.

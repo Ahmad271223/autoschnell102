@@ -11,8 +11,10 @@
 #   1. Drain-Marker setzen: /api/health antwortet 503, der LB nimmt den
 #      Server nach seinen Wiederholungen (3 x 15 s) aus der Rotation.
 #   2. Code holen.
-#   3. Bauen und starten.
-#   4. Warten, bis Backend (/api/ready) und Oberflaeche (/) antworten.
+#   3. Images bauen, die Migration als EIGENEN Schritt im neuen Image fahren
+#      (Pruefbericht 20.09.2026, AL-05), dann die Container wechseln.
+#   4. Warten, bis Backend (/api/ready) und Oberflaeche (/) antworten —
+#      laenger, solange die Migrationssperre noch gehalten wird.
 #   5. Marker entfernen, dem LB Zeit geben, den Server wieder aufzunehmen.
 #   6. Abschlusspruefung von aussen (scripts/betriebsprobe.py ueber Cloudflare
 #      und Load Balancer, wie ein Besucher). NUR wenn sie fehlerfrei ist,
@@ -46,6 +48,9 @@
 #   prod1:  cd /opt/autoschnell && sh deploy/rollout.sh
 # Umgebung: WARTE_LB (Sekunden je LB-Umschaltung, Standard 60),
 #           SCHLAF (Wartetakt der Bereitschaftsschleifen, Standard 3),
+#           WARTE_MIGRATION (Sekunden, die Schritt 4 zusaetzlich wartet, solange
+#             die Migrationssperre gehalten wird; Standard 14400 = 4 h, dieselbe
+#             Obergrenze wie migrationen.py — Pruefbericht 20.09.2026, AL-05),
 #           VERZ (Checkout, Standard /opt/autoschnell),
 #           ERSTER_SERVER=1 (erster von zwei Servern: die Probe wertet einen
 #             404 fuer das Oberflaechen-Skript nur als Warnung, weil der andere
@@ -59,6 +64,7 @@ set -e
 VERZ=${VERZ:-/opt/autoschnell}
 WARTE_LB=${WARTE_LB:-60}
 SCHLAF=${SCHLAF:-3}
+WARTE_MIGRATION=${WARTE_MIGRATION:-14400}
 cd "$VERZ" || { echo "FEHLER: $VERZ fehlt"; exit 2; }
 
 # Replikat-Ergaenzung IMMER mitnehmen (Vorfall 07.09.2026 vormittags), es sei
@@ -144,11 +150,15 @@ sleep "$WARTE_LB"
 # Aenderung (z.B. Besucher-IP an das Backend) waere still wirkungslos.
 VORLAGE=$(grep '^PROXY_TEMPLATE=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
 VORLAGE=deploy/${VORLAGE:-default.conf.template}
+# Pruefbericht 20.09.2026 (DP-14): die Sicherheits-Kopfzeilen liegen in einer
+# eigenen Datei, die beide Vorlagen per include laden — auch sie liest nginx
+# nur beim Start. Deshalb zaehlt sie zum "Stand" der Vorlage dazu.
+SICHERHEITSKOPF=deploy/sicherheitskopf.inc
 # Immer erfolgreich: fehlt die Datei (oder md5sum), ist der Stand leer —
 # ein Fehlercode wuerde hier wegen 'set -e' das ganze Rollout abbrechen.
 vorlagen_stand() {
     if [ -f "$VORLAGE" ]; then
-        md5sum "$VORLAGE" 2>/dev/null | cut -d' ' -f1 || true
+        cat "$VORLAGE" "$SICHERHEITSKOPF" 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1 || true
     fi
     return 0
 }
@@ -229,7 +239,24 @@ fi
 find deploy/assets-alt/static -type f -mtime +90 -delete 2>/dev/null || true
 find deploy/assets-alt/static -mindepth 1 -type d -empty -delete 2>/dev/null || true
 
-echo "== 3/6 Bauen und starten"
+echo "== 3/6 Bauen, Migration, starten"
+# Pruefbericht 20.09.2026 (AL-05): Bisher lief die Migration ERST beim Start
+# des neuen Backend-Containers (Dockerfile-CMD "python migrationen.py && exec
+# uvicorn"). Eine lange Datenmigration oder ein Indexaufbau lief damit gegen
+# die Warteschleife in Schritt 4 (60 Runden) und den Container-Healthcheck:
+# das Skript brach mit "Backend nicht bereit" ab, der Server blieb im Drain,
+# und die Migration lief unsichtbar im Container weiter. Jetzt:
+#   1. Images bauen, ohne einen Container anzufassen (scheitert der Bau,
+#      ist die Datenbank noch unveraendert).
+#   2. Die Migration als EIGENEN, sichtbaren Schritt im neuen Image fahren —
+#      Einmal-Container, nur gegen die laufende Datenbank (--no-deps). Das
+#      alte Backend laeuft derweil weiter (der Server ist ohnehin im Drain).
+#      Ein Fehler endet mit Code != 0 (fail-closed in Produktion): der
+#      Rollout bricht HIER ab, im Drain, ohne die Container zu wechseln.
+#   3. Container wechseln. Der Start des neuen Backends findet alles
+#      erledigt vor und ist in Sekunden bereit; der zweite Server ebenso.
+docker compose build
+docker compose run -T --rm --no-deps backend python migrationen.py
 docker compose up -d --build
 if [ "$PROXY_NEU" = 1 ]; then
     # Der Drain-Marker auf dem Host (deploy/drain/aktiv) ueberlebt das,
@@ -243,10 +270,35 @@ if [ "$PROXY_NEU" = 1 ]; then
 fi
 
 echo "== 4/6 Warten, bis Backend und Oberflaeche antworten"
+# Pruefbericht 20.09.2026 (AL-05): Haelt ein lebender Prozess die
+# Migrationssperre (job_locks "migration" — z.B. weil der Containerstart doch
+# noch etwas nachzieht oder der andere Server gerade migriert), gibt die
+# Schleife nach den 60 Runden NICHT auf, sondern wartet weiter — hoechstens
+# WARTE_MIGRATION Sekunden. Eine Sperre ohne lebenden Besitzer laeuft nach
+# 600 s ab; dann endet auch das Warten hier mit "nicht bereit".
+migrationssperre_gehalten() {
+    docker compose exec -T backend python migrationen.py --sperre-gehalten >/dev/null 2>&1
+}
 i=0
+WARTE_START=$(date +%s)
 until docker compose exec -T backend curl -fsS http://localhost:8001/api/ready >/dev/null 2>&1; do
     i=$((i+1))
-    [ $i -gt 60 ] && { echo "FEHLER: Backend nicht bereit"; docker compose exec -T backend curl -s http://localhost:8001/api/ready; docker compose logs --tail 40 backend; exit 1; }
+    if [ $i -gt 60 ]; then
+        if migrationssperre_gehalten; then
+            if [ $(( $(date +%s) - WARTE_START )) -lt "$WARTE_MIGRATION" ]; then
+                echo "   Migration laeuft noch (Sperre 'migration' wird gehalten) — warte weiter, insgesamt hoechstens ${WARTE_MIGRATION}s; Fortschritt: docker compose logs -f backend"
+                i=40
+                sleep "$SCHLAF"
+                continue
+            fi
+            echo "FEHLER: Backend nicht bereit — die Migrationssperre wird seit ueber ${WARTE_MIGRATION}s gehalten (WARTE_MIGRATION)."
+        else
+            echo "FEHLER: Backend nicht bereit"
+        fi
+        docker compose exec -T backend curl -s http://localhost:8001/api/ready
+        docker compose logs --tail 40 backend
+        exit 1
+    fi
     sleep "$SCHLAF"
 done
 i=0

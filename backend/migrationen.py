@@ -851,5 +851,34 @@ def _main() -> int:
     return asyncio.run(lauf())
 
 
+def _sperre_gehalten_cli() -> int:
+    """CLI `python migrationen.py --sperre-gehalten` (Pruefbericht 20.09.2026,
+    AL-05, fuer deploy/rollout.sh): Rueckgabe 0 = die Migrationssperre wird
+    gerade von einem lebenden Prozess gehalten (das Rollout wartet dann
+    weiter), 1 = frei, 2 = Datenbank nicht erreichbar. Nur ein Blick in
+    job_locks — keine Produktionspruefung, keine Indizes, nichts wird
+    veraendert."""
+    async def lauf():
+        from deps import db
+        try:
+            doc = await db.job_locks.find_one({"name": _SPERRE})
+        except Exception as exc:  # noqa: BLE001
+            print(f"Migrationssperre: Datenbank nicht erreichbar ({exc})")
+            return 2
+        ablauf = (doc or {}).get("expires_at")
+        if isinstance(ablauf, datetime) and ablauf.tzinfo is None:
+            ablauf = ablauf.replace(tzinfo=timezone.utc)
+        if isinstance(ablauf, datetime) and ablauf > datetime.now(timezone.utc):
+            print(f"Migrationssperre: gehalten von {doc.get('owner')} "
+                  f"bis {ablauf.isoformat()}")
+            return 0
+        print("Migrationssperre: frei")
+        return 1
+
+    return asyncio.run(lauf())
+
+
 if __name__ == "__main__":
+    if "--sperre-gehalten" in sys.argv[1:]:
+        sys.exit(_sperre_gehalten_cli())
     sys.exit(_main())

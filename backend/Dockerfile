@@ -31,7 +31,13 @@ USER app
 EXPOSE 8001
 
 # Health-Check: der Container gilt als "unhealthy", wenn /api/health nicht 200 liefert.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+# Pruefbericht 20.09.2026 (AL-05): start-period 40 s -> 120 s. Der Start
+# fuehrt erst migrationen.py aus (Indizes, Seeds, Datenmigrationen); dauerte
+# das laenger als 40 s + 3 x 30 s, galt der Container als "unhealthy", obwohl
+# er nur noch nicht fertig war. Die lange Arbeit erledigt deploy/rollout.sh
+# inzwischen VOR dem Containerwechsel als eigenen Schritt — der Start hier
+# soll trotzdem nie an der Uhr scheitern.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -fsS http://localhost:8001/api/health || exit 1
 
 # Produktion: mehrere Worker-Prozesse (Anzahl via WEB_CONCURRENCY, Default 8).

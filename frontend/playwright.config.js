@@ -6,7 +6,11 @@
  *   E2E_BASE_URL  Frontend (Default http://localhost:3100)
  *   E2E_API_URL   Backend-API (Default http://localhost:8002/api)
  *
- * Lokal:  cd frontend && REACT_APP_BACKEND_URL= yarn build && yarn e2e
+ * Lokal:  cd frontend && APP_FASSUNG=1700000000-aaaaaaa REACT_APP_BACKEND_URL= yarn build && yarn e2e
+ *         (APP_FASSUNG = bewusst ALTER Fassungs-Stempel, genau wie in ci.yml —
+ *         ohne ihn ueberspringt fassung.spec.js; Pruefbericht 20.09.2026, T-17)
+ * Stack:  E2E_STACK=1 E2E_BASE_URL=https://localhost yarn e2e
+ *         (nur stack.spec.js gegen den laufenden Compose-Stack, s. u.)
  * Der webServer (e2e/serve.js) liefert build/ aus und reicht /api an das
  * Backend weiter — dieselbe Herkunft wie in Produktion hinter nginx.
  */

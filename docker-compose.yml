@@ -473,6 +473,10 @@ services:
       # Host): liegt sie, meldet /api/health 503 — auch nach einem Neustart
       # des Proxy-Containers. Nur die LB-Vorlage wertet sie aus.
       - ./deploy/drain:/etc/nginx/drain:ro
+      # Pruefbericht 20.09.2026 (DP-14): Sicherheits-Kopfzeilen liegen EINMAL in
+      # deploy/sicherheitskopf.inc; beide Vorlagen binden sie im server-Block
+      # und in jeder Location mit eigenem add_header ein.
+      - ./deploy/sicherheitskopf.inc:/etc/nginx/sicherheitskopf.inc:ro
       # PROXY_TEMPLATE waehlt die Betriebsart:
       #   default.conf.template            = nginx macht TLS selbst (ein Server)
       #   hinter-loadbalancer.conf.template = Load Balancer macht TLS

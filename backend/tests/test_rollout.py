@@ -123,6 +123,8 @@ _FAKE_DOCKER = """#!/bin/sh
 #   FAKE_TERM_BEI=<t>  -> schickt dem aufrufenden Skript ein Signal (FAKE_SIG,
 #                         Standard TERM), wenn der Aufruf <t> enthaelt (wie ein
 #                         "kill" von aussen oder Strg+C mit FAKE_SIG=INT)
+#   FAKE_MIGRATION_FAIL=1 -> der eigene Migrationsschritt (AL-05) scheitert
+#   FAKE_SPERRE=1      -> "migrationen.py --sperre-gehalten" meldet: gehalten
 echo "docker $*" >> "$FAKE_LOG"
 if [ -n "$FAKE_TERM_BEI" ]; then
   case "$*" in *"$FAKE_TERM_BEI"*) kill -"${FAKE_SIG:-TERM}" "$PPID" ;; esac
@@ -132,6 +134,8 @@ case "$*" in
     if [ "${FAKE_PROBE_RC:-0}" = 0 ]; then echo "ERGEBNIS: 9 ok, 0 Warnungen, 0 Fehler"
     else echo "ERGEBNIS: 8 ok, 0 Warnungen, 1 Fehler"; fi
     exit "${FAKE_PROBE_RC:-0}" ;;
+  *"--sperre-gehalten"*) [ "$FAKE_SPERRE" = 1 ] && exit 0; exit 1 ;;
+  *"migrationen.py"*)    [ "$FAKE_MIGRATION_FAIL" = 1 ] && exit 1; exit 0 ;;
   *"up -d --build"*) [ "$FAKE_BUILD_FAIL" = 1 ] && exit 1; exit 0 ;;
   *"/api/ready"*)    [ "$FAKE_READY_FAIL" = 1 ] && exit 1; exit 0 ;;
   *"wget"*)          [ "$FAKE_WEB_FAIL" = 1 ] && exit 1; exit 0 ;;
@@ -185,13 +189,14 @@ def _skript_lauf(tmp_path, skript, fehler=None, args=(), extra_env=None, rm_sche
     log = tmp_path / "aufrufe.log"
     env = dict(os.environ)
     # Schalter aus der Umgebung des Testlaufs duerfen nicht durchschlagen
-    for k in ("OHNE_AUSSENPROBE", "ERSTER_SERVER", "FAKE_TERM_BEI", "FAKE_SIG"):
+    for k in ("OHNE_AUSSENPROBE", "ERSTER_SERVER", "FAKE_TERM_BEI", "FAKE_SIG",
+              "WARTE_MIGRATION"):
         env.pop(k, None)
     env.update({"PATH": str(fake) + os.pathsep + env.get("PATH", ""),
                 "VERZ": str(verz).replace("\\", "/"), "WARTE_LB": "0", "SCHLAF": "0",
                 "FAKE_LOG": str(log).replace("\\", "/"),
                 "FAKE_BUILD_FAIL": "0", "FAKE_READY_FAIL": "0", "FAKE_WEB_FAIL": "0",
-                "FAKE_PROBE_RC": "0"})
+                "FAKE_PROBE_RC": "0", "FAKE_MIGRATION_FAIL": "0", "FAKE_SPERRE": "0"})
     if fehler:
         env[fehler] = "1"
     env.update(extra_env or {})
@@ -589,3 +594,79 @@ def test_rollout_hebt_die_bundles_des_vorherigen_standes_auf():
     assert 'location @fehlt { add_header Cache-Control "no-store" always; return 404; }' in docker
     ignore = (WURZEL / ".gitignore").read_text(encoding="utf-8")
     assert "deploy/assets-alt/*" in ignore
+
+
+# ============================================================ Pruefbericht 20.09.2026, AL-05
+# Bisher lief die Migration ERST beim Start des neuen Backend-Containers.
+# Eine lange Datenmigration traf dann auf die 60 Runden der Warteschleife und
+# den Healthcheck (40 s + 3 x 30 s): "Backend nicht bereit", Server im Drain,
+# Migration lief unsichtbar weiter. Jetzt: Images bauen, Migration als eigener
+# Schritt, erst dann Container wechseln; die Warteschleife wartet weiter,
+# solange die Migrationssperre gehalten wird.
+_MIGRATION = "docker compose run -T --rm --no-deps backend python migrationen.py"
+
+
+def test_al05_migration_laeuft_vor_dem_containerwechsel():
+    roh = (WURZEL / "deploy" / "rollout.sh").read_text(encoding="utf-8")
+    s = "\n".join(z for z in roh.splitlines() if not z.lstrip().startswith("#"))
+    assert _MIGRATION in s
+    assert s.index("git pull --ff-only") < s.index("\ndocker compose build\n") \
+        < s.index(_MIGRATION) < s.index("docker compose up -d --build"), \
+        "erst bauen (ohne Container), dann migrieren, dann wechseln"
+    assert "migrationen.py --sperre-gehalten" in s and "WARTE_MIGRATION" in s
+    assert "WARTE_MIGRATION=${WARTE_MIGRATION:-14400}" in s, "4 h wie migrationen.py"
+    docker = (WURZEL / "backend" / "Dockerfile").read_text(encoding="utf-8")
+    assert "--start-period=120s" in docker and "--start-period=40s" not in docker
+    quelle = (WURZEL / "backend" / "migrationen.py").read_text(encoding="utf-8")
+    assert '"--sperre-gehalten" in sys.argv[1:]' in quelle
+    doku = (WURZEL / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert "--sperre-gehalten" in doku and "WARTE_MIGRATION" in doku
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+def test_al05_erfolg_reihenfolge_bauen_migrieren_wechseln(tmp_path):
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path, "rollout.sh")
+    assert rc == 0, out
+    bau = next(i for i, a in enumerate(aufrufe) if a.strip() == "docker compose build")
+    mig = next(i for i, a in enumerate(aufrufe) if "migrationen.py" in a and "--sperre" not in a)
+    up = next(i for i, a in enumerate(aufrufe) if "up -d --build" in a)
+    assert bau < mig < up, aufrufe
+    assert _MIGRATION.replace("docker ", "", 1) in aufrufe[mig]
+    assert not any("--sperre-gehalten" in a for a in aufrufe), "ohne Wartezeit keine Sperrabfrage"
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+def test_al05_migrationsfehler_laesst_server_im_drain_ohne_containerwechsel(tmp_path):
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path, "rollout.sh",
+                                            extra_env={"FAKE_MIGRATION_FAIL": "1"})
+    assert rc == 1 and marker, out
+    assert "BLEIBT im Drain" in out and "freigeben.sh" in out, out
+    assert any("migrationen.py" in a for a in aufrufe)
+    assert not any("up -d --build" in a for a in aufrufe), \
+        "nach gescheiterter Migration darf kein Container gewechselt werden"
+    assert not any("betriebsprobe" in a for a in aufrufe)
+    assert not any("rm -f /tmp/drain" in a for a in aufrufe)
+
+
+@pytest.mark.skipif(not _SH, reason="kein sh vorhanden")
+def test_al05_warteschleife_wartet_solange_die_sperre_gehalten_wird(tmp_path):
+    def bereit_versuche(aufrufe):
+        return [a for a in aufrufe if "/api/ready" in a and "-fsS" in a]
+    # Sperre gehalten, Backend nie bereit: mehr als die 60 Runden, Meldung
+    # "Migration laeuft noch", nach WARTE_MIGRATION Abbruch im Drain. Das
+    # Fenster zaehlt ab Beginn der Schleife — unter Windows brauchen schon die
+    # ersten 61 Attrappen-Aufrufe mehrere Sekunden, deshalb 20 s.
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path / "a", "rollout.sh", "FAKE_READY_FAIL",
+                                            extra_env={"FAKE_SPERRE": "1", "WARTE_MIGRATION": "20"})
+    assert rc == 1 and marker, out
+    assert len(bereit_versuche(aufrufe)) > 61, len(bereit_versuche(aufrufe))
+    assert "Migration laeuft noch" in out and "WARTE_MIGRATION" in out, out
+    assert "BLEIBT im Drain" in out and "FERTIG" not in out
+    assert sum("--sperre-gehalten" in a for a in aufrufe) >= 2
+    # Sperre frei: wie bisher nach 60 Runden Schluss, keine Migrationsmeldung.
+    rc, out, marker, aufrufe = _skript_lauf(tmp_path / "b", "rollout.sh", "FAKE_READY_FAIL",
+                                            extra_env={"WARTE_MIGRATION": "20"})
+    assert rc == 1 and marker, out
+    assert len(bereit_versuche(aufrufe)) == 61, len(bereit_versuche(aufrufe))
+    assert "Migration laeuft noch" not in out and "Backend nicht bereit" in out
+    assert sum("--sperre-gehalten" in a for a in aufrufe) == 1

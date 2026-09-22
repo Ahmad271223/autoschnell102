@@ -1,5 +1,12 @@
 # PRD — Autohandel SaaS (mobile.de Filter-Generator)
 
+> **Historisch, Stand 02/2026.** Dieses Dokument beschreibt den Anfangsstand
+> und wird nicht mehr gepflegt. Stripe-Checkout und -Webhook, die
+> Playwright-Snapshots samt Snapshot-Cleanup und die Selbstregistrierung sind
+> inzwischen entfernt (Anmeldung nur mit Kontonummer, Konten legt der
+> Super-Admin an; Beweisdokumente entstehen ohne Browser auf Knopfdruck).
+> Der heutige Stand steht in `DEPLOYMENT.md` und `README.md`.
+
 ## Original Problem Statement
 Eine SaaS-Web-App für deutsche Autohändler. Händler gibt mobile.de-URL ein → App holt Fahrzeugdaten → öffnet mobile.de mit den entsprechenden Filtern.
 

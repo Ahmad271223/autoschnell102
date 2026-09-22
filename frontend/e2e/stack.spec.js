@@ -13,14 +13,17 @@
  * Fachlogik prueft die grosse Suite. Ein kurzer, stabiler Test, der bei
  * jedem Push laeuft, ist mehr wert als ein langer, der flackert.
  *
- * Laeuft nur, wenn E2E_STACK=1 gesetzt ist (siehe playwright.config.js).
+ * Laeuft nur, wenn E2E_STACK=1 gesetzt ist (siehe playwright.config.js):
+ *   E2E_STACK=1 E2E_BASE_URL=https://localhost yarn e2e
  */
 const { test, expect } = require("@playwright/test");
+const h = require("./helpers");
 
-const BENUTZER = process.env.E2E_SUPER_ADMIN_USERNAME
-  || process.env.SUPER_ADMIN_USERNAME || "";
-const PASSWORT = process.env.E2E_SUPER_ADMIN_PASSWORD
-  || process.env.SUPER_ADMIN_PASSWORD || "";
+// Pruefbericht 20.09.2026 (T-24): Zugangsdaten wie in der uebrigen Suite ueber
+// helpers.js — E2E_SUPER_ADMIN_*, sonst SUPER_ADMIN_* aus der Umgebung, sonst
+// (nur lokal) aus backend/.env. Vorher las diese Datei nur die Umgebung.
+const BENUTZER = h.SUPER_ADMIN.username;
+const PASSWORT = h.SUPER_ADMIN.password;
 
 test.describe("Produktions-Stack (nginx + Container + MongoDB mit Auth)", () => {
   test("Oberflaeche kommt ueber HTTPS durch den Proxy", async ({ page }) => {

@@ -24,7 +24,12 @@ cp .env.example .env
 nano .env          # JWT_SECRET, SUPER_ADMIN_USERNAME, SUPER_ADMIN_PASSWORD, SMTP, Domain … eintragen
 ```
 - `JWT_SECRET` erzeugen: `openssl rand -hex 32`
-- `WEB_CONCURRENCY` = Anzahl CPU-Kerne des Servers.
+- `WEB_CONCURRENCY` = Zahl der Web-Worker, **Standard 4** (CCX23: 4 Kerne). Mehr nur nach
+  der Faustregel `(BACKEND_MEM_LIMIT − 500 MB) / 400 MB` (bei 4 GB also höchstens 8) — und
+  dann `RESEND_PROZESSE` und `APIFY_MAX_PARALLEL` **mitziehen** (Abschnitte „Lasttest
+  ‚30 gleichzeitige Verträge und Mails‘“ — Takt `RESEND_RATE ÷ RESEND_PROZESSE` — und
+  „Apify-Grenze“), sonst gehen Mails und Abrufe verloren. Prüfbericht 20.09.2026, DO-17:
+  „= Anzahl CPU-Kerne“ hätte auf einem CCX53 32 Worker ≈ 13 GB ergeben, weit über dem Limit.
 
 ## 3. HTTPS-Zertifikat holen (einmalig)
 ```bash
@@ -70,18 +75,32 @@ cd /opt/autoschnell && sh deploy/rollout.sh
 Ohne `ERSTER_SERVER=1` endet die Abschlussprobe auf prod2 mit Code 3 (das
 neue Oberflaechen-Skript fehlt auf prod1 noch — 404).
 
-**Lange Datenmigration (Pruefbericht 20.09.2026, AL-05):** Das Skript wartet
-hoechstens rund drei Minuten auf `/api/ready`. Bringt ein Update eine lange
-Migration mit (im Log `docker compose logs -f backend`: "Migration … laeuft"),
-bricht es mit "Backend nicht bereit" ab — der Server bleibt dann bewusst im
-Drain, die Besucher bedient der andere Server. Nichts neu starten: warten, bis
-im Log "Migration … fertig" steht und
-`docker compose exec -T backend curl -s http://localhost:8001/api/ready`
-`"ready": true` meldet, dann `sh deploy/freigeben.sh` und erst danach der
-zweite Server. (Stand 21.09.2026: alle Migrationen sind durch.)
+**Migration als eigener Schritt (Pruefbericht 20.09.2026, AL-05; seit 22.09.2026):**
+Schritt 3 baut zuerst die Images, faehrt dann die Migration sichtbar im
+Vordergrund (`docker compose run -T --rm --no-deps backend python migrationen.py`
+— Einmal-Container mit dem neuen Image gegen die laufende Datenbank; das alte
+Backend bedient derweil weiter) und wechselt erst danach die Container. Eine
+lange Datenmigration oder ein Indexaufbau laeuft also, BEVOR ein Container
+ausgetauscht wird; der neue Container findet beim Start alles erledigt vor und
+ist in Sekunden bereit (sein Healthcheck hat trotzdem 120 s Anlaufzeit).
+Scheitert die Migration, endet das Rollout mit Code 1 im Drain, OHNE die
+Container zu wechseln — das alte Backend laeuft weiter; die Datenbank ist dann
+so weit migriert, wie der Lauf kam (jede Migration ist idempotent: Ursache
+beheben, dann erneut `sh deploy/rollout.sh`). Schritt 4 wartet weiter hoechstens
+rund drei Minuten auf `/api/ready` — haelt aber ein lebender Prozess die
+Migrationssperre (`job_locks` "migration", z. B. weil der andere Server gerade
+migriert), wartet es weiter, bis zu `WARTE_MIGRATION` Sekunden (Standard
+14400 = 4 h, wie `migrationen.py` selbst). Sperrzustand von Hand:
+`docker compose exec -T backend python migrationen.py --sperre-gehalten`
+(Code 0 = gehalten, 1 = frei, 2 = Datenbank nicht erreichbar). Auf dem zweiten
+Server ist die Migration dann schon durch, der Schritt dauert dort Sekunden.
+Fuer den Bediener aendert sich nichts: derselbe Aufruf, dieselbe Reihenfolge
+(prod2 mit `ERSTER_SERVER=1`, dann prod1). (Stand 22.09.2026: alle Migrationen
+sind durch.)
 
 Dauer je Server rund drei Minuten (zweimal 60 s Wartezeit fuer den Load
-Balancer). Waehrenddessen traegt der andere Server die Last allein.
+Balancer) plus die Dauer einer etwaigen Migration. Waehrenddessen traegt der
+andere Server die Last allein.
 
 Zwei Sicherungen stecken dahinter: Der Drain-Marker liegt auf dem Host
 (`deploy/drain/aktiv`, per Volume im Proxy sichtbar) und ueberlebt damit
@@ -324,6 +343,15 @@ meldet `BACKUP OK` (Exit 0) nur, wenn Datenbank, alle Datei-Speicher
 (uploads, local_storage, ggf. S3) **und** — falls konfiguriert — die
 Offsite-Kopie gesichert wurden.
 
+**Zwei Server (Prüfbericht 20.09.2026, DP-10):** Die Nachtsicherung läuft auf
+**einem** der beiden Server — dem, der die Tagessperre `backup-<tag>` in
+`job_locks` gewinnt (prod1 ODER prod2); der Dump liegt dann nur auf dessen
+Platte in `backups_data`. Welcher das war, steht in `/api/ready` →
+`backup.server` (im Container: `docker compose exec -T backend curl -s
+http://localhost:8001/api/ready`, Quelle „Sicherung lief auf …“) und auf der
+Betriebsseite. Die Offsite-Kopie im Sicherungs-Bucket ist serverunabhängig —
+für einen Restore auf dem anderen Server von dort holen.
+
 **Datei-Speicher seit 19.09.2026 (Entscheidung Ahmad): kein Spiegel mehr auf
 der Platte.** Vorher lud jeder nächtliche Lauf den *ganzen* S3-Bucket auf die
 Serverplatte (14 Stände + gepacktes Archiv = 15 × Bucket-Größe). Bei den
@@ -388,11 +416,12 @@ Ohne S3-Offsite das Volume regelmäßig auf einen ANDEREN Ort kopieren
 (z. B. Hetzner Storage Box), damit ein Server-Ausfall nicht auch die Backups
 mitnimmt:
 ```bash
-# Beispiel: naechtlich per cron auf eine Storage Box spiegeln. Runde 21:
-# Kopien aelter als 30 Tage werden entfernt — die Datenschutzerklaerung
-# sagt "ausser Haus bis zu 30 Tage" (vorher loeschte "cp -ru" nie).
+# Beispiel: naechtlich per cron auf eine Storage Box spiegeln. Pruefbericht
+# 20.09.2026 (DO-14): nur die juengsten 14 Staende bleiben — die Datenschutz-
+# erklaerung sagt "ausser Haus die letzten 14 Sicherungen" (Runde 21 loeschte
+# nach 30 Tagen, davor loeschte "cp -ru" nie).
 docker run --rm -v autoschnell_backups_data:/b -v /mnt/storagebox:/dest \
-  alpine sh -c "cp -ru /b/. /dest/ && find /dest -mindepth 1 -maxdepth 1 -name 'autoschnell-*' -mtime +30 -exec rm -rf {} +"
+  alpine sh -c "cp -ru /b/. /dest/ && cd /dest && ls -1d autoschnell-* | sort -r | tail -n +15 | xargs -r rm -rf"
 ```
 
 **RPO/RTO:** RPO ≤ 24 h (ein Lauf pro Nacht; wer weniger Verlust
@@ -463,7 +492,11 @@ oder vollständig auf Backup-Stand**, nie gemischt.
 | `--notfall-unvollstaendig-akzeptieren` | ein als UNVOLLSTAENDIG markiertes Backup **trotzdem** einspielen — nur im Notfall; die fehlenden Teile werden laut aufgelistet und fehlen danach |
 | `--ohne-s3` | S3-Objekte im Backup bewusst nicht zurückspielen (sonst Abbruch, wenn S3 hier nicht konfiguriert ist) |
 | `--nur-datenbank` | Datei-Speicher (uploads, local_storage, S3) unangetastet lassen — für die Restore-Probe in eine Testdatenbank |
-| `--exakt` | Collections, die es live gibt, im Backup aber nicht, wandern in die Vorher-Datenbank — der Live-Stand entspricht danach exakt dem Backup (Phase 3, 15.09.2026). Ohne die Option bleiben sie unverändert. Die Schema-Version wird in jedem Fall aus dem Backup übernommen, fehlende Migrationen laufen beim nächsten Start. |
+| `--exakt` | Collections, die es live gibt, im Backup aber nicht, wandern in die Vorher-Datenbank — der Live-Stand entspricht danach exakt dem Backup (Phase 3, 15.09.2026). **Seit 20.09.2026 (Nr. 75) das Standardverhalten**; die Option ist nur noch aus Gewohnheit erlaubt, Gegenteil: `--zusaetzliche-behalten`. Die Schema-Version wird in jedem Fall aus dem Backup übernommen, fehlende Migrationen laufen beim nächsten Start. |
+| `--zusaetzliche-behalten` | Collections, die es nur live gibt, **stehen lassen** — der Stand ist dann gemischt (alte Daten aus dem Backup neben neueren Collections); laute Warnung, nur mit gutem Grund |
+| `--notfall-inkonsistent-akzeptieren` | ein als INKONSISTENT markiertes Backup (Snapshot gescheitert, Collections nacheinander gelesen) trotzdem einspielen — nur im Notfall |
+| `--alt-backup-ohne-indexdaten` | Alt-Backup ohne (lesbare) `metadata.json` einspielen; für diese Collections werden dann **keine** Indexe angelegt oder geprüft (Standard: Abbruch) — der nächste Start legt sie über `migrationen.py` neu an |
+| `--vorher-aufbewahrung TAGE` | nach erfolgreichem Restore ältere Sicherungskopien (`<db>__vorher_<zeit>`, `uploads.vorher-<zeit>`) löschen; Standard 30 Tage, `0` = nie; der jüngste Stand bleibt immer (Abschnitt „Alte Sicherungskopien nach einem Restore“) |
 
 **Wartungsmodus:** Vor dem Umschalten schreibt der Restore in der
 Zieldatenbank `system_flags` → `{_id: "wartungsmodus", aktiv: true, grund:
@@ -597,7 +630,9 @@ Seit Runde 17 (08.09.2026) außerdem:
 
 ## Skalieren (mehr Last)
 - **Mehr CPU:** Hetzner-Konsole → Server → „Rescale" (2 Min), dann in
-  `.env` `WEB_CONCURRENCY` erhöhen und `docker compose up -d`.
+  `.env` `WEB_CONCURRENCY` erhöhen (Grenze: `(BACKEND_MEM_LIMIT − 500 MB) / 400 MB`,
+  Abschnitt 2) **und** `RESEND_PROZESSE` sowie `APIFY_MAX_PARALLEL` mitziehen, dann
+  `docker compose up -d`.
 - **Abруf-Sperren vermeiden** (viele neue Vergleiche): `PROXY_ENABLED=true`
   + `PROXY_URL=...` setzen. Langfristig ist das client-seitige Abrufen
   (Browser-Erweiterung der Nutzer) geplant — verteilt die Abrufe auf
@@ -978,7 +1013,11 @@ Alt-Funde). Jeder NEUE Fund blockiert den Build.
 die nummerierten Datenmigrationen (`schema_migrations`) mit Mongo-Sperre
 aus; die Worker prüfen beim Start nur noch die Zielversion. In Produktion
 bricht ein Migrations-/Indexfehler den Start ab (fail-closed). Stand:
-`GET /api/ready` (Feld `schema_version`).
+`GET /api/ready` (Feld `schema_version`). Seit 22.09.2026 (Prüfbericht
+20.09.2026, AL-05) fährt `deploy/rollout.sh` dieselbe Migration schon **vor**
+dem Containerwechsel als eigenen Schritt (Abschnitt „Updates einspielen“);
+der Container-Start wiederholt sie nur noch als Absicherung (idempotent,
+Sekunden). Sperrzustand: `python migrationen.py --sperre-gehalten`.
 
 ### Liveness und Readiness
 - `/api/health` — nur Datenbank-Ping (Container-Healthcheck).
@@ -1003,8 +1042,15 @@ selbst; manuell: `docker compose exec backend python scripts/wartung_aufheben.py
 Hosts erhalten 444, HTTP leitet fest auf `https://PUBLIC_HOST` um. Der
 Proxy setzt HSTS, `X-Frame-Options`, `nosniff`, Referrer-Policy,
 Permissions-Policy und `Content-Security-Policy: frame-ancestors 'none'`
-für ALLE Antworten (auch die React-Oberfläche). Prüfen nach dem Start:
-`curl -sI https://PUBLIC_HOST/ | grep -i -E "strict|frame|content-type-options"`.
+für ALLE Antworten (auch die React-Oberfläche). Die Kopfzeilen stehen seit
+22.09.2026 einmal in `deploy/sicherheitskopf.inc` (per docker-compose in den
+Proxy eingehängt) und werden von beiden Vorlagen im server-Block **und** in
+jeder Location mit eigenem `add_header` eingebunden — nginx vererbt
+`add_header` sonst nicht dorthin, unter `/static/` fehlten sie (Prüfbericht
+20.09.2026, DP-14); `payment=()` seit Stripe entfernt ist (K-20). Ändert sich
+die Datei, erzeugt `deploy/rollout.sh` den Proxy neu. Prüfen nach dem Start:
+`curl -sI https://PUBLIC_HOST/ | grep -i -E "strict|frame|content-type-options"`
+und dasselbe für eine Datei unter `/static/`.
 
 ### Speicher voll
 Anzeichen: `/api/ready` meldet zu wenig freien Speicher (unter `MIN_FREI_MB`),
@@ -1067,8 +1113,25 @@ unter `beweise/<portal>/` in R2) — der Vergleich wartet nie darauf.
   docker compose exec -T mongo mongosh --quiet -u "$(grep ^MONGO_USER .env | cut -d= -f2)" -p "$(grep ^MONGO_PASSWORD .env | cut -d= -f2)" --authenticationDatabase admin autoschnell --eval 'db.inserat_beweise.aggregate([{$group:{_id:"$status",n:{$sum:1}}}]).toArray()'
   ```
   `offen` sollte nach wenigen Sekunden zu `fertig` werden. Endgültig
-  `fehlgeschlagen` löst den Betriebsalarm `beweis_fehlgeschlagen` aus; beim
-  nächsten Vergleich des Links wird es erneut versucht.
+  `fehlgeschlagen` löst den Betriebsalarm `beweis_fehlgeschlagen` aus; ein
+  neuer Versuch startet **nicht** von selbst (seit 18.09.2026 entsteht das
+  Dokument nur auf Knopfdruck): in der Beweis-Karte „Noch einmal versuchen“
+  drücken bzw. `POST /api/beweise/anfordern` (Abschnitt „Beweisdokument nur
+  noch auf Knopfdruck“).
+- **Hängender Job** (Prüfbericht 20.09.2026, DO-23): Ein Link-Job, dessen
+  Worker gestorben ist, bleibt bis `processing_until`
+  (`LINK_JOB_PROCESSING_TTL`, Standard 240 s) in `processing`, wird dann von
+  selbst neu eingereiht und nach `LINK_JOB_MAX_ATTEMPTS` (3) als `failed`
+  beendet; `/api/ready` warnt bei Jobs, die länger als 15 min warten.
+  Ansehen bzw. wegräumen (mongosh wie oben):
+  `db.link_jobs.find({status:{$in:["queued","processing"]}}, {id:1,status:1,updated_at:1,processing_until:1})`,
+  `db.link_jobs.deleteOne({id:"<id>"})`. Sperren in `job_locks` (`migration`,
+  `cleanup-cycle`, `backup-<tag>`, `betriebsmeldung`) laufen von selbst ab
+  (`expires_at`); ansehen: `db.job_locks.find({}, {name:1,owner:1,expires_at:1})`,
+  im Notfall `db.job_locks.deleteOne({name:"<name>"})` — nur, wenn der
+  Besitzer-Prozess sicher nicht mehr läuft. Die Migrationssperre fragt
+  `docker compose exec -T backend python migrationen.py --sperre-gehalten`
+  ab (Code 0 = gehalten, 1 = frei).
 
 ### Installierbare App (09/2026)
 AutoSchnell lässt sich als App installieren — Symbol auf Taskleiste,
@@ -1277,7 +1340,17 @@ python scripts/lasttest.py --users 100 --duration 120                         # 
 MongoDB läuft in der Standard-Zusammenstellung ohne Replica Set. Dann liest die Sicherung eine Collection nach der anderen: laufende Buchungen oder Terminänderungen können dazwischenliegen, die Dateien passen also nicht auf die Sekunde zusammen. Zwei Wege:
 
 1. **Replica Set einrichten** (empfohlen): `mongod --replSet rs0` plus einmalig `rs.initiate()`. Die Sicherung nutzt dann automatisch einen Snapshot; das Manifest meldet `"konsistenz": "snapshot"`.
-2. **Schreibpause**: den nächtlichen Lauf mit `--wartung` starten. Für die Dauer der Sicherung antwortet die API auf schreibende Aufrufe mit 503 (Wartungsmodus), danach wird er automatisch wieder abgeschaltet.
+2. **Schreibpause**: `BACKUP_WARTUNG=true` in der Server-`.env` setzen
+   (`sh deploy/env_setzen.sh BACKUP_WARTUNG=true`; Einzelheiten im Abschnitt
+   „Wartungsmodus und Datei-Sicherung“). Der nächtliche Lauf schaltet dann für die
+   Dauer der Sicherung den Wartungsmodus ein — die API antwortet solange auf **alle**
+   Aufrufe mit 503, auch lesende — und danach automatisch wieder ab (mit Ablaufzeit,
+   falls der Lauf abstürzt). Von Hand: `python scripts/backup_mongo.py --wartung`.
+   **Grenze (Prüfbericht 20.09.2026, SK-10):** Angehalten werden nur die HTTP-Wege;
+   Link-, Beweis-, Aufräum- und Abo-Worker schreiben weiter
+   (`backend/backup_service.py`), die Sicherung ist also auch so nicht
+   stichtagsgenau. Deshalb bleibt die Empfehlung: Replica Set (Ahmads Server
+   laufen so) und `BACKUP_WARTUNG` leer.
 
 ```bash
 python scripts/backup_mongo.py --wartung
@@ -1358,7 +1431,8 @@ AutoScout24) nicht mehr direkt vom fremden CDN, sondern als kleines JPEG
 Bild einmal, verkleinert es und hält es im Speicher (`BILD_PROXY_CACHE`,
 Standard 400 Bilder). Kein offener Proxy: nur https-Adressen der bekannten
 Portal-Hosts (Allowliste, erweiterbar über `BILD_PROXY_HOSTS`, kommagetrennt),
-jede Adresse trägt eine Signatur mit Ablauf, je IP 300 Bilder/Minute.
+jede Adresse trägt eine Signatur mit Ablauf, je IP `BILD_PROXY_LIMIT` (Standard 3000)
+Bilder/Minute.
 Vorschaubilder stehen in den Antworten als `images_thumbs`
 (Vergleich), `einkauf_thumbs` (Inserat), `vehicle_image_urls_thumbs`
 (Vertragsliste) und in den öffentlichen Marktplatz-Fotos. Große Ansichten

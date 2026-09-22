@@ -58,13 +58,11 @@ server {
 
   # Sicherheits-Header fuer ALLE Antworten (API und Oberflaeche) — "always",
   # damit sie auch bei Fehlerseiten gesetzt werden.
-  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-  add_header X-Content-Type-Options "nosniff" always;
-  add_header X-Frame-Options "DENY" always;
-  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-  add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(self)" always;
-  # frame-ancestors laesst sich nur per Header setzen (nicht per <meta>).
-  add_header Content-Security-Policy "frame-ancestors 'none'" always;
+  # Pruefbericht 20.09.2026 (DP-14): die Zeilen stehen EINMAL in
+  # deploy/sicherheitskopf.inc (per docker-compose eingehaengt). nginx vererbt
+  # add_header nicht in Bloecke mit eigenem add_header — deshalb wird die
+  # Datei unten in /static/ und @static_fehlt erneut eingebunden.
+  include /etc/nginx/sicherheitskopf.inc;
 
   # API ans Backend.
   location /api/ {
@@ -97,14 +95,11 @@ server {
     # als "no-store" ausliefern (nur die 404, die 200 bleibt ein Jahr cachebar).
     proxy_intercept_errors on;
     error_page 404 = @static_fehlt;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    include /etc/nginx/sicherheitskopf.inc;
   }
 
   location @static_fehlt {
+    include /etc/nginx/sicherheitskopf.inc;
     add_header Cache-Control "no-store" always;
     return 404;
   }

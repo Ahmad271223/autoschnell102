@@ -72,7 +72,7 @@ Befehl und Abnahmekriterium stehen jeweils dabei.
   `MOBILE_API_USER/PASS` in `.env`. Ohne Zugang bleiben mobile.de-Links
   gesperrt (klare 400-Meldung — gewollt).
 - [ ] Kleinanzeigen: schriftlich klären, ob der geplante Abrufweg
-  (Server-Abruf gedrosselt auf 3 gleichzeitige bzw. Client-Abruf über die
+  (Server-Abruf gedrosselt auf `MAX_CONCURRENT_KLEINANZEIGEN`, Standard 2 gleichzeitig, bzw. Client-Abruf über die
   Erweiterung) den Nutzungsbedingungen entspricht — siehe
   docs/kleinanzeigen-abruf.md. **Keine Lasttests gegen echte Anbieter**
   (der Lasttest verweigert den Start ohne Mock — automatisiert geprüft).
@@ -103,12 +103,20 @@ es gibt keinen Webhook mehr. Der folgende Abschnitt ist nur noch historisch.
 
 ## 9. Monitoring
 
-- [x] `GET /api/admin/monitoring` (Admin): Ampel + unerwartete Fehler der
-  letzten Stunde (error_logs), Job-Rückstau inkl. Alter des ältesten
-  wartenden Jobs, aktive Anbieter-Slots, Abrufe heute.
-- [ ] **[Server]** Externe Überwachung: alle 1–5 min `/api/health`
-  (Erwartung: 200 + `"db":"up"`) und `/api/admin/monitoring`
-  (Alarm bei `"ampel":"rot"`); dazu Host-Metriken (CPU/RAM/Disk).
+- [x] `GET /api/admin/monitoring` (nur Super-Admin, Betriebsseite): Ampel +
+  unerwartete Fehler der letzten Stunde (error_logs), Job-Rückstau inkl. Alter
+  des ältesten wartenden Jobs, aktive Anbieter-Slots, Abrufe heute. **Nicht**
+  für eine externe Überwachung geeignet: braucht ein Super-Admin-Token, und
+  jede Anmeldung beendet die vorige Sitzung (Einzelsitzung).
+- [ ] **[Server]** Externe Überwachung (Prüfbericht 20.09.2026, DO-19): alle
+  1–5 min `GET /api/ready` ohne Anmeldung — 200 = bereit, 503 = nicht bereit
+  (Datenbank, Migrationsstand, Speicher, Datei-Speicher); nach außen nur
+  `ready` true/false, Einzelheiten im Container
+  (`docker compose exec -T backend curl -s http://localhost:8001/api/ready`).
+  Dazu Betriebsmeldungen per E-Mail: `BETRIEB_MELDUNG_AN` in der `.env` setzen
+  (Sofortmeldung bei neuem Betriebsalarm, Freischaltungs-Anfragen,
+  Tagesbericht — DEPLOYMENT.md „Betriebsmeldungen per E-Mail“) und
+  Host-Metriken (CPU/RAM/Disk).
 
 ## 10. Lasttest auf der Zielumgebung
 
