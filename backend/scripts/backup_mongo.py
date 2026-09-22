@@ -283,6 +283,52 @@ def indexe_gegenpruefen(target: Path, namen) -> dict:
     return out
 
 
+class DumpGegenleseFehler(RuntimeError):
+    """Pruefbericht 20.09.2026 (AL-11): eine .bson.gz laesst sich nicht
+    zurueck­lesen oder enthaelt nicht so viele Dokumente wie gezaehlt."""
+
+
+def bson_dokumente_zaehlen(pfad: Path) -> int:
+    """Dokumente einer .bson.gz ueber die BSON-Laengenpraefixe zaehlen (ohne
+    zu dekodieren); wirft ValueError bei abgeschnittener Datei."""
+    n = 0
+    with gzip.open(pfad, "rb") as fh:
+        while True:
+            kopf = fh.read(4)
+            if not kopf:
+                return n
+            if len(kopf) < 4:
+                raise ValueError("BSON-Datei ist abgeschnitten (Laengenfeld)")
+            laenge = int.from_bytes(kopf, "little")
+            if laenge < 5:
+                raise ValueError(f"BSON-Dokument mit unmoeglicher Laenge {laenge}")
+            rest = fh.read(laenge - 4)
+            if len(rest) != laenge - 4:
+                raise ValueError("BSON-Datei ist abgeschnitten")
+            n += 1
+
+
+def dumps_gegenlesen(target: Path, counts: dict, logfile: Path) -> None:
+    """AL-11: VOR dem Umbenennen jede .bson.gz einmal zuruecklesen und die
+    Dokumentzahl gegen counts pruefen — ein Schreibfehler (Platte, gzip)
+    faellt so beim Sichern auf, nicht erst beim Restore. Wirft
+    DumpGegenleseFehler."""
+    fehler = []
+    for name, erwartet in sorted(counts.items()):
+        pfad = target / f"{name}.bson.gz"
+        try:
+            gelesen = bson_dokumente_zaehlen(pfad)
+        except (OSError, EOFError, ValueError) as exc:
+            fehler.append(f"{name}: nicht lesbar ({exc})")
+            continue
+        if gelesen != int(erwartet):
+            fehler.append(f"{name}: {gelesen} Dokumente gelesen, {erwartet} geschrieben")
+    if fehler:
+        raise DumpGegenleseFehler("; ".join(fehler[:10]))
+    log(f"  Gegenlesen: {len(counts)} Collections stimmen mit der Dokumentzahl ueberein",
+        logfile)
+
+
 class Schreibpause:
     """Schreibpause fuer die Dauer der Sicherung (Audit 09/2026).
 
@@ -312,6 +358,10 @@ class Schreibpause:
         self.kennung = None
         #: RP-246: True, wenn ein fremder gueltiger Merker das Setzen verhindert hat
         self.fremder_merker = False
+        #: Pruefbericht 20.09.2026 (SK-09): True, sobald verlaengern() den
+        #: eigenen Merker nicht mehr fand (abgelaufen, aufgeraeumt, ersetzt)
+        #: — dann schrieb die Plattform womoeglich wieder.
+        self.verloren = False
         self._stop = threading.Event()
         self._faden = None
 
@@ -390,12 +440,30 @@ class Schreibpause:
                 f"trotzdem, gilt aber NICHT als stichtagsgenau.", self.logfile)
         return False
 
+    def noch_gueltig(self) -> bool:
+        """SK-09: steht der EIGENE Merker noch? Verlaengert ihn dabei einmal
+        synchron. Eine Stoerung beim Nachsehen gilt nicht als Verlust."""
+        if not self.aktiv or self.verloren:
+            return False
+        try:
+            gehalten = wartung.verlaengern(self.db[wartung.FLAG_COLLECTION],
+                                           self.kennung, _wartung_frist_min())
+        except Exception:  # noqa: BLE001
+            return True
+        if not gehalten:
+            self.verloren = True
+            log("  WARNUNG: die Schreibpause steht nicht mehr (Merker abgelaufen oder "
+                "ersetzt) — die Plattform konnte zwischenzeitlich schreiben.", self.logfile)
+        return gehalten
+
     def _verlaengern(self) -> None:
         # Alle 60 s die Frist erneuern, solange der Lauf arbeitet.
         while not self._stop.wait(60):
             try:
-                wartung.verlaengern(self.db[wartung.FLAG_COLLECTION],
-                                    self.kennung, _wartung_frist_min())
+                if not wartung.verlaengern(self.db[wartung.FLAG_COLLECTION],
+                                           self.kennung, _wartung_frist_min()):
+                    # SK-09: der Rueckgabewert wurde bisher ignoriert
+                    self.verloren = True
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1077,10 +1145,17 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         counts, konsistenz, inkonsistent = dump_datenbank(
             client, db, names, target, logfile, pflicht=snapshot_pflicht(mongo_url))
         indexe = indexe_gegenpruefen(target, counts)
+        dumps_gegenlesen(target, counts, logfile)       # AL-11
     except IndexMetadatenFehler as exc:
         schreibpause.ausschalten()
         log(f"FEHLER: Index-Metadaten nicht gesichert — {exc}. Ohne sie fehlen "
             f"nach einem Restore Unique- und TTL-Indexe; kein Backup angelegt.", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return 1
+    except DumpGegenleseFehler as exc:
+        schreibpause.ausschalten()
+        log(f"FEHLER: Datenbank-Dump laesst sich nicht fehlerfrei zuruecklesen — {exc}. "
+            f"Kein Backup angelegt (Platte/gzip pruefen).", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
     except Exception as exc:  # noqa: BLE001
@@ -1088,7 +1163,7 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         log(f"FEHLER beim Sichern der Datenbank: {exc}", logfile)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return 1
-    if pause and ruhig:
+    if pause and ruhig and schreibpause.noch_gueltig():
         # Bei pausierten Schreibzugriffen passen auch nacheinander gelesene
         # Collections zusammen (auch nach einem gescheiterten Snapshot).
         #
@@ -1099,7 +1174,16 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
         # schreiben, und die Sicherung nannte sich trotzdem stichtagsgenau.
         # Jetzt gilt die Zusage nur, wenn ALLE Backend-Prozesse null offene
         # Schreibzugriffe gemeldet haben (siehe auslaufen_lassen).
+        # Pruefbericht 20.09.2026 (SK-09): und nur, wenn der EIGENE Merker
+        # den ganzen Dump ueber stand (noch_gueltig prueft einmal synchron).
         konsistenz, inkonsistent = KONSISTENZ_SCHREIBPAUSE, ""
+    elif pause and ruhig:
+        # SK-09: Merker waehrend des Dumps verloren -> keine Zusage mehr
+        konsistenz = KONSISTENZ_RUECKFALL
+        inkonsistent = ("Schreibpause waehrend des Dumps verloren (Merker abgelaufen "
+                        "oder ersetzt) — Schreibzugriffe waren moeglich, Zeitstaende "
+                        "koennen abweichen")
+        log(f"  WARNUNG: {inkonsistent} — Backup wird als INKONSISTENT markiert", logfile)
     elif pause:
         log("  HINWEIS: Die Schreibpause lief, aber das Auslaufen konnte nicht "
             "bestaetigt werden — die Sicherung gilt deshalb NICHT als "

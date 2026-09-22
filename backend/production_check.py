@@ -176,21 +176,38 @@ def pruefe_produktion(log) -> None:
         fehler.append("SUPER_ADMIN_USERNAME und SUPER_ADMIN_PASSWORD muessen in Produktion "
                       "gesetzt sein — sonst gibt es kein Betreiberkonto.")
     # Pruefung 14.09.2026 (A18/B30): Zahlen-Variablen mit Tippfehler
-    from konfig import FEHLERHAFT, zahl_pruefen
+    from konfig import FEHLERHAFT, GEKLEMMT, zahl_pruefen
     for name, roh in sorted(FEHLERHAFT.items()):
         (fehler if ist_prod else warnungen).append(
             f"{name}='{roh}' ist keine ganze Zahl — Standardwert aktiv, bitte korrigieren.")
+    # Pruefbericht 20.09.2026 (AL-21): Werte, die eine Unter-/Obergrenze
+    # verletzen, werden geklemmt — bisher nur eine Zeile im Log.
+    for name, (eingestellt, wirksam) in sorted(GEKLEMMT.items()):
+        warnungen.append(f"{name}={eingestellt} liegt ausserhalb des erlaubten Bereichs — "
+                         f"wirksam ist {wirksam}; bitte korrigieren.")
+    # AL-22: BACKUP_HOUR dazu — backup_service wird erst lange nach dieser
+    # Pruefung geladen (im CLI-Lauf gar nicht), ein Tippfehler blieb stumm.
+    # P-19: RESEND_PARALLEL/-VERSUCHE/-PROZESSE dazu (email_service wird erst
+    # beim ersten Versand geladen).
     for name in ("LOGIN_KONTO_LIMIT", "LOGIN_KONTO_FENSTER", "LOGIN_IP_LIMIT", "BACKUP_S3_KEEP",
                  "WEB_CONCURRENCY", "MIN_FREI_MB", "BEWEIS_FOTOS_MAX", "BEWEIS_AUFBEWAHRUNG_TAGE",
                  "BEWEIS_PARALLEL", "FAHRERFOTO_TAGE", "BERICHT_AUFBEWAHRUNG_TAGE",
                  "ANBIETER_TAGESLIMIT_JE_FIRMA", "ANBIETER_TAGESLIMIT_GESAMT",
                  "ANBIETER_TAGESLIMIT_JE_KONTO",
-                 "ANBIETER_TAGESWARNUNG", "ABRUF_RUECKFALL_TAGESLIMIT", "BILD_PROXY_LIMIT"):
+                 "ANBIETER_TAGESWARNUNG", "ABRUF_RUECKFALL_TAGESLIMIT", "BILD_PROXY_LIMIT",
+                 "BACKUP_HOUR", "RESEND_PARALLEL", "RESEND_VERSUCHE", "RESEND_PROZESSE",
+                 "DATEI_LIMIT"):
         if name not in FEHLERHAFT:
             roh = zahl_pruefen(name)
             if roh is not None:
                 (fehler if ist_prod else warnungen).append(
                     f"{name}='{roh}' ist keine ganze Zahl — bitte korrigieren.")
+    # AL-22: eine Stunde ausserhalb 0-23 wird von backup_service auf den Rand
+    # geklemmt (BACKUP_HOUR=25 -> 23:00) — das soll niemand raten muessen.
+    _stunde = os.environ.get("BACKUP_HOUR", "").strip()
+    if _stunde and zahl_pruefen("BACKUP_HOUR") is None and not 0 <= int(_stunde) <= 23:
+        warnungen.append(f"BACKUP_HOUR={_stunde} liegt ausserhalb von 0-23 — die Sicherung "
+                         "laeuft dann um " + ("23" if int(_stunde) > 23 else "0") + ":00 Uhr.")
 
     # Befund 131 (16.09.2026): Entscheidung Ahmad 16.09.2026 — 400 neue Abrufe
     # je Konto und Tag. Im Code heisst 0/fehlend "aus"; docker-compose setzt

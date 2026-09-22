@@ -1137,9 +1137,19 @@ def wiederherstellen(args) -> int:
         return 0
 
     if not args.yes:
-        answer = input(f"{len(dumps)} Collections nach '{args.db}' wiederherstellen? "
-                       f"Bestehende Daten dort werden ERSETZT (Kopie bleibt als "
-                       f"'{args.db}__vorher_...'). [ja/nein] ")
+        # Pruefbericht 20.09.2026 (SK-17): ohne Terminal (docker compose exec -T,
+        # Pipe) endete input() mit einer EOFError-Rueckverfolgung.
+        if not sys.stdin.isatty():
+            print("Ohne Terminal (Pipe, docker compose exec -T) bitte --yes angeben. "
+                  "Abgebrochen, nichts veraendert.")
+            return 1
+        try:
+            answer = input(f"{len(dumps)} Collections nach '{args.db}' wiederherstellen? "
+                           f"Bestehende Daten dort werden ERSETZT (Kopie bleibt als "
+                           f"'{args.db}__vorher_...'). [ja/nein] ")
+        except EOFError:
+            print("Abgebrochen (keine Eingabe).")
+            return 1
         if answer.strip().lower() not in ("ja", "j", "yes", "y"):
             print("Abgebrochen.")
             return 1
@@ -1429,8 +1439,11 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="nur pruefen, nichts veraendern")
     ap.add_argument("--allow-no-manifest", action="store_true")
+    # Pruefbericht 20.09.2026 (SK-19): wird nirgends ausgewertet — der bisherige
+    # Stand bleibt IMMER erhalten. Nur aus Gewohnheit noch erlaubt.
     ap.add_argument("--keep-old", action="store_true", default=True,
-                    help="bisherige Collections als <db>__vorher_<stamp> behalten (Standard)")
+                    help="(ohne Wirkung — der bisherige Stand bleibt immer als "
+                         "<db>__vorher_<stamp> erhalten)")
     ap.add_argument("--vorher-aufbewahrung", type=int, default=30,
                     metavar="TAGE",
                     help="nach erfolgreichem Restore aeltere Sicherungskopien "

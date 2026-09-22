@@ -738,9 +738,40 @@ async def ausfuehren(db, indexe=None, seeds=(), wache=None) -> dict:
     return erledigt
 
 
-async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int = 180) -> str:
+#: Pruefbericht 20.09.2026 (SV-12): kritische Unique-Indizes, die ein wartender
+#: Prozess per list_indexes stichprobenartig prueft (dieselben wie in
+#: server.KRITISCHE_INDIZES / /api/health).
+KRITISCHE_INDIZES = {
+    "vehicles": ("dealer_id", "id"),
+    "kaufvorgaenge": ("contract_id",),
+}
+
+
+async def kritische_indizes_fehlen(db) -> list:
+    """SV-12: welche der KRITISCHEN Unique-Indizes fehlen (Stichprobe ueber
+    index_information, ohne etwas anzulegen). Leer = alles da."""
+    fehlend = []
+    for sammlung, felder in KRITISCHE_INDIZES.items():
+        vorhanden = await db[sammlung].index_information()
+        if not any(i.get("unique") and [f for f, _r in i["key"]] == list(felder)
+                   for i in vorhanden.values()):
+            fehlend.append(f"{sammlung} ({', '.join(felder)})")
+    return fehlend
+
+
+async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int = 180,
+                                 indexe_im_wartenden: bool = True) -> str:
     """Genau ein Prozess migriert; die anderen warten auf die Zielversion.
-    Rueckgabe: "leader" | "gewartet" | "timeout"."""
+    Rueckgabe: "leader" | "gewartet" | "gewartet_mit_fehler" | "timeout".
+
+    indexe_im_wartenden (SV-12): True (CLI-Lauf) = der Wartende legt nach
+    Erreichen der Zielversion ebenfalls alle Indizes an (idempotent; faengt
+    einen aelteren Leader auf). False (server.on_start) = nur eine Stichprobe
+    der kritischen Unique-Indizes — die volle Anlage samt Dubletten-
+    Aggregationen und Kundennummern-Nachzug hat der CLI-Lauf vor uvicorn
+    schon erledigt, und waehrend des Lifespans antwortet der Worker nicht.
+    AL-18: scheitert Anlage bzw. Stichprobe, ist das Ergebnis
+    "gewartet_mit_fehler" (der Aufrufer entscheidet: /ready 503 bzw. Abbruch)."""
     verloren = False
     if await _sperre_holen(db):
         stop = asyncio.Event()
@@ -781,13 +812,30 @@ async def ausfuehren_oder_warten(db, indexe=None, seeds=(), warte_sekunden: int 
     gesamt = 0
     while True:
         if await aktuelle_version(db) >= ZIEL_VERSION:
-            # Indizes sind idempotent — zur Sicherheit auch hier anlegen
-            # (z.B. wenn der Leader ein aelterer Prozess war).
-            if indexe is not None:
-                try:
-                    await indexe()
-                except Exception as exc:
-                    log.warning("Index-Anlage im Wartenden fehlgeschlagen: %s", exc)
+            if indexe_im_wartenden:
+                # Indizes sind idempotent — zur Sicherheit auch hier anlegen
+                # (z.B. wenn der Leader ein aelterer Prozess war).
+                if indexe is not None:
+                    try:
+                        await indexe()
+                    except Exception as exc:
+                        # AL-18: vorher nur log.warning — folgende Anlagen
+                        # fehlten in diesem Prozess, ohne dass es jemand sah.
+                        log.error("Index-Anlage im Wartenden fehlgeschlagen: %s", exc)
+                        return "gewartet_mit_fehler"
+                return "gewartet"
+            # SV-12 (nur server.on_start): statt der Anlage die Stichprobe
+            # der kritischen Unique-Indizes
+            try:
+                fehlend = await kritische_indizes_fehlen(db)
+            except Exception as exc:  # noqa: BLE001
+                log.error("Index-Stichprobe im Wartenden nicht moeglich: %s", exc)
+                return "gewartet_mit_fehler"
+            if fehlend:
+                log.error("Index-Stichprobe im Wartenden: Unique-Index fehlt: %s — "
+                          "Dubletten bereinigen (python scripts/dubletten_pruefen.py)",
+                          ", ".join(fehlend))
+                return "gewartet_mit_fehler"
             return "gewartet"
         if gesamt >= _WARTEN_MAX_S:
             break
@@ -839,6 +887,12 @@ def _main() -> int:
             # Kontonummer (13.09.2026), Schritt 5: nur noch der Super-Admin
             seeds=(server.seed_super_admin,), warte_sekunden=300)
         log.info("Migration: %s (Version %d)", ergebnis, await aktuelle_version(db))
+        if ergebnis == "gewartet_mit_fehler":
+            # AL-18: der wartende CLI-Lauf (zweiter Server startet parallel)
+            # konnte die Indizes nicht anlegen — kein Start mit Luecken.
+            log.error("Start ABGEBROCHEN: Index-Anlage im wartenden Prozess fehlgeschlagen "
+                      "(siehe oben)")
+            return 78
         if indizes.FEHLENDE_UNIQUE and _ist_prod():
             # SV-04: dieselbe Regel wie server.on_start — nur hier, BEVOR
             # uvicorn ueberhaupt startet, und mit der vollstaendigen Liste.

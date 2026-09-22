@@ -142,11 +142,14 @@ def _code_ohne_kommentare(funktion) -> str:
 
 def test_56_schreibprobe_hat_einen_eigenen_namen():
     import server
-    q = _code_ohne_kommentare(server._readiness_pruefen)
+    # Pruefbericht 20.09.2026 (SV-14): die Plattenpruefung steht jetzt in
+    # _platten_pruefen (laeuft im Thread), _readiness_pruefen ruft sie auf.
+    q = _code_ohne_kommentare(server._platten_pruefen)
     assert 'pfad / ".readiness"' not in q, \
         "fester Name -> zwei Aufrufe loeschten sich die Datei (Nr. 56)"
     assert ".readiness-" in q and "uuid.uuid4()" in q
     assert "missing_ok=True" in q, "das Aufraeumen darf nicht selbst scheitern"
+    assert "asyncio.to_thread(_platten_pruefen)" in inspect.getsource(server._readiness_pruefen)
 
 
 def test_56b_auch_der_lokale_speicher(tmp_path):

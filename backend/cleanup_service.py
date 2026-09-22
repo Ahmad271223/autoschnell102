@@ -1560,7 +1560,11 @@ async def fehlerlogs_begrenzen(db, now: datetime, *,
     (b) harter Deckel ERROR_LOG_MAX — darueber werden die aeltesten
     Eintraege entfernt, unabhaengig vom Status."""
     offen_tage = LOG_AUFBEWAHRUNG_TAGE_OFFEN if offen_tage is None else offen_tage
-    maximum = ERROR_LOG_MAX if maximum is None else maximum
+    # Pruefbericht 20.09.2026 (SV-11): ohne ausdrueckliches maximum auf 90 %
+    # des Deckels kuerzen — vorher blieb das Archiv dauerhaft voll, sobald der
+    # Deckel einmal erreicht war (server.py nimmt ab ERROR_LOG_MAX nichts
+    # Neues mehr an).
+    maximum = int(ERROR_LOG_MAX * 0.9) if maximum is None else maximum
     cutoff = (now - timedelta(days=offen_tage)).isoformat()
     r = await db.error_logs.delete_many(
         {"status": "open", "created_at": {"$lt": cutoff}})
@@ -2744,6 +2748,7 @@ async def run_cleanup_forever(db):
     await asyncio.sleep(30)
     from job_lock import acquire, heartbeat
     while True:
+        from server import worker_erfolg; worker_erfolg("aufraeumen")  # noqa: E702 — Pruefbericht 20.09. SV-05: voriger Durchlauf (auch ohne Sperre) beendet
         # Nachpruefung 20.09.2026, Nr. 64: waehrend einer Schreibpause
         # (Sicherung/Restore) nichts loeschen — sonst verschwinden Dateien
         # mitten im Dump und die Sicherung nennt sich zu Unrecht

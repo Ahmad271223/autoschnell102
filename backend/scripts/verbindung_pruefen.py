@@ -17,9 +17,13 @@ Geprueft wird:
   7. optional: Schreibtest in einer eigenen Wegwerf-Collection
 
 Aufruf:
-  python scripts/verbindung_pruefen.py "mongodb+srv://nutzer:passwort@cluster.mongodb.net/?retryWrites=true"
   python scripts/verbindung_pruefen.py --db autoschnell --schreibtest
-Ohne URL wird MONGO_URL aus der Umgebung/.env genommen.
+  MONGO_URL="mongodb://…" python scripts/verbindung_pruefen.py
+Ohne URL wird MONGO_URL aus der Umgebung/.env genommen. Eine Adresse MIT
+Zugangsdaten (nutzer:passwort@…) wird als Argument abgelehnt (Pruefbericht
+20.09.2026, SK-18: sie landete sonst in Shell-Verlauf und Prozessliste) —
+dann MONGO_URL setzen; nur eine Adresse ohne Zugangsdaten darf als Argument
+stehen.
 
 Exit 0 = brauchbar, 1 = Problem gefunden.
 """
@@ -66,6 +70,15 @@ def konto_index_status(db) -> dict:
     return status
 
 
+def zugangsdaten_im_argument(url: str) -> bool:
+    """SK-18: traegt die Adresse Benutzer oder Passwort (…://nutzer:pw@host)?"""
+    try:
+        teile = urlsplit(url)
+        return bool(teile.username or teile.password)
+    except ValueError:
+        return "@" in url
+
+
 def _verschleiert(url: str) -> str:
     """URL ohne Passwort ausgeben (Logs, Screenshots)."""
     try:
@@ -93,6 +106,12 @@ def main() -> int:
     except ImportError:
         pass
 
+    if args.url and zugangsdaten_im_argument(args.url):
+        # SK-18: Benutzer/Passwort gehoeren nicht auf die Befehlszeile
+        print("FEHLER: Die Verbindungszeichenfolge enthaelt Zugangsdaten (nutzer:passwort@…) "
+              "— nicht als Argument uebergeben (Shell-Verlauf, Prozessliste), sondern "
+              "MONGO_URL in der Umgebung bzw. .env setzen und das Skript ohne URL starten.")
+        return 1
     url = args.url or os.environ.get("MONGO_URL", "")
     db_name = args.db or os.environ.get("DB_NAME") or "autoschnell"
     if not url:

@@ -19,11 +19,20 @@ Nuetzliche Schalter:
     --grenze 200      nur die ersten 200 Dateien ansehen (Probelauf)
     --praefix resale  nur einen Bereich (mehrfach angebbar)
     --leise           keine Zeile je Datei, nur das Ergebnis
+    --ohne-sicherung  Original NICHT unter verkleinert-original/<key> ablegen
 
-Angefasst werden nur Bilder (jpg, jpeg, png, webp) in den Bereichen
-resale/, pickup/ und logo/. Unterschriften unter protocol/ bleiben
-unberuehrt: Strichzeichnungen werden durch erneutes Umwandeln schlechter,
-und sie sind ohnehin klein. PDFs und Videos werden nie angefasst.
+Angefasst werden nur Bilder (jpg, jpeg, png) in den Bereichen resale/,
+pickup/ und logo/. Pruefbericht 20.09.2026 (SK-21): .webp bleibt liegen —
+bild_verkleinern erzeugt nur JPEG/PNG, eine .webp waere sonst als JPEG unter
+dem alten Schluessel gespeichert und als image/webp ausgeliefert worden.
+Unterschriften unter protocol/ bleiben unberuehrt: Strichzeichnungen werden
+durch erneutes Umwandeln schlechter, und sie sind ohnehin klein. PDFs und
+Videos werden nie angefasst.
+
+SK-21: Vor dem Ersetzen wird das Original unter `verkleinert-original/<key>`
+abgelegt (gleicher Speicher); laesst sich die Sicherung nicht schreiben, wird
+die Datei NICHT ersetzt. Die Sicherungen raeumt niemand automatisch weg —
+nach einer Kontrolle von Hand loeschen (Praefix verkleinert-original/).
 
 Exit 0 = fertig (auch beim Probelauf)
 Exit 1 = abgebrochen, z.B. Speicher nicht erreichbar
@@ -35,8 +44,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BILD_ENDUNGEN = (".jpg", ".jpeg", ".png", ".webp")
+BILD_ENDUNGEN = (".jpg", ".jpeg", ".png")      # SK-21: kein .webp
 STANDARD_PRAEFIXE = ("resale/", "pickup/", "logo/")
+SICHERUNGS_PRAEFIX = "verkleinert-original/"   # SK-21
 
 
 def menschlich(bytes_: int) -> str:
@@ -86,6 +96,8 @@ def main() -> int:
                     help="Bereich einschraenken, z.B. resale (mehrfach moeglich)")
     ap.add_argument("--leise", action="store_true",
                     help="keine Zeile je Datei ausgeben")
+    ap.add_argument("--ohne-sicherung", action="store_true",
+                    help="Original nicht unter verkleinert-original/<key> sichern (SK-21)")
     args = ap.parse_args()
 
     try:
@@ -149,6 +161,16 @@ def main() -> int:
             if not args.leise:
                 print(f"  {key}: {menschlich(len(roh))} -> {menschlich(len(neu))}")
             if args.wirklich:
+                if not args.ohne_sicherung:
+                    # SK-21: Original zuerst sichern; scheitert das, bleibt
+                    # die Datei unangetastet.
+                    try:
+                        storage.save(SICHERUNGS_PRAEFIX + key, roh)
+                    except Exception as exc:        # noqa: BLE001
+                        fehler += 1
+                        print(f"  FEHLER Sicherung {SICHERUNGS_PRAEFIX}{key}: {exc} "
+                              f"— Datei NICHT ersetzt")
+                        continue
                 try:
                     storage.save(key, neu)
                 except Exception as exc:            # noqa: BLE001

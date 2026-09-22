@@ -3909,6 +3909,10 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         # Rollenprüfung 22.09.2026 (RP-394, Welle 2): letzter (vollstaendiger)
         # Aufraeumlauf und die gescheiterten Schritte (cleanup_service).
         "aufraeumlauf": await _aufraeumlauf_stand(),
+        # Pruefbericht 20.09.2026 (AL-21): Umgebungswerte, die eine Grenze
+        # verletzt haben und geklemmt wurden (konfig.zahl_env/kommazahl_env).
+        "geklemmte_werte": {n: {"eingestellt": r, "wirksam": w}
+                            for n, (r, w) in __import__("konfig").GEKLEMMT.items()},
     }
 
 

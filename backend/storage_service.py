@@ -34,6 +34,8 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm", ".pdf"}
 MAX_FILE_MB = 25
 
 _KEY_RE = re.compile(r"^[a-z0-9_\-]+(/[A-Za-z0-9_\-.]+)+$")
+#: Pruefbericht 20.09.2026 (SV-10): Blockgroesse beim Stroemen grosser Dateien
+BLOCK_BYTES = 1024 * 1024
 
 
 class StorageError(ValueError):
@@ -262,6 +264,31 @@ class LocalDiskStorage:
             raise StorageError("Datei nicht gefunden")
         return path.read_bytes()
 
+    def groesse(self, key: str) -> int:
+        """Pruefbericht 20.09.2026 (SV-10): Dateigroesse ohne Laden."""
+        _validate_key(key)
+        path = self.root / key
+        if not path.is_file():
+            raise StorageError("Datei nicht gefunden")
+        return path.stat().st_size
+
+    def bloecke(self, key: str, start: int, ende: int, blockgroesse: int = BLOCK_BYTES):
+        """SV-10: Bytes start..ende (einschliesslich) in Bloecken liefern —
+        blockierender Generator, vom Aufrufer im Speicher-Pool getrieben."""
+        _validate_key(key)
+        path = self.root / key
+        if not path.is_file():
+            raise StorageError("Datei nicht gefunden")
+        rest = ende - start + 1
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            while rest > 0:
+                block = fh.read(min(blockgroesse, rest))
+                if not block:
+                    return
+                rest -= len(block)
+                yield block
+
     def delete(self, key: str) -> bool:
         _validate_key(key)
         path = self.root / key
@@ -379,6 +406,43 @@ class S3Storage:
                 raise StorageError("Datei nicht gefunden") from exc
             raise
         return obj["Body"].read()
+
+    def groesse(self, key: str) -> int:
+        """Pruefbericht 20.09.2026 (SV-10): Objektgroesse per HEAD."""
+        _validate_key(key)
+        try:
+            kopf = self.client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            if _ist_nicht_gefunden(exc):
+                raise StorageError("Datei nicht gefunden") from exc
+            raise
+        return int(kopf.get("ContentLength", 0))
+
+    def bloecke(self, key: str, start: int, ende: int, blockgroesse: int = BLOCK_BYTES):
+        """SV-10: Bytes start..ende (einschliesslich) als Bloecke — EIN
+        Range-GET, der Koerper wird stueckweise gelesen (nie ganz im Speicher).
+        Blockierender Generator; das Schliessen (auch bei Abbruch des
+        Aufrufers) gibt die Verbindung frei."""
+        _validate_key(key)
+        try:
+            obj = self.client.get_object(Bucket=self.bucket, Key=key,
+                                         Range=f"bytes={start}-{ende}")
+        except Exception as exc:  # noqa: BLE001
+            if _ist_nicht_gefunden(exc):
+                raise StorageError("Datei nicht gefunden") from exc
+            raise
+        koerper = obj["Body"]
+        try:
+            while True:
+                block = koerper.read(blockgroesse)
+                if not block:
+                    return
+                yield block
+        finally:
+            try:
+                koerper.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def delete(self, key: str) -> bool:
         _validate_key(key)
@@ -546,6 +610,30 @@ async def save_async(key: str, data: bytes) -> str:
 
 async def load_async(key: str) -> bytes:
     return await speicher_aufruf(storage.load, key)
+
+
+async def groesse_async(key: str) -> int:
+    """Pruefbericht 20.09.2026 (SV-10): Groesse ohne Laden (stat bzw. HEAD)."""
+    return await speicher_aufruf(storage.groesse, key)
+
+
+async def bloecke_async(key: str, start: int, ende: int):
+    """SV-10: Bytes start..ende als asynchroner Block-Strom. Jeder Block wird
+    im Speicher-Pool gelesen (kein blockierendes Lesen in der Ereignisschleife);
+    bricht der Empfaenger ab, wird der blockierende Generator geschlossen
+    (bei S3 gibt das die Verbindung frei)."""
+    lesen = storage.bloecke(key, start, ende)
+    try:
+        while True:
+            block = await speicher_aufruf(next, lesen, None)
+            if block is None:
+                return
+            yield block
+    finally:
+        try:
+            lesen.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def delete_async(key: str) -> bool:

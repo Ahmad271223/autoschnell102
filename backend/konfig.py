@@ -20,12 +20,30 @@ log = logging.getLogger("autohandel")
 
 # name -> roher Wert, der sich nicht lesen liess (fuer production_check)
 FEHLERHAFT: Dict[str, str] = {}
+# Pruefbericht 20.09.2026 (AL-21): name -> (eingestellt, wirksam) fuer Werte,
+# die unten/oben verletzt haben und geklemmt wurden. Bisher stand das nur
+# als Warnung im Log; jetzt sehen es production_check und /admin/betrieb.
+GEKLEMMT: Dict[str, tuple] = {}
+
+
+def _klemmen(name: str, wert, unten, oben):
+    """unten/oben durchsetzen, Verletzung in GEKLEMMT festhalten (AL-21)."""
+    roh = wert
+    if unten is not None and wert < unten:
+        log.warning("%s=%s liegt unter %s — wird auf %s gesetzt", name, wert, unten, unten)
+        wert = unten
+    if oben is not None and wert > oben:
+        log.warning("%s=%s liegt ueber %s — wird auf %s gesetzt", name, wert, oben, oben)
+        wert = oben
+    if wert != roh:
+        GEKLEMMT[name] = (roh, wert)
+    return wert
 
 
 def zahl_env(name: str, standard: int, *, unten: Optional[int] = None,
              oben: Optional[int] = None) -> int:
     """Ganze Zahl aus der Umgebung; leer -> Standard; unlesbar -> Standard +
-    Eintrag in FEHLERHAFT; unten/oben begrenzen mit Warnung."""
+    Eintrag in FEHLERHAFT; unten/oben begrenzen mit Warnung (+ GEKLEMMT)."""
     roh = os.environ.get(name, "")
     roh = roh.strip() if isinstance(roh, str) else ""
     if not roh:
@@ -44,13 +62,30 @@ def zahl_env(name: str, standard: int, *, unten: Optional[int] = None,
                 log.error("%s=%r ist keine ganze Zahl — Standard %s wird verwendet",
                           name, roh, standard)
                 wert = int(standard)
-    if unten is not None and wert < unten:
-        log.warning("%s=%s liegt unter %s — wird auf %s gesetzt", name, wert, unten, unten)
-        wert = unten
-    if oben is not None and wert > oben:
-        log.warning("%s=%s liegt ueber %s — wird auf %s gesetzt", name, wert, oben, oben)
-        wert = oben
-    return wert
+    return _klemmen(name, wert, unten, oben)
+
+
+def kommazahl_env(name: str, standard: float, *, unten: Optional[float] = None,
+                  oben: Optional[float] = None) -> float:
+    """Pruefbericht 20.09.2026 (P-19): Kommazahl aus der Umgebung — dieselben
+    Regeln wie zahl_env (leer -> Standard, unlesbar -> Standard + FEHLERHAFT,
+    unten/oben klemmen). Vorher las email_service RESEND_RATE/-WARTEN_MAX roh
+    per float(): ein Tippfehler brach jeden Mailversand beim Import ab."""
+    roh = os.environ.get(name, "")
+    roh = roh.strip() if isinstance(roh, str) else ""
+    if not roh:
+        wert = float(standard)
+    else:
+        try:
+            wert = float(roh.replace(",", "."))
+            if wert != wert or wert in (float("inf"), float("-inf")):
+                raise ValueError(roh)
+        except ValueError:
+            FEHLERHAFT[name] = roh
+            log.error("%s=%r ist keine Zahl — Standard %s wird verwendet",
+                      name, roh, standard)
+            wert = float(standard)
+    return _klemmen(name, wert, unten, oben)
 
 
 def zahl_pruefen(name: str) -> Optional[str]:

@@ -1091,6 +1091,7 @@ async def run_job_worker_forever(db) -> None:
             if frei > 0:
                 for job in await _claim_many(db, frei):
                     laufend.add(asyncio.create_task(_process(db, job)))
+            from server import worker_erfolg; worker_erfolg("link_jobs")  # noqa: E702 — Pruefbericht 20.09. SV-05: Durchlauf geschafft
         except Exception as exc:  # noqa: BLE001
             log.warning("link job loop error: %s", exc)
         await asyncio.sleep(0.3)

@@ -746,6 +746,7 @@ async def run_beweis_worker_forever(db) -> None:
             if time.monotonic() - letzte_aufraeumung > 60:
                 letzte_aufraeumung = time.monotonic()
                 await _aufraeumen(db)
+            from server import worker_erfolg; worker_erfolg("beweise")  # noqa: E702 — Pruefbericht 20.09. SV-05: Durchlauf geschafft
             await sperre.acquire()
             try:
                 doc = await _beanspruchen(db)

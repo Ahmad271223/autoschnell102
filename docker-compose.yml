@@ -135,6 +135,8 @@ services:
       - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
       - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
       - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-3000}
+      # Pruefbericht 20.09.2026 (SV-10): IP-Limit fuer /api/files
+      - DATEI_LIMIT=${DATEI_LIMIT:-3000}
       # Weiterverkauf, Regeln vom 20.09.2026 (Ahmad): Beschreibung 500
       # Zeichen, hoechstens 10 eigene Fotos je Inserat, Laufzeit 3
       # Wochen — danach verschwindet die Anzeige samt Fotos von selbst
@@ -309,6 +311,10 @@ services:
       # Backups: lokal im Volume + verschluesselte Offsite-Kopie (S3-kompatibel)
       - BACKUP_DIR=/backups
       - BACKUP_HOUR=${BACKUP_HOUR:-3}
+      # Pruefbericht 20.09.2026 (AL-20): sichert dieser Server? (prod2: false)
+      - BACKUP_AKTIV=${BACKUP_AKTIV:-true}
+      # AL-11: Takt der Pruefsummen-Nachrechnung des juengsten guten Backups
+      - BACKUP_PRUEFSUMMEN_TAGE=${BACKUP_PRUEFSUMMEN_TAGE:-7}
       - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
       # Eigene Adresse, falls der Sicherungs-Bucket in einer anderen Zone
       # liegt (bei Cloudflare R2 hat die EU-Zone eine eigene Adresse).

@@ -29,11 +29,22 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from backup_bewertung import inkonsistenz, ist_gut, ist_stichtagsgenau, mangel
+from backup_bewertung import (BESCHAEDIGT_FELD, inkonsistenz, ist_gut,
+                              ist_stichtagsgenau, mangel)
 from deps import log
 
-from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
+from konfig import schalter_env, zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
 BACKUP_HOUR = zahl_env("BACKUP_HOUR", 3, unten=0, oben=23)
+#: Pruefbericht 20.09.2026 (AL-11): alle so viele Tage die Pruefsummen des
+#: juengsten guten Backups nachrechnen (je Server, siehe pruefsummen_nachrechnen)
+PRUEFSUMMEN_INTERVALL_TAGE = zahl_env("BACKUP_PRUEFSUMMEN_TAGE", 7, unten=1)
+
+
+def backup_aktiv() -> bool:
+    """Pruefbericht 20.09.2026 (AL-20): sichert DIESER Server? BACKUP_AKTIV
+    (Standard true). Auf einem Server bewusst false setzen (z. B. prod2),
+    damit die lokalen Sicherungen nicht mal hier, mal dort liegen."""
+    return schalter_env("BACKUP_AKTIV", True)
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", r"C:\AutoSchnell-Backups")
                   if sys.platform == "win32"
                   else os.environ.get("BACKUP_DIR", "/var/backups/autoschnell"))
@@ -370,6 +381,133 @@ def _seconds_until_next_run() -> float:
     return (nxt - now).total_seconds()
 
 
+# ---- Pruefsummen-Nachrechnung (Pruefbericht 20.09.2026, AL-11) ----
+# ist_gut() bewertete nur Manifest-Felder; ob die .bson.gz auf der Platte
+# noch zum Manifest passen, pruefte bis jetzt nur der Restore selbst (und
+# offsite_pruefen.py --laden von Hand). Eine kippende Platte haette man also
+# erst im Notfall bemerkt. Jetzt rechnet jeder Server alle
+# PRUEFSUMMEN_INTERVALL_TAGE die SHA-256 seines juengsten guten Backups nach;
+# eine Abweichung setzt einen Betriebsalarm und markiert das Manifest als
+# "beschaedigt" — damit liefert ist_gut() False (Rotation, Restore, /ready,
+# Nachholung suchen sich das naechste gute).
+_PRUEFSUMMEN_MERKER = ".pruefsummen.json"
+
+
+def _sha256(p: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _pruefsummen_vergleichen(ordner: Path, manifest: dict) -> list:
+    """Blockierend: jede Datei aus manifest['files'] nachrechnen. Liefert die
+    Abweichungen (leer = alles in Ordnung)."""
+    fehler = []
+    for rel, info in sorted((manifest.get("files") or {}).items()):
+        f = ordner / rel
+        if not f.is_file():
+            fehler.append(f"fehlt: {rel}")
+            continue
+        try:
+            if f.stat().st_size != int(info.get("bytes", -1)):
+                fehler.append(f"Groesse weicht ab: {rel}")
+            elif _sha256(f) != info.get("sha256"):
+                fehler.append(f"Pruefsumme falsch: {rel}")
+        except OSError as exc:
+            fehler.append(f"nicht lesbar: {rel} ({exc})")
+    return fehler
+
+
+def _manifest_schreiben(ordner: Path, manifest: dict) -> None:
+    tmp = ordner / "manifest.json.tmp"
+    tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, ordner / "manifest.json")
+
+
+def _pruefsummen_merker_lesen() -> dict:
+    try:
+        m = json.loads((BACKUP_DIR / _PRUEFSUMMEN_MERKER).read_text(encoding="utf-8"))
+        return m if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def pruefsummen_faellig() -> bool:
+    """Ist die Nachrechnung fuer das juengste gute Backup dran? (noch nie,
+    anderes Backup als beim letzten Mal, oder laenger als das Intervall her)"""
+    for p in _backup_ordner():
+        if _ist_gut(_manifest(p)):
+            merker = _pruefsummen_merker_lesen()
+            if merker.get("ordner") != p.name:
+                return True
+            try:
+                zeit = datetime.fromisoformat(str(merker.get("geprueft")))
+            except (TypeError, ValueError):
+                return True
+            if zeit.tzinfo is None:
+                zeit = zeit.replace(tzinfo=timezone.utc)
+            return _alter_stunden(zeit) >= PRUEFSUMMEN_INTERVALL_TAGE * 24
+    return False
+
+
+async def pruefsummen_nachrechnen(db=None, *, erzwingen: bool = False):
+    """AL-11: Pruefsummen des juengsten GUTEN lokalen Backups nachrechnen.
+
+    Liefert None (nichts faellig / kein gutes Backup) oder
+    {"ordner", "dateien", "fehler": [...]}. Bei Abweichung: Betriebsalarm
+    backup_beschaedigt und Manifest-Feld "beschaedigt" (ist_gut -> False).
+    Wirft nie."""
+    try:
+        if not erzwingen and not pruefsummen_faellig():
+            return None
+        ziel = None
+        for p in _backup_ordner():
+            m = _manifest(p)
+            if _ist_gut(m):
+                ziel = (p, m)
+                break
+        if ziel is None:
+            return None
+        ordner, manifest = ziel
+        log.info("[backup] Pruefsummen-Nachrechnung: %s", ordner.name)
+        fehler = await asyncio.to_thread(_pruefsummen_vergleichen, ordner, manifest)
+        ergebnis = {"ordner": ordner.name, "dateien": len(manifest.get("files") or {}),
+                    "fehler": fehler, "geprueft": datetime.now(timezone.utc).isoformat()}
+        if fehler:
+            grund = (f"Pruefsummen-Nachrechnung am {ergebnis['geprueft'][:10]}: "
+                     + "; ".join(fehler[:5])
+                     + (f" (+{len(fehler) - 5} weitere)" if len(fehler) > 5 else ""))
+            log.error("[backup] BESCHAEDIGT: %s — %s", ordner.name, grund)
+            try:
+                manifest[BESCHAEDIGT_FELD] = grund
+                await asyncio.to_thread(_manifest_schreiben, ordner, manifest)
+            except Exception as exc:  # noqa: BLE001
+                log.error("[backup] Manifest %s nicht markierbar: %s", ordner.name, exc)
+            await _alarm(db, "backup_beschaedigt", ordner.name, grund=grund,
+                         hinweis="Lokale Sicherung passt nicht mehr zum Manifest "
+                                 "(Platte pruefen). Sie zaehlt nicht mehr als gutes "
+                                 "Backup; naechste Sicherung abwarten oder von Hand "
+                                 "starten, Offsite-Kopie mit offsite_pruefen.py --laden "
+                                 "pruefen.")
+            await stand_speichern(db)
+        else:
+            log.info("[backup] Pruefsummen in Ordnung: %s (%d Dateien)",
+                     ordner.name, ergebnis["dateien"])
+        try:
+            (BACKUP_DIR / _PRUEFSUMMEN_MERKER).write_text(
+                json.dumps({"ordner": ordner.name, "geprueft": ergebnis["geprueft"],
+                            "fehler": fehler}), encoding="utf-8")
+        except OSError as exc:
+            log.warning("[backup] Pruefsummen-Merker nicht geschrieben: %s", exc)
+        return ergebnis
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[backup] Pruefsummen-Nachrechnung nicht moeglich: %s", exc)
+        return None
+
+
 async def run_backup_forever(db=None) -> None:
     """Backup-Schleife. Bei mehreren Worker-Prozessen (WEB_CONCURRENCY>1)
     sorgt eine Sperre in MongoDB dafuer, dass pro Tag nur EIN Worker das
@@ -421,6 +559,9 @@ async def run_backup_forever(db=None) -> None:
         if not await _lauf_mit_sperre():
             fehlversuche = 1
     while True:
+        # AL-11: nach jedem (Nach-)Lauf, wenn faellig — im Thread, blockiert
+        # die Schleife nicht laenger als die Sicherung selbst.
+        await pruefsummen_nachrechnen(db)
         wait = _seconds_until_next_run()
         if fehlversuche:
             # Phase 3 (F3): nach einem Fehlschlag in einer Stunde erneut (bis 3x)

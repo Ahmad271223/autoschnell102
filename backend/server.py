@@ -33,13 +33,13 @@ import traceback
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from rate_limiter import SlidingWindowRateLimiter
-from konfig import zahl_env
+from konfig import schalter_env, zahl_env
 import wartung
 
 from auth import hash_password
@@ -218,6 +218,21 @@ WORKER_STATUS: dict = {}
 #: Pruefbericht 20.09.2026 (SV-06): starke Referenzen auf die Hintergrund-
 #: Tasks — die Ereignisschleife haelt Tasks nur schwach (Python-Doku).
 _HINTERGRUND: set = set()
+#: Pruefbericht 20.09.2026 (SV-05): Takt (Sekunden), in dem ein Job seinen
+#: Erfolg stempelt (worker_erfolg). /api/ready wertet "kein Erfolg seit
+#: 3 x Takt" als Fehler — die Schleifen fangen intern alles, "laeuft" allein
+#: sagte also nichts darueber, ob sie noch etwas zustande bringen.
+#: link_jobs/beweise: Schleifen im Sekundentakt, 30 s ohne Durchlauf ist ein
+#: Problem; aufraeumen: ein Durchlauf je Stunde (CLEANUP_INTERVAL_SECONDS).
+WORKER_TAKT_S = {"link_jobs": 30, "beweise": 30, "aufraeumen": 60 * 60}
+
+
+def worker_erfolg(name: str) -> None:
+    """SV-05: erfolgreicher Durchlauf eines Hintergrundjobs — von den
+    Schleifen (link_jobs, beweis_service, cleanup_service) aufgerufen."""
+    st = WORKER_STATUS.get(name)
+    if st is not None:
+        st["letzter_erfolg"] = now_iso()
 
 
 def _worker_starten(name: str, fabrik) -> None:
@@ -301,6 +316,54 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
     eines nackten 500 ohne CORS-Header, der im Browser als 'Network Error'
     erscheint."""
 
+    #: Pruefbericht 20.09.2026 (SV-09): so lange darf das Festhalten in der
+    #: Datenbank die 500-Antwort hoechstens verzoegern.
+    DB_ZEITLIMIT_S = 1.0
+
+    async def _festhalten(self, request: Request, exc: Exception, err_id: str, tb: str) -> str:
+        """Fehler in error_logs schreiben (Dedup + Deckel); liefert die
+        Referenz (bei einem Duplikat die des ersten Eintrags)."""
+        # Rollenprüfung 22.09.2026 (RP-547): Jeder Aufruf schrieb bis
+        # zu 8 KB Traceback in error_logs — ohne Zusammenfassen und
+        # ohne Obergrenze (die galten nur fuer /client-errors). Ein
+        # oeffentlicher Weg, der wiederholt scheitert (fehlende Datei
+        # im Objektspeicher, logo/ ohne Signatur), fuellte so die
+        # Sammlung. Jetzt wie bei /client-errors: gleicher Weg + Typ
+        # + Meldung in 10 Minuten wird hochgezaehlt, und ab
+        # ERROR_LOG_MAX wird nichts Neues mehr angelegt.
+        import hashlib as _hashlib
+        pfad = str(request.url.path)[:300]
+        nachricht = redigieren(str(exc))[:1000]
+        hash_ = _hashlib.sha256(
+            f"backend|{request.method}|{pfad}|{type(exc).__name__}|{nachricht}"
+            .encode("utf-8")).hexdigest()[:24]
+        frist = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        dup = await db.error_logs.find_one_and_update(
+            {"hash": hash_, "created_at": {"$gte": frist}},
+            {"$inc": {"anzahl": 1}, "$set": {"zuletzt": now_iso()}},
+            projection={"_id": 0, "id": 1})
+        if dup:
+            return dup.get("id") or err_id
+        if await db.error_logs.estimated_document_count() < \
+                int(os.environ.get("ERROR_LOG_MAX", "20000") or 20000):
+            await db.error_logs.insert_one({
+                "id": err_id,
+                "source": "backend",
+                "method": request.method,
+                "path": pfad,
+                "error_type": type(exc).__name__,
+                "message": nachricht,
+                "traceback": tb[-8000:],
+                "ip": (request.client.host if request.client else "") or "",
+                "hash": hash_, "anzahl": 1,
+                "status": "open",
+                "created_at": now_iso(),
+            })
+        else:
+            log.error("error_logs voll (ERROR_LOG_MAX) — Fehler %s nur im Protokoll",
+                      err_id[:8])
+        return err_id
+
     async def dispatch(self, request: Request, call_next) -> Response:
         try:
             return await call_next(request)
@@ -310,45 +373,13 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
             log.exception("Unhandled error on %s %s (ref=%s)",
                           request.method, request.url.path, err_id[:8])
             try:
-                # Rollenprüfung 22.09.2026 (RP-547): Jeder Aufruf schrieb bis
-                # zu 8 KB Traceback in error_logs — ohne Zusammenfassen und
-                # ohne Obergrenze (die galten nur fuer /client-errors). Ein
-                # oeffentlicher Weg, der wiederholt scheitert (fehlende Datei
-                # im Objektspeicher, logo/ ohne Signatur), fuellte so die
-                # Sammlung. Jetzt wie bei /client-errors: gleicher Weg + Typ
-                # + Meldung in 10 Minuten wird hochgezaehlt, und ab
-                # ERROR_LOG_MAX wird nichts Neues mehr angelegt.
-                import hashlib as _hashlib
-                pfad = str(request.url.path)[:300]
-                nachricht = redigieren(str(exc))[:1000]
-                hash_ = _hashlib.sha256(
-                    f"backend|{request.method}|{pfad}|{type(exc).__name__}|{nachricht}"
-                    .encode("utf-8")).hexdigest()[:24]
-                frist = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-                dup = await db.error_logs.find_one_and_update(
-                    {"hash": hash_, "created_at": {"$gte": frist}},
-                    {"$inc": {"anzahl": 1}, "$set": {"zuletzt": now_iso()}},
-                    projection={"_id": 0, "id": 1})
-                if dup:
-                    err_id = dup.get("id") or err_id
-                elif await db.error_logs.estimated_document_count() < \
-                        int(os.environ.get("ERROR_LOG_MAX", "20000") or 20000):
-                    await db.error_logs.insert_one({
-                        "id": err_id,
-                        "source": "backend",
-                        "method": request.method,
-                        "path": pfad,
-                        "error_type": type(exc).__name__,
-                        "message": nachricht,
-                        "traceback": tb[-8000:],
-                        "ip": (request.client.host if request.client else "") or "",
-                        "hash": hash_, "anzahl": 1,
-                        "status": "open",
-                        "created_at": now_iso(),
-                    })
-                else:
-                    log.error("error_logs voll (ERROR_LOG_MAX) — Fehler %s nur im Protokoll",
-                              err_id[:8])
+                # SV-09: mit Zeitlimit — bei einer Datenbankstoerung wartete
+                # jede Fehlerantwort sonst bis zum Treiber-Timeout.
+                err_id = await asyncio.wait_for(
+                    self._festhalten(request, exc, err_id, tb), self.DB_ZEITLIMIT_S)
+            except asyncio.TimeoutError:
+                log.error("error_logs: Schreiben dauerte > %.0f s — Fehler %s nur im "
+                          "Protokoll", self.DB_ZEITLIMIT_S, err_id[:8])
             except Exception:
                 log.exception("error_logs write failed (ref=%s)", err_id[:8])
             return JSONResponse(
@@ -410,9 +441,13 @@ class WartungsmodusMiddleware(BaseHTTPMiddleware):
             WartungsmodusMiddleware._offene_schreiber -= 1
 
 
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(ErrorReportingMiddleware)
+# Pruefbericht 20.09.2026 (SV-08): die ZULETZT hinzugefuegte Schicht liegt
+# aussen. Vorher lag SecurityHeaders innen — die 503 des Wartungsmodus und
+# die 500 der Fehlermeldung trugen keine Sicherheitskopfzeilen und keinen
+# X-AH-Fassung. Jetzt: Wartung (innen) -> Fehlermeldung -> Sicherheit (aussen).
 app.add_middleware(WartungsmodusMiddleware)
+app.add_middleware(ErrorReportingMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @api.get("/")
@@ -632,23 +667,13 @@ async def readiness_check(request: Request, response: Response):
     return {"ready": ergebnis["ready"]}
 
 
-async def _readiness_pruefen():
-    """Die eigentliche Pruefung — Ergebnis und HTTP-Code."""
+def _platten_pruefen() -> tuple:
+    """Pruefbericht 20.09.2026 (SV-14): freier Platz und Schreibprobe der
+    lokalen Volumes — blockierend (mkdir, disk_usage, Schreiben), deshalb aus
+    _readiness_pruefen per asyncio.to_thread aufgerufen (vorher lief das im
+    Ereignisverwalter). Liefert (fehler, info)."""
     import shutil
-    from migrationen import ZIEL_VERSION, aktuelle_version
-    fehler, warnungen, info = [], [], {}
-    try:
-        await db.command("ping")
-        info["db"] = "up"
-    except Exception as exc:
-        fehler.append(f"db: {exc}")
-    try:
-        v = await aktuelle_version(db)
-        info["schema_version"] = v
-        if v < ZIEL_VERSION:
-            fehler.append(f"migration: Stand {v} < Ziel {ZIEL_VERSION}")
-    except Exception as exc:
-        fehler.append(f"migration: {exc}")
+    fehler, info = [], {}
     for name, pfad in (("uploads", ROOT_DIR / "uploads"),
                        ("snapshots", ROOT_DIR / "local_storage"),
                        ("backups", Path(os.environ.get("BACKUP_DIR") or (ROOT_DIR / "backups")))):
@@ -667,8 +692,38 @@ async def _readiness_pruefen():
                 probe.write_text("ok")
             finally:
                 probe.unlink(missing_ok=True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             fehler.append(f"{name}: nicht schreibbar ({exc})")
+    return fehler, info
+
+
+async def _readiness_pruefen():
+    """Die eigentliche Pruefung — Ergebnis und HTTP-Code."""
+    from migrationen import ZIEL_VERSION, aktuelle_version
+    fehler, warnungen, info = [], [], {}
+    try:
+        await db.command("ping")
+        info["db"] = "up"
+    except Exception as exc:
+        fehler.append(f"db: {exc}")
+    try:
+        v = await aktuelle_version(db)
+        info["schema_version"] = v
+        if v < ZIEL_VERSION:
+            fehler.append(f"migration: Stand {v} < Ziel {ZIEL_VERSION}")
+    except Exception as exc:
+        fehler.append(f"migration: {exc}")
+    try:
+        # SV-14: im Thread mit Zeitlimit — eine haengende Platte (NFS, volles
+        # Volume) hielt sonst die ganze Ereignisschleife an.
+        platte_fehler, platte_info = await asyncio.wait_for(
+            asyncio.to_thread(_platten_pruefen), 5)
+        fehler += platte_fehler
+        info.update(platte_info)
+    except asyncio.TimeoutError:
+        fehler.append("platte: Pruefung dauerte > 5 s (Volume haengt?)")
+    except Exception as exc:  # noqa: BLE001
+        fehler.append(f"platte: {exc}")
     if os.environ.get("S3_BUCKET"):
         # Pruefbericht 09/2026 (roter Befund): hier wurde eine Methode
         # gesucht, die es nirgends gab. Fehlte sie, wurde der Datei-Speicher
@@ -695,6 +750,15 @@ async def _readiness_pruefen():
                 except asyncio.TimeoutError:
                     ok = False
                 info["s3"] = "up" if ok else "nicht erreichbar"
+                if ok:
+                    # Pruefbericht 20.09.2026 (AL-17): der Alarm blieb nach
+                    # jeder kurzen Stoerung offen, bis ihn jemand quittierte.
+                    try:
+                        from betrieb import alarm_schliessen
+                        await alarm_schliessen(db, "datei_speicher_nicht_erreichbar",
+                                               ref=os.environ.get("S3_BUCKET", ""))
+                    except Exception:               # noqa: BLE001
+                        pass
                 if not ok:
                     warnungen.append("s3: nicht erreichbar")
                     # Runde 8, Befund 5 — bewusste Entscheidung: Ein Ausfall
@@ -777,8 +841,14 @@ async def _readiness_pruefen():
             warnungen.append("BETRIEB_MELDUNG_AN ist leer — Betriebsalarme werden an "
                              "niemanden gemeldet (sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=…)")
         alt = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        # Pruefbericht 20.09.2026 (SV-17): nur Jobs zaehlen, die der Worker
+        # ueberhaupt nehmen wuerde — aktiv und reif (Wartezeit nach einem
+        # Tempolimit abgelaufen). Vorher zaehlten auch abgesagte und bewusst
+        # zurueckgestellte Jobs als "haengend".
+        from link_jobs import _reif
         haengend = await db.link_jobs.count_documents(
-            {"status": "queued", "created_at": {"$lt": datetime.now(timezone.utc) - timedelta(minutes=15)}})
+            {"status": "queued", "active": True, **_reif(),
+             "created_at": {"$lt": datetime.now(timezone.utc) - timedelta(minutes=15)}})
         info["link_jobs_haengend"] = haengend
         if haengend:
             warnungen.append(f"{haengend} Link-Jobs warten > 15 min")
@@ -911,19 +981,38 @@ async def _readiness_pruefen():
     # Prozesslokale Teile: sie koennen sich nicht selbst heilen, ein Neustart
     # dieses Prozesses ist der Weg.
     _TEILE = {"link_worker": "Link-Abruf-Arbeiter",
-              "anbieter_grenze": "Anbieter-Begrenzung (provider_limiter)"}
+              "anbieter_grenze": "Anbieter-Begrenzung (provider_limiter)",
+              # Pruefbericht 20.09.2026 (AL-18): Index-Pruefung im wartenden
+              # Migrationszweig (migrationen "gewartet_mit_fehler")
+              "indizes": "Index-Anlage/-Pruefung beim Start (Migration)"}
     for schluessel, klartext in _TEILE.items():
         if BETRIEBSBEREIT.get(schluessel) is False:
             fehler.append(f"{klartext} ist beim Start gescheitert — "
                           "Protokoll pruefen und diesen Prozess neu starten")
     # Pruefung 14.09.2026 (Liste 1, Nr. 9-12): ein Hintergrundjob, der nicht
     # laeuft (Absturz, wartet auf Neustart), macht die Instanz nicht bereit.
+    # Pruefbericht 20.09.2026 (SV-05): und einer, der zwar laeuft, aber seit
+    # 3 x Takt keinen Durchlauf mehr geschafft hat (worker_erfolg), ebenfalls
+    # — nicht waehrend einer Schreibpause: da halten die Worker bewusst an.
+    schreibpause = bool(info.get("wartungsmodus"))
     for name, st in WORKER_STATUS.items():
         if not st.get("laeuft"):
             fehler.append(f"Hintergrundjob {name} laeuft nicht "
                           f"({st.get('letzter_fehler') or 'unbekannt'}; Neustarts: "
                           f"{st.get('neustarts', 0)})")
+            continue
+        takt = WORKER_TAKT_S.get(name)
+        bezug = st.get("letzter_erfolg") or st.get("seit") or ""
+        grenze = (datetime.now(timezone.utc) - timedelta(seconds=3 * takt)).isoformat() \
+            if takt else ""
+        if takt and bezug and bezug < grenze and not schreibpause:
+            fehler.append(f"Hintergrundjob {name}: kein erfolgreicher Durchlauf seit "
+                          f"{bezug[:16].replace('T', ' ')} UTC (> {3 * takt} s) — "
+                          "Protokoll pruefen")
     info["hintergrundjobs"] = dict(WORKER_STATUS)
+    # AL-20: sichert DIESER Server? (BACKUP_AKTIV; fuer einen Restore zaehlt
+    # der Offsite-Bucket bzw. der Server, den info["backup"] nennt)
+    info["backup_aktiv"] = schalter_env("BACKUP_AKTIV", True)
     info["betriebsbereit"] = {**BETRIEBSBEREIT, **{f"index_{k}": v
                                                    for k, v in steht.items()}}
     bereit = not fehler
@@ -960,23 +1049,84 @@ _DATEI_SIGNATUR_PFLICHT = (
     or os.environ.get("DATEI_SIGNATUR_PFLICHT", "true").strip().lower() not in ("0", "false", "no"))
 
 
+#: Pruefbericht 20.09.2026 (SV-10): ab dieser Groesse wird nicht mehr am Stueck
+#: geladen, sondern in Bloecken gestroemt (Videos bis 25 MB lagen vorher je
+#: Aufruf komplett im Speicher des Workers).
+DATEI_STREAM_AB = 1024 * 1024
+#: SV-10: IP-Limit fuer /api/files — dieselbe Ueberlegung wie BILD_PROXY_LIMIT
+#: (30 Sucher hinter EINER Adresse, viele Fotos je Seite).
+_datei_limiter = SlidingWindowRateLimiter(
+    max_attempts=zahl_env("DATEI_LIMIT", 3000, unten=100),
+    window_seconds=60, name="dateien")
+
+
+def _bereich_lesen(kopf: Optional[str], groesse: int):
+    """SV-10: Range-Kopf auswerten (RFC 7233, nur EIN Bereich).
+    Liefert (start, ende) einschliesslich, None ohne (brauchbaren) Kopf —
+    wirft ValueError, wenn der Bereich nicht erfuellbar ist (416)."""
+    if not kopf or not kopf.lower().startswith("bytes="):
+        return None
+    teil = kopf[6:].strip()
+    if "," in teil or "-" not in teil:
+        return None                      # mehrere Bereiche: ganze Datei
+    a, _, b = teil.partition("-")
+    try:
+        if a == "":                      # bytes=-500: die letzten 500
+            n = int(b)
+            if n <= 0:
+                raise ValueError(kopf)
+            return max(0, groesse - n), groesse - 1
+        start = int(a)
+        ende = int(b) if b else groesse - 1
+    except ValueError:
+        return None
+    if start >= groesse or start < 0 or ende < start:
+        raise ValueError(kopf)
+    return start, min(ende, groesse - 1)
+
+
 @app.get("/api/files/{key:path}")
-async def serve_file(key: str, exp: Optional[str] = None, sig: Optional[str] = None):
-    from storage_service import guess_media_type, load_async, StorageError
+async def serve_file(key: str, request: Request, exp: Optional[str] = None,
+                     sig: Optional[str] = None):
+    from storage_service import (StorageError, bloecke_async, groesse_async,
+                                 guess_media_type, load_async)
     from dateien import signatur_gueltig, signatur_noetig
+    from rate_limiter import client_ip
     if key.startswith(_PRIVATE_FILE_PREFIXES):
         return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
     geschuetzt = signatur_noetig(key)
     if geschuetzt and _DATEI_SIGNATUR_PFLICHT and not signatur_gueltig(key, exp, sig):
         return JSONResponse(status_code=403, content={"detail": "Link abgelaufen oder ungültig"})
+    if not await _datei_limiter.check(client_ip(request)):
+        return JSONResponse(status_code=429, content={"detail": "Zu viele Dateianfragen"},
+                            headers={"Retry-After": "60"})
+    cache = "private, max-age=300" if geschuetzt else "public, max-age=86400"
+    kopf = {"Cache-Control": cache, "Accept-Ranges": "bytes"}
+    medientyp = guess_media_type(key)
     try:
         # Heissester Pfad der App (jedes Foto/Video) — nie im Loop lesen.
-        data = await load_async(key)
+        groesse = await groesse_async(key)
+        bereich_kopf = request.headers.get("range")
+        if groesse <= DATEI_STREAM_AB and not bereich_kopf:
+            return Response(content=await load_async(key), media_type=medientyp,
+                            headers=kopf)
+        # SV-10: gross oder mit Range — in Bloecken aus dem Speicher stroemen,
+        # Content-Length steht fest, ein Bereich antwortet mit 206.
+        try:
+            bereich = _bereich_lesen(bereich_kopf, groesse)
+        except ValueError:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{groesse}"})
+        start, ende = bereich if bereich else (0, groesse - 1)
+        if groesse == 0:
+            return Response(content=b"", media_type=medientyp, headers=kopf)
+        kopf["Content-Length"] = str(ende - start + 1)
+        if bereich:
+            kopf["Content-Range"] = f"bytes {start}-{ende}/{groesse}"
+        return StreamingResponse(bloecke_async(key, start, ende),
+                                 status_code=206 if bereich else 200,
+                                 media_type=medientyp, headers=kopf)
     except StorageError:
         return JSONResponse(status_code=404, content={"detail": "Datei nicht gefunden"})
-    cache = "private, max-age=300" if geschuetzt else "public, max-age=86400"
-    return Response(content=data, media_type=guess_media_type(key),
-                    headers={"Cache-Control": cache})
 
 
 # ---------- Bild-Proxy fuer Inseratsfotos (10.09.2026) ----------
@@ -1039,7 +1189,10 @@ async def report_client_error(body: ClientErrorIn, request: Request):
     from rate_limiter import client_ip
     ip = client_ip(request)
     if not await _client_error_limiter.check(ip):
-        return {"ok": False}
+        # Pruefbericht 20.09.2026 (SV-11): 429 statt 200 {ok:false} — der
+        # Client soll die Sperre sehen, nicht einen Erfolg vermuten.
+        return JSONResponse(status_code=429, content={"ok": False, "hinweis": "Zu viele Meldungen"},
+                            headers={"Retry-After": "60"})
     import hashlib
     pfad = body.url.split("?")[0].split("#")[0][:500]
     nachricht = redigieren(body.message)[:1000]
@@ -1056,7 +1209,10 @@ async def report_client_error(body: ClientErrorIn, request: Request):
         return {"ok": True, "ref": dup["id"][:8], "dedup": True}
     maximum = int(os.environ.get("ERROR_LOG_MAX", "20000") or 20000)
     if await db.error_logs.estimated_document_count() >= maximum:
-        return {"ok": False, "hinweis": "Fehlerarchiv voll"}
+        # SV-11: 507 (Insufficient Storage) — der Aufraeumlauf kuerzt das
+        # Archiv auf 90 % des Deckels (cleanup_service.fehlerlogs_begrenzen),
+        # damit danach wieder Platz fuer neue Meldungen ist.
+        return JSONResponse(status_code=507, content={"ok": False, "hinweis": "Fehlerarchiv voll"})
     err_id = str(uuid.uuid4())
     await db.error_logs.insert_one({
         "id": err_id,
@@ -1645,9 +1801,21 @@ async def on_start():
                         "(vermutlich abgebrochene Sicherung)")
     except Exception as exc:  # noqa: BLE001
         log.warning("Wartungsmodus nicht pruefbar: %s", exc)
+    # Pruefbericht 20.09.2026 (SV-12): der wartende Web-Worker legt KEINE
+    # Indizes mehr an — das hat der CLI-Lauf (python migrationen.py) vor
+    # uvicorn schon getan; hier nur Zielversion + Stichprobe der kritischen
+    # Unique-Indizes (der Prozess antwortet waehrend des Lifespans nicht).
     ergebnis = await ausfuehren_oder_warten(
-        db, indexe=_alle_indexe, seeds=(seed_super_admin,))
+        db, indexe=_alle_indexe, seeds=(seed_super_admin,), indexe_im_wartenden=False)
     log.info("Migration/Indizes: %s", ergebnis)
+    if ergebnis == "gewartet_mit_fehler":
+        # AL-18: die Stichprobe (bzw. die Index-Anlage) im Wartezweig ist
+        # gescheitert — /api/ready meldet diesen Prozess als nicht bereit.
+        BETRIEBSBEREIT["indizes"] = False
+        log.error("Index-Pruefung im wartenden Prozess gescheitert — /api/ready meldet 503, "
+                  "Protokoll pruefen und Prozess neu starten")
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            raise SystemExit(78)
     # Phase 3 (3.6, A17/B20): in Produktion fail-closed — ohne die eindeutigen
     # Indizes (Dubletten in Altdaten) startet die Instanz nicht.
     try:
@@ -1752,9 +1920,16 @@ async def on_start():
     # Tägliches Backup (03:00, MongoDB + Datei-Speicher, 14 Tage Rotation).
     # Läuft im Backend selbst — kein OS-Scheduler nötig; holt beim Start
     # nach, wenn das letzte Backup älter als 24h ist.
+    # Pruefbericht 20.09.2026 (AL-20): BACKUP_AKTIV=false nimmt diesen Server
+    # aus der Sicherung (z. B. prod2) — sonst gewinnt mal der eine, mal der
+    # andere die Tagessperre und die lokalen Sicherungen liegen verstreut.
     try:
-        from backup_service import run_backup_forever
-        _worker_starten("backup", lambda: run_backup_forever(db))
+        from backup_service import backup_aktiv, run_backup_forever
+        if backup_aktiv():
+            _worker_starten("backup", lambda: run_backup_forever(db))
+        else:
+            log.info("Sicherung auf diesem Server aus (BACKUP_AKTIV=false) — "
+                     "massgeblich sind der Offsite-Bucket und der Server aus /api/ready")
     except Exception as exc:
         log.warning("backup task start failed: %s", exc)
         WORKER_STATUS["backup"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
@@ -1838,6 +2013,13 @@ async def _alle_indexe():
     await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
     await db.betriebsalarme.create_index([("offen", 1), ("created_at", -1)])
     await db.betriebsalarme.create_index([("typ", 1), ("ref", 1), ("offen", 1)])
+    # Pruefbericht 20.09.2026 (AL-16): hoechstens EIN offener Alarm je (typ,
+    # ref) — zwei gleichzeitige alarm()-Upserts legten sonst zwei Eintraege an
+    # (betrieb.alarm wiederholt bei DuplicateKey ohne upsert). Weich: Alt-
+    # dubletten sind nur ein Schoenheitsfehler, kein Startabbruch.
+    await unique_anlegen(db.betriebsalarme, [("typ", 1), ("ref", 1)],
+                         name="alarm_offen_je_typ_ref", weich=True,
+                         partialFilterExpression={"offen": True})
     # Pruefbericht 20.09.2026 (AL-04): geschlossene Alarme verfallen
     # (loeschen_ab setzen alarm_schliessen/quittieren; offene haben es nicht).
     await db.betriebsalarme.create_index("loeschen_ab", expireAfterSeconds=0,

@@ -13,8 +13,13 @@ mit Netzwerk-Mitgliedschaften, Merkliste, Verknuepfungen zu Firmen, Trennung
 offener Termine und Audit. Firmen und Sucher werden NIE angefasst.
 
 Aufruf (im Container):
-    python scripts/alte_kontonummern_loeschen.py              # nur anzeigen
-    python scripts/alte_kontonummern_loeschen.py --ausfuehren # wirklich loeschen
+    python scripts/alte_kontonummern_loeschen.py                            # nur anzeigen
+    python scripts/alte_kontonummern_loeschen.py --ausfuehren --erwartet 7  # wirklich loeschen
+
+Pruefbericht 20.09.2026 (SK-13): --ausfuehren verlangt --erwartet N (die
+Zahl aus dem Probelauf) — weicht die gefundene Anzahl ab, passiert nichts.
+Ziel (Host ohne Passwort, Datenbank) wird vorher ausgegeben; an einem
+Terminal wird zusaetzlich 'ja' abgefragt.
 """
 from __future__ import annotations
 
@@ -23,15 +28,41 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-async def _lauf(ausfuehren: bool) -> int:
+def _verschleiert(url: str) -> str:
+    """MONGO_URL ohne Passwort (SK-13)."""
+    try:
+        teile = urlsplit(url)
+        if teile.password:
+            return url.replace(f":{teile.password}@", ":***@")
+    except ValueError:
+        pass
+    return url
+
+
+def _bestaetigt(gefunden: int) -> bool:
+    """SK-13: an einem Terminal 'ja' verlangen; ohne Terminal (Pipe,
+    docker compose exec -T) gilt --erwartet als Bestaetigung."""
+    if not sys.stdin.isatty():
+        return True
+    try:
+        antwort = input(f"{gefunden} Konto/Konten unwiderruflich loeschen? [ja/nein] ")
+    except EOFError:
+        return False
+    return antwort.strip().lower() == "ja"
+
+
+async def _lauf(ausfuehren: bool, erwartet: int | None = None) -> int:
     from deps import db
     from kontonummer import ist_kontonummer
     import routes.admin as ADMIN
 
+    print(f"Ziel: {_verschleiert(os.environ.get('MONGO_URL', ''))}  "
+          f"Datenbank: {os.environ.get('DB_NAME') or db.name}")
     kaeufer = [k async for k in db.users.find(
         {"role": "b2b_buyer", "kontonummer": {"$type": "string"}},
         {"_id": 0, "id": 1, "kontonummer": 1, "company_name": 1, "contact_name": 1,
@@ -54,9 +85,19 @@ async def _lauf(ausfuehren: bool) -> int:
     if not alte_kaeufer and not alte_fahrer:
         print("Nichts zu tun — alle Zwischenhaendler und Fahrer tragen schon das neue Muster.")
         return 0
+    gefunden = len(alte_kaeufer) + len(alte_fahrer)
     if not ausfuehren:
-        print("\nPROBELAUF — nichts geloescht. Zum Loeschen: --ausfuehren")
+        print(f"\nPROBELAUF — nichts geloescht. Zum Loeschen: --ausfuehren --erwartet {gefunden}")
         return 0
+    # SK-13: Obergrenze/Gegenprobe — nur die Anzahl aus dem Probelauf
+    if erwartet is None or erwartet != gefunden:
+        print(f"\nABGEBROCHEN: gefunden {gefunden}, --erwartet "
+              f"{'fehlt' if erwartet is None else erwartet}. Erst Probelauf, dann "
+              f"--ausfuehren --erwartet {gefunden}. Nichts geloescht.")
+        return 1
+    if not _bestaetigt(gefunden):
+        print("Abgebrochen — nichts geloescht.")
+        return 1
 
     # Handelnder fuer das Audit: der Super-Admin (sonst ein Skript-Platzhalter).
     sa = await db.users.find_one({"role": "admin", "is_super_admin": True},
@@ -86,6 +127,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Zwischenhaendler und Fahrer mit alter Nummer loeschen")
     ap.add_argument("--ausfuehren", action="store_true",
                     help="wirklich loeschen (ohne diese Angabe nur Probelauf)")
+    ap.add_argument("--erwartet", type=int, default=None, metavar="N",
+                    help="Pflicht mit --ausfuehren: Anzahl der Konten aus dem Probelauf; "
+                         "weicht der Fund ab, wird nichts geloescht (SK-13)")
     args = ap.parse_args(argv)
     try:
         from dotenv import load_dotenv
@@ -94,7 +138,7 @@ def main(argv=None) -> int:
         pass
     if not os.environ.get("MONGO_URL"):
         os.environ["MONGO_URL"] = "mongodb://127.0.0.1:27017"
-    return asyncio.run(_lauf(args.ausfuehren))
+    return asyncio.run(_lauf(args.ausfuehren, args.erwartet))
 
 
 if __name__ == "__main__":

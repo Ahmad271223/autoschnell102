@@ -73,10 +73,28 @@ def inkonsistenz(manifest) -> str:
     return ""
 
 
+#: Pruefbericht 20.09.2026 (AL-11): Manifest-Feld, das die woechentliche
+#: Pruefsummen-Nachrechnung (backup_service.pruefsummen_nachrechnen) setzt,
+#: wenn eine Datei nicht mehr zum Manifest passt. Ein so markiertes Backup
+#: zaehlt nirgends mehr als gut (Rotation, Restore, /ready).
+BESCHAEDIGT_FELD = "beschaedigt"
+
+
+def beschaedigt(manifest) -> str:
+    """Grund, warum das Backup nachtraeglich als beschaedigt gilt ("" = nein)."""
+    if not isinstance(manifest, dict):
+        return ""
+    return str(manifest.get(BESCHAEDIGT_FELD) or "")
+
+
 def unvollstaendig(manifest) -> list:
     if not isinstance(manifest, dict):
         return []
-    return [str(x) for x in (manifest.get("unvollstaendig") or [])]
+    fehlend = [str(x) for x in (manifest.get("unvollstaendig") or [])]
+    grund = beschaedigt(manifest)
+    if grund:
+        fehlend.append("beschaedigt: " + grund)
+    return fehlend
 
 
 def mangel(manifest):

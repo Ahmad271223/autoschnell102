@@ -132,9 +132,14 @@ def _liste(wert) -> List[str]:
 # (Retry-After des Anbieters, sonst 0,5-4 s plus Zufall, zusammen hoechstens
 # RESEND_WARTEN_MAX Sekunden). Wiederholungen sind sicher, weil jede Mail
 # einen Idempotency-Key traegt (Resend stellt dann nicht doppelt zu).
-RESEND_PARALLEL = max(1, int(os.environ.get("RESEND_PARALLEL", "3") or 3))
-RESEND_VERSUCHE = max(1, int(os.environ.get("RESEND_VERSUCHE", "6") or 6))
-RESEND_WARTEN_MAX = float(os.environ.get("RESEND_WARTEN_MAX", "20") or 20)
+# Pruefbericht 20.09.2026 (P-19): ueber konfig statt int()/float() roh — das
+# Modul wird erst beim ersten Versand geladen, ein Tippfehler in der .env
+# brach vorher JEDEN Mailversand beim Import ab (production_check prueft
+# die Ganzzahlen jetzt ebenfalls).
+from konfig import kommazahl_env as _kommazahl_env, zahl_env as _zahl_env  # noqa: E402
+RESEND_PARALLEL = _zahl_env("RESEND_PARALLEL", 3, unten=1)
+RESEND_VERSUCHE = _zahl_env("RESEND_VERSUCHE", 6, unten=1)
+RESEND_WARTEN_MAX = _kommazahl_env("RESEND_WARTEN_MAX", 20.0, unten=0.0)
 # Nachpruefung 20.09.2026 (P1, gemessen mit scripts/lasttest_mailversand.py):
 # Die Obergrenze oben zaehlt GLEICHZEITIGE Anfragen, nicht Anfragen je
 # Sekunde — und sie gilt je Worker. Vier Worker auf zwei Servern duerfen
@@ -147,8 +152,8 @@ RESEND_WARTEN_MAX = float(os.environ.get("RESEND_WARTEN_MAX", "20") or 20)
 # Konto-Limit durch (RESEND_RATE geteilt durch RESEND_PROZESSE). Das
 # braucht keine gemeinsame Ablage — die Teilung ist fuer alle gleich.
 # RESEND_PROZESSE = Worker je Server x Server (Standard 4 x 2).
-RESEND_RATE = float(os.environ.get("RESEND_RATE", "10") or 10)
-RESEND_PROZESSE = max(1, int(os.environ.get("RESEND_PROZESSE", "8") or 8))
+RESEND_RATE = _kommazahl_env("RESEND_RATE", 10.0, unten=0.1)      # P-19
+RESEND_PROZESSE = _zahl_env("RESEND_PROZESSE", 8, unten=1)       # P-19
 _RESEND_VORUEBERGEHEND = {429, 500, 502, 503, 504}
 # Befund 106 (16.09.2026): nach diesen Antworten ist UNKLAR, ob Resend die
 # Mail angenommen hat (429 = sicher abgelehnt, 5xx = vielleicht angenommen).

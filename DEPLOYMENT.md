@@ -351,6 +351,8 @@ Platte in `backups_data`. Welcher das war, steht in `/api/ready` →
 http://localhost:8001/api/ready`, Quelle „Sicherung lief auf …“) und auf der
 Betriebsseite. Die Offsite-Kopie im Sicherungs-Bucket ist serverunabhängig —
 für einen Restore auf dem anderen Server von dort holen.
+`BACKUP_AKTIV=false` (Standard `true`, Prüfbericht AL-20) nimmt einen Server
+aus der Nachtsicherung heraus — dann läuft sie nur noch auf dem anderen.
 
 **Datei-Speicher seit 19.09.2026 (Entscheidung Ahmad): kein Spiegel mehr auf
 der Platte.** Vorher lud jeder nächtliche Lauf den *ganzen* S3-Bucket auf die

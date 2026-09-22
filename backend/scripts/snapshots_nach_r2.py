@@ -18,14 +18,49 @@ Aufruf (im Container, Ordner backend):
         # vollstaendig ist (Groesse stimmt ueberein)
 
 Sicher gegen Wiederholung: eine Datei, die im Objektspeicher schon mit
-richtiger Groesse liegt, wird uebersprungen. Exit 0 = alles wie erwartet.
+richtiger Groesse UND gleichem Inhalt liegt (Pruefbericht 20.09.2026, SK-11:
+SHA-256 im Metadatum `sha256`, ersatzweise ETag = MD5 bei Einteil-Upload),
+wird uebersprungen; nur dann wird mit --loeschen die lokale Kopie entfernt.
+Exit 0 = alles wie erwartet.
 """
 import argparse
+import hashlib
 import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _sha256(pfad: Path) -> str:
+    h = hashlib.sha256()
+    with open(pfad, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _md5(pfad: Path) -> str:
+    h = hashlib.md5()  # noqa: S324 — nur Vergleich mit dem S3-ETag, kein Schutzzweck
+    with open(pfad, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def inhalt_gleich(kopf: dict, pfad: Path, groesse: int, digest: str) -> bool:
+    """SK-11: Ist das Objekt nachweislich dieselbe Datei? Groesse gleich UND
+    (Metadatum sha256 gleich ODER — ohne Metadatum — ETag gleich dem MD5 der
+    Datei; ein Mehrteil-ETag mit '-' laesst sich so nicht pruefen -> False)."""
+    if int((kopf or {}).get("ContentLength", -1)) != groesse:
+        return False
+    meta_sha = ((kopf or {}).get("Metadata") or {}).get("sha256")
+    if meta_sha:
+        return meta_sha == digest
+    etag = str((kopf or {}).get("ETag") or "").strip('"')
+    if etag and "-" not in etag:
+        return etag.lower() == _md5(pfad)
+    return False
 
 
 def main() -> int:
@@ -75,11 +110,13 @@ def main() -> int:
         except st.StorageError as exc:
             fehler.append(f"{key}: {exc}")
             continue
+        digest = _sha256(pfad)
         vorhanden = False
         try:
             if speicher.exists(key):
                 kopf = speicher.client.head_object(Bucket=speicher.bucket, Key=key)
-                vorhanden = int(kopf.get("ContentLength", -1)) == groesse
+                # SK-11: Groesse allein genuegt nicht — Inhalt vergleichen
+                vorhanden = inhalt_gleich(kopf, pfad, groesse, digest)
         except Exception:                               # noqa: BLE001
             vorhanden = False
         if vorhanden:
@@ -89,15 +126,22 @@ def main() -> int:
             continue
         else:
             try:
-                speicher.save(key, pfad.read_bytes())
+                # SK-11: mit sha256-Metadatum (wie backup_mongo.offsite_hochladen),
+                # damit sich jeder spaetere Lauf am Inhalt orientieren kann.
+                speicher.client.put_object(Bucket=speicher.bucket, Key=key,
+                                           Body=pfad.read_bytes(),
+                                           Metadata={"sha256": digest})
                 kopf = speicher.client.head_object(Bucket=speicher.bucket, Key=key)
-                if int(kopf.get("ContentLength", -1)) != groesse:
-                    fehler.append(f"{key}: Groesse nach Upload weicht ab")
+                if not inhalt_gleich(kopf, pfad, groesse, digest):
+                    fehler.append(f"{key}: Inhalt nach Upload nicht bestaetigt "
+                                  f"(Groesse/Pruefsumme weicht ab)")
                     continue
                 hoch += 1
             except Exception as exc:                    # noqa: BLE001
                 fehler.append(f"{key}: {exc}")
                 continue
+        # Hierher kommt nur, was nachweislich mit gleichem Inhalt im
+        # Objektspeicher liegt — erst dann darf die lokale Kopie weg (SK-11).
         if args.wirklich and args.loeschen:
             try:
                 pfad.unlink()

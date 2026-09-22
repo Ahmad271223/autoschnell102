@@ -46,17 +46,28 @@ def _aufraeumen(client) -> None:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="as-restore-test-") as tmp:
-        print(f"[1/4] Backup nach {tmp} …")
+        print(f"[1/4] Backup nach {tmp} (nur Datenbank, ohne Offsite-Kopie) …")
+        # Pruefbericht 20.09.2026 (SK-12): die Probe lief mit der VOLLEN
+        # Umgebung — jedes Probe-Backup wanderte in den Offsite-Bucket und
+        # offsite_rotieren verdraengte dafuer das aelteste echte Archiv.
+        # Jetzt: kein Offsite-Upload, keine Dateisicherung (die Probe beweist
+        # die Datenbank-Wiederherstellung; Dateien prueft offsite_pruefen.py).
+        umgebung = {**os.environ, "BACKUP_S3_BUCKET": "", "BACKUP_DATEIEN": "aus"}
         r = subprocess.run([sys.executable, "-X", "utf8",
                             str(HIER / "backup_mongo.py"), "--dir", tmp],
-                           capture_output=True, text=True, timeout=1800)
+                           capture_output=True, text=True, timeout=1800, env=umgebung)
         # Runde 21: Exit 3 = BACKUP INKONSISTENT (Daten gesichert, aber nicht
         # stichtagsgleich) — die Wiederherstellung wird trotzdem geprobt.
         if r.returncode not in (0, 2, 3):
             print("BACKUP FEHLGESCHLAGEN:\n", r.stdout[-800:], r.stderr[-800:])
             return 1
-        dump = next(p for p in Path(tmp).iterdir()
-                    if p.is_dir() and p.name.startswith("autoschnell-"))
+        # SK-12: ohne Ordner klare Meldung statt StopIteration-Rueckverfolgung
+        dump = next((p for p in Path(tmp).iterdir()
+                     if p.is_dir() and p.name.startswith("autoschnell-")), None)
+        if dump is None:
+            print(f"BACKUP FEHLGESCHLAGEN: kein Ordner autoschnell-* unter {tmp} "
+                  f"(Exit {r.returncode}):\n", r.stdout[-800:], r.stderr[-800:])
+            return 1
         manifest = json.loads((dump / "manifest.json").read_text(encoding="utf-8"))
         fehlend = [str(x) for x in manifest.get("unvollstaendig") or []]
         grund = inkonsistenz(manifest)

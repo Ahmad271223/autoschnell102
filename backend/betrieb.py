@@ -15,9 +15,14 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from pymongo.errors import DuplicateKeyError
+
 from konfig import zahl_env
 
 log = logging.getLogger("autohandel.betrieb")
+
+#: Pruefbericht 20.09.2026 (AL-24): hoechstens so viele Detail-Schluessel je Alarm
+DETAILS_MAX = 20
 
 
 def _now() -> str:
@@ -43,16 +48,25 @@ async def alarm(db, typ: str, ref: str = "", **details) -> None:
     sondern hochgezaehlt. Darf selbst NIE eine Exception nach aussen
     werfen — der Alarm ist Beiwerk des eigentlichen Vorgangs."""
     try:
-        clean = {k: (v if isinstance(v, (str, int, float, bool)) or v is None
-                     else str(v)[:500]) for k, v in details.items()}
-        r = await db.betriebsalarme.update_one(
-            {"typ": typ, "ref": ref or "", "offen": True},
-            {"$inc": {"anzahl": 1},
-             "$set": {"details": clean, "zuletzt": _now()},
-             "$setOnInsert": {"id": str(uuid.uuid4()), "typ": typ,
-                              "ref": ref or "", "offen": True,
-                              "created_at": _now()}},
-            upsert=True)
+        # Pruefbericht 20.09.2026 (AL-24): auch Zeichenketten auf 500 Zeichen
+        # kuerzen (vorher landeten lange Fehlertexte vollstaendig im Alarm)
+        # und hoechstens DETAILS_MAX Schluessel — der Alarm ist Beiwerk.
+        clean = {k: (v if isinstance(v, (int, float, bool)) or v is None
+                     else str(v)[:500])
+                 for k, v in list(details.items())[:DETAILS_MAX]}
+        aenderung = {"$inc": {"anzahl": 1},
+                     "$set": {"details": clean, "zuletzt": _now()},
+                     "$setOnInsert": {"id": str(uuid.uuid4()), "typ": typ,
+                                      "ref": ref or "", "offen": True,
+                                      "created_at": _now()}}
+        filter_ = {"typ": typ, "ref": ref or "", "offen": True}
+        try:
+            r = await db.betriebsalarme.update_one(filter_, aenderung, upsert=True)
+        except DuplicateKeyError:
+            # AL-16: zwei gleichzeitige Aufrufe, der andere hat den offenen
+            # Eintrag gerade angelegt (Teil-Unique-Index alarm_offen_je_typ_ref)
+            # — einmal ohne upsert nachzaehlen.
+            r = await db.betriebsalarme.update_one(filter_, aenderung)
         if r.upserted_id is not None:
             log.error("BETRIEBSALARM %s (%s): %s", typ, ref, clean)
             if (ref or "") != SAMMEL_REF:

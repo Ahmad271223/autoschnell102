@@ -175,8 +175,10 @@ def _vom_code_gelesen() -> set:
         # Pruefbericht 20.09.2026 (DP-03): auch die Lese-Helfer (konfig.zahl_env
         # und Verwandte). Sechs Namen, die NUR so gelesen werden, fehlten im
         # Container — die Suche nach os.environ konnte sie nicht sehen.
+        # Pruefbericht 20.09.2026 (P-19): auch kommazahl_env (email_service)
         gelesen |= set(re.findall(
-            r'\b(?:zahl_env|_zahl_env|_int_env|schalter_env)\(\s*["\']([A-Z][A-Z0-9_]{2,})["\']',
+            r'\b(?:zahl_env|_zahl_env|_int_env|schalter_env|kommazahl_env|_kommazahl_env)'
+            r'\(\s*["\']([A-Z][A-Z0-9_]{2,})["\']',
             text))
     return gelesen
 
