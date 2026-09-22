@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { freigabeZaehlerAktualisieren } from "@/lib/freigaben";
@@ -390,6 +390,23 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
   );
 }
 
+/** Prüfbericht 20.09. U-164: der Server kappt die Warteliste und meldet das
+ *  per X-Truncated — dann "mindestens N" statt einer scheinbar vollen Zahl. */
+export function wartendUeberschrift(anzahl, gekuerzt) {
+  return gekuerzt
+    ? `Warten auf Freigabe (mindestens ${anzahl} — älteste nicht angezeigt)`
+    : `Warten auf Freigabe (${anzahl})`;
+}
+
+/** Prüfbericht 20.09. U-171: Fehlertext für einen getippten Preis, null wenn
+ *  er gesendet werden darf. preisAusText("0") liefert 0 (nicht null) — der
+ *  Server verlangt gt=0 und antwortete 422 mit englischem Text. */
+export function preisFehler(zahl) {
+  if (zahl === null) return "Bitte einen gültigen Preis eingeben, z. B. 15.000 oder 15000,50";
+  if (!(zahl > 0)) return "Der Preis muss größer als 0 sein – zum Entfernen „Auf Vertragspreis zurücksetzen“ nutzen.";
+  return null;
+}
+
 export default function Freigaben() {
   const { user } = useAuth();
   // 14.09.2026 (Wunsch Ahmad): "Nur der Firmenchef darf mit dem Fahrer vor Ort
@@ -398,15 +415,24 @@ export default function Freigaben() {
   const chef = user?.role === "dealer";
   const [liste, setListe] = useState(null);
   const [ladeFehler, setLadeFehler] = useState("");
+  const [gekuerzt, setGekuerzt] = useState(false);
   const [entwurf, setEntwurf] = useState({});
   const [busy, setBusy] = useState({});
+  // Prüfbericht 20.09. U-163: Intervall, Sichtbarwerden und "nach dem Senden"
+  // rufen laden() parallel — nur die zuletzt GESTARTETE Anfrage darf die
+  // Liste setzen, sonst gewann die zuletzt ankommende (ältere) Antwort.
+  const lauf = useRef(0);
 
   const laden = useCallback(async () => {
     if (!chef) { setListe([]); return; }
+    const n = ++lauf.current;
     try {
-      const { data } = await api.get("/protocols/zur-freigabe");
+      const r = await api.get("/protocols/zur-freigabe");
+      if (n !== lauf.current) return;
+      const data = r.data;
       const neu = Array.isArray(data) ? data : [];
       setListe(neu);
+      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
       setLadeFehler("");
       // Gegenpruefung 12.09.2026: Entwuerfe zu Protokollen, die nicht mehr
       // warten (abgeschlossen, zurueckgeschickt), verwerfen — sonst hielten
@@ -421,6 +447,7 @@ export default function Freigaben() {
         return JSON.stringify(erg) === JSON.stringify(s) ? s : erg;
       });
     } catch (e) {
+      if (n !== lauf.current) return;
       setLadeFehler(errMsg(e, "Freigaben konnten nicht geladen werden"));
       setListe((l) => l ?? []);
     }
@@ -451,8 +478,9 @@ export default function Freigaben() {
       const freigabe = !zurueck && !preis_zuruecksetzen;
       if (freigabe && String(eigener.preis ?? "").trim() !== "") {
         const zahl = preisAusText(eigener.preis);
-        if (zahl === null) {
-          toast.error("Bitte einen gültigen Preis eingeben, z. B. 15.000 oder 15000,50");
+        const fehler = preisFehler(zahl);
+        if (fehler) {
+          toast.error(fehler);
           return;
         }
         koerper.neuer_preis = zahl;
@@ -533,7 +561,9 @@ export default function Freigaben() {
 
       {wartend.length > 0 && (
         <div className="mt-6 space-y-4">
-          <div className="text-[12px] uppercase tracking-wider text-zinc-500">Warten auf Freigabe ({wartend.length})</div>
+          <div className="text-[12px] uppercase tracking-wider text-zinc-500" data-testid="freigaben-wartend-titel">
+            {wartendUeberschrift(wartend.length, gekuerzt)}
+          </div>
           {wartend.map((e) => (
             <Karte key={e.protocol_id} eintrag={e} entwurf={entwurf} setEntwurf={setEntwurf}
                    busy={Boolean(busy[e.protocol_id])} senden={senden} />

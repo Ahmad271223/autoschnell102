@@ -127,6 +127,25 @@ export default function Bestand() {
     }
   };
 
+  // Prüfbericht 20.09. U-44: Sucher haben hier keine Chef-Entscheidungen,
+  // aber wie in der Akte "Aus meiner Liste entfernen" — verschwindet nur bei
+  // ihnen, der Chef behält Fahrzeug, Vertrag, Termine und Historie.
+  const entfernen = async (vehicleId) => {
+    if (busy) return;
+    if (!window.confirm("Fahrzeug aus deiner Liste entfernen?\n"
+        + "Es verschwindet nur bei dir — der Chef behält Fahrzeug, Vertrag, Termine und Historie.")) return;
+    setBusy(vehicleId);
+    try {
+      await api.post(`/vehicles/${vehicleId}/entfernen`);
+      toast.success("Aus deiner Liste entfernt — der Chef behält das Fahrzeug");
+      load();
+    } catch (e) {
+      toast.error(errMsg(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // Offene Marktplatz-Anfragen (nur Chef — der Endpunkt ist dealer-only,
   // Sucher bekommen 403 und sehen still kein Banner).
   const { user } = useAuth();
@@ -176,7 +195,9 @@ export default function Bestand() {
         <div className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm"
              style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
           <AlertTriangle size={16} />
-          {pending} abgeholte(s) Fahrzeug(e) warten auf deine Entscheidung.
+          {/* Prüfbericht 20.09. U-44: Sucher entscheiden nicht (Knöpfe sind
+              chef-gated) — der Hinweis sagt ihnen, dass der Chef dran ist. */}
+          {pending} abgeholte(s) Fahrzeug(e) warten auf {chef ? "deine Entscheidung" : "die Entscheidung des Chefs"}.
         </div>
       )}
 
@@ -405,6 +426,14 @@ export default function Bestand() {
                         Fahrzeugakte
                       </Link>
                     </>
+                  )}
+                  {/* U-44: Sucher — nur aus der eigenen Liste entfernen (wie in der Akte) */}
+                  {!chef && (
+                    <button onClick={() => entfernen(v.id)} disabled={busy === v.id}
+                            data-testid={`bestand-sucher-entfernen-${v.id}`}
+                            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400 disabled:opacity-50">
+                      <Trash2 size={13} /> Aus meiner Liste entfernen
+                    </button>
                   )}
                 </div>
               </div>

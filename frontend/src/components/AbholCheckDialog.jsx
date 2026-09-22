@@ -79,14 +79,29 @@ const DEVIATION_TYPES = [
 ];
 
 const FUEL_LEVELS = ["leer", "1/4", "1/2", "3/4", "voll"];
+// Prüfbericht 20.09. K-25: Standardwerte — weichen Schlüssel oder Tankstand
+// davon ab, gilt der Dialog als ungespeichert (vorher zählten nur km/Notiz/
+// Abweichungen, ein geänderter Tankstand ging beim Verlassen still verloren).
+export const SCHLUESSEL_STANDARD = "2";
+export const TANK_STANDARD = "1/2";
+// K-05: dieselben Längen wie der Server (routes/drivers.py PickupReportIn).
+export const ABWEICHUNG_TEXT_MAX = 200;
+export const BEMERKUNG_MAX = 5000;
+
+/** K-25: hat der Fahrer schon etwas eingetragen, das verloren ginge? */
+export function abholCheckUngespeichert({ mileage, keys, fuel, notes, deviations }) {
+  return Boolean(mileage || (notes || "").trim() || (deviations || []).length
+    || String(keys ?? SCHLUESSEL_STANDARD) !== SCHLUESSEL_STANDARD
+    || (fuel ?? TANK_STANDARD) !== TANK_STANDARD);
+}
 
 export default function AbholCheckDialog({ appointment, onDone, onClose }) {
   const navigate = useNavigate();
   // RP-064/RP-163: gesicherten Zwischenstand dieser Fahrt wieder aufnehmen.
   const [start] = useState(() => entwurfLesen(appointment.id) || {});
   const [mileage, setMileage] = useState(start.mileage ?? "");
-  const [keys, setKeys] = useState(start.keys ?? "2");
-  const [fuel, setFuel] = useState(start.fuel ?? "1/2");
+  const [keys, setKeys] = useState(start.keys ?? SCHLUESSEL_STANDARD);
+  const [fuel, setFuel] = useState(start.fuel ?? TANK_STANDARD);
   const [notes, setNotes] = useState(start.notes ?? "");
   const [deviations, setDeviations] = useState(Array.isArray(start.deviations) ? start.deviations : []);
   const [busy, setBusy] = useState(false);
@@ -110,22 +125,23 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
     }).catch(() => { /* ohne Vorbelegung weiter */ });
     return () => { aktiv = false; };
   }, [appointment.id]);
+  const ungespeichert = abholCheckUngespeichert({ mileage, keys, fuel, notes, deviations });
   useEffect(() => {
-    if (!(mileage || notes.trim() || deviations.length)) return undefined;
+    if (!ungespeichert) return undefined;
     const t = setTimeout(() => {
       if (!berichtGespeichert.current) {
         entwurfSichern(appointment.id, { mileage, keys, fuel, notes, deviations, berichtId });
       }
     }, 400);
     return () => clearTimeout(t);
-  }, [appointment.id, mileage, keys, fuel, notes, deviations, berichtId]);
+  }, [appointment.id, ungespeichert, mileage, keys, fuel, notes, deviations, berichtId]);
   // Runde 21 (Gegenpruefung): Fotos, die gerade noch verkleinert werden —
   // solange darf nicht abgesendet werden (sonst fehlt das Foto im
   // unveraenderbaren Bericht).
   const [fotoLaeuft, setFotoLaeuft] = useState(0);
   // Runde 31: Kilometerstand, Abweichungen und Kamera-Fotos gehen erst beim
   // Absenden an den Server — bis dahin nicht still verlieren.
-  useUngespeichert(Boolean(mileage || notes.trim() || deviations.length));
+  useUngespeichert(ungespeichert);
 
   const addDeviation = () =>
     setDeviations((d) => [...d, {
@@ -326,14 +342,17 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
                 <Trash2 size={15} />
               </button>
             </div>
+            {/* K-05: Längen wie der Server — sonst 422 mit englischem Text erst beim Absenden */}
             <input value={d.label} onChange={(e) => updateDev(d.id, { label: e.target.value })}
-                   placeholder="Kurzbeschreibung, z.B. Kratzer hinten rechts *"
+                   placeholder="Kurzbeschreibung, z.B. Kratzer hinten rechts *" maxLength={ABWEICHUNG_TEXT_MAX}
                    className={inputCls} style={inputStyle} />
             <div className="grid grid-cols-2 gap-2">
               <input value={d.expected} onChange={(e) => updateDev(d.id, { expected: e.target.value })}
-                     placeholder="Laut Vertrag (z.B. 84.000 km)" className={inputCls} style={inputStyle} />
+                     placeholder="Laut Vertrag (z.B. 84.000 km)" maxLength={ABWEICHUNG_TEXT_MAX}
+                     className={inputCls} style={inputStyle} />
               <input value={d.actual} onChange={(e) => updateDev(d.id, { actual: e.target.value })}
-                     placeholder="Vor Ort (z.B. 85.120 km)" className={inputCls} style={inputStyle} />
+                     placeholder="Vor Ort (z.B. 85.120 km)" maxLength={ABWEICHUNG_TEXT_MAX}
+                     className={inputCls} style={inputStyle} />
             </div>
             <div className="flex items-center gap-2">
               <label className="inline-flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer hover:text-white">
@@ -350,7 +369,7 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
         <div className="mt-3">
           <label className="text-[11px] text-zinc-500">Bemerkungen (optional)</label>
           <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
-                    className={inputCls} style={inputStyle} />
+                    maxLength={BEMERKUNG_MAX} className={inputCls} style={inputStyle} />
         </div>
 
         <button onClick={submit} disabled={busy || fotoLaeuft > 0} data-testid="abholcheck-absenden"

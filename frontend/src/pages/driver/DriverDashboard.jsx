@@ -17,6 +17,11 @@ import { NICHT_ABGEHOLT_GRUENDE, nichtAbgeholtNotiz, protokollIstFinal } from ".
 const NACHLADEN_MS = 60000;
 const GESCHLOSSEN = ["abgeholt", "nicht abgeholt", "storniert", "erledigt"];
 
+/** Prüfbericht 20.09. V-34: hat der Server die Liste gekappt (X-Truncated: 1)? */
+export function listeGekuerzt(antwort) {
+  return String(antwort?.headers?.["x-truncated"] || "") === "1";
+}
+
 /** RP-537: "Nicht abgeholt" nur mit Grund (vorher ein nacktes confirm). */
 function NichtAbgeholtDialog({ fahrt, onAbbrechen, onSenden, busy }) {
   const [grund, setGrund] = useState("");
@@ -84,6 +89,9 @@ export default function DriverDashboard() {
   // Pruefung 14.09.2026 (A1): Ladefehler getrennt merken — vorher stand nach
   // einem Funkloch "Noch keine Fahrten", obwohl Fahrten zugeteilt waren.
   const [ladeFehler, setLadeFehler] = useState(null);
+  // Prüfbericht 20.09. V-34: der Server deckelt bei 500 Fahrten (offene haben
+  // Vorrang, alte abgeschlossene fallen weg) und meldet das per X-Truncated.
+  const [gekuerzt, setGekuerzt] = useState(false);
   // Rollenprüfung 22.09.2026 (RP-062/RP-161): Das Protokoll schickt nach einer
   // geänderten Fahrt hierher (/fahrer?fahrt=<id>) — genau diese Fahrt gleich
   // aufgeklappt zeigen, damit der Fahrer sie prüfen und erneut annehmen kann.
@@ -101,7 +109,7 @@ export default function DriverDashboard() {
     setLoading(true);
     setLadeFehler(null);
     return driverApi.get("/driver/appointments")
-      .then((r) => { setItems(r.data); setLadeFehler(null); })
+      .then((r) => { setItems(r.data); setGekuerzt(listeGekuerzt(r)); setLadeFehler(null); })
       .catch((e) => setLadeFehler(errMsg(e, "Termine konnten nicht geladen werden")))
       .finally(() => setLoading(false));
   };
@@ -115,7 +123,7 @@ export default function DriverDashboard() {
       if (document.visibilityState !== "visible" || stillLaeuft.current) return;
       stillLaeuft.current = true;
       driverApi.get("/driver/appointments")
-        .then((r) => { setItems(r.data); setLadeFehler(null); })
+        .then((r) => { setItems(r.data); setGekuerzt(listeGekuerzt(r)); setLadeFehler(null); })
         .catch(() => { /* nächster Takt versucht es erneut */ })
         .finally(() => { stillLaeuft.current = false; });
     };
@@ -265,6 +273,12 @@ export default function DriverDashboard() {
                   className="mt-4 px-4 py-2 rounded-sm text-xs font-semibold bg-white/10 hover:bg-white/20">
             Erneut versuchen
           </button>
+        </div>
+      )}
+
+      {gekuerzt && (
+        <div className="tactical-card px-4 py-2 mb-4 text-xs text-zinc-400" data-testid="driver-gekuerzt">
+          Nicht alle Fahrten angezeigt — ältere abgeschlossene Fahrten fehlen, offene stehen alle drin.
         </div>
       )}
 

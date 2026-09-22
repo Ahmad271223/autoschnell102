@@ -33,9 +33,17 @@ export default function Fahrer() {
   // die Seite sagte "Noch keine Fahrer", obwohl welche verknuepft waren.
   const [ladeZustand, setLadeZustand] = useState("laedt");
   const [ladeFehler, setLadeFehler] = useState("");
+  // Prüfbericht 20.09. V-33/U-169: der Server kappt bei 500 Verknüpfungen und
+  // meldet das per X-Truncated — vorher stand die Liste als vollständig da.
+  const [gekuerzt, setGekuerzt] = useState(false);
 
   const load = () => api.get("/drivers")
-    .then((r) => { setItems(Array.isArray(r.data) ? r.data : []); setLadeZustand("ok"); setLadeFehler(""); })
+    .then((r) => {
+      setItems(Array.isArray(r.data) ? r.data : []);
+      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+      setLadeZustand("ok");
+      setLadeFehler("");
+    })
     .catch((e) => { setLadeZustand("fehler"); setLadeFehler(errMsg(e, "Fahrer konnten nicht geladen werden")); });
   useEffect(() => { load(); }, []);
 
@@ -129,9 +137,16 @@ export default function Fahrer() {
       </form>
       )}
 
+      {gekuerzt && (
+        <div className="mt-6 rounded-sm border px-4 py-2 text-sm" data-testid="drivers-gekuerzt"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
+          Die Liste ist gekürzt — es werden nur 500 Fahrer angezeigt.
+        </div>
+      )}
+
       {/* RP-041/RP-140: am Handy quer scrollbar statt abgeschnitten — vorher
           lag die Spalte "Aktion" (Entfernen) bei langen E-Mails außerhalb. */}
-      <div className="mt-6 tactical-card overflow-x-auto" data-testid="drivers-tabelle">
+      <div className={`${gekuerzt ? "mt-3" : "mt-6"} tactical-card overflow-x-auto`} data-testid="drivers-tabelle">
         <table className="w-full min-w-[640px] text-sm">
           <thead>
             <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>

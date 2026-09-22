@@ -59,16 +59,26 @@ async function pdfOeffnen(id) {
   }
 }
 
+// Prüfbericht 20.09. U-119: liefert die Blob-Adresse zurück, damit die Karte
+// sie beim Aushängen freigeben kann (vorher nur per 10-Minuten-Timer).
 async function pdfDrucken(id) {
   try {
     const r = await api.get(`/beweise/${id}/pdf`, { responseType: "blob" });
     const blobUrl = URL.createObjectURL(r.data);
     printBlobUrl(blobUrl, { label: "Beweisdokument" });
     setTimeout(() => URL.revokeObjectURL(blobUrl), 10 * 60 * 1000);
+    return blobUrl;
   } catch (err) {
     toast.error(errMsg(err, "Drucken nicht möglich"));
+    return null;
   }
 }
+
+/** Prüfbericht 20.09. U-11: Karte ohne Knopf, wenn die Daten aus der
+ *  Browser-Erweiterung stammen — der Server hat das Inserat nie selbst
+ *  gesehen und kann kein Beweisdokument bauen (409 nach dem Klick). */
+export const BEWEIS_NICHT_MOEGLICH_TEXT =
+  "Inserat per Browser-Erweiterung geladen – kein Beweisdokument möglich.";
 
 /**
  * Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Ist das Element (bald)
@@ -109,12 +119,18 @@ export default function BeweisCard({ lazy = false, ...props }) {
 }
 
 function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
-                            compact = false }) {
+                            compact = false, moeglich = true }) {
   const [beweis, setBeweis] = useState(start || null);
   const [altSnapshot, setAltSnapshot] = useState(null);
   const [geladen, setGeladen] = useState(!vehicleId);
   const [zeitUeber, setZeitUeber] = useState(false);
   const [holt, setHolt] = useState(false);
+  // U-119: Drucken läuft — Knöpfe gesperrt, Blob-Adresse beim Aushängen freigeben.
+  const [druckt, setDruckt] = useState(false);
+  const blobRef = useRef(null);
+  useEffect(() => () => {
+    if (blobRef.current) { try { URL.revokeObjectURL(blobRef.current); } catch { /* egal */ } }
+  }, []);
   // U-98/H30: "nicht ladbar" ist etwas anderes als "gibt es nicht" — vorher
   // sahen "kein Dokument", "keine Berechtigung" und "Server kaputt" gleich aus.
   const [ladeFehler, setLadeFehler] = useState("");
@@ -124,6 +140,16 @@ function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
   // Ohne Fahrzeug oder Inseratsschluessel kann man nichts anfordern (z. B.
   // wenn die Karte nur ueber eine Beweis-ID eingebunden ist).
   const kannAnfordern = Boolean(vehicleId || cacheKey);
+  const drucken = async () => {
+    if (druckt) return;
+    setDruckt(true);
+    try {
+      const url = await pdfDrucken(id);
+      if (url) blobRef.current = url;
+    } finally {
+      setDruckt(false);
+    }
+  };
 
   // Wunsch Ahmad 18.09.2026: erst auf Knopfdruck erzeugen. Der Server merkt
   // vor (idempotent je Inserat), der Hintergrund-Worker baut das PDF; die
@@ -200,7 +226,9 @@ function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
       if (n >= MAX_ABFRAGEN) { setZeitUeber(true); return; }
       timer = setTimeout(tick, TAKT_MS);
     };
-    timer = setTimeout(tick, n === 0 && start ? TAKT_MS : 0);
+    // U-120: auch im Fahrzeug-Modus erst nach einem Takt — das Dokument kam
+    // gerade per GET /beweise?vehicle_id, sofortiges Nachfragen holte es doppelt.
+    timer = setTimeout(tick, n === 0 && (start || vehicleId) ? TAKT_MS : 0);
     return () => { aus = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, status, neuLaden, nichtVerfuegbar]);
@@ -224,6 +252,16 @@ function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
   if (!id) {
     if (!kannAnfordern) {
       return altSnapshot ? <AltSnapshot snap={altSnapshot} compact={compact} /> : null;
+    }
+    // U-11: Browser-Erweiterungsdaten — kein Knopf, nur der Hinweis.
+    if (moeglich === false) {
+      return (
+        <div className={compact ? "text-[11px]" : "apple-surface p-4 text-xs"}
+             data-testid="beweis-nicht-moeglich" style={{ color: "var(--text-muted)" }}>
+          <ShieldCheck size={11} className="inline mr-1 text-[var(--accent-red)]" />
+          {BEWEIS_NICHT_MOEGLICH_TEXT}
+        </div>
+      );
     }
     const knopf = (
       <button type="button" onClick={anfordern} disabled={holt}
@@ -281,10 +319,10 @@ function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
                     data-testid="beweis-pdf-inline">
               <FileText size={11} /> PDF
             </button>
-            <button type="button" onClick={() => pdfDrucken(id)}
-                    className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full"
+            <button type="button" onClick={drucken} disabled={druckt}
+                    className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full disabled:opacity-50"
                     data-testid="beweis-print-inline" title="Direkt drucken">
-              <Printer size={11} /> Drucken
+              <Printer size={11} /> {druckt ? "Lädt…" : "Drucken"}
             </button>
             <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
               · {datum(beweis?.fertig_am)}
@@ -332,10 +370,10 @@ function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
                     data-testid="beweis-pdf-btn">
               <FileText size={13} /> PDF öffnen <ExternalLink size={10} />
             </button>
-            <button type="button" onClick={() => pdfDrucken(id)}
-                    className="apple-btn apple-btn-secondary !py-2.5 !text-[12px]"
+            <button type="button" onClick={drucken} disabled={druckt}
+                    className="apple-btn apple-btn-secondary !py-2.5 !text-[12px] disabled:opacity-50"
                     data-testid="beweis-print-btn" title="Direkt drucken">
-              <Printer size={13} /> Drucken
+              <Printer size={13} /> {druckt ? "Lädt…" : "Drucken"}
             </button>
           </div>
           {beweis?.pdf_bytes ? (

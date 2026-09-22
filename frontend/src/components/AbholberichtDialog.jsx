@@ -7,13 +7,18 @@ import AbholFoto from "@/components/AbholFoto";
 
 const fmtDatum = (d) => (d ? d.toLocaleDateString("de-DE") : "");
 
-/** Loeschdatum der Fahrerfotos: Bericht erstellt + Frist (Tage). */
+/** Loeschdatum der Fahrerfotos: Bericht erstellt + Frist (Tage).
+ *  Prüfbericht 20.09. U-68: wie der Server in vollen 24-Stunden-Schritten
+ *  rechnen (created_at <= jetzt − N×24 h), nicht mit setDate in Ortszeit —
+ *  über die Zeitumstellung oder kurz vor Mitternacht lag der Tag sonst daneben.
+ *  Anzeige deshalb als "ab dem …". */
 export function fotosBis(createdAt, tage) {
   if (!createdAt || !tage) return null;
-  const d = new Date(createdAt);
-  if (Number.isNaN(d.getTime())) return null;
-  d.setDate(d.getDate() + Number(tage));
-  return d;
+  const start = Date.parse(createdAt);
+  if (Number.isNaN(start)) return null;
+  const frist = Number(tage);
+  if (!Number.isFinite(frist) || frist <= 0) return null;
+  return new Date(start + frist * 86400000);
 }
 
 /**
@@ -114,7 +119,7 @@ export default function AbholberichtDialog({ appt, onClose }) {
 
             {mitFoto > 0 && bis && (
               <div className="mt-4 text-[11px] text-zinc-500 inline-flex items-center gap-1.5" data-testid="fotos-bis">
-                <Camera size={12} /> Die Fotos werden am {fmtDatum(bis)} automatisch gelöscht.
+                <Camera size={12} /> Die Fotos werden ab dem {fmtDatum(bis)} automatisch gelöscht.
                 Im Verkaufsinserat kannst du sie vorher übernehmen.
               </div>
             )}

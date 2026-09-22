@@ -9,6 +9,9 @@
  *   - kind:    "mobile" | "autoscout"
  *   - active:  Boolean — Farbe an / Graustufen aus
  *   - size:    "sm" (40h, in Dialogen) | "md" (48h, Toolbar)
+ *   - dekorativ: true (Standard) = für Vorleser unsichtbar, weil daneben
+ *                Text steht; false = das Abzeichen IST die Portal-Angabe
+ *                (Prüfbericht 20.09. U-124) und bekommt role="img" + Namen.
  */
 
 const SPEC = {
@@ -37,16 +40,19 @@ const SIZES = {
   md: 48,
 };
 
-export default function PortalBadge({ kind, active = true, size = "md" }) {
+export default function PortalBadge({ kind, active = true, size = "md", dekorativ = true }) {
   const spec = SPEC[kind];
   if (!spec) return null;
   const h = SIZES[size] || SIZES.md;
   const w = Math.round(h * 1.55);
   const imgH = Math.round(h * spec.fill);
+  const zugaenglich = dekorativ
+    ? { "aria-hidden": "true" }
+    : { role: "img", "aria-label": spec.alt };
 
   return (
     <span
-      aria-hidden="true"
+      {...zugaenglich}
       className="rounded-lg flex items-center justify-center shrink-0 overflow-hidden transition-all"
       style={{
         background: active ? spec.bg : "var(--hover-bg)",

@@ -466,32 +466,42 @@ export default function Inserat() {
   };
 
   const publish = async (visibility = "public") => {
-    if (busy) return;
-    // RP-467: Öffentliche Inserate sehen Käufer nur bei öffentlichem
-    // Marktplatz-Profil. Vorher kam "veröffentlicht", obwohl bei neuen Firmen
-    // niemand außer dem eigenen Netzwerk das Inserat sah.
-    if (visibility === "public" && l.marktplatz_profil_oeffentlich === false) {
-      if (!window.confirm("Dein Marktplatz-Profil ist noch nicht öffentlich — ein öffentliches "
-          + "Inserat sähen dann nur deine Netzwerk-Partner.\n\nProfil jetzt öffentlich schalten "
-          + "und veröffentlichen?\n(Abbrechen = nichts veröffentlichen)")) return;
-      try {
-        await api.put("/dealer/marketplace-profile", { public: true });
-        setL((s) => (s ? { ...s, marktplatz_profil_oeffentlich: true } : s));
-      } catch (e) {
-        toast.error(errMsg(e, "Das Marktplatz-Profil konnte nicht öffentlich geschaltet werden"));
-        return;
-      }
-    }
-    if (!(await save())) return;           // zuerst aktuellen Stand sichern (v.a. Preis)
+    if (busy || statusLaeuft.current) return;
+    // Prüfbericht 20.09. U-108: wie setStatus bis zum neu geladenen Stand
+    // sperren — vorher gab save() busy vor dem Publish-POST wieder frei und
+    // ein Doppelklick schickte zwei Publish-Anfragen.
+    statusLaeuft.current = true;
+    setStatusBusy(true);
     try {
-      const r = await api.post(`/resale/${l.id}/publish`, { visibility });
-      if (r.data?.hinweis) toast.warning(r.data.hinweis);
-      else toast.success(visibility === "private"
-        ? "Für dein Netzwerk veröffentlicht" : "Auf dem Marktplatz veröffentlicht");
-      load();
-    } catch (e) {
-      // 402 = kein Verkaufspaket / Kontingent voll -> aussagekräftige Meldung
-      toast.error(errMsg(e, "Veröffentlichen nicht möglich"));
+      // RP-467: Öffentliche Inserate sehen Käufer nur bei öffentlichem
+      // Marktplatz-Profil. Vorher kam "veröffentlicht", obwohl bei neuen Firmen
+      // niemand außer dem eigenen Netzwerk das Inserat sah.
+      if (visibility === "public" && l.marktplatz_profil_oeffentlich === false) {
+        if (!window.confirm("Dein Marktplatz-Profil ist noch nicht öffentlich — ein öffentliches "
+            + "Inserat sähen dann nur deine Netzwerk-Partner.\n\nProfil jetzt öffentlich schalten "
+            + "und veröffentlichen?\n(Abbrechen = nichts veröffentlichen)")) return;
+        try {
+          await api.put("/dealer/marketplace-profile", { public: true });
+          setL((s) => (s ? { ...s, marktplatz_profil_oeffentlich: true } : s));
+        } catch (e) {
+          toast.error(errMsg(e, "Das Marktplatz-Profil konnte nicht öffentlich geschaltet werden"));
+          return;
+        }
+      }
+      if (!(await save())) return;           // zuerst aktuellen Stand sichern (v.a. Preis)
+      try {
+        const r = await api.post(`/resale/${l.id}/publish`, { visibility });
+        if (r.data?.hinweis) toast.warning(r.data.hinweis);
+        else toast.success(visibility === "private"
+          ? "Für dein Netzwerk veröffentlicht" : "Auf dem Marktplatz veröffentlicht");
+        await load();
+      } catch (e) {
+        // 402 = kein Verkaufspaket / Kontingent voll -> aussagekräftige Meldung
+        toast.error(errMsg(e, "Veröffentlichen nicht möglich"));
+      }
+    } finally {
+      statusLaeuft.current = false;
+      setStatusBusy(false);
     }
   };
 
@@ -691,13 +701,14 @@ export default function Inserat() {
               </button>
             ))}
             {unterlagen.contracts.map((c, i) => (
-              <button key={c.id} type="button" data-testid={`inserat-vertrag-${c.id}`}
+              <button key={c.id || i} type="button" data-testid={`inserat-vertrag-${c.id}`}
                       onClick={() => openContractPdf(c.id)
                         .catch((e) => toast.error(errMsg(e, "Kaufvertrag konnte nicht geladen werden")))}
                       className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-zinc-200 hover:bg-white/5"
                       style={{ borderColor: "var(--border-default)" }}>
                 <FileText size={13} />
-                Kaufvertrag {c.contract_no || c.id.slice(0, 8)}{i === 0 ? " · aktuelle Fassung" : ""}
+                {/* Prüfbericht 20.09. U-125: ohne id nicht abstürzen */}
+                Kaufvertrag {c.contract_no || String(c.id || "").slice(0, 8) || "ohne Nummer"}{i === 0 ? " · aktuelle Fassung" : ""}
               </button>
             ))}
           </div>
@@ -723,21 +734,24 @@ export default function Inserat() {
                       style={{ background: "var(--accent-red)" }}>
                 <Globe size={16} /> Öffentlich veröffentlichen
               </button>
+              {/* Prüfbericht 20.09. M-18: Statusknöpfe mindestens 44 px hoch;
+                  der Rückschritt (Entwurf / vom Marktplatz) steht abgesetzt
+                  vom grünen "Verkauft" — auf dem Handy in eigener Zeile. */}
               <button onClick={() => publish("private")} disabled={statusGesperrt || erneutGesperrt}
                       title="Nur für eingeladene Netzwerk-Partner sichtbar"
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 min-h-[44px] text-xs font-semibold border disabled:opacity-50"
                       style={st}>
                 <EyeOff size={14} /> Nur Netzwerk (privat)
               </button>
-              <button onClick={reservierenVonHand} disabled={statusGesperrt} className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Reservieren</button>
+              <button onClick={reservierenVonHand} disabled={statusGesperrt} className="rounded-xl px-3 py-2 min-h-[44px] text-xs border disabled:opacity-50" style={st}>Reservieren</button>
               <button onClick={() => {
                         verkauftMelden();
                       }} disabled={statusGesperrt}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 min-h-[44px] text-xs font-semibold text-white disabled:opacity-50"
                       style={{ background: "var(--st-gruen)" }}>
                 <Tag size={13} /> Verkauft
               </button>
-              <button onClick={() => setStatus("entwurf")} disabled={statusGesperrt} data-testid="inserat-zurueck-entwurf" className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1 disabled:opacity-50"><Undo2 size={13} /> Zurück zu Entwurf</button>
+              <button onClick={() => setStatus("entwurf")} disabled={statusGesperrt} data-testid="inserat-zurueck-entwurf" className="basis-full sm:basis-auto sm:ml-auto rounded-xl px-3 py-2 min-h-[44px] text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1 disabled:opacity-50"><Undo2 size={13} /> Zurück zu Entwurf</button>
             </>
           )}
           {l.status === "veroeffentlicht" && (
@@ -746,16 +760,16 @@ export default function Inserat() {
                     style={{ background: "#34c75920", color: "var(--st-gruen)", border: "1px solid #34c75955" }}>
                 <Globe size={14} /> {l.visibility === "private" ? "Live für dein Netzwerk" : "Live auf dem Marktplatz"}
               </span>
-              <button onClick={reservierenVonHand} disabled={statusGesperrt} className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Reservieren</button>
+              <button onClick={reservierenVonHand} disabled={statusGesperrt} className="rounded-xl px-3 py-2 min-h-[44px] text-xs border disabled:opacity-50" style={st}>Reservieren</button>
               <button onClick={() => {
                         verkauftMelden();
                       }} disabled={statusGesperrt}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 min-h-[44px] text-xs font-semibold text-white disabled:opacity-50"
                       style={{ background: "var(--st-gruen)" }}>
                 <Tag size={13} /> Verkauft
               </button>
               <button onClick={() => setStatus("zurueckgezogen")} disabled={statusGesperrt} data-testid="inserat-vom-marktplatz"
-                      className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1 disabled:opacity-50">
+                      className="basis-full sm:basis-auto sm:ml-auto rounded-xl px-3 py-2 min-h-[44px] text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1 disabled:opacity-50">
                 <EyeOff size={13} /> Vom Marktplatz nehmen
               </button>
             </>
@@ -774,11 +788,11 @@ export default function Inserat() {
               </button>
               <button onClick={() => publish(l.visibility === "private" ? "public" : "private")}
                       disabled={statusGesperrt || erneutGesperrt}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 min-h-[44px] text-xs font-semibold border disabled:opacity-50"
                       style={st}>
                 {l.visibility === "private" ? <><Globe size={14} /> Stattdessen öffentlich</> : <><EyeOff size={14} /> Stattdessen nur Netzwerk</>}
               </button>
-              <button onClick={() => setStatus("verkaufsbereit")} disabled={statusGesperrt} className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Auf „verkaufsbereit" setzen</button>
+              <button onClick={() => setStatus("verkaufsbereit")} disabled={statusGesperrt} className="rounded-xl px-3 py-2 min-h-[44px] text-xs border disabled:opacity-50" style={st}>Auf „verkaufsbereit" setzen</button>
             </>
           )}
           {l.status === "reserviert" && (
@@ -786,11 +800,11 @@ export default function Inserat() {
               <button onClick={() => {
                         verkauftMelden();
                       }} disabled={statusGesperrt}
-                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--st-gruen)" }}>
+                      className="rounded-xl px-4 py-2.5 min-h-[44px] text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--st-gruen)" }}>
                 Als verkauft markieren
               </button>
               <button onClick={reservierungAufheben} disabled={statusGesperrt} data-testid="inserat-reservierung-aufheben"
-                      className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Reservierung aufheben</button>
+                      className="rounded-xl px-3 py-2 min-h-[44px] text-xs border disabled:opacity-50" style={st}>Reservierung aufheben</button>
             </>
           )}
         </div>
@@ -930,10 +944,13 @@ export default function Inserat() {
               </div>
             )}
             <div className="mt-3 grid grid-cols-4 sm:grid-cols-6 gap-2">
-              {(mode !== "neu") && einkaufFotos.slice(0, 12).map((u, i) => (
+              {/* Prüfbericht 20.09. U-106: alle Einkaufsfotos zeigen — vorher
+                  .slice(0, 12), Fotos ab Nr. 13 waren weder sichtbar noch
+                  entfernbar, der Marktplatz lieferte sie aber aus. */}
+              {(mode !== "neu") && einkaufFotos.map((u, i) => (
                 <div key={`e${i}`} className="relative group">
                   <a href={u} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                    <img src={thumbSrc(l.einkauf_thumbs?.[i], u)} alt="" loading="lazy" referrerPolicy="no-referrer"
+                    <img src={thumbSrc(l.einkauf_thumbs?.[i], u)} alt={`Foto ${i + 1} aus dem alten Bestand`} loading="lazy" referrerPolicy="no-referrer"
                          onError={(e) => thumbFehler(e, u)}
                          className="aspect-square w-full object-cover rounded-lg opacity-90 hover:opacity-100 cursor-zoom-in" />
                   </a>
@@ -952,7 +969,7 @@ export default function Inserat() {
               {uploadedKeys.map((k, i) => (
                 <div key={k} className="relative group">
                   <a href={fotoUrl(k)} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
-                    <img src={fotoUrl(k)} alt="" onError={fotoFehler}
+                    <img src={fotoUrl(k)} alt={`Foto ${i + 1}`} onError={fotoFehler}
                          className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
                   </a>
                   {/* RP-469: Titelbild und Reihenfolge (das erste eigene Foto ist das Titelbild) */}
@@ -1115,14 +1132,38 @@ export default function Inserat() {
 
 /** Eingehende Marktplatz-Anfragen zu DIESEM Inserat (beantwortet werden
  *  sie zentral unter /app/anfragen). Sucher bekommen auf dem dealer-only
- *  Endpunkt 403 — die Karte bleibt dann einfach leer. */
+ *  Endpunkt 403 — die Karte bleibt dann einfach leer.
+ *  Prüfbericht 20.09. U-118: jeder andere Fehler zeigt eine kleine Karte
+ *  mit "Erneut versuchen" statt still zu verschwinden; eine späte Antwort
+ *  eines früheren Inserats wird verworfen (aktiv-Merker). */
 function AnfragenKarte({ listingId, onWeg }) {
   const [anfragen, setAnfragen] = useState(null);
+  const [fehler, setFehler] = useState(false);
+  const [versuch, setVersuch] = useState(0);
   useEffect(() => {
+    let aktiv = true;
+    setFehler(false);
     api.get("/dealer/interessen", { params: { listing_id: listingId } })
-      .then((r) => setAnfragen(Array.isArray(r.data) ? r.data : []))
-      .catch(() => setAnfragen(null));
-  }, [listingId]);
+      .then((r) => { if (aktiv) setAnfragen(Array.isArray(r.data) ? r.data : []); })
+      .catch((e) => {
+        if (!aktiv) return;
+        setAnfragen(null);
+        setFehler(e?.response?.status !== 403);
+      });
+    return () => { aktiv = false; };
+  }, [listingId, versuch]);
+  if (fehler) {
+    return (
+      <div className="tactical-card p-4 text-[12.5px]" data-testid="inserat-anfragen-fehler"
+           style={{ color: "var(--text-muted)" }}>
+        Kaufanfragen konnten nicht geladen werden.{" "}
+        <button type="button" onClick={() => setVersuch((n) => n + 1)}
+                className="font-semibold hover:underline" style={{ color: "var(--accent-red)" }}>
+          Erneut versuchen
+        </button>
+      </div>
+    );
+  }
   if (!anfragen || anfragen.length === 0) return null;
   const offen = anfragen.filter((a) => a.status === "offen").length;
   return (

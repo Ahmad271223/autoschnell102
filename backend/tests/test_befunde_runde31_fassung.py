@@ -165,7 +165,9 @@ def test_09_nachladen_heilt_den_zwischenspeicher_und_schont_eingaben():
         (("src", "pages", "driver", "Protokoll.jsx"),
          "useUngespeichert(Boolean(((sigDriver || sigSeller) && !isFinal) || (ungesichert && !gesperrt)));"),
         (("src", "components", "ContractDialog.jsx"), "useUngespeichert(Boolean(open));"),
-        (("src", "components", "AbholCheckDialog.jsx"), "useUngespeichert(Boolean(mileage || notes.trim() || deviations.length));"),
+        # Pruefbericht 20.09. K-25: Schluessel und Tankstand zaehlen jetzt mit
+        # (abholCheckUngespeichert), der Aufruf bekommt den fertigen Wert.
+        (("src", "components", "AbholCheckDialog.jsx"), "useUngespeichert(ungespeichert);"),
         (("src", "pages", "admin_v2", "Settings.jsx"), "useUngespeichert(Boolean(codes?.length));"),
     ):
         assert aufruf in _lies("frontend", *teile), teile[-1]

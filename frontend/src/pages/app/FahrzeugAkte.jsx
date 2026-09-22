@@ -100,9 +100,15 @@ export default function FahrzeugAkte() {
     ? { pfad: "/app/fahrzeuge", text: "Zurück zu meinen Fahrzeugen" }
     : { pfad: "/app/bestand", text: "Zurück zum Bestand" };
 
+  // Prüfbericht 20.09. U-47: nur die LETZTE Anfrage darf die Akte setzen —
+  // beim Wechsel Akte A→B (Zurück/Vor) überschrieb sonst die langsamere
+  // Antwort von A die schon angezeigte Akte B (wie anfrageNr in Bestand.jsx).
+  const anfrageNr = useRef(0);
   const load = useCallback(async ({ offeneVerwerfen = false } = {}) => {
+    const nr = ++anfrageNr.current;
     try {
       const r = await api.get(`/vehicles/${id}/akte`);
+      if (nr !== anfrageNr.current) return;
       setLadeFehler(null);
       setAkte(r.data);
       const neu = bestandFormAus(r.data.vehicle?.bestand);
@@ -110,6 +116,7 @@ export default function FahrzeugAkte() {
       bestandStandRef.current = neu;
       setBestandForm((alt) => bestandMitOffenenAenderungen(alt, alterStand, neu));
     } catch (e) {
+      if (nr !== anfrageNr.current) return;
       // Wunsch Ahmad 21.09.2026 (R1-01): der Chef haengt keine Fahrzeuge mehr
       // um — "einem anderen Konto zugeordnet" ist deshalb kein Grund mehr.
       const text = e?.response?.status === 404
@@ -423,7 +430,7 @@ export default function FahrzeugAkte() {
               </div>
               {deviations.some((d) => d.photo_key) && fotosBis(report.created_at, akte.fahrerfoto_tage) && (
                 <div className="text-[11px] text-zinc-500 mb-2" data-testid="akte-fotos-bis">
-                  Fahrerfotos werden am {fotosBis(report.created_at, akte.fahrerfoto_tage).toLocaleDateString("de-DE")} automatisch
+                  Fahrerfotos werden ab dem {fotosBis(report.created_at, akte.fahrerfoto_tage).toLocaleDateString("de-DE")} automatisch
                   gelöscht. Wichtige Fotos vorher im Verkaufsinserat übernehmen.
                 </div>
               )}
@@ -578,12 +585,13 @@ export default function FahrzeugAkte() {
                 val={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time}\u00a0Uhr` : ""} · ${lesbar(a.status || "offen")}`} />
           ))}
           {(akte.contracts || []).map((c, i) => (
-            <button key={c.id} type="button" data-testid={`akte-vertrag-${c.id}`}
+            <button key={c.id || i} type="button" data-testid={`akte-vertrag-${c.id}`}
                     onClick={() => openContractPdf(c.id)
                       .catch((e) => toast.error(errMsg(e, "Kaufvertrag konnte nicht geladen werden")))}
                     className="mt-2 w-full flex items-center justify-between text-sm rounded-lg px-2 py-1.5 hover:bg-white/[0.04] text-left">
               <span className="inline-flex items-center gap-1.5 text-zinc-300">
-                <FileText size={13} /> Kaufvertrag {c.contract_no || c.id.slice(0, 8)}
+                {/* Prüfbericht 20.09. U-125: ohne id nicht abstürzen */}
+                <FileText size={13} /> Kaufvertrag {c.contract_no || String(c.id || "").slice(0, 8) || "ohne Nummer"}
                 {i === 0 && <span className="text-[10px] text-zinc-500">aktuelle Fassung</span>}
               </span>
               <span className="text-zinc-500 text-xs">{fmtDate(c.created_at)}</span>

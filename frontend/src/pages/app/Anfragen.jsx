@@ -182,8 +182,15 @@ export function annahmeFrage(it) {
     + "Das Inserat verschwindet dann vom Marktplatz; andere Käufer können nicht mehr verhandeln.";
 }
 
+// Prüfbericht 20.09. U-30: ein unbekannter Status hieß "Abgelehnt" — jetzt
+// neutral mit dem Rohwert, damit nichts Falsches behauptet wird.
+export function statusMeta(status) {
+  return STATUS_META[status]
+    || { label: status || "Unbekannt", fg: "var(--text-dim)", bg: "var(--wa-05)", bd: "var(--wa-12)" };
+}
+
 function StatusBadge({ status, beendet }) {
-  const m = STATUS_META[status] || STATUS_META.abgelehnt;
+  const m = statusMeta(status);
   // RP-502/RP-089: vom System oder vom Käufer beendete Anfragen heißen
   // "Beendet" — "Abgelehnt" klang, als hätte der Händler abgelehnt.
   const label = status === "abgelehnt" && beendet ? "Beendet" : m.label;

@@ -108,7 +108,12 @@ export default function Vergleich() {
     const id = restored?.contract?.id;
     if (!id) return undefined;
     let aktiv = true;
-    api.get(`/contracts/${id}`).catch((err) => {
+    api.get(`/contracts/${id}`).then(({ data }) => {
+      // Prüfbericht 20.09. U-85: den Schnappschuss durch den Serverstand
+      // ersetzen — der Versand-Dialog bekam sonst z. B. den Stand vor einer
+      // Verkäufer-Korrektur.
+      if (aktiv && data?.id === id) setContract((c) => (c?.id === id ? { ...c, ...data } : c));
+    }).catch((err) => {
       if (aktiv && err?.response?.status === 404) {
         setContract((c) => (c?.id === id ? null : c));
       }
@@ -215,15 +220,20 @@ export default function Vergleich() {
   // Persist on every meaningful state change. Ohne Ergebnis (neuer Lauf
   // gestartet oder gescheitert) wird der alte Stand entfernt (H8) — sonst
   // kam nach dem Neuladen das vorherige Auto zurueck.
+  // Prüfbericht 20.09. U-12: der Link kommt per Ref mit, nicht als
+  // Abhängigkeit — sonst wurde bei jedem Tastendruck im Linkfeld das ganze
+  // Ergebnis serialisiert und in den Sitzungsspeicher geschrieben.
+  const urlRef = useRef(url);
+  urlRef.current = url;
   useEffect(() => {
     try {
       if (result) {
-        vergleichSichern(sitzungsSpeicher(), kontoId, { url, result, counter, contract });
+        vergleichSichern(sitzungsSpeicher(), kontoId, { url: urlRef.current, result, counter, contract });
       } else {
         vergleichEntfernen(sitzungsSpeicher(), kontoId);
       }
     } catch { /* quota/private mode — silent */ }
-  }, [url, result, counter, contract, kontoId]);
+  }, [result, counter, contract, kontoId]);
 
   // Wunsch Ahmad 18.09.2026: Dauert ein Abruf zu lange, bricht das "X" ihn
   // ab — die Seite ist sofort wieder eingabebereit (derselbe oder ein neuer
@@ -272,11 +282,18 @@ export default function Vergleich() {
 
   const vielleichtStarten = (text, vorher = "") => {
     const neu = (text || "").trim();
-    if (!neu || loading || laeuftRef.current) return false;
+    if (!neu) return false;
     // RP-409: geteilter Text ("Schau mal: https://…") -> nur der Link
     const link = inseratsLinkAusText(neu);
     if (!link) return false;
     if (neu.length - (vorher || "").trim().length < SPRUNG) return false;
+    // Prüfbericht 20.09. U-15: läuft noch ein Vergleich, wurde der neue Link
+    // still ins Feld übernommen und das alte Ergebnis stand darunter — jetzt
+    // ein Hinweis auf das X (Abbrechen), der Lauf bleibt unangetastet.
+    if (loading || laeuftRef.current) {
+      toast.info(VERGLEICH_LAEUFT_HINWEIS, { id: "vergleich-laeuft" });
+      return false;
+    }
     if (link !== neu) setUrl(link);
     startCompare(null, link);
     return true;
@@ -530,7 +547,12 @@ export default function Vergleich() {
                 const text = (e.clipboardData?.getData("text") || "").trim();
                 // RP-409: aus "Schau mal: https://…" nur den Link übernehmen
                 const link = inseratsLinkAusText(text);
-                if (link && !loading) {
+                if (link && (loading || laeuftRef.current)) {
+                  // U-15: während eines Laufs nicht einfügen (das Ergebnis
+                  // gehörte sonst zum falschen Link), sondern hinweisen.
+                  e.preventDefault();
+                  toast.info(VERGLEICH_LAEUFT_HINWEIS, { id: "vergleich-laeuft" });
+                } else if (link) {
                   e.preventDefault();
                   setUrl(link);
                   vielleichtStarten(link);
@@ -745,8 +767,10 @@ export default function Vergleich() {
                     <ImageIcon size={11} /> Fotos vom Inserat ({result.vehicle.images.length})
                   </div>
                   <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2" data-testid="kleinanzeigen-gallery">
+                    {/* Prüfbericht 20.09. U-14: Index im Schlüssel — doppelte
+                        Bildadressen ergaben doppelte React-Schlüssel. */}
                     {result.vehicle.images.slice(0, 10).map((src, idx) => (
-                      <a key={src} href={src} target="_blank" rel="noopener noreferrer"
+                      <a key={`${idx}-${src}`} href={src} target="_blank" rel="noopener noreferrer"
                          className="block aspect-[4/3] rounded-lg overflow-hidden border hover:opacity-80 transition"
                          style={{ borderColor: "var(--hairline)" }}
                          data-testid={`gallery-thumb-${idx}`}>
@@ -771,8 +795,8 @@ export default function Vergleich() {
                 <div className="mt-6 pt-5 border-t" style={{ borderColor: "var(--hairline)" }}>
                   <div className="overline mb-3">Ausstattung ({result.vehicle.features.length})</div>
                   <div className="flex flex-wrap gap-1.5">
-                    {result.vehicle.features.map((f) => (
-                      <span key={f}
+                    {result.vehicle.features.map((f, i) => (
+                      <span key={`${i}-${f}`}
                             className="text-[11px] px-2.5 py-1 rounded-full"
                             style={{
                               background: "var(--apple-btn-secondary-bg)",
@@ -958,9 +982,12 @@ export default function Vergleich() {
             {/* 18.09.2026: Gibt es zum Inserat noch kein Dokument, steht hier
                 der Knopf "Beweisdokument erstellen" (frueher entstand es
                 automatisch bei jedem Vergleich). */}
+            {/* Prüfbericht 20.09. U-11: beweis_moeglich === false (Daten aus der
+                Browser-Erweiterung) — die Karte zeigt statt des Knopfs den Hinweis. */}
             {(result.beweis?.id || result.cache_key) && (
               <BeweisCard key={result.beweis?.id || result.cache_key}
-                          beweis={result.beweis} cacheKey={result.cache_key} />
+                          beweis={result.beweis} cacheKey={result.cache_key}
+                          moeglich={result.beweis_moeglich !== false} />
             )}
 
             <div className="text-[11px] leading-relaxed px-1" style={{ color: "var(--text-muted)" }}>
@@ -979,11 +1006,7 @@ export default function Vergleich() {
           vehicleId={result.vehicle_id}
           onCreated={(c) => {
             setContract(c);
-            if (c.appointment_id) {
-              toast.success("PDF erstellt – Termin automatisch im Terminplaner angelegt");
-            } else {
-              toast.success("PDF erstellt");
-            }
+            toast.success(vertragErstelltMeldung(c));
             setShowContract(false);
             setShowSend(true);
           }}
@@ -1000,6 +1023,19 @@ export default function Vergleich() {
     </div>
   );
 }
+
+/** Prüfbericht 20.09. U-82: der Server meldet bereits_vorhanden, wenn der
+ *  Vertrag schon angelegt war (Doppelklick, zweiter Tab) — dann nicht
+ *  "PDF erstellt" behaupten. */
+export function vertragErstelltMeldung(c) {
+  if (c?.bereits_vorhanden) return "Dieser Vertrag war schon angelegt — es wurde kein neuer erstellt";
+  if (c?.appointment_id) return "PDF erstellt – Termin automatisch im Terminplaner angelegt";
+  return "PDF erstellt";
+}
+
+/** U-15: Hinweis, wenn während eines laufenden Vergleichs ein neuer Link kommt. */
+export const VERGLEICH_LAEUFT_HINWEIS =
+  "Es läuft noch ein Vergleich – mit dem X abbrechen, dann den neuen Link einfügen.";
 
 function Stat({ icon: Icon, label, value }) {
   return (

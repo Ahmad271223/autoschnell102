@@ -393,7 +393,12 @@ export default function Einstellungen() {
         {/* Content */}
         <div className="space-y-5">
           {active === "profile" && (
-            <Section title="Händlerprofil" subtitle="Diese Angaben erscheinen auf jedem Kaufvertrag, in den Versand-Vorlagen und – für Zwischenhändler – auf dem Marktplatz.">
+            // Prüfbericht 20.09. U-136: der Marktplatz liest nur das Firmen-
+            // dokument des Chefs — Sucher bekommen deshalb keinen Marktplatz-Satz.
+            <Section title="Händlerprofil"
+                     subtitle={user?.role === "sucher"
+                       ? "Gilt für deine Verträge und Versand-Vorlagen – der Marktplatz zeigt die Firmendaten des Chefs."
+                       : "Diese Angaben erscheinen auf jedem Kaufvertrag, in den Versand-Vorlagen und – für Zwischenhändler – auf dem Marktplatz."}>
               {/* Firmenlogo */}
               <div className="flex items-center gap-4 mb-4">
                 <div className="w-20 h-20 rounded-2xl overflow-hidden flex items-center justify-center shrink-0"
@@ -469,7 +474,11 @@ export default function Einstellungen() {
                           placeholder={"Mo–Fr: 08:00–18:00\nSa: 09:00–13:00\nSo: geschlossen"}
                           className="w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40"
                           style={{ borderColor: "var(--divider)" }} />
-                <div className="text-[11px] text-zinc-500 mt-1">Wird Zwischenhändlern im Marktplatz angezeigt.</div>
+                <div className="text-[11px] text-zinc-500 mt-1">
+                  {user?.role === "sucher"
+                    ? "Im Marktplatz erscheinen die Öffnungszeiten des Chefs."
+                    : "Wird Zwischenhändlern im Marktplatz angezeigt."}
+                </div>
               </div>
             </Section>
           )}
@@ -1306,6 +1315,9 @@ function SubscriptionPanel() {
   const [loading, setLoading] = useState(true);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState("");
+  // Prüfbericht 20.09. U-139: Ladefehler merken — vorher nur ein Toast, der
+  // Reiter blieb leer (kein Titel, kein neuer Versuch).
+  const [ladeFehler, setLadeFehler] = useState("");
   // Letzter Kontext-Stand, ohne den Abruf-Takt neu aufzusetzen.
   const kontextRef = useRef(subscription);
   kontextRef.current = subscription;
@@ -1320,8 +1332,11 @@ function SubscriptionPanel() {
     try {
       const { data } = await api.get("/dealer/subscription");
       uebernehmen(data);
+      setLadeFehler("");
     } catch (err) {
-      toast.error(errMsg(err, "Abo-Info konnte nicht geladen werden"));
+      const text = errMsg(err, "Abo-Info konnte nicht geladen werden");
+      setLadeFehler(text);
+      toast.error(text);
     } finally {
       setLoading(false);
     }
@@ -1377,7 +1392,21 @@ function SubscriptionPanel() {
       </Section>
     );
   }
-  if (!data) return null;
+  if (!data) {
+    // U-139: statt leerem Reiter — Titel, Fehlertext und neuer Versuch.
+    return (
+      <Section title="Abo & Zahlung" subtitle="Die Abo-Daten konnten nicht geladen werden.">
+        <div className="text-sm py-2" role="alert" data-testid="abo-ladefehler" style={{ color: "var(--tx-rot)" }}>
+          {ladeFehler || "Abo-Info konnte nicht geladen werden"}
+        </div>
+        <button type="button" onClick={load} data-testid="abo-erneut-laden"
+                className="mt-1 rounded-xl border px-4 py-2 text-sm font-semibold"
+                style={{ borderColor: "var(--divider)", color: "var(--text-primary)" }}>
+          Erneut laden
+        </button>
+      </Section>
+    );
+  }
 
   const badge = STATUS_BADGE[data.status] || STATUS_BADGE.none;
   const planLabel = planText(data.plan);

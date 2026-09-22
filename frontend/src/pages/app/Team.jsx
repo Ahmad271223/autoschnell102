@@ -59,6 +59,9 @@ export default function Team() {
   const [ladeFehler, setLadeFehler] = useState("");
   // U-161: je Sucher gesperrt, solange die Anfrage laeuft.
   const [fragtAn, setFragtAn] = useState("");
+  // Prüfbericht 20.09. U-165: der Server kappt bei 1.000 Suchern und meldet
+  // das per X-Truncated — vorher galt die Liste als vollständig.
+  const [gekuerzt, setGekuerzt] = useState(false);
 
   // Go-Live-Schalter (15.09.2026): der Weiterverkaufsplan gehoert zum
   // Marktplatz — ausgeschaltet wird er weder geladen noch angezeigt (die
@@ -69,6 +72,7 @@ export default function Team() {
     try {
       const s = await api.get("/dealer/sucher");
       setSucher(Array.isArray(s.data) ? s.data : []);
+      setGekuerzt(String(s.headers?.["x-truncated"] || "") === "1");
       setLadeZustand("ok");
       setLadeFehler("");
     } catch (e) {
@@ -140,6 +144,13 @@ export default function Team() {
           <UserPlus size={16} /> Weitere Sucher anfragen
         </a>
       </div>
+
+      {gekuerzt && (
+        <div className="mt-6 rounded-xl border px-4 py-2 text-sm" data-testid="team-gekuerzt"
+             style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
+          Die Liste ist gekürzt — es werden nur die ersten 1.000 Sucher angezeigt.
+        </div>
+      )}
 
       {/* Hinweis: Verwaltung durch den Betreiber */}
       <div className="mt-6 rounded-xl border px-4 py-3 flex items-start gap-3 text-sm"

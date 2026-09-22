@@ -413,6 +413,10 @@ function FieldGroup({ icon, label, children }) {
   );
 }
 
+// Prüfbericht 20.09. M-17: sichtbarer Tastatur-Fokus (outline-none hatte
+// keinen Ersatz) — an Eingaben, Auswahl, Chips und Auswahlfeldern.
+const FOKUS = "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]";
+
 function NumInput({ value, onChange, placeholder, suffix, testid }) {
   return (
     <div className="relative">
@@ -422,7 +426,7 @@ function NumInput({ value, onChange, placeholder, suffix, testid }) {
         value={value}
         onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
         placeholder={placeholder}
-        className="w-full h-11 px-4 pr-10 rounded-xl outline-none text-[14px]"
+        className={`w-full h-11 px-4 pr-10 rounded-xl text-[14px] ${FOKUS}`}
         style={{
           background: "var(--input-bg)",
           border: "1px solid var(--divider)",
@@ -454,7 +458,7 @@ function YearSelect({ value, onChange, years, placeholder, testid }) {
         data-testid={testid}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full h-11 px-4 pr-9 rounded-xl outline-none text-[14px] appearance-none"
+        className={`w-full h-11 px-4 pr-9 rounded-xl text-[14px] appearance-none ${FOKUS}`}
         style={{
           // Deckend statt var(--input-bg) (rgba 5%): Chromium nutzt diese
           // Farbe auch fuer den Rahmen der aufgeklappten Options-Liste —
@@ -486,7 +490,8 @@ function ChipRow({ value, onChange, options, testidPrefix }) {
             type="button"
             data-testid={`${testidPrefix}-${opt.toLowerCase().replace(/[^a-z]/g, "-")}`}
             onClick={() => onChange(active ? "" : opt)}
-            className="px-3 py-1.5 rounded-lg text-[12.5px] font-medium transition-all"
+            // M-18: mindestens 44 px Tipp-Höhe
+            className={`px-3 py-1.5 min-h-[44px] rounded-lg text-[12.5px] font-medium transition-all ${FOKUS}`}
             style={active ? {
               background: "var(--accent-red)", color: "white",
               border: "1px solid var(--accent-red)",
@@ -503,11 +508,39 @@ function ChipRow({ value, onChange, options, testidPrefix }) {
   );
 }
 
+/** M-17: Tastatur im Auswahlfeld — liefert die neue Markierung (Index) für
+ *  Pfeil hoch/runter, sonst den alten Wert. */
+export function naechsteMarkierung(taste, aktuell, anzahl) {
+  if (!anzahl) return 0;
+  const jetzt = Math.min(Math.max(0, aktuell || 0), anzahl - 1);
+  if (taste === "ArrowDown") return Math.min(jetzt + 1, anzahl - 1);
+  if (taste === "ArrowUp") return Math.max(jetzt - 1, 0);
+  if (taste === "Home") return 0;
+  if (taste === "End") return anzahl - 1;
+  return jetzt;
+}
+
 function PickerCard({
   icon, label, value, placeholder, isOpen, onOpen, onClose,
   searchValue, onSearch, searchPlaceholder, items, onPick, disabled,
   testid, extraItemHint,
 }) {
+  // M-17: Escape schließt, Pfeiltasten bewegen die Markierung, Enter wählt.
+  const [markiert, setMarkiert] = useState(0);
+  useEffect(() => { setMarkiert(0); }, [searchValue, isOpen]);
+  const tasten = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      setMarkiert((i) => naechsteMarkierung(e.key, i, items.length));
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const it = items[Math.min(markiert, items.length - 1)];
+      if (it) onPick(it);
+    }
+  };
   return (
     <div className="apple-card p-4 relative">
       <div className="overline mb-2 flex items-center gap-1.5">
@@ -518,7 +551,9 @@ function PickerCard({
         disabled={disabled}
         onClick={onOpen}
         data-testid={`${testid}-trigger`}
-        className="w-full h-12 px-4 rounded-xl text-left flex items-center justify-between text-[14px] transition-all"
+        aria-haspopup="listbox"
+        aria-expanded={Boolean(isOpen)}
+        className={`w-full h-12 px-4 rounded-xl text-left flex items-center justify-between text-[14px] transition-all ${FOKUS}`}
         style={{
           background: "var(--input-bg)",
           border: "1px solid var(--divider)",
@@ -542,6 +577,7 @@ function PickerCard({
               maxHeight: 380,
             }}
             data-testid={`${testid}-dropdown`}
+            onKeyDown={tasten}
           >
             <div className="p-2.5 flex items-center gap-2"
                  style={{ borderBottom: "1px solid var(--hairline)" }}>
@@ -552,26 +588,28 @@ function PickerCard({
                 value={searchValue}
                 onChange={(e) => onSearch(e.target.value)}
                 placeholder={searchPlaceholder}
-                className="flex-1 bg-transparent border-0 outline-none text-[14px]"
+                aria-label={searchPlaceholder || label}
+                className={`flex-1 bg-transparent border-0 text-[14px] rounded-md ${FOKUS}`}
                 style={{ color: "var(--text-primary)" }}
               />
             </div>
-            <ul className="overflow-y-auto" style={{ maxHeight: 320 }}>
+            <ul className="overflow-y-auto" role="listbox" style={{ maxHeight: 320 }}>
               {items.length === 0 ? (
                 <li className="px-4 py-6 text-center text-[13px]" style={{ color: "var(--text-muted)" }}>
                   Keine Treffer
                 </li>
               ) : (
-                items.map((it) => (
-                  <li key={it.id}>
+                items.map((it, i) => (
+                  <li key={it.id} role="option" aria-selected={i === markiert}>
                     <button
                       type="button"
                       onClick={() => onPick(it)}
                       data-testid={`${testid}-item-${it.id}`}
-                      className="w-full text-left px-4 py-2.5 text-[14px] transition-colors"
-                      style={{ color: "var(--text-primary)" }}
-                      onMouseEnter={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
-                      onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                      data-markiert={i === markiert ? "1" : undefined}
+                      ref={i === markiert ? (el) => el?.scrollIntoView?.({ block: "nearest" }) : undefined}
+                      className={`w-full text-left px-4 py-2.5 text-[14px] transition-colors ${FOKUS}`}
+                      style={{ color: "var(--text-primary)", background: i === markiert ? "var(--hover-bg)" : "transparent" }}
+                      onMouseEnter={() => setMarkiert(i)}
                     >
                       {extraItemHint ? extraItemHint(it) : it.name}
                     </button>
