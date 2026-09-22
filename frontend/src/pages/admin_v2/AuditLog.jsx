@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { api } from "@/lib/api";
+import { api, errMsg } from "@/lib/api";
+import { toast } from "sonner";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { RefreshCw } from "lucide-react";
 
@@ -28,6 +29,9 @@ export default function AdminAuditLog() {
   const [filter, setFilter] = useState("");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  // Prüfbericht 20.09.2026 (AD-21): ein Ladefehler stand nur in der Konsole,
+  // die Seite sagte "Keine Einträge" — jetzt sichtbar, mit Neuladen.
+  const [ladeFehler, setLadeFehler] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -37,8 +41,10 @@ export default function AdminAuditLog() {
       if (q.trim()) params.set("q", q.trim());
       const r = await api.get(`/admin/audit?${params.toString()}`);
       setItems(r.data);
+      setLadeFehler("");
     } catch (e) {
-      console.warn("Audit-Log konnte nicht laden:", e?.response?.status || e);
+      setLadeFehler(errMsg(e, "Audit-Log konnte nicht geladen werden"));
+      toast.error(errMsg(e, "Audit-Log konnte nicht geladen werden"));
     } finally {
       setLoading(false);
     }
@@ -83,10 +89,25 @@ export default function AdminAuditLog() {
 
       {loading && !items ? (
         <div className="flex items-center gap-2 text-zinc-500 text-sm"><Spinner /> lade…</div>
+      ) : ladeFehler && !items?.length ? (
+        // AD-21: kein leerer Erfolg — der Stand ist unbekannt
+        <div className="rounded-xl border px-4 py-3 text-sm text-red-300" role="alert"
+             data-testid="audit-ladefehler" style={{ borderColor: "#ef444455", background: "#ef444414" }}>
+          {ladeFehler} — die Einträge sind NICHT leer, sie konnten nur nicht geladen werden.{" "}
+          <button type="button" onClick={load} className="underline underline-offset-2 font-semibold text-white">
+            Erneut laden
+          </button>
+        </div>
       ) : !items?.length ? (
         <EmptyState title="Keine Einträge" hint="Für diesen Filter gibt es noch keine Aktivitäten." />
       ) : (
         <Card padded={false}>
+          {ladeFehler && (
+            <div className="px-4 py-2 text-[12.5px] text-red-300" role="alert"
+                 style={{ borderBottom: "1px solid var(--wa-08)" }}>
+              Aktualisieren fehlgeschlagen ({ladeFehler}) — angezeigt ist der letzte Stand.
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead>

@@ -69,7 +69,11 @@ export function verlaengerungText(anfrage) {
 }
 
 export function anfragePlan(wanted) {
-  return ANFRAGE_PLAENE[wanted || "monthly"]
+  // Prüfbericht 20.09.2026 (AD-27): eine Altanfrage OHNE wanted_plan fiel
+  // still auf "monthly" zurück — der Betreiber wählt jetzt ausdrücklich
+  // Monat oder Jahr (eigene Knöpfe in der Zeile), nichts wird still gebucht.
+  if (!wanted) return { text: "Wunsch unbekannt (Altanfrage) — Monat oder Jahr wählen", freischaltbar: false };
+  return ANFRAGE_PLAENE[wanted]
     || { text: `unbekannter Plan „${wanted}“`, freischaltbar: false };
 }
 
@@ -159,8 +163,10 @@ export default function AdminFreischaltungen() {
     }
   };
 
-  const grantSucher = (req) => aktion(req.id, async () => {
-    const plan = req.wanted_plan || "monthly";
+  // AD-27: planWahl kommt nur von den Monat/Jahr-Knöpfen einer Altanfrage
+  // ohne wanted_plan — sonst gilt allein der Wunsch aus der Anfrage.
+  const grantSucher = (req, planWahl) => aktion(req.id, async () => {
+    const plan = req.wanted_plan || planWahl;
     if (!anfragePlan(plan).freischaltbar) {
       toast.error("Diese Anfrage nennt kein bezahltes Abo — bitte ablehnen und ggf. in der "
         + "Firmenansicht direkt freischalten.");
@@ -337,6 +343,17 @@ export default function AdminFreischaltungen() {
                           {isSucher && anfragePlan(r.wanted_plan).freischaltbar && (
                             <Button size="sm" onClick={() => grantSucher(r)} disabled={!!arbeitet} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>
                           )}
+                          {isSucher && !r.wanted_plan && (<>
+                            {/* AD-27: Altanfrage ohne Plan — Monat oder Jahr ausdrücklich wählen */}
+                            <Button size="sm" onClick={() => grantSucher(r, "monthly")} disabled={!!arbeitet}
+                                    data-testid={`abo-ja-monat-${r.id}`} title="Freischalten als Monats-Abo (150 €)">
+                              <Check size={14} /> Monat (150 €)
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => grantSucher(r, "yearly")} disabled={!!arbeitet}
+                                    data-testid={`abo-ja-jahr-${r.id}`} title="Freischalten als Jahres-Abo (1.500 €)">
+                              Jahr (1.500 €)
+                            </Button>
+                          </>)}
                           {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)} disabled={!!arbeitet}><Check size={14} /> Zugang aktivieren</Button>}
                           {!isZugang && !isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
                             <Button size="sm" onClick={() => grantPlan(r)} disabled={!!arbeitet}><Check size={14} /> Paket aktivieren</Button>
@@ -655,7 +672,10 @@ function PasswortSetzenDialog({ konto, onClose }) {
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async () => {
-    if (pw.length < 8) { toast.error("Mindestens 8 Zeichen"); return; }
+    // Prüfbericht 20.09.2026 (AD-17): dieselbe Vorprüfung wie die übrigen
+    // Dialoge — der Server verlangt mind. 10 Zeichen, hier stand "min. 8".
+    const problem = passwortProblem(pw);
+    if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
       await api.post(`/admin/users/${konto.id}/password`, { new_password: pw });
@@ -670,9 +690,11 @@ function PasswortSetzenDialog({ konto, onClose }) {
         {konto.company_name || konto.contact_name || "Zwischenhändler"}
         {konto.kontonummer ? ` · Kontonummer ${konto.kontonummer}` : ""}
       </div>
-      <input type="text" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus
-             placeholder="Neues Passwort (min. 8, Ziffer oder Sonderzeichen)"
-             data-testid="buyer-pw-input" className={`${inputCls} mt-3`} style={inputStyle} />
+      <div className="mt-3">
+        <PasswortFeld value={pw} onChange={setPw} autoFocus
+                      placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
+                      testid="buyer-pw-input" className={inputCls} style={inputStyle} />
+      </div>
       <div className="mt-4 flex gap-2 justify-end">
         <Button variant="ghost" onClick={onClose}>Abbrechen</Button>
         <Button onClick={submit} disabled={busy} data-testid="buyer-pw-submit">Setzen</Button>

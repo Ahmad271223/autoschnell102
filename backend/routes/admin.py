@@ -832,26 +832,66 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
     return antwort
 
 
+# Pruefbericht 20.09.2026 (AD-19/AD-33): serverseitige Suche fuer Nutzer- und
+# Fahrerliste — vorher suchte die Oberflaeche nur in der ersten Seite (1000
+# Konten bzw. 2000 Fahrer), aeltere Konten waren unauffindbar. Der Suchtext
+# wird als Literal gesucht (re.escape, keine Regex-Sonderzeichen des Nutzers),
+# Gross-/Kleinschreibung egal, hoechstens SUCHE_MAX_ZEICHEN Zeichen.
+SUCHE_MAX_ZEICHEN = 80
+
+
+def _suchmuster(q: Optional[str]) -> Optional[dict]:
+    q = (q or "").strip()[:SUCHE_MAX_ZEICHEN]
+    if not q:
+        return None
+    return {"$regex": re.escape(q), "$options": "i"}
+
+
+async def _firmen_ids_zu(q: Optional[str], muster: dict) -> list:
+    """Firmen, deren Name den Suchtext enthaelt — oder deren Kundennummer ihm
+    entspricht ('#10999' wie in der Nutzerliste, oder '10999')."""
+    bedingung = [{"company_name": muster}]
+    ziffern = (q or "").strip().lstrip("#")
+    if ziffern.isdigit() and len(ziffern) <= 12:      # int64-sicher
+        bedingung.append({"kunden_nr": int(ziffern)})
+    return [d["id"] async for d in db.dealers.find(
+        {"$or": bedingung}, {"_id": 0, "id": 1}).limit(500)]
+
+
 @router.get("/admin/users")
 async def admin_list_users(response: Response, _=Depends(current_admin),
-                           page: int = 1, limit: int = 1000):
+                           page: int = 1, limit: int = 1000,
+                           q: Optional[str] = None):
     """Nutzerliste MIT Firmenname und Abo-Status — in 3 Abfragen gesamt
     statt 2 Abfragen JE NUTZER (vorher: bis zu 2001 Abfragen bei 1000
     Nutzern). Standard-Limit 1000 = bisheriges Verhalten, damit die
     Admin-Oberflaeche ohne Umbau denselben Bestand sieht; page/limit
-    stehen fuer kuenftige Pagination bereit."""
+    stehen fuer kuenftige Pagination bereit.
+
+    AD-19: `q` sucht serverseitig in Kontonummer, E-Mail, Benutzername,
+    Vor-/Nachname, Kontaktname und ueber die Firma (Name oder Kundennummer)."""
     limit = max(1, min(int(limit or 1000), 1000))
     # Nachpruefung 13.09.2026 (wie #52): page nach oben begrenzen — sonst
     # sprengt (page - 1) * limit int64 und pymongo wirft OverflowError (500).
     page = max(1, min(int(page or 1), 10 ** 6))
+    filter_: dict = {}
+    muster = _suchmuster(q)
+    if muster:
+        oder = [{"kontonummer": muster}, {"email": muster}, {"username": muster},
+                {"first_name": muster}, {"last_name": muster}, {"contact_name": muster},
+                {"company_name": muster}]
+        firmen = await _firmen_ids_zu(q, muster)
+        if firmen:
+            oder.append({"dealer_id": {"$in": firmen}})
+        filter_ = {"$or": oder}
     # Runde 12: Sitzungs-ID gehoert nicht in Admin-Antworten.
     # Rollenpruefung 22.09.2026 (Welle 3): 'id' als zweiter Sortierschluessel —
     # bei gleichem created_at (Altbestand, Import) ist die Reihenfolge sonst
     # nicht festgelegt, und ueber die Seitengrenze hinweg konnte ein Konto
     # auf keiner Seite oder auf zweien auftauchen.
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
-                                      "mfa.pending_secret": 0, "mfa.wiederherstellung": 0,
-                                      "current_session_id": 0}) \
+    users = await db.users.find(filter_, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
+                                           "mfa.pending_secret": 0, "mfa.wiederherstellung": 0,
+                                           "current_session_id": 0}) \
         .sort([("created_at", -1), ("id", 1)]).skip((page - 1) * limit).to_list(limit + 1)
     # Pruefbericht 20.09.2026 (AD-16): eine Zeile mehr lesen — gibt es sie,
     # ist die Liste gekuerzt (X-Truncated), die Oberflaeche sagt es.
@@ -1721,11 +1761,26 @@ async def admin_user_set_password(
 # plattformweit; Firmenzugehoerigkeit ergibt sich aus dealer_drivers.
 @router.get("/admin/drivers")
 async def admin_list_drivers(response: Response, limit: int = 2000, seite: int = 1,
-                             _=Depends(current_admin)):
+                             _=Depends(current_admin), q: Optional[str] = None):
+    """AD-33: `q` sucht serverseitig in Kontonummer, Name, E-Mail, Fahrer-Code
+    und ueber die verknuepften Firmen (Name/Kundennummer) — wie die Suche in
+    der Oberflaeche, nur ueber ALLE Fahrer statt nur die erste Seite."""
     limit = max(1, min(int(limit), 5000))
     seite = max(1, int(seite))
+    filter_: dict = {}
+    muster = _suchmuster(q)
+    if muster:
+        oder = [{"kontonummer": muster}, {"display_name": muster},
+                {"email": muster}, {"driver_code": muster}]
+        firmen = await _firmen_ids_zu(q, muster)
+        if firmen:
+            fahrer_ids = await db.dealer_drivers.distinct(
+                "driver_account_id", {"dealer_id": {"$in": firmen}})
+            if fahrer_ids:
+                oder.append({"id": {"$in": fahrer_ids}})
+        filter_ = {"$or": oder}
     fahrer = await db.driver_accounts.find(
-        {}, {"_id": 0, "password_hash": 0, "current_session_id": 0},
+        filter_, {"_id": 0, "password_hash": 0, "current_session_id": 0},
     ).sort("created_at", -1).skip((seite - 1) * limit).to_list(limit + 1)
     fahrer = _seite_kopf(response, fahrer, limit)
     links: Dict[str, dict] = {}
@@ -3762,16 +3817,24 @@ async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_a
         # Betreiber aus seiner Sitzung (wie beim MFA-Abschalten, AD-06).
         raise HTTPException(400, "Aktuelles Passwort ist nicht korrekt")
     _pw_persoenlich_400(body.new_password, persoenliche_werte(user))
+    # Pruefbericht 20.09.2026 (AD-28): vorher current_session_id=None und
+    # {ok: true} — der naechste Aufruf dieses Tabs lief in die 401 und auf die
+    # Anmeldeseite, obwohl "Passwort geaendert" stand. Jetzt wie
+    # /admin/me/mfa/aktivieren: DIESER Aufruf bekommt eine neue Einzel-Sitzung
+    # (Token in der Antwort); jedes andere Geraet muss sich neu anmelden, die
+    # alte sid passt nicht mehr (Einzel-Sitzung bleibt).
+    sid = new_session_id()
     # Nachpruefung 15.09.2026: CAS auf den soeben geprueften Hash.
     r = await db.users.update_one(
         {"id": admin["id"], "password_hash": user["password_hash"]},
         {"$set": {"password_hash": await hash_password_async(body.new_password),
-          "current_session_id": None}},
+                  "current_session_id": sid, "current_session_seit": now_iso()}},
     )
     if r.matched_count == 0:
         raise HTTPException(409, "Das Passwort wurde gerade anderweitig geändert — bitte neu anmelden")
     await log_activity_sicher("", admin["id"], "admin.passwort.geaendert")
-    return {"ok": True}
+    return {"ok": True, "token": create_token(admin["id"], sid),
+            "hinweis": "Andere Geräte müssen sich neu anmelden."}
 
 
 # ---------- Betrieb: Alarme, Loesch-Warteschlange, Abgleiche ----------
@@ -3779,7 +3842,9 @@ async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_a
 async def admin_betrieb(admin=Depends(current_super_admin)):
     """Sichtbarkeit fuer alles, was frueher still scheiterte (Audit 09/2026):
     offene Betriebsalarme, nicht loeschbare Dateien, haengende
-    Freischaltungs-Vorgaenge, Zahlungen ohne Zugang, letztes Backup."""
+    Freischaltungs-Vorgaenge, letztes Backup. (Pruefbericht 20.09.2026 DO-22:
+    "Zahlungen ohne Zugang" entfaellt — Stripe ist seit 14.09.2026 entfernt,
+    der Alarm zahlung_ohne_zugang wird nirgends mehr ausgeloest.)"""
     from betrieb import alarm_uebersicht, offene_alarme
     try:
         # Runde 21 (Nebenbefund): serveruebergreifend wie /ready — sonst
@@ -3802,8 +3867,6 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
             {"aufgegeben": True}, {"_id": 0}).limit(50).to_list(50),
         "abo_vorgaenge_haengend": await db.abo_vorgaenge.count_documents(
             {"status": "laeuft", "updated_at": {"$lt": frist}}),
-        "zahlungen_ohne_zugang": await db.payment_transactions.count_documents(
-            {"status": {"$in": ["paid", "activating", "activation_failed"]}}),
         "backup": backup,
         # Nachpruefung 20.09.2026, Nr. 66: hier stand nur `.get("aktiv")`.
         # Ein abgelaufener Merker (abgestuerztes Sicherungsskript) haette die

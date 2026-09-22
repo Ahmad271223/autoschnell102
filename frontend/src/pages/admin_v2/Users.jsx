@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
-import { Search, KeyRound, Lock, Unlock, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
+import { Search, KeyRound, Lock, Unlock, ChevronDown, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
 import KontoPruefen from "@/components/admin/KontoPruefen";
@@ -35,33 +35,49 @@ export function istChefKonto(u) {
   return u.role === "dealer";
 }
 
-// Haendler-Hauptaccount: das Backend verlangt eine ausdrueckliche
-// Bestaetigung (?firma_loeschen=true), weil dabei die KOMPLETTE Firma
-// entfernt wird. Vorher zeigen wir die Loeschvorschau des Backends.
-async function deleteUserSmart(u) {
-  try {
-    await api.delete(`/admin/users/${u.id}`);
-    return true;
-  } catch (e) {
-    // Pruefbericht 20.09.2026 (AD-09): 409 kommt auch fuer einen Sucher,
-    // dessen Firma keinen Hauptaccount hat — dann NICHT die Rueckfrage
-    // "komplette Firma loeschen", sondern der echte Grund.
-    if (e?.response?.status !== 409 || !istChefKonto(u)) throw e;
+// Pruefbericht 20.09.2026 (AD-24/AD-25): Der Loeschdialog sagte fuer JEDE
+// Rolle "inklusive Haendler-Profil und allen Abos", die Loeschvorschau kam
+// erst im zweiten window.confirm nach der 409. Jetzt: Umfang je Rolle
+// (Server: admin_delete_user), Vorschau fuer den Chef schon im Dialog.
+export function rolleText(u) {
+  if (u?.is_super_admin) return "Super-Admin";
+  if (istChefKonto(u)) return "Händler-Hauptaccount (Chef)";
+  if (u?.role === "dealer") return "weiteres Konto (arbeitet als Sucher)";
+  if (u?.role === "sucher") return "Sucher";
+  if (u?.role === "b2b_buyer") return "Zwischenhändler";
+  if (u?.role === "admin") return "Admin";
+  return u?.role || "—";
+}
+
+export function loeschUmfang(u) {
+  if (istChefKonto(u)) {
+    return "Händler-Hauptaccount — die KOMPLETTE Firma wird gelöscht: Chef, alle Sucher, "
+      + "Fahrzeuge, Termine, Verträge, Inserate und Abos.";
   }
-  let vorschau = "";
-  try {
-    const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
-    const w = data?.wuerde_loeschen || {};
-    vorschau = Object.entries(w).filter(([, n]) => n > 0)
-      .map(([k, n]) => `${n} × ${k}`).join(", ") || "keine weiteren Daten";
-  } catch { vorschau = "Vorschau nicht verfügbar"; }
-  const ok = window.confirm(
-    `ACHTUNG: "${kontoLabel(u)}" ist ein Händler-Hauptaccount.\n` +
-    `Die KOMPLETTE Firma wird gelöscht (${vorschau}).\n\n` +
-    `Wirklich unwiderruflich löschen?`);
-  if (!ok) return false;
-  await api.delete(`/admin/users/${u.id}?firma_loeschen=true`);
-  return true;
+  if (u?.role === "sucher" || u?.role === "dealer") {
+    return "nur dieses Konto — Fahrzeuge, Verträge und Termine gehen an den Chef der Firma.";
+  }
+  if (u?.role === "b2b_buyer") {
+    return "nur dieses Zwischenhändler-Konto — Marktplatz-Zugang, Merkliste und Kaufanfragen "
+      + "werden entfernt, reservierte Fahrzeuge freigegeben.";
+  }
+  return "nur dieses Konto.";
+}
+
+/** Text der Loeschvorschau (/admin/dealers/{id}/loeschvorschau). */
+export function vorschauText(data) {
+  const w = data?.wuerde_loeschen || {};
+  return Object.entries(w).filter(([, n]) => n > 0)
+    .map(([k, n]) => `${n} × ${k}`).join(", ") || "keine weiteren Daten";
+}
+
+// Pruefbericht 20.09.2026 (AD-19): ab so vielen Zeichen sucht der SERVER in
+// allen Konten (q) — vorher nur die Oberflaeche in der ersten Seite (1000),
+// aeltere Konten waren unauffindbar.
+export const SUCHE_AB = 3;
+export function serverSuche(q) {
+  const s = String(q ?? "").trim();
+  return s.length >= SUCHE_AB ? s : "";
 }
 
 export default function AdminUsers() {
@@ -79,22 +95,42 @@ export default function AdminUsers() {
   // keine Nutzer gefunden" zeigen; eine gekuerzte Liste als solche kennzeichnen.
   const [ladeFehler, setLadeFehler] = useState("");
   const [gekuerzt, setGekuerzt] = useState(false);
+  // AD-19: Seite und "Weitere laden"; nur die juengste Antwort zaehlt (eine
+  // langsame aeltere Suche darf eine neuere nicht ueberschreiben).
+  const [seite, setSeite] = useState(1);
+  const [laedtMehr, setLaedtMehr] = useState(false);
+  const ladeLauf = useRef(0);
+  // AD-24: Loeschvorschau fuer den Chef, geladen beim Oeffnen des Dialogs
+  const [loeschVorschau, setLoeschVorschau] = useState(null);
+  const suche = serverSuche(q);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async ({ suchtext = suche, naechste = 1 } = {}) => {
+    const lauf = ++ladeLauf.current;
+    if (naechste > 1) setLaedtMehr(true); else setLoading(true);
     try {
-      const { data, headers } = await api.get("/admin/users");
-      setUsers(data.users || data || []);
+      const { data, headers } = await api.get("/admin/users",
+        { params: { page: naechste, ...(suchtext ? { q: suchtext } : {}) } });
+      if (lauf !== ladeLauf.current) return;          // ueberholt
+      const neu = data.users || data || [];
+      setUsers((alt) => (naechste > 1 ? [...alt, ...neu] : neu));
+      setSeite(naechste);
       setGekuerzt(headers?.["x-truncated"] === "1");
       setLadeFehler("");
     } catch (e) {
+      if (lauf !== ladeLauf.current) return;
       setLadeFehler(errMsg(e, "Konten konnten nicht geladen werden"));
       toast.error(errMsg(e, "Fehler beim Laden"));
     } finally {
-      setLoading(false);
+      if (lauf === ladeLauf.current) { setLoading(false); setLaedtMehr(false); }
     }
   };
-  useEffect(() => { load(); }, []);
+  // Erstes Laden sofort; eine Server-Suche (ab SUCHE_AB Zeichen) kurz
+  // entprellt, damit nicht jeder Tastendruck eine Abfrage wird.
+  useEffect(() => {
+    const t = setTimeout(() => load({ suchtext: suche, naechste: 1 }), q ? 300 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suche]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -154,16 +190,33 @@ export default function AdminUsers() {
     } catch (e) { toast.error(errMsg(e, "Fehler")); }
   };
 
+  // AD-24: beim Chef die Loeschvorschau des Servers gleich in den Dialog holen
+  const loeschenOeffnen = async (u) => {
+    setDeleteUser(u);
+    setLoeschVorschau(null);
+    if (!istChefKonto(u) || !u.dealer_id) return;
+    try {
+      const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
+      setLoeschVorschau({ text: vorschauText(data) });
+    } catch (e) {
+      setLoeschVorschau({ fehler: errMsg(e, "Löschvorschau nicht verfügbar") });
+    }
+  };
+
   const submitDelete = async () => {
     if (!deleteUser) return;
     setDeleting(true);
     try {
-      const done = await deleteUserSmart(deleteUser);
-      if (done) {
-        toast.success(`Account "${kontoLabel(deleteUser)}" dauerhaft gelöscht`);
-        setDeleteUser(null);
-        load();
-      }
+      // AD-24: Der Chef hat Umfang und Vorschau schon im Dialog gesehen —
+      // direkt mit ?firma_loeschen=true. Fuer alle anderen Rollen kommt eine
+      // 409 (z. B. Firma ohne Hauptaccount, AD-09) als echter Grund im Toast.
+      const pfad = istChefKonto(deleteUser)
+        ? `/admin/users/${deleteUser.id}?firma_loeschen=true`
+        : `/admin/users/${deleteUser.id}`;
+      await api.delete(pfad);
+      toast.success(`Account "${kontoLabel(deleteUser)}" dauerhaft gelöscht`);
+      setDeleteUser(null);
+      load();
     } catch (e) {
       toast.error(errMsg(e, "Löschen fehlgeschlagen"));
     } finally {
@@ -176,7 +229,8 @@ export default function AdminUsers() {
       <PageHeader
         title="Nutzer"
         subtitle={ladeFehler && !users.length ? "Konten konnten nicht geladen werden"
-          : `${users.length} Konten insgesamt${gekuerzt ? " (Liste gekürzt)" : ""}`}
+          : suche ? `${users.length} Treffer für „${suche}“${gekuerzt ? " (gekürzt)" : ""}`
+            : `${users.length} Konten insgesamt${gekuerzt ? " (Liste gekürzt)" : ""}`}
         action={
           <Button disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin legt Firmen an"}
             data-testid="admin-create-user-btn"
@@ -197,7 +251,7 @@ export default function AdminUsers() {
             data-testid="admin-users-search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Suchen (Kontonummer, Firma, #Kundennummer, E-Mail)"
+            placeholder="Suchen (Kontonummer, Firma, #Kundennummer, E-Mail) — ab 3 Zeichen in allen Konten"
             className="flex-1 bg-transparent border-0 outline-none text-[14px] text-white placeholder:text-zinc-500"
           />
         </div>
@@ -205,7 +259,8 @@ export default function AdminUsers() {
         {gekuerzt && !loading && (
           <div className="px-4 py-2 text-[12.5px] text-amber-200" data-testid="admin-users-gekuerzt"
                style={{ borderBottom: "1px solid var(--wa-08)" }}>
-            Liste gekürzt: angezeigt werden die neuesten 1.000 Konten — ältere sind hier nicht sichtbar.
+            Liste gekürzt: es gibt weitere Konten — unten „Weitere laden“ oder gezielt suchen
+            (ab 3 Zeichen sucht der Server in allen Konten).
           </div>
         )}
         {loading ? (
@@ -294,7 +349,7 @@ export default function AdminUsers() {
                         data-testid={`user-delete-btn-${u.id}`}
                         variant="danger"
                         size="sm"
-                        onClick={() => setDeleteUser(u)}
+                        onClick={() => loeschenOeffnen(u)}
                         title="Account dauerhaft löschen"
                       >
                         <Trash2 size={14} />
@@ -308,6 +363,16 @@ export default function AdminUsers() {
               </li>
             ))}
           </ul>
+        )}
+        {gekuerzt && !loading && !ladeFehler && (
+          // AD-19: die naechste Seite unten anhaengen statt "aeltere unsichtbar"
+          <div className="px-4 py-4 flex justify-center" style={{ borderTop: "1px solid var(--wa-06)" }}>
+            <Button variant="outline" size="sm" onClick={() => load({ naechste: seite + 1 })}
+                    disabled={laedtMehr} data-testid="admin-users-mehr">
+              {laedtMehr ? <Spinner /> : <ChevronDown size={14} />}
+              {laedtMehr ? "lädt…" : "Weitere laden"}
+            </Button>
+          </div>
         )}
       </Card>
 
@@ -367,11 +432,29 @@ export default function AdminUsers() {
                   Account dauerhaft löschen?
                 </div>
                 <div className="text-[13px] text-zinc-400 mt-1">
-                  Du löschst <b className="text-white">{kontoName(deleteUser)}</b>
-                  {deleteUser.kontonummer ? <> (Kontonummer {deleteUser.kontonummer})</> : null}{" "}
-                  inklusive Händler-Profil und allen Abos.
-                  <br />
-                  <span className="text-red-300/80">Dieser Vorgang ist nicht umkehrbar.</span>
+                  {/* AD-24: Umfang je Rolle statt "inklusive Haendler-Profil und allen Abos" */}
+                  Du löschst <b className="text-white">{kontoName(deleteUser)}</b>:{" "}
+                  <span data-testid="admin-delete-user-umfang">{loeschUmfang(deleteUser)}</span>
+                  {/* AD-25: Rolle, Kontonummer, #Kundennummer, E-Mail, Anlagedatum, Konto-ID */}
+                  <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12.5px]"
+                      data-testid="admin-delete-user-daten">
+                    <dt>Rolle</dt><dd className="text-white">{rolleText(deleteUser)}</dd>
+                    <dt>Kontonummer</dt><dd className="text-white font-mono">{deleteUser.kontonummer || "—"}</dd>
+                    {deleteUser.kunden_nr != null && (<><dt>Kundennummer</dt><dd className="text-white">#{deleteUser.kunden_nr}</dd></>)}
+                    <dt>E-Mail</dt><dd className="text-white break-all">{deleteUser.email || "—"}</dd>
+                    <dt>Erstellt</dt><dd className="text-white">{fmtDate(deleteUser.created_at)}</dd>
+                    <dt>Konto-ID</dt><dd className="text-white font-mono break-all">{deleteUser.id}</dd>
+                  </dl>
+                  {istChefKonto(deleteUser) && (
+                    <div className="mt-2 text-[12.5px]" data-testid="admin-delete-user-vorschau">
+                      {loeschVorschau === null ? "Löschvorschau wird geladen…"
+                        : loeschVorschau.fehler ? <span className="text-amber-300">{loeschVorschau.fehler}</span>
+                          : <>Würde löschen: <span className="text-white">{loeschVorschau.text}</span></>}
+                    </div>
+                  )}
+                  <div className="mt-2">
+                    <span className="text-red-300/80">Dieser Vorgang ist nicht umkehrbar.</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -389,7 +472,8 @@ export default function AdminUsers() {
                 data-testid="admin-delete-user-confirm"
                 variant="danger"
                 onClick={submitDelete}
-                disabled={deleting}
+                // AD-24: beim Chef erst loeschen, wenn die Vorschau da ist (oder ihr Fehler)
+                disabled={deleting || (istChefKonto(deleteUser) && loeschVorschau === null)}
               >
                 {deleting ? "Lösche…" : "Endgültig löschen"}
               </Button>

@@ -6,10 +6,12 @@ import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from ".
 
 /**
  * Betrieb (Audit 09/2026): alles, was frueher still scheiterte, ist hier
- * sichtbar — offene Betriebsalarme (bezahlt ohne Zugang, Datei nicht
- * loeschbar, Vertrag ohne dauerhaften Datensatz, Backup unvollstaendig),
- * die Loesch-Warteschlange, haengende Freischaltungs-Vorgaenge und das
- * letzte Backup. Nur Super-Admin.
+ * sichtbar — offene Betriebsalarme (Datei nicht loeschbar, Vertrag ohne
+ * dauerhaften Datensatz, Backup unvollstaendig), die Loesch-Warteschlange,
+ * haengende Freischaltungs-Vorgaenge und das letzte Backup. Nur Super-Admin.
+ * Pruefbericht 20.09.2026 (DO-22): die Kachel "Zahlungen ohne Zugang" ist
+ * weg — Stripe ist seit 14.09.2026 entfernt, der Alarm zahlung_ohne_zugang
+ * wird nirgends mehr ausgeloest.
  */
 export default function AdminBetrieb() {
   const [data, setData] = useState(null);
@@ -117,11 +119,10 @@ export default function AdminBetrieb() {
         }
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
         <Kachel label="Offene Alarme" wert={alarmeGesamt} tone={alarmeGesamt ? "red" : "green"} />
         <Kachel label="Dateilöschungen offen" wert={data.datei_loeschungen_offen} tone={data.datei_loeschungen_offen ? "yellow" : "green"} />
         <Kachel label="Abo-Vorgänge hängend" wert={data.abo_vorgaenge_haengend} tone={data.abo_vorgaenge_haengend ? "yellow" : "green"} />
-        <Kachel label="Zahlungen ohne Zugang" wert={data.zahlungen_ohne_zugang} tone={data.zahlungen_ohne_zugang ? "red" : "green"} />
         <Kachel label="Wartungsmodus" wert={data.wartungsmodus ? "AKTIV" : "aus"} tone={data.wartungsmodus ? "red" : "green"} />
       </div>
       {"alarm_empfaenger" in data && !data.alarm_empfaenger && (
@@ -205,7 +206,7 @@ export default function AdminBetrieb() {
           </div>
         )}
         {alarme.length === 0 ? (
-          <EmptyState title="Keine offenen Alarme" hint="Bezahlt-ohne-Zugang, nicht löschbare Dateien, Verträge ohne Datensatz und Backup-Probleme erscheinen hier." />
+          <EmptyState title="Keine offenen Alarme" hint="Nicht löschbare Dateien, Verträge ohne Datensatz und Backup-Probleme erscheinen hier." />
         ) : (
           <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
             {alarme.map((a) => (

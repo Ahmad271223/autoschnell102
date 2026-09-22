@@ -21,7 +21,10 @@ function MfaKarte() {
   // Runde 31: Die Codes werden genau einmal gezeigt — ein Neuladen haette den
   // Notzugang des einzigen Super-Admins vernichtet.
   useUngespeichert(Boolean(codes?.length));
-  const load = () => api.get("/admin/me/mfa").then((r) => setSt(r.data)).catch(() => setSt({ aktiv: false }));
+  // Pruefbericht 20.09.2026 (AD-29): ein Ladefehler hiess vorher "nicht
+  // aktiv" samt Knopf "Einrichten" — jetzt "Status unbekannt" mit Neuladen;
+  // "Einrichten" nur, wenn der Server wirklich aktiv === false meldet.
+  const load = () => api.get("/admin/me/mfa").then((r) => setSt(r.data)).catch(() => setSt({ fehler: true }));
   useEffect(() => { load(); }, []);
   const einrichten = async () => {
     setBusy(true);
@@ -78,14 +81,25 @@ function MfaKarte() {
       <div className="flex items-center gap-2 mb-2">
         <ShieldCheck size={16} className="text-zinc-500" />
         <span className="text-[15px] font-semibold text-white">Zwei-Faktor-Anmeldung (Authenticator-App)</span>
-        {st && (st.aktiv ? <span className="text-[11px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300">aktiv</span>
-                         : <span className="text-[11px] px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-300">nicht aktiv</span>)}
+        {st && (st.fehler
+          ? <span className="text-[11px] px-2 py-0.5 rounded-md bg-red-500/15 text-red-300" data-testid="mfa-status-unbekannt">Status unbekannt</span>
+          : st.aktiv ? <span className="text-[11px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300">aktiv</span>
+                     : <span className="text-[11px] px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-300">nicht aktiv</span>)}
       </div>
+      {st?.fehler && (
+        <div className="rounded-lg p-3 mb-3 text-[12.5px] text-red-300" role="alert" data-testid="mfa-ladefehler"
+             style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.35)" }}>
+          Der Zwei-Faktor-Status konnte nicht geladen werden — ob die Anmeldung geschützt ist, ist gerade UNBEKANNT.{" "}
+          <button type="button" onClick={load} className="underline underline-offset-2 font-semibold text-white">
+            Neu laden
+          </button>
+        </div>
+      )}
       <p className="text-[12.5px] text-zinc-400 mb-3">
         Beim Anmelden wird zusätzlich zum Passwort ein 6-stelliger Code aus einer Authenticator-App
         (z.B. Google Authenticator, Microsoft Authenticator, Aegis) verlangt. Für den Super-Admin dringend empfohlen.
       </p>
-      {st && !st.aktiv && st.neu_einrichten_bis && (
+      {st && st.aktiv === false && st.neu_einrichten_bis && (
         <div className="rounded-lg p-3 mb-3 text-[12.5px] text-amber-200" role="alert" data-testid="mfa-gnadenfrist"
              style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.35)" }}>
           Zwei-Faktor ist abgeschaltet, für den Betreiber aber Pflicht: bitte bis{" "}
@@ -93,7 +107,7 @@ function MfaKarte() {
           neu einrichten — danach ist nach dem Abmelden keine Anmeldung mehr möglich.
         </div>
       )}
-      {st && !st.aktiv && !setup && (
+      {st && st.aktiv === false && !setup && (
         <Button size="sm" onClick={einrichten} disabled={busy} data-testid="mfa-einrichten">Einrichten</Button>
       )}
       {setup && (
@@ -189,8 +203,13 @@ export default function AdminSettings() {
     if (nw !== nw2) return toast.error("Passwörter stimmen nicht überein");
     setBusy(true);
     try {
-      await api.post("/admin/me/password", { current_password: cur, new_password: nw });
-      toast.success("Passwort geändert");
+      const r = await api.post("/admin/me/password", { current_password: cur, new_password: nw });
+      // Pruefbericht 20.09.2026 (AD-28): der Server stellt eine neue
+      // Einzel-Sitzung aus (die alte ist ungueltig) — dieser Tab uebernimmt
+      // das neue Token wie bei der MFA-Aktivierung, sonst endete der naechste
+      // Aufruf mit 401 auf der Anmeldeseite, direkt nach "Passwort geaendert".
+      if (r.data?.token) tokenSetzen(TOKEN_APP, r.data.token, { nurSitzung: true });
+      toast.success("Passwort geändert — andere Geräte müssen sich neu anmelden");
       setCur(""); setNw(""); setNw2("");
     } catch (e) {
       toast.error(errMsg(e, "Fehler"));

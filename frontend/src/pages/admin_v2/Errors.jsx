@@ -9,6 +9,9 @@ export default function AdminErrors() {
   const [status, setStatus] = useState("open");
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState(null);
+  // Prüfbericht 20.09.2026 (AD-21): ein Ladefehler stand nur in der Konsole,
+  // die Seite sagte "Keine offenen Fehler" — jetzt sichtbar, mit Neuladen.
+  const [ladeFehler, setLadeFehler] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -16,8 +19,10 @@ export default function AdminErrors() {
       const params = status ? `?status=${status}` : "";
       const r = await api.get(`/admin/errors${params}`);
       setItems(r.data);
+      setLadeFehler("");
     } catch (e) {
-      console.warn("Fehler-Liste konnte nicht laden:", e?.response?.status || e);
+      setLadeFehler(errMsg(e, "Fehler-Liste konnte nicht geladen werden"));
+      toast.error(errMsg(e, "Fehler-Liste konnte nicht geladen werden"));
     } finally {
       setLoading(false);
     }
@@ -84,6 +89,15 @@ export default function AdminErrors() {
 
       {loading && !items ? (
         <div className="flex items-center gap-2 text-zinc-500 text-sm"><Spinner /> lade…</div>
+      ) : ladeFehler && !items?.length ? (
+        // AD-21: kein leerer Erfolg — der Stand ist unbekannt
+        <div className="rounded-xl border px-4 py-3 text-sm text-red-300" role="alert"
+             data-testid="errors-ladefehler" style={{ borderColor: "#ef444455", background: "#ef444414" }}>
+          {ladeFehler} — ob Fehler offen sind, ist gerade UNBEKANNT.{" "}
+          <button type="button" onClick={load} className="underline underline-offset-2 font-semibold text-white">
+            Erneut laden
+          </button>
+        </div>
       ) : !items?.length ? (
         <EmptyState
           title={status === "open" ? "Keine offenen Fehler 🎉" : "Keine Einträge"}
@@ -91,6 +105,12 @@ export default function AdminErrors() {
         />
       ) : (
         <div className="space-y-3">
+          {ladeFehler && (
+            <div className="rounded-xl border px-4 py-2 text-[12.5px] text-red-300" role="alert"
+                 style={{ borderColor: "#ef444455", background: "#ef444414" }}>
+              Aktualisieren fehlgeschlagen ({ladeFehler}) — angezeigt ist der letzte Stand.
+            </div>
+          )}
           {items.map((it) => {
             const expanded = openId === it.id;
             return (

@@ -986,8 +986,9 @@ bricht ein Migrations-/Indexfehler den Start ab (fail-closed). Stand:
   (`MIN_FREI_MB`) oder nicht schreibbarem Datei-Speicher; Warnungen bei
   Backup älter als 26 h, offenen Betriebsalarmen, hängenden Link-Jobs, S3.
   Für externe Überwachung `/api/ready` verwenden.
-- Admin → **Betrieb** (nur Super-Admin): offene Alarme (bezahlt ohne Zugang,
-  nicht löschbare Dateien, Vertrag ohne Datensatz, Backup unvollständig),
+- Admin → **Betrieb** (nur Super-Admin): offene Alarme (nicht löschbare
+  Dateien, Vertrag ohne Datensatz, Backup unvollständig; *historisch:* „bezahlt
+  ohne Zugang“ — entfällt seit 14.09.2026, Stripe entfernt, Prüfbericht DO-22),
   Löschwarteschlange, hängende Freischaltungs-Vorgänge, letztes Backup,
   Reparaturlauf per Klick (läuft sonst alle 10 Minuten automatisch).
 

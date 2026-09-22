@@ -18,7 +18,7 @@ Legende: **✅ umgesetzt (im Code, mit Test)** · **🔧 vorbereitet, Betreiber 
 
 | # | Befund | Stand | Was/Wo |
 |---|--------|-------|--------|
-| 8 | Bezahlt ohne Zugang | ✅ | Zustandsautomat `paid → activating → active/activation_failed`, idempotent, Abgleich alle 10 min, Alarm `zahlung_ohne_zugang`. |
+| 8 | Bezahlt ohne Zugang | ➖ entfällt seit 14.09.2026 (Stripe entfernt, Freischaltung per Rechnung; Prüfbericht DO-22) — *historisch:* | Zustandsautomat `paid → activating → active/activation_failed`, idempotent, Abgleich alle 10 min, Alarm `zahlung_ohne_zugang` (wird nicht mehr ausgelöst, Kachel im Betrieb entfernt). |
 | 9 | Host-Header beeinflusst URLs | ✅ | Proxy nur `PUBLIC_HOST` (444 sonst), feste Redirect-Domain, keine URL aus `request.base_url`. |
 | 10 | Clickjacking-Schutz Oberfläche | ✅ | Header im Proxy (`deploy/default.conf.template`) und im Web-Image für alle Antworten. |
 | 11 | Datei-Löschfehler als Erfolg | ✅ | `loeschen_oder_vormerken` + Retry-Queue mit Referenzen, Schlüssel bleibt bis bestätigter Löschung, Alarm nach 20 Versuchen, sichtbar unter Admin → Betrieb. |

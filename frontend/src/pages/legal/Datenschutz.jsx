@@ -138,7 +138,11 @@ export default function Datenschutz() {
           LOG_AUFBEWAHRUNG_TAGE=60, SNAPSHOT_RETENTION_DAYS=60 (nur Alt-Snapshots),
           beweis_service.py BEWEIS_AUFBEWAHRUNG_TAGE=30,
           BERICHT_AUFBEWAHRUNG_TAGE=60 (ganzer Abholbericht ab Terminabschluss),
-          CLEANUP_RULES 7/14 Tage fuer Inseratsfotos, FAHRERFOTO_TAGE=60
+          CLEANUP_RULES fuer Inseratsfotos (abgeholt/erledigt 7 Tage,
+          nicht abgeholt/storniert 14 Tage — Pruefbericht RE-09),
+          Backups: scripts/backup_mongo.py KEEP=14 lokal + juengstes gutes,
+          BACKUP_S3_KEEP=14 offsite, BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE=30
+          Papierkorb geloeschter Dateien (RE-10), FAHRERFOTO_TAGE=60
           fuer Fahrerfotos ab dem Hochladen), routes/bestand.py
           (BESTAND_RETENTION_DAYS=50), routes/listings.py
           (LISTING_CACHE_TTL_HOURS). Wird eine Umgebungsvariable geaendert,
@@ -171,8 +175,9 @@ export default function Datenschutz() {
         lange, wie der zugehörige Kaufvertrag aufbewahrt wird. Der
         Abholbericht selbst (Kilometerstand, Mängel, Notizen, Name des
         Fahrers) wird 60 Tage nach Abschluss des Termins gelöscht. Aus dem
-        Inserat übernommene Fahrzeugfotos werden 7 Tage nach der Abholung
-        (bei nicht abgeholten Fahrzeugen nach 14 Tagen) gelöscht, sofern das
+        Inserat übernommene Fahrzeugfotos werden bei abgeholten oder
+        erledigten Terminen 7 Tage, bei nicht abgeholten oder stornierten
+        Terminen 14 Tage nach dem Abschluss des Termins gelöscht, sofern das
         Fahrzeug nicht in den Bestand oder Verkauf übernommen wurde.
         Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert.
         Beweisdokumente zu Inseraten löschen wir 30 Tage nach ihrer
@@ -188,8 +193,11 @@ export default function Datenschutz() {
         <li>Fehlerprotokolle: max. 60 Tage</li>
         <li>Marktplatz-Anfragen: 60 Tage nach Abschluss</li>
         <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 21 Tage; zu einem Kaufvertrag gehörende Inseratsdaten so lange wie der Vertrag</li>
-        <li>Backups: täglich; auf unseren Servern 14 Tage, zusätzlich
-            verschlüsselt außer Haus die letzten 14 Sicherungen</li>
+        <li>Backups: täglich; auf unseren Servern die letzten 14 Sicherungen
+            (die jüngste vollständige bleibt stets erhalten), zusätzlich
+            verschlüsselt außer Haus die letzten 14 Sicherungen; im
+            Datei-Speicher gelöschte Dateien bleiben bis zu 30 Tage in der
+            Dateisicherung, danach werden sie auch dort entfernt</li>
       </ul>
 
       <H2>6. Deine Rechte</H2>

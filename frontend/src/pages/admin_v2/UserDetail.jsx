@@ -254,18 +254,26 @@ export default function AdminUserDetail() {
     } catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
+  // Pruefbericht 20.09.2026 (AD-22): Sperren und Loeschen liefen ohne
+  // sperren()/freigeben() — ein zweiter Klick schickte den Aufruf doppelt
+  // (zwei Toasts, zwei Audit-Eintraege, beim Sperren die Umkehr). Jetzt wie
+  // grantAbo: Zeile bis nach dem Neuladen gesperrt.
   const toggleSucherActive = async (s) => {
     if (s.active && !window.confirm(`Konto ${sucherLabel(s)} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
+    if (!sperren(s.id)) return;
     try {
       await api.post(`/admin/users/${s.id}/active`, { active: !s.active });
       toast.success(s.active ? "Sucher gesperrt" : "Sucher entsperrt");
-      loadFirma();
+      await loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
   };
   const removeSucher = async (s) => {
     if (!window.confirm(`Sucher ${sucherLabel(s)} endgültig löschen?`)) return;
-    try { await api.delete(`/admin/users/${s.id}`); toast.success("Sucher gelöscht"); loadFirma(); }
+    if (!sperren(s.id)) return;
+    try { await api.delete(`/admin/users/${s.id}`); toast.success("Sucher gelöscht"); await loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
   };
   const addZahlung = async () => {
     const betrag = window.prompt("Betrag in € (z. B. 1.500 oder 150,00):");
@@ -513,10 +521,13 @@ export default function AdminUserDetail() {
                                   <Crown size={13} /> Zum Chef machen
                                 </Button>
                               )}
-                              <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} disabled={!superAdmin} title={s.active ? "Konto komplett sperren (Anmeldung unmoeglich)" : "Konto entsperren"}>
+                              <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`sucher-sperren-${s.id}`}
+                                      title={s.active ? "Konto komplett sperren (Anmeldung unmoeglich)" : "Konto entsperren"}>
                                 <Ban size={13} /> {s.active ? "Konto sperren" : "Entsperren"}
                               </Button>
-                              <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} disabled={!superAdmin} title="Löschen">
+                              <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`sucher-loeschen-${s.id}`} title="Löschen">
                                 <Trash2 size={13} />
                               </Button>
                             </>

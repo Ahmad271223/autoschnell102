@@ -64,7 +64,9 @@ describe("RP-224: Plan einer Sucher-Abo-Anfrage", () => {
   it("Tabelle statt 'alles ausser Jahr ist 150 €'", () => {
     expect(anfragePlan("monthly")).toEqual({ text: "1 Monat · 150 €", freischaltbar: true });
     expect(anfragePlan("yearly").text).toBe("1 Jahr · 1.500 €");
-    expect(anfragePlan(undefined).text).toBe("1 Monat · 150 €");
+    // Prüfbericht 20.09.2026 (AD-27): ohne Plan kein stiller Rückfall auf "monthly"
+    expect(anfragePlan(undefined)).toEqual(expect.objectContaining({ freischaltbar: false }));
+    expect(anfragePlan(undefined).text).toMatch(/Wunsch unbekannt/);
     expect(anfragePlan("probe3").freischaltbar).toBe(false);
     expect(anfragePlan("probe5").text).toMatch(/Probe · 5 Tage/);
     expect(anfragePlan("quatsch")).toEqual(expect.objectContaining({ freischaltbar: false }));
