@@ -2137,7 +2137,9 @@ app.add_middleware(
     # bei getrennter API-Adresse blieben sie ohne diese Liste unsichtbar.
     # Rollenprüfung 22.09.2026 (RP-546): X-Neues-Token (auth.NEUES_TOKEN_KOPF)
     # traegt die verlaengerte Sitzung aus deps.current_user.
+    # Prüfbericht 20.09. (U-73): X-Vertrag-Version (Fassung der geteilten Datei)
+    # und X-Beweis-SHA256 auch bei getrennter API-Adresse lesbar.
     expose_headers=["X-Sperre", "X-Wiederholen", "Retry-After", "X-AH-Fassung",
                     "X-Truncated", "X-Truncated-Laufend", "X-Next-Before",
-                    "X-Neues-Token"],
+                    "X-Neues-Token", "X-Vertrag-Version", "X-Beweis-SHA256"],
 )
