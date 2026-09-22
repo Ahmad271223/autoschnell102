@@ -64,4 +64,10 @@ regexes = [
   # Kontonummer (14.09.2026): Testwert in tests/test_kontonummer_http.py —
   # prueft nur, dass die alte Chef-Route /dealer/sucher gesperrt ist.
   '''Neu\-Passwort\-13x''',
+  # Rollenprüfung 22.09.2026 (Commit e627bcc): zwei erfundene Testwerte —
+  # ein absichtlich ungueltiger Einladungs-Code (test_rp_admin_abo_welle2)
+  # und ein Platzhalter-Token in einer Wegwerf-.env unter tmp_path
+  # (test_rp_betrieb, env_erzeugen --vorlage). Kein echter Schluessel.
+  '''abcdefgh12345''',
+  '''apify_echt''',
 ]
