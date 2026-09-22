@@ -32,6 +32,11 @@ jobs:
       # Go-Live-Schalter: Marktplatz/Inserieren in den Tests eingeschaltet
       # (Produktions-Default: false, siehe docker-compose.yml)
       MARKTPLATZ_AKTIV: "true"
+      # Pruefbericht 20.09.2026 (T-02): wie in Produktion hinter nginx/LB —
+      # tests/test_client_ip.py prueft die Anmeldesperre mit gefaelschten
+      # X-Forwarded-For-Kopfzeilen. Fuer das gestartete Backend aendert sich
+      # nichts: der Nachbar 127.0.0.1 schickt keine Kopfzeilen.
+      TRUST_PROXY: "true"
       # Super-Admin-Seed fuer tests/test_admin_dashboard.py (nur CI-Testwerte —
       # Produktion setzt eigene in der .env). Kontonummer (13.09.2026): Konten
       # legt nur der Super-Admin an; es gibt keinen Admin per E-Mail mehr.
@@ -100,9 +105,32 @@ jobs:
         # (Uebersicht: docs/tests/UEBERSPRUNGENE_TESTS.md).
         run: |
           python -m pytest -v -rs tests/
+      - name: Verkaufskontingent (zweites Backend mit VERKAUF_KOSTENLOS=false)
+        # Pruefbericht 20.09.2026 (T-07): tests/test_kontingent.py wird oben
+        # uebersprungen, weil das Backend mit VERKAUF_KOSTENLOS=true (Standard)
+        # laeuft — die Kontingent-Regeln (5 Autos je Zeitraum, Loeschen gibt
+        # keinen Platz frei) liefen in der CI deshalb nie. Hier ein zweites
+        # Backend auf Port 8003 mit eigener Datenbank und Schalter aus.
+        working-directory: backend
+        env:
+          DB_NAME: autoschnell_ci_kontingent
+          VERKAUF_KOSTENLOS: "false"
+          TEST_BASE_URL: http://127.0.0.1:8003
+        run: |
+          nohup python -m uvicorn server:app --host 127.0.0.1 --port 8003 \
+            --loop asyncio > /tmp/backend-kontingent.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8003/api/health && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8003/api/health
+          python -m pytest -v -rs tests/test_kontingent.py
       - name: Backend-Log bei Fehler zeigen
         if: failure()
-        run: tail -100 /tmp/backend.log || true
+        run: |
+          tail -100 /tmp/backend.log || true
+          echo "--- Kontingent-Backend (Port 8003) ---"
+          tail -60 /tmp/backend-kontingent.log || true
 
   frontend:
     name: Frontend (Build)

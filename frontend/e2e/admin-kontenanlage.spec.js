@@ -150,7 +150,10 @@ test.describe("Super-Admin: Kontenanlage mit Kontonummer", () => {
       }
     };
     await anmelden("auth", chefNr, /\/app\/bestand/);
-    await anmelden("auth", sucherNr, /\/(app|abo)(\/|$)/);    // ohne Abo: Abo-Hinweis
+    // Pruefbericht 20.09.2026 (T-15): ohne Abo landet der Sucher GENAU auf /abo
+    // (ProtectedRoute -> AboNachpruefen) — vorher liess /(app|abo)/ auch den
+    // Vergleich durch, eine fehlende Abo-Schranke waere unbemerkt geblieben.
+    await anmelden("auth", sucherNr, /\/abo(\/|$)/);
     await anmelden("buyer", kaeuferNr, /\/markt\/?$/);
     await anmelden("driver", fahrerNr, /\/fahrer\/?$/);
   });

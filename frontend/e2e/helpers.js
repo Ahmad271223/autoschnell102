@@ -233,6 +233,22 @@ async function publishListing(firma, { pricePublic = 19900, priceB2b = 18500 } =
   return { vehicleId: v.id, listingId: draft.id, title: draft.title };
 }
 
+// ---------- Vergleich gegen den Anbieter-Mock (Pruefbericht 20.09.2026, T-14/T-16/T-25) ----------
+/** Synthetischer Kleinanzeigen-Link — im Mock-Modus (MOCK_PROVIDER_FETCH=true)
+ *  liefert das Backend dafuer ein erfundenes Fahrzeug (vehicle._mock). */
+function mockInseratUrl(tag = "e2e") {
+  const nr = String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
+  return `https://www.kleinanzeigen.de/s-anzeige/${tag}/97${nr}-216-1`;
+}
+
+/** Vergleich per API als Sucher/Chef mit Abo. null, wenn das Backend NICHT im
+ *  Mock-Modus laeuft (dann wuerde ein echter Anbieter-Abruf ausgeloest). */
+async function compareMock(konto, tag = "e2e") {
+  const r = await api("POST", "/mobile/compare", { token: konto.token, body: { url: mockInseratUrl(tag) }, ok: false });
+  if (r.status !== 200 || !r.data?.vehicle?._mock) return null;
+  return { vehicleId: r.data.vehicle_id || r.data.vehicle?.id, antwort: r.data };
+}
+
 // ---------- Aufraeumen (bestmoeglich, Fehler nur als Warnung) ----------
 // Nacheinander, nicht parallel: ein 401 wuerde sonst mehrere gleichzeitige
 // Neu-Anmeldungen ausloesen, die sich gegenseitig die Sitzung wegnehmen.
@@ -314,4 +330,5 @@ module.exports = {
   createFirma, createSucher, createDriver, createBuyer,
   createAppointment, publishListing, cleanup, sweepLeftovers,
   authPage, newAuthedPage,
+  TEST_FOTO, mockInseratUrl, compareMock,
 };

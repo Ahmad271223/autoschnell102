@@ -118,6 +118,7 @@ def welt():
         dbx.vehicles.delete_many({"dealer_id": d})
         dbx.network_members.delete_many({"dealer_id": d})
     dbx.buyer_favorites.delete_many({"buyer_user_id": daten["kaeufer_id"]})
+    dbx.listing_interest.delete_many({"buyer_user_id": daten["kaeufer_id"]})
 
 
 def _ids(antwort):
@@ -203,13 +204,34 @@ def test_08_kaeufer_ohne_netzwerk_sieht_nichts_privates(welt):
 
 
 def test_09_privates_inserat_nicht_ueber_die_id_erreichbar(welt):
-    """Auch mit bekannter ID darf ohne Netzwerk nichts gehen."""
+    """Auch mit bekannter ID darf ohne Netzwerk nichts gehen.
+
+    Pruefbericht 20.09.2026 (T-09): vorher 'in (403, 404)' — eine entfernte
+    Route (404) haette den Berechtigungstest bestanden. Deshalb zuerst die
+    Positivprobe am OEFFENTLICHEN Inserat (200), dann am privaten genau die
+    404 'Inserat nicht gefunden' (kein Hinweis, dass es das Inserat gibt)."""
+    # Positivprobe: dieselben Routen funktionieren fuer das oeffentliche Inserat
+    r = requests.post(f"{API}/marktplatz/favoriten/{welt['oeffentlich']}",
+                      headers=welt["kaeufer"], timeout=30)
+    assert r.status_code == 200 and r.json().get("favorit") is True, r.text[:200]
+    r = requests.post(f"{API}/marktplatz/favoriten/{welt['oeffentlich']}?aktiv=false",
+                      headers=welt["kaeufer"], timeout=30)
+    assert r.status_code == 200 and r.json().get("favorit") is False, r.text[:200]
+    r = requests.post(f"{API}/marktplatz/listings/{welt['oeffentlich']}/interesse",
+                      headers=welt["kaeufer"], json={"message": "Test"}, timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    # Privates Inserat ohne Netzwerk: genau 404, nichts gemerkt, nichts angefragt
     r = requests.post(f"{API}/marktplatz/favoriten/{welt['privat']}",
                       headers=welt["kaeufer"], timeout=30)
-    assert r.status_code in (403, 404), r.text[:200]
+    assert r.status_code == 404, r.text[:200]
     r = requests.post(f"{API}/marktplatz/listings/{welt['privat']}/interesse",
                       headers=welt["kaeufer"], json={"message": "Test"}, timeout=30)
-    assert r.status_code in (403, 404), r.text[:200]
+    assert r.status_code == 404, r.text[:200]
+    dbx = _db()
+    assert dbx.buyer_favorites.count_documents(
+        {"buyer_user_id": welt["kaeufer_id"], "listing_id": welt["privat"]}) == 0
+    assert dbx.listing_interest.count_documents(
+        {"buyer_user_id": welt["kaeufer_id"], "listing_id": welt["privat"]}) == 0
 
 
 # ------------------------------------------- angemeldet, MIT Netzwerk

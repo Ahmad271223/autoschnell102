@@ -32,6 +32,33 @@ test.describe("Rollen-Navigation", () => {
     // Direkter Aufruf der Kaufanfragen wird zum Vergleich umgeleitet.
     await page.goto("/app/anfragen");
     await expect(page).toHaveURL(/\/app\/vergleich/);
+
+    // Pruefbericht 20.09.2026 (T-13): Team ist Chefsache — der Direktaufruf
+    // landet im Vergleich (Team.jsx: Navigate zur Startseite der Rolle).
+    await page.goto("/app/team");
+    await expect(page).toHaveURL(/\/app\/vergleich/);
+    await expect(page.getByTestId("team-page")).toHaveCount(0);
+
+    // Bestand oeffnet fuer den Sucher (eigene Fahrzeuge), aber ohne die
+    // Chef-Funktionen: kein manuelles Anlegen, keine Entscheidungs-Knoepfe.
+    await page.goto("/app/bestand");
+    await expect(page.getByTestId("bestand-page")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Fahrzeug manuell hinzufügen/ })).toHaveCount(0);
+    await expect(page.locator('[data-testid^="bestand-weiterverkaufen-"], [data-testid^="bestand-loeschen-"], '
+      + '[data-testid^="bestand-bearbeiten-"], [data-testid^="bestand-inserat-"], [data-testid^="bestand-verlaengern-"]'))
+      .toHaveCount(0);
+
+    // Fahrer: nur lesen — Hinweis statt Eingabefeld
+    await page.goto("/app/fahrer");
+    await expect(page.getByTestId("drivers-page")).toBeVisible();
+    await expect(page.getByTestId("drivers-readonly-hint")).toBeVisible();
+    await expect(page.getByTestId("add-driver-btn")).toHaveCount(0);
+    await expect(page.getByTestId("driver-code-input")).toHaveCount(0);
+
+    // Freigaben: Chefsache-Hinweis, keine Liste
+    await page.goto("/app/freigaben");
+    await expect(page.getByTestId("freigaben-chefsache")).toBeVisible();
+    await expect(page.getByTestId("freigaben-leer")).toHaveCount(0);
   });
 
   test("Rolle 'admin' ist nicht mehr vergebbar (nur der Super-Admin)", async () => {

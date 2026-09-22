@@ -50,5 +50,18 @@ test.describe("Sucher-Abo: Anfrage und Freischaltung", () => {
     await page.getByTestId("abo-status-aktualisieren").click();
     await expect(page.getByTestId("abo-anfrage-offen")).toHaveCount(0);
     await expect(page.getByTestId("abo-status-badge")).toContainText(/aktiv/i);
+
+    // Pruefbericht 20.09.2026 (T-16): die Freischaltung WIRKT — der Vergleich
+    // oeffnet ohne Umleitung nach /abo, und ein Vergleich gegen den Mock
+    // (MOCK_PROVIDER_FETCH) liefert ein Fahrzeug.
+    await page.goto("/app/vergleich");
+    await expect(page).toHaveURL(/\/app\/vergleich/);
+    const eingabe = page.getByTestId("vergleich-url-input");
+    await expect(eingabe).toBeVisible();
+    await eingabe.fill(h.mockInseratUrl("abo"));      // Einfuegen startet den Abruf
+    const start = page.getByTestId("vergleich-start-btn");
+    if (await start.isEnabled()) await start.click();  // falls nicht automatisch gestartet
+    await expect(page.getByTestId("vehicle-title")).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId("vergleich-page")).toBeVisible();
   });
 });

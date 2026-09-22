@@ -124,6 +124,13 @@ def test_00_admin(welt):
         "password_hash": bcrypt.hashpw(PW.encode(), bcrypt.gensalt()).decode(),
         "created_at": "2026-01-01T00:00:00+00:00"})
     welt["A"] = _login(mail)
+    # Pruefbericht 20.09.2026 (T-10): der Aufbau-Test sichert etwas zu — das
+    # Konto ist als Super-Admin angemeldet (vorher nur der Statuscode im Helfer).
+    me = requests.get(f"{API}/auth/me", headers=welt["A"], timeout=30)
+    assert me.status_code == 200, me.text[:200]
+    konto = me.json()["user"]
+    assert konto["role"] == "admin" and konto.get("is_super_admin") is True, konto
+    assert konto["id"] == f"fvadm_{SUF}"
     welt["max_vor_probe"] = _max_nr()      # hoechste Nummer VOR allen Testfirmen
 
 

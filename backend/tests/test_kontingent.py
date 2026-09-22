@@ -29,29 +29,34 @@ SUF = uuid.uuid4().hex[:8]
 PW = "Kq4Lm9Xw2-Sicher-Kt!"
 
 
-def _verkauf_kostenlos() -> bool:
-    """Seit 09/2026 ist das Verkaufen kostenlos und unbegrenzt
-    (VERKAUF_KOSTENLOS). Die Kontingent-Regeln bleiben im Code und werden
-    hier weiter geprueft, sobald der Schalter wieder auf false steht."""
+def _backend_da() -> bool:
+    """Pruefbericht 20.09.2026 (T-07): die Bedingungen sind getrennt — ohne
+    erreichbares Backend wird uebersprungen (vorher liefen die Tests und
+    scheiterten), der Schalter VERKAUF_KOSTENLOS wird unten beim Aufbau ueber
+    die Konfig-Route GET /dealer/sale-plan des SERVERS abgefragt (vorher aus
+    der Umgebung des Testprozesses, die nichts ueber den Server sagt)."""
     try:
-        import requests as _r
-        from auth import create_token  # noqa: F401  (nur zur Verfuegbarkeitspruefung)
+        requests.get(f"{API}/health", timeout=5)
+        return True
     except Exception:
         return False
-    try:
-        r = _r.get(f"{API}/health", timeout=5)
-        if r.status_code != 200:
-            return False
-    except Exception:
-        return False
-    import os as _os
-    return (_os.environ.get("VERKAUF_KOSTENLOS", "true").strip().lower()
-            not in ("0", "false", "no"))
 
 
 pytestmark = pytest.mark.skipif(
-    _verkauf_kostenlos(),
-    reason="Verkaufen ist derzeit kostenlos und unbegrenzt (VERKAUF_KOSTENLOS=true)")
+    not _backend_da(), reason=f"Backend fehlt (TEST_BASE_URL={BASE} nicht erreichbar)")
+
+
+def _verkauf_kostenlos_laut_server(H) -> bool:
+    """GET /dealer/sale-plan meldet kostenlos=True / tier 'kostenlos', solange
+    der Server mit VERKAUF_KOSTENLOS=true laeuft (routes.team.get_sale_plan_status).
+    503 = Marktplatz-Schalter aus (MARKTPLATZ_AKTIV) — dann ebenfalls Skip."""
+    r = requests.get(f"{API}/dealer/sale-plan", headers=H, timeout=30)
+    if r.status_code == 503:
+        pytest.skip("Marktplatz/Inserieren ist abgeschaltet (MARKTPLATZ_AKTIV) — "
+                    "Kontingent nicht pruefbar")
+    assert r.status_code == 200, r.text[:200]
+    p = r.json()
+    return bool(p.get("kostenlos")) or p.get("tier") == "kostenlos"
 
 
 def _db():
@@ -112,10 +117,7 @@ def _plan(H):
     return r.json()
 
 
-@pytest.fixture(scope="module")
-def welt():
-    z = {}
-    yield z
+def _aufraeumen(z):
     dbx = _db()
     if z.get("dealer_id"):
         for coll in ("users", "subscriptions", "vehicles", "resale_listings",
@@ -125,15 +127,35 @@ def welt():
     dbx.users.delete_many({"email": {"$regex": f"_{SUF}@"}})
 
 
-def test_00_aufbau(welt):
+@pytest.fixture(scope="module")
+def welt():
+    """Chef anlegen und den Schalter beim Server nachsehen. Ist das Verkaufen
+    kostenlos, werden alle Tests der Datei uebersprungen — nach dem Aufraeumen
+    (ein pytest.skip im Aufbau laesst den Teil nach yield nicht mehr laufen)."""
+    z = {}
     r = konten.registrieren(json={
         "email": f"kq_chef_{SUF}@e2etest-mail.de", "password": PW,
         "company_name": "Kontingent Autohaus", "contact_person": "K Chef",
         "phone": "0511 5"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    welt["H"] = {"Authorization": f"Bearer {r.json()['token']}"}
-    me = requests.get(f"{API}/auth/me", headers=welt["H"], timeout=30).json()["user"]
-    welt["dealer_id"] = me["dealer_id"]
+    z["H"] = {"Authorization": f"Bearer {r.json()['token']}"}
+    me = requests.get(f"{API}/auth/me", headers=z["H"], timeout=30).json()["user"]
+    z["dealer_id"] = me["dealer_id"]
+    try:
+        kostenlos = _verkauf_kostenlos_laut_server(z["H"])
+    except BaseException:
+        _aufraeumen(z)
+        raise
+    if kostenlos:
+        _aufraeumen(z)
+        pytest.skip("Verkaufen ist auf diesem Server kostenlos und unbegrenzt "
+                    "(VERKAUF_KOSTENLOS=true laut GET /dealer/sale-plan) — "
+                    "Kontingent-Regeln nur mit VERKAUF_KOSTENLOS=false pruefbar")
+    yield z
+    _aufraeumen(z)
+
+
+def test_00_aufbau(welt):
     admin = _admin()
     r = requests.put(f"{API}/admin/dealers/{welt['dealer_id']}/sale-plan",
                      headers=admin, json={"tier": "s5", "months": 1}, timeout=30)

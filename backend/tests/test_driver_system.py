@@ -400,10 +400,18 @@ class TestDriverAppointments:
         DH = {"Authorization": f"Bearer {drv_token}"}
         # Pruefung 14.09.2026 (C22/C23): Abholauftrag und Vertrag erst nach
         # dem Annehmen der Fahrt.
-        for pfad in (f"/driver/appointments/{appt['id']}/pickup-order.pdf",
-                     f"/driver/contracts/{contract_id}/pdf"):
-            r = requests.get(f"{API}{pfad}", headers=DH, timeout=60)
-            assert r.status_code in (404, 409), f"{pfad} vor Annahme: {r.status_code}"
+        # Pruefbericht 20.09.2026 (T-09): je Route der EINE erwartete Code
+        # (vorher 'in (404, 409)' — eine entfernte Route haette bestanden):
+        # der Abholauftrag findet den zugeteilten Termin und antwortet 409
+        # "erst annehmen" (zuteilung_offen_oder_409); der Kaufvertrag sucht nur
+        # ANGENOMMENE Fahrten und antwortet 404 (kein Hinweis auf den Vertrag).
+        # Die Positivprobe (200 nach dem Annehmen) folgt in Schritt 6 und 7.
+        r = requests.get(f"{API}/driver/appointments/{appt['id']}/pickup-order.pdf",
+                         headers=DH, timeout=60)
+        assert r.status_code == 409, f"Abholauftrag vor Annahme: {r.status_code} {r.text[:200]}"
+        assert "annehmen" in r.text
+        r = requests.get(f"{API}/driver/contracts/{contract_id}/pdf", headers=DH, timeout=60)
+        assert r.status_code == 404, f"Kaufvertrag vor Annahme: {r.status_code} {r.text[:200]}"
         r = requests.put(f"{API}/driver/appointments/{appt['id']}/zuteilung",
                          headers=DH, json={"action": "annehmen"}, timeout=30)
         assert r.status_code == 200, r.text

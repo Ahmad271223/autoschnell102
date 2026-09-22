@@ -317,10 +317,12 @@ def test_c6_betreiber_sperre_gilt_im_kostenlos_modus(welt):
     k2 = welt["k2"]
     r = requests.post(f"{API}/admin/buyers/{k2['id']}/access", headers=welt["A"], json={"plan": None}, timeout=30)
     assert r.status_code == 200 and r.json().get("gesperrt") is True, r.text[:200]
+    # Pruefbericht 20.09.2026 (T-09): /marktplatz/zugang haengt an current_buyer
+    # (ohne Sperrpruefung) und MELDET die Sperre — genau 200 mit gesperrt=True,
+    # vorher 'in (200, 403)'.
     z = requests.get(f"{API}/marktplatz/zugang", headers=k2["kopf"], timeout=30)
-    assert z.status_code in (200, 403), z.text[:200]
-    if z.status_code == 200:
-        assert z.json().get("active") is False and z.json().get("gesperrt") is True, z.json()
+    assert z.status_code == 200, z.text[:200]
+    assert z.json().get("active") is False and z.json().get("gesperrt") is True, z.json()
     assert requests.get(f"{API}/marktplatz/listings", headers=k2["kopf"], timeout=30).status_code == 403
     assert requests.post(f"{API}/marktplatz/favoriten/{welt['oeffentlich']}", headers=k2["kopf"],
                          timeout=30).status_code == 403
