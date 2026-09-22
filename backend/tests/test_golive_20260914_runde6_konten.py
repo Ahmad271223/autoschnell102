@@ -253,13 +253,13 @@ def test_03_passwortregeln_ueberall_klar(welt):
     r = K.anmelden(welt["fahrer_nr"], welt["pw_aktuell"], "driver")
     assert r.status_code == 200, r.text[:200]
     welt["F"] = _kopf(r.json()["token"])
-    # Ein Passwort mit Leerzeichen am Ende ist erlaubt und muss dann GENAU so
-    # eingegeben werden (Server schneidet nichts ab).
+    # Pruefbericht 20.09. (K-06): Leerzeichen am Rand lehnt der Server ab (wie
+    # das Frontend) — vorher wurde es angenommen und musste GENAU so getippt
+    # werden, was beim Weitergeben des Passworts regelmaessig schiefging.
     mit_leer = f"Ll3{SUF}Kq4Lm9X "
     r = _post(f"/admin/users/{welt['sucher_id']}/password", {"new_password": mit_leer}, S)
-    assert r.status_code == 200, r.text[:200]
-    assert K.anmelden(welt["sucher_nr"], mit_leer, "auth").status_code == 200
-    assert K.anmelden(welt["sucher_nr"], mit_leer.strip(), "auth").status_code == 401
+    assert r.status_code == 422 and "Leerzeichen" in r.text, (r.status_code, r.text[:200])
+    assert K.anmelden(welt["sucher_nr"], mit_leer, "auth").status_code == 401
 
 
 @http

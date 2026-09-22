@@ -188,7 +188,9 @@ def test_79b_der_stille_weg_ist_wirklich_vorhanden():
     PDF-Fehler tatsaechlich False statt zu werfen?"""
     import routes.contracts as C
     q = inspect.getsource(C.regenerate_contract_for_pickup)
-    stelle = q.split("_pdfs_erzeugen")[1][:500]
+    # (22.09.: der except-Zweig traegt seit P-16 einen Betriebsalarm, daher
+    # ein groesseres Fenster)
+    stelle = q.split("_pdfs_erzeugen")[1][:1500]
     assert "except Exception:" in stelle and "return False" in stelle
 
 

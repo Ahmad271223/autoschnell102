@@ -734,7 +734,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # mehreren Terminen zum Fahrzeug standen zwei "Version 1" gleichartig
     # nebeneinander. Jetzt mit Termin-ID und Abholdatum (eine Abfrage).
     from routes.protocols import termine_zu_protokollen
-    await termine_zu_protokollen(protocols, user["dealer_id"])
+    await termine_zu_protokollen(protocols, user["dealer_id"], datenbank=db)
 
     # Runde 12: Sucher sehen nur ihre eigenen Aktionen zum Fahrzeug —
     # nicht, was Chef oder Kollegen damit gemacht haben.

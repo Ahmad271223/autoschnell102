@@ -2221,7 +2221,8 @@ async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
 _PROTOKOLLE_JE_FAHRZEUG = 200
 
 
-async def termine_zu_protokollen(docs: List[dict], dealer_id: str) -> None:
+async def termine_zu_protokollen(docs: List[dict], dealer_id: str,
+                                 datenbank=None) -> None:
     """Pruefbericht 20.09.2026 (R1-22): Versionen zaehlen je TERMIN — in der
     Akte und in der Protokollliste standen zwei Termine desselben Fahrzeugs
     als gleichartige "Version 1" nebeneinander. Haengt jedem Protokoll das
@@ -2229,8 +2230,11 @@ async def termine_zu_protokollen(docs: List[dict], dealer_id: str) -> None:
     appointment_id bleibt in der Antwort. Auch fuer bestand.vehicle_akte."""
     ids = sorted({d.get("appointment_id") for d in docs if d.get("appointment_id")})
     termine: Dict[str, dict] = {}
+    # Aufrufer aus anderen Modulen (bestand.vehicle_akte) reichen ihre eigene
+    # Verbindung durch — die Tests laufen dort mit eigener Ereignisschleife.
+    quelle = datenbank if datenbank is not None else db
     if ids:
-        async for t in db.appointments.find(
+        async for t in quelle.appointments.find(
                 {"id": {"$in": ids}, "dealer_id": dealer_id},
                 {"_id": 0, "id": 1, "pickup_date": 1, "pickup_time": 1}):
             termine[t["id"]] = t
