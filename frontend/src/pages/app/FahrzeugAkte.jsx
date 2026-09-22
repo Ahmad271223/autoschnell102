@@ -7,6 +7,7 @@ import { useUngespeichert } from "@/lib/ungespeichert";
 import {
   bestandFormAus, bestandGeaendert, bestandMitOffenenAenderungen, fristErneuertText, kostenLesen,
 } from "@/lib/bestandForm";
+import { protokollBefundHinweis, termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
 import BeweisCard from "@/components/BeweisCard";
@@ -188,10 +189,23 @@ export default function FahrzeugAkte() {
       // RP-496: der angezeigte Zustand geht mit — hat er sich inzwischen
       // geändert (zweiter Tab), antwortet der Server mit 409 statt still
       // umzuschalten.
-      const r = await api.post(`/vehicles/${v.id}/decision`, { decision, von_lifecycle: v.lifecycle });
+      const body = { decision, von_lifecycle: v.lifecycle };
+      let r;
+      try {
+        r = await api.post(`/vehicles/${v.id}/decision`, body);
+      } catch (e) {
+        // RP-454 (Welle B2): offene Abholtermine — der Chef sieht sie (Datum,
+        // Fahrer) und entscheidet, ob sie mit dem Fahrzeug storniert werden.
+        // Nie still: erst nach dem Ja geht termine_stornieren=true raus.
+        const offen = termineOffenDetail(e);
+        if (!offen || !window.confirm(termineStornoFrage(offen))) throw e;
+        r = await api.post(`/vehicles/${v.id}/decision`, { ...body, termine_stornieren: true });
+      }
       toast.success(r.data?.verlaengert
         ? fristErneuertText(r.data?.expires_at)
-        : "Gespeichert");
+        : r.data?.termine_storniert?.length
+          ? `Fahrzeug gelöscht, ${r.data.termine_storniert.length} Termin(e) storniert`
+          : "Gespeichert");
       load();
     } catch (e) {
       // 409: Status inzwischen geändert (RP-496), Termine offen (RP-454) oder
@@ -495,7 +509,8 @@ export default function FahrzeugAkte() {
           UNTERSCHRIEBENEN Abholprotokoll — auch ohne Abhol-Check. Vorher kamen
           sie nie ins Fahrzeug (nur ins Inserat, und auch das erst seit heute). */}
       {befundOffen && (
-        <Section title="Aus dem Abholprotokoll übernehmen">
+        <Section title={protokollBefundHinweis({ km: befundKmNeu ? befund.km : null, schaeden: befundNeueSchaeden.length })}
+                 warn={<span className="text-[11px] font-normal normal-case text-amber-400">Nach der Unterschrift</span>}>
           <div className="text-xs text-zinc-400 mb-2">
             Im unterschriebenen Abholprotokoll steht etwas, das noch nicht in den Fahrzeugdaten ist:
           </div>

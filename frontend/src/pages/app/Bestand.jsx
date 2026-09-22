@@ -13,6 +13,7 @@ import StatusSchild from "@/components/StatusSchild";
 import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
 import { kmAusText, preisAusText } from "@/lib/preis";
 import { betragAlsText, fristErneuertText } from "@/lib/bestandForm";
+import { termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
 import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 
 /**
@@ -113,12 +114,25 @@ export default function Bestand() {
       }
       // RP-496: der angezeigte Zustand geht mit (409, wenn ein anderer Tab
       // das Fahrzeug inzwischen inseriert hat).
-      const r = await api.post(`/vehicles/${vehicleId}/decision`, { decision, von_lifecycle: vonLifecycle });
+      const body = { decision, von_lifecycle: vonLifecycle };
+      let r;
+      try {
+        r = await api.post(`/vehicles/${vehicleId}/decision`, body);
+      } catch (e) {
+        // RP-454 (Welle B2): offene Abholtermine — der Chef sieht sie (Datum,
+        // Fahrer) und entscheidet, ob sie mit dem Fahrzeug storniert werden.
+        // Nie still: erst nach dem Ja geht termine_stornieren=true raus.
+        const offen = termineOffenDetail(e);
+        if (!offen || !window.confirm(termineStornoFrage(offen))) throw e;
+        r = await api.post(`/vehicles/${vehicleId}/decision`, { ...body, termine_stornieren: true });
+      }
       toast.success(r.data?.verlaengert
         ? fristErneuertText(r.data?.expires_at)
         : decision === "bestand"
           ? "Ins Bestand übernommen (50 Tage Aufbewahrung)"
-          : "Fahrzeug gelöscht");
+          : r.data?.termine_storniert?.length
+            ? `Fahrzeug gelöscht, ${r.data.termine_storniert.length} Termin(e) storniert`
+            : "Fahrzeug gelöscht");
       load();
     } catch (e) {
       toast.error(errMsg(e));

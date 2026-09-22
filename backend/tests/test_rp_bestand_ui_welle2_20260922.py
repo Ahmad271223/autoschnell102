@@ -137,9 +137,15 @@ def test_01_loeschen_mit_offenem_termin_409(welt, status):
     with pytest.raises(HTTPException) as e:
         w.run(B.vehicle_decision(vid, B.DecisionIn(decision="loeschen"), w.chef))
     assert e.value.status_code == 409
-    assert "offenen Abholtermin" in e.value.detail and "stornieren" in e.value.detail
+    # Welle B2 (RP-454): detail = {msg, code, termine} — die Oberflaeche baut
+    # daraus die Rueckfrage "Offene Termine stornieren und Fahrzeug löschen".
+    detail = e.value.detail
+    assert "offenen Abholtermin" in detail["msg"] and "stornieren" in detail["msg"]
+    assert detail["code"] == "termine_offen"
+    assert [t["id"] for t in detail["termine"]] == [f"t_zwei_{w.s}"]
     v = w.run(w.db.vehicles.find_one({"id": vid}))
     assert v["lifecycle"] == "abgeholt" and v["data"]["image_urls"], "nichts geaendert"
+    assert w.run(w.db.appointments.find_one({"id": f"t_zwei_{w.s}"}))["status"] == status
 
 
 def test_02_loeschen_ohne_offenen_termin_geht(welt):

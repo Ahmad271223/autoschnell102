@@ -83,6 +83,11 @@ class DecisionIn(BaseModel):
     # sonst ein inzwischen veroeffentlichtes Fahrzeug still auf "bestand".
     # Optional, damit alte Oberflaechen/Skripte weiter funktionieren.
     von_lifecycle: Optional[str] = Field(default=None, max_length=40)
+    # Rollenprüfung 22.09.2026 (RP-454, Welle B2): "loeschen" storniert die
+    # offenen Abholtermine des Fahrzeugs NUR mit diesem Flag — die Oberflaeche
+    # setzt es erst, nachdem der Chef die Termine (Datum, Fahrer) gesehen und
+    # die Rueckfrage bestaetigt hat. Ohne Flag weiterhin 409 mit der Liste.
+    termine_stornieren: bool = False
 
 
 class BestandUpdateIn(BaseModel):
@@ -170,6 +175,62 @@ _INSERAT_LIVE_TEXT = {"verkaufsbereit": "verkaufsbereit",
                       "reserviert": "reserviert"}
 
 
+# Rollenprüfung 22.09.2026 (RP-454, Welle B2): Kennung im 409-Detail, an der
+# Bestand.jsx/FahrzeugAkte.jsx die Rueckfrage "Offene Termine stornieren und
+# Fahrzeug löschen" erkennen (detail = {"msg", "code", "termine"}).
+TERMINE_OFFEN_CODE = "termine_offen"
+TERMINE_OFFEN_TEXT = ("Zu diesem Fahrzeug gibt es noch einen offenen Abholtermin — "
+                      "bitte den Termin zuerst abschließen oder stornieren (Termine), "
+                      "dann löschen.")
+
+
+async def _offene_termine(vehicle_id: str, dealer_id: str) -> List[Dict[str, Any]]:
+    """RP-454: offene Abholtermine des Fahrzeugs (Doppel-Abholung: auch der
+    zweite Termin), aelteste zuerst — mit Datum, Uhrzeit und Fahrername fuer
+    die Rueckfrage des Chefs. Fehlender/leerer Status zaehlt als offen."""
+    termine = await db.appointments.find(
+        {"dealer_id": dealer_id, "vehicle_id": vehicle_id,
+         "status": {"$in": TERMIN_OFFEN_WERTE}},
+        {"_id": 0, "id": 1, "pickup_date": 1, "pickup_time": 1, "driver_id": 1,
+         "status": 1, "updated_at": 1}).sort("pickup_date", 1).to_list(50)
+    fahrer_ids = [t["driver_id"] for t in termine if t.get("driver_id")]
+    namen: Dict[str, str] = {}
+    if fahrer_ids:
+        async for f in db.driver_accounts.find({"id": {"$in": fahrer_ids}},
+                                               {"_id": 0, "id": 1, "display_name": 1}):
+            namen[f["id"]] = f.get("display_name") or ""
+    return [{"id": t["id"], "pickup_date": t.get("pickup_date"),
+             "pickup_time": t.get("pickup_time"), "status": t.get("status"),
+             "driver_name": namen.get(t.get("driver_id") or "") or None,
+             "updated_at": t.get("updated_at")} for t in termine]
+
+
+async def _termine_stornieren(termine: List[Dict[str, Any]], user: dict) -> List[str]:
+    """RP-454: die Termine ueber DENSELBEN Weg stornieren wie "Termine ->
+    Storno" (routes.appointments.update_appointment): Verlaufseintrag
+    termin.aktualisiert mit status_von/nach, Kaufvorgang und Fahrzeugstatus
+    nachgezogen, Fahrer-Sichtfrist gesetzt, Freigabe/Korrektur des Protokolls
+    zurueckgenommen. Der gelesene Stand (updated_at) geht als `stand` mit —
+    hat der Fahrer inzwischen abgeschlossen, kommt 409 statt eines stillen
+    Stornos. Bricht ein Termin ab, bleibt das Fahrzeug stehen (die bis dahin
+    stornierten Termine sind im Verlauf belegt)."""
+    from routes.appointments import AppointmentIn, update_appointment
+    storniert: List[str] = []
+    for t in termine:
+        try:
+            await update_appointment(
+                t["id"], AppointmentIn(status="storniert", stand=t.get("updated_at")), user)
+        except HTTPException as exc:
+            wann = t.get("pickup_date") or "ohne Datum"
+            raise HTTPException(
+                exc.status_code if exc.status_code in (403, 409) else 409,
+                f"Termin am {wann} konnte nicht storniert werden: "
+                f"{exc.detail if isinstance(exc.detail, str) else 'bitte unter Termine prüfen'} "
+                "— das Fahrzeug wurde nicht gelöscht.")
+        storniert.append(t["id"])
+    return storniert
+
+
 # =========================================================
 #            NACH-ABHOLUNG-ENTSCHEIDUNG
 # =========================================================
@@ -202,13 +263,28 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
         # Fahrer danach mit einem Termin zu einem geloeschten Fahrzeug da, und
         # der Termin liess sich weder aendern noch stornieren. Bewusst kein
         # stilles Mitstornieren — Fahrer und Verkaeufer sind schon verabredet.
-        offen = await db.appointments.count_documents(
-            {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
-             "status": {"$in": TERMIN_OFFEN_WERTE}}, limit=1)
-        if offen:
-            raise HTTPException(409, "Zu diesem Fahrzeug gibt es noch einen offenen "
-                                     "Abholtermin — bitte den Termin zuerst abschließen "
-                                     "oder stornieren (Termine), dann löschen.")
+        # Welle B2 (Entscheidung Ahmad 22.09.2026): Der Chef bekommt im 409
+        # die Termine (Datum, Uhrzeit, Fahrer) und kann mit
+        # termine_stornieren=true bewusst "Offene Termine stornieren und
+        # Fahrzeug löschen" waehlen — ueber denselben Storno-Weg wie unter
+        # Termine (_termine_stornieren), nie still.
+        offene_termine = await _offene_termine(vehicle_id, user["dealer_id"])
+        termine_storniert: List[str] = []
+        if offene_termine and not body.termine_stornieren:
+            raise HTTPException(409, {"msg": TERMINE_OFFEN_TEXT, "code": TERMINE_OFFEN_CODE,
+                                      "termine": [{k: t.get(k) for k in
+                                                   ("id", "pickup_date", "pickup_time",
+                                                    "driver_name")}
+                                                  for t in offene_termine]})
+        if offene_termine:
+            # Erst pruefen, ob das Loeschen aus diesem Status ueberhaupt geht —
+            # sonst waeren die Termine storniert und das Fahrzeug bliebe stehen.
+            from lifecycle import ALLOWED_TRANSITIONS
+            if "geloescht" not in ALLOWED_TRANSITIONS.get(v.get("lifecycle") or "", set()):
+                raise HTTPException(409, f"Ein Fahrzeug im Status „{v.get('lifecycle')}“ "
+                                         "lässt sich nicht löschen — die Termine bleiben "
+                                         "unverändert.")
+            termine_storniert = await _termine_stornieren(offene_termine, user)
         # Fotos sofort räumen — Vertrag, Abholbericht, Historie bleiben.
         # Dotted-Paths statt Ganzobjekt: nichts anderes in data wird angefasst.
         leeren = {f"data.{key}": [] for key in ("image_urls", "images", "photos", "pictures")}
@@ -223,11 +299,15 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
         # veroeffentlichen, obwohl das Fahrzeug geloescht war.
         geloeschte_inserate = await _inserate_zum_fahrzeug_schliessen(
             vehicle_id, user)
+        # RP-454 (Welle B2): welche Termine mit dem Loeschen storniert wurden
+        # (jeder einzelne steht zusaetzlich als termin.aktualisiert im Verlauf).
         await log_activity_sicher(user["dealer_id"], user["id"],
                            "fahrzeug.entscheidung.geloescht", ref=vehicle_id,
-                           meta={"inserate_geloescht": geloeschte_inserate})
+                           meta={"inserate_geloescht": geloeschte_inserate,
+                                 "termine_storniert": termine_storniert})
         return {"ok": True, "lifecycle": "geloescht",
-                "inserate_geloescht": geloeschte_inserate}
+                "inserate_geloescht": geloeschte_inserate,
+                "termine_storniert": termine_storniert}
 
     if body.decision == "verkaufsentwurf" and not marktplatz_aktiv():
         # Go-Live-Schalter (15.09.2026): "Jetzt inserieren" / "Weiterverkaufen"
