@@ -20,10 +20,21 @@ function inseratUrl(v) {
   return typeof u === "string" && u.startsWith("http") ? u : null;
 }
 
+// Entscheidung Ahmad 22.09.2026: Die Seite zeigt nur die 60 zuletzt
+// bearbeiteten Fahrzeuge (der Pool selbst haelt bis zu 300 je Konto).
+export const POOL_ANZEIGE_MAX = 60;
+
+export function neuesteFahrzeuge(liste, max = POOL_ANZEIGE_MAX) {
+  const zeit = (v) => Date.parse(v?.updated_at || v?.created_at || "") || 0;
+  return [...(Array.isArray(liste) ? liste : [])]
+    .sort((a, b) => zeit(b) - zeit(a))
+    .slice(0, max);
+}
+
 export default function Fahrzeugpool() {
   const [items, setItems] = useState([]);
+  const [gesamt, setGesamt] = useState(0);
   const [ladeFehler, setLadeFehler] = useState(false);
-  const [gekuerzt, setGekuerzt] = useState(false);
 
   useEffect(() => {
     // Array-Guard: liefert der Dev-Proxy in einem Grenzfall etwas anderes
@@ -33,8 +44,9 @@ export default function Fahrzeugpool() {
     // sichtbar machen statt "Noch keine Fahrzeuge".
     api.get("/vehicles")
       .then((r) => {
-        setItems(Array.isArray(r.data) ? r.data : []);
-        setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+        const alle = Array.isArray(r.data) ? r.data : [];
+        setGesamt(alle.length);
+        setItems(neuesteFahrzeuge(alle));
       })
       .catch((e) => { setItems([]); setLadeFehler(true); toast.error(errMsg(e, "Fahrzeuge konnten nicht geladen werden")); });
   }, []);
@@ -78,9 +90,9 @@ export default function Fahrzeugpool() {
                 {ladeFehler ? "Fahrzeuge konnten nicht geladen werden — bitte neu laden." : "Noch keine Fahrzeuge im Pool. Starte einen Vergleich."}
               </td></tr>
             )}
-            {gekuerzt && (
+            {gesamt > items.length && (
               <tr><td colSpan={mitBearbeiter ? 9 : 8} className="px-4 py-2 text-center text-xs text-zinc-500" data-testid="pool-gekuerzt">
-                Die Liste zeigt nur die neuesten 500 Fahrzeuge.
+                Die Liste zeigt die neuesten {POOL_ANZEIGE_MAX} von {gesamt} Fahrzeugen.
               </td></tr>
             )}
             {items.map((v) => {
