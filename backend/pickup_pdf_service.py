@@ -791,6 +791,11 @@ def _build_pickup_pdf(
                    or contract.get("seller_name") or "")
     if seller_name:
         seller_lines.append(f"<b>{_xe(seller_name)}</b>")
+    # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vom Fahrer vor Ort
+    # nachgetragen (Protokoll-Entwurf), direkt neben dem Verkaeufernamen.
+    seller_id_document = str(filled.get("seller_id_document") or "").strip()
+    if seller_id_document:
+        seller_lines.append(f"Ausweis-Nr.: {_xe(seller_id_document)}")
     # P-21: ein vorhandenes, aber leeres Feld (None) brach hier mit TypeError.
     addr = (appointment.get("pickup_address")
             or " ".join([str(contract.get("seller_address") or ""),

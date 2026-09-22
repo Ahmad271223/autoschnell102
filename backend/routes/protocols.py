@@ -162,6 +162,13 @@ class ProtocolIn(BaseModel):
     # ohne Verkaeufernamen (Terminplaner ohne Vertrag) lief bei JEDEM
     # Abschicken in 422, und eine Korrektur konnte den Namen nie aendern.
     seller_name: Optional[str] = Field(default=None, max_length=200)
+    # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): Der Fahrer traegt vor Ort
+    # die Ausweisnummer des Verkaeufers nach — im Entwurf wie der Name
+    # (Autosave), gedruckt im Protokoll-PDF neben dem Verkaeufer und in der
+    # neuen Vertragsfassung nach der Abholung (Feld "Ausweis"). Personenbezogen:
+    # nie in Log-Zeilen oder Audit-Meta, geleert mit den uebrigen
+    # Personendaten (cleanup_service).
+    seller_id_document: Optional[str] = Field(default=None, max_length=60)
     # Wunsch Ahmad 14.09.2026: Auch der Fahrer kann den vor Ort verhandelten
     # Preis und eine Sondervereinbarung eintragen. Der Chef sieht beides bei
     # der Freigabe; gibt er ohne eigenen Preis frei, gilt der Vorschlag.
@@ -712,6 +719,15 @@ async def protokoll_korrekturen(appt: dict, protokoll: dict) -> tuple:
         return {}, []
 
 
+def verkaeufer_aus_protokoll(protokoll: dict) -> Dict[str, Any]:
+    """Entscheidung Ahmad 22.09.2026 (Ausweisnummer): Verkaeuferfelder, die
+    das Protokoll fuer die neue Vertragsfassung beisteuert — heute nur die
+    vor Ort nachgetragene Ausweisnummer (contracts.VERKAEUFER_FELDER kennt
+    id_document). Leer, wenn der Fahrer nichts eingetragen hat."""
+    nummer = str((protokoll or {}).get("seller_id_document") or "").strip()
+    return {"id_document": nummer} if nummer else {}
+
+
 async def _vertrag_alarm_schliessen(appt: dict, protokoll_id: str) -> None:
     """Rollenprüfung 22.09.2026 (RP-073/172): Der Vertrag steht auf dem Stand
     dieser Protokollversion — ein offener Alarm vertrag_nach_abholung_offen
@@ -735,15 +751,18 @@ async def _vertrag_alarm_schliessen(appt: dict, protokoll_id: str) -> None:
 
 async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
                                               neuer_preis, sondervereinbarung,
-                                              korrekturen=None, neue_schaeden=None) -> bool:
+                                              korrekturen=None, neue_schaeden=None,
+                                              verkaeufer=None) -> bool:
     """Wunsch Ahmad 14.09.2026: nach dem unterschriebenen Protokoll den Vertrag
     mit neuem Preis und Sondervereinbarung neu erzeugen. 19.09.2026: dazu die
     vor Ort korrigierten Fahrzeugdaten und die neu aufgenommenen Schaeden.
+    Entscheidung Ahmad 22.09.2026 (Ausweisnummer): dazu die Verkaeuferfelder
+    aus dem Protokoll (verkaeufer_aus_protokoll), z. B. id_document.
     Wirft nie."""
     if not appt.get("contract_id"):
         return False
     nichts_neues = (neuer_preis is None and not (sondervereinbarung or "").strip()
-                    and not korrekturen and not neue_schaeden)
+                    and not korrekturen and not neue_schaeden and not verkaeufer)
     try:
         from routes.contracts import regenerate_contract_for_pickup
         # Pruefbericht 20.09.2026 (V-25): idempotent. Traegt der Vertrag diese
@@ -784,6 +803,7 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
                       "role": "dealer"},
                 neuer_preis=neuer_preis, sondervereinbarung=sondervereinbarung,
                 korrekturen=korrekturen, neue_schaeden=neue_schaeden,
+                verkaeufer=verkaeufer or None,
                 grund="abholung_abgeschlossen", protokoll_id=protokoll_id,
                 ergebnis=erg)
             if ok or erg.get("grund") != "cas_verloren":
@@ -836,9 +856,10 @@ async def vertrag_nach_abholung_sicherstellen(appt: dict, protokoll: dict) -> bo
             # der Termin haengt inzwischen an einem anderen Vertrag — nicht anfassen
             return True
         korrekturen, neue_schaeden = await protokoll_korrekturen(appt, protokoll)
+        verkaeufer = verkaeufer_aus_protokoll(protokoll)
         if protokoll.get("neuer_preis") is None \
                 and not (protokoll.get("sondervereinbarung") or "").strip() \
-                and not korrekturen and not neue_schaeden:
+                and not korrekturen and not neue_schaeden and not verkaeufer:
             # Rollenprüfung 22.09.2026 (RP-480): nur "nichts zu tun", wenn der
             # Vertrag keine Fassung einer ANDEREN Version dieser Abholung traegt.
             stand = await db.generated_pdfs.find_one(
@@ -849,7 +870,8 @@ async def vertrag_nach_abholung_sicherstellen(appt: dict, protokoll: dict) -> bo
         return await vertrag_nach_abholung_aktualisieren(
             appt, protokoll["id"], protokoll.get("neuer_preis"),
             protokoll.get("sondervereinbarung"),
-            korrekturen=korrekturen, neue_schaeden=neue_schaeden)
+            korrekturen=korrekturen, neue_schaeden=neue_schaeden,
+            verkaeufer=verkaeufer)
     except Exception:  # noqa: BLE001
         log.exception("Vertragsstand nach Abholung zu Termin %s nicht geprueft", appt.get("id"))
         return False
@@ -1236,6 +1258,9 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
     if "seller_name" in payload:
         # Rollenprüfung 22.09.2026 (RP-058/157): wie der Ort — getrimmt.
         payload["seller_name"] = str(payload["seller_name"]).strip()
+    if "seller_id_document" in payload:
+        # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): ebenso getrimmt.
+        payload["seller_id_document"] = str(payload["seller_id_document"]).strip()
     if doc and doc.get("preis_vorschlag_verworfen") and "preis_vorschlag" in payload \
             and _anderer_vorschlag(payload["preis_vorschlag"], doc.get("preis_vorschlag")):
         # Rollenprüfung 22.09.2026 (RP-453): ein NEUER Vorschlag des Fahrers
@@ -1989,6 +2014,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     # Verkaeufername aus dem Protokoll; die App-Werte nur, wenn dort nichts steht.
     filled["place"] = doc.get("place") or body.place or ""
     filled["seller_name"] = doc.get("seller_name") or body.seller_name or appt.get("seller_name") or ""
+    # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): nur aus dem Entwurf — die
+    # App schickt sie beim Abschluss nicht mit (ab "zur Freigabe" gesperrt).
+    filled["seller_id_document"] = str(doc.get("seller_id_document") or "").strip()
     filled["sondervereinbarung"] = doc.get("sondervereinbarung") or ""
     filled["driver_name"] = driver.get("display_name", "")
     # Runde 30: der nachverhandelte Preis steht im unterschriebenen PDF.
@@ -2125,9 +2153,12 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # aufgenommenen Schaeden. Gab es NICHTS davon, bleibt die alte Fassung
         # unveraendert (kein neuer Vertrag ohne Anlass).
         korrekturen, neue_schaeden = await protokoll_korrekturen(appt, filled)
+        # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): die vor Ort
+        # nachgetragene Ausweisnummer steht in der neuen Fassung unter "Ausweis".
         await vertrag_nach_abholung_aktualisieren(
             appt, doc["id"], _preis_final, filled.get("sondervereinbarung"),
-            korrekturen=korrekturen, neue_schaeden=neue_schaeden)
+            korrekturen=korrekturen, neue_schaeden=neue_schaeden,
+            verkaeufer=verkaeufer_aus_protokoll(filled))
         # Nachpruefung 20.09.2026, Nr. 78: Der Merker wurde bisher SCHON VOR
         # der Vertragsneuerzeugung entfernt. Starb der Prozess dazwischen,
         # sah die Selbstheilung ein finales Protokoll, heilte Termin, Preis

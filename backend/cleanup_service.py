@@ -901,7 +901,10 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         # Pruefbericht 20.09.2026 (R1-30): auch die Freitexte (Notizen bis
         # 5000 Zeichen, Sondervereinbarung, Preis-Notiz) — dort stehen oft
         # Name, Telefon oder Absprachen mit dem Verkaeufer.
-        upd = {"$set": {"seller_name": "", "place": "", "pickup_address": "",
+        # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): auch die vor Ort
+        # nachgetragene Ausweisnummer des Verkaeufers (seller_id_document).
+        upd = {"$set": {"seller_name": "", "seller_id_document": "", "place": "",
+                        "pickup_address": "",
                         "notes": "", "sondervereinbarung": "", "preis_notiz": "",
                         "pii_geloescht_at": jetzt, "vertrag_geloescht": True, **offen}}
         unset = {**unset, "contract_id": "", "kaufvorgang_id": ""}
@@ -2406,6 +2409,8 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
     async for p in db.pickup_protocols.find(
             {"pii_geloescht_at": {"$in": [None, ""]},
              "$or": [{"seller_name": {"$nin": [None, ""]}}, {"place": {"$nin": [None, ""]}},
+                     # Entscheidung Ahmad 22.09.2026 (Ausweisnummer)
+                     {"seller_id_document": {"$nin": [None, ""]}},
                      {"pdf_path": {"$type": "string"}},
                      {"signature_seller_key": {"$type": "string"}}]},
             {"_id": 0, "appointment_id": 1}).batch_size(500):

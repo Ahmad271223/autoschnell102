@@ -537,15 +537,15 @@ def _fahrer_eintrag(da: dict, link: dict, voll: bool = True) -> dict:
     Fahrer-ID — zum Zuteilen reichen Name und Status.
 
     Rollenpruefung 22.09.2026 (RP-542): Der Betreiber erfasst die Telefonnummer
-    am Fahrerkonto, der Chef hatte sie aber nirgends. Jetzt fuer den Hauptchef
-    (voll=True) mit; Sucher sehen sie wie E-Mail und Fahrer-ID nicht (ob sie
-    sie sehen duerfen, ist eine offene Frage an Ahmad)."""
+    am Fahrerkonto, der Chef hatte sie aber nirgends. Entscheidung Ahmad
+    22.09.2026: Chef UND Sucher sehen die Telefonnummer immer (zum Anrufen vor
+    der Abholung); Fahrer-ID und E-Mail bleiben nur fuer den Hauptchef."""
     return {
         "id": da["id"],
         "driver_code": da.get("driver_code") if voll else None,
         "name": link.get("display_name") or da.get("display_name"),
         "email": da.get("email") if voll else None,
-        "phone": (da.get("phone") or None) if voll else None,
+        "phone": da.get("phone") or None,
         "active": da.get("active") is True,      # R1-26: eine Regel fuer "aktiv"
         "added_at": link.get("added_at"),
     }

@@ -3493,11 +3493,14 @@ async def regenerate_contract_for_pickup(
                     "sondervereinbarung": bool(sonder_neu),
                     "felder": felder_geaendert,
                     "neue_schaeden": len(schaeden_neu),
+                    # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vom
+                    # Protokoll beigesteuerte Verkaeuferfelder (id_document).
+                    "verkaeufer_felder": sorted(verk_korrigiert),
                     "nach_protokoll_korrektur": basis is not None},
                 "nach_abholung_versand_offen": True}
                if abholung
                and (preis_neu or sonder_neu or korrigiert or schaeden_neu
-                    or basis is not None) else {}),
+                    or verk_korrigiert or basis is not None) else {}),
         },
          # Runde 17 (Nr. 321): Historie gedeckelt — die juengsten 100
          # Verschiebungen bleiben, das Dokument waechst nicht unbegrenzt.

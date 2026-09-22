@@ -151,13 +151,38 @@ function zurAnmeldung() {
   window.location.href = anmeldeAdresse(window.location);
 }
 
+export const ABMELDEGRUND_SCHLUESSEL = "ah_abmeldegrund";
+
+/**
+ * Gemerkter Abmeldegrund dieses Tabs ("" = keiner). Wirft nie.
+ *
+ * Welle A9 (22.09.2026): Nach einer Firmensperre (403, X-Sperre: firma) kam
+ * der Servertext nie an. Der Abfaenger merkt den Grund und setzt die harte
+ * Umleitung /login?reason=session — vorher rendert React aber schon
+ * ProtectedRoute mit user=null, also <Navigate to="/login?next=…">, und
+ * Login.jsx las UND loeschte den Grund einmalig. Die harte Umleitung fand
+ * dann nur noch den allgemeinen Satz vor. Deshalb: lesen ohne loeschen,
+ * vergessen erst beim Verlassen der Anmeldeseite (abmeldegrundVergessen).
+ */
+export function abmeldegrundLesen() {
+  try {
+    const g = sitzungsSpeicher()?.getItem(ABMELDEGRUND_SCHLUESSEL);
+    return typeof g === "string" ? g : "";
+  } catch { return ""; }
+}
+
+/** Gemerkten Abmeldegrund verwerfen (nach der Anzeige). Wirft nie. */
+export function abmeldegrundVergessen() {
+  try { sitzungsSpeicher()?.removeItem(ABMELDEGRUND_SCHLUESSEL); } catch { /* gesperrter Speicher */ }
+}
+
 /**
  * Abmeldegrund fuer die Anmeldeseite merken (nur dieser Tab, nie in der URL)
  * und den zuletzt angezeigten Vergleich verwerfen — beides darf nie werfen.
  */
 export function abmeldegrundMerken(detail) {
   const speicher = sitzungsSpeicher();
-  schreiben(speicher, "ah_abmeldegrund", typeof detail === "string" && detail ? detail : "");
+  schreiben(speicher, ABMELDEGRUND_SCHLUESSEL, typeof detail === "string" && detail ? detail : "");
   // Runde 27 (Pruefbefund P0): Auch der zuletzt angezeigte Vergleich muss
   // weg — sonst sieht der naechste Nutzer an diesem Browser Fahrzeug,
   // Verkaeuferdaten und Vertrag des vorherigen Kontos.

@@ -198,6 +198,10 @@ export default function Protokoll() {
   // und mit genau dem Wert, den der Server drucken wird. Korrektur nur über
   // eine Rückfrage des Händlers (dann wieder Entwurf).
   const ortAnzeige = gesperrt ? (data?.protocol?.place || f.place || "") : f.place;
+  // Entscheidung Ahmad 22.09.2026 (Ausweisnummer): gesperrt wie Ort und Name.
+  const ausweisAnzeige = gesperrt
+    ? (data?.protocol?.seller_id_document || f.seller_id_document || "")
+    : (f.seller_id_document || "");
   const nameAnzeige = gesperrt
     ? (data?.protocol?.seller_name || sellerName || data?.appointment?.seller_name || "")
     : sellerName;
@@ -1091,10 +1095,20 @@ export default function Protokoll() {
             </button>
           </div>
         )}
+        {/* Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vor Ort nachtragen, Autosave
+            wie der Name (Teil des Entwurfs), ab "zur Freigabe" gesperrt. Steht im
+            Protokoll-PDF neben dem Verkäufer und in der neuen Vertragsfassung. */}
+        <div className="mt-3">
+          <label className="text-[11px] text-zinc-500">Ausweisnummer des Verkäufers (optional)</label>
+          <input value={ausweisAnzeige} disabled={gesperrt} data-testid="protokoll-ausweis"
+                 maxLength={60} autoComplete="off" spellCheck={false}
+                 onChange={(e) => upd({ seller_id_document: e.target.value })}
+                 className={inputCls} style={st} placeholder="z. B. L01X00T47" />
+        </div>
         {gesperrt && !isFinal && (
           <div className="mt-1.5 text-[11px] text-zinc-500">
-            Ort und Name stehen so im Protokoll. Für eine Korrektur muss der Händler das
-            Protokoll zurückschicken.
+            Ort, Name und Ausweisnummer stehen so im Protokoll. Für eine Korrektur muss der
+            Händler das Protokoll zurückschicken.
           </div>
         )}
         {unterschriften && (

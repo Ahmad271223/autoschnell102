@@ -280,12 +280,14 @@ def test_rp542_telefon_nur_fuer_den_hauptchef(welt):
     assert eintrag["driver"]["phone"] == "0171 2345678"
     einzeln = w.run(A.get_appointment(t.aid, w.chef))
     assert einzeln["driver"]["phone"] == "0171 2345678"
-    # zweites dealer-Konto (kein Hauptchef): keine Nummer
+    # Entscheidung Ahmad 22.09.2026 (Welle B1): die Nummer sehen ALLE in der
+    # Firma — zweites dealer-Konto und Sucher; Fahrer-ID/E-Mail weiter nur
+    # der Hauptchef.
     zweit = {"id": f"zweit_{w.s}", "dealer_id": w.dealer_id, "role": "dealer"}
     liste2 = w.run(A.list_appointments(Response(), zweit))
-    for a in liste2:
-        if a["id"] == t.aid:
-            assert a["driver"]["phone"] is None
+    eintrag2 = next(a for a in liste2 if a["id"] == t.aid)
+    assert eintrag2["driver"]["phone"] == "0171 2345678"
+    assert eintrag2["driver"]["driver_code"] is None and eintrag2["driver"]["email"] is None
 
 
 # ======================================================================= RP-067 (PDF, echt)

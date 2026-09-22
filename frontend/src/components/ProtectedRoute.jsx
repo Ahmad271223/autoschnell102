@@ -3,6 +3,19 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { bereichVonPfad, darfBereich, startseite } from "@/lib/rollen";
 import VerbindungsFehler from "@/components/VerbindungsFehler";
+import { abmeldegrundLesen } from "@/lib/api";
+
+/**
+ * Welle A9 (22.09.2026): Ziel der Umleitung ohne Nutzer. Hat api.js gerade
+ * einen Abmeldegrund gemerkt (401/403 Firmensperre), traegt der Weg zur
+ * Anmeldung `reason=session` — die Anmeldeseite zeigt dann den Servertext,
+ * auch wenn diese SPA-Umleitung vor der harten Umleitung aus api.js kommt.
+ * Rein exportiert, damit es sich pruefen laesst.
+ */
+export function anmeldeZiel(loc, grund = abmeldegrundLesen()) {
+  const ziel = encodeURIComponent(`${loc.pathname || ""}${loc.search || ""}${loc.hash || ""}`);
+  return grund ? `/login?reason=session&next=${ziel}` : `/login?next=${ziel}`;
+}
 
 /*
  * Zugangssperre fuer die geschuetzten Seiten.
@@ -27,7 +40,7 @@ export const ProtectedRoute = ({ children, requireSub = true, adminOnly = false 
   // versucht es dann von selbst erneut (5/10/20 s, "online"), ohne Neuladen.
   if (!user && verbindungsfehler) return <VerbindungsFehler grund={verbindungsfehler} onRetry={refresh} />;
   // U-151: Query und Fragment gehoeren zum Rueckweg (z. B. ?tab=…, #termin-…).
-  if (!user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search + loc.hash)}`} replace />;
+  if (!user) return <Navigate to={anmeldeZiel(loc)} replace />;
 
   // adminOnly bleibt als ausdrueckliche Kennzeichnung erhalten; die
   // eigentliche Pruefung macht der Bereichsabgleich.

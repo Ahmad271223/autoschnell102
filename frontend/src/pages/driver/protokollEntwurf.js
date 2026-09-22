@@ -19,6 +19,9 @@ export const LEERER_ENTWURF = Object.freeze({
   documents: {}, features: {}, condition: {}, keys_count: "", keys_expected: "",
   notes: "", place: "", damages_confirmed: null, new_damages: [],
   vehicle_check: {}, preis_vorschlag: "", sondervereinbarung: "",
+  // Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vor Ort nachgetragen,
+  // Teil des Entwurfs (Autosave, Zusammenführung, Sicherung wie alle Felder).
+  seller_id_document: "",
 });
 
 /** Zahl vom Server als deutsch lesbarer Text fürs Eingabefeld ("15000,5"). */
@@ -44,6 +47,7 @@ export function entwurfAusServer(p) {
     vehicle_check: x.vehicle_check || {},
     preis_vorschlag: preisFeldText(x.preis_vorschlag),
     sondervereinbarung: x.sondervereinbarung || "",
+    seller_id_document: x.seller_id_document || "",
   };
 }
 
@@ -82,6 +86,8 @@ export function nutzlast(s, sellerName) {
   if (preis.lesbar) out.preis_vorschlag = preis.wert;
   if (typeof out.damages_confirmed !== "boolean") delete out.damages_confirmed;
   if (typeof sellerName === "string") out.seller_name = sellerName.trim();
+  // Ausweisnummer (22.09.2026): getrimmt, höchstens 60 Zeichen (wie ProtocolIn).
+  out.seller_id_document = String(out.seller_id_document ?? "").trim().slice(0, 60);
   return out;
 }
 

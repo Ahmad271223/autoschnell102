@@ -314,10 +314,12 @@ def test_rp457_542_fahrer_id_normalisiert_telefon_und_offene_fahrten(welt):
     assert liste[w.driver["id"]]["phone"] == "0511 4711"
     assert liste[w.driver["id"]]["offene_fahrten"] == 2
     assert liste[w.driver2["id"]]["offene_fahrten"] == 0
-    # Sucher: weder Telefonnummer noch Zaehler
+    # Sucher: Telefonnummer ja (Entscheidung Ahmad 22.09.2026, Welle B1),
+    # aber weder Zaehler noch Fahrer-ID/E-Mail
     sucher = {"id": f"su2_{w.s}", "dealer_id": w.dealer_id, "role": "sucher"}
     knapp = {d["id"]: d for d in w.run(D.list_drivers(sucher))}
-    assert knapp[w.driver["id"]]["phone"] is None and "offene_fahrten" not in knapp[w.driver["id"]]
+    assert knapp[w.driver["id"]]["phone"] == "0511 4711" and "offene_fahrten" not in knapp[w.driver["id"]]
+    assert knapp[w.driver["id"]]["driver_code"] is None and knapp[w.driver["id"]]["email"] is None
     # Unbekannter Code weiter 404
     code_, _ = _fehler(w, D.add_driver_by_code(D.DriverLinkIn(driver_code="FD-ZZZZZZZZ"), w.chef))
     assert code_ == 404

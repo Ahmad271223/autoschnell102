@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useBuyer } from "@/context/BuyerContext";
-import { errMsg } from "@/lib/api";
+import { abmeldegrundLesen, abmeldegrundVergessen, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { sicheresZiel } from "@/lib/rollen";
 import { Bolt, ArrowRight } from "lucide-react";
@@ -27,14 +27,14 @@ export default function Login() {
   const reason = params.get("reason");
   const next = params.get("next") || "/app";
   // Runde 19: genauer Grund der Abmeldung aus diesem Tab (api.js legt ihn
-  // bei einer 401 ab). Nur einmal anzeigen, dann wieder vergessen.
-  const [abmeldegrund] = useState(() => {
-    try {
-      const g = window.sessionStorage.getItem("ah_abmeldegrund") || "";
-      window.sessionStorage.removeItem("ah_abmeldegrund");
-      return g;
-    } catch { return ""; }
-  });
+  // bei einer 401/403 ab). Welle A9 (22.09.2026): NICHT schon beim Lesen
+  // vergessen — nach einer Firmensperre rendert React diese Seite zuerst per
+  // <Navigate> (ohne reason) und gleich danach kommt die harte Umleitung
+  // /login?reason=session; der Grund muss beide Aufrufe ueberleben. Vergessen
+  // wird er erst nach der gelungenen Anmeldung (unten in submit) — nicht beim
+  // Abbau der Seite: React.StrictMode baut sie in der Entwicklung probeweise
+  // ab und wieder auf, der Grund waere vor der harten Umleitung schon weg.
+  const [abmeldegrund] = useState(() => abmeldegrundLesen());
 
   const submit = async (e) => {
     e.preventDefault();
@@ -50,6 +50,8 @@ export default function Login() {
         // U-145: Marktplatz-Stand laden, bevor dorthin gewechselt wird.
         try { await kaeufer?.refresh?.(); } catch { /* Marktplatz meldet sich selbst */ }
       }
+      // Welle A9: der gemerkte Abmeldegrund ist mit der neuen Anmeldung erledigt.
+      abmeldegrundVergessen();
       toast.success("Willkommen zurück");
       // Dem ?next aus der Adresszeile wird nur gefolgt, wenn das Ziel zur
       // Rolle passt. Sonst landete ein Super-Admin, der sich auf
@@ -105,7 +107,9 @@ export default function Login() {
           <h1 className="font-display font-black text-3xl tracking-tight">Anmelden</h1>
           <p className="text-zinc-400 text-sm mt-1">Willkommen zurück.</p>
 
-          {reason === "session" && (
+          {/* Welle A9: auch ohne ?reason=session, sobald ein Grund gemerkt ist
+              (SPA-Umleitung durch ProtectedRoute vor der harten Umleitung). */}
+          {(reason === "session" || Boolean(abmeldegrund)) && (
             <div className="mt-5 text-xs px-3 py-2 rounded-sm border" data-testid="login-abmeldegrund"
                  style={{ borderColor: "var(--accent-red)", background: "rgba(255,59,48,0.08)", color: "var(--accent-red)" }}>
               {abmeldegrund

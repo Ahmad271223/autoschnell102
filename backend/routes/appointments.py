@@ -823,9 +823,10 @@ async def list_appointments(response: Response, user=Depends(current_firma),
                 "id": d["id"], "name": d.get("display_name"),
                 "driver_code": d.get("driver_code") if chef_sicht else None,
                 "email": d.get("email") if chef_sicht else None,
-                # Rollenprüfung 22.09.2026 (RP-542): Telefon des Fahrers fuer
-                # den Hauptchef (wie drivers._fahrer_eintrag), Sucher nicht.
-                "phone": (d.get("phone") or None) if chef_sicht else None,
+                # Rollenprüfung 22.09.2026 (RP-542), Entscheidung Ahmad: Telefon
+                # des Fahrers fuer Chef UND Sucher (wie drivers._fahrer_eintrag);
+                # Fahrer-ID und E-Mail weiter nur fuer den Hauptchef.
+                "phone": d.get("phone") or None,
             }
     # Runde 15 (Nr. 3): nur die Fahrzeuge der gelisteten Termine und nur
     # die Felder, die Termine.jsx liest (vehicle.data) — vorher wurde der
@@ -947,8 +948,8 @@ async def get_appointment(appt_id: str, user=Depends(current_firma)):
                 "id": d["id"], "name": d.get("display_name"),
                 "driver_code": d.get("driver_code") if chef_sicht else None,
                 "email": d.get("email") if chef_sicht else None,
-                # Rollenprüfung 22.09.2026 (RP-542): wie in der Liste.
-                "phone": (d.get("phone") or None) if chef_sicht else None,
+                # Rollenprüfung 22.09.2026 (RP-542): wie in der Liste — fuer alle.
+                "phone": d.get("phone") or None,
             }
     return termin_fuer_sucher(user, a)
 
