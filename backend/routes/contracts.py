@@ -352,6 +352,12 @@ class SendIn(BaseModel):
     # "teilen" = das Handy hat das PDF ueber das Teilen-Menue an WhatsApp
     # uebergeben (von der eigenen Nummer des Suchers) — nur Vermerk.
     methode: Optional[str] = Field(default=None, max_length=20)
+    # Pruefbericht 20.09.2026 (U-73): bei methode="teilen" die Fassung der
+    # Datei, die das Handy WIRKLICH an WhatsApp uebergeben hat (aus der
+    # Kopfzeile X-Vertrag-Version beim Vorabladen). Weicht sie von der
+    # aktuellen Fassung ab, gibt es keinen Vermerk (409) — vorher blieb eine
+    # im 45-s-Fenster veraltete geteilte Datei unerkannt.
+    version: Optional[int] = Field(default=None, ge=1)
 
     @field_validator("methode")
     @classmethod
@@ -866,6 +872,23 @@ async def _offener_eigener_vertrag(user: dict, vehicle_id: str) -> Optional[dict
     return None
 
 
+def _idempotenz_konflikt(vorhanden: dict) -> dict:
+    """Pruefbericht 20.09.2026 (U-83): derselbe Idempotenz-Schluessel, anderer
+    Inhalt — vorher nur "bitte neu laden" ohne Vertrags-Id und Preis. Der
+    Entwurf im sessionStorage traegt den alten Schluessel weiter, deshalb kam
+    derselbe 409 nach dem Neuladen wieder. Jetzt bekommt die Oberflaeche, was
+    sie fuer die Rueckfrage braucht (vorhandenen Vertrag oeffnen oder mit
+    neuem Schluessel neu anlegen)."""
+    preis = vorhanden.get("purchase_price")
+    return {
+        "code": "idempotenz_konflikt",
+        "msg": "Dieser Idempotenz-Schlüssel wurde schon für einen anderen Vertrag "
+               "verwendet — bitte neu laden",
+        "contract_id": vorhanden.get("id"),
+        "purchase_price": float(preis) if isinstance(preis, (int, float)) else None,
+    }
+
+
 @router.post("/contracts")
 async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Pruefung 14.09.2026 (Liste 3, Nr. 1): derselbe Schluessel -> derselbe Vertrag.
@@ -879,8 +902,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             # Pruefung 14.09.2026 (F16): derselbe Schluessel mit ANDEREN
             # Vertragsdaten ist ein Fehler, nicht "der alte Vertrag".
             if vorhanden.get("idempotency_hash") and vorhanden["idempotency_hash"] != anfrage_hash:
-                raise HTTPException(409, "Dieser Idempotenz-Schlüssel wurde schon für einen "
-                                         "anderen Vertrag verwendet — bitte neu laden")
+                raise HTTPException(409, _idempotenz_konflikt(vorhanden))
             return {**clean_doc(vorhanden), "bereits_vorhanden": True}
     # Umbau Kaufvorgaenge 09.09.2026: Inserat firmenweit gemeinsam — jeder
     # Sucher darf einen eigenen Vertrag (= eigenen Kaufvorgang) anlegen.
@@ -1099,8 +1121,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
                 # Runde 16 (15.09.2026): dieselbe Hash-Pruefung wie im Vorabpfad —
                 # sonst bekam Anfrage B still den Vertrag von Anfrage A.
                 if vorhanden.get("idempotency_hash") and vorhanden["idempotency_hash"] != anfrage_hash:
-                    raise HTTPException(409, "Dieser Idempotenz-Schlüssel wurde schon für einen "
-                                             "anderen Vertrag verwendet — bitte neu laden")
+                    raise HTTPException(409, _idempotenz_konflikt(vorhanden))
                 return {**clean_doc(vorhanden), "bereits_vorhanden": True}
             raise
         except Exception:
@@ -1646,9 +1667,12 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
         media_type="application/pdf",
         # Pruefung 14.09.2026 (Liste 3, Nr. 4): Personendaten nie im Browser-Cache.
         # Rollenpruefung 22.09.2026 (RP-200): ASCII + UTF-8-Name, kein 500 bei 'Š'.
+        # Pruefbericht 20.09.2026 (U-73): Fassung dieser Datei — der Versand-
+        # Dialog merkt sie zum Blob und schickt sie beim Teilen mit (SendIn.version).
         headers={"Content-Disposition": content_disposition(
                      c.get("filename") or "", fallback="kaufvertrag.pdf"),
-                 "Cache-Control": "no-store"},
+                 "Cache-Control": "no-store",
+                 "X-Vertrag-Version": str(int(c.get("version") or 1))},
     )
 
 
@@ -2027,6 +2051,21 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # den Kauf wieder offen.
     if await _kaufvorgang_status(c) in KAUF_BEENDET:
         raise HTTPException(409, VERSAND_KAUF_BEENDET)
+    # Pruefbericht 20.09.2026 (U-73): Das Handy hat eine vorab geladene Datei
+    # geteilt. Ist der Vertrag seitdem neu erzeugt worden (Terminverschiebung,
+    # Preis nach Abholung, Verkaeufer-Korrektur), ging die ALTE Fassung raus —
+    # kein Vermerk; der Dialog laedt die neue Fassung und der Nutzer teilt
+    # noch einmal. Vor der Reservierung, damit nichts zurueckzunehmen ist.
+    if body.methode == "teilen" and body.version is not None \
+            and int(c.get("version") or 1) != int(body.version):
+        raise HTTPException(409, {
+            "code": "fassung_veraltet",
+            "msg": "Geteilt wurde eine veraltete Fassung des Vertrags — es gibt inzwischen "
+                   f"Fassung {int(c.get('version') or 1)}. Bitte die neue Fassung noch einmal "
+                   "teilen.",
+            "version": int(c.get("version") or 1),
+            "geteilt": int(body.version),
+        })
     # Runde 16 (15.09.2026): Versand-Limit je Konto — kein Spam-/Kostenpfad
     # ueber frei eingetragene Empfaenger (Resend/SMTP).
     if not await _versand_limiter.check(f"konto:{user.get('id')}"):

@@ -45,6 +45,13 @@ describe("dateiTeilen", () => {
     expect(await dateiTeilen({ datei, text: "x" }, nav)).toBe("nicht_moeglich");
     expect(await dateiTeilen({ datei, text: "x" }, {})).toBe("nicht_moeglich");
   });
+
+  // Pruefbericht 20.09.2026 (K-14)
+  test("Browser verlangt frische Nutzeraktion (NotAllowedError): 'erneut', kein Link-Weg", async () => {
+    const err = new Error("must be handling a user gesture"); err.name = "NotAllowedError";
+    const nav = { share: vi.fn().mockRejectedValue(err), canShare: () => true };
+    expect(await dateiTeilen({ datei, text: "x" }, nav)).toBe("erneut");
+  });
 });
 
 describe("pdfDatei", () => {

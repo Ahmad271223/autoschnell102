@@ -13,6 +13,7 @@ import StatusSchild from "@/components/StatusSchild";
 import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
 import { kmAusText, preisAusText } from "@/lib/preis";
 import { betragAlsText, fristErneuertText } from "@/lib/bestandForm";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 
 /**
  * Fahrzeugbestand (B2B-Modul Phase 1).
@@ -539,14 +540,20 @@ function ManualVehicleDialog({ fahrzeug = null, onClose, onDone }) {
 
   const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
   const st = { borderColor: "var(--border-default)" };
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Escape, Fokus (lib/useModal);
+  // waehrend des Speicherns schliesst Escape nicht.
+  const dialogRef = useModal(() => { if (!busy) onClose?.(); });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>
-      <div className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl p-5"
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="manuell-dialog-titel"
+           className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl px-5 pb-5"
            style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
-        <div className="flex items-center justify-between mb-3">
+        {/* M-11: Kopfzeile bleibt beim Scrollen oben, Schliessen mit 44-px-Trefferflaeche */}
+        <div className="flex items-center justify-between gap-3 py-4 mb-1 sticky top-0 z-10"
+             style={{ background: "var(--bg-elevated)" }}>
           <div>
-            <div className="text-lg font-bold">
+            <div className="text-lg font-bold" id="manuell-dialog-titel">
               {bearbeiten ? "Fahrzeugdaten bearbeiten" : "Fahrzeug manuell hinzufügen"}
             </div>
             <div className="text-xs text-zinc-500">
@@ -555,7 +562,10 @@ function ManualVehicleDialog({ fahrzeug = null, onClose, onDone }) {
                 : "Für Fahrzeuge, die du bereits besitzt oder außerhalb der Plattform gekauft hast."}
             </div>
           </div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-white"><X size={20} /></button>
+          <button type="button" onClick={onClose} aria-label="Schließen" data-testid="manuell-schliessen"
+                  className="w-11 h-11 -mr-2 shrink-0 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10">
+            <X size={20} />
+          </button>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Marke *"><input value={f.make_label} onChange={set("make_label")} className={inputCls} style={st} placeholder="BMW" /></Field>

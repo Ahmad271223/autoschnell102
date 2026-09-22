@@ -757,7 +757,17 @@ select option {
   cursor: pointer;
   transition: background 0.12s ease-out;
   display: flex; flex-direction: column; gap: 4px;
+  /* Pruefbericht 20.09.2026 (M-05): die Tageszelle ist jetzt ein <button>
+     (per Tastatur waehlbar) — Browser-Knopfstil zuruecksetzen, die Raender
+     rechts/unten bleiben. */
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border-top: 0; border-left: 0; border-radius: 0;
+  font: inherit; color: inherit; text-align: left;
+  width: 100%;
 }
+.cal-day:focus-visible { outline: 2px solid var(--accent-blue, #0a84ff); outline-offset: -2px; z-index: 1; }
 .cal-day:hover { background: var(--apple-btn-secondary-bg); }
 .cal-day.muted { opacity: 0.4; }
 .cal-day.selected { background: rgba(10,132,255,0.10); box-shadow: inset 0 0 0 1px rgba(10,132,255,0.45); }

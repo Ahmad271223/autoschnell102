@@ -7,6 +7,17 @@ import { X, Send, MessageCircle, Mail, Save, Calendar as CalIcon, FileText, Shie
 import { openContractPdf } from "@/lib/pdf";
 import { dateiTeilen, kannDateiTeilen, pdfDatei } from "@/lib/teilen";
 import { nachKorrektur } from "@/lib/versand";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
+
+// Pruefbericht 20.09.2026 (U-73): Fassungsnummer aus der Kopfzeile der
+// PDF-Antwort (X-Vertrag-Version) — sie gehoert zu GENAU diesem Blob und
+// geht beim Teilen mit, damit der Server eine inzwischen veraltete Datei
+// erkennt. Unlesbar/fehlend -> null (dann prueft der Server wie bisher).
+export function fassungAusKopf(headers) {
+  const roh = headers?.["x-vertrag-version"] ?? headers?.["X-Vertrag-Version"];
+  const n = Number.parseInt(String(roh ?? ""), 10);
+  return Number.isFinite(n) && n >= 1 ? n : null;
+}
 
 /**
  * Rollenprüfung 22.09.2026 (RP-406/RP-417): Abholtermin zu einem Vertrag
@@ -63,8 +74,12 @@ export default function SendDialog({ open, contract, onClose }) {
   const { dealer, refresh } = useAuth();
   const nav = useNavigate();
   const [tab, setTab] = useState("whatsapp");
-  const [phone, setPhone] = useState(contract.seller_phone || "");
-  const [email, setEmail] = useState(contract.seller_email || "");
+  // Pruefbericht 20.09.2026 (U-92): contract?. — und beim Wechsel auf einen
+  // anderen Vertrag werden Empfaenger und Versandzustand unten zurueckgesetzt.
+  const [phone, setPhone] = useState(contract?.seller_phone || "");
+  const [email, setEmail] = useState(contract?.seller_email || "");
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Escape, Fokus (lib/useModal).
+  const dialogRef = useModal(onClose, { offen: Boolean(open) });
   // Wunsch Ahmad 21.09.2026: Ging schon eine FRUEHERE Fassung dieses
   // Vertrags raus, ist das hier der "erneute Versand (nach Korrektur)" —
   // mit eigenem Betreff und Text aus den Einstellungen.
@@ -214,6 +229,8 @@ export default function SendDialog({ open, contract, onClose }) {
   // Grund, ohne neuen Versuch. Jetzt: Fehlertext + "Erneut versuchen".
   const [pdfFehler, setPdfFehler] = useState("");
   const pdfFuer = useRef(null);
+  // U-73: Fassung der vorab geladenen Datei (null = unbekannt).
+  const pdfFassung = useRef(null);
   useEffect(() => {
     if (!open || !contract?.id) return undefined;
     let aktiv = true;
@@ -221,12 +238,14 @@ export default function SendDialog({ open, contract, onClose }) {
     // den Knopf sonst jedes Mal kurz auf "wird vorbereitet" springen.
     if (pdfFuer.current !== contract.id) {
       pdfFuer.current = contract.id;
+      pdfFassung.current = null;
       setPdf(null);
     }
     api.get(`/contracts/${contract.id}/pdf`, { responseType: "blob", params: { variante: "digital" } })
       .then((r) => {
         if (!aktiv) return;
         const name = contract.filename || `Kaufvertrag ${contract.make || ""} ${contract.model || ""}`.trim();
+        pdfFassung.current = fassungAusKopf(r.headers);
         setPdf(pdfDatei(r.data, name));
         setPdfFehler("");
       })
@@ -250,8 +269,29 @@ export default function SendDialog({ open, contract, onClose }) {
   // moeglich) — ein versehentlicher zweiter Klick stellte damit aber sicher
   // doppelt zu. Jetzt fragt der zweite E-Mail-Versand einmal nach.
   const [emailGesendet, setEmailGesendet] = useState(false);
+  // Pruefbericht 20.09.2026 (U-92): Der Dialog wird in der Vertragsliste fuer
+  // verschiedene Vertraege wiederverwendet — Empfaenger und Versandzustand
+  // gehoeren zum VERTRAG, nicht zum Dialog.
+  useEffect(() => {
+    setPhone(contract?.seller_phone || "");
+    setEmail(contract?.seller_email || "");
+    setWaUrl("");
+    setEmailGesendet(false);
+    setBeweisFrage(false);
+    setBeweisFertig(false);
+  }, [contract?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!open) return null;
+
+  // Pruefbericht 20.09.2026 (U-93): Der Versand IST erfolgt, aber der Vertrag
+  // war beim Vermerk nicht mehr erreichbar (Loeschung begonnen) — das Archiv
+  // zeigt ihn weiter als unversendet. Bisher sah der Nutzer nur "versendet".
+  const vermerkPruefen = (data) => {
+    if (data?.status_vermerk === "nicht_gespeichert") {
+      toast.warning("Versendet, aber im Archiv nicht vermerkt — bitte den Vertrag im "
+        + "Vertragsarchiv prüfen.", { duration: 15000 });
+    }
+  };
 
   const send = async (channel) => {
     if (channel === "email" && emailGesendet
@@ -272,6 +312,7 @@ export default function SendDialog({ open, contract, onClose }) {
             idempotency_key };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       keyRef.current = neuerSchluessel();
+      vermerkPruefen(data);
       if (channel === "whatsapp" && data.wa_url) {
         setWaUrl(data.wa_url);
         let geoeffnet = false;
@@ -367,23 +408,52 @@ export default function SendDialog({ open, contract, onClose }) {
     setBusy(true);
     try {
       const titel = `Kaufvertrag ${contract.make || ""} ${contract.model || ""}`.trim();
+      // U-73: die Fassung GENAU dieser Datei — nicht die des Vertrags im
+      // Zustand, der kann seit dem Vorabladen schon neuer sein.
+      const fassung = pdfFassung.current;
       const ergebnis = await dateiTeilen({ datei: pdf, text: waMsg, titel });
       if (ergebnis === "geteilt") {
+        let vermerkt = true;
         try {
-          await api.post(`/contracts/${contract.id}/send`, {
+          const { data } = await api.post(`/contracts/${contract.id}/send`, {
             channel: "whatsapp", recipient: phone, message: waMsg,
             idempotency_key: keyRef.current, methode: "teilen",
+            ...(fassung ? { version: fassung } : {}),
           });
           keyRef.current = neuerSchluessel();
+          vermerkPruefen(data);
         } catch (err) {
-          toast.warning(errMsg(err, "Der Versand konnte nicht im Archiv vermerkt werden"));
+          const d = err?.response?.data?.detail;
+          if (err?.response?.status === 409 && d?.code === "fassung_veraltet") {
+            // U-73: Geteilt wurde eine inzwischen veraltete Fassung (neuer
+            // Termin, neuer Preis) — kein Vermerk; die neue Datei wird
+            // jetzt geladen, der Nutzer teilt noch einmal.
+            vermerkt = false;
+            keyRef.current = neuerSchluessel();
+            setPdfStand((n) => n + 1);
+            toast.warning(d.msg || "Der Vertrag hat inzwischen eine neue Fassung — bitte die neue "
+              + "Fassung noch einmal teilen.", { duration: 15000 });
+          } else {
+            toast.warning(errMsg(err, "Der Versand konnte nicht im Archiv vermerkt werden"));
+          }
         }
-        toast.success("An WhatsApp übergeben · Chat des Verkäufers wählen und senden");
-        if (contract.vehicle_id && !beweisFertig) setBeweisFrage(true);
+        if (vermerkt) {
+          toast.success("An WhatsApp übergeben · Chat des Verkäufers wählen und senden");
+          if (contract.vehicle_id && !beweisFertig) setBeweisFrage(true);
+        }
       } else if (ergebnis === "abgebrochen") {
         toast.info("Teilen abgebrochen");
-      } else {
-        toast.info("Teilen ist auf diesem Gerät nicht möglich — der Chat wird mit Download-Link geöffnet");
+      } else if (ergebnis === "erneut") {
+        // Pruefbericht 20.09.2026 (K-14): Der Browser verlangt einen frischen
+        // Tipp — frueher lief das still in den Chat mit oeffentlichem Link.
+        toast.warning("Bitte noch einmal auf „Per WhatsApp teilen“ tippen.");
+      } else if (!phone) {
+        toast.error("Teilen ist auf diesem Gerät nicht möglich — für den Chat mit Download-Link "
+          + "bitte oben die Telefonnummer eintragen.");
+      } else if (window.confirm("Teilen ist auf diesem Gerät nicht möglich.\n\nStattdessen den "
+          + "WhatsApp-Chat mit einem Download-Link zum Vertrag öffnen? Der Link ist zeitlich "
+          + "begrenzt und für jeden nutzbar, der ihn kennt.")) {
+        // K-14: nur nach Rueckfrage — der Link ist oeffentlich.
         await send("whatsapp");
       }
     } finally {
@@ -407,8 +477,11 @@ export default function SendDialog({ open, contract, onClose }) {
     }
   };
 
+  // Pruefbericht 20.09.2026 (U-89): Der Knopf hiess "PDF speichern" und
+  // meldete "PDF gespeichert" — gespeichert war der Vertrag laengst, der
+  // Knopf fuehrt nur ins Archiv. Jetzt sagt er das.
   const saveOnly = () => {
-    toast.success("PDF gespeichert");
+    toast.success("Der Vertrag liegt im Vertragsarchiv");
     onClose();
     nav("/app/vertraege");
   };
@@ -445,20 +518,27 @@ export default function SendDialog({ open, contract, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="bg-[var(--bg-surface)] border w-full max-w-2xl rounded-md max-h-[90vh] overflow-y-auto"
+      {/* M-07: Rahmen ist der Dialog (role/aria-modal/Fokus); M-11: Kopfzeile
+          bleibt beim Scrollen oben, Schliessen-Knopf mit 44-px-Trefferflaeche. */}
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="send-dialog-titel"
+           className="bg-[var(--bg-surface)] border w-full max-w-2xl rounded-md max-h-[90vh] overflow-y-auto"
            style={{ borderColor: "var(--border-default)" }} data-testid="send-dialog">
-        <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: "var(--border-default)" }}>
+        <div className="flex items-center justify-between px-6 py-3 border-b sticky top-0 bg-[var(--bg-surface)] z-10"
+             style={{ borderColor: "var(--border-default)" }}>
           <div>
             <div className="overline">Vertrag versenden</div>
-            <div className="font-display font-bold text-lg">{contract.make} {contract.model}</div>
+            <div className="font-display font-bold text-lg" id="send-dialog-titel">{contract.make} {contract.model}</div>
           </div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-white" data-testid="close-send">
+          <button type="button" onClick={onClose} data-testid="close-send" aria-label="Schließen"
+                  className="w-11 h-11 -mr-2 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10">
             <X size={20} />
           </button>
         </div>
 
         <div className="px-6 pt-4">
-          <div className="flex border rounded-sm overflow-hidden w-full" style={{ borderColor: "var(--border-default)" }}>
+          {/* M-20: echte Reiter-Semantik (role=tablist/tab, aria-selected) */}
+          <div className="flex border rounded-sm overflow-hidden w-full" role="tablist" aria-label="Versandweg"
+               style={{ borderColor: "var(--border-default)" }}>
             <TabBtn active={tab === "whatsapp"} onClick={() => setTab("whatsapp")} icon={MessageCircle} label="WhatsApp" testid="tab-whatsapp" />
             <TabBtn active={tab === "email"} onClick={() => setTab("email")} icon={Mail} label="E-Mail" testid="tab-email" />
           </div>
@@ -478,7 +558,9 @@ export default function SendDialog({ open, contract, onClose }) {
           )}
           {tab === "whatsapp" ? (
             <>
-              <Field label="Telefonnummer (international, z.B. +49…)" value={phone} onChange={setPhone} testid="wa-phone" />
+              {/* M-12: Telefon-Tastatur am Handy */}
+              <Field label="Telefonnummer (international, z.B. +49…)" value={phone} onChange={setPhone} testid="wa-phone"
+                     type="tel" inputMode="tel" autoComplete="tel" />
               <div>
                 <label className="text-xs text-zinc-400">Nachricht</label>
                 <textarea data-testid="wa-message" rows={5} className="input-base w-full mt-1"
@@ -610,7 +692,7 @@ export default function SendDialog({ open, contract, onClose }) {
             <button onClick={saveOnly} data-testid="save-only-btn"
                     className="flex-1 px-4 py-3 rounded-sm border hover:bg-white/5 flex items-center justify-center gap-2"
                     style={{ borderColor: "var(--border-default)" }}>
-              <Save size={14} /> PDF speichern
+              <Save size={14} /> Fertig — zum Vertragsarchiv
             </button>
             <button onClick={saveAndSchedule} data-testid="save-and-schedule-btn" disabled={busy}
                     className="flex-1 px-4 py-3 rounded-sm flex items-center justify-center gap-2 disabled:opacity-50"
@@ -624,8 +706,9 @@ export default function SendDialog({ open, contract, onClose }) {
   );
 }
 
+// M-20: role=tab + aria-selected — der aktive Reiter war nur optisch erkennbar.
 const TabBtn = ({ active, onClick, icon: Icon, label, testid }) => (
-  <button onClick={onClick} data-testid={testid}
+  <button type="button" onClick={onClick} data-testid={testid} role="tab" aria-selected={active}
           className={`flex-1 px-4 py-2.5 text-sm flex items-center justify-center gap-2 transition-colors ${
             active ? "bg-white/5 text-white" : "text-zinc-400 hover:text-white"
           }`}>
@@ -633,10 +716,12 @@ const TabBtn = ({ active, onClick, icon: Icon, label, testid }) => (
   </button>
 );
 
-const Field = ({ label, value, onChange, type = "text", testid }) => (
+// M-12: inputMode/autoComplete durchreichen (Telefonnummer -> Zifferntastatur).
+const Field = ({ label, value, onChange, type = "text", testid, inputMode, autoComplete }) => (
   <div>
     <label className="text-xs text-zinc-400">{label}</label>
     <input data-testid={testid} type={type} value={value} onChange={(e) => onChange(e.target.value)}
+           inputMode={inputMode} autoComplete={autoComplete}
            className="input-base w-full mt-1" />
   </div>
 );

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 import KopierKnopf from "@/components/KopierKnopf";
 import { Mail, Send, X } from "lucide-react";
 import { toast } from "sonner";
@@ -85,6 +86,9 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
   const versuche = useRef({});
   // Der vom Server geladene Text der aktuellen Vorlage (RP-215: geändert?).
   const [vorlageText, setVorlageText] = useState("");
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Escape, Fokus (lib/useModal);
+  // waehrend des Versands schliesst Escape nicht.
+  const dialogRef = useModal(() => { if (!sendet) onClose?.(gesendet); }, { offen: Boolean(open) });
 
   // Vorlage vom Server holen: er setzt Name und Daten des Vertrags ein.
   // Beim Wechsel und nach einem Fehler werden die Felder geleert — sonst
@@ -189,18 +193,19 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
           frueher hier benutzten Farbnamen gab es nicht, das Fenster war
           durchsichtig und der Text lief ueber die Vertragsliste
           (Waechter: backend/tests/test_farb_tokens_20260921.py). */}
-      <div className="w-full max-w-2xl rounded-2xl overflow-hidden flex flex-col"
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="folgemail-titel"
+           className="w-full max-w-2xl rounded-2xl overflow-hidden flex flex-col"
            style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)",
                     maxHeight: "90vh" }}>
         <div className="flex items-center justify-between px-5 py-4"
              style={{ borderBottom: "1px solid var(--border-default)" }}>
-          <div className="flex items-center gap-2 font-semibold"
+          <div className="flex items-center gap-2 font-semibold" id="folgemail-titel"
                style={{ color: "var(--text-primary)" }}>
             <Mail size={18} /> Hinweis &amp; Bahnverbindung
           </div>
-          <button onClick={() => onClose?.(gesendet)} data-testid="folgemail-schliessen"
-                  className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10"
-                  style={{ color: "var(--text-secondary)" }} title="Schließen">
+          <button type="button" onClick={() => onClose?.(gesendet)} data-testid="folgemail-schliessen"
+                  className="w-11 h-11 -mr-1 rounded-full flex items-center justify-center hover:bg-white/10"
+                  style={{ color: "var(--text-secondary)" }} title="Schließen" aria-label="Schließen">
             <X size={18} />
           </button>
         </div>
@@ -208,8 +213,8 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
         <div className="px-5 py-4 overflow-y-auto flex flex-col gap-4">
           <div className="flex flex-wrap gap-2">
             {ARTEN.map((a) => (
-              <button key={a.id} onClick={() => artWechseln(a.id)}
-                      data-testid={`folgemail-art-${a.id}`}
+              <button key={a.id} type="button" onClick={() => artWechseln(a.id)}
+                      data-testid={`folgemail-art-${a.id}`} aria-pressed={art === a.id}
                       className="px-3 py-2 rounded-xl text-sm transition-colors"
                       style={{
                         background: art === a.id

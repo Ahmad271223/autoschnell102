@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 import { UserRoundPen, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -31,6 +32,9 @@ export default function VerkaeuferKorrekturDialog({ open, contract, onClose }) {
   const [form, setForm] = useState(() => Object.fromEntries(
     FELDER.map(([k]) => [k, String(cd[k] ?? contract?.[k] ?? "")])));
   const [arbeitet, setArbeitet] = useState(false);
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Escape, Fokus (lib/useModal);
+  // waehrend des Speicherns schliesst Escape nicht.
+  const dialogRef = useModal(() => { if (!arbeitet) onClose?.(null); }, { offen: Boolean(open) });
   if (!open) return null;
 
   const speichern = async () => {
@@ -58,17 +62,19 @@ export default function VerkaeuferKorrekturDialog({ open, contract, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
          data-testid="verkaeufer-korrektur-dialog">
-      <div className="w-full max-w-lg rounded-2xl overflow-hidden flex flex-col"
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="verkaeufer-korrektur-titel"
+           className="w-full max-w-lg rounded-2xl overflow-hidden flex flex-col"
            style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)",
                     maxHeight: "90vh" }}>
         <div className="flex items-center justify-between px-5 py-4"
              style={{ borderBottom: "1px solid var(--border-default)" }}>
-          <div className="flex items-center gap-2 font-semibold" style={{ color: "var(--text-primary)" }}>
+          <div className="flex items-center gap-2 font-semibold" style={{ color: "var(--text-primary)" }}
+               id="verkaeufer-korrektur-titel">
             <UserRoundPen size={18} /> Verkäuferdaten korrigieren
           </div>
-          <button onClick={() => onClose?.(null)} data-testid="verkaeufer-korrektur-schliessen"
-                  className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10"
-                  style={{ color: "var(--text-secondary)" }} title="Schließen">
+          <button type="button" onClick={() => onClose?.(null)} data-testid="verkaeufer-korrektur-schliessen"
+                  className="w-11 h-11 -mr-1 rounded-full flex items-center justify-center hover:bg-white/10"
+                  style={{ color: "var(--text-secondary)" }} title="Schließen" aria-label="Schließen">
             <X size={18} />
           </button>
         </div>
@@ -83,6 +89,7 @@ export default function VerkaeuferKorrekturDialog({ open, contract, onClose }) {
             <label key={k} className="flex flex-col gap-1">
               <span className="text-xs" style={{ color: "var(--text-secondary)" }}>{label}</span>
               <input value={form[k]} type={typ} data-testid={`verkaeufer-${k}`}
+                     data-autofocus={k === "seller_name" ? "" : undefined}
                      onChange={(e) => setForm((alt) => ({ ...alt, [k]: e.target.value }))}
                      className="px-3 py-2 rounded-xl outline-none"
                      style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)",

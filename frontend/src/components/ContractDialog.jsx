@@ -10,6 +10,8 @@ import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-r
 import DamageSelector from "./DamageSelector";
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
+import { openContractPdf } from "@/lib/pdf";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 
 const YN_OPTIONS = [
   { value: "", label: "—" },
@@ -73,6 +75,21 @@ const neuerIdempotenzSchluessel = () =>
   (typeof crypto !== "undefined" && crypto.randomUUID)
     ? crypto.randomUUID()
     : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+
+// Pruefbericht 20.09.2026 (U-83): Der Server meldet, dass unter diesem
+// Idempotenz-Schluessel schon ein ANDERER Vertrag liegt (z. B. Entwurf aus
+// dem sessionStorage nach geaendertem Preis). Vorher: 409 "bitte neu laden"
+// als Fehler — und der Entwurf trug den alten Schluessel weiter, der naechste
+// Versuch scheiterte identisch. Jetzt die Rueckfrage mit dem Preis des
+// vorhandenen Vertrags; das Formular bleibt stehen.
+export function idempotenzKonfliktFrage(detail) {
+  const preis = Number(detail?.purchase_price);
+  const preisSatz = Number.isFinite(preis) && preis > 0
+    ? ` (Kaufpreis ${preisText(preis)})` : "";
+  return `Aus diesem Vorgang wurde schon ein Kaufvertrag angelegt${preisSatz}.\n\n`
+    + "OK = jetzt trotzdem einen NEUEN Kaufvertrag mit deinen Eingaben anlegen.\n"
+    + "Abbrechen = nichts anlegen — den vorhandenen Vertrag kannst du dann über den Hinweis öffnen.";
+}
 
 // Rollenprüfung 22.09.2026 (RP-412): Am Handy verwirft der Browser eine Seite
 // im Hintergrund ohne Nachfrage (beforeunload kommt dort nicht zuverlässig) —
@@ -270,6 +287,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     entwurfLoeschen(entwurfKey);
     onClose?.();
   };
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Fokus, Escape — Escape geht
+  // ueber schliessen(), also nur nach Rueckfrage bei eigenen Eingaben.
+  const dialogRef = useModal(schliessen, { offen: Boolean(open) });
   // Runde 24 (11.09.2026): Käuferdaten sind Pflicht (Wunsch Ahmad). Der
   // Hinweis sagt, was die EINSTELLUNGEN offen lassen — daher aus dem Profil
   // abgeleitet, nicht aus dem Formular: er bleibt stehen, während der
@@ -528,20 +548,48 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       // Netzabbruch legt keinen zweiten Vertrag an (Schluessel je Dialog).
       const senden = (extra = {}) => api.post("/contracts",
         { ...buildPayload(), idempotency_key: idempotenz.current, ...extra });
-      let data;
-      try {
-        ({ data } = await senden());
-      } catch (err) {
-        // Rollenprüfung 22.09.2026 (RP-416): Derselbe Sucher hat für dieses
-        // Fahrzeug schon einen offenen Vertrag — erst nachfragen, dann
-        // bewusst einen zweiten anlegen (z. B. nachverhandelter Preis).
-        const d = err?.response?.data?.detail;
-        if (err?.response?.status === 409 && d?.code === "vertrag_vorhanden"
-            && window.confirm(`${d.msg}\n\nTrotzdem einen zweiten Kaufvertrag anlegen?`)) {
-          ({ data } = await senden({ zweiter_vertrag_bestaetigt: true }));
-        } else {
+      const anlegen = async () => {
+        try {
+          return (await senden()).data;
+        } catch (err) {
+          // Rollenprüfung 22.09.2026 (RP-416): Derselbe Sucher hat für dieses
+          // Fahrzeug schon einen offenen Vertrag — erst nachfragen, dann
+          // bewusst einen zweiten anlegen (z. B. nachverhandelter Preis).
+          const d = err?.response?.data?.detail;
+          if (err?.response?.status === 409 && d?.code === "vertrag_vorhanden"
+              && window.confirm(`${d.msg}\n\nTrotzdem einen zweiten Kaufvertrag anlegen?`)) {
+            return (await senden({ zweiter_vertrag_bestaetigt: true })).data;
+          }
           throw err;
         }
+      };
+      let data;
+      try {
+        data = await anlegen();
+      } catch (err) {
+        const d = err?.response?.data?.detail;
+        if (!(err?.response?.status === 409 && d?.code === "idempotenz_konflikt")) throw err;
+        // U-83: neuer Schluessel — auch im Entwurf, sonst kaeme derselbe
+        // Konflikt nach einem Neuladen wieder.
+        idempotenz.current = neuerIdempotenzSchluessel();
+        if (bearbeitet.current) {
+          entwurfSpeichern(entwurfKey, { form: formRef.current, beruehrt: beruehrt.current,
+                                         idempotenz: idempotenz.current });
+        }
+        if (!window.confirm(idempotenzKonfliktFrage(d))) {
+          const preis = Number(d?.purchase_price);
+          toast.info(`Vorhandener Kaufvertrag${Number.isFinite(preis) && preis > 0
+            ? ` (Kaufpreis ${preisText(preis)})` : ""} — deine Eingaben bleiben stehen.`, {
+            duration: 15000,
+            action: d?.contract_id ? {
+              label: "Öffnen",
+              onClick: () => openContractPdf(d.contract_id)
+                .catch((e) => toast.error(errMsg(e, "Vertrag konnte nicht geöffnet werden"))),
+            } : undefined,
+          });
+          return;
+        }
+        data = await anlegen();
       }
       // RP-412: gespeichert — der Entwurf wird nicht mehr gebraucht.
       entwurfLoeschen(entwurfKey);
@@ -549,6 +597,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       // Runde 15: der Vertrag ist gespeichert, auch wenn der automatische
       // Abholtermin nicht angelegt werden konnte — der Server sagt es.
       if (data?.termin_hinweis) toast.warning(data.termin_hinweis, { duration: 8000 });
+      // Pruefbericht 20.09.2026 (U-82): Fahrzeugstatus/Protokoll konnten nicht
+      // nachgezogen werden (der Aufraeumjob holt es nach) — und "bereits
+      // vorhanden" heisst: dieselbe Anfrage war schon angekommen, es gibt
+      // keinen zweiten Vertrag. Beides wurde bisher verworfen.
+      if (data?.nacharbeit_hinweis) toast.warning(data.nacharbeit_hinweis, { duration: 10000 });
+      if (data?.bereits_vorhanden) {
+        toast.info("Dieser Kaufvertrag war schon angelegt — es wurde kein zweiter erstellt.");
+      }
       onCreated?.(data);
     } catch (err) {
       toast.error(errMsg(err, "PDF konnte nicht erstellt werden"));
@@ -559,18 +615,22 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="bg-[var(--bg-surface)] border w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl"
+      {/* M-07: Rahmen ist der Dialog (role/aria-modal/Fokus, lib/useModal). */}
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="contract-dialog-titel"
+           className="bg-[var(--bg-surface)] border w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl"
            style={{ borderColor: "var(--border-default)" }} data-testid="contract-dialog">
-        <div className="flex items-center justify-between px-6 py-4 border-b sticky top-0 bg-[var(--bg-surface)] z-10"
+        <div className="flex items-center justify-between px-6 py-3 border-b sticky top-0 bg-[var(--bg-surface)] z-10"
              style={{ borderColor: "var(--border-default)" }}>
           <div>
             <div className="overline">Kaufvertrag</div>
-            <div className="font-display font-bold text-lg">
+            <div className="font-display font-bold text-lg" id="contract-dialog-titel">
               {vehicle?.make_label} {vehicle?.model_label}
             </div>
           </div>
-          <button onClick={schliessen} className="text-zinc-400 hover:text-white" data-testid="close-contract"
-                  aria-label="Kaufvertrag schließen">
+          {/* M-11: 44-px-Trefferflaeche statt des nackten 20-px-Symbols */}
+          <button type="button" onClick={schliessen} data-testid="close-contract"
+                  aria-label="Kaufvertrag schließen"
+                  className="w-11 h-11 -mr-2 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10">
             <X size={20} />
           </button>
         </div>
@@ -585,13 +645,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                          {namensHinweise.map((h) => <span key={h} className="block">{h}</span>)}
                        </span>
                      )} />
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Telefon" value={form.seller_phone} onChange={(v) => set("seller_phone", v)} testid="contract-seller-phone" />
+              {/* M-13: am Handy einspaltig; M-12: Telefon-/Zifferntastatur */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="Telefon" type="tel" autoComplete="tel" value={form.seller_phone} onChange={(v) => set("seller_phone", v)} testid="contract-seller-phone" />
                 <Field label="E-Mail" type="email" value={form.seller_email} onChange={(v) => set("seller_email", v)} testid="contract-seller-email" />
               </div>
               <Field label="Adresse" value={form.seller_address} onChange={(v) => set("seller_address", v)} testid="contract-seller-address" />
-              <div className="grid grid-cols-3 gap-3">
-                <Field label="PLZ" value={form.seller_zip} onChange={(v) => set("seller_zip", v)} testid="contract-seller-zip" />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <Field label="PLZ" inputMode="numeric" value={form.seller_zip} onChange={(v) => set("seller_zip", v)} testid="contract-seller-zip" />
                 <Field label="Ort" value={form.seller_city} onChange={(v) => set("seller_city", v)} testid="contract-seller-city" />
                 <Field label="Ausweis-Nr." value={form.id_document} onChange={(v) => set("id_document", v)} testid="contract-id-doc" />
               </div>
@@ -629,17 +690,17 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 </div>
               )}
               <Field label="Firma *" required value={form.dealer_company} onChange={(v) => set("dealer_company", v)} testid="contract-dealer-company" />
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Field label="Ansprechpartner" value={form.dealer_contact} onChange={(v) => set("dealer_contact", v)} testid="contract-dealer-contact" />
-                <Field label="Telefon" value={form.dealer_phone} onChange={(v) => set("dealer_phone", v)} testid="contract-dealer-phone" />
+                <Field label="Telefon" type="tel" autoComplete="tel" value={form.dealer_phone} onChange={(v) => set("dealer_phone", v)} testid="contract-dealer-phone" />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="WhatsApp" value={form.dealer_whatsapp} onChange={(v) => set("dealer_whatsapp", v)} testid="contract-dealer-wa" />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="WhatsApp" type="tel" autoComplete="tel" value={form.dealer_whatsapp} onChange={(v) => set("dealer_whatsapp", v)} testid="contract-dealer-wa" />
                 <Field label="E-Mail" type="email" value={form.dealer_email} onChange={(v) => set("dealer_email", v)} testid="contract-dealer-email" />
               </div>
               <Field label="Adresse *" required value={form.dealer_address} onChange={(v) => set("dealer_address", v)} testid="contract-dealer-address" />
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="PLZ *" required value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="PLZ *" required inputMode="numeric" value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
                 <Field label="Ort *" required value={form.dealer_city} onChange={(v) => set("dealer_city", v)} testid="contract-dealer-city" />
               </div>
               <div className="text-[11px] text-zinc-500 leading-relaxed">
@@ -673,18 +734,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="Kilometerstand" value={form.vehicle_mileage} onChange={(v) => set("vehicle_mileage", v)} testid="contract-veh-km"
                      inputMode="numeric"
                      helper={kmText === null ? "Nicht lesbar — bitte z. B. 85.120 eingeben." : undefined} />
-              <Field label="Hubraum (ccm)" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
+              {/* M-12: Zifferntastatur fuer reine Zahlenfelder */}
+              <Field label="Hubraum (ccm)" inputMode="numeric" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <Field label="Kraftstoff" value={form.vehicle_fuel} onChange={(v) => set("vehicle_fuel", v)} testid="contract-veh-fuel" />
               <Field label="Getriebe" value={form.vehicle_gearbox} onChange={(v) => set("vehicle_gearbox", v)} testid="contract-veh-gear" />
-              <Field label="Leistung (kW)" value={form.vehicle_power_kw} onChange={(v) => set("vehicle_power_kw", v)} testid="contract-veh-kw" />
-              <Field label="Leistung (PS)" value={form.vehicle_power_ps} onChange={(v) => set("vehicle_power_ps", v)} testid="contract-veh-ps" />
+              <Field label="Leistung (kW)" inputMode="numeric" value={form.vehicle_power_kw} onChange={(v) => set("vehicle_power_kw", v)} testid="contract-veh-kw" />
+              <Field label="Leistung (PS)" inputMode="numeric" value={form.vehicle_power_ps} onChange={(v) => set("vehicle_power_ps", v)} testid="contract-veh-ps" />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <Field label="Farbe" value={form.vehicle_color} onChange={(v) => set("vehicle_color", v)} testid="contract-veh-color" />
-              <Field label="Türen" value={form.vehicle_doors} onChange={(v) => set("vehicle_doors", v)} testid="contract-veh-doors" />
-              <Field label="Sitze" value={form.vehicle_seats} onChange={(v) => set("vehicle_seats", v)} testid="contract-veh-seats" />
+              <Field label="Türen" inputMode="numeric" value={form.vehicle_doors} onChange={(v) => set("vehicle_doors", v)} testid="contract-veh-doors" />
+              <Field label="Sitze" inputMode="numeric" value={form.vehicle_seats} onChange={(v) => set("vehicle_seats", v)} testid="contract-veh-seats" />
               {/* Rollenprüfung 22.09.2026 (RP-430): Die Portale liefern die
                   ANZAHL DER FAHRZEUGHALTER (der jetzige mitgezählt, "2. Hand"
                   = 2) — als "Vorhalter" war das um eins zu hoch. */}
@@ -849,7 +911,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 </span>
               </span>
             </label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date" />
               <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
                      helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
@@ -1006,7 +1068,8 @@ const Section = ({ title, subtitle, children }) => (
   </div>
 );
 
-const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength }) => (
+// M-12: autoComplete durchreichen (type="tel" autoComplete="tel" an den Telefonfeldern).
+const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete }) => (
   <div>
     <label className="text-xs text-zinc-400">{label}</label>
     {multiline ? (
@@ -1016,7 +1079,7 @@ const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, req
       <input data-testid={testid} type={type} value={value} onChange={(e) => onChange(e.target.value)}
              required={required} className="input-base w-full mt-1 disabled:opacity-50"
              placeholder={placeholder} disabled={disabled}
-             inputMode={inputMode} maxLength={maxLength} />
+             inputMode={inputMode} maxLength={maxLength} autoComplete={autoComplete} />
     )}
     {helper && <div className="text-[11px] text-zinc-500 mt-1 leading-snug">{helper}</div>}
   </div>

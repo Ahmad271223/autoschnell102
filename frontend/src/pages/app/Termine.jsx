@@ -17,6 +17,7 @@ import { Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
 import { preisAusText } from "@/lib/preis";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
   format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
@@ -257,6 +258,47 @@ export const BERICHT_LOESCHEN_FRAGE = "Zu diesem Termin gibt es einen Abholberic
   + "bleibt der Bericht erhalten.\n\nTrotzdem löschen? Der Bericht wird samt Fotos "
   + "unwiderruflich mitgelöscht.";
 
+/**
+ * Pruefbericht 20.09.2026 (U-63): Antwort von GET /drivers/{id}/conflicts
+ * auswerten. Der Server liefert `count` (Gesamtzahl aus der Datenbank) und
+ * `has_more` (Liste auf 50 gekuerzt) — gezaehlt wurde bisher nur die
+ * gekuerzte Liste. Der eigene Termin zaehlt nicht mit.
+ * Rueckgabe null (keine Doppelbuchung) oder { anzahl }.
+ */
+export function konfliktAuswerten(data, eigeneId) {
+  const liste = Array.isArray(data?.conflicts) ? data.conflicts : [];
+  const eigene = eigeneId ? liste.filter((c) => c?.id === eigeneId).length : 0;
+  const andere = liste.length - eigene;
+  const gesamt = Number(data?.count);
+  const anzahl = Number.isFinite(gesamt) ? Math.max(gesamt - eigene, andere) : andere;
+  return anzahl > 0 ? { anzahl } : null;
+}
+
+/** U-63: Text, wenn die Pruefung selbst scheitert (vorher stiller .catch). */
+export function konfliktFehlerText(err) {
+  return err?.response?.status === 404
+    ? "Fahrer nicht mehr in deiner Liste — Doppelbuchung nicht prüfbar."
+    : "Doppelbuchung konnte nicht geprüft werden.";
+}
+
+/**
+ * Pruefbericht 20.09.2026 (U-90): "Bevorstehend" in der Monatsansicht — offene
+ * Termine ab heute UND offene Termine ohne Datum (aus einem Vertrag ohne
+ * Abholdatum angelegt). Die standen nur in der Listenansicht ("Ohne Datum");
+ * am PC (Monatsansicht ist Standard) fehlten sie ganz. Ohne Datum zuerst —
+ * sie brauchen eins.
+ */
+export function bevorstehend(items, heute, max = 8) {
+  const offen = (Array.isArray(items) ? items : [])
+    .filter((a) => a && !ABGESCHLOSSEN.has(a.status));
+  const ohneDatum = offen.filter((a) => !a.pickup_date);
+  const datiert = offen
+    .filter((a) => a.pickup_date && a.pickup_date >= heute)
+    .sort((x, y) => x.pickup_date.localeCompare(y.pickup_date)
+      || (x.pickup_time || "").localeCompare(y.pickup_time || ""));
+  return [...ohneDatum, ...datiert].slice(0, max);
+}
+
 /** Hinweis im Termin-Dialog, wenn der Ausgang nachtraeglich geaendert wurde. */
 export function ausgangHinweis(ag) {
   if (!ag || typeof ag !== "object") return null;
@@ -491,14 +533,9 @@ export default function Termine() {
 
   // M28: "Bevorstehend" nur fuer noch offene Termine — eine heute Morgen
   // erledigte Abholung ist keine anstehende Fahrt mehr.
-  const upcomingAppts = useMemo(() => {
-    const todayKey = format(new Date(), "yyyy-MM-dd");
-    return items
-      .filter((a) => (a.pickup_date || "") >= todayKey && !ABGESCHLOSSEN.has(a.status))
-      .sort((x, y) => (x.pickup_date || "").localeCompare(y.pickup_date || "")
-        || (x.pickup_time || "").localeCompare(y.pickup_time || ""))
-      .slice(0, 8);
-  }, [items]);
+  // U-90: undatierte offene Termine stehen mit drin (bevorstehend).
+  const upcomingAppts = useMemo(
+    () => bevorstehend(items, format(new Date(), "yyyy-MM-dd")), [items]);
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="termine-page">
@@ -521,10 +558,13 @@ export default function Termine() {
           <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">Abholtermine</h1>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="apple-segment" role="tablist">
-            <button onClick={() => setView("month")} data-testid="view-month"
+          {/* M-20: role=tab + aria-selected — der aktive Reiter war nur optisch erkennbar */}
+          <div className="apple-segment" role="tablist" aria-label="Ansicht">
+            <button type="button" onClick={() => setView("month")} data-testid="view-month"
+                    role="tab" aria-selected={view === "month"}
                     className={`apple-segment-item ${view === "month" ? "active" : ""}`}>Monat</button>
-            <button onClick={() => setView("list")} data-testid="view-list"
+            <button type="button" onClick={() => setView("list")} data-testid="view-list"
+                    role="tab" aria-selected={view === "list"}
                     className={`apple-segment-item ${view === "list" ? "active" : ""}`}>Liste</button>
           </div>
           <button onClick={() => setCreating(true)} data-testid="new-appt-btn"
@@ -645,11 +685,18 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
             const wd = d.getDay();
             const visible = dayAppts.slice(0, 3);
             const more = dayAppts.length - visible.length;
+            // Pruefbericht 20.09.2026 (M-05): Tageszelle als <button> — per
+            // Tastatur waehlbar, aria-pressed = ausgewaehlt, Name mit Datum und
+            // Terminzahl (Stil-Reset in index.css .cal-day). Die Chips bleiben
+            // Maus-Abkuerzungen; per Tastatur oeffnet man den Termin ueber die
+            // Tagesliste rechts.
             return (
-              <div key={key}
-                   data-testid={`cal-day-${key}`}
-                   onClick={() => setSelectedDay(d)}
-                   className={`cal-day ${muted ? "muted" : ""} ${isToday ? "is-today" : ""} ${isSelected ? "selected" : ""} ${wd === 0 || wd === 6 ? "is-weekend" : ""}`}>
+              <button key={key} type="button"
+                      data-testid={`cal-day-${key}`}
+                      onClick={() => setSelectedDay(d)}
+                      aria-pressed={isSelected}
+                      aria-label={`${format(d, "EEEE, d. LLLL", { locale: de })}, ${dayAppts.length} Termin${dayAppts.length === 1 ? "" : "e"}`}
+                      className={`cal-day ${muted ? "muted" : ""} ${isToday ? "is-today" : ""} ${isSelected ? "selected" : ""} ${wd === 0 || wd === 6 ? "is-weekend" : ""}`}>
                 <div className="flex items-center justify-between">
                   <span className="cal-daynum">{format(d, "d")}</span>
                   {dayAppts.length > 0 && !visible.length && (
@@ -671,7 +718,7 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
                   })}
                   {more > 0 && <div className="cal-event-more">+{more} weitere</div>}
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
@@ -719,6 +766,12 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
 // M26: Die Beweis-Karte (eigener Abruf + Nachfragen im Takt) nur dort, wo
 // wenige Termine stehen (Tagesfeld) — in der Liste mit hunderten Terminen
 // waren das hunderte parallele Anfragen. Im Termin-Dialog steht sie immer.
+// Pruefbericht 20.09.2026 (U-67): Die Karte war selbst ein <button> — darin
+// lagen Telefon (role=link), Abholbericht (role=button) und die Knoepfe der
+// Beweis-Karte: verschachtelte Bedienelemente, ungueltiges HTML. Jetzt ist die
+// Karte ein <div> (Maus: Klick oeffnet), der Titel ein echter Knopf (Tastatur),
+// Telefon ein <a href="tel:">, Abholbericht ein <button>; der Abholbericht-
+// Dialog rendert ohnehin per Portal ausserhalb.
 function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
   const meta = STATUS_META[a.status] || STATUS_META.offen;
   // Runde 21: Abholbericht samt Fahrerfotos direkt am Termin (auch fuer Sucher).
@@ -726,8 +779,8 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
   const v = a.vehicle?.data;
   const date = safeParse(a.pickup_date);
   return (
-    <button onClick={() => onEdit(a)} data-testid={`appt-row-${a.id}`}
-            className="w-full text-left apple-card-gloss p-3 flex gap-3 items-start">
+    <div onClick={() => onEdit(a)} data-testid={`appt-row-${a.id}`}
+         className="w-full text-left apple-card-gloss p-3 flex gap-3 items-start cursor-pointer">
       <div className="flex flex-col items-center pt-0.5 min-w-[44px]">
         <div className="cal-dot mb-1" style={{ background: meta.dot, width: 8, height: 8 }} />
         <div className="text-[11px] font-mono font-semibold tabular-nums text-zinc-300">
@@ -738,9 +791,20 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
             {format(date, "d. LLL", { locale: de })}
           </div>
         )}
+        {/* U-90: undatierter Termin in "Bevorstehend" — braucht ein Datum */}
+        {compact && !date && (
+          <div className="text-[10px] uppercase tracking-wider text-amber-300 mt-0.5"
+               data-testid={`ohne-datum-${a.id}`}>
+            ohne Datum
+          </div>
+        )}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="font-medium text-sm leading-snug truncate">{a.title}</div>
+        <button type="button" onClick={(e) => { e.stopPropagation(); onEdit(a); }}
+                data-testid={`appt-open-${a.id}`}
+                className="block w-full text-left font-medium text-sm leading-snug truncate hover:underline">
+          {a.title}
+        </button>
         {v && !compact && (
           <div className="text-xs text-zinc-500 mt-0.5 truncate">
             {v.first_registration} · {v.mileage?.toLocaleString("de-DE")} km · {v.power_ps} PS
@@ -758,21 +822,14 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
             </span>
           )}
           {/* Rollenprüfung 22.09.2026 (RP-542): Telefon des Fahrers (nur der
-              Hauptchef bekommt es vom Server). Die Zeile ist selbst ein Knopf —
-              deshalb kein <a> darin, sondern role="link" wie beim Abholbericht. */}
+              Hauptchef bekommt es vom Server). U-67: jetzt ein echter tel:-Link. */}
           {telHref(a.driver?.phone) && (
-            <span role="link" tabIndex={0} data-testid={`fahrer-tel-${a.id}`}
-                  title={`${a.driver.name || "Fahrer"} anrufen`}
-                  onClick={(e) => { e.stopPropagation(); window.location.href = telHref(a.driver.phone); }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault(); e.stopPropagation();
-                      window.location.href = telHref(a.driver.phone);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline cursor-pointer">
+            <a href={telHref(a.driver.phone)} data-testid={`fahrer-tel-${a.id}`}
+               title={`${a.driver.name || "Fahrer"} anrufen`}
+               onClick={(e) => e.stopPropagation()}
+               className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline">
               <Phone size={10} /> {a.driver.phone}
-            </span>
+            </a>
           )}
           {!a.driver?.name && a.zuteilung === "abgelehnt" && (
             <span className="inline-flex flex-wrap items-center gap-1 text-[11px] text-red-300 min-w-0 [overflow-wrap:anywhere]"
@@ -783,13 +840,12 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
             </span>
           )}
           {a.has_pickup_report && (
-            <span role="button" tabIndex={0} data-testid={`bericht-${a.id}`}
-                  onClick={(e) => { e.stopPropagation(); setBericht(true); }}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setBericht(true); } }}
-                  className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline cursor-pointer">
+            <button type="button" data-testid={`bericht-${a.id}`}
+                    onClick={(e) => { e.stopPropagation(); setBericht(true); }}
+                    className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline">
               <Camera size={10} /> Abholbericht
               {a.deviations_count ? ` · ${a.deviations_count} Abweichung${a.deviations_count === 1 ? "" : "en"}` : ""}
-            </span>
+            </button>
           )}
           {a.contract_id && (
             <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "var(--st-gruen)" }}>
@@ -804,7 +860,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
         )}
       </div>
       {bericht && <AbholberichtDialog appt={a} onClose={() => setBericht(false)} />}
-    </button>
+    </div>
   );
 }
 
@@ -992,6 +1048,8 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
   const fahrerFehlt = !!a.driver_id && !drivers.some((d) => d.id === a.driver_id);
 
   // Warnung: schon eine Fahrt am selben Tag?
+  // Pruefbericht 20.09.2026 (U-63): count/has_more des Servers werden genutzt
+  // (konfliktAuswerten), und ein Fehler der Pruefung ist sichtbar statt still.
   useEffect(() => {
     setConflict(null);
     if (!a.driver_id || !a.pickup_date) return;
@@ -999,10 +1057,12 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
     api.get(`/drivers/${a.driver_id}/conflicts`, { params: { date: a.pickup_date } })
       .then((r) => {
         if (cancelled) return;
-        const list = (r.data?.conflicts || []).filter((c) => c.id !== a.id);
-        setConflict(list.length > 0 ? list : null);
+        setConflict(konfliktAuswerten(r.data, a.id));
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (cancelled) return;
+        setConflict({ fehler: konfliktFehlerText(err) });
+      });
     return () => { cancelled = true; };
   }, [a.driver_id, a.pickup_date, a.id]);
 
@@ -1015,21 +1075,26 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
       || preisText !== preisStart;
     if (!geaendert || window.confirm("Änderungen verwerfen?")) onClose();
   };
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Escape (mit derselben
+  // Rueckfrage wie der Tipp daneben), Fokus (lib/useModal).
+  const dialogRef = useModal(hintergrundKlick);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 apple-modal-backdrop"
          onClick={hintergrundKlick} data-testid="edit-appt-hintergrund">
-      <div className="apple-modal w-full max-w-xl max-h-[90vh] overflow-y-auto"
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="edit-appt-titel"
+           className="apple-modal w-full max-w-xl max-h-[90vh] overflow-y-auto"
            onClick={(e) => e.stopPropagation()}
            data-testid="edit-appt-dialog">
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.08]">
           <div>
             <div className="overline">{isNew ? "Neu" : "Bearbeiten"}</div>
-            <div className="font-display font-bold text-xl mt-0.5">
+            <div className="font-display font-bold text-xl mt-0.5" id="edit-appt-titel">
               {isNew ? "Neuer Termin" : "Termin bearbeiten"}
             </div>
           </div>
-          <button onClick={onClose} className="apple-btn apple-btn-ghost !p-2">
+          <button type="button" onClick={onClose} className="apple-btn apple-btn-ghost !p-2"
+                  aria-label="Schließen">
             <X size={18} />
           </button>
         </div>
@@ -1124,14 +1189,22 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
                   <Phone size={12} /> {appt.driver.name || "Fahrer"} anrufen: {appt.driver.phone}
                 </a>
               )}
-              {conflict && (
+              {conflict?.fehler && (
+                <div data-testid="driver-conflict-fehler" role="status"
+                     className="mt-2 p-2.5 rounded-sm text-xs leading-relaxed"
+                     style={{ background: "var(--wa-04)", border: "1px solid var(--border-default)",
+                              color: "var(--text-secondary)" }}>
+                  {conflict.fehler}
+                </div>
+              )}
+              {conflict && !conflict.fehler && (
                 <div data-testid="driver-conflict-warning"
                      className="mt-2 p-2.5 rounded-sm text-xs leading-relaxed"
                      style={{ background: "rgba(255,149,0,0.12)",
                               border: "1px solid rgba(255,149,0,0.35)",
                               color: "var(--tx-amber)" }}>
                   ⚠️ Fahrer ist am {a.pickup_date} bereits einer Fahrt zugeordnet
-                  ({conflict.length}×). Du kannst trotzdem zuweisen.
+                  ({conflict.anzahl}×). Du kannst trotzdem zuweisen.
                 </div>
               )}
             </div>

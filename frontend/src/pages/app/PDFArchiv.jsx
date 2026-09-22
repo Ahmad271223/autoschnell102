@@ -422,7 +422,9 @@ export default function PDFArchiv() {
       </div>
 
       {senden && (
-        <SendDialog open contract={senden}
+        // Pruefbericht 20.09.2026 (U-92): key je Vertrag — sonst behielt der
+        // Dialog Empfaenger und Zustand des zuvor gesendeten Vertrags.
+        <SendDialog open contract={senden} key={senden.id}
                     onClose={() => { setSenden(null); load(); }} />
       )}
 
@@ -469,13 +471,10 @@ const FELD_NAMEN = {
   accident_free: "unfallfrei",
 };
 
-function NachAbholungHinweis({ item, onSenden }) {
-  // Wunsch Ahmad 19.09.2026: Nach dem unterschriebenen Abholprotokoll wird der
-  // Vertrag mit den vor Ort festgestellten Daten neu erstellt. Die alte Fassung
-  // bleibt als Beweis (unten "Frühere Fassungen"), hier steht die GÜLTIGE — und
-  // die Frage, ob der Verkäufer sie bekommen soll.
-  const ae = item.nach_abholung_aenderungen;
-  if (!item.nach_abholung_versand_offen || !ae) return null;
+// Pruefbericht 20.09.2026 (U-88): Was nach der Abholung anders ist — als
+// Liste fuer den Hinweis (auch ohne Versandmerker, siehe unten).
+export function nachAbholungTeile(ae) {
+  if (!ae || typeof ae !== "object") return [];
   const teile = [];
   if (ae.preis != null) {
     const alt = ae.preis_vorher != null
@@ -485,19 +484,42 @@ function NachAbholungHinweis({ item, onSenden }) {
   (ae.felder || []).forEach((f) => teile.push(FELD_NAMEN[f] || f));
   if (ae.neue_schaeden) teile.push(`${ae.neue_schaeden} neue(r) Schaden/Schäden`);
   if (ae.sondervereinbarung) teile.push("Sondervereinbarung");
+  return teile;
+}
+
+function NachAbholungHinweis({ item, onSenden }) {
+  // Wunsch Ahmad 19.09.2026: Nach dem unterschriebenen Abholprotokoll wird der
+  // Vertrag mit den vor Ort festgestellten Daten neu erstellt. Die alte Fassung
+  // bleibt als Beweis (unten "Frühere Fassungen"), hier steht die GÜLTIGE — und
+  // die Frage, ob der Verkäufer sie bekommen soll.
+  // Pruefbericht 20.09.2026 (U-88): Der Versand entfernt nur den MERKER
+  // (nach_abholung_versand_offen), die Aenderungen bleiben am Vertrag. Der
+  // Hinweis, dass dieser Vertrag nach der Abholung neu entstand, verschwand
+  // damit nach dem Senden — jetzt bleibt er stehen, nur ohne Senden-Knopf.
+  const ae = item.nach_abholung_aenderungen;
+  if (!ae) return null;
+  const offen = Boolean(item.nach_abholung_versand_offen);
+  const teile = nachAbholungTeile(ae);
   return (
     <div className="mt-3 rounded-xl border px-3 py-2.5 flex flex-wrap items-center gap-2 text-[13px]"
          data-testid={`nach-abholung-${item.id}`}
-         style={{ borderColor: "rgba(255,159,10,0.35)", background: "rgba(255,159,10,0.10)" }}>
+         style={offen
+           ? { borderColor: "rgba(255,159,10,0.35)", background: "rgba(255,159,10,0.10)" }
+           : { borderColor: "var(--border-default)", background: "var(--wa-04)" }}>
       <span style={{ color: "var(--text-primary)" }}>
         <b>Nach der Abholung neu erstellt</b>{teile.length ? ` — ${teile.join(", ")}.` : "."}
         {" "}Die vorherige Fassung bleibt als Nachweis erhalten.
+        {!offen && item.nach_abholung_versand_ausgesetzt && (
+          <> {" "}Versand ausgesetzt — der Ausgang der Abholung wurde geändert.</>
+        )}
       </span>
-      <button onClick={onSenden} data-testid={`nach-abholung-senden-${item.id}`}
-              className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-              style={{ background: "var(--accent-red)" }}>
-        <Send size={13} /> Neuen Vertrag senden
-      </button>
+      {offen && (
+        <button onClick={onSenden} data-testid={`nach-abholung-senden-${item.id}`}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                style={{ background: "var(--accent-red)" }}>
+          <Send size={13} /> Neuen Vertrag senden
+        </button>
+      )}
     </div>
   );
 }
@@ -635,19 +657,31 @@ function GalleryViewer({ item, urls, startIndex = 0, onClose }) {
 
   // Wisch-Geste (Touch / Trackpad-Drag)
   const [touchX, setTouchX] = useState(null);
-  const onTouchStart = (e) => setTouchX(e.touches[0].clientX);
+  // Pruefbericht 20.09.2026 (M-16): Nach einem Wisch schickt das Handy noch
+  // einen Klick auf denselben Hintergrund — der schloss die Galerie. Der
+  // Merker schluckt genau diesen einen Klick; ein neuer Tipp (touchstart)
+  // setzt ihn zurueck, damit nie ein echter Klick verloren geht.
+  const gewischt = useRef(false);
+  const onTouchStart = (e) => { gewischt.current = false; setTouchX(e.touches[0].clientX); };
   const onTouchEnd = (e) => {
     if (touchX == null) return;
     const dx = e.changedTouches[0].clientX - touchX;
-    if (Math.abs(dx) > 50) (dx < 0 ? next() : prev());
+    if (Math.abs(dx) > 50) {
+      gewischt.current = true;
+      if (dx < 0) next(); else prev();
+    }
     setTouchX(null);
+  };
+  const hintergrundKlick = () => {
+    if (gewischt.current) { gewischt.current = false; return; }
+    onClose();
   };
 
   return (
     <div
       className="fixed inset-0 z-[70] flex flex-col"
       style={{ background: "rgba(0,0,0,0.94)", backdropFilter: "blur(14px)" }}
-      onClick={onClose}
+      onClick={hintergrundKlick}
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
       data-testid="photos-gallery"
@@ -730,7 +764,20 @@ function GalleryViewer({ item, urls, startIndex = 0, onClose }) {
 }
 
 
-/** Ältere Vertragsfassungen (entstehen beim Verschieben des Abholtermins).
+// Pruefbericht 20.09.2026 (U-88): Warum eine Fassung archiviert wurde —
+// dieselben Gruende wie im Backend (routes/contracts.py: grund=...). Der
+// Tooltip kannte nur den verschobenen Abholtermin.
+const FASSUNG_GRUND = {
+  abholtermin_geaendert: "Abholtermin geändert",
+  abholung_abgeschlossen: "Preis/Daten nach Abholung",
+  verkaeufer_korrigiert: "Verkäuferdaten korrigiert",
+};
+export function fassungGrundText(grund) {
+  return FASSUNG_GRUND[grund] || "";
+}
+
+/** Ältere Vertragsfassungen (entstehen beim Verschieben des Abholtermins,
+ *  nach der Abholung mit neuem Preis oder nach einer Verkäufer-Korrektur).
  *  Lazy: die Liste wird erst beim Aufklappen geladen; jede Fassung öffnet
  *  per Authorization-Abruf (Review 09/2026: Versionen existierten im
  *  Backend, waren aber nirgends sichtbar). */
@@ -791,7 +838,7 @@ function VersionenZeile({ contractId }) {
                       data-testid={`version-pdf-${contractId}-${v.version}`}
                       onClick={() => openAuthedFile(`/contracts/${contractId}/versions/${v.version}/pdf`)
                         .catch(() => toast.error("Fassung konnte nicht geladen werden"))}
-                      title={`Archiviert ${new Date(v.archived_at).toLocaleString("de-DE")}${v.grund === "abholtermin_geaendert" ? " · Abholtermin geändert" : ""}`}
+                      title={`Archiviert ${new Date(v.archived_at).toLocaleString("de-DE")}${fassungGrundText(v.grund) ? ` · ${fassungGrundText(v.grund)}` : ""}`}
                       className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full">
                 v{v.version}{v.pickup_date ? ` · Abholung ${v.pickup_date}` : ""}
               </button>

@@ -23,7 +23,14 @@ export function kannDateiTeilen(datei, nav = typeof navigator !== "undefined" ? 
  * Teilt die Datei. Ergebnis:
  *   "geteilt"        — an die gewaehlte App uebergeben
  *   "abgebrochen"    — der Nutzer hat das Teilen-Menue geschlossen
+ *   "erneut"         — der Browser verlangt eine frische Nutzeraktion
+ *                      (NotAllowedError: Tipp zu alt, schon ein Teilen offen)
+ *                      -> noch einmal tippen, NICHT der Link-Weg
  *   "nicht_moeglich" — Geraet/Browser kann es nicht (-> Link-Weg)
+ *
+ * Pruefbericht 20.09.2026 (K-14): NotAllowedError lief bisher als
+ * "nicht_moeglich" — der Versand-Dialog oeffnete dann ohne Rueckfrage den
+ * Chat mit oeffentlichem Download-Link, obwohl das Geraet teilen KANN.
  */
 export async function dateiTeilen({ datei, text, titel }, nav = typeof navigator !== "undefined" ? navigator : undefined) {
   if (!kannDateiTeilen(datei, nav)) return "nicht_moeglich";
@@ -32,6 +39,7 @@ export async function dateiTeilen({ datei, text, titel }, nav = typeof navigator
     return "geteilt";
   } catch (e) {
     if (e && e.name === "AbortError") return "abgebrochen";
+    if (e && e.name === "NotAllowedError") return "erneut";
     return "nicht_moeglich";
   }
 }
