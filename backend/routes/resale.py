@@ -1182,7 +1182,10 @@ async def update_listing(listing_id: str, body: ListingUpdateIn,
     if body.description is not None:
         update["description"] = body.description
     if body.known_defects is not None:
-        update["known_defects"] = [str(m)[:300] for m in body.known_defects]
+        # Pruefbericht 20.09.2026 (U-122): Leereintraege ("", "  ") verwerfen —
+        # die Oberflaeche bereinigt zwar, andere Clients nicht.
+        update["known_defects"] = [str(m).strip()[:300] for m in body.known_defects
+                                   if str(m).strip()]
     if body.photo_mode is not None:
         update["photos.mode"] = body.photo_mode
     # Nachpruefung Runde 14 (Nr. 91): Preise einzeln per Pfad schreiben statt

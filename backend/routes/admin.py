@@ -918,18 +918,17 @@ async def admin_list_users(response: Response, _=Depends(current_admin),
     def _ist_chef(u) -> bool:
         return (u.get("role") == "dealer" and bool(u.get("dealer_id"))
                 and haupt_je_firma.get(u["dealer_id"]) == u.get("id"))
-    # Juengstes HAENDLER-Abo je Firma — mit derselben Vorrang-Regel wie
-    # deps.get_subscription_status: Dokumente OHNE subject_user_id-Feld
-    # gewinnen gegen Alt-Dokumente mit explizitem null, egal wie alt.
+    # Juengstes HAENDLER-Abo je Firma — dieselbe Regel wie
+    # deps.get_subscription_status: Dokumente ohne subject_user_id-Feld und
+    # Alt-Dokumente mit explizitem null zaehlen gleich, das juengste nicht
+    # ersetzte gilt (Pruefbericht 20.09.2026, R1-16: vorher gewann "Feld
+    # fehlt" hier wie dort, egal wie alt).
     newest_subs = {}
     async for row in db.subscriptions.aggregate([
-        {"$match": {"dealer_id": {"$in": dealer_ids},
+        {"$match": {"dealer_id": {"$in": dealer_ids}, "status": {"$ne": "ersetzt"},
                     "$or": [{"subject_user_id": {"$exists": False}},
                             {"subject_user_id": None}]}},
-        {"$addFields": {"_feld_fehlt": {
-            "$cond": [{"$eq": [{"$type": "$subject_user_id"}, "missing"]},
-                      1, 0]}}},
-        {"$sort": {"_feld_fehlt": -1, "created_at": -1}},
+        {"$sort": {"created_at": -1}},
         {"$group": {"_id": "$dealer_id", "sub": {"$first": "$$ROOT"}}},
     ]):
         newest_subs[row["_id"]] = row["sub"]
@@ -983,10 +982,9 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
     # ROLLENAENDERUNGEN sind Super-Admin-Sache (PR-Review 09/2026): sonst
     # kann jeder normale Admin beliebige Nutzer zu weiteren Admins machen
     # (Eskalation) oder Kollegen degradieren. Erlaubte Zielrollen sind
-    # zudem fest verdrahtet.
+    # zudem fest verdrahtet. Super-Admin durch Dependency gesichert
+    # (current_super_admin; Pruefbericht 20.09.2026, R1-37: toter Zweig weg).
     if "role" in fields:
-        if not admin.get("is_super_admin"):
-            raise HTTPException(403, "Rollen ändern darf nur der Super-Admin")
         # Runde 12: "admin" ist keine vergebbare Rolle mehr — es gibt genau
         # einen Betreiber (Super-Admin), weitere Admin-Konten sind abgeschafft.
         if fields["role"] == "admin":
@@ -1139,12 +1137,8 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                 # gesetzt, Zeiger noch alt) wird durch Wiederholen zu Ende gefuehrt.
                 await _chef_befoerdern(target, alte_rolle, fields, True, admin)
             fields.pop("role", None)
-    # Admin-Konten verwalten nur Super-Admins: Passwort-Reset, Sperren
-    # oder Loeschen eines Admins durch einen NORMALEN Admin waere eine
-    # Kontouebernahme auf gleicher Stufe.
-    if target.get("role") == "admin" and target.get("id") != admin.get("id") \
-            and not admin.get("is_super_admin"):
-        raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
+    # Admin-Konten verwalten nur Super-Admins — Super-Admin durch Dependency
+    # gesichert (current_super_admin; R1-37: toter Zweig weg).
     if target.get("is_super_admin"):
         if "role" in fields and fields["role"] != "admin":
             raise HTTPException(400, "Super-Admin-Rolle kann nicht geändert werden")
@@ -1350,8 +1344,7 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         raise HTTPException(404)
     if u.get("is_super_admin"):
         raise HTTPException(400, "Super-Admin kann nicht gelöscht werden")
-    if u.get("role") == "admin" and not admin.get("is_super_admin"):
-        raise HTTPException(403, "Admin-Konten löscht nur der Super-Admin")
+    # Super-Admin durch Dependency gesichert (current_super_admin; R1-37).
     if u.get("id") == admin.get("id"):
         raise HTTPException(400, "Du kannst dich nicht selbst löschen")
 
@@ -1667,10 +1660,8 @@ async def admin_user_set_active(
     if u.get("is_super_admin") and not body.active:
         raise HTTPException(400, "Super-Admin kann nicht gesperrt werden")
     # Dieselbe Regel wie bei Passwort/PUT (Prüfbericht Runde 4): Admin-Konten
-    # sperrt/entsperrt nur der Super-Admin — nicht ein Admin-Kollege.
-    if u.get("role") == "admin" and u.get("id") != admin.get("id") \
-            and not admin.get("is_super_admin"):
-        raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
+    # sperrt/entsperrt nur der Super-Admin — Super-Admin durch Dependency
+    # gesichert (current_super_admin; R1-37).
     if u.get("id") == admin.get("id") and not body.active:
         raise HTTPException(400, "Du kannst dich nicht selbst sperren")
     # Pruefbericht 20.09.2026 (V-05): Konten in Loeschung (oder einer Firma in
@@ -1732,9 +1723,7 @@ async def admin_user_set_password(
         # Betreiber-Passwort — /admin/me/password mit aktuellem Passwort.
         raise HTTPException(400, "Das Super-Admin-Passwort wird nur über /admin/me/password "
                                  "mit dem aktuellen Passwort geändert.")
-    if u.get("role") == "admin" and u.get("id") != admin.get("id") \
-            and not admin.get("is_super_admin"):
-        raise HTTPException(403, "Admin-Konten verwaltet nur der Super-Admin")
+    # Super-Admin durch Dependency gesichert (current_super_admin; R1-37).
     _pw_persoenlich_400(body.new_password, persoenliche_werte(u))
     # Nachpruefung 15.09.2026 (Anmeldung Nr. 11): kein Passwort fuer ein Konto
     # in laufender Loeschung — Bedingung im Filter (CAS).
@@ -4037,10 +4026,17 @@ async def admin_betrieb_nachholen(admin=Depends(current_super_admin)):
     """Reparaturlaeufe sofort anstossen (sonst alle 10 Minuten automatisch)."""
     # Runde 17: fehlende Unique-Indizes (Altdubletten beim Start) ohne
     # Neustart nachholen, sobald die Daten bereinigt sind.
+    # Pruefbericht 20.09.2026 (AL-19): KEIN Produktionsabbruch aus dem Handler
+    # (abbruch=False — vorher SystemExit(78) mitten in der Anfrage, der Worker
+    # endete ohne Antwort); Dubletten stehen als "dubletten" in der Antwort.
+    # _favoriten_unique_index/_interesse_/_buyer_access_ bereinigen selbst und
+    # brechen nie ab (_unique_index_mit_bereinigung).
     from indizes import (_termin_unique_index, _unique_index_sicher, _favoriten_unique_index,
-                         _interesse_unique_index, _buyer_access_unique_index)
+                         _interesse_unique_index, _buyer_access_unique_index, termin_dubletten)
+    termin_index = await _termin_unique_index(abbruch=False)
     return {"abo_vorgaenge": await abo_vorgaenge_nachholen(),
-            "termin_index": await _termin_unique_index(),
+            "termin_index": termin_index,
+            "dubletten": {"termine": [] if termin_index else await termin_dubletten()},
             "fahrzeug_index": await _unique_index_sicher(
                 db.vehicles, ["dealer_id", "id"], abbruch_in_produktion=False),
             # Go-Live 14.09.2026 (B5, Punkt 3): wie in server.ensure_indexes —

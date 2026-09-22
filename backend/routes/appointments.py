@@ -292,8 +292,11 @@ async def _fahrer_pruefen(dealer_id: str, driver_id) -> None:
                                  "'Fahrer' per Code hinzufügen.")
     # Runde 12 (15.09.2026, Nr. 7): ein vom Betreiber deaktiviertes oder in
     # Loeschung befindliches Fahrer-Konto bekommt keine neuen Fahrten.
+    # Pruefbericht 20.09.2026 (R1-26): aktiv heisst ueberall active is True
+    # (Migration m8 setzt das Feld explizit; ein fehlendes Feld zaehlt wie in
+    # deps.current_user als gesperrt).
     konto = await db.driver_accounts.find_one({"id": driver_id}, {"_id": 0, "active": 1, "loeschung": 1})
-    if konto is not None and (konto.get("active") is False
+    if konto is not None and (konto.get("active") is not True
                               or (konto.get("loeschung") or {}).get("status") == "laeuft"):
         raise HTTPException(400, "Dieser Fahrer ist deaktiviert oder wird gelöscht — "
                                  "er kann keine Fahrten mehr annehmen.")
@@ -318,7 +321,7 @@ async def _fahrer_nachpruefen(appt_id: str, dealer_id: str,
         {"id": driver_id}, {"_id": 0, "id": 1, "active": 1, "loeschung": 1}) \
         if verknuepft else None
     if verknuepft and not (konto is not None and (
-            konto.get("active") is False
+            konto.get("active") is not True          # R1-26: wie _fahrer_pruefen
             or (konto.get("loeschung") or {}).get("status") == "laeuft")):
         return True
     await db.appointments.update_one(
@@ -498,18 +501,10 @@ async def _offener_termin_zum_vertrag(dealer_id: str, contract_id: Optional[str]
         q, {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1, "status": 1})
 
 
-async def _offener_termin_zum_fahrzeug(dealer_id: str, vehicle_id: Optional[str],
-                                       ausser: Optional[str] = None) -> Optional[dict]:
-    """Runde 15 (Nr. 6): offener Abholtermin derselben Firma zu diesem
-    Fahrzeug (ohne den Termin `ausser`, z.B. den gerade bearbeiteten)."""
-    if not vehicle_id:
-        return None
-    q: Dict[str, Any] = {"dealer_id": dealer_id, "vehicle_id": vehicle_id,
-                         "status": {"$in": TERMIN_OFFEN_WERTE}}
-    if ausser:
-        q["id"] = {"$ne": ausser}
-    return await db.appointments.find_one(
-        q, {"_id": 0, "id": 1, "contract_id": 1, "created_by": 1, "status": 1})
+# Pruefbericht 20.09.2026 (R1-09): _offener_termin_zum_fahrzeug (Runde 15,
+# ein Termin je Fahrzeug) entfernt — seit dem Umbau Kaufvorgaenge gilt ein
+# offener Termin je VERTRAG (Entscheidung 13.09.2026: Doppel-Abholung bleibt),
+# die Funktion hatte keinen Aufrufer mehr.
 
 
 async def _fahrzeug_fuer_termin_erlaubt(user: dict, vehicle_id: str) -> bool:
@@ -1704,8 +1699,12 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
     # Befund 103 (16.09.2026): auch ein STATUSWECHSEL ohne Client-Stand laeuft
     # gegen den gelesenen Stand — ein alter Aufruf ueberschreibt keinen
     # neueren Status mehr still.
-    status_gewechselt_cas = "status" in update and update["status"] != existing.get("status")
-    if (beweisdaten_wechsel or status_gewechselt_cas) and not stand and existing.get("updated_at"):
+    # Pruefbericht 20.09.2026 (V-30): ohne Client-Stand gilt der gelesene Stand
+    # fuer JEDE Aenderung (auch Titel, Notizen, Kosten, Endpreis) — vorher nur
+    # bei Beweisdaten und Statuswechsel; ein Kollege oder das Protokoll
+    # dazwischen ergibt 409 statt eines stillen Ueberschreibens. Termine.jsx
+    # schickt den Stand immer mit; das betrifft nur fremde/alte Clients.
+    if not stand and existing.get("updated_at"):
         write_filt["updated_at"] = existing["updated_at"]
 
     async def _schreiben(session=None):

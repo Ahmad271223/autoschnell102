@@ -228,8 +228,9 @@ def test_19_stand_pruefung_ohne_client_stand(wegwerf):
     src = inspect.getsource(A.update_appointment)
     assert 'write_filt["updated_at"] = existing["updated_at"]' in src
     # Befund 103 (16.09.2026): auch ein Statuswechsel ohne Client-Stand laeuft
-    # gegen den gelesenen Stand.
-    assert "(beweisdaten_wechsel or status_gewechselt_cas) and not stand" in src
+    # gegen den gelesenen Stand. Pruefbericht 20.09.2026 (V-30): inzwischen
+    # JEDE Aenderung ohne Client-Stand (auch Titel/Notizen/Kosten).
+    assert 'if not stand and existing.get("updated_at"):' in src
     # Protokoll-Abschicken fasst den Termin-Stand an
     assert 'db.appointments.update_one({"id": appt_id}, {"$set": {"updated_at": jetzt}})' \
         in inspect.getsource(P.submit_protocol)

@@ -13,8 +13,30 @@ Regel EINMAL:
 
 Je Termin zaehlt nur die hoechste nicht ersetzte Version. Rueckgabe ohne
 _id, oder None, wenn es keinen aktuellen Bericht gibt.
+
+Pruefbericht 20.09.2026 (P-37): Die 100 juengsten Berichte wurden geladen und
+ERST DANACH galt der Vorrang abgeholter Termine — ab 100 Terminen zum selben
+Fahrzeug fiel der Bericht der Abholung still aus der Auswahl. Jetzt werden
+zuerst die abgeholten Termine des Fahrzeugs bestimmt (ueber die Termin-IDs
+aller aktuellen Berichte, ohne Grenze) und deren Berichte gezielt geladen;
+nur ohne abgeholten Termin greift die allgemeine Abfrage.
 """
 from typing import Optional
+
+# Obergrenze nur gegen Ausreisser (Berichte je Termin: hoechstens einige Versionen).
+_BERICHTE_MAX = 100
+
+
+def _hoechste_je_termin(berichte: list) -> list:
+    """Je Termin nur die hoechste Version (Doppelzustaende aus abgebrochenen
+    Laeufen, siehe routes/drivers.py driver_submit_report)."""
+    je_termin: dict = {}
+    for b in berichte:
+        schluessel = b.get("appointment_id")
+        alt = je_termin.get(schluessel)
+        if alt is None or (b.get("version") or 0) > (alt.get("version") or 0):
+            je_termin[schluessel] = b
+    return list(je_termin.values())
 
 
 async def massgeblicher_bericht(db, vehicle_id: str, dealer_id: str,
@@ -32,33 +54,30 @@ async def massgeblicher_bericht(db, vehicle_id: str, dealer_id: str,
         if not termine:
             return None
         filter_["appointment_id"] = {"$in": termine}
-    berichte = await db.pickup_reports.find(
-        filter_,
-        {"_id": 0},
-    ).sort([("created_at", -1), ("version", -1)]).to_list(100)
+    sortierung = [("created_at", -1), ("version", -1)]
+    # P-37: Termine ALLER aktuellen Berichte (distinct, ohne Grenze), davon
+    # die abgeholten — deren Berichte gezielt laden.
+    termin_ids = [t for t in await db.pickup_reports.distinct("appointment_id", filter_) if t]
+    if termin_ids:
+        termine: dict = {}
+        async for a in db.appointments.find(
+                {"id": {"$in": termin_ids}, "dealer_id": dealer_id, "status": "abgeholt"},
+                {"_id": 0, "id": 1, "pickup_date": 1}):
+            termine[a["id"]] = a
+        if termine:
+            abgeholt = _hoechste_je_termin(await db.pickup_reports.find(
+                {**filter_, "appointment_id": {"$in": sorted(termine)}},
+                {"_id": 0},
+            ).sort(sortierung).to_list(_BERICHTE_MAX))
+            if abgeholt:
+                abgeholt.sort(
+                    key=lambda b: ((termine.get(b.get("appointment_id")) or {}).get("pickup_date") or "",
+                                   b.get("created_at") or ""),
+                    reverse=True)
+                return abgeholt[0]
+    berichte = await db.pickup_reports.find(filter_, {"_id": 0}).sort(sortierung).to_list(_BERICHTE_MAX)
     if not berichte:
         return None
-    # Je Termin nur die hoechste Version (Doppelzustaende aus abgebrochenen
-    # Laeufen, siehe routes/drivers.py driver_submit_report).
-    je_termin: dict = {}
-    for b in berichte:
-        schluessel = b.get("appointment_id")
-        alt = je_termin.get(schluessel)
-        if alt is None or (b.get("version") or 0) > (alt.get("version") or 0):
-            je_termin[schluessel] = b
-    kandidaten = list(je_termin.values())
-    termine = {}
-    async for a in db.appointments.find(
-            {"id": {"$in": [k for k in je_termin if k]}, "dealer_id": dealer_id},
-            {"_id": 0, "id": 1, "status": 1, "pickup_date": 1}):
-        termine[a["id"]] = a
-    abgeholt = [b for b in kandidaten
-                if (termine.get(b.get("appointment_id")) or {}).get("status") == "abgeholt"]
-    if abgeholt:
-        abgeholt.sort(
-            key=lambda b: ((termine.get(b.get("appointment_id")) or {}).get("pickup_date") or "",
-                           b.get("created_at") or ""),
-            reverse=True)
-        return abgeholt[0]
+    kandidaten = _hoechste_je_termin(berichte)
     kandidaten.sort(key=lambda b: (b.get("created_at") or ""), reverse=True)
     return kandidaten[0]

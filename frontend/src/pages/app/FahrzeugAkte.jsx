@@ -634,6 +634,14 @@ export default function FahrzeugAkte() {
                   <PenLine size={13} className="text-[color:var(--accent-green,#34c759)]" />
                   Abhol-Protokoll (unterschrieben)
                   {p.version > 1 && <span className="text-[10px] text-zinc-500">v{p.version}</span>}
+                  {/* Prüfbericht 20.09.2026 (R1-22): Versionen zählen je Termin — bei
+                      mehreren Terminen zum Fahrzeug sagt das Abholdatum, welcher gemeint ist. */}
+                  {p.pickup_date && (
+                    <span className="text-[10px] text-zinc-500" data-testid="akte-protokoll-abholung">
+                      · Abholung vom {String(p.pickup_date).split("-").reverse().join(".")}
+                      {p.pickup_time ? ` ${p.pickup_time}` : ""}
+                    </span>
+                  )}
                 </span>
                 <span className="text-zinc-500 text-xs">{fmtDate(p.finalized_at)}</span>
               </button>

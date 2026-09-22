@@ -193,12 +193,14 @@ def test_13_freigaben_alarm_bei_obergrenze(wegwerf, monkeypatch):
     monkeypatch.setattr(P.betrieb, "alarm", _alarm)
     user = {"id": "u13", "dealer_id": did, "role": "dealer"}
     monkeypatch.setattr(P, "_FREIGABE_MAX", 1)
-    run(P._wartende_protokolle(user))
+    # Pruefbericht 20.09.2026 (U-164): liefert (paare, abgeschnitten)
+    paare, abgeschnitten = run(P._wartende_protokolle(user))
+    assert abgeschnitten is True and len(paare) == 1
     assert alarme and alarme[0][0] == "freigaben_liste_abgeschnitten" and alarme[0][1] == did
     alarme.clear()
     monkeypatch.setattr(P, "_FREIGABE_MAX", 5000)
-    paare = run(P._wartende_protokolle(user))
-    assert len(paare) == 2 and alarme == []
+    paare, abgeschnitten = run(P._wartende_protokolle(user))
+    assert len(paare) == 2 and alarme == [] and abgeschnitten is False
 
 
 # ============================================================ 10 (HTTP)

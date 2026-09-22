@@ -249,7 +249,8 @@ def test_09_unique_index_sicher_feldliste_alarm_statt_abbruch(welt, monkeypatch)
 def test_10_termin_unique_index_alarmiert_bei_dubletten_und_filtert_leere_ids(welt, monkeypatch):
     S = _module("indizes")
     monkeypatch.setattr(S, "db", welt.db)
-    q = inspect.getsource(S._termin_unique_index)
+    # Pruefbericht 20.09.2026 (AL-19): der Filter steht in _termin_index_filter
+    q = inspect.getsource(S._termin_unique_index) + inspect.getsource(S._termin_index_filter)
     assert '"$gt": ""' in q and 'alarm(db, "termin_index_fehlt"' in q and "drop_index" in q
 
     async def lauf():
@@ -284,7 +285,8 @@ def test_12_betriebsseite_zeigt_index_zustand_und_nachholen_legt_indizes_an():
     q = (WURZEL / "backend" / "routes" / "admin.py").read_text(encoding="utf-8")
     assert '"termin_index_aktiv"' in q and '"fahrzeug_index_aktiv"' in q
     i = q.index("async def admin_betrieb_nachholen")
-    assert "_termin_unique_index()" in q[i:i + 900] and "_unique_index_sicher(" in q[i:i + 900]
+    # Pruefbericht 20.09.2026 (AL-19): aus dem Handler ohne Produktionsabbruch
+    assert "_termin_unique_index(abbruch=False)" in q[i:i + 1500] and "_unique_index_sicher(" in q[i:i + 1500]
 
 
 def test_13_alarm_schliessen(welt):

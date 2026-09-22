@@ -726,9 +726,15 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     protocols = await db.pickup_protocols.find(
         protokoll_filter,
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
-         "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1},
+         "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1,
+         "appointment_id": 1},
     ).sort([("finalized_at", -1), ("version", -1)]).to_list(20)
     protocols_gesamt = await db.pickup_protocols.count_documents(protokoll_filter)
+    # Pruefbericht 20.09.2026 (R1-22): Versionen zaehlen je Termin — bei
+    # mehreren Terminen zum Fahrzeug standen zwei "Version 1" gleichartig
+    # nebeneinander. Jetzt mit Termin-ID und Abholdatum (eine Abfrage).
+    from routes.protocols import termine_zu_protokollen
+    await termine_zu_protokollen(protocols, user["dealer_id"])
 
     # Runde 12: Sucher sehen nur ihre eigenen Aktionen zum Fahrzeug —
     # nicht, was Chef oder Kollegen damit gemacht haben.
@@ -925,7 +931,22 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
     # aus dem Lesestand zurueck — zwischenzeitlich geleerte Fotofelder
     # (Loeschen, Tagesregel des Aufraeumers) standen danach wieder drin.
     geaendert: Dict[str, Any] = {}
-    known_defects = list(v.get("known_defects") or [])
+    # Pruefbericht 20.09.2026 (R2-12): neue Maengel werden gesammelt und per
+    # $addToSet angehaengt statt die ganze Liste aus dem Lesestand
+    # zurueckzuschreiben — zwei parallele Uebernahmen ueberschrieben sich
+    # sonst still. `known_defects` bleibt die zusammengefuehrte Sicht fuer
+    # die Antwort.
+    bestand_maengel = v.get("known_defects")
+    known_defects = list(bestand_maengel or []) if isinstance(bestand_maengel, list) else []
+    neue_maengel: List[str] = []
+
+    def _mangel(txt: str) -> bool:
+        if txt in known_defects:
+            return False
+        known_defects.append(txt)
+        neue_maengel.append(txt)
+        return True
+
     applied = []
     for dev_id in body.deviation_ids:
         d = by_id.get(dev_id)
@@ -947,16 +968,14 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
                 txt = f"Schlüssel: {d['actual']}"
                 if d.get("expected"):
                     txt += f" (erwartet {d['expected']})"
-                if txt not in known_defects:
-                    known_defects.append(txt)
+                _mangel(txt)
                 eintrag["mangel"] = txt
             applied.append(eintrag)
         else:
             txt = d.get("label") or "Abweichung"
             if d.get("actual"):
                 txt += f": {d['actual']}"
-            if txt not in known_defects:
-                known_defects.append(txt)
+            _mangel(txt)
             applied.append({"mangel": txt})
 
     # RP-474: das unterschriebene Protokoll geht vor (wie im Inseratsentwurf,
@@ -967,13 +986,20 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
         applied.append({"feld": "Kilometerstand", "neu": befund["km"],
                         "quelle": "abholprotokoll"})
     for txt in befund.get("schaeden") or []:
-        if txt not in known_defects:
-            known_defects.append(txt)
+        if _mangel(txt):
             applied.append({"mangel": txt, "quelle": "abholprotokoll"})
 
-    update: Dict[str, Any] = {"known_defects": known_defects,
-                              "deviations_applied_at": now_iso(),
+    update: Dict[str, Any] = {"deviations_applied_at": now_iso(),
                               "updated_at": now_iso()}
+    aenderung: Dict[str, Any] = {"$set": update}
+    if isinstance(bestand_maengel, list):
+        # R2-12: nur die neuen Eintraege anhaengen (Mengen-Semantik, atomar).
+        if neue_maengel:
+            aenderung["$addToSet"] = {"known_defects": {"$each": neue_maengel}}
+    else:
+        # Feld fehlt oder ist kein Array ($addToSet scheitert dort) — einmalig
+        # als ganze Liste; verloren gehen kann dabei nichts.
+        update["known_defects"] = known_defects
     if isinstance(v.get("data"), dict):
         update.update({f"data.{k}": wert for k, wert in geaendert.items()})
     elif geaendert:
@@ -987,7 +1013,7 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
     res = await db.vehicles.update_one(
         {"id": vehicle_id, "dealer_id": user["dealer_id"],
          "lifecycle": {"$nin": list(_ABGESCHLOSSEN)}},
-        {"$set": update})
+        aenderung)
     if res.matched_count == 0:
         raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich abgeschlossen — "
                                  "Abweichungen nicht uebernommen, bitte neu laden")

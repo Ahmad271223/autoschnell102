@@ -230,9 +230,11 @@ def test_9_gesperrte_firma_sperrt_fahrerzugriff_und_entsperren_stellt_her():
         assert sorted(a["id"] for a in await D.driver_appointments(t.driver)) == sorted([a1, a2])
         await D._zugriff_pruefen(appt1, t.driver)
         assert (await D.driver_get_report(a1, t.driver)) == {}
-        # fehlendes active-Feld = aktiv (wie deps.firma_gesperrt)
+        # Pruefbericht 20.09.2026 (R1-26): fehlendes active-Feld = gesperrt
+        # (fail-closed wie deps.current_user; Migration m8 setzt es explizit)
         await db.users.update_one({"id": f"u_{t.dealer_id}"}, {"$unset": {"active": ""}})
-        await D._zugriff_pruefen(appt1, t.driver)
+        e = await _erwarte(403, D._zugriff_pruefen(appt1, t.driver))
+        assert "gesperrt" in e.detail
 
     _run(lauf)
 

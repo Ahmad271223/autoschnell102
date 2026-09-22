@@ -475,7 +475,9 @@ def test_08_protokolle_und_fotos_nur_zu_eigenen_terminen(welt):
         return eigene, mitbearbeiter, fremd, chef, bereich
 
     eigene, mitbearbeiter, fremd, chef, bereich = welt.run(lauf())
-    assert [p["id"] for p in eigene] == [f"p_a{w.s}"] and "appointment_id" not in eigene[0]
+    # Pruefbericht 20.09.2026 (R1-22): der eigene Termin steht jetzt dabei
+    # (Versionen zaehlen je Termin) — nur eigene Termine erscheinen ohnehin.
+    assert [p["id"] for p in eigene] == [f"p_a{w.s}"] and eigene[0]["appointment_id"] == f"t_a{w.s}"
     assert mitbearbeiter == [], "Mitbearbeiter sieht das Protokoll des Kollegen nicht"
     assert fremd == [], "fremdes Fahrzeug ohne eigenen Termin: leere Liste"
     assert [p["id"] for p in chef] == [f"p_b{w.s}"]

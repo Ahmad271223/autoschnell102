@@ -113,6 +113,16 @@ class ProtocolIn(BaseModel):
             return v
         if not isinstance(v, dict) or len(v) > FELD_MAX:
             raise ValueError(f"zu viele oder ungueltige Felder (max. {FELD_MAX})")
+
+        # Pruefbericht 20.09.2026 (R1-21): Feldnamen landen als Mongo-Schluessel
+        # — ein "$"-Praefix ist dort ein Operator, NUL-Zeichen sind in BSON-
+        # Schluesseln verboten (Schreibfehler 500). Punkte bleiben erlaubt
+        # (Ausstattungsnamen wie "2.0 TDI").
+        def _name(k, grenze):
+            if not isinstance(k, str) or len(k) > grenze or k.startswith("$") or "\x00" in k:
+                raise ValueError("ungueltiger Feldname")
+            return k
+
         def _wert(k, w, tiefe=0):
             if isinstance(w, str):
                 return w[:500]
@@ -124,16 +134,14 @@ class ProtocolIn(BaseModel):
                 return w
             # Verschachtelte Eintraege wie {"make": {"status": "stimmt", "value": ...}}
             if isinstance(w, dict) and tiefe == 0 and len(w) <= 20:
-                return {str(kk)[:80]: _wert(kk, ww, 1) for kk, ww in w.items()}
+                return {_name(kk, 80): _wert(kk, ww, 1) for kk, ww in w.items()}
             if isinstance(w, list) and tiefe == 0 and len(w) <= 50:
                 return [_wert(k, x, 1) for x in w]
             raise ValueError(f"Feld {k}: nur Text, Zahl oder Ja/Nein")
         out = {}
         for k, w in v.items():
             # Rollenprüfung 22.09.2026 (RP-063/162): FELDNAME_MAX statt 80.
-            if not isinstance(k, str) or len(k) > FELDNAME_MAX:
-                raise ValueError("ungueltiger Feldname")
-            out[k] = _wert(k, w)
+            out[_name(k, FELDNAME_MAX)] = _wert(k, w)
         return out
     documents: Optional[Dict[str, bool]] = None         # Abschnitt 2
     keys_count: Optional[str] = Field(default=None, max_length=20)
@@ -2213,6 +2221,25 @@ async def _protokoll_im_bereich(user: dict, doc: dict) -> bool:
 _PROTOKOLLE_JE_FAHRZEUG = 200
 
 
+async def termine_zu_protokollen(docs: List[dict], dealer_id: str) -> None:
+    """Pruefbericht 20.09.2026 (R1-22): Versionen zaehlen je TERMIN — in der
+    Akte und in der Protokollliste standen zwei Termine desselben Fahrzeugs
+    als gleichartige "Version 1" nebeneinander. Haengt jedem Protokoll das
+    Abholdatum seines Termins an (pickup_date/pickup_time, EINE Abfrage);
+    appointment_id bleibt in der Antwort. Auch fuer bestand.vehicle_akte."""
+    ids = sorted({d.get("appointment_id") for d in docs if d.get("appointment_id")})
+    termine: Dict[str, dict] = {}
+    if ids:
+        async for t in db.appointments.find(
+                {"id": {"$in": ids}, "dealer_id": dealer_id},
+                {"_id": 0, "id": 1, "pickup_date": 1, "pickup_time": 1}):
+            termine[t["id"]] = t
+    for d in docs:
+        t = termine.get(d.get("appointment_id")) or {}
+        d["pickup_date"] = t.get("pickup_date") or None
+        d["pickup_time"] = t.get("pickup_time") or None
+
+
 # ---------- Händler-Sicht ----------
 @router.get("/vehicles/{vehicle_id}/protocols")
 async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep),
@@ -2249,8 +2276,8 @@ async def dealer_list_protocols(vehicle_id: str, user=Depends(_dealer_dep),
                     "Versionen abgeschnitten", vehicle_id, _PROTOKOLLE_JE_FAHRZEUG)
         if response is not None:
             response.headers["X-Truncated"] = "1"
-    for d in docs:
-        d.pop("appointment_id", None)
+    # Pruefbericht 20.09.2026 (R1-22): appointment_id bleibt, Abholdatum dazu.
+    await termine_zu_protokollen(docs, user["dealer_id"])
     return docs
 
 
@@ -2307,9 +2334,9 @@ async def _abgelaufene_claims_freigeben(bedingung: Dict[str, Any]) -> int:
     return res.modified_count + zurueck.modified_count
 
 
-async def _wartende_protokolle(user, felder: Optional[Dict[str, int]] = None) -> List[tuple]:
+async def _wartende_protokolle(user, felder: Optional[Dict[str, int]] = None) -> tuple:
     """Alle Protokolle, die beim Chef liegen — zur Freigabe oder freigegeben,
-    noch nicht unterschrieben.
+    noch nicht unterschrieben. Liefert (paare, abgeschnitten).
 
     Runde 33 (Analyse 12.09.2026, Wunsch Ahmad "mehrere Fahrer gleichzeitig"):
       * das am LAENGSTEN wartende zuerst (vorher: neueste zuerst)
@@ -2318,45 +2345,55 @@ async def _wartende_protokolle(user, felder: Optional[Dict[str, int]] = None) ->
       * Protokolle zu abgeschlossenen oder geloeschten Terminen blieben fuer
         immer stehen — jetzt nicht mehr
       * Termine gebuendelt geladen statt einzeln je Protokoll
-    Gegenpruefung 12.09.2026: Die Grenze griff ohne Sortierung — liegen
-    gebliebene Protokolle geschlossener Termine (die aeltesten) verdraengten
-    die Fahrer, die JETZT warten. Geladen wird deshalb das zuletzt Abgeschickte
-    zuerst; angezeigt weiter das am laengsten Wartende oben."""
+    Pruefbericht 20.09.2026 (V-23/U-164): Protokolle geschlossener oder
+    geloeschter Termine fallen schon in der Abfrage weg ($lookup auf den
+    Termin derselben Firma), geladen wird aufsteigend nach Wartebeginn
+    (erstmals_abgeschickt_am, sonst abgeschickt_am). Die Grenze
+    _FREIGABE_MAX kappt damit die NEUESTEN — die am laengsten Wartenden
+    bleiben immer drin (vorher: absteigend geladen, Grenze nur im Log). Ob
+    gekappt wurde, steht im zweiten Rueckgabewert; die Endpunkte melden es
+    als Kopfzeile X-Truncated."""
     await _abgelaufene_claims_freigeben({"dealer_id": user["dealer_id"]})
-    docs = await db.pickup_protocols.find(
-        {"dealer_id": user["dealer_id"], "status": {"$in": _FREIGABE_STATI},
-         "superseded": {"$ne": True}},
-        felder or {"_id": 0, "pdf_path": 0},
-    ).sort("abgeschickt_am", -1).to_list(_FREIGABE_MAX)
-    if len(docs) >= _FREIGABE_MAX:
-        log.warning("Freigaben: Firma %s hat %s oder mehr offene Protokolle — die aeltesten "
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {"dealer_id": user["dealer_id"], "status": {"$in": _FREIGABE_STATI},
+                    "superseded": {"$ne": True}}},
+        # localField/foreignField nutzt den Index appointments.id.
+        {"$lookup": {"from": "appointments", "localField": "appointment_id",
+                     "foreignField": "id", "as": "_termin"}},
+        {"$unwind": "$_termin"},           # ohne Termin (geloescht): weg
+        {"$match": {"_termin.dealer_id": user["dealer_id"],
+                    # fehlender Status zaehlt als "offen" ($nin trifft auch fehlend)
+                    "_termin.status": {"$nin": sorted(_ABGESCHLOSSEN)}}},
+        {"$addFields": {"_wartet_seit": {"$ifNull": [
+            "$erstmals_abgeschickt_am", {"$ifNull": ["$abgeschickt_am", ""]}]}}},
+        {"$sort": {"_wartet_seit": 1, "_id": 1}},
+        {"$limit": _FREIGABE_MAX + 1},
+    ]
+    if felder:
+        pipeline.append({"$project": {**felder, "_termin": 1}})
+    else:
+        pipeline.append({"$project": {"_id": 0, "pdf_path": 0, "_wartet_seit": 0}})
+    docs = await db.pickup_protocols.aggregate(pipeline).to_list(_FREIGABE_MAX + 1)
+    abgeschnitten = len(docs) > _FREIGABE_MAX
+    if abgeschnitten:
+        docs = docs[:_FREIGABE_MAX]
+        log.warning("Freigaben: Firma %s hat mehr als %s offene Protokolle — die neuesten "
                     "werden nicht gezeigt", user["dealer_id"], _FREIGABE_MAX)
         try:
             await betrieb.alarm(db, "freigaben_liste_abgeschnitten", ref=user["dealer_id"],
                                 meta={"max": _FREIGABE_MAX})
         except Exception:
             log.exception("Alarm freigaben_liste_abgeschnitten nicht abgesetzt")
-    termin_ids = sorted({d.get("appointment_id") for d in docs if d.get("appointment_id")})
-    termine: Dict[str, dict] = {}
-    if termin_ids:
-        async for t in db.appointments.find(
-                {"id": {"$in": termin_ids}, "dealer_id": user["dealer_id"]},
-                {"_id": 0, "id": 1, "status": 1, "pickup_date": 1, "pickup_time": 1,
-                 "pickup_address": 1, "seller_name": 1, "vehicle_id": 1,
-                 "contract_id": 1, "created_by": 1, "kaufvorgang_id": 1}):
-            termine[t["id"]] = t
     paare = []
     for d in docs:
-        appt = termine.get(d.get("appointment_id"))
-        if not appt or (appt.get("status") or "offen") in _ABGESCHLOSSEN:
-            continue
+        appt = d.pop("_termin", None) or {}
+        appt.pop("_id", None)
+        d.pop("_wartet_seit", None)
         # Runde 16/29: Sucher sehen nur ihre eigenen Vorgaenge.
         if ist_sucher(user) and not await termin_im_bereich(user, appt):
             continue
         paare.append((d, appt))
-    paare.sort(key=lambda p: str(p[0].get("erstmals_abgeschickt_am")
-                                 or p[0].get("abgeschickt_am") or ""))
-    return paare
+    return paare, abgeschnitten
 
 
 def _eur(preis) -> str:
@@ -2367,28 +2404,37 @@ def _eur(preis) -> str:
 
 
 @router.get("/protocols/zur-freigabe/anzahl")
-async def protokolle_zur_freigabe_anzahl(user=Depends(_chef_dep)):
+async def protokolle_zur_freigabe_anzahl(user=Depends(_chef_dep), response: Response = None):
     """Runde 33: Zaehler fuers Menue — der Chef merkt auf jeder Seite, dass
-    ein Fahrer beim Verkaeufer auf seine Freigabe wartet."""
-    paare = await _wartende_protokolle(user, _ZAEHLER_FELDER)
+    ein Fahrer beim Verkaeufer auf seine Freigabe wartet.
+    Pruefbericht 20.09.2026 (U-164): ist die Liste gekappt (_FREIGABE_MAX),
+    Kopfzeile X-Truncated: 1 und Feld abgeschnitten — die Zahl ist dann
+    "mindestens"."""
+    paare, abgeschnitten = await _wartende_protokolle(user, _ZAEHLER_FELDER)
+    if abgeschnitten and response is not None:
+        response.headers["X-Truncated"] = "1"
     wartend = [d for d, _a in paare if d.get("status") == ZUR_FREIGABE]
     return {"wartet": len(wartend),
             "freigegeben": sum(1 for d, _a in paare if d.get("status") == FREIGEGEBEN),
             # Gegenpruefung 12.09.2026: fuer den Hinweis "neues Protokoll" — die
             # Zahl allein bleibt gleich, wenn eins freigegeben und eins
             # abgeschickt wird.
-            "ids": [d.get("id") for d in wartend]}
+            "ids": [d.get("id") for d in wartend],
+            "abgeschnitten": abgeschnitten}
 
 
 @router.get("/protocols/zur-freigabe")
-async def protokolle_zur_freigabe(user=Depends(_chef_dep)):
+async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = None):
     """Runde 30 (Wunsch Ahmad): Was wartet gerade auf die Freigabe des Chefs?
 
     Liefert das ausgefuellte Protokoll — Vergleich Vertrag/vor Ort, neue
     Schaeden, Kilometerstand — damit der Chef entscheiden (und notfalls
     beim Verkaeufer anrufen) kann, ohne das ganze PDF zu oeffnen.
-    Runde 33: fuer die eigene Seite "Freigaben" (siehe _wartende_protokolle)."""
-    paare = await _wartende_protokolle(user)
+    Runde 33: fuer die eigene Seite "Freigaben" (siehe _wartende_protokolle).
+    U-164: gekappte Liste -> Kopfzeile X-Truncated: 1."""
+    paare, abgeschnitten = await _wartende_protokolle(user)
+    if abgeschnitten and response is not None:
+        response.headers["X-Truncated"] = "1"
     fz_ids = sorted({d.get("vehicle_id") or a.get("vehicle_id") for d, a in paare} - {None, ""})
     fahrzeuge: Dict[str, dict] = {}
     if fz_ids:

@@ -71,7 +71,8 @@ def test_rp546_current_driver_liefert_das_neue_token_mit(welt):
                  seit=(jetzt - timedelta(days=6)).timestamp())
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=tok)
     resp = Response()
-    fahrer = w.run(D.current_driver(None, None, creds, resp))
+    # Pruefbericht 20.09.2026 (R1-28): current_driver(creds, response) — ohne request/auth
+    fahrer = w.run(D.current_driver(creds, resp))
     assert fahrer["id"] == w.driver["id"]
     neu = resp.headers.get(AUTHMOD.NEUES_TOKEN_KOPF)
     assert neu, "Kopfzeile fehlt"
@@ -79,16 +80,16 @@ def test_rp546_current_driver_liefert_das_neue_token_mit(welt):
     assert p["sid"] == sid and p["role"] == "driver_account"
     # Das neue Token ist gueltig (dieselbe Sitzung) ...
     resp2 = Response()
-    w.run(D.current_driver(None, None, HTTPAuthorizationCredentials(
+    w.run(D.current_driver(HTTPAuthorizationCredentials(
         scheme="Bearer", credentials=neu), resp2))
     assert AUTHMOD.NEUES_TOKEN_KOPF not in resp2.headers, "frisches Token: keine weitere Kopfzeile"
     # ... ohne Response (direkter Aufruf) laeuft alles wie bisher
-    assert w.run(D.current_driver(None, None, creds))["id"] == w.driver["id"]
+    assert w.run(D.current_driver(creds))["id"] == w.driver["id"]
     # Abmelden beendet auch das verlaengerte Token sofort.
     w.run(w.db.driver_accounts.update_one({"id": w.driver["id"]},
                                           {"$set": {"current_session_id": None}}))
     with pytest.raises(HTTPException) as e:
-        w.run(D.current_driver(None, None, HTTPAuthorizationCredentials(
+        w.run(D.current_driver(HTTPAuthorizationCredentials(
             scheme="Bearer", credentials=neu), Response()))
     assert e.value.status_code == 401
 

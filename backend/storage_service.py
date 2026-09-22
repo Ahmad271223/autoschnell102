@@ -25,6 +25,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from pymongo.errors import DuplicateKeyError as _DuplicateKeyError  # Pruefbericht 20.09.2026 (R1-32)
+
 log = logging.getLogger("autohandel.storage")
 
 _UPLOAD_ROOT = Path(__file__).resolve().parent / "uploads"
@@ -708,14 +710,21 @@ async def loeschen_oder_vormerken(db, *, key: Optional[str] = None,
     try:
         # Upsert je (art, key/prefix): derselbe Key wird nicht mehrfach
         # vorgemerkt, wenn der Aufraeumjob ihn stuendlich erneut anfasst.
+        # Pruefbericht 20.09.2026 (R1-32): art/key/prefix stehen im Filter —
+        # Mongo uebernimmt sie beim Einfuegen selbst und wiederholt den Upsert
+        # bei einem parallelen Einfuegen (Unique-Index retry_je_ziel) nur, wenn
+        # der Filter allein den Schluessel bildet.
         await db.storage_delete_retry.update_one(
             {"art": art_eintrag, "key": key, "prefix": prefix},
-            {"$setOnInsert": {"id": str(_uuid.uuid4()), "art": art_eintrag,
-                              "key": key, "prefix": prefix, "versuche": 0,
+            {"$setOnInsert": {"id": str(_uuid.uuid4()), "versuche": 0,
                               "created_at": jetzt},
              "$set": {"grund": grund, "dealer_id": dealer_id or "",
                       "ref": ref, "letzter_fehler": fehler, "updated_at": jetzt}},
             upsert=True)
+    except _DuplicateKeyError:
+        # R1-32: zwei parallele Vormerkungen desselben Ziels — die andere hat
+        # gewonnen, die Vormerkung steht. Kein Alarm.
+        log.info("Datei-Loeschung %s bereits vorgemerkt", key or prefix)
     except Exception as exc2:  # noqa: BLE001
         # Pruefung 14.09.2026 (Liste 5, Nr. 4): Datei liegt noch UND die
         # Vormerkung fehlt — das darf nicht still bleiben: Betriebsalarm.

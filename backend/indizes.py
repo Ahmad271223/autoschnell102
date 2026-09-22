@@ -311,7 +311,29 @@ async def email_eindeutigkeit_entfernen(db) -> dict:
     return ergebnis
 
 
-async def _termin_unique_index() -> bool:
+def _termin_index_filter() -> dict:
+    """Teilfilter des Index termin_offen_je_vertrag (offene Termine mit Vertrag)."""
+    from deps import TERMIN_OFFEN
+    # Runde 17: "" ist ein String — ein Termin mit vehicle_id "" darf nicht
+    # mit anderen leeren kollidieren ($gt "" = nicht leer).
+    # Umbau Kaufvorgaenge 09.09.2026: EIN offener Termin je VERTRAG (nicht
+    # mehr je Fahrzeug — mehrere Sucher duerfen dasselbe Inserat kaufen).
+    return {"contract_id": {"$type": "string", "$gt": ""},
+            "status": {"$in": list(TERMIN_OFFEN)}}
+
+
+async def termin_dubletten() -> list:
+    """Vertraege mit mehreren OFFENEN Terminen (hoechstens 5 Beispiele) — die
+    Faelle, die den Unique-Index blockieren. Pruefbericht 20.09.2026 (AL-19):
+    auch fuer die Rueckmeldung von POST /admin/betrieb/nachholen."""
+    dubletten = await db.appointments.aggregate([
+        {"$match": _termin_index_filter()},
+        {"$group": {"_id": {"d": "$dealer_id", "c": "$contract_id"}, "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+    return [str(d["_id"].get("c")) for d in dubletten]
+
+
+async def _termin_unique_index(abbruch: bool = True) -> bool:
     """Runde 15 (Nr. 6): hoechstens EIN offener Abholtermin je Fahrzeug und
     Firma. Zwei parallele Vertragsanlagen (oder Doppelklicks) erzeugten
     zwei Termine fuer dasselbe Auto; die Vorabpruefung der Routen ist nicht
@@ -319,15 +341,15 @@ async def _termin_unique_index() -> bool:
     (abgeholt, storniert, ...) sind ausgenommen — ein Fahrzeug darf spaeter
     erneut einen Termin bekommen. Bestehende Dubletten blockieren nur den
     Index (Warnung), nicht den Start: die Regel ist neu, Altdaten werden
-    ueber den Terminplaner bereinigt."""
+    ueber den Terminplaner bereinigt.
+
+    abbruch (Pruefbericht 20.09.2026, AL-19): beim Start True — in Produktion
+    endet der Prozess ohne Index (SystemExit 78, _in_produktion_abbrechen).
+    Aus einem Request-Handler (POST /admin/betrieb/nachholen) False: dort
+    beendete der Abbruch den Worker mitten in der Anfrage; es bleibt beim
+    Alarm und der Rueckgabe False."""
     from betrieb import alarm, alarm_schliessen
-    from deps import TERMIN_OFFEN
-    # Runde 17: "" ist ein String — ein Termin mit vehicle_id "" darf nicht
-    # mit anderen leeren kollidieren ($gt "" = nicht leer).
-    # Umbau Kaufvorgaenge 09.09.2026: EIN offener Termin je VERTRAG (nicht
-    # mehr je Fahrzeug — mehrere Sucher duerfen dasselbe Inserat kaufen).
-    filter_ = {"contract_id": {"$type": "string", "$gt": ""},
-               "status": {"$in": list(TERMIN_OFFEN)}}
+    filter_ = _termin_index_filter()
     name = "termin_offen_je_vertrag"
     try:
         alt_index = await db.appointments.index_information()
@@ -335,12 +357,9 @@ async def _termin_unique_index() -> bool:
             await db.appointments.drop_index("termin_offen_je_fahrzeug")
     except Exception as exc:
         log.warning("alter Termin-Index nicht entfernt: %s", exc)
-    dubletten = await db.appointments.aggregate([
-        {"$match": filter_},
-        {"$group": {"_id": {"d": "$dealer_id", "c": "$contract_id"}, "n": {"$sum": 1}}},
-        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+    dubletten = await termin_dubletten()
     if dubletten:
-        beispiele = ", ".join(str(d["_id"].get("c")) for d in dubletten)
+        beispiele = ", ".join(dubletten)
         log.error("ensure_indexes: appointments: mehrere OFFENE Termine je "
                   "Vertrag vorhanden (%s) — Unique-Index NICHT angelegt. "
                   "Bitte doppelte offene Termine im Terminplaner schliessen "
@@ -348,7 +367,8 @@ async def _termin_unique_index() -> bool:
         # Runde 17: sichtbar im Admin-Bereich (/admin/betrieb), nicht nur im Log
         FEHLENDE_UNIQUE.add("appointments.termin_offen_je_vertrag")
         await alarm(db, "termin_index_fehlt", ref="appointments", beispiele=beispiele)
-        _in_produktion_abbrechen("termin_offen_je_vertrag: doppelte offene Termine")
+        if abbruch:
+            _in_produktion_abbrechen("termin_offen_je_vertrag: doppelte offene Termine")
         return False
     from pymongo.errors import OperationFailure
 
@@ -390,7 +410,8 @@ async def _termin_unique_index() -> bool:
         log.error("ensure_indexes: termin_offen_je_vertrag: %s", exc)
         FEHLENDE_UNIQUE.add("appointments.termin_offen_je_vertrag")
         await alarm(db, "termin_index_fehlt", ref="appointments", fehler=str(exc)[:300])
-        _in_produktion_abbrechen(f"termin_offen_je_vertrag: {exc}")
+        if abbruch:
+            _in_produktion_abbrechen(f"termin_offen_je_vertrag: {exc}")
         return False
 
 

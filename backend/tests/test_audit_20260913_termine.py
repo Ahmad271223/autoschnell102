@@ -129,7 +129,9 @@ def test_01_sucher_sieht_eigenes_protokoll_trotz_vieler_fremder_versionen(welt):
 
     liste_a, liste_b = w.run(lauf())
     assert [p["id"] for p in liste_a] == [f"pA_{w.s}"], "eigenes Protokoll darf nicht verschwinden"
-    assert "appointment_id" not in liste_a[0]
+    # Pruefbericht 20.09.2026 (R1-22): der eigene Termin (samt Abholdatum) steht
+    # jetzt dabei — Versionen zaehlen je Termin.
+    assert liste_a[0]["appointment_id"] == f"tA_{w.s}" and "pickup_date" in liste_a[0]
     ids_b = [p["id"] for p in liste_b]
     assert f"pA_{w.s}" not in ids_b and len(ids_b) == 21
 

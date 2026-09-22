@@ -42,7 +42,12 @@ def _schluessel() -> list:
     damit vorhandene Geheimnisse nach dem Setzen des Zweitschluessels weiter
     gelten (neu verschluesselt wird nur mit dem ersten)."""
     daten = (os.environ.get("DATEN_SCHLUESSEL") or "").strip()
-    jwt = os.environ.get("JWT_SECRET") or "dev-secret"
+    # Pruefbericht 20.09.2026 (R1-25): EINE Quelle fuer das Geheimnis — auth
+    # prueft es beim Start (fehlt es oder ist es "dev-secret", bricht der
+    # Start ausserhalb der Entwicklung ab); der eigene Rueckfall "dev-secret"
+    # hier war eine zweite, ungepruefte Quelle. Import in der Funktion, weil
+    # auth beim Laden die .env liest.
+    from auth import JWT_SECRET as jwt
     return [daten, jwt] if daten and daten != jwt else [jwt]
 
 

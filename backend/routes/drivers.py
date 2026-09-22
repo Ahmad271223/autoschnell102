@@ -205,14 +205,15 @@ def fahrer_token_erneuern(payload: dict) -> Optional[str]:
                                bis=datetime.fromtimestamp(ende, tz=timezone.utc))
 
 
-async def current_driver(request: Request, auth: Optional[str] = None,
-                         creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
+async def current_driver(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
                          response: Response = None):
     """Token NUR via `Authorization: Bearer ...`.
 
     ?auth=<token> in der URL wird NICHT mehr akzeptiert: der Token landete
     damit in Browser-Verlauf, Proxy- und Server-Logs. Die Fahrer-App laedt
     PDFs seit 08/2026 per fetch mit Authorization-Header (openDriverPdf).
+    Pruefbericht 20.09.2026 (R1-28): die ungenutzten Parameter request und
+    auth (Rest des alten ?auth=) sind weg — direkte Aufrufe: (creds, response).
     """
     token = None
     if creds and creds.credentials:
@@ -228,7 +229,9 @@ async def current_driver(request: Request, auth: Optional[str] = None,
     driver = await db.driver_accounts.find_one(
         {"id": payload.get("sub")}, {"_id": 0, "password_hash": 0},
     )
-    if not driver or not driver.get("active", True):
+    # Pruefbericht 20.09.2026 (R1-26): aktiv = active is True (wie deps.current_user;
+    # Migration m8 setzt das Feld explizit) — kein stilles "fehlt = aktiv" mehr.
+    if not driver or driver.get("active") is not True:
         raise HTTPException(401, "Fahrer-Account deaktiviert")
     # Single-Session STRIKT (wie bei deps.current_user): die Session-ID im
     # Token muss exakt der gespeicherten entsprechen. Die fruehere Toleranz
@@ -543,7 +546,7 @@ def _fahrer_eintrag(da: dict, link: dict, voll: bool = True) -> dict:
         "name": link.get("display_name") or da.get("display_name"),
         "email": da.get("email") if voll else None,
         "phone": (da.get("phone") or None) if voll else None,
-        "active": da.get("active", True),
+        "active": da.get("active") is True,      # R1-26: eine Regel fuer "aktiv"
         "added_at": link.get("added_at"),
     }
 
@@ -588,7 +591,7 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
     da = await db.driver_accounts.find_one({"driver_code": code}, {"_id": 0})
     if not da:
         raise HTTPException(404, "Kein Fahrer mit diesem Code gefunden")
-    if not da.get("active", True):
+    if da.get("active") is not True:                # R1-26
         raise HTTPException(409, "Dieser Fahrer-Account ist deaktiviert")
     # Runde 8 (15.09.2026, Liste 3 Nr. 2): Blieb beim Entfernen die Termin-
     # bereinigung haengen (Alarm fahrer_bereinigung_fehlgeschlagen), traegt ein
@@ -622,8 +625,8 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
     # das Konto — dazwischen darf kein neuer Link entstehen. Nach dem Insert
     # nachpruefen; sonst Link zuruecknehmen.
     konto = await db.driver_accounts.find_one({"id": da["id"]}, {"_id": 0, "active": 1, "loeschung": 1})
-    if konto is None or konto.get("active") is False \
-            or (konto.get("loeschung") or {}).get("status") == "laeuft":
+    if konto is None or konto.get("active") is not True \
+            or (konto.get("loeschung") or {}).get("status") == "laeuft":     # R1-26
         await db.dealer_drivers.delete_one(
             {"dealer_id": user["dealer_id"], "driver_account_id": da["id"]})
         raise HTTPException(409, "Dieses Fahrer-Konto wurde gerade deaktiviert oder gelöscht")
@@ -966,7 +969,7 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     if not await verify_password_async(body.password, pw_hash) or not da:
         await konto_fehlversuch(konto_k, ip)
         raise HTTPException(401, LOGIN_FALSCH)
-    if not da.get("active", True):
+    if da.get("active") is not True:                # R1-26
         raise HTTPException(403, "Account deaktiviert")
     await driver_login_limiter.reset(schluessel)
     # Kontonummer (13.09.2026): den Konto-Zaehler (login_konto_limiter) bei
@@ -982,7 +985,7 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     sid = str(uuid.uuid4())
     r = await db.driver_accounts.update_one(
         {"id": da["id"], "password_hash": da.get("password_hash"),
-         "active": {"$ne": False}, "loeschung.status": {"$ne": "laeuft"}},
+         "active": True, "loeschung.status": {"$ne": "laeuft"}},     # R1-26
         {"$set": {"current_session_id": sid}},
     )
     if r.matched_count == 0:

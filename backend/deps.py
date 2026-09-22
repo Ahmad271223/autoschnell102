@@ -299,7 +299,10 @@ async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
     Einladungen. Vorher pruefte nur current_user den Hauptaccount; der
     Marktplatz zeigte eine gesperrte Firma weiter, _redeem_invite legte
     weiter Mitgliedschaften an. Hauptaccount = aeltestes dealer-Konto je
-    Firma (Runde 11); fehlendes active-Feld gilt wie bisher als aktiv."""
+    Firma (Runde 11).
+    Pruefbericht 20.09.2026 (R1-26): aktiv heisst active is True — wie bei
+    current_user ("not user.get('active')"); Migration m8 setzt das Feld
+    ueberall explizit, ein fehlendes Feld gilt nicht mehr still als aktiv."""
     if not dealer_id:
         return False
     # Runde 12 (15.09.2026, Nr. 4): der eingetragene Hauptaccount (dealers.user_id)
@@ -308,18 +311,17 @@ async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
     if firma and firma.get("user_id"):
         chef = await db.users.find_one({"id": firma["user_id"]}, {"_id": 0, "active": 1})
         if chef is not None:
-            return not chef.get("active", True)
+            return chef.get("active") is not True
     chef = await db.users.find_one(
         {"dealer_id": dealer_id, "role": "dealer"},
         {"_id": 0, "active": 1}, sort=[("created_at", 1)])
-    return chef is not None and not chef.get("active", True)
+    return chef is not None and chef.get("active") is not True
 
 
 async def gesperrte_firmen_ids() -> set:
     """Runde 13: A8 — alle Firmen, deren Hauptaccount (aeltestes dealer-Konto)
     gesperrt ist, in EINER Abfrage — fuer die Listenfilter des Marktplatzes.
-    Sperre = active explizit False (fehlendes Feld = aktiv, wie
-    firma_gesperrt)."""
+    Sperre = active nicht True (R1-26: dieselbe Regel wie firma_gesperrt)."""
     # Runde 16 (15.09.2026): dieselbe Regel wie firma_gesperrt — der eingetragene
     # Hauptaccount (dealers.user_id) entscheidet; nur Firmen ohne Eintrag fallen
     # auf das aelteste dealer-Konto zurueck. Vorher bewerteten Sucher (firma_
@@ -341,13 +343,13 @@ async def gesperrte_firmen_ids() -> set:
         if not chefs:
             continue
         mit_hauptkonto.add(d["id"])
-        if chefs[0].get("active") is False:
+        if chefs[0].get("active") is not True:
             gesperrt.add(d["id"])
     rows = db.users.aggregate([
         {"$match": {"role": "dealer", "dealer_id": {"$nin": [None, ""]}}},
         {"$sort": {"created_at": 1}},
         {"$group": {"_id": "$dealer_id", "active": {"$first": "$active"}}},
-        {"$match": {"active": False}},
+        {"$match": {"active": {"$ne": True}}},
     ])
     async for r in rows:
         if r["_id"] not in mit_hauptkonto:
@@ -636,18 +638,20 @@ async def get_subscription_status(dealer_id: str,
                      {"dealer_id": None}]},
             sort=[("created_at", -1)])
     else:
+        # Firmen-Abo: Dokumente ohne subject_user_id-Feld UND Alt-Dokumente mit
+        # explizitem null (vor m1_abos_normalisieren) — in EINER Abfrage, das
+        # juengste nicht ersetzte gilt. WICHTIG: NICHT einfach irgendein Abo
+        # des Haendlers nehmen — sonst wuerde das persoenliche Abo eines
+        # Suchers faelschlich fuer den Chef zaehlen (Chef muss sein EIGENES
+        # Abo haben).
+        # Pruefbericht 20.09.2026 (R1-16): vorher zwei Abfragen (erst ohne Feld,
+        # dann null ohne status-Filter) — ein aelteres Dokument ohne Feld gewann
+        # gegen ein juengeres mit null, und die Admin-Uebersicht bildete diese
+        # Vorrangregel nach. Jetzt zaehlt allein created_at, hier wie dort.
         sub = await db.subscriptions.find_one(
-            {"dealer_id": dealer_id, "subject_user_id": {"$exists": False},
-             "status": {"$ne": "ersetzt"}},
+            {"dealer_id": dealer_id, "status": {"$ne": "ersetzt"},
+             "$or": [{"subject_user_id": {"$exists": False}}, {"subject_user_id": None}]},
             sort=[("created_at", -1)])
-        if not sub:
-            # Fallback: alte Abos, bei denen das Feld explizit null ist.
-            # WICHTIG: NICHT einfach irgendein Abo des Haendlers nehmen —
-            # sonst wuerde das persoenliche Abo eines Suchers faelschlich
-            # fuer den Chef zaehlen (Chef muss sein EIGENES Abo haben).
-            sub = await db.subscriptions.find_one(
-                {"dealer_id": dealer_id, "subject_user_id": None},
-                sort=[("created_at", -1)])
     return sub_status_from_doc(sub)
 
 
