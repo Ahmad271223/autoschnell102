@@ -108,6 +108,7 @@ ADMIN_SCHREIBEND_NUR_ADMIN = {
     "/api/admin/me/password",                 # eigenes Passwort
     "/api/admin/me/mfa/einrichten", "/api/admin/me/mfa/aktivieren",
     "/api/admin/me/mfa/deaktivieren", "/api/admin/me/mfa/codes-neu",   # eigener 2. Faktor
+    "/api/admin/me/mfa/wechsel",              # Geraetewechsel (RP-556, Welle B3)
     "/api/admin/errors", "/api/admin/errors/{error_id}",              # Fehlerliste pflegen
     "/api/admin/buyers/{buyer_id}/ustid-pruefen",                     # nur Abfrage bei VIES
 }
