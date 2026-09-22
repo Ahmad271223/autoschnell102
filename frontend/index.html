@@ -23,8 +23,10 @@
           Note: frame-ancestors is intentionally omitted here — it is ignored in
           <meta> tags (browser spec). It is enforced via the HTTP header set by
           SecurityHeadersMiddleware in server.py.
+          Pruefbericht 20.09.2026 (K-20/RE-11): api.stripe.com aus connect-src
+          gestrichen — Stripe ist seit 14.09.2026 entfernt.
         -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' %REACT_APP_CSP_SCRIPT%; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self' %REACT_APP_CSP_CONNECT% https://api.stripe.com; object-src 'none'; base-uri 'self';" />
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' %REACT_APP_CSP_SCRIPT%; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self' %REACT_APP_CSP_CONNECT%; object-src 'none'; base-uri 'self';" />
         <!-- Installierbare App (09/2026): Manifest + Symbole, siehe public/manifest.json -->
         <link rel="manifest" href="/manifest.json" />
         <link rel="icon" href="/favicon.ico" sizes="48x48" />

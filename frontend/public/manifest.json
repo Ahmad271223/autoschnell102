@@ -18,12 +18,6 @@
   ],
   "shortcuts": [
     {
-      "name": "Neuer Vergleich",
-      "short_name": "Vergleich",
-      "url": "/app/vergleich",
-      "icons": [{ "src": "/icon-96.png", "type": "image/png", "sizes": "96x96" }]
-    },
-    {
       "name": "Terminplaner",
       "short_name": "Termine",
       "url": "/app/termine",
@@ -33,12 +27,6 @@
       "name": "Verträge / PDFs",
       "short_name": "Verträge",
       "url": "/app/vertraege",
-      "icons": [{ "src": "/icon-96.png", "type": "image/png", "sizes": "96x96" }]
-    },
-    {
-      "name": "Fahrer-App",
-      "short_name": "Fahrer",
-      "url": "/fahrer",
       "icons": [{ "src": "/icon-96.png", "type": "image/png", "sizes": "96x96" }]
     }
   ]

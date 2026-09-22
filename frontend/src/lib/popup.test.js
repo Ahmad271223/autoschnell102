@@ -161,8 +161,9 @@ describe("filterOeffnen", () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     expect(filterOeffnen([mobile, as24], { automatisch: true })).toEqual([mobile, as24]);
     const [titel, opts] = toast.warning.mock.calls[0];
-    expect(titel).toBe("Automatisches Öffnen vom Browser blockiert");
-    expect(opts.action.label).toBe("mobile.de öffnen");
+    // K-22: Portale im Titel, am Knopf steht, dass danach noch eines aussteht.
+    expect(titel).toBe("Automatisches Öffnen vom Browser blockiert: mobile.de und AutoScout24");
+    expect(opts.action.label).toBe("mobile.de öffnen (1 von 2)");
 
     open.mockReset().mockReturnValueOnce(fensterAttrappe()).mockReturnValueOnce(null);
     const event = { preventDefault: vi.fn() };
@@ -172,7 +173,7 @@ describe("filterOeffnen", () => {
     const [titel2, opts2] = toast.warning.mock.calls[1];   // ... aktualisiert fuer den Rest
     expect(titel2).toBe("AutoScout24 vom Browser blockiert");
     expect(opts2.id).toBe(FILTER_TOAST_ID);
-    expect(opts2.action.label).toBe("AutoScout24 öffnen");
+    expect(opts2.action.label).toBe("AutoScout24 öffnen");   // nur noch eines: kein "1 von"
   });
 });
 

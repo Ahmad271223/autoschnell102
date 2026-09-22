@@ -75,7 +75,9 @@ export function passwortProblem(pw) {
   if (s !== s.trim()) return "Passwort darf nicht mit einem Leerzeichen beginnen oder enden";
   if (s.length < PASSWORT_MIN) return `Passwort muss mindestens ${PASSWORT_MIN} Zeichen lang sein`;
   if (new TextEncoder().encode(s).length > PASSWORT_MAX_BYTES) {
-    return `Passwort darf höchstens ${PASSWORT_MAX_BYTES} Zeichen lang sein`;
+    // Pruefbericht 20.09.2026 (K-06): gemessen werden Bytes (wie am Server),
+    // nicht Zeichen — sonst passte die Meldung nicht zur Ablehnung.
+    return `Passwort darf höchstens ${PASSWORT_MAX_BYTES} Bytes lang sein (Umlaute zählen doppelt)`;
   }
   // K-04: Umlaute zaehlen (wie am Server) NICHT als Sonderzeichen.
   if (![...s].some(istRand)) {

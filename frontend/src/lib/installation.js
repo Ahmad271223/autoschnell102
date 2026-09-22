@@ -23,17 +23,30 @@ import { useSyncExternalStore } from "react";
 // das App-Fenster den Speicher mit dem Browser. iPhone/iPad und Safari am
 // Mac trennen den Speicher der installierten App vom Browser (von Apple so
 // gewollt); dort bleibt der Knopf im Browser sichtbar, was nicht stoert.
+//
+// Pruefbericht 20.09.2026 (K-13): Der Merker war ein "1" ohne Zeit und wurde
+// nur durch beforeinstallprompt zurueckgesetzt. Auf Firefox/Android (kennt
+// das Ereignis nicht) blieb er nach einer Deinstallation fuer immer — der
+// Installations-Knopf kam nie wieder. Jetzt: Zeitstempel, gilt 30 Tage (jeder
+// App-Start erneuert ihn) und zaehlt nur auf Plattformen mit beforeinstallprompt.
 const MERKER = "ah_app_installiert";
+export const MERKER_GILT_MS = 30 * 24 * 60 * 60 * 1000;
+const MIT_MELDUNG = new Set(["windows", "desktop", "android"]);
 
 function merken(wert) {
   try {
-    if (wert) window.localStorage.setItem(MERKER, "1");
+    if (wert) window.localStorage.setItem(MERKER, String(Date.now()));
     else window.localStorage.removeItem(MERKER);
   } catch { /* Speicher gesperrt: dann eben ohne Merker */ }
 }
 
-function gemerkt() {
-  try { return window.localStorage.getItem(MERKER) === "1"; } catch { return false; }
+function gemerkt(p) {
+  if (!MIT_MELDUNG.has(p)) return false;
+  try {
+    const seit = Number(window.localStorage.getItem(MERKER));
+    // Ein altes "1" (ohne Zeit) zaehlt nicht mehr — der naechste App-Start setzt es neu.
+    return Number.isFinite(seit) && seit > 1 && Date.now() - seit < MERKER_GILT_MS;
+  } catch { return false; }
 }
 
 /** Laeuft die Seite gerade als installierte App (eigenes Fenster)? */
@@ -107,7 +120,7 @@ export function installationsStand() {
   let art = null;
   if (laeuftAlsApp()) art = null;
   else if (ereignis) art = "direkt";
-  else if (!gemerkt() && p !== "keine") art = "anleitung";
+  else if (!gemerkt(p) && p !== "keine") art = "anleitung";
   stand = { art, plattform: p, edge: istEdge(), mac: istMac() };
   return stand;
 }

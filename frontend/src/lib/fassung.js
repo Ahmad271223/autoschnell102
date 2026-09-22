@@ -98,6 +98,22 @@ export function neueFassungLaden(ziel) {
   return true;
 }
 
+/**
+ * Wurde fuer die gemeldete Fassung schon einmal neu geladen (Merker)?
+ *
+ * Pruefbericht 20.09.2026 (K-09): Landet das Neuladen im Rollout-Fenster auf
+ * dem alten Server, kommt mit der naechsten Antwort dieselbe Meldung zurueck.
+ * Dann laeuft die Verteilung noch — der Hinweis sagt das, statt "neu" zu rufen.
+ */
+export function fassungSchonGeladen() {
+  if (zustand?.grund !== "fassung") return false;
+  try {
+    return window.sessionStorage.getItem(MERKER) === zustand.fassung;
+  } catch {
+    return false;
+  }
+}
+
 /** Nur fuer Tests. */
 export function _zuruecksetzen() {
   zustand = null;

@@ -25,6 +25,21 @@ import { hatUngespeichert } from "@/lib/ungespeichert";
 //   3. Sonst zeigt die Fehlergrenze "Neu laden".
 const NEU_GELADEN = "ah_seite_neu_geladen_um";
 const DATEI_IN_FEHLER = /(https?:[/][/][^ "')]+[.](?:js|css))/i;
+// Pruefbericht 20.09.2026 (K-11): laden() wartete ohne Zeitlimit. Hing die
+// Verbindung, griffen weder zweiter Versuch noch Neuladen noch Fehlergrenze,
+// und "Lade…" stand fuer immer. Ein Versuch gilt jetzt nach 20 s als
+// gescheitert (SeiteLaedt bietet ab 10 s selbst "Neu laden" an).
+const LADEN_ZEITLIMIT_MS = 20000;
+
+function mitZeitlimit(versprechen, ms = LADEN_ZEITLIMIT_MS) {
+  return new Promise((erfuellen, ablehnen) => {
+    const t = setTimeout(() => ablehnen(new Error("Zeitüberschreitung beim Laden der Seite")), ms);
+    versprechen.then(
+      (wert) => { clearTimeout(t); erfuellen(wert); },
+      (fehler) => { clearTimeout(t); ablehnen(fehler); },
+    );
+  });
+}
 
 async function zwischenspeicherErneuern(fehler) {
   const treffer = DATEI_IN_FEHLER.exec(String(fehler?.message || ""));
@@ -42,7 +57,7 @@ function seite(laden) {
     for (const warten of [0, 700]) {
       if (warten) await new Promise((weiter) => { setTimeout(weiter, warten); });
       try {
-        return await laden();
+        return await mitZeitlimit(laden());
       } catch (fehler) {
         letzter = fehler;
         await zwischenspeicherErneuern(fehler);
@@ -93,7 +108,7 @@ function Vorladen() {
   }, [user]);
   return null;
 }
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { useTheme } from "@/components/ThemeToggle";
 
@@ -101,7 +116,7 @@ import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { DriverAuthProvider } from "@/context/DriverContext";
 import { BuyerAuthProvider } from "@/context/BuyerContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
-import { startseite } from "@/lib/rollen";
+import { nichtGefundenZiel, startseite } from "@/lib/rollen";
 import AppLayout from "@/components/AppLayout";
 import FeatureGate from "@/components/FeatureGate";
 
@@ -179,6 +194,28 @@ function AppHome() {
 function WeiterleitungMitQuery({ nach }) {
   const { search } = useLocation();
   return <Navigate to={`${nach}${search}`} replace />;
+}
+
+// Pruefbericht 20.09.2026 (U-148): Unbekannte Adresse. Vorher <Navigate to="/">:
+// ein Angemeldeter mit Tippfehler in der Adresse landete auf der Werbeseite.
+// Jetzt eine kurze Meldung mit dem passenden Ausweg (lib/rollen.nichtGefundenZiel).
+function NichtGefunden() {
+  const { user, loading } = useAuth();
+  const { pathname } = useLocation();
+  if (loading) return <SeiteLaedt ganzeSeite />;
+  const ziel = nichtGefundenZiel(user, pathname);
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-3 px-6 text-center"
+         style={{ background: "var(--bg-app)", color: "var(--text-primary)" }} data-testid="nicht-gefunden">
+      <div className="text-lg font-bold tracking-tight">Seite nicht gefunden</div>
+      <div className="text-[13px] max-w-sm" style={{ color: "var(--text-secondary)" }}>
+        Unter dieser Adresse gibt es nichts{user ? " – vielleicht ein Tippfehler." : "."}
+      </div>
+      <Link to={ziel} replace className="apple-btn apple-btn-primary" data-testid="nicht-gefunden-link">
+        {ziel === "/login" ? "Zur Anmeldung" : "Zur Startseite"}
+      </Link>
+    </div>
+  );
 }
 
 export default function App() {
@@ -270,7 +307,8 @@ export default function App() {
               <Route path="settings" element={<AdminSettings />} />
             </Route>
 
-            <Route path="*" element={<Navigate to="/" replace />} />
+            {/* U-148: kein blindes <Navigate to="/"> mehr */}
+            <Route path="*" element={<NichtGefunden />} />
           </Routes>
           </Suspense>
           </NachladeFehler>

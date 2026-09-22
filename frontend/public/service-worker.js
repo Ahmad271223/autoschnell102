@@ -34,6 +34,9 @@
 // Die Offline-Seite prueft alle 10 s selbst, ob der Server wieder antwortet:
 // "online" feuert nur, wenn das Geraet sein Netz wiederfindet — nicht im
 // WLAN ohne Internet, hinter einem Hotel-Portal oder bei DNS-Ausfall.
+// Pruefbericht 20.09.2026 (K-16): neu geladen wird nur bei einer guten
+// Antwort (r.ok) — ein 502/503/52x im Rollout loeste sonst das Neuladen aus,
+// und danach stand die rohe Fehlerseite ohne den 10-s-Takt.
 const OFFLINE_SEITE = `<!doctype html>
 <html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -57,7 +60,7 @@ a{background:#ff3b30;color:#fff;text-decoration:none;font-weight:600;padding:12p
 addEventListener("online", function () { location.reload(); });
 setInterval(function () {
   if (document.visibilityState !== "visible") return;
-  fetch(location.href, { method: "HEAD", cache: "no-store" }).then(function () { location.reload(); }, function () {});
+  fetch(location.href, { method: "HEAD", cache: "no-store" }).then(function (r) { if (r.ok) location.reload(); }, function () {});
 }, 10000);
 </script>
 </body></html>`;

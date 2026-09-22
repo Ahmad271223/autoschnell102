@@ -6,6 +6,7 @@ und die vom Betreiber angelegten Konten prueften nur die Laenge. Jetzt:
 EINE Funktion fuer alle Rollen (Firma, Sucher, Fahrer, Kaeufer, Admin).
 
 Regeln:
+- kein Leerzeichen am Anfang oder Ende (Pruefbericht 20.09.2026, K-06)
 - mindestens 10 Zeichen, hoechstens 72 Bytes (bcrypt-Grenze — laengere
   Passwoerter wuerden still abgeschnitten)
 - mindestens einen Buchstaben UND eine Ziffer oder ein Sonderzeichen
@@ -101,6 +102,11 @@ def pruefe_passwort(pw: str, persoenlich=()) -> str:
     die nicht im Passwort stecken duerfen (Nachpruefung 15.09.2026)."""
     if pw is None or not isinstance(pw, str):
         raise ValueError("Passwort fehlt")
+    if pw != pw.strip():
+        # Pruefbericht 20.09.2026 (K-06): wie die Vorpruefung der Oberflaeche
+        # (frontend/src/lib/passwort.js) — ein Leerzeichen am Rand geht beim
+        # Abtippen oder Vorlesen verloren, das Passwort "klappt" dann nie.
+        raise ValueError("Passwort darf nicht mit einem Leerzeichen beginnen oder enden")
     if len(pw) < MIN_LAENGE:
         raise ValueError(f"Passwort muss mindestens {MIN_LAENGE} Zeichen lang sein")
     if len(pw.encode("utf-8")) > MAX_BYTES:

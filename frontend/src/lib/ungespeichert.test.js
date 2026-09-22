@@ -5,7 +5,7 @@
 import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hatUngespeichert, ungespeichertMelden, useUngespeichert } from "./ungespeichert";
+import { hatUngespeichert, ungespeichertMelden, ungespeichertVerwerfen, useUngespeichert } from "./ungespeichert";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -38,6 +38,19 @@ describe("ungespeichertMelden", () => {
     const e2 = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(e2);
     expect(e2.defaultPrevented).toBe(false);
+  });
+
+  it("U-80: nach dem Verwerfen (Sitzung beendet) haelt nichts mehr an", () => {
+    const aufheben = ungespeichertMelden();
+    ungespeichertMelden();
+    ungespeichertVerwerfen();
+    expect(hatUngespeichert()).toBe(false);
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(false);
+    // Das spaete Aufheben einer verworfenen Stelle stoert nichts.
+    aufheben();
+    expect(hatUngespeichert()).toBe(false);
   });
 });
 

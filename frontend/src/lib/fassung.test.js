@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  _zuruecksetzen, fassungAbonnieren, fassungMithoeren, fassungPruefen,
+  _zuruecksetzen, fassungAbonnieren, fassungMithoeren, fassungPruefen, fassungSchonGeladen,
   fassungsZeit, istNeuer, nachladenGescheitert, neueFassungLaden, veralteteFassung,
 } from "./fassung";
 import { ungespeichertMelden } from "./ungespeichert";
@@ -136,5 +136,18 @@ describe("neueFassungLaden", () => {
     expect(window.location.assign).not.toHaveBeenCalled();
     aufheben();
     expect(neueFassungLaden("/fahrer")).toBe(true);
+  });
+
+  it("K-09: fassungSchonGeladen kennt den Merker dieser Fassung", () => {
+    expect(fassungSchonGeladen()).toBe(false);          // nichts gemeldet
+    fassungPruefen(antwort(NEU), ALT);
+    expect(fassungSchonGeladen()).toBe(false);          // gemeldet, noch nie geladen
+    expect(neueFassungLaden("/app/termine")).toBe(true);
+    expect(fassungSchonGeladen()).toBe(true);           // Rollout laeuft noch
+    fassungPruefen(antwort(NOCH_NEUER), ALT);
+    expect(fassungSchonGeladen()).toBe(false);          // eine NOCH neuere: wieder frisch
+    _zuruecksetzen();
+    nachladenGescheitert();
+    expect(fassungSchonGeladen()).toBe(false);          // ohne Stempel nie
   });
 });

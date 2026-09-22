@@ -837,7 +837,11 @@ select option {
 
 /* FAB */
 .apple-fab {
-  position: fixed; right: 28px; bottom: 28px;
+  /* Pruefbericht 20.09.2026 (M-15): auf dem iPhone lag der Knopf unter dem
+     Home-Balken — safe-area wie bei der Fahrer-Tableiste. */
+  position: fixed;
+  right: calc(28px + env(safe-area-inset-right, 0px));
+  bottom: calc(28px + env(safe-area-inset-bottom, 0px));
   width: 56px; height: 56px;
   border-radius: 50%;
   background: linear-gradient(180deg, #0a84ff 0%, #0062cc 100%);

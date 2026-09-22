@@ -6,7 +6,7 @@
  * "Nur fuer Haendler-Accounts". Diese Tests halten fest, wer wohin darf.
  */
 import {
-  bereichVonPfad, bereichVonRolle, startseite, darfBereich, sicheresZiel,
+  bereichVonPfad, bereichVonRolle, startseite, darfBereich, sicheresZiel, nichtGefundenZiel,
   BEREICH_FIRMA, BEREICH_ADMIN, BEREICH_MARKT, BEREICH_FAHRER,
 } from "./rollen";
 
@@ -55,6 +55,40 @@ describe("Wohin gehoert wer", () => {
     expect(startseite(ADMIN)).toBe("/admin");
     expect(startseite(SUPER)).toBe("/admin");
     expect(startseite(KAEUFER)).toBe("/markt");
+  });
+
+  test("U-154: eine unbekannte Rolle gehoert nirgends hin", () => {
+    // Vorher: jede nicht genannte Rolle landete im Firmen-Bereich (/app/bestand).
+    for (const fremd of [{ role: "driver" }, { role: "" }, { role: undefined }, {}]) {
+      expect(bereichVonRolle(fremd)).toBeNull();
+      expect(startseite(fremd)).toBe("/login");
+      expect(darfBereich(fremd, BEREICH_FIRMA)).toBe(false);
+      expect(darfBereich(fremd, BEREICH_ADMIN)).toBe(false);
+      expect(sicheresZiel(fremd, "/app/bestand")).toBe("/login");
+    }
+  });
+});
+
+describe("U-148: Ausweg von einer unbekannten Adresse", () => {
+  test("Angemeldete kommen auf ihre Startseite, nicht auf die Werbeseite", () => {
+    expect(nichtGefundenZiel(SUCHER, "/app/vergleichh")).toBe("/app/vergleich");
+    expect(nichtGefundenZiel(CHEF, "/app/vertraeg")).toBe("/app/bestand");
+    expect(nichtGefundenZiel(SUPER, "/admin/nutzer")).toBe("/admin");
+    expect(nichtGefundenZiel(CHEF, "/irgendwas")).toBe("/app/bestand");
+  });
+
+  test("Fahrer- und Marktplatz-Adressen fuehren zu deren Einstieg", () => {
+    // Beide haben eine eigene Anmeldung — auch ohne Firmen-Konto nicht auf "/".
+    expect(nichtGefundenZiel(null, "/fahrer/protokol/7")).toBe("/fahrer");
+    expect(nichtGefundenZiel(CHEF, "/fahrer/x")).toBe("/fahrer");
+    expect(nichtGefundenZiel(null, "/markt/merklist")).toBe("/markt");
+  });
+
+  test("ohne Anmeldung: Firmen-/Admin-Adressen zur Anmeldung, sonst Startseite", () => {
+    expect(nichtGefundenZiel(null, "/app/termin")).toBe("/login");
+    expect(nichtGefundenZiel(null, "/admin/x")).toBe("/login");
+    expect(nichtGefundenZiel(null, "/abo/x")).toBe("/login");
+    expect(nichtGefundenZiel(null, "/tippfehler")).toBe("/");
   });
 });
 

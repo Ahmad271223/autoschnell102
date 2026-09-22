@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw, ServerOff, WifiOff } from "lucide-react";
 
 /*
@@ -31,9 +32,57 @@ export function verbindungsGrund(e) {
   return { status, detail: typeof d === "string" ? d : "" };
 }
 
-export default function VerbindungsFehler({ grund = null }) {
+/** K-21: Abstaende der automatischen Wiederholung in Sekunden; der letzte bleibt. */
+export const WIEDERHOLUNG_S = [5, 10, 20];
+
+/*
+ * Pruefbericht 20.09.2026 (K-21): Der einzige Ausweg war "Erneut versuchen"
+ * = Seite neu laden. Jetzt:
+ *  - `onRetry` (refresh() aus dem Anmelde-Kontext): die Anmeldung wird ohne
+ *    Neuladen erneut geprueft — von selbst nach 5, 10, 20 s (dann alle 20 s,
+ *    mit Countdown) und auf Klick.
+ *  - Kommt das Netz zurueck ("online"), sofort — auch ohne onRetry (dann
+ *    Neuladen wie bisher).
+ *  Ohne onRetry KEIN Takt: ein Neuladen im Takt wuerde die Meldung bei
+ *  jedem Versuch ersetzen und den Zaehler zuruecksetzen.
+ */
+export default function VerbindungsFehler({ grund = null, onRetry = null }) {
   const antwort = Boolean(grund?.status);
   const Icon = antwort ? ServerOff : WifiOff;
+  const automatisch = typeof onRetry === "function";
+  const [versuch, setVersuch] = useState(0);
+  const [rest, setRest] = useState(WIEDERHOLUNG_S[0]);
+  const laeuft = useRef(false);
+
+  // Nie zwei Versuche gleichzeitig (Takt + "online" + Klick).
+  const erneut = useCallback(async () => {
+    if (laeuft.current) return;
+    laeuft.current = true;
+    try {
+      if (typeof onRetry === "function") await onRetry();
+      else window.location.reload();
+    } catch { /* den Grund meldet der Kontext selbst (verbindungsfehler) */ }
+    finally { laeuft.current = false; }
+  }, [onRetry]);
+
+  useEffect(() => {
+    if (!automatisch) return undefined;
+    const warte = WIEDERHOLUNG_S[Math.min(versuch, WIEDERHOLUNG_S.length - 1)];
+    setRest(warte);
+    const takt = setInterval(() => setRest((r) => Math.max(0, r - 1)), 1000);
+    const timer = setTimeout(async () => {
+      await erneut();
+      setVersuch((v) => v + 1);      // naechste Stufe (nach Erfolg ist die Meldung ohnehin weg)
+    }, warte * 1000);
+    return () => { clearInterval(takt); clearTimeout(timer); };
+  }, [automatisch, versuch, erneut]);
+
+  useEffect(() => {
+    const zurueck = () => { erneut(); };
+    window.addEventListener("online", zurueck);
+    return () => window.removeEventListener("online", zurueck);
+  }, [erneut]);
+
   return (
     <div data-testid="verbindungsfehler" role="alert"
          className="min-h-screen flex items-center justify-center px-6"
@@ -56,12 +105,18 @@ export default function VerbindungsFehler({ grund = null }) {
             ? "Deine Anmeldung bleibt erhalten. Bitte versuche es gleich noch einmal."
             : "Deine Anmeldung bleibt erhalten. Prüfe die Internetverbindung."}
         </p>
-        <button type="button" onClick={() => window.location.reload()}
+        <button type="button" onClick={() => { erneut(); }}
                 data-testid="verbindungsfehler-erneut"
                 className="kinetic-button mt-6 inline-flex items-center gap-2 px-5 py-2.5 rounded-sm text-sm"
                 style={{ background: "var(--accent-red)", color: "var(--text-primary)" }}>
           <RotateCw size={14} aria-hidden="true" /> Erneut versuchen
         </button>
+        {automatisch && (
+          <p className="mt-3 text-xs" style={{ color: "var(--text-muted)" }}
+             data-testid="verbindungsfehler-countdown" aria-live="polite">
+            Nächster Versuch von selbst in {rest} s
+          </p>
+        )}
       </div>
     </div>
   );

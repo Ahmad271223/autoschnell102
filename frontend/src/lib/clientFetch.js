@@ -21,12 +21,14 @@ export function extensionReady(waitMs = 400) {
   return new Promise((resolve) => {
     if (_extReady) return resolve(true);
     try { window.postMessage({ __autoschnell: true, type: "PING" }, "*"); } catch (_) {}
-    const t = setTimeout(() => resolve(_extReady), waitMs);
     const onMsg = (e) => {
       if (e.source === window && e.data && e.data.__autoschnell && e.data.type === "EXT_READY") {
         clearTimeout(t); window.removeEventListener("message", onMsg); resolve(true);
       }
     };
+    // Pruefbericht 20.09.2026 (U-114): Der Zeitablauf liess den Hoerer haengen —
+    // je Vergleich mit needs_client_fetch blieb ein message-Listener zurueck.
+    const t = setTimeout(() => { window.removeEventListener("message", onMsg); resolve(_extReady); }, waitMs);
     window.addEventListener("message", onMsg);
   });
 }

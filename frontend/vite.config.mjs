@@ -35,6 +35,28 @@ function cspPlatzhalter(werte) {
   };
 }
 
+/**
+ * connect-src der CSP.
+ *
+ * Pruefbericht 20.09.2026 (K-08): REACT_APP_CSP_CONNECT war in Produktion
+ * leer, REACT_APP_BACKEND_URL davon unabhaengig — wer die Oberflaeche gegen
+ * eine fremde Backend-Adresse baute, bekam eine CSP, die genau diese Adresse
+ * sperrte. Jetzt: ohne ausdruecklichen Wert ist die Herkunft der Backend-
+ * Adresse der Standard; eine ungueltige Adresse bricht den Bau ab.
+ */
+export function cspConnectStandard(env, dev) {
+  if (env.REACT_APP_CSP_CONNECT !== undefined) return env.REACT_APP_CSP_CONNECT;
+  const standard = dev ? "http://localhost:8001" : "";
+  const backend = String(env.REACT_APP_BACKEND_URL || "").trim();
+  if (!backend) return standard;
+  let herkunft = "";
+  try { herkunft = new URL(backend).origin; } catch { herkunft = ""; }
+  if (!herkunft || herkunft === "null" || !/^https?:$/.test(new URL(backend).protocol)) {
+    throw new Error(`REACT_APP_BACKEND_URL ist keine gueltige http(s)-Adresse: "${backend}"`);
+  }
+  return dev ? `${standard} ${herkunft}` : herkunft;
+}
+
 function dateiname(info) {
   const name = (info.names && info.names[0]) || info.name || "";
   return name.endsWith(".css")
@@ -50,7 +72,8 @@ export default defineConfig(({ command, mode }) => {
   const alle = loadEnv(mode, WURZEL, "");
   const dev = command === "serve";
   const werte = {
-    REACT_APP_CSP_CONNECT: env.REACT_APP_CSP_CONNECT ?? (dev ? "http://localhost:8001" : ""),
+    // K-08: Standard aus REACT_APP_BACKEND_URL (siehe cspConnectStandard).
+    REACT_APP_CSP_CONNECT: cspConnectStandard(env, dev),
     REACT_APP_CSP_SCRIPT: env.REACT_APP_CSP_SCRIPT ?? (dev ? "'unsafe-eval' 'unsafe-inline'" : ""),
   };
 

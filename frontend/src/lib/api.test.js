@@ -4,11 +4,13 @@
  * und beim Laden von PDFs sah der Nutzer deshalb einen Fehler, obwohl der
  * Server weiterarbeitete. Diese Wege bekommen jetzt ein laengeres Zeitlimit.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  darfWiederholen, gehoertZumAktuellenToken, istLangeAktion,
+  ABRUF_ZEITUEBERSCHREITUNG, anmeldeAdresse, api, darfWiederholen, errMsg,
+  gehoertZumAktuellenToken, imGeschuetztenBereich, istAbruf, istLangeAktion,
   LANGE_AKTION_MS, wiederholenNachMs, WIEDERHOLEN_MAX,
 } from "./api";
+import { hatUngespeichert, ungespeichertMelden } from "./ungespeichert";
 
 describe("istLangeAktion", () => {
   it("gilt fuer jeden Datei-Abruf (PDF, Bilder)", () => {
@@ -38,6 +40,108 @@ describe("istLangeAktion", () => {
   it("bleibt unter dem Limit von nginx (300 s)", () => {
     expect(LANGE_AKTION_MS).toBeGreaterThan(60000);
     expect(LANGE_AKTION_MS).toBeLessThan(300000);
+  });
+
+  it("DP-04: gibt VOR dem Cloudflare-Abbruch (~100 s) auf — sonst kommt die rohe 524-Seite", () => {
+    expect(LANGE_AKTION_MS).toBeLessThan(100000);
+  });
+});
+
+/**
+ * Pruefbericht 20.09.2026 (DP-04): Laeuft ein Fahrzeug-Abruf ins Zeitlimit,
+ * arbeitet der Server (Apify) im Hintergrund weiter — die Meldung sagt das.
+ */
+describe("DP-04: Zeitueberschreitung beim Abruf", () => {
+  it("erkennt die Abruf-Wege", () => {
+    expect(istAbruf({ url: "/mobile/compare" })).toBe(true);
+    expect(istAbruf({ url: "/listings/check" })).toBe(true);
+    expect(istAbruf({ url: "/listings/check/j1?x=1" })).toBe(true);
+    expect(istAbruf({ url: "/listings/ingest" })).toBe(true);
+    expect(istAbruf({ url: "/contracts" })).toBe(false);
+    expect(istAbruf({ url: "/mobile/comparex" })).toBe(false);
+    expect(istAbruf({})).toBe(false);
+    expect(istAbruf(undefined)).toBe(false);
+  });
+
+  it("nennt beim Abruf das Weiterladen im Hintergrund, sonst die allgemeine Meldung", () => {
+    const zeit = (url) => ({ code: "ECONNABORTED", message: "timeout of 95000ms exceeded", config: { url } });
+    expect(errMsg(zeit("/mobile/compare"))).toBe(ABRUF_ZEITUEBERSCHREITUNG);
+    expect(errMsg(zeit("/mobile/compare"))).toMatch(/in einer Minute/);
+    expect(errMsg(zeit("/contracts"))).toMatch(/nicht rechtzeitig geantwortet/);
+    expect(errMsg({ code: "ECONNABORTED", message: "timeout" })).toMatch(/nicht rechtzeitig geantwortet/);
+  });
+});
+
+/**
+ * Pruefbericht 20.09.2026 (U-147/U-151/U-80): beendete Sitzung.
+ *  U-147  /abo zaehlt wie /app und /admin (Bereich aus lib/rollen).
+ *  U-151  Rueckweg (next=) mit Query und Fragment.
+ *  U-80   Die Rueckfrage "ungespeichert" haelt die Umleitung nicht auf.
+ */
+describe("U-147: geschuetzter Bereich fuer die Umleitung", () => {
+  it("deckt /app, /admin und /abo ab — nicht die oeffentlichen Seiten", () => {
+    for (const p of ["/app", "/app/vergleich", "/admin", "/admin/users/5", "/abo", "/abo/x"]) {
+      expect(imGeschuetztenBereich(p)).toBe(true);
+    }
+    for (const p of ["/", "/login", "/start", "/fahrer", "/markt", "/appartements", "/impressum"]) {
+      expect(imGeschuetztenBereich(p)).toBe(false);
+    }
+  });
+});
+
+describe("U-151: Anmeldeadresse mit Rueckweg", () => {
+  it("nimmt Pfad, Query und Fragment mit", () => {
+    expect(anmeldeAdresse({ pathname: "/app/akte/5", search: "?tab=kosten", hash: "#oben" }))
+      .toBe(`/login?reason=session&next=${encodeURIComponent("/app/akte/5?tab=kosten#oben")}`);
+    expect(anmeldeAdresse({ pathname: "/abo" })).toBe("/login?reason=session&next=%2Fabo");
+  });
+});
+
+describe("401-Abfaenger: Umleitung zur Anmeldung", () => {
+  let echt;
+  beforeEach(() => {
+    echt = window.location;
+    delete window.location;
+    window.location = { pathname: "/abo", search: "?von=test", hash: "", href: "" };
+    sessionStorage.clear();
+    localStorage.clear();
+  });
+  afterEach(() => {
+    window.location = echt;
+    sessionStorage.clear();
+  });
+
+  /** Der eigentliche Abfaenger ist der zuletzt registrierte (nach fassungMithoeren). */
+  const abfaenger = () => {
+    const alle = api.interceptors.response.handlers.filter((h) => h && h.rejected);
+    return alle[alle.length - 1].rejected;
+  };
+  const fehler401 = (url) => {
+    const e = new Error("Request failed with status code 401");
+    e.config = { url, headers: { Authorization: "Bearer T" } };
+    e.response = { status: 401, data: { detail: "Sitzung beendet" }, headers: {} };
+    return e;
+  };
+
+  it("auf /abo: Token weg, Grund gemerkt, Umleitung MIT Rueckweg, Rueckfrage aufgehoben", async () => {
+    sessionStorage.setItem("ah_token", "T");
+    const aufheben = ungespeichertMelden();
+    expect(hatUngespeichert()).toBe(true);
+    const err = fehler401("/bestand");
+    await expect(abfaenger()(err)).rejects.toBe(err);
+    expect(sessionStorage.getItem("ah_token")).toBeNull();
+    expect(sessionStorage.getItem("ah_abmeldegrund")).toBe("Sitzung beendet");
+    expect(window.location.href).toBe(`/login?reason=session&next=${encodeURIComponent("/abo?von=test")}`);
+    expect(hatUngespeichert()).toBe(false);      // U-80
+    aufheben();
+  });
+
+  it("auf einer oeffentlichen Seite: keine Umleitung", async () => {
+    window.location.pathname = "/impressum";
+    sessionStorage.setItem("ah_token", "T");
+    const err = fehler401("/bestand");
+    await expect(abfaenger()(err)).rejects.toBe(err);
+    expect(window.location.href).toBe("");
   });
 });
 

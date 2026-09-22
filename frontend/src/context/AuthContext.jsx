@@ -8,6 +8,19 @@ import { verbindungsGrund } from "@/components/VerbindungsFehler";
 const AuthCtx = createContext(null);
 
 /*
+ * Pruefbericht 20.09.2026 (U-149): /auth/me lief nur beim Laden der App.
+ * Eine beendete Sitzung (neue Anmeldung woanders, Sperre) fiel einem Sucher
+ * ausserhalb der Vergleichsseite erst beim naechsten Klick auf. Jetzt ein
+ * leichter Takt fuer alle Rollen: alle 60 s und beim Sichtbarwerden des Tabs
+ * (fruehestens 15 s nach der letzten Pruefung). Das Ergebnis wird NICHT in
+ * den Zustand geschrieben (kein Neuzeichnen der ganzen App im Takt) — eine
+ * 401/403 loest ueber den Abfaenger in lib/api die bestehende Umleitung aus.
+ * Im Hintergrund-Tab wird nichts gesendet.
+ */
+export const SITZUNG_TAKT_MS = 60000;
+export const SITZUNG_SICHTBAR_MIN_MS = 15000;
+
+/*
  * Rollenpruefung 22.09.2026 (RP-557): "bekanntes Geraet". Nach der ersten
  * erfolgreichen Anmeldung schickt der Server einen zufaelligen Geraete-
  * Schluessel (geraet_id); das Geraet legt ihn ab und schickt ihn bei jeder
@@ -157,6 +170,29 @@ export const AuthProvider = ({ children }) => {
     aboNeuLadenAnmelden(() => { refresh(); });
     return () => aboNeuLadenAnmelden(null);
   }, [refresh]);
+
+  // U-149: Sitzungs-Takt (siehe oben). Abhaengig nur von "angemeldet oder
+  // nicht", damit ein refresh() den Takt nicht jedes Mal neu startet.
+  const angemeldet = Boolean(user);
+  useEffect(() => {
+    if (!angemeldet || typeof document === "undefined") return undefined;
+    let zuletzt = Date.now();
+    const pruefen = () => {
+      if (document.visibilityState === "hidden") return;
+      zuletzt = Date.now();
+      // 401/403 erledigt der Abfaenger in lib/api; Netzfehler: naechster Takt.
+      api.get("/auth/me").catch(() => {});
+    };
+    const takt = setInterval(pruefen, SITZUNG_TAKT_MS);
+    const sichtbar = () => {
+      if (document.visibilityState === "visible" && Date.now() - zuletzt >= SITZUNG_SICHTBAR_MIN_MS) pruefen();
+    };
+    document.addEventListener("visibilitychange", sichtbar);
+    return () => {
+      clearInterval(takt);
+      document.removeEventListener("visibilitychange", sichtbar);
+    };
+  }, [angemeldet]);
 
   // Nach dem Token noch /auth/me: erst wenn das klappt, ist die Anmeldung
   // wirklich durch. Sonst einen Fehler MIT dem Text des Servers werfen —

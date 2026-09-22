@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { RefreshCw, X } from "lucide-react";
-import { fassungAbonnieren, neueFassungLaden, veralteteFassung } from "@/lib/fassung";
+import { fassungAbonnieren, fassungSchonGeladen, neueFassungLaden, veralteteFassung } from "@/lib/fassung";
 
 /**
  * Runde 31 (12.09.2026): Hinweis "Neue Version verfuegbar".
@@ -13,6 +13,13 @@ import { fassungAbonnieren, neueFassungLaden, veralteteFassung } from "@/lib/fas
  *    verlassen, statt des Wechsels im Speicher laedt der Browser die
  *    Zielseite frisch. Geht nur einmal je Fassung, und nie, solange etwas
  *    Ungespeichertes gemeldet ist.
+ *
+ * Pruefbericht 20.09.2026 (K-09): Der Klick lief an neueFassungLaden vorbei
+ * (nur reload, ohne Merker). Landete das Neuladen im Rollout auf dem alten
+ * Server, kam das Band mit der naechsten Antwort unveraendert zurueck. Jetzt
+ * setzt auch der Klick den Merker; traegt er schon diese Fassung, steht
+ * "wird gerade verteilt" — der Knopf laedt dann schlicht neu (Klick = Geste
+ * des Nutzers, Rueckfrage bei Ungespeichertem stellt der Browser).
  */
 export default function FassungsHinweis() {
   const [stand, setStand] = useState(veralteteFassung);
@@ -31,6 +38,10 @@ export default function FassungsHinweis() {
   if (!stand) return null;
   const kennung = stand.fassung || stand.grund;
   if (spaeter === kennung) return null;
+  const verteilt = fassungSchonGeladen();
+  const aktualisieren = () => {
+    if (!neueFassungLaden(pathname + search + hash)) window.location.reload();
+  };
 
   return (
     <div role="status" data-testid="fassungs-hinweis"
@@ -43,9 +54,11 @@ export default function FassungsHinweis() {
            color: "var(--text-strong)",
          }}>
       <RefreshCw size={14} className="shrink-0" style={{ color: "var(--accent-red)" }} />
-      <span className="whitespace-nowrap">Neue Version verfügbar</span>
+      <span className="whitespace-nowrap" data-testid="fassungs-hinweis-text">
+        {verteilt ? "Neue Version wird gerade verteilt – gleich noch einmal" : "Neue Version verfügbar"}
+      </span>
       <button type="button" data-testid="fassungs-hinweis-laden"
-              onClick={() => window.location.reload()}
+              onClick={aktualisieren}
               className="rounded-full px-3 py-1 text-[12.5px] font-semibold text-white whitespace-nowrap"
               style={{ background: "var(--accent-red)" }}>
         Aktualisieren

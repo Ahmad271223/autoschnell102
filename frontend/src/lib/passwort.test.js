@@ -21,4 +21,10 @@ describe("K-04: Sperrliste wie am Server", () => {
   it("Vorschläge bestehen die Prüfung", () => {
     for (let i = 0; i < 20; i++) expect(passwortProblem(passwortVorschlag())).toBe("");
   });
+  it("K-06: die Längenmeldung nennt Bytes (Umlaute zählen doppelt), wie am Server", () => {
+    // 40 Umlaute = 80 Bytes > 72, aber nur 40 Zeichen.
+    expect(passwortProblem(`${"ä".repeat(40)}1`)).toMatch(/72 Bytes/);
+    expect(passwortProblem("Sommerregen2026!".repeat(4))).toBe("");   // 64 Bytes: in Ordnung
+    expect(passwortProblem(" Sommerregen2026!")).toMatch(/Leerzeichen/);
+  });
 });

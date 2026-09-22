@@ -37,12 +37,16 @@ export function bereichVonPfad(pfad) {
   return null;
 }
 
-/** In welchen Bereich gehoert dieses Konto? */
+/** In welchen Bereich gehoert dieses Konto?
+ *  Pruefbericht 20.09.2026 (U-154): nur bekannte Rollen bekommen einen
+ *  Bereich — eine unbekannte Rolle landete vorher stillschweigend im
+ *  Firmen-Bereich. */
 export function bereichVonRolle(user) {
   if (!user) return null;
   if (user.role === "admin" || user.is_super_admin) return BEREICH_ADMIN;
   if (user.role === "b2b_buyer") return BEREICH_MARKT;
-  return BEREICH_FIRMA;                   // dealer und sucher
+  if (user.role === "dealer" || user.role === "sucher") return BEREICH_FIRMA;
+  return null;
 }
 
 /** Wo gehoert dieses Konto nach der Anmeldung hin? */
@@ -51,7 +55,25 @@ export function startseite(user) {
   if (user.role === "admin" || user.is_super_admin) return "/admin";
   if (user.role === "b2b_buyer") return "/markt";
   if (user.role === "sucher") return "/app/vergleich";
-  return "/app/bestand";                  // Haendler-Chef
+  if (user.role === "dealer") return "/app/bestand";   // Haendler-Chef
+  return "/login";                        // U-154: unbekannte Rolle
+}
+
+/**
+ * Wohin fuehrt der Ausweg von einer unbekannten Adresse?
+ *
+ * Pruefbericht 20.09.2026 (U-148): Ein Tippfehler in der Adresse schickte
+ * auch Angemeldete auf die Werbe-Startseite. Jetzt: Angemeldete auf ihre
+ * Startseite; Fahrer- und Marktplatz-Adressen (eigene Anmeldung, nicht im
+ * Firmen-Kontext) auf deren Einstieg; Firmen-/Admin-Adressen ohne Anmeldung
+ * auf die Anmeldung; alles andere auf die Startseite.
+ */
+export function nichtGefundenZiel(user, pfad) {
+  const bereich = bereichVonPfad(pfad);
+  if (bereich === BEREICH_FAHRER) return "/fahrer";
+  if (bereich === BEREICH_MARKT) return "/markt";
+  if (user) return startseite(user);
+  return bereich ? "/login" : "/";
 }
 
 /** Darf dieses Konto diesen Bereich betreten? */

@@ -39,6 +39,18 @@ export function hatUngespeichert() {
   return offen.size > 0;
 }
 
+/**
+ * Pruefbericht 20.09.2026 (U-80): Die Sitzung ist beendet (401 / Firma
+ * gesperrt), lib/api leitet hart zur Anmeldung um. Die Rueckfrage vor dem
+ * Verlassen haette den Nutzer dabei ohne Token auf der Seite festgehalten —
+ * der Vertragsentwurf liegt ohnehin gesichert im sessionStorage (RP-412).
+ * Hebt alle Meldungen und die Rueckfrage auf; ab jetzt darf neu geladen werden.
+ */
+export function ungespeichertVerwerfen() {
+  offen.clear();
+  if (typeof window !== "undefined") window.removeEventListener("beforeunload", warnen);
+}
+
 export const VERLASSEN_FRAGE = "Es gibt ungespeicherte Änderungen auf dieser Seite.\n"
   + "Seite trotzdem verlassen? Die Eingaben gehen dann verloren.";
 

@@ -34,16 +34,19 @@ export function filterOeffnen(eintraege, { automatisch = false } = {}) {
   }
 
   const labels = blockiert.map((e) => e.label || "Filter");
+  // Pruefbericht 20.09.2026 (K-22): auch im Automatik-Fall die Portale nennen,
+  // und am Knopf sagen, dass danach noch eines aussteht ("1 von 2").
   const titel = automatisch
-    ? "Automatisches Öffnen vom Browser blockiert"
+    ? `Automatisches Öffnen vom Browser blockiert: ${labels.join(" und ")}`
     : `${labels.join(" und ")} vom Browser blockiert`;
+  const knopf = labels.length > 1 ? `${labels[0]} öffnen (1 von ${labels.length})` : `${labels[0]} öffnen`;
   // Feste id: jeder weitere Aufruf ersetzt den Hinweis, statt zu stapeln.
   toast.warning(titel, {
     id: FILTER_TOAST_ID,
     duration: 20000,
     description: POPUP_ERLAUBEN_HINWEIS,
     action: {
-      label: `${labels[0]} öffnen`,
+      label: knopf,
       onClick: (event) => {
         const rest = filterOeffnen(blockiert);
         // sonner schliesst den Hinweis nach dem Klick — bleibt noch etwas

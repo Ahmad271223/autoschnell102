@@ -4,6 +4,8 @@ import axios from "axios";
 import { TOKEN_APP, tokenErneuern, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
 import { schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { blobOeffnen } from "@/lib/dateiOeffnen";
+import { BEREICH_ADMIN, BEREICH_FIRMA, bereichVonPfad } from "@/lib/rollen";
+import { ungespeichertVerwerfen } from "@/lib/ungespeichert";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND}/api`;
@@ -25,7 +27,23 @@ fassungMithoeren(api);
 // eine Anfrage nach rund 100 s mit HTTP 524. Dieses Limit wirkt also als
 // Netz fuer den Browser, nicht als Verlaengerung darueber hinaus — es
 // verhindert vor allem, dass der Browser VOR dem Server aufgibt.
-export const LANGE_AKTION_MS = 180000;
+//
+// Pruefbericht 20.09.2026 (DP-04): 180 s lagen ueber dem Cloudflare-Abbruch —
+// der Nutzer bekam bei langsamen Abrufen die rohe 524-Seite statt einer
+// Meldung. Jetzt 95 s: der Browser gibt knapp VOR Cloudflare auf und zeigt
+// die deutsche Meldung (errMsg); der Server arbeitet im Hintergrund weiter.
+export const LANGE_AKTION_MS = 95000;
+
+/** DP-04: Meldung, wenn ein Fahrzeug-Abruf ins Zeitlimit laeuft. */
+export const ABRUF_ZEITUEBERSCHREITUNG =
+  "Der Abruf dauert zu lange — bitte in einer Minute noch einmal versuchen; "
+  + "der Link wird im Hintergrund weitergeladen.";
+
+/** Ist das ein Fahrzeug-Abruf (der Server laedt den Link im Hintergrund weiter)? */
+export function istAbruf(config = {}) {
+  const pfad = String(config?.url || "").split("?")[0];
+  return /^\/(mobile\/compare|listings\/(check|ingest|resolve))(\/|$)/.test(pfad);
+}
 
 /** Braucht diese Anfrage das lange Zeitlimit? (rein, damit testbar) */
 export function istLangeAktion(config = {}) {
@@ -94,6 +112,43 @@ export function istFirmensperre(err) {
   if (!r || r.status !== 403) return false;
   const kopf = r.headers?.["x-sperre"] ?? r.headers?.["X-Sperre"];
   return String(kopf || "") === "firma";
+}
+
+/**
+ * Liegt diese Adresse in einem Bereich, den nur ein angemeldetes Firmen-
+ * oder Betreiber-Konto sieht? Dann fuehrt eine beendete Sitzung zur Anmeldung.
+ *
+ * Pruefbericht 20.09.2026 (U-147): Vorher zaehlten nur /app und /admin —
+ * auf /abo wurde der Token zwar geloescht, aber weder Grund gemerkt noch
+ * umgeleitet. Die Bereichszuordnung kommt jetzt aus lib/rollen (deckt /abo ab).
+ */
+export function imGeschuetztenBereich(pfad) {
+  return [BEREICH_FIRMA, BEREICH_ADMIN].includes(bereichVonPfad(pfad));
+}
+
+/**
+ * Adresse der Anmeldung nach einer beendeten Sitzung — MIT Rueckweg.
+ *
+ * Pruefbericht 20.09.2026 (U-151): Vorher nur "/login?reason=session"; nach
+ * der neuen Anmeldung landete man auf der Startseite statt dort, wo man war.
+ * Login.jsx prueft `next` ueber sicheresZiel (nur eigene, passende Ziele).
+ */
+export function anmeldeAdresse(loc = window.location) {
+  const ziel = `${loc.pathname || ""}${loc.search || ""}${loc.hash || ""}`;
+  return `/login?reason=session&next=${encodeURIComponent(ziel)}`;
+}
+
+/**
+ * Zur Anmeldung umleiten, weil die Sitzung beendet ist.
+ *
+ * Pruefbericht 20.09.2026 (U-80): Solange eine Stelle "ungespeichert"
+ * meldete, fragte der Browser vor dieser Umleitung nach — wer "bleiben"
+ * waehlte, stand ohne Token da. Die Sitzung ist weg und der Entwurf liegt
+ * gesichert (RP-412), also die Rueckfrage aufheben und dann umleiten.
+ */
+function zurAnmeldung() {
+  ungespeichertVerwerfen();
+  window.location.href = anmeldeAdresse(window.location);
 }
 
 /**
@@ -227,10 +282,9 @@ api.interceptors.response.use(
       if (gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_APP)) && tokenLesen(TOKEN_APP)) {
         tokenLoeschen(TOKEN_APP);
         abmeldegrundMerken(err?.response?.data?.detail);
-        const pfad = window.location.pathname;
-        if (pfad.startsWith("/app") || pfad.startsWith("/admin")) {
-          window.location.href = "/login?reason=session";
-        }
+        // U-147: ueber die Bereichszuordnung (deckt /abo ab), U-80/U-151: ohne
+        // Rueckfrage und mit Rueckweg.
+        if (imGeschuetztenBereich(window.location.pathname)) zurAnmeldung();
       }
       return Promise.reject(err);
     }
@@ -244,7 +298,8 @@ api.interceptors.response.use(
       if (loestAbmeldungAus(url)) {
         tokenLoeschen(TOKEN_APP);
         const pfad = window.location.pathname;
-        const imBereich = pfad.startsWith("/app") || pfad.startsWith("/admin");
+        // U-147: /app, /admin UND /abo (lib/rollen entscheidet).
+        const imBereich = imGeschuetztenBereich(pfad);
         // /start (Einstieg der installierten App, 09/2026) leitet selbst
         // weiter — den Grund trotzdem merken, damit die Anmeldung ihn zeigt.
         if (imBereich || pfad === "/start") {
@@ -254,7 +309,8 @@ api.interceptors.response.use(
           // Logs), sondern nur fuer diesen Tab.
           abmeldegrundMerken(err?.response?.data?.detail);
         }
-        if (imBereich) window.location.href = "/login?reason=session";
+        // U-80/U-151: ohne Rueckfrage, mit Rueckweg (next=).
+        if (imBereich) zurAnmeldung();
       }
     }
     return Promise.reject(err);
@@ -295,6 +351,9 @@ export const errMsg = (err, fallback = "Ein Fehler ist aufgetreten") => {
   if (err && !err.response) {
     const code = String(err.code || "");
     if (code === "ECONNABORTED" || code === "ETIMEDOUT" || /timeout/i.test(String(err.message || ""))) {
+      // DP-04: Beim Fahrzeug-Abruf laeuft der Server (Apify) im Hintergrund
+      // weiter — der zweite Versuch in einer Minute trifft meist den Cache.
+      if (istAbruf(err.config)) return ABRUF_ZEITUEBERSCHREITUNG;
       return "Der Server hat nicht rechtzeitig geantwortet — bitte gleich noch einmal versuchen.";
     }
     if (code === "ERR_NETWORK" || String(err.message || "") === "Network Error") {

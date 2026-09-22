@@ -1,10 +1,11 @@
 import {
-  _zuruecksetzenFuerTests, installationsStand, installieren, istEdge, istMac, plattform,
+  _zuruecksetzenFuerTests, installationsStand, installieren, istEdge, istMac, MERKER_GILT_MS, plattform,
 } from "./installation";
 
 const CHROME_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 const SAFARI_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
 const FIREFOX_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0";
+const FIREFOX_ANDROID = "Mozilla/5.0 (Android 14; Mobile; rv:130.0) Gecko/130.0 Firefox/130.0";
 
 describe("plattform", () => {
   test.each([
@@ -73,8 +74,24 @@ describe("Installations-Stand", () => {
 
   test("hier schon installiert (Merker): kein Knopf im Browser-Tab", () => {
     browser(CHROME_WIN);
-    window.localStorage.setItem("ah_app_installiert", "1");
+    window.localStorage.setItem("ah_app_installiert", String(Date.now()));
     expect(installationsStand().art).toBe(null);
+  });
+
+  test("K-13: ein alter Merker (30 Tage) oder das fruehere '1' zaehlt nicht mehr", () => {
+    browser(CHROME_WIN);
+    window.localStorage.setItem("ah_app_installiert", String(Date.now() - MERKER_GILT_MS - 1000));
+    expect(installationsStand().art).toBe("anleitung");
+    _zuruecksetzenFuerTests();
+    window.localStorage.setItem("ah_app_installiert", "1");
+    expect(installationsStand().art).toBe("anleitung");
+  });
+
+  test("K-13: Firefox/Android kennt beforeinstallprompt nicht — der Merker zaehlt dort nie", () => {
+    // Sonst blieb der Knopf nach einer Deinstallation fuer immer weg.
+    browser(FIREFOX_ANDROID, 5);
+    window.localStorage.setItem("ah_app_installiert", String(Date.now()));
+    expect(installationsStand().art).toBe("anleitung");
   });
 
   test("laeuft als App (eigenes Fenster): kein Knopf", () => {
@@ -92,13 +109,15 @@ describe("Installations-Stand", () => {
     await expect(installieren()).resolves.toBe("angenommen");
     expect(e.prompt).toHaveBeenCalledTimes(1);
     window.dispatchEvent(new Event("appinstalled"));
-    expect(window.localStorage.getItem("ah_app_installiert")).toBe("1");
+    // K-13: Zeitstempel statt "1"
+    const merker = Number(window.localStorage.getItem("ah_app_installiert"));
+    expect(merker).toBeGreaterThan(Date.now() - 5000);
     expect(installationsStand().art).toBe(null);  // Chrome-UA: ohne Merker waere es "anleitung"
   });
 
   test("abgelehnt: Meldung verbraucht, meldet sich der Browser neu, gilt sie wieder", async () => {
     browser(CHROME_WIN);
-    window.localStorage.setItem("ah_app_installiert", "1");
+    window.localStorage.setItem("ah_app_installiert", String(Date.now()));
     const e = meldung("dismissed");
     window.dispatchEvent(e);
     // Der Browser bietet die Installation an -> hier ist sie NICHT installiert.
