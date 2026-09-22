@@ -414,18 +414,10 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
 
 def _autoscout_tueren(wert) -> Optional[Tuple[int, int]]:
-    """mobile.de-Tuerenschluessel (TWO_OR_THREE …) oder Zahl -> (von, bis)."""
-    if wert in (None, ""):
-        return None
-    s = str(wert).strip().upper()
-    bereiche = {"TWO_OR_THREE": (2, 3), "FOUR_OR_FIVE": (4, 5), "SIX_OR_SEVEN": (6, 7)}
-    if s in bereiche:
-        return bereiche[s]
-    m = re.match(r"(\d)", s)
-    if m:
-        n = int(m.group(1))
-        return (n, n) if 1 <= n <= 7 else None
-    return None
+    """Tuerenangabe (Code, "4/5" oder Zahl) -> (von, bis). S-19: ueber die
+    zentrale Zuordnung — "4/5" ergab vorher (4, 4)."""
+    from fahrzeug_codes import tueren_bereich
+    return tueren_bereich(wert)
 
 
 # Runde 24 (11.09.2026): Die Zuordnung mobile.de-Kategorie -> AutoScout24
@@ -472,6 +464,13 @@ def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
     # oder sie ist unbekannt -> sagen statt still ohne Filter zu suchen.
     from fahrzeug_codes import filter_hinweise
     hinweise += filter_hinweise(vehicle, rules)
+    # Pruefbericht 20.09.2026 (S-23): Neufahrzeug ohne Erstzulassung — der
+    # Jahresfilter faellt in beiden Links weg, das soll der Sucher wissen.
+    fr_mode = (rules.get("first_registration") or {}).get("mode", "older_exact")
+    if (vehicle or {}).get("neufahrzeug") and not (vehicle or {}).get("first_registration") \
+            and fr_mode not in ("ignore", "any", "year_range"):
+        hinweise.append("Neufahrzeug ohne Erstzulassung im Inserat — beide Links suchen "
+                        "ohne Erstzulassungs-Filter.")
     return hinweise
 
 
@@ -608,7 +607,10 @@ def parse_autoscout_item(item: dict, item_id: str,
     Der Actor liefert flache Felder mit deutschen Werten ("Schaltgetriebe",
     "Benzin", "242.000 km") und fertige Bild-URLs — deutlich einfacher als
     bei mobile.de."""
-    from mobile_service import _apify_leistung, _apify_zahl, telefon_aus
+    from mobile_service import (_apify_html_zu_text, _apify_leistung, _apify_zahl,
+                                telefon_aus)
+    from fahrzeug_codes import tueren_text
+    from kleinanzeigen_service import _teile_ausserhalb_klammern
 
     adresse = item.get("address") or {}
     kw, ps = _apify_leistung(item.get("power"))
@@ -632,22 +634,46 @@ def parse_autoscout_item(item: dict, item_id: str,
     # S-17: eine Zeichenkette ist EINE Nummer (vorher: ihr erstes Zeichen).
     telefon = telefon_aus(item.get("phones"))
 
-    beschreibung = (item.get("descriptionText") or "").strip()
-    if not beschreibung and item.get("description"):
-        import html as _h
-        beschreibung = _h.unescape(re.sub(r"<[^>]+>", " ", item["description"])).strip()
+    # Pruefbericht 20.09.2026 (S-28): description (HTML) zuerst — dort stehen
+    # die Umbrueche (<br>/<li>); descriptionText klebt alle Zeilen aneinander.
+    beschreibung = _apify_html_zu_text(item.get("description") or "")
+    if not beschreibung:
+        beschreibung = (item.get("descriptionText") or "").strip()
 
     # comfort/media/safety/extras: je nach Inserat Liste oder Text.
+    # S-21: nicht innerhalb von Klammern trennen ("Audiosystem (Touchscreen,
+    # MP3)" ist EIN Merkmal), Dubletten weg, Obergrenze wie Kleinanzeigen.
+    from kleinanzeigen_api import MAX_MERKMALE
     features: list = []
+    gesehen: set = set()
+
+    def _merkmal(text) -> None:
+        t = str(text or "").strip()
+        if not t or t.casefold() in gesehen or len(features) >= MAX_MERKMALE:
+            return
+        gesehen.add(t.casefold())
+        features.append(t)
+
     for k in ("comfort", "media", "safety", "extras"):
         v = item.get(k)
         if isinstance(v, list):
-            features.extend(str(x) for x in v if x)
+            for x in v:
+                _merkmal(x)
         elif isinstance(v, str) and v.strip():
-            features.extend(t.strip() for t in v.split(",") if t.strip())
+            for t in _teile_ausserhalb_klammern(v):
+                _merkmal(t)
 
     detail_url = (item.get("url") or url or "").split("?")[0]
+    # S-29: paint als dritter Rueckfall — Platzhalter ("Andere"/"Other") nicht.
     farbe = (item.get("colour") or item.get("manufacturerColour") or "").strip()
+    if not farbe:
+        paint = str(item.get("paint") or "").strip()
+        if paint.casefold() not in ("", "andere", "other", "sonstige", "sonstiges"):
+            farbe = paint
+
+    # S-24: einmal filtern UND Dubletten entfernen; image_count zaehlt die Liste.
+    bilder = list(dict.fromkeys(u for u in item.get("images") or []
+                                if isinstance(u, str) and u.startswith("http")))
 
     preis = item.get("rawPrice")
     if not isinstance(preis, (int, float)):
@@ -676,7 +702,7 @@ def parse_autoscout_item(item: dict, item_id: str,
         "power_kw": kw,
         "power_ps": ps,
         "displacement": _apify_zahl(item.get("engineSize")),
-        "doors": item.get("doors") or None,
+        "doors": tueren_text(item.get("doors")),                  # S-19
         "seats": _apify_zahl(item.get("seats")),
         "color": farbe or None,
         "vin": None,
@@ -691,6 +717,11 @@ def parse_autoscout_item(item: dict, item_id: str,
         "description": beschreibung,
         "list_price": float(preis) if preis is not None else None,
         "currency": item.get("currency") or "EUR",
+        # S-09: VB und MwSt-Ausweis (isPriceDeductable = MwSt. ausweisbar)
+        "price_type": "NEGOTIABLE" if item.get("isPriceNegotiable") is True else None,
+        "price_negotiable": item.get("isPriceNegotiable") is True,
+        "mwst_ausweisbar": (item["isPriceDeductable"]
+                            if isinstance(item.get("isPriceDeductable"), bool) else None),
         "seller_name": verkaeufer,
         # RP-444: Verkaufsberater eines Haendlers (nur Information, nie Vertragspartei)
         "seller_ansprechpartner": ansprechpartner,
@@ -701,11 +732,9 @@ def parse_autoscout_item(item: dict, item_id: str,
         "seller_city": adresse.get("city") or None,
         "seller_phone": telefon,
         "seller_email": "",
-        "image_urls": [u for u in item.get("images") or []
-                       if isinstance(u, str) and u.startswith("http")],
-        "images": [u for u in item.get("images") or []
-                   if isinstance(u, str) and u.startswith("http")],
-        "image_count": len(item.get("images") or []),
+        "image_urls": list(bilder),
+        "images": list(bilder),
+        "image_count": len(bilder),
     }
 
 
@@ -718,10 +747,12 @@ async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
         return None
     endpoint = (f"https://api.apify.com/v2/acts/{APIFY_AUTOSCOUT_ACTOR}"
                 f"/run-sync-get-dataset-items")
-    from mobile_service import apify_lauf_parameter
+    from mobile_service import APIFY_TIMEOUT_SEKUNDEN, apify_lauf_parameter
+    from listing_identity import ABRUF_ZU_LANGE_TEXT, AbrufDauertZuLange
     try:
+        # DP-04: dieselbe Grenze wie mobile.de (unter dem Cloudflare-Abbruch)
         async with _httpx.AsyncClient(
-                timeout=_httpx.Timeout(180.0, connect=20.0)) as client:
+                timeout=_httpx.Timeout(float(APIFY_TIMEOUT_SEKUNDEN), connect=20.0)) as client:
             r = await client.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
@@ -753,6 +784,10 @@ async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
             return v
     except (AnbieterFehler, ListingGone):
         raise
+    except _httpx.TimeoutException:
+        _log.warning("Apify AutoScout: Zeitueberschreitung (%s s) fuer %s",
+                     APIFY_TIMEOUT_SEKUNDEN, item_id)
+        raise AbrufDauertZuLange(ABRUF_ZU_LANGE_TEXT)
     except Exception as exc:
         _log.exception("Apify AutoScout: Abruf fehlgeschlagen fuer %s", item_id)
         raise aus_ausnahme(exc, "AutoScout24")

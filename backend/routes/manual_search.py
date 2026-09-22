@@ -50,7 +50,11 @@ _FUEL_TO_MOBILE = {
     "benzin": "PETROL", "petrol": "PETROL", "super": "PETROL",
     "diesel": "DIESEL",
     "elektro": "ELECTRICITY", "electric": "ELECTRICITY", "strom": "ELECTRICITY",
-    "hybrid": "HYBRID", "hybridbenzin": "HYBRID", "hybriddiesel": "HYBRID",
+    "hybrid": "HYBRID", "hybridbenzin": "HYBRID", "hybridbenzinelektro": "HYBRID",
+    # Pruefbericht 20.09.2026 (B-07): Diesel-Hybrid ist ein eigener Code
+    # (mobile.de ft=HYBRID_DIESEL, AutoScout fuel=3) — vorher als HYBRID gesucht.
+    "hybriddiesel": "HYBRID_DIESEL", "hybriddieselelektro": "HYBRID_DIESEL",
+    "dieselhybrid": "HYBRID_DIESEL",
     "pluginhybrid": "HYBRID", "plugin": "HYBRID",
     "lpg": "LPG", "autogas": "LPG",
     "cng": "CNG", "erdgas": "CNG",
@@ -80,7 +84,8 @@ def _fuel_code(label: str) -> str:
 # Standard-Label je mobile.de-Code — fuer AutoScout, wenn das Original-Label
 # dort unbekannt ist (z.B. "Super", "Strom", "LPG / Autogas").
 _FUEL_CANON = {"PETROL": "Benzin", "DIESEL": "Diesel", "ELECTRICITY": "Elektro",
-               "HYBRID": "Hybrid", "LPG": "LPG", "CNG": "CNG", "HYDROGENIUM": "Wasserstoff"}
+               "HYBRID": "Hybrid", "HYBRID_DIESEL": "Hybrid (Diesel/Elektro)",
+               "LPG": "LPG", "CNG": "CNG", "HYDROGENIUM": "Wasserstoff"}
 
 
 def _autoscout_label(label: str, code: str) -> str:
@@ -285,28 +290,34 @@ async def manual_search(body: ManualSearchIn, user=Depends(require_active_sub)):
                         "(keine Suche ueber die ganze Marke).")
     if body.kw and body.ps:
         hinweise.append("kW und PS beide angegeben — fuer die Suche gilt der kW-Wert.")
-    if body.fuel and not _as_fuel(vehicle["fuel_label"]):
-        # Nachpruefung Runde 10: vorher lief der AutoScout-Link dann still
-        # ueber ALLE Kraftstoffe.
+    # Pruefbericht 20.09.2026 (B-07): am CODE pruefen, nicht am Label —
+    # _autoscout_label lieferte immer ein AutoScout-bekanntes Label, die
+    # Warnung griff nie. Nachpruefung Runde 10: vorher lief der AutoScout-Link
+    # dann still ueber ALLE Kraftstoffe.
+    from fahrzeug_codes import autoscout_kraftstoff
+    if body.fuel and not autoscout_kraftstoff(fuel_code):
         hinweise.append(f"AutoScout kennt den Kraftstoff {body.fuel!r} nicht — "
                         "der AutoScout-Link laeuft OHNE Kraftstoff-Filter.")
 
-    if not body.model:
-        # Nachpruefung Runde 10: Ohne Modell zeigen beide Links die ganze
-        # Marke — das sagt der Server jetzt (warnen statt bremsen).
-        filter_gesetzt = any([body.ez_from, body.ez_to, body.km_min is not None,
-                              body.km_max is not None, body.kw, body.ps, fuel_code, gear_code])
-        hinweise.append(
-            f"Kein Modell gewaehlt — beide Links zeigen die ganze Marke {vehicle['make']}"
-            + ("" if filter_gesetzt else
-               " ohne weitere Filter (Erstzulassung, km, Leistung, Kraftstoff, Getriebe)")
-            + ".")
     # Pruefung 14.09.2026 (Liste 4, Nr. 80): kennt mobile.de die Marke nicht,
     # gibt es keinen mobile.de-Link (vorher eine Suche OHNE Markenfilter —
     # der Sucher bekam beliebige Fahrzeuge).
     mobile_url = (build_mobile_url(vehicle, rules)
                   if mo_make_id and (not body.model or mo_model_id) else None)
     autoscout_url = build_autoscout_url(vehicle, rules)
+    if not body.model:
+        # Nachpruefung Runde 10: Ohne Modell zeigen beide Links die ganze
+        # Marke — das sagt der Server jetzt (warnen statt bremsen).
+        # Pruefbericht 20.09.2026 (B-06): erst NACH mobile_url — gibt es keinen
+        # mobile.de-Link (Marke unbekannt), zeigt nur der AutoScout-Link die Marke.
+        filter_gesetzt = any([body.ez_from, body.ez_to, body.km_min is not None,
+                              body.km_max is not None, body.kw, body.ps, fuel_code, gear_code])
+        welche = "beide Links zeigen" if mobile_url else "der AutoScout-Link zeigt"
+        hinweise.append(
+            f"Kein Modell gewaehlt — {welche} die ganze Marke {vehicle['make']}"
+            + ("" if filter_gesetzt else
+               " ohne weitere Filter (Erstzulassung, km, Leistung, Kraftstoff, Getriebe)")
+            + ".")
     # Runde 11: Was der AutoScout-Link von den Firmenregeln NICHT umsetzt
     # (z.B. Land CH), sagt der Server — vorher sah der Link nur "erfolgreich" aus.
     from autoscout_service import regeln_nicht_abgebildet

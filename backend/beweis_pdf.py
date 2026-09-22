@@ -203,6 +203,20 @@ def _eur(betrag: Any) -> str:
         return ""
 
 
+def _preis_mit_zusatz(preis, daten: dict):
+    """Pruefbericht 20.09.2026 (S-09): Preisart und MwSt-Ausweis aus dem
+    Inserat (mobile.de/Apify/AutoScout) an den Preis haengen — fuer Haendler
+    mit Vorsteuer entscheidend. Kleinanzeigen traegt "VB" schon im price_label."""
+    if not preis:
+        return preis
+    text = str(preis)
+    if daten.get("price_negotiable") and " VB" not in text:
+        text += " VB"
+    if daten.get("mwst_ausweisbar") is True:
+        text += " (MwSt. ausweisbar)"
+    return text
+
+
 def _zahl(wert: Any, einheit: str) -> str:
     try:
         return f"{int(float(wert)):,} {einheit}".replace(",", ".")
@@ -268,6 +282,7 @@ def fahrzeugdaten(quelle: str, daten: Dict[str, Any]) -> List[Tuple[str, str]]:
     preis = _eur(daten.get("list_price"))
     if daten.get("price_label") and q == "kleinanzeigen":
         preis = _saeubern(daten.get("price_label")) or preis
+    preis = _preis_mit_zusatz(preis, daten)          # S-09: VB / MwSt. ausweisbar
     paare = [
         ("Marke", daten.get("make_label") or daten.get("make")),
         ("Modell", daten.get("model_label") or daten.get("model")),
@@ -589,6 +604,7 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
     preis = _eur(daten.get("list_price"))
     if q == "kleinanzeigen" and daten.get("price_label"):
         preis = _saeubern(daten.get("price_label")) or preis
+    preis = _preis_mit_zusatz(preis, daten)          # S-09: VB / MwSt. ausweisbar
     story.append(Table(
         [[Paragraph(_xml(titel or unter or "Fahrzeug"), stil("t", 14, dick=True)),
           Paragraph(_xml(preis or "Preis: keine Angabe"), st_preis)],

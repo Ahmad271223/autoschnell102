@@ -50,12 +50,12 @@ from kleinanzeigen_service import (
     ListingGone, fetch_kleinanzeigen_vehicle,
     parse_kleinanzeigen_html, looks_like_kleinanzeigen_listing,
 )
-from provider_fetch import TageslimitErreicht, fetch_listing
+from provider_fetch import TageslimitErreicht, fetch_listing, rueckfall_schluessel
 from rate_limiter import SlidingWindowRateLimiter
 from listing_identity import (
     ListingBusy, ListingIdentityError, get_listing_identity,
     get_or_fetch_listing, inserats_url_aus_text, peek_cached_listing,
-    set_cache_snapshot, store_client_listing,
+    store_client_listing,
 )
 
 # Client-seitiges Abrufen (nur Kleinanzeigen): ist es an, holt NICHT der
@@ -153,16 +153,32 @@ class ListingURLIn(BaseModel):
 RUECKFALL_TAGESLIMIT = int(os.environ.get("ABRUF_RUECKFALL_TAGESLIMIT", "25"))
 
 
+def _rueckfall_konto(user: dict) -> str:
+    return str(user.get("id") or user.get("dealer_id") or "ohne")
+
+
 async def _rueckfall_zurueck(user: dict) -> None:
     """Runde 16 (15.09.2026): ein gebuchter Rueckfall, dem KEIN erfolgreicher
     Abruf folgte (Anbieterfehler, volle Warteschlange), wird zurueckgebucht —
-    vorher frassen technische Fehler das Tageskontingent."""
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    schluessel = f"{tag}:rueckfall:{user.get('id') or user.get('dealer_id') or 'ohne'}"
+    vorher frassen technische Fehler das Tageskontingent.
+    B-13: Tagesschluessel in deutscher Zeit (provider_fetch.rueckfall_schluessel)."""
+    schluessel = rueckfall_schluessel(_rueckfall_konto(user))
     try:
         await db.provider_budget.update_one({"_id": schluessel, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
     except Exception:  # noqa: BLE001
         log.exception("Rueckfall %s nicht zurueckgebucht", schluessel)
+
+
+def _erweiterung_hinweis(gewuenscht: bool) -> str:
+    """Hinweis zu needs_client_fetch. Pruefbericht 20.09.2026 (A-05): wer den
+    Server-Abruf wollte und abgelehnt wurde, hat sein Tageskontingent
+    verbraucht — das soll er samt Zeitpunkt lesen, statt nur "bitte ueber die
+    Erweiterung laden"."""
+    if gewuenscht and RUECKFALL_TAGESLIMIT > 0:
+        return (f"Tageskontingent für Abrufe ohne Browser-Erweiterung erreicht "
+                f"({RUECKFALL_TAGESLIMIT}/Tag je Konto) — wieder ab 0 Uhr (deutsche Zeit). "
+                "Bitte über die Browser-Erweiterung laden.")
+    return "Bitte über die Browser-Erweiterung laden."
 
 
 # Runde 16 (15.09.2026): direkte Anbieter-Abrufe (Cache-Miss in /mobile/compare
@@ -228,12 +244,12 @@ async def _rueckfall_erlaubt(gewuenscht: bool, user: dict) -> bool:
         return False
     if RUECKFALL_TAGESLIMIT <= 0:
         return False
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     # Runde 26 (12.09.2026, Vorgabe Ahmad): Das Tageslimit gilt je KONTO, nicht
     # je Firma — sonst verbrauchen 30 Sucher gemeinsam 25 Rueckfaelle und der
     # 26. Link des Tages scheitert fuer alle. Jeder Sucher hat sein eigenes
     # Budget; Limits werden nie von einem Konto auf ein anderes uebertragen.
-    schluessel = f"{tag}:rueckfall:{user.get('id') or user.get('dealer_id') or 'ohne'}"
+    # B-13: Tageswechsel um Mitternacht deutscher Zeit (vorher UTC, 02:00 Uhr).
+    schluessel = rueckfall_schluessel(_rueckfall_konto(user))
     doc = await db.provider_budget.find_one_and_update(
         {"_id": schluessel},
         {"$inc": {"n": 1},
@@ -540,7 +556,14 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
         except DuplicateKeyError:
             if versuch < 2:
                 continue
-            raise
+            # Pruefbericht 20.09.2026 (R1-05): der dritte DuplicateKey in
+            # Folge (drei gleichzeitige Erstvergleiche) wurde weitergeworfen —
+            # compare faengt ihn nicht, der Sucher sah einen 500. Jetzt eine
+            # klare, wiederholbare Antwort.
+            raise HTTPException(
+                503, "Das Fahrzeug wird gerade von einem Kollegen angelegt — bitte "
+                     "den Vergleich in ein paar Sekunden erneut starten.",
+                headers={"Retry-After": "2", "X-Wiederholen": "1"})
         if vorher is not None:
             # Das Dokument gab es schon (paralleler Erstvergleich): noch einmal
             # von vorn — diesmal ueber den Zweig "vorhanden", der die frischen
@@ -640,7 +663,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
                     "needs_client_fetch": True,
                     "url": raw_url,
                     "source": "kleinanzeigen",
-                    "hint": "Bitte über die Browser-Erweiterung laden.",
+                    "hint": _erweiterung_hinweis(body.ohne_erweiterung),   # A-05
                 }
             rueckfall_gebucht = bool(body.ohne_erweiterung)
 
@@ -655,11 +678,13 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         if client_hit is not None:
             # Daten aus der (eigenen) Quarantaene bzw. dem freigegebenen
             # Client-Cache — kein Server-Abruf im Client-Fetch-Modus.
-            vehicle, was_cached, cached_snapshot_id = (
-                dict(client_hit[0]), True, client_hit[1])
+            vehicle, was_cached = dict(client_hit[0]), True
         else:
-            vehicle, was_cached, cached_snapshot_id = await get_or_fetch_listing(
+            # A-20: zwei Rueckgaben (kein snapshot_id mehr); B-04: Firma fuer
+            # den Anteil an den Anbieter-Plaetzen.
+            vehicle, was_cached = await get_or_fetch_listing(
                 db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
+                dealer_id=user.get("dealer_id") or "",
             )
     except ListingIdentityError as exc:
         if rueckfall_gebucht:
@@ -782,15 +807,21 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # das Dokument nur noch, wenn es zu diesem Inserat schon eines gibt; sonst
     # bietet die Oberflaeche den Knopf "Beweisdokument erstellen" an.
     beweis = None
-    if client_hit is None:
-        from beweis_service import automatisch_aktiv, beweis_fuer_schluessel, oeffentlich
-        from beweis_service import beweis_vormerken
-        if automatisch_aktiv():
-            beweis = await beweis_vormerken(
-                db, cache_key=identity["cache_key"], quelle=source,
-                item_id=identity["item_id"], url=raw_url, anlass="vergleich")
-        else:
-            beweis = oeffentlich(await beweis_fuer_schluessel(db, identity["cache_key"]))
+    # Pruefbericht 20.09.2026 (U-11): Daten aus der Browser-Einreichung
+    # (Quarantaene, bestaetigte Browserdaten) sind ungeprueft — dafuer gibt es
+    # kein Beweisdokument (routes/beweise antwortet 409). Die Oberflaeche
+    # blendet den Knopf dann aus (beweis_moeglich). Und: auch bei einem
+    # Treffer aus dem Speicher wird nach einem VORHANDENEN Dokument gesucht —
+    # vorher zeigte die Karte "erstellen", obwohl es laengst eines gab.
+    beweis_moeglich = client_hit is None or client_hit[1] == "speicher"
+    from beweis_service import automatisch_aktiv, beweis_fuer_schluessel, oeffentlich
+    from beweis_service import beweis_vormerken
+    if client_hit is None and automatisch_aktiv():
+        beweis = await beweis_vormerken(
+            db, cache_key=identity["cache_key"], quelle=source,
+            item_id=identity["item_id"], url=raw_url, anlass="vergleich")
+    else:
+        beweis = oeffentlich(await beweis_fuer_schluessel(db, identity["cache_key"]))
 
     hinweise = list(katalog_hinweise) + list(regeln_nicht_abgebildet(vehicle, rules))
     nfz = _nutzfahrzeug_hinweis(vehicle, raw_url, source)
@@ -857,6 +888,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "cached": was_cached,
         "cache_key": identity["cache_key"],
         "beweis": beweis,
+        # U-11: False bei Browserdaten — kein Knopf "Beweisdokument erstellen"
+        "beweis_moeglich": beweis_moeglich,
     }
 
 
@@ -996,12 +1029,17 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
                 "source": source, "item_id": identity["item_id"]}
 
     rueckfall_gebucht = False
+    rueckfall_am_job = ""
     if source == "kleinanzeigen" and _erweiterung_noetig():
         if not await _rueckfall_erlaubt(body.ohne_erweiterung, user):
             return {"status": "needs_client_fetch", "url": raw_url,
                     "source": source,
-                    "hint": "Bitte über die Browser-Erweiterung laden."}
+                    "hint": _erweiterung_hinweis(body.ohne_erweiterung)}   # A-05
         rueckfall_gebucht = bool(body.ohne_erweiterung)
+        if rueckfall_gebucht:
+            # A-05: der Job merkt sich den gebuchten Punkt — scheitert er
+            # spaeter im Worker, geht der Punkt zurueck (link_jobs._job_scheitern).
+            rueckfall_am_job = rueckfall_schluessel(_rueckfall_konto(user))
 
     from link_jobs import enqueue_job, process_one_now, WarteschlangeVoll, JobRace
     try:
@@ -1010,7 +1048,8 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         # Warteschlange nicht mehr fuer alle fuellen.
         job = await enqueue_job(db, raw_url,
                                 dealer_id=user.get("dealer_id") or "",
-                                user_id=user.get("id") or "")
+                                user_id=user.get("id") or "",
+                                rueckfall_schluessel=rueckfall_am_job)
     except JobRace as race:
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)
@@ -1019,6 +1058,10 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         if rueckfall_gebucht:
             await _rueckfall_zurueck(user)     # Runde 16: Kontingent nicht verbrennen
         raise HTTPException(429, voll.text)
+    if rueckfall_gebucht and not job.get("neu"):
+        # Pruefbericht 20.09.2026 (A-05): einem schon laufenden (oder fertigen)
+        # Job beigetreten — kein eigener Abruf, der gebuchte Punkt geht zurueck.
+        await _rueckfall_zurueck(user)
     if job.get("status") == "queued":
         # Sofort-Anstoss (begrenzt/dedupliziert, Audit 09/2026 Punkt 17)
         from link_jobs import anstossen
@@ -1027,7 +1070,9 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
             "source": source, "item_id": identity["item_id"]}
 
 
-_status_limiter = SlidingWindowRateLimiter(max_attempts=40, window_seconds=10)
+# Pruefbericht 20.09.2026 (SV-16): fester Name statt erzeugtem "limit40per10"
+_status_limiter = SlidingWindowRateLimiter(max_attempts=40, window_seconds=10,
+                                           name="listings-status")
 
 
 @router.get("/listings/check/{job_id}")
@@ -1400,13 +1445,15 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
         ident = identity
         # Befund 87 (16.09.2026): auch der Treffer aus Quarantaene/Cache steht
         # im Vergleichsprotokoll — vorher nur der frische externe Abruf.
+        # A-20/U-11: statt der (immer leeren) snapshot_id liefert peek_cached_
+        # listing die Herkunft; das Protokoll unterscheidet Speicher/Quarantaene.
         await log_activity_sicher(user.get("dealer_id") or "", user.get("id"), "inserat.aufgeloest",
                                   ref=ident["cache_key"],
                                   meta={"source": ident["source"], "cached": True,
-                                        "quarantaene": True})
+                                        "quarantaene": eigen[1] == "quarantaene"})
         return {"source": ident["source"], "item_id": ident["item_id"],
                 "cache_key": ident["cache_key"], "cached": True,
-                "vehicle": eigen[0], "snapshot_id": eigen[1]}
+                "vehicle": eigen[0]}
 
     # Rollenprüfung 22.09.2026 (RP-026): Dieselbe Kleinanzeigen-Regel wie beim
     # Vergleich — muss der Browser holen (Erweiterungsbetrieb ohne API-
@@ -1418,12 +1465,13 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
         if not await _rueckfall_erlaubt(body.ohne_erweiterung, user):
             return {"needs_client_fetch": True, "url": body.url,
                     "source": "kleinanzeigen",
-                    "hint": "Bitte über die Browser-Erweiterung laden."}
+                    "hint": _erweiterung_hinweis(body.ohne_erweiterung)}   # A-05
         rueckfall_gebucht = bool(body.ohne_erweiterung)
 
     try:
-        data, was_cached, cached_snapshot_id = await get_or_fetch_listing(
+        data, was_cached = await get_or_fetch_listing(
             db, body.url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
+            dealer_id=user.get("dealer_id") or "",          # B-04
         )
     except ListingIdentityError as exc:
         if rueckfall_gebucht:
@@ -1465,6 +1513,6 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
         "item_id": identity["item_id"],
         "cache_key": identity["cache_key"],
         "cached": was_cached,
-        "snapshot_id": cached_snapshot_id,
+        # A-20: snapshot_id entfaellt (Snapshots gibt es seit dem Beweisdokument nicht)
         "vehicle": data,
     }

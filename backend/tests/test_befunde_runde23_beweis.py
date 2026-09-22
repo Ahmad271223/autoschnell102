@@ -397,7 +397,7 @@ def test_08_erster_portalabruf_uebergibt_daten_und_abrufzeit(welt, monkeypatch):
     # TTL abgelaufen -> erneuter Portalabruf mit neuem Stand im Cache.
     welt.run(welt.db.listings_cache.update_one(
         {"cache_key": ck}, {"$set": {"expires_at": _jetzt() - timedelta(minutes=1)}}))
-    daten, aus_cache, _ = welt.run(get_or_fetch_listing(welt.db, url, fetcher, ttl_hours=1))
+    daten, aus_cache = welt.run(get_or_fetch_listing(welt.db, url, fetcher, ttl_hours=1))   # A-20: 2-Tupel
     assert len(aufrufe) == 2 and not aus_cache and daten["description"] == "Abruf 2"
     zeile2 = welt.run(welt.db.inserat_beweise.find_one({"cache_key": ck}))
     assert zeile2["quelle_daten"]["description"] == "Abruf 1"

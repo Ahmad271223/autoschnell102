@@ -93,7 +93,7 @@ def test_rp276b_jeder_fehler_gibt_den_rueckfall_zurueck(rueckfall, monkeypatch, 
 
 def test_rp276b_erfolg_behaelt_die_buchung(rueckfall, monkeypatch):
     async def liefert(*a, **k):
-        return {"title": "VW Golf"}, False, None
+        return {"title": "VW Golf"}, False                      # A-20: 2-Tupel
 
     monkeypatch.setattr(L, "get_or_fetch_listing", liefert)
     r = _resolve(KA_URL)

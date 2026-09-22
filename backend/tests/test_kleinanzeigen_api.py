@@ -264,7 +264,8 @@ def test_12_abrufweg_ist_verdrahtet_und_begrenzt_getrennt():
     assert '"kleinanzeigen_api"' in pl, "eigene Obergrenze fuer den API-Weg fehlt"
     li = (WURZEL / "listing_identity.py").read_text(encoding="utf-8")
     assert 'begrenzung = "kleinanzeigen_api"' in li
-    assert "acquire_slot(db, begrenzung)" in li
+    # B-04 (Pruefbericht 20.09.2026): der Aufruf traegt jetzt dealer_id=...
+    assert "acquire_slot(db, begrenzung" in li
 
 
 def test_17_notloesung_laeuft_unter_der_strengen_bremse():

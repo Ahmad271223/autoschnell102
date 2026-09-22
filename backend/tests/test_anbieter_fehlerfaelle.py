@@ -107,10 +107,15 @@ def test_http_fehler_werden_klar_benannt(apify, status, text, art, stichwort):
 
 
 def test_zeitueberschreitung_und_netzfehler(apify):
+    # Pruefbericht 20.09.2026 (DP-04): eine Zeitueberschreitung des Apify-Laufs
+    # ist "bitte gleich nochmal" (ListingBusy -> 503 mit Retry-After), kein
+    # Anbieter-Ausfall (502) — mit verstaendlichem Text.
+    from listing_identity import AbrufDauertZuLange, ListingBusy
     _FakeClient.ausnahme = httpx.ReadTimeout("zu langsam")
-    with pytest.raises(anbieter_fehler.AnbieterFehler) as e:
+    with pytest.raises(ListingBusy) as e:
         _mobile()
-    assert e.value.art == anbieter_fehler.ART_ZEIT and "antwortet nicht" in str(e.value)
+    assert isinstance(e.value, AbrufDauertZuLange) and not e.value.hintergrund
+    assert "dauert zu lange" in str(e.value) and "erneut versuchen" in str(e.value)
     _FakeClient.ausnahme = httpx.ConnectError("keine Verbindung")
     with pytest.raises(anbieter_fehler.AnbieterFehler) as e:
         _mobile()
@@ -137,11 +142,13 @@ def test_autoscout_gleiche_behandlung(apify):
         asyncio.run(autoscout_service.fetch_autoscout_vehicle(
             "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123"))
     assert e.value.art == anbieter_fehler.ART_TOKEN and "AutoScout24" in str(e.value)
+    # DP-04: Zeitueberschreitung auch bei AutoScout als "dauert zu lange" (503)
+    from listing_identity import AbrufDauertZuLange
     _FakeClient.ausnahme = httpx.ReadTimeout("x")
-    with pytest.raises(anbieter_fehler.AnbieterFehler) as e:
+    with pytest.raises(AbrufDauertZuLange) as e:
         asyncio.run(autoscout_service.fetch_autoscout_vehicle(
             "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123"))
-    assert e.value.art == anbieter_fehler.ART_ZEIT
+    assert "dauert zu lange" in str(e.value)
 
 
 def test_get_vehicle_reicht_fehler_durch_statt_fake_daten(apify):
@@ -203,8 +210,7 @@ def test_tagesbudget_klarer_text_und_zaehler_zurueck(monkeypatch):
             with pytest.raises(RuntimeError) as e:
                 await provider_fetch._budget_pruefen(db, "mobile", dealer)  # 2 -> Limit
             assert "Tageslimit" in str(e.value) and "1/Tag" in str(e.value)
-            from datetime import datetime, timezone
-            tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            tag = provider_fetch.tagesschluessel()   # B-13: deutsche Zeit
             doc = await db.provider_budget.find_one({"_id": f"{tag}:firma:{dealer}"})
             # der abgelehnte Versuch wurde zurueckgebucht
             assert doc and doc["n"] == 1, doc
@@ -226,8 +232,7 @@ def test_ohne_limit_wird_nie_gebremst(monkeypatch):
     dealer = f"firma-{uuid.uuid4().hex[:8]}"
 
     async def _lauf(db):
-        from datetime import datetime, timezone
-        tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tag = provider_fetch.tagesschluessel()   # B-13: deutsche Zeit
         try:
             for _ in range(25):
                 await provider_fetch._budget_pruefen(db, "mobile", dealer)
@@ -247,8 +252,7 @@ def test_warnung_meldet_einmal_und_bremst_nicht(monkeypatch):
     dealer = f"firma-{uuid.uuid4().hex[:8]}"
 
     async def _lauf(db):
-        from datetime import datetime, timezone
-        tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tag = provider_fetch.tagesschluessel()   # B-13: deutsche Zeit
         gesamt = await db.provider_budget.find_one({"_id": f"{tag}:gesamt"}) or {}
         stand = int(gesamt.get("n", 0))
         monkeypatch.setattr(provider_fetch, "TAGESWARNUNG", stand + 2)
@@ -303,8 +307,7 @@ def test_tageslimit_je_konto_zaehlt_alle_quellen(monkeypatch):
     u1, u2 = f"u1-{uuid.uuid4().hex[:6]}", f"u2-{uuid.uuid4().hex[:6]}"
 
     async def _lauf(db):
-        from datetime import datetime, timezone
-        tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tag = provider_fetch.tagesschluessel()   # B-13: deutsche Zeit
         k1, k2, kf = f"{tag}:konto:{u1}", f"{tag}:konto:{u2}", f"{tag}:firma:{dealer}"
         try:
             b = await provider_fetch._budget_pruefen(db, "kleinanzeigen", dealer, user_id=u1)  # 1

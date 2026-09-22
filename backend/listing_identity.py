@@ -23,7 +23,7 @@ geladen.
 * extract_mobile_id(url)           -> str | None
 * extract_autoscout_id(url)        -> str | None
 * get_listing_identity(url)        -> {"source", "item_id", "cache_key"}
-* get_or_fetch_listing(db, url, fetcher, ttl_hours=24)
+* get_or_fetch_listing(db, url, fetcher, ttl_hours=24, dealer_id="", frist_sekunden=None)
                                    -> Tuple[dict, bool]   (vehicle, was_cached)
 
 Bonus (am Ende der Datei):
@@ -36,10 +36,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
+
+from konfig import zahl_env
 
 _log = logging.getLogger("autohandel")
 
@@ -280,6 +283,45 @@ class ListingBusy(RuntimeError):
     der Aufrufer soll kurz warten und erneut anfragen (HTTP 503)."""
 
 
+# Pruefbericht 20.09.2026 (A-17): EINE Gesamtfrist je Abruf — Lease-Warten,
+# Anbieter-Platz, Apify-Topf und der Abruf selbst zaehlen dagegen. Vorher
+# addierten sich die Phasen (bis zu 30 + 30 + 30 + 180 s), das Frontend hatte
+# laengst aufgegeben und die Plaetze blieben belegt. Standard 90 s: unter dem
+# Cloudflare-Abbruch (~100 s) und dem Frontend-Limit (95 s, DP-04).
+ABRUF_GESAMT_SEKUNDEN = zahl_env("ABRUF_GESAMT_SEKUNDEN", 90, unten=10)
+# A-06: Hoechstdauer des Lease-Herzschlags (Sicherheitsnetz hinter der Frist;
+# wie link_jobs.HERZSCHLAG_MAX_SEKUNDEN). Danach laufen Lease und Plaetze aus,
+# die Selbstheilung greift.
+LEASE_HERZSCHLAG_MAX_SEKUNDEN = zahl_env("LEASE_HERZSCHLAG_MAX", 300, unten=60)
+# Hoechstens so lange auf die Lease bzw. auf Anbieter-Plaetze warten (wie
+# bisher ~30 s) — und nie ueber die Gesamtfrist hinaus.
+LEASE_WARTEN_SEKUNDEN = 30
+SLOT_WARTEN_SEKUNDEN = 30
+# Bleibt weniger Frist als das, wird kein Abruf mehr gestartet (der Anbieter
+# braucht selbst Sekunden; ein abgebrochener Apify-Lauf kostet trotzdem).
+ABRUF_MINDESTREST_SEKUNDEN = 15
+ABRUF_ZU_LANGE_TEXT = "Abruf dauert zu lange — bitte in einer Minute erneut versuchen."
+
+
+class AbrufDauertZuLange(ListingBusy):
+    """Zeitueberschreitung (DP-04: Apify-Lauf; A-17: Gesamtfrist) — dieselbe
+    freundliche 503-Antwort wie ListingBusy.
+
+    hintergrund=True: der Abruf laeuft im Hintergrund zu Ende und landet im
+    Speicher — ein Link-Job darf einfach spaeter nachsehen (zaehlt nicht als
+    Fehlversuch). hintergrund=False: der Anbieter selbst war zu langsam — im
+    Job zaehlt das als Versuch (jeder Lauf kostet)."""
+
+    def __init__(self, text: str = ABRUF_ZU_LANGE_TEXT, hintergrund: bool = False):
+        super().__init__(text)
+        self.hintergrund = hintergrund
+
+
+# Abrufe, die nach Ablauf der Gesamtfrist im Hintergrund zu Ende laufen —
+# Referenz halten, sonst raeumt asyncio den Task mitten im Abruf weg.
+_hintergrund_abrufe: set = set()
+
+
 async def ensure_cache_indexes(db) -> None:
     """Idempotent: legt die nötigen Indizes auf der listings_cache Collection an."""
     # Altlasten raus: fruehere Versionen legten Lease-Dokumente OHNE
@@ -329,9 +371,16 @@ def _ohne_herkunft(daten):
 
 async def peek_cached_listing(db, url: str,
                               dealer_id: Optional[str] = None
-                              ) -> Optional[Tuple[dict, Optional[str]]]:
+                              ) -> Optional[Tuple[dict, str]]:
     """Schaut NUR im Cache nach (kein Abruf, kein Lease). Liefert
-    (data, snapshot_id) bei gültigem Treffer, sonst None.
+    (data, herkunft) bei gültigem Treffer, sonst None.
+
+    herkunft: "speicher" (gemeinsamer Zwischenspeicher, Server-Abruf),
+    "browser" (Speicher, aber aus bestaetigten Browser-Einreichungen) oder
+    "quarantaene" (eigene Browser-Einreichung). Pruefbericht 20.09.2026
+    (A-20/U-11): vorher stand hier eine snapshot_id, die seit dem
+    Beweisdokument immer None war; die Herkunft braucht der Vergleich, weil
+    es fuer Browserdaten kein Beweisdokument gibt.
 
     Mit dealer_id wird zusaetzlich die QUARANTAENE des Haendlers geprueft:
     Client-Einreichungen sind zunaechst nur fuer den einreichenden Haendler
@@ -347,7 +396,8 @@ async def peek_cached_listing(db, url: str,
             {"$inc": {"use_count": 1},
              "$set": {"last_used_at": datetime.now(timezone.utc), "url": url}})
         # Altbestand im geteilten Cache kann die Herkunft noch tragen.
-        return _ohne_herkunft(cached["data"]), cached.get("snapshot_id")
+        return (_ohne_herkunft(cached["data"]),
+                "browser" if cached.get("client_confirmed") else "speicher")
     if dealer_id:
         own = await db.listings_cache_client.find_one(
             {"cache_key": cache_key, "dealer_id": dealer_id}, {"_id": 0})
@@ -358,7 +408,7 @@ async def peek_cached_listing(db, url: str,
             # dass ein Kollege dasselbe Inserat schon geholt hat. Die
             # Inseratsdaten selbst duerfen firmenweit geteilt werden, die
             # Herkunft nicht. Zum Aufraeumen bleibt sie in der Datenbank.
-            return _ohne_herkunft(own["data"]), None
+            return _ohne_herkunft(own["data"]), "quarantaene"
     return None
 
 
@@ -451,9 +501,12 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
     if min_dealers < 3:
         return "quarantined"
     bestaetiger = []
+    # Pruefbericht 20.09.2026 (A-21): AELTESTE Einreichung zuerst — ohne
+    # Sortierung bestimmte die Reihenfolge der Datenbank, wessen Stand
+    # veroeffentlicht wird.
     async for other in db.listings_cache_client.find(
             {"cache_key": cache_key, "dealer_id": {"$ne": dealer_id},
-             "expires_at": {"$gt": now}}, {"_id": 0}):
+             "expires_at": {"$gt": now}}, {"_id": 0}).sort("created_at", 1):
         if _client_core_match(other.get("data") or {}, data):
             bestaetiger.append(other)
     if len(bestaetiger) + 1 >= min_dealers:
@@ -464,28 +517,27 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
         # den peek_cached_listing ALLEN Firmen liefert.
         freigabe = {k: v for k, v in (other.get("data") or data).items()
                     if not str(k).startswith("ingested_by_")}
-        if True:
-            await db.listings_cache.update_one(
-                {"cache_key": cache_key},
-                {"$set": {"cache_key": cache_key,
-                          "source": identity["source"],
-                          "item_id": identity["item_id"],
-                          # Die AELTERE Einreichung wird veroeffentlicht:
-                          # wer als Zweiter bestaetigt, bestimmt nicht den
-                          # Inhalt, den alle Haendler sehen.
-                          "url": url, "data": freigabe,
-                          "fetched_at": now,
-                          # Kuerzere TTL als Server-Abrufe: Client-Daten
-                          # sind Momentaufnahmen zweier Browser, keine
-                          # API-Antwort.
-                          "expires_at": now + timedelta(hours=confirmed_ttl_hours),
-                          "last_used_at": now,
-                          "client_confirmed": True,
-                          "confirmed_by": [b.get("dealer_id") for b in bestaetiger]
-                          + [dealer_id]},
-                 "$setOnInsert": {"created_at": now}},
-                upsert=True)
-            return "promoted"
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key},
+            {"$set": {"cache_key": cache_key,
+                      "source": identity["source"],
+                      "item_id": identity["item_id"],
+                      # Die AELTERE Einreichung wird veroeffentlicht:
+                      # wer als Zweiter bestaetigt, bestimmt nicht den
+                      # Inhalt, den alle Haendler sehen.
+                      "url": url, "data": freigabe,
+                      "fetched_at": now,
+                      # Kuerzere TTL als Server-Abrufe: Client-Daten
+                      # sind Momentaufnahmen zweier Browser, keine
+                      # API-Antwort.
+                      "expires_at": now + timedelta(hours=confirmed_ttl_hours),
+                      "last_used_at": now,
+                      "client_confirmed": True,
+                      "confirmed_by": [b.get("dealer_id") for b in bestaetiger]
+                      + [dealer_id]},
+             "$setOnInsert": {"created_at": now}},
+            upsert=True)
+        return "promoted"
     return "quarantined"
 
 
@@ -504,19 +556,24 @@ async def get_or_fetch_listing(
     url: str,
     fetcher: Callable[[str, str, str], Awaitable[dict]],
     ttl_hours: int = 6,
-) -> Tuple[dict, bool, Optional[str]]:
+    dealer_id: str = "",
+    frist_sekunden: Optional[int] = None,
+) -> Tuple[dict, bool]:
     """
-    Liefert (vehicle_data, was_cached, cached_snapshot_id).
+    Liefert (vehicle_data, was_cached).
 
     Ablauf:
       1. ID erkennen (sonst ListingIdentityError).
       2. Cache lesen. Wenn vorhanden & nicht abgelaufen -> aus DB liefern,
-         use_count++ und last_used_at aktualisieren. Liefert auch die
-         zuletzt gespeicherte snapshot_id zurück, damit der Caller den
-         vorhandenen Beweis wiederverwenden kann.
+         use_count++ und last_used_at aktualisieren.
       3. Sonst fetcher(source, item_id, url) aufrufen und Ergebnis speichern.
 
     `fetcher` ist eine async-Funktion (source, item_id, url) -> dict.
+    `dealer_id` (B-04): Firma des Abrufs fuer den Firmenanteil an den
+    Anbieter-Plaetzen. `frist_sekunden` (A-17): Gesamtfrist fuer Warten und
+    Abruf, Standard ABRUF_GESAMT_SEKUNDEN.
+    Pruefbericht 20.09.2026 (A-20): die dritte Rueckgabe (snapshot_id) ist
+    entfallen — seit dem Beweisdokument war sie immer None.
     """
     identity = get_listing_identity(url)
     source = identity["source"]
@@ -540,7 +597,7 @@ async def get_or_fetch_listing(
                         "$set": {"last_used_at": now, "url": url},
                     },
                 )
-                return cached["data"], True, cached.get("snapshot_id")
+                return cached["data"], True
 
     # MISS oder abgelaufen -> Single-Flight: nur EINE Anfrage ruft wirklich
     # ab; gleichzeitige Anfragen derselben URL warten auf deren Ergebnis.
@@ -562,8 +619,16 @@ async def get_or_fetch_listing(
         return None
 
     claim = uuid.uuid4().hex                   # Runde 19: Besitzer-Token der Lease
+    # A-17: Gesamtfrist — alle Wartezeiten und der Abruf zaehlen dagegen.
+    frist_s = int(frist_sekunden) if frist_sekunden else ABRUF_GESAMT_SEKUNDEN
+    frist = time.monotonic() + frist_s
+
+    def _rest() -> float:
+        return frist - time.monotonic()
+
     got_lease = False
-    for _wait in range(20):                    # max. ~30 s warten, dann klare Meldung
+    lease_bis = time.monotonic() + LEASE_WARTEN_SEKUNDEN
+    while True:                                # max. ~30 s warten, dann klare Meldung
         lease_now = datetime.now(timezone.utc)
         try:
             await db.listings_cache.update_one(
@@ -589,6 +654,8 @@ async def get_or_fetch_listing(
             got_lease = False                  # jemand anderes laedt gerade
         if got_lease:
             break
+        if time.monotonic() >= lease_bis or _rest() <= 1.5:
+            break                              # A-17: Wartezeit bzw. Frist verbraucht
         await _aio.sleep(1.5)
         c = await _fresh_cached()
         if c:                                  # der Erste ist fertig - uebernehmen
@@ -596,7 +663,7 @@ async def get_or_fetch_listing(
                 {"cache_key": cache_key},
                 {"$inc": {"use_count": 1},
                  "$set": {"last_used_at": datetime.now(timezone.utc)}})
-            return c["data"], True, c.get("snapshot_id")
+            return c["data"], True
     if not got_lease:
         raise ListingBusy(
             "Das Inserat wird gerade von einer anderen Anfrage geladen - "
@@ -612,14 +679,14 @@ async def get_or_fetch_listing(
             {"$inc": {"use_count": 1},
              "$set": {"last_used_at": datetime.now(timezone.utc)}})
         await _lease_freigeben(db, cache_key, claim)
-        return frisch["data"], True, frisch.get("snapshot_id")
+        return frisch["data"], True
 
     # ZENTRALE PROVIDER-BEGRENZUNG: bevor wirklich extern abgerufen wird,
     # einen Slot belegen (MongoDB — wirkt ueber ALLE Worker/Server). So
     # loesen 300 gleichzeitige Nutzer nicht 300 externe Abrufe aus,
     # sondern hoechstens MAX_CONCURRENT_<QUELLE> — der Rest wartet kurz
     # oder bekommt eine freundliche "bitte gleich nochmal"-Antwort.
-    from provider_limiter import acquire_slot, extend_slot, release_slot
+    from provider_limiter import APIFY_QUELLEN, acquire_slot, extend_slot, release_slot
     # Runde 29 (12.09.2026): Kleinanzeigen wird jetzt zuerst ueber die API
     # geholt (bezahlter Dienst, 600 Anfragen/Minute) statt die Webseite
     # abzugreifen. Dafuer gilt eine eigene, deutlich hoehere Obergrenze —
@@ -635,36 +702,42 @@ async def get_or_fetch_listing(
             pass
     slot_id = None
     apify_slot = None          # N9: Platz im gemeinsamen Apify-Topf
+    braucht_topf = source in APIFY_QUELLEN
     try:
         # 0,3-s-Takt statt 1,5 s: bei kurzen Abrufen (Mock 0,4 s; echte
         # Abrufe 1-3 s) verschenkte der grobe Takt bis zu 1,5 s je
         # Slot-Wechsel — das drittelte den Durchsatz der Warteschlange.
-        for _try in range(100):                # max. ~30 s auf einen Slot warten
-            slot_id = await acquire_slot(db, begrenzung)
-            if slot_id:
-                break
-            await _aio.sleep(0.3)
+        #
         # Nachpruefung 20.09.2026 (N9): mobile.de und AutoScout24 teilen sich
         # EINEN Apify-Plan. Zusaetzlich zum Platz der Quelle braucht es also
         # einen aus dem gemeinsamen Topf — sonst duerfen beide zusammen mehr,
         # als der Plan hergibt (Apify antwortet dann mit 429).
         #
         # Reihenfolge: erst Quelle, dann Topf — ueberall gleich, deshalb kann
-        # sich nichts gegenseitig blockieren. Klappt der zweite Griff nicht,
-        # wird der erste sofort zurueckgegeben.
-        from provider_limiter import APIFY_QUELLEN
-        if slot_id and source in APIFY_QUELLEN:
-            for _try in range(100):
-                apify_slot = await acquire_slot(db, "apify")
-                if apify_slot:
-                    break
-                await _aio.sleep(0.3)
-            if not apify_slot:
-                await release_slot(db, slot_id)
-                slot_id = None
-    except Exception:
-        # Lease nicht haengen lassen, sonst warten alle anderen 90 s.
-        await _lease_freigeben(db, cache_key, claim)
+        # sich nichts gegenseitig blockieren. A-17: Klappt der zweite Griff
+        # nicht, geht der erste SOFORT zurueck und es wird in EINER Wartezeit
+        # neu angesetzt — vorher hielt der Wartende bis zu 30 s einen Platz
+        # der Quelle, waehrend er auf den Topf wartete. B-04: dealer_id fuer
+        # den Firmenanteil.
+        slot_bis = time.monotonic() + SLOT_WARTEN_SEKUNDEN
+        while True:
+            slot_id = await acquire_slot(db, begrenzung, dealer_id=dealer_id)
+            if slot_id and braucht_topf:
+                apify_slot = await acquire_slot(db, "apify", dealer_id=dealer_id)
+                if not apify_slot:
+                    await release_slot(db, slot_id)
+                    slot_id = None
+            if slot_id:
+                break
+            if time.monotonic() >= slot_bis or _rest() <= ABRUF_MINDESTREST_SEKUNDEN:
+                break
+            await _aio.sleep(0.3)
+    except BaseException:
+        # Lease (und einen schon belegten Platz) nicht haengen lassen, sonst
+        # warten alle anderen 90 s. BaseException: auch beim Abbruch (X).
+        if slot_id:
+            await _aio.shield(release_slot(db, slot_id))
+        await _aio.shield(_lease_freigeben(db, cache_key, claim))
         raise
     if not slot_id:
         await _lease_freigeben(db, cache_key, claim)
@@ -678,9 +751,19 @@ async def get_or_fetch_listing(
         # JEDER Fehler wird geschluckt: stuerbe die Schleife an einem
         # kurzen Datenbank-Schluckauf, liefen Lease und Slot mitten im
         # Abruf ab — genau das, was der Herzschlag verhindern soll.
+        # Pruefbericht 20.09.2026 (A-06): nicht mehr endlos — nach
+        # LEASE_HERZSCHLAG_MAX_SEKUNDEN endet er (wie in link_jobs), Lease und
+        # Plaetze laufen dann aus und die Selbstheilung greift. Die
+        # Gesamtfrist unten greift im Normalfall lange vorher.
+        beginn = time.monotonic()
         while True:
             try:
                 await _aio.sleep(30)
+                if time.monotonic() - beginn > LEASE_HERZSCHLAG_MAX_SEKUNDEN:
+                    _log.warning("listings_cache %s: Abruf laeuft laenger als %s s — "
+                                 "Lease wird nicht mehr verlaengert",
+                                 cache_key, LEASE_HERZSCHLAG_MAX_SEKUNDEN)
+                    return
                 # Runde 19: nur die eigene Lease verlaengern (Claim-Token)
                 await db.listings_cache.update_one(
                     {"cache_key": cache_key, "fetching_claim": claim},
@@ -704,126 +787,138 @@ async def get_or_fetch_listing(
             {"$inc": {"calls": 1}}, upsert=True)
     except Exception:
         pass
-    try:
-        data = await fetcher(source, item_id, url)
-    except BaseException:
-        # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
-        # BaseException (statt Exception) wegen CancelledError: Wunsch Ahmad
-        # 18.09.2026 — bricht der Nutzer ab ("X") oder legt der Browser auf,
-        # wird dieser Task abgebrochen. Ohne Freigabe blieb derselbe Link bis
-        # zu 90 Sekunden gesperrt ("wird gerade abgerufen"). shield(): die
-        # Aufraeumung laeuft zu Ende, auch wenn der Task schon abgebrochen ist.
-        await _aio.shield(_lease_freigeben(db, cache_key, claim))
-        raise
-    finally:
-        _heartbeat.cancel()
-        await _aio.shield(release_slot(db, slot_id))
-        if apify_slot:
-            await _aio.shield(release_slot(db, apify_slot))
-    if not isinstance(data, dict):
-        await _lease_freigeben(db, cache_key, claim)
-        raise RuntimeError(
-            f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
-        )
 
-    # Befund 79 (16.09.2026): fetched_at/expires_at/last_used_at stempeln den
-    # ERFOLGREICHEN Abruf — nicht den Start vor Lease- und Slot-Wartezeit
-    # (sonst war der Eintrag bis zu einer Minute "aelter" und lief frueher ab).
-    abruf_ende = datetime.now(timezone.utc)
-    expires_at = abruf_ende + timedelta(hours=ttl_hours)
-    # Runde 19: das Ergebnis nur unter der EIGENEN Lease speichern — ist sie
-    # inzwischen an einen Nachfolger gegangen, schreibt der (kein Upsert mehr,
-    # sonst entstuende ein zweites Dokument).
-    res = await db.listings_cache.update_one(
-        {"cache_key": cache_key, "fetching_claim": claim},
-        {
-            "$set": {
-                "cache_key": cache_key,
-                "source": source,
-                "item_id": item_id,
-                "url": url,
-                "data": data,
-                "fetched_at": abruf_ende,
-                "expires_at": expires_at,
-                "last_used_at": abruf_ende,
-                # Beim Re-Fetch (TTL abgelaufen) muss ein alter Snapshot
-                # als ungültig gelten — der Caller erzeugt direkt einen
-                # neuen. Vorher löschen verhindert, dass nach dem
-                # Re-Fetch versehentlich noch auf den alten Schnappschuss
-                # verwiesen wird, falls der Caller das snapshot_id-
-                # Speichern (set_cache_snapshot) auslassen sollte.
-                "snapshot_id": None,
-                "fetching_until": None,
+    async def _abruf_und_speichern() -> Tuple[dict, bool]:
+        """Abruf, Aufraeumen und Speichern als EIGENER Task (A-17): laeuft die
+        Gesamtfrist ab, arbeitet er im Hintergrund zu Ende und legt das
+        Ergebnis in den Speicher — der naechste Versuch trifft dann sofort."""
+        try:
+            data = await fetcher(source, item_id, url)
+        except BaseException:
+            # Lease freigeben, damit der naechste Versuch nicht 90 s warten muss.
+            # BaseException (statt Exception) wegen CancelledError: Wunsch Ahmad
+            # 18.09.2026 — bricht der Nutzer ab ("X") oder legt der Browser auf,
+            # wird dieser Task abgebrochen. Ohne Freigabe blieb derselbe Link bis
+            # zu 90 Sekunden gesperrt ("wird gerade abgerufen"). shield(): die
+            # Aufraeumung laeuft zu Ende, auch wenn der Task schon abgebrochen ist.
+            await _aio.shield(_lease_freigeben(db, cache_key, claim))
+            raise
+        finally:
+            _heartbeat.cancel()
+            await _aio.shield(release_slot(db, slot_id))
+            if apify_slot:
+                await _aio.shield(release_slot(db, apify_slot))
+        if not isinstance(data, dict):
+            await _lease_freigeben(db, cache_key, claim)
+            raise RuntimeError(
+                f"fetcher für {source}:{item_id} hat kein dict zurückgegeben."
+            )
+
+        # Befund 79 (16.09.2026): fetched_at/expires_at/last_used_at stempeln den
+        # ERFOLGREICHEN Abruf — nicht den Start vor Lease- und Slot-Wartezeit
+        # (sonst war der Eintrag bis zu einer Minute "aelter" und lief frueher ab).
+        abruf_ende = datetime.now(timezone.utc)
+        expires_at = abruf_ende + timedelta(hours=ttl_hours)
+        # Runde 19: das Ergebnis nur unter der EIGENEN Lease speichern — ist sie
+        # inzwischen an einen Nachfolger gegangen, schreibt der (kein Upsert mehr,
+        # sonst entstuende ein zweites Dokument).
+        # A-20: kein snapshot_id-Feld mehr (Snapshots gibt es seit dem
+        # Beweisdokument nicht; set_cache_snapshot wurde nie aufgerufen).
+        res = await db.listings_cache.update_one(
+            {"cache_key": cache_key, "fetching_claim": claim},
+            {
+                "$set": {
+                    "cache_key": cache_key,
+                    "source": source,
+                    "item_id": item_id,
+                    "url": url,
+                    "data": data,
+                    "fetched_at": abruf_ende,
+                    "expires_at": expires_at,
+                    "last_used_at": abruf_ende,
+                    "fetching_until": None,
+                },
+                # fetch_count: Abrufzaehler je Inserat — belegt im Lasttest
+                # und im Betrieb, dass kein Inserat mehrfach extern geholt
+                # wird. WICHTIG: mit use_count in EINEM $inc — ein zweiter
+                # "$inc"-Schluessel im selben Dict wuerde den ersten still
+                # verdraengen (Python behaelt nur den letzten).
+                "$inc": {"use_count": 1, "fetch_count": 1},
+                "$unset": {"fetching_claim": ""},
             },
-            # fetch_count: Abrufzaehler je Inserat — belegt im Lasttest
-            # und im Betrieb, dass kein Inserat mehrfach extern geholt
-            # wird. WICHTIG: mit use_count in EINEM $inc — ein zweiter
-            # "$inc"-Schluessel im selben Dict wuerde den ersten still
-            # verdraengen (Python behaelt nur den letzten).
-            "$inc": {"use_count": 1, "fetch_count": 1},
-            "$unset": {"fetching_claim": ""},
-        },
-    )
-    if res.matched_count == 0:
-        _log.warning("listings_cache %s: Lease waehrend des Abrufs verloren — "
-                     "Ergebnis nicht gespeichert (Nachfolger schreibt)", cache_key)
-        # Befund 116 (16.09.2026): der verlorene Abruf darf auch KEINEN
-        # Beweisstand einfrieren — sonst dokumentierte das Dokument einen
-        # Stand, der nie Cache-Stand wurde. Der Nachfolger merkt vor.
-        #
-        # Befund 153 (19.09.2026): Er darf seine verworfenen Daten auch nicht
-        # mehr ZURUECKGEBEN. Sonst stand im gemeinsamen Speicher der Stand des
-        # Gewinners und im Fahrzeug dieses Suchers ein anderer — zwei Kollegen
-        # sahen dasselbe Inserat mit verschiedenen Zahlen. Stattdessen kurz auf
-        # den Gewinner warten und DESSEN Stand liefern.
-        for _versuch in range(4):
-            gewinner = await _fresh_cached()
-            if gewinner:
-                await db.listings_cache.update_one(
-                    {"cache_key": cache_key},
-                    {"$inc": {"use_count": 1},
-                     "$set": {"last_used_at": datetime.now(timezone.utc)}})
-                return gewinner["data"], True, gewinner.get("snapshot_id")
-            await _aio.sleep(0.5)
-        raise ListingBusy(
-            "Das Inserat wurde gerade von einer anderen Anfrage aktualisiert - "
-            "bitte in ein paar Sekunden erneut versuchen.")
-    # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
-    # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
-    # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).
-    # Eigener Schutzblock: ein Fehler darf den Datenabruf nie brechen.
-    try:
-        from beweis_service import automatisch_aktiv
-        from beweis_service import beweis_vormerken
-        # Runde 23 (11.09.2026): den Stand DIESES Abrufs mitgeben — er wird
-        # beim Anlegen eingefroren; der Worker liest sonst spaeter den
-        # veraenderlichen Cache (neuerer Stand nach Wiederholung/Neuabruf).
-        # Wunsch Ahmad 18.09.2026: nur noch auf Knopfdruck (POST
-        # /beweise/anfordern) — der blosse Abruf legt kein Dokument mehr an.
-        if automatisch_aktiv():
-            await beweis_vormerken(db, cache_key=cache_key, quelle=source,
-                                   item_id=item_id, url=url, anlass="abruf",
-                                   daten=data, abgerufen_am=abruf_ende)
-    except Exception as exc:  # noqa: BLE001
-        import logging as _logging
-        _logging.getLogger("autohandel").warning(
-            "Beweis-Vormerkung %s: %s", cache_key, exc)
-    return data, False, None
+        )
+        if res.matched_count == 0:
+            _log.warning("listings_cache %s: Lease waehrend des Abrufs verloren — "
+                         "Ergebnis nicht gespeichert (Nachfolger schreibt)", cache_key)
+            # Befund 116 (16.09.2026): der verlorene Abruf darf auch KEINEN
+            # Beweisstand einfrieren — sonst dokumentierte das Dokument einen
+            # Stand, der nie Cache-Stand wurde. Der Nachfolger merkt vor.
+            #
+            # Befund 153 (19.09.2026): Er darf seine verworfenen Daten auch nicht
+            # mehr ZURUECKGEBEN. Sonst stand im gemeinsamen Speicher der Stand des
+            # Gewinners und im Fahrzeug dieses Suchers ein anderer — zwei Kollegen
+            # sahen dasselbe Inserat mit verschiedenen Zahlen. Stattdessen kurz auf
+            # den Gewinner warten und DESSEN Stand liefern.
+            for _versuch in range(4):
+                gewinner = await _fresh_cached()
+                if gewinner:
+                    await db.listings_cache.update_one(
+                        {"cache_key": cache_key},
+                        {"$inc": {"use_count": 1},
+                         "$set": {"last_used_at": datetime.now(timezone.utc)}})
+                    return gewinner["data"], True
+                await _aio.sleep(0.5)
+            raise ListingBusy(
+                "Das Inserat wurde gerade von einer anderen Anfrage aktualisiert - "
+                "bitte in ein paar Sekunden erneut versuchen.")
+        # Beweisdokument (ersetzt die Snapshots, 10.09.2026): erster Abruf eines
+        # Inserats durch den Server -> genau EIN Dokument je Inserat vormerken
+        # (Linkpruefung, Vergleich, resolve laufen alle durch diesen Zweig).
+        # Eigener Schutzblock: ein Fehler darf den Datenabruf nie brechen.
+        try:
+            from beweis_service import automatisch_aktiv
+            from beweis_service import beweis_vormerken
+            # Runde 23 (11.09.2026): den Stand DIESES Abrufs mitgeben — er wird
+            # beim Anlegen eingefroren; der Worker liest sonst spaeter den
+            # veraenderlichen Cache (neuerer Stand nach Wiederholung/Neuabruf).
+            # Wunsch Ahmad 18.09.2026: nur noch auf Knopfdruck (POST
+            # /beweise/anfordern) — der blosse Abruf legt kein Dokument mehr an.
+            if automatisch_aktiv():
+                await beweis_vormerken(db, cache_key=cache_key, quelle=source,
+                                       item_id=item_id, url=url, anlass="abruf",
+                                       daten=data, abgerufen_am=abruf_ende)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Beweis-Vormerkung %s: %s", cache_key, exc)
+        return data, False
 
+    verwaist = {"ja": False}
 
-async def set_cache_snapshot(db, url: str, snapshot_id: str) -> None:
-    """Verknüpft einen frisch erzeugten Snapshot mit dem Cache-Eintrag, so
-    dass Folge-Aufrufe innerhalb der TTL den bestehenden Beweis
-    wiederverwenden können. Fehlerhaft/unerkannte URLs werden stumm
-    ignoriert (kein harter Fehler im Hot-Path)."""
+    def _hintergrund_ende(t) -> None:
+        _hintergrund_abrufe.discard(t)
+        if verwaist["ja"] and not t.cancelled() and t.exception() is not None:
+            _log.info("listings_cache %s: Hintergrund-Abruf endete mit %s: %s",
+                      cache_key, type(t.exception()).__name__, str(t.exception())[:200])
+
+    lauf = _aio.ensure_future(_abruf_und_speichern())
+    _hintergrund_abrufe.add(lauf)
+    lauf.add_done_callback(_hintergrund_ende)
     try:
-        identity = get_listing_identity(url)
-    except ListingIdentityError:
-        return
-    await db.listings_cache.update_one(
-        {"cache_key": identity["cache_key"]},
-        {"$set": {"snapshot_id": snapshot_id}},
-    )
+        return await _aio.wait_for(_aio.shield(lauf), timeout=max(1.0, _rest()))
+    except _aio.TimeoutError:
+        # A-06/A-17: Frist verbraucht. Der Abruf laeuft im Hintergrund zu Ende
+        # (Lease und Plaetze bleiben bis dahin belegt, das Ergebnis landet im
+        # Speicher — DP-04: "der Link wird im Hintergrund weitergeladen");
+        # der Aufrufer bekommt eine klare, wiederholbare Meldung (503).
+        verwaist["ja"] = True
+        _log.warning("listings_cache %s: Gesamtfrist %s s verbraucht — Abruf laeuft "
+                     "im Hintergrund weiter", cache_key, frist_s)
+        raise AbrufDauertZuLange(ABRUF_ZU_LANGE_TEXT, hintergrund=True)
+    except _aio.CancelledError:
+        # Wunsch Ahmad 18.09.2026: bricht der Nutzer ab ("X") oder legt der
+        # Browser auf, bricht auch der Abruf ab — das finally im Task gibt
+        # Lease und Plaetze frei.
+        lauf.cancel()
+        raise
 
 
 # -----------------------------------------------------------------------------
@@ -890,9 +985,9 @@ __all__ = [
     "extract_autoscout_id",
     "get_listing_identity",
     "get_or_fetch_listing",
-    "set_cache_snapshot",
     "ensure_cache_indexes",
     "ListingBusy",
+    "AbrufDauertZuLange",
     "store_client_listing",
     "router",
 ]

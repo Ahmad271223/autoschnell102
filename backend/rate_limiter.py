@@ -95,6 +95,17 @@ if _NUR_LISTE and not _TRUSTED_PROXIES:
 _VERMITTLER_NETZE = list(_TRUSTED_PROXIES) + ([] if (_NUR_LISTE and _TRUSTED_PROXIES)
                                               else _PRIVATE_NETZE)
 
+# Pruefbericht 20.09.2026 (B-15): Faellt der gemeinsame Mongo-Zaehler aus,
+# zaehlt jeder Worker-Prozess fuer sich — bei 4 Workern je Server galt dann
+# das Vierfache. Der lokale Rueckfall teilt das Limit deshalb durch die Zahl
+# der Prozesse (WEB_CONCURRENCY, wie im Dockerfile/Compose).
+try:
+    _WEB_CONCURRENCY = max(1, int((os.environ.get("WEB_CONCURRENCY") or "1").strip() or 1))
+except ValueError:
+    _WEB_CONCURRENCY = 1
+# Hinweis auf den Rueckfall hoechstens einmal je Minute je Limiter.
+_RUECKFALL_MELDUNG_ABSTAND_S = 60
+
 
 def _gueltige_ip(wert: str) -> str:
     """Nur echte Adressen zaehlen — sonst landet "not-an-ip" oder ein
@@ -198,12 +209,18 @@ class SlidingWindowRateLimiter:
         self.fail_closed = fail_closed
         # Stabiler Name = gemeinsamer Schluessel ueber ALLE Worker-Prozesse
         # (id(self) o.ae. waere je Prozess anders und wuerde die Zaehler
-        # wieder trennen).
-        self.name = name or f"limit{max_attempts}per{window_seconds}"
+        # wieder trennen). Pruefbericht 20.09.2026 (SV-16): ein erzeugter
+        # Name wie "limit20per60" liesse zwei Limiter mit gleichen Zahlen
+        # denselben Zaehler teilen — deshalb Pflicht.
+        if not name:
+            raise ValueError("Limiter braucht einen Namen (gemeinsamer Schluessel "
+                             "ueber alle Worker)")
+        self.name = name
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = Lock()
+        self._rueckfall_gemeldet = 0.0
         # Garbage-Collection: alle N Aufrufe abgelaufene Buckets entfernen.
         self._gc_every = 500
         self._calls_since_gc = 0
@@ -230,7 +247,27 @@ class SlidingWindowRateLimiter:
                 logging.getLogger("rate_limiter").exception(
                     "Limiter %s: gemeinsamer Zaehler nicht erreichbar — fail-closed", self.name)
                 return False
+            await self._rueckfall_melden()
             return self._check_lokal(key)
+
+    async def _rueckfall_melden(self) -> None:
+        """B-15: Der stille Rueckfall auf den Zaehler je Prozess war unsichtbar.
+        Jetzt Warnung im Log und Betriebsalarm, gedrosselt je Limiter."""
+        jetzt = time.monotonic()
+        if jetzt - self._rueckfall_gemeldet < _RUECKFALL_MELDUNG_ABSTAND_S:
+            return
+        self._rueckfall_gemeldet = jetzt
+        logging.getLogger("rate_limiter").warning(
+            "Limiter %s: gemeinsamer Zaehler nicht erreichbar — Zaehler je Prozess "
+            "(Limit durch WEB_CONCURRENCY=%s geteilt)", self.name, _WEB_CONCURRENCY)
+        try:
+            from betrieb import alarm
+            from deps import db
+            await alarm(db, "limiter_lokal", ref=self.name, limiter=self.name,
+                        hinweis="Der gemeinsame Zaehler (rate_limits) ist nicht erreichbar; "
+                                "das Limit gilt vorerst je Worker-Prozess.")
+        except Exception:  # noqa: BLE001 — Mongo ist gerade weg, der Alarm darf nichts brechen
+            pass
 
     async def _check_mongo(self, key: str) -> bool:
         """Gleitendes Fenster ueber zwei feste Zeitfenster (atomar per $inc,
@@ -319,6 +356,10 @@ class SlidingWindowRateLimiter:
             with self._lock:
                 return len([t for t in self._buckets.get(key, []) if t > cutoff])
 
+    def _lokale_grenze(self) -> int:
+        """B-15: je Prozess nur der Anteil am Limit (mindestens 1)."""
+        return max(1, self.max_attempts // _WEB_CONCURRENCY)
+
     def _check_lokal(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self.window_seconds
@@ -326,7 +367,7 @@ class SlidingWindowRateLimiter:
             timestamps = self._buckets[key]
             # Drop timestamps outside the current window.
             fresh = [t for t in timestamps if t > cutoff]
-            if len(fresh) >= self.max_attempts:
+            if len(fresh) >= self._lokale_grenze():
                 self._buckets[key] = fresh
                 return False
             fresh.append(now)

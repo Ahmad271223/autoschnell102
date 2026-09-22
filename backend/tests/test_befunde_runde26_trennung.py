@@ -151,7 +151,8 @@ def test_07_rueckfall_schluessel_enthaelt_das_konto(db_welt, monkeypatch):
     monkeypatch.setattr(L, "RUECKFALL_TAGESLIMIT", 5)
     user = {"id": "su_schluessel", "dealer_id": "d_schluessel", "role": "sucher"}
     run(L._rueckfall_erlaubt(True, user))
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from provider_fetch import tagesschluessel   # B-13: deutsche Zeit
+    tag = tagesschluessel()
     doc = run(L.db.provider_budget.find_one({"_id": f"{tag}:rueckfall:su_schluessel"}))
     assert doc and doc["n"] == 1, "Budget haengt an der Konto-ID"
     assert run(L.db.provider_budget.find_one({"_id": f"{tag}:rueckfall:d_schluessel"})) is None

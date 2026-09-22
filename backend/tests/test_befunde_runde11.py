@@ -155,10 +155,10 @@ def test_h5_nichts_wird_still_gestutzt():
     from regeln import RegelFehler, regeln_validieren, LAENDER_MOBILE
     with pytest.raises(RegelFehler, match="hoechstens 40"):
         regeln_validieren({"country": {"mode": "exact", "codes": list(LAENDER_MOBILE)[:41]}})
-    with pytest.raises(RegelFehler, match="result_count"):
-        regeln_validieren({"result_count": 50})
-    assert regeln_validieren({"result_count": 20})["result_count"] == 20
-    assert regeln_validieren({"result_count": "4"})["result_count"] == 4
+    # Pruefbericht 20.09.2026 (B-08): result_count ist kein Regelschluessel
+    # mehr (kein Link-Bauer las ihn) — Altwerte werden still verworfen.
+    assert "result_count" not in regeln_validieren({"result_count": 50})
+    assert "result_count" not in regeln_validieren({"result_count": "4", "sort": "price_asc"})
 
 
 def test_h6_ausstattung_nur_bekannte_namen_und_exact_erreichbar():
@@ -259,9 +259,13 @@ def test_h4_h5_speichern_lehnt_unbekanntes_land_und_zu_viel_ab(welt):
     r = requests.put(f"{API}/dealer/settings", headers=welt["C"], json={
         "comparison_rules": {**DEFAULT_RULES, "country": {"mode": "exact", "codes": ["XX"]}}}, timeout=30)
     assert r.status_code == 400 and "XX" in r.text, r.text[:200]
+    # B-08: statt result_count (entfallen) die Laendergrenze als "zu viel"
+    from regeln import LAENDER_MOBILE
     r = requests.put(f"{API}/dealer/settings", headers=welt["C"], json={
-        "comparison_rules": {**DEFAULT_RULES, "result_count": 50}}, timeout=30)
-    assert r.status_code == 400 and "result_count" in r.text, r.text[:200]
+        "comparison_rules": {**DEFAULT_RULES,
+                             "country": {"mode": "exact", "codes": list(LAENDER_MOBILE)[:41]}}},
+        timeout=30)
+    assert r.status_code == 400 and "hoechstens 40" in r.text, r.text[:200]
 
 
 def test_i2_chef_einstellungen_und_profilwechsel_im_protokoll(welt):

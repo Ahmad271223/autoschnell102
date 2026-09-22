@@ -192,8 +192,8 @@ def test_geteilter_job_bucht_beim_konto_mit_kontingent(wegwerf, monkeypatch):
     db, run = wegwerf.db, wegwerf.run
     versuche = []
 
-    async def gof(db_, url, fetcher, ttl_hours=6):
-        return await fetcher("kleinanzeigen", "1", url), False, None
+    async def gof(db_, url, fetcher, ttl_hours=6, **kw):      # B-04: dealer_id=...; A-20: 2-Tupel
+        return await fetcher("kleinanzeigen", "1", url), False
     monkeypatch.setattr(LI, "get_or_fetch_listing", gof)
 
     async def fetch(db_, src, iid, url, dealer_id="", user_id=""):
@@ -401,7 +401,7 @@ def test_inserat_weg_zaehlt_technischer_fehler_nicht(wegwerf, monkeypatch):
     from kleinanzeigen_service import ListingGone
     db, run = wegwerf.db, wegwerf.run
     monkeypatch.setattr(PF, "MOCK_PROVIDER_FETCH", False)
-    tag = _jetzt().strftime("%Y-%m-%d")
+    tag = PF.tagesschluessel()   # B-13: deutsche Zeit
     fehler = {"art": "weg"}
 
     async def abrufen(db_, source, item_id, url):

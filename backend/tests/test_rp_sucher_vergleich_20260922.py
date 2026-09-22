@@ -149,7 +149,7 @@ def test_rp202_zaehlt_fuer_das_tageslimit(wegwerf, monkeypatch):
     monkeypatch.setattr(PF, "MOCK_PROVIDER_FETCH", False)
     with pytest.raises(AF.ListingGone):
         run(PF.fetch_listing(db, "mobile", "1", "https://suchen.mobile.de/x", dealer_id="d1", user_id="u1"))
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tag = PF.tagesschluessel()   # B-13: deutsche Zeit
     assert run(db.provider_budget.find_one({"_id": f"{tag}:konto:u1"}))["n"] == 1
 
 
@@ -490,7 +490,7 @@ def _job_doc(s, **extra):
 def _abruf_stubs(monkeypatch, fehler=None):
     abrufe = []
 
-    async def holen(db, url, fetcher, ttl_hours=0):
+    async def holen(db, url, fetcher, ttl_hours=0, **kw):      # B-04: dealer_id=...
         return await fetcher("mobile", "1", url)
 
     async def fetch(db, src, iid, url, dealer_id="", user_id=""):

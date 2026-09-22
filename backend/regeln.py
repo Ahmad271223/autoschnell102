@@ -13,13 +13,18 @@ abgelehnt. Die URL-Bauer (mobile_service/autoscout_service) bekommen damit
 garantiert typsichere Werte.
 
 Runde 11 (09/2026): Nichts wird mehr still zurechtgestutzt. Zu viele
-Laender oder Ausstattungen, ein result_count ausserhalb 1..20, ein Land,
-das kein Portal kennt, oder eine Ausstattung, die kein Portal filtert —
-alles ist ein Fehler mit Hinweis statt einer Konfiguration, die anders
-gespeichert wird, als der Firmenchef sie abgeschickt hat. "radius" ist
-kein Regelschluessel mehr: kein Portal-Bauer hat ihn je ausgewertet, ein
-gespeicherter Radius war also eine leere Zusage.
+Laender oder Ausstattungen, ein Land, das kein Portal kennt, oder eine
+Ausstattung, die kein Portal filtert — alles ist ein Fehler mit Hinweis
+statt einer Konfiguration, die anders gespeichert wird, als der Firmenchef
+sie abgeschickt hat. "radius" ist kein Regelschluessel mehr: kein
+Portal-Bauer hat ihn je ausgewertet, ein gespeicherter Radius war also eine
+leere Zusage.
+
+Pruefbericht 20.09.2026 (B-08): "result_count" ebenso — validiert und
+gespeichert, aber weder von einem Link-Bauer noch von der Oberflaeche
+gelesen. Der Schluessel wird wie jeder unbekannte still verworfen.
 """
+import copy
 import re
 from typing import Any, Dict, List
 
@@ -92,7 +97,6 @@ _REGELN: Dict[str, Dict[str, Any]] = {
 SORTIERUNGEN = {"price_asc", "price_desc", "mileage_asc", "mileage_desc",
                 "first_registration_desc", "first_registration_asc", "relevance"}
 _SORT = SORTIERUNGEN
-RESULT_COUNT_MIN, RESULT_COUNT_MAX = 1, 20
 
 
 class RegelFehler(ValueError):
@@ -180,13 +184,6 @@ def regeln_validieren(rohe: Any) -> Dict[str, Any]:
         if rohe["sort"] not in _SORT:
             raise RegelFehler(f"sort: unbekannter Wert {rohe['sort']!r}")
         sauber["sort"] = rohe["sort"]
-    if "result_count" in rohe:
-        n = _int_oder_none(rohe["result_count"], "result_count", "regeln")
-        if n is not None:
-            if n < RESULT_COUNT_MIN or n > RESULT_COUNT_MAX:
-                raise RegelFehler(f"result_count: {RESULT_COUNT_MIN} bis "
-                                  f"{RESULT_COUNT_MAX} erlaubt, bekommen {n}")
-            sauber["result_count"] = n
     feats = rohe.get("features")
     if feats is not None:
         if not isinstance(feats, dict):
@@ -219,7 +216,7 @@ def regeln_lesen(rohe: Any, standard: Dict[str, Any]) -> Dict[str, Any]:
     Standard zurueck; gueltige Eintraege bleiben, fehlende werden aus dem
     Standard ergaenzt. Der Schreibpfad (regeln_validieren) bleibt streng."""
     if not isinstance(rohe, dict):
-        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in standard.items()}
+        return copy.deepcopy(standard)
     sauber: Dict[str, Any] = {}
     for k, v in rohe.items():
         try:
@@ -237,9 +234,12 @@ def regeln_lesen(rohe: Any, standard: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 sauber[k] = teil[k]
         elif k in standard:
-            sauber[k] = standard[k]
+            # Pruefbericht 20.09.2026 (B-12): Kopie statt des Standard-Objekts
+            # selbst — sonst teilte das gelesene Paket dict-Werte mit
+            # DEFAULT_RULES, und eine Aenderung am Ergebnis aenderte den Standard.
+            sauber[k] = copy.deepcopy(standard[k])
     for k, v in standard.items():
-        sauber.setdefault(k, v)
+        sauber.setdefault(k, copy.deepcopy(v))
     return sauber
 
 

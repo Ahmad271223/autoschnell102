@@ -98,14 +98,25 @@ def _alle_merkmale(tabelle: Dict[str, str], beschreibung: Optional[str]) -> List
         klein = w.lower()
         if klein in bekannt:
             continue
-        # Steckt das Wort schon in einem der Haken? (ABS / Xenon ...)
-        if any(klein in m for m in bekannt):
+        # Steckt das Wort schon in einem der Haken — oder umgekehrt ein Haken
+        # im Wort? Pruefbericht 20.09.2026 (S-26): nur eine Richtung liess
+        # "ABS" (Haken) und "Antiblockiersystem (ABS)" (Text) beide stehen.
+        if any(_merkmal_enthalten(klein, m) or _merkmal_enthalten(m, klein) for m in bekannt):
             continue
         merkmale.append(w)
         bekannt.add(klein)
         if len(merkmale) >= MAX_MERKMALE:
             break
     return merkmale
+
+
+def _merkmal_enthalten(kurz: str, lang: str) -> bool:
+    """Steckt `kurz` in `lang`? Kuerzel bis 4 Zeichen (ABS, ESP, AHK, LED) nur
+    als ganzes Wort — sonst faende "AHK" in "Fahrkomfort" (S-26)."""
+    import re
+    if len(kurz) <= 4:
+        return re.search(r"(?<![a-z0-9äöü])" + re.escape(kurz) + r"(?![a-z0-9äöü])", lang) is not None
+    return kurz in lang
 
 
 # Obergrenze fuer die Ausstattungsliste. Eine echte Haendleranzeige bringt
@@ -134,26 +145,10 @@ def _ohne_listenueberschrift(wort: str) -> str:
 
 
 def _teile_ausserhalb_klammern(block: str) -> List[str]:
-    """An Kommas trennen, aber NICHT innerhalb von Klammern.
-
-    "Audiosystem Composition Colour (Touchscreen, MP3, Radio/CD-Player)" ist
-    EIN Merkmal — naives Trennen machte daraus drei unsinnige Bruchstuecke
-    (echte Anzeige 3458821471)."""
-    teile: List[str] = []
-    tiefe = 0
-    aktuell: List[str] = []
-    for zeichen in block:
-        if zeichen == "(":
-            tiefe += 1
-        elif zeichen == ")":
-            tiefe = max(0, tiefe - 1)
-        if zeichen == "," and tiefe == 0:
-            teile.append("".join(aktuell))
-            aktuell = []
-        else:
-            aktuell.append(zeichen)
-    teile.append("".join(aktuell))
-    return teile
+    """An Kommas trennen, aber NICHT innerhalb von Klammern — seit S-21 in
+    kleinanzeigen_service (auch der AutoScout-Parser nutzt sie)."""
+    from kleinanzeigen_service import _teile_ausserhalb_klammern as _teile
+    return _teile(block)
 
 
 def _ausstattung_aus_text(text: str) -> List[str]:
@@ -232,11 +227,12 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     Die Form ist identisch zu kleinanzeigen_service.parse_kleinanzeigen_html;
     ein Test haelt beide Schluesselmengen zusammen, damit sie nicht
     auseinanderlaufen."""
-    from kleinanzeigen_service import (_enhance_kleinanzeigen_model, _km_aus_text,
-                                       _marke_aus_titel, _marke_fehlt,
+    from kleinanzeigen_service import (_enhance_kleinanzeigen_model, _halter,
+                                       _km_aus_text, _marke_aus_titel, _marke_fehlt,
                                        _parse_first_registration, _parse_fuel,
                                        _parse_gearbox, _parse_power,
                                        _resolve_make, _resolve_model, _to_int)
+    from fahrzeug_codes import tueren_text
     from owners_extractor import extract_owners_from_text
 
     tabelle = _details_als_tabelle(ad)
@@ -337,6 +333,10 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     # Pruefbericht 20.09.2026 (S-06): ohne Angabe None statt "kein Unfall".
     from mobile_service import zustand_fahrbereit, zustand_unfall
     unfall = zustand_unfall(None, zustand)
+    # S-22/A-11: Tabellenwert 0 zaehlt; nur 0-15 gilt als Halterzahl.
+    halter = _halter(tabelle.get("Anzahl der Fahrzeughalter"))
+    if halter is None:
+        halter = extract_owners_from_text(beschreibung or "")
 
     ergebnis: Dict[str, Any] = {
         "mobile_ad_id": nummer,
@@ -360,14 +360,13 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "power_kw": kw,
         "power_ps": ps,
         "displacement": _to_int(tabelle.get("Hubraum")),
-        "doors": tabelle.get("Anzahl Türen"),
+        "doors": tueren_text(tabelle.get("Anzahl Türen")),         # S-19
         "seats": _to_int(tabelle.get("Anzahl Sitzplätze")),
         "color": tabelle.get("Außenfarbe"),
         "vin": None,
         "license_plate": None,
         "hu": tabelle.get("HU bis"),
-        "previous_owners": (_to_int(tabelle.get("Anzahl der Fahrzeughalter"))
-                            or extract_owners_from_text(beschreibung or "")),
+        "previous_owners": halter,
         "accident_damaged": unfall,
         # S-05: Kleinanzeigen kennt keine Fahrbereit-Angabe — nichts erfinden.
         "roadworthy": zustand_fahrbereit(None, zustand),
@@ -397,6 +396,7 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "price_negotiable": verhandelbar,
         "location": ortszeile,
         "images": bilder,
+        "image_urls": list(bilder),                     # S-30
         "image_count": len(bilder),
         "_resolved_make_id": marke_id,
         "_resolved_model_id": modell_id,

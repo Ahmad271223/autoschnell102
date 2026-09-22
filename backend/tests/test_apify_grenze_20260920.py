@@ -65,7 +65,9 @@ def test_01b_der_gemeinsame_topf_deckelt_beide():
     assert set(PL.APIFY_QUELLEN) == {"mobile", "autoscout24"}
     quelle = (BACKEND / "listing_identity.py").read_text(encoding="utf-8")
     code = "\n".join(z.split("#", 1)[0] for z in quelle.splitlines())
-    assert 'acquire_slot(db, "apify")' in code, (
+    # B-04 (Pruefbericht 20.09.2026): der Aufruf traegt jetzt die Firma
+    # (dealer_id=...) — deshalb nur der Anfang des Aufrufs.
+    assert 'acquire_slot(db, "apify"' in code, (
         "der Abrufweg belegt keinen Platz im gemeinsamen Topf")
     assert code.count("release_slot(db, apify_slot)") >= 1, (
         "der Platz im gemeinsamen Topf wird nie zurueckgegeben")
@@ -173,9 +175,11 @@ def test_06_der_filter_sitzt_an_allen_drei_stellen():
     wartende Jobs holt — sonst greift der Abstand nur teilweise."""
     quelle = (BACKEND / "link_jobs.py").read_text(encoding="utf-8")
     code = "\n".join(z.split("#", 1)[0] for z in quelle.splitlines())
-    assert code.count("**_reif()") == 3, (
-        f"_reif() steht an {code.count('**_reif()')} statt 3 Stellen "
-        "(_beanspruchen und die beiden Kandidaten-Runden)")
+    # Pruefbericht 20.09.2026 (A-16): dazu kommt der billige Vorab-Blick in
+    # _claim_many (find_one ueber by_status), der ebenfalls nur faellige Jobs zaehlt.
+    assert code.count("**_reif()") == 4, (
+        f"_reif() steht an {code.count('**_reif()')} statt 4 Stellen "
+        "(_beanspruchen, Vorab-Blick und die beiden Kandidaten-Runden)")
     # Und kein Weg darf noch ohne den Filter auf wartende Jobs zugreifen.
     ohne_filter = [z for z in code.splitlines()
                    if '"status": "queued", "active": True' in z

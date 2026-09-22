@@ -240,7 +240,7 @@ def test_budget_wird_bei_technischem_fehler_zurueckgebucht(wegwerf, monkeypatch)
     monkeypatch.setattr(PF, "_abrufen", kaputt)
     with pytest.raises(RuntimeError):
         run(PF.fetch_listing(db, "mobile", "1", "https://suchen.mobile.de/x", dealer_id="d1"))
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tag = PF.tagesschluessel()   # B-13: deutsche Zeit
     for schluessel in (f"{tag}:firma:d1", f"{tag}:gesamt"):
         doc = run(db.provider_budget.find_one({"_id": schluessel}))
         assert doc is not None and doc["n"] == 0, (schluessel, doc)

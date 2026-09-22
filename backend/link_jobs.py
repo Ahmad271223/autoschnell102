@@ -65,6 +65,14 @@ MAX_ATTEMPTS = int(os.environ.get("LINK_JOB_MAX_ATTEMPTS", "3"))
 # Fehler (Inserat weg, Netz, Zeitueberschreitung) laufen wie bisher sofort
 # wieder an.
 TEMPOLIMIT_WARTEN = zahl_env("LINK_JOB_TEMPOLIMIT_WARTEN", 5, unten=0, oben=120)
+# Pruefbericht 20.09.2026 (A-16): Der Dauer-Worker fragte alle 0,3 s zwei
+# Aggregationen ab — auch bei leerer Schlange, je Worker-Prozess, rund um die
+# Uhr. Jetzt: erst ein billiger Blick ueber den by_status-Index; ist nichts da,
+# schlaeft die Schleife LEERLAUF_TAKT_S, und die Rueckstellung verwaister Jobs
+# laeuft nur alle REQUEUE_ABSTAND_S. Neue Jobs stoesst /listings/check ohnehin
+# sofort an (anstossen).
+LEERLAUF_TAKT_S = 2.0
+REQUEUE_ABSTAND_S = 5.0
 
 
 def _reif() -> dict:
@@ -413,10 +421,46 @@ class JobRace(WarteschlangeVoll):
     soll kurz spaeter neu einreihen (503 statt geratenem 'completed')."""
 
 
+async def _rueckfall_freigeben(db, job: Optional[dict]) -> None:
+    """Pruefbericht 20.09.2026 (A-05): Der Rueckfall (Server-Abruf ohne
+    Browser-Erweiterung, RUECKFALL_TAGESLIMIT je Konto) wird in /listings/check
+    VOR dem Einreihen gebucht — scheiterte der Job spaeter oder wurde er
+    abgebrochen, blieb der Punkt verbraucht. Der Schluessel des Einreichers
+    steht am Job; endet der Job ohne Ergebnis, geht der Punkt zurueck."""
+    schluessel = (job or {}).get("rueckfall_schluessel")
+    if not schluessel:
+        return
+    try:
+        await db.provider_budget.update_one(
+            {"_id": schluessel, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("link_jobs: Rueckfall %s nicht zurueckgebucht: %s", schluessel, exc)
+
+
+async def _job_scheitern(db, job: dict, eigener_claim: dict, fehler: str,
+                         **felder) -> bool:
+    """Job endgueltig beenden (failed) — nur unter dem eigenen Claim — und
+    den gebuchten Rueckfall zurueckgeben (A-05). True, wenn DIESER Aufruf den
+    Job beendet hat (sonst hat ihn ein Nachfolger uebernommen)."""
+    r = await db.link_jobs.update_one(
+        eigener_claim,
+        {"$set": {"status": "failed", "active": False, "error": fehler,
+                  "finished_at": _now(), "updated_at": _now(), **felder}})
+    if r.matched_count:
+        await _rueckfall_freigeben(db, job)
+    return bool(r.matched_count)
+
+
 async def enqueue_job(db, url: str, dealer_id: str = "",
-                      user_id: str = "") -> dict:
+                      user_id: str = "", rueckfall_schluessel: str = "") -> dict:
     """Job fuer diesen Link anlegen — oder den bereits AKTIVEN Job dieses
-    Inserats zurueckgeben (idempotent, race-fest ueber den Unique-Index)."""
+    Inserats zurueckgeben (idempotent, race-fest ueber den Unique-Index).
+
+    Pruefbericht 20.09.2026 (A-05): Das Ergebnis traegt `neu` — True nur fuer
+    den selbst angelegten Job. Wer einem laufenden Job beitritt, loest keinen
+    Abruf aus; /listings/check gibt dann den gebuchten Rueckfall zurueck.
+    `rueckfall_schluessel` (Budget-Schluessel des Einreichers) wird am Job
+    gespeichert, damit ein gescheiterter Job ihn zurueckbuchen kann."""
     from listing_identity import get_listing_identity
     identity = get_listing_identity(url)
     # Audit 13.09.2026 (#31): Einem schon aktiven Job beizutreten kostet
@@ -425,7 +469,7 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
     bestehend = await _aktivem_job_beitreten(
         db, identity["cache_key"], dealer_id, user_id)
     if bestehend:
-        return bestehend
+        return {**bestehend, "neu": False}
     job: dict = {}
     for _versuch in range(3):
         await _grenzen_pruefen(db, dealer_id, user_id)
@@ -441,6 +485,8 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
             "error": None,
             "requested_by_dealer": dealer_id,
             "requested_by_user": user_id,
+            # A-05: gebuchter Rueckfall des Einreichers (leer = keiner)
+            "rueckfall_schluessel": rueckfall_schluessel or "",
             # Rollenprüfung 22.09.2026 (RP-204/RP-355): Nur ein Job, der OHNE
             # Konto eingereiht wurde (Skripte, Probe), ist ein interner Abruf.
             # Steigt beim Konto-Job der letzte Wartende aus, darf der Worker
@@ -463,7 +509,7 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
             existing = await _aktivem_job_beitreten(
                 db, identity["cache_key"], dealer_id, user_id)
             if existing:
-                return existing
+                return {**existing, "neu": False}
             # Der aktive Job ist zwischen Einfuegen und Beitritt verschwunden.
             # Nachpruefung 13.09.2026 (#28): Das kann ein FERTIGER Job sein
             # (Ergebnis liegt im Cache) — oder einer, den ein anderer Tab an
@@ -476,9 +522,10 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
                 {"cache_key": identity["cache_key"], "status": "completed"},
                 {"_id": 0}, sort=[("updated_at", -1)])
             if fertig:
-                return fertig
+                return {**fertig, "neu": False}
             continue
         job.pop("_id", None)
+        job["neu"] = True                      # A-05: selbst angelegt (nicht gespeichert)
         # Audit 13.09.2026 (#28): Rang-Pruefung NUR fuer den selbst eingefuegten
         # Job — nie im Beitrittsweg; _grenzen_pruefen oben bleibt der Schnellweg.
         try:
@@ -504,7 +551,7 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
     except Exception:  # noqa: BLE001
         treffer = None
     if treffer is not None:
-        return {**job, "status": "completed", "active": False}
+        return {**job, "status": "completed", "active": False, "neu": False}
     raise JobRace("Der Link wird gerade eingereiht — bitte in ein paar Sekunden erneut "
                   "versuchen.", 0, 0)
 
@@ -633,6 +680,7 @@ async def warten_beenden(db, job_id: str, dealer_id: str = "",
         if entfernt.deleted_count == 1:
             log.info("link_jobs: Job %s vom Nutzer abgebrochen (niemand wartet mehr)",
                      job_id)
+            await _rueckfall_freigeben(db, job)      # A-05: kein Abruf -> Punkt zurueck
             return {"status": "abgebrochen"}
     return {"status": "laeuft_weiter", "job_status": job.get("status")}
 
@@ -679,7 +727,8 @@ async def _requeue_stale(db) -> None:
     cutoff = _now()
     async for j in db.link_jobs.find(
             {"status": "processing", "processing_until": {"$lt": cutoff}},
-            {"_id": 0, "id": 1, "attempts": 1, "processing_until": 1, "claim_id": 1}):
+            {"_id": 0, "id": 1, "attempts": 1, "processing_until": 1, "claim_id": 1,
+             "rueckfall_schluessel": 1}):
         # Befund 119 (16.09.2026): nur den GELESENEN Stand zurueckstellen —
         # hat der Herzschlag die Frist inzwischen verlaengert oder ein anderer
         # Worker den Job neu beansprucht (neue claim_id, neue Frist), trifft
@@ -689,12 +738,14 @@ async def _requeue_stale(db) -> None:
                  "processing_until": j.get("processing_until"),
                  "claim_id": j["claim_id"] if j.get("claim_id") else {"$exists": False}}
         if j.get("attempts", 0) >= MAX_ATTEMPTS:
-            await db.link_jobs.update_one(
+            r = await db.link_jobs.update_one(
                 stand,
                 {"$set": {"status": "failed", "active": False,
                           "error": "Abgebrochen: Bearbeiter mehrfach "
                                    "ausgefallen", "finished_at": _now(),
                           "updated_at": _now()}})
+            if r.matched_count:
+                await _rueckfall_freigeben(db, j)      # A-05
         else:
             # Audit 13.09.2026 (#32): claim_id entfernen — beansprucht ein
             # Server der alten Fassung (setzt keine claim_id) den Job neu,
@@ -808,6 +859,11 @@ async def _claim_many(db, n: int) -> list:
     jobs: list = []
     if n <= 0:
         return jobs
+    # A-16: billiger Blick ueber den by_status-Index — bei leerer Schlange
+    # (der Normalfall) keine zwei Aggregationen je Takt und Prozess.
+    if await db.link_jobs.find_one(
+            {"status": "queued", "active": True, **_reif()}, {"_id": 1}) is None:
+        return jobs
     je_konto = [{"$unwind": {"path": "$user_ids", "preserveNullAndEmptyArrays": True}}]
     konto = {"$ifNull": ["$user_ids", "$requested_by_user"]}
     laufend: dict = {}
@@ -891,18 +947,20 @@ async def _process(db, job: dict) -> None:
     # wuerde ein "except ListingBusy" darunter selbst crashen (Name
     # unbekannt) und der Job bis zum Fristablauf in 'processing' haengen.
     try:
-        from listing_identity import ListingBusy, get_or_fetch_listing
+        from listing_identity import ListingBusy, AbrufDauertZuLange, get_or_fetch_listing
         from kleinanzeigen_service import ListingGone
         from provider_fetch import TageslimitErreicht, fetch_listing
         from routes.listings import LISTING_CACHE_TTL_HOURS
     except Exception as exc:  # noqa: BLE001
         log.error("link_jobs: Import fuer Job %s fehlgeschlagen: %s", job["id"], exc)
-        await db.link_jobs.update_one(
+        r = await db.link_jobs.update_one(
             eigener_claim,
             {"$set": {"status": "failed", "active": False,
                       "error": FEHLER_TECHNISCH,
                       "error_intern": f"Import: {exc}"[:300],
                       "finished_at": _now(), "updated_at": _now()}})
+        if r.matched_count:
+            await _rueckfall_freigeben(db, job)      # A-05
         return
 
     async def _fetcher(src, iid, url):
@@ -957,14 +1015,54 @@ async def _process(db, job: dict) -> None:
                 "noch berechtigt (gesperrt, Abo abgelaufen oder Firma gelöscht).")
         raise letzte or gebremst
 
+    async def _fehlversuch(exc: BaseException) -> None:
+        """Ein Versuch ist gescheitert: nach MAX_ATTEMPTS endgueltig (failed,
+        Rueckfall zurueck), sonst zurueck in die Schlange."""
+        endgueltig = job.get("attempts", 1) >= MAX_ATTEMPTS
+        # Befund 122 (16.09.2026): nach aussen nur eigene Sachtexte — der
+        # rohe Ausnahmetext (Hostnamen, Anbieterantworten, Treibermeldungen)
+        # bleibt im Log und in error_intern (nicht Teil der Statusantwort).
+        log.warning("link_jobs: Job %s Versuch %s fehlgeschlagen: %s",
+                    job["id"], job.get("attempts", 1), str(exc)[:300])
+        # RP-204/RP-355: Ist waehrend des Versuchs der letzte Wartende
+        # ausgestiegen, endet der Job hier — ein weiterer Versuch wuerde
+        # sonst ohne Konto (am Konto- und Firmenlimit vorbei) abrufen.
+        if not endgueltig and await _niemand_wartet_mehr(db, job["id"]):
+            await _job_scheitern(db, job, eigener_claim, NIEMAND_WARTET,
+                                 error_intern=str(exc)[:300])
+            return
+        if endgueltig:
+            await _job_scheitern(db, job, eigener_claim, fehlertext(exc),
+                                 error_intern=str(exc)[:300])
+        else:
+            neu_setzen = {"status": "queued",
+                          "error": fehlertext(exc),
+                          "error_intern": str(exc)[:300],
+                          "updated_at": _now()}
+            if _ist_tempolimit(exc) and TEMPOLIMIT_WARTEN > 0:
+                neu_setzen["fruehestens"] = _now() + timedelta(
+                    seconds=TEMPOLIMIT_WARTEN)
+            await db.link_jobs.update_one(
+                eigener_claim,
+                {"$set": neu_setzen, "$unset": {"claim_id": ""}})
+
     herz = None
     if claim_id:
         herz = asyncio.create_task(_frist_verlaengern(db, job["id"], claim_id))
     try:
         try:
-            await get_or_fetch_listing(db, job["url"], _fetcher,
-                                       ttl_hours=LISTING_CACHE_TTL_HOURS)
-        except ListingBusy:
+            await get_or_fetch_listing(
+                db, job["url"], _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
+                # B-04: Firmenanteil an den Anbieter-Plaetzen
+                dealer_id=job.get("requested_by_dealer") or (job.get("dealer_ids") or [""])[0])
+        except ListingBusy as exc:
+            # Pruefbericht 20.09.2026 (DP-04): War der ANBIETER zu langsam
+            # (Apify-Zeitlimit), zaehlt das als Versuch — jeder Lauf kostet.
+            # Lief nur die Gesamtfrist ab (A-17), arbeitet der Abruf im
+            # Hintergrund weiter und der Job sieht spaeter im Speicher nach.
+            if isinstance(exc, AbrufDauertZuLange) and not exc.hintergrund:
+                await _fehlversuch(exc)
+                return
             # Anbieter gerade voll ausgelastet — zurueck in die Schlange,
             # zaehlt nicht als Fehlversuch.
             # Pruefbericht 20.09.2026 (A-07): Vorher OHNE Wartezeit (der Job
@@ -975,16 +1073,10 @@ async def _process(db, job: dict) -> None:
             erstellt = _als_utc(job.get("created_at"))
             if await _niemand_wartet_mehr(db, job["id"]):
                 # RP-204: niemand wartet mehr — nicht wieder einreihen.
-                await db.link_jobs.update_one(
-                    eigener_claim,
-                    {"$set": {"status": "failed", "active": False, "error": NIEMAND_WARTET,
-                              "finished_at": _now(), "updated_at": _now()}})
+                await _job_scheitern(db, job, eigener_claim, NIEMAND_WARTET)
                 return
             if erstellt is not None and (_now() - erstellt).total_seconds() > BUSY_FRIST_S:
-                await db.link_jobs.update_one(
-                    eigener_claim,
-                    {"$set": {"status": "failed", "active": False, "error": BUSY_FEHLER,
-                              "finished_at": _now(), "updated_at": _now()}})
+                await _job_scheitern(db, job, eigener_claim, BUSY_FEHLER)
                 return
             await db.link_jobs.update_one(
                 eigener_claim,
@@ -998,63 +1090,19 @@ async def _process(db, job: dict) -> None:
             # Befunde 146-149: niemand darf diesen Abruf (noch) ausloesen.
             # Endgueltig: ein Wiederholungsversuch aendert daran nichts.
             log.info("link_jobs: Job %s ohne berechtigtes Konto beendet", job["id"])
-            await db.link_jobs.update_one(
-                eigener_claim,
-                {"$set": {"status": "failed", "active": False,
-                          "error": str(exc), "finished_at": _now(),
-                          "updated_at": _now()}})
+            await _job_scheitern(db, job, eigener_claim, str(exc))
             return
         except TageslimitErreicht as exc:
             # Tageslimit je Konto/Firma (16.09.2026): sofort endgueltig, kein
             # weiterer Versuch — jeder Versuch wuerde nur erneut abgelehnt.
-            await db.link_jobs.update_one(
-                eigener_claim,
-                {"$set": {"status": "failed", "active": False,
-                          "error": str(exc), "finished_at": _now(),
-                          "updated_at": _now()}})
+            await _job_scheitern(db, job, eigener_claim, str(exc))
             return
         except ListingGone as exc:
             # Runde 19 (Nr. 31): nur den EIGENEN Claim abschliessen
-            await db.link_jobs.update_one(
-                eigener_claim,
-                {"$set": {"status": "failed", "active": False,
-                          "error": str(exc), "finished_at": _now(),
-                          "updated_at": _now()}})
+            await _job_scheitern(db, job, eigener_claim, str(exc))
             return
         except Exception as exc:  # noqa: BLE001
-            endgueltig = job.get("attempts", 1) >= MAX_ATTEMPTS
-            # Befund 122 (16.09.2026): nach aussen nur eigene Sachtexte — der
-            # rohe Ausnahmetext (Hostnamen, Anbieterantworten, Treibermeldungen)
-            # bleibt im Log und in error_intern (nicht Teil der Statusantwort).
-            log.warning("link_jobs: Job %s Versuch %s fehlgeschlagen: %s",
-                        job["id"], job.get("attempts", 1), str(exc)[:300])
-            # RP-204/RP-355: Ist waehrend des Versuchs der letzte Wartende
-            # ausgestiegen, endet der Job hier — ein weiterer Versuch wuerde
-            # sonst ohne Konto (am Konto- und Firmenlimit vorbei) abrufen.
-            if not endgueltig and await _niemand_wartet_mehr(db, job["id"]):
-                await db.link_jobs.update_one(
-                    eigener_claim,
-                    {"$set": {"status": "failed", "active": False, "error": NIEMAND_WARTET,
-                              "error_intern": str(exc)[:300],
-                              "finished_at": _now(), "updated_at": _now()}})
-                return
-            if endgueltig:
-                await db.link_jobs.update_one(
-                    eigener_claim,
-                    {"$set": {"status": "failed", "active": False,
-                              "error": fehlertext(exc), "error_intern": str(exc)[:300],
-                              "finished_at": _now(), "updated_at": _now()}})
-            else:
-                neu_setzen = {"status": "queued",
-                              "error": fehlertext(exc),
-                              "error_intern": str(exc)[:300],
-                              "updated_at": _now()}
-                if _ist_tempolimit(exc) and TEMPOLIMIT_WARTEN > 0:
-                    neu_setzen["fruehestens"] = _now() + timedelta(
-                        seconds=TEMPOLIMIT_WARTEN)
-                await db.link_jobs.update_one(
-                    eigener_claim,
-                    {"$set": neu_setzen, "$unset": {"claim_id": ""}})
+            await _fehlversuch(exc)
             return
         r = await db.link_jobs.update_one(
             eigener_claim,
@@ -1074,7 +1122,10 @@ async def run_job_worker_forever(db) -> None:
     begrenzt weiterhin provider_limiter."""
     await asyncio.sleep(3)  # Backend erst hochfahren lassen
     laufend: set = set()
+    import time as _time
+    zuletzt_requeue = 0.0
     while True:
+        takt = 0.3
         try:
             # Nachpruefung 20.09.2026, Nr. 64: waehrend einer Schreibpause
             # (Sicherung/Restore) darf dieser Worker NICHT schreiben — sonst
@@ -1084,14 +1135,20 @@ async def run_job_worker_forever(db) -> None:
                 await asyncio.sleep(5)
                 continue
             laufend = {t for t in laufend if not t.done()}
-            await _requeue_stale(db)
+            # A-16: verwaiste Jobs nur alle REQUEUE_ABSTAND_S zurueckstellen
+            if _time.monotonic() - zuletzt_requeue >= REQUEUE_ABSTAND_S:
+                zuletzt_requeue = _time.monotonic()
+                await _requeue_stale(db)
             # Lasttest 16.09.2026: freie Plaetze in EINEM Paket fuellen (statt
             # einzeln mit zwei Aggregationen je Job).
             frei = JOB_CONCURRENCY - len(laufend)
             if frei > 0:
-                for job in await _claim_many(db, frei):
+                neue = await _claim_many(db, frei)
+                for job in neue:
                     laufend.add(asyncio.create_task(_process(db, job)))
+                if not neue:
+                    takt = LEERLAUF_TAKT_S       # A-16: leere Schlange -> ruhiger Takt
             from server import worker_erfolg; worker_erfolg("link_jobs")  # noqa: E702 — Pruefbericht 20.09. SV-05: Durchlauf geschafft
         except Exception as exc:  # noqa: BLE001
             log.warning("link job loop error: %s", exc)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(takt)

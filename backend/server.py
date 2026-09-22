@@ -1169,7 +1169,9 @@ async def bild_proxy_route(request: Request, u: str = "", exp: Optional[str] = N
 # ---------- Frontend-Fehler-Meldung (landet im Admin-Bereich) ----------
 # 20 Meldungen / 60 s pro IP — verhindert, dass ein kaputter Client (oder
 # ein Angreifer) die error_logs-Collection flutet.
-_client_error_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60)
+# Pruefbericht 20.09.2026 (SV-16): fester Name statt erzeugtem "limit20per60"
+_client_error_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60,
+                                                 name="client-errors")
 
 
 class ClientErrorIn(BaseModel):
@@ -1830,8 +1832,10 @@ async def on_start():
         log.warning("Index-Register nicht pruefbar: %s", exc)
     # Object storage for listing snapshots (PDF + PNG proof archives).
     # Non-fatal if EMERGENT_LLM_KEY missing — snapshot endpoints will 503.
+    # Pruefbericht 20.09.2026 (A-20): init_storage macht requests.post
+    # (timeout=30) — nicht im Event-Loop, sonst steht der Start bis zu 30 s.
     try:
-        init_storage()
+        await asyncio.to_thread(init_storage)
     except Exception as exc:
         log.warning("snapshot storage init failed at startup: %s", exc)
     # Job-Sperren-Index SYNCHRON anlegen, BEVOR irgendein Hintergrundjob

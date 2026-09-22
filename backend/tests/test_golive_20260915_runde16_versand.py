@@ -184,7 +184,8 @@ def test_rueckfall_rueckbuchung_und_abruf_bremse(wegwerf, monkeypatch):
     user = {"id": "s1", "dealer_id": "d1"}
     assert run(L._rueckfall_erlaubt(True, user)) is True
     run(L._rueckfall_zurueck(user))
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from provider_fetch import tagesschluessel   # B-13: deutsche Zeit
+    tag = tagesschluessel()
     assert run(db.provider_budget.find_one({"_id": f"{tag}:rueckfall:s1"}))["n"] == 0
     run(L._rueckfall_zurueck(user))                     # nie unter null
     assert run(db.provider_budget.find_one({"_id": f"{tag}:rueckfall:s1"}))["n"] == 0

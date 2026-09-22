@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 # Ausstattung "Navigationssystem" (Suchparameter fe=). Wunsch Ahmad
 # 18.09.2026: Steht im Inserat ein Navi, wird im Vergleich auch danach
@@ -141,6 +141,56 @@ def autoscout_getriebe(*werte) -> str:
 def autoscout_kraftstoff(*werte) -> str:
     """AutoScout24-Kraftstoffcode oder "" (kein Filter)."""
     return AUTOSCOUT_KRAFTSTOFF.get(kraftstoff_code(*werte) or "", "")
+
+
+# Pruefbericht 20.09.2026 (S-19): Tueren kamen je Quelle anders an — mobile.de-
+# XML "FOUR_OR_FIVE", Apify "4/5", AutoScout24 "5", Kleinanzeigen "4/5" — und
+# pdf_service druckte den Rohwert. Die Parser speichern jetzt EINE Anzeigeform
+# (tueren_text), die Link-Bauer leiten ihre Codes daraus ab (tueren_code fuer
+# mobile.de doors=, tueren_bereich fuer AutoScout doorfrom/doorto).
+_TUEREN_TEXT = {"TWO_OR_THREE": "2/3", "FOUR_OR_FIVE": "4/5", "SIX_OR_SEVEN": "6/7"}
+
+
+def tueren_text(wert) -> Optional[str]:
+    """Anzeigeform der Tuerenzahl: "2/3", "4/5", "6/7" oder eine Zahl als
+    Text ("5"); None ohne (lesbare) Angabe."""
+    if wert is None or isinstance(wert, bool):
+        return None
+    s = str(wert).strip()
+    if not s:
+        return None
+    if s.upper() in _TUEREN_TEXT:
+        return _TUEREN_TEXT[s.upper()]
+    m = re.fullmatch(r"(\d)\s*/\s*(\d)", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    m = re.match(r"(\d)(?!\d)", s)          # "5", "5 Türen", "5.0"
+    if m and 1 <= int(m.group(1)) <= 7:
+        return m.group(1)
+    return None
+
+
+def tueren_bereich(wert) -> Optional[Tuple[int, int]]:
+    """(von, bis) fuer AutoScout doorfrom/doorto — "4/5" -> (4, 5), "5" -> (5, 5)."""
+    text = tueren_text(wert)
+    if not text:
+        return None
+    if "/" in text:
+        von, bis = text.split("/", 1)
+        return int(von), int(bis)
+    return int(text), int(text)
+
+
+def tueren_code(wert) -> Optional[str]:
+    """mobile.de-Suchcode (doors=): TWO_OR_THREE / FOUR_OR_FIVE / SIX_OR_SEVEN."""
+    bereich = tueren_bereich(wert)
+    if not bereich:
+        return None
+    if bereich[0] <= 3:
+        return "TWO_OR_THREE"
+    if bereich[0] <= 5:
+        return "FOUR_OR_FIVE"
+    return "SIX_OR_SEVEN"
 
 
 def _erster_text(werte: Iterable) -> str:

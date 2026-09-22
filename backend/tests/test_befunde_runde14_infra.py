@@ -366,7 +366,8 @@ def test_100_kandidatenabfrage_findet_erledigt_ueber_beide_zeitfelder():
 def test_86_cache_treffer_verbraucht_keinen_rueckfall():
     url = f"https://www.kleinanzeigen.de/s-anzeige/r14-rueckfall/97{uuid.uuid4().int % 10**8:08d}-216-1"
     user = {"id": f"u_r14_{SUF}", "dealer_id": f"d_r14_rf_{SUF}", "role": "sucher"}
-    tag = JETZT.strftime("%Y-%m-%d")
+    from provider_fetch import tagesschluessel   # B-13: deutsche Zeit
+    tag = tagesschluessel()
     budget_id = f"{tag}:rueckfall:{user['dealer_id']}"
 
     async def lauf(db):

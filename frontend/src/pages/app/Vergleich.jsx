@@ -742,6 +742,15 @@ export default function Vergleich() {
                     {result.vehicle.list_price ? `${result.vehicle.list_price.toLocaleString("de-DE")} €` : "—"}
                   </div>
                   <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>Listenpreis · nicht im Vertrag</div>
+                  {/* Prüfbericht 20.09.2026 (S-09): Preisart (VB) und MwSt-Ausweis aus dem Inserat */}
+                  {(result.vehicle.price_negotiable || result.vehicle.mwst_ausweisbar === true) && (
+                    <div className="text-[11px] font-semibold" data-testid="vergleich-preisart"
+                         style={{ color: "var(--text-secondary)" }}>
+                      {[result.vehicle.price_negotiable ? "VB (Verhandlungsbasis)" : null,
+                        result.vehicle.mwst_ausweisbar === true ? "MwSt. ausweisbar" : null]
+                        .filter(Boolean).join(" · ")}
+                    </div>
+                  )}
                   {datenStand(result) && (
                     <div className={`text-[11px] ${datenStand(result).alt ? "font-semibold" : ""}`}
                          data-testid="vergleich-datenstand"

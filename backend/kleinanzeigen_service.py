@@ -88,6 +88,64 @@ def _to_int(value: Any) -> Optional[int]:
     return int(digits) if digits else None
 
 
+# Pruefbericht 20.09.2026 (A-11): Halterzahl nur als kleine ganze Zahl.
+# _to_int machte aus "125.000 km" (Folgezeile eines fehlenden Tabellenwerts)
+# 125000 Halter — bis ins Beweisdokument und in den Vertrag.
+HALTER_MAX = 15
+
+
+def _halter(value: Any) -> Optional[int]:
+    """Fahrzeughalter aus dem Tabellenwert: 0-15, sonst None."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not re.fullmatch(r"\d{1,2}", s):
+        return None
+    n = int(s)
+    return n if 0 <= n <= HALTER_MAX else None
+
+
+# Tabellenfelder, deren Wert eine kleine Zahl sein MUSS (A-11): steht in der
+# naechsten Zeile etwas mit Einheit (km, €, PS, kW), fehlt der Wert in der
+# Tabelle und die Zeile gehoert zu einem anderen Feld.
+_ZAEHLFELDER = {
+    "anzahl der fahrzeughalter": re.compile(r"^\d{1,2}$"),
+    "anzahl sitzplätze": re.compile(r"^\d{1,2}$"),
+    "anzahl türen": re.compile(r"^\d(\s*/\s*\d)?$"),
+    "anzahl der türen": re.compile(r"^\d(\s*/\s*\d)?$"),
+}
+
+
+def _wert_plausibel(feld_lower: str, wert: str) -> bool:
+    muster = _ZAEHLFELDER.get(feld_lower)
+    return True if muster is None else bool(muster.match(wert.strip()))
+
+
+def _teile_ausserhalb_klammern(block: str) -> List[str]:
+    """An Kommas trennen, aber NICHT innerhalb von Klammern.
+
+    "Audiosystem Composition Colour (Touchscreen, MP3, Radio/CD-Player)" ist
+    EIN Merkmal — naives Trennen machte daraus drei unsinnige Bruchstuecke
+    (echte Anzeige 3458821471). Pruefbericht 20.09.2026 (S-21): hierher
+    verschoben, damit auch der AutoScout-Parser sie nutzt (kleinanzeigen_api
+    zieht deps/db mit, autoscout_service soll ohne laufen)."""
+    teile: List[str] = []
+    tiefe = 0
+    aktuell: List[str] = []
+    for zeichen in block:
+        if zeichen == "(":
+            tiefe += 1
+        elif zeichen == ")":
+            tiefe = max(0, tiefe - 1)
+        if zeichen == "," and tiefe == 0:
+            teile.append("".join(aktuell))
+            aktuell = []
+        else:
+            aktuell.append(zeichen)
+    teile.append("".join(aktuell))
+    return teile
+
+
 # Rollenprüfung 22.09.2026 (RP-436): Obergrenze fuer einen plausiblen
 # Kilometerstand. Alles darueber ist ein Lesefehler, kein Auto.
 KM_MAX = 2_000_000
@@ -357,12 +415,15 @@ def _parse_structured(text: str) -> Dict[str, str]:
                     val = lines[j]
                     vlow = val.lower()
                     if vlow not in wanted_lower and vlow not in skip_values:
-                        tabelle[wanted_lower[low]] = val
+                        # A-11: fuer Zaehlfelder nur eine kleine Zahl — sonst
+                        # fehlt der Wert und die Zeile gehoert woanders hin.
+                        if _wert_plausibel(low, val):
+                            tabelle[wanted_lower[low]] = val
                         break
             for w_lower, original in wanted_lower.items():
                 if low.startswith(w_lower + ":"):
                     raw = line.split(":", 1)[1].strip()
-                    if raw and raw.lower() != w_lower:
+                    if raw and raw.lower() != w_lower and _wert_plausibel(w_lower, raw):
                         fliesstext.setdefault(original, raw)
         return tabelle, fliesstext
 
@@ -391,6 +452,15 @@ def _parse_first_registration(value: Optional[str]) -> Optional[str]:
         return f"{m.group(1).zfill(2)}/{m.group(2)}"
     yr_m = re.search(r"\b(19|20)\d{2}\b", v)
     if not yr_m:
+        # Pruefbericht 20.09.2026 (S-31): "03/19", "EZ 3/19" — zweistelliges
+        # Jahr zu 20xx ergaenzen (nicht in der Zukunft, sonst 19xx).
+        m = re.search(r"(?<!\d)(\d{1,2})[./](\d{2})(?!\d)", v)
+        if m and 1 <= int(m.group(1)) <= 12:
+            from datetime import datetime as _dt
+            jahr = 2000 + int(m.group(2))
+            if jahr > _dt.now().year:
+                jahr -= 100
+            return f"{m.group(1).zfill(2)}/{jahr}"
         return None
     year = yr_m.group(0)
     low = v.lower()
@@ -701,9 +771,17 @@ async def _get_mit_geprueften_weiterleitungen(client, url: str):
 
 
 async def _fetch_html(url: str) -> str:
+    # Pruefbericht 20.09.2026 (A-13): Fehler ueber anbieter_fehler wie bei
+    # Apify — vorher endeten fremde Statuscodes in r.raise_for_status()
+    # (httpx.HTTPStatusError -> generischer 500-Text), und die Dauersperre
+    # nach SCRAPE_MAX_RETRIES war ein nackter RuntimeError ohne Betriebsmeldung.
+    # provider_fetch.fetch_listing ruft fuer AnbieterFehler melden() auf.
+    from anbieter_fehler import (ART_AUSFALL, ART_LIMIT, AnbieterFehler,
+                                 aus_ausnahme)
     await _assert_public_host(url)
     proxy = get_proxy_url()  # rotierender Proxy-Endpoint (oder None = direkt)
     last_exc: Optional[Exception] = None
+    letzter_status: Optional[int] = None
 
     # Retry-Schleife: Bei 403/429 (Bot-Block / Rate-Limit) erneut versuchen.
     # Mit gesetztem rotierenden Proxy bekommt jeder Versuch eine neue IP.
@@ -756,19 +834,34 @@ async def _fetch_html(url: str) -> str:
             if r.status_code in (403, 429, 500, 502, 503, 504):
                 # Block / Rate-Limit / CDN-Wackler -> erneut versuchen
                 # (mit rotierendem Proxy = neue IP pro Versuch).
+                letzter_status = r.status_code
                 last_exc = RuntimeError(
                     f"Kleinanzeigen antwortet mit HTTP {r.status_code}."
                 )
                 await _backoff()
                 continue
-            r.raise_for_status()
+            if r.status_code >= 400 or r.status_code in _WEITERLEITUNGEN:
+                # A-13: jeder andere Fehlercode ist eine Stoerung beim Anbieter
+                # (401/403 sind hier KEIN Apify-Token — deshalb nicht
+                # aus_http_antwort, das wuerde vom Token reden).
+                raise AnbieterFehler(ART_AUSFALL, "Kleinanzeigen",
+                                     f"HTTP {r.status_code}")
             return r.text
 
-    raise RuntimeError(
-        "Kleinanzeigen blockiert automatisierte Anfragen "
-        f"(nach {SCRAPE_MAX_RETRIES} Versuchen). "
-        "Bitte später erneut versuchen oder Proxy prüfen."
-    ) from last_exc
+    # A-13: wiederholte 403/429 = Sperre/Tempolimit (Link-Job wartet kurz,
+    # Sucher liest "Limit erreicht"); Netzfehler ueber aus_ausnahme; 5xx = Ausfall.
+    if letzter_status in (403, 429):
+        raise AnbieterFehler(
+            ART_LIMIT, "Kleinanzeigen",
+            f"HTTP {letzter_status} nach {SCRAPE_MAX_RETRIES} Versuchen") from last_exc
+    if letzter_status is not None:
+        raise AnbieterFehler(
+            ART_AUSFALL, "Kleinanzeigen",
+            f"HTTP {letzter_status} nach {SCRAPE_MAX_RETRIES} Versuchen") from last_exc
+    if last_exc is not None:
+        raise aus_ausnahme(last_exc, "Kleinanzeigen") from last_exc
+    raise AnbieterFehler(ART_AUSFALL, "Kleinanzeigen",
+                         f"kein Ergebnis nach {SCRAPE_MAX_RETRIES} Versuchen")
 
 
 # -------------------- Marke aus dem Titel --------------------
@@ -961,6 +1054,12 @@ def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
     gear_key, gear_label = _parse_gearbox(structured.get("Getriebe"))
     images = _extract_images(html_text)
     item_id = _extract_item_id(url)
+    from fahrzeug_codes import tueren_text
+    # S-22/A-11: ein Tabellenwert 0 zaehlt (kein Rueckfall auf den Freitext);
+    # unplausible Werte (kein 0-15) werden verworfen.
+    halter = _halter(structured.get("Anzahl der Fahrzeughalter"))
+    if halter is None:
+        halter = extract_owners_from_text(visible)
 
     # Same shape as `_parse_ad_xml` output → reusable in build_search_url.
     result = {
@@ -985,14 +1084,13 @@ def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
         "power_kw": kw,
         "power_ps": ps,
         "displacement": _to_int(structured.get("Hubraum")),
-        "doors": structured.get("Anzahl Türen"),
+        "doors": tueren_text(structured.get("Anzahl Türen")),      # S-19
         "seats": _to_int(structured.get("Anzahl Sitzplätze")),
         "color": structured.get("Außenfarbe"),
         "vin": None,
         "license_plate": None,
         "hu": structured.get("HU bis"),
-        "previous_owners": _to_int(structured.get("Anzahl der Fahrzeughalter"))
-                           or extract_owners_from_text(visible),
+        "previous_owners": halter,
         # Pruefbericht 20.09.2026 (S-05/S-06): nur echte Angaben, sonst None.
         "accident_damaged": _zustand_unfall(structured.get("Fahrzeugzustand")),
         "roadworthy": None,
@@ -1011,6 +1109,7 @@ def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
         "price_label": price,
         "location": location,
         "images": images,
+        "image_urls": list(images),                     # S-30: wie mobile/AutoScout
         "image_count": len(images),
         "_resolved_make_id": make_id,
         "_resolved_model_id": model_id,

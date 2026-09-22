@@ -24,6 +24,7 @@ import io
 import logging
 import os
 import time
+import weakref
 from collections import OrderedDict
 from typing import Iterable, List, Optional
 from urllib.parse import quote, urlparse
@@ -43,10 +44,23 @@ from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-T
 THUMB_KANTE = zahl_env("BILD_PROXY_KANTE", 640, unten=64, oben=4096)
 MAX_BYTES = 8 * 1024 * 1024
 ZEITLIMIT = 12.0
+# Pruefbericht 20.09.2026 (B-09): ZEITLIMIT gilt je Phase (Verbinden, Lesen);
+# mit drei Weiterleitungen und langsamem Lesen wartete ein Bild ueber eine
+# Minute. Jetzt ein Gesamtdeckel je Bild.
+HOLEN_GESAMT_SEKUNDEN = 15.0
+# B-09: Fehlschlaege (kein Bild, fremder Host, Zeitueberschreitung) werden
+# gemerkt — vorher fragte jede Vertragsseite dieselbe tote Adresse erneut ab.
+NEGATIV_SEKUNDEN = zahl_env("BILD_PROXY_NEGATIV_SEKUNDEN", 600, unten=0)
+_NEGATIV_MAX = 2000
 STANDARD_TTL = 7 * 24 * 3600
 _CACHE_MAX = zahl_env("BILD_PROXY_CACHE", 400, unten=10)
 _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _cache_lock = asyncio.Lock()
+_negativ: "OrderedDict[str, float]" = OrderedDict()      # url -> Ablauf (monotonic)
+# B-09: EIN httpx-Client je Event-Loop statt einem neuen je Bild (TLS-Aufbau
+# fuer jedes Foto). Je Loop, weil Verbindungen an die Schleife gebunden sind
+# (Tests starten mehrere Schleifen).
+_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36 AutoSchnell-Bildproxy")
 
@@ -122,21 +136,50 @@ def _verkleinern(raw: bytes) -> bytes:
 _WEITERLEITUNGEN = (301, 302, 303, 307, 308)
 
 
+def _negativ_gemerkt(url: str) -> bool:
+    ablauf = _negativ.get(url)
+    if ablauf is None:
+        return False
+    if ablauf < time.monotonic():
+        _negativ.pop(url, None)
+        return False
+    return True
+
+
+def _negativ_merken(url: str) -> None:
+    if NEGATIV_SEKUNDEN <= 0:
+        return
+    _negativ[url] = time.monotonic() + NEGATIV_SEKUNDEN
+    _negativ.move_to_end(url)
+    while len(_negativ) > _NEGATIV_MAX:
+        _negativ.popitem(last=False)
+
+
 async def _holen(url: str) -> Optional[bytes]:
     """Rohdaten eines erlaubten Portal-Fotos (hoechstens MAX_BYTES).
 
     Weiterleitungen werden von Hand verfolgt (hoechstens 3) und JEDES Ziel
     erneut gegen die Allowliste geprueft. Vorher folgte httpx jeder
     Weiterleitung selbst (follow_redirects=True) — ein Portal-Host haette so
-    auf beliebige Adressen zeigen koennen, auch auf interne."""
+    auf beliebige Adressen zeigen koennen, auch auf interne.
+    B-09: gemeinsamer Client je Loop, Gesamtdeckel HOLEN_GESAMT_SEKUNDEN."""
     if not erlaubt(url):
         return None
     import httpx
     ziel = url
-    async with httpx.AsyncClient(
+    # Gemeinsamer Client dieser Event-Loop (B-09), bei Bedarf angelegt.
+    loop = asyncio.get_running_loop()
+    client = _clients.get(loop)
+    if client is None:
+        client = httpx.AsyncClient(
             timeout=ZEITLIMIT, follow_redirects=False,
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
             headers={"User-Agent": _UA,
-                     "Accept": "image/jpeg,image/png,image/webp;q=0.9,*/*;q=0.5"}) as client:
+                     "Accept": "image/jpeg,image/png,image/webp;q=0.9,*/*;q=0.5"})
+        _clients[loop] = client
+
+    async def _lauf() -> Optional[bytes]:
+        nonlocal ziel
         for _ in range(4):
             async with client.stream("GET", ziel) as r:
                 if r.status_code in _WEITERLEITUNGEN:
@@ -158,7 +201,9 @@ async def _holen(url: str) -> Optional[bytes]:
                         return None
                     teile.append(chunk)
                 return b"".join(teile)
-    return None
+        return None
+
+    return await asyncio.wait_for(_lauf(), HOLEN_GESAMT_SEKUNDEN)
 
 
 def _fuer_pdf(raw: bytes, kante: int, qualitaet: int = 0) -> bytes:
@@ -188,13 +233,17 @@ async def laden_fuer_pdf(url: str, kante: int = 800,
     ohne Metadaten. None, wenn das Portal nicht liefert oder die Adresse
     nicht erlaubt ist. Bewusst OHNE den Vorschau-Zwischenspeicher (andere
     Groesse; jedes Foto wird fuer genau ein Dokument einmal geladen)."""
+    if _negativ_gemerkt(url):
+        return None
     try:
         raw = await _holen(url)
         if not raw:
+            _negativ_merken(url)
             return None
         return await asyncio.to_thread(_fuer_pdf, raw,
                                        max(200, min(int(kante), 2000)), qualitaet)
     except Exception as exc:  # noqa: BLE001
+        _negativ_merken(url)
         log.info("Bild-Proxy (PDF): %s nicht ladbar (%s)", url[:120], exc.__class__.__name__)
         return None
 
@@ -207,12 +256,16 @@ async def laden(url: str) -> Optional[bytes]:
         if hit is not None:
             _cache.move_to_end(url)
             return hit
+    if _negativ_gemerkt(url):
+        return None
     try:
         raw = await _holen(url)
         if not raw:
+            _negativ_merken(url)
             return None
         klein = await asyncio.to_thread(_verkleinern, raw)
     except Exception as exc:  # noqa: BLE001
+        _negativ_merken(url)
         log.info("Bild-Proxy: %s nicht ladbar (%s)", url[:120], exc.__class__.__name__)
         return None
     async with _cache_lock:

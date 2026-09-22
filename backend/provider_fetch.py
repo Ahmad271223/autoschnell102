@@ -8,9 +8,46 @@ EINMAL, damit kein Pfad daran vorbeikommt.
 import asyncio
 from anbieter_fehler import AnbieterFehler, melden
 import os
-from typing import Any, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 from deps import log
+
+
+def _berlin(d: datetime) -> datetime:
+    """Zeitpunkt in deutscher Zeit — wie beweis_pdf._berlin: zoneinfo, ohne
+    Zeitzonendaten (python:3.12-slim ohne tzdata) die EU-Regel von Hand."""
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return d.astimezone(ZoneInfo("Europe/Berlin"))
+    except Exception:  # noqa: BLE001 — Image ohne tzdata
+        u = d.astimezone(timezone.utc)
+
+        def _letzter_sonntag(monat: int) -> datetime:
+            tag = datetime(u.year, monat, 31, 1, tzinfo=timezone.utc)
+            while tag.weekday() != 6:
+                tag -= timedelta(days=1)
+            return tag
+
+        sommer = _letzter_sonntag(3) <= u < _letzter_sonntag(10)
+        return u.astimezone(timezone(timedelta(hours=2 if sommer else 1)))
+
+
+def tagesschluessel(jetzt: Optional[datetime] = None) -> str:
+    """Tag fuer Konto-Tageslimit und Rueckfall-Kontingent ("2026-09-22").
+
+    Pruefbericht 20.09.2026 (B-13): vorher UTC — das Tageslimit und die 25
+    Rueckfaelle je Konto wechselten um 01:00 bzw. 02:00 Uhr deutscher Zeit
+    statt um Mitternacht. Gemeinsamer Helfer fuer routes/listings und hier."""
+    return _berlin(jetzt or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+
+
+def rueckfall_schluessel(konto: str) -> str:
+    """Budget-Schluessel des Rueckfalls (Server-Abruf ohne Erweiterung) je
+    Konto und Tag — derselbe in routes/listings und link_jobs (A-05)."""
+    return f"{tagesschluessel()}:rueckfall:{konto or 'ohne'}"
 
 # NUR fuer Staging-Lasttests: externe Abrufe durch synthetische Daten
 # ersetzen (Cache-, Lease- und Begrenzungslogik laeuft trotzdem echt).
@@ -87,9 +124,8 @@ async def _budget_zurueck(db, belastet) -> None:
 
 
 async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "") -> list:
-    from datetime import datetime, timedelta, timezone
     from pymongo import ReturnDocument
-    tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tag = tagesschluessel()                      # B-13: Mitternacht deutscher Zeit
     ablauf = datetime.now(timezone.utc) + timedelta(days=2)
     belastet = []
 
@@ -109,7 +145,7 @@ async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "") ->
         raise TageslimitErreicht(
             f"Tageslimit für neue Links erreicht ({limit}/Tag {wer}). "
             "Bekannte Links kommen weiter aus dem Speicher; neue Links "
-            "bitte morgen erneut. Betreiber: Limit in der .env "
+            "wieder ab 0 Uhr (deutsche Zeit). Betreiber: Limit in der .env "
             "(ANBIETER_TAGESLIMIT_*).")
 
     # Konto-Limit (Entscheidung Ahmad 16.09.2026): zaehlt JEDEN echten

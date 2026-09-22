@@ -38,8 +38,20 @@ INSERAT_WEG_MOBILE = ("Das Inserat ist bei mobile.de nicht mehr online "
 
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
+from konfig import zahl_env  # noqa: E402
 from owners_extractor import extract_owners_from_text
 from proxy_config import get_proxy_url, random_user_agent
+
+log = logging.getLogger("mobile_service")
+
+# Pruefbericht 20.09.2026 (DP-04): Der Apify-Lauf (run-sync) durfte 180 s
+# dauern — Cloudflare bricht die Anfrage aber nach ~100 s mit 524 ab, der
+# Sucher sah einen nackten Fehler und der Lauf lief weiter. Jetzt hoechstens
+# 85 s (Vorgabe: unter der Cloudflare-Grenze, das Frontend wartet 95 s);
+# bei Zeitueberschreitung eine verstaendliche, wiederholbare Meldung
+# (listing_identity.AbrufDauertZuLange -> 503). Gilt fuer mobile.de UND
+# AutoScout24 (autoscout_service liest denselben Wert).
+APIFY_TIMEOUT_SEKUNDEN = zahl_env("APIFY_TIMEOUT_SEKUNDEN", 85, unten=10, oben=85)
 
 
 MOBILE_BASE = os.environ.get("MOBILE_API_BASE", "https://services.sandbox.mobile.de")
@@ -108,7 +120,7 @@ GEAR_LABELS = {
 }
 # 17.09.2026: EINE Zuordnung fuer Getriebe und Kraftstoff (alle Quellen, beide Portale)
 from fahrzeug_codes import (NAVI_CODE, getriebe_code, hat_navigation,  # noqa: E402
-                            kraftstoff_code)
+                            kraftstoff_code, tueren_code, tueren_text)
 CATEGORY_LABELS = {
     "Cabrio": "Cabrio / Roadster", "EstateCar": "Kombi", "Limousine": "Limousine",
     "OffRoad": "SUV / Geländewagen", "OtherCar": "Sonstiges", "SmallCar": "Kleinwagen",
@@ -173,8 +185,19 @@ def _features_list(vehicle: dict) -> List[str]:
     for f in feats_raw or []:
         label = _desc(f) or _attr(f, "key")
         if label:
-            out.append(str(label).replace("_", " ").title() if str(label).isupper() else str(label))
+            out.append(_feature_label(str(label)))
     return out
+
+
+def _feature_label(label: str) -> str:
+    """Schluessel wie ALLOY_WHEELS -> "Alloy Wheels". Pruefbericht 20.09.2026
+    (S-27): kurze Abkuerzungen (ABS, ESP, LED, USB — bis 4 Zeichen ohne
+    Unterstrich) blieben nicht stehen, sondern wurden "Abs"/"Esp"."""
+    if not label.isupper():
+        return label
+    if "_" not in label and len(label) <= 4:
+        return label
+    return label.replace("_", " ").title()
 
 
 def _xml_bool(knoten) -> Optional[bool]:
@@ -200,7 +223,13 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
     """Map a single mobile.de <ad:ad> dict (already parsed by xmltodict) to a flat
     vehicle dict. Looks into <ad:vehicle> + <ad:vehicle><ad:specifics>."""
     vehicle = ad.get("ad:vehicle") or {}
+    if not isinstance(vehicle, dict):
+        vehicle = {}
     specifics = vehicle.get("ad:specifics") or {}
+    # Pruefbericht 20.09.2026 (S-20): ein leeres <ad:specifics/> kommt als
+    # String — .get darauf war ein AttributeError bis zum 500.
+    if not isinstance(specifics, dict):
+        specifics = {}
 
     make_node = vehicle.get("ad:make") or {}
     model_node = vehicle.get("ad:model") or {}
@@ -227,8 +256,15 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
     color = _desc(specifics.get("ad:exterior-color") or vehicle.get("ad:exterior-color"))
 
     price_node = ad.get("ad:price") or {}
+    if not isinstance(price_node, dict):
+        price_node = {}
     consumer_price = price_node.get("ad:consumer-price-amount") or {}
     list_price = _attr(consumer_price, "value")
+    # Pruefbericht 20.09.2026 (S-09): Preisart (FIXED / NEGOTIABLE = VB) und
+    # ad:vatable (MwSt. ausweisbar — fuer Haendler mit Vorsteuer relevant)
+    # wurden verworfen; jetzt in Vergleich und Beweisdokument sichtbar.
+    price_type = str(_attr(price_node, "type") or "").strip().upper() or None
+    mwst_ausweisbar = _xml_bool(price_node.get("ad:vatable"))
 
     seller_node = ad.get("seller:seller") or {}
     seller_addr = seller_node.get("seller:address") or {}
@@ -280,7 +316,7 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         "power_kw": int(kw) if kw else None,
         "power_ps": kw_to_ps(int(kw)) if kw else None,
         "displacement": int(cubic) if cubic else None,
-        "doors": doors,
+        "doors": tueren_text(doors),            # S-19: "FOUR_OR_FIVE" -> "4/5"
         "seats": int(seats) if seats else None,
         "color": color,
         "vin": _attr(vehicle.get("ad:vin") or {}, "value"),
@@ -296,6 +332,9 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         "description": description,
         "list_price": float(list_price) if list_price else None,
         "currency": _attr(price_node, "currency") or "EUR",
+        "price_type": price_type,
+        "price_negotiable": preis_verhandelbar(price_type),
+        "mwst_ausweisbar": mwst_ausweisbar,
         "seller_name": _attr(seller_node.get("seller:contact-person") or {}, "value")
                        or _attr(seller_node.get("seller:company-name") or {}, "value")
                        or None,
@@ -308,8 +347,20 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         "seller_phone": _attr(seller_node.get("seller:phone") or {}, "value"),
         "seller_email": _attr(seller_node.get("seller:email") or {}, "value"),
         "image_urls": image_urls,
+        # S-30: beide Feldnamen wie Apify/AutoScout — Oberflaeche und PDF
+        # lesen mal images, mal image_urls.
+        "images": list(image_urls),
         "image_count": len(image_urls),
     }
+
+
+# Pruefbericht 20.09.2026 (S-09): Preisarten, die "Verhandlungsbasis" bedeuten
+# (mobile.de-XML/Apify price.type; Kleinanzeigen setzt price_negotiable selbst).
+_PREIS_VERHANDELBAR = {"NEGOTIABLE", "VB", "NEGOTIATION_BASIS", "ON_REQUEST_NEGOTIABLE"}
+
+
+def preis_verhandelbar(price_type) -> bool:
+    return str(price_type or "").strip().upper() in _PREIS_VERHANDELBAR
 
 
 # -------------------- Sandbox bundle --------------------
@@ -329,13 +380,20 @@ def _load_sandbox_bundle():
         ads = data.get("search:search-result", {}).get("search:ads", {}).get("ad:ad", [])
         if isinstance(ads, dict):
             ads = [ads]
-        for raw in ads:
-            v = _parse_ad_xml(raw)
-            if v.get("mobile_ad_id"):
-                _SANDBOX_BUNDLE[v["mobile_ad_id"]] = v
-                _SANDBOX_LIST.append(v)
     except Exception as exc:
         print(f"[mobile_service] failed to load sandbox bundle: {exc}")
+        return
+    for raw in ads:
+        # S-20: je Inserat abfangen — vorher brach das erste kaputte Inserat
+        # das Laden aller uebrigen ab.
+        try:
+            v = _parse_ad_xml(raw)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mobile_service] sandbox ad skipped: {exc}")
+            continue
+        if v.get("mobile_ad_id"):
+            _SANDBOX_BUNDLE[v["mobile_ad_id"]] = v
+            _SANDBOX_LIST.append(v)
 
 
 # Sandbox bundle is loaded LATER, after _load_makes_models() so that
@@ -355,10 +413,12 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
                                  headers={"Accept": "application/xml",
                                           "User-Agent": random_user_agent()})
             if r.status_code != 200:
+                log.warning("mobile.de-API: HTTP %s fuer %s", r.status_code, ad_id)
                 return None
             data = await asyncio.to_thread(xmltodict.parse, r.text)
             ad = data.get("ad:ad") or data.get("ad") or {}
             if not ad:
+                log.warning("mobile.de-API: Antwort ohne ad:ad fuer %s", ad_id)
                 return None
             parsed = _parse_ad_xml(ad)
             # Recover real model name when seller picked "Weitere [Brand]".
@@ -367,12 +427,15 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
             except Exception:
                 pass
             return parsed
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # S-20: nicht mehr still None — der Betreiber sah sonst nie, warum
+        # der offizielle Weg nicht lieferte (Apify uebernahm kommentarlos).
+        log.warning("mobile.de-API: Abruf %s fehlgeschlagen (%s: %s)",
+                    ad_id, type(exc).__name__, str(exc)[:200])
         return None
 
 
 # -------------------- Apify-Scraper (memo23/mobile-de-scraper) --------------------
-log = logging.getLogger("mobile_service")
 
 # Lokalisierte Actor-Werte -> deutsche Labels der App. Der Actor liefert je
 # nach Proxy-Land Englisch ("Petrol", "Automatic") oder Deutsch ("Benzin");
@@ -583,6 +646,9 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
                   or item.get("modelKey") or ""
 
     preis = None
+    waehrung = None
+    price_type = None
+    mwst_ausweisbar = None
     p = item.get("price")
     if isinstance(p, dict):
         # Pruefbericht 20.09.2026 (S-10): nettoAmount ist KEIN Listenpreis —
@@ -592,6 +658,14 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
             if isinstance(knoten, dict) and isinstance(
                     knoten.get("amount"), (int, float)):
                 preis = float(knoten["amount"])
+                # S-25: Waehrung aus dem gewaehlten Preisknoten (vorher fest EUR)
+                waehrung = str(knoten.get("currency") or p.get("currency") or "").strip() or None
+                break
+        # S-09: Preisart (FIXED/NEGOTIABLE) und MwSt-Ausweis, sofern geliefert
+        price_type = str(p.get("type") or "").strip().upper() or None
+        for schluessel in ("vatable", "vatDeductible", "vat_deductible"):
+            if isinstance(p.get(schluessel), bool):
+                mwst_ausweisbar = p[schluessel]
                 break
     elif isinstance(p, (int, float)):
         preis = float(p)
@@ -619,6 +693,7 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
     unfall = zustand_unfall(item.get("isDamageCase"), schaden_text)
 
     halter = _apify_zahl(_apify_attr(item, "numberOfPreviousOwners"))
+    erstzulassung, neufahrzeug = apify_erstzulassung(_apify_attr(item, "firstRegistration"))
 
     return {
         "mobile_ad_id": str(item.get("id") or ad_id),
@@ -632,7 +707,9 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
         "category": cat_raw,
         "category_label": CATEGORY_LABELS.get(
             cat_raw, _APIFY_CATEGORY_DE.get(cat_raw.lower(), cat_raw)),
-        "first_registration": _apify_attr(item, "firstRegistration"),
+        # S-23: nur MM/JJJJ; "New"/"Neu" ist ein Neufahrzeug ohne Erstzulassung
+        "first_registration": erstzulassung,
+        "neufahrzeug": neufahrzeug,
         "mileage": _apify_zahl(_apify_attr(item, "mileage")),
         # 17.09.2026: mobile.de-Codes speichern (vorher "AUTOMATIC",
         # "MANUAL GEARBOX", "ELECTRIC" — die kennt der mobile.de-Link nicht).
@@ -644,7 +721,7 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
         "power_kw": kw,
         "power_ps": ps,
         "displacement": _apify_zahl(_apify_attr(item, "cubicCapacity")),
-        "doors": _apify_attr(item, "doorCount"),
+        "doors": tueren_text(_apify_attr(item, "doorCount")),   # S-19
         "seats": _apify_zahl(_apify_attr(item, "numSeats")),
         "color": _APIFY_COLOR_DE.get(
             (_apify_attr(item, "color") or "").lower(),
@@ -660,7 +737,10 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
         "features": [str(f) for f in item.get("features") or []],
         "description": beschreibung,
         "list_price": preis,
-        "currency": "EUR",
+        "currency": waehrung or "EUR",
+        "price_type": price_type,
+        "price_negotiable": preis_verhandelbar(price_type),
+        "mwst_ausweisbar": mwst_ausweisbar,
         # Pruefbericht 20.09.2026 (S-16): kein Platzhalter "Händler"/
         # "Privatverkäufer" als Name — er fuellte im Vertragsdialog das
         # Pflichtfeld "Name / Firma", der echte Name wurde nie verlangt.
@@ -683,6 +763,30 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
     }
 
 
+_NEUFAHRZEUG = ("new", "neu", "neufahrzeug", "neuwagen")
+
+
+def apify_erstzulassung(roh) -> Tuple[Optional[str], bool]:
+    """(Erstzulassung "MM/JJJJ" oder None, Neufahrzeug?).
+
+    Pruefbericht 20.09.2026 (S-23): der Rohwert wurde uebernommen — "New"
+    blieb als Erstzulassung stehen, der Jahresfilter fiel dann still weg."""
+    s = str(roh or "").strip()
+    if not s:
+        return None, False
+    if s.lower() in _NEUFAHRZEUG:
+        return None, True
+    m = re.fullmatch(r"(\d{1,2})[./-](\d{4})", s)
+    if m:
+        return f"{int(m.group(1)):02d}/{m.group(2)}", False
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})(?:-\d{1,2})?", s)      # 2019-06[-15]
+    if m:
+        return f"{int(m.group(2)):02d}/{m.group(1)}", False
+    if re.fullmatch(r"\d{4}", s):
+        return f"01/{s}", False
+    return None, False
+
+
 async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[dict]:
     """Einzelnes Inserat ueber den Apify-Actor abrufen (run-sync)."""
     if not apify_enabled():
@@ -693,9 +797,11 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
         detail_url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={ad_id}"
     endpoint = (f"https://api.apify.com/v2/acts/{APIFY_MOBILE_ACTOR}"
                 f"/run-sync-get-dataset-items")
+    from listing_identity import ABRUF_ZU_LANGE_TEXT, AbrufDauertZuLange
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(180.0, connect=20.0), verify=_SSL_CONTEXT,
+            timeout=httpx.Timeout(float(APIFY_TIMEOUT_SEKUNDEN), connect=20.0),
+            verify=_SSL_CONTEXT,
         ) as client:
             r = await client.post(
                 endpoint,
@@ -736,6 +842,12 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
             return v
     except (AnbieterFehler, ListingGone):
         raise
+    except httpx.TimeoutException:
+        # DP-04: Zeitueberschreitung ist ein "bitte gleich nochmal" (503 mit
+        # Retry-After), kein Anbieter-Ausfall (502).
+        log.warning("Apify mobile.de: Zeitueberschreitung (%s s) fuer %s",
+                    APIFY_TIMEOUT_SEKUNDEN, ad_id)
+        raise AbrufDauertZuLange(ABRUF_ZU_LANGE_TEXT)
     except Exception as exc:
         # Zeitueberschreitung / Netz / kaputte Antwort: klarer Text statt
         # "konnte nicht geladen werden" (Audit 09/2026, Punkt 48).
@@ -774,7 +886,7 @@ def _mock_vehicle(ad_id: str) -> dict:
         "fuel": "DIESEL", "fuel_label": "Diesel",
         "gearbox": "MANUAL_GEAR", "gearbox_label": "Schaltgetriebe",
         "power_kw": 81, "power_ps": 110, "displacement": 1598,
-        "doors": "FOUR_OR_FIVE", "seats": 5, "color": "Weiß",
+        "doors": "4/5", "seats": 5, "color": "Weiß",
         "features": ["Klimaanlage", "Tempomat", "Bluetooth"],
         "description": "Demo-Fahrzeug.", "list_price": 8490.0, "currency": "EUR",
         "seller_name": "Demo Händler", "seller_zip": "10115", "seller_city": "Berlin",
@@ -790,10 +902,15 @@ async def cache_get(db, ad_id: str) -> Optional[dict]:
         return None
     expires_at = doc.get("expires_at")
     if expires_at:
-        ea = datetime.fromisoformat(expires_at) if isinstance(expires_at, str) else expires_at
-        if ea.tzinfo is None:
-            ea = ea.replace(tzinfo=timezone.utc)
-        if ea < datetime.now(timezone.utc):
+        # Pruefbericht 20.09.2026 (B-14): ein unlesbares expires_at warf
+        # ValueError bis zum 500 — jetzt gilt der Eintrag als abgelaufen.
+        try:
+            ea = datetime.fromisoformat(expires_at) if isinstance(expires_at, str) else expires_at
+            if ea.tzinfo is None:
+                ea = ea.replace(tzinfo=timezone.utc)
+            if ea < datetime.now(timezone.utc):
+                return None
+        except (ValueError, TypeError, AttributeError):
             return None
     return doc.get("data")
 
@@ -999,16 +1116,14 @@ def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
     if not make_entry:
         return vehicle
 
-    # Build the search text: prefer the listing title (model_description),
-    # then fall back to the first part of the body description.
+    # Pruefbericht 20.09.2026 (B-10): NUR der Titel (model_description) darf
+    # das Modell bestimmen. Ein Treffer in der Beschreibung ("Guenstiger als
+    # jeder Golf!") machte aus "Weitere Volkswagen" das Modell Golf — bis in
+    # Zwischenspeicher, Fahrzeug und Vertragsdialog. Aus der Beschreibung
+    # kommt hoechstens ein Vorschlag (model_vorschlag) fuer den Sucher.
     md = (vehicle.get("model_description") or "").strip()
     desc = (vehicle.get("description") or "").strip()
-    candidates_haystacks = []
-    if md:
-        candidates_haystacks.append(md)
-    if desc:
-        candidates_haystacks.append(desc[:600])
-    if not candidates_haystacks:
+    if not md and not desc:
         return vehicle
 
     raw_models = make_entry.get("models_raw") or []
@@ -1029,13 +1144,15 @@ def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
                 return name
         return None
 
-    # Search each haystack in priority order.
-    for hs in candidates_haystacks:
-        matched = _try_match(hs)
-        if matched:
-            vehicle["model_label"] = matched
-            vehicle["model"] = matched.upper()
-            return vehicle
+    matched = _try_match(md) if md else None
+    if matched:
+        vehicle["model_label"] = matched
+        vehicle["model"] = matched.upper()
+        return vehicle
+    if desc:
+        vorschlag = _try_match(desc[:600])
+        if vorschlag:
+            vehicle["model_vorschlag"] = vorschlag
 
     # Fallback: if model_description contains useful info beyond the
     # brand name, surface it as the label even if no catalogue match.
@@ -1287,8 +1404,11 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     if (rules.get("navi") or {}).get("mode", "wenn_vorhanden") != "ignore" \
             and hat_navigation(vehicle):
         params.append(("fe", NAVI_CODE))
-    if (rules.get("doors") or {}).get("mode") == "exact" and vehicle.get("doors"):
-        params.append(("doors", str(vehicle["doors"])))
+    if (rules.get("doors") or {}).get("mode") == "exact":
+        # S-19: gespeichert ist die Anzeigeform ("4/5"), mobile.de braucht den Code
+        tueren = tueren_code(vehicle.get("doors"))
+        if tueren:
+            params.append(("doors", tueren))
 
     # Hubraum (kept long form — no documented compact equivalent)
     cc = vehicle.get("displacement")
@@ -1355,6 +1475,9 @@ _MOBILE_SORT = {
 # Runde 24 (11.09.2026): Standard-Regeln ohne Kategorie, Navigation
 # (features) und Klimatisierung — diese Filter gibt es fuer beide Portale
 # nicht mehr (regeln.ENTFERNTE_REGELN / ENTFERNTE_FEATURES).
+# Pruefbericht 20.09.2026 (B-08): result_count entfaellt — kein Link-Bauer
+# und keine Oberflaeche hat die Trefferzahl je ausgewertet (regeln.py
+# verwirft Altwerte still).
 DEFAULT_RULES = {
     "first_registration": {"mode": "older_exact", "years": 1},
     "mileage": {"mode": "plus", "value": 30000},
@@ -1368,7 +1491,6 @@ DEFAULT_RULES = {
     "seller": {"mode": "all"},
     "country": {"mode": "exact", "codes": ["DE"]},
     "sort": "price_asc",
-    "result_count": 4,
 }
 
 
@@ -1387,5 +1509,4 @@ DEFAULT_EXPORT_RULES = {
     "seller": {"mode": "all"},
     "country": {"mode": "all"},
     "sort": "price_asc",
-    "result_count": 4,
 }

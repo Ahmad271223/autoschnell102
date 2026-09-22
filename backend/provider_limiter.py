@@ -66,6 +66,15 @@ PROVIDER_MAX_CONCURRENT = {
 
 #: Quellen, die sich den Apify-Topf teilen.
 APIFY_QUELLEN = ("mobile", "autoscout24")
+# Pruefbericht 20.09.2026 (B-04): Die Plaetze einer Quelle waren rein global —
+# eine Firma mit vielen Suchern konnte alle belegen, die naechste Firma
+# wartete. Jetzt darf eine Firma hoechstens diesen Anteil der Plaetze einer
+# Quelle halten (mindestens 1), SOBALD eine andere Firma dort Plaetze haelt.
+# Ist sie allein, bekommt sie weiterhin alle (Lasttest 180 Sucher einer
+# Firma bleibt gueltig). Entscheidung Ahmad: nur gleichzeitige Plaetze,
+# keine Tagesbudgets je Firma. 100 = aus.
+from konfig import zahl_env  # noqa: E402
+FIRMENANTEIL_PROZENT = zahl_env("ANBIETER_FIRMENANTEIL_PROZENT", 50, unten=1, oben=100)
 # Nach so vielen Sekunden gilt ein Slot als verwaist (Prozess abgestuerzt).
 SLOT_TTL_SECONDS = int(os.environ.get("PROVIDER_SLOT_TTL", "120"))
 # Mindestabstand zwischen zwei Reparaturlaeufen je Quelle.
@@ -248,9 +257,32 @@ async def _slot_verwerfen(db, slot_id: str) -> None:
         pass
 
 
-async def acquire_slot(db, provider: str) -> Optional[str]:
+def firmen_anteil(provider: str) -> int:
+    """Hoechstzahl gleichzeitiger Plaetze einer Firma an dieser Quelle (B-04),
+    sobald andere Firmen dort mitwarten."""
+    limit = PROVIDER_MAX_CONCURRENT.get(provider, 3)
+    return max(1, limit * FIRMENANTEIL_PROZENT // 100)
+
+
+async def _firma_ueber_anteil(db, provider: str, dealer_id: str) -> bool:
+    """B-04: haelt diese Firma schon ihren Anteil UND haelt eine andere Firma
+    (oder ein Abruf ohne Firma) gerade Plaetze? Dann muss sie warten."""
+    if not dealer_id or FIRMENANTEIL_PROZENT >= 100:
+        return False
+    eigene = await db.provider_slots.count_documents(
+        {"provider": provider, "dealer_id": dealer_id, "freigegeben": {"$ne": True}})
+    if eigene < firmen_anteil(provider):
+        return False
+    fremde = await db.provider_slots.count_documents(
+        {"provider": provider, "dealer_id": {"$ne": dealer_id},
+         "freigegeben": {"$ne": True}}, limit=1)
+    return fremde > 0
+
+
+async def acquire_slot(db, provider: str, dealer_id: str = "") -> Optional[str]:
     """Versucht, einen Abruf-Slot zu belegen. Liefert die Slot-ID oder None
-    (Limit erreicht). Kein Warten — das macht der Aufrufer."""
+    (Limit erreicht). Kein Warten — das macht der Aufrufer.
+    dealer_id (B-04): Firma des Abrufs fuer den Firmenanteil; leer = ohne."""
     limit = PROVIDER_MAX_CONCURRENT.get(provider, 3)
     await _indizes_sicherstellen(db)
     now = datetime.now(timezone.utc)
@@ -268,10 +300,13 @@ async def acquire_slot(db, provider: str) -> Optional[str]:
         # Voll — oder Zaehler haengt wegen eines abgestuerzten Prozesses.
         await _heal_stale(db, provider)
         return None
+    if await _firma_ueber_anteil(db, provider, dealer_id or ""):
+        return None
     # ZUERST der Slot, DANN der Zaehler (Invariante siehe Modulkopf).
     slot_id = uuid.uuid4().hex
     await db.provider_slots.insert_one({
         "id": slot_id, "provider": provider,
+        "dealer_id": dealer_id or "",            # B-04: Firmenanteil
         "created_at": now,
         "expires_at": now + timedelta(seconds=SLOT_TTL_SECONDS)})
     try:
